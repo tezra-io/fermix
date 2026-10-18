@@ -40,6 +40,28 @@ defmodule FermixCore.Management.McpServers.RowTest do
       assert %{"primary_action" => "enable", "actions" => ["enable"]} = row
     end
 
+    # A hand-written block with nothing to start is never started, so it would
+    # otherwise read "Starting." for good. No stored value would help it.
+    test "a server that names nothing to start fails ahead of a missing value" do
+      local = %{server(@local) | command: nil, args: []}
+      remote = %{server(@remote) | url: nil}
+
+      for {server, sentence} <- [
+            {local, "It has no command to start. Add one in its settings."},
+            {remote, "It has no address. Add one in its settings."}
+          ] do
+        assert %{
+                 "status" => "failed",
+                 "status_sentence" => ^sentence,
+                 "last_error" => ^sentence,
+                 "primary_action" => nil,
+                 "actions" => ["disable"]
+               } = build(server)
+
+        assert %{"status" => "off"} = build(%{server | enabled?: false})
+      end
+    end
+
     test "a missing value names what the server waits for" do
       presence = %{
         env: [{"GITHUB_TOKEN", true}],
@@ -111,7 +133,7 @@ defmodule FermixCore.Management.McpServers.RowTest do
                failed = build(server, presence: stored(server), entry: exited)
 
       assert failed["status_sentence"] ==
-               "Stopped after three failed starts. The last thing it said: fatal: no"
+               "It kept stopping, so Fermix stopped starting it. The last thing it said: fatal: no"
 
       assert failed["last_error"] == failed["status_sentence"]
     end
@@ -209,8 +231,19 @@ defmodule FermixCore.Management.McpServers.RowTest do
                "oauth_client" => %{"client_id" => "fermix", "secret_present" => true}
              } = build(server, presence: presence)
 
-      auto = %{server | auth: :auto, key_header: nil}
-      assert %{"auth" => %{"mode" => "auto", "state" => "signed_out"}} = build(auto)
+      # No sign-in yet: an `auto` server is signed out only where it asked for one.
+      auto = %{server | auth: :auto, key_header: nil, header_secrets: ["X-Workspace"]}
+      asked = entry(:reauthorization_required, :sign_in_required)
+      assert %{"auth" => %{"mode" => "auto", "state" => "not_needed"}} = build(auto)
+
+      assert %{"auth" => %{"mode" => "auto", "state" => "not_needed"}} =
+               build(auto, presence: stored(auto), entry: ready(3))
+
+      assert %{
+               "status" => "needs_sign_in",
+               "auth" => %{"mode" => "auto", "state" => "signed_out"}
+             } =
+               build(auto, presence: stored(auto), entry: asked)
     end
 
     test "tools ride only when asked for, with the owner's switches and the server's hints" do

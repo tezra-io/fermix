@@ -1288,7 +1288,7 @@
       "method": "(schema)",
       "field": "job_kinds:mcp_check",
       "kind": "engine_only",
-      "why": "M74: an MCP server check connects the server and lists its tools once, so it is a job of its own kind with a 15000 ms budget and the phases connecting and listing. The draft predates the kind; a client that has not re-vendored never starts one."
+      "why": "M74: an MCP server check connects the server and lists its tools once, so it is a job of its own kind with a 75000 ms budget and the phases connecting and listing. The draft predates the kind; a client that has not re-vendored never starts one."
     },
     {
       "method": "(schema)",

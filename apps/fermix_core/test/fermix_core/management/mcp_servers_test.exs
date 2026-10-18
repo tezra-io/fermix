@@ -11,6 +11,7 @@ defmodule FermixCore.Management.McpServersTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
+  alias FermixCore.Capabilities.MCP.LoginPath
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
   alias FermixCore.Management.Jobs
@@ -85,12 +86,22 @@ defmodule FermixCore.Management.McpServersTest do
       :ok = RestartState.record_persisted_baseline()
     end)
 
-    opts = [mcp_supervisor: FakeTree, runtime_status: @status, jobs: [server: jobs]]
+    opts = [
+      mcp_supervisor: FakeTree,
+      runtime_status: @status,
+      jobs: [server: jobs],
+      home: "/Users/owner"
+    ]
+
     %{home: home, path: Path.join(home, "config.toml"), opts: opts, jobs: [server: jobs]}
   end
 
   describe "list and get" do
     test "a server written by hand shows like one added here", %{path: path, opts: opts} do
+      login_path = start_login_path(fn -> {:ok, System.get_env("PATH", "")} end)
+      _read = LoginPath.path(login_path)
+      opts = Keyword.put(opts, :login_path, login_path)
+
       write_config!(path, """
       [mcp.servers.files]
       command = "sh"
@@ -155,6 +166,41 @@ defmodule FermixCore.Management.McpServersTest do
     test "a name no server has is refused by field", %{opts: opts} do
       assert {:error, {:invalid_params, "name", "There is no MCP server by that name."}} =
                McpServers.get("nowhere", opts)
+    end
+
+    # The first reading of the login shell can take up to its time limit, and a
+    # list must not: a bare command resolves once the PATH is read, a path at once.
+    test "a list never waits on the login shell", %{path: path, opts: opts} do
+      test = self()
+
+      login_path =
+        start_login_path(fn ->
+          send(test, {:reading, self()})
+          receive do: (:finish -> {:ok, Path.dirname(System.find_executable("sh"))})
+        end)
+
+      write_config!(path, """
+      [mcp.servers.bare]
+      command = "sh"
+
+      [mcp.servers.pathed]
+      command = "/bin/sh"
+      """)
+
+      start = Task.async(fn -> LoginPath.path(login_path) end)
+      assert_receive {:reading, reading}, 5_000
+
+      listing = Task.async(fn -> McpServers.list(Keyword.put(opts, :login_path, login_path)) end)
+      assert {:ok, {:ok, %{"servers" => [bare, pathed]}}} = Task.yield(listing, 2_000)
+      assert {bare["resolved_command"], pathed["resolved_command"]} == {nil, "/bin/sh"}
+
+      send(reading, :finish)
+      Task.await(start)
+
+      assert {:ok, %{"servers" => [bare, _pathed]}} =
+               McpServers.list(Keyword.put(opts, :login_path, login_path))
+
+      assert bare["resolved_command"] == System.find_executable("sh")
     end
   end
 
@@ -244,6 +290,62 @@ defmodule FermixCore.Management.McpServersTest do
       assert {:error, {:invalid_params, "name", _sentence}} = McpServers.add(params, opts)
       assert {:ok, %{transport: :stdio}} = server_config("fetch")
     end
+
+    # Another add of the same name lands after this add read the servers: the
+    # name is checked again where the block is written, under the config lock.
+    test "an add that read the servers before another add landed does not merge", ctx do
+      write_config!(ctx.path, ~s([mcp.servers.fetch]\ncommand = "/bin/sh"\n))
+      before = File.read!(ctx.path)
+      {:ok, reads} = Agent.start_link(fn -> 0 end)
+
+      # The servers as they were before the other add landed, on the first read.
+      servers = fn ->
+        case Agent.get_and_update(reads, &{&1, &1 + 1}) do
+          0 -> []
+          _later -> McpConfig.configured()
+        end
+      end
+
+      params = %{"name" => "fetch", "transport" => "stdio", "command_line" => "uvx serve"}
+
+      assert McpServers.add(params, Keyword.put(ctx.opts, :servers, servers)) ==
+               {:error,
+                {:invalid_params, "name",
+                 "An MCP server by this name is already here. Choose another."}}
+
+      assert File.read!(ctx.path) == before
+    end
+
+    # A shell writes the home folder in for `~`, so the file holds the path that
+    # runs, and the row shows it.
+    test "a leading ~ in the command line and the folder is the home folder", ctx do
+      params = %{
+        "name" => "files",
+        "transport" => "stdio",
+        "command_line" => "npx -y @modelcontextprotocol/server-filesystem ~/Documents '~/kept'",
+        "cwd" => "~/code"
+      }
+
+      assert {:ok, %{"server" => server}} = McpServers.add(params, ctx.opts)
+
+      assert {:ok, files} = server_config("files")
+
+      assert {files.args, files.cwd} ==
+               {[
+                  "-y",
+                  "@modelcontextprotocol/server-filesystem",
+                  "/Users/owner/Documents",
+                  "~/kept"
+                ], "/Users/owner/code"}
+
+      assert server["location"] ==
+               "npx -y @modelcontextprotocol/server-filesystem /Users/owner/Documents '~/kept'"
+
+      refused = %{params | "name" => "notes", "cwd" => "~bob/code"}
+
+      assert McpServers.add(refused, ctx.opts) ==
+               {:error, {:invalid_params, "cwd", "Write the full path in place of ~bob."}}
+    end
   end
 
   describe "update" do
@@ -295,6 +397,20 @@ defmodule FermixCore.Management.McpServersTest do
       assert {:ok, linear} = server_config("linear")
       assert linear.header_secrets == ["X-Workspace"]
       assert {:error, _absent} = McpSecrets.fetch("linear", {:header, "Authorization"})
+    end
+
+    # A value the file gives by hand and one stored for the same name would be
+    # two values with no rule for which the server sees.
+    test "a variable the file already gives is refused at the field, in copy", ctx do
+      write_config!(
+        ctx.path,
+        ~s([mcp.servers.files]\ncommand = "sh"\nenv = { LEVEL = "debug" }\n)
+      )
+
+      assert McpServers.update(%{"name" => "files", "env_names" => ["LEVEL"]}, ctx.opts) ==
+               {:error,
+                {:invalid_params, "env_names",
+                 "The settings file already gives LEVEL a value, so Fermix cannot also store one."}}
     end
 
     test "the transport and the name stay", %{path: path, opts: opts} do
@@ -376,6 +492,37 @@ defmodule FermixCore.Management.McpServersTest do
                McpServers.check_start("notes", ctx.opts)
     end
 
+    # A block written by hand without its command or URL is never started, so
+    # a check of it is refused rather than left waiting for a start.
+    test "a server that names nothing to start is refused with its row's sentence", ctx do
+      write_config!(ctx.path, """
+      [mcp.servers.files]
+      env_secrets = ["KEY"]
+
+      [mcp.servers.web]
+      transport = "http"
+      """)
+
+      assert McpServers.check_start("files", ctx.opts) ==
+               {:error,
+                {:invalid_params, "name", "It has no command to start. Add one in its settings."}}
+
+      assert McpServers.check_start("web", ctx.opts) ==
+               {:error, {:invalid_params, "name", "It has no address. Add one in its settings."}}
+    end
+
+    # A first `npx -y` or `uvx` start downloads its package and has 60 s to
+    # answer, so the check's budget outlasts that and the job reports how the
+    # start ended rather than "still starting".
+    test "a check's budget outlasts a first start", ctx do
+      write_config!(ctx.path, ~s([mcp.servers.fetch]\ncommand = "/bin/sh"\n))
+
+      assert {:ok, %{"kind" => "mcp_check", "budget_ms" => 75_000, "job_id" => job_id}} =
+               McpServers.check_start("fetch", ctx.opts)
+
+      assert {:ok, %{"status" => "completed"}} = eventually_terminal(ctx.jobs, job_id)
+    end
+
     test "a connection that fails ends the job with the row's sentence", ctx do
       write_config!(ctx.path, ~s([mcp.servers.broken]\ncommand = "sh"\ncwd = "/nowhere"\n))
 
@@ -417,6 +564,12 @@ defmodule FermixCore.Management.McpServersTest do
     end
 
     assert length(answers) == 7
+  end
+
+  defp start_login_path(read) do
+    name = :"mcp_servers_test_login_path_#{System.unique_integer([:positive])}"
+    start_supervised!({LoginPath, name: name, read: read})
+    name
   end
 
   defp write_config!(path, contents) do

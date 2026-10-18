@@ -5,9 +5,10 @@ defmodule FermixCore.Management.McpServers do
 
   An operator server is one `[mcp.servers.<name>]` block in `config.toml`, and
   every write goes through the one write path `ConfigStore` owns
-  (`put_mcp_server/3`, `delete_mcp_server/2`, `put_mcp_tool/4`), which applies
-  it to the one server it names with no restart. Every answer is a row from
-  `McpServers.Row`, the one owner of its shape and its words.
+  (`add_mcp_server/3`, `put_mcp_server/3`, `delete_mcp_server/2`,
+  `put_mcp_tool/4`), which applies it to the one server it names with no
+  restart. Every answer is a row from `McpServers.Row`, the one owner of its
+  shape and its words.
 
   A form writes a server as fields: `command_line` (split as a shell would,
   `McpServers.CommandLine`) or `url`, `cwd`, `env_names`, `auth`,
@@ -16,11 +17,14 @@ defmodule FermixCore.Management.McpServers do
   and the field it is about, named as the form names it, so the writer's
   `command`/`args`, `env_secrets` and `header_secrets` become `command_line`,
   `env_names` and `header_names` here. Values never ride these methods: they
-  arrive through `secret.set mcp:<name>/…`.
+  arrive through `secret.set mcp:<name>/…`. A leading `~` in `command_line`
+  or `cwd` is the home folder the daemon gives the program (`:home`, the
+  daemon's own by default), so the file holds the absolute path that runs.
 
   A check (`mcp_check`) is a job: it connects the server, starting it again if
   it is not running or has failed and waiting for it if it is starting, then
-  asks it for its tools once and answers how many and how long that took.
+  asks it for its tools once and answers how many and how long that took. Only
+  a server the daemon runs (`McpSupervisor.runs?/1`) is checked.
   """
 
   alias FermixCore.Auth.Redaction
@@ -60,8 +64,9 @@ defmodule FermixCore.Management.McpServers do
     "header_secrets" => "header_names"
   }
   # A check waits for the server to connect, leaving the rest of its budget for
-  # the one tool listing it then asks for.
-  @listing_reserve_ms 3_000
+  # the one tool listing it then asks for. The wait outlasts a first start's own
+  # verdict (`MCP.Server`'s 60 s), so the job reports how the start ended.
+  @listing_reserve_ms 10_000
 
   @no_server "There is no MCP server by that name."
 
@@ -102,10 +107,10 @@ defmodule FermixCore.Management.McpServers do
   @spec add(map(), keyword()) :: {:ok, map()} | {:error, error()}
   def add(params, opts \\ []) when is_map(params) and is_list(opts) do
     with {:ok, name} <- name_param(params),
-         :ok <- not_present(name, opts),
          {:ok, transport} <- transport_param(params),
-         {:ok, attrs} <- attrs(transport, params, nil),
-         :ok <- write(fn -> put_server(name, Map.put(attrs, "origin", "added"), opts) end),
+         {:ok, attrs} <- attrs(transport, params, nil, opts),
+         attrs = Map.put(attrs, "origin", "added"),
+         :ok <- write(fn -> ConfigStore.add_mcp_server(name, attrs, writer_opts(opts)) end),
          {:ok, server} <- fetch_server(name, opts) do
       row = row(server, sources(opts), [])
       {:ok, %{"server" => row, "job_id" => first_check(server, row, opts)}}
@@ -120,7 +125,7 @@ defmodule FermixCore.Management.McpServers do
   def update(params, opts \\ []) when is_map(params) and is_list(opts) do
     with {:ok, name} <- name_param(params),
          {:ok, before} <- fetch_server(name, opts),
-         {:ok, attrs} <- attrs(before.transport, params, before),
+         {:ok, attrs} <- attrs(before.transport, params, before, opts),
          attrs = with_transport(attrs, params, before),
          :ok <- write(fn -> put_server(name, attrs, opts) end),
          {:ok, server} <- fetch_server(name, opts) do
@@ -157,14 +162,14 @@ defmodule FermixCore.Management.McpServers do
   end
 
   @doc """
-  Starts one check. A server that does not start (turned off, or waiting for a
-  value) is refused with its own row's sentence.
+  Starts one check. A server the daemon does not run (turned off, naming
+  nothing to start, or waiting for a value) is refused with its own row's
+  sentence.
   """
   @spec check_start(String.t(), keyword()) :: {:ok, map()} | {:error, error()}
   def check_start(name, opts \\ []) when is_binary(name) and is_list(opts) do
     with {:ok, server} <- fetch_server(name, opts),
-         row = row(server, sources(opts), []),
-         :ok <- checkable(row) do
+         :ok <- checkable(server, row(server, sources(opts), [])) do
       start_check(server, opts)
     end
   end
@@ -200,9 +205,10 @@ defmodule FermixCore.Management.McpServers do
     }
   end
 
+  # Never the blocking resolve: a row answers from the PATH already read.
   defp resolution(%{transport: :stdio, command: command, cwd: cwd}, login_path)
        when is_binary(command) and command != "",
-       do: LoginPath.resolve(login_path, command, cwd)
+       do: LoginPath.known(login_path, command, cwd)
 
   defp resolution(_server, _login_path), do: nil
 
@@ -227,12 +233,12 @@ defmodule FermixCore.Management.McpServers do
   defp transport_param(_params),
     do: refuse("transport", "A server runs on this Mac (stdio) or at a URL (http).")
 
-  defp attrs(transport, params, before) do
+  defp attrs(transport, params, before, opts) do
     fields = Map.drop(params, ["name", "transport"])
 
     with :ok <- of_transport(transport, fields),
          :ok <- typed(fields) do
-      compose(transport, fields, before)
+      compose(transport, fields, before, home(opts))
     end
   end
 
@@ -287,13 +293,14 @@ defmodule FermixCore.Management.McpServers do
 
   defp name?(value), do: is_binary(value) and byte_size(value) in 1..@max_name_bytes
 
-  defp compose(:stdio, fields, _before) do
-    with {:ok, command} <- command_attrs(fields) do
+  defp compose(:stdio, fields, _before, home) do
+    with {:ok, command} <- command_attrs(fields, home),
+         {:ok, fields} <- cwd_at_home(fields, home) do
       {:ok, Map.merge(command, renamed(fields, %{"cwd" => "cwd", "env_names" => "env_secrets"}))}
     end
   end
 
-  defp compose(:http, fields, before) do
+  defp compose(:http, fields, before, _home) do
     with :ok <- url_check(fields) do
       attrs = renamed(fields, %{"url" => "url", "oauth_client_id" => "oauth_client_id"})
       attrs = if before, do: attrs, else: Map.put(attrs, "transport", "http")
@@ -301,13 +308,22 @@ defmodule FermixCore.Management.McpServers do
     end
   end
 
-  defp command_attrs(%{"command_line" => line}) do
-    with {:ok, {command, args}} <- CommandLine.split(line) do
+  defp command_attrs(%{"command_line" => line}, home) do
+    with {:ok, {command, args}} <- CommandLine.split(line, home) do
       {:ok, %{"command" => command, "args" => nil_if_empty(args)}}
     end
   end
 
-  defp command_attrs(_fields), do: {:ok, %{}}
+  defp command_attrs(_fields, _home), do: {:ok, %{}}
+
+  # The working folder takes the command line's own rule for a leading `~`.
+  defp cwd_at_home(%{"cwd" => cwd} = fields, home) when is_binary(cwd) do
+    with {:ok, path} <- CommandLine.expand_home(cwd, home, "cwd") do
+      {:ok, Map.put(fields, "cwd", path)}
+    end
+  end
+
+  defp cwd_at_home(fields, _home), do: {:ok, fields}
 
   # The one rule for an owner's URL is the remote rail's own, so a URL the
   # server would be refused at start is refused at the form instead.
@@ -419,7 +435,7 @@ defmodule FermixCore.Management.McpServers do
   # --- checks ---------------------------------------------------------------
 
   defp first_check(server, row, opts) do
-    with :ok <- checkable(row),
+    with :ok <- checkable(server, row),
          {:ok, %{"job_id" => job_id}} <- start_check(server, opts) do
       job_id
     else
@@ -432,10 +448,13 @@ defmodule FermixCore.Management.McpServers do
     end
   end
 
-  defp checkable(%{"status" => status} = row) when status in ["off", "needs_secret"],
-    do: refuse("name", row["status_sentence"])
-
-  defp checkable(_row), do: :ok
+  # The daemon's own rule for a server it runs, so the gate and the start
+  # never disagree; the row says why one does not run.
+  defp checkable(server, row) do
+    if McpSupervisor.runs?(server),
+      do: :ok,
+      else: refuse("name", row["status_sentence"])
+  end
 
   defp start_check(server, opts) do
     run = check_run(server, opts)
@@ -544,15 +563,10 @@ defmodule FermixCore.Management.McpServers do
     end
   end
 
-  defp not_present(name, opts) do
-    if Enum.any?(servers(opts), &(&1.name == name)),
-      do: refuse("name", "An MCP server by this name is already here. Choose another."),
-      else: :ok
-  end
-
   defp fetch(source_id, opts), do: RuntimeStatus.fetch(runtime_status(opts), source_id)
 
   defp writer_opts(opts), do: Keyword.take(opts, [:mcp_supervisor])
+  defp home(opts), do: Keyword.get_lazy(opts, :home, &System.user_home!/0)
   defp supervisor(opts), do: Keyword.get(opts, :mcp_supervisor, McpSupervisor)
   defp runtime_status(opts), do: Keyword.get(opts, :runtime_status, RuntimeStatus)
   defp jobs_opts(opts), do: Keyword.get(opts, :jobs, [])

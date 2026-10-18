@@ -2352,11 +2352,11 @@
     },
     "mcpServerTool": {
       "type": "object",
-      "description": "One tool the server listed, in its order. `read_only` and `destructive` are the server's own `readOnlyHint` and `destructiveHint` as it declared them, an absent hint being false; they inform and decide nothing. `enabled` is false where the owner hid the tool from the agent.",
+      "description": "One tool the server listed, in its order. Only a tool whose name is at most 128 bytes is described; a longer one is counted in the row's `tool_count` and as on in `tools_on`. `read_only` and `destructive` are the server's own `readOnlyHint` and `destructiveHint` as it declared them, an absent hint being false, not the MCP specification's default, and a tool declared read-only is never destructive; they inform and decide nothing. `enabled` is false where the owner hid the tool from the agent.",
       "required": ["name", "title", "description", "read_only", "destructive", "enabled"],
       "additionalProperties": false,
       "properties": {
-        "name": { "type": "string" },
+        "name": { "type": "string", "maxLength": 128 },
         "title": { "type": ["string", "null"], "maxLength": 128 },
         "description": { "type": ["string", "null"], "maxLength": 512 },
         "read_only": { "type": "boolean" },
@@ -2416,7 +2416,7 @@
         },
         "url": { "type": ["string", "null"] },
         "resolved_command": {
-          "description": "The program a local server's command runs, found on the login shell's PATH; null where it was not found or the server is remote.",
+          "description": "The program a local server's command runs, found on the login shell's PATH; null where it was not found, before the daemon has read that PATH for a command without a slash, or where the server is remote.",
           "type": ["string", "null"]
         },
         "cwd": { "type": ["string", "null"] },

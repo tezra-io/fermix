@@ -1,9 +1,10 @@
 defmodule FermixCore.Setup.ConfigStoreMcpWriteTest do
   @moduledoc """
-  The one write path for operator MCP servers (M74 E2): `put_mcp_server/3`,
-  `delete_mcp_server/2` and `put_mcp_tool/4`. Each one asks the outside-edit
-  guard, takes the config lock every writer of `config.toml` takes, renders
-  through the settings renderer, records the baseline and applies the result.
+  The one write path for operator MCP servers (M74 E2): `add_mcp_server/3`,
+  `put_mcp_server/3`, `delete_mcp_server/2` and `put_mcp_tool/4`. Each one
+  asks the outside-edit guard, takes the config lock every writer of
+  `config.toml` takes, renders through the settings renderer, records the
+  baseline and applies the result.
 
   Every case runs against its own home and the stub secret store. The MCP
   supervisor is a recorder, or a tree of this case's own with stub discovery,
@@ -135,13 +136,13 @@ defmodule FermixCore.Setup.ConfigStoreMcpWriteTest do
     %{home: home, path: Path.join(home, "config.toml")}
   end
 
-  describe "put_mcp_server/3" do
+  describe "add_mcp_server/3 and put_mcp_server/3" do
     test "writes the block a hand edit would hold, applies it and reloads", %{path: path} do
       File.write!(path, ~s([fermix_core.personalization]\nuser_name = "Ada"\n))
       :ok = RestartState.record_persisted_baseline()
 
       attrs = Map.merge(@files, %{"env_secrets" => ["GITHUB_TOKEN"], "origin" => "added"})
-      assert :ok = ConfigStore.put_mcp_server("files", attrs, @recording)
+      assert :ok = ConfigStore.add_mcp_server("files", attrs, @recording)
       assert_received :reloaded
 
       written = File.read!(path)
@@ -162,7 +163,7 @@ defmodule FermixCore.Setup.ConfigStoreMcpWriteTest do
     # The baseline is recorded with the write, so the next settings save does
     # not read this write as an edit made outside Fermix.
     test "a settings save after a server write goes through", %{path: path} do
-      assert :ok = ConfigStore.put_mcp_server("files", @files, @recording)
+      assert :ok = ConfigStore.add_mcp_server("files", @files, @recording)
 
       assert RestartState.writable() == :ok
       {:ok, snapshot} = ConfigStore.load_runtime_config()
@@ -193,7 +194,7 @@ defmodule FermixCore.Setup.ConfigStoreMcpWriteTest do
         "enabled" => false
       }
 
-      assert :ok = ConfigStore.put_mcp_server("files", attrs, @recording)
+      assert :ok = ConfigStore.add_mcp_server("files", attrs, @recording)
 
       assert [server] = McpConfig.from_toml(File.read!(path))
       assert server.command == attrs["command"]
@@ -237,13 +238,23 @@ defmodule FermixCore.Setup.ConfigStoreMcpWriteTest do
     end
 
     test "a refusal names its field and changes nothing", %{path: path} do
-      assert :ok = ConfigStore.put_mcp_server("files", @files, @recording)
+      assert :ok = ConfigStore.add_mcp_server("files", @files, @recording)
       assert_received :reloaded
       before = File.read!(path)
 
       for {name, attrs, field} <- [
             {"files", %{"cwd" => "line one\nline two"}, "cwd"},
             {"files", %{"env" => %{"A" => "b"}}, "env"},
+            {"absent", %{"enabled" => false}, "name"}
+          ] do
+        assert {:error, {:invalid_params, ^field, sentence}} =
+                 ConfigStore.put_mcp_server(name, attrs, @recording)
+
+        assert is_binary(sentence)
+      end
+
+      for {name, attrs, field} <- [
+            {"files", %{"command" => "uvx"}, "name"},
             {"Bad Name", @files, "name"},
             {"files_", %{"command" => "uvx"}, "name"},
             {"gmail", @files, "name"},
@@ -255,7 +266,7 @@ defmodule FermixCore.Setup.ConfigStoreMcpWriteTest do
              }, "header_secrets"}
           ] do
         assert {:error, {:invalid_params, ^field, sentence}} =
-                 ConfigStore.put_mcp_server(name, attrs, @recording)
+                 ConfigStore.add_mcp_server(name, attrs, @recording)
 
         assert is_binary(sentence)
       end
@@ -264,8 +275,31 @@ defmodule FermixCore.Setup.ConfigStoreMcpWriteTest do
       refute_received :reloaded
     end
 
+    # The name is checked under the lock the write holds, so of two adds of one
+    # name that race, one writes its block and the other is refused; neither
+    # merges into the other.
+    test "two adds of one name at once write one block and refuse the other", %{path: path} do
+      local = %{"command" => "/bin/sh", "args" => ["serve.sh"]}
+      remote = %{"transport" => "http", "url" => "https://mcp.example.com/mcp"}
+
+      results =
+        [local, remote]
+        |> Enum.map(fn attrs ->
+          Task.async(fn -> {attrs, ConfigStore.add_mcp_server("files", attrs, @recording)} end)
+        end)
+        |> Task.await_many(30_000)
+
+      assert [{written, :ok}] = Enum.filter(results, &match?({_attrs, :ok}, &1))
+
+      assert [{_refused, {:error, {:invalid_params, "name", sentence}}}] =
+               Enum.reject(results, &match?({_attrs, :ok}, &1))
+
+      assert sentence == "An MCP server by this name is already here. Choose another."
+      assert McpConfig.document(File.read!(path)) == %{"files" => %{server: written}}
+    end
+
     test "an outside edit refuses the write before anything is written", %{path: path} do
-      assert :ok = ConfigStore.put_mcp_server("files", @files, @recording)
+      assert :ok = ConfigStore.add_mcp_server("files", @files, @recording)
 
       File.write!(
         path,
@@ -285,7 +319,7 @@ defmodule FermixCore.Setup.ConfigStoreMcpWriteTest do
       :ok = RestartState.record_persisted_baseline()
 
       assert {:error, {:unrenderable_settings, sentence}} =
-               ConfigStore.put_mcp_server("files", @files, @recording)
+               ConfigStore.add_mcp_server("files", @files, @recording)
 
       assert sentence =~ "[custom]"
       assert File.read!(path) == "[custom]\nkey = \"kept\"\n"
@@ -357,8 +391,8 @@ defmodule FermixCore.Setup.ConfigStoreMcpWriteTest do
   describe "delete_mcp_server/2" do
     test "removes the server and every value it declares, and nothing else", %{path: path} do
       attrs = Map.put(@files, "env_secrets", ["GITHUB_TOKEN", "API_KEY"])
-      assert :ok = ConfigStore.put_mcp_server("files", attrs, @recording)
-      assert :ok = ConfigStore.put_mcp_server("notes", %{"command" => "node"}, @recording)
+      assert :ok = ConfigStore.add_mcp_server("files", attrs, @recording)
+      assert :ok = ConfigStore.add_mcp_server("notes", %{"command" => "node"}, @recording)
       assert :ok = McpSecrets.put("files", {:env, "GITHUB_TOKEN"}, "t")
       assert :ok = McpSecrets.put("files", {:env, "API_KEY"}, "k")
       assert :ok = McpSecrets.put("notes", {:env, "GITHUB_TOKEN"}, "kept")
@@ -381,7 +415,7 @@ defmodule FermixCore.Setup.ConfigStoreMcpWriteTest do
 
   describe "put_mcp_tool/4" do
     test "off and on write what a hand edit would hold", %{path: path} do
-      assert :ok = ConfigStore.put_mcp_server("files", @files, @recording)
+      assert :ok = ConfigStore.add_mcp_server("files", @files, @recording)
 
       assert :ok = ConfigStore.put_mcp_tool("files", "write_file", false, @recording)
 
@@ -408,7 +442,7 @@ defmodule FermixCore.Setup.ConfigStoreMcpWriteTest do
       )
 
       reload = [mcp_supervisor: TreeReloader]
-      assert :ok = ConfigStore.put_mcp_server("files", @files, reload)
+      assert :ok = ConfigStore.add_mcp_server("files", @files, reload)
 
       both = ["mcp_files_create_issue", "mcp_files_list_issues"]
       assert await(fn -> agent_tools() == both end)
@@ -440,7 +474,8 @@ defmodule FermixCore.Setup.ConfigStoreMcpWriteTest do
     {:ok, snapshot} = ConfigStore.load_runtime_config()
 
     writers = [
-      fn -> ConfigStore.put_mcp_server("files", @files, @recording) end,
+      fn -> ConfigStore.add_mcp_server("files", @files, @recording) end,
+      fn -> ConfigStore.put_mcp_server("files", %{"enabled" => false}, @recording) end,
       fn -> ConfigStore.put_mcp_tool("files", "read_file", false, @recording) end,
       fn -> ConfigStore.save_snapshot(snapshot) end,
       fn -> ConfigStore.put_web_port(home, 4610) end

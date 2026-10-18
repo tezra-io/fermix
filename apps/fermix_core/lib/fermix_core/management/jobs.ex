@@ -55,8 +55,10 @@ defmodule FermixCore.Management.Jobs do
     # own recipient dialog, so both budgets are a person's, not a machine's.
     imessage_grant: %{budget_ms: 120_000, phases: []},
     imessage_policy_confirm: %{budget_ms: 180_000, phases: []},
-    # M74 §5: connecting a server the owner added, then one tool listing.
-    mcp_check: %{budget_ms: 15_000, phases: ["connecting", "listing"]}
+    # M74 §5: connecting a server the owner added, then one tool listing. A
+    # first `npx -y` or `uvx` start downloads its package, and `MCP.Server`
+    # gives that 60 s, so the connecting wait outlasts it.
+    mcp_check: %{budget_ms: 75_000, phases: ["connecting", "listing"]}
   ]
   @kind_names Keyword.keys(@kinds)
   # The closed failure vocabulary a run may answer with. `timed_out` and

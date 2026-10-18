@@ -17,10 +17,16 @@ defmodule FermixCore.Capabilities.MCP.LoginPath do
   which tells the owner to give the full path.
 
   `config.toml` keeps the command as typed. `resolve/3` turns it into the
-  absolute program at every start, at draft time and on the row, so a Node or
-  uv upgrade that moves the program does not break the server. A command
-  without a slash is looked up on this `PATH`; one with a slash is a path,
-  read relative to the server's `cwd`, else the home folder.
+  absolute program at every start, so a Node or uv upgrade that moves the
+  program does not break the server. A command without a slash is looked up on
+  this `PATH`; one with a slash is a path, read relative to the server's `cwd`,
+  else the home folder.
+
+  The shell is read in a task of its own, so the owner keeps answering while
+  it runs: a start waits for the `PATH` (`path/1`, `resolve/3`), and a row
+  never does. `known/3` resolves from the `PATH` already read and answers `nil`
+  for a command without a slash before the first reading finishes, so a list
+  of servers never waits up to the shell's time limit.
 
   The reading is injected (`:read`); the daemon's comes from
   `config :fermix_core, :mcp_login_shell` (default `LoginPath.Shell`), so a
@@ -41,7 +47,10 @@ defmodule FermixCore.Capabilities.MCP.LoginPath do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
-  @doc "The `PATH` an operator stdio server runs with."
+  @doc """
+  The `PATH` an operator stdio server runs with, read from the login shell the
+  first time it is asked for, which then waits for the reading.
+  """
   @spec path(GenServer.server()) :: String.t()
   def path(server) do
     GenServer.call(server, :path, __MODULE__.Shell.timeout_ms() + 5_000)
@@ -59,11 +68,27 @@ defmodule FermixCore.Capabilities.MCP.LoginPath do
         do: find_path(command, cwd),
         else: find_on(command, path(server))
 
-    case found do
-      nil -> {:error, {:command_not_found, command}}
-      program -> {:ok, program}
-    end
+    resolution(command, found)
   end
+
+  @doc """
+  What `resolve/3` answers, without waiting for the login shell: a command
+  with a slash is resolved as `resolve/3` resolves it, one without only on a
+  `PATH` already read, and `nil` before then. It never starts the reading.
+  """
+  @spec known(GenServer.server(), String.t(), String.t() | nil) :: resolution() | nil
+  def known(server, command, cwd)
+      when is_binary(command) and command != "" and (is_binary(cwd) or is_nil(cwd)) do
+    if String.contains?(command, "/"),
+      do: resolution(command, find_path(command, cwd)),
+      else: known_on(command, GenServer.call(server, :known_path))
+  end
+
+  defp known_on(_command, nil), do: nil
+  defp known_on(command, path), do: resolution(command, find_on(command, path))
+
+  defp resolution(command, nil), do: {:error, {:command_not_found, command}}
+  defp resolution(_command, program), do: {:ok, program}
 
   defp find_path(command, cwd) do
     command
@@ -86,7 +111,7 @@ defmodule FermixCore.Capabilities.MCP.LoginPath do
   @impl true
   def init(opts) do
     read = Keyword.get_lazy(opts, :read, &configured_read/0)
-    {:ok, %{read: read, path: nil}}
+    {:ok, %{read: read, path: nil, reading: nil, waiting: []}}
   end
 
   defp configured_read do
@@ -95,12 +120,27 @@ defmodule FermixCore.Capabilities.MCP.LoginPath do
   end
 
   @impl true
-  def handle_call(:path, _from, %{path: nil} = state) do
-    path = read_once(state.read)
-    {:reply, path, %{state | path: path}}
+  def handle_call(:path, from, %{path: nil} = state), do: {:noreply, await_reading(state, from)}
+  def handle_call(:path, _from, state), do: {:reply, state.path, state}
+  def handle_call(:known_path, _from, state), do: {:reply, state.path, state}
+
+  @impl true
+  def handle_info({ref, path}, %{reading: ref} = state) do
+    Process.demonitor(ref, [:flush])
+    Enum.each(state.waiting, &GenServer.reply(&1, path))
+    {:noreply, %{state | path: path, reading: nil, waiting: []}}
   end
 
-  def handle_call(:path, _from, state), do: {:reply, state.path, state}
+  # The first caller starts the one reading; every caller until it finishes
+  # waits for the same answer. The task is linked, as the reading inside a
+  # call was: a reading that crashes takes the owner with it, and its
+  # supervisor starts a fresh one.
+  defp await_reading(%{reading: nil} = state, from) do
+    task = Task.async(fn -> read_once(state.read) end)
+    %{state | reading: task.ref, waiting: [from]}
+  end
+
+  defp await_reading(state, from), do: %{state | waiting: [from | state.waiting]}
 
   defp read_once(read) do
     case read.() do

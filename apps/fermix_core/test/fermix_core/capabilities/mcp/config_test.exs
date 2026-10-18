@@ -221,6 +221,26 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
       refute Map.has_key?(server, :command)
     end
 
+    # A block that names nothing to start, which only a hand edit writes, is
+    # not started either: there is no program and no address.
+    test "a server without its command or URL is not started" do
+      toml = """
+      [mcp.servers.local]
+      env_secrets = ["TOKEN"]
+
+      [mcp.servers.remote]
+      transport = "http"
+
+      [mcp.servers.blank]
+      command = ""
+      """
+
+      assert [blank, local, remote] = Config.from_toml(toml)
+      refute Config.startable?(blank)
+      refute Config.startable?(local)
+      refute Config.startable?(remote)
+    end
+
     test "an enabled server is started, stdio or http; a disabled one of either is not" do
       toml = """
       [mcp.servers.off]
@@ -291,9 +311,11 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
             ~s(auth = "none"\nheader_secrets = ["authorization"]\n),
             ~s(auth = "header"\nheader_secrets = ["Authorization", "X-Key"]\nkey_header = "X-Key"\n)
           ] do
-        assert_raise ArgumentError, ~r/Authorization is declared only for a server/, fn ->
-          Config.from_toml(base <> extra)
-        end
+        assert_raise ArgumentError,
+                     ~r/The Authorization header holds only the server's key/,
+                     fn ->
+                       Config.from_toml(base <> extra)
+                     end
       end
 
       assert [%{header_secrets: ["Authorization", "X-Org"], key_header: "Authorization"}] =
@@ -310,11 +332,15 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
         "header_secrets" => ["Authorization"]
       }
 
-      assert {:error, {:invalid_params, "header_secrets", _sentence}} =
-               Config.put_server(%{}, "remote", attrs, [])
+      assert {:error, {:invalid_params, "header_secrets", sentence}} =
+               Config.add_server(%{}, "remote", attrs, [])
+
+      assert sentence ==
+               "The Authorization header holds only the server's key. " <>
+                 "Choose to send a key in that header."
 
       keyed = %{attrs | "auth" => "header"} |> Map.put("key_header", "Authorization")
-      assert {:ok, _document} = Config.put_server(%{}, "remote", keyed, [])
+      assert {:ok, _document} = Config.add_server(%{}, "remote", keyed, [])
     end
 
     test "secret names follow their grammar and are declared once" do
@@ -336,11 +362,21 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
     end
 
     test "a variable declared as a secret and as a literal or passthrough is refused" do
-      assert_raise ArgumentError, ~r/declares TOKEN in more than one/, fn ->
+      assert_raise ArgumentError,
+                   ~r/The settings file already gives TOKEN a value, so Fermix cannot also/,
+                   fn ->
+                     Config.from_toml("""
+                     [mcp.servers.files]
+                     env = { TOKEN = "literal" }
+                     env_secrets = ["TOKEN"]
+                     """)
+                   end
+
+      assert_raise ArgumentError, ~r/declares TOKEN in both env and pass_env/, fn ->
         Config.from_toml("""
         [mcp.servers.files]
         env = { TOKEN = "literal" }
-        env_secrets = ["TOKEN"]
+        pass_env = ["TOKEN"]
         """)
       end
     end
@@ -463,12 +499,26 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
     end
   end
 
-  describe "put_server/4" do
+  describe "add_server/4 and put_server/3" do
     @stdio %{"command" => "/opt/homebrew/bin/npx", "args" => ["-y", "pkg"], "origin" => "added"}
 
     test "a new server takes its keys as its block" do
-      assert {:ok, document} = Config.put_server(%{}, "files", @stdio, [])
+      assert {:ok, document} = Config.add_server(%{}, "files", @stdio, [])
       assert document == %{"files" => %{server: @stdio}}
+    end
+
+    # The check of a new name is the edit of the document it is written into,
+    # so an add never merges into a server of the same name.
+    test "an add refuses a name the file holds, and a change one it does not" do
+      document = %{"files" => %{server: %{"command" => "npx"}}}
+
+      assert Config.add_server(document, "files", @stdio, []) ==
+               {:error,
+                {:invalid_params, "name",
+                 "An MCP server by this name is already here. Choose another."}}
+
+      assert Config.put_server(%{}, "files", %{"enabled" => false}) ==
+               {:error, {:invalid_params, "name", "There is no MCP server by that name."}}
     end
 
     test "an edit merges over the block, nil removes a key, and hand-written keys are carried" do
@@ -480,7 +530,7 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
       }
 
       assert {:ok, edited} =
-               Config.put_server(document, "files", %{"enabled" => false, "cwd" => nil}, [])
+               Config.put_server(document, "files", %{"enabled" => false, "cwd" => nil})
 
       assert edited["files"].server ==
                %{
@@ -504,48 +554,49 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
             {%{@stdio | "args" => ["-y", 3]}, "args"}
           ] do
         assert {:error, {:invalid_params, ^field, sentence}} =
-                 Config.put_server(%{}, "files", attrs, [])
+                 Config.add_server(%{}, "files", attrs, [])
 
         assert is_binary(sentence) and sentence != ""
       end
     end
 
     test "refuses a name, a missing command or URL, and a changed transport" do
-      assert {:error, {:invalid_params, "name", _}} = Config.put_server(%{}, "Files", @stdio, [])
+      assert {:error, {:invalid_params, "name", _}} = Config.add_server(%{}, "Files", @stdio, [])
 
       assert {:error, {:invalid_params, "command", _}} =
-               Config.put_server(%{}, "files", Map.delete(@stdio, "command"), [])
+               Config.add_server(%{}, "files", Map.delete(@stdio, "command"), [])
 
       assert {:error, {:invalid_params, "url", _}} =
-               Config.put_server(%{}, "remote", %{"transport" => "http"}, [])
+               Config.add_server(%{}, "remote", %{"transport" => "http"}, [])
 
-      {:ok, document} = Config.put_server(%{}, "files", @stdio, [])
+      {:ok, document} = Config.add_server(%{}, "files", @stdio, [])
+
+      assert {:error, {:invalid_params, "command", _}} =
+               Config.put_server(document, "files", %{"command" => nil})
 
       assert {:error, {:invalid_params, "transport", _}} =
-               Config.put_server(
-                 document,
-                 "files",
-                 %{"transport" => "http", "url" => "https://x.example/mcp"},
-                 []
-               )
+               Config.put_server(document, "files", %{
+                 "transport" => "http",
+                 "url" => "https://x.example/mcp"
+               })
     end
 
     test "a new name may not share a tool prefix with a server or a plugin, or be the 33rd" do
-      {:ok, document} = Config.put_server(%{}, "foo-bar", @stdio, [])
+      {:ok, document} = Config.add_server(%{}, "foo-bar", @stdio, [])
 
       assert {:error, {:invalid_params, "name", _}} =
-               Config.put_server(document, "foo_bar", @stdio, [])
+               Config.add_server(document, "foo_bar", @stdio, [])
 
       assert {:error,
               {:invalid_params, "name", "A plugin already uses this name. Choose another."}} =
-               Config.put_server(%{}, "gmail", @stdio, ["gmail"])
+               Config.add_server(%{}, "gmail", @stdio, ["gmail"])
 
       full = Map.new(1..32, fn n -> {"s#{n}", %{server: @stdio}} end)
 
       assert {:error, {:invalid_params, "name", _}} =
-               Config.put_server(full, "one-more", @stdio, [])
+               Config.add_server(full, "one-more", @stdio, [])
 
-      assert {:ok, _} = Config.put_server(full, "s1", %{"enabled" => false}, [])
+      assert {:ok, _} = Config.put_server(full, "s1", %{"enabled" => false})
     end
   end
 
@@ -555,7 +606,7 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
     @legacy %{"GitHub" => %{server: %{"command" => "npx", "env_secrets" => ["TOKEN"]}}}
 
     test "can be updated, switched and removed" do
-      assert {:ok, updated} = Config.put_server(@legacy, "GitHub", %{"enabled" => false}, [])
+      assert {:ok, updated} = Config.put_server(@legacy, "GitHub", %{"enabled" => false})
       assert updated["GitHub"].server["enabled"] == false
 
       assert {:ok, switched} = Config.put_tool(@legacy, "GitHub", "create_issue", false)
@@ -566,10 +617,10 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
 
     test "is not a name a new server may take" do
       assert {:error, {:invalid_params, "name", _}} =
-               Config.put_server(@legacy, "GitLab", %{"command" => "npx"}, [])
+               Config.add_server(@legacy, "GitLab", %{"command" => "npx"}, [])
 
       assert {:error, {:invalid_params, "name", _}} =
-               Config.put_server(@legacy, "github", %{"command" => "npx"}, [])
+               Config.add_server(@legacy, "github", %{"command" => "npx"}, [])
     end
   end
 

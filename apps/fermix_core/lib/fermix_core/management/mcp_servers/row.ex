@@ -10,17 +10,20 @@ defmodule FermixCore.Management.McpServers.Row do
   Every field is always present, null where the transport has none.
 
   The status is derived in one order, and the first that holds wins: `off`
-  (written `enabled = false`), `needs_secret` (a declared value is not stored,
-  so the server is not started), `needs_sign_in` (an `auto` server the server
-  itself asked to sign in), `starting` (connecting, or no status yet for a
-  server that runs), `connected` (ready), `retrying` (the last status is a
-  failure and the subtree still runs, so it is being started again), `failed`
-  (a failure with the subtree gone). The status is published for logs and
-  support; a client draws `status_sentence` and switches on `primary_action`
-  and `actions`.
+  (written `enabled = false`), `failed` for a block that names nothing to
+  start (`McpConfig.startable?/1`: a stdio server without its command, an http
+  one without its URL, which no stored value would help), `needs_secret` (a
+  declared value is not stored, so the server is not started), `needs_sign_in`
+  (an `auto` server the server itself asked to sign in), `starting`
+  (connecting, or no status yet for a server that runs), `connected` (ready),
+  `retrying` (the last status is a failure and the subtree still runs, so it is
+  being started again), `failed` (a failure with the subtree gone). The status
+  is published for logs and support; a client draws `status_sentence` and
+  switches on `primary_action` and `actions`.
 
   Stage 1 has no sign-in (M74 E5), so no row carries `sign_in` or `sign_out`
-  yet, and an `auto` server's sign-in state is `signed_out`.
+  yet, and an `auto` server's sign-in state is `signed_out` only where the
+  server asked to sign in, `not_needed` otherwise.
   """
 
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
@@ -81,7 +84,7 @@ defmodule FermixCore.Management.McpServers.Row do
       "name" => server.name,
       "transport" => Atom.to_string(server.transport),
       "enabled" => server.enabled?,
-      "status" => Atom.to_string(status),
+      "status" => published(status),
       "status_sentence" => status_sentence(status, server, facts),
       "primary_action" => primary_action(status),
       "actions" => actions(status),
@@ -92,7 +95,7 @@ defmodule FermixCore.Management.McpServers.Row do
       "cwd" => Map.get(server, :cwd),
       "env" => names(facts.presence.env),
       "headers" => names(extra_headers(server, facts.presence.headers)),
-      "auth" => auth(server, facts.presence),
+      "auth" => auth(server, facts),
       "oauth_client" => oauth_client(server, facts.presence),
       "server_info" => server_info(discovery),
       "tool_count" => tool_count(discovery),
@@ -111,6 +114,7 @@ defmodule FermixCore.Management.McpServers.Row do
   defp status(server, facts) do
     cond do
       not server.enabled? -> :off
+      not McpConfig.startable?(server) -> :unaddressed
       missing(server, facts.presence) != [] -> :needs_secret
       sign_in_required?(server, facts.entry) -> :needs_sign_in
       starting?(facts.entry) -> :starting
@@ -150,6 +154,11 @@ defmodule FermixCore.Management.McpServers.Row do
   defp starting?(%{status: :connecting}), do: true
   defp starting?(_entry), do: false
 
+  # A server with nothing to start fails before it is started, so it is
+  # published as `failed`, with nothing a check could change.
+  defp published(:unaddressed), do: "failed"
+  defp published(status), do: Atom.to_string(status)
+
   defp primary_action(:off), do: "enable"
   defp primary_action(:failed), do: "check"
   defp primary_action(_status), do: nil
@@ -161,6 +170,7 @@ defmodule FermixCore.Management.McpServers.Row do
   # --- sentences ------------------------------------------------------------
 
   defp status_sentence(:off, _server, _facts), do: "Turned off."
+  defp status_sentence(:unaddressed, server, _facts), do: unaddressed(server)
 
   defp status_sentence(:needs_secret, server, facts),
     do: "Waiting for #{listed(missing(server, facts.presence))}."
@@ -174,9 +184,15 @@ defmodule FermixCore.Management.McpServers.Row do
   defp status_sentence(:retrying, _server, _facts), do: "Trying again."
   defp status_sentence(:failed, server, facts), do: failure(server, facts.entry, true)
 
+  defp last_error(:unaddressed, server, _facts), do: unaddressed(server)
   defp last_error(:retrying, server, facts), do: failure(server, facts.entry, false)
   defp last_error(:failed, server, facts), do: failure(server, facts.entry, true)
   defp last_error(_status, _server, _facts), do: nil
+
+  defp unaddressed(%{transport: :stdio}),
+    do: "It has no command to start. Add one in its settings."
+
+  defp unaddressed(%{transport: :http}), do: "It has no address. Add one in its settings."
 
   defp tools_phrase(1), do: "1 tool"
   defp tools_phrase(count), do: "#{count} tools"
@@ -234,7 +250,7 @@ defmodule FermixCore.Management.McpServers.Row do
     do: "Fermix cannot start it as it is set up. Check its settings."
 
   defp unreachable(_server, %{detail: :exited, stderr_tail: tail}, true),
-    do: said("Stopped after three failed starts.", tail)
+    do: said("It kept stopping, so Fermix stopped starting it.", tail)
 
   defp unreachable(_server, %{detail: :exited, stderr_tail: tail}, false),
     do: said("It stopped.", tail)
@@ -306,13 +322,19 @@ defmodule FermixCore.Management.McpServers.Row do
 
   defp extra_headers(_server, headers), do: headers
 
-  defp auth(%{transport: :http, auth: :header, key_header: key_header}, presence) do
-    present = Enum.any?(presence.headers, &(&1 == {key_header, true}))
+  defp auth(%{transport: :http, auth: :header, key_header: key_header}, facts) do
+    present = Enum.any?(facts.presence.headers, &(&1 == {key_header, true}))
     auth_row("header", if(present, do: "signed_in", else: "signed_out"), key_header)
   end
 
-  defp auth(%{transport: :http, auth: :auto}, _presence), do: auth_row("auto", "signed_out", nil)
-  defp auth(_server, _presence), do: auth_row("none", "not_needed", nil)
+  # Stage 1 has no sign-in, so an `auto` server is signed out only where the
+  # server itself asked for one.
+  defp auth(%{transport: :http, auth: :auto} = server, facts) do
+    state = if sign_in_required?(server, facts.entry), do: "signed_out", else: "not_needed"
+    auth_row("auto", state, nil)
+  end
+
+  defp auth(_server, _facts), do: auth_row("none", "not_needed", nil)
 
   defp auth_row(mode, state, key_header) do
     %{
@@ -343,7 +365,8 @@ defmodule FermixCore.Management.McpServers.Row do
   defp tool_count(nil), do: 0
 
   # A tool switched off is one the server listed and the owner hid. Only the
-  # tools the row describes can be told apart, so past 256 the rest count as on.
+  # tools the row describes can be told apart, so the rest, past 256 or with a
+  # name too long to describe, count as on.
   defp tools_on(_server, nil), do: 0
 
   defp tools_on(server, discovery),

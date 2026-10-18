@@ -99,6 +99,36 @@ defmodule FermixCore.Capabilities.MCP.LoginPathTest do
     end
   end
 
+  describe "known/3" do
+    # A row asks this: it answers from the PATH already read, while the first
+    # reading still runs, and never starts one itself.
+    test "answers without waiting for the reading, and never starts one", ctx do
+      test = self()
+
+      owner =
+        start_owner(fn ->
+          send(test, {:reading, self()})
+          receive do: (:finish -> {:ok, ctx.dir})
+        end)
+
+      assert LoginPath.known(owner, "fermix-fake-mcp", nil) == nil
+      refute_received {:reading, _reader}
+
+      waiters = for _n <- 1..2, do: Task.async(fn -> LoginPath.path(owner) end)
+      assert_receive {:reading, reader}, 5_000
+
+      assert LoginPath.known(owner, "fermix-fake-mcp", nil) == nil
+      assert LoginPath.known(owner, ctx.program, nil) == {:ok, ctx.program}
+
+      send(reader, :finish)
+      assert Task.await_many(waiters) == [ctx.dir, ctx.dir]
+      refute_received {:reading, _again}
+
+      assert LoginPath.known(owner, "fermix-fake-mcp", nil) == {:ok, ctx.program}
+      assert LoginPath.known(owner, "absent", nil) == {:error, {:command_not_found, "absent"}}
+    end
+  end
+
   describe "the login shell reader" do
     test "runs an interactive login shell and takes the value between its markers" do
       test = self()

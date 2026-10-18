@@ -793,13 +793,15 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
     end
 
     # The supervisor starts the TOML servers that are startable: a disabled one
-    # is kept in the file and not started. (An enabled `http` one starts on the
-    # remote rail: `OperatorRemoteTest`.)
+    # is kept in the file and not started, and so is one that names no command.
+    # (An enabled `http` one starts on the remote rail: `OperatorRemoteTest`.)
     test "only startable TOML servers are started", %{cap_registry: cap_registry, suffix: suffix} do
       previous = Application.get_env(:fermix_core, :mcp_servers)
       on_exit(fn -> Application.put_env(:fermix_core, :mcp_servers, previous || []) end)
 
       stub = %{
+        command: "fake-server",
+        reporter: self(),
         discoverer: HappyDiscoverer,
         caller: StubCaller,
         tools_overrides: %{},
@@ -808,7 +810,8 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
 
       Application.put_env(:fermix_core, :mcp_servers, [
         Map.merge(stub, %{name: "on", transport: :stdio, enabled?: true}),
-        Map.merge(stub, %{name: "off", transport: :stdio, enabled?: false})
+        Map.merge(stub, %{name: "off", transport: :stdio, enabled?: false}),
+        Map.merge(stub, %{name: "bare", transport: :stdio, enabled?: true, command: nil})
       ])
 
       sup =
@@ -817,13 +820,15 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
            [
              name: :"mcp_sup_startable_#{suffix}",
              mcp_registry: :"mcp_sup_startable_reg_#{suffix}",
-             capability_registry: cap_registry
+             capability_registry: cap_registry,
+             anubis_starter: RecordingAnubisStarter
            ]},
           id: :mcp_supervisor_startable_test
         )
 
       assert is_pid(server_child_pid(sup, "on"))
       assert server_child_pid(sup, "off") == nil
+      assert server_child_pid(sup, "bare") == nil
     end
   end
 

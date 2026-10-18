@@ -39,7 +39,10 @@ defmodule FermixCore.Capabilities.MCP.Discoverer do
           version: String.t() | nil
         }
 
-  @typedoc "What one discovery found: every tool counted, the first 256 described."
+  @typedoc """
+  What one discovery found: every tool counted, the first 256 whose names can
+  be described, described.
+  """
   @type discovery :: %{
           tool_count: non_neg_integer(),
           server_info: server_info() | nil,
@@ -50,6 +53,9 @@ defmodule FermixCore.Capabilities.MCP.Discoverer do
   # and each text inside a bound, so one server's list stays far inside the
   # protocol's result bound however much its descriptions say.
   @max_described_tools 256
+  # The MCP specification's guidance for a tool name's length. A longer name is
+  # counted and not described, so no name can carry a row past the bound.
+  @max_tool_name_bytes 128
   @max_title_chars 128
   @max_description_chars 512
   @max_info_chars 128
@@ -116,7 +122,9 @@ defmodule FermixCore.Capabilities.MCP.Discoverer do
   What a discovery found, for the owner (M74 E9): how many tools the server
   listed, its `serverInfo`, and the first #{@max_described_tools} tools in its
   order, each with its title, description and the server's own
-  `readOnlyHint` and `destructiveHint`.
+  `readOnlyHint` and `destructiveHint`. Only a tool whose name is at most
+  #{@max_tool_name_bytes} bytes is described; a longer one is counted in
+  `tool_count` and not described, and the row counts it as on.
 
   A hint is what the server declared: an absent one is `false`, and a tool
   that says it only reads is never also destructive. The title is the tool's
@@ -129,9 +137,18 @@ defmodule FermixCore.Capabilities.MCP.Discoverer do
     %{
       tool_count: length(descriptors),
       server_info: server_info(server_info),
-      tools: descriptors |> Enum.take(@max_described_tools) |> Enum.map(&tool_metadata/1)
+      tools:
+        descriptors
+        |> Enum.filter(&describable?/1)
+        |> Enum.take(@max_described_tools)
+        |> Enum.map(&tool_metadata/1)
     }
   end
+
+  defp describable?(%{name: name}) when is_binary(name),
+    do: byte_size(name) <= @max_tool_name_bytes
+
+  defp describable?(_descriptor), do: false
 
   defp server_info(nil), do: nil
 

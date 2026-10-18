@@ -260,7 +260,7 @@ Notes that the shapes alone do not carry:
   `plugin_workspaces_discover` 60000 ms, `plugin_workspace_select` 60000 ms,
   `capability_install` 900000 ms, `meetings_signin` 660000 ms,
   `computer_use_grant` 120000 ms, `browser_install` 900000 ms, `imessage_grant`
-  120000 ms, `imessage_policy_confirm` 180000 ms, `mcp_check` 15000 ms. At most 4 jobs run at once, at most one per
+  120000 ms, `imessage_policy_confirm` 180000 ms, `mcp_check` 75000 ms. At most 4 jobs run at once, at most one per
   kind and name (`busy` beyond either), and at most 16 finished jobs are
   retained, none older than 600000 ms. A `job_id` this daemon does not retain
   answers `unknown_job`.
@@ -751,54 +751,66 @@ Notes that the shapes alone do not carry:
   `tools_on` alone. `consent_sentence` always says where the code runs and what
   leaves this Mac: a local server runs on this Mac as a separate program with
   the owner's access, a remote one on the host its URL names.
-- **The status is derived in one order, and the row switches on actions.**
-  `off` (turned off), `needs_secret` (a declared value is not stored, so the
-  server does not start; the sentence names what it waits for), `needs_sign_in`
-  (an `auto` server the server itself asked to sign in), `starting`
-  (connecting, or no status yet for a server that runs), `connected`,
-  `retrying` (the last connection failed and the daemon is starting it again),
-  `failed` (it stopped trying). The first that holds wins. The status is
-  published for logs and support; a client draws `status_sentence` and switches
-  on `primary_action` and `actions`, which are `check`, `enable`, `disable`,
-  `sign_in` and `sign_out`. `check` is offered while a server is `connected`,
-  `retrying` or `failed`, and a `failed` server leads with it; an `off` server
-  leads with `enable`. No row carries `sign_in` or `sign_out` yet: until the
-  sign-in for MCP servers is published, an `auto` server's `auth.state` is
-  `signed_out` and one the server asks to sign in stays `needs_sign_in`.
-  `last_error` is the daemon's sentence for the failure while a server is
-  `retrying` or `failed`, and null otherwise.
-- **`server_info` and the tools are what the server last said.** Both come
-  from the server's last connection, so a server that is off or starting again
-  still shows them; `server_info` is null before a server first connects. A
-  tool's `read_only` and `destructive` are the server's own `readOnlyHint` and
+- **The status is derived in one order, and the row switches on actions.** `off`
+  (turned off), `failed` for a server that names nothing to start (a local one
+  without its command, a remote one without its URL, which only a hand edit
+  writes; its sentence says what to add, and it offers only `disable`),
+  `needs_secret` (a declared value is not stored, so the server does not start;
+  the sentence names what it waits for), `needs_sign_in` (an `auto` server the
+  server itself asked to sign in), `starting` (connecting, or no status yet for
+  a server that runs), `connected`, `retrying` (the last connection failed and
+  the daemon is starting it again), `failed` (it stopped trying). The first that
+  holds wins. The status is published for logs and support; a client draws
+  `status_sentence` and switches on `primary_action` and `actions`, which are
+  `check`, `enable`, `disable`, `sign_in` and `sign_out`. `check` is offered
+  while a server is `connected`, `retrying` or `failed`, and a `failed` server
+  leads with it; an `off` server leads with `enable`. No row carries `sign_in`
+  or `sign_out` yet: until the sign-in for MCP servers is published, an `auto`
+  server's `auth.state` is `signed_out` only where the server asked to sign in,
+  which stays `needs_sign_in`, and `not_needed` otherwise. `last_error` is the
+  daemon's sentence for the failure while a server is `retrying` or `failed`,
+  and null otherwise.
+- **`server_info` and the tools are what the server last said.** Both come from
+  the server's last connection, so a server that is off or starting again still
+  shows them; `server_info` is null before a server first connects. A tool's
+  `read_only` and `destructive` are the server's own `readOnlyHint` and
   `destructiveHint` as it declared them, an absent hint being false; they inform
-  the owner and decide nothing. `enabled` is false for a tool the owner hid from
-  the agent, and `tools_on` counts the rest.
+  the owner and decide nothing. This is not the MCP specification's default,
+  which takes a tool that declares nothing as destructive, and a tool declared
+  read-only is never destructive. `enabled` is false for a tool the owner hid
+  from the agent, and `tools_on` counts the rest. Only a tool whose name is at
+  most 128 bytes is described, so a tool with a longer name is counted in
+  `tool_count`, not listed in `tools`, and counted as on in `tools_on`.
 - **A form writes a server as fields, and a refusal names the field.**
-  `command_line` is one line, split as a shell splits one simple command:
-  blanks separate words, quotes and `\` keep what they cover, and nothing is
-  expanded, so a line that needs a shell (a pipe, a redirection, a list, `$`, a
-  leading `NAME=value`) is refused rather than run as something else. A local
-  server takes `command_line`, `cwd` and `env_names`; a remote one `url`,
-  `auth` (`auto`, the default, `header` or `none`), `key_header`,
-  `header_names` and `oauth_client_id`; the other transport's fields are
-  refused. `header_names` are the headers besides the key's own, which
-  `key_header` names and the row reports as `auth.key_header`. A URL is
-  `https`, or `http` only to this Mac. On an update a null clears a nullable
-  field (`cwd`, `key_header`, `oauth_client_id`) and a list replaces the one it
-  names. Every refusal is `invalid_params` with the daemon's `sentence` and the
-  `field` a form marks, named as the form names it. Values never ride these
-  methods: they follow through `secret.set mcp:<name>/…`, and the server starts
-  once the last one is stored. Every write applies to the one server it names,
-  with no restart, and refuses with `external_change` while the settings file
-  was changed outside Fermix.
+  `command_line` is one line, split as a shell splits one simple command: blanks
+  separate words, quotes and `\` keep what they cover, and a line that needs a
+  shell (a pipe, a redirection, a list, `$`, a leading `NAME=value`) is refused
+  rather than run as something else. The one expansion is a shell's `~`: an
+  unquoted `~` that starts a word, alone or before a `/`, is the home folder, in
+  `command_line` and in `cwd`, and the server is written with the absolute path
+  that runs, which the row's `location` shows; a quoted `~` stays as it is, and
+  `~name` is refused. A local server takes `command_line`, `cwd` and
+  `env_names`; a remote one `url`, `auth` (`auto`, the default, `header` or
+  `none`), `key_header`, `header_names` and `oauth_client_id`; the other
+  transport's fields are refused. `header_names` are the headers besides the
+  key's own, which `key_header` names and the row reports as `auth.key_header`.
+  A URL is `https`, or `http` only to this Mac. On an update a null clears a
+  nullable field (`cwd`, `key_header`, `oauth_client_id`) and a list replaces
+  the one it names. Every refusal is `invalid_params` with the daemon's
+  `sentence` and the `field` a form marks, named as the form names it. Values
+  never ride these methods: they follow through `secret.set mcp:<name>/…`, and
+  the server starts once the last one is stored. Every write applies to the one
+  server it names, with no restart, and refuses with `external_change` while the
+  settings file was changed outside Fermix.
 - **A check connects, then lists once.** `mcp.servers.check.start` waits for a
   server that is starting, starts again one that is not running or has failed,
   then asks it for its tools; `tool_count` is what it listed and `latency_ms`
-  how long that took. A server that is off or waiting for a value is refused
-  with its own row's sentence, and a connection that fails ends the job with
-  that sentence. After an add or an update, `mcp.servers.get` reads the row as
-  it connects.
+  how long that took. Its wait for a connection outlasts a first start's own
+  60 s, so a server that downloads its package on first run ends the job with
+  how that start ended. A server the daemon does not run (off, naming nothing to
+  start, or waiting for a value) is refused with its own row's sentence, and a
+  connection that fails ends the job with that sentence. After an add or an
+  update, `mcp.servers.get` reads the row as it connects.
 - **A sign-in client appears only where a plugin needs one.** `oauth_clients` is
   derived from the providers the published rows name, so a client row for a
   family this Mac has no plugin for is never drawn. `client_id` is the public

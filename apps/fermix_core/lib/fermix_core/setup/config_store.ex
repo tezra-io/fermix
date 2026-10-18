@@ -456,19 +456,31 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   @doc """
-  Writes MCP server `name` from `attrs`, its `[mcp.servers.<name>]` keys, and
-  applies it (M74 E2). A new server takes `attrs`; an existing one has them
-  merged over what it holds, `nil` removing a key. `McpConfig.put_server/4`
-  decides what is refused, as `{:invalid_params, field, sentence}`.
+  Adds MCP server `name`, its `[mcp.servers.<name>]` keys from `attrs`, and
+  applies it (M74 E2). A name the file already holds is refused under the
+  same lock as the write, so two adds of one name never merge.
+  `McpConfig.add_server/4` decides what is refused, as `{:invalid_params,
+  field, sentence}`.
+  """
+  @spec add_mcp_server(String.t(), %{String.t() => term()}, keyword()) :: :ok | {:error, term()}
+  def add_mcp_server(name, attrs, opts \\ [])
+      when is_binary(name) and is_map(attrs) and is_list(opts) do
+    write_mcp(opts, fn servers ->
+      with {:ok, plugins} <- PluginRegistry.list() do
+        McpConfig.add_server(servers, name, attrs, Enum.map(plugins, & &1.name))
+      end
+    end)
+  end
+
+  @doc """
+  Changes MCP server `name` by `attrs`, merged over what it holds, `nil`
+  removing a key, and applies it (M74 E2). `McpConfig.put_server/3` decides
+  what is refused, a name the file does not hold included.
   """
   @spec put_mcp_server(String.t(), %{String.t() => term()}, keyword()) :: :ok | {:error, term()}
   def put_mcp_server(name, attrs, opts \\ [])
       when is_binary(name) and is_map(attrs) and is_list(opts) do
-    write_mcp(opts, fn servers ->
-      with {:ok, plugin_names} <- plugin_names_for(servers, name) do
-        McpConfig.put_server(servers, name, attrs, plugin_names)
-      end
-    end)
+    write_mcp(opts, &McpConfig.put_server(&1, name, attrs))
   end
 
   @doc """
@@ -525,13 +537,6 @@ defmodule FermixCore.Setup.ConfigStore do
            ) do
       RestartState.record_persisted_baseline()
     end
-  end
-
-  # Only a new name can collide with a plugin's, so only a new name reads them.
-  defp plugin_names_for(servers, name) when is_map_key(servers, name), do: {:ok, []}
-
-  defp plugin_names_for(_servers, _name) do
-    with {:ok, plugins} <- PluginRegistry.list(), do: {:ok, Enum.map(plugins, & &1.name)}
   end
 
   # The one config lock: every writer of `config.toml` holds it from its read to
@@ -1499,8 +1504,9 @@ defmodule FermixCore.Setup.ConfigStore do
   # One order whatever order the owner wrote: servers by name, each followed by
   # its tool blocks by tool name; keys by name in each. A value the reader read
   # is written in its dialect and reads back as it was, and the MCP writers
-  # refuse a value the dialect cannot hold (`McpConfig.put_server/4`), so what
-  # is written here reads back without a second check (M74 E2).
+  # refuse a value the dialect cannot hold (`McpConfig.add_server/4`,
+  # `put_server/3`), so what is written here reads back without a second check
+  # (M74 E2).
   defp render_mcp(%{servers: servers}) do
     servers
     |> Enum.sort_by(&elem(&1, 0))

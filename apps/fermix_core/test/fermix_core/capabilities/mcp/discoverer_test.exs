@@ -186,6 +186,22 @@ defmodule FermixCore.Capabilities.MCP.Discoverer.AnubisTest do
       assert hd(described).name == "tool_1" and List.last(described).name == "tool_256"
     end
 
+    # A name is unbounded on the wire, so one too long to describe could carry
+    # `mcp.servers.get` past the result bound: it is counted and not described.
+    test "a tool whose name passes 128 bytes is counted and not described" do
+      long = String.duplicate("é", 65)
+      edge = String.duplicate("a", 128)
+      names = ["first", long, edge] ++ for(n <- 1..300, do: "tool_#{n}")
+      tools = Enum.map(names, &Discoverer.normalize(%{"name" => &1}))
+
+      assert %{tool_count: 303, tools: described} = Discoverer.discovery(tools, nil)
+
+      assert length(described) == 256
+      assert Enum.map(Enum.take(described, 3), & &1.name) == ["first", edge, "tool_1"]
+      refute Enum.any?(described, &(&1.name == long))
+      assert List.last(described).name == "tool_254"
+    end
+
     test "a hint is what the server declared, and text is bounded in characters" do
       long = String.duplicate("é", 600)
 

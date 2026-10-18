@@ -16,7 +16,7 @@ defmodule FermixCore.Capabilities.MCP.Config do
   A new server's name is `^[a-z][a-z0-9_-]{0,31}$`, there are at most 32
   servers, and no two names share a tool prefix: `foo-bar` and `foo_bar` both
   name tools `mcp_foo_bar_…`. Those rules bind a server being added
-  (`put_server/4`); a file that already breaks them loads as it always did, and
+  (`add_server/4`); a file that already breaks them loads as it always did, and
   `rule_breaks/1` names what it breaks, because a name the owner wrote must
   never stop the daemon. Only a dot in a name, which this reader has always
   refused, refuses the file. A key this reader does not read, a key of the
@@ -38,11 +38,11 @@ defmodule FermixCore.Capabilities.MCP.Config do
   MCP tools are visible to the agent by default. To hide a specific tool
   from the LLM, set `[mcp.servers.X.tools.Y] hidden_from_agent = true`.
 
-  The editors (`put_server/4`, `delete_server/2`, `put_tool/4`) change the
-  `document/1` shape and nothing else, and refuse what this reader's dialect
-  cannot hold, so the settings writer renders their result and it reads back
-  as it was written (M74 E2). Every refusal is `{:invalid_params, field,
-  sentence}`, the field being the key it is about.
+  The editors (`add_server/4`, `put_server/3`, `delete_server/2`,
+  `put_tool/4`) change the `document/1` shape and nothing else, and refuse what
+  this reader's dialect cannot hold, so the settings writer renders their
+  result and it reads back as it was written (M74 E2). Every refusal is
+  `{:invalid_params, field, sentence}`, the field being the key it is about.
   """
 
   alias FermixCore.Capabilities.MCP.Naming
@@ -195,12 +195,18 @@ defmodule FermixCore.Capabilities.MCP.Config do
 
   @doc """
   Whether the daemon starts this server by its configuration: an enabled one,
-  stdio or `http` (the remote rail takes an operator endpoint, M74 E4). This is
-  the one place that decides.
+  stdio or `http` (the remote rail takes an operator endpoint, M74 E4), that
+  names what to start: a stdio server's `command`, an http server's `url`. A
+  hand-written block without one has nothing to start. This is the one place
+  that decides.
   """
   @spec startable?(server_config()) :: boolean()
-  def startable?(%{enabled?: enabled?, transport: transport}) when transport in [:stdio, :http],
-    do: enabled?
+  def startable?(%{enabled?: enabled?, transport: transport} = server)
+      when transport in [:stdio, :http],
+      do: enabled? and address(server) not in [nil, ""]
+
+  defp address(%{transport: :stdio, command: command}), do: command
+  defp address(%{transport: :http, url: url}), do: url
 
   @doc "The most operator servers one settings file holds."
   @spec max_servers() :: pos_integer()
@@ -265,7 +271,7 @@ defmodule FermixCore.Capabilities.MCP.Config do
   One server block, checked and typed, without its tool blocks: the reader's
   rule for every server, and the check every edit's result passes. A refusal
   names the key it is about. The name is not checked here: a loaded server
-  keeps the name it has, and `put_server/4` checks a new one.
+  keeps the name it has, and `add_server/4` checks a new one.
   """
   @spec server(String.t(), %{String.t() => term()}) ::
           {:ok, server_config()} | {:error, refusal()}
@@ -290,27 +296,47 @@ defmodule FermixCore.Capabilities.MCP.Config do
   # --- editing (M74 E2) -----------------------------------------------------
 
   @doc """
-  `document` with server `name` written from `attrs`, its §4 keys.
+  `document` with a new server `name`, whose block is `attrs`, its §4 keys.
 
-  A new server takes `attrs` as its block; an existing one merges them over
-  the block it has, `nil` removing a key, so a key the owner wrote by hand and
-  `attrs` does not name is carried. Refused: a name that is not valid, a key
-  the daemon does not write, a value the reader's dialect cannot hold, a
-  changed transport, a server without its command or URL, and, for a new
-  server, a name outside the pattern, a 33rd one, or a name whose tool prefix
-  another operator server or one of `plugin_names` already gives. A server the
-  file already holds keeps its name, whatever the rules say of it, so the owner
-  can still change or remove it.
+  Refused: a name the file already holds, a name outside the pattern, a 33rd
+  server, a name whose tool prefix another operator server or one of
+  `plugin_names` already gives, and whatever `put_server/3` refuses of a
+  block. The name is checked in the document the server is written into, so a
+  caller that holds the config lock across the read and the write never merges
+  two adds of one name into one block.
   """
-  @spec put_server(document(), String.t(), %{String.t() => term()}, [String.t()]) ::
+  @spec add_server(document(), String.t(), %{String.t() => term()}, [String.t()]) ::
           {:ok, document()} | {:error, refusal()}
-  def put_server(document, name, attrs, plugin_names)
+  def add_server(document, name, attrs, plugin_names)
       when is_map(document) and is_binary(name) and is_map(attrs) and is_list(plugin_names) do
-    sections = Map.get(document, name, %{})
+    with :ok <- new_name(document, name),
+         :ok <- room_for(document, name, plugin_names) do
+      write_server(document, name, %{}, attrs)
+    end
+  end
+
+  @doc """
+  `document` with server `name`'s block changed by `attrs`, merged over the
+  block it has, `nil` removing a key, so a key the owner wrote by hand and
+  `attrs` does not name is carried. Refused: a name the file does not hold, a
+  key the daemon does not write, a value the reader's dialect cannot hold, a
+  changed transport, and a server left without its command or URL. A server
+  the file already holds keeps its name, whatever the rules say of it, so the
+  owner can still change or remove it.
+  """
+  @spec put_server(document(), String.t(), %{String.t() => term()}) ::
+          {:ok, document()} | {:error, refusal()}
+  def put_server(document, name, attrs)
+      when is_map(document) and is_binary(name) and is_map(attrs) do
+    with {:ok, sections} <- fetch_server(document, name) do
+      write_server(document, name, sections, attrs)
+    end
+  end
+
+  defp write_server(document, name, sections, attrs) do
     block = merge_block(Map.get(sections, :server, %{}), attrs)
 
-    with :ok <- room_for(document, name, plugin_names),
-         :ok <- writable(attrs),
+    with :ok <- writable(attrs),
          :ok <- same_transport(Map.get(sections, :server), attrs),
          {:ok, server} <- server(name, block),
          :ok <- required(server, block) do
@@ -426,7 +452,10 @@ defmodule FermixCore.Capabilities.MCP.Config do
          Map.get(block, "transport", "stdio"),
        do: :ok,
        else:
-         refuse("transport", "A server's transport cannot change. Remove it and add it again.")
+         refuse(
+           "transport",
+           "A server cannot move between this Mac and a URL. Remove it and add it again."
+         )
   end
 
   defp required(server, block) do
@@ -441,7 +470,10 @@ defmodule FermixCore.Capabilities.MCP.Config do
   defp required_sentence(:stdio), do: "A local server needs the command that starts it."
   defp required_sentence(:http), do: "A remote server needs its URL."
 
-  defp room_for(document, name, _plugin_names) when is_map_key(document, name), do: :ok
+  defp new_name(document, name) when is_map_key(document, name),
+    do: refuse("name", "An MCP server by this name is already here. Choose another.")
+
+  defp new_name(_document, _name), do: :ok
 
   defp room_for(document, name, plugin_names) do
     cond do
@@ -644,8 +676,8 @@ defmodule FermixCore.Capabilities.MCP.Config do
 
   defp authorization_sentence,
     do:
-      "Authorization is declared only for a server that sends its key there: " <>
-        "auth \"header\" with key_header \"Authorization\"."
+      "The Authorization header holds only the server's key. " <>
+        "Choose to send a key in that header."
 
   defp optional_bool(block, key, default) do
     case Map.get(block, key, default) do
@@ -717,26 +749,35 @@ defmodule FermixCore.Capabilities.MCP.Config do
 
   # One declaration per variable: a name given a literal value, passed through
   # from `[sandbox.env]` and read from the secret store would have three values
-  # and no rule for which one the server sees.
+  # and no rule for which one the server sees. A stored name is one a form
+  # declares beside a value only a hand edit writes, so its sentence is copy.
   defp one_declaration_per_name(env, pass_env, env_secrets) do
     names = Map.keys(env) ++ Enum.uniq(pass_env) ++ env_secrets
+    duplicates = (names -- Enum.uniq(names)) |> Enum.uniq() |> Enum.sort()
+    stored = Enum.filter(duplicates, &(&1 in env_secrets))
 
-    case names -- Enum.uniq(names) do
-      [] ->
+    cond do
+      duplicates == [] ->
         :ok
 
-      duplicates ->
-        listed = duplicates |> Enum.uniq() |> Enum.sort() |> Enum.join(", ")
+      stored != [] ->
+        refuse("env_secrets", stored_twice_sentence(stored))
 
-        field =
-          if Enum.any?(duplicates, &(&1 in env_secrets)), do: "env_secrets", else: "pass_env"
-
+      true ->
         refuse(
-          field,
-          "declares #{listed} in more than one of env, pass_env and env_secrets. " <>
+          "pass_env",
+          "declares #{Enum.join(duplicates, ", ")} in both env and pass_env. " <>
             "Pick one declaration shape per env name."
         )
     end
+  end
+
+  defp stored_twice_sentence([name]),
+    do: "The settings file already gives #{name} a value, so Fermix cannot also store one."
+
+  defp stored_twice_sentence(names) do
+    listed = Enum.join(Enum.drop(names, -1), ", ") <> " and " <> List.last(names)
+    "The settings file already gives #{listed} values, so Fermix cannot also store them."
   end
 
   defp parse_tools_overrides(tools, server_name) do
