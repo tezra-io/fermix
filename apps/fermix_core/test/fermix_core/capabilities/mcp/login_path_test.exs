@@ -193,6 +193,18 @@ defmodule FermixCore.Capabilities.MCP.LoginPathTest do
       assert_received {:ran, "/bin/zsh", ["-ilc", _script]}
     end
 
+    # The script is run as a POSIX shell runs it, without the login and
+    # interactive flags, so no rc file of this Mac is read: only what the
+    # script expands to is under test.
+    test "a real shell prints its PATH between the markers" do
+      run = fn _shell, ["-ilc", script] ->
+        {output, 0} = System.cmd("/bin/sh", ["-c", script], env: [{"PATH", "/opt/a:/opt/b"}])
+        {:ok, output}
+      end
+
+      assert Shell.read(shell: "/bin/zsh", run: run) == {:ok, "/opt/a:/opt/b"}
+    end
+
     test "an answer without the value, a timeout and no shell are each a reason" do
       assert Shell.read(shell: "/bin/zsh", run: fn _shell, _args -> {:ok, "banner only"} end) ==
                {:error, :no_path_printed}

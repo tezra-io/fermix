@@ -228,7 +228,9 @@ defmodule FermixCore.Capabilities.MCP.LoginPath.Shell do
   def read(opts) when is_list(opts) do
     run = Keyword.get(opts, :run, &run/2)
     shell = Keyword.get_lazy(opts, :shell, fn -> System.get_env("SHELL") end)
-    script = ~s(printf '%s' "#{@marker}$PATH#{@marker}")
+    # `${PATH}`, braced: the marker after it starts with an underscore, which
+    # a shell would read as part of the name and expand an unset variable.
+    script = ~s(printf '%s' "#{@marker}${PATH}#{@marker}")
 
     with :ok <- absolute(shell),
          {:ok, output} <- run.(shell, ["-ilc", script]) do
