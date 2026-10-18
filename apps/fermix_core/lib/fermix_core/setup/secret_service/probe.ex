@@ -20,6 +20,7 @@ defmodule FermixCore.Setup.SecretService.Probe do
   """
 
   alias FermixCore.CommandRunner
+  alias FermixCore.SessionBus
 
   @service "org.freedesktop.secrets"
   @service_path "/org/freedesktop/secrets"
@@ -27,18 +28,6 @@ defmodule FermixCore.Setup.SecretService.Probe do
   @call_timeout_ms 1_500
   @evidence_bytes 200
   @collection_path ~r"^/[A-Za-z0-9_/]*$"
-
-  # What busctl says, verbatim, when there is no session bus to ask: no
-  # address at all (a shell reached with `su`, some SSH logins), or an address
-  # with nothing listening behind it.
-  @no_bus_marks [
-    "Failed to set bus address",
-    "Failed to connect to bus",
-    "No such file or directory",
-    "Connection refused",
-    "not defined",
-    "No medium found"
-  ]
 
   @typep runner :: (String.t(), [String.t()] -> {:ok, String.t()} | {:error, term()})
 
@@ -172,7 +161,7 @@ defmodule FermixCore.Setup.SecretService.Probe do
   # A bus that cannot be reached is its own state; everything else the first
   # call can fail with is unknown, with the evidence.
   defp bus_failure({:helper_failed, _code, output} = reason) do
-    if String.contains?(output, @no_bus_marks) do
+    if SessionBus.unreachable?(output) do
       verdict(
         :no_session_bus,
         "no session bus is reachable from this process, so the keyring cannot be reached; " <>

@@ -122,7 +122,8 @@ config :fermix_core, :jobs,
     "imessage" => FermixChannels.Channels.IMessage,
     "mobile" => FermixChannels.Channels.Mobile,
     "companion" => FermixChannels.Channels.Companion,
-    "cli" => FermixChannels.CLI
+    "cli" => FermixChannels.CLI,
+    "computer" => FermixCore.Native.Notifications
   }
 
 # Coding-harness completion continuation (CODING_HARNESS_ORCHESTRATION §23.2): the
