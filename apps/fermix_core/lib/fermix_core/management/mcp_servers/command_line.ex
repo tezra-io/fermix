@@ -21,6 +21,12 @@ defmodule FermixCore.Management.McpServers.CommandLine do
   `join/1` writes the words back as a line that `split/2` reads as the same
   words, quoting only a word that needs it, so the row shows the command that
   runs, a home folder written out.
+
+  `tokens/2` reads a line Fermix reads but never runs as one command, such as a
+  pasted `claude mcp add` line, by the same rules with one difference: a `$` a
+  shell would expand (unquoted, or inside double quotes) is kept as written
+  rather than refused, and each word says whether it holds one, so the caller
+  decides what such a word means.
   """
 
   @max_words 128
@@ -43,14 +49,43 @@ defmodule FermixCore.Management.McpServers.CommandLine do
   """
   @spec split(String.t(), Path.t()) :: {:ok, {String.t(), [String.t()]}} | {:error, refusal()}
   def split(line, home) when is_binary(line) and is_binary(home) do
-    with {:ok, words} <- words(String.to_charlist(line), [], nil, :blank),
-         {:ok, words} <- at_home(words, home),
-         :ok <- bounded(words),
+    with {:ok, words} <- read(line, home, :refuse),
          :ok <- no_assignment(words) do
       [command | args] = words
       {:ok, {command, args}}
     end
   end
+
+  @doc """
+  The words of `line`, each with whether it holds a `$` a shell would expand,
+  which is kept as written; every other refusal is `split/2`'s, naming
+  `command_line`, and a leading `~` is `home` as there.
+  """
+  @spec tokens(String.t(), Path.t()) :: {:ok, [{String.t(), boolean()}]} | {:error, refusal()}
+  def tokens(line, home) when is_binary(line) and is_binary(home) do
+    with {:ok, words} <- read(line, home, :keep) do
+      {:ok, Enum.map(words, &token/1)}
+    end
+  end
+
+  @doc "The refusal of a line that needs a shell to mean what it says."
+  @spec shell_sentence() :: String.t()
+  def shell_sentence,
+    do:
+      "Fermix runs the command itself, not through a shell, so it cannot hold a pipe, " <>
+        "a redirection, a list or a dollar sign. Quote a character the program needs."
+
+  # `dollars` is `:refuse` for a command that runs, `:keep` for `tokens/2`.
+  defp read(line, home, dollars) do
+    with {:ok, words} <- words(String.to_charlist(line), [], nil, :blank, dollars),
+         {:ok, words} <- at_home(words, home),
+         :ok <- bounded(words) do
+      {:ok, words}
+    end
+  end
+
+  defp token({:dollar, word}), do: {word, true}
+  defp token(word), do: {word, false}
 
   @doc """
   `path` with a leading `~` read as a shell reads it: `~` alone or before a
@@ -81,14 +116,19 @@ defmodule FermixCore.Management.McpServers.CommandLine do
     end
   end
 
-  defp home_word({:home, word}, {:ok, acc}, home) do
-    case expand_home(word, home, "command_line") do
-      {:ok, path} -> {:cont, {:ok, [path | acc]}}
+  defp home_word(word, {:ok, acc}, home) do
+    case at_home_word(word, home) do
+      {:ok, expanded} -> {:cont, {:ok, [expanded | acc]}}
       {:error, _refusal} = error -> {:halt, error}
     end
   end
 
-  defp home_word(word, {:ok, acc}, _home), do: {:cont, {:ok, [word | acc]}}
+  defp at_home_word({:dollar, word}, home) do
+    with {:ok, expanded} <- at_home_word(word, home), do: {:ok, {:dollar, expanded}}
+  end
+
+  defp at_home_word({:home, word}, home), do: expand_home(word, home, "command_line")
+  defp at_home_word(word, _home), do: {:ok, word}
 
   @doc "The line `split/2` reads as exactly these words."
   @spec join([String.t()]) :: String.t()
@@ -101,69 +141,94 @@ defmodule FermixCore.Management.McpServers.CommandLine do
   end
 
   # `current` is the word being read, reversed, or nil between words; `mode` is
-  # `:blank`, `:word`, `:single` or `:double`.
-  defp words([], acc, current, mode) when mode in [:blank, :word],
+  # `:blank`, `:word`, `:single` or `:double`; `dollars` says what a `$` a shell
+  # would expand does: `:refuse` refuses the line, `:keep` keeps it and marks
+  # its word for `tokens/2`.
+  defp words([], acc, current, mode, _dollars) when mode in [:blank, :word],
     do: {:ok, Enum.reverse(push(acc, current))}
 
-  defp words([], _acc, _current, _mode),
+  defp words([], _acc, _current, _mode, _dollars),
     do: refuse("A quotation mark is not closed.")
 
-  defp words([char | rest], acc, current, :single), do: single(char, rest, acc, current)
-  defp words([char | rest], acc, current, :double), do: double(char, rest, acc, current)
-  defp words([char | rest], acc, current, _mode), do: bare(char, rest, acc, current)
+  defp words([char | rest], acc, current, :single, dollars),
+    do: single(char, rest, acc, current, dollars)
 
-  defp bare(char, rest, acc, current) when char in [?\s, ?\t],
-    do: words(rest, push(acc, current), nil, :blank)
+  defp words([char | rest], acc, current, :double, dollars),
+    do: double(char, rest, acc, current, dollars)
 
-  defp bare(char, _rest, _acc, _current) when char in [?\n, ?\r],
+  defp words([char | rest], acc, current, _mode, dollars),
+    do: bare(char, rest, acc, current, dollars)
+
+  defp bare(char, rest, acc, current, dollars) when char in [?\s, ?\t],
+    do: words(rest, push(acc, current), nil, :blank, dollars)
+
+  defp bare(char, _rest, _acc, _current, _dollars) when char in [?\n, ?\r],
     do: refuse("A command is one line.")
 
-  defp bare(?', rest, acc, current), do: words(rest, acc, started(current), :single)
-  defp bare(?", rest, acc, current), do: words(rest, acc, started(current), :double)
-  defp bare(?\\, [], _acc, _current), do: refuse("A command cannot end with a backslash.")
+  defp bare(?', rest, acc, current, dollars),
+    do: words(rest, acc, started(current), :single, dollars)
 
-  defp bare(?\\, [next | rest], acc, current),
-    do: words(rest, acc, [next | started(current)], :word)
+  defp bare(?", rest, acc, current, dollars),
+    do: words(rest, acc, started(current), :double, dollars)
+
+  defp bare(?\\, [], _acc, _current, _dollars),
+    do: refuse("A command cannot end with a backslash.")
+
+  defp bare(?\\, [next | rest], acc, current, dollars),
+    do: words(rest, acc, [next | started(current)], :word, dollars)
 
   # A `~` that starts a word is marked for `at_home/2`, unless a quote before
   # the word's first `/` quotes it.
-  defp bare(?~, rest, acc, nil) do
+  defp bare(?~, rest, acc, nil, dollars) do
     prefix = Enum.take_while(rest, &(&1 not in [?/, ?\s, ?\t]))
 
     if Enum.any?(prefix, &(&1 in @quoting)),
-      do: words(rest, acc, [?~], :word),
-      else: words(rest, acc, [?~, :home], :word)
+      do: words(rest, acc, [?~], :word, dollars),
+      else: words(rest, acc, [?~, :home], :word, dollars)
   end
 
-  defp bare(char, _rest, _acc, _current) when char in @operators,
-    do: refuse(operator_sentence())
+  defp bare(?$, rest, acc, current, :keep),
+    do: words(rest, acc, [?$, :dollar | started(current)], :word, :keep)
 
-  defp bare(char, rest, acc, current), do: words(rest, acc, [char | started(current)], :word)
+  defp bare(char, _rest, _acc, _current, _dollars) when char in @operators,
+    do: refuse(shell_sentence())
+
+  defp bare(char, rest, acc, current, dollars),
+    do: words(rest, acc, [char | started(current)], :word, dollars)
 
   defp started(nil), do: []
   defp started(current), do: current
 
-  defp single(?', rest, acc, current), do: words(rest, acc, current, :word)
-  defp single(char, rest, acc, current), do: words(rest, acc, [char | current], :single)
+  defp single(?', rest, acc, current, dollars), do: words(rest, acc, current, :word, dollars)
 
-  defp double(?", rest, acc, current), do: words(rest, acc, current, :word)
+  defp single(char, rest, acc, current, dollars),
+    do: words(rest, acc, [char | current], :single, dollars)
 
-  defp double(?\\, [next | rest], acc, current) when next in [?", ?\\, ?$, ?`],
-    do: words(rest, acc, [next | current], :double)
+  defp double(?", rest, acc, current, dollars), do: words(rest, acc, current, :word, dollars)
 
-  defp double(char, _rest, _acc, _current) when char in [?$, ?`],
-    do: refuse(operator_sentence())
+  defp double(?\\, [next | rest], acc, current, dollars) when next in [?", ?\\, ?$, ?`],
+    do: words(rest, acc, [next | current], :double, dollars)
 
-  defp double(char, rest, acc, current), do: words(rest, acc, [char | current], :double)
+  defp double(?$, rest, acc, current, :keep),
+    do: words(rest, acc, [?$, :dollar | current], :double, :keep)
+
+  defp double(char, _rest, _acc, _current, _dollars) when char in [?$, ?`],
+    do: refuse(shell_sentence())
+
+  defp double(char, rest, acc, current, dollars),
+    do: words(rest, acc, [char | current], :double, dollars)
 
   defp push(acc, nil), do: acc
 
+  # A word that holds a kept `$` comes back marked, around what it is otherwise.
   defp push(acc, current) do
-    case Enum.reverse(current) do
-      [:home | word] -> [{:home, List.to_string(word)} | acc]
-      word -> [List.to_string(word) | acc]
-    end
+    chars = Enum.reverse(current)
+    word = word(Enum.reject(chars, &(&1 == :dollar)))
+    if :dollar in chars, do: [{:dollar, word} | acc], else: [word | acc]
   end
+
+  defp word([:home | chars]), do: {:home, List.to_string(chars)}
+  defp word(chars), do: List.to_string(chars)
 
   defp bounded([]), do: refuse("A local server needs the command that starts it.")
 
@@ -177,11 +242,6 @@ defmodule FermixCore.Management.McpServers.CommandLine do
       do: refuse("A variable goes in a row of its own, not in front of the command."),
       else: :ok
   end
-
-  defp operator_sentence,
-    do:
-      "Fermix runs the command itself, not through a shell, so it cannot hold a pipe, " <>
-        "a redirection, a list or a dollar sign. Quote a character the program needs."
 
   defp refuse(sentence), do: refuse("command_line", sentence)
   defp refuse(field, sentence), do: {:error, {:invalid_params, field, sentence}}

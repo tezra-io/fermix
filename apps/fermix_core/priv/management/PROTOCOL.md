@@ -824,8 +824,9 @@ Notes that the shapes alone do not carry:
   shell's PATH and waits for it only briefly, so a bare command's
   `resolved_command` and `command_sentence` may be null, and the next draft has
   them. A server keeps the name its source gives it where a new server may take
-  that name; otherwise the name comes from the URL's host (`mcp.linear.app` is
-  `linear`) or the command's package (`uvx mcp-server-fetch` is `fetch`).
+  that name; otherwise the name comes from the URL's host, the label before its
+  public suffix (`mcp.linear.app` is `linear`, `eu.mcp.sentry.io` is `sentry`),
+  or the command's package (`uvx mcp-server-fetch` is `fetch`).
   `conflict` is true where an MCP server here already has the name, or one that
   gives its tools the same names. `summary` is `Remote, <host>`, or the program
   and the package it starts.
@@ -833,9 +834,12 @@ Notes that the shapes alone do not carry:
   value in the text is held in the daemon's memory, and `env` and `headers` say
   which names it carried (`present`); the key's header is among `headers`, and
   `key_header` names it. A placeholder (`${input:…}`, `${env:…}`, `${NAME}`,
-  `${NAME:-default}`, an empty value, a Codex variable name) declares its name
-  and carries no value, so the server waits for it. `Authorization: Bearer
-  <token>` is the key, sent as `Bearer <value>`, its value the token; otherwise
+  `${NAME:-default}`, an empty value, a Codex variable name, and in a `claude
+  mcp add` line, written for a shell, `$NAME` or anything the shell would fill
+  in, `Bearer $NAME` included) declares its name and carries no value, so the
+  server waits for it. In such a line a `$` in the name, the address or the
+  command needs a shell and is refused, as in a command line.
+  `Authorization: Bearer <token>` is the key, sent as `Bearer <value>`, its value the token; otherwise
   a remote server's first header is its key and the rest its other headers, and
   a remote server with no header signs in by itself (`auto`). Each draft that
   carried a value has its own `draft_id`, null for one that carried none, so

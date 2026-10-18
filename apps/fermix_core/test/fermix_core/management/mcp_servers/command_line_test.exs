@@ -105,6 +105,48 @@ defmodule FermixCore.Management.McpServers.CommandLineTest do
     end
   end
 
+  # A line read but never run as one command, such as a pasted claude mcp add
+  # line: a `$` a shell would expand is kept and its word marked, and every
+  # other rule is split/2's.
+  describe "tokens/2" do
+    test "marks each word that holds a $ a shell would expand, and keeps it" do
+      line =
+        ~S(claude mcp add -e KEY=$KEY -H "Authorization: Bearer ${PAT}" ) <>
+          ~S(-e 'LIT=$NOT' -e ESC=\$NOT x -- ~/bin/run "\$also")
+
+      assert CommandLine.tokens(line, @home) ==
+               {:ok,
+                [
+                  {"claude", false},
+                  {"mcp", false},
+                  {"add", false},
+                  {"-e", false},
+                  {"KEY=$KEY", true},
+                  {"-H", false},
+                  {"Authorization: Bearer ${PAT}", true},
+                  {"-e", false},
+                  {"LIT=$NOT", false},
+                  {"-e", false},
+                  {"ESC=$NOT", false},
+                  {"x", false},
+                  {"--", false},
+                  {"/Users/owner/bin/run", false},
+                  {"$also", false}
+                ]}
+    end
+
+    test "still refuses what needs a shell beyond a variable" do
+      for line <- ["a -e K=$(cat key)", "a `which b`", "a | b", "a 'open"] do
+        assert {:error, {:invalid_params, "command_line", _sentence}} =
+                 CommandLine.tokens(line, @home),
+               line
+      end
+
+      assert {:error, {:invalid_params, "command_line", sentence}} = split("npx $SERVER")
+      assert sentence == CommandLine.shell_sentence()
+    end
+  end
+
   describe "expand_home/3" do
     test "a working folder takes the same rule, refused under its own field" do
       assert CommandLine.expand_home("~/code", @home, "cwd") == {:ok, "/Users/owner/code"}

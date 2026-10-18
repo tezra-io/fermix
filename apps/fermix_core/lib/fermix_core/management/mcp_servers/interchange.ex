@@ -19,7 +19,10 @@ defmodule FermixCore.Management.McpServers.Interchange do
       it is;
     * a `claude mcp add` line (`--transport`, `--scope`, `-e`/`--env`,
       `-H`/`--header`, a name, then a URL or `--` and a command), or
-      `claude mcp add-json <name> '<json>'`;
+      `claude mcp add-json <name> '<json>'`. Such a line is written for a
+      shell, so a value the shell would fill in from a variable (`$NAME`,
+      `${NAME}`, `Bearer $NAME`) is a placeholder, and a `$` in the name, the
+      address or the command is refused as in a command line;
     * a Codex block of `[mcp_servers.<name>]` tables (`command`, `args`, `env`,
       `cwd`, `url`, `bearer_token_env_var`, `http_headers`, `env_http_headers`).
 
@@ -38,13 +41,17 @@ defmodule FermixCore.Management.McpServers.Interchange do
 
   A server keeps the name its source gives it (the JSON key, the `claude mcp
   add` name, the Codex table) where a new server may take that name. Otherwise,
-  and for a bare URL or command line, the name is derived: from a URL's host
-  without a leading `mcp.`, `api.` or `www.` and without its public suffix
-  (`mcp.linear.app` is `linear`), from a command's package, the first word after
-  `npx`, `bunx`, `uvx` or `pipx run` that is not a flag, else the program's own
-  name, without its scope, its version and `mcp-server-`, `server-`,
-  `-mcp-server`, `-mcp` or `-server` (a package that is only `mcp`, as
-  `@playwright/mcp`, takes its scope's name), then lowercased to the name rule.
+  and for a bare URL or command line, the name is derived. A URL's is the
+  label just before its public suffix, which is the last label, or the last
+  two where a two-letter country follows a second level such as `co`
+  (`mcp.linear.app` is `linear`, `eu.mcp.sentry.io` is `sentry`,
+  `mcp.example.co.uk` is `example`); an address is `server`, and a single label
+  such as `localhost` is itself. A command's is its package, the first word
+  after `npx`, `bunx`, `uvx` or `pipx run` that is not a flag, else the
+  program's own name, without its scope, its version and `mcp-server-`,
+  `server-`, `-mcp-server`, `-mcp` or `-server` (a package that is only `mcp`,
+  as `@playwright/mcp`, takes its scope's name). Either is then lowercased to
+  the name rule.
 
   Every refusal is `{:invalid_params, "text", sentence}`. A placeholder Fermix
   would have to fill in itself (in the command or its arguments, the working
@@ -75,9 +82,10 @@ defmodule FermixCore.Management.McpServers.Interchange do
                     "--header" => :header,
                     "-H" => :header
                   })
-  @claude_line %{transport: nil, env: [], headers: [], words: []}
+  @claude_parsed %{transport: nil, env: [], headers: [], words: []}
+  @claude_start ~r/\Aclaude[ \t]+mcp[ \t]+add(-json)?([ \t]|\z)/
+  @shell_variable ~r/\$\{?[A-Za-z_]/
   @runners ~w(npx bunx uvx)
-  @host_prefixes ~w(mcp api www)
   # A country's own second level (`co.uk`, `com.au`) is part of its suffix.
   @second_levels ~w(ac co com edu gov net org)
   @name_prefixes ~w(mcp-server- server-)
@@ -161,7 +169,8 @@ defmodule FermixCore.Management.McpServers.Interchange do
     cond do
       String.contains?(line, ["\n", "\r"]) -> refuse(@paste_sentence)
       url?(line) -> {:ok, [remote_spec(nil, line, [])]}
-      true -> with {:ok, words} <- words(line, home), do: words_specs(words)
+      Regex.match?(@claude_start, line) -> claude_line(line, home)
+      true -> command_line(line, home)
     end
   end
 
@@ -170,16 +179,15 @@ defmodule FermixCore.Management.McpServers.Interchange do
       match?(%URI{scheme: scheme} when scheme in ["http", "https"], URI.parse(line))
   end
 
-  defp words(line, home) do
-    case CommandLine.split(line, home) do
-      {:ok, {command, args}} -> {:ok, [command | args]}
-      {:error, {:invalid_params, _field, sentence}} -> refuse(sentence)
+  defp command_line(line, home) do
+    with {:ok, {command, args}} <- line |> CommandLine.split(home) |> about_text() do
+      {:ok, [local_spec(nil, command, args, nil, [])]}
     end
   end
 
-  defp words_specs(["claude", "mcp", "add" | words]), do: claude_add(words)
-  defp words_specs(["claude", "mcp", "add-json" | words]), do: claude_add_json(words)
-  defp words_specs([command | args]), do: {:ok, [local_spec(nil, command, args, nil, [])]}
+  # `CommandLine` names the form's field; a paste's refusal is about its text.
+  defp about_text({:error, {:invalid_params, _field, sentence}}), do: refuse(sentence)
+  defp about_text(result), do: result
 
   defp local_spec(source, command, args, cwd, env),
     do: %{source: source, transport: :stdio, command: command, args: args, cwd: cwd, env: env}
@@ -189,40 +197,90 @@ defmodule FermixCore.Management.McpServers.Interchange do
 
   # --- claude mcp add -------------------------------------------------------
 
-  # Options are read anywhere before `--`; the words after it are the command.
-  # Without `--`, the name is followed by a URL, or by a program and its
-  # arguments, which then hold no option of Claude's.
-  defp claude_add(words) do
-    {own, command} = split_at_dashes(words)
-
-    with {:ok, parsed} <- claude_options(own, @claude_line, @claude_options),
-         {:ok, transport} <- claude_transport(parsed.transport) do
-      claude_spec(transport, Enum.reverse(parsed.words), command, parsed)
+  # A claude line goes through a shell before Claude reads it, so it is read as
+  # tokens: a `$` the shell would expand is kept and its word marked
+  # (`CommandLine.tokens/2`). A variable's or a header's value the shell fills
+  # in, or one that names a variable (`$NAME`, `${NAME}`, after `Bearer ` too),
+  # is a placeholder, waited for as JSON's `${…}` is. In the name, the address
+  # or the command such a `$` would need a shell, and is refused as in a
+  # command line.
+  defp claude_line(line, home) do
+    with {:ok, tokens} <- line |> CommandLine.tokens(home) |> about_text() do
+      case tokens do
+        [_claude, _mcp, {"add", false} | rest] -> claude_add(rest)
+        [_claude, _mcp, {"add-json", false} | rest] -> claude_add_json(rest)
+      end
     end
   end
 
-  defp claude_add_json(words) do
-    with {:ok, parsed} <- claude_options(words, @claude_line, @claude_json_options) do
+  # Options are read anywhere before `--`; the words after it are the command.
+  # Without `--`, the name is followed by a URL, or by a program and its
+  # arguments, which then hold no option of Claude's.
+  defp claude_add(tokens) do
+    {own, command} = split_at_dashes(tokens)
+
+    with {:ok, parsed} <- claude_options(own, @claude_parsed, @claude_options),
+         {:ok, transport} <- claude_transport(parsed.transport),
+         {:ok, words} <- unshelled(Enum.reverse(parsed.words)),
+         {:ok, command} <- unshelled(command) do
+      claude_spec(transport, words, command, parsed)
+    end
+  end
+
+  defp claude_add_json(tokens) do
+    with {:ok, parsed} <- claude_options(tokens, @claude_parsed, @claude_json_options) do
       case Enum.reverse(parsed.words) do
-        [name, json] -> json_server(name, json)
+        [{name, false}, {json, shell?}] -> json_server(name, json, shell?)
+        [{_name, true}, _json] -> refuse(CommandLine.shell_sentence())
         _other -> refuse("This line needs the server's name and its settings.")
       end
     end
   end
 
-  defp json_server(name, json) do
+  defp json_server(name, json, shell?) do
     case Jason.decode(json, objects: :ordered_objects) do
       {:ok, %OrderedObject{} = object} ->
-        with {:ok, spec} <- server_spec(name, object), do: {:ok, [spec]}
+        with {:ok, spec} <- server_spec(name, object), do: {:ok, [shell_filled(spec, shell?)]}
 
       _unread ->
         refuse(@json_sentence)
     end
   end
 
-  defp split_at_dashes(words) do
-    case Enum.split_while(words, &(&1 != "--")) do
-      {own, ["--" | command]} -> {own, command}
+  # In settings the shell read inside double quotes, any value with a `$` in
+  # it is the shell's to fill in.
+  defp shell_filled(%{transport: :stdio} = spec, shell?),
+    do: %{spec | env: shell_filled_pairs(spec.env, shell?)}
+
+  defp shell_filled(%{transport: :http} = spec, shell?),
+    do: %{spec | headers: shell_filled_pairs(spec.headers, shell?)}
+
+  defp shell_filled_pairs(pairs, shell?) do
+    Enum.map(pairs, fn
+      {name, raw} when is_binary(raw) ->
+        {name, shell_value(raw, shell? and String.contains?(raw, "$"))}
+
+      pair ->
+        pair
+    end)
+  end
+
+  defp shell_value(raw, filled?) do
+    if filled? or Regex.match?(@shell_variable, raw), do: nil, else: raw
+  end
+
+  # Where a `$` would need a shell to mean what it says.
+  defp unshelled(nil), do: {:ok, nil}
+
+  defp unshelled(tokens) do
+    if Enum.any?(tokens, fn {_word, shell?} -> shell? end),
+      do: refuse(CommandLine.shell_sentence()),
+      else: {:ok, Enum.map(tokens, fn {word, _shell?} -> word end)}
+  end
+
+  defp split_at_dashes(tokens) do
+    case Enum.split_while(tokens, &(&1 != {"--", false})) do
+      {own, [_dashes | command]} -> {own, command}
       {own, []} -> {own, nil}
     end
   end
@@ -230,55 +288,59 @@ defmodule FermixCore.Management.McpServers.Interchange do
   # `options` are the ones this line takes, each by the key it fills.
   defp claude_options([], parsed, _options), do: {:ok, parsed}
 
-  defp claude_options([word | rest], parsed, options) do
-    {option, inline} = option_parts(word)
+  defp claude_options([token | rest], parsed, options) do
+    {option, inline} = option_parts(token)
 
     case Map.fetch(options, option) do
       {:ok, key} -> claude_value(key, option, inline, rest, {parsed, options})
-      :error -> claude_word(word, rest, parsed, options)
+      :error -> claude_word(token, rest, parsed, options)
     end
   end
 
-  defp claude_word("-" <> _flag = word, _rest, _parsed, _options),
+  defp claude_word({"-" <> _flag = word, _shell?}, _rest, _parsed, _options),
     do: refuse("Fermix does not know the option #{quoted(word)}.")
 
-  defp claude_word(word, rest, parsed, options),
-    do: claude_options(rest, %{parsed | words: [word | parsed.words]}, options)
+  defp claude_word(token, rest, parsed, options),
+    do: claude_options(rest, %{parsed | words: [token | parsed.words]}, options)
 
-  defp option_parts("--" <> _long = word) do
+  defp option_parts({"--" <> _long = word, shell?}) do
     case String.split(word, "=", parts: 2) do
-      [option, value] -> {option, value}
+      [option, value] -> {option, {value, shell?}}
       [option] -> {option, nil}
     end
   end
 
-  defp option_parts(word), do: {word, nil}
+  defp option_parts({word, _shell?}), do: {word, nil}
 
-  defp claude_value(key, option, nil, [value | rest], line),
-    do: claude_value(key, option, value, rest, line)
+  defp claude_value(key, option, nil, [token | rest], line),
+    do: claude_value(key, option, token, rest, line)
 
   defp claude_value(_key, option, nil, [], _line),
     do: refuse("The option #{option} needs a value.")
 
-  defp claude_value(key, _option, value, rest, {parsed, options}) do
-    with {:ok, parsed} <- claude_put(key, value, parsed),
+  defp claude_value(key, _option, token, rest, {parsed, options}) do
+    with {:ok, parsed} <- claude_put(key, token, parsed),
          do: claude_options(rest, parsed, options)
   end
 
-  defp claude_put(:transport, value, parsed), do: {:ok, %{parsed | transport: value}}
-  defp claude_put(:scope, _value, parsed), do: {:ok, parsed}
+  defp claude_put(key, {_value, true}, _parsed) when key in [:transport, :scope],
+    do: refuse(CommandLine.shell_sentence())
 
-  defp claude_put(:env, value, parsed) do
+  defp claude_put(:transport, {value, false}, parsed), do: {:ok, %{parsed | transport: value}}
+  defp claude_put(:scope, _token, parsed), do: {:ok, parsed}
+
+  defp claude_put(:env, {value, shell?}, parsed) do
     case String.split(value, "=", parts: 2) do
-      [name, raw] -> {:ok, %{parsed | env: parsed.env ++ [{name, raw}]}}
+      [name, raw] -> {:ok, %{parsed | env: parsed.env ++ [{name, shell_value(raw, shell?)}]}}
       [_name] -> refuse("Fermix cannot read the variable #{quoted(value)}.")
     end
   end
 
-  defp claude_put(:header, value, parsed) do
+  defp claude_put(:header, {value, shell?}, parsed) do
     case String.split(value, ":", parts: 2) do
       [name, raw] ->
-        {:ok, %{parsed | headers: parsed.headers ++ [{String.trim(name), String.trim(raw)}]}}
+        header = {String.trim(name), shell_value(String.trim(raw), shell?)}
+        {:ok, %{parsed | headers: parsed.headers ++ [header]}}
 
       [_name] ->
         refuse("Fermix cannot read the header #{quoted(value)}.")
@@ -648,15 +710,10 @@ defmodule FermixCore.Management.McpServers.Interchange do
 
   defp ip?(host), do: match?({:ok, _address}, :inet.parse_address(String.to_charlist(host)))
 
-  # The host without a leading mcp., api. or www. and without its public suffix.
+  # The name a host is registered under: the label just before its public
+  # suffix (`eu.mcp.sentry.io` is `sentry`). A single label is its own name.
   defp registered([only]), do: only
-
-  defp registered(labels) do
-    case labels |> without_suffix() |> Enum.drop_while(&(&1 in @host_prefixes)) do
-      [] -> labels |> without_suffix() |> List.last()
-      kept -> Enum.join(kept, ".")
-    end
-  end
+  defp registered(labels), do: labels |> without_suffix() |> List.last()
 
   defp without_suffix(labels) do
     case Enum.reverse(labels) do

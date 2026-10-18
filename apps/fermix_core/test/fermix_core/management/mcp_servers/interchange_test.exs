@@ -93,8 +93,11 @@ defmodule FermixCore.Management.McpServers.InterchangeTest do
         "https://mcp.linear.app/mcp" => "linear",
         "https://mcp.sentry.dev/mcp" => "sentry",
         "https://api.githubcopilot.com/mcp/" => "githubcopilot",
-        "https://www.example.co.uk/mcp" => "example",
-        "https://eu.mcp.sentry.io/mcp" => "eu-mcp-sentry",
+        "https://mcp.context7.com/mcp" => "context7",
+        "https://mcp.example.co.uk/mcp" => "example",
+        "https://eu.mcp.sentry.io/mcp" => "sentry",
+        "https://remote.mcp.example.com.au/sse" => "example",
+        "http://localhost:3000/mcp" => "localhost",
         "http://127.0.0.1:8080/mcp" => "server",
         "npx -y @modelcontextprotocol/server-filesystem" => "filesystem",
         "uvx mcp-server-fetch" => "fetch",
@@ -322,6 +325,60 @@ defmodule FermixCore.Management.McpServers.InterchangeTest do
 
       assert {server.name, server.attrs["command"]} == {"weather", "weather-cli"}
       assert values(server) == %{{:env, "CACHE_DIR"} => "/tmp"}
+    end
+
+    # README lines are written for a shell: a value it would fill in from a
+    # variable is a placeholder, so the server waits for it.
+    test "a value from a shell variable is a name with no value" do
+      github =
+        one(
+          ~s(claude mcp add --transport http github https://api.githubcopilot.com/mcp ) <>
+            ~s(-H "Authorization: Bearer $GITHUB_PAT" -H 'X-Toolsets: $TOOLSETS')
+        )
+
+      assert {github.attrs["key_header"], github.attrs["header_secrets"]} ==
+               {"Authorization", ["Authorization", "X-Toolsets"]}
+
+      assert values(github) == %{}
+
+      files =
+        one(
+          ~s|claude mcp add -e API_KEY=$API_KEY -e "TOKEN=${TOKEN}" -e "SECRET=$(pass api)" | <>
+            ~s(-e LEVEL=debug ) <>
+            ~s(-e 'PASS=pa$$1' files -- npx -y files-mcp '$literal')
+        )
+
+      assert files.attrs["env_secrets"] == ~w(API_KEY TOKEN SECRET LEVEL PASS)
+      assert files.attrs["args"] == ["-y", "files-mcp", "$literal"]
+      assert values(files) == %{{:env, "LEVEL"} => "debug", {:env, "PASS"} => "pa$$1"}
+    end
+
+    test "add-json takes a shell variable in a value as a placeholder too" do
+      single =
+        ~s(claude mcp add-json gh '{"url": "https://a.dev/mcp", "headers": {"Authorization": "Bearer $PAT"}}')
+
+      double =
+        ~S(claude mcp add-json gh "{\"url\": \"https://a.dev/mcp\", \"headers\": {\"X-Key\": \"k-$SUFFIX\"}}")
+
+      assert values(one(single)) == %{}
+      assert one(single).attrs["key_header"] == "Authorization"
+      assert values(one(double)) == %{}
+      assert one(double).attrs["header_secrets"] == ["X-Key"]
+    end
+
+    # Anywhere else a shell's variable would change what runs or where.
+    test "a shell variable in the name, the address or the command is refused" do
+      lines = [
+        "claude mcp add files -- npx -y files-mcp $HOME/notes",
+        ~s(claude mcp add files -- sh "$SCRIPT"),
+        "claude mcp add notes node $ENTRY",
+        "claude mcp add $NAME https://a.dev/mcp",
+        "claude mcp add a https://a.dev/$TEAM/mcp",
+        "claude mcp add --transport $T a https://a.dev/mcp",
+        ~s(claude mcp add-json $NAME '{"command": "sh"}')
+      ]
+
+      for line <- lines, do: assert(refusal(line) == CommandLine.shell_sentence(), line)
     end
 
     test "what it cannot read" do
