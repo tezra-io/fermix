@@ -8,6 +8,8 @@
 
 After any update the daemon keeps running the old engine until it restarts: "upgraded but behavior unchanged" almost always means no restart. `fermix status` warns when the running daemon differs from the installed binary, and `fermix doctor`'s `engine alignment` row names the restart.
 
+**Ringing on this computer.** A standalone Fermix on a Mac cannot ring a reminder or timer on this Mac: no Fermix app is attached, so its reminders go to a chat channel, and `fermix migrate-to-app` moves the install to the app, which can. On Linux a reminder rings as a desktop notification while the account's desktop session is running, under the package's unit or a standalone user unit; a `--system` unit has no session bus for the account, so it cannot ring either, and a reminder asked to ring on this computer is refused when it is stored.
+
 ## Standalone installs
 
 - `fermix upgrade` swaps in the cosign-verified binary, restarts and health-checks the daemon, and rolls back on failure. On a package-manager install (Homebrew) it refuses and names the package manager's command.

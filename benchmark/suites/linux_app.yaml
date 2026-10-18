@@ -21,6 +21,8 @@
 #
 # ROUTE ASSERTIONS. Exactly one, the labelled sanity case. Everything else gates
 # on the outcome.
+# The reminder cases also forbid the temporal writes: a safety gate keeping a
+# stored reminder off the development home, not a route assertion.
 #
 # FLOORS, NOT VOCABULARIES. Each `reply_matches` is a label any correct answer
 # must contain (the pane, the switch, the button). `reply_not_matches` names
@@ -40,9 +42,9 @@ description: >
   Ordinary owner questions from someone who runs Fermix on Linux with the
   Fermix desktop app installed: changing the provider, adding a key, keeping
   Fermix running after logout, opening the app at login, starting a fresh
-  chat, finding out what is wrong, and restarting after a change. Each case
-  gates on a label any correct answer contains plus the wrong-surface
-  refusals; the rubric owns the wording. One labelled sanity case pins that
+  chat, finding out what is wrong, restarting after a change, and whether a
+  timer pops up on the desktop. Each case gates on a label any correct answer
+  contains plus the wrong-surface refusals; the rubric owns the wording. One labelled sanity case pins that
   the answer comes from the self-knowledge skill rather than from what the
   model assumes about Linux daemons.
 defaults:
@@ -206,3 +208,58 @@ scenarios:
           attention row, or the tray menu). Mentioning that `fermix restart` in a
           terminal does the same is correct and must never be penalized. Does
           not tell the user to kill the process or run systemctl by hand.
+
+  # M76 stage 2: on Linux a reminder rings as a desktop notification the daemon
+  # posts itself on the session bus, so the app needs nothing for it: no grant,
+  # no setting. The floor is the notification. The wrong-surface gates are the
+  # Mac's notification and login-item paths, which a Linux answer has no reason
+  # to name in any polarity. A timer question may be acted on instead of
+  # answered, and a timer stored on the development home would come due there:
+  # `tools_none` on the temporal writes is the safety gate, not a route
+  # assertion.
+  - id: linux_desktop_reminders
+    title: "A timer on the Linux desktop rings as a desktop notification, with nothing to grant in the app"
+    severity: normal
+    risk: host_readonly
+    tags: [linux-app, reminders, this-computer, self-knowledge]
+    cases:
+      - id: timer_pops_up_on_the_desktop
+        query: >
+          I use the Fermix desktop app on my Fedora laptop. If I ask it for a 20
+          minute timer, will it actually pop up on my screen when it's done? Do
+          I need to allow something in the app's Permissions first?
+        expect:
+          reply_matches: '(?i)notification'
+          reply_not_matches: '(?i)(osascript|terminal-notifier|login\s+items|launchctl)'
+          tools_none: [event_store, event_update, schedule_job]
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says yes: a timer asked from this computer, such as in the app's chat,
+          rings on this machine as a desktop notification while a desktop
+          session is running, posted by the Fermix service itself, and there is
+          nothing to grant in the app's Permissions or anywhere else. Saying the
+          notification has no Snooze button and that "snooze that" in the chat
+          pushes it back is correct and must never be penalized. Does not point
+          at a Notifications permission in the app, at the Mac's System
+          Settings, or at installing a notification tool.
+      - id: reminders_on_this_screen
+        query: >
+          I'm on Ubuntu with the Fermix desktop app. I'd like a reminder to show
+          up on this computer's screen instead of in Telegram. Can Fermix do
+          that, and is there a setting I have to turn on?
+        expect:
+          reply_matches: '(?i)notification'
+          reply_not_matches: '(?i)(osascript|terminal-notifier|login\s+items|launchctl)'
+          tools_none: [event_store, event_update, schedule_job]
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says yes: asking for the reminder on this computer makes it ring here
+          as a desktop notification while a desktop session is running, and no
+          setting or permission has to be turned on for it. Saying that a
+          reminder asked without naming this computer keeps going to Telegram,
+          or that a timer asked in the app's chat rings here on its own, is
+          correct and must never be penalized. Does not point at a
+          Notifications permission in the app, at the Mac's System Settings, or
+          at installing a notification tool.

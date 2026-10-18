@@ -104,6 +104,22 @@
         "invokes skill self_knowledge",
         "answers for the one install the prompt's ## This Fermix section names (the Mac app's Check for Updates…, the Linux package's installer run again then fermix restart, a Homebrew formula's brew upgrade fermix then fermix restart, or a standalone binary's fermix upgrade) and does not ask the person which install they have or list the others"
       ]
+    },
+    {
+      "name": "mac_app_timer_rings_here",
+      "prompt": "I use the Fermix app on my Mac. Can you set timers, and will I actually hear them go off?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "says a timer asked in the Mac app rings on this Mac as a notification from the Fermix app, with sound and a Snooze 10 minutes button, opening Fermix in the background when it is not running, and that it needs the Notifications permission (Settings > Permissions > Notifications > Grant…, or System Settings > Notifications > Fermix once refused); does not send the person to a CLI verb or config.toml"
+      ]
+    },
+    {
+      "name": "standalone_mac_cannot_ring",
+      "prompt": "I run Fermix from Homebrew on my Mac. Can a reminder pop up as a notification on this Mac?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "says nothing can ring on this Mac from the standalone install, because no Fermix app is attached, so its reminders go to a chat channel; says the Fermix app can, and that fermix migrate-to-app moves the install to it; does not offer osascript, terminal-notifier or another stand-in"
+      ]
     }
   ]
 }

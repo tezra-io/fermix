@@ -7,6 +7,8 @@ defmodule FermixCore.HostFactsTest do
   alias FermixCore.BootProfile
   alias FermixCore.BuildInfo
   alias FermixCore.HostFacts
+  alias FermixCore.Native.Notifications
+  alias FermixCore.Tools.EventStore
   alias FermixTestSupport.HostFactsStub
   alias FermixTestSupport.SafeRm
 
@@ -153,57 +155,65 @@ defmodule FermixCore.HostFactsTest do
   end
 
   describe "render/1" do
-    # One table over every install M76 §4.2 names. Stage 1 has two lines:
-    # nothing can ring on this computer yet, so no line says it can.
-    test "names the install and the machine for every host" do
+    # One table over every install M76 §4.2 names: the install, the machine,
+    # and whether a reminder can ring on this computer.
+    test "names the install, the machine and what can ring here for every host" do
       table = [
         {facts(:app_engine, :darwin),
          """
          ## This Fermix
          - Install: the Fermix app on this Mac. The app owns setup, settings, the background service and updates, and ships no `fermix` command: answer "how do I" with the app's own labels (Settings > <pane>), never a CLI verb or config.toml.
          - Machine: macOS 26.1 on Apple silicon (arm64).
+         - This computer: a reminder or timer can ring here as a notification from the Fermix app (`event_store` with `delivery: "computer"`); its Notifications permission is in Settings > Permissions.
          """},
         {facts(:standalone_cli, :darwin, architecture: "x86_64"),
          """
          ## This Fermix
          - Install: the standalone Fermix on this Mac (Homebrew formula or a downloaded binary), run by its own launchd service and managed with the `fermix` command, browser setup and config.toml. No Fermix app is attached.
          - Machine: macOS 26.1 on Intel (x86_64).
+         - This computer: nothing can ring here; reminders go to a chat channel. The Fermix app can ring on this Mac (`fermix migrate-to-app`).
          """},
         {facts(:linux_package_cli, :linux, linux_app: true),
          """
          ## This Fermix
          - Install: the Fermix Linux package (.deb or .rpm), run as the systemd user unit fermix.service and managed with the `fermix` command, browser setup and config.toml. The Fermix desktop app (Flatpak io.tezra.Fermix) was installed when Fermix started: it shows settings, chat, voice and logs, so answer "how do I" with its own labels for anything it has a control for.
          - Machine: Ubuntu 24.04 LTS on x86_64.
+         - This computer: a reminder or timer can ring here as a desktop notification while a desktop session is running (`event_store` with `delivery: "computer"`); a headless host has none.
          """},
         {facts(:linux_package_cli, :linux),
          """
          ## This Fermix
          - Install: the Fermix Linux package (.deb or .rpm), run as the systemd user unit fermix.service and managed with the `fermix` command, browser setup and config.toml. No Fermix desktop app was installed when Fermix started; the `fermix` command and browser setup are the surfaces.
          - Machine: Ubuntu 24.04 LTS on x86_64.
+         - This computer: a reminder or timer can ring here as a desktop notification while a desktop session is running (`event_store` with `delivery: "computer"`); a headless host has none.
          """},
         {facts(:standalone_cli, :linux, linux_app: true, architecture: "arm64"),
          """
          ## This Fermix
          - Install: the standalone Fermix binary on this Linux machine, run by its own systemd service and managed with the `fermix` command, browser setup and config.toml. The Fermix desktop app (Flatpak io.tezra.Fermix) was installed when Fermix started: it shows settings, chat, voice and logs, so answer "how do I" with its own labels for anything it has a control for.
          - Machine: Ubuntu 24.04 LTS on arm64.
+         - This computer: a reminder or timer can ring here as a desktop notification while a desktop session is running (`event_store` with `delivery: "computer"`); a headless host has none.
          """},
         {facts(:standalone_cli, :linux),
          """
          ## This Fermix
          - Install: the standalone Fermix binary on this Linux machine, run by its own systemd service and managed with the `fermix` command, browser setup and config.toml. No Fermix desktop app was installed when Fermix started; the `fermix` command and browser setup are the surfaces.
          - Machine: Ubuntu 24.04 LTS on x86_64.
+         - This computer: a reminder or timer can ring here as a desktop notification while a desktop session is running (`event_store` with `delivery: "computer"`); a headless host has none.
          """},
         {facts(:source, :darwin),
          """
          ## This Fermix
          - Install: a development run from a source checkout (`mix fermix.dev`), managed with the `fermix` command, browser setup and config.toml.
          - Machine: macOS 26.1 on Apple silicon (arm64).
+         - This computer: nothing can ring here; the Fermix app's own engine can.
          """},
         {facts(:source, :linux),
          """
          ## This Fermix
          - Install: a development run from a source checkout (`mix fermix.dev`), managed with the `fermix` command, browser setup and config.toml.
          - Machine: Ubuntu 24.04 LTS on x86_64.
+         - This computer: a reminder or timer can ring here as a desktop notification while a desktop session is running (`event_store` with `delivery: "computer"`); a headless host has none.
          """}
       ]
 
@@ -220,14 +230,37 @@ defmodule FermixCore.HostFactsTest do
                "\n- Machine: Linux on x86_64; the distribution and its version could not be read."
     end
 
-    test "no line says anything can ring on this computer yet" do
-      for install <- [:app_engine, :standalone_cli, :source], os <- [:darwin] do
-        refute HostFacts.render(facts(install, os)) =~ ~r/(?i)ring|notification|This computer/
-      end
+    # The truthfulness rule (M76 §4.2, §4.11): the line the model reads, the
+    # build's offer and the tool's schema are one answer. The third line says
+    # this computer can ring exactly where `Native.Notifications.offered?/1`
+    # holds for the host the facts name, which is exactly where `event_store`
+    # publishes `delivery`.
+    test "the third line says this computer can ring iff the build offers it and the schema has delivery" do
+      hosts =
+        [facts(:app_engine, :darwin), facts(:standalone_cli, :darwin), facts(:source, :darwin)] ++
+          for install <- [:linux_package_cli, :standalone_cli, :source], app <- [true, false] do
+            facts(install, :linux, linux_app: app)
+          end
 
-      for install <- [:linux_package_cli, :standalone_cli, :source], app <- [true, false] do
-        refute HostFacts.render(facts(install, :linux, linux_app: app)) =~
-                 ~r/(?i)ring|notification|This computer/
+      for %{install: install, os: os} = facts <- hosts do
+        host = %{profile: install, os: os}
+
+        assert [_heading, _install, _machine, computer] =
+                 String.split(HostFacts.render(facts), "\n")
+
+        rings? =
+          String.starts_with?(computer, "- This computer: a reminder or timer can ring here")
+
+        silent? = String.starts_with?(computer, "- This computer: nothing can ring here")
+        offered? = Notifications.offered?(host: host)
+
+        published? =
+          Map.has_key?(EventStore.dynamic_parameters(%{host: host}).properties, :delivery)
+
+        assert rings? != silent?, "#{inspect(host)}: #{computer}"
+        assert rings? == offered?, "#{inspect(host)} rings #{rings?}, offered #{offered?}"
+        assert rings? == published?, "#{inspect(host)} rings #{rings?}, schema #{published?}"
+        assert computer =~ ~s(delivery: "computer") == rings?
       end
     end
   end

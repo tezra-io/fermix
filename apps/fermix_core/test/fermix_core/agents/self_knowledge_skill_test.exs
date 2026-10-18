@@ -3,6 +3,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
 
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Delivery.OwnerInbox
+  alias FermixCore.NativeHost.Server, as: NativeHostServer
   alias FermixCore.Temporal.Registry, as: TemporalRegistry
 
   test "bundled self-knowledge skill loads as a core skill with no tools" do
@@ -331,6 +332,43 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
 
     assert derived =~ "iMessage"
     assert reference =~ "(" <> derived <> ")"
+  end
+
+  # M76 §4.4: the native host socket is a file in the home like the other
+  # sockets, and only the Mac app's engine serves it. Its name is read from the
+  # listener, so a rename fails here until the body follows.
+  test "the home's file list names the native host socket and who serves it" do
+    socket = Path.basename(NativeHostServer.socket_path())
+
+    [home_line] =
+      self_knowledge_path()
+      |> File.read!()
+      |> String.split("\n")
+      |> Enum.filter(&String.starts_with?(&1, "- `FERMIX_HOME` default"))
+
+    assert home_line =~ "`#{socket}` (served only by the Mac app's engine"
+  end
+
+  # M76 §4.9, §4.10: whether a reminder can ring on this computer, said where
+  # each install's owner looks: the Mac app's Permissions pane and its launch
+  # on demand, what a standalone Mac and a system unit cannot do, and the
+  # Linux desktop, which needs nothing in its app.
+  test "says where a reminder can ring on this computer for each install" do
+    read = fn name -> name |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ") end
+
+    for {name, required} <- [
+          {"macos_app", "**Notifications**"},
+          {"macos_app", "held by Fermix and read by the app itself"},
+          {"macos_app", "System Settings > Notifications > Fermix"},
+          {"macos_app", "opens Fermix in the background to ring when it is not running"},
+          {"service_unit", "cannot ring a reminder or timer on this Mac"},
+          {"service_unit", "`fermix migrate-to-app`"},
+          {"service_unit", "a `--system` unit has no session bus for the account"},
+          {"linux_app", "desktop notification the daemon posts itself"},
+          {"linux_app", "while a desktop session is running"}
+        ] do
+      assert read.(name) =~ required, "the #{name} reference does not say #{required}"
+    end
   end
 
   # M34 §4 changes what a whole family of CLI verbs does on an app-managed

@@ -20,6 +20,38 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Fermix reads no machine name, account name, serial number or address for
   it, and a guest you let talk to Fermix is told none of it. A desktop app
   installed after Fermix started is known at its next restart.
+- **A reminder or a timer can ring on this computer (engine side).** Ask for
+  it on this Mac or here, or set a timer from the Mac chat, a terminal, an
+  editor or a voice call, and it rings on the computer Fermix runs on instead
+  of in a chat: on a Mac as a notification from the Fermix app, with sound,
+  opening the app in the background when it is not running; on Linux as a
+  desktop notification while a desktop session is running. A reminder you ask
+  for from your phone or a chat app still goes where your reminders go unless
+  you name this computer, and when Fermix has no chat to reach you on, it
+  rings here. On a Mac it needs the Fermix app's Notifications permission,
+  which Fermix asks for only when you ask from the Mac itself; asked from
+  anywhere else before you have granted it, it says where to grant it and
+  stores nothing. A ring that fails is tried again on this computer like any
+  reminder and never moves to a chat. A headless Linux host, a system-wide
+  Linux service and a standalone Fermix on a Mac cannot ring, and say why
+  when asked, a standalone Mac naming `fermix migrate-to-app` as the move to
+  the app. No released Fermix.app rings yet: the app half ships in the next
+  app release.
+- **Timers, in minutes and hours.** "Remind me in 20 minutes" and "set a two
+  hour timer" are reminders at that exact moment in your time zone, up to a
+  day ahead in minutes and a week ahead in hours, and Fermix confirms the
+  clock time it will ring. Two timers with the same name minutes apart are
+  both kept.
+- **Snooze 10 minutes, from the Mac notification itself.** A reminder that
+  rings on your Mac carries a Snooze 10 minutes button, which moves that
+  reminder ten minutes on with nothing to type and no reply from Fermix. It
+  arrives with the same Fermix app release. A Linux desktop notification has
+  no button; say "snooze that" instead.
+- **"Snooze that" and "cancel that" after it rang on this computer.** Right
+  after a reminder rings on this computer, "snooze that" or "cancel that" in
+  the Mac chat, a terminal, an editor, the Linux app's chat or a voice call
+  finds it with no id, as it already does in the chat a reminder arrived in.
+  From your phone or a chat app it never reaches one that rang here.
 - **MCP servers you add yourself, managed over the management socket (engine
   side).** The daemon now owns the MCP servers you add, so the Mac app can
   offer them with no terminal and no hand edit: add one by its URL, with a key

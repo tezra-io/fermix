@@ -28,6 +28,12 @@ The first provider connected becomes primary; Settings > Providers > the provide
 
 Settings (⌘,): which pane holds what is in `skill_view(name: "self-knowledge", file: "config")`. Secrets show only as stored, never read back. A change that needs a restart shows **Restart to apply** > **Restart…**; an outside edit to `config.toml` stops saves until **Reload settings from disk**, and an unreadable one offers **Open recovery**. The app records its home in `~/Library/Application Support/Fermix/launcher.json` and ignores a shell `FERMIX_HOME`.
 
+## The Permissions pane
+
+Settings > Permissions lists each macOS right with the identity that holds it, since one grant never implies another, and its state: **Microphone** and **Notifications** (held by Fermix and read by the app itself), **Background service** (the Fermix background agent), **Screen recording** and **Accessibility** (the Fermix computer-use helper), and, once iMessage is used, **Messages data**, **Messages automation** and **Who Fermix may message** (Fermix Messages). A right that is not granted has its fix beside it.
+
+**Notifications** is what a reminder or timer that rings on this Mac needs: **Grant…** while it reads Not asked yet, System Settings > Notifications > Fermix once refused. A reminder for this Mac opens Fermix in the background to ring when it is not running, so quitting the app does not stop it. Where reminders go and when Fermix asks for the grant: `skill_view(name: "self-knowledge", file: "events_reminders")`.
+
 ## Updates and removal
 
 - **Check for Updates…** (Fermix menu or the menu bar item) > **Install**; the app asks once whether to check on its own and never installs by itself. Home then reads "…ready and installs when Fermix quits": quit and reopen. **Restart to finish updating** means **Restart Fermix…**. A cask install can also `brew upgrade --cask tezra-io/tap/fermix`.

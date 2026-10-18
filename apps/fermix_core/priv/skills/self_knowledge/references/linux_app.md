@@ -23,6 +23,10 @@ Answer a Linux app user with the app's labels for anything it has a control for 
 
 Fourteen panes, in this order: Providers, Personality, Memory, Channels, Integrations, Voice, Meetings, Computer, Coding agents, Search, Images, Secrets, Sandbox, Permissions (grouped Assistant, Connections, Capabilities and System). The rows in each are the daemon's, so they match the browser setup page and the Mac app's panes for the same section. In Providers each provider row offers its ways in, most direct first (**Sign in**, **Import from** a sign-in already on the machine, **Paste a setup token…** for Anthropic, **Use an API key…**), and its menu holds **Make primary**, **Replace key…**, **Remove key** and **Sign out**. A setting this copy of the app has no control for says so and asks for an app update.
 
+## Reminders on this computer
+
+Nothing in the app: a reminder or timer that rings on this computer is a desktop notification the daemon posts itself on the session bus while a desktop session is running, named Fermix and drawn with this app's name and icon when it is installed. Linux holds no grant for it, so Permissions shows nothing new, and it carries no Snooze button: "snooze that" in the app's chat snoozes it.
+
 ## What it does not have
 
 - No Phone pane: pairing a phone is `fermix pair` from the owner's own terminal.

@@ -1908,6 +1908,19 @@ def test_routing_boundary_cases_forbid_the_config_mutation_tool():
 _ROUTE_GATES = {"tools_any", "tools_all", "tools_in_order", "tools_none",
                 "tools_none_succeeded"}
 
+# The writes a host_readonly reminder question must never make: it runs against
+# the development home, where a stored timer comes due and is sent. A
+# `tools_none` naming only these is that safety gate, not a route assertion.
+_TEMPORAL_WRITES = {"event_store", "event_update", "event_remove", "reminder_snooze",
+                    "schedule_job"}
+
+
+def _route_gates(case: suites.Case) -> set[str]:
+    gates = _ROUTE_GATES & set(case.expect)
+    if set(case.expect.get("tools_none", [])) <= _TEMPORAL_WRITES:
+        gates.discard("tools_none")
+    return gates
+
 
 def test_macos_app_scenarios_declare_risk_and_keep_one_labelled_route_assertion():
     suite = _suite_by_name("macos_app")
@@ -1917,7 +1930,7 @@ def test_macos_app_scenarios_declare_risk_and_keep_one_labelled_route_assertion(
     assert all(len(scenario.cases) >= 2 for scenario in suite.scenarios)
 
     routed = [case.id for scenario in suite.scenarios for case in scenario.cases
-              if _ROUTE_GATES & set(case.expect)]
+              if _route_gates(case)]
     assert routed == ["stop_background_service_sanity"]
 
 
@@ -2036,7 +2049,7 @@ def test_linux_app_scenarios_declare_risk_and_keep_one_labelled_route_assertion(
     assert all(len(scenario.cases) >= 2 for scenario in suite.scenarios)
 
     routed = [case.id for scenario in suite.scenarios for case in scenario.cases
-              if _ROUTE_GATES & set(case.expect)]
+              if _route_gates(case)]
     assert routed == ["switch_provider_sanity"]
 
 
@@ -2068,6 +2081,12 @@ def test_linux_app_gates_accept_the_app_answer():
         "restart_after_change":
             "Click Restart Fermix… in the window's header; `fermix restart` in a "
             "terminal does the same.",
+        "timer_pops_up_on_the_desktop":
+            "Yes: it shows as a desktop notification while you are logged in to "
+            "the desktop. There is nothing to grant in Permissions.",
+        "reminders_on_this_screen":
+            "Ask for it on this computer and it rings here as a desktop "
+            "notification; no setting has to be turned on.",
     }
     assert set(correct) == set(cases)
     for case_id, reply in correct.items():
@@ -2095,10 +2114,123 @@ def test_linux_app_gates_reject_the_wrong_surface():
             "Open Doctor, then run `brew services restart fermix`.",
         "restart_after_change":
             "Restart Fermix with `launchctl kickstart -k gui/$UID/io.tezra.fermix`.",
+        "timer_pops_up_on_the_desktop":
+            "It pops up as a notification once Fermix is allowed in Login Items.",
+        "reminders_on_this_screen":
+            "I can show a notification myself with "
+            "`osascript -e 'display notification \"call the bank\"'`.",
     }
     assert set(wrong) == set(cases)
     for case_id, reply in wrong.items():
         assert not _reply_regexes_pass(cases[case_id], 0, reply), case_id
+
+
+# M76 stage 2: where a reminder or a timer rings on this computer, asked of
+# the development home with the install stated in the prompt.
+_THIS_COMPUTER_CASES = {
+    "macos_app": ["timer_in_the_app_chat", "reminder_with_telegram_connected",
+                  "homebrew_reminder_popup", "homebrew_timer_ring"],
+    "linux_app": ["timer_pops_up_on_the_desktop", "reminders_on_this_screen"],
+    "linux_packages": ["headless_server_reminder", "closet_box_timer"],
+}
+
+
+def test_this_computer_reminder_questions_cannot_store_one_on_the_development_home():
+    # host_readonly runs against the development home, where a timer the model
+    # set instead of answering would come due and be sent. Each question
+    # forbids the temporal writes, and its scenario declares its risk.
+    for suite_name, case_ids in _THIS_COMPUTER_CASES.items():
+        suite = _suite_by_name(suite_name)
+        scenarios = {case.id: scenario for scenario in suite.scenarios
+                     for case in scenario.cases}
+        cases = _suite_cases(suite_name)
+        for case_id in case_ids:
+            assert scenarios[case_id].risk == "host_readonly", case_id
+            forbidden = set(cases[case_id].expect.get("tools_none", []))
+            assert {"event_store", "event_update", "schedule_job"} <= forbidden, case_id
+
+
+def test_this_computer_gates_accept_the_answer_for_the_stated_install():
+    macos = _suite_cases("macos_app")
+    packages = _suite_cases("linux_packages")
+    correct = [
+        (macos["timer_in_the_app_chat"],
+         "It rings on this Mac as a notification from the Fermix app. Allow it once "
+         "in Settings > Permissions > Notifications > Grant…"),
+        (macos["reminder_with_telegram_connected"],
+         "It reaches you on Telegram. Say \"remind me on my Mac\" and it rings here as "
+         "a notification from the Fermix app instead."),
+        (macos["homebrew_reminder_popup"],
+         "No: nothing can ring on this Mac without the Fermix app, so reminders go to "
+         "a chat channel. `fermix migrate-to-app` moves you to the app, which can."),
+        (macos["homebrew_timer_ring"],
+         "Not from the standalone install: its timers go to Telegram. The Fermix app "
+         "can ring on this Mac."),
+        (packages["headless_server_reminder"],
+         "No. On Linux a reminder rings only as a desktop notification, and a "
+         "headless server runs no desktop session, so it goes to Telegram."),
+        (packages["closet_box_timer"],
+         "No desktop session runs on that box, so nothing there can show a "
+         "notification; a timer you set from Telegram rings in Telegram."),
+    ]
+    for case, reply in correct:
+        assert _reply_regexes_pass(case, 0, reply), case.id
+
+
+def test_this_computer_gates_reject_a_stand_in_or_another_install():
+    macos = _suite_cases("macos_app")
+    packages = _suite_cases("linux_packages")
+    # Each still names its case's floor, so only the wrong-mode gate refuses it:
+    # a notification poster of the model's own, or another install's answer.
+    wrong = [
+        (macos["timer_in_the_app_chat"],
+         "I'll post the notification myself with `osascript -e 'display notification'`."),
+        (macos["timer_in_the_app_chat"],
+         "Run `fermix setup` and the notification goes to your default channel."),
+        (macos["reminder_with_telegram_connected"],
+         "Telegram, unless you load a launch agent with `launchctl` to show it here."),
+        (macos["homebrew_reminder_popup"],
+         "No app needed: `brew install terminal-notifier` and I will post it."),
+        (macos["homebrew_timer_ring"],
+         "Yes without the app: an AppleScript display notification rings it here."),
+        (packages["headless_server_reminder"],
+         "Yes: I'll post a desktop notification with notify-send when it is due."),
+        (packages["closet_box_timer"],
+         "It can: a notification goes out through `notify-send` on that box."),
+    ]
+    for case, reply in wrong:
+        assert not _reply_regexes_pass(case, 0, reply), case.id
+
+
+def _store_gates_pass(case: suites.Case, when: dict, tool: str = "event_store") -> bool:
+    trace = {
+        "_eval_trace_complete": True,
+        "total_estimated_cost": 0.0,
+        "usage": {"total_tokens": 1},
+        "metadata": {"iterations": 1},
+        "output": "Set.",
+    }
+    spans = [{"type": "tool", "name": tool,
+              "input": {"title": "pasta", "kind": "explicit_reminder", "when": when}}]
+    gates = grade.grade(trace, spans, case.turns[0].expect, elapsed_ms=1.0)
+    return all(gate.passed for gate in gates)
+
+
+def test_timer_cases_take_the_relative_unit_the_tool_resolves():
+    # The date note carries no time of day, so a timer's one correct `when` is
+    # relative in minutes or hours: a datetime the model computed, a whole day,
+    # or a scheduled job each fail the first turn.
+    cases = _suite_cases("temporal_events")
+    for case_id, unit in (("pasta_timer_minutes", "minutes"),
+                          ("laundry_reminder_hours", "hours")):
+        case = cases[case_id]
+        relative = {"type": "relative", "amount": 2, "unit": unit}
+        assert _store_gates_pass(case, relative), case_id
+        assert not _store_gates_pass(
+            case, {"type": "datetime", "date": "2026-11-20", "time": "18:12:00"}), case_id
+        assert not _store_gates_pass(
+            case, {"type": "relative", "amount": 1, "unit": "days"}), case_id
+        assert not _store_gates_pass(case, relative, tool="schedule_job"), case_id
 
 
 def test_only_stream_span_operator_cases_require_telegram_streaming():

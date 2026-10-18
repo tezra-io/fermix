@@ -18,7 +18,7 @@
 | Images | **Images** backend, **Model**, its key |
 | Sandbox | **Sandbox** mode, **Command profile**, **Allowed environment variables** |
 | Browser | which browser tasks run in (read-only), **Run tasks**, **Most open tabs**, **Private hosts the browser may open**; downloads Chromium when none is installed |
-| Permissions | macOS permissions |
+| Permissions | macOS permissions, each with the identity that holds it, **Notifications** among them (a reminder or timer ringing on this Mac); see the `macos_app` reference |
 
 - **Linux and dev installs**: `fermix settings` (below; works over SSH with no browser), browser setup (`fermix setup` opens it with a one-time `/setup?t=…` link; the durable setup token never goes in a URL), the terminal wizard (`fermix setup --terminal`), `fermix setup --<flag>` for headless values, or `config.toml`, then `fermix restart`.
 - **Needs a restart** (read at boot): providers, routing, the outbound proxy, voice, channels, ACP, sandbox (except `[sandbox.env]`, read per command), coding harness, skill curation, meetings, computer use, computer history. Setup and the app say which change is waiting.

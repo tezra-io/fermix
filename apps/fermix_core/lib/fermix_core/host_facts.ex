@@ -23,6 +23,11 @@ defmodule FermixCore.HostFacts do
   Never read: the hostname, the account name, the serial, any address, or the
   engine's own version.
 
+  The section's last line says whether a reminder can ring on this computer.
+  That is `Native.Notifications.offered?/1`'s answer for the host the facts
+  name, the same answer `event_store` publishes `delivery` on, so the line and
+  the tool never disagree; nothing here re-derives the provider.
+
   `remember/0` reads through the module `config :fermix_core,
   :host_facts_reader` names (this one by default): `config/test.exs` pins
   `FermixTestSupport.HostFactsStub`, and `read/3` takes `plutil:`,
@@ -33,6 +38,7 @@ defmodule FermixCore.HostFacts do
   alias FermixCore.BootProfile
   alias FermixCore.BuildInfo
   alias FermixCore.CommandRunner
+  alias FermixCore.Native.Notifications
 
   require Logger
 
@@ -108,10 +114,14 @@ defmodule FermixCore.HostFacts do
     [@system_exports, Path.join(data_home(xdg_data_home, home), @user_exports)]
   end
 
-  @doc "The `## This Fermix` section for `facts`: the install, then the machine."
+  @doc """
+  The `## This Fermix` section for `facts`: the install, the machine, then
+  whether a reminder can ring on this computer.
+  """
   @spec render(t()) :: String.t()
   def render(%{install: _install, os: _os} = facts) do
-    Enum.join(["## This Fermix", install_line(facts), machine_line(facts)], "\n")
+    lines = [install_line(facts), machine_line(facts), computer_line(facts)]
+    Enum.join(["## This Fermix" | lines], "\n")
   end
 
   defp os_version(os, opts) do
@@ -265,6 +275,34 @@ defmodule FermixCore.HostFacts do
 
   defp machine_line(%{os_version: version} = facts) when is_binary(version),
     do: "- Machine: #{version} on #{processor(facts)}."
+
+  # Whether it rings is the build's offer for the host the facts name; the
+  # wording then says how, or where else a reminder goes.
+  defp computer_line(%{install: install, os: os} = facts) do
+    computer_sentence(Notifications.offered?(host: %{profile: install, os: os}), facts)
+  end
+
+  defp computer_sentence(true, %{os: :darwin}) do
+    "- This computer: a reminder or timer can ring here as a notification from the Fermix " <>
+      "app (`event_store` with `delivery: \"computer\"`); its Notifications permission is in " <>
+      "Settings > Permissions."
+  end
+
+  # Whether a desktop session is running is asked when a reminder is stored and
+  # when it fires, never at boot: a lingering unit starts before anyone logs in.
+  defp computer_sentence(true, %{os: :linux}) do
+    "- This computer: a reminder or timer can ring here as a desktop notification while a " <>
+      "desktop session is running (`event_store` with `delivery: \"computer\"`); a headless " <>
+      "host has none."
+  end
+
+  defp computer_sentence(false, %{install: :standalone_cli, os: :darwin}) do
+    "- This computer: nothing can ring here; reminders go to a chat channel. The Fermix app " <>
+      "can ring on this Mac (`fermix migrate-to-app`)."
+  end
+
+  defp computer_sentence(false, %{install: :source, os: :darwin}),
+    do: "- This computer: nothing can ring here; the Fermix app's own engine can."
 
   defp processor(%{os: :darwin, architecture: "arm64"}), do: "Apple silicon (arm64)"
   defp processor(%{os: :darwin, architecture: "x86_64"}), do: "Intel (x86_64)"
