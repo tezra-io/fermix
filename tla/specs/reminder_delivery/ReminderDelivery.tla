@@ -30,15 +30,15 @@
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/temporal/scheduler.ex @ 0a264754d567
 \* SOURCE: apps/fermix_core/lib/fermix_core/temporal/delivery_worker.ex @ 35e1b4be4964
-\* SOURCE: apps/fermix_core/lib/fermix_core/temporal/delivery.ex @ f0cf3e71c8ff
+\* SOURCE: apps/fermix_core/lib/fermix_core/temporal/delivery.ex @ 7c7619d41cf8
 \* SOURCE: apps/fermix_core/lib/fermix_core/temporal/delivery_supervisor.ex @ f4c7d9dd90a1
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/temporal_sql.ex @ c322fb1ca6bc
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,call_or_timeout_error,periodic_opts,claim_due_reminders,recover_delivering_reminder,sweep_delivering_reminders,update_temporal_event @ ebd91fdc0e6f
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 9b06289e25ae
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/error.ex @ a3cd3a75d3ca
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex @ 9e95a610b074
-\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,temporal_scheduler_opts @ ab93eb961986
-\* SOURCE: apps/fermix_core/lib/fermix_core/temporal/registry.ex @ ee0831d5019c
+\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,temporal_scheduler_opts @ ece44c7a42c3
+\* SOURCE: apps/fermix_core/lib/fermix_core/temporal/registry.ex @ 5f277965a35e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex @ b8ec31a5444a
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex @ 214348321d4a
 EXTENDS Naturals, FiniteSets

@@ -29,6 +29,14 @@ mechanism check.
   neither is a reminder platform (see the plan hypotheses).
 - `PlatformCanBeSlow`: the platform can answer after the watchdog fired, and can
   still show a message Fermix gave up on.
+
+This computer (M76), the `computer` platform, is a reminder platform that
+neither dedupes (its adapter ignores `proactive_key`) nor answers inside the
+watchdog for certain (the Mac app is opened on demand), so it is the worst
+case the core checks already run (`PlatformDedupes = FALSE`,
+`PlatformCanBeSlow = TRUE`): a timed-out post the app still shows is the
+known "duplicates without dedupe" below. Its delivery is one `ChannelSend`
+attempt like every platform's, so nothing here models it separately.
 - `WorkersCanCrash`: a worker exits before settling: a raise before the send, or
   its settlement Repo call returns an error and rolls back
   (`delivery_worker.ex:210-213`, `:75`).

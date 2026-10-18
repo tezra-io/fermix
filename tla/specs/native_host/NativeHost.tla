@@ -61,11 +61,11 @@
 (* racing it.                                                              *)
 (***************************************************************************)
 
-\* SOURCE: apps/fermix_core/lib/fermix_core/native/host_availability.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/native_host/link.ex#request,handle_call,handle_info,caller_request,write_request,sent,attach,host_stopping,answered,deliver
-\* SOURCE: apps/fermix_core/lib/fermix_core/native/notifications/mac_app.ex#post,posted,host,run,launch,wait
-\* SOURCE: apps/fermix_core/lib/fermix_core/app_launcher.ex#launch
-\* SOURCE: apps/fermix_core/priv/native_host/PROTOCOL.md
+\* SOURCE: apps/fermix_core/lib/fermix_core/native/host_availability.ex @ acb7bc813f3c
+\* SOURCE: apps/fermix_core/lib/fermix_core/native_host/link.ex#request,handle_call,handle_info,caller_request,write_request,sent,attach,host_stopping,answered,deliver @ 917055f7fa1e
+\* SOURCE: apps/fermix_core/lib/fermix_core/native/notifications/mac_app.ex#post,posted,host,run,launch,wait @ 13710aafcf21
+\* SOURCE: apps/fermix_core/lib/fermix_core/app_launcher.ex#launch @ d3f98dcfb59f
+\* SOURCE: apps/fermix_core/priv/native_host/PROTOCOL.md @ 21d6a07e01a5
 
 EXTENDS Naturals, FiniteSets, TLC
 
