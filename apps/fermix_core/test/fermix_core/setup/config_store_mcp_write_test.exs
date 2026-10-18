@@ -314,6 +314,36 @@ defmodule FermixCore.Setup.ConfigStoreMcpWriteTest do
       assert File.read!(path) == edited
     end
 
+    # Another writer holding the lock has written the file and not yet recorded
+    # its baseline. The guard is asked under the lock, so a write waiting on it
+    # sees that write as the daemon's own, never as an outside edit.
+    test "a write waiting on the lock is not refused for the write that holds it", %{
+      home: home,
+      path: path
+    } do
+      assert :ok = ConfigStore.add_mcp_server("files", @files, @recording)
+
+      waiting =
+        Lock.with_lock(Path.join(home, "config.toml.lock"), fn ->
+          File.write!(
+            path,
+            File.read!(path) <> "\n[fermix_core.personalization]\nuser_name = \"Ada\"\n"
+          )
+
+          task =
+            Task.async(fn ->
+              ConfigStore.put_mcp_server("files", %{"enabled" => false}, @recording)
+            end)
+
+          refute Task.yield(task, 300)
+          :ok = RestartState.record_persisted_baseline()
+          task
+        end)
+
+      assert Task.await(waiting, 30_000) == :ok
+      assert File.read!(path) =~ ~s(user_name = "Ada")
+    end
+
     test "a section the renderer would drop refuses the write", %{path: path} do
       File.write!(path, "[custom]\nkey = \"kept\"\n")
       :ok = RestartState.record_persisted_baseline()

@@ -509,21 +509,25 @@ defmodule FermixCore.Setup.ConfigStore do
     write_mcp(opts, &McpConfig.put_tool(&1, name, tool, enabled?))
   end
 
-  # The one write path (M74 E2), in this order: the outside-edit guard a
-  # settings save also asks; the config lock around the read, the edit and the
-  # write, rendered by the settings renderer; the baseline, or the next save
-  # would read this write as an outside edit; then the apply, whose reload
-  # restarts only the server whose spec changed. `:mcp_supervisor` names the
-  # module that reloads, for a test.
+  # The one write path (M74 E2), in this order, all but the apply under the
+  # config lock: the outside-edit guard a settings save also asks, asked under
+  # the lock so a write that just landed is never taken for an outside edit; the
+  # read, the edit and the write, rendered by the settings renderer; the
+  # baseline, or the next save would read this write as an outside edit; then
+  # the apply, whose reload restarts only the server whose spec changed.
+  # `:mcp_supervisor` names the module that reloads, for a test.
   defp write_mcp(opts, edit) do
     home = fermix_home()
 
-    with :ok <- RestartState.writable(),
-         :ok <- with_config_lock(home, fn -> commit_mcp(home, edit) end),
+    with :ok <- with_config_lock(home, fn -> guarded_commit_mcp(home, edit) end),
          :ok <- apply_mcp_config(),
          {:ok, _summary} <- Keyword.get(opts, :mcp_supervisor, McpSupervisor).reload() do
       :ok
     end
+  end
+
+  defp guarded_commit_mcp(home, edit) do
+    with :ok <- RestartState.writable(), do: commit_mcp(home, edit)
   end
 
   defp commit_mcp(home, edit) do
