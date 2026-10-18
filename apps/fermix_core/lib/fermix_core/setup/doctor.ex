@@ -303,7 +303,9 @@ defmodule FermixCore.Setup.Doctor do
   setup doctor pane so both define "stale" the same way.
 
   Only profiles Fermix still reads are reported: a provider's auth profile
-  (`Store.profile/1`) and a plugin's own profile. An entry stored under a bare
+  (`Store.profile/1`) and a plugin's own profile. An MCP server's grant
+  (`mcp:<name>`) is not: it is refreshed when its server next connects, and its
+  row says when it needs a sign-in. An entry stored under a bare
   provider id is one an older build wrote (the Codex-client grant under
   `openai_codex`, whose provider now signs in under `chatgpt`); nothing reads it,
   so asking to renew it would send the operator after a credential that does
@@ -327,7 +329,8 @@ defmodule FermixCore.Setup.Doctor do
   # provider id is a leftover, and every remaining name is a plugin's profile.
   defp read_profile?(profile) do
     profile in Enum.map(Store.profiled_providers(), &Store.profile/1) or
-      profile not in Enum.map(ModelCatalog.providers(), &Atom.to_string/1)
+      (profile not in Enum.map(ModelCatalog.providers(), &Atom.to_string/1) and
+         not Store.mcp_profile?(profile))
   end
 
   @doc """

@@ -38,7 +38,12 @@ defmodule FermixCore.Management.Jobs do
   # per-kind budget, and the phases a run of that kind may report.
   @kinds [
     provider_probe: %{budget_ms: 15_000, phases: ["calling"]},
-    auth: %{budget_ms: 300_000, phases: ["binding", "awaiting_browser", "verifying"]},
+    # M74 E5: an MCP server's sign-in finds its authorization server and its
+    # client before the browser opens.
+    auth: %{
+      budget_ms: 300_000,
+      phases: ["binding", "discovering", "registering", "awaiting_browser", "verifying"]
+    },
     auth_import: %{budget_ms: 60_000, phases: ["reading_keychain", "verifying"]},
     plugin_install: %{budget_ms: 600_000, phases: ["downloading"]},
     plugin_check: %{budget_ms: 30_000, phases: ["probing"]},

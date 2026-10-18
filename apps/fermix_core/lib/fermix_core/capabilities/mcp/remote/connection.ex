@@ -149,6 +149,10 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
   complete event, with that event as the body, for a stream that may never
   end (the older SSE transport's, M74 D7). The response is then unfinished,
   so that connection is unusable too and the caller must `close/1` it.
+
+  `max_bytes` lowers the universal response cap for a caller whose answers
+  are small documents (a sign-in's metadata and tokens, M74 E5); it bites
+  while the body streams, as the universal one does, and never raises it.
   """
   @spec request(
           t(),
@@ -165,9 +169,12 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
     target = connection.endpoint.path
     stop = Keyword.get(opts, :stop, :done)
 
+    max_bytes =
+      min(Keyword.get(opts, :max_bytes, Limits.max_response_bytes()), Limits.max_response_bytes())
+
     case Mint.HTTP.request(connection.conn, method, target, headers, body) do
       {:ok, conn, ref} ->
-        read(%{connection | conn: conn}, ref, deadline, timeout_ms, stop)
+        read(%{connection | conn: conn}, ref, deadline, timeout_ms, {stop, max_bytes})
 
       # The send itself failed, so the peer never saw this request. That is a
       # materially different fact from a close mid-response: resending is not a
@@ -186,9 +193,11 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
     :ok
   end
 
-  defp read(connection, ref, deadline, budget_ms, stop) when stop in [:done, :first_event] do
+  defp read(connection, ref, deadline, budget_ms, {stop, max_bytes})
+       when stop in [:done, :first_event] do
     acc = %{
       stop: stop,
+      max_bytes: max_bytes,
       status: nil,
       headers: [],
       header_bytes: 0,
@@ -302,7 +311,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
   defp absorb_data(acc, data) do
     received = acc.received + byte_size(data)
 
-    if received > Limits.max_response_bytes() do
+    if received > acc.max_bytes do
       {:error, {:remote_protocol_error, {:response_too_large, received}}}
     else
       absorb_body(%{acc | received: received}, data)

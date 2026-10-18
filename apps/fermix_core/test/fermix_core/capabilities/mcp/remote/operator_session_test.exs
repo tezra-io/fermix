@@ -65,8 +65,15 @@ defmodule FermixCore.Capabilities.MCP.Remote.OperatorSessionTest do
   defp restore(key, nil), do: Application.delete_env(:fermix_core, key)
   defp restore(key, value), do: Application.put_env(:fermix_core, key, value)
 
-  defp server(auth, headers),
-    do: %{name: "linear", transport: :http, auth: auth, header_secrets: headers}
+  defp server(auth, headers) do
+    %{
+      name: "linear",
+      transport: :http,
+      url: "https://mcp.linear.app/mcp",
+      auth: auth,
+      header_secrets: headers
+    }
+  end
 
   defp agent(responses) do
     {:ok, agent} = Agent.start_link(fn -> %{responses: responses, requests: []} end)

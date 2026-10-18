@@ -1483,6 +1483,12 @@
       "why": "M74: a finished `mcp_check` job's result carries `tool_count` beside `latency_ms`, how many tools the server listed. The draft predates the kind, and a job result is a flat map of scalars a client reads by key."
     },
     {
+      "method": "job.get",
+      "field": "result.account_label",
+      "kind": "engine_only",
+      "why": "M74 E5: a finished `auth` job that signed in an MCP server carries `account_label`, the account its grant names, as a provider's sign-in does. The draft illustrates only a provider probe's result, and a job result is a flat map of scalars a client reads by key."
+    },
+    {
       "method": "mcp.servers.add",
       "field": "params:auth",
       "kind": "engine_only",

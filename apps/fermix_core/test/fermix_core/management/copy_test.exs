@@ -518,6 +518,10 @@ defmodule FermixCore.Management.CopyTest do
   key_header = "Authorization"
   header_secrets = ["X-Workspace", "Authorization"]
   oauth_client_id = "fermix"
+
+  [mcp.servers.notion]
+  transport = "http"
+  url = "https://mcp.notion.com/mcp"
   """
 
   # One row for every status and every class a failed server can end in, for a
@@ -528,6 +532,7 @@ defmodule FermixCore.Management.CopyTest do
 
     entries =
       [nil, {:connecting, nil}, {:ready, nil}, {:reauthorization_required, :sign_in_required}] ++
+        [{:insufficient_credential_scope, nil}] ++
         for(
           detail <- ~w(command_not_found cwd_not_found env_unavailable header_unavailable
                        reserved_header invalid_url other)a,
@@ -551,17 +556,32 @@ defmodule FermixCore.Management.CopyTest do
         enabled? <- [true, false],
         stored? <- [true, false],
         entry <- entries,
-        alive? <- [true, false] do
+        alive? <- [true, false],
+        grant <- mcp_grants() do
       row =
         McpRow.build(%{server | enabled?: enabled?}, %{
           presence: mcp_presence(server, stored?),
           entry: mcp_entry(entry, tail),
           alive?: alive?,
-          resolution: nil
+          resolution: nil,
+          grant: grant
         })
 
-      {row, ["npx", "mcp.linear.app", "/Users/owner/mcp", "GITHUB_TOKEN", "X-Workspace"] ++ tail}
+      names = ["npx", "mcp.linear.app", "mcp.notion.com", "/Users/owner/mcp", "GITHUB_TOKEN"]
+      {row, names ++ ["X-Workspace"] ++ tail}
     end
+  end
+
+  # Every state an `auto` server's grant reads as on its row (M74 E5).
+  defp mcp_grants do
+    grant = %{
+      state: :signed_in,
+      account_label: "owner@example.com",
+      issuer: "https://auth.example.com",
+      wanted_scopes: []
+    }
+
+    [nil, grant, %{grant | state: :expired}, %{grant | wanted_scopes: ["admin"]}]
   end
 
   defp mcp_presence(server, stored?) do

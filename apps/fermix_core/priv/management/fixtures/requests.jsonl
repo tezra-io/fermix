@@ -79,3 +79,5 @@
 {"name": "mcp_servers_disable", "expect": "v1", "method": "mcp.servers.disable", "frame": {"request_id": "req-mcp-servers-disable-1", "protocol_version": 2, "method": "mcp.servers.disable", "params": {"name": "linear"}}}
 {"name": "mcp_servers_tool_set", "expect": "v1", "method": "mcp.servers.tool.set", "frame": {"request_id": "req-mcp-servers-tool-set-1", "protocol_version": 2, "method": "mcp.servers.tool.set", "params": {"name": "linear", "tool": "update_project", "enabled": true}}}
 {"name": "mcp_servers_check_start", "expect": "v1", "method": "mcp.servers.check.start", "frame": {"request_id": "req-mcp-servers-check-start-1", "protocol_version": 2, "method": "mcp.servers.check.start", "params": {"name": "linear"}}}
+{"name": "auth_start_mcp", "expect": "v1", "method": "auth.start", "frame": {"request_id": "req-auth-start-mcp-1", "protocol_version": 2, "method": "auth.start", "params": {"provider": "mcp:linear"}}}
+{"name": "auth_logout_mcp", "expect": "v1", "method": "auth.logout", "frame": {"request_id": "req-auth-logout-mcp-1", "protocol_version": 2, "method": "auth.logout", "params": {"provider": "mcp:linear"}}}

@@ -207,9 +207,9 @@ daemon onto anything else.
 | `job.get` | `job_id` | One job's uniform view. Minimum version `2`. |
 | `job.cancel` | `job_id` | Stops a running job and answers its terminal view. Cancelling a finished job is a no-op, not an error. Minimum version `2`. |
 | `job.list` | none | Every job this daemon retains, oldest first. What lets a reopened surface find a run it started rather than starting a second one. Minimum version `2`. |
-| `auth.start` | `provider` | Starts a browser sign-in and answers with the job plus the authorize url and its lifetime, returned once. `openai_codex` signs in with ChatGPT: a sign-in that leaves ChatGPT plan usage off fails the job with its sentence, and a completed one first makes sure the default model is one the account lists. When that check cannot be made (the account's model list could not be read, or the model could not be saved), the sign-in still completes and its result carries `model_warning`, the daemon's sentence saying the default model was not checked and why, beside `account_label`. The field is optional: absent means the check was made, and a client that does not know it shows the sign-in as completed. Minimum version `2`. |
+| `auth.start` | `provider` | Starts a browser sign-in and answers with the job plus the authorize url and its lifetime, returned once. `openai_codex` signs in with ChatGPT: a sign-in that leaves ChatGPT plan usage off fails the job with its sentence, and a completed one first makes sure the default model is one the account lists. When that check cannot be made (the account's model list could not be read, or the model could not be saved), the sign-in still completes and its result carries `model_warning`, the daemon's sentence saying the default model was not checked and why, beside `account_label`. The field is optional: absent means the check was made, and a client that does not know it shows the sign-in as completed. `mcp:<name>` signs in one MCP server the owner added, a remote one whose `auth` is `auto`, and is refused with `invalid_params` on `provider` and a sentence for a name no server has, a server on this Mac, one that sends a key and one set to need no sign-in. Minimum version `2`. |
 | `auth.import.start` | `source` | Adopts a sign-in this Mac already has, from Claude Code. A job, because reading the keychain can prompt. `codex_cli` is still accepted as a source and refused with `invalid_params` and a sentence: a Codex CLI sign-in is no longer adopted, and `openai_codex` signs in with ChatGPT through `auth.start`. Minimum version `2`. |
-| `auth.logout` | `provider` | Forgets one provider's local session and reverts the route it fed. Nothing is revoked upstream, except for `openai_codex`: its sign-out revokes the ChatGPT session and keeps the registration, so the next sign-in reuses it. Minimum version `2`. |
+| `auth.logout` | `provider` | Forgets one provider's local session and reverts the route it fed. Nothing is revoked upstream, except for `openai_codex`: its sign-out revokes the ChatGPT session and keeps the registration, so the next sign-in reuses it. `mcp:<name>` forgets one MCP server's sign-in, revokes nothing upstream, and starts the server again without it; a client its sign-in registered is kept for the next one. Minimum version `2`. |
 | `plugins.list` | none | Every integration this daemon can show, installed or not, in one row shape, plus one entry per sign-in client a published plugin needs, each carrying the account region it is bound to and the regions this daemon offers for it. Every word on a row is the daemon's. Minimum version `2`. |
 | `plugins.install.start` | `name` | Fetches, verifies and activates one catalog plugin. A job. Minimum version `2`. |
 | `plugins.check.start` | `name` | Runs one plugin's own health check, live probe included. A job. Minimum version `2`. |
@@ -267,7 +267,9 @@ Notes that the shapes alone do not carry:
   answers `unknown_job`.
 - **`phase` is display copy, never a state.** It names the current step from a
   closed per-kind vocabulary — `provider_probe`: `calling`; `auth`: `binding`,
-  `awaiting_browser`, `verifying`; `auth_import`: `reading_keychain`,
+  `discovering`, `registering`, `awaiting_browser`, `verifying` (an MCP server's
+  sign-in discovers and registers before the browser opens, and binds nothing
+  first); `auth_import`: `reading_keychain`,
   `verifying`; `plugin_install`: `downloading`; `plugin_check`: `probing`;
   `plugin_workspaces_discover`: `listing`; `plugin_workspace_select`: `binding`;
   `capability_install`: `sidecar_downloading`, `downloading`,
@@ -765,14 +767,38 @@ Notes that the shapes alone do not carry:
   the daemon is starting it again), `failed` (it stopped trying). The first that
   holds wins. The status is published for logs and support; a client draws
   `status_sentence` and switches on `primary_action` and `actions`, which are
-  `check`, `enable`, `disable`, `sign_in` and `sign_out`. `check` is offered
-  while a server is `connected`, `retrying` or `failed`, and a `failed` server
-  leads with it; an `off` server leads with `enable`. No row carries `sign_in`
-  or `sign_out` yet: until the sign-in for MCP servers is published, an `auto`
-  server's `auth.state` is `signed_out` only where the server asked to sign in,
-  which stays `needs_sign_in`, and `not_needed` otherwise. `last_error` is the
-  daemon's sentence for the failure while a server is `retrying` or `failed`,
-  and null otherwise.
+  `check`, `enable`, `disable`, `sign_in` and `sign_out`, in that order. `check`
+  is offered while a server is `connected`, `retrying` or `failed`, and a
+  `failed` server leads with it; an `off` server offers and leads with `enable`
+  alone. `needs_sign_in` also covers an `auto` server that asked to be signed
+  in again for more access. `last_error` is the daemon's sentence for the
+  failure while a server is `retrying` or `failed`, and null otherwise.
+- **An `auto` server's sign-in is on its row.** `auth.state` is `signed_in`
+  with a grant the server can use, `expired` when its authorization server
+  refused to refresh it, `signed_out` where the server asked for a sign-in and
+  there is no grant, and `not_needed` otherwise; `account_label` (the
+  account's email, user name or name, else the authorization server's host)
+  and `issuer` (the authorization server) name the grant, and are null without
+  one. `sign_in` is offered, and led with, where the server asks for a sign-in,
+  where the grant expired, and where one of its tools asked for more access than
+  the grant gives (`status_sentence` then says so beside its tools); `sign_out`
+  is offered while signed in. A `header` or `none` server offers neither.
+- **An MCP server signs in through `auth.start mcp:<name>`.** The job discovers
+  the server's authorization server the way the MCP authorization
+  specification orders it (the server's `401` challenge, its protected resource
+  metadata, then its authorization server's metadata), with no redirect
+  followed and every address held to the rule its own URL is. It registers
+  with the server's `oauth_client_id` (and `mcp:<name>/client_secret` when
+  stored), else with Fermix's client metadata document
+  (`https://fermix.ai/oauth/mcp-client.json`) where the authorization server
+  takes one, else by dynamic client registration, whose client is kept for the
+  next sign-in to the same authorization server. The browser sign-in uses PKCE
+  and names the server as the resource; a reply from another authorization
+  server is refused. A sign-in that completes starts the server once and its
+  result carries `account_label`. The grant lives in the daemon's auth store,
+  never in `config.toml` and never on the wire; it is refreshed before it
+  expires and once when the server refuses it, is not used once the server
+  names another authorization server, and is deleted with the server.
 - **`server_info` and the tools are what the server last said.** Both come from
   the server's last connection, so a server that is off or starting again still
   shows them; `server_info` is null before a server first connects. A tool's

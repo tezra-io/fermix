@@ -9,6 +9,7 @@ defmodule FermixCore.Setup.ConfigStore do
 
   alias FermixCore.Browser.Config, as: BrowserConfig
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
+  alias FermixCore.Capabilities.MCP.OAuth.Grant, as: McpGrant
   alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
@@ -485,14 +486,16 @@ defmodule FermixCore.Setup.ConfigStore do
 
   @doc """
   Removes MCP server `name` and applies it. The values it declares are deleted
-  from the secret store first, by its declared names, so a refused delete keeps
-  the block that names what is left.
+  from the secret store first, by its declared names, and its sign-in grant
+  from the auth store, so a refused delete keeps the block that names what is
+  left.
   """
   @spec delete_mcp_server(String.t(), keyword()) :: :ok | {:error, term()}
   def delete_mcp_server(name, opts \\ []) when is_binary(name) and is_list(opts) do
     write_mcp(opts, fn servers ->
       with {:ok, rest, server} <- McpConfig.delete_server(servers, name),
-           :ok <- McpSecrets.delete_declared(server) do
+           :ok <- McpSecrets.delete_declared(server),
+           :ok <- McpGrant.delete(name) do
         {:ok, rest}
       end
     end)

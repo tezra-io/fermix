@@ -1979,6 +1979,7 @@
     },
     "auth_start_params": {
       "type": "object",
+      "description": "`provider` is a provider with a browser sign-in, `plugin:<name>` for a plugin's own, or `mcp:<name>` for an MCP server the owner added whose `auth` is `auto`.",
       "required": ["provider"],
       "additionalProperties": false,
       "properties": { "provider": { "type": "string", "minLength": 1, "maxLength": 256 } }
@@ -2027,6 +2028,7 @@
     "auth_import_start_result": { "$ref": "#/$defs/jobView" },
     "auth_logout_params": {
       "type": "object",
+      "description": "`provider` is a provider with a stored sign-in, or `mcp:<name>` for an MCP server the owner added.",
       "required": ["provider"],
       "additionalProperties": false,
       "properties": { "provider": { "type": "string", "minLength": 1, "maxLength": 256 } }

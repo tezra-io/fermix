@@ -38,6 +38,17 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
   `{:remote_protocol_error, :legacy_sse_transport}`; any other answer keeps
   the `initialize` failure.
 
+  ## A grant's token (M74 E5)
+
+  An operator server signed in with OAuth (`AuthRef` `:mcp_oauth`) sends the
+  token its grant holds now: `AuthRef.current/2` before every request, which
+  refreshes one about to expire. A `401` to a request that carried one is
+  renewed once (`AuthRef.renew/3`) and the request sent again, which repeats
+  nothing: the server ran nothing it did not authenticate. A request refused
+  for a sign-in tells the owner (`{:mcp_session, {:refused, reason}}`), so the
+  server's status says so rather than every later call failing behind a
+  connected row.
+
   ## Server-initiated notifications
 
   This rail opens no GET stream, so the SSE stream answering a POST is the only
@@ -302,8 +313,14 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
   @impl true
   def handle_call({:request, method, params, timeout_ms, _opts}, _from, state) do
     case exchange(state, method, params, timeout_ms) do
-      {:error, state, :session_expired} -> renew_and_resend(state, method, params, timeout_ms)
-      result -> reply(result)
+      {:error, state, :session_expired} ->
+        renew_and_resend(state, method, params, timeout_ms)
+
+      {:error, state, {:reauthorization_required, :sign_in_required} = reason} ->
+        refused(state, reason)
+
+      result ->
+        reply(result)
     end
   end
 
@@ -315,6 +332,15 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
 
   defp reply({:ok, state, result, _headers}), do: {:reply, {:ok, result}, state}
   defp reply({:error, state, reason}), do: {:reply, {:error, reason}, state}
+
+  # The owner turns the refusal into the server's status and ends the subtree;
+  # a bare session (probe, unit test) has nobody to tell.
+  defp refused(%{notify: notify} = state, reason) when is_pid(notify) do
+    send(notify, {:mcp_session, {:refused, reason}})
+    {:reply, {:error, reason}, state}
+  end
+
+  defp refused(state, reason), do: {:reply, {:error, reason}, state}
 
   # MCP 2025-06-18: a 404 answering a request that carried `Mcp-Session-Id` means
   # the server has terminated that session, and the client MUST start a new one.
@@ -369,6 +395,29 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
 
   defp post_and_classify(state, body, timeout_ms, id) do
     case post(state, body, timeout_ms) do
+      {:ok, state, %{status: 401} = response} ->
+        renew_or_classify(state, response, body, timeout_ms, id)
+
+      {:ok, state, response} ->
+        classify(state, response, id)
+
+      {:error, state, reason} ->
+        {:error, state, reason}
+    end
+  end
+
+  # Once per request: the answer to the request sent again is classified as it
+  # is, a second `401` included.
+  defp renew_or_classify(state, response, body, timeout_ms, id) do
+    case AuthRef.renew(state.auth_ref, state.auth_headers, response.headers) do
+      {:ok, headers} -> resend(%{state | auth_headers: headers}, body, timeout_ms, id)
+      :none -> classify(state, response, id)
+      {:error, reason} -> {:error, state, reason}
+    end
+  end
+
+  defp resend(state, body, timeout_ms, id) do
+    case post(state, body, timeout_ms) do
       {:ok, state, response} -> classify(state, response, id)
       {:error, state, reason} -> {:error, state, reason}
     end
@@ -398,9 +447,18 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
   end
 
   defp post(state, body, timeout_ms) do
-    case send_once(state, body, timeout_ms) do
-      {:error, state, {:not_sent, _class}} -> reconnect_and_send(state, body, timeout_ms)
-      result -> result
+    with {:ok, state} <- current_credential(state) do
+      case send_once(state, body, timeout_ms) do
+        {:error, state, {:not_sent, _class}} -> reconnect_and_send(state, body, timeout_ms)
+        result -> result
+      end
+    end
+  end
+
+  defp current_credential(state) do
+    case AuthRef.current(state.auth_ref, state.auth_headers) do
+      {:ok, headers} -> {:ok, %{state | auth_headers: headers}}
+      {:error, reason} -> {:error, state, reason}
     end
   end
 

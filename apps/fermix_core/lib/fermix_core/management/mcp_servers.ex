@@ -36,6 +36,7 @@ defmodule FermixCore.Management.McpServers do
   alias FermixCore.Auth.Redaction
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.MCP.LoginPath
+  alias FermixCore.Capabilities.MCP.OAuth.Grant
   alias FermixCore.Capabilities.MCP.Remote.Endpoint
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
@@ -173,7 +174,7 @@ defmodule FermixCore.Management.McpServers do
     end
   end
 
-  @doc "Removes one server, the values it declares and its live status."
+  @doc "Removes one server, the values it declares, its sign-in grant and its live status."
   @spec remove(String.t(), keyword()) :: {:ok, map()} | {:error, error()}
   def remove(name, opts \\ []) when is_binary(name) and is_list(opts) do
     with :ok <- write(fn -> ConfigStore.delete_mcp_server(name, writer_opts(opts)) end) do
@@ -273,7 +274,8 @@ defmodule FermixCore.Management.McpServers do
     %{
       entries: runtime_entries(opts),
       supervisor: supervisor(opts),
-      login_path: Keyword.get(opts, :login_path, LoginPath)
+      login_path: Keyword.get(opts, :login_path, LoginPath),
+      grant_opts: Keyword.take(opts, [:auth_path])
     }
   end
 
@@ -284,9 +286,16 @@ defmodule FermixCore.Management.McpServers do
       presence: McpSecrets.presence(server),
       entry: Map.get(sources.entries, source_id),
       alive?: sources.supervisor.subtree_alive?(source_id),
-      resolution: resolution(server, sources.login_path)
+      resolution: resolution(server, sources.login_path),
+      grant: grant(server, sources.grant_opts)
     }
   end
+
+  # Only an `auto` server signs in; another has no grant to read.
+  defp grant(%{transport: :http, auth: :auto, url: url} = server, grant_opts) when is_binary(url),
+    do: Grant.row_state(server, grant_opts)
+
+  defp grant(_server, _grant_opts), do: nil
 
   # Never the blocking resolve: a row answers from the PATH already read.
   defp resolution(%{transport: :stdio, command: command, cwd: cwd}, login_path)

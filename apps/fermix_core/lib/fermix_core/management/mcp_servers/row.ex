@@ -6,28 +6,35 @@ defmodule FermixCore.Management.McpServers.Row do
   `build/3` is pure. It composes the server's configuration with the facts the
   daemon holds about it: which declared values are stored, the source's live
   status and what its last discovery found (`RuntimeStatus`), whether its
-  subtree is still running, and where its command resolves (`LoginPath`).
-  Every field is always present, null where the transport has none.
+  subtree is still running, where its command resolves (`LoginPath`), and
+  what its sign-in grant says (`OAuth.Grant.row_state/2`). Every field is
+  always present, null where the transport has none.
 
   The status is derived in one order, and the first that holds wins: `off`
   (written `enabled = false`), `failed` for a block that names nothing to
   start (`McpConfig.startable?/1`: a stdio server without its command, an http
   one without its URL, which no stored value would help), `needs_secret` (a
   declared value is not stored, so the server is not started), `needs_sign_in`
-  (an `auto` server the server itself asked to sign in), `starting`
+  (an `auto` server the server itself asked to sign in, or to sign in again
+  for more access), `starting`
   (connecting, or no status yet for a server that runs), `connected` (ready),
   `retrying` (the last status is a failure and the subtree still runs, so it is
   being started again), `failed` (a failure with the subtree gone). The status
   is published for logs and support; a client draws `status_sentence` and
   switches on `primary_action` and `actions`.
 
-  Stage 1 has no sign-in (M74 E5), so no row carries `sign_in` or `sign_out`
-  yet, and an `auto` server's sign-in state is `signed_out` only where the
-  server asked to sign in, `not_needed` otherwise.
+  An `auto` server's sign-in (M74 E5) is `signed_in` with a usable grant,
+  `expired` when its refresh was refused, `signed_out` where the server asked
+  and there is no grant, and `not_needed` otherwise, with the grant's account
+  and issuer. `sign_in` is offered, and led with, where the server asks for a
+  sign-in, where the grant expired, and where a tool asked for more access
+  than the grant gives; `sign_out` while signed in. An `off` row offers only
+  `enable`.
   """
 
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.MCP.LoginPath
+  alias FermixCore.Capabilities.MCP.OAuth.Grant
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
   alias FermixCore.Management.McpServers.CommandLine
@@ -47,12 +54,14 @@ defmodule FermixCore.Management.McpServers.Row do
   @uv_hint "Install uv or use the full path."
   @path_hint "Use the full path."
   @url_sentence "Fermix cannot connect to this address. Use https, or http only to this Mac."
+  @more_access "A tool asked for more access, so sign in again to allow it."
 
   @type facts :: %{
           presence: McpSecrets.presence(),
           entry: RuntimeStatus.entry() | nil,
           alive?: boolean(),
-          resolution: LoginPath.resolution() | nil
+          resolution: LoginPath.resolution() | nil,
+          grant: Grant.row_state() | nil
         }
 
   @doc "Every status a row can carry, ordered as they are derived."
@@ -79,6 +88,7 @@ defmodule FermixCore.Management.McpServers.Row do
   def build(server, facts, opts \\ []) when is_map(server) and is_map(facts) and is_list(opts) do
     status = status(server, facts)
     discovery = discovery(facts.entry)
+    sign_in? = sign_in_offered?(status, server, facts)
 
     row = %{
       "name" => server.name,
@@ -86,8 +96,8 @@ defmodule FermixCore.Management.McpServers.Row do
       "enabled" => server.enabled?,
       "status" => published(status),
       "status_sentence" => status_sentence(status, server, facts),
-      "primary_action" => primary_action(status),
-      "actions" => actions(status),
+      "primary_action" => primary_action(status, sign_in?),
+      "actions" => actions(status, sign_in?, signed_in?(server, facts)),
       "consent_sentence" => consent_sentence(server),
       "location" => location(server),
       "url" => Map.get(server, :url),
@@ -148,7 +158,28 @@ defmodule FermixCore.Management.McpServers.Row do
        }),
        do: true
 
+  defp sign_in_required?(%{transport: :http, auth: :auto}, %{
+         status: :insufficient_credential_scope
+       }),
+       do: true
+
   defp sign_in_required?(_server, _entry), do: false
+
+  # Where signing in is what the row asks for: the server asked, the grant
+  # expired, or a tool asked for more access than it gives.
+  defp sign_in_offered?(:off, _server, _facts), do: false
+  defp sign_in_offered?(:needs_sign_in, _server, _facts), do: true
+
+  defp sign_in_offered?(_status, %{transport: :http, auth: :auto}, %{grant: grant}),
+    do: match?(%{state: :expired}, grant) or more_access?(grant)
+
+  defp sign_in_offered?(_status, _server, _facts), do: false
+
+  defp signed_in?(%{transport: :http, auth: :auto}, %{grant: %{state: :signed_in}}), do: true
+  defp signed_in?(_server, _facts), do: false
+
+  defp more_access?(%{state: :signed_in, wanted_scopes: [_ | _]}), do: true
+  defp more_access?(_grant), do: false
 
   defp starting?(nil), do: true
   defp starting?(%{status: :connecting}), do: true
@@ -159,13 +190,20 @@ defmodule FermixCore.Management.McpServers.Row do
   defp published(:unaddressed), do: "failed"
   defp published(status), do: Atom.to_string(status)
 
-  defp primary_action(:off), do: "enable"
-  defp primary_action(:failed), do: "check"
-  defp primary_action(_status), do: nil
+  defp primary_action(:off, _sign_in?), do: "enable"
+  defp primary_action(_status, true), do: "sign_in"
+  defp primary_action(:failed, false), do: "check"
+  defp primary_action(_status, false), do: nil
 
-  defp actions(:off), do: ["enable"]
-  defp actions(status) when status in @checkable, do: ["check", "disable"]
-  defp actions(_status), do: ["disable"]
+  # In the closed set's order: the sign-in pair, then the status's own.
+  defp actions(:off, _sign_in?, _signed_in?), do: ["enable"]
+
+  defp actions(status, sign_in?, signed_in?) do
+    signing =
+      if(sign_in?, do: ["sign_in"], else: []) ++ if(signed_in?, do: ["sign_out"], else: [])
+
+    signing ++ if(status in @checkable, do: ["check", "disable"], else: ["disable"])
+  end
 
   # --- sentences ------------------------------------------------------------
 
@@ -175,14 +213,29 @@ defmodule FermixCore.Management.McpServers.Row do
   defp status_sentence(:needs_secret, server, facts),
     do: "Waiting for #{listed(missing(server, facts.presence))}."
 
-  defp status_sentence(:needs_sign_in, _server, _facts), do: "Sign in to finish connecting."
+  defp status_sentence(:needs_sign_in, _server, facts), do: sign_in_sentence(facts)
   defp status_sentence(:starting, _server, _facts), do: "Starting."
 
-  defp status_sentence(:connected, _server, facts),
-    do: "Connected. #{tools_phrase(tool_count(discovery(facts.entry)))}."
+  defp status_sentence(:connected, _server, facts) do
+    connected = "Connected. #{tools_phrase(tool_count(discovery(facts.entry)))}."
+    if more_access?(facts.grant), do: connected <> " " <> @more_access, else: connected
+  end
 
   defp status_sentence(:retrying, _server, _facts), do: "Trying again."
   defp status_sentence(:failed, server, facts), do: failure(server, facts.entry, true)
+
+  # Why the server asks for a sign-in: none yet, more access, a grant that
+  # expired, or one it no longer accepts.
+  defp sign_in_sentence(%{entry: %{status: :insufficient_credential_scope}}),
+    do: "It needs more access than your sign-in gives. Sign in again to allow it."
+
+  defp sign_in_sentence(%{grant: %{state: :expired}}),
+    do: "Your sign-in has expired. Sign in again."
+
+  defp sign_in_sentence(%{grant: %{state: :signed_in}}),
+    do: "The server no longer accepts your sign-in. Sign in again."
+
+  defp sign_in_sentence(_facts), do: "Sign in to finish connecting."
 
   defp last_error(:unaddressed, server, _facts), do: unaddressed(server)
   defp last_error(:retrying, server, facts), do: failure(server, facts.entry, false)
@@ -339,8 +392,11 @@ defmodule FermixCore.Management.McpServers.Row do
     auth_row("header", if(present, do: "signed_in", else: "signed_out"), key_header)
   end
 
-  # Stage 1 has no sign-in, so an `auto` server is signed out only where the
-  # server itself asked for one.
+  # An `auto` server's grant names its account and issuer; with none, it is
+  # signed out only where the server itself asked for a sign-in.
+  defp auth(%{transport: :http, auth: :auto}, %{grant: %{state: state} = grant}),
+    do: auth_row("auto", Atom.to_string(state), nil, grant)
+
   defp auth(%{transport: :http, auth: :auto} = server, facts) do
     state = if sign_in_required?(server, facts.entry), do: "signed_out", else: "not_needed"
     auth_row("auto", state, nil)
@@ -348,13 +404,13 @@ defmodule FermixCore.Management.McpServers.Row do
 
   defp auth(_server, _facts), do: auth_row("none", "not_needed", nil)
 
-  defp auth_row(mode, state, key_header) do
+  defp auth_row(mode, state, key_header, grant \\ %{account_label: nil, issuer: nil}) do
     %{
       "mode" => mode,
       "state" => state,
       "key_header" => key_header,
-      "account_label" => nil,
-      "issuer" => nil
+      "account_label" => grant.account_label,
+      "issuer" => grant.issuer
     }
   end
 

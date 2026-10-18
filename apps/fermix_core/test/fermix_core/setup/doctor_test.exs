@@ -2183,6 +2183,15 @@ defmodule FermixCore.Setup.DoctorTest do
       assert {:ok, %{tokens: %{access_token: "at"}}} = Store.read("openai_codex")
     end
 
+    # An MCP server's grant is refreshed when its server next connects, and its
+    # row says when it needs a sign-in (M74 E5), so it is not a stale profile.
+    test "an MCP server's grant is not reported" do
+      :ok = Store.write(Store.mcp_profile("linear"), token_entry(-7200))
+      :ok = Store.write("xai_oauth", token_entry(-7200))
+
+      assert {:ok, ["xai_oauth"]} = Doctor.stale_token_profiles()
+    end
+
     test "propagates a read error instead of swallowing it", %{home: home} do
       File.write!(Path.join(home, "auth.json"), "{ not json")
 

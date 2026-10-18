@@ -288,6 +288,11 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
     {:stop, :normal, state}
   end
 
+  # The session's grant can no longer be used (M74 E5): the server asks for a
+  # sign-in, so this owner gives up with that status, as a refused start does,
+  # and a completed sign-in starts the server again.
+  def handle_info({:mcp_session, {:refused, reason}}, state), do: give_up(state, reason)
+
   # Discovery has not run yet, so no registration exists for the notification to
   # invalidate — the watch is armed before the first `tools/list`, so this is
   # only ever the pre-discovery window. Dropping it is the whole correct action,

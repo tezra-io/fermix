@@ -101,6 +101,15 @@ defmodule FermixCore.Management.ProtocolContractTest do
   origin = "added"
   """
 
+  # The server the sign-in goldens illustrate: a remote one that signs in by
+  # itself (M74 E5).
+  @mcp_sign_in_toml ~S"""
+  [mcp.servers.linear]
+  transport = "http"
+  url = "https://mcp.linear.app/mcp"
+  origin = "added"
+  """
+
   setup_all do
     raw = File.read!(@schema_path)
     %{raw: raw, schema: Jason.decode!(raw)}
@@ -680,6 +689,142 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert named_fixture_result("mcp_servers_add_remote_key")["server"] == build.("context7", [])
   end
 
+  # A signed-in row and an expired one, from the grant facts `OAuth.Grant`
+  # reads (M74 E5), sentences, actions, account and issuer included.
+  test "the golden signed-in and expired MCP server rows are the ones the row builder writes" do
+    [server] = McpConfig.from_toml(@mcp_sign_in_toml)
+    signed_in = named_fixture_result("mcp_servers_get_signed_in")["server"]
+
+    discovery = %{
+      tool_count: 2,
+      server_info: info("linear", "Linear", "1.4.2"),
+      tools: Enum.map(signed_in["tools"], &tool_metadata/1)
+    }
+
+    grant = %{
+      state: :signed_in,
+      account_label: "owner@example.com",
+      issuer: "https://mcp.linear.app",
+      wanted_scopes: []
+    }
+
+    ready =
+      mcp_facts(%{
+        entry: %{mcp_entry(:ready, nil) | discovery: discovery},
+        alive?: true,
+        grant: grant
+      })
+
+    asked = %{mcp_entry(:reauthorization_required, :sign_in_required) | discovery: discovery}
+    expired = mcp_facts(%{entry: asked, grant: %{grant | state: :expired}})
+
+    assert signed_in == McpRow.build(server, ready, tools?: true)
+
+    assert named_fixture_result("mcp_servers_get_expired")["server"] ==
+             McpRow.build(server, expired, tools?: true)
+  end
+
+  # `auth.start mcp:linear`, the job it starts read while it discovers and once
+  # it completed, `auth.logout mcp:linear`, and the refusals, each driven
+  # through the router with only the sign-in itself stood in for. The job id
+  # and the clock are the daemon's, so they are the golden's only free fields.
+  test "the golden MCP sign-in answers are the ones the router writes" do
+    servers = McpConfig.from_toml(@mcp_sign_in_toml)
+    jobs = jobs()
+    test = self()
+
+    login = fn %{name: "linear"}, login_opts ->
+      Keyword.fetch!(login_opts, :phase).("discovering")
+      send(test, {:discovering, self()})
+      receive do: (:go -> :ok)
+      Keyword.fetch!(login_opts, :phase).("registering")
+
+      :ok =
+        Keyword.fetch!(login_opts, :opener).(
+          named_fixture_result("auth_start_mcp")["authorize_url"]
+        )
+
+      receive do: (:finish -> {:ok, %{account_label: "owner@example.com"}})
+    end
+
+    opts = [operation_opts: [jobs: jobs, servers: fn -> servers end, mcp_login: login]]
+
+    start =
+      Task.async(fn ->
+        Router.route(request("auth.start", %{"provider" => "mcp:linear"}), opts)
+      end)
+
+    assert_receive {:discovering, run}
+
+    {:ok, [%{"job_id" => job_id}]} = Jobs.list(jobs)
+    {:ok, view} = Router.route(request("job.get", %{"job_id" => job_id}), opts)
+    assert view == volatile(named_fixture_result("job_get_auth_discovering"), view)
+
+    send(run, :go)
+    assert {:ok, started} = Task.await(start)
+    assert started == volatile(named_fixture_result("auth_start_mcp"), started)
+
+    send(run, :finish)
+    {:ok, _terminal} = eventually_terminal(jobs, job_id)
+    {:ok, completed} = Router.route(request("job.get", %{"job_id" => job_id}), opts)
+    assert completed == volatile(named_fixture_result("job_get_auth_completed"), completed)
+
+    logout_opts = [
+      operation_opts: [
+        servers: fn -> servers end,
+        mcp_forget: fn "linear" -> :ok end,
+        mcp_supervisor: __MODULE__.FakeMcpTree
+      ]
+    ]
+
+    {:ok, logout} =
+      Router.route(request("auth.logout", %{"provider" => "mcp:linear"}), logout_opts)
+
+    assert logout == %{"restart" => Settings.restart()}
+    assert shape(logout) == shape(named_fixture_result("auth_logout_mcp"))
+  end
+
+  test "the golden MCP sign-in refusals are the ones the router answers" do
+    servers =
+      McpConfig.from_toml(~S"""
+      [mcp.servers.files]
+      command = "/bin/sh"
+
+      [mcp.servers.keyed]
+      transport = "http"
+      url = "https://mcp.example.com/mcp"
+      auth = "header"
+      key_header = "X-Key"
+      header_secrets = ["X-Key"]
+
+      [mcp.servers.open]
+      transport = "http"
+      url = "https://mcp.example.com/mcp"
+      auth = "none"
+      """)
+
+    opts = [operation_opts: [servers: fn -> servers end]]
+
+    for {name, provider} <- [
+          {"invalid_params_auth_start_mcp_unknown", "mcp:linear"},
+          {"invalid_params_auth_start_mcp_stdio", "mcp:files"},
+          {"invalid_params_auth_start_mcp_key", "mcp:keyed"},
+          {"invalid_params_auth_start_mcp_none", "mcp:open"}
+        ] do
+      assert {:error, :invalid_params, details} =
+               Router.route(request("auth.start", %{"provider" => provider}), opts)
+
+      assert details == golden_error_details(name), name
+    end
+  end
+
+  defp request(method, params),
+    do: %{request_id: "req-1", protocol_version: 2, method: method, params: params}
+
+  # The golden with the fields only the live job can know taken from it.
+  defp volatile(golden, live),
+    do: Map.merge(golden, Map.take(live, ["job_id", "started_at", "finished_at"]))
+
   # A draft is "every field always present" and the schema closes it, as it
   # closes the row.
   test "the schema declares exactly the fields an MCP server draft carries", %{schema: schema} do
@@ -947,6 +1092,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
     def subtree_alive?(_source_id), do: true
     def list_tools(_source_id, _server), do: {:ok, [%{name: "create_issue"}]}
+    def restart_server(_source_id, _server), do: {:ok, self()}
   end
 
   # The three MCP reads and the check against servers whose declared values are
@@ -1473,7 +1619,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
         presence: %{env: [], headers: [], client_secret: false},
         entry: nil,
         alive?: false,
-        resolution: nil
+        resolution: nil,
+        grant: nil
       },
       facts
     )

@@ -70,13 +70,15 @@ defmodule FermixCore.Auth.OAuthFlow do
 
   @typedoc """
   A settled callback: the code, the client the provider issued (`nil` for a
-  `:static` client), the callback's own `scope`, and what the exchange must
+  `:static` client), the callback's own `scope` and `iss` (RFC 9207, `nil`
+  when it names none, which the caller judges), and what the exchange must
   repeat.
   """
   @type authorization :: %{
           code: String.t(),
           client_id: String.t() | nil,
           scope: String.t() | nil,
+          iss: String.t() | nil,
           redirect_uri: String.t(),
           code_verifier: String.t()
         }
@@ -157,6 +159,10 @@ defmodule FermixCore.Auth.OAuthFlow do
     %{code_verifier: code_verifier, code_challenge: code_challenge, state: state}
   end
 
+  @doc """
+  The authorize url. A provider with no scopes sends no `scope`: an MCP
+  server that names none is asked for none (M74 E5).
+  """
   @spec authorize_url(OAuthProvider.t(), pkce(), String.t()) :: String.t()
   def authorize_url(
         %OAuthProvider{} = provider,
@@ -168,15 +174,18 @@ defmodule FermixCore.Auth.OAuthFlow do
         "response_type" => "code",
         "client_id" => provider.client_id,
         "redirect_uri" => redirect_uri,
-        "scope" => Enum.join(provider.scopes, " "),
         "code_challenge" => code_challenge,
         "code_challenge_method" => "S256",
         "state" => state
       }
+      |> put_scope(provider.scopes)
       |> Map.merge(provider.extra_authorize_params)
 
     provider.authorize_url <> "?" <> URI.encode_query(params)
   end
+
+  defp put_scope(params, []), do: params
+  defp put_scope(params, scopes), do: Map.put(params, "scope", Enum.join(scopes, " "))
 
   @spec parse_callback_path(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
   def parse_callback_path(path, expected_state)
@@ -645,7 +654,7 @@ defmodule FermixCore.Auth.OAuthFlow do
       # A genuine callback (valid code+state, an error param, or a state
       # mismatch) is terminal — only its parse result ends the wait.
       case parse_callback_path(path, spec.state) do
-        {:ok, code} -> {:ok, %{code: code, client_id: nil, scope: nil}}
+        {:ok, code} -> {:ok, %{code: code, client_id: nil, scope: nil, iss: nil}}
         {:error, _reason} = error -> error
       end
     end
@@ -708,10 +717,18 @@ defmodule FermixCore.Auth.OAuthFlow do
   end
 
   defp settle_client(params, code, spec) do
-    with {:ok, client_id} <- issued_client(values(params, "client_id"), spec) do
-      {:ok, %{code: code, client_id: client_id, scope: List.first(values(params, "scope"))}}
+    with {:ok, client_id} <- issued_client(values(params, "client_id"), spec),
+         {:ok, iss} <- at_most_one(values(params, "iss")) do
+      {:ok,
+       %{code: code, client_id: client_id, scope: List.first(values(params, "scope")), iss: iss}}
     end
   end
+
+  # RFC 9207 §2: one `iss`, or none for the caller to judge; two is a forged
+  # or broken callback.
+  defp at_most_one([]), do: {:ok, nil}
+  defp at_most_one([value]), do: {:ok, value}
+  defp at_most_one(_duplicated), do: {:error, :invalid_callback}
 
   # A first registration must come back naming the client it issued; a
   # re-authorization may leave it out, but never names another.

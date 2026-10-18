@@ -84,12 +84,16 @@ defmodule FermixCore.Management.McpServers.RowTest do
                build(server(@local), presence: local)
     end
 
-    test "an auto server the server asked to sign in needs a sign-in, a keyed one fails" do
+    test "an auto server the server asked to sign in leads with sign_in, a keyed one fails" do
       auto = %{server(@remote) | auth: :auto, key_header: nil, oauth_client_id: nil}
       entry = entry(:reauthorization_required, :sign_in_required)
 
-      assert %{"status" => "needs_sign_in", "primary_action" => nil, "actions" => ["disable"]} =
-               build(auto, presence: stored(auto), entry: entry)
+      assert %{
+               "status" => "needs_sign_in",
+               "status_sentence" => "Sign in to finish connecting.",
+               "primary_action" => "sign_in",
+               "actions" => ["sign_in", "disable"]
+             } = build(auto, presence: stored(auto), entry: entry)
 
       keyed = server(@remote)
       refused = entry(:reauthorization_required, :key_refused)
@@ -136,6 +140,87 @@ defmodule FermixCore.Management.McpServers.RowTest do
                "It kept stopping, so Fermix stopped starting it. The last thing it said: fatal: no"
 
       assert failed["last_error"] == failed["status_sentence"]
+    end
+  end
+
+  # M74 E5: an `auto` server's grant, as `OAuth.Grant.row_state/2` reads it.
+  describe "sign-in" do
+    test "a usable grant names its account and issuer, and offers sign_out" do
+      auto = auto_server()
+
+      assert %{
+               "status" => "connected",
+               "status_sentence" => "Connected. 3 tools.",
+               "primary_action" => nil,
+               "actions" => ["sign_out", "check", "disable"],
+               "auth" => auth
+             } = build(auto, entry: ready(3), grant: grant(:signed_in))
+
+      assert auth == %{
+               "mode" => "auto",
+               "state" => "signed_in",
+               "key_header" => nil,
+               "account_label" => "owner@example.com",
+               "issuer" => "https://auth.example.com"
+             }
+    end
+
+    test "an expired grant says so and leads with sign_in, wherever the server stands" do
+      auto = auto_server()
+      asked = entry(:reauthorization_required, :sign_in_required)
+
+      assert %{
+               "status" => "needs_sign_in",
+               "status_sentence" => "Your sign-in has expired. Sign in again.",
+               "primary_action" => "sign_in",
+               "actions" => ["sign_in", "disable"],
+               "auth" => %{"state" => "expired", "account_label" => "owner@example.com"}
+             } = build(auto, entry: asked, grant: grant(:expired))
+
+      assert %{"status" => "starting", "primary_action" => "sign_in"} =
+               build(auto, grant: grant(:expired))
+
+      assert %{"primary_action" => "enable", "actions" => ["enable"]} =
+               build(%{auto | enabled?: false}, grant: grant(:expired))
+    end
+
+    test "a grant the server no longer accepts asks for a sign-in again" do
+      asked = entry(:reauthorization_required, :sign_in_required)
+
+      assert %{
+               "status" => "needs_sign_in",
+               "status_sentence" => "The server no longer accepts your sign-in. Sign in again.",
+               "actions" => ["sign_in", "sign_out", "disable"]
+             } = build(auto_server(), entry: asked, grant: grant(:signed_in))
+    end
+
+    test "more access asked for is said on the row, which leads with sign_in" do
+      auto = auto_server()
+      wanted = %{grant(:signed_in) | wanted_scopes: ["admin"]}
+
+      assert %{
+               "status" => "connected",
+               "status_sentence" =>
+                 "Connected. 3 tools. A tool asked for more access, so sign in again to allow it.",
+               "primary_action" => "sign_in",
+               "actions" => ["sign_in", "sign_out", "check", "disable"]
+             } = build(auto, entry: ready(3), grant: wanted)
+
+      scope = entry(:insufficient_credential_scope, nil)
+
+      assert %{
+               "status" => "needs_sign_in",
+               "status_sentence" =>
+                 "It needs more access than your sign-in gives. Sign in again to allow it.",
+               "primary_action" => "sign_in"
+             } = build(auto, entry: scope, grant: grant(:signed_in))
+    end
+
+    test "a server that is not auto has no sign-in to offer, whatever the facts" do
+      keyed = server(@remote)
+
+      assert %{"actions" => ["check", "disable"], "auth" => %{"mode" => "header"}} =
+               build(keyed, presence: stored(keyed), entry: ready(3), grant: grant(:signed_in))
     end
   end
 
@@ -315,7 +400,7 @@ defmodule FermixCore.Management.McpServers.RowTest do
   defp build(server, facts \\ [], opts \\ []) do
     facts =
       Map.merge(
-        %{presence: @no_values, entry: nil, alive?: false, resolution: nil},
+        %{presence: @no_values, entry: nil, alive?: false, resolution: nil, grant: nil},
         Map.new(facts)
       )
 
@@ -328,6 +413,24 @@ defmodule FermixCore.Management.McpServers.RowTest do
       env: Enum.map(Map.get(server, :env_secrets, []), &{&1, true}),
       headers: Enum.map(Map.get(server, :header_secrets, []), &{&1, true}),
       client_secret: is_binary(Map.get(server, :oauth_client_id))
+    }
+  end
+
+  defp auto_server,
+    do: %{
+      server(@remote)
+      | auth: :auto,
+        key_header: nil,
+        header_secrets: [],
+        oauth_client_id: nil
+    }
+
+  defp grant(state) do
+    %{
+      state: state,
+      account_label: "owner@example.com",
+      issuer: "https://auth.example.com",
+      wanted_scopes: []
     }
   end
 

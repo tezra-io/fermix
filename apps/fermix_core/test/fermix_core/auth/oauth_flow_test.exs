@@ -625,6 +625,82 @@ defmodule FermixCore.Auth.OAuthFlowTest do
   # a static bounce page forwards the callback query string to this listener.
   # The authorize request and the code exchange must both name the public URI
   # while the listener still binds 127.0.0.1 on the provider's fixed port.
+  # M74 E5: an MCP server's sign-in judges the callback's `iss` (RFC 9207)
+  # and asks for no scope where the server names none.
+  describe "await_authorization/2 — the callback's iss and an empty scope" do
+    test "carries one iss to the caller, and refuses two" do
+      assert {:ok, %{code: "c1", iss: "https://auth.example"}} =
+               await_hardened(fn state ->
+                 "code=c1&state=#{state}&iss=https%3A%2F%2Fauth.example"
+               end)
+
+      assert {:ok, %{code: "c2", iss: nil}} =
+               await_hardened(fn state -> "code=c2&state=#{state}" end)
+
+      assert {:error, :invalid_callback} =
+               await_hardened(fn state ->
+                 "code=c3&state=#{state}&iss=https%3A%2F%2Fa&iss=https%3A%2F%2Fb"
+               end)
+    end
+
+    test "asks for no scope where the provider names none" do
+      parent = self()
+      provider = %{hardened_provider() | scopes: []}
+
+      assert {:error, :callback_timeout} =
+               OAuthFlow.await_authorization(provider,
+                 opener: fn url -> send(parent, {:url, url}) && :ok end,
+                 puts: fn _line -> :ok end,
+                 timeout_ms: 50
+               )
+
+      assert_received {:url, url}
+      query = url |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+      refute Map.has_key?(query, "scope")
+      assert query["resource"] == "https://mcp.example/mcp"
+    end
+  end
+
+  defp hardened_provider do
+    %OAuthProvider{
+      id: :mcp,
+      authorize_url: "https://auth.example/authorize",
+      token_url: "https://auth.example/token",
+      client_id: "client",
+      redirect_host: "127.0.0.1",
+      redirect_port: 0,
+      redirect_path: "/callback",
+      scopes: ["read"],
+      extra_authorize_params: %{"resource" => "https://mcp.example/mcp"},
+      hardened_callback?: true
+    }
+  end
+
+  # One attempt whose browser answers the callback with `query.(state)`.
+  defp await_hardened(query) do
+    opener = fn url ->
+      params = url |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+      port = params["redirect_uri"] |> URI.parse() |> Map.fetch!(:port)
+      target = "/callback?" <> query.(params["state"])
+
+      Task.start(fn ->
+        {:ok, conn} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
+        request = "GET #{target} HTTP/1.1\r\nHost: 127.0.0.1:#{port}\r\nConnection: close\r\n\r\n"
+        :ok = :gen_tcp.send(conn, request)
+        {:ok, _response} = :gen_tcp.recv(conn, 0, 5_000)
+        :gen_tcp.close(conn)
+      end)
+
+      :ok
+    end
+
+    OAuthFlow.await_authorization(hardened_provider(),
+      opener: opener,
+      puts: fn _line -> :ok end,
+      timeout_ms: 5_000
+    )
+  end
+
   describe "start_loopback/2 — a provider with a public redirect URI" do
     test "authorizes with the public URI, binds the loopback port, and completes on a bounce" do
       port = pick_free_port()
