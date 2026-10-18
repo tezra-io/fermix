@@ -13,7 +13,7 @@
 | `description` | no | none | for the source catalog |
 | `expires_at` | no | none | ISO8601 + offset, future |
 | `delivery_mode` | no | config default, else `none` | `none`/`origin`/`channel`/`local` |
-| `delivery_target` | no | none | `platform` plus one of `chat_id`, `channel_id`, `recipient`, `target`, `reply_target` |
+| `delivery_target` | no | none | `platform` plus one of `chat_id`, `channel_id`, `recipient`, `target`, `reply_target`; a chat, never this computer (`computer` takes reminders only, so it is refused here, and a configured default target of `computer` serves reminders alone) |
 | `allowed_tools` | no | no narrowing | subset of the caller's visible tools |
 | `skill_name` | no | none | must name a loaded skill |
 | `provider` + `model` | no | cron route | both or neither; provider known |
