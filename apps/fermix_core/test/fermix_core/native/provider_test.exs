@@ -3,9 +3,12 @@ defmodule FermixCore.Native.ProviderTest do
   The native-services provider (M76 §4.3): one table over every host
   `BootProfile.host/0` can answer, and the `provider:` and `host:` seams a
   caller names it with.
+
+  `async: false`: one test removes the recorded boot profile, and restores it,
+  to show that this build's provider is read from it.
   """
 
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias FermixCore.BootProfile
   alias FermixCore.Native.Provider
@@ -14,14 +17,13 @@ defmodule FermixCore.Native.ProviderTest do
   @brew_mac %{profile: :standalone_cli, os: :darwin}
   @mac_checkout %{profile: :source, os: :darwin}
 
-  # Every host a build boots as: the app's engine, the Burrito CLIs and a
-  # source run, on each operating system Fermix ships for. A Linux package is
-  # built for Linux only, so no build boots it on a Mac.
+  # Every host a build boots as: the app's engine on a Mac, the Burrito CLIs
+  # and a source run, on each operating system Fermix ships for. A Linux
+  # package is built for Linux only, and the app's engine for a Mac only.
   @table [
     {@mac_app, :mac_app},
     {@brew_mac, :none},
     {@mac_checkout, :none},
-    {%{profile: :app_engine, os: :linux}, :dbus},
     {%{profile: :standalone_cli, os: :linux}, :dbus},
     {%{profile: :linux_package_cli, os: :linux}, :dbus},
     {%{profile: :source, os: :linux}, :dbus}
@@ -34,13 +36,23 @@ defmodule FermixCore.Native.ProviderTest do
   end
 
   test "a host no build boots as is refused, never guessed" do
-    for host <- [%{profile: :linux_package_cli, os: :darwin}, %{profile: :source, os: :freebsd}] do
+    for host <- [
+          %{profile: :app_engine, os: :linux},
+          %{profile: :linux_package_cli, os: :darwin},
+          %{profile: :source, os: :freebsd}
+        ] do
       assert_raise FunctionClauseError, fn -> Provider.select(host) end
     end
   end
 
-  test "this build's provider is the one its boot profile selects" do
-    assert Provider.current() == Provider.select(BootProfile.host())
+  test "this build's provider and host are read from the boot profile boot recorded" do
+    recorded = Application.fetch_env!(:fermix_core, :boot_profile)
+    on_exit(fn -> BootProfile.remember(recorded) end)
+    Application.delete_env(:fermix_core, :boot_profile)
+
+    for read <- [&Provider.current/0, fn -> Provider.current([]) end, fn -> Provider.host([]) end] do
+      assert_raise ArgumentError, ~r/boot_profile/, read
+    end
   end
 
   test "provider: names the provider; host: names the host that selects it" do
@@ -48,15 +60,13 @@ defmodule FermixCore.Native.ProviderTest do
     assert Provider.current(provider: :dbus, host: @mac_app) == :dbus
     assert Provider.current(host: @mac_app) == :mac_app
     assert Provider.current(host: @brew_mac) == :none
-    assert Provider.current([]) == Provider.current()
   end
 
   test "a provider outside the three is refused" do
     assert_raise ArgumentError, ~r/:osascript/, fn -> Provider.current(provider: :osascript) end
   end
 
-  test "host: names the host, this build's otherwise" do
+  test "host: names the host" do
     assert Provider.host(host: @mac_checkout) == @mac_checkout
-    assert Provider.host([]) == BootProfile.host()
   end
 end

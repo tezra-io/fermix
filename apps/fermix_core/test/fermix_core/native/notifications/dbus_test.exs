@@ -8,6 +8,8 @@ defmodule FermixCore.Native.Notifications.DBusTest do
 
   use ExUnit.Case, async: true
 
+  alias FermixCore.Delivery.Error
+  alias FermixCore.Native.Notifications
   alias FermixCore.Native.Notifications.DBus
 
   @busctl "/usr/bin/busctl"
@@ -26,7 +28,6 @@ defmodule FermixCore.Native.Notifications.DBusTest do
 
   @name_has_owner [
     "--user",
-    "--timeout=1",
     "--",
     "call",
     "org.freedesktop.DBus",
@@ -116,7 +117,6 @@ defmodule FermixCore.Native.Notifications.DBusTest do
       assert_received {:busctl,
        [
          "--user",
-         "--timeout=1",
          "--",
          "call",
          "org.freedesktop.Notifications",
@@ -166,7 +166,7 @@ defmodule FermixCore.Native.Notifications.DBusTest do
       assert {:ok, "9"} = DBus.post(notification, owned({:ok, "u 9\n"}))
 
       assert_received {:busctl, _owner}
-      assert_received {:busctl, ["--user", "--timeout=1", "--", "call" | rest]}
+      assert_received {:busctl, ["--user", "--", "call" | rest]}
       assert ["-v", "--help"] == rest |> Enum.drop(8) |> Enum.take(2)
     end
 
@@ -191,6 +191,20 @@ defmodule FermixCore.Native.Notifications.DBusTest do
 
     test "a missing busctl is backend_missing, and nothing runs" do
       assert DBus.post(@notification, no_busctl()) == {:error, :backend_missing}
+    end
+
+    # busctl's own method timeout is never set, so the runner's bound is the
+    # one timeout: busctl would otherwise answer first, "Call failed:
+    # Connection timed out", a failure, which the rail does not retry.
+    test "no call carries a timeout of busctl's own; the runner's bound running out is timeout" do
+      assert DBus.post(@notification, owned({:error, :timeout})) == {:error, :timeout}
+      assert_received {:busctl, owner}
+      assert_received {:busctl, notify}
+      refute Enum.any?(owner ++ notify, &String.starts_with?(&1, "--timeout"))
+
+      reason = Notifications.delivery_error(:timeout)
+      assert reason == {:transport, :timeout}
+      assert Error.retryable?(reason)
     end
 
     test "a call that times out is timeout" do

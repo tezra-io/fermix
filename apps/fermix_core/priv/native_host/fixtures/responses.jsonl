@@ -1,0 +1,9 @@
+{"id":1,"ok":true,"result":{"host_version":"0.6.0","notifications":"granted"}}
+{"id":2,"ok":true,"result":{"state":"granted"}}
+{"id":3,"ok":true,"result":{"notification_id":"7E1A3C1F-5B2D-4F7A-9C8E-2D41B6A0F311"}}
+{"id":4,"ok":true,"result":{"notification_id":"0C9D2B44-1E7F-4A3B-8D5C-6F20A9E1B702"}}
+{"id":5,"ok":true,"result":{}}
+{"id":3,"ok":false,"error":{"reason":"not_authorized","message":"Notifications are turned off for Fermix in System Settings"}}
+{"id":4,"ok":false,"error":{"reason":"post_failed","message":"The notification could not be scheduled"}}
+{"id":4,"ok":false,"error":{"reason":"invalid_request","message":"the notification has no title"}}
+{"id":1,"ok":false,"error":{"reason":"host_unavailable","message":"the app is quitting"}}

@@ -37,7 +37,8 @@ defmodule FermixCore.Native.Notifications.DBus do
   @bus_path "/org/freedesktop/DBus"
   @service "org.freedesktop.Notifications"
   @service_path "/org/freedesktop/Notifications"
-  @bus_timeout_s "1"
+  # The one bound on a call: busctl's own method timeout is never set, so it
+  # cannot answer first with a failure where this bound would say timeout.
   @call_timeout_ms 1_500
   @evidence_bytes 200
 
@@ -148,7 +149,7 @@ defmodule FermixCore.Native.Notifications.DBus do
 
   # Everything after `--` is an argument, never an option: the expiry is a
   # negative integer, and the summary and body are the owner's own text.
-  defp call_args(rest), do: ["--user", "--timeout=#{@bus_timeout_s}", "--", "call" | rest]
+  defp call_args(rest), do: ["--user", "--", "call" | rest]
 
   # A bus that cannot be reached has no server to post to; a call that ran
   # out its bound is a timeout; anything else fails with its evidence.

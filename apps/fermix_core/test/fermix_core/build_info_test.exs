@@ -5,6 +5,7 @@ defmodule FermixCore.BuildInfoTest do
   alias FermixCore.BuildInfo
   alias FermixCore.Companion.Protocol, as: CompanionProtocol
   alias FermixCore.Management.Protocol, as: ManagementProtocol
+  alias FermixCore.NativeHost.Protocol, as: NativeHostProtocol
   alias FermixCore.Realtime.Protocol, as: RealtimeProtocol
 
   @build_env_vars ~w(
@@ -88,12 +89,13 @@ defmodule FermixCore.BuildInfoTest do
     assert output |> String.split() |> List.last() == "standalone"
   end
 
-  test "publishes management, Realtime, companion and browser host protocol ranges from their authorities" do
+  test "publishes management, Realtime, companion, browser host and native host protocol ranges from their authorities" do
     assert BuildInfo.protocols() == %{
              management: protocol_metadata(ManagementProtocol),
              realtime: protocol_metadata(RealtimeProtocol),
              companion: protocol_metadata(CompanionProtocol),
-             browser_host: protocol_metadata(BrowserHostProtocol)
+             browser_host: protocol_metadata(BrowserHostProtocol),
+             native_host: protocol_metadata(NativeHostProtocol)
            }
   end
 

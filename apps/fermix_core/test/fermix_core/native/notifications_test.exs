@@ -9,13 +9,18 @@ defmodule FermixCore.Native.NotificationsTest do
 
   use ExUnit.Case, async: true
 
+  @moduletag :capture_log
+
   alias FermixCore.Delivery.ChannelSend
   alias FermixCore.Delivery.Error
+  alias FermixCore.Native.HostAvailability
   alias FermixCore.Native.Notifications
   alias FermixCore.Native.Notifications.DBus
+  alias FermixCore.Native.Notifications.MacApp
 
   @busctl "/usr/bin/busctl"
   @brew_mac %{profile: :standalone_cli, os: :darwin}
+  @mac_app %{profile: :app_engine, os: :darwin}
   @mac_checkout %{profile: :source, os: :darwin}
   @no_server "no desktop notification server is running on this machine"
   @text "Tea, today at 16:05."
@@ -43,6 +48,24 @@ defmodule FermixCore.Native.NotificationsTest do
   defp server(notify_answer),
     do: dbus(%{"NameHasOwner" => {:ok, "b true\n"}, "Notify" => notify_answer})
 
+  # The Mac app backend, named, on an attached app whose link answers a post
+  # with `answer` and tells this test what it was sent.
+  defp mac_app(answer) do
+    record = start_supervised!({HostAvailability, name: nil}, id: make_ref())
+    link = spawn(fn -> Process.sleep(:infinity) end)
+    on_exit(fn -> Process.exit(link, :kill) end)
+    :ok = HostAvailability.listening(record, link)
+    :ok = HostAvailability.attached(record, link, 1, "0.6.0")
+    test_pid = self()
+
+    request = fn ^link, "notifications.post", payload, _timeout_ms ->
+      send(test_pid, {:posted, payload})
+      answer
+    end
+
+    [provider: :mac_app, host_availability: record, request: request]
+  end
+
   defp nothing_runs do
     [
       runner: fn _busctl, _args -> flunk("busctl ran") end,
@@ -52,9 +75,34 @@ defmodule FermixCore.Native.NotificationsTest do
 
   describe "resolve/1" do
     test "on every Linux build the host decides D-Bus" do
-      for profile <- [:app_engine, :standalone_cli, :linux_package_cli, :source] do
+      for profile <- [:standalone_cli, :linux_package_cli, :source] do
         assert Notifications.resolve(host: %{profile: profile, os: :linux}) ==
                  {:ok, %{provider: :dbus, module: DBus, source: :build}}
+      end
+    end
+
+    test "the Fermix app's own engine on a Mac decides the app" do
+      assert Notifications.resolve(host: @mac_app) ==
+               {:ok, %{provider: :mac_app, module: MacApp, source: :build}}
+    end
+
+    test "every host the provider table accepts resolves without raising" do
+      hosts =
+        [@mac_app, @brew_mac, @mac_checkout] ++
+          for profile <- [:standalone_cli, :linux_package_cli, :source],
+              do: %{profile: profile, os: :linux}
+
+      for host <- hosts do
+        assert {status, _resolution} = Notifications.resolve(host: host)
+        assert status in [:ok, :error], inspect(host)
+      end
+    end
+
+    test "a provider of none named against a host that offers one is refused at the seam" do
+      for host <- [@mac_app, %{profile: :linux_package_cli, os: :linux}] do
+        assert_raise ArgumentError, ~r/contradicts/, fn ->
+          Notifications.resolve(provider: :none, host: host)
+        end
       end
     end
 
@@ -72,6 +120,102 @@ defmodule FermixCore.Native.NotificationsTest do
                   "notifications on this Mac; the Fermix app's own engine does"}
 
       assert Notifications.resolve(provider: :none, host: @brew_mac) == {:error, @brew_sentence}
+    end
+  end
+
+  describe "offered?/1" do
+    test "a build offers notifications exactly where its provider is not none" do
+      for host <- [@mac_app, %{profile: :linux_package_cli, os: :linux}] do
+        assert Notifications.offered?(host: host), inspect(host)
+      end
+
+      for host <- [@brew_mac, @mac_checkout] do
+        refute Notifications.offered?(host: host), inspect(host)
+      end
+
+      assert Notifications.offered?(provider: :dbus, host: @brew_mac)
+      refute Notifications.offered?(provider: :none, host: @brew_mac)
+    end
+  end
+
+  describe "refusal sentences" do
+    # A caller embeds a refusal as a clause ("… because <sentence>."), so every
+    # backend's refusal is one: no final period, and lowercase unless it starts
+    # with "Fermix".
+    test "every backend refuses in a clause" do
+      for sentence <- refusals() do
+        refute String.ends_with?(sentence, "."), "a sentence, not a clause: #{sentence}"
+
+        first = String.first(sentence)
+
+        assert String.starts_with?(sentence, "Fermix") or first == String.downcase(first),
+               "a clause starts lowercase unless it starts with Fermix: #{sentence}"
+      end
+    end
+
+    defp refusals do
+      not_offered = for host <- [@brew_mac, @mac_checkout], do: refusal(host: host)
+
+      dbus =
+        for answer <- [
+              {:ok, "b false\n"},
+              {:error, :timeout},
+              {:ok, ~s(s "yes"\n)},
+              {:error, {:helper_failed, 1, "Failed to connect to bus: No such file or directory"}}
+            ],
+            do: refusal(dbus(%{"NameHasOwner" => answer}))
+
+      missing = refusal(provider: :dbus, find_executable: fn "busctl" -> nil end)
+      not_offered ++ dbus ++ [missing] ++ mac_app_refusals()
+    end
+
+    defp mac_app_refusals do
+      here = %{channel: "companion", computer_use_origin: :interactive}
+      away = %{channel: "telegram", computer_use_origin: :interactive}
+      status = fn state -> {:ok, %{"host_version" => "0.6.0", "notifications" => state}} end
+
+      answered =
+        for {context, type, answer} <- [
+              {away, "host.status", status.("not_asked")},
+              {away, "host.status", status.("not_granted")},
+              {here, "notifications.authorize", {:ok, %{"state" => "not_asked"}}},
+              {here, "notifications.authorize", {:ok, %{"state" => "not_granted"}}},
+              {here, "notifications.authorize", {:error, :timeout}},
+              {away, "host.status", {:error, :timeout}},
+              {away, "host.status", {:error, :closed}},
+              {away, "host.status",
+               {:error, %{"reason" => "host_unavailable", "message" => "the app is quitting"}}}
+            ],
+            do: mac_refusal(context, type, answer)
+
+      empty = start_supervised!({HostAvailability, name: nil}, id: make_ref())
+
+      unserved =
+        refusal(
+          [
+            provider: :mac_app,
+            host_availability: empty,
+            request: fn _l, _t, _p, _ms -> flunk("asked") end
+          ],
+          away
+        )
+
+      answered ++ [unserved]
+    end
+
+    defp mac_refusal(context, type, answer) do
+      record = start_supervised!({HostAvailability, name: nil}, id: make_ref())
+      link = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(link, :kill) end)
+      :ok = HostAvailability.listening(record, link)
+      :ok = HostAvailability.attached(record, link, 1, "0.6.0")
+      request = fn ^link, ^type, _payload, _timeout_ms -> answer end
+      refusal([provider: :mac_app, host_availability: record, request: request], context)
+    end
+
+    defp refusal(opts, context \\ %{}) do
+      assert {:error, sentence} = Notifications.ready(context, opts)
+      sentence
     end
   end
 
@@ -119,10 +263,68 @@ defmodule FermixCore.Native.NotificationsTest do
 
       assert_received {:busctl, _owner}
       assert_received {:busctl, notify}
-      assert ["Tea", @text] == notify |> Enum.drop(12) |> Enum.take(2)
+      # After Notify, its signature, app_name, replaces_id and app_icon.
+      summary_at = Enum.find_index(notify, &(&1 == "Notify")) + 5
+      assert ["Tea", @text] == notify |> Enum.drop(summary_at) |> Enum.take(2)
 
       assert ["sound-name", "s", "alarm-clock-elapsed"] ==
                notify |> Enum.drop(-1) |> Enum.take(-3)
+    end
+
+    test "the reminder's id reaches the Mac app, which offers Snooze 10 minutes for it" do
+      send_opts =
+        [title: "Tea", reminder_id: "rem_1"] ++ mac_app({:ok, %{"notification_id" => "n"}})
+
+      assert Notifications.send_message("local", @text, send_opts) == :ok
+
+      assert_received {:posted,
+                       %{"reminder_id" => "rem_1", "actions" => [%{"id" => "snooze_10m"}]}}
+    end
+
+    test "a delivery for no reminder names none, and D-Bus ignores the id either way" do
+      assert Notifications.send_message(
+               "local",
+               @text,
+               [title: "Tea"] ++ mac_app({:ok, %{"notification_id" => "n"}})
+             ) ==
+               :ok
+
+      assert_received {:posted, payload}
+      refute Map.has_key?(payload, "reminder_id")
+
+      for opts <- [[title: "Tea"], [title: "Tea", reminder_id: "rem_1"]] do
+        assert Notifications.send_message("local", @text, opts ++ server({:ok, "u 1\n"})) == :ok
+        assert_received {:busctl, _owner}
+        assert_received {:busctl, notify}
+        refute "rem_1" in notify
+      end
+    end
+
+    test "a reminder id that is not one is refused before any call" do
+      for bad <- ["", 7] do
+        opts = [title: "Tea", reminder_id: bad] ++ nothing_runs()
+
+        assert Notifications.send_message("local", @text, opts) ==
+                 {:error, {:permanent, :malformed_request}}
+      end
+    end
+
+    test "each Mac answer lands in the closed vocabulary" do
+      rows = [
+        {{:error, %{"reason" => "not_authorized", "message" => "off"}},
+         {:permanent, :authorization}},
+        {{:error, %{"reason" => "post_failed", "message" => "refused"}},
+         {:permanent, :remote_rejected}},
+        {{:error, :closed}, {:transport, :timeout}},
+        {{:error, :timeout}, {:transport, :timeout}}
+      ]
+
+      for {answer, error} <- rows do
+        opts = [title: "Tea", reminder_id: "rem_1"] ++ mac_app(answer)
+
+        assert Notifications.send_message("local", @text, opts) == {:error, error},
+               inspect(answer)
+      end
     end
 
     test "each Linux failure lands in the closed vocabulary" do

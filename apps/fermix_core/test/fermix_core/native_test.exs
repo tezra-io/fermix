@@ -46,6 +46,22 @@ defmodule FermixCore.NativeTest do
     end
   end
 
+  # A Buzz relay session is an ACP turn at :interactive, but a relay carries
+  # other people (`Acp.Identity.multi_principal?/1`), so it is not proof the
+  # person is at this computer; an editor's own session is.
+  test "an ACP turn over a Buzz relay is not this computer; an editor's own session is" do
+    relay =
+      Map.put(turn_context(%{channel: "acp"}), :session_env, %{
+        "BUZZ_RELAY_URL" => "wss://relay.example"
+      })
+
+    assert relay.computer_use_origin == :interactive
+    refute Native.local_surface?(relay)
+
+    editor = Map.put(turn_context(%{channel: "acp"}), :session_env, %{"PATH" => "/usr/bin"})
+    assert Native.local_surface?(editor)
+  end
+
   test "a Live voice call is this computer" do
     context = turn_context(voice_message())
 

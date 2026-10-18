@@ -1,0 +1,685 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fermix.sh/native_host/protocol.schema.json",
+  "title": "Fermix native host protocol",
+  "description": "Newline-delimited JSON wire contract between the Fermix daemon and the Fermix app's native host on native_host.sock: the app serves this Mac's own services to the daemon. The app opens it with the handshake and attached, then reports capabilities; the daemon sends requests with an id, the app answers each (response), and sends events. Source of truth: FermixCore.NativeHost.Protocol. See PROTOCOL.md.",
+  "x-protocol-version": 1,
+  "x-supported-version-range": {
+    "min": 1,
+    "max": 1
+  },
+  "x-max-line-bytes": 4194304,
+  "x-max-message-chars": 500,
+  "anyOf": [
+    {
+      "$ref": "#/$defs/hostEvent"
+    },
+    {
+      "$ref": "#/$defs/response"
+    },
+    {
+      "$ref": "#/$defs/daemonFrame"
+    }
+  ],
+  "$defs": {
+    "hostEvent": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "client_hello",
+            "attached",
+            "capabilities",
+            "notification.action",
+            "host_stopping"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "client_hello"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/client_hello"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "attached"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/attached"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "capabilities"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/capabilities"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "notification.action"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/notification.action"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "host_stopping"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/host_stopping"
+          }
+        }
+      ]
+    },
+    "daemonFrame": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "server_hello",
+            "error",
+            "notifications.authorize",
+            "notifications.post",
+            "host.status",
+            "host.stop_ack"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "server_hello"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/server_hello"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "error"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/error"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "notifications.authorize"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/notifications.authorize"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "notifications.post"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/notifications.post"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "host.status"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/host.status"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "host.stop_ack"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/host.stop_ack"
+          }
+        }
+      ]
+    },
+    "notifications.authorize": {
+      "type": "object",
+      "description": "Raise the macOS notification prompt if the app has never asked; answer the grant state after it, or at once if it was already decided. Never raises the prompt twice. Sent only for a turn from this computer's own surfaces, and bounded: on its deadline the daemon stops waiting, the prompt stays up, and the person's answer arrives as capabilities.",
+      "required": [
+        "id",
+        "type"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "notifications.authorize"
+        }
+      },
+      "additionalProperties": false
+    },
+    "notifications.post": {
+      "type": "object",
+      "description": "Show one notification. Refused not_authorized unless the grant is granted; never raises the prompt. A post that offers an action carries the reminder_id the press names.",
+      "required": [
+        "id",
+        "type",
+        "title",
+        "body",
+        "sound",
+        "actions"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "notifications.post"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1800
+        },
+        "sound": {
+          "type": "boolean"
+        },
+        "actions": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/$defs/action"
+          }
+        },
+        "reminder_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "additionalProperties": false,
+      "if": {
+        "required": [
+          "actions"
+        ],
+        "properties": {
+          "actions": {
+            "minItems": 1
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "reminder_id"
+        ]
+      }
+    },
+    "host.status": {
+      "type": "object",
+      "description": "The host's own account of itself, raising no prompt.",
+      "required": [
+        "id",
+        "type"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "host.status"
+        }
+      },
+      "additionalProperties": false
+    },
+    "host.stop_ack": {
+      "type": "object",
+      "description": "The answer to host_stopping: the daemon has marked the host stopping; the app may finish quitting.",
+      "required": [
+        "id",
+        "type"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "host.stop_ack"
+        }
+      },
+      "additionalProperties": false
+    },
+    "notifications.authorize.result": {
+      "type": "object",
+      "description": "The grant state once the prompt, if any, was answered.",
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/grantState"
+        }
+      }
+    },
+    "notifications.post.result": {
+      "type": "object",
+      "description": "The app's own identifier for the notification it posted.",
+      "required": [
+        "notification_id"
+      ],
+      "properties": {
+        "notification_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "host.status.result": {
+      "type": "object",
+      "description": "The host's account of itself.",
+      "required": [
+        "host_version",
+        "notifications"
+      ],
+      "properties": {
+        "host_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "notifications": {
+          "$ref": "#/$defs/grantState"
+        }
+      }
+    },
+    "host.stop_ack.result": {
+      "type": "object",
+      "description": "Nothing.",
+      "required": [],
+      "properties": {}
+    },
+    "client_hello": {
+      "type": "object",
+      "description": "First frame. Opens the handshake.",
+      "required": [
+        "type",
+        "protocol_version"
+      ],
+      "properties": {
+        "type": {
+          "const": "client_hello"
+        },
+        "protocol_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        }
+      }
+    },
+    "attached": {
+      "type": "object",
+      "description": "Sent once, after server_hello: the app is the host.",
+      "required": [
+        "type",
+        "host_version"
+      ],
+      "properties": {
+        "type": {
+          "const": "attached"
+        },
+        "host_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "description": "The app's grants, read from the framework itself: sent right after attached and on every change (after a prompt is answered, when the app becomes active).",
+      "required": [
+        "type",
+        "notifications"
+      ],
+      "properties": {
+        "type": {
+          "const": "capabilities"
+        },
+        "notifications": {
+          "$ref": "#/$defs/grantState"
+        }
+      }
+    },
+    "notification.action": {
+      "type": "object",
+      "description": "The person pressed one of a notification's actions.",
+      "required": [
+        "type",
+        "reminder_id",
+        "action"
+      ],
+      "properties": {
+        "type": {
+          "const": "notification.action"
+        },
+        "reminder_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "action": {
+          "enum": [
+            "snooze_10m"
+          ]
+        }
+      }
+    },
+    "host_stopping": {
+      "type": "object",
+      "description": "The app is quitting: it holds its quit for host.stop_ack, or its own bound. Final for the connection.",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "host_stopping"
+        }
+      }
+    },
+    "server_hello": {
+      "type": "object",
+      "description": "Handshake reply; advertises the accepted range.",
+      "required": [
+        "type",
+        "min_version",
+        "max_version"
+      ],
+      "properties": {
+        "type": {
+          "const": "server_hello"
+        },
+        "min_version": {
+          "const": 1
+        },
+        "max_version": {
+          "const": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "description": "The daemon refused the connection or a frame; it closes the connection after it.",
+      "required": [
+        "type",
+        "reason"
+      ],
+      "properties": {
+        "type": {
+          "const": "error"
+        },
+        "reason": {
+          "enum": [
+            "invalid_json",
+            "invalid_frame",
+            "missing_type",
+            "unknown_event",
+            "missing_field",
+            "invalid_field",
+            "line_too_large",
+            "handshake_required",
+            "unexpected_client_hello",
+            "attach_required",
+            "unexpected_attached",
+            "unsupported_protocol_version",
+            "host_already_attached",
+            "untrusted_host"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "event": {
+          "type": "string",
+          "minLength": 1
+        },
+        "direction": {
+          "enum": [
+            "client_too_old",
+            "client_too_new"
+          ]
+        },
+        "client_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "min_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "max_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "description": "The app's answer to the request with the same id: a result, or an error from the host's vocabulary. Which result shape is decided by the request the id names.",
+      "required": [
+        "id",
+        "ok"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/notifications.authorize.result"
+            },
+            {
+              "$ref": "#/$defs/notifications.post.result"
+            },
+            {
+              "$ref": "#/$defs/host.status.result"
+            },
+            {
+              "$ref": "#/$defs/host.stop_ack.result"
+            }
+          ]
+        },
+        "error": {
+          "$ref": "#/$defs/hostError"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "ok": {
+              "const": true
+            }
+          },
+          "required": [
+            "result"
+          ]
+        },
+        {
+          "properties": {
+            "ok": {
+              "const": false
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ]
+    },
+    "hostError": {
+      "type": "object",
+      "required": [
+        "reason",
+        "message"
+      ],
+      "properties": {
+        "reason": {
+          "enum": [
+            "not_authorized",
+            "post_failed",
+            "invalid_request",
+            "host_unavailable"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        }
+      },
+      "additionalProperties": false
+    },
+    "grantState": {
+      "description": "The app's notification grant, as the framework reports it.",
+      "enum": [
+        "granted",
+        "not_granted",
+        "not_asked"
+      ]
+    },
+    "action": {
+      "type": "object",
+      "description": "One button on a notification: its id comes back in notification.action; its title is the button's words.",
+      "required": [
+        "id",
+        "title"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "snooze_10m"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

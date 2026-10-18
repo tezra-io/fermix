@@ -40,6 +40,8 @@ defmodule FermixCore.Application do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Store
+  alias FermixCore.Native.Provider, as: NativeProvider
+  alias FermixCore.NativeHost.Supervisor, as: NativeHostSupervisor
   alias FermixCore.Net.Egress
   alias FermixCore.Plugins.CapabilitySeeder, as: PluginCapabilitySeeder
   alias FermixCore.Plugins.Dist.Installer, as: PluginInstaller
@@ -267,6 +269,7 @@ defmodule FermixCore.Application do
         # precedent), disabled in `config/test.exs`, never by omission.
         {HarnessSupervisor, harness_worker_opts()},
         maybe_daemon_socket(),
+        maybe_native_host(),
         maybe_realtime_supervisor(),
         maybe_computer_use_supervisor(),
         maybe_computer_history_supervisor(),
@@ -422,6 +425,15 @@ defmodule FermixCore.Application do
     else
       []
     end
+  end
+
+  # The Fermix app's native host socket (M76 §4.4): served by a daemon whose
+  # provider is the app, the one build an app attaches to for this Mac's own
+  # services. Every other build serves nothing an app could attach to.
+  defp maybe_native_host do
+    if daemon_boot?() and NativeProvider.current() == :mac_app,
+      do: [NativeHostSupervisor],
+      else: []
   end
 
   defp maybe_realtime_supervisor do

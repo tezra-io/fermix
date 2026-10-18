@@ -14,6 +14,8 @@ defmodule FermixCore.Native do
   disagree about what counts as this computer.
   """
 
+  alias FermixCore.Acp.Identity
+
   # The surfaces only this computer can reach, each a socket in the daemon's
   # home: the Mac app's chat (`companion`), `fermix ask` (`cli`), and an editor
   # or the Linux app's chat over `acp.sock` (`acp`).
@@ -27,17 +29,22 @@ defmodule FermixCore.Native do
   local voice socket carries. False for every chat channel and the phone,
   though `computer_use_origin/1` marks their foreground turns attended too
   (`:interactive`): attended is not proof the person is here. False, too, for
-  a prompt a local socket carried for nobody (`:unattended`: a process the
-  daemon started, a detached one, a re-ingested coding notice), and for a
-  context that names no origin, such as a scheduled run's: absence is never
-  read as presence.
+  an ACP session over a Buzz relay, which other people can post in
+  (`Acp.Identity.multi_principal?/1`, read from the turn's `session_env` as
+  every other reader of it does); for a prompt a local socket carried for
+  nobody (`:unattended`: a process the daemon started, a detached one, a
+  re-ingested coding notice); and for a context that names no origin, such as
+  a scheduled run's: absence is never read as presence.
   """
   @spec local_surface?(map()) :: boolean()
   def local_surface?(context) when is_map(context) do
     case Map.get(context, :computer_use_origin) do
       :voice -> true
-      :interactive -> Map.get(context, :channel) in @local_channels
+      :interactive -> local_channel?(context) and not shared?(context)
       _unattended_or_absent -> false
     end
   end
+
+  defp local_channel?(context), do: Map.get(context, :channel) in @local_channels
+  defp shared?(context), do: Identity.multi_principal?(Map.get(context, :session_env))
 end

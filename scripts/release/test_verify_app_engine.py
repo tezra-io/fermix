@@ -538,6 +538,11 @@ class VerifyAppEngineTest(unittest.TestCase):
                     "minimum_version": 1,
                     "maximum_version": 1,
                 },
+                "native_host": {
+                    "current_version": 1,
+                    "minimum_version": 1,
+                    "maximum_version": 1,
+                },
             },
             "provenance": {
                 "oidc_issuer": "https://token.actions.githubusercontent.com",

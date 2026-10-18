@@ -27,14 +27,17 @@ defmodule FermixCore.Native.Provider do
 
   @doc """
   The provider for `host` (`BootProfile.host/0`'s shape). A host no build
-  boots as (a Linux package on a Mac, an operating system Fermix does not ship
-  for) is refused rather than given a guess.
+  boots as (a Linux package on a Mac, the app's engine on Linux, an operating
+  system Fermix does not ship for) is refused rather than given a guess.
   """
   @spec select(BootProfile.host()) :: t()
   def select(%{profile: :app_engine, os: :darwin}), do: :mac_app
   def select(%{profile: :standalone_cli, os: :darwin}), do: :none
   def select(%{profile: :source, os: :darwin}), do: :none
-  def select(%{profile: _profile, os: :linux}), do: :dbus
+
+  def select(%{profile: profile, os: :linux})
+      when profile in [:linux_package_cli, :standalone_cli, :source],
+      do: :dbus
 
   @doc "This build's provider: the one its boot profile and operating system select."
   @spec current() :: t()

@@ -5,11 +5,12 @@ defmodule FermixCore.Native.Notifications do
   for platform `"computer"`.
 
   `resolve/1` is the only place a backend is chosen, from `Native.Provider`:
-  `Notifications.DBus` where the provider is `:dbus`. A build whose provider is
-  `:none` (a standalone engine or a source run on a Mac) has no backend and
-  refuses with a sentence naming the build, as `PlaceSearch.Backend` names a
-  build without the Apple Maps helper. Nothing substitutes another backend: no
-  `osascript`, no `notify-send`, no poster of the engine's own.
+  `Notifications.MacApp` where the provider is `:mac_app`, `Notifications.DBus`
+  where it is `:dbus`. A build whose provider is `:none` (a standalone engine
+  or a source run on a Mac) has no backend and refuses with a sentence naming
+  the build, as `PlaceSearch.Backend` names a build without the Apple Maps
+  helper. Nothing substitutes another backend: no `osascript`, no
+  `notify-send`, no poster of the engine's own.
 
   A backend answers two questions, both asked live:
 
@@ -33,10 +34,21 @@ defmodule FermixCore.Native.Notifications do
 
   alias FermixCore.Delivery.Error
   alias FermixCore.Native.Notifications.DBus
+  alias FermixCore.Native.Notifications.MacApp
   alias FermixCore.Native.Provider
 
-  @typedoc "One notification: its summary, its body, and whether it rings with sound."
-  @type notification :: %{title: String.t(), body: String.t(), sound: boolean()}
+  @typedoc """
+  One notification: its summary, its body, whether it rings with sound, and
+  the reminder it is for, if any. A backend that offers an action on it (the
+  Mac app's Snooze 10 minutes) names the reminder the press acts on; D-Bus
+  offers none and ignores it.
+  """
+  @type notification :: %{
+          required(:title) => String.t(),
+          required(:body) => String.t(),
+          required(:sound) => boolean(),
+          optional(:reminder_id) => String.t() | nil
+        }
 
   @typedoc "The backend's own id for a posted notification (the server's, on D-Bus)."
   @type id :: String.t()
@@ -69,7 +81,11 @@ defmodule FermixCore.Native.Notifications do
   @type source :: :build | :given
   @type resolution :: %{provider: :mac_app | :dbus, module: module(), source: source()}
 
-  @doc "Whether a notification could be shown now; a refusal is one sentence."
+  @doc """
+  Whether a notification could be shown now. A refusal is one clause its
+  caller embeds ("… because <refusal>."): no final period, and lowercase
+  unless it starts with "Fermix".
+  """
   @callback ready(context :: map(), opts :: keyword()) :: :ok | {:error, String.t()}
 
   @doc "Shows one notification, answering its id or why it did not show."
@@ -101,6 +117,14 @@ defmodule FermixCore.Native.Notifications do
   end
 
   @doc """
+  Whether this build offers notifications at all: its provider is not
+  `:none`. The one answer to that question, read through `resolve/1`, so it
+  never disagrees with what a post would resolve; the seams are `resolve/1`'s.
+  """
+  @spec offered?(keyword()) :: boolean()
+  def offered?(opts) when is_list(opts), do: match?({:ok, _resolution}, resolve(opts))
+
+  @doc """
   Whether a notification could be shown now, asked of the resolved backend
   with the turn's tool context. A build that offers none answers its
   `resolve/1` sentence and asks nothing.
@@ -130,16 +154,19 @@ defmodule FermixCore.Native.Notifications do
   sound, to this computer, the only destination (`destination/0`).
 
   `opts` are the rail's send options: the event's title as `:title` (the
-  summary) is required; `:proactive_key` goes unused, since a notification
-  server keeps no idempotency key; the `resolve/1` and backend seams pass
-  through. A failure is one error of `Delivery.Error`'s closed vocabulary.
+  summary) is required; the reminder row's id as `:reminder_id` is optional,
+  and becomes the notification's; `:proactive_key` goes unused, since a
+  notification server keeps no idempotency key; the `resolve/1` and backend
+  seams pass through. A failure is one error of `Delivery.Error`'s closed
+  vocabulary.
   """
   @spec send_message(String.t(), String.t(), keyword()) :: :ok | {:error, Error.t()}
   def send_message(destination, text, opts)
       when is_binary(destination) and is_binary(text) and is_list(opts) do
     with :ok <- this_computer(destination),
-         {:ok, title} <- title(opts) do
-      %{title: title, body: text, sound: true}
+         {:ok, title} <- title(opts),
+         {:ok, reminder_id} <- reminder_id(opts) do
+      %{title: title, body: text, sound: true, reminder_id: reminder_id}
       |> post(opts)
       |> delivered()
     end
@@ -167,8 +194,7 @@ defmodule FermixCore.Native.Notifications do
   def delivery_error({:failed, evidence}) when is_binary(evidence),
     do: {:permanent, :remote_rejected}
 
-  # The Mac app's backend arrives with the `native_host` wire (§4.4); until
-  # then a `:mac_app` provider has no clause here and raises.
+  defp backend(:mac_app), do: MacApp
   defp backend(:dbus), do: DBus
 
   defp source(opts), do: if(Keyword.has_key?(opts, :provider), do: :given, else: :build)
@@ -182,6 +208,14 @@ defmodule FermixCore.Native.Notifications do
   defp not_offered(%{profile: :source, os: :darwin}) do
     "this build (a development run from a source checkout) shows no notifications on this " <>
       "Mac; the Fermix app's own engine does"
+  end
+
+  # Only a seam can get here: a `provider: :none` named against a host whose
+  # build does offer notifications.
+  defp not_offered(host) do
+    raise ArgumentError,
+          "provider: :none contradicts host #{inspect(host)}, which selects " <>
+            inspect(Provider.select(host))
   end
 
   defp this_computer(@destination), do: :ok
@@ -202,6 +236,20 @@ defmodule FermixCore.Native.Notifications do
 
       _missing ->
         Logger.error("A delivery to this computer carries no event title for its summary")
+        {:error, {:permanent, :malformed_request}}
+    end
+  end
+
+  defp reminder_id(opts) do
+    case Keyword.get(opts, :reminder_id) do
+      nil ->
+        {:ok, nil}
+
+      id when is_binary(id) and id != "" ->
+        {:ok, id}
+
+      _invalid ->
+        Logger.error("A delivery to this computer carries a reminder id that is not one")
         {:error, {:permanent, :malformed_request}}
     end
   end

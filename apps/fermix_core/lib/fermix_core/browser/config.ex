@@ -103,6 +103,7 @@ defmodule FermixCore.Browser.Config do
   sizes of what they remember.
   """
 
+  alias FermixCore.AppLauncher
   alias FermixCore.Browser.Error
   alias FermixCore.Browser.Policy
   alias FermixCore.BuildInfo
@@ -215,8 +216,8 @@ defmodule FermixCore.Browser.Config do
             launch_timeout_ms: 15_000,
             cdp_ready_poll_interval_ms: 100,
             cdp_version_probe_timeout_ms: 500,
-            host_launch_timeout_ms: 3_000,
-            host_launch_cooldown_ms: 300_000,
+            host_launch_timeout_ms: AppLauncher.deadline_ms(),
+            host_launch_cooldown_ms: AppLauncher.cooldown_ms(),
             stop_grace_ms: 2_000,
             kill_grace_ms: 2_000,
             start_failure_threshold: 3,
