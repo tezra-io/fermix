@@ -237,8 +237,9 @@ daemon onto anything else.
 | `imessage.policy.confirm` | none | Asks the helper to confirm the saved recipients; when they differ from the ones it holds, the helper shows its own dialog naming every handle. A job that completes with the permissions view plus `outcome`. Minimum version `2`. |
 | `mcp.servers.list` | none | Every MCP server the owner added, imported or wrote by hand in `config.toml`, as rows without their tools, plus `limits` (`max_servers`) and `can_add`. Minimum version `2`. |
 | `mcp.servers.get` | `name` | One server's row with its `tools`, at most 256, in the server's order. Minimum version `2`. |
-| `mcp.servers.add` | `name`, `transport`, `command_line` or `url`, `cwd`, `env_names`, `auth`, `key_header`, `header_names`, `oauth_client_id` | Writes one server and answers `{server, job_id}`: its row, and the `mcp_check` it started, or a null `job_id` where the server waits for a value and so did not start. Minimum version `2`. |
-| `mcp.servers.update` | `name` and any field `add` takes | Changes the fields given and answers `{server}`. The name and transport cannot change, and a value the server no longer declares is deleted. Minimum version `2`. |
+| `mcp.servers.draft` | `text` | Reads what the owner typed or pasted into the add form (a URL, a command line, an `mcpServers` or `servers` JSON map, one server object, a `claude mcp add` line or a Codex `[mcp_servers.<name>]` block), writes nothing, and answers `{drafts}`: at most 32, each a server as the form takes it, with the `draft_id` that holds the values it carried. Minimum version `2`. |
+| `mcp.servers.add` | `name`, `transport`, `command_line` or `url`, `cwd`, `env_names`, `auth`, `key_header`, `header_names`, `oauth_client_id`, `draft_id` | Writes one server and answers `{server, job_id}`: its row, and the `mcp_check` it started, or a null `job_id` where the server waits for a value and so did not start. With a `draft_id`, the values that draft carried are stored for the names the form still declares. Minimum version `2`. |
+| `mcp.servers.update` | `name` and any field `add` takes but `draft_id` | Changes the fields given and answers `{server}`. The name and transport cannot change, and a value the server no longer declares is deleted. Minimum version `2`. |
 | `mcp.servers.remove` | `name` | Removes one server, every value it declares and its live status, and answers `{name, removed: true}`. Minimum version `2`. |
 | `mcp.servers.enable` | `name` | Turns one server on and answers `{server}`. Minimum version `2`. |
 | `mcp.servers.disable` | `name` | Turns one server off and answers `{server}`. Minimum version `2`. |
@@ -690,7 +691,9 @@ Notes that the shapes alone do not carry:
   `Bearer <value>`, so a pasted `Bearer …` is stored as what follows it.
   Storing the last value a server was missing starts it, storing a new one
   restarts it, and clearing one it runs with stops it. Both answer the shape
-  `env:` answers, with `environment_override` null. A server whose name was
+  `env:` answers, with `environment_override` null. A value pasted into the
+  add form never travels back: `mcp.servers.draft` holds it under a
+  `draft_id`, and `mcp.servers.add` stores it. A server whose name was
   written by hand outside the name rule holds no values, and the refusal says to
   add it again under a lowercase name.
 - **A plugin row is one shape for two halves.** An installed plugin and a
@@ -798,10 +801,57 @@ Notes that the shapes alone do not carry:
   nullable field (`cwd`, `key_header`, `oauth_client_id`) and a list replaces
   the one it names. Every refusal is `invalid_params` with the daemon's
   `sentence` and the `field` a form marks, named as the form names it. Values
-  never ride these methods: they follow through `secret.set mcp:<name>/…`, and
-  the server starts once the last one is stored. Every write applies to the one
+  never ride these methods: they follow through `secret.set mcp:<name>/…`, or
+  an add's `draft_id`, and the server starts once the last one is stored. Every write applies to the one
   server it names, with no restart, and refuses with `external_change` while the
   settings file was changed outside Fermix.
+- **A draft fills the add form, and writes nothing.** `mcp.servers.draft`
+  reads one `text` of at most 65536 bytes: a URL (`https`, or `http` only to
+  this Mac), a command line (split as `command_line` is, with its refusals and
+  its `~`), JSON (an `mcpServers` map as Claude Desktop, Claude Code, Cursor and
+  Windsurf write it, a `servers` map as VS Code writes it, a bare map of names to
+  servers, or one server object, with `command`, `args`, `env` and `cwd`, or
+  `url` or `serverUrl` with `headers`, and `type` or `transport` of `stdio`,
+  `http`, `streamable-http` or `sse`), a `claude mcp add` line (`--transport`,
+  `--scope`, `-e`, `-H`, a name, then a URL or `--` and a command) or a `claude
+  mcp add-json` line, or a Codex block of `[mcp_servers.<name>]` tables. It
+  answers at most 32 drafts, in the text's order (a Codex block's by name).
+  Every field of a draft is present, null where the transport has none.
+  `command_line` is the words that will run, a leading `~` written out;
+  `resolved_command` is the program a local command runs and `command_sentence`
+  says `Runs <program>` or the row's own sentence for a program this Mac does
+  not have. The first draft after the daemon starts may begin reading the login
+  shell's PATH and waits for it only briefly, so a bare command's
+  `resolved_command` and `command_sentence` may be null, and the next draft has
+  them. A server keeps the name its source gives it where a new server may take
+  that name; otherwise the name comes from the URL's host (`mcp.linear.app` is
+  `linear`) or the command's package (`uvx mcp-server-fetch` is `fetch`).
+  `conflict` is true where an MCP server here already has the name, or one that
+  gives its tools the same names. `summary` is `Remote, <host>`, or the program
+  and the package it starts.
+- **A pasted value is held, never returned.** A variable's or a header's
+  value in the text is held in the daemon's memory, and `env` and `headers` say
+  which names it carried (`present`); the key's header is among `headers`, and
+  `key_header` names it. A placeholder (`${input:…}`, `${env:…}`, `${NAME}`,
+  `${NAME:-default}`, an empty value, a Codex variable name) declares its name
+  and carries no value, so the server waits for it. `Authorization: Bearer
+  <token>` is the key, sent as `Bearer <value>`, its value the token; otherwise
+  a remote server's first header is its key and the rest its other headers, and
+  a remote server with no header signs in by itself (`auto`). Each draft that
+  carried a value has its own `draft_id`, null for one that carried none, so
+  one paste may give two servers one name with two values. A `draft_id` is
+  opaque, belongs to this boot, expires 10 minutes after its draft, is used
+  once, and at most 64 are held, a newer one dropping the oldest. An add with it
+  stores, under the name the form chose, the values for the names the form
+  still declares, and drops the rest; the server starts once, with all of them,
+  and its row then waits only for what the paste did not carry. A refused add
+  stores nothing and leaves the `draft_id` for the next try. An unknown,
+  expired or used `draft_id` is `invalid_params` with `field` `draft_id`.
+- **A paste Fermix cannot add as given is refused whole.** Text that is none of
+  the shapes, and a placeholder inside a command, its arguments, a working
+  folder or an address (nothing there is filled in), are `invalid_params` with
+  `field` `text` and a sentence; in a paste of several servers the sentence
+  names the server, and the paste answers no drafts.
 - **A check connects, then lists once.** `mcp.servers.check.start` waits for a
   server that is starting, starts again one that is not running or has failed,
   then asks it for its tools; `tool_count` is what it listed and `latency_ms`

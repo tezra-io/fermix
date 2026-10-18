@@ -92,6 +92,7 @@ defmodule FermixCore.Management.Protocol do
     {"imessage.policy.confirm", 2},
     {"mcp.servers.list", 2},
     {"mcp.servers.get", 2},
+    {"mcp.servers.draft", 2},
     {"mcp.servers.add", 2},
     {"mcp.servers.update", 2},
     {"mcp.servers.remove", 2},

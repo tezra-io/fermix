@@ -26,9 +26,13 @@ defmodule FermixCore.Capabilities.MCP.LoginPath do
   it runs: a start waits for the `PATH` (`path/1`, `resolve/3`), and a row
   never does. `known/3` resolves from the `PATH` already read and answers `nil`
   for a command without a slash before the first reading finishes, so a list
-  of servers never waits up to the shell's time limit.
+  of servers never waits up to the shell's time limit. A draft is the moment
+  the owner adds a local server, so `await_read/1` starts the reading and waits
+  for it, but only briefly: a draft answers well inside a client's request
+  budget, and the next draft finds the `PATH` read.
 
-  The reading is injected (`:read`); the daemon's comes from
+  The reading is injected (`:read`), and a test shortens a draft's wait
+  (`:draft_wait_ms`); the daemon's reading comes from
   `config :fermix_core, :mcp_login_shell` (default `LoginPath.Shell`), so a
   test never runs the real login shell.
   """
@@ -38,6 +42,9 @@ defmodule FermixCore.Capabilities.MCP.LoginPath do
   require Logger
 
   @callback read() :: {:ok, String.t()} | {:error, term()}
+
+  # How long a draft waits for the first reading before it answers without it.
+  @draft_wait_ms 3_000
 
   @type resolution :: {:ok, Path.t()} | {:error, {:command_not_found, String.t()}}
 
@@ -84,6 +91,15 @@ defmodule FermixCore.Capabilities.MCP.LoginPath do
       else: known_on(command, GenServer.call(server, :known_path))
   end
 
+  @doc """
+  Starts reading the login shell's `PATH` if no reading has run, and waits for
+  it at most #{@draft_wait_ms} ms: `:ok` once the `PATH` is read, `:timeout`
+  past the wait, the reading going on. A draft asks once, then resolves each of
+  its commands with `known/3`, so a paste of many servers waits once.
+  """
+  @spec await_read(GenServer.server()) :: :ok | :timeout
+  def await_read(server), do: GenServer.call(server, :await_read)
+
   defp known_on(_command, nil), do: nil
   defp known_on(command, path), do: resolution(command, find_on(command, path))
 
@@ -111,7 +127,8 @@ defmodule FermixCore.Capabilities.MCP.LoginPath do
   @impl true
   def init(opts) do
     read = Keyword.get_lazy(opts, :read, &configured_read/0)
-    {:ok, %{read: read, path: nil, reading: nil, waiting: []}}
+    draft_wait_ms = Keyword.get(opts, :draft_wait_ms, @draft_wait_ms)
+    {:ok, %{read: read, draft_wait_ms: draft_wait_ms, path: nil, reading: nil, waiting: []}}
   end
 
   defp configured_read do
@@ -120,27 +137,50 @@ defmodule FermixCore.Capabilities.MCP.LoginPath do
   end
 
   @impl true
-  def handle_call(:path, from, %{path: nil} = state), do: {:noreply, await_reading(state, from)}
+  def handle_call(:path, from, %{path: nil} = state),
+    do: {:noreply, await_reading(state, {:path, from})}
+
   def handle_call(:path, _from, state), do: {:reply, state.path, state}
   def handle_call(:known_path, _from, state), do: {:reply, state.path, state}
+
+  def handle_call(:await_read, from, %{path: nil} = state) do
+    Process.send_after(self(), {:waited, from}, state.draft_wait_ms)
+    {:noreply, await_reading(state, {:read, from})}
+  end
+
+  def handle_call(:await_read, _from, state), do: {:reply, :ok, state}
 
   @impl true
   def handle_info({ref, path}, %{reading: ref} = state) do
     Process.demonitor(ref, [:flush])
-    Enum.each(state.waiting, &GenServer.reply(&1, path))
+    Enum.each(state.waiting, &answer(&1, path))
     {:noreply, %{state | path: path, reading: nil, waiting: []}}
+  end
+
+  # A draft's wait ended before the reading did: it answers without the PATH,
+  # and the reading goes on for the next caller.
+  def handle_info({:waited, from}, state) do
+    if {:read, from} in state.waiting do
+      GenServer.reply(from, :timeout)
+      {:noreply, %{state | waiting: List.delete(state.waiting, {:read, from})}}
+    else
+      {:noreply, state}
+    end
   end
 
   # The first caller starts the one reading; every caller until it finishes
   # waits for the same answer. The task is linked, as the reading inside a
   # call was: a reading that crashes takes the owner with it, and its
   # supervisor starts a fresh one.
-  defp await_reading(%{reading: nil} = state, from) do
+  defp await_reading(%{reading: nil} = state, waiter) do
     task = Task.async(fn -> read_once(state.read) end)
-    %{state | reading: task.ref, waiting: [from]}
+    %{state | reading: task.ref, waiting: [waiter]}
   end
 
-  defp await_reading(state, from), do: %{state | waiting: [from | state.waiting]}
+  defp await_reading(state, waiter), do: %{state | waiting: [waiter | state.waiting]}
+
+  defp answer({:path, from}, path), do: GenServer.reply(from, path)
+  defp answer({:read, from}, _path), do: GenServer.reply(from, :ok)
 
   defp read_once(read) do
     case read.() do

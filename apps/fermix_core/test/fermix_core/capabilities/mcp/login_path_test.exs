@@ -27,9 +27,9 @@ defmodule FermixCore.Capabilities.MCP.LoginPathTest do
     %{dir: dir, program: program}
   end
 
-  defp start_owner(read) do
+  defp start_owner(read, opts \\ []) do
     name = :"mcp_login_path_#{System.unique_integer([:positive])}"
-    start_supervised!({LoginPath, name: name, read: read})
+    start_supervised!({LoginPath, [name: name, read: read] ++ opts})
     name
   end
 
@@ -126,6 +126,55 @@ defmodule FermixCore.Capabilities.MCP.LoginPathTest do
 
       assert LoginPath.known(owner, "fermix-fake-mcp", nil) == {:ok, ctx.program}
       assert LoginPath.known(owner, "absent", nil) == {:error, {:command_not_found, "absent"}}
+    end
+  end
+
+  describe "await_read/1" do
+    # A draft asks this: it starts the first reading and waits for it, but no
+    # longer than its bound, and the reading it started goes on.
+    test "starts the reading, and answers once it is read", ctx do
+      test = self()
+
+      owner =
+        start_owner(fn ->
+          send(test, :login_shell_read)
+          {:ok, ctx.dir}
+        end)
+
+      assert LoginPath.await_read(owner) == :ok
+      assert_received :login_shell_read
+      assert LoginPath.known(owner, "fermix-fake-mcp", nil) == {:ok, ctx.program}
+
+      assert LoginPath.await_read(owner) == :ok
+      refute_received :login_shell_read
+    end
+
+    test "answers past its wait without the PATH, and the reading goes on", ctx do
+      test = self()
+
+      owner =
+        start_owner(
+          fn ->
+            send(test, {:reading, self()})
+            receive do: (:finish -> {:ok, ctx.dir})
+          end,
+          draft_wait_ms: 50
+        )
+
+      started = System.monotonic_time(:millisecond)
+      assert LoginPath.await_read(owner) == :timeout
+      assert System.monotonic_time(:millisecond) - started < 5_000
+      assert_received {:reading, reader}
+
+      waiter = Task.async(fn -> LoginPath.path(owner) end)
+      assert LoginPath.known(owner, "fermix-fake-mcp", nil) == nil
+
+      send(reader, :finish)
+      assert Task.await(waiter) == ctx.dir
+      refute_received {:reading, _again}
+
+      assert LoginPath.await_read(owner) == :ok
+      assert LoginPath.known(owner, "fermix-fake-mcp", nil) == {:ok, ctx.program}
     end
   end
 

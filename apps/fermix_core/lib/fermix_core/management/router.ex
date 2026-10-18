@@ -66,6 +66,8 @@ defmodule FermixCore.Management.Router do
   @mcp_server_params ~w(
     name transport command_line url cwd env_names auth key_header header_names oauth_client_id
   )
+  @mcp_add_params ["draft_id" | @mcp_server_params]
+  @mcp_draft_params ~w(text)
   @mcp_tool_params ~w(name tool enabled)
   # A published name, an opaque workspace id and a display label are all bounded
   # strings; the widest of them is the workspace id's own 256-byte bound.
@@ -202,11 +204,13 @@ defmodule FermixCore.Management.Router do
   defp route_known("mcp.servers.get", params, opts),
     do: mcp_by_name(&McpServers.get/2, params, opts)
 
+  defp route_known("mcp.servers.draft", params, opts), do: mcp_draft(params, opts)
+
   defp route_known("mcp.servers.add", params, opts),
-    do: mcp_server(&McpServers.add/2, params, opts)
+    do: mcp_server(&McpServers.add/2, params, @mcp_add_params, opts)
 
   defp route_known("mcp.servers.update", params, opts),
-    do: mcp_server(&McpServers.update/2, params, opts)
+    do: mcp_server(&McpServers.update/2, params, @mcp_server_params, opts)
 
   defp route_known("mcp.servers.remove", params, opts),
     do: mcp_by_name(&McpServers.remove/2, params, opts)
@@ -437,10 +441,25 @@ defmodule FermixCore.Management.Router do
   end
 
   # A server's fields are typed by the operation, which names the field a form
-  # marks in its refusal; this only closes the set.
-  defp mcp_server(verb, params, opts) when is_function(verb, 2) do
-    with :ok <- reject_unknown_params(params, @mcp_server_params) do
+  # marks in its refusal; this only closes the set. Only an add takes a
+  # `draft_id`.
+  defp mcp_server(verb, params, allowed, opts) when is_function(verb, 2) do
+    with :ok <- reject_unknown_params(params, allowed) do
       operation_result(verb.(params, operation_opts(opts)))
+    end
+  end
+
+  # The text's length and what it says are the translator's to refuse, with a
+  # sentence the form shows under the field.
+  defp mcp_draft(params, opts) do
+    with :ok <- reject_unknown_params(params, @mcp_draft_params) do
+      case Map.get(params, "text") do
+        text when is_binary(text) ->
+          operation_result(McpServers.draft(text, operation_opts(opts)))
+
+        _invalid ->
+          invalid_params("text")
+      end
     end
   end
 

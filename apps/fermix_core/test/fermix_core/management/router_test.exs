@@ -5,6 +5,7 @@ defmodule FermixCore.Management.RouterTest do
   alias FermixCore.Management.Doctor
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Lifecycle
+  alias FermixCore.Management.McpServers.DraftValues
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Router
 
@@ -1200,10 +1201,10 @@ defmodule FermixCore.Management.RouterTest do
     end
 
     test "a server's fields are a closed set, and a refusal names the field with a sentence" do
-      for method <- ~w(mcp.servers.add mcp.servers.update) do
-        assert {:error, :invalid_params, %{"field" => "draft_id"}} =
-                 Router.route(v2(method, %{"name" => "fetch", "draft_id" => "draft:1"}))
-      end
+      assert {:error, :invalid_params, %{"field" => "draft_id"}} =
+               Router.route(
+                 v2("mcp.servers.update", %{"name" => "fetch", "draft_id" => "draft:1"})
+               )
 
       params = %{"name" => "fetch", "transport" => "stdio", "url" => "https://x.dev/mcp"}
 
@@ -1211,6 +1212,34 @@ defmodule FermixCore.Management.RouterTest do
                Router.route(v2("mcp.servers.add", params))
 
       assert sentence == "A server on this Mac does not take this."
+    end
+
+    # Only an add takes a draft_id, and one no paste holds is refused with the
+    # sentence the form shows.
+    test "an add takes a draft_id, and refuses one no paste holds" do
+      holder = :"router_test_drafts_#{System.unique_integer([:positive])}"
+      start_supervised!({DraftValues, name: holder})
+      params = %{"name" => "fetch", "transport" => "stdio", "command_line" => "sh"}
+
+      assert {:error, :invalid_params, %{"field" => "draft_id", "sentence" => sentence}} =
+               Router.route(v2("mcp.servers.add", Map.put(params, "draft_id", "draft:1")),
+                 operation_opts: [draft_values: holder]
+               )
+
+      assert sentence == "This paste has expired. Paste it again."
+    end
+
+    test "a draft takes text and nothing else" do
+      for params <- [%{}, %{"text" => 1}] do
+        assert {:error, :invalid_params, %{"field" => "text"}} =
+                 Router.route(v2("mcp.servers.draft", params))
+      end
+
+      assert {:error, :invalid_params, %{"field" => "extra"}} =
+               Router.route(v2("mcp.servers.draft", %{"text" => "sh", "extra" => 1}))
+
+      assert {:error, :invalid_params, %{"field" => "text", "sentence" => "Paste " <> _rest}} =
+               Router.route(v2("mcp.servers.draft", %{"text" => " "}))
     end
 
     test "a tool switch names its server, its tool and a boolean" do

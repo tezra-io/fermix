@@ -33,6 +33,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Management.Doctor, as: ManagementDoctor
   alias FermixCore.Management.Jobs, as: ManagementJobs
   alias FermixCore.Management.Lifecycle, as: ManagementLifecycle
+  alias FermixCore.Management.McpServers.DraftValues, as: McpDraftValues
   alias FermixCore.Management.Plugins.Discovery, as: ManagementPluginDiscovery
   alias FermixCore.Meetings.Supervisor, as: MeetingsSupervisor
   alias FermixCore.Memory.ConversationStore
@@ -411,6 +412,9 @@ defmodule FermixCore.Application do
         # Beside the job family it serves: a workspace discovery is a job, and
         # what it found is republished on the plugin row rather than in the job.
         ManagementPluginDiscovery,
+        # The values a pasted MCP server carried, held in memory under their
+        # draft_id until an add stores them; a restart forgets every one.
+        McpDraftValues,
         Daemon
       ]
     else

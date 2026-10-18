@@ -8,6 +8,30 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **MCP servers you add yourself, managed over the management socket (engine
+  side).** The daemon now owns the MCP servers you add, so the Mac app can
+  offer them with no terminal and no hand edit: add one by its URL, with a key
+  sent as a header where it needs one, or by the command that starts it on
+  this Mac, then list, change, turn off or remove it, all applied at once with
+  no restart. Keys and other values go to the Keychain under the server's own
+  name, never into the settings file, and a server starts once the last value
+  it needs is stored. Instead of typing, paste what a README or another app
+  gives: a URL, a command line, the `mcpServers` or `servers` block Claude
+  Desktop, Claude Code, Cursor, Windsurf or VS Code use, a `claude mcp add`
+  line or a Codex `[mcp_servers]` block. Fermix fills in the form, names the
+  server, and keeps a key the paste carried in memory for the add, so it never
+  travels back to the app; a paste of several servers fills one form each.
+  Each tool can be switched off for the agent while its server keeps running,
+  and a check connects a server and counts its tools. Every server says where
+  its code runs and what leaves this Mac, its state in a sentence ("Waiting
+  for GITHUB_TOKEN.", "Connected. 23 tools."), and what a local one last said
+  when it stopped. A local server runs with your login shell's PATH and only
+  the environment it declares; a remote one may be on this Mac or your
+  network, never a cloud metadata address, and no redirect is followed.
+  Signing in to hosted servers and importing the servers other apps on this
+  Mac already have come next. No released Fermix.app has the Integrations tab
+  for them yet.
+
 - **Grok Voice as a voice model, beside GPT-Live (opt-in, engine side).**
   Settings > Voice now offers `grok-voice-3.0`, SpaceXAI's voice model. Like
   GPT-Live it listens and speaks while your Fermix agent does the work, with

@@ -1310,6 +1310,12 @@
     },
     {
       "method": "(schema)",
+      "field": "methods:mcp.servers.draft",
+      "kind": "engine_only",
+      "why": "M74: mcp.servers.draft postdates the draft. It reads what the owner typed or pasted into the add form (a URL, a command line, a configuration block from a README or another app), writes nothing, and answers drafts that fill the form. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls it; the app finds it in hello's methods."
+    },
+    {
+      "method": "(schema)",
       "field": "methods:mcp.servers.enable",
       "kind": "engine_only",
       "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
@@ -1359,6 +1365,12 @@
     {
       "method": "(schema)",
       "field": "minimum_versions:mcp.servers.disable=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.draft=2",
       "kind": "engine_only",
       "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
     },
@@ -1424,6 +1436,12 @@
     },
     {
       "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.draft",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
       "field": "capabilities.minimum_versions.mcp.servers.enable",
       "kind": "engine_only",
       "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
@@ -1478,6 +1496,18 @@
     },
     {
       "method": "mcp.servers.add",
+      "field": "params:draft_id",
+      "kind": "engine_only",
+      "why": "M74: an add made from a paste names the draft whose values the paste carried. The daemon held them in memory under that draft_id when it answered mcp.servers.draft, so the app never holds a pasted key again, and the add stores them for the names the form still declares. The draft predates the paste."
+    },
+    {
+      "method": "mcp.servers.add",
+      "field": "params:env_names",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.add",
       "field": "params:key_header",
       "kind": "engine_only",
       "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
@@ -1511,6 +1541,12 @@
       "field": "params:name",
       "kind": "engine_only",
       "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.draft",
+      "field": "params:text",
+      "kind": "engine_only",
+      "why": "M74: mcp.servers.draft takes the one text the add form's field holds, whatever was typed or pasted into it, at most 64 KiB. The draft predates the method."
     },
     {
       "method": "mcp.servers.enable",

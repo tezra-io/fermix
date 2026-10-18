@@ -115,6 +115,7 @@ defmodule FermixCore.Management.ProtocolTest do
              "imessage.policy.confirm",
              "mcp.servers.list",
              "mcp.servers.get",
+             "mcp.servers.draft",
              "mcp.servers.add",
              "mcp.servers.update",
              "mcp.servers.remove",

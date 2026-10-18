@@ -62,12 +62,14 @@ defmodule FermixCore.Management.Secrets do
   """
 
   alias FermixCore.Auth.AnthropicLogin
+  alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Management.Auth
+  alias FermixCore.Management.McpServers.PastedValues
   alias FermixCore.Management.Settings
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.ExternalEnv
@@ -217,6 +219,39 @@ defmodule FermixCore.Management.Secrets do
     with {:ok, key} <- fetch_key(id) do
       commit(id, key, fn -> Wizard.clear_secret(key) end)
     end
+  end
+
+  @doc """
+  Stores the values a paste carried for the names MCP server `server` declares
+  (`mcp.servers.add` with a `draft_id`, M74 E8), through the writer `set/3`
+  uses, then starts the server once if they complete it, as storing its last
+  missing value one at a time does. Values for names it does not declare are
+  dropped. A value the store refuses is not stored, so the server's row says
+  it waits for it; the log names it, never its value. Nothing stored, nothing
+  started: the write that added the server already applied it.
+
+  `:mcp_supervisor` names the module that starts the server, for a test.
+  """
+  @spec store_mcp_values(McpConfig.server_config(), PastedValues.t(), keyword()) :: :ok
+  def store_mcp_values(server, %PastedValues{} = pasted, opts \\ []) when is_list(opts) do
+    stored =
+      for ref <- McpSecrets.declared(server),
+          {:ok, value} <- [PastedValues.fetch(pasted, ref)],
+          stored_pasted?(server.name, ref, McpSecrets.put(server.name, ref, value)),
+          do: ref
+
+    if stored == [], do: :ok, else: start_when_complete(server, opts)
+  end
+
+  defp stored_pasted?(_name, _ref, :ok), do: true
+
+  defp stored_pasted?(name, ref, {:error, reason}) do
+    Logger.error(
+      "MCP server #{name} could not store the pasted value of #{McpSecrets.id(name, ref)}: " <>
+        Redaction.format(reason)
+    )
+
+    false
   end
 
   # A stored token is inert until the route selects it, so storing one and

@@ -16,6 +16,7 @@ defmodule FermixCore.Management.McpServersTest do
   alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.McpServers
+  alias FermixCore.Management.McpServers.DraftValues
   alias FermixCore.Management.McpServers.Row
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
@@ -61,6 +62,30 @@ defmodule FermixCore.Management.McpServersTest do
     end
   end
 
+  # Stands in for `McpSupervisor` where every start is counted: it tells the
+  # test, and the subtree runs once started, so a check waits for that start
+  # instead of making one of its own.
+  defmodule CountingTree do
+    @moduledoc false
+
+    alias FermixCore.Capabilities.MCP.RuntimeStatus
+
+    @status :mcp_servers_test_status
+    @listener :mcp_servers_test_starts
+
+    def reload, do: {:ok, %{started: [], stopped: [], unchanged: [], failed: []}}
+
+    def subtree_alive?(source_id),
+      do: match?({:ok, _owner, _generation}, RuntimeStatus.owner(@status, source_id))
+
+    def restart_server({:operator, name} = source_id, server) do
+      send(@listener, {:started, name})
+      FakeTree.restart_server(source_id, server)
+    end
+
+    def list_tools(source_id, server), do: FakeTree.list_tools(source_id, server)
+  end
+
   setup do
     home = SafeRm.make_tmp_dir!("management-mcp-servers")
     previous_home = System.get_env("FERMIX_HOME")
@@ -77,6 +102,7 @@ defmodule FermixCore.Management.McpServersTest do
     tasks = :"mcp_servers_test_tasks_#{System.unique_integer([:positive])}"
     start_supervised!({Task.Supervisor, name: tasks})
     jobs = start_supervised!({Jobs, name: :mcp_servers_test_jobs, task_supervisor: tasks})
+    start_supervised!({DraftValues, name: :mcp_servers_test_drafts})
 
     on_exit(fn ->
       restore_core_env(previous_env)
@@ -90,6 +116,7 @@ defmodule FermixCore.Management.McpServersTest do
       mcp_supervisor: FakeTree,
       runtime_status: @status,
       jobs: [server: jobs],
+      draft_values: :mcp_servers_test_drafts,
       home: "/Users/owner"
     ]
 
@@ -348,6 +375,290 @@ defmodule FermixCore.Management.McpServersTest do
     end
   end
 
+  describe "draft" do
+    test "a URL, a command, a uvx command and one this Mac lacks", ctx do
+      programs = programs!(ctx, ~w(npx uvx))
+      opts = Keyword.put(ctx.opts, :login_path, start_login_path(fn -> {:ok, programs} end))
+
+      assert {:ok, %{"drafts" => [linear]}} = McpServers.draft("https://mcp.linear.app/mcp", opts)
+
+      assert linear == %{
+               "name" => "linear",
+               "transport" => "http",
+               "url" => "https://mcp.linear.app/mcp",
+               "command_line" => nil,
+               "resolved_command" => nil,
+               "command_sentence" => nil,
+               "cwd" => nil,
+               "env" => [],
+               "headers" => [],
+               "auth" => "auto",
+               "key_header" => nil,
+               "oauth_client_id" => nil,
+               "consent_sentence" =>
+                 "Runs on mcp.linear.app. What you ask its tools is sent there.",
+               "summary" => "Remote, mcp.linear.app",
+               "conflict" => false,
+               "draft_id" => nil
+             }
+
+      npx = Path.join(programs, "npx")
+      line = "npx -y @modelcontextprotocol/server-filesystem ~/Documents"
+
+      assert {:ok, %{"drafts" => [files]}} = McpServers.draft(line, opts)
+
+      assert %{
+               "name" => "filesystem",
+               "transport" => "stdio",
+               "command_line" =>
+                 "npx -y @modelcontextprotocol/server-filesystem /Users/owner/Documents",
+               "resolved_command" => ^npx,
+               "command_sentence" => "Runs " <> ^npx,
+               "auth" => "none",
+               "consent_sentence" => "Runs on this Mac as a separate program, with your access.",
+               "summary" => "npx @modelcontextprotocol/server-filesystem",
+               "draft_id" => nil
+             } = files
+
+      assert {:ok, %{"drafts" => [fetch]}} = McpServers.draft("uvx mcp-server-fetch", opts)
+      assert {fetch["name"], fetch["summary"]} == {"fetch", "uvx mcp-server-fetch"}
+      assert fetch["resolved_command"] == Path.join(programs, "uvx")
+
+      assert {:ok, %{"drafts" => [missing]}} = McpServers.draft("bunx some-tool", opts)
+
+      assert {missing["resolved_command"], missing["command_sentence"]} ==
+               {nil, "Fermix could not find bunx on this Mac. Use the full path."}
+    end
+
+    # Two servers in one paste may declare one name with two values, so each
+    # draft's values are held under its own id.
+    test "each draft that carries a value has its own draft_id", ctx do
+      text = ~S"""
+      {"mcpServers": {
+        "sentry": {"type": "http", "url": "https://mcp.sentry.dev/mcp"},
+        "brave-search": {"command": "npx", "args": ["-y", "@brave/brave-search-mcp-server"],
+                         "env": {"BRAVE_API_KEY": "bsa-1", "LEVEL": "${LEVEL}"}},
+        "brave-two": {"command": "npx", "args": ["-y", "@brave/brave-search-mcp-server"],
+                      "env": {"BRAVE_API_KEY": "bsa-2"}}
+      }}
+      """
+
+      assert {:ok, %{"drafts" => [sentry, brave, two]}} =
+               McpServers.draft(text, with_programs(ctx, ~w(npx)))
+
+      assert sentry["draft_id"] == nil
+
+      assert brave["env"] == [
+               %{"name" => "BRAVE_API_KEY", "present" => true},
+               %{"name" => "LEVEL", "present" => false}
+             ]
+
+      assert is_binary(brave["draft_id"]) and is_binary(two["draft_id"])
+      assert brave["draft_id"] != two["draft_id"]
+
+      refute inspect(McpServers.draft(text, with_programs(ctx, ~w(npx)))) =~ "bsa-"
+      assert stored_mcp_values() == []
+    end
+
+    test "a remote draft names its key header and every header, the key's with them", ctx do
+      line =
+        ~s(claude mcp add --transport http context7 https://mcp.context7.com/mcp ) <>
+          ~s(-H "X-Org: acme" --header "CONTEXT7_API_KEY: ctx7sk-1")
+
+      assert {:ok, %{"drafts" => [draft]}} = McpServers.draft(line, ctx.opts)
+
+      assert %{
+               "auth" => "header",
+               "key_header" => "X-Org",
+               "headers" => [
+                 %{"name" => "X-Org", "present" => true},
+                 %{"name" => "CONTEXT7_API_KEY", "present" => true}
+               ]
+             } = draft
+    end
+
+    test "a name already here is a conflict, as is one with its tools' names", ctx do
+      write_config!(ctx.path, ~s([mcp.servers.brave_search]\ncommand = "sh"\n))
+
+      assert {:ok, %{"drafts" => [draft]}} =
+               McpServers.draft("npx -y @brave/brave-search-mcp-server", with_programs(ctx, []))
+
+      assert {draft["name"], draft["conflict"]} == {"brave-search", true}
+    end
+
+    # The first reading of the login shell is waited for only briefly, and the
+    # next draft finds the PATH read.
+    test "a bare command has no answer until the login shell's PATH is read", ctx do
+      test = self()
+      programs = programs!(ctx, ~w(uvx))
+
+      login_path =
+        start_login_path(
+          fn ->
+            send(test, {:reading, self()})
+            receive do: (:finish -> {:ok, programs})
+          end,
+          draft_wait_ms: 50
+        )
+
+      opts = Keyword.put(ctx.opts, :login_path, login_path)
+
+      assert {:ok, %{"drafts" => [draft]}} = McpServers.draft("uvx mcp-server-fetch", opts)
+      assert {draft["resolved_command"], draft["command_sentence"]} == {nil, nil}
+
+      assert_received {:reading, reader}
+      send(reader, :finish)
+      _read = LoginPath.path(login_path)
+
+      assert {:ok, %{"drafts" => [draft]}} = McpServers.draft("uvx mcp-server-fetch", opts)
+      assert draft["resolved_command"] == Path.join(programs, "uvx")
+    end
+
+    test "text that is none of the shapes is refused at text, and nothing is held", ctx do
+      assert McpServers.draft("one\ntwo", ctx.opts) ==
+               {:error,
+                {:invalid_params, "text",
+                 "Paste a server's address, the command that starts it, or the settings " <>
+                   "a README or another app gives for it."}}
+
+      text =
+        ~s({"mcpServers": {"a": {"command": "sh", "env": {"K": "v"}}, "b": {"command": "${X}"}}})
+
+      assert {:error, {:invalid_params, "text", "b: " <> _sentence}} =
+               McpServers.draft(text, ctx.opts)
+    end
+  end
+
+  describe "add with a draft_id" do
+    setup do
+      Process.register(self(), :mcp_servers_test_starts)
+      :ok
+    end
+
+    # The form may rename the server and drop a name: the values go under the
+    # name it chose, for the names it kept, a value that is no secret included,
+    # and the server starts once, with all of them.
+    test "the paste's values are stored for the names the form keeps, and it starts once", ctx do
+      text = ~s({"mcpServers": {"brave-search": {"command": "/bin/sh", "args": ["serve.sh"],
+                 "env": {"BRAVE_API_KEY": "bsa-1", "LOG_LEVEL": "debug", "EXTRA": "dropped"}}}})
+
+      assert {:ok, %{"drafts" => [%{"draft_id" => draft_id}]}} = McpServers.draft(text, ctx.opts)
+
+      params = %{
+        "name" => "brave",
+        "transport" => "stdio",
+        "command_line" => "/bin/sh serve.sh",
+        "env_names" => ["BRAVE_API_KEY", "LOG_LEVEL"],
+        "draft_id" => draft_id
+      }
+
+      opts = Keyword.put(ctx.opts, :mcp_supervisor, CountingTree)
+      assert {:ok, %{"server" => server, "job_id" => job_id}} = McpServers.add(params, opts)
+
+      assert stored_mcp_values() == [
+               {"mcp:brave/env/BRAVE_API_KEY", "bsa-1"},
+               {"mcp:brave/env/LOG_LEVEL", "debug"}
+             ]
+
+      refute File.read!(ctx.path) =~ "bsa-1"
+
+      assert %{
+               "env" => [
+                 %{"name" => "BRAVE_API_KEY", "present" => true},
+                 %{"name" => "LOG_LEVEL", "present" => true}
+               ]
+             } = server
+
+      assert {:ok, %{"status" => "completed"}} = eventually_terminal(ctx.jobs, job_id)
+      assert_received {:started, "brave"}
+      refute_received {:started, _again}
+    end
+
+    test "a name the paste did not carry is what the server waits for", ctx do
+      line =
+        ~s(claude mcp add --transport http linear https://mcp.linear.app/mcp -H "Authorization: Bearer tok-1")
+
+      assert {:ok, %{"drafts" => [%{"draft_id" => draft_id}]}} = McpServers.draft(line, ctx.opts)
+
+      params = %{
+        "name" => "linear",
+        "transport" => "http",
+        "url" => "https://mcp.linear.app/mcp",
+        "auth" => "header",
+        "key_header" => "authorization",
+        "header_names" => ["X-Workspace"],
+        "draft_id" => draft_id
+      }
+
+      opts = Keyword.put(ctx.opts, :mcp_supervisor, CountingTree)
+      assert {:ok, %{"server" => server, "job_id" => nil}} = McpServers.add(params, opts)
+
+      assert stored_mcp_values() == [{"mcp:linear/header/authorization", "tok-1"}]
+
+      assert %{"status" => "needs_secret", "status_sentence" => "Waiting for X-Workspace."} =
+               server
+
+      refute_received {:started, _name}
+    end
+
+    test "a refused add stores nothing, and the paste can be added again", ctx do
+      write_config!(ctx.path, ~s([mcp.servers.fetch]\ncommand = "sh"\nenv_secrets = ["KEY"]\n))
+      :ok = McpSecrets.put("fetch", {:env, "KEY"}, "kept")
+
+      text = ~s({"command": "uvx", "args": ["mcp-server-fetch"], "env": {"KEY": "pasted"}})
+      assert {:ok, %{"drafts" => [%{"draft_id" => draft_id}]}} = McpServers.draft(text, ctx.opts)
+
+      params = %{
+        "name" => "fetch",
+        "transport" => "stdio",
+        "command_line" => "uvx mcp-server-fetch",
+        "env_names" => ["KEY"],
+        "draft_id" => draft_id
+      }
+
+      assert {:error, {:invalid_params, "name", _sentence}} = McpServers.add(params, ctx.opts)
+      assert stored_mcp_values() == [{"mcp:fetch/env/KEY", "kept"}]
+
+      assert {:ok, _added} = McpServers.add(%{params | "name" => "fetch2"}, ctx.opts)
+      assert {:ok, "pasted"} = McpSecrets.fetch("fetch2", {:env, "KEY"})
+      assert {:ok, "kept"} = McpSecrets.fetch("fetch", {:env, "KEY"})
+    end
+
+    test "an unknown, used or expired draft_id is refused at draft_id", ctx do
+      expired = "This paste has expired. Paste it again."
+      params = %{"name" => "fetch", "transport" => "stdio", "command_line" => "sh"}
+
+      for draft_id <- ["draft:unknown", 7] do
+        assert McpServers.add(Map.put(params, "draft_id", draft_id), ctx.opts) ==
+                 {:error, {:invalid_params, "draft_id", expired}}
+      end
+
+      assert {:ok, %{"drafts" => [%{"draft_id" => used}]}} =
+               McpServers.draft(~s({"command": "sh", "env": {"K": "v"}}), ctx.opts)
+
+      assert {:ok, _added} = McpServers.add(Map.put(params, "draft_id", used), ctx.opts)
+
+      assert McpServers.add(%{params | "name" => "other"} |> Map.put("draft_id", used), ctx.opts) ==
+               {:error, {:invalid_params, "draft_id", expired}}
+
+      short =
+        start_supervised!({DraftValues, name: :mcp_servers_test_short, ttl_ms: 20}, id: :short)
+
+      opts = Keyword.put(ctx.opts, :draft_values, short)
+
+      assert {:ok, %{"drafts" => [%{"draft_id" => late}]}} =
+               McpServers.draft(~s({"command": "sh", "env": {"K": "v"}}), opts)
+
+      Process.sleep(200)
+      refute DraftValues.held?(short, late)
+
+      assert McpServers.add(%{params | "name" => "late"} |> Map.put("draft_id", late), opts) ==
+               {:error, {:invalid_params, "draft_id", expired}}
+
+      refute File.read!(ctx.path) =~ "[mcp.servers.late]"
+    end
+  end
+
   describe "update" do
     test "changes the fields given, and a value no longer declared is deleted", ctx do
       write_config!(ctx.path, """
@@ -566,10 +877,43 @@ defmodule FermixCore.Management.McpServersTest do
     assert length(answers) == 7
   end
 
-  defp start_login_path(read) do
+  defp start_login_path(read, opts \\ []) do
     name = :"mcp_servers_test_login_path_#{System.unique_integer([:positive])}"
-    start_supervised!({LoginPath, name: name, read: read})
+
+    start_supervised!(
+      Supervisor.child_spec({LoginPath, [name: name, read: read] ++ opts}, id: name)
+    )
+
     name
+  end
+
+  # A login shell PATH that holds only the programs named, as executables.
+  defp with_programs(ctx, programs) do
+    dir = programs!(ctx, programs)
+    login_path = start_login_path(fn -> {:ok, dir} end)
+    Keyword.put(ctx.opts, :login_path, login_path)
+  end
+
+  defp programs!(ctx, programs) do
+    dir = Path.join(ctx.home, "bin-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+
+    for program <- programs do
+      path = Path.join(dir, program)
+      File.write!(path, "#!/bin/sh\nexit 0\n")
+      File.chmod!(path, 0o755)
+    end
+
+    dir
+  end
+
+  # Every MCP value the stub store holds, by its id, in id order.
+  defp stored_mcp_values do
+    entries =
+      for {{_profile, _store, {:mcp, id}}, value} <- :ets.tab2list(SecretWriterStub),
+          do: {id, value}
+
+    Enum.sort(entries)
   end
 
   defp write_config!(path, contents) do

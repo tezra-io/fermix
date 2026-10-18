@@ -138,6 +138,7 @@
     "imessage.policy.confirm": 2,
     "mcp.servers.list": 2,
     "mcp.servers.get": 2,
+    "mcp.servers.draft": 2,
     "mcp.servers.add": 2,
     "mcp.servers.update": 2,
     "mcp.servers.remove": 2,
@@ -211,6 +212,7 @@
             "imessage.policy.confirm",
             "mcp.servers.list",
             "mcp.servers.get",
+            "mcp.servers.draft",
             "mcp.servers.add",
             "mcp.servers.update",
             "mcp.servers.remove",
@@ -584,6 +586,13 @@
         {
           "if": {
             "required": ["method"],
+            "properties": { "method": { "const": "mcp.servers.draft" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mcp_servers_draft_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
             "properties": { "method": { "const": "mcp.servers.add" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/mcp_servers_add_params" } } }
@@ -746,6 +755,7 @@
         { "$ref": "#/$defs/imessage_policy_confirm_result" },
         { "$ref": "#/$defs/mcp_servers_list_result" },
         { "$ref": "#/$defs/mcp_servers_get_result" },
+        { "$ref": "#/$defs/mcp_servers_draft_result" },
         { "$ref": "#/$defs/mcp_servers_add_result" },
         { "$ref": "#/$defs/mcp_servers_update_result" },
         { "$ref": "#/$defs/mcp_servers_remove_result" },
@@ -2522,12 +2532,93 @@
         "server": { "allOf": [{ "$ref": "#/$defs/mcpServerRow" }, { "required": ["tools"] }] }
       }
     },
+    "mcpServerDraft": {
+      "type": "object",
+      "description": "One server a paste describes, as the add form takes it, in the daemon's words. Every field is present, null where the transport has none. `command_line` is written back as the words that will run, a leading `~` written out as the home folder. `resolved_command` is the program a local command runs, null for a remote server and while the login shell's PATH is still being read; `command_sentence` is \"Runs <program>\", the sentence a row says of a command this Mac does not have, or null when `resolved_command` is null for either reason. `env` and `headers` name every value the server declares, the key's header included (`key_header` names it), and `present` says the paste carried its value. `consent_sentence` is the row's own. `summary` is \"Remote, <host>\", or the program and the package it starts. `conflict` is true where an MCP server here already has this name, or one that gives its tools the same names. `draft_id` names the values this draft carried, for `mcp.servers.add`; null when it carried none.",
+      "required": [
+        "name",
+        "transport",
+        "url",
+        "command_line",
+        "resolved_command",
+        "command_sentence",
+        "cwd",
+        "env",
+        "headers",
+        "auth",
+        "key_header",
+        "oauth_client_id",
+        "consent_sentence",
+        "summary",
+        "conflict",
+        "draft_id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "transport": { "enum": ["stdio", "http"] },
+        "url": { "type": ["string", "null"] },
+        "command_line": { "type": ["string", "null"] },
+        "resolved_command": { "type": ["string", "null"] },
+        "command_sentence": { "type": ["string", "null"] },
+        "cwd": { "type": ["string", "null"] },
+        "env": { "type": "array", "items": { "$ref": "#/$defs/mcpServerName" } },
+        "headers": { "type": "array", "items": { "$ref": "#/$defs/mcpServerName" } },
+        "auth": { "enum": ["auto", "header", "none"] },
+        "key_header": { "type": ["string", "null"] },
+        "oauth_client_id": { "type": ["string", "null"] },
+        "consent_sentence": { "type": "string" },
+        "summary": { "type": "string" },
+        "conflict": { "type": "boolean" },
+        "draft_id": { "type": ["string", "null"] }
+      }
+    },
+    "mcp_servers_draft_params": {
+      "type": "object",
+      "required": ["text"],
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "description": "What the owner typed or pasted: a URL, a command line, an `mcpServers` or `servers` JSON map, one server object, a `claude mcp add` line or a Codex `[mcp_servers.<name>]` block. At most 65536 bytes.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        }
+      }
+    },
+    "mcp_servers_draft_result": {
+      "type": "object",
+      "required": ["drafts"],
+      "additionalProperties": false,
+      "properties": {
+        "drafts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/mcpServerDraft" }
+        }
+      }
+    },
     "mcp_servers_add_params": {
-      "description": "The fields of `mcp.servers.update`, with `transport` required.",
-      "allOf": [
-        { "$ref": "#/$defs/mcp_servers_update_params" },
-        { "required": ["name", "transport"] }
-      ]
+      "description": "The fields of `mcp.servers.update`, with `transport` required, and `draft_id`: the draft whose pasted values the add stores for the names the form still declares.",
+      "type": "object",
+      "required": ["name", "transport"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/mcp_servers_update_params/properties/name" },
+        "transport": { "$ref": "#/$defs/mcp_servers_update_params/properties/transport" },
+        "command_line": { "$ref": "#/$defs/mcp_servers_update_params/properties/command_line" },
+        "url": { "$ref": "#/$defs/mcp_servers_update_params/properties/url" },
+        "cwd": { "$ref": "#/$defs/mcp_servers_update_params/properties/cwd" },
+        "env_names": { "$ref": "#/$defs/mcp_servers_update_params/properties/env_names" },
+        "auth": { "$ref": "#/$defs/mcp_servers_update_params/properties/auth" },
+        "key_header": { "$ref": "#/$defs/mcp_servers_update_params/properties/key_header" },
+        "header_names": { "$ref": "#/$defs/mcp_servers_update_params/properties/header_names" },
+        "oauth_client_id": {
+          "$ref": "#/$defs/mcp_servers_update_params/properties/oauth_client_id"
+        },
+        "draft_id": { "type": ["string", "null"], "minLength": 1, "maxLength": 64 }
+      }
     },
     "mcp_servers_add_result": {
       "type": "object",
@@ -2542,7 +2633,7 @@
       }
     },
     "mcp_servers_update_params": {
-      "description": "A server as a form writes it: on an update, the fields given change and the rest stay, and `name` and `transport` cannot change. A local server takes `command_line`, `cwd` and `env_names`; a remote one `url`, `auth`, `key_header`, `header_names` and `oauth_client_id`; the other transport's fields are refused. A null clears a nullable field, and a list replaces the one it names. Values never ride here: they arrive through `secret.set` under `mcp:<name>/…`.",
+      "description": "A server as a form writes it: on an update, the fields given change and the rest stay, and `name` and `transport` cannot change. A local server takes `command_line`, `cwd` and `env_names`; a remote one `url`, `auth`, `key_header`, `header_names` and `oauth_client_id`; the other transport's fields are refused. A null clears a nullable field, and a list replaces the one it names. Values never ride here: they arrive through `secret.set` under `mcp:<name>/…`, or, on an add, from the paste its `draft_id` names.",
       "type": "object",
       "required": ["name"],
       "additionalProperties": false,

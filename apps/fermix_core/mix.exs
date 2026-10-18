@@ -56,6 +56,10 @@ defmodule FermixCore.MixProject do
       {:qr_code, "~> 3.2"},
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.0"},
+      # Reads a Codex `[mcp_servers.<name>]` block an owner pastes or imports
+      # (`McpServers.Interchange`). Already in the release through
+      # `fermix_channels`; declared here because this app reads it too.
+      {:toml_elixir, "~> 3.0"},
       # Compile-time-embedded IANA tz database (no runtime network fetch, unlike
       # :tzdata) so scheduled-job cron timezones resolve in the Burrito binary.
       {:tz, "~> 0.28"},

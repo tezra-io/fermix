@@ -510,7 +510,12 @@ The owner manages operator servers over `daemon.sock` (`mcp.servers.*`,
 writer, and `Management.McpServers.Row` is the one owner of a server's row,
 composed from its block, its stored values, its `RuntimeStatus` entry (which
 keeps what its last discovery found, the server's `serverInfo` and its tools
-described) and whether its subtree still runs.
+described) and whether its subtree still runs. What the owner pastes into the
+add form (a URL, a command line, another app's configuration block) goes
+through one translator, `Management.McpServers.Interchange`, which takes text
+and never reads a file; the values a paste carried are held in memory only, by
+`Management.McpServers.DraftValues`, under a boot-bound `draft_id` an add
+redeems.
 Fermix is only ever an MCP client: it does not expose its own tools as an MCP
 server.
 

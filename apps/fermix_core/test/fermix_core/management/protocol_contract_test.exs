@@ -20,6 +20,10 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Logs
+  alias FermixCore.Management.McpServers.Draft, as: McpDraft
+  alias FermixCore.Management.McpServers.DraftValues
+  alias FermixCore.Management.McpServers.Interchange
+  alias FermixCore.Management.McpServers.PastedValues
   alias FermixCore.Management.McpServers.Row, as: McpRow
   alias FermixCore.Management.Plugins.Row, as: PluginRow
   alias FermixCore.Management.Protocol
@@ -676,6 +680,66 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert named_fixture_result("mcp_servers_add_remote_key")["server"] == build.("context7", [])
   end
 
+  # A draft is "every field always present" and the schema closes it, as it
+  # closes the row.
+  test "the schema declares exactly the fields an MCP server draft carries", %{schema: schema} do
+    draft_def = schema["$defs"]["mcpServerDraft"]
+    {:ok, [translated]} = Interchange.translate("uvx mcp-server-fetch", "/Users/owner")
+
+    fields =
+      translated
+      |> McpDraft.build(%{resolution: nil, conflict: false, draft_id: nil})
+      |> Map.keys()
+
+    assert draft_def["additionalProperties"] == false
+    assert Enum.sort(draft_def["required"]) == Enum.sort(fields)
+    assert draft_def["properties"] |> Map.keys() |> Enum.sort() == Enum.sort(fields)
+  end
+
+  # The golden drafts are what the translator and the draft builder write for
+  # the text each one's request sends, sentences and names included. The facts
+  # beside the text are the golden's own: where its command resolves (the
+  # sentence for a program this Mac lacks is the builder's), and the id its
+  # values are held under, present exactly where the draft carried a value.
+  test "the golden MCP server drafts are the ones the translator and the builder write" do
+    goldens = ~w(
+      mcp_servers_draft_url mcp_servers_draft_command mcp_servers_draft_command_uvx
+      mcp_servers_draft_command_not_found mcp_servers_draft_pasted_config
+      mcp_servers_draft_claude_add mcp_servers_draft_codex
+    )
+
+    for name <- goldens do
+      text = named_request(name)["frame"]["params"]["text"]
+      drafts = named_fixture_result(name)["drafts"]
+      assert {:ok, translated} = Interchange.translate(text, "/Users/owner"), name
+      assert length(translated) == length(drafts), name
+
+      for {server, golden} <- Enum.zip(translated, drafts) do
+        assert is_binary(golden["draft_id"]) == not PastedValues.empty?(server.values), name
+        assert McpDraft.build(server, golden_draft_facts(server, golden)) == golden, name
+      end
+    end
+  end
+
+  test "the golden draft refusals are the ones the router answers" do
+    holder = start_supervised!({DraftValues, name: :"contract_drafts_#{unique()}"})
+
+    for {name, request} <- [
+          {"invalid_params_mcp_servers_draft_text",
+           {"mcp.servers.draft", %{"text" => ~s({"editor.fontSize": 14})}}},
+          {"invalid_params_mcp_servers_add_draft_id",
+           {"mcp.servers.add", named_request("mcp_servers_add_draft")["frame"]["params"]}}
+        ] do
+      {method, params} = request
+      route = %{request_id: "req-1", protocol_version: 2, method: method, params: params}
+
+      assert {:error, :invalid_params, details} =
+               Router.route(route, operation_opts: [draft_values: holder])
+
+      assert details == golden_error_details(name)
+    end
+  end
+
   test "every golden MCP server row routes on its own closed actions", %{schema: schema} do
     published = schema["$defs"]["mcpServerAction"]["enum"]
     rows = golden_mcp_rows()
@@ -911,6 +975,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
     [
       {"mcp.servers.list", %{}, [operation_opts: sources]},
       {"mcp.servers.get", %{"name" => "linear"}, [operation_opts: sources]},
+      {"mcp.servers.draft", %{"text" => "https://mcp.linear.app/mcp"}, [operation_opts: sources]},
       {"mcp.servers.check.start", %{"name" => "linear"},
        [operation_opts: [jobs: jobs()] ++ sources]}
     ]
@@ -1312,6 +1377,19 @@ defmodule FermixCore.Management.ProtocolContractTest do
     |> Enum.filter(&(&1["method"] == method))
     |> Enum.find(&matching_result?(&1, params))
     |> get_in(["response", "result"])
+  end
+
+  defp named_request(name), do: @requests |> fixtures() |> Enum.find(&(&1["name"] == name))
+
+  defp golden_draft_facts(server, golden) do
+    resolution =
+      case {server.server, golden["resolved_command"]} do
+        {%{transport: :http}, nil} -> nil
+        {_stdio, nil} -> {:error, {:command_not_found, server.server.command}}
+        {_stdio, program} -> {:ok, program}
+      end
+
+    %{resolution: resolution, conflict: golden["conflict"], draft_id: golden["draft_id"]}
   end
 
   defp named_fixture_result(name) do

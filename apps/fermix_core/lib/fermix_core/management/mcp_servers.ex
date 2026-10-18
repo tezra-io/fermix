@@ -21,6 +21,12 @@ defmodule FermixCore.Management.McpServers do
   or `cwd` is the home folder the daemon gives the program (`:home`, the
   daemon's own by default), so the file holds the absolute path that runs.
 
+  `draft/2` reads what the owner typed or pasted into the add form (a URL, a
+  command line, a configuration block, `McpServers.Interchange`) and answers
+  drafts that fill the form, writing nothing. A value the paste carried is held
+  in memory under its draft's `draft_id` (`McpServers.DraftValues`), and an add
+  that names it stores the values for the names the form still declares.
+
   A check (`mcp_check`) is a job: it connects the server, starting it again if
   it is not running or has failed and waiting for it if it is starting, then
   asks it for its tools once and answers how many and how long that took. Only
@@ -36,7 +42,12 @@ defmodule FermixCore.Management.McpServers do
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.McpServers.CommandLine
+  alias FermixCore.Management.McpServers.Draft
+  alias FermixCore.Management.McpServers.DraftValues
+  alias FermixCore.Management.McpServers.Interchange
+  alias FermixCore.Management.McpServers.PastedValues
   alias FermixCore.Management.McpServers.Row
+  alias FermixCore.Management.Secrets
   alias FermixCore.Setup.ConfigStore
 
   require Logger
@@ -69,6 +80,7 @@ defmodule FermixCore.Management.McpServers do
   @listing_reserve_ms 10_000
 
   @no_server "There is no MCP server by that name."
+  @expired_draft "This paste has expired. Paste it again."
 
   @type error ::
           {:invalid_params, String.t(), String.t()}
@@ -100,18 +112,45 @@ defmodule FermixCore.Management.McpServers do
   end
 
   @doc """
+  The servers `text` describes, as drafts that fill the add form, and nothing
+  written. Each draft that carried a value names it by its own `draft_id`, so
+  each add takes only its own values. A command without a slash is resolved
+  on the login shell's `PATH`, which a draft starts reading and waits for
+  once, briefly; past the wait its `resolved_command` is null.
+  """
+  @spec draft(String.t(), keyword()) :: {:ok, map()} | {:error, error()}
+  def draft(text, opts \\ []) when is_binary(text) and is_list(opts) do
+    with {:ok, translated} <- Interchange.translate(text, home(opts)) do
+      login_path = Keyword.get(opts, :login_path, LoginPath)
+      :ok = await_path(translated, login_path)
+      names = Enum.map(servers(opts), & &1.name)
+      {:ok, %{"drafts" => Enum.map(translated, &draft_row(&1, names, login_path, opts))}}
+    end
+  end
+
+  @doc """
   Adds one server, `origin = "added"`, and starts a check of it. `job_id` is
   null when the server does not start yet, because a value it declares is not
   stored, or when no check could start beside the ones running.
+
+  With a `draft_id`, the values its paste carried for the names the form still
+  declares are stored under the name the form chose, after the server is
+  written and before it starts: the write applies the server, which waits for
+  them, and storing them starts it once. A refused add stores nothing, and
+  leaves the `draft_id` for the next try.
   """
   @spec add(map(), keyword()) :: {:ok, map()} | {:error, error()}
   def add(params, opts \\ []) when is_map(params) and is_list(opts) do
+    {draft_id, params} = Map.pop(params, "draft_id")
+
     with {:ok, name} <- name_param(params),
          {:ok, transport} <- transport_param(params),
+         :ok <- draft_held(draft_id, opts),
          {:ok, attrs} <- attrs(transport, params, nil, opts),
          attrs = Map.put(attrs, "origin", "added"),
          :ok <- write(fn -> ConfigStore.add_mcp_server(name, attrs, writer_opts(opts)) end),
          {:ok, server} <- fetch_server(name, opts) do
+      :ok = store_pasted(server, draft_id, opts)
       row = row(server, sources(opts), [])
       {:ok, %{"server" => row, "job_id" => first_check(server, row, opts)}}
     end
@@ -171,6 +210,50 @@ defmodule FermixCore.Management.McpServers do
     with {:ok, server} <- fetch_server(name, opts),
          :ok <- checkable(server, row(server, sources(opts), [])) do
       start_check(server, opts)
+    end
+  end
+
+  # --- drafts ---------------------------------------------------------------
+
+  # One wait for the login shell's PATH covers every bare command in a paste.
+  defp await_path(translated, login_path) do
+    if Enum.any?(translated, &bare_command?(&1.server)), do: LoginPath.await_read(login_path)
+    :ok
+  end
+
+  defp bare_command?(%{transport: :stdio, command: command}),
+    do: not String.contains?(command, "/")
+
+  defp bare_command?(_server), do: false
+
+  defp draft_row(%{server: server, values: values} = translated, names, login_path, opts) do
+    Draft.build(translated, %{
+      resolution: resolution(server, login_path),
+      conflict: Enum.any?(names, &McpConfig.same_prefix?(&1, server.name)),
+      draft_id: hold(values, opts)
+    })
+  end
+
+  defp hold(values, opts) do
+    if PastedValues.empty?(values), do: nil, else: DraftValues.hold(draft_values(opts), values)
+  end
+
+  defp draft_held(nil, _opts), do: :ok
+
+  defp draft_held(id, opts) do
+    if is_binary(id) and DraftValues.held?(draft_values(opts), id),
+      do: :ok,
+      else: refuse("draft_id", @expired_draft)
+  end
+
+  # The id was held a moment ago; one that expired or was taken by another add
+  # since leaves the server waiting for what it declares, as its row says.
+  defp store_pasted(_server, nil, _opts), do: :ok
+
+  defp store_pasted(server, id, opts) do
+    case DraftValues.take(draft_values(opts), id) do
+      {:ok, values} -> Secrets.store_mcp_values(server, values, writer_opts(opts))
+      :error -> :ok
     end
   end
 
@@ -566,6 +649,7 @@ defmodule FermixCore.Management.McpServers do
   defp fetch(source_id, opts), do: RuntimeStatus.fetch(runtime_status(opts), source_id)
 
   defp writer_opts(opts), do: Keyword.take(opts, [:mcp_supervisor])
+  defp draft_values(opts), do: Keyword.get(opts, :draft_values, DraftValues)
   defp home(opts), do: Keyword.get_lazy(opts, :home, &System.user_home!/0)
   defp supervisor(opts), do: Keyword.get(opts, :mcp_supervisor, McpSupervisor)
   defp runtime_status(opts), do: Keyword.get(opts, :runtime_status, RuntimeStatus)

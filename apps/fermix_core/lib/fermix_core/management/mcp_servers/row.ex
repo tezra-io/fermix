@@ -230,7 +230,7 @@ defmodule FermixCore.Management.McpServers.Row do
   defp failure(_server, _entry, _gave_up?), do: "It stopped. See the daemon log."
 
   defp config_failure(%{transport: :stdio} = server, :command_not_found),
-    do: not_found(server.command)
+    do: not_found_sentence(server.command)
 
   defp config_failure(%{transport: :stdio} = server, :cwd_not_found),
     do: "Fermix could not find the working folder #{server.cwd} on this Mac."
@@ -275,7 +275,12 @@ defmodule FermixCore.Management.McpServers.Row do
   defp said(lead, tail),
     do: "#{lead} The last thing it said: #{String.slice(List.last(tail), 0, @max_said_chars)}"
 
-  defp not_found(command) do
+  @doc """
+  What a row says of a command this Mac does not have, and a draft says under
+  the command it fills in: with the install hint for Node's and uv's programs.
+  """
+  @spec not_found_sentence(String.t()) :: String.t()
+  def not_found_sentence(command) when is_binary(command) do
     base = "Fermix could not find #{command} on this Mac."
 
     cond do
@@ -286,9 +291,14 @@ defmodule FermixCore.Management.McpServers.Row do
     end
   end
 
-  defp consent_sentence(%{transport: :stdio}), do: @local_consent
+  @doc """
+  Where `server`'s code runs and what leaves this Mac, on its row and on the
+  draft that adds it (M74 §7).
+  """
+  @spec consent_sentence(McpConfig.server_config()) :: String.t()
+  def consent_sentence(%{transport: :stdio}), do: @local_consent
 
-  defp consent_sentence(server) do
+  def consent_sentence(server) do
     case host(server) do
       nil -> "Runs on another computer. What you ask its tools is sent there."
       host -> "Runs on #{host}. What you ask its tools is sent there."
@@ -297,9 +307,11 @@ defmodule FermixCore.Management.McpServers.Row do
 
   # --- fields ---------------------------------------------------------------
 
-  defp location(%{transport: :http} = server), do: host(server) || server.url || ""
-  defp location(%{command: nil}), do: ""
-  defp location(%{command: command, args: args}), do: CommandLine.join([command | args])
+  @doc "Where a server is: a remote one's host, a local one's command line as it runs."
+  @spec location(McpConfig.server_config()) :: String.t()
+  def location(%{transport: :http} = server), do: host(server) || server.url || ""
+  def location(%{command: nil}), do: ""
+  def location(%{command: command, args: args}), do: CommandLine.join([command | args])
 
   defp host(%{url: url}) when is_binary(url) do
     case URI.parse(url) do
