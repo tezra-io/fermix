@@ -23,7 +23,9 @@ defmodule FermixTestSupport.LoopbackOAuth do
     * `POST /register` registers a client and answers its id.
     * `GET /authorize` refuses a request without `S256` PKCE, without the
       `resource` it protects, with an unknown client, or with a redirect that
-      is not loopback, and otherwise redirects to the callback with a code,
+      is not loopback, or, for a registered client, not one of the redirect
+      URIs it registered, matched exactly; and otherwise redirects to the
+      callback with a code,
       the state and `iss` (`iss: :correct | :wrong | :absent`).
     * `POST /token` exchanges a code only with its verifier, its client
       (authenticated as its registration says), its redirect and its
@@ -252,7 +254,7 @@ defmodule FermixTestSupport.LoopbackOAuth do
       {s256_challenge?(params), "invalid_request: pkce"},
       {params["resource"] == (s.resource || s.base <> "/mcp"), "invalid_target"},
       {known_client?(s, params["client_id"]), "invalid_client"},
-      {loopback_redirect?(params["redirect_uri"]), "invalid_redirect"},
+      {redirect_allowed?(s, params), "invalid_redirect"},
       {is_binary(params["state"]), "invalid_request: state"}
     ]
     |> Enum.find_value(fn {passed?, error} -> if not passed?, do: error end)
@@ -260,6 +262,16 @@ defmodule FermixTestSupport.LoopbackOAuth do
 
   defp s256_challenge?(params),
     do: params["code_challenge_method"] == "S256" and byte_size(params["code_challenge"] || "") == 43
+
+  # A registered client's redirect is one it registered, matched exactly, as
+  # an authorization server that holds registrations to their redirect URIs
+  # does; any other client's is a loopback redirect on any port (RFC 8252 §7.3).
+  defp redirect_allowed?(s, params) do
+    case Map.fetch(s.registered, params["client_id"]) do
+      {:ok, metadata} -> params["redirect_uri"] in (metadata["redirect_uris"] || [])
+      :error -> loopback_redirect?(params["redirect_uri"])
+    end
+  end
 
   defp loopback_redirect?(uri) when is_binary(uri),
     do: Regex.match?(~r{\Ahttp://127\.0\.0\.1:\d+/callback\z}, uri)

@@ -14,7 +14,7 @@ defmodule FermixCore.Management.McpServers.Row do
   (written `enabled = false`), `failed` for a block that names nothing to
   start (`McpConfig.startable?/1`: a stdio server without its command, an http
   one without its URL, which no stored value would help), `needs_secret` (a
-  declared value is not stored, so the server is not started), `needs_sign_in`
+  value it needs is not stored, so the server is not started), `needs_sign_in`
   (an `auto` server the server itself asked to sign in, or to sign in again
   for more access), `starting`
   (connecting, or no status yet for a server that runs), `connected` (ready),
@@ -134,23 +134,19 @@ defmodule FermixCore.Management.McpServers.Row do
     end
   end
 
-  # What the owner is asked for, in the row's words: a variable or a header by
-  # its name, the key by what it is.
+  # What the owner is asked for, of the values the server needs
+  # (`McpSecrets.needed/1`), in the row's words: a variable or a header by its
+  # name, the key by what it is.
   defp missing(server, presence) do
-    env = for {name, false} <- presence.env, do: name
-    headers = for {name, false} <- presence.headers, do: header_label(server, name)
-    secret = if client_secret_missing?(server, presence), do: ["the client secret"], else: []
-    env ++ headers ++ secret
+    for ref <- McpSecrets.needed(server), not present?(presence, ref), do: label(server, ref)
   end
 
-  defp header_label(%{key_header: name}, name), do: "the key"
-  defp header_label(_server, name), do: name
+  defp present?(presence, {:env, name}), do: {name, true} in presence.env
+  defp present?(presence, {:header, name}), do: {name, true} in presence.headers
 
-  defp client_secret_missing?(%{transport: :http, oauth_client_id: id}, presence)
-       when is_binary(id),
-       do: not presence.client_secret
-
-  defp client_secret_missing?(_server, _presence), do: false
+  defp label(_server, {:env, name}), do: name
+  defp label(%{key_header: name}, {:header, name}), do: "the key"
+  defp label(_server, {:header, name}), do: name
 
   defp sign_in_required?(%{transport: :http, auth: :auto}, %{
          status: :reauthorization_required,

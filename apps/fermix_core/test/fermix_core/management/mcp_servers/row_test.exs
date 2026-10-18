@@ -72,7 +72,7 @@ defmodule FermixCore.Management.McpServers.RowTest do
       assert %{"status" => "needs_secret", "status_sentence" => sentence} =
                build(server(@remote), presence: presence)
 
-      assert sentence == "Waiting for X-Workspace, the key and the client secret."
+      assert sentence == "Waiting for X-Workspace and the key."
 
       local = %{
         env: [{"GITHUB_TOKEN", false}, {"API_KEY", true}],
@@ -82,6 +82,20 @@ defmodule FermixCore.Management.McpServers.RowTest do
 
       assert %{"status_sentence" => "Waiting for GITHUB_TOKEN.", "actions" => ["disable"]} =
                build(server(@local), presence: local)
+    end
+
+    # A pre-registered public client has no secret: its server starts without
+    # one, and its row says whether one is stored.
+    test "a client ID without a stored secret waits for nothing" do
+      auto = %{server(@remote) | auth: :auto, key_header: nil, header_secrets: []}
+      presence = %{env: [], headers: [], client_secret: false}
+
+      assert %{
+               "status" => "connected",
+               "oauth_client" => %{"client_id" => "fermix", "secret_present" => false}
+             } = build(auto, presence: presence, entry: ready(2))
+
+      assert %{"status" => "starting"} = build(auto, presence: presence)
     end
 
     test "an auto server the server asked to sign in leads with sign_in, a keyed one fails" do

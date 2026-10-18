@@ -79,7 +79,8 @@ defmodule FermixCore.Auth.Store do
   @typedoc """
   What an `mcp:<name>` grant holds beside the token set: the issuer that
   minted it, the resource it was minted for, the token endpoint and the
-  client that refresh it, the scopes granted and the scopes the server asked
+  client that refresh it (with the loopback port a registered client's
+  redirect names), the scopes granted and the scopes the server asked
   for since, and the account it names.
   """
   @type mcp_grant :: %{
@@ -89,13 +90,14 @@ defmodule FermixCore.Auth.Store do
           client_kind: String.t() | nil,
           token_auth: String.t() | nil,
           client_secret: String.t() | nil,
+          redirect_port: :inet.port_number() | nil,
           scopes: [String.t()] | nil,
           wanted_scopes: [String.t()] | nil,
           account_label: String.t() | nil
         }
 
   @mcp_prefix "mcp:"
-  @mcp_keys ~w(issuer resource token_endpoint client_kind token_auth client_secret scopes wanted_scopes account_label)a
+  @mcp_keys ~w(issuer resource token_endpoint client_kind token_auth client_secret redirect_port scopes wanted_scopes account_label)a
 
   @spec read(provider(), Path.t()) :: {:ok, entry()} | {:error, term()}
   def read(provider, path \\ default_path()) when is_atom(provider) or is_binary(provider) do

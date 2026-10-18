@@ -145,8 +145,12 @@ defmodule FermixCore.Capabilities.MCP.OAuthSignInTest do
       assert exchange["resource"] == as.url
       assert is_binary(exchange["code_verifier"])
 
-      # What the registration sent is Fermix's own metadata, `native` included.
-      assert state.registered["dcr-client-1"] == Map.delete(Registration.document(), "client_id")
+      # What the registration sent is Fermix's own metadata, `native` included,
+      # naming the exact redirect the sign-in used, port and all.
+      assert state.registered["dcr-client-1"] ==
+               Registration.document()
+               |> Map.delete("client_id")
+               |> Map.put("redirect_uris", [authorize["redirect_uri"]])
 
       # The server was started once more, by the sign-in, with the token: the
       # start before it and the discovery's probe sent none.
@@ -197,7 +201,10 @@ defmodule FermixCore.Capabilities.MCP.OAuthSignInTest do
       assert row!(ctx)["auth"]["account_label"] == "127.0.0.1"
     end
 
-    test "keeps a registered client and uses it again for the next sign-in to its issuer", ctx do
+    # The double holds a registered client to the redirect URIs it registered,
+    # matched exactly, as some authorization servers do.
+    test "registers its exact redirect, and uses the client and its port again for the next sign-in to its issuer",
+         ctx do
       as = LoopbackOAuth.start()
       configure!(ctx, as.url)
       assert :ok = sign_in!(ctx)
@@ -205,16 +212,68 @@ defmodule FermixCore.Capabilities.MCP.OAuthSignInTest do
 
       state = LoopbackOAuth.state(as)
       assert state.registrations == 1
+      assert [first, second] = state.authorize_requests
+      assert {first["client_id"], second["client_id"]} == {"dcr-client-1", "dcr-client-1"}
+      assert second["redirect_uri"] == first["redirect_uri"]
+      assert state.registered["dcr-client-1"]["redirect_uris"] == [first["redirect_uri"]]
+      assert {:ok, %{mcp: %{redirect_port: port}}} = Grant.read(@server)
+      assert first["redirect_uri"] == "http://127.0.0.1:#{port}/callback"
 
-      assert Enum.map(state.authorize_requests, & &1["client_id"]) == [
-               "dcr-client-1",
-               "dcr-client-1"
-             ]
-
-      # Signed out, the client stays for the next sign-in.
+      # Signed out, the client and its port stay for the next sign-in.
       assert {:ok, _restart} = Auth.logout("mcp:#{@server}", auth_opts(ctx))
       assert :ok = sign_in!(ctx)
       assert LoopbackOAuth.state(as).registrations == 1
+
+      assert List.last(LoopbackOAuth.state(as).authorize_requests)["redirect_uri"] ==
+               first["redirect_uri"]
+    end
+
+    test "registers again, for the port it binds, when the kept port is taken, and keeps that",
+         ctx do
+      as = LoopbackOAuth.start()
+      configure!(ctx, as.url)
+      assert :ok = sign_in!(ctx)
+      {:ok, %{mcp: %{redirect_port: kept}}} = Grant.read(@server)
+
+      {:ok, taken} =
+        :gen_tcp.listen(kept, [:binary, ip: {127, 0, 0, 1}, active: false, reuseaddr: true])
+
+      try do
+        assert :ok = sign_in!(ctx)
+      after
+        :gen_tcp.close(taken)
+      end
+
+      state = LoopbackOAuth.state(as)
+      assert state.registrations == 2
+      assert [_first, again] = state.authorize_requests
+      assert again["client_id"] == "dcr-client-2"
+      refute again["redirect_uri"] == "http://127.0.0.1:#{kept}/callback"
+      assert state.registered["dcr-client-2"]["redirect_uris"] == [again["redirect_uri"]]
+
+      assert {:ok, %{client_id: "dcr-client-2", mcp: %{redirect_port: port}}} =
+               Grant.read(@server)
+
+      assert again["redirect_uri"] == "http://127.0.0.1:#{port}/callback"
+    end
+
+    # A client ID with no stored secret is a pre-registered public client: its
+    # server starts, and its sign-in authenticates with the id alone.
+    test "uses a client ID with no stored secret as a public client", ctx do
+      as = LoopbackOAuth.start(%{owner_clients: %{"public-client" => nil}})
+      configure!(ctx, as.url, ~s(oauth_client_id = "public-client"))
+
+      assert await_status({:reauthorization_required, :sign_in_required})
+      refute row!(ctx)["status"] == "needs_secret"
+
+      assert row!(ctx)["oauth_client"] == %{
+               "client_id" => "public-client",
+               "secret_present" => false
+             }
+
+      assert :ok = sign_in!(ctx)
+      assert [exchange] = LoopbackOAuth.state(as).token_requests
+      assert exchange["authenticated_as"] == {:form, "public-client", nil}
     end
 
     test "uses the owner's client ID first, with its secret as the metadata allows", ctx do
@@ -417,6 +476,9 @@ defmodule FermixCore.Capabilities.MCP.OAuthSignInTest do
       assert read_back.tokens == before.tokens
       assert read_back.client_id == "dcr-client-1"
 
+      [authorize] = LoopbackOAuth.state(as).authorize_requests
+      %URI{port: port} = URI.parse(authorize["redirect_uri"])
+
       assert read_back.mcp == %{
                issuer: as.base,
                resource: as.url,
@@ -424,6 +486,7 @@ defmodule FermixCore.Capabilities.MCP.OAuthSignInTest do
                client_kind: "registered",
                token_auth: "none",
                client_secret: nil,
+               redirect_port: port,
                scopes: ["mcp:read"],
                wanted_scopes: [],
                account_label: "127.0.0.1"

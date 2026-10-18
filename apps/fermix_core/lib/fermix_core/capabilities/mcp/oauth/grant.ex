@@ -7,7 +7,7 @@ defmodule FermixCore.Capabilities.MCP.OAuth.Grant do
   It carries the token set and its expiry, the client that refreshes it (its
   id at the top, as every entry's, and under `mcp` how it authenticates and
   where it came from: the owner's, Fermix's Client ID Metadata Document, or a
-  registration), the issuer that minted it, the resource it was minted for
+  registration, with the loopback port its redirect names), the issuer that minted it, the resource it was minted for
   and that issuer's token endpoint, the scopes granted and the scopes the
   server asked for since, and the account label. Its status:
 
@@ -131,6 +131,7 @@ defmodule FermixCore.Capabilities.MCP.OAuth.Grant do
         client_kind: Map.fetch!(@client_kinds, client.kind),
         token_auth: client.auth,
         client_secret: if(client.kind == :registered, do: client.secret),
+        redirect_port: if(client.kind == :registered, do: client.port),
         scopes: granted(tokens.scope, requested),
         wanted_scopes: [],
         account_label: account_label
@@ -160,8 +161,15 @@ defmodule FermixCore.Capabilities.MCP.OAuth.Grant do
         %{client_id: id, mcp: %{client_kind: "registered", issuer: issuer} = mcp},
         issuer
       )
-      when is_binary(id),
-      do: %{id: id, secret: mcp.client_secret, auth: mcp.token_auth || "none", kind: :registered}
+      when is_binary(id) do
+    %{
+      id: id,
+      secret: mcp.client_secret,
+      auth: mcp.token_auth || "none",
+      kind: :registered,
+      port: mcp.redirect_port
+    }
+  end
 
   def registered_client(_entry, _issuer), do: nil
 
@@ -274,7 +282,15 @@ defmodule FermixCore.Capabilities.MCP.OAuth.Grant do
   end
 
   defp signed_out(%{mcp: mcp} = entry) do
-    kept = Map.take(mcp, [:issuer, :token_endpoint, :client_kind, :token_auth, :client_secret])
+    kept =
+      Map.take(mcp, [
+        :issuer,
+        :token_endpoint,
+        :client_kind,
+        :token_auth,
+        :client_secret,
+        :redirect_port
+      ])
 
     %{
       entry

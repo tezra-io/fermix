@@ -82,6 +82,18 @@ defmodule FermixCore.Capabilities.MCP.SecretsTest do
       refute :client_secret in Secrets.declared(%{@http | oauth_client_id: nil})
       refute Secrets.declares?(@stdio, {:env, "OTHER"})
     end
+
+    # The client secret is declared, so it is deleted with the server, and not
+    # needed: a client ID with no secret is a pre-registered public client.
+    test "a server needs every value it declares but the client secret" do
+      assert Secrets.needed(@stdio) == Secrets.declared(@stdio)
+      assert Secrets.needed(@http) == [{:header, "Authorization"}, {:header, "X-Workspace"}]
+
+      assert :ok = Secrets.put("linear", {:header, "Authorization"}, "a")
+      assert :ok = Secrets.put("linear", {:header, "X-Workspace"}, "w")
+      assert Secrets.complete?(@http)
+      assert %{client_secret: false} = Secrets.presence(@http)
+    end
   end
 
   describe "storing" do

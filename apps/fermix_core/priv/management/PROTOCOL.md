@@ -685,13 +685,16 @@ Notes that the shapes alone do not carry:
 - **`mcp:<name>/env/<NAME>`, `mcp:<name>/header/<Header-Name>` and
   `mcp:<name>/client_secret` store the values an MCP server declares**: a local
   server's `env_names`, a remote server's headers (`header_names` and its
-  `key_header`), and the secret of its `oauth_client_id`. The family is open,
+  `key_header`), and the secret of its `oauth_client_id`, which is optional: a
+  client ID with no secret is a pre-registered public client, so a server
+  never waits for it, and `oauth_client.secret_present` says whether one is
+  stored. The family is open,
   like `env:`: an id is accepted only when the server exists and declares that
   name, and the server's block in `config.toml` is the reference, so storing
   writes nothing else and `present` is "the store reads the value back". The
   value is one line of 1 to 8,192 bytes; an `Authorization` key is sent as
   `Bearer <value>`, so a pasted `Bearer …` is stored as what follows it.
-  Storing the last value a server was missing starts it, storing a new one
+  Storing the last value a server needs starts it, storing a new one
   restarts it, and clearing one it runs with stops it. Both answer the shape
   `env:` answers, with `environment_override` null. A value pasted into the
   add form never travels back: `mcp.servers.draft` holds it under a
@@ -760,7 +763,7 @@ Notes that the shapes alone do not carry:
   (turned off), `failed` for a server that names nothing to start (a local one
   without its command, a remote one without its URL, which only a hand edit
   writes; its sentence says what to add, and it offers only `disable`),
-  `needs_secret` (a declared value is not stored, so the server does not start;
+  `needs_secret` (a value it needs is not stored, so the server does not start;
   the sentence names what it waits for), `needs_sign_in` (an `auto` server the
   server itself asked to sign in), `starting` (connecting, or no status yet for
   a server that runs), `connected`, `retrying` (the last connection failed and
@@ -789,10 +792,12 @@ Notes that the shapes alone do not carry:
   metadata, then its authorization server's metadata), with no redirect
   followed and every address held to the rule its own URL is. It registers
   with the server's `oauth_client_id` (and `mcp:<name>/client_secret` when
-  stored), else with Fermix's client metadata document
+  stored; without one it is a public client), else with Fermix's client metadata document
   (`https://fermix.ai/oauth/mcp-client.json`) where the authorization server
-  takes one, else by dynamic client registration, whose client is kept for the
-  next sign-in to the same authorization server. The browser sign-in uses PKCE
+  takes one, else by dynamic client registration, which names the exact
+  loopback redirect the sign-in uses, port included; its client and port are
+  kept for the next sign-in to the same authorization server, which uses that
+  port again, or registers again where the port is taken. The browser sign-in uses PKCE
   and names the server as the resource; a reply from another authorization
   server is refused. A sign-in that completes starts the server once and its
   result carries `account_label`. The grant lives in the daemon's auth store,

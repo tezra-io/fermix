@@ -126,16 +126,19 @@ defmodule FermixCore.Management.SecretsMcpTest do
 
     # An http server runs on the remote rail (M74 E4), so its last missing
     # value starts it like a stdio server's; a disabled one stays stopped.
-    test "a disabled server is not started; an http server starts with its last value" do
+    # The client secret is optional (a client ID without one is a public
+    # client), so the key is the last value the server needs; a client secret
+    # stored after it is a new value, which restarts the server.
+    test "a disabled server is not started; an http server starts with the last value it needs" do
       assert {:ok, _view} = Secrets.set("mcp:notes/env/NOTES_KEY", "n", @opts)
       refute_received {:restart_server, _source_id, _name}
 
       assert {:ok, _view} = Secrets.set("mcp:linear/header/Authorization", "Bearer lin", @opts)
-      refute_received {:restart_server, _source_id, _name}
+      assert_received {:restart_server, {:operator, "linear"}, "linear"}
+      assert McpSecrets.fetch("linear", {:header, "Authorization"}) == {:ok, "lin"}
 
       assert {:ok, _view} = Secrets.set("mcp:linear/client_secret", "s", @opts)
       assert_received {:restart_server, {:operator, "linear"}, "linear"}
-      assert McpSecrets.fetch("linear", {:header, "Authorization"}) == {:ok, "lin"}
     end
   end
 

@@ -12,13 +12,19 @@ defmodule FermixCore.Capabilities.MCP.OAuth.Registration do
        URL that serves it (`@client_id`), and its bytes are
        `priv/oauth/mcp-client.json`, which the site serves.
     3. **Dynamic Client Registration** (RFC 7591) at `registration_endpoint`,
-       with `application_type: "native"` and the document's own metadata. The
-       client it issues is kept with the server's grant, under the issuer, and
-       the next sign-in to that issuer uses it again.
+       with `application_type: "native"` and the document's own metadata but
+       for its redirect: the exact loopback redirect the sign-in uses, port
+       included, so an authorization server that matches redirect URIs
+       exactly accepts it. The registration happens once the listener has
+       bound its port (`dynamic/5`). The client it issues is kept with the
+       server's grant, under the issuer and with its port, and the next
+       sign-in to that issuer binds that port and uses it again; where the
+       port is taken, it registers again for the one bound and keeps that.
 
   Every client is public to the authorization server unless it holds a
-  secret: the document and a registration ask for `none`, and a loopback
-  redirect whose port the listener chooses (RFC 8252 §7.3).
+  secret: the document and a registration ask for `none`. The document names
+  a loopback redirect without a port, whose port the listener chooses
+  (RFC 8252 §7.3).
   """
 
   alias FermixCore.Capabilities.MCP.OAuth.Http
@@ -29,7 +35,8 @@ defmodule FermixCore.Capabilities.MCP.OAuth.Registration do
   @client_id "https://fermix.ai/oauth/mcp-client.json"
   @redirect_host "127.0.0.1"
   @redirect_path "/callback"
-  # What Fermix says of itself, in the document and in every registration.
+  # What Fermix says of itself, in the document and in every registration,
+  # which names its exact redirect in place of the document's.
   @metadata %{
     "client_name" => "Fermix",
     "client_uri" => "https://fermix.ai",
@@ -43,12 +50,20 @@ defmodule FermixCore.Capabilities.MCP.OAuth.Registration do
   @max_client_id_bytes 1_024
 
   @type kind :: :owner | :metadata_document | :registered
+  @typedoc "A client, and for a registered one the loopback port its redirect names."
   @type client :: %{
           id: String.t(),
           secret: String.t() | nil,
           auth: String.t(),
-          kind: kind()
+          kind: kind(),
+          port: :inet.port_number() | nil
         }
+
+  @typedoc """
+  How a sign-in gets its client: one known before the listener binds, or one
+  registered for the port it binds, reusing `registered` where it names it.
+  """
+  @type choice :: {:client, client()} | {:dynamic, client() | nil}
 
   @doc "The `client_id` of Fermix's Client ID Metadata Document: the URL that serves it."
   @spec client_id() :: String.t()
@@ -62,26 +77,46 @@ defmodule FermixCore.Capabilities.MCP.OAuth.Registration do
   @spec redirect() :: {String.t(), String.t()}
   def redirect, do: {@redirect_host, @redirect_path}
 
+  @doc "The exact redirect a registration for `port` names."
+  @spec redirect_uri(:inet.port_number()) :: String.t()
+  def redirect_uri(port) when is_integer(port),
+    do: "http://#{@redirect_host}:#{port}#{@redirect_path}"
+
   @doc """
-  The client for a sign-in to `server` at the authorization server `metadata`
-  describes. `registered` is the client an earlier registration with the same
-  issuer issued, or `nil`.
+  How a sign-in to `server` at the authorization server `metadata` describes
+  gets its client. `registered` is the client an earlier registration with
+  the same issuer issued, or `nil`.
   """
-  @spec client(map(), map(), client() | nil, integer(), keyword()) ::
-          {:ok, client()} | {:error, term()}
-  def client(server, metadata, registered, deadline, opts \\ []) do
+  @spec client(map(), map(), client() | nil) :: {:ok, choice()} | {:error, term()}
+  def client(server, metadata, registered) do
     cond do
       is_binary(server.oauth_client_id) ->
         owner_client(server, metadata)
 
       metadata.client_id_metadata_document? ->
-        {:ok, public(@client_id, :metadata_document)}
+        {:ok, {:client, public(@client_id, :metadata_document)}}
 
-      registered != nil ->
+      registered != nil or is_binary(metadata.registration_endpoint) ->
+        {:ok, {:dynamic, registered}}
+
+      true ->
+        {:error, :no_client_registration}
+    end
+  end
+
+  @doc """
+  The registered client for a listener bound on `port`: `registered` where it
+  names that port, else a new registration naming its redirect.
+  """
+  @spec dynamic(map(), client() | nil, :inet.port_number(), integer(), keyword()) ::
+          {:ok, client()} | {:error, term()}
+  def dynamic(metadata, registered, port, deadline, opts \\ []) do
+    cond do
+      match?(%{port: ^port}, registered) ->
         {:ok, registered}
 
       is_binary(metadata.registration_endpoint) ->
-        register(metadata.registration_endpoint, deadline, opts)
+        register(metadata.registration_endpoint, port, deadline, opts)
 
       true ->
         {:error, :no_client_registration}
@@ -97,8 +132,13 @@ defmodule FermixCore.Capabilities.MCP.OAuth.Registration do
     secret = owner_secret(server.name)
 
     case auth_method(secret, metadata.token_auth_methods) do
-      nil -> {:error, :unsupported_client_auth}
-      auth -> {:ok, %{id: server.oauth_client_id, secret: secret, auth: auth, kind: :owner}}
+      nil ->
+        {:error, :unsupported_client_auth}
+
+      auth ->
+        {:ok,
+         {:client,
+          %{id: server.oauth_client_id, secret: secret, auth: auth, kind: :owner, port: nil}}}
     end
   end
 
@@ -112,15 +152,16 @@ defmodule FermixCore.Capabilities.MCP.OAuth.Registration do
   defp auth_method(nil, _methods), do: "none"
   defp auth_method(_secret, methods), do: Enum.find(@secret_methods ++ ["none"], &(&1 in methods))
 
-  defp public(id, kind), do: %{id: id, secret: nil, auth: "none", kind: kind}
+  defp public(id, kind, port \\ nil),
+    do: %{id: id, secret: nil, auth: "none", kind: kind, port: port}
 
-  defp register(endpoint, deadline, opts) do
+  defp register(endpoint, port, deadline, opts) do
     headers = [{"content-type", "application/json"}, {"accept", "application/json"}]
-    body = Jason.encode!(@metadata)
+    body = Jason.encode!(%{@metadata | "redirect_uris" => [redirect_uri(port)]})
 
     case Http.request("POST", endpoint, headers, body, deadline, opts) do
       {:ok, %{status: status} = response} when status in 200..299 ->
-        registered(Http.document(response))
+        registered(Http.document(response), port)
 
       {:ok, response} ->
         refused(response)
@@ -132,24 +173,24 @@ defmodule FermixCore.Capabilities.MCP.OAuth.Registration do
 
   # RFC 7591 §3.2.1: the server answers what it registered. A method it chose
   # over `none` is followed, with the secret it issued for it.
-  defp registered(%{"client_id" => id} = answer)
+  defp registered(%{"client_id" => id} = answer, port)
        when is_binary(id) and byte_size(id) in 1..@max_client_id_bytes do
     auth = Map.get(answer, "token_endpoint_auth_method", "none")
     secret = answer["client_secret"]
 
     cond do
       auth == "none" ->
-        {:ok, public(id, :registered)}
+        {:ok, public(id, :registered, port)}
 
       auth in @secret_methods and is_binary(secret) ->
-        {:ok, %{id: id, secret: secret, auth: auth, kind: :registered}}
+        {:ok, %{id: id, secret: secret, auth: auth, kind: :registered, port: port}}
 
       true ->
         {:error, :unsupported_client_auth}
     end
   end
 
-  defp registered(_answer), do: {:error, {:client_registration_refused, :invalid_answer}}
+  defp registered(_answer, _port), do: {:error, {:client_registration_refused, :invalid_answer}}
 
   defp refused(response) do
     code = response.body |> Http.object() |> error_code()

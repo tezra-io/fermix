@@ -4,7 +4,10 @@ defmodule FermixCore.Capabilities.MCP.OAuth.SignIn do
   `auth.start mcp:<name>` runs as an `auth` job. Its phases:
 
     1. `discovering`: `OAuth.Discovery` reads how the server is signed in to.
-    2. `registering`: `OAuth.Registration` picks the client (D6).
+    2. `registering`: `OAuth.Registration` picks the client (D6). A dynamic
+       registration names the exact loopback redirect, so it is made, or a
+       kept one reused, once the listener has bound its port: the port a kept
+       registration names when it is free, another when it is not.
     3. `awaiting_browser`: the loopback listener of `Auth.OAuthFlow`, with
        PKCE (`S256`), `state`, and the `resource` indicator (RFC 8707) on the
        authorization request. The scopes are the server's (its challenge, or
@@ -54,9 +57,9 @@ defmodule FermixCore.Capabilities.MCP.OAuth.SignIn do
     deadline = Http.deadline(@prepare_budget_ms)
 
     with {:ok, metadata, stored} <- discover(server, phase, deadline, opts),
-         {:ok, client} <- register(server, metadata, stored, phase, deadline, opts),
+         {:ok, choice} <- register(server, metadata, stored, phase),
          scopes = requested_scopes(metadata, stored),
-         {:ok, authorization} <- authorize(metadata, client, scopes, opts),
+         {:ok, authorization, client} <- authorize(metadata, choice, scopes, deadline, opts),
          {:ok, entry} <- redeem(server, metadata, client, scopes, authorization, phase, opts) do
       :ok = start(server, opts)
       {:ok, %{account_label: entry.mcp.account_label}}
@@ -72,31 +75,37 @@ defmodule FermixCore.Capabilities.MCP.OAuth.SignIn do
     end
   end
 
-  defp register(server, metadata, stored, phase, deadline, opts) do
+  defp register(server, metadata, stored, phase) do
     phase.("registering")
-    registered = Grant.registered_client(stored, metadata.issuer)
-    Registration.client(server, metadata, registered, deadline, opts)
+    Registration.client(server, metadata, Grant.registered_client(stored, metadata.issuer))
   end
 
   defp requested_scopes(metadata, stored),
     do: Enum.uniq(metadata.scopes ++ Grant.wanted_scopes(stored, metadata.issuer))
 
-  defp authorize(metadata, client, scopes, opts) do
+  defp authorize(metadata, choice, scopes, deadline, opts) do
+    provider = provider(metadata, choice, scopes)
+
     with {:ok, authorization} <-
-           OAuthFlow.await_authorization(provider(metadata, client, scopes), flow_opts(opts)),
+           OAuthFlow.await_authorization(provider, flow_opts(metadata, choice, deadline, opts)),
          :ok <- check_issuer(authorization, metadata) do
-      {:ok, authorization}
+      {:ok, authorization, client_of(choice, authorization)}
     end
   end
 
-  defp provider(metadata, client, scopes) do
+  # A registered client is registered for the port the listener binds, so it
+  # is known only once the authorization carries it back.
+  defp client_of({:client, client}, _authorization), do: client
+  defp client_of({:dynamic, _registered}, authorization), do: authorization.registration
+
+  defp provider(metadata, choice, scopes) do
     {host, path} = Registration.redirect()
 
     %OAuthProvider{
       id: :mcp,
       authorize_url: metadata.authorization_endpoint,
       token_url: metadata.token_endpoint,
-      client_id: client.id,
+      client_id: known_client_id(choice),
       redirect_host: host,
       redirect_port: 0,
       redirect_path: path,
@@ -106,10 +115,28 @@ defmodule FermixCore.Capabilities.MCP.OAuth.SignIn do
     }
   end
 
-  defp flow_opts(opts) do
+  defp known_client_id({:client, client}), do: client.id
+  defp known_client_id({:dynamic, _registered}), do: nil
+
+  defp flow_opts(metadata, choice, deadline, opts) do
     opts
     |> Keyword.take([:opener, :timeout_ms])
     |> Keyword.put(:puts, fn _line -> :ok end)
+    |> Keyword.merge(listener_opts(metadata, choice, deadline, opts))
+  end
+
+  # A registration names its exact redirect: the listener asks for the port a
+  # kept one names, and the client is registered, or reused, for the port it
+  # bound before the authorize url names it.
+  defp listener_opts(_metadata, {:client, _client}, _deadline, _opts), do: []
+
+  defp listener_opts(metadata, {:dynamic, registered}, deadline, opts) do
+    register = fn port ->
+      with {:ok, client} <- Registration.dynamic(metadata, registered, port, deadline, opts),
+           do: {:ok, client.id, client}
+    end
+
+    [preferred_port: registered && registered.port, register: register]
   end
 
   # RFC 9207 §2.4: a present `iss` is the issuer, compared exactly; an absent

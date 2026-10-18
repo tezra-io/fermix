@@ -6,7 +6,7 @@ profile, a child of `TokenSupervisor` started on the profile's first use
 (`token_supervisor.ex:228-256`). A tree-less CLI VM refreshes a profile
 directly, with no manager (`token_supervisor.ex:212-218`, `:303-320`). Every
 refresher persists through `Store.write`, which reads the whole file and then
-renames a new one over it (`store.ex:177-183`, `:467-475`, `:669-683`). The
+renames a new one over it (`store.ex:179-185`, `:469-477`, `:671-685`). The
 model therefore keeps the file as one map: a write is never torn, and the last
 rename wins. After a 4xx, every refresher writes back the entry it read when
 its refresh began (`mark_reauthorization_required`). Logout deletes the entry,
@@ -19,14 +19,14 @@ go of the profile over the control socket (`auth_forget`,
 `cli/daemon.ex:852-882` → `TokenSupervisor.forget_signed_out`).
 
 OpenAI Codex signs in with ChatGPT, under the `chatgpt` profile
-(`store.ex:257-267`). That registration outlives a sign-out, so the sign-out
+(`store.ex:259-269`). That registration outlives a sign-out, so the sign-out
 writes instead of deleting: under the profile lock it revokes the session
 upstream and writes the entry back with no token, then calls
 `TokenSupervisor.forget_signed_out` (`auth/chatgpt/logout.ex:35-49`, `:71-86`).
 It is reached through `ChatGPT.logout` from the app's `auth.logout`
 (`management/auth.ex:494-501`), `fermix auth logout` (`auth_command.ex:297-323`)
 and the web setup. Every reader treats an entry with no token as gone:
-`Store.read` refuses it as `:missing_access_token` (`store.ex:380-389`), and a
+`Store.read` refuses it as `:missing_access_token` (`store.ex:382-391`), and a
 manager maps that to signed out exactly as it maps a deleted entry
 (`token_manager.ex:320-328`). So the model's delete, then `forget_signed_out`
 (the plugin logout) covers it. The revoke is not modelled: it runs under the
@@ -41,12 +41,12 @@ says. Any other 4xx keeps the stored tokens and writes nothing (`:94-97`).
 Two cross-VM lockfiles (`FermixCore.Plugins.Dist.Lock`) order those writers
 (`store.ex:11-41`):
 - the store lock, `auth.json.lock`, around every `Store.write` and
-  `Store.delete_provider` (`store.ex:177-183`, `:193-201`);
+  `Store.delete_provider` (`store.ex:179-185`, `:195-203`);
 - one profile lock per profile, `auth.json.<base64 profile>.lock`, around one
   refresh from its read of the entry to its write (`token_manager.ex:285-288`,
-  `token_supervisor.ex:314-319`), around a delete (`store.ex:193-201`) and
+  `token_supervisor.ex:314-319`), around a delete (`store.ex:195-203`) and
   ChatGPT's sign-out (`chatgpt/logout.ex:40-43`), and around a sign-in or
-  import from before it spends anything to its write (`store.ex:203-224`;
+  import from before it spends anything to its write (`store.ex:205-226`;
   `chatgpt/login.ex:73-90`, `xai_login.ex:46-58`, `plugins/auth.ex:190-207`,
   `anthropic_login.ex:101-121`). Every taker waits the same 10 s, and a lock
   still busy after it is `{:error, :profile_busy}` with nothing spent.
@@ -120,7 +120,7 @@ least one check):
   The profile lock subsumes this mechanism, so it is load-bearing only in check
   16, which has the profile lock off.
 - `MergesOnWrite`: `Store.write` re-reads the file and replaces only its own
-  entry (`store.ex:467-475`, `:559-591`).
+  entry (`store.ex:469-477`, `:561-593`).
 - `LogoutReachesManager`: logout reaches the profile's live manager: the plugin
   logout and ChatGPT's sign-out have it forget its tokens and stop it
   (`plugins/auth.ex:73`, `chatgpt/logout.ex:46` →
@@ -137,12 +137,12 @@ least one check):
   `terminate/2`, mid-callback if one is running, and the token file stays on
   disk until the next boot sweep.
 - `StoreLock`: `Store.write` and `Store.delete_provider` hold `auth.json.lock`
-  from their read to their rename (`store.ex:177-183`, `:193-201`,
+  from their read to their rename (`store.ex:179-185`, `:195-203`,
   `:603-623`).
 - `ProfileLock`: a refresh holds its profile's lock from its read of the entry
   to its write, in the manager (`token_manager.ex:285-288`) and the tree-less
   direct refresh (`token_supervisor.ex:314-319`); `Store.delete_provider` takes
-  it before its store lock (`store.ex:193-201`), and ChatGPT's sign-out holds
+  it before its store lock (`store.ex:195-203`), and ChatGPT's sign-out holds
   it from its read of the entry through its write (`chatgpt/logout.ex:40-43`).
   A sign-in holds it from before its code exchange to its write; that is folded
   (see the spec header).
@@ -161,12 +161,12 @@ least one check):
   it answers the notice with an error, which the CLI reports by exiting
   non-zero; checks 14 and 26 model that case.
 
-The atomic rename (`store.ex:675`) is not a switch. The model writes the whole
+The atomic rename (`store.ex:677`) is not a switch. The model writes the whole
 map by construction, and no property here is about a torn file. Neither is the
 tmp it renames: it is made private before its bytes land, and filled through
-the descriptor that created it (`store.ex:685-701`), and a tmp a killed VM
+the descriptor that created it (`store.ex:687-703`), and a tmp a killed VM
 left is removed by the next write or delete under the store lock every tmp
-writer holds (`store.ex:703-745`), so neither touches the map. A writer whose
+writer holds (`store.ex:705-747`), so neither touches the map. A writer whose
 store lock was broken as stale (see "Lock staleness") and whose tmp the next
 holder removes fails its chmod or its rename; its bytes never reach a
 re-created file.

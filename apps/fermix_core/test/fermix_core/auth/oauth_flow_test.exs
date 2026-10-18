@@ -661,6 +661,56 @@ defmodule FermixCore.Auth.OAuthFlowTest do
     end
   end
 
+  # M74 E5: a client registered for one exact redirect.
+  describe "await_authorization/2 — a preferred port and a client registered for it" do
+    test "binds the preferred port when free, another when taken, and registers for the one bound" do
+      parent = self()
+      free = pick_free_port()
+
+      register = fn port ->
+        send(parent, {:registered, port})
+        {:ok, "client-for-#{port}", %{port: port}}
+      end
+
+      opts = [preferred_port: free, register: register]
+      assert {:ok, %{registration: %{port: ^free}} = authorization} = await_with(opts)
+      assert_received {:registered, ^free}
+      assert authorization.redirect_uri == "http://127.0.0.1:#{free}/callback"
+      assert_received {:client_id, client_id}
+      assert client_id == "client-for-#{free}"
+
+      {:ok, taken} =
+        :gen_tcp.listen(free, [:binary, ip: {127, 0, 0, 1}, active: false, reuseaddr: true])
+
+      try do
+        assert {:ok, %{registration: %{port: other}}} = await_with(opts)
+        assert other != free
+        assert_received {:registered, ^other}
+      after
+        :gen_tcp.close(taken)
+      end
+    end
+
+    test "a refused registration ends the attempt before the url is opened" do
+      parent = self()
+
+      assert {:error, :refused} =
+               OAuthFlow.await_authorization(hardened_provider(),
+                 register: fn _port -> {:error, :refused} end,
+                 opener: fn url -> send(parent, {:url, url}) && :ok end,
+                 puts: fn _line -> :ok end,
+                 timeout_ms: 1_000
+               )
+
+      refute_received {:url, _url}
+    end
+
+    test "without them a provider binds as it did and carries no registration" do
+      assert {:ok, %{code: "c4", registration: nil}} =
+               await_hardened(fn state -> "code=c4&state=#{state}" end)
+    end
+  end
+
   defp hardened_provider do
     %OAuthProvider{
       id: :mcp,
@@ -676,10 +726,18 @@ defmodule FermixCore.Auth.OAuthFlowTest do
     }
   end
 
-  # One attempt whose browser answers the callback with `query.(state)`.
-  defp await_hardened(query) do
+  # One attempt whose browser answers the callback with `query.(state)`
+  # (`await_with/1`: with a code), the client id the url names sent to the
+  # test.
+  defp await_with(flow_opts),
+    do: await_hardened(fn state -> "code=c0&state=#{state}" end, flow_opts)
+
+  defp await_hardened(query, flow_opts \\ []) do
+    parent = self()
+
     opener = fn url ->
       params = url |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+      send(parent, {:client_id, params["client_id"]})
       port = params["redirect_uri"] |> URI.parse() |> Map.fetch!(:port)
       target = "/callback?" <> query.(params["state"])
 
@@ -694,10 +752,9 @@ defmodule FermixCore.Auth.OAuthFlowTest do
       :ok
     end
 
-    OAuthFlow.await_authorization(hardened_provider(),
-      opener: opener,
-      puts: fn _line -> :ok end,
-      timeout_ms: 5_000
+    OAuthFlow.await_authorization(
+      hardened_provider(),
+      [opener: opener, puts: fn _line -> :ok end, timeout_ms: 5_000] ++ flow_opts
     )
   end
 

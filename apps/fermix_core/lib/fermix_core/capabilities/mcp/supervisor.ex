@@ -31,8 +31,8 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
 
   The TOML servers are the ones `runs?/1` answers for: startable by their
   configuration (`MCP.Config.startable?/1`: a disabled server stays in the
-  file and is not started), with every value they declare in the secret store
-  (`MCP.Secrets.complete?/1`). An operator stdio server's environment is built
+  file and is not started), with every value they need in the secret store
+  (`MCP.Secrets.complete?/1`: all they declare but a client secret). An operator stdio server's environment is built
   by its own `StdioTransport`, never resolved into its spec here. An operator
   `http` server runs on the remote rail, under its own `Remote.Owner`, with no
   signed contract: its tools register as a stdio server's do, and calls go to

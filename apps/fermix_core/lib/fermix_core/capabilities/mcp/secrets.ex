@@ -15,6 +15,11 @@ defmodule FermixCore.Capabilities.MCP.Secrets do
   server that declares it, so nothing here enumerates the store, and a server's
   values are deleted by the names it declares.
 
+  Two sets, each with one owner: what a server declares (`declared/1`), every
+  value it may hold and that is deleted with it, and what it needs to start
+  (`needed/1`), which is all of them but the client secret: a server with an
+  `oauth_client_id` and no stored secret is a pre-registered public client.
+
   Present means readable now: a missing item and a store that refuses the read
   are both not present, because either way the server cannot be given the
   value. `fetch/2` is the read the stdio transport makes in its own `init`, so a
@@ -191,10 +196,17 @@ defmodule FermixCore.Capabilities.MCP.Secrets do
     }
   end
 
-  @doc "Whether every value `server` declares is present."
+  @doc """
+  Every value `server` cannot start without, in the order its row lists them:
+  what it declares but the client secret, which a public client has none of.
+  """
+  @spec needed(McpConfig.server_config()) :: [ref()]
+  def needed(server), do: declared(server) -- [:client_secret]
+
+  @doc "Whether every value `server` needs is present."
   @spec complete?(McpConfig.server_config()) :: boolean()
   def complete?(%{name: name} = server),
-    do: server |> declared() |> Enum.all?(&present?(name, &1))
+    do: server |> needed() |> Enum.all?(&present?(name, &1))
 
   defp present?(server, ref), do: match?({:ok, _value}, fetch(server, ref))
 end
