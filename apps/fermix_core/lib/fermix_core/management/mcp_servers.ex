@@ -27,6 +27,13 @@ defmodule FermixCore.Management.McpServers do
   in memory under its draft's `draft_id` (`McpServers.DraftValues`), and an add
   that names it stores the values for the names the form still declares.
 
+  `import_scan/1` reads the other apps' settings on this Mac
+  (`McpServers.ImportSources`) when the owner opens the import page, and only
+  then (D3), and answers the servers they hold as candidates, names only.
+  `import_servers/2` reads them again, never from what a scan saw, and adds
+  each server asked for through the add path an add takes, with the values
+  its file held stored as a paste's are and `origin = "imported:<source>"`.
+
   A check (`mcp_check`) is a job: it connects the server, starting it again if
   it is not running or has failed and waiting for it if it is starting, then
   asks it for its tools once and answers how many and how long that took. Only
@@ -42,14 +49,17 @@ defmodule FermixCore.Management.McpServers do
   alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Management.Jobs
+  alias FermixCore.Management.McpServers.Candidate
   alias FermixCore.Management.McpServers.CommandLine
   alias FermixCore.Management.McpServers.Draft
   alias FermixCore.Management.McpServers.DraftValues
+  alias FermixCore.Management.McpServers.ImportSources
   alias FermixCore.Management.McpServers.Interchange
   alias FermixCore.Management.McpServers.PastedValues
   alias FermixCore.Management.McpServers.Row
   alias FermixCore.Management.Secrets
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.RestartState
 
   require Logger
 
@@ -67,6 +77,9 @@ defmodule FermixCore.Management.McpServers do
   @nullable ~w(cwd key_header oauth_client_id)
   @lists %{"env_names" => 64, "header_names" => 32}
   @max_name_bytes 128
+  # The most servers one import names, and the most read from one settings
+  # file: the most this daemon holds.
+  @import_listed McpConfig.max_servers()
   @auth_modes ~w(auto header none)
   # The writer's keys, named as the form names them.
   @wire_fields %{
@@ -82,6 +95,7 @@ defmodule FermixCore.Management.McpServers do
 
   @no_server "There is no MCP server by that name."
   @expired_draft "This paste has expired. Paste it again."
+  @import_shape "This is a list of at most #{@import_listed} servers, each with its source and name."
 
   @type error ::
           {:invalid_params, String.t(), String.t()}
@@ -149,11 +163,64 @@ defmodule FermixCore.Management.McpServers do
          :ok <- draft_held(draft_id, opts),
          {:ok, attrs} <- attrs(transport, params, nil, opts),
          attrs = Map.put(attrs, "origin", "added"),
-         :ok <- write(fn -> ConfigStore.add_mcp_server(name, attrs, writer_opts(opts)) end),
-         {:ok, server} <- fetch_server(name, opts) do
-      :ok = store_pasted(server, draft_id, opts)
-      row = row(server, sources(opts), [])
+         {:ok, server, row} <- add_server(name, attrs, fn -> taken(draft_id, opts) end, opts) do
       {:ok, %{"server" => row, "job_id" => first_check(server, row, opts)}}
+    end
+  end
+
+  @doc """
+  The MCP servers other apps' settings on this Mac hold, as `candidates` for
+  the import page, each with where it comes from, the names of the values it
+  declares and never a value, read now (D3). A server one of them holds that
+  could not be added as it is written, and a settings file that could not be
+  read, is a `skipped` entry with the daemon's sentence; neither stops the
+  rest. At most 32 servers are read from one file. A local command is
+  resolved as a draft's is.
+  """
+  @spec import_scan(keyword()) :: {:ok, map()}
+  def import_scan(opts \\ []) when is_list(opts) do
+    {found, skipped} =
+      ImportSources.all()
+      |> Enum.map(&scan_source(&1, opts))
+      |> Enum.unzip()
+
+    found = List.flatten(found)
+    login_path = Keyword.get(opts, :login_path, LoginPath)
+    :ok = await_path(Enum.map(found, &elem(&1, 1)), login_path)
+    names = Enum.map(servers(opts), & &1.name)
+
+    {:ok,
+     %{
+       "candidates" => Enum.map(found, &candidate(&1, names, login_path)),
+       "skipped" => List.flatten(skipped)
+     }}
+  end
+
+  @doc """
+  Adds each server `servers` names (`[%{"source" => id, "name" => name}]`, at
+  most 32), read again from its source's file, through the add path: the block,
+  then the values the file held under `mcp:<name>/…`, then one start, with
+  `origin = "imported:<source>"`. Answers the new rows in `servers` and, for
+  each server that was not added, its sentence in `refused`: one refused
+  server leaves the others. A settings file changed outside Fermix refuses the
+  whole import before anything is read.
+  """
+  @spec import_servers(term(), keyword()) :: {:ok, map()} | {:error, error()}
+  def import_servers(servers, opts \\ []) when is_list(opts) do
+    with {:ok, wanted} <- import_param(servers),
+         :ok <- RestartState.writable() do
+      read = Map.new(Enum.uniq_by(wanted, & &1.id), &{&1.id, read_source(&1, opts)})
+
+      {added, refused} =
+        wanted
+        |> Enum.map(fn source -> import_one(source, read[source.id], opts) end)
+        |> Enum.split_with(&match?({:ok, _row}, &1))
+
+      {:ok,
+       %{
+         "servers" => Enum.map(added, fn {:ok, row} -> row end),
+         "refused" => Enum.map(refused, fn {:refused, entry} -> entry end)
+       }}
     end
   end
 
@@ -249,14 +316,200 @@ defmodule FermixCore.Management.McpServers do
 
   # The id was held a moment ago; one that expired or was taken by another add
   # since leaves the server waiting for what it declares, as its row says.
-  defp store_pasted(_server, nil, _opts), do: :ok
+  defp taken(nil, _opts), do: nil
 
-  defp store_pasted(server, id, opts) do
+  defp taken(id, opts) do
     case DraftValues.take(draft_values(opts), id) do
-      {:ok, values} -> Secrets.store_mcp_values(server, values, writer_opts(opts))
-      :error -> :ok
+      {:ok, values} -> values
+      :error -> nil
     end
   end
+
+  # The one add path, an add's and an import's: the block, under the config
+  # lock that refuses a name already here; then the values for the names it
+  # declares, read only once the block is written; then one start, when they
+  # complete it (`Secrets.store_mcp_values/3`).
+  defp add_server(name, attrs, values, opts) do
+    with :ok <- write(fn -> ConfigStore.add_mcp_server(name, attrs, writer_opts(opts)) end),
+         {:ok, server} <- fetch_server(name, opts) do
+      :ok = store_values(server, values.(), opts)
+      {:ok, server, row(server, sources(opts), [])}
+    end
+  end
+
+  defp store_values(_server, nil, _opts), do: :ok
+
+  defp store_values(server, values, opts),
+    do: Secrets.store_mcp_values(server, values, writer_opts(opts))
+
+  # --- import ---------------------------------------------------------------
+
+  defp scan_source(source, opts) do
+    case read_source(source, opts) do
+      {:ok, results, over?} -> scanned(source, results, over?, opts)
+      {:error, sentence} -> {[], [skipped(source, nil, sentence)]}
+    end
+  end
+
+  # A server is offered only where the add form would take it as written, so
+  # what the page lists is what an import adds.
+  defp scanned(source, results, over?, opts) do
+    {found, skipped} =
+      Enum.reduce(results, {[], []}, fn {key, result}, {found, skipped} ->
+        case offerable(result, opts) do
+          {:ok, translated} ->
+            {[{source, translated} | found], skipped}
+
+          {:error, {:invalid_params, _field, sentence}} ->
+            {found, [skipped(source, key, sentence) | skipped]}
+        end
+      end)
+
+    over = if over?, do: [skipped(source, nil, over_sentence(source))], else: []
+    {Enum.reverse(found), Enum.reverse(skipped) ++ over}
+  end
+
+  defp over_sentence(source),
+    do: "Fermix lists the first #{@import_listed} servers in #{source.label}'s settings."
+
+  # One read and one translation of a source's file per call: its servers by
+  # their key there, each translated or refused on its own.
+  defp read_source(source, opts) do
+    with {:ok, entries} <- ImportSources.servers(source, import_home(opts)) do
+      results =
+        entries
+        |> Enum.take(@import_listed)
+        |> Enum.map(fn {key, raw} ->
+          {key, Interchange.translate_server(source.format, key, raw, home(opts))}
+        end)
+
+      {:ok, results, length(entries) > @import_listed}
+    end
+  end
+
+  defp offerable({:ok, translated}, opts) do
+    with {:ok, _attrs} <- form_attrs(translated, opts), do: {:ok, translated}
+  end
+
+  defp offerable(refused, _opts), do: refused
+
+  # A translated server as the add form would send it, typed and composed by
+  # the form's own rules, so an import writes what an add of it would.
+  defp form_attrs(%{server: server} = translated, opts),
+    do: attrs(server.transport, form_fields(translated), nil, opts)
+
+  defp form_fields(%{name: name, server: %{transport: :stdio} = server}) do
+    %{
+      "name" => name,
+      "transport" => "stdio",
+      "command_line" => CommandLine.join([server.command | server.args]),
+      "cwd" => server.cwd,
+      "env_names" => server.env_secrets
+    }
+  end
+
+  defp form_fields(%{name: name, server: %{transport: :http} = server}) do
+    %{
+      "name" => name,
+      "transport" => "http",
+      "url" => server.url,
+      "auth" => Atom.to_string(server.auth),
+      "key_header" => server.key_header,
+      "header_names" => server.header_secrets -- [server.key_header]
+    }
+  end
+
+  defp candidate({source, %{server: server} = translated}, names, login_path) do
+    Candidate.build(source, translated, %{
+      resolution: resolution(server, login_path),
+      conflict: Enum.any?(names, &McpConfig.same_prefix?(&1, server.name))
+    })
+  end
+
+  defp skipped(source, key, sentence) do
+    %{
+      "source" => source.id,
+      "source_label" => source.label,
+      "name" => key && String.slice(key, 0, @max_name_bytes),
+      "sentence" => sentence
+    }
+  end
+
+  defp import_param(servers) when is_list(servers) and length(servers) in 1..@import_listed do
+    Enum.reduce_while(servers, {:ok, []}, fn entry, {:ok, acc} ->
+      case wanted(entry) do
+        {:ok, source} -> {:cont, {:ok, [source | acc]}}
+        :error -> {:halt, refuse("servers", @import_shape)}
+      end
+    end)
+    |> case do
+      {:ok, reversed} -> {:ok, Enum.reverse(reversed)}
+      refusal -> refusal
+    end
+  end
+
+  defp import_param(_servers), do: refuse("servers", @import_shape)
+
+  defp wanted(%{"source" => id, "name" => name} = entry)
+       when map_size(entry) == 2 and is_binary(id) and is_binary(name) and
+              byte_size(name) in 1..@max_name_bytes do
+    with {:ok, source} <- ImportSources.fetch(id), do: {:ok, Map.put(source, :name, name)}
+  end
+
+  defp wanted(_entry), do: :error
+
+  defp import_one(wanted, {:error, sentence}, _opts), do: import_refused(wanted, sentence)
+
+  defp import_one(wanted, {:ok, results, _over?}, opts) do
+    case importable(results, wanted.name) do
+      {:ok, translated} -> import_added(wanted, translated, opts)
+      {:error, {:invalid_params, _field, sentence}} -> import_refused(wanted, sentence)
+      :gone -> import_refused(wanted, "This server is no longer in #{wanted.label}'s settings.")
+    end
+  end
+
+  # The server the scan named, by the name it was offered under; one that no
+  # longer translates is found by its key, and answers why.
+  defp importable(results, name) do
+    case Enum.find(results, &offered?(&1, name)) || Enum.find(results, &refused?(&1, name)) do
+      {_key, result} -> result
+      nil -> :gone
+    end
+  end
+
+  defp offered?({_key, {:ok, %{name: name}}}, name), do: true
+  defp offered?(_result, _name), do: false
+
+  defp refused?({name, {:error, _refusal}}, name), do: true
+  defp refused?(_result, _name), do: false
+
+  defp import_added(wanted, translated, opts) do
+    origin = "imported:" <> wanted.id
+
+    with {:ok, attrs} <- form_attrs(translated, opts),
+         {:ok, _server, row} <-
+           add_server(
+             translated.name,
+             Map.put(attrs, "origin", origin),
+             fn -> translated.values end,
+             opts
+           ) do
+      {:ok, row}
+    else
+      {:error, {:invalid_params, _field, sentence}} ->
+        import_refused(wanted, sentence)
+
+      {:error, reason} ->
+        Logger.error(
+          "MCP import of #{wanted.name} from #{wanted.id} was refused: #{Redaction.format(reason)}"
+        )
+
+        import_refused(wanted, "Fermix could not add it. See the daemon log.")
+    end
+  end
+
+  defp import_refused(wanted, sentence),
+    do: {:refused, %{"source" => wanted.id, "name" => wanted.name, "sentence" => sentence}}
 
   # --- rows -----------------------------------------------------------------
 
@@ -658,6 +911,7 @@ defmodule FermixCore.Management.McpServers do
   defp fetch(source_id, opts), do: RuntimeStatus.fetch(runtime_status(opts), source_id)
 
   defp writer_opts(opts), do: Keyword.take(opts, [:mcp_supervisor])
+  defp import_home(opts), do: Keyword.get_lazy(opts, :import_home, fn -> home(opts) end)
   defp draft_values(opts), do: Keyword.get(opts, :draft_values, DraftValues)
   defp home(opts), do: Keyword.get_lazy(opts, :home, &System.user_home!/0)
   defp supervisor(opts), do: Keyword.get(opts, :mcp_supervisor, McpSupervisor)

@@ -122,7 +122,9 @@ defmodule FermixCore.Management.ProtocolTest do
              "mcp.servers.enable",
              "mcp.servers.disable",
              "mcp.servers.tool.set",
-             "mcp.servers.check.start"
+             "mcp.servers.check.start",
+             "mcp.servers.import.scan",
+             "mcp.servers.import"
            ]
 
     assert Protocol.error_codes() == [

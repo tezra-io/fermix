@@ -132,6 +132,23 @@ defmodule FermixCore.Management.McpServers.Interchange do
   end
 
   @doc """
+  One server of another app's settings file, by its key there: `format` is
+  `:json` for an `mcpServers` or `servers` entry, `:toml` for a Codex
+  `[mcp_servers.<name>]` table. It is translated as the same server in a paste
+  is, and a refusal is about it alone, so one server an import cannot take
+  leaves the others.
+  """
+  @spec translate_server(:json | :toml, String.t(), term(), Path.t()) ::
+          {:ok, translated()} | {:error, refusal()}
+  def translate_server(:json, key, object, home) when is_binary(key) and is_binary(home) do
+    with {:ok, spec} <- server_spec(key, object), do: translated(spec, home)
+  end
+
+  def translate_server(:toml, key, table, home) when is_binary(key) and is_binary(home) do
+    with {:ok, spec} <- codex_spec(key, table), do: translated(spec, home)
+  end
+
+  @doc """
   The package a runner starts: the first word after `npx`, `bunx`, `uvx` or
   `pipx run` that is not a flag, as written; nil for any other program.
   """

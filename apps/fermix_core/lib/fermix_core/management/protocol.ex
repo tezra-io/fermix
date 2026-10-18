@@ -99,7 +99,9 @@ defmodule FermixCore.Management.Protocol do
     {"mcp.servers.enable", 2},
     {"mcp.servers.disable", 2},
     {"mcp.servers.tool.set", 2},
-    {"mcp.servers.check.start", 2}
+    {"mcp.servers.check.start", 2},
+    {"mcp.servers.import.scan", 2},
+    {"mcp.servers.import", 2}
   ]
   @methods Enum.map(@method_minimums, fn {method, _minimum} -> method end)
   @method_minimum_versions Map.new(@method_minimums)

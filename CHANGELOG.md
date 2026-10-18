@@ -28,9 +28,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when it stopped. A local server runs with your login shell's PATH and only
   the environment it declares; a remote one may be on this Mac or your
   network, never a cloud metadata address, and no redirect is followed.
-  Signing in to hosted servers and importing the servers other apps on this
-  Mac already have come next. No released Fermix.app has the Integrations tab
-  for them yet.
+  The servers Claude Desktop, Claude Code, Cursor, VS Code, Windsurf and Codex
+  already have on this Mac can be imported in one step, each named as a paste
+  would name it, with the keys their settings hold copied into the Keychain
+  and a placeholder left for you to fill in; Fermix reads those apps' settings
+  only when you ask, and never writes to them. No released Fermix.app has the
+  Integrations tab for them yet.
 
 - **Grok Voice as a voice model, beside GPT-Live (opt-in, engine side).**
   Settings > Voice now offers `grok-voice-3.0`, SpaceXAI's voice model. Like

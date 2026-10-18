@@ -20,8 +20,10 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Logs
+  alias FermixCore.Management.McpServers.Candidate
   alias FermixCore.Management.McpServers.Draft, as: McpDraft
   alias FermixCore.Management.McpServers.DraftValues
+  alias FermixCore.Management.McpServers.ImportSources
   alias FermixCore.Management.McpServers.Interchange
   alias FermixCore.Management.McpServers.PastedValues
   alias FermixCore.Management.McpServers.Row, as: McpRow
@@ -885,6 +887,49 @@ defmodule FermixCore.Management.ProtocolContractTest do
     end
   end
 
+  # A candidate is "every field always present" and the schema closes it; the
+  # skipped and refused entries are closed to the keys their goldens, pinned to
+  # the import's own answers, carry.
+  test "the schema declares exactly the fields an MCP import answers", %{schema: schema} do
+    defs = schema["$defs"]
+    {:ok, source} = ImportSources.fetch("cursor")
+
+    {:ok, translated} =
+      Interchange.translate_server(:toml, "fetch", %{"command" => "sh"}, "/Users/owner")
+
+    candidate = Candidate.build(source, translated, %{resolution: nil, conflict: false})
+    scan = named_fixture_result("mcp_servers_import_scan")
+    import = named_fixture_result("mcp_servers_import")
+
+    closed = fn name ->
+      {defs[name]["additionalProperties"], Enum.sort(defs[name]["required"])}
+    end
+
+    assert closed.("mcpImportCandidate") == {false, candidate |> Map.keys() |> Enum.sort()}
+
+    assert closed.("mcpImportSkipped") ==
+             {false, scan["skipped"] |> hd() |> Map.keys() |> Enum.sort()}
+
+    refused = defs["mcp_servers_import_result"]["properties"]["refused"]["items"]
+
+    assert Enum.sort(refused["required"]) ==
+             import["refused"] |> hd() |> Map.keys() |> Enum.sort()
+
+    assert defs["mcpImportSource"]["enum"] == ImportSources.ids()
+  end
+
+  test "the golden import refusal is the one the router answers" do
+    route = %{
+      request_id: "req-1",
+      protocol_version: 2,
+      method: "mcp.servers.import",
+      params: %{"servers" => []}
+    }
+
+    assert {:error, :invalid_params, details} = Router.route(route)
+    assert details == golden_error_details("invalid_params_mcp_servers_import_servers")
+  end
+
   test "every golden MCP server row routes on its own closed actions", %{schema: schema} do
     published = schema["$defs"]["mcpServerAction"]["enum"]
     rows = golden_mcp_rows()
@@ -1123,8 +1168,27 @@ defmodule FermixCore.Management.ProtocolContractTest do
       {"mcp.servers.get", %{"name" => "linear"}, [operation_opts: sources]},
       {"mcp.servers.draft", %{"text" => "https://mcp.linear.app/mcp"}, [operation_opts: sources]},
       {"mcp.servers.check.start", %{"name" => "linear"},
-       [operation_opts: [jobs: jobs()] ++ sources]}
+       [operation_opts: [jobs: jobs()] ++ sources]},
+      {"mcp.servers.import.scan", %{}, [operation_opts: [import_home: import_home()] ++ sources]}
     ]
+  end
+
+  # A home of this case's own holding one app's server and another app's file
+  # that does not parse, so a scan answers both lists; never the real home.
+  defp import_home do
+    home = SafeRm.make_tmp_dir!("contract-mcp-import")
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+
+    for {path, contents} <- [
+          {".cursor/mcp.json",
+           ~s({"mcpServers": {"fetch": {"command": "/bin/sh", "env": {"K": "v"}}}})},
+          {"Library/Application Support/Code/User/mcp.json", "{ // a comment\n}"}
+        ] do
+      File.mkdir_p!(Path.dirname(Path.join(home, path)))
+      File.write!(Path.join(home, path), contents)
+    end
+
+    home
   end
 
   # Facts in the shape the phone channel hands over. `pair_get` answers a phone

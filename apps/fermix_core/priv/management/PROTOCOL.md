@@ -245,6 +245,8 @@ daemon onto anything else.
 | `mcp.servers.disable` | `name` | Turns one server off and answers `{server}`. Minimum version `2`. |
 | `mcp.servers.tool.set` | `name`, `tool`, `enabled` (boolean) | Switches one tool on or off for the agent and answers `{server}`. The server's program keeps running. Minimum version `2`. |
 | `mcp.servers.check.start` | `name` | Connects one server and lists its tools once. A job, kind `mcp_check`, whose result carries `tool_count` and `latency_ms`. Minimum version `2`. |
+| `mcp.servers.import.scan` | none | Reads the MCP servers in Claude Desktop's, Claude Code's, Cursor's, VS Code's, Windsurf's and Codex's settings on this Mac, now and only now, and answers `candidates`, each with its `source`, `source_label`, name, transport, summary, command line or URL, consent sentence, resolved program and `secret_names` (never a value), and `skipped`, what could not be offered with the daemon's sentence. Minimum version `2`. |
+| `mcp.servers.import` | `servers` (`[{source, name}]`, at most 32) | Reads those settings again and adds each server named through the add path, with the values its settings held stored in the Keychain and `origin` `imported:<source>`, and answers `{servers, refused}`: the new rows, and each server not added with its sentence. Minimum version `2`. |
 
 Notes that the shapes alone do not carry:
 
@@ -887,6 +889,26 @@ Notes that the shapes alone do not carry:
   folder or an address (nothing there is filled in), are `invalid_params` with
   `field` `text` and a sentence; in a paste of several servers the sentence
   names the server, and the paste answers no drafts.
+- **Import reads another app's settings only when asked.** `mcp.servers.import.scan`
+  and `mcp.servers.import` each read the settings files then, and nothing is
+  kept between them, so an import adds what the files hold when it runs. The
+  sources are fixed files under the home folder: Claude Desktop's
+  `claude_desktop_config.json`, Claude Code's `~/.claude.json` (its user
+  servers, not a project's), Cursor's `~/.cursor/mcp.json`, VS Code's user
+  `mcp.json`, Windsurf's `mcp_config.json` and Codex's `~/.codex/config.toml`,
+  each read whole up to 8 MiB, its servers taken out and translated one by
+  one as a paste is. A missing file holds no servers; one that cannot be
+  opened, is too large, does not parse or holds its servers in another shape
+  is one `skipped` entry with `name` null, and a server that could not be added
+  as it is written (a placeholder in its command, say) is one with its name;
+  neither hides the rest. At most 32 servers are read from one file. A
+  candidate is named as a draft is, and `conflict` says the name, or its
+  tools' names, is taken here. Neither method ever carries a value: an import
+  stores what the file held under `mcp:<name>/…` as a paste's values are
+  stored, a placeholder declares a name the server waits for, and the other
+  app's file is never written. One refused server leaves the others; a
+  settings file changed outside Fermix refuses the whole import with
+  `external_change` before anything is added.
 - **A check connects, then lists once.** `mcp.servers.check.start` waits for a
   server that is starting, starts again one that is not running or has failed,
   then asks it for its tools; `tool_count` is what it listed and `latency_ms`

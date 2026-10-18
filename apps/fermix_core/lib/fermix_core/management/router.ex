@@ -38,7 +38,7 @@ defmodule FermixCore.Management.Router do
     settings.sections settings.reload job.list plugins.list meetings.signin.start
     computer_use.grant.start computer_use.permissions.get mobile.status mobile.pair.start
     mobile.devices.list browser.install.start imessage.permissions.get imessage.policy.confirm
-    mcp.servers.list
+    mcp.servers.list mcp.servers.import.scan
   )
   @lease_params ~w(lease_id)
   @doctor_session_params ~w(session_id)
@@ -68,6 +68,7 @@ defmodule FermixCore.Management.Router do
   )
   @mcp_add_params ["draft_id" | @mcp_server_params]
   @mcp_draft_params ~w(text)
+  @mcp_import_params ~w(servers)
   @mcp_tool_params ~w(name tool enabled)
   # A published name, an opaque workspace id and a display label are all bounded
   # strings; the widest of them is the workspace id's own 256-byte bound.
@@ -222,6 +223,11 @@ defmodule FermixCore.Management.Router do
     do: mcp_by_name(&McpServers.disable/2, params, opts)
 
   defp route_known("mcp.servers.tool.set", params, opts), do: mcp_tool_set(params, opts)
+
+  defp route_known("mcp.servers.import.scan", %{}, opts),
+    do: operation_result(McpServers.import_scan(operation_opts(opts)))
+
+  defp route_known("mcp.servers.import", params, opts), do: mcp_import(params, opts)
 
   defp route_known("mcp.servers.check.start", params, opts),
     do: mcp_by_name(&McpServers.check_start/2, params, opts)
@@ -460,6 +466,16 @@ defmodule FermixCore.Management.Router do
         _invalid ->
           invalid_params("text")
       end
+    end
+  end
+
+  # Each entry is typed by the operation, which refuses the list with the
+  # sentence a client shows.
+  defp mcp_import(params, opts) do
+    with :ok <- reject_unknown_params(params, @mcp_import_params) do
+      operation_result(
+        McpServers.import_servers(Map.get(params, "servers"), operation_opts(opts))
+      )
     end
   end
 

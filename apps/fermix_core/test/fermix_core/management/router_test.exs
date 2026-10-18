@@ -1229,6 +1229,18 @@ defmodule FermixCore.Management.RouterTest do
       assert sentence == "This paste has expired. Paste it again."
     end
 
+    test "an import scan takes nothing, and an import takes its servers alone" do
+      assert {:error, :invalid_params, %{"method" => "mcp.servers.import.scan"}} =
+               Router.route(v2("mcp.servers.import.scan", %{"source" => "cursor"}))
+
+      assert {:error, :invalid_params, %{"field" => "extra"}} =
+               Router.route(v2("mcp.servers.import", %{"servers" => [], "extra" => 1}))
+
+      assert {:error, :invalid_params,
+              %{"field" => "servers", "sentence" => "This is a list " <> _}} =
+               Router.route(v2("mcp.servers.import", %{}))
+    end
+
     test "a draft takes text and nothing else" do
       for params <- [%{}, %{"text" => 1}] do
         assert {:error, :invalid_params, %{"field" => "text"}} =

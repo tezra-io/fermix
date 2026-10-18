@@ -515,7 +515,10 @@ add form (a URL, a command line, another app's configuration block) goes
 through one translator, `Management.McpServers.Interchange`, which takes text
 and never reads a file; the values a paste carried are held in memory only, by
 `Management.McpServers.DraftValues`, under a boot-bound `draft_id` an add
-redeems.
+redeems. An import reads other apps' settings files only when the owner asks
+(`Management.McpServers.ImportSources`, fixed paths under the home folder,
+each bounded and parsed whole), translates each server it finds with the same
+translator, and adds it through the same add path.
 Fermix is only ever an MCP client: it does not expose its own tools as an MCP
 server.
 
