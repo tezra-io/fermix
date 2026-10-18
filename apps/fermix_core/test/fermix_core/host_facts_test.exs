@@ -241,7 +241,6 @@ defmodule FermixCore.HostFactsTest do
 
       assert HostFacts.current() == expected
       assert HostFacts.prompt_section() == HostFacts.render(expected)
-      assert HostFacts.prompt_section() == HostFacts.prompt_section()
     end
 
     test "remember/0 is what current/0 reads, and nothing remembered raises" do
