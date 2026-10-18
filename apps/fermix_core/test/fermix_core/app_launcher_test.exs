@@ -21,6 +21,7 @@ defmodule FermixCore.AppLauncherTest do
 
   test "opening the app has one owner" do
     assert Code.ensure_loaded?(HostLauncher)
+    assert Code.ensure_loaded?(AppLauncher)
     assert function_exported?(AppLauncher, :launch, 1)
     refute function_exported?(HostLauncher, :launch, 1)
   end

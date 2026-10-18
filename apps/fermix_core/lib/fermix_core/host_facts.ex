@@ -293,7 +293,7 @@ defmodule FermixCore.HostFacts do
   defp computer_sentence(true, %{os: :linux}) do
     "- This computer: a reminder or timer can ring here as a desktop notification while a " <>
       "desktop session is running (`event_store` with `delivery: \"computer\"`); a headless " <>
-      "host has none."
+      "host or a system-wide service has none."
   end
 
   defp computer_sentence(false, %{install: :standalone_cli, os: :darwin}) do

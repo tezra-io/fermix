@@ -43,12 +43,12 @@ defmodule FermixCore.Native.Notifications.MacApp do
   alias FermixCore.Native.HostAvailability
   alias FermixCore.Native.Notifications
   alias FermixCore.NativeHost.Link
+  alias FermixCore.NativeHost.Protocol
 
   @poll_ms 100
   @request_timeout_ms 5_000
   # Long enough for a person at the Mac to read and answer the prompt.
   @authorize_timeout_ms 30_000
-  @snooze %{"id" => "snooze_10m", "title" => "Snooze 10 minutes"}
 
   # Each refusal is a clause, as `Native.Notifications`' `ready/2` callback
   # asks: its caller embeds it ("… because <refusal>.").
@@ -134,8 +134,11 @@ defmodule FermixCore.Native.Notifications.MacApp do
     base = %{"title" => title, "body" => body, "sound" => sound}
 
     case Map.get(notification, :reminder_id) do
-      nil -> Map.put(base, "actions", [])
-      id when is_binary(id) -> Map.merge(base, %{"reminder_id" => id, "actions" => [@snooze]})
+      nil ->
+        Map.put(base, "actions", [])
+
+      id when is_binary(id) ->
+        Map.merge(base, %{"reminder_id" => id, "actions" => Protocol.reminder_actions()})
     end
   end
 
@@ -159,7 +162,7 @@ defmodule FermixCore.Native.Notifications.MacApp do
     do: "the Fermix app on this Mac could not be reached: nothing in this engine serves it"
 
   defp host_sentence(:stopping), do: "the Fermix app on this Mac is quitting"
-  defp host_sentence(:not_attached), do: @not_opened
+  defp host_sentence(:not_attached), do: "the Fermix app on this Mac did not connect in time"
   defp host_sentence({:launch_failed, reason}), do: "#{@not_opened}: #{reason}"
 
   defp request(opts), do: Keyword.get(opts, :request, &Link.request/4)

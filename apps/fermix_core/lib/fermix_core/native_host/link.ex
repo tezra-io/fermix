@@ -54,8 +54,6 @@ defmodule FermixCore.NativeHost.Link do
   # rather than queued behind an app that stopped answering.
   @max_pending 64
   @max_error_message 500
-  # What each notification action does: the one in v1 is Snooze 10 minutes.
-  @snooze_minutes %{"snooze_10m" => 10}
 
   @typedoc """
   What a request is answered with: the app's result or its error, or, when no
@@ -296,9 +294,9 @@ defmodule FermixCore.NativeHost.Link do
   # has no answer on the wire, so a snooze the registry refuses is logged with
   # its own sentence, and the connection goes on.
   defp notification_action(%{"reminder_id" => reminder_id, "action" => action}, state) do
-    minutes = Map.fetch!(@snooze_minutes, action)
+    minutes = Protocol.snooze_minutes(action)
 
-    case state.snooze.(reminder_id, minutes, []) do
+    case snooze(state, reminder_id, minutes) do
       {:ok, _snoozed} ->
         Logger.info("reminder #{reminder_id} snoozed #{minutes} minutes from its notification")
 
@@ -307,9 +305,23 @@ defmodule FermixCore.NativeHost.Link do
           "reminder #{reminder_id} was not snoozed from its notification: " <>
             Registry.describe_error(reason)
         )
+
+      {:exit, reason} ->
+        Logger.error(
+          "reminder #{reminder_id} was not snoozed from its notification: the registry did " <>
+            "not answer (#{inspect(reason, limit: 5, printable_limit: 200)})"
+        )
     end
 
     {:cont, state}
+  end
+
+  # The registry's Repo and scheduler calls can exit (a Repo call that timed
+  # out); the press then fails alone, and the app's connection stays up.
+  defp snooze(state, reminder_id, minutes) do
+    state.snooze.(reminder_id, minutes, [])
+  catch
+    :exit, reason -> {:exit, reason}
   end
 
   # An answer whose request is not waiting any more (a late one, after its

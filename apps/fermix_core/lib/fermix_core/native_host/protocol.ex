@@ -57,7 +57,10 @@ defmodule FermixCore.NativeHost.Protocol do
   )
 
   @grant_states ~w(granted not_granted not_asked)
-  @action_ids ~w(snooze_10m)
+  # The actions a reminder's notification carries, each its button title and
+  # what a press does: one table, so the button, the codec and the press agree.
+  @reminder_actions %{"snooze_10m" => %{title: "Snooze 10 minutes", snooze_minutes: 10}}
+  @action_ids @reminder_actions |> Map.keys() |> Enum.sort()
 
   @request_required %{
     "notifications.authorize" => [],
@@ -119,6 +122,17 @@ defmodule FermixCore.NativeHost.Protocol do
   @doc "The action ids a notification may offer; a press comes back as `notification.action`."
   @spec action_ids() :: [String.t()]
   def action_ids, do: @action_ids
+
+  @doc "The buttons a reminder's notification carries, as `notifications.post` sends them."
+  @spec reminder_actions() :: [%{String.t() => String.t()}]
+  def reminder_actions do
+    Enum.map(@action_ids, &%{"id" => &1, "title" => @reminder_actions[&1].title})
+  end
+
+  @doc "How many minutes a press on `action` snoozes its reminder."
+  @spec snooze_minutes(String.t()) :: pos_integer()
+  def snooze_minutes(action) when is_map_key(@reminder_actions, action),
+    do: @reminder_actions[action].snooze_minutes
 
   @doc "Maximum bytes of one inbound line, newline excluded."
   @spec max_line_bytes() :: pos_integer()

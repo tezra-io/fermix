@@ -178,28 +178,28 @@ defmodule FermixCore.HostFactsTest do
          ## This Fermix
          - Install: the Fermix Linux package (.deb or .rpm), run as the systemd user unit fermix.service and managed with the `fermix` command, browser setup and config.toml. The Fermix desktop app (Flatpak io.tezra.Fermix) was installed when Fermix started: it shows settings, chat, voice and logs, so answer "how do I" with its own labels for anything it has a control for.
          - Machine: Ubuntu 24.04 LTS on x86_64.
-         - This computer: a reminder or timer can ring here as a desktop notification while a desktop session is running (`event_store` with `delivery: "computer"`); a headless host has none.
+         - This computer: a reminder or timer can ring here as a desktop notification while a desktop session is running (`event_store` with `delivery: "computer"`); a headless host or a system-wide service has none.
          """},
         {facts(:linux_package_cli, :linux),
          """
          ## This Fermix
          - Install: the Fermix Linux package (.deb or .rpm), run as the systemd user unit fermix.service and managed with the `fermix` command, browser setup and config.toml. No Fermix desktop app was installed when Fermix started; the `fermix` command and browser setup are the surfaces.
          - Machine: Ubuntu 24.04 LTS on x86_64.
-         - This computer: a reminder or timer can ring here as a desktop notification while a desktop session is running (`event_store` with `delivery: "computer"`); a headless host has none.
+         - This computer: a reminder or timer can ring here as a desktop notification while a desktop session is running (`event_store` with `delivery: "computer"`); a headless host or a system-wide service has none.
          """},
         {facts(:standalone_cli, :linux, linux_app: true, architecture: "arm64"),
          """
          ## This Fermix
          - Install: the standalone Fermix binary on this Linux machine, run by its own systemd service and managed with the `fermix` command, browser setup and config.toml. The Fermix desktop app (Flatpak io.tezra.Fermix) was installed when Fermix started: it shows settings, chat, voice and logs, so answer "how do I" with its own labels for anything it has a control for.
          - Machine: Ubuntu 24.04 LTS on arm64.
-         - This computer: a reminder or timer can ring here as a desktop notification while a desktop session is running (`event_store` with `delivery: "computer"`); a headless host has none.
+         - This computer: a reminder or timer can ring here as a desktop notification while a desktop session is running (`event_store` with `delivery: "computer"`); a headless host or a system-wide service has none.
          """},
         {facts(:standalone_cli, :linux),
          """
          ## This Fermix
          - Install: the standalone Fermix binary on this Linux machine, run by its own systemd service and managed with the `fermix` command, browser setup and config.toml. No Fermix desktop app was installed when Fermix started; the `fermix` command and browser setup are the surfaces.
          - Machine: Ubuntu 24.04 LTS on x86_64.
-         - This computer: a reminder or timer can ring here as a desktop notification while a desktop session is running (`event_store` with `delivery: "computer"`); a headless host has none.
+         - This computer: a reminder or timer can ring here as a desktop notification while a desktop session is running (`event_store` with `delivery: "computer"`); a headless host or a system-wide service has none.
          """},
         {facts(:source, :darwin),
          """
@@ -213,7 +213,7 @@ defmodule FermixCore.HostFactsTest do
          ## This Fermix
          - Install: a development run from a source checkout (`mix fermix.dev`), managed with the `fermix` command, browser setup and config.toml.
          - Machine: Ubuntu 24.04 LTS on x86_64.
-         - This computer: a reminder or timer can ring here as a desktop notification while a desktop session is running (`event_store` with `delivery: "computer"`); a headless host has none.
+         - This computer: a reminder or timer can ring here as a desktop notification while a desktop session is running (`event_store` with `delivery: "computer"`); a headless host or a system-wide service has none.
          """}
       ]
 

@@ -33,10 +33,9 @@ The modules it describes:
 
 ## Pins
 
-The `.tla` header lists the `SOURCE` files without hashes: the spec was
-written against uncommitted code, and `make -C tla repin` refuses that. Until
-the code is committed and the spec re-pinned, every run reports it STALE. The
-pins it takes:
+The `.tla` header pins these sources by hash, so `make -C tla check` reports
+the spec STALE when one of them changes. The comments cite functions by name,
+not by line, since the pins are by function:
 
 - `apps/fermix_core/lib/fermix_core/native/host_availability.ex`, whole;
 - `apps/fermix_core/lib/fermix_core/native_host/link.ex`, by function:

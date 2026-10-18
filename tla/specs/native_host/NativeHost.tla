@@ -16,16 +16,16 @@
 (* The modules it describes:                                               *)
 (*  - FermixCore.Native.HostAvailability: the record (the attached link,   *)
 (*    stopping, the pending launch's deadline) and claim/3, which reads it *)
-(*    and records a launch in one call (host_availability.ex:129, :202);   *)
+(*    and records a launch in one call (host_availability.ex, :202);   *)
 (*    its monitor of the link (:218);                                      *)
 (*  - FermixCore.NativeHost.Link: the connection process. Its callers'     *)
-(*    requests are one GenServer.call each (request/4, link.ex:73;         *)
+(*    requests are one GenServer.call each (request/4, link.ex;         *)
 (*    handle_call, :103), written with the next id (write_request, :357),  *)
 (*    refused once it took host_stopping (caller_request, :342), which it  *)
 (*    answers host.stop_ack (host_stopping, :284); its exit ends every     *)
 (*    caller still waiting (:closed);                                      *)
 (*  - FermixCore.Native.Notifications.MacApp: the caller. post/2           *)
-(*    (mac_app.ex:79) claims a step (run, :188), opens the app on :launch  *)
+(*    (mac_app.ex) claims a step (run, :188), opens the app on :launch  *)
 (*    (launch, :204), waits on a pending launch (wait, :215), and asks on  *)
 (*    the attached link under a bound.                                     *)
 (*                                                                         *)
@@ -76,21 +76,21 @@ CONSTANTS
     PersonCanOpen,  \* the person opens the app themself
     AppCanQuit,     \* the person quits the app: host_stopping, then the hold
     AppCanCrash,    \* the app dies with no host_stopping
-    LaunchCanFail,  \* `open` exits non-zero at once (launch, mac_app.ex:204)
+    LaunchCanFail,  \* `open` exits non-zero at once (launch, mac_app.ex)
     \* Mechanism switches: TRUE is the code; each is switched off only by
     \* the check that shows a rule needs it.
     AtomicClaim,          \* the step and the launch's record are one call
-                          \* (claim/3, host_availability.ex:129,:202); FALSE
+                          \* (claim/3, host_availability.ex,:202); FALSE
                           \* reads the record, then records the launch
     Cooldown,             \* a claim within the cooldown after a launch that
                           \* never attached is unavailable (step, cooling?,
-                          \* host_availability.ex:145); FALSE launches again
+                          \* host_availability.ex); FALSE launches again
     RefuseAfterStopping,  \* the link refuses a request once it took
-                          \* host_stopping (caller_request, link.ex:342)
+                          \* host_stopping (caller_request, link.ex)
     CallerBound,          \* a request is bounded by the caller's timeout
-                          \* (request/4, link.ex:73)
+                          \* (request/4, link.ex)
     StopAck               \* the link answers host_stopping with host.stop_ack
-                          \* (host_stopping, link.ex:284)
+                          \* (host_stopping, link.ex)
 
 Conns == 1..MaxConns
 Symm == Permutations(Callers)
@@ -176,8 +176,8 @@ RecordLaunch ==
 -----------------------------------------------------------------------------
 (* The caller: MacApp.post/2                                               *)
 
-\* One claim (run, mac_app.ex:188; claim/3 and step/2,
-\* host_availability.ex:129-172,:202-207): an attached app that is not
+\* One claim (run, mac_app.ex; claim/3 and step/2,
+\* host_availability.ex-172,:202-207): an attached app that is not
 \* quitting is asked on its link; a quitting one is unavailable; a pending
 \* launch is waited on (only once it ends does the caller claim again); a
 \* launch that never attached is unavailable within the cooldown; otherwise
@@ -218,7 +218,7 @@ Record(c) ==
     /\ UNCHANGED <<app_vars, link_vars, recConn, recStopping, cooling, via, outcome, opens,
                    afterAck, used, quitMidPost>>
 
-\* AppLauncher.launch/1 (launch, mac_app.ex:204): `open` brings the app up,
+\* AppLauncher.launch/1 (launch, mac_app.ex): `open` brings the app up,
 \* and the caller waits on the launch; or `open` fails at once, the record
 \* takes that moment as the launch's deadline (launching/2), and the caller
 \* is unavailable.
@@ -236,7 +236,7 @@ Open(c) ==
     /\ UNCHANGED <<appConn, nextConn, quitting, link_vars, recConn, recStopping, via, windows,
                    openedInCooldown, afterAck, quitMidPost>>
 
-\* The link's handle_call (link.ex:103): a link that has exited answers no
+\* The link's handle_call (link.ex): a link that has exited answers no
 \* call (:closed); one that took host_stopping refuses (caller_request,
 \* :342); otherwise the post is written with the next id (write_request,
 \* :357).
@@ -257,7 +257,7 @@ Call(c) ==
     /\ UNCHANGED <<app_vars, conn, linkUp, stopSent, linkStopping, stopAcked, rec_vars, via,
                    windows, opens, openedInCooldown, used, quitMidPost>>
 
-\* The caller's bound runs out (request/4's timeout, link.ex:73); a late
+\* The caller's bound runs out (request/4's timeout, link.ex); a late
 \* answer finds it gone.
 Timeout(c) ==
     /\ CallerBound /\ pc[c] = "sent"
@@ -267,9 +267,9 @@ Timeout(c) ==
 -----------------------------------------------------------------------------
 (* The link and the record                                                 *)
 
-\* The link takes host_stopping (host_stopping, link.ex:284): final for the
+\* The link takes host_stopping (host_stopping, link.ex): final for the
 \* connection, the record marks it stopping (HostAvailability.stopping/2,
-\* host_availability.ex:197), and StopAck writes host.stop_ack.
+\* host_availability.ex), and StopAck writes host.stop_ack.
 LinkStops(i) ==
     /\ linkUp[i] /\ stopSent[i] /\ ~linkStopping[i]
     /\ linkStopping' = [linkStopping EXCEPT ![i] = TRUE]
@@ -278,7 +278,7 @@ LinkStops(i) ==
     /\ UNCHANGED <<app_vars, conn, linkUp, stopSent, toApp, recConn, pending, cooling,
                    caller_vars, hist_vars>>
 
-\* The socket closed (tcp_closed, link.ex:127): the link has read every line
+\* The socket closed (tcp_closed, link.ex): the link has read every line
 \* the app wrote before it, then exits, and every caller still waiting on it
 \* is answered :closed.
 LinkExits(i) ==
@@ -291,7 +291,7 @@ LinkExits(i) ==
     /\ UNCHANGED <<app_vars, conn, stopSent, linkStopping, stopAcked, toApp, rec_vars, via,
                    hist_vars>>
 
-\* The record takes the link's :DOWN (host_availability.ex:218, detached/1).
+\* The record takes the link's :DOWN (host_availability.ex, detached/1).
 RecordDown(i) ==
     /\ ~linkUp[i] /\ recConn = i
     /\ recConn' = 0 /\ recStopping' = FALSE
@@ -306,8 +306,8 @@ Deadline ==
 \* The cooldown ends. It outlasts any caller's own wait (AppLauncher's
 \* cooldown_ms against its deadline_ms), so it never ends while a caller is
 \* opening the app or waiting on a launch: a caller with no time left opens
-\* nothing (unattached_step, host_availability.ex:157), and a launch counts as one of
-\* its polls (launch, mac_app.ex:204).
+\* nothing (unattached_step, host_availability.ex), and a launch counts as one of
+\* its polls (launch, mac_app.ex).
 CooldownEnds ==
     /\ cooling
     /\ \A c \in Callers : pc[c] \notin {"record", "open", "wait"}
@@ -334,9 +334,9 @@ Connect ==
     /\ UNCHANGED <<quitting, stopSent, linkStopping, stopAcked, toApp, rec_vars, caller_vars,
                    hist_vars>>
 
-\* `attached`, as the link takes it (attach, link.ex:252): the record names
+\* `attached`, as the link takes it (attach, link.ex): the record names
 \* this connection, and an earlier launch is void (attached/4,
-\* host_availability.ex:186).
+\* host_availability.ex).
 Attach ==
     /\ appConn # 0 /\ conn[appConn] = "open"
     /\ conn' = [conn EXCEPT ![appConn] = "attached"]
@@ -345,7 +345,7 @@ Attach ==
                    hist_vars>>
 
 \* The app answers a post on its attached connection, and the link replies
-\* to the caller (answered/deliver, link.ex:304); an answer to a caller whose
+\* to the caller (answered/deliver, link.ex); an answer to a caller whose
 \* bound ran out is dropped.
 Answer(c) ==
     /\ appConn # 0 /\ conn[appConn] = "attached" /\ c \in toApp[appConn]

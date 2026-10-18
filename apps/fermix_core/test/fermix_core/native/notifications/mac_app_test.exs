@@ -26,6 +26,7 @@ defmodule FermixCore.Native.Notifications.MacAppTest do
                       "are at it, open System Settings > Notifications > Fermix and turn on " <>
                       "Allow notifications"
   @not_opened "the Fermix app on this Mac could not be opened"
+  @not_connected "the Fermix app on this Mac did not connect in time"
 
   defp process do
     pid = spawn(fn -> Process.sleep(:infinity) end)
@@ -176,13 +177,13 @@ defmodule FermixCore.Native.Notifications.MacAppTest do
       launcher = fn _timeout_ms -> send(test, :launched) && :ok end
       ticking = [now: clock(0, 500), launcher: launcher]
 
-      assert MacApp.ready(@away, opts(host, no_request(), ticking)) == {:error, @not_opened}
+      assert MacApp.ready(@away, opts(host, no_request(), ticking)) == {:error, @not_connected}
       assert_received :launched
       assert is_integer(HostAvailability.current(host).launch_until)
 
       # Every read of this clock is inside the cooldown after that deadline.
       again = [now: clock(AppLauncher.deadline_ms() + 1_000, 0), launcher: no_launch()]
-      assert MacApp.ready(@away, opts(host, no_request(), again)) == {:error, @not_opened}
+      assert MacApp.ready(@away, opts(host, no_request(), again)) == {:error, @not_connected}
 
       assert MacApp.post(@notification, opts(host, no_request(), again)) ==
                {:error, :host_unavailable}
@@ -206,7 +207,7 @@ defmodule FermixCore.Native.Notifications.MacAppTest do
       end
 
       ticking = [now: clock(0, 1_000), launcher: launcher]
-      assert MacApp.ready(@away, opts(host, no_request(), ticking)) == {:error, @not_opened}
+      assert MacApp.ready(@away, opts(host, no_request(), ticking)) == {:error, @not_connected}
 
       launches = drain(:launched)
       assert launches in 1..3, "opened #{launches} times"
@@ -220,7 +221,7 @@ defmodule FermixCore.Native.Notifications.MacAppTest do
                {:error, @not_opened <> ": open exited 1: no such app"}
 
       assert HostAvailability.current(host).launch_until == 0
-      assert MacApp.ready(@away, opts(host, no_request())) == {:error, @not_opened}
+      assert MacApp.ready(@away, opts(host, no_request())) == {:error, @not_connected}
     end
 
     test "nothing serving the wire, or an app that is quitting, is refused without a launch" do

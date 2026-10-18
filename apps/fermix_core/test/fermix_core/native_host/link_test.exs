@@ -229,6 +229,27 @@ defmodule FermixCore.NativeHost.LinkTest do
     assert {:ok, _status} = round_trip(app, link)
   end
 
+  test "a registry that does not answer a press leaves the link up, and says so", ctx do
+    snooze = fn _reminder_id, _minutes, _opts -> exit(:timeout) end
+    restart_with_link_opts(ctx, snooze: snooze)
+    app = attach(ctx.socket_path)
+    link = attached_link(ctx.host)
+
+    {_result, log} =
+      with_log(fn ->
+        send_line(app, %{
+          "type" => "notification.action",
+          "reminder_id" => "rem_1",
+          "action" => "snooze_10m"
+        })
+
+        assert {:ok, _status} = round_trip(app, link)
+      end)
+
+    assert log =~
+             "reminder rem_1 was not snoozed from its notification: the registry did not answer"
+  end
+
   test "a snooze the registry refuses is logged with its sentence, and the link goes on", ctx do
     snooze = fn _reminder_id, _minutes, _opts -> {:error, :not_rung_on_this_computer} end
     restart_with_link_opts(ctx, snooze: snooze)
