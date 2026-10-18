@@ -897,7 +897,9 @@ Notes that the shapes alone do not carry:
   servers, not a project's), Cursor's `~/.cursor/mcp.json`, VS Code's user
   `mcp.json`, Windsurf's `mcp_config.json` and Codex's `~/.codex/config.toml`,
   each read whole up to 8 MiB, its servers taken out and translated one by
-  one as a paste is. A missing file holds no servers; one that cannot be
+  one as a paste is. VS Code's is read as VS Code reads it, JSON with `//` and
+  `/* */` comments and trailing commas; the others as JSON, as their apps read
+  them. A missing file holds no servers; one that cannot be
   opened, is too large, does not parse or holds its servers in another shape
   is one `skipped` entry with `name` null, and a server that could not be added
   as it is written (a placeholder in its command, say) is one with its name;

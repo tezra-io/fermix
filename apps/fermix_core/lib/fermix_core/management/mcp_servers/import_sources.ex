@@ -11,7 +11,7 @@ defmodule FermixCore.Management.McpServers.ImportSources do
   | `claude_desktop` | Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` | `mcpServers` |
   | `claude_code` | Claude Code | `~/.claude.json` | `mcpServers`, the user's own; a project's are not read |
   | `cursor` | Cursor | `~/.cursor/mcp.json` | `mcpServers` |
-  | `vscode` | VS Code | `~/Library/Application Support/Code/User/mcp.json` | `servers` |
+  | `vscode` | VS Code | `~/Library/Application Support/Code/User/mcp.json` | `servers`, in JSON with comments as VS Code reads it (`Jsonc`) |
   | `windsurf` | Windsurf | `~/.codeium/windsurf/mcp_config.json` | `mcpServers` |
   | `codex` | Codex | `~/.codex/config.toml` | `[mcp_servers.<name>]` |
 
@@ -26,6 +26,7 @@ defmodule FermixCore.Management.McpServers.ImportSources do
   sentence, which never quotes the file, since it may hold keys.
   """
 
+  alias FermixCore.Management.McpServers.Jsonc
   alias Jason.OrderedObject
 
   @max_file_bytes 8 * 1024 * 1024
@@ -35,6 +36,7 @@ defmodule FermixCore.Management.McpServers.ImportSources do
       label: "Claude Desktop",
       path: "Library/Application Support/Claude/claude_desktop_config.json",
       format: :json,
+      comments: false,
       key: "mcpServers"
     },
     %{
@@ -42,14 +44,23 @@ defmodule FermixCore.Management.McpServers.ImportSources do
       label: "Claude Code",
       path: ".claude.json",
       format: :json,
+      comments: false,
       key: "mcpServers"
     },
-    %{id: "cursor", label: "Cursor", path: ".cursor/mcp.json", format: :json, key: "mcpServers"},
+    %{
+      id: "cursor",
+      label: "Cursor",
+      path: ".cursor/mcp.json",
+      format: :json,
+      comments: false,
+      key: "mcpServers"
+    },
     %{
       id: "vscode",
       label: "VS Code",
       path: "Library/Application Support/Code/User/mcp.json",
       format: :json,
+      comments: true,
       key: "servers"
     },
     %{
@@ -57,9 +68,17 @@ defmodule FermixCore.Management.McpServers.ImportSources do
       label: "Windsurf",
       path: ".codeium/windsurf/mcp_config.json",
       format: :json,
+      comments: false,
       key: "mcpServers"
     },
-    %{id: "codex", label: "Codex", path: ".codex/config.toml", format: :toml, key: "mcp_servers"}
+    %{
+      id: "codex",
+      label: "Codex",
+      path: ".codex/config.toml",
+      format: :toml,
+      comments: false,
+      key: "mcp_servers"
+    }
   ]
 
   @type source :: %{
@@ -67,6 +86,7 @@ defmodule FermixCore.Management.McpServers.ImportSources do
           label: String.t(),
           path: String.t(),
           format: :json | :toml,
+          comments: boolean(),
           key: String.t()
         }
 
@@ -139,11 +159,20 @@ defmodule FermixCore.Management.McpServers.ImportSources do
 
   defp parsed("", _source), do: {:ok, []}
 
+  # VS Code reads its `mcp.json` as JSON with comments, so Fermix does too;
+  # Claude Desktop, Claude Code, Cursor and Windsurf read theirs as JSON.
+  defp parsed(contents, %{format: :json, comments: true} = source) do
+    case Jsonc.to_json(contents) do
+      {:ok, json} -> parsed(json, %{source | comments: false})
+      {:error, :unclosed_comment} -> {:error, json_sentence(source)}
+    end
+  end
+
   defp parsed(contents, %{format: :json} = source) do
     case Jason.decode(contents, objects: :ordered_objects) do
       {:ok, %OrderedObject{} = document} -> entries(document[source.key], source)
       {:ok, _other} -> {:error, shape_sentence(source)}
-      {:error, _reason} -> {:error, "#{source.label}'s settings file is not valid JSON."}
+      {:error, _reason} -> {:error, json_sentence(source)}
     end
   end
 
@@ -158,6 +187,8 @@ defmodule FermixCore.Management.McpServers.ImportSources do
   defp entries(%OrderedObject{values: values}, _source), do: {:ok, values}
   defp entries(table, _source) when is_map(table), do: {:ok, Enum.sort(table)}
   defp entries(_other, source), do: {:error, shape_sentence(source)}
+
+  defp json_sentence(source), do: "#{source.label}'s settings file is not valid JSON."
 
   defp shape_sentence(source),
     do: "#{source.label}'s settings file holds its MCP servers in a shape Fermix does not know."

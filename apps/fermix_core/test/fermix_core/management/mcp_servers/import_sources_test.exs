@@ -70,6 +70,32 @@ defmodule FermixCore.Management.McpServers.ImportSourcesTest do
     assert keys(ImportSources.servers(source("claude_code"), home)) == ["fetch"]
   end
 
+  # VS Code reads its mcp.json as JSON with comments; the others read theirs
+  # as JSON, so a comment there is a file they do not read either.
+  test "VS Code's file may hold comments and trailing commas, and only VS Code's", %{home: home} do
+    commented = ~S"""
+    {
+      // the servers this editor starts
+      "servers": {
+        "fetch": {"command": "uvx", "args": ["mcp-server-fetch"],}, /* by uv */
+      },
+    }
+    """
+
+    write!(home, "vscode", commented)
+    assert keys(ImportSources.servers(source("vscode"), home)) == ["fetch"]
+
+    write!(home, "cursor", String.replace(commented, ~s("servers"), ~s("mcpServers")))
+
+    assert ImportSources.servers(source("cursor"), home) ==
+             {:error, "Cursor's settings file is not valid JSON."}
+
+    write!(home, "vscode", ~s({"servers": {}} /* never closed))
+
+    assert ImportSources.servers(source("vscode"), home) ==
+             {:error, "VS Code's settings file is not valid JSON."}
+  end
+
   test "Codex's tables, by name, and nothing else of its settings", %{home: home} do
     write!(home, "codex", """
     model = "gpt-5"

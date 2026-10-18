@@ -1182,7 +1182,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
     for {path, contents} <- [
           {".cursor/mcp.json",
            ~s({"mcpServers": {"fetch": {"command": "/bin/sh", "env": {"K": "v"}}}})},
-          {"Library/Application Support/Code/User/mcp.json", "{ // a comment\n}"}
+          {".codeium/windsurf/mcp_config.json", ~s({"mcpServers": {},})}
         ] do
       File.mkdir_p!(Path.dirname(Path.join(home, path)))
       File.write!(Path.join(home, path), contents)

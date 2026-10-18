@@ -51,9 +51,10 @@ defmodule FermixCore.Management.McpServersImportTest do
     end
   end
 
-  # The settings the goldens illustrate: two remote servers and two local
-  # ones across four apps, a placeholder, a server that cannot be added as
-  # written, a name already here, and a file VS Code's comments make unreadable.
+  # The settings the goldens illustrate: two remote servers and three local
+  # ones across five apps, VS Code's with its comments and trailing commas, a
+  # placeholder, a server that cannot be added as written, a name already here,
+  # and a Windsurf file a trailing comma makes unreadable, as Windsurf reads it.
   @claude_desktop ~S"""
   {"globalShortcut": "",
    "mcpServers": {
@@ -76,8 +77,18 @@ defmodule FermixCore.Management.McpServersImportTest do
   @vscode ~S"""
   {
     // the servers this editor starts
-    "servers": {}
+    "servers": {
+      "memory": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-memory"], /* keeps notes */
+      },
+    },
+    "inputs": [],
   }
+  """
+  @windsurf ~S"""
+  {"mcpServers": {"deepwiki": {"serverUrl": "https://mcp.deepwiki.com/mcp"},}}
   """
   @codex ~S"""
   model = "gpt-5"
@@ -150,6 +161,7 @@ defmodule FermixCore.Management.McpServersImportTest do
                {"claude_desktop", "filesystem"},
                {"claude_code", "linear"},
                {"cursor", "brave-search"},
+               {"vscode", "memory"},
                {"codex", "fetch"}
              ]
 
@@ -165,7 +177,7 @@ defmodule FermixCore.Management.McpServersImportTest do
 
       assert Enum.map(skipped, &{&1["source"], &1["name"]}) == [
                {"cursor", "notes"},
-               {"vscode", nil}
+               {"windsurf", nil}
              ]
 
       refute_secrets(candidates)
@@ -369,16 +381,16 @@ defmodule FermixCore.Management.McpServersImportTest do
       assert {:ok, %{"servers" => [%{"name" => "fetch"}], "refused" => [refused]}} =
                McpServers.import_servers(
                  [
-                   %{"source" => "vscode", "name" => "anything"},
+                   %{"source" => "windsurf", "name" => "deepwiki"},
                    %{"source" => "codex", "name" => "fetch"}
                  ],
                  ctx.opts
                )
 
       assert refused == %{
-               "source" => "vscode",
-               "name" => "anything",
-               "sentence" => "VS Code's settings file is not valid JSON."
+               "source" => "windsurf",
+               "name" => "deepwiki",
+               "sentence" => "Windsurf's settings file is not valid JSON."
              }
     end
 
@@ -422,6 +434,7 @@ defmodule FermixCore.Management.McpServersImportTest do
     write_source!(home, "claude_code", @claude_code)
     write_source!(home, "cursor", @cursor)
     write_source!(home, "vscode", @vscode)
+    write_source!(home, "windsurf", @windsurf)
     write_source!(home, "codex", @codex)
   end
 

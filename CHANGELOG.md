@@ -15,7 +15,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   this Mac, then list, change, turn off or remove it, all applied at once with
   no restart. Keys and other values go to the Keychain under the server's own
   name, never into the settings file, and a server starts once the last value
-  it needs is stored. Instead of typing, paste what a README or another app
+  it needs is stored. A server you add that asks you to sign in signs in
+  through your browser, from the app or over the management socket: Fermix
+  finds how the server signs people in, registers itself with it where the
+  server asks, and keeps the sign-in, renewing it, until you sign out or
+  remove the server. Instead of typing, paste what a README or another app
   gives: a URL, a command line, the `mcpServers` or `servers` block Claude
   Desktop, Claude Code, Cursor, Windsurf or VS Code use, a `claude mcp add`
   line or a Codex `[mcp_servers]` block. Fermix fills in the form, names the
