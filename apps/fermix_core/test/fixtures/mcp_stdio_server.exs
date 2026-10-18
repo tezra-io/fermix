@@ -3,7 +3,7 @@
 # through a real OS process, so a library upgrade or a transport change is
 # proven on the wire instead of through stubs.
 #
-#   elixir mcp_stdio_server.exs [PROTOCOL_VERSION] [MODE]
+#   elixir mcp_stdio_server.exs [PROTOCOL_VERSION] [MODE] [DELAY_MS]
 #
 # It answers `initialize` with PROTOCOL_VERSION (default 2025-11-25), so a test
 # can stand in for an older server. Two tools: `echo` returns its text, and
@@ -16,6 +16,10 @@
 #   * `crash`: writes 30 numbered lines to stderr and exits with status 3
 #     before it reads anything.
 #   * `silent`: reads its input and never answers.
+#   * `slow`: serves once DELAY_MS have passed since it started, as a first
+#     `uvx` or `npx -y` start downloads its package before it reads anything.
+#   * `reject`: answers `initialize` with an error, as a server that refuses
+#     the handshake, and nothing else.
 #   * `chatty`: writes 400 numbered lines to stderr before it reads anything,
 #     then serves, with one more tool, `finish`, which writes three last lines
 #     to stderr and exits with status 4.
@@ -68,6 +72,10 @@ defmodule McpStdioFixture do
     :stdio |> IO.stream(:line) |> Stream.run()
   end
 
+  def run(_protocol_version, "reject") do
+    :stdio |> IO.stream(:line) |> Enum.each(&refuse_handshake/1)
+  end
+
   def run(protocol_version, "chatty") do
     Enum.each(1..400, &IO.puts(:stderr, "fixture chatty line #{&1}"))
     serve(protocol_version, @tools ++ [@finish_tool])
@@ -76,6 +84,12 @@ defmodule McpStdioFixture do
   def run(protocol_version, mode) do
     tools = if mode == "probe", do: @tools ++ @probe_tools, else: @tools
     serve(protocol_version, tools)
+  end
+
+  def run(protocol_version, "slow", delay_ms) do
+    {since_start_ms, _since_last_call} = :erlang.statistics(:wall_clock)
+    Process.sleep(max(String.to_integer(delay_ms) - since_start_ms, 0))
+    serve(protocol_version, @tools)
   end
 
   defp serve(protocol_version, tools) do
@@ -90,6 +104,16 @@ defmodule McpStdioFixture do
         reply(id, answer(method, Map.get(message, "params", %{}), protocol_version, tools))
 
       _notification_or_blank ->
+        :ok
+    end
+  end
+
+  defp refuse_handshake(line) do
+    case line |> String.trim() |> decode() do
+      %{"id" => id, "method" => "initialize"} ->
+        reply(id, {:error, %{"code" => -32_602, "message" => "Unsupported protocol version"}})
+
+      _other ->
         :ok
     end
   end
@@ -145,5 +169,6 @@ end
 case System.argv() do
   [] -> McpStdioFixture.run("2025-11-25", "serve")
   [protocol_version] -> McpStdioFixture.run(protocol_version, "serve")
-  [protocol_version, mode | _rest] -> McpStdioFixture.run(protocol_version, mode)
+  [protocol_version, mode] -> McpStdioFixture.run(protocol_version, mode)
+  [protocol_version, mode, delay_ms] -> McpStdioFixture.run(protocol_version, mode, delay_ms)
 end

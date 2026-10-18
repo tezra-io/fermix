@@ -96,6 +96,13 @@ defmodule FermixCore.Capabilities.MCP.Server do
   # a first `npx -y` or `uvx` start to download its package.
   @first_connection_ms 60_000
 
+  @doc """
+  How long an operator's stdio server has to answer its first `initialize`
+  and `tools/list`, in milliseconds: the window this process retries in.
+  """
+  @spec first_connection_ms() :: pos_integer()
+  def first_connection_ms, do: @first_connection_ms
+
   @spec start_link([opt()]) :: GenServer.on_start()
   def start_link(opts) do
     case Keyword.get(opts, :name) do

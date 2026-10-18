@@ -60,7 +60,9 @@ defmodule FermixCore.Capabilities.MCP.AnubisStarter.Default do
 
   @behaviour FermixCore.Capabilities.MCP.AnubisStarter
 
+  alias FermixCore.Capabilities.MCP.AnubisStarter.OperatorClient
   alias FermixCore.Capabilities.MCP.Remote.Owner, as: RemoteOwner
+  alias FermixCore.Capabilities.MCP.Server, as: McpServer
   alias FermixCore.Capabilities.MCP.StdioTransport
   alias FermixCore.Timeouts
 
@@ -118,7 +120,8 @@ defmodule FermixCore.Capabilities.MCP.AnubisStarter.Default do
   # The client and its transport are children of the server's own subtree,
   # client first: the transport tells it to initialize once the program runs.
   # The client is started as a plain `GenServer`, because Anubis's start path
-  # accepts only the transports it ships; its `init/1` takes the same options.
+  # accepts only the transports it ships; its `init/1` takes the same options,
+  # and `OperatorClient` is `Anubis.Client` with the one clause it lacks.
   defp operator_specs(server, config) do
     source_id = Map.fetch!(server, :source_id)
     client_name = client_name_for(source_id)
@@ -130,12 +133,12 @@ defmodule FermixCore.Capabilities.MCP.AnubisStarter.Default do
       client_info: client_info(source_id),
       capabilities: %{},
       protocol_version: Anubis.Protocol.latest_version(),
-      timeout: @operation_timeout_ms
+      timeout: handshake_timeout_ms()
     }
 
     client_spec = %{
       id: {:anubis_client, source_id},
-      start: {GenServer, :start_link, [Anubis.Client, client_options, [name: client_name]]},
+      start: {GenServer, :start_link, [OperatorClient, client_options, [name: client_name]]},
       restart: :permanent
     }
 
@@ -156,6 +159,12 @@ defmodule FermixCore.Capabilities.MCP.AnubisStarter.Default do
 
     %{children: [client_spec, transport_spec], client_name: client_name}
   end
+
+  # The client's own timeout ends the `initialize` it sends on its own behalf.
+  # It outlasts `MCP.Server`'s first-connection window by one operation, so
+  # the window alone decides how long a first start may take: a window that
+  # closes ends this subtree, and the client in it, first.
+  defp handshake_timeout_ms, do: McpServer.first_connection_ms() + @operation_timeout_ms
 
   defp plugin_specs(server, command) do
     source_id = Map.fetch!(server, :source_id)
@@ -193,4 +202,56 @@ defmodule FermixCore.Capabilities.MCP.AnubisStarter.Default do
     version = Application.spec(:fermix_core, :vsn) |> to_string()
     %{"name" => "fermix-#{kind}-#{name}", "version" => version}
   end
+end
+
+defmodule FermixCore.Capabilities.MCP.AnubisStarter.OperatorClient do
+  @moduledoc """
+  The callback module an operator stdio server's client runs (M74 E3):
+  `Anubis.Client`, with the one clause it lacks.
+
+  Anubis sends `initialize` on its own behalf, with `{self(), make_ref()}` as
+  the caller to answer. Whatever ends that request without a result, its
+  timeout or an error the server answers, replies there: to the client
+  itself, which has no clause for the reply and stops on a
+  `FunctionClauseError` (`anubis_mcp` 2.0.0 and 2.1.0 alike). No other request
+  names the client as its caller, so a reply here is that one. It is logged by
+  its reason and dropped: the client stays up, uninitialized, and
+  `MCP.Server`'s first-connection window decides, as for a program that never
+  answers.
+
+  Every other callback is Anubis's own.
+  """
+
+  @behaviour GenServer
+
+  require Logger
+
+  @impl GenServer
+  defdelegate init(options), to: Anubis.Client
+
+  @impl GenServer
+  defdelegate handle_call(request, from, state), to: Anubis.Client
+
+  @impl GenServer
+  defdelegate handle_cast(request, state), to: Anubis.Client
+
+  @impl GenServer
+  defdelegate handle_continue(continue, state), to: Anubis.Client
+
+  @impl GenServer
+  def handle_info({ref, {:error, %Anubis.MCP.Error{reason: reason}}}, state)
+      when is_reference(ref) do
+    %{client_info: %{"name" => name}} = state
+
+    Logger.warning(
+      "MCP client #{name}: its initialize ended without a result: #{inspect(reason)}"
+    )
+
+    {:noreply, state}
+  end
+
+  def handle_info(message, state), do: Anubis.Client.handle_info(message, state)
+
+  @impl GenServer
+  defdelegate terminate(reason, state), to: Anubis.Client
 end

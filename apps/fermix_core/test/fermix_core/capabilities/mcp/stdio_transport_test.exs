@@ -31,6 +31,7 @@ defmodule FermixCore.Capabilities.MCP.StdioTransportTest do
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.SecretWriterStub
+  alias FermixTestSupport.TelemetryCapture
 
   @fixture Path.expand("../../../fixtures/mcp_stdio_server.exs", __DIR__)
 
@@ -316,6 +317,46 @@ defmodule FermixCore.Capabilities.MCP.StdioTransportTest do
     end
   end
 
+  describe "the handshake" do
+    # A first `uvx` or `npx -y` start downloads its package before the program
+    # reads anything, here for most of the window. The client's own timeout
+    # for its `initialize` must not end the handshake before the window does;
+    # the case shrinks both, keeping the daemon's ratio (`start_server/3`).
+    test "a program that serves late in its first-connection window is ready", ctx do
+      name = "slow#{ctx.suffix}"
+      source = {:operator, name}
+      spec = spec(ctx, name, "slow", %{args: [@fixture, "2025-11-25", "slow", "2400"]})
+
+      %{client: client} =
+        start_server(ctx, spec, await: false, discovery: true, first_connection_ms: 4_000)
+
+      assert :ok = Anubis.Client.await_ready(client, timeout: @bound_ms)
+      assert eventually(fn -> match?({:ok, %{status: :ready}}, fetch(ctx, source)) end)
+      assert {:ok, %{discovery: %{tool_count: 2}}} = fetch(ctx, source)
+    end
+
+    # Anubis ends the `initialize` it sends on its own behalf by replying to the
+    # client itself: a refused handshake is one way there, a timed-out one
+    # another. Of two calls made once the refusal is read, the second queues
+    # behind that reply, so its answer shows the client lived through it.
+    test "a program that refuses the handshake leaves its client running", ctx do
+      name = "reject#{ctx.suffix}"
+      pin = [method: "initialize", error_message: "Unsupported protocol version"]
+      TelemetryCapture.attach([[:anubis_mcp, :client, :error]], pin)
+
+      log =
+        capture_log(fn ->
+          %{client: client} = start_server(ctx, spec(ctx, name, "reject"), await: false)
+          assert_receive {:telemetry, _event, _measurements, _metadata}, @bound_ms
+
+          assert Anubis.Client.get_server_capabilities(client) == nil
+          assert Anubis.Client.get_server_capabilities(client) == nil
+        end)
+
+      assert log =~ "initialize ended without a result"
+    end
+  end
+
   # Before M74 both clients were registered as `Client.<name>` and introduced
   # themselves as `fermix-<name>`: the second start was refused, and two
   # clients of one `client_info` name crash on the second `tools/list` reply.
@@ -370,6 +411,7 @@ defmodule FermixCore.Capabilities.MCP.StdioTransportTest do
 
     transport_opts = Keyword.get(opts, :transport, [])
     children = Enum.map(children, &with_transport_opts(&1, transport_opts))
+    children = Enum.map(children, &with_window(&1, opts))
     children = children ++ discovery(ctx, spec, client, opts)
 
     subtree =
@@ -397,6 +439,22 @@ defmodule FermixCore.Capabilities.MCP.StdioTransportTest do
   end
 
   defp with_transport_opts(child, _extra), do: child
+
+  # A case that shrinks the first-connection window shrinks the client's own
+  # request timeout by the same factor, so the two keep the daemon's ratio.
+  defp with_window(%{id: {:anubis_client, _source}} = child, opts) do
+    case Keyword.fetch(opts, :first_connection_ms) do
+      {:ok, window_ms} -> update_in(child.start, &scale_timeout(&1, window_ms))
+      :error -> child
+    end
+  end
+
+  defp with_window(child, _opts), do: child
+
+  defp scale_timeout({GenServer, :start_link, [module, options, gen_opts]}, window_ms) do
+    timeout = div(options.timeout * window_ms, McpServer.first_connection_ms())
+    {GenServer, :start_link, [module, %{options | timeout: timeout}, gen_opts]}
+  end
 
   defp discovery(ctx, spec, client, opts) do
     if Keyword.get(opts, :discovery, false) do
