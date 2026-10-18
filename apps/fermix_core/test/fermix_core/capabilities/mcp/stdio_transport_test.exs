@@ -211,15 +211,17 @@ defmodule FermixCore.Capabilities.MCP.StdioTransportTest do
       transport = Module.concat(client, "Transport")
 
       # The 400 lines are written before the fixture answers `initialize`, but
-      # a check may land while they are being written; the one that matters
-      # carries the last of them.
+      # a check may land while they are being written, so the last of them may
+      # be in the carry, still in the file under its cap, or split between the
+      # two; the exit reads the two together. A carry at all means the cap was
+      # enforced, as 400 lines are several times the cap.
       assert eventually(fn ->
-               List.last(:sys.get_state(transport).stderr_carry) == "fixture chatty line 400"
-             end)
+               %{stderr_file: file, stderr_carry: carry} = :sys.get_state(transport)
 
-      %{stderr_file: file, stderr_carry: carry} = :sys.get_state(transport)
-      assert File.stat!(file).size <= cap
-      assert carry == Enum.map(381..400, &"fixture chatty line #{&1}")
+               File.stat!(file).size <= cap and carry != [] and
+                 Enum.take(carry ++ StdioTransport.tail(file), -20) ==
+                   Enum.map(381..400, &"fixture chatty line #{&1}")
+             end)
 
       capture_log(fn ->
         ref = Process.monitor(transport)
