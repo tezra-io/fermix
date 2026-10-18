@@ -281,6 +281,42 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
       end
     end
 
+    # Authorization is where the key goes and where a sign-in's token will go,
+    # so only a server that sends its key there declares it.
+    test "Authorization is declared only as a header server's key, read or written" do
+      base = ~s([mcp.servers.r]\ntransport = "http"\nurl = "https://mcp.example.com/mcp"\n)
+
+      for extra <- [
+            ~s(header_secrets = ["Authorization"]\n),
+            ~s(auth = "none"\nheader_secrets = ["authorization"]\n),
+            ~s(auth = "header"\nheader_secrets = ["Authorization", "X-Key"]\nkey_header = "X-Key"\n)
+          ] do
+        assert_raise ArgumentError, ~r/Authorization is declared only for a server/, fn ->
+          Config.from_toml(base <> extra)
+        end
+      end
+
+      assert [%{header_secrets: ["Authorization", "X-Org"], key_header: "Authorization"}] =
+               Config.from_toml(
+                 base <>
+                   ~s(auth = "header"\nheader_secrets = ["Authorization", "X-Org"]\n) <>
+                   ~s(key_header = "Authorization"\n)
+               )
+
+      attrs = %{
+        "transport" => "http",
+        "url" => "https://mcp.example.com/mcp",
+        "auth" => "auto",
+        "header_secrets" => ["Authorization"]
+      }
+
+      assert {:error, {:invalid_params, "header_secrets", _sentence}} =
+               Config.put_server(%{}, "remote", attrs, [])
+
+      keyed = %{attrs | "auth" => "header"} |> Map.put("key_header", "Authorization")
+      assert {:ok, _document} = Config.put_server(%{}, "remote", keyed, [])
+    end
+
     test "secret names follow their grammar and are declared once" do
       assert_raise ArgumentError, ~r/A variable name is letters/, fn ->
         Config.from_toml("[mcp.servers.files]\nenv_secrets = [\"1BAD\"]\n")

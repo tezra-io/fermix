@@ -5,11 +5,14 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
   This is the dedicated per-origin connector the design calls for, and it is
   deliberately *not* the shared `FermixCore.Finch` pool:
 
-    * **Pinned peer.** It connects to the address `Endpoint.resolve/2`
+    * **Pinned peer.** It connects to an address `Endpoint.resolve/2`
       validated, while presenting the signed hostname for the `Host` header,
       TLS SNI, and certificate verification. Handing a hostname to a pooled
       client would let the socket layer resolve it a second time, behind the
-      guard — validating a name you then don't connect to is not a gate.
+      guard — validating a name you then don't connect to is not a gate. An
+      operator endpoint may have several validated addresses (`localhost` is
+      `::1` and `127.0.0.1`); they are dialled in order until one connects,
+      at most four, and nothing else is.
     * **Streaming caps.** The universal response cap has to bite *before* a
       body is buffered, which a request/response client cannot express. Mint in
       passive mode gives byte-level control and never touches the owner's
@@ -32,6 +35,12 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
   alias FermixCore.Capabilities.MCP.Remote.SSE
   alias FermixCore.Net.Egress
   alias FermixCore.Timeouts
+
+  require Logger
+
+  # The most validated addresses one open dials, each under the connect
+  # timeout.
+  @max_peers 4
 
   @type t :: %__MODULE__{
           conn: Mint.HTTP.t(),
@@ -58,8 +67,24 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
   @spec open(Endpoint.t(), keyword()) :: {:ok, t()} | {:error, term()}
   def open(%Endpoint{} = endpoint, opts \\ []) when is_list(opts) do
     with :ok <- ensure_direct(endpoint, opts),
-         {:ok, peer} <- Endpoint.resolve(endpoint, opts) do
-      connect(endpoint, peer, opts)
+         {:ok, peers} <- Endpoint.resolve(endpoint, opts) do
+      dial(endpoint, Enum.take(peers, @max_peers), opts)
+    end
+  end
+
+  # The validated addresses in order until one connects; the last one's
+  # failure when none does. A failed address is named by its class only.
+  defp dial(endpoint, [peer | rest], opts) do
+    case connect(endpoint, peer, opts) do
+      {:ok, connection} ->
+        {:ok, connection}
+
+      {:error, reason} when rest != [] ->
+        Logger.debug("remote MCP dial failed, trying the next address: #{inspect(reason)}")
+        dial(endpoint, rest, opts)
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

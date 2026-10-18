@@ -50,6 +50,38 @@ defmodule FermixCore.Capabilities.MCP.Remote.ConnectionTest do
     assert {"host", "127.0.0.1:#{LoopbackHttp.port(server)}"} in first.headers
   end
 
+  # `localhost` is `::1` and `127.0.0.1` on most machines, and a server binds
+  # one or the other: the validated answers are dialled in order until one
+  # connects, with no second lookup.
+  test "a name reaches a server bound to any one of its validated answers" do
+    resolver = fn "localhost" -> {:ok, [{0, 0, 0, 0, 0, 0, 0, 1}, {127, 0, 0, 1}]} end
+    ok = fn _request -> {200, [{"content-type", "application/json"}], "{}"} end
+
+    for ip <- [{127, 0, 0, 1}, {0, 0, 0, 0, 0, 0, 0, 1}] do
+      server = start_supervised!({LoopbackHttp, {ok, ip}}, id: {:loopback, ip})
+      {:ok, endpoint} = Endpoint.operator("http://localhost:#{LoopbackHttp.port(server)}/mcp")
+
+      assert {:ok, connection} = Connection.open(endpoint, egress: @direct, resolver: resolver)
+      assert connection.peer == ip
+
+      assert {:ok, connection, %{status: 200}} =
+               Connection.request(connection, "POST", [], "{}", @call_ms)
+
+      Connection.close(connection)
+      assert [%{method: "POST"}] = LoopbackHttp.requests(server)
+    end
+  end
+
+  test "a name with a metadata address among its answers is never dialled" do
+    {_server, endpoint} = serve(fn _request -> flunk("a refused name was dialled") end)
+    resolver = fn "localhost" -> {:ok, [{127, 0, 0, 1}, {169, 254, 169, 254}]} end
+    {:ok, named} = Endpoint.operator("http://localhost:#{endpoint.port}/mcp")
+
+    assert {:error,
+            {:remote_security_blocked, {:resolved_to_link_local_address, {169, 254, 169, 254}}}} =
+             Connection.open(named, egress: @direct, resolver: resolver)
+  end
+
   test "a redirect is terminal and is never followed" do
     {server, endpoint} =
       serve(fn

@@ -193,44 +193,49 @@ defmodule FermixCore.Net.GuardTest do
     end
   end
 
-  describe "the owner policy (an address the owner typed, M74 E4)" do
-    @owner [policy: :owner]
-
+  describe "owner_peers/2 (an address the owner typed, M74 E4)" do
     test "admits loopback, private ranges and IP literals the public policy refuses" do
-      for url <- [
-            "https://127.0.0.1:8443/mcp",
-            "https://[::1]/mcp",
-            "https://10.0.0.5/mcp",
-            "https://172.16.4.2/mcp",
-            "https://192.168.1.20/mcp",
-            "https://100.64.0.1/mcp",
-            "https://[fd12:3456::1]/mcp"
+      for {url, ip} <- [
+            {"https://127.0.0.1:8443/mcp", {127, 0, 0, 1}},
+            {"https://[::1]/mcp", {0, 0, 0, 0, 0, 0, 0, 1}},
+            {"https://10.0.0.5/mcp", {10, 0, 0, 5}},
+            {"https://172.16.4.2/mcp", {172, 16, 4, 2}},
+            {"https://192.168.1.20/mcp", {192, 168, 1, 20}},
+            {"https://100.64.0.1/mcp", {100, 64, 0, 1}},
+            {"https://[fd12:3456::1]/mcp", {0xFD12, 0x3456, 0, 0, 0, 0, 0, 1}}
           ] do
-        assert Guard.resolve_and_validate(url, @owner) == :ok, url
+        assert Guard.owner_peers(url) == {:ok, [ip]}, url
         assert {:error, _refused} = Guard.validate(url), "the public policy let #{url} through"
       end
 
-      assert Guard.resolve_and_validate("https://93.184.216.34/mcp", @owner) == :ok
+      assert Guard.owner_peers("https://93.184.216.34/mcp") == {:ok, [{93, 184, 216, 34}]}
     end
 
-    test "admits a name that resolves to the owner's own network, pinned to its answer" do
-      resolver = fn "nas.home.example" -> {:ok, [{192, 168, 1, 20}, {10, 0, 0, 5}]} end
+    # The system resolver's answers, every one of them, in its order: a server
+    # bound to only one of `localhost`'s addresses is still reached.
+    test "keeps every answer for a name, in order, localhost included" do
+      resolver = fn "localhost" -> {:ok, [{0, 0, 0, 0, 0, 0, 0, 1}, {127, 0, 0, 1}]} end
 
-      assert {:ok, {192, 168, 1, 20}} =
-               Guard.resolve_and_validate(
-                 "https://nas.home.example/mcp",
-                 [resolver: resolver] ++ @owner
-               )
-    end
+      assert Guard.owner_peers("http://localhost:3000/mcp", resolver: resolver) ==
+               {:ok, [{0, 0, 0, 0, 0, 0, 0, 1}, {127, 0, 0, 1}]}
 
-    # RFC 6761: a localhost name is this machine, and is not asked of DNS.
-    test "a localhost name is the loopback address, never looked up" do
-      resolver = fn host -> flunk("#{host} must not be looked up") end
-
-      for url <- ["http://localhost:3000/mcp", "https://api.localhost/mcp"] do
-        assert {:ok, {127, 0, 0, 1}} =
-                 Guard.resolve_and_validate(url, [resolver: resolver] ++ @owner)
+      resolver = fn "nas.home.example" ->
+        {:ok, [{192, 168, 1, 20}, {10, 0, 0, 5}, {10, 0, 0, 5}]}
       end
+
+      assert Guard.owner_peers("https://nas.home.example/mcp", resolver: resolver) ==
+               {:ok, [{192, 168, 1, 20}, {10, 0, 0, 5}]}
+    end
+
+    # The public policy refuses `.local` by name; the owner's mDNS names are
+    # theirs, and resolve through the system resolver.
+    test "resolves a .local name through the system resolver" do
+      resolver = fn "nas.local" -> {:ok, [{192, 168, 1, 20}]} end
+
+      assert Guard.owner_peers("https://nas.local/mcp", resolver: resolver) ==
+               {:ok, [{192, 168, 1, 20}]}
+
+      assert {:error, {:blocked_host, :local_domain}} = Guard.validate("https://nas.local/mcp")
     end
 
     test "refuses a link-local or metadata literal" do
@@ -242,23 +247,28 @@ defmodule FermixCore.Net.GuardTest do
             "https://[::ffff:169.254.169.254]/mcp",
             "https://0.0.0.0/mcp"
           ] do
-        assert {:error, {:blocked_host, :link_local_address}} =
-                 Guard.resolve_and_validate(url, @owner),
-               url
+        assert {:error, {:blocked_host, :link_local_address}} = Guard.owner_peers(url), url
       end
     end
 
-    test "refuses a name that resolves to a link-local or metadata address" do
+    test "refuses a name any of whose answers is link-local or metadata" do
       for {ip, true, why} <- @link_local_cases do
         resolver = fn "answer.example" -> {:ok, [{10, 0, 0, 5}, ip]} end
 
         assert {:error, {:resolved_to_link_local_address, ^ip}} =
-                 Guard.resolve_and_validate(
-                   "https://answer.example/mcp",
-                   [resolver: resolver] ++ @owner
-                 ),
+                 Guard.owner_peers("https://answer.example/mcp", resolver: resolver),
                "the owner policy let through #{:inet.ntoa(ip)} (#{why})"
       end
+    end
+
+    test "a name with no answer is a failed lookup" do
+      assert {:error, {:dns_resolution_failed, :nxdomain}} =
+               Guard.owner_peers("https://gone.example/mcp", resolver: fn _host -> {:ok, []} end)
+
+      assert {:error, {:dns_resolution_failed, :timeout}} =
+               Guard.owner_peers("https://gone.example/mcp",
+                 resolver: fn _host -> {:error, :timeout} end
+               )
     end
 
     test "loopback_host?/1 answers this machine only" do

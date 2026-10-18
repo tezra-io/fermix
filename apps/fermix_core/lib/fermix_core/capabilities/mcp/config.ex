@@ -584,6 +584,7 @@ defmodule FermixCore.Capabilities.MCP.Config do
          :ok <- distinct_headers(headers),
          {:ok, key_header} <- optional_string(block, "key_header"),
          :ok <- key_header_declared(auth, key_header, headers),
+         :ok <- authorization_carries_the_key(auth, key_header, headers),
          {:ok, client_id} <- optional_string(block, "oauth_client_id") do
       {:ok,
        %{
@@ -628,6 +629,23 @@ defmodule FermixCore.Capabilities.MCP.Config do
 
   defp key_header_declared(_auth, _key_header, _headers),
     do: refuse("key_header", "Only a server that sends a key names a key header.")
+
+  # `Authorization` is where a server's key goes, and where a sign-in's token
+  # will go (M74 E5), so it is declared only as the key of a server that sends
+  # one; any other server declaring it would send a second credential beside
+  # its own. These keys are new to M74, so no file that booted before holds this.
+  defp authorization_carries_the_key(auth, key_header, headers) do
+    case Enum.find(headers, &(String.downcase(&1) == "authorization")) do
+      nil -> :ok
+      ^key_header when auth == :header -> :ok
+      _other -> refuse("header_secrets", authorization_sentence())
+    end
+  end
+
+  defp authorization_sentence,
+    do:
+      "Authorization is declared only for a server that sends its key there: " <>
+        "auth \"header\" with key_header \"Authorization\"."
 
   defp optional_bool(block, key, default) do
     case Map.get(block, key, default) do

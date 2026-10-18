@@ -1,15 +1,17 @@
 defmodule FermixCore.Net.Guard do
   @moduledoc """
-  Public-web URL guard shared by outbound tools.
+  Public-web URL guard shared by outbound tools, and the owner policy an
+  address the owner typed is checked under.
 
-  `resolve_and_validate/2` checks under one of two policies. `:public`, the
-  default, admits only globally routable peers. `:owner` is for an address the
-  owner typed (an MCP server's URL, M74 E4): the owner's own machine and
-  network are theirs to name, so loopback, private ranges and IP literals pass,
-  and only what no server is reached at is refused, the link-local and cloud
-  metadata addresses `metadata_or_link_local?/1` answers, whether written as a
-  literal or answered by DNS. A `localhost` name is this machine's loopback
-  address under it (RFC 6761) and is not looked up.
+  `resolve_and_validate/2` is the public policy: only globally routable peers.
+  `owner_peers/2` is for an address the owner typed (an MCP server's URL, M74
+  E4). The owner's own machine and network are theirs to name, so loopback,
+  private ranges and IP literals pass, and only what no server is reached at is
+  refused: the link-local and cloud metadata addresses
+  `metadata_or_link_local?/1` answers, written as a literal or among any of a
+  name's answers. A name is looked up the way every other program on the
+  owner's machine looks it up, through the operating system's resolver, so
+  the hosts file, `localhost` and mDNS `.local` names resolve as they do there.
   """
 
   import Bitwise
@@ -21,11 +23,11 @@ defmodule FermixCore.Net.Guard do
   # (`Fermix.CLI.Service.Templates`): an endpoint added here is added there too.
   @aws_ipv6_metadata {0xFD00, 0x0EC2, 0, 0, 0, 0, 0, 0x0254}
 
-  @loopback_ipv4 {127, 0, 0, 1}
+  # One bound for each address family's system lookup.
+  @owner_lookup_ms 10_000
 
   @type resolver :: (String.t() -> {:ok, [:inet.ip_address()]} | {:error, term()})
-  @type policy :: :public | :owner
-  @type opts :: [resolver: resolver(), policy: policy()]
+  @type opts :: [resolver: resolver()]
 
   @spec validate(String.t(), opts()) :: :ok | {:error, term()}
   def validate(url, opts \\ []) when is_binary(url) do
@@ -59,9 +61,6 @@ defmodule FermixCore.Net.Guard do
   Audit F-04: prior `Guard.validate/2` resolved DNS once at preflight,
   then Req re-resolved at connect; this entry point hands the validated
   IP to the caller so the connect is pinned to it.
-
-  `policy: :owner` checks an address the owner typed (see the moduledoc); a
-  `localhost` name answers `{:ok, {127, 0, 0, 1}}` under it.
   """
   @spec resolve_and_validate(String.t(), opts()) ::
           :ok | {:ok, :inet.ip_address()} | {:error, term()}
@@ -70,10 +69,30 @@ defmodule FermixCore.Net.Guard do
          %URI{} = uri <- URI.parse(url),
          :ok <- validate_scheme(uri.scheme),
          {:ok, host} <- fetch_host(uri),
-         {:ok, validated_ip_or_skip} <- peer(Keyword.get(opts, :policy, :public), host, opts) do
+         :ok <- validate_host(host),
+         {:ok, validated_ip_or_skip} <- resolve_validated_ip(host, opts) do
       case validated_ip_or_skip do
         :ip_literal -> :ok
         ip -> {:ok, ip}
+      end
+    end
+  end
+
+  @doc """
+  Every peer an address the owner typed may be dialled at, in order: an IP
+  literal itself, or each answer the operating system's resolver gives for a
+  name (IPv6 first, then IPv4). Any answer that is link-local or a metadata
+  address refuses the whole set. `:resolver` replaces the system lookup.
+  """
+  @spec owner_peers(String.t(), opts()) :: {:ok, [:inet.ip_address(), ...]} | {:error, term()}
+  def owner_peers(url, opts \\ []) when is_binary(url) do
+    with :ok <- validate_text(url),
+         %URI{} = uri <- URI.parse(url),
+         :ok <- validate_scheme(uri.scheme),
+         {:ok, host} <- fetch_host(uri) do
+      case parse_ip(host) do
+        {:ok, ip} -> owner_literal(ip)
+        {:error, :einval} -> owner_lookup(host, Keyword.get(opts, :resolver) || (&os_resolve/1))
       end
     end
   end
@@ -88,7 +107,7 @@ defmodule FermixCore.Net.Guard do
 
     case parse_ip(host) do
       {:ok, ip} -> loopback_ip?(ip)
-      {:error, :einval} -> localhost_name?(host)
+      {:error, :einval} -> host == "localhost" or String.ends_with?(host, ".localhost")
     end
   end
 
@@ -97,7 +116,42 @@ defmodule FermixCore.Net.Guard do
   defp loopback_ip?({0, 0, 0, 0, 0, 65_535, high, _low}), do: high >>> 8 == 127
   defp loopback_ip?(_ip), do: false
 
-  defp localhost_name?(host), do: host == "localhost" or String.ends_with?(host, ".localhost")
+  defp owner_lookup(host, resolver) do
+    case resolver.(host) do
+      {:ok, []} -> {:error, {:dns_resolution_failed, :nxdomain}}
+      {:ok, ips} -> ips |> Enum.uniq() |> owner_answers()
+      {:error, reason} -> {:error, {:dns_resolution_failed, reason}}
+    end
+  end
+
+  defp owner_literal(ip) do
+    if metadata_or_link_local?(ip),
+      do: {:error, {:blocked_host, :link_local_address}},
+      else: {:ok, [ip]}
+  end
+
+  defp owner_answers(ips) do
+    case Enum.find(ips, &metadata_or_link_local?/1) do
+      nil -> {:ok, ips}
+      ip -> {:error, {:resolved_to_link_local_address, ip}}
+    end
+  end
+
+  # The native lookup: the hosts file, mDNS and the system's DNS, as every
+  # other program on this machine sees them. One family answering is a name
+  # that resolves; neither is the IPv4 lookup's failure.
+  defp os_resolve(host) do
+    name = String.to_charlist(host)
+
+    case {:inet.getaddrs(name, :inet6, @owner_lookup_ms),
+          :inet.getaddrs(name, :inet, @owner_lookup_ms)} do
+      {{:error, _v6}, {:error, reason}} -> {:error, reason}
+      {v6, v4} -> {:ok, family_answers(v6) ++ family_answers(v4)}
+    end
+  end
+
+  defp family_answers({:ok, ips}), do: ips
+  defp family_answers({:error, _absent}), do: []
 
   @doc """
   The A and AAAA answers for `host`: the lookup `validate/2` makes when it is
@@ -205,54 +259,29 @@ defmodule FermixCore.Net.Guard do
     end
   end
 
-  defp peer(:public, host, opts) do
-    with :ok <- validate_host(host), do: resolve_validated_ip(host, opts)
-  end
-
-  defp peer(:owner, host, opts) do
-    if localhost_name?(host), do: {:ok, @loopback_ipv4}, else: owner_peer(host, opts)
-  end
-
-  defp owner_peer(host, opts) do
-    case parse_ip(host) do
-      {:ok, ip} ->
-        owner_literal(ip)
-
-      {:error, :einval} ->
-        lookup(host, opts, &metadata_or_link_local?/1, :resolved_to_link_local_address)
-    end
-  end
-
-  defp owner_literal(ip) do
-    if metadata_or_link_local?(ip),
-      do: {:error, {:blocked_host, :link_local_address}},
-      else: {:ok, :ip_literal}
-  end
-
   defp resolve_validated_ip(host, opts) do
     case parse_ip(host) do
-      {:ok, _ip} -> {:ok, :ip_literal}
-      {:error, :einval} -> lookup(host, opts, &private_ip?/1, :resolved_to_private_address)
+      {:ok, _ip} ->
+        {:ok, :ip_literal}
+
+      {:error, :einval} ->
+        resolver = Keyword.get(opts, :resolver) || (&resolve/1)
+
+        case resolver.(host) do
+          {:ok, []} -> {:error, {:dns_resolution_failed, :nxdomain}}
+          {:ok, ips} -> validate_all_answers(ips)
+          {:error, reason} -> {:error, {:dns_resolution_failed, reason}}
+        end
     end
   end
 
-  defp lookup(host, opts, refused?, refusal) do
-    resolver = Keyword.get(opts, :resolver) || (&resolve/1)
-
-    case resolver.(host) do
-      {:ok, []} -> {:error, {:dns_resolution_failed, :nxdomain}}
-      {:ok, ips} -> validate_all_answers(ips, refused?, refusal)
-      {:error, reason} -> {:error, {:dns_resolution_failed, reason}}
-    end
-  end
-
-  # Every A and AAAA answer must pass: a mixed set means the name can steer a
-  # later resolution at a refused peer, so picking the convenient answer would
-  # hand an attacker the rebind they wanted.
-  defp validate_all_answers([first | _rest] = ips, refused?, refusal) do
-    case Enum.find(ips, refused?) do
+  # Every A and AAAA answer must be globally routable: a mixed set means the
+  # name can steer a later resolution at a non-global peer, so picking the
+  # convenient public answer would hand an attacker the rebind they wanted.
+  defp validate_all_answers([first | _rest] = ips) do
+    case Enum.find(ips, &private_ip?/1) do
       nil -> {:ok, first}
-      ip -> {:error, {refusal, ip}}
+      ip -> {:error, {:resolved_to_private_address, ip}}
     end
   end
 

@@ -16,15 +16,16 @@ defmodule FermixCore.Capabilities.MCP.Remote.Endpoint do
       `[mcp.servers.*]` server. It may carry a path and a query, and name an IP
       literal, a private network or this machine, because the owner typed it;
       userinfo, a fragment and a template are refused, plain `http` is allowed
-      only to this machine, and the peer is checked under `Net.Guard`'s owner
-      policy, which still refuses link-local and cloud metadata addresses.
+      only to this machine, and its peers are checked under `Net.Guard`'s owner
+      policy: the operating system's answers for its name, none of them a
+      link-local or cloud metadata address.
 
   Both answer this one struct, which the one remote client takes. `resolve/2`
-  returns the peer the caller must connect to. Callers connect to that address
-  while presenting the endpoint's **hostname** for the `Host` header, TLS SNI,
-  and certificate verification — validating a name and then letting the
-  socket layer resolve it again is not a gate (the resolver could answer
-  differently the second time).
+  returns the peers the caller may connect to, in order. Callers connect to
+  one of those addresses while presenting the endpoint's **hostname** for the
+  `Host` header, TLS SNI, and certificate verification — validating a name
+  and then letting the socket layer resolve it again is not a gate (the
+  resolver could answer differently the second time).
   """
 
   alias FermixCore.Net.Guard
@@ -111,35 +112,37 @@ defmodule FermixCore.Capabilities.MCP.Remote.Endpoint do
   end
 
   @doc """
-  Resolve the endpoint's host to one validated peer address.
+  Resolve the endpoint's host to the validated peer addresses, in the order
+  they are to be dialled.
 
-  A manifest endpoint's every A and AAAA answer must be globally routable;
-  an operator endpoint's must be no link-local or metadata address, and its IP
-  literal is its own peer. `Net.Guard` refuses the whole set if any answer
+  A manifest endpoint has one: every A and AAAA answer must be globally
+  routable, and the first is the peer. An operator endpoint has each answer
+  the operating system's resolver gives, none of them a link-local or metadata
+  address, or its IP literal. `Net.Guard` refuses the whole set if any answer
   fails, so Fermix never picks a convenient answer out of a mixed reply.
   Callers must re-run this before every new connection — a cached peer is a
   cached DNS decision.
   """
-  @spec resolve(t(), keyword()) :: {:ok, :inet.ip_address()} | {:error, term()}
-  def resolve(%__MODULE__{} = endpoint, opts \\ []) when is_list(opts) do
-    case Guard.resolve_and_validate(uri(endpoint), [policy: policy(endpoint)] ++ opts) do
-      {:ok, ip} -> {:ok, ip}
-      :ok -> literal_peer(endpoint)
+  @spec resolve(t(), keyword()) :: {:ok, [:inet.ip_address(), ...]} | {:error, term()}
+  def resolve(endpoint, opts \\ [])
+
+  def resolve(%__MODULE__{source: :manifest} = endpoint, opts) when is_list(opts) do
+    case Guard.resolve_and_validate(uri(endpoint), opts) do
+      {:ok, ip} -> {:ok, [ip]}
+      # An IP-literal host is refused at `new/2`, so the guard's `:ok`
+      # (nothing to pin) is unreachable here; treat it as the invariant
+      # violation it would be rather than connecting unpinned.
+      :ok -> {:error, {:remote_security_blocked, :endpoint_not_pinnable}}
       {:error, reason} -> {:error, {:remote_security_blocked, reason}}
     end
   end
 
-  defp policy(%__MODULE__{source: :manifest}), do: :public
-  defp policy(%__MODULE__{source: :operator}), do: :owner
-
-  # An IP-literal host is refused at `new/2`, so the guard's `:ok` (nothing to
-  # pin) is unreachable for a manifest endpoint; treat it as the invariant
-  # violation it would be rather than connecting unpinned.
-  defp literal_peer(%__MODULE__{source: :operator, host: host}),
-    do: :inet.parse_address(String.to_charlist(host))
-
-  defp literal_peer(%__MODULE__{}),
-    do: {:error, {:remote_security_blocked, :endpoint_not_pinnable}}
+  def resolve(%__MODULE__{source: :operator} = endpoint, opts) when is_list(opts) do
+    case Guard.owner_peers(uri(endpoint), opts) do
+      {:ok, peers} -> {:ok, peers}
+      {:error, reason} -> {:error, {:remote_security_blocked, reason}}
+    end
+  end
 
   defp validate_base_url(base_url) do
     with :ok <- refuse_unsafe_text(base_url, :invalid_base_url),

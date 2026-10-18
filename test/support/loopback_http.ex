@@ -1,6 +1,8 @@
 defmodule FermixTestSupport.LoopbackHttp do
   @moduledoc """
-  A plain HTTP/1.1 server on 127.0.0.1, for tests that drive a real client
+  A plain HTTP/1.1 server on 127.0.0.1, or on another loopback address
+  (`{handler, {0, 0, 0, 0, 0, 0, 0, 1}}` listens on `::1` only), for tests
+  that drive a real client
   socket: the remote MCP rail's connection over `http` to this machine, which
   `Remote.Endpoint.operator/1` admits for a loopback URL (M74 E4).
 
@@ -33,9 +35,13 @@ defmodule FermixTestSupport.LoopbackHttp do
           {pos_integer(), [{String.t(), String.t()}], binary()}
           | {:stream, pos_integer(), [{String.t(), String.t()}], binary()}
 
-  @spec start_link((request() -> response())) :: GenServer.on_start()
+  @spec start_link((request() -> response()) | {(request() -> response()), :inet.ip_address()}) ::
+          GenServer.on_start()
+  def start_link({handler, ip}) when is_function(handler, 1) and is_tuple(ip),
+    do: GenServer.start_link(__MODULE__, {handler, ip})
+
   def start_link(handler) when is_function(handler, 1),
-    do: GenServer.start_link(__MODULE__, handler)
+    do: GenServer.start_link(__MODULE__, {handler, {127, 0, 0, 1}})
 
   @doc "The port it listens on."
   @spec port(pid()) :: :inet.port_number()
@@ -46,15 +52,9 @@ defmodule FermixTestSupport.LoopbackHttp do
   def requests(server), do: GenServer.call(server, :requests)
 
   @impl true
-  def init(handler) do
+  def init({handler, ip}) do
     {:ok, listen} =
-      :gen_tcp.listen(0, [
-        :binary,
-        ip: {127, 0, 0, 1},
-        packet: :http_bin,
-        active: false,
-        reuseaddr: true
-      ])
+      :gen_tcp.listen(0, family(ip) ++ [:binary, ip: ip, packet: :http_bin, active: false])
 
     {:ok, port} = :inet.port(listen)
     server = self()
@@ -62,6 +62,9 @@ defmodule FermixTestSupport.LoopbackHttp do
     :ok = :gen_tcp.controlling_process(listen, acceptor)
     {:ok, %{port: port, requests: []}}
   end
+
+  defp family(ip) when tuple_size(ip) == 8, do: [:inet6]
+  defp family(_ip), do: [:inet]
 
   @impl true
   def handle_call(:port, _from, state), do: {:reply, state.port, state}

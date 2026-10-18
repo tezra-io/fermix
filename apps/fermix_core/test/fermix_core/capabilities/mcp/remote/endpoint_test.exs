@@ -224,19 +224,22 @@ defmodule FermixCore.Capabilities.MCP.Remote.EndpointTest do
       resolver = fn host -> flunk("#{host} must not be looked up") end
 
       {:ok, endpoint} = Endpoint.operator("https://10.0.0.5/mcp")
-      assert {:ok, {10, 0, 0, 5}} = Endpoint.resolve(endpoint, resolver: resolver)
+      assert {:ok, [{10, 0, 0, 5}]} = Endpoint.resolve(endpoint, resolver: resolver)
 
       {:ok, endpoint} = Endpoint.operator("http://[::1]:3000/mcp")
-      assert {:ok, {0, 0, 0, 0, 0, 0, 0, 1}} = Endpoint.resolve(endpoint, resolver: resolver)
+      assert {:ok, [{0, 0, 0, 0, 0, 0, 0, 1}]} = Endpoint.resolve(endpoint, resolver: resolver)
     end
 
-    test "a name on the owner's network resolves; localhost is the loopback address" do
-      {:ok, endpoint} = Endpoint.operator("https://nas.home.example/mcp")
-      resolver = fn "nas.home.example" -> {:ok, [{192, 168, 1, 20}]} end
-      assert {:ok, {192, 168, 1, 20}} = Endpoint.resolve(endpoint, resolver: resolver)
+    test "a name's every answer is a peer, in the resolver's order" do
+      {:ok, endpoint} = Endpoint.operator("https://nas.local/mcp")
+      resolver = fn "nas.local" -> {:ok, [{192, 168, 1, 20}]} end
+      assert {:ok, [{192, 168, 1, 20}]} = Endpoint.resolve(endpoint, resolver: resolver)
 
       {:ok, endpoint} = Endpoint.operator("http://localhost:3000/mcp")
-      assert {:ok, {127, 0, 0, 1}} = Endpoint.resolve(endpoint)
+      resolver = fn "localhost" -> {:ok, [{0, 0, 0, 0, 0, 0, 0, 1}, {127, 0, 0, 1}]} end
+
+      assert {:ok, [{0, 0, 0, 0, 0, 0, 0, 1}, {127, 0, 0, 1}]} =
+               Endpoint.resolve(endpoint, resolver: resolver)
     end
 
     test "a metadata or link-local address is a security block, literal or answered" do
@@ -246,7 +249,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.EndpointTest do
                Endpoint.resolve(endpoint)
 
       {:ok, endpoint} = Endpoint.operator("https://metadata.example/mcp")
-      resolver = fn "metadata.example" -> {:ok, [{169, 254, 169, 254}]} end
+      resolver = fn "metadata.example" -> {:ok, [{10, 0, 0, 5}, {169, 254, 169, 254}]} end
 
       assert {:error,
               {:remote_security_blocked, {:resolved_to_link_local_address, {169, 254, 169, 254}}}} =
@@ -269,7 +272,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.EndpointTest do
       {:ok, endpoint} = Endpoint.new(@base, "/mcp")
       resolver = fn _host -> {:ok, [{93, 184, 216, 34}]} end
 
-      assert {:ok, {93, 184, 216, 34}} = Endpoint.resolve(endpoint, resolver: resolver)
+      assert {:ok, [{93, 184, 216, 34}]} = Endpoint.resolve(endpoint, resolver: resolver)
     end
 
     # The gate has to run in the world the connection runs in: if resolution

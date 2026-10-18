@@ -243,7 +243,13 @@ defmodule FermixCore.Setup.ConfigStoreMcpWriteTest do
             {"files", %{"env" => %{"A" => "b"}}, "env"},
             {"Bad Name", @files, "name"},
             {"files_", %{"command" => "uvx"}, "name"},
-            {"gmail", @files, "name"}
+            {"gmail", @files, "name"},
+            {"remote",
+             %{
+               "transport" => "http",
+               "url" => "https://mcp.example.com/mcp",
+               "header_secrets" => ["Authorization"]
+             }, "header_secrets"}
           ] do
         assert {:error, {:invalid_params, ^field, sentence}} =
                  ConfigStore.put_mcp_server(name, attrs, @recording)
