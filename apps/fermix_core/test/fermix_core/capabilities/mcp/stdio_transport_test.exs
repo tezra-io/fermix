@@ -201,27 +201,44 @@ defmodule FermixCore.Capabilities.MCP.StdioTransportTest do
     end
 
     # A server that talks for days must not fill the disk: past its cap the
-    # file's last lines are carried and the file emptied, and the exit sentence
-    # reads the carry and then what the file holds.
-    test "the file is held under its cap, and the last lines still reach the exit", ctx do
+    # file's last lines are carried and the file emptied. A line written
+    # between a check's read and its emptying is lost (the transport says so),
+    # so while the fixture writes its 400 lines only these hold: the file ends
+    # under its cap, and the cap was enforced, as the lines are several times it.
+    test "the file is held under its cap while the program writes", ctx do
       name = "chatty#{ctx.suffix}"
       cap = 2_048
       bound = [stderr_cap_bytes: cap, stderr_check_ms: 20]
       %{client: client} = start_server(ctx, spec(ctx, name, "chatty"), transport: bound)
       transport = Module.concat(client, "Transport")
 
-      # The 400 lines are written before the fixture answers `initialize`, but
-      # a check may land while they are being written, so the last of them may
-      # be in the carry, still in the file under its cap, or split between the
-      # two; the exit reads the two together. A carry at all means the cap was
-      # enforced, as 400 lines are several times the cap.
       assert eventually(fn ->
                %{stderr_file: file, stderr_carry: carry} = :sys.get_state(transport)
-
-               File.stat!(file).size <= cap and carry != [] and
-                 Enum.take(carry ++ StdioTransport.tail(file), -20) ==
-                   Enum.map(381..400, &"fixture chatty line #{&1}")
+               File.stat!(file).size <= cap and carry != []
              end)
+    end
+
+    # The exit sentence reads the carry and then what the file holds. The
+    # check runs once, by hand, after the last of the fixture's 400 lines is in
+    # the file (its stderr may land after its answer to `initialize`, and with
+    # no check running the file only grows), so no line is in flight.
+    test "the last lines reach the exit across the carry and the file", ctx do
+      name = "chatty#{ctx.suffix}"
+      cap = 2_048
+      bound = [stderr_cap_bytes: cap, stderr_check_ms: :timer.hours(1)]
+      %{client: client} = start_server(ctx, spec(ctx, name, "chatty"), transport: bound)
+      transport = Module.concat(client, "Transport")
+
+      %{stderr_file: file} = :sys.get_state(transport)
+
+      assert eventually(fn ->
+               List.last(StdioTransport.tail(file)) == "fixture chatty line 400"
+             end)
+
+      send(transport, :check_stderr)
+      %{stderr_carry: carry} = :sys.get_state(transport)
+      assert File.stat!(file).size == 0
+      assert carry == Enum.map(381..400, &"fixture chatty line #{&1}")
 
       capture_log(fn ->
         ref = Process.monitor(transport)
