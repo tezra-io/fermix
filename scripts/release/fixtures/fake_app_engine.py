@@ -150,7 +150,8 @@ def remove_runtime_paths(daemon_path, socket_paths, pid_path):
     else:
         daemon_path.unlink(missing_ok=True)
     for path in socket_paths:
-        path.unlink(missing_ok=True)
+        if not controlled(f"stale-{path.stem}"):
+            path.unlink(missing_ok=True)
     pid_path.unlink(missing_ok=True)
 
 
@@ -162,7 +163,7 @@ def run_runtime(home, port, manifest):
     server = None
     stopping = threading.Event()
     try:
-        for name in ("realtime", "companion", "browser_host"):
+        for name in ("realtime", "companion", "browser_host", "native_host"):
             if not controlled(f"no-{name}"):
                 listeners[home / f"{name}.sock"] = unix_listener(home / f"{name}.sock")
         Health.product_version = manifest["identity"]["product_version"]

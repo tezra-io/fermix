@@ -298,6 +298,22 @@ class VerifyAppEngineTest(unittest.TestCase):
                     timeouts=self.timeouts,
                 )
 
+    # The app engine serves the native host socket (M76), and its listener
+    # removes the file when the engine stops, as every other socket's does.
+    def test_fails_when_shutdown_leaves_the_native_host_socket(self):
+        archive = self._archive_with_control("stale-native_host")
+
+        with self._darwin_host("arm64"):
+            with self.assertRaisesRegex(verify.VerificationError, "native_host.sock remained"):
+                verify.verify_app_engine(
+                    archive,
+                    TARGET,
+                    VERSION,
+                    "native",
+                    temp_parent=self.base,
+                    timeouts=self.timeouts,
+                )
+
     def test_startup_timeout_reports_health_when_only_realtime_socket_is_missing(self):
         short = verify.Timeouts(
             startup_attempts=50,
@@ -380,6 +396,37 @@ class VerifyAppEngineTest(unittest.TestCase):
                     timeouts=short,
                 )
 
+    # A packaged app engine whose native host socket cannot bind boots on
+    # without it (the listener logs and ignores), so nothing would ring on the
+    # Mac: the smoke run is where that is caught.
+    def test_startup_timeout_reports_when_only_the_native_host_socket_is_missing(self):
+        short = verify.Timeouts(
+            startup_attempts=50,
+            shutdown_attempts=3,
+            poll_interval_seconds=0.02,
+            health_timeout_seconds=0.02,
+            management_timeout_seconds=0.1,
+            stop_timeout_seconds=0.1,
+            cleanup_timeout_seconds=1.0,
+        )
+
+        archive = self._archive_with_control("no-native_host")
+
+        with self._darwin_host("arm64"), self._start_after_fixture_ready():
+            with self.assertRaisesRegex(
+                verify.VerificationError,
+                r"daemon_socket=true.*realtime_socket=true.*companion_socket=true.*"
+                r"browser_host_socket=true.*native_host_socket=false.*health=true",
+            ):
+                verify.verify_app_engine(
+                    archive,
+                    TARGET,
+                    VERSION,
+                    "native",
+                    temp_parent=self.base,
+                    timeouts=short,
+                )
+
     def test_startup_timeout_reports_each_missing_runtime_surface(self):
         short = verify.Timeouts(
             startup_attempts=50,
@@ -397,7 +444,7 @@ class VerifyAppEngineTest(unittest.TestCase):
             with self.assertRaisesRegex(
                 verify.VerificationError,
                 r"daemon_socket=false.*realtime_socket=false.*companion_socket=false.*"
-                r"browser_host_socket=false.*health=false",
+                r"browser_host_socket=false.*native_host_socket=false.*health=false",
             ):
                 verify.verify_app_engine(
                     archive,
