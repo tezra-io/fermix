@@ -3,8 +3,9 @@ defmodule FermixCore.Capabilities.MCP.AnubisStarter do
   Behaviour for "build the client child spec for one MCP server."
 
   Production uses `Default`, which spawns either an `Anubis.Client` over a
-  stdio transport (`command`/`args`/`env`) or, for a `remote_mcp` spec, a
-  `Remote.Owner` holding one authenticated Streamable HTTP session (M27 §7.3).
+  stdio transport (`command`/`args`/`env`) or, for a `remote_mcp` plugin spec
+  or an operator `http` server, a `Remote.Owner` holding one authenticated
+  Streamable HTTP session (M27 §7.3, M74 E4).
   Tests substitute a stub that returns no children (and records the parsed
   config) so they don't have to spawn real subprocesses or open sockets.
 
@@ -30,9 +31,10 @@ defmodule FermixCore.Capabilities.MCP.AnubisStarter.Default do
   Production starter.
 
   A spec is either local or remote, never both (`McpSource` refuses the blend):
-  `transport: :streamable_http` builds a `Remote.Owner`; a stdio spec with a
-  `:command` builds an `Anubis.Client`; a spec with neither gets an empty child
-  list — the test/discoverer-only path.
+  `transport: :streamable_http` (a plugin's) and `transport: :http` (an
+  operator server's) build a `Remote.Owner`; a stdio spec with a `:command`
+  builds an `Anubis.Client`; a spec with neither gets an empty child list —
+  the test/discoverer-only path.
 
   The stdio client runs over one of two transports. An operator server
   (`[mcp.servers.*]`, `transport: :stdio`) runs over `StdioTransport`, which
@@ -69,7 +71,7 @@ defmodule FermixCore.Capabilities.MCP.AnubisStarter.Default do
   @impl true
   def child_specs_for(%{name: name} = server, config) when is_binary(name) and is_map(config) do
     case Map.get(server, :transport) do
-      :streamable_http -> remote_specs(server, config)
+      remote when remote in [:streamable_http, :http] -> remote_specs(server, config)
       transport -> local_specs(transport, server, config)
     end
   end

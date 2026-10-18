@@ -500,6 +500,11 @@ An operator stdio server runs over `Capabilities.MCP.StdioTransport`, which
 reads its secrets in its own process, builds its environment, finds its program
 on the login shell's `PATH` (`Capabilities.MCP.LoginPath`) and is its
 `RuntimeStatus` owner; a plugin's `local_stdio` server runs over Anubis's own.
+An operator `http` server runs on the same remote rail as a `remote_mcp`
+plugin, one `Remote.Owner` and `Remote.Session`, with its endpoint from the URL
+the owner typed (`Remote.Endpoint.operator/1`, checked under `Net.Guard`'s
+owner policy) and its headers from `Capabilities.MCP.Secrets`; with no signed
+contract, its tools register as a stdio server's do.
 Fermix is only ever an MCP client: it does not expose its own tools as an MCP
 server.
 

@@ -136,6 +136,35 @@ defmodule FermixCore.Capabilities.MCP.Remote.SessionTest do
       assert {"mcp-protocol-version", "2025-06-18"} in initialized.headers
     end
 
+    # A server need not issue a session id; the negotiated version still rides
+    # every request after initialize (M74 E4: it used to be keyed on the id).
+    test "sends the protocol version after initialize to a server with no session id" do
+      agent = start_agent([initialize_ok("2025-06-18", []), accepted()])
+      {_agent, opts} = handshake()
+
+      {:ok, _session} =
+        start_supervised({Session, Keyword.put(opts, :connect_opts, agent: agent)})
+
+      [initialize, initialized] = requests(agent)
+
+      refute Enum.any?(initialize.headers, &(elem(&1, 0) == "mcp-protocol-version"))
+      refute Enum.any?(initialized.headers, &(elem(&1, 0) == "mcp-session-id"))
+      assert {"mcp-protocol-version", "2025-06-18"} in initialized.headers
+    end
+
+    # A plugin's manifest declares and signs its transport, so a refused
+    # initialize is not followed by the older-transport check.
+    test "a refused initialize is not checked for the older SSE transport" do
+      agent = start_agent([{:ok, %{status: 405, headers: [], body: {:empty, ""}}}])
+      {_agent, opts} = handshake()
+      opts = Keyword.put(opts, :connect_opts, agent: agent)
+
+      assert {:error, {:remote_http_error, 405}} =
+               start_supervised({Session, opts}) |> unwrap_start_error()
+
+      assert [%{method: "POST"}] = requests(agent)
+    end
+
     test "pins 2025-06-18 and refuses any other negotiated version" do
       assert Session.protocol_version() == "2025-06-18"
 

@@ -20,7 +20,9 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
       manifest did not name.
 
   The connection is HTTP/1 only. Streamable HTTP is defined over either
-  version, but one wire shape means one code path to audit (Rule #12).
+  version, but one wire shape means one code path to audit (Rule #12). It is
+  TLS, verified as below, except to an operator endpoint on this machine,
+  which `Endpoint.operator/1` alone admits over plain `http`.
 
   The caller owns the returned struct and must `close/1` it on every path.
   """
@@ -76,19 +78,26 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
     end
   end
 
+  # `hostname:` is what the `Host` header carries; certificate checking takes
+  # the bare host from `tls_opts/2`.
   defp connect(endpoint, peer, opts) do
     connect_opts = [
-      hostname: endpoint.host,
+      hostname: Endpoint.authority_host(endpoint),
       mode: :passive,
       protocols: [:http1],
-      transport_opts: tls_opts(endpoint.host, opts)
+      transport_opts: transport_opts(endpoint, opts)
     ]
 
-    case Mint.HTTP.connect(:https, peer, endpoint.port, connect_opts) do
+    case Mint.HTTP.connect(endpoint.scheme, peer, endpoint.port, connect_opts) do
       {:ok, conn} -> {:ok, %__MODULE__{conn: conn, endpoint: endpoint, peer: peer}}
       {:error, reason} -> {:error, {:remote_unreachable, transport_class(reason)}}
     end
   end
+
+  defp transport_opts(%Endpoint{scheme: :https, host: host}, opts), do: tls_opts(host, opts)
+
+  defp transport_opts(%Endpoint{scheme: :http}, opts),
+    do: [timeout: Keyword.get(opts, :connect_timeout_ms, Timeouts.mcp_remote_connect())]
 
   # `hostname:` above already drives Host/SNI/cert checking in Mint; these are
   # spelled out anyway because this is the audited path — an implicit default
@@ -110,17 +119,30 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
 
   Returns the updated connection so the caller can reuse it, or an error. On
   error the connection is unusable and the caller must `close/1`.
+
+  `stop: :first_event` answers as soon as an event stream has delivered one
+  complete event, with that event as the body, for a stream that may never
+  end (the older SSE transport's, M74 D7). The response is then unfinished,
+  so that connection is unusable too and the caller must `close/1` it.
   """
-  @spec request(t(), String.t(), [{String.t(), String.t()}], binary() | nil, pos_integer()) ::
-          {:ok, t(), response()} | {:error, t(), term()}
-  def request(%__MODULE__{} = connection, method, headers, body, timeout_ms)
-      when is_binary(method) and is_list(headers) and is_integer(timeout_ms) and timeout_ms > 0 do
+  @spec request(
+          t(),
+          String.t(),
+          [{String.t(), String.t()}],
+          binary() | nil,
+          pos_integer(),
+          keyword()
+        ) :: {:ok, t(), response()} | {:error, t(), term()}
+  def request(%__MODULE__{} = connection, method, headers, body, timeout_ms, opts \\ [])
+      when is_binary(method) and is_list(headers) and is_integer(timeout_ms) and timeout_ms > 0 and
+             is_list(opts) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     target = connection.endpoint.path
+    stop = Keyword.get(opts, :stop, :done)
 
     case Mint.HTTP.request(connection.conn, method, target, headers, body) do
       {:ok, conn, ref} ->
-        read(%{connection | conn: conn}, ref, deadline, timeout_ms)
+        read(%{connection | conn: conn}, ref, deadline, timeout_ms, stop)
 
       # The send itself failed, so the peer never saw this request. That is a
       # materially different fact from a close mid-response: resending is not a
@@ -139,8 +161,9 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
     :ok
   end
 
-  defp read(connection, ref, deadline, budget_ms) do
+  defp read(connection, ref, deadline, budget_ms, stop) when stop in [:done, :first_event] do
     acc = %{
+      stop: stop,
       status: nil,
       headers: [],
       header_bytes: 0,
@@ -175,11 +198,15 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
 
   defp apply_responses(connection, ref, responses, acc, deadline, budget_ms) do
     case Enum.reduce_while(responses, {:cont, acc}, &fold_response(&1, &2, ref)) do
+      {:cont, %{stop: :first_event, events: [_ | _]} = acc} -> first_event(connection, acc)
       {:cont, acc} -> recv_loop(connection, ref, acc, deadline, budget_ms)
       {:done, acc} -> finish(connection, acc)
       {:halt, reason} -> {:error, connection, reason}
     end
   end
+
+  defp first_event(connection, acc),
+    do: {:ok, connection, %{status: acc.status, headers: acc.headers, body: {:sse, acc.events}}}
 
   defp fold_response({:status, ref, status}, {:cont, acc}, ref) do
     if status in 300..399 do

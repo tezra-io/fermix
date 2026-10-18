@@ -44,7 +44,10 @@ defmodule FermixCore.Capabilities.MCP.Server do
   failed registration never leaves a partial tool set or a stale name.
 
   Local stdio servers keep their existing prefixing, per-tool tolerance, and
-  discovery behaviour unchanged.
+  discovery behaviour unchanged. An operator's remote server (M74 E4) carries
+  no signed contract, so it registers the way they do, while its discovery is
+  bounded and its failures classified by its `Remote.Owner`, as a remote
+  plugin's are.
   """
 
   use GenServer
@@ -172,10 +175,9 @@ defmodule FermixCore.Capabilities.MCP.Server do
   # bounded by its owner's startup budget, a plugin's stdio server by its
   # attempts. `:first_connection_ms` is a test seam.
   defp first_connection_deadline(opts, {:operator, _name}) do
-    case Keyword.get(opts, :contract) do
-      nil -> now_ms() + Keyword.get(opts, :first_connection_ms, @first_connection_ms)
-      _signed -> nil
-    end
+    if Keyword.get(opts, :discoverer) == RemoteOwner,
+      do: nil,
+      else: now_ms() + Keyword.get(opts, :first_connection_ms, @first_connection_ms)
   end
 
   defp first_connection_deadline(_opts, _source_id), do: nil
@@ -417,10 +419,11 @@ defmodule FermixCore.Capabilities.MCP.Server do
   defp terminal_contract_error?({class, _detail}) when class in @terminal_classes, do: true
   defp terminal_contract_error?(_reason), do: false
 
-  # A remote source's last failure is already classified by its rail. A stdio
-  # program's is whatever its client said while it never answered, so the
-  # status names what happened: the attempts ran out (the log line above keeps
-  # the client's class).
+  # A remote source's last failure is already classified by its rail, with or
+  # without a signed contract. A stdio program's is whatever its client said
+  # while it never answered, so the status names what happened: the attempts
+  # ran out (the log line above keeps the client's class).
+  defp give_up_reason(%{discoverer: RemoteOwner}, reason), do: reason
   defp give_up_reason(%{contract: nil}, _reason), do: :retries_exhausted
   defp give_up_reason(_state, reason), do: reason
 

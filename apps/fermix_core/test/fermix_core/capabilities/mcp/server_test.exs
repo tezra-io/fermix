@@ -6,6 +6,8 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.MCP.Naming
   alias FermixCore.Capabilities.MCP.Registry, as: McpRegistry
+  alias FermixCore.Capabilities.MCP.Remote.Owner, as: RemoteOwner
+  alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Capabilities.MCP.Server, as: McpServer
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
 
@@ -110,6 +112,24 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
         tools when is_list(tools) -> {:ok, tools}
       end
     end
+  end
+
+  # Stands where a `Remote.Owner` answers discovery: every `tools/list` is
+  # refused with the classified reason it was started with.
+  defmodule RefusingOwner do
+    use GenServer
+
+    def start_link(reason), do: GenServer.start_link(__MODULE__, reason)
+    def calls(owner), do: GenServer.call(owner, :calls)
+
+    @impl true
+    def init(reason), do: {:ok, %{reason: reason, calls: 0}}
+
+    @impl true
+    def handle_call(:list_tools, _from, state),
+      do: {:reply, {:error, state.reason}, %{state | calls: state.calls + 1}}
+
+    def handle_call(:calls, _from, state), do: {:reply, state.calls, state}
   end
 
   setup do
@@ -404,6 +424,37 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
       end)
 
       assert CapabilityRegistry.list(ctx.cap_registry, kind: :mcp) == []
+    end
+
+    # M74 E4: an operator's remote server has no signed contract, yet its owner
+    # bounds its start and classifies its failures, as a remote plugin's does.
+    test "an operator's remote server gives up after its attempts with its rail's class", ctx do
+      status = start_supervised!({RuntimeStatus, name: :"mcp_server_remote_status_#{ctx.test}"})
+      owner = start_supervised!({RefusingOwner, {:reauthorization_required, :key_refused}})
+      {:ok, _generation} = RuntimeStatus.register_owner(status, {:operator, "linear"}, owner)
+
+      {:ok, pid} =
+        McpServer.start_link(
+          server_name: "linear",
+          source_id: {:operator, "linear"},
+          discoverer: RemoteOwner,
+          client: owner,
+          capability_registry: ctx.cap_registry,
+          mcp_registry: ctx.mcp_registry,
+          runtime_status: status,
+          main_agent: nil,
+          realtime_supervisor: nil,
+          retry_base_ms: 1,
+          max_discovery_attempts: 2
+        )
+
+      ref = Process.monitor(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 10_000
+
+      assert RefusingOwner.calls(owner) == 2
+
+      assert {:ok, %{status: :reauthorization_required, detail: :key_refused}} =
+               RuntimeStatus.fetch(status, {:operator, "linear"})
     end
 
     test "tool_overrides win for policy_class and hidden_from_agent?", %{

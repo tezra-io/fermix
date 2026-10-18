@@ -221,7 +221,7 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
       refute Map.has_key?(server, :command)
     end
 
-    test "only an enabled stdio server is started; http waits for the remote rail" do
+    test "an enabled server is started, stdio or http; a disabled one of either is not" do
       toml = """
       [mcp.servers.off]
       command = "npx"
@@ -233,14 +233,24 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
       [mcp.servers.remote]
       transport = "http"
       url = "https://mcp.example.com/mcp"
+
+      [mcp.servers.remote_off]
+      transport = "http"
+      url = "https://mcp.example.com/mcp"
+      enabled = false
       """
 
-      assert [%{name: "off"} = off, %{name: "on"} = on, %{name: "remote"} = remote] =
-               Config.from_toml(toml)
+      assert [
+               %{name: "off"} = off,
+               %{name: "on"} = on,
+               %{name: "remote"} = remote,
+               %{name: "remote_off"} = remote_off
+             ] = Config.from_toml(toml)
 
       refute Config.startable?(off)
       assert Config.startable?(on)
-      refute Config.startable?(remote)
+      assert Config.startable?(remote)
+      refute Config.startable?(remote_off)
     end
 
     test "an auth mode outside auto, header and none is refused by key" do

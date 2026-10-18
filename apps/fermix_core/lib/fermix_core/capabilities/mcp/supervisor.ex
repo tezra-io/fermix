@@ -30,11 +30,13 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
   cold-starts the server's program.
 
   The TOML servers are the ones `runs?/1` answers for: startable by their
-  configuration (`MCP.Config.startable?/1`: a disabled server, and an `http`
-  one until the remote rail takes an operator endpoint, stays in the file and
-  is not started), with every value they declare in the secret store
+  configuration (`MCP.Config.startable?/1`: a disabled server stays in the
+  file and is not started), with every value they declare in the secret store
   (`MCP.Secrets.complete?/1`). An operator stdio server's environment is built
-  by its own `StdioTransport`, never resolved into its spec here.
+  by its own `StdioTransport`, never resolved into its spec here. An operator
+  `http` server runs on the remote rail, under its own `Remote.Owner`, with no
+  signed contract: its tools register as a stdio server's do, and calls go to
+  the owner through `Caller.OperatorRemote` (M74 E4).
 
   Child identity is **source-qualified** (M27 §7.3): `{:plugin, "acme"}` for a
   plugin-owned server, `{:operator, "acme"}` for a `[mcp.servers.acme]` TOML
@@ -51,6 +53,7 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
   require Logger
 
   alias FermixCore.Capabilities.MCP.AnubisStarter
+  alias FermixCore.Capabilities.MCP.Caller.OperatorRemote, as: OperatorRemoteCaller
   alias FermixCore.Capabilities.MCP.Caller.Remote, as: RemoteCaller
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.MCP.LoginPath
@@ -512,13 +515,18 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
   # A remote server's tool list comes from its own connection owner, over the
   # session that owner already authenticated — there is no Anubis client to ask.
   defp discoverer_for(%{discoverer: discoverer}), do: discoverer
-  defp discoverer_for(%{transport: :streamable_http}), do: RemoteOwner
+
+  defp discoverer_for(%{transport: remote}) when remote in [:streamable_http, :http],
+    do: RemoteOwner
+
   defp discoverer_for(_server), do: nil
 
-  # A remote source dispatches through its allowlisted proxy, never a raw client
-  # (M27 §7.6). The signed spec itself is the contract enforcer's input.
+  # A remote plugin source dispatches through its allowlisted proxy, never a raw
+  # client (M27 §7.6). The signed spec itself is the contract enforcer's input.
+  # An operator's remote server has no signed contract and calls its owner.
   defp caller_for(%{caller: caller}), do: caller
   defp caller_for(%{transport: :streamable_http}), do: RemoteCaller
+  defp caller_for(%{transport: :http}), do: OperatorRemoteCaller
   defp caller_for(_server), do: nil
 
   defp contract_for(%{transport: :streamable_http} = server), do: server
@@ -543,6 +551,10 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
   # An operator stdio server's `StdioTransport` builds its environment in its
   # own process, so no value it reads is ever in this spec (M74 E3).
   defp resolve_server_env!(%{transport: :stdio} = server), do: server
+
+  # An operator http server is a URL, not a process; its header values are read
+  # by its session (M74 E4).
+  defp resolve_server_env!(%{transport: :http} = server), do: server
 
   defp resolve_server_env!(server) do
     pass_env = Map.get(server, :pass_env, [])

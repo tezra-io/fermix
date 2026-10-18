@@ -30,8 +30,9 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
   ## Owners, and the two facts beside a status
 
   The owner is the process that holds a source's connection: `Remote.Owner`
-  for a remote source, `StdioTransport` for an operator stdio one (M74 E3). A
-  plugin's stdio source has none. `MCP.Server` writes into the generation the
+  for a remote source, a plugin's or an operator `http` server's (M74 E4),
+  `StdioTransport` for an operator stdio one (M74 E3). A plugin's stdio source
+  has none. `MCP.Server` writes into the generation the
   owner installed. The status words were minted for the remote rail and a
   stdio source uses the same ones: what is new for it is a class, here in
   `classify/1`, not a status, because every status is published in the plugin
@@ -278,7 +279,20 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
     do: {:insufficient_credential_scope, nil, nil}
 
   def classify({:invalid_remote_config, detail}), do: {:invalid_remote_config, class(detail), nil}
+
+  # An operator's remote server (M74 E4) says which credential was refused: the
+  # key its `header` mode sent, or none at all where its `auto` mode is asked to
+  # sign in. A plugin's refusal carries its host, which is dropped.
+  def classify({:reauthorization_required, class})
+      when class in [:key_refused, :sign_in_required],
+      do: {:reauthorization_required, class, nil}
+
   def classify({:reauthorization_required, _host}), do: {:reauthorization_required, nil, nil}
+
+  # A header an operator's remote server declares that could not be read when
+  # its session started. The payload names it, so only the class survives.
+  def classify({:header_unavailable, _name}),
+    do: {:invalid_remote_config, :header_unavailable, nil}
 
   def classify({:remote_security_blocked, detail}),
     do: {:remote_security_blocked, class(detail), nil}

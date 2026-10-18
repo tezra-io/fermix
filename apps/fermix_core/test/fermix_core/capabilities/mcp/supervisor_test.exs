@@ -784,7 +784,8 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
     end
 
     # The supervisor starts the TOML servers that are startable: a disabled one
-    # and an `http` one are kept in the file and not started.
+    # is kept in the file and not started. (An enabled `http` one starts on the
+    # remote rail: `OperatorRemoteTest`.)
     test "only startable TOML servers are started", %{cap_registry: cap_registry, suffix: suffix} do
       previous = Application.get_env(:fermix_core, :mcp_servers)
       on_exit(fn -> Application.put_env(:fermix_core, :mcp_servers, previous || []) end)
@@ -798,8 +799,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
 
       Application.put_env(:fermix_core, :mcp_servers, [
         Map.merge(stub, %{name: "on", transport: :stdio, enabled?: true}),
-        Map.merge(stub, %{name: "off", transport: :stdio, enabled?: false}),
-        Map.merge(stub, %{name: "remote", transport: :http, enabled?: true})
+        Map.merge(stub, %{name: "off", transport: :stdio, enabled?: false})
       ])
 
       sup =
@@ -815,7 +815,6 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
 
       assert is_pid(server_child_pid(sup, "on"))
       assert server_child_pid(sup, "off") == nil
-      assert server_child_pid(sup, "remote") == nil
     end
   end
 

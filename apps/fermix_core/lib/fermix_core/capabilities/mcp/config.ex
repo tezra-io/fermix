@@ -194,14 +194,13 @@ defmodule FermixCore.Capabilities.MCP.Config do
   def configured, do: Application.get_env(:fermix_core, :mcp_servers, [])
 
   @doc """
-  Whether the daemon starts this server: an enabled stdio server.
-
-  An `http` server is read and kept, and not started until the remote client
-  takes an operator endpoint (M74 E4). This is the one place that decides.
+  Whether the daemon starts this server by its configuration: an enabled one,
+  stdio or `http` (the remote rail takes an operator endpoint, M74 E4). This is
+  the one place that decides.
   """
   @spec startable?(server_config()) :: boolean()
-  def startable?(%{enabled?: enabled?, transport: transport}),
-    do: enabled? and transport == :stdio
+  def startable?(%{enabled?: enabled?, transport: transport}) when transport in [:stdio, :http],
+    do: enabled?
 
   @doc "The most operator servers one settings file holds."
   @spec max_servers() :: pos_integer()

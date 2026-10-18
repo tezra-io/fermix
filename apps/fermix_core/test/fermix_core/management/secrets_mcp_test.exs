@@ -124,12 +124,17 @@ defmodule FermixCore.Management.SecretsMcpTest do
       assert_received {:restart_server, {:operator, "files"}, "files"}
     end
 
-    test "a disabled server, and one this build does not start, are not started" do
+    # An http server runs on the remote rail (M74 E4), so its last missing
+    # value starts it like a stdio server's; a disabled one stays stopped.
+    test "a disabled server is not started; an http server starts with its last value" do
       assert {:ok, _view} = Secrets.set("mcp:notes/env/NOTES_KEY", "n", @opts)
-      assert {:ok, _view} = Secrets.set("mcp:linear/header/Authorization", "Bearer lin", @opts)
-      assert {:ok, _view} = Secrets.set("mcp:linear/client_secret", "s", @opts)
-
       refute_received {:restart_server, _source_id, _name}
+
+      assert {:ok, _view} = Secrets.set("mcp:linear/header/Authorization", "Bearer lin", @opts)
+      refute_received {:restart_server, _source_id, _name}
+
+      assert {:ok, _view} = Secrets.set("mcp:linear/client_secret", "s", @opts)
+      assert_received {:restart_server, {:operator, "linear"}, "linear"}
       assert McpSecrets.fetch("linear", {:header, "Authorization"}) == {:ok, "lin"}
     end
   end
@@ -213,13 +218,15 @@ defmodule FermixCore.Management.SecretsMcpTest do
 
     # The program keeps the environment it started with, so the value is still
     # in use until the server stops.
-    test "a server this build starts is stopped; one it does not start is left alone" do
+    test "a server this build starts is stopped, stdio or http; a disabled one is left alone" do
       assert {:ok, _view} = Secrets.clear("mcp:files/env/API_KEY", @opts)
       assert_received {:stop_server, {:operator, "files"}}
 
       assert {:ok, _view} = Secrets.clear("mcp:notes/env/NOTES_KEY", @opts)
-      assert {:ok, _view} = Secrets.clear("mcp:linear/header/Authorization", @opts)
       refute_received {:stop_server, _source_id}
+
+      assert {:ok, _view} = Secrets.clear("mcp:linear/header/Authorization", @opts)
+      assert_received {:stop_server, {:operator, "linear"}}
     end
   end
 

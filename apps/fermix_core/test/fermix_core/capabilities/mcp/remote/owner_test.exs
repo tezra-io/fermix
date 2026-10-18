@@ -359,13 +359,17 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
       assert opens(agent) == 1
     end
 
+    # A refused spec still starts: failing `init/1` would fail the subtree's
+    # start, and at boot the MCP supervisor's with it (M74 E4).
     test "a spec that is not remote is refused before anything connects", %{status: status} do
       Process.flag(:trap_exit, true)
       agent = start_agent([])
       opts = owner_opts(status, agent, %{transport: :stdio})
 
-      assert {:error, {:invalid_remote_config, _detail}} = Owner.start_link(opts)
+      assert {:ok, owner} = Owner.start_link(opts)
+      assert_receive {:EXIT, ^owner, :normal}
       assert {:ok, %{status: :invalid_remote_config}} = RuntimeStatus.fetch(status, @source)
+      assert opens(agent) == 0
     end
 
     test "an unpinnable endpoint is refused before anything connects", %{status: status} do
@@ -373,8 +377,10 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
       agent = start_agent([])
       opts = owner_opts(status, agent, %{base_url: "http://mcp.acme.example"})
 
-      assert {:error, {:invalid_remote_config, _detail}} = Owner.start_link(opts)
+      assert {:ok, owner} = Owner.start_link(opts)
+      assert_receive {:EXIT, ^owner, :normal}
       assert {:ok, %{status: :invalid_remote_config}} = RuntimeStatus.fetch(status, @source)
+      assert opens(agent) == 0
     end
 
     test "an absent credential is :needs_secret, not a client that starts and 401s", %{
@@ -475,13 +481,37 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
       refute rendered =~ "ws_opaque_id"
     end
 
-    test "a start failure reports the reason, not the configuration", %{status: status} do
+    # Some hosted servers put a key in the URL's path or query (M74 E4).
+    test "an operator server's redacted view names where it points, not its path or query" do
+      spec = %{
+        source_id: {:operator, "zap"},
+        name: "zap",
+        transport: :http,
+        url: "https://mcp.zap.example/s/path_canary_51/mcp?key=query_canary_52",
+        auth: :none,
+        header_secrets: []
+      }
+
+      redacted = Owner.redacted(spec)
+      rendered = inspect(redacted, limit: :infinity)
+
+      assert redacted.origin == "https://mcp.zap.example:443"
+      refute rendered =~ "path_canary_51"
+      refute rendered =~ "query_canary_52"
+    end
+
+    # A refusal is an atom class in the status table, never a start error that
+    # would print the configuration in a `failed_to_start_child` report.
+    test "a refusal is a classified status, not a start error", %{status: status} do
       Process.flag(:trap_exit, true)
       agent = start_agent([])
       opts = owner_opts(status, agent, %{transport: :stdio})
 
-      assert {:error, reason} = Owner.start_link(opts)
-      refute inspect(reason, limit: :infinity) =~ @credential
+      assert {:ok, owner} = Owner.start_link(opts)
+      assert_receive {:EXIT, ^owner, :normal}
+
+      assert {:ok, %{status: :invalid_remote_config, detail: :transport}} =
+               RuntimeStatus.fetch(status, @source)
     end
   end
 

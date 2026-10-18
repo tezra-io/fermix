@@ -12,9 +12,10 @@ defmodule FermixCore.Capabilities.MCP.Caller do
   signed read-only / replay-safe facts. Model arguments never contribute to it —
   they are a separate argument, and the closure is not reachable from them.
 
-  Production stdio servers use `Caller.Anubis`; remote servers use
-  `Caller.Remote`, which can only reach the allowlisted `Remote.Proxy`. Tests
-  implement this behaviour to stub the transport without spawning clients.
+  Production stdio servers use `Caller.Anubis`; remote plugin servers use
+  `Caller.Remote`, which can only reach the allowlisted `Remote.Proxy`; an
+  operator's remote server uses `Caller.OperatorRemote`. Tests implement this
+  behaviour to stub the transport without spawning clients.
   """
 
   @type source_id :: {atom(), String.t()}
@@ -79,6 +80,33 @@ defmodule FermixCore.Capabilities.MCP.Caller.Remote do
     case McpRegistry.lookup_proxy(source_id) do
       {:ok, proxy} -> {:ok, proxy}
       {:error, :not_found} -> {:error, :remote_not_connected}
+    end
+  end
+end
+
+defmodule FermixCore.Capabilities.MCP.Caller.OperatorRemote do
+  @moduledoc """
+  Production caller for an operator's remote server (`[mcp.servers.*]`,
+  `transport = "http"`, M74 E4).
+
+  The server carries no signed contract, so there is no proxy to pass: its
+  `Remote.Owner` is published as the source's client, exactly as an operator
+  stdio server's Anubis client is, and the call goes over the session that
+  owner authenticated. The answer is the server's own `CallToolResult`, which
+  `MCP.Capability` renders.
+  """
+
+  @behaviour FermixCore.Capabilities.MCP.Caller
+
+  alias FermixCore.Capabilities.MCP.Registry, as: McpRegistry
+  alias FermixCore.Capabilities.MCP.Remote.Owner, as: RemoteOwner
+  alias FermixCore.Timeouts
+
+  @impl true
+  def call_tool({:operator, name} = source_id, tool, args, _context)
+      when is_binary(name) and is_binary(tool) and is_map(args) do
+    with {:ok, owner} <- McpRegistry.lookup_client(source_id) do
+      RemoteOwner.call_tool(owner, tool, args, Timeouts.mcp_remote_call())
     end
   end
 end
