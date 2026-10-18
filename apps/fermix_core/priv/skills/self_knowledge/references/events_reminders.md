@@ -1,6 +1,6 @@
 # Events and reminders
 
-A durable personal date plus a finite reminder plan, delivered to the owner through the default background channel. No model runs when a reminder fires.
+A durable personal date plus a finite reminder plan, delivered to the owner through the default background channel or, where the build can ring it, as a notification on this computer. No model runs when a reminder fires.
 
 ## Event or scheduled job
 
@@ -11,7 +11,7 @@ A durable personal date plus a finite reminder plan, delivered to the owner thro
 
 ## Time and recurrence
 
-- `when` is one tagged form: `{"type":"date"}`, `{"type":"datetime"}` (with `utc_offset` when a local time is ambiguous), `{"type":"relative","amount":2,"unit":"days"|"weeks"}`, or `{"type":"annual","month":9,"day":14}`.
+- `when` is one tagged form: `{"type":"date"}`, `{"type":"datetime"}` (with `utc_offset` when a local time is ambiguous), `{"type":"relative","amount":2,"unit":"days"|"weeks"}`, or `{"type":"annual","month":9,"day":14}`. A timer is a relative `when` in `"minutes"` (1 to 1,440) or `"hours"` (1 to 168): it names its exact moment in the owner's zone, takes no `time`, and is an ordinary explicit reminder with one at-time rule, so two alike timers minutes apart are both kept; further out, use days, weeks or a datetime.
 - The tool owns the clock: it uses `[fermix_core.personalization] timezone` unless the owner names an IANA zone, and a missing or invalid zone fails creation rather than assuming UTC. A nonexistent DST-gap time is rejected; an ambiguous one needs `utc_offset` (ask the owner).
 - Recurrence is one-time or yearly. A yearly event is one row with one id; reminders are materialized for the next two occurrences, rolling over by local calendar, never +365 days. A yearly February 29 needs a `feb_28` or `mar_1` policy: ask once.
 - Every create and edit returns `stated_as`, the stored occurrence written absolutely with its weekday (a yearly event: its day plus the next occurrence); confirm with that, not the owner's relative word. A relative day word used in the small hours after midnight gets a which-day question naming both dates before anything is stored.
@@ -19,9 +19,17 @@ A durable personal date plus a finite reminder plan, delivered to the owner thro
 ## Reminder plans and delivery
 
 - Defaults: birthday or anniversary, 7 days before and the day of at 9:00 local; timed appointment, 24 hours and 1 hour before; date-only deadline, 7 days, 1 day and the day of. "Remind me at X" creates exactly that one. A custom plan replaces the defaults (at most 10 rules); lead times already past are skipped, so say when nothing future remains.
-- Delivery goes to `[fermix_core.jobs] default_delivery_target`, snapshotted onto the event: Telegram, Slack, Discord, Signal, WhatsApp or iMessage (`cli` is a jobs target, not a reminder target). With none configured, Fermix derives the owner's inbox from the first channel with an explicit `owner_user_id` (Telegram, then Signal, then WhatsApp, then iMessage); `delivery.source` says `configured` or `derived`, so the acknowledgement can name the derived inbox. With neither, `event_store` fails naming both fixes and never falls back to the current chat. The default target is a `config.toml` key; no settings pane writes it. Telegram refuses a bot's first message to someone who never pressed **Start**, so a Telegram inbox needs the owner to have started the bot once.
+- Delivery goes to `[fermix_core.jobs] default_delivery_target`, snapshotted onto the event: Telegram, Slack, Discord, Signal, WhatsApp, iMessage or this computer (`cli` is a jobs target, not a reminder target). With none configured, Fermix derives the owner's inbox from the first channel with an explicit `owner_user_id` (Telegram, then Signal, then WhatsApp, then iMessage), and last this computer where the build can ring it now; `delivery.source` says `configured`, `derived` or `computer`, so the acknowledgement can name where it will ring. With none of them, `event_store` fails naming the fixes and never falls back to the current chat. The default target is a `config.toml` key; no settings pane writes it. Telegram refuses a bot's first message to someone who never pressed **Start**, so a Telegram inbox needs the owner to have started the bot once.
 - A later config change does not move existing events; `event_update(rebind_delivery_to_default: true)` does.
 - A failed send is retried on the same target (at due, +1 min, +5 min, +15 min, +60 min, honoring a rate-limit hint, within the reminder's validity), then fails visibly; it never switches channel. A later rule coming due supersedes an earlier still-failing one, so a recovery never sends "one week before" and "today" together. Messages always state the absolute date and time and fit in one message on every channel.
+
+## This computer
+
+- `event_store` and `event_update` take `delivery: "computer"` only where the build can ring here: the Fermix app's engine on a Mac and every Linux build. Choose it when the owner asks for it here, or for a timer or a reminder minutes or hours away asked from this computer's own surfaces (the Mac chat, a terminal, an editor, a voice call). A chat or phone ask keeps its default target unless the owner names this computer.
+- On a Mac the Fermix app shows it with sound and a **Snooze 10 minutes** button. The app is opened in the background to ring when it is not running, a locked Mac shows it as its lock-screen setting says, and a Mac asleep at the moment rings at wake while the reminder is still valid (two hours for a timer), else it expires. It needs the app's Notifications permission: **Settings > Permissions > Notifications > Grant…**, or System Settings > Notifications > Fermix once refused. Fermix raises the macOS prompt only when the ask comes from this computer's own surfaces; asked from a chat or the phone before the grant, it refuses saying where to grant and stores nothing. Nothing stands in for a missing grant, computer use included.
+- On Linux the desktop's notification server shows it while a desktop session is running. A headless host, a `--system` unit or a logged-out session has none, so a reminder for this computer is refused when stored, and a due one is retried on the same target and then expires.
+- A standalone Fermix on a Mac (a Homebrew formula or a download) and a source run on a Mac cannot ring here; `fermix migrate-to-app` moves a standalone install to the app.
+- A ring that fails is retried on the same target like any reminder; it never moves to a chat. "Snooze that" and "cancel that" after it rang resolve it from this computer's own surfaces, never from a remote chat, and the Mac notification's Snooze 10 minutes moves it with no turn.
 
 ## The follow-up check-in
 

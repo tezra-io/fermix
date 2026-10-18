@@ -639,7 +639,8 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
         "discord" => "Discord",
         "signal" => "Signal",
         "whatsapp" => "WhatsApp",
-        "imessage" => "iMessage"
+        "imessage" => "iMessage",
+        "computer" => "this computer"
       },
       platform
     )

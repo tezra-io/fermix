@@ -20,6 +20,17 @@ defmodule FermixCore.Tools.EventToolsTest do
   @owner_channels [:telegram, :discord, :signal, :slack, :whatsapp]
   @weekdays ~w(Monday Tuesday Wednesday Thursday Friday Saturday Sunday)
 
+  # M76 §4.6: the builds that offer this computer as a reminder target, and
+  # the ones that offer none (a standalone engine and a source run on a Mac).
+  @mac_checkout %{profile: :source, os: :darwin}
+  @offering_hosts [
+    %{profile: :app_engine, os: :darwin},
+    %{profile: :linux_package_cli, os: :linux},
+    %{profile: :standalone_cli, os: :linux},
+    %{profile: :source, os: :linux}
+  ]
+  @silent_hosts [%{profile: :standalone_cli, os: :darwin}, @mac_checkout]
+
   setup do
     unique = System.unique_integer([:positive])
     db_path = Path.join(System.tmp_dir!(), "fermix-event-tools-#{unique}.db")
@@ -227,6 +238,8 @@ defmodule FermixCore.Tools.EventToolsTest do
     test "a failed creation never reads like success", %{repo: repo} do
       Application.put_env(:fermix_core, :jobs, delivery_channels: @channels)
 
+      # With no chat rung left the ladder would ask this computer; the host is
+      # one that offers no notifications, so no suite ever asks its own machine.
       {:ok, result} =
         EventStore.execute(
           %{
@@ -234,7 +247,7 @@ defmodule FermixCore.Tools.EventToolsTest do
             "kind" => "birthday",
             "when" => %{"type" => "annual", "month" => 9, "day" => 14}
           },
-          context(repo)
+          context(repo, %{host: @mac_checkout})
         )
 
       assert result.success == false
@@ -311,6 +324,74 @@ defmodule FermixCore.Tools.EventToolsTest do
       assert metadata.tool == "event_store"
       assert metadata.success == true
       assert duration >= 0
+    end
+  end
+
+  describe "this computer as a target, and timers (M76 §4.6, §4.7)" do
+    test "event_store and event_update publish delivery only where the build offers it" do
+      for tool <- [EventStore, EventUpdate] do
+        for host <- @offering_hosts do
+          assert %{type: "string", enum: ["computer"]} =
+                   tool.dynamic_parameters(%{host: host}).properties.delivery,
+                 "#{tool.name()} hides delivery on #{inspect(host)}"
+        end
+
+        for host <- @silent_hosts do
+          refute Map.has_key?(tool.dynamic_parameters(%{host: host}).properties, :delivery),
+                 "#{tool.name()} publishes delivery on #{inspect(host)}"
+        end
+      end
+    end
+
+    test "the rule for choosing this computer stands only beside the parameter" do
+      for host <- @offering_hosts do
+        assert EventStore.when_to_use(%{host: host}) =~ ~s(delivery "computer")
+      end
+
+      for host <- @silent_hosts do
+        refute EventStore.when_to_use(%{host: host}) =~ "computer"
+      end
+    end
+
+    test "the time form names minutes and hours for a timer" do
+      description = EventStore.parameters().properties.when.description
+
+      assert description =~ ~s("minutes")
+      assert description =~ ~s("hours")
+    end
+
+    test "a build that offers no notifications refuses delivery computer, storing nothing", %{
+      repo: repo
+    } do
+      {:ok, result} =
+        EventStore.execute(
+          %{
+            "title" => "Tea",
+            "kind" => "explicit_reminder",
+            "when" => %{"type" => "relative", "amount" => 10, "unit" => "minutes"},
+            "delivery" => "computer"
+          },
+          context(repo, %{host: %{profile: :standalone_cli, os: :darwin}})
+        )
+
+      assert result.success == false
+      assert result.error =~ "fermix migrate-to-app"
+      assert {:ok, %{events: []}} = Repo.list_temporal_events(%{}, server: repo)
+    end
+
+    test "event_update hands delivery to the registry, which refuses an unknown choice", %{
+      repo: repo
+    } do
+      stored = payload(store_birthday(repo))
+
+      {:ok, result} =
+        EventUpdate.execute(
+          %{"event_id" => stored["event_id"], "delivery" => "fax"},
+          context(repo)
+        )
+
+      assert result.success == false
+      assert result.error =~ ~s("computer")
     end
   end
 

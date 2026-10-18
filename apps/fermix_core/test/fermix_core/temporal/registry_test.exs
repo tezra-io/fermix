@@ -13,6 +13,12 @@ defmodule FermixCore.Temporal.RegistryTest do
   @tz "America/New_York"
   @now ~U[2026-08-02 12:00:00Z]
 
+  # A build that offers no notifications (a source run on a Mac), so a test
+  # whose ladder runs past every chat rung never reaches this machine's own
+  # notification server, whichever operating system runs the suite.
+  @mac_checkout %{profile: :source, os: :darwin}
+  @offers_none [native: [host: @mac_checkout]]
+
   defmodule FakeAdapter do
     @moduledoc false
     def send_message(_destination, _text, _opts), do: :ok
@@ -410,9 +416,11 @@ defmodule FermixCore.Temporal.RegistryTest do
   describe "create_event/3 — default target snapshot (§11.1)" do
     test "no configured target and no owner-configured channel leaves no event row", %{repo: repo} do
       assert {:error, :no_default_delivery_target} =
-               create(repo, birthday_params(),
-                 jobs_config: [delivery_channels: @channels],
-                 configured_owners: %{}
+               create(
+                 repo,
+                 birthday_params(),
+                 [jobs_config: [delivery_channels: @channels], configured_owners: %{}] ++
+                   @offers_none
                )
 
       message = Registry.describe_error(:no_default_delivery_target)
@@ -507,9 +515,13 @@ defmodule FermixCore.Temporal.RegistryTest do
       repo: repo
     } do
       assert {:error, :no_default_delivery_target} =
-               create(repo, birthday_params(),
-                 jobs_config: [delivery_channels: @channels],
-                 configured_owners: %{"cli" => "local", "discord" => "owner-d"}
+               create(
+                 repo,
+                 birthday_params(),
+                 [
+                   jobs_config: [delivery_channels: @channels],
+                   configured_owners: %{"cli" => "local", "discord" => "owner-d"}
+                 ] ++ @offers_none
                )
     end
 
@@ -2228,6 +2240,590 @@ defmodule FermixCore.Temporal.RegistryTest do
                })
 
       assert_receive {:scheduler_cast, :event_changed}
+    end
+  end
+
+  # --- this computer as a reminder target (M76 §4.6, D3, D6) ---------------
+
+  @busctl "/usr/bin/busctl"
+  @no_server "no desktop notification server is running on this machine"
+
+  # This computer as its D-Bus backend answers for it, against a replayed
+  # busctl: a notification server owns its name, or none does. Every question
+  # asked of it is reported, so a test can say this computer was asked.
+  defp this_computer(server?) do
+    test_pid = self()
+    answer = if server?, do: {:ok, "b true\n"}, else: {:ok, "b false\n"}
+
+    [
+      provider: :dbus,
+      find_executable: fn "busctl" -> @busctl end,
+      runner: fn @busctl, _args ->
+        send(test_pid, :computer_asked)
+        answer
+      end
+    ]
+  end
+
+  # A computer no test may reach: any question asked of it fails the test.
+  defp computer_never_asked(native \\ [provider: :dbus]) do
+    native ++
+      [
+        find_executable: fn "busctl" -> flunk("this computer was asked") end,
+        runner: fn _busctl, _args -> flunk("this computer was asked") end
+      ]
+  end
+
+  # No configured target and no owner id on any channel: every chat rung of
+  # the ladder is empty.
+  defp no_chat_inbox, do: [jobs_config: [delivery_channels: @channels], configured_owners: %{}]
+
+  defp triple(row),
+    do: {row.delivery_platform, row.delivery_destination, row.delivery_thread_scope}
+
+  describe "create_event/3 — this computer, named (M76 §4.6)" do
+    test "delivery computer snapshots this computer's triple over the configured target", %{
+      repo: repo
+    } do
+      # `opts/0` configures a Telegram target; the owner naming this computer wins.
+      assert {:ok, %{event: event, reminders: reminders}} =
+               create(repo, report_params(%{delivery: "computer"}), native: this_computer(true))
+
+      assert_received :computer_asked
+      assert triple(event) == {"computer", "local", "root"}
+      assert Enum.all?(reminders, &(triple(&1) == {"computer", "local", "root"}))
+      assert Registry.event_view(event)["delivery"]["source"] == "computer"
+    end
+
+    test "a computer that cannot ring refuses in its own sentence and stores nothing", %{
+      repo: repo
+    } do
+      assert {:error, {:computer_not_ready, @no_server} = reason} =
+               create(repo, report_params(%{delivery: "computer"}), native: this_computer(false))
+
+      assert Registry.describe_error(reason) =~ @no_server
+      assert Registry.describe_error(reason) =~ "Nothing was stored"
+      assert {:ok, %{events: []}} = Registry.list_events(%{}, context(repo), opts())
+    end
+
+    test "a build that offers no notifications refuses naming the build, asking nothing", %{
+      repo: repo
+    } do
+      assert {:error, {:computer_not_ready, sentence}} =
+               create(repo, report_params(%{delivery: "computer"}),
+                 native: computer_never_asked(host: @mac_checkout)
+               )
+
+      assert sentence =~ "a development run from a source checkout"
+      assert {:ok, %{events: []}} = Registry.list_events(%{}, context(repo), opts())
+    end
+
+    test "any other delivery choice is refused before this computer is asked", %{repo: repo} do
+      assert {:error, {:unsupported_delivery_choice, "telegram"} = reason} =
+               create(repo, report_params(%{delivery: "telegram"}),
+                 native: computer_never_asked()
+               )
+
+      assert Registry.describe_error(reason) =~ ~s("computer")
+    end
+
+    test "a configured computer target is accepted on its readiness", %{repo: repo} do
+      config = jobs_config(default_delivery_target: [platform: "computer", target: "local"])
+
+      assert {:ok, %{event: event}} =
+               create(repo, birthday_params(), jobs_config: config, native: this_computer(true))
+
+      assert triple(event) == {"computer", "local", "root"}
+      assert Registry.event_view(event)["delivery"]["source"] == "configured"
+
+      assert {:error, {:computer_not_ready, @no_server}} =
+               create(repo, birthday_params(%{title: "Ana's birthday"}),
+                 jobs_config: config,
+                 native: this_computer(false)
+               )
+    end
+
+    test "a configured computer target names its one destination", %{repo: repo} do
+      config = jobs_config(default_delivery_target: [platform: "computer", target: "my-mac"])
+
+      assert {:error, {:computer_destination, "my-mac"} = reason} =
+               create(repo, birthday_params(),
+                 jobs_config: config,
+                 native: computer_never_asked()
+               )
+
+      assert Registry.describe_error(reason) =~ ~s("local")
+    end
+  end
+
+  describe "create_event/3 — this computer, the last derived rung (D3)" do
+    test "with no target and no chat inbox, a computer that can ring is derived", %{repo: repo} do
+      assert {:ok, %{event: event}} =
+               create(repo, birthday_params(), no_chat_inbox() ++ [native: this_computer(true)])
+
+      assert triple(event) == {"computer", "local", "root"}
+      assert Registry.event_view(event)["delivery"]["source"] == "derived"
+    end
+
+    test "a chat inbox keeps the reminder and this computer is never asked", %{repo: repo} do
+      assert {:ok, %{event: event}} =
+               create(repo, birthday_params(),
+                 jobs_config: [delivery_channels: @channels],
+                 configured_owners: %{"telegram" => "tg-owner"},
+                 native: computer_never_asked()
+               )
+
+      assert triple(event) == {"telegram", "tg-owner", "root"}
+      assert Registry.event_view(event)["delivery"]["source"] == "derived"
+    end
+
+    test "a configured target keeps the reminder and this computer is never asked", %{
+      repo: repo
+    } do
+      assert {:ok, %{event: event}} =
+               create(repo, birthday_params(), native: computer_never_asked())
+
+      assert event.delivery_platform == "telegram"
+      assert Registry.event_view(event)["delivery"]["source"] == "configured"
+    end
+
+    test "a computer that cannot ring is the third remedy named, and nothing is stored", %{
+      repo: repo
+    } do
+      assert {:error, {:no_default_delivery_target, @no_server} = reason} =
+               create(repo, birthday_params(), no_chat_inbox() ++ [native: this_computer(false)])
+
+      message = Registry.describe_error(reason)
+      assert message =~ "default_delivery_target"
+      assert message =~ "owner id"
+      assert message =~ @no_server
+      assert {:ok, %{events: []}} = Registry.list_events(%{}, context(repo), opts())
+    end
+
+    test "a build that offers no notifications keeps the two-remedy refusal, asking nothing", %{
+      repo: repo
+    } do
+      assert {:error, :no_default_delivery_target} =
+               create(
+                 repo,
+                 birthday_params(),
+                 no_chat_inbox() ++ [native: computer_never_asked(host: @mac_checkout)]
+               )
+    end
+  end
+
+  describe "update_event/4 — this computer (M76 §4.6)" do
+    test "delivery computer moves the event's unsent reminders to this computer", %{repo: repo} do
+      {:ok, %{event: stored}} = create(repo, report_params(%{}))
+
+      assert {:ok, %{event: moved, reminders: reminders}} =
+               Registry.update_event(
+                 stored.id,
+                 %{delivery: "computer"},
+                 context(repo),
+                 opts(native: this_computer(true))
+               )
+
+      assert triple(moved) == {"computer", "local", "root"}
+      assert reminders != []
+      assert Enum.all?(reminders, &(&1.delivery_platform == "computer"))
+      assert Registry.event_view(moved)["delivery"]["source"] == "computer"
+    end
+
+    test "a computer that cannot ring refuses the move and the stored target stands", %{
+      repo: repo
+    } do
+      {:ok, %{event: stored}} = create(repo, report_params(%{}))
+
+      assert {:error, {:computer_not_ready, @no_server}} =
+               Registry.update_event(
+                 stored.id,
+                 %{delivery: "computer"},
+                 context(repo),
+                 opts(native: this_computer(false))
+               )
+
+      assert {:ok, kept} = Repo.get_temporal_event(stored.id, server: repo)
+      assert kept.delivery_platform == "telegram"
+      assert kept.revision == stored.revision
+    end
+
+    test "a rebind derives this computer when it is the only rung left", %{repo: repo} do
+      {:ok, %{event: stored}} = create(repo, report_params(%{}))
+
+      assert {:ok, %{event: rebound}} =
+               Registry.update_event(
+                 stored.id,
+                 %{rebind_delivery_to_default: true},
+                 context(repo),
+                 opts(no_chat_inbox() ++ [native: this_computer(true)])
+               )
+
+      assert rebound.delivery_platform == "computer"
+      assert Registry.event_view(rebound)["delivery"]["source"] == "derived"
+    end
+
+    test "naming this computer and rebinding to the default at once is refused", %{repo: repo} do
+      {:ok, %{event: stored}} = create(repo, report_params(%{}))
+
+      assert {:error, :conflicting_delivery_change = reason} =
+               Registry.update_event(
+                 stored.id,
+                 %{delivery: "computer", rebind_delivery_to_default: true},
+                 context(repo),
+                 opts(native: computer_never_asked())
+               )
+
+      assert Registry.describe_error(reason) =~ "rebind_delivery_to_default"
+    end
+  end
+
+  # --- timers (M76 §4.7, D7) -----------------------------------------------
+
+  defp timer(amount, unit, overrides \\ %{}) do
+    Map.merge(
+      %{
+        title: "Tea",
+        kind: "explicit_reminder",
+        when: %{"type" => "relative", "amount" => amount, "unit" => unit}
+      },
+      overrides
+    )
+  end
+
+  describe "create_event/3 — timers in minutes and hours (M76 §4.7)" do
+    test "minutes are now plus the amount on the owner's clock, rung by one at-time reminder", %{
+      repo: repo
+    } do
+      # @now is 08:00 EDT on Sunday, August 2.
+      assert {:ok, %{event: event, reminders: [reminder], stated_as: stated_as}} =
+               create(repo, timer(10, "minutes"))
+
+      assert event.time_kind == "datetime"
+      assert event.recurrence_kind == "once"
+      assert event.local_date == ~D[2026-08-02]
+      assert event.local_time == ~T[08:10:00]
+      assert event.occurrence_at == ~U[2026-08-02 12:10:00.000000Z]
+      assert reminder.reminder_rule_id == "at_time"
+      assert reminder.scheduled_for == ~U[2026-08-02 12:10:00.000000Z]
+      assert stated_as == "Sunday, August 2 at 8:10 AM EDT"
+    end
+
+    test "hours past the owner's midnight land on their next day", %{repo: repo} do
+      # 22:30 EDT on Sunday, August 2.
+      assert {:ok, %{event: event, stated_as: stated_as}} =
+               create(repo, timer(3, "hours"), now: ~U[2026-08-03 02:30:00Z])
+
+      assert event.local_date == ~D[2026-08-03]
+      assert event.local_time == ~T[01:30:00]
+      assert event.occurrence_at == ~U[2026-08-03 05:30:00.000000Z]
+      assert stated_as == "Monday, August 3 at 1:30 AM EDT"
+    end
+
+    test "the clock's seconds carry and its fraction does not", %{repo: repo} do
+      assert {:ok, %{event: event}} =
+               create(repo, timer(10, "minutes"), now: ~U[2026-08-02 12:00:37.654321Z])
+
+      assert event.local_time == ~T[08:10:37]
+      assert event.occurrence_at == ~U[2026-08-02 12:10:37.000000Z]
+    end
+
+    test "a timer across the spring-forward gap rings at its real instant", %{repo: repo} do
+      # 01:30 EST; an hour on, the wall clock reads 03:30 EDT, and 02:30 never was.
+      assert {:ok, %{event: event}} =
+               create(repo, timer(1, "hours"), now: ~U[2026-03-08 06:30:00Z])
+
+      assert event.occurrence_at == ~U[2026-03-08 07:30:00.000000Z]
+      assert event.local_time == ~T[03:30:00]
+    end
+
+    test "a timer inside the fall-back fold is stored at its instant, never asked which", %{
+      repo: repo
+    } do
+      # 01:15 EDT, the first pass through the repeated hour.
+      now = ~U[2026-11-01 05:15:00Z]
+
+      assert {:ok, %{event: first}} = create(repo, timer(30, "minutes"), now: now)
+      assert first.occurrence_at == ~U[2026-11-01 05:45:00.000000Z]
+      assert first.local_time == ~T[01:45:00]
+
+      # An hour on, the wall clock reads 01:15 again, now EST.
+      assert {:ok, %{event: second}} =
+               create(repo, timer(1, "hours", %{title: "Laundry"}), now: now)
+
+      assert second.occurrence_at == ~U[2026-11-01 06:15:00.000000Z]
+      assert second.local_time == ~T[01:15:00]
+    end
+
+    test "minutes run 1 to 1,440 and hours 1 to 168; past that the error names the others", %{
+      repo: repo
+    } do
+      assert {:ok, %{event: day}} = create(repo, timer(1_440, "minutes"))
+      assert day.occurrence_at == ~U[2026-08-03 12:00:00.000000Z]
+
+      assert {:ok, %{event: week}} = create(repo, timer(168, "hours", %{title: "Laundry"}))
+      assert week.occurrence_at == ~U[2026-08-09 12:00:00.000000Z]
+
+      for {amount, unit} <- [{1_441, "minutes"}, {169, "hours"}] do
+        assert {:error, {:relative_too_far, ^amount, ^unit} = reason} =
+                 create(repo, timer(amount, unit, %{title: "Bread"}))
+
+        message = Registry.describe_error(reason)
+        assert message =~ "days"
+        assert message =~ "weeks"
+        assert message =~ "datetime"
+      end
+
+      for amount <- [0, -5, 1.5] do
+        assert {:error, {:invalid_when, _form}} =
+                 create(repo, timer(amount, "minutes", %{title: "Bread"}))
+      end
+
+      assert {:ok, %{events: events}} = Registry.list_events(%{}, context(repo), opts())
+      assert Enum.map(events, & &1.title) |> Enum.sort() == ["Laundry", "Tea"]
+    end
+
+    test "a timer names its own moment, so it takes no clock time", %{repo: repo} do
+      form = %{"type" => "relative", "amount" => 2, "unit" => "hours", "time" => "15:00:00"}
+
+      assert {:error, {:relative_time_not_allowed, "hours"} = reason} =
+               create(repo, timer(2, "hours", %{when: form}))
+
+      assert Registry.describe_error(reason) =~ "datetime"
+    end
+
+    test "an edit restarts a timer from the edit's own clock", %{repo: repo} do
+      {:ok, %{event: event}} = create(repo, timer(10, "minutes"))
+
+      assert {:ok, %{event: moved}} =
+               Registry.update_event(
+                 event.id,
+                 %{
+                   when: %{"type" => "relative", "amount" => 15, "unit" => "minutes"},
+                   owner_direction: "make it fifteen minutes"
+                 },
+                 context(repo),
+                 opts(now: ~U[2026-08-02 12:04:00Z])
+               )
+
+      assert moved.occurrence_at == ~U[2026-08-02 12:19:00.000000Z]
+    end
+  end
+
+  # D7: no exemption is coded, because the dedupe key of a one-time event
+  # already hashes its local date AND wall time, so two timers titled alike
+  # minutes apart never share an identity for the twin check to refuse.
+  describe "timers and the twin check (D7)" do
+    test "two timers titled alike minutes apart are both stored, with no identity conflict", %{
+      repo: repo
+    } do
+      assert {:ok, %{status: :created, event: first}} = create(repo, timer(10, "minutes"))
+
+      assert {:ok, %{status: :created, event: second}} =
+               create(repo, timer(10, "minutes"), now: DateTime.add(@now, 300, :second))
+
+      refute second.id == first.id
+      refute second.dedupe_key == first.dedupe_key
+      assert second.occurrence_at == ~U[2026-08-02 12:15:00.000000Z]
+    end
+
+    test "the same timer asked again in the same second is the one already stored", %{
+      repo: repo
+    } do
+      assert {:ok, %{status: :created, event: first}} = create(repo, timer(10, "minutes"))
+      assert {:ok, %{status: :existing, event: again}} = create(repo, timer(10, "minutes"))
+      assert again.id == first.id
+    end
+  end
+
+  # --- after it rang on this computer (D6) ---------------------------------
+
+  # This computer's own surfaces, as `Native.local_surface?/1` reads a turn:
+  # an attended turn on the Mac chat, a terminal or an editor, or a voice call.
+  @local_surfaces [
+    {"the Mac chat",
+     %{channel: "companion", conversation_key: {"companion", "profile-1", :root}}},
+    {"a terminal", %{channel: "cli", conversation_key: {"cli", "1", :root}}},
+    {"an editor", %{channel: "acp", conversation_key: {"acp", "session-1", :root}}},
+    {"a voice call",
+     %{
+       channel: "voice",
+       conversation_key: {"voice", "call-1", :root},
+       computer_use_origin: :voice
+     }}
+  ]
+
+  defp rung_on_this_computer!(repo, sent_at, title) do
+    {:ok, %{reminders: [row]}} =
+      create(repo, report_params(%{title: title, delivery: "computer"}),
+        native: this_computer(true)
+      )
+
+    {:ok, claimed} = Repo.claim_due_reminders(row.scheduled_for, 10, server: repo)
+    hit = Enum.find(claimed, &(&1.id == row.id))
+    {:ok, delivered} = Repo.temporal_reminder_delivered(hit.id, sent_at, server: repo)
+    delivered
+  end
+
+  describe ~s["snooze that" and "cancel that" after it rang on this computer (D6)] do
+    test "this computer's own surfaces resolve the reminder rung here", %{repo: repo} do
+      rung = rung_on_this_computer!(repo, ~U[2026-08-16 19:00:00Z], "Water the plants")
+
+      for {surface, overrides} <- @local_surfaces do
+        assert {:ok, result} =
+                 snooze(
+                   repo,
+                   %{snooze: hours(1), confirm_past_boundary: true},
+                   [now: ~U[2026-08-16 19:30:00Z]],
+                   overrides
+                 ),
+               "#{surface} did not resolve the reminder rung on this computer"
+
+        assert result.source.id == rung.id
+        assert result.reminder.delivery_platform == "computer"
+      end
+    end
+
+    test "a remote chat never resolves a reminder rung on this computer", %{repo: repo} do
+      _rung = rung_on_this_computer!(repo, ~U[2026-08-16 19:00:00Z], "Water the plants")
+
+      remote = [
+        {"Telegram", %{channel: "telegram", conversation_key: {"telegram", "555", :root}}},
+        {"the phone", %{channel: "mobile", conversation_key: {"mobile", "phone-1", :root}}},
+        {"a local socket nobody is at",
+         %{
+           channel: "cli",
+           conversation_key: {"cli", "1", :root},
+           computer_use_origin: :unattended
+         }}
+      ]
+
+      for {surface, overrides} <- remote do
+        assert {:error, :no_recent_reminder} =
+                 snooze(
+                   repo,
+                   %{snooze: hours(1), confirm_past_boundary: true},
+                   [now: ~U[2026-08-16 19:30:00Z]],
+                   overrides
+                 ),
+               "#{surface} resolved a reminder rung on this computer"
+      end
+    end
+
+    test "this computer's surfaces never reach a reminder delivered into a chat", %{repo: repo} do
+      {_event, _telegram} = delivered_reminder!(repo, ~U[2026-08-16 19:00:00Z])
+
+      for {surface, overrides} <- @local_surfaces do
+        assert {:error, :no_recent_reminder} =
+                 snooze(
+                   repo,
+                   %{snooze: hours(1), confirm_past_boundary: true},
+                   [now: ~U[2026-08-16 19:30:00Z]],
+                   overrides
+                 ),
+               "#{surface} resolved a reminder delivered into a chat"
+      end
+    end
+
+    test "cancel that from the Mac chat cancels the event rung on this computer", %{repo: repo} do
+      rung = rung_on_this_computer!(repo, ~U[2026-08-16 19:00:00Z], "Water the plants")
+      [{_surface, mac_chat} | _others] = @local_surfaces
+
+      assert {:ok, %{event: event, source: source}} =
+               Registry.cancel_referent(
+                 context(repo, mac_chat),
+                 opts(now: ~U[2026-08-16 19:30:00Z])
+               )
+
+      assert source.id == rung.id
+      assert event.status == "cancelled"
+    end
+  end
+
+  describe "snooze_from_notification/3 (D6)" do
+    defp notification_opts(repo, extra \\ []) do
+      Keyword.merge(
+        [
+          now: ~U[2026-08-16 19:05:00Z],
+          personalization: [timezone: @tz],
+          memory_repo: repo,
+          temporal_scheduler: nil,
+          owner_id: "default"
+        ],
+        extra
+      )
+    end
+
+    test "the notification's snooze defers the rung reminder as the owner's own act", %{
+      repo: repo
+    } do
+      rung = rung_on_this_computer!(repo, ~U[2026-08-16 19:00:00Z], "Tea")
+
+      # The press is on a reminder that already rang at its event's own moment,
+      # so the later reminder needs no further consent: the press is it.
+      assert {:ok, result} =
+               Registry.snooze_from_notification(rung.id, 10, notification_opts(repo))
+
+      assert result.status == :created
+      assert result.source.id == rung.id
+      assert result.reminder.scheduled_for == ~U[2026-08-16 19:15:00.000000Z]
+      assert result.reminder.valid_until == ~U[2026-08-16 21:15:00.000000Z]
+      assert triple(result.reminder) == {"computer", "local", "root"}
+
+      # The one snooze path: its view is the tool's, and a repeat stores nothing new.
+      assert Registry.snooze_view(result)["status"] == "snoozed"
+
+      assert {:ok, %{status: :existing}} =
+               Registry.snooze_from_notification(rung.id, 10, notification_opts(repo))
+    end
+
+    test "the committed snooze notifies the scheduler", %{repo: repo} do
+      scheduler = :"notification_snooze_scheduler_#{System.unique_integer([:positive])}"
+      start_supervised!({FakeScheduler, name: scheduler, test_pid: self()})
+      rung = rung_on_this_computer!(repo, ~U[2026-08-16 19:00:00Z], "Tea")
+
+      assert {:ok, _result} =
+               Registry.snooze_from_notification(
+                 rung.id,
+                 10,
+                 notification_opts(repo, temporal_scheduler: scheduler)
+               )
+
+      assert_receive {:scheduler_cast, :event_changed}
+    end
+
+    test "a reminder that rang anywhere else is refused, and nothing is written", %{repo: repo} do
+      {event, telegram} = delivered_reminder!(repo, ~U[2026-08-16 19:00:00Z])
+
+      assert {:error, :not_rung_on_this_computer = reason} =
+               Registry.snooze_from_notification(telegram.id, 10, notification_opts(repo))
+
+      assert Registry.describe_error(reason) =~ "this computer"
+      assert reminders_for(repo, event.id) == []
+    end
+
+    test "an unknown reminder, or another owner's, is not found", %{repo: repo} do
+      rung = rung_on_this_computer!(repo, ~U[2026-08-16 19:00:00Z], "Tea")
+
+      assert {:error, :not_found} =
+               Registry.snooze_from_notification("rem_missing", 10, notification_opts(repo))
+
+      assert {:error, :not_found} =
+               Registry.snooze_from_notification(
+                 rung.id,
+                 10,
+                 notification_opts(repo, owner_id: "someone_else")
+               )
+    end
+
+    test "an id or a duration outside the contract raises" do
+      assert_raise FunctionClauseError, fn ->
+        apply(Registry, :snooze_from_notification, ["", 10, []])
+      end
+
+      assert_raise FunctionClauseError, fn ->
+        apply(Registry, :snooze_from_notification, ["rem_x", 0, []])
+      end
     end
   end
 end

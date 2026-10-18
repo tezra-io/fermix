@@ -59,7 +59,7 @@ Durable memory is SQLite at `~/.fermix/memory.db`; ETS is cache. `memory_recall`
 
 ## Events & reminders
 
-`event_store` keeps an owner-stated date (one-time or yearly) with a finite reminder plan, delivered through the default background channel with same-target retry; no model runs when a reminder fires. `event_list`/`event_update`/`event_remove` manage events and `reminder_snooze` defers a delivered reminder; right after one arrives, "snooze that" and "cancel that" need no id. Notify-only dates belong here; work that must reason or act is a `schedule_job`. The mutating tools are attended-owner-only; `event_list` is also readable by an operator-created scheduled run. Plans, delivery, the optional follow-up check-in and every refusal: skill_view(name: "self-knowledge", file: "events_reminders").
+`event_store` keeps an owner-stated date (one-time or yearly) with a finite reminder plan, delivered through the default background channel with same-target retry, or with `delivery: "computer"` as a notification on this computer where the build can ring it (the Fermix app on a Mac, the desktop's notification server on Linux); timers are reminders minutes or hours away; no model runs when a reminder fires. `event_list`/`event_update`/`event_remove` manage events and `reminder_snooze` defers a delivered reminder; right after one arrives, "snooze that" and "cancel that" need no id. Notify-only dates belong here; work that must reason or act is a `schedule_job`. The mutating tools are attended-owner-only; `event_list` is also readable by an operator-created scheduled run. Plans, delivery, the optional follow-up check-in and every refusal: skill_view(name: "self-knowledge", file: "events_reminders").
 
 ## Channels & access control
 
