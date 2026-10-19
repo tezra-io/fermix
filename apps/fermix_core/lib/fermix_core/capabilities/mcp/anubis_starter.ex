@@ -207,17 +207,18 @@ end
 defmodule FermixCore.Capabilities.MCP.AnubisStarter.OperatorClient do
   @moduledoc """
   The callback module an operator stdio server's client runs (M74 E3):
-  `Anubis.Client`, with the one clause it lacks.
+  `Anubis.Client`, with the clauses it lacks.
 
   Anubis sends `initialize` on its own behalf, with `{self(), make_ref()}` as
-  the caller to answer. Whatever ends that request without a result, its
-  timeout or an error the server answers, replies there: to the client
-  itself, which has no clause for the reply and stops on a
-  `FunctionClauseError` (`anubis_mcp` 2.0.0 and 2.1.0 alike). No other request
-  names the client as its caller, so a reply here is that one. It is logged by
-  its reason and dropped: the client stays up, uninitialized, and
-  `MCP.Server`'s first-connection window decides, as for a program that never
-  answers.
+  the caller to answer. Whatever ends that request without a handshake
+  replies there: its timeout, an error the server answers, or a result
+  without the `serverInfo` the protocol requires, which Anubis passes on as
+  it would any answer. The reply reaches the client itself, which has no
+  clause for it and stops on a `FunctionClauseError` (`anubis_mcp` 2.0.0 and
+  2.1.0 alike). No other request names the client as its caller, so a reply
+  here is that one. It is logged and dropped: the client stays up,
+  uninitialized, and `MCP.Server`'s first-connection window decides, as for a
+  program that never answers.
 
   Every other callback is Anubis's own.
   """
@@ -247,6 +248,13 @@ defmodule FermixCore.Capabilities.MCP.AnubisStarter.OperatorClient do
       "MCP client #{name}: its initialize ended without a result: #{inspect(reason)}"
     )
 
+    {:noreply, state}
+  end
+
+  def handle_info({ref, {:ok, %Anubis.MCP.Response{method: "initialize"}}}, state)
+      when is_reference(ref) do
+    %{client_info: %{"name" => name}} = state
+    Logger.warning("MCP client #{name}: its initialize was answered without serverInfo")
     {:noreply, state}
   end
 

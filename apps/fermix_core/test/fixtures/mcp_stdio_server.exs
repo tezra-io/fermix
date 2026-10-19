@@ -20,6 +20,8 @@
 #     `uvx` or `npx -y` start downloads its package before it reads anything.
 #   * `reject`: answers `initialize` with an error, as a server that refuses
 #     the handshake, and nothing else.
+#   * `nameless`: answers `initialize` with a result that leaves out the
+#     `serverInfo` the protocol requires, and nothing else.
 #   * `chatty`: writes 400 numbered lines to stderr before it reads anything,
 #     then serves, with one more tool, `finish`, which writes three last lines
 #     to stderr and exits with status 4.
@@ -76,6 +78,10 @@ defmodule McpStdioFixture do
     :stdio |> IO.stream(:line) |> Enum.each(&refuse_handshake/1)
   end
 
+  def run(protocol_version, "nameless") do
+    :stdio |> IO.stream(:line) |> Enum.each(&answer_handshake_nameless(&1, protocol_version))
+  end
+
   def run(protocol_version, "chatty") do
     Enum.each(1..400, &IO.puts(:stderr, "fixture chatty line #{&1}"))
     serve(protocol_version, @tools ++ [@finish_tool])
@@ -112,6 +118,16 @@ defmodule McpStdioFixture do
     case line |> String.trim() |> decode() do
       %{"id" => id, "method" => "initialize"} ->
         reply(id, {:error, %{"code" => -32_602, "message" => "Unsupported protocol version"}})
+
+      _other ->
+        :ok
+    end
+  end
+
+  defp answer_handshake_nameless(line, protocol_version) do
+    case line |> String.trim() |> decode() do
+      %{"id" => id, "method" => "initialize"} ->
+        reply(id, {:result, %{"protocolVersion" => protocol_version, "capabilities" => %{}}})
 
       _other ->
         :ok

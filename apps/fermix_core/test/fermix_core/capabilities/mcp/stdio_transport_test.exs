@@ -355,6 +355,26 @@ defmodule FermixCore.Capabilities.MCP.StdioTransportTest do
 
       assert log =~ "initialize ended without a result"
     end
+
+    # A result without the `serverInfo` the protocol requires is no handshake
+    # to Anubis: it passes the result on, as it would any answer, to the
+    # caller of `initialize`, which is the client itself.
+    test "a program that answers the handshake without serverInfo leaves its client running",
+         ctx do
+      name = "nameless#{ctx.suffix}"
+      TelemetryCapture.attach([[:anubis_mcp, :client, :response]], method: "initialize")
+
+      log =
+        capture_log(fn ->
+          %{client: client} = start_server(ctx, spec(ctx, name, "nameless"), await: false)
+          assert_receive {:telemetry, _event, _measurements, _metadata}, @bound_ms
+
+          assert Anubis.Client.get_server_capabilities(client) == nil
+          assert Anubis.Client.get_server_capabilities(client) == nil
+        end)
+
+      assert log =~ "initialize was answered without serverInfo"
+    end
   end
 
   # Before M74 both clients were registered as `Client.<name>` and introduced
