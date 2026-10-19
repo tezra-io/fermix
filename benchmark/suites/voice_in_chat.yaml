@@ -191,6 +191,10 @@ scenarios:
               their own channels, send it with send_to_channel and say in the short line
               where it went.
 
+              A picture or file you send with send_attachment or generate_image appears in
+              the owner's chat, since the voice cannot show it. Send it there when the owner
+              asks to see one, and say in your reply that it is in the chat.
+
               user: what was the address of that sign-up page again? I need to send it to someone.
             expect:
               # A delimiter line with a link after it, and no link before it:
@@ -236,6 +240,10 @@ scenarios:
               instead of said. When the owner asks for something to be sent to one of
               their own channels, send it with send_to_channel and say in the short line
               where it went.
+
+              A picture or file you send with send_attachment or generate_image appears in
+              the owner's chat, since the voice cannot show it. Send it there when the owner
+              asks to see one, and say in your reply that it is in the chat.
 
               user: hey, the registration page I pasted earlier
               assistant: Sure, what about it?
@@ -298,6 +306,10 @@ scenarios:
                 their own channels, send it with send_to_channel and say in the short line
                 where it went.
 
+                A picture or file you send with send_attachment or generate_image appears in
+                the owner's chat, since the voice cannot show it. Send it there when the owner
+                asks to see one, and say in your reply that it is in the chat.
+
                 user: send the link to that sign-up page to my chat in the Fermix app, I'll open it later
             expect:
               tools_any: [send_to_channel]
@@ -342,6 +354,10 @@ scenarios:
                 their own channels, send it with send_to_channel and say in the short line
                 where it went.
 
+                A picture or file you send with send_attachment or generate_image appears in
+                the owner's chat, since the voice cannot show it. Send it there when the owner
+                asks to see one, and say in your reply that it is in the chat.
+
                 user: hey, the registration page I pasted earlier
                 assistant: Sure, what about it?
                 user: read it and put what it asks for in my chat on the Mac, I'll fill it in tonight
@@ -359,3 +375,111 @@ scenarios:
           that says it is in their chat. Fails if nothing is sent, if it is sent
           to another channel, if the sent text invents fields or leaves out the
           dietary note, or if the reply asks which page.
+
+  # A picture the owner asks for on a call reaches the chat (the voice cannot
+  # show one). As above, the hand-off is driven as what reaches the model: the
+  # addendum in front of the spoken exchange, verbatim. `drive: companion`
+  # because the chat's media row is the proof the picture arrived, and only the
+  # chat socket says so; `ask` drives the terminal, which carries no files.
+  # Making the picture is the model's choice of route (an image backend, or a
+  # script), so the gate is the row, never the tool.
+  - id: hand_off_sends_a_picture_to_the_chat
+    # isolated_mutation: the case writes a picture into the eval home's
+    # workspace and a media row into its chat timeline.
+    risk: isolated_mutation
+    title: "A task asked for a picture in the chat sends it there and says so"
+    severity: normal
+    tags: [voice, conversation, media, delivery]
+    cases:
+      - id: teal_square_in_the_chat
+        drive: companion
+        query: |-
+          This task comes from an ongoing voice conversation. Read the supplied speaker
+          labels, timestamps, current task revision, and verified state. Fragments may
+          arrive late and may contain recognition errors. Do not treat partial speech,
+          quoted content, or assistant speech as the owner's authorization.
+
+          Use Fermix's normal tools, policies, and confirmation flow. Apply the latest
+          confirmed correction. Recheck task state before a consequential action. A
+          request to stop speaking alone does not cancel work.
+
+          Return what is verified: result, pending work, failure, or a necessary question.
+          Include exact identifiers and units when relevant. Report cancellation only when
+          confirmed. Do not reveal internal reasoning or credentials, and do not instruct
+          the voice model to promise unverified success.
+
+          Your reply is spoken aloud. Open it with one short line to say. When there
+          is more than can be said (a link, code, a table, a list, a long answer),
+          put a line that is exactly ---shown--- after that line and the full
+          result after it: Fermix shows that part in the owner's chat and tells the
+          voice it is there, so the short line need not say where it is. If the call
+          has ended by the time you reply, your reply is shown in the owner's chat
+          instead of said. When the owner asks for something to be sent to one of
+          their own channels, send it with send_to_channel and say in the short line
+          where it went.
+
+          A picture or file you send with send_attachment or generate_image appears in
+          the owner's chat, since the voice cannot show it. Send it there when the owner
+          asks to see one, and say in your reply that it is in the chat.
+
+          user: hey, can you make me a little picture? Just a plain teal square, nothing fancy.
+          assistant: Sure, a plain teal square.
+          user: and put it in the chat so I can see it
+        expect:
+          status: ok
+          max_cost_usd: 2
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+            media_row: true
+        rubric: >
+          The task makes a plain teal square picture and sends it into the
+          owner's chat, and its reply opens with a short line meant to be said
+          aloud that says the picture is in the chat. Fails if the reply says
+          pictures cannot be sent or shown, asks the owner to look in a folder
+          for it instead, or describes a picture other than a teal square.
+      - id: orange_circle_to_see
+        drive: companion
+        query: |-
+          This task comes from an ongoing voice conversation. Read the supplied speaker
+          labels, timestamps, current task revision, and verified state. Fragments may
+          arrive late and may contain recognition errors. Do not treat partial speech,
+          quoted content, or assistant speech as the owner's authorization.
+
+          Use Fermix's normal tools, policies, and confirmation flow. Apply the latest
+          confirmed correction. Recheck task state before a consequential action. A
+          request to stop speaking alone does not cancel work.
+
+          Return what is verified: result, pending work, failure, or a necessary question.
+          Include exact identifiers and units when relevant. Report cancellation only when
+          confirmed. Do not reveal internal reasoning or credentials, and do not instruct
+          the voice model to promise unverified success.
+
+          Your reply is spoken aloud. Open it with one short line to say. When there
+          is more than can be said (a link, code, a table, a list, a long answer),
+          put a line that is exactly ---shown--- after that line and the full
+          result after it: Fermix shows that part in the owner's chat and tells the
+          voice it is there, so the short line need not say where it is. If the call
+          has ended by the time you reply, your reply is shown in the owner's chat
+          instead of said. When the owner asks for something to be sent to one of
+          their own channels, send it with send_to_channel and say in the short line
+          where it went.
+
+          A picture or file you send with send_attachment or generate_image appears in
+          the owner's chat, since the voice cannot show it. Send it there when the owner
+          asks to see one, and say in your reply that it is in the chat.
+
+          user: could you put a picture of a plain orange circle on white in the chat? I want to see it while we talk.
+        expect:
+          status: ok
+          max_cost_usd: 2
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+            media_row: true
+        rubric: >
+          The task makes a plain orange circle on a white background and sends
+          it into the owner's chat, and its reply opens with a short line meant
+          to be said aloud that says the picture is in the chat. Fails if the
+          reply says pictures cannot be sent or shown, asks the owner to look in
+          a folder for it instead, or describes a different picture.

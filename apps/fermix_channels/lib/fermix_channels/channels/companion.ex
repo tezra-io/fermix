@@ -347,15 +347,21 @@ defmodule FermixChannels.Channels.Companion do
   end
 
   @doc """
-  Attachments do not travel on this socket in version 1, so a media reply is
-  refused rather than written as a row the client could never fetch.
+  Write one picture or file Fermix sends into the timeline and announce it. The
+  Mac draws it from the row's media ref, whose bytes it fetches with
+  `media_fetch` (protocol 3), and the phones get it as they get one sent through
+  their own channel: `Mobile.write_media/4` is the one write for a media reply,
+  here through this channel's store, counted as this channel's delivery.
   """
   @impl true
   @spec send_media(String.t(), Reply.media_part()) :: :ok | {:error, term()}
   @spec send_media(String.t(), Reply.media_part(), Channel.send_opts()) :: :ok | {:error, term()}
   def send_media(profile_id, media, opts \\ [])
       when is_binary(profile_id) and is_map(media) and is_list(opts) do
-    {:error, :unsupported_media}
+    {result, duration_us} =
+      Telemetry.timed_us(fn -> Mobile.write_media(store(), profile_id, media, opts) end)
+
+    emit_outbound(result, duration_us)
   end
 
   # A row written here is no turn's completion (a slash command's answer, a

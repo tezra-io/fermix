@@ -688,9 +688,79 @@ defmodule FermixChannels.Channels.CompanionTest do
                     %{"t" => "tool_event", "tool" => "shell", "phase" => "start"}}
   end
 
-  test "media does not travel on this socket" do
-    assert {:error, :unsupported_media} =
-             Companion.send_media("main", %{kind: :image, path: "/tmp/x.png"}, [])
+  # A picture Fermix sends here is a row of the shared timeline: the Mac draws
+  # it from the row's media ref and the phones get its bytes, as they do one
+  # sent through their own channel.
+  describe "send_media/3" do
+    setup do
+      test_pid = self()
+      env = ~w(mobile_media_resolver mobile_event_sink)a
+      previous = Map.new(env, &{&1, Application.fetch_env(:fermix_channels, &1)})
+
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("companion-outbound")
+      path = Path.join(dir, "dog.png")
+      File.write!(path, "image")
+
+      Application.put_env(:fermix_channels, :mobile_media_resolver, fn media ->
+        {:ok,
+         %{
+           "ref" => String.duplicate("a", 64),
+           "kind" => Atom.to_string(media.kind),
+           "mime" => media.mime_type,
+           "size_bytes" => 5,
+           "path" => media.path
+         }}
+      end)
+
+      Application.put_env(:fermix_channels, :mobile_event_sink, fn profile_id, event ->
+        send(test_pid, {:phone_event, profile_id, event})
+        :ok
+      end)
+
+      on_exit(fn ->
+        FermixTestSupport.SafeRm.rm_rf!(dir)
+
+        Enum.each(previous, fn
+          {key, {:ok, value}} -> Application.put_env(:fermix_channels, key, value)
+          {key, :error} -> Application.delete_env(:fermix_channels, key)
+        end)
+      end)
+
+      {:ok, path: path}
+    end
+
+    test "writes a row the Mac draws from its media ref and streams it to the phones", %{
+      path: path
+    } do
+      media = %{kind: :image, path: path, mime_type: "image/png", caption: "A dog"}
+      assert :ok = Companion.send_media("main", media, [])
+
+      ref = String.duplicate("a", 64)
+
+      assert_receive {:append, "main",
+                      %{
+                        role: "assistant",
+                        kind: "media",
+                        content: "A dog",
+                        media_refs: [%{"ref" => ^ref, "kind" => "image", "mime" => "image/png"}]
+                      }}
+
+      assert_receive {:companion_event,
+                      %{"t" => "row", "server_seq" => 41, "media_refs" => [%{"ref" => ^ref}]}}
+
+      assert_receive {:phone_event, "main", %{"t" => "media_begin", "ref" => ^ref}}
+      assert_receive {:phone_event, "main", %{"t" => "media_end", "ref" => ^ref}}
+    end
+
+    test "a file it cannot read is refused, and nothing is written", %{path: path} do
+      Application.delete_env(:fermix_channels, :mobile_media_resolver)
+      missing = Path.join(Path.dirname(path), "gone.png")
+
+      assert {:error, _reason} =
+               Companion.send_media("main", %{kind: :image, path: missing}, [])
+
+      refute_received {:append, "main", _attrs}
+    end
   end
 
   # The hand-off is sent to Turns, not awaited: once Turns and then the queue

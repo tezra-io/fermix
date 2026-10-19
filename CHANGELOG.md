@@ -227,6 +227,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Pictures and files reach the Mac chat, from a voice call too.** A picture
+  Fermix makes or a file it sends in the Mac app's chat used to fail with
+  "unsupported media", and a GPT-Live or Grok call could not make one at all:
+  asked for a picture, the agent drew around the missing tool and you got
+  text. Now a file or image Fermix sends in the chat appears there, drawn as
+  the phone's pictures are, and reaches your phone too. Ask for one on a call,
+  private or in the chat, and it is made or sent and lands in the chat, while
+  the voice tells you it is there.
 - **What Fermix says about itself is current again.** It no longer tells a
   Mac app owner that the app has no chat window, and it names iMessage among
   the places a reminder can go, and among the inboxes it picks from when no

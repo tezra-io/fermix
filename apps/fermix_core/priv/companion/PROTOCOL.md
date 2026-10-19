@@ -91,8 +91,11 @@ reads `turn_done`.
 
 Version 3 lets the Mac's chat show what the phones put in the timeline: a
 voice note, a picture or a file sent from a phone, a picture Fermix sent to
-one, and the picture of a link preview stored on a row. Their bytes are in the
-daemon's media store, by `ref`, the sha256 of the bytes. It adds:
+one, and the picture of a link preview stored on a row. A picture or file
+Fermix sends in the Mac's chat, or from a voice call, is the same: an
+assistant row of `kind: "media"` whose `media_refs[]` names it, announced as a
+`row`. Their bytes are in the daemon's media store, by `ref`, the sha256 of
+the bytes. It adds:
 
 - two client events: `media_fetch { profile_id, ref }` asks for a managed
   local file holding the bytes of a ref, and `media_release { profile_id,
@@ -242,7 +245,9 @@ decided and left open; or, when the gist could not be made, the call's tasks,
 one a line, each its state and summary (`Still running` for a task that
 outlived the call); or nothing more when the call had neither. It is written
 once the gist is made or has failed, so it always carries the settled cost.
-A private call writes no row.
+A private call writes no row. A picture or file a call's task sends, in a call
+in the chat or a private one, is not a call row: it is a media row like any
+other (see *Version 3*), with no `metadata.call`.
 
 A task still running when a call in the chat ends is not cancelled: it
 finishes into the chat, so it writes two rows of its own. The first, as the

@@ -22,9 +22,10 @@ defmodule FermixChannels.Channels.Voice do
     the session: `:history_tainted`, the runner's word, before the reply, that
     the reply is drawn from Computer History (M56 §9), so the session gives it
     to no voice that may not carry it.
-  - **Media is refused.** The Live wire carries audio and text only, so an
-    attachment has nowhere to go and says so (`:unsupported_in_voice`) instead
-    of being silently dropped.
+  - **Media goes to the chat.** The voice wire carries audio and text only, so
+    a picture or file a delegation sends is written to the owner's chat
+    (`Channels.Companion.send_media/3`), under the delegation's fence, in a
+    private call as in one in the chat.
 
   Every closure carries the turn's fence — the call's UUID, the delegation id
   and its revision, minted by the session and carried on `metadata.voice_call`
@@ -42,6 +43,7 @@ defmodule FermixChannels.Channels.Voice do
 
   require Logger
 
+  alias FermixChannels.Channels.Companion
   alias FermixChannels.Gateway.Channel
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Telemetry, as: ChannelTelemetry
@@ -152,23 +154,18 @@ defmodule FermixChannels.Channels.Voice do
   end
 
   @doc """
-  Refuse an attachment: the Live wire carries audio and text only, so there is
-  no surface to deliver bytes on. The refusal is returned (never raised, never
-  silently dropped) so the turn's ledger records that nothing was delivered and
-  the canned empty-completion path still closes the turn honestly.
+  Send one delegation's picture or file to the owner's chat. The voice wire
+  carries audio and text only, so the call cannot show it; the chat can, in a
+  private call as in one in the chat. The fence travels in `opts` as for an
+  answer, so an attachment from a closed call or a superseded revision is
+  dropped as its answer would be, and the drop is the turn's error.
   """
   @impl true
-  @spec send_media(String.t(), Reply.media_part()) :: {:error, :unsupported_in_voice}
-  @spec send_media(String.t(), Reply.media_part(), Channel.send_opts()) ::
-          {:error, :unsupported_in_voice}
-  def send_media(call_id, media_part, _opts \\ [])
+  @spec send_media(String.t(), Reply.media_part()) :: :ok | {:error, term()}
+  @spec send_media(String.t(), Reply.media_part(), Channel.send_opts()) :: :ok | {:error, term()}
+  def send_media(call_id, media_part, opts \\ [])
       when is_binary(call_id) and is_map(media_part) do
-    Logger.warning(
-      "voice adapter refusing a #{inspect(Map.get(media_part, :kind))} attachment for " <>
-        "call #{call_id}: the Live wire carries no media"
-    )
-
-    {:error, :unsupported_in_voice}
+    notify({call_id, Keyword.get(opts, @turn_opt)}, {:media, media_part})
   end
 
   # --- Routing ---
@@ -275,6 +272,11 @@ defmodule FermixChannels.Channels.Voice do
   end
 
   defp dispatch(_callbacks, {:turn_result, {:completed}}), do: :ok
+
+  # The chat is where a call's pictures and files are seen, so the row is the
+  # delivery; the session hears of it in the answer that says it was sent.
+  defp dispatch(_callbacks, {:media, media_part}),
+    do: Companion.send_media(Companion.chat_profile(), media_part)
 
   defp drop(call_id, delegation_id, payload, reason) do
     Logger.debug(

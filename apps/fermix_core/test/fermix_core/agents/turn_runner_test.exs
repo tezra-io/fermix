@@ -2942,19 +2942,25 @@ defmodule FermixCore.Agents.TurnRunnerTest do
                "a private call's delegation must not advertise a #{excluded} capability"
       end
 
-      # The boundary excludes categories, not the whole surface.
+      # The boundary excludes categories, not the whole surface: a picture or
+      # file it sends goes to the owner's chat.
       assert :system in categories
+      assert :channel in categories
+      assert :media in categories
     end
 
     # M56 §4.7: a hand-off in the chat launches a coding run in the chat's own
     # conversation, so the run's outcome re-enters the chat and is answered
-    # there; channel sends, media and fan-out stay out.
-    test "a hand-off in the chat is built with coding runs, and without the rest" do
+    # there; pictures and files it sends are written to the chat; fan-out
+    # stays out.
+    test "a hand-off in the chat is built with coding runs, pictures and files, and without fan-out" do
       registry = boundary_registry()
       categories = boundary_categories(chat_hand_off("fix the flaky test"), registry)
 
       assert :harness in categories
       assert :system in categories
+      assert :channel in categories
+      assert :media in categories
 
       for excluded <- VoiceCall.excluded_categories("chat") do
         refute excluded in categories,
@@ -3227,7 +3233,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     name = :"tr_boundary_reg_#{System.unique_integer([:positive])}"
     start_supervised!({CapabilityRegistry, name: name}, id: name)
 
-    for category <- [:system | VoiceCall.excluded_categories("private")] do
+    for category <- [:system, :channel, :media | VoiceCall.excluded_categories("private")] do
       :ok = CapabilityRegistry.register(name, boundary_capability(category))
     end
 

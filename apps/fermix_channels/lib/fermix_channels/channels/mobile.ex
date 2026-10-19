@@ -313,17 +313,30 @@ defmodule FermixChannels.Channels.Mobile do
   def send_media(profile_id, media, opts \\ [])
       when is_binary(profile_id) and is_map(media) and is_list(opts) do
     {result, duration_us} =
-      Telemetry.timed_us(fn ->
-        with :ok <- validate_profile(profile_id),
-             :ok <- validate_proactive_media_opts(opts),
-             {:ok, ref} <- resolve_outbound_media(media),
-             {:ok, {status, row}} <- persist_media(profile_id, media, ref, Map.new(opts)),
-             :ok <- deliver_persisted_media(status, profile_id, media, ref, row, opts) do
-          {:ok, status}
-        end
-      end)
+      Telemetry.timed_us(fn -> write_media(store(), profile_id, media, opts) end)
 
     emit_outbound(result, duration_us)
+  end
+
+  @doc """
+  Write one picture or file Fermix sends into the shared timeline through
+  `store`, and deliver it: its bytes to the phones, its row to the Mac's chat,
+  and a push while the phones' channel runs. The one write for a media reply:
+  the Mac's chat sends one this way too (`Companion.send_media/3`), and each
+  channel counts its own delivery. Answers whether the row is new or one the
+  store already held.
+  """
+  @spec write_media(module(), String.t(), Reply.media_part(), Channel.send_opts()) ::
+          {:ok, :created | :existing} | {:error, term()}
+  def write_media(store, profile_id, media, opts)
+      when is_atom(store) and is_binary(profile_id) and is_map(media) and is_list(opts) do
+    with :ok <- validate_profile(profile_id),
+         :ok <- validate_proactive_media_opts(opts),
+         {:ok, ref} <- resolve_outbound_media(media),
+         {:ok, {status, row}} <- persist_media(store, profile_id, media, ref, Map.new(opts)),
+         :ok <- deliver_persisted_media(status, store, profile_id, media, ref, row, opts) do
+      {:ok, status}
+    end
   end
 
   @impl true
@@ -425,7 +438,7 @@ defmodule FermixChannels.Channels.Mobile do
     Output.persist_final_text(store(), message.chat_id, attrs, text)
   end
 
-  defp persist_media(profile_id, media, ref, attrs) do
+  defp persist_media(store, profile_id, media, ref, attrs) do
     timeline_ref = timeline_media_ref(media, ref)
 
     timeline_attrs = %{
@@ -437,7 +450,7 @@ defmodule FermixChannels.Channels.Mobile do
     }
 
     Output.persist_output(
-      store(),
+      store,
       profile_id,
       timeline_attrs,
       attrs,
@@ -452,7 +465,7 @@ defmodule FermixChannels.Channels.Mobile do
   defp deliver_persisted_text(:created, profile, text, row, opts) do
     _ = emit_after_commit(profile, delivered_text(profile, text, row, opts))
     _ = announce_to_companion(:created, profile, row)
-    delivered_effects(profile, row.server_seq, text, opts)
+    delivered_effects(store(), profile, row.server_seq, text, opts)
   end
 
   # A request's reply seals a bubble of its turn, which the request's own
@@ -466,12 +479,12 @@ defmodule FermixChannels.Channels.Mobile do
     end
   end
 
-  defp deliver_persisted_media(:existing, _profile, _media, _ref, _row, _opts), do: :ok
+  defp deliver_persisted_media(:existing, _store, _profile, _media, _ref, _row, _opts), do: :ok
 
-  defp deliver_persisted_media(:created, profile, media, ref, row, opts) do
+  defp deliver_persisted_media(:created, store, profile, media, ref, row, opts) do
     _ = emit_media_after_commit(profile, row.server_seq, media, ref)
     _ = announce_to_companion(:created, profile, row)
-    delivered_effects(profile, row.server_seq, value(media, :caption) || "", opts)
+    delivered_effects(store, profile, row.server_seq, value(media, :caption) || "", opts)
   end
 
   # A delivered row's push is for phones, so it is launched only while the
@@ -479,11 +492,11 @@ defmodule FermixChannels.Channels.Mobile do
   # delivered here while it does not is still a row of the shared timeline,
   # which the Mac has heard, and nobody is pushed. Its links are previewed
   # either way, as every row's are.
-  defp delivered_effects(profile, server_seq, text, opts) do
+  defp delivered_effects(store, profile, server_seq, text, opts) do
     _ =
       if MobileSupervisor.running?(), do: maybe_schedule_proactive_push(profile, server_seq, opts)
 
-    LinkPreviews.schedule(profile, server_seq, ReplyBlocks.links(text), store: store())
+    LinkPreviews.schedule(profile, server_seq, ReplyBlocks.links(text), store: store)
   end
 
   # One durable timeline row is one delivered outbound message. A row the store

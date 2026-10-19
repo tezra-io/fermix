@@ -428,8 +428,11 @@ around that message:
 `accepted`, `row` (the message's own row, announced as it is written),
 `turn_started`, `text_delta`, `tool_event`, `text_done`, `turn_error`), `error_code` (the `turn_error`'s code), `blocker_events_all`
 (needs `cancel: waiting`), `reads_find_marker: true` (every declared read found
-the marker; needs `reads`), and `offline_row_matches` (a regex some row written
-while offline matches; needs `offline_wait_s`). Run placeholders render inside
+the marker; needs `reads`), `offline_row_matches` (a regex some row written
+while offline matches; needs `offline_wait_s`), and `media_row: true` (the turn
+sent a picture or file into the chat: a media `row`, which names no request on
+the wire, so it is credited to the one message still open and to none when two
+are). Run placeholders render inside
 it as in every gate. It is case-level only and required on every companion
 case.
 

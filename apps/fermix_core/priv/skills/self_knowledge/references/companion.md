@@ -43,6 +43,6 @@ The chat shows what the phones put in the timeline (voice notes, pictures and fi
 
 ## What it does not carry
 
-Attachments do not travel on it from the Mac yet: a message with attachments is refused, and a file or image sent into this chat (`send_attachment`, an image delivery) is refused rather than written as a row the app could not fetch, so answer in text there. Voice uses the realtime socket, not this one.
+Attachments do not travel on it from the Mac yet: a message with attachments is refused. The other way they do: a file or image Fermix sends into this chat (`send_attachment`, a `generate_image` delivery, from a typed turn or a voice call's task) is written as a media row naming its stored ref, which the app draws from a granted file as it does the phone's pictures, and the phones get it as one sent through their own channel. Voice uses the realtime socket, not this one.
 
 Turns keep the `main-*` trace session and group in Opik under the `companion:main` thread; each accepted request counts one inbound `channel_msg` and each reply row one outbound (channel `companion`), and a resent duplicate counts nothing.

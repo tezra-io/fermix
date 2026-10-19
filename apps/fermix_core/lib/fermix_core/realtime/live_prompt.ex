@@ -96,6 +96,12 @@ defmodule FermixCore.Realtime.LivePrompt do
   credentials, and do not instruct the voice model to promise unverified success.
   """
 
+  @addendum_media """
+  A picture or file you send with send_attachment or generate_image appears in
+  the owner's chat, since the voice cannot show it. Send it there when the owner
+  asks to see one, and say in your reply that it is in the chat.
+  """
+
   @addendum_chat_reply """
   Return what is verified: result, pending work, failure, or a necessary question.
   Include exact identifiers and units when relevant. Report cancellation only when
@@ -212,8 +218,11 @@ defmodule FermixCore.Realtime.LivePrompt do
       is shown in the chat instead (§4.6); a result the owner asks to have
       sent to one of their channels goes out with `send_to_channel`, and the
       line said names where (§4.7);
-    * `"private"`: today's wording, verbatim, since a private call shows
-      nothing (M56 §5).
+    * `"private"`: today's wording, since a private call shows nothing
+      (M56 §5).
+
+  In either, a picture or file the turn sends goes to the owner's chat
+  (`Channels.Voice.send_media/3`), so the reply says it is there.
   """
   @spec backend_addendum(String.t()) :: String.t()
   def backend_addendum("chat") do
@@ -231,12 +240,18 @@ defmodule FermixCore.Realtime.LivePrompt do
       their own channels, send it with send_to_channel and say in the short line
       where it went.
       """
-      |> String.trim()
+      |> String.trim(),
+      String.trim(@addendum_media)
     ])
   end
 
   def backend_addendum("private"),
-    do: join([String.trim(@addendum_task), String.trim(@addendum_private_reply)])
+    do:
+      join([
+        String.trim(@addendum_task),
+        String.trim(@addendum_private_reply),
+        String.trim(@addendum_media)
+      ])
 
   @doc """
   The capabilities a Live call in `conversation` (`"chat"` or `"private"`)
@@ -246,11 +261,11 @@ defmodule FermixCore.Realtime.LivePrompt do
 
   That list is shared with `TurnRunner`, which builds the delegation turn's
   profile from it, so what the voice model is told about and what its delegation
-  is actually given cannot drift apart. A call in the chat keeps the Realtime
-  engine's boundary (`SessionServer.default_capabilities/1`), coding runs
-  included: a run it launches reports back into the chat (M56 §4.7). A private
-  call additionally drops `:harness`, because its conversation ends with it
-  and a run's completion would have nothing left to answer it.
+  is actually given cannot drift apart. A call in the chat keeps coding runs: a
+  run it launches reports back into the chat (M56 §4.7). Either mode keeps
+  attachments and media generation, whose pictures and files go to the owner's
+  chat. A private call additionally drops `:harness`, because its conversation
+  ends with it and a run's completion would have nothing left to answer it.
   """
   @spec eligible_capabilities(GenServer.server(), String.t()) :: [Capability.t()]
   def eligible_capabilities(registry, conversation)
