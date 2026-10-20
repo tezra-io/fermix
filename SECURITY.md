@@ -14,8 +14,9 @@ release. Always run the latest release.
 
 **Please do not open a public issue for security vulnerabilities.**
 
-Report privately through GitHub's [private vulnerability reporting][gh-pvr]:
-open the repository's **Security** tab and click **"Report a vulnerability."**
+Report privately by email to **[security@tezra.io](mailto:security@tezra.io)**.
+The same address covers every Fermix repository: the engine, the macOS, Linux
+and Android apps, the sidecars and the plugins.
 
 Please include:
 
@@ -57,5 +58,3 @@ Also out of scope: the operator's own model provider (reached over TLS with the
 operator's own key), and GitHub itself for release distribution — the upgrade
 path pins the release origin and verifies a keyless cosign signature, which
 bounds tampering in transit, not a compromise of the platform hosting it.
-
-[gh-pvr]: https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability
