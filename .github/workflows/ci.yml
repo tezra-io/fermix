@@ -1,17 +1,24 @@
 name: ci
 
+# Pull requests and main. A change reaches main through a pull request, which
+# runs every job, and main's push proves the merged tree again; a push to dev or
+# a release branch runs nothing. `gh workflow run ci --ref <branch>` runs it on
+# any branch by hand.
 on:
   pull_request:
     branches: [main, dev, "release/**"]
   push:
-    branches: [main, dev, "release/**"]
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# A newer commit cancels a pull request's older run. Main's runs queue instead,
+# so a merge's validation is never cut short.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
@@ -20,7 +27,9 @@ jobs:
     # this matrix only linux_x86_64 ever ran the suite. The `gate` job below
     # aggregates these legs so legs can be renamed/added/removed without
     # touching branch protection — but only once protection actually requires
-    # `gate`. See the note on that job for what is required today.
+    # `gate`. See the note on that job for what is required today. That is
+    # also why every leg keeps this name although only linux-x64 runs format
+    # and credo.
     name: compile · format · credo · test (${{ matrix.leg }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.timeout }}
@@ -29,7 +38,8 @@ jobs:
       matrix:
         include:
           # linux-x64 also stresses the change's test files, so it needs the
-          # history to diff against and the time to repeat them.
+          # history to diff against and the time to repeat them. It alone
+          # checks formatting and credo, which read source only.
           - { os: ubuntu-24.04, leg: linux-x64, timeout: 45, fetch_depth: 0 }
           - { os: ubuntu-24.04-arm, leg: linux-arm64, timeout: 30, fetch_depth: 1 }
           - { os: macos-15, leg: macos-arm64, timeout: 45, fetch_depth: 1 }
@@ -89,10 +99,14 @@ jobs:
           file "$helper"
           "$helper" --check
 
+      # Same source, same result on every platform: one leg is enough. Each leg
+      # still compiles with warnings as errors and runs the whole suite.
       - name: Check formatting
+        if: matrix.leg == 'linux-x64'
         run: mix format --check-formatted
 
       - name: Credo (strict)
+        if: matrix.leg == 'linux-x64'
         run: mix credo --strict
 
       - name: Test
@@ -278,7 +292,7 @@ jobs:
     # by `zig cc` under strict flags — while dev macOS builds use the lenient
     # host cc. That split already shipped one release-only C break (the v0.6.0
     # NIF), so compile the shim here with the release-exact zig flags on every
-    # push. Keep the flags in lockstep with DISCLAIM_CFLAGS in
+    # run. Keep the flags in lockstep with DISCLAIM_CFLAGS in
     # apps/fermix_nif/Makefile and ZIG_VERSION with release.yml.
     #
     # The NIF (fermix_nif.c) is cross-compiled by zig for every release target
