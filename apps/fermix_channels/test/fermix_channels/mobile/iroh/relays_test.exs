@@ -15,9 +15,11 @@ defmodule FermixChannels.Mobile.Iroh.RelaysTest do
     })
   end
 
-  test "the shipped source launches with Fermix's two relays, at the iroh version they run" do
-    assert Relays.launch_set() == [@us1, @eu1]
-    assert %{iroh: "1.3.0", relays: [@us1, @eu1], id: id} = Relays.current()
+  # us1 runs alone until the Android app is in the store; eu1 then joins in a
+  # revision of its own (relay spec §4.1, owner 2026-10-19).
+  test "the shipped source launches with us1 alone, at the iroh version it runs" do
+    assert Relays.launch_set() == [@us1]
+    assert %{iroh: "1.3.0", relays: [@us1], id: id} = Relays.current()
     assert id =~ ~r/\A[0-9a-f]{16}\z/
   end
 
@@ -26,7 +28,7 @@ defmodule FermixChannels.Mobile.Iroh.RelaysTest do
              ~s([{"quic_port":7842,"url":"https://us1.relay.fermix.ai/"},) <>
                ~s({"quic_port":7842,"url":"https://eu1.relay.fermix.ai/"}])
 
-    digest = :crypto.hash(:sha256, Source.canonical_json([@us1, @eu1]))
+    digest = :crypto.hash(:sha256, Source.canonical_json(Relays.current().relays))
     assert Relays.current().id == digest |> Base.encode16(case: :lower) |> binary_part(0, 16)
   end
 

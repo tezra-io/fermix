@@ -4,8 +4,7 @@
     {
       "iroh": "1.3.0",
       "relays": [
-        {"url": "https://us1.relay.fermix.ai/", "quic_port": 7842},
-        {"url": "https://eu1.relay.fermix.ai/", "quic_port": 7842}
+        {"url": "https://us1.relay.fermix.ai/", "quic_port": 7842}
       ]
     }
   ]

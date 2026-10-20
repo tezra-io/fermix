@@ -141,10 +141,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     assert start["bridge_socket"] == Path.join(ctx.root, "mobile/bridge.sock")
     assert start["alpn"] == "fermix/mobile/1"
 
-    assert start["relays"] == [
-             %{"url" => @us1.url, "quic_port" => 7842},
-             %{"url" => @eu1.url, "quic_port" => 7842}
-           ]
+    assert start["relays"] == [%{"url" => @us1.url, "quic_port" => 7842}]
 
     assert start["limits"]["max_connections"] == 64
 
