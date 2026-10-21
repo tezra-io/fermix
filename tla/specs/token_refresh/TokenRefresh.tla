@@ -87,7 +87,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/oauth_flow.ex @ d5975a06db84
 \* SOURCE: apps/fermix_core/lib/fermix_core/plugins/auth.ex @ 8bf2d738a4e0
 \* SOURCE: apps/fermix_core/lib/fermix_core/plugins/dist/lock.ex @ db28568d0c53
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/auth.ex @ f35083edf1be
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/auth.ex @ 9ee53e236c2e
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt.ex#logout @ 2f34e631693b
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/login.ex @ 0d2545361498
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/logout.ex @ 53141064392c
