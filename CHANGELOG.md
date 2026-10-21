@@ -275,15 +275,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Mac's players do not read. They are now `.m4a`, `.wav`, `.mov` and `.mp3`,
   as are Word, Excel, PowerPoint, plain text and SVG files by their own
   extensions.
-- **Fermix reaches a provider over IPv6 when its IPv4 path fails.** Outbound
-  connections now try IPv6 first and fall back to IPv4, the order curl and
-  browsers use. Since 14 October 2026 OpenAI has answered Sign in with ChatGPT
-  requests with HTTP 520 over IPv4 while the same requests work over IPv6
-  (#139), which left OpenAI Codex with no model list and every message failing.
-  On a machine with IPv6 they go through again. A machine without IPv6
-  connects as before. On a network that silently drops IPv6, a new connection
-  waits out its connect timeout before it tries IPv4. Connections through a
-  configured proxy are unchanged.
+- **Fermix connects to a provider over IPv6 first.** Outbound connections now
+  try IPv6 first and fall back to IPv4 when the IPv6 connection cannot be
+  made, the order curl and browsers use; Fermix used to dial IPv4 only. Since
+  14 October 2026 OpenAI has answered Sign in with ChatGPT requests with HTTP
+  520 over IPv4 on some networks while the same requests work over IPv6
+  (#139), which left OpenAI Codex with no model list and every message
+  failing; where IPv6 works they go through again. Where OpenAI answers 520
+  over IPv6 too, they still fail: an HTTP error is never retried over IPv4. A
+  machine without IPv6 connects as before. On a network that silently drops
+  IPv6, a new connection waits out its connect timeout before it tries IPv4.
+  Connections through a configured proxy are unchanged.
 - **"What changed" matches what was said before.** Asked to redo an answer
   against an earlier one, the assistant could report a move that never
   happened, such as calling an item "no longer the top priority" when its own
@@ -299,6 +301,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   status, and Cloudflare when the page names it. `fermix doctor --full`'s auth
   probe says the same line instead of "(transient?)", and the new provider
   health row judges whether it keeps happening.
+- **A place search Brave refuses says why.** A refused Brave place search said
+  only "HTTP 400", so a key whose Brave plan does not include Place Search
+  looked like a broken request. The error now carries Brave's own code and
+  sentence, such as `OPTION_NOT_IN_PLAN`, and the names of the fields it
+  rejected, and a wrong key reads as an authentication failure instead of a
+  provider error.
 - **Signing in with ChatGPT says when the model was not checked.** When the
   account's model list could not be read during sign-in, the app reported a
   plain success and the default model was left unchecked. The sign-in still
