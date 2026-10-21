@@ -3,6 +3,7 @@ defmodule FermixCore.Setup.DoctorTest do
 
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.Store
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Setup.Doctor
   alias FermixCore.Transcription.Local.ModelStore
   alias FermixCore.Transcription.Local.SidecarInstaller, as: SttInstaller
@@ -130,6 +131,22 @@ defmodule FermixCore.Setup.DoctorTest do
       assert is_integer(ms) and ms >= 0
     end
 
+    # `fermix setup --openai-base-url` writes a root, as the adapter reads it.
+    test "probes a configured root base_url at the /responses endpoint (matches the adapter)" do
+      put_provider(:openai, api_key: "sk-test", base_url: "http://127.0.0.1:18081/v1")
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:probed, conn.host, conn.port, conn.request_path})
+        Plug.Conn.send_resp(conn, 200, ~s({"ok": true}))
+      end
+
+      assert {:ok, %{provider: :openai}} =
+               Doctor.probe_provider(:openai, req_options: [plug: plug])
+
+      assert_received {:probed, "127.0.0.1", 18_081, "/v1/responses"}
+    end
+
     test "returns auth_scope_mismatch on 401" do
       put_provider(:openai, api_key: "sk-bad")
 
@@ -210,9 +227,10 @@ defmodule FermixCore.Setup.DoctorTest do
     end
   end
 
-  # The voice call's key is the `openai` provider key whatever the primary is,
-  # so an install that chats through Codex has a key no provider probe reaches.
-  describe "probe_openai_key/1" do
+  # The voice call's key is the voice provider's own whatever the primary is, so
+  # an install that chats through Codex or a SpaceXAI sign-in has a key no
+  # provider probe reaches. The probe asks the vendor the engine dials.
+  describe "probe_voice_key/2" do
     test "reads the model list with the key and sends no prompt" do
       put_provider(:openai, api_key: "sk-test")
 
@@ -226,7 +244,9 @@ defmodule FermixCore.Setup.DoctorTest do
         Plug.Conn.send_resp(conn, 200, ~s({"object":"list","data":[]}))
       end
 
-      assert {:ok, %{latency_ms: ms}} = Doctor.probe_openai_key(req_options: [plug: plug])
+      assert {:ok, %{latency_ms: ms}} =
+               Doctor.probe_voice_key(openai_voice(), req_options: [plug: plug])
+
       assert is_integer(ms) and ms >= 0
     end
 
@@ -243,7 +263,7 @@ defmodule FermixCore.Setup.DoctorTest do
 
       plug = fn conn -> json(conn, 401, Jason.encode!(%{"error" => error})) end
 
-      result = Doctor.probe_openai_key(req_options: [plug: plug])
+      result = Doctor.probe_voice_key(openai_voice(), req_options: [plug: plug])
 
       assert result == {:error, {:refused, 401, "invalid_api_key"}}
       refute inspect(result) =~ "abcd"
@@ -260,7 +280,8 @@ defmodule FermixCore.Setup.DoctorTest do
         )
       end
 
-      assert {:error, {:refused, 403, nil}} = Doctor.probe_openai_key(req_options: [plug: plug])
+      assert {:error, {:refused, 403, nil}} =
+               Doctor.probe_voice_key(openai_voice(), req_options: [plug: plug])
     end
 
     test "a code that is not an identifier is dropped" do
@@ -270,7 +291,8 @@ defmodule FermixCore.Setup.DoctorTest do
         json(conn, 401, ~s({"error":{"code":"key sk-test is wrong"}}))
       end
 
-      assert {:error, {:refused, 401, nil}} = Doctor.probe_openai_key(req_options: [plug: plug])
+      assert {:error, {:refused, 401, nil}} =
+               Doctor.probe_voice_key(openai_voice(), req_options: [plug: plug])
     end
 
     test "a body that is not an OpenAI error is a refusal without a code" do
@@ -278,7 +300,8 @@ defmodule FermixCore.Setup.DoctorTest do
 
       plug = fn conn -> Plug.Conn.send_resp(conn, 401, "Unauthorized") end
 
-      assert {:error, {:refused, 401, nil}} = Doctor.probe_openai_key(req_options: [plug: plug])
+      assert {:error, {:refused, 401, nil}} =
+               Doctor.probe_voice_key(openai_voice(), req_options: [plug: plug])
     end
 
     test "any other status is a server error carrying no body" do
@@ -286,7 +309,8 @@ defmodule FermixCore.Setup.DoctorTest do
 
       plug = fn conn -> Plug.Conn.send_resp(conn, 503, ~s({"error":"busy"})) end
 
-      assert {:error, {:server_error, 503}} = Doctor.probe_openai_key(req_options: [plug: plug])
+      assert {:error, {:server_error, 503}} =
+               Doctor.probe_voice_key(openai_voice(), req_options: [plug: plug])
     end
 
     test "a transport failure is a network error" do
@@ -294,15 +318,93 @@ defmodule FermixCore.Setup.DoctorTest do
       adapter = fn req -> {req, %Req.TransportError{reason: :econnrefused}} end
 
       assert {:error, {:network, %Req.TransportError{reason: :econnrefused}}} =
-               Doctor.probe_openai_key(req_options: [adapter: adapter])
+               Doctor.probe_voice_key(openai_voice(), req_options: [adapter: adapter])
     end
 
     test "no saved key makes no request" do
       Application.put_env(:fermix_core, :providers, openai: [])
       adapter = fn _req -> flunk("a probe with no key reached the network") end
 
-      assert {:error, :no_key} = Doctor.probe_openai_key(req_options: [adapter: adapter])
+      assert {:error, :no_key} =
+               Doctor.probe_voice_key(openai_voice(), req_options: [adapter: adapter])
     end
+
+    test "an unresolved secret reference makes no request" do
+      put_provider(:openai, api_key: "@keyring")
+      adapter = fn _req -> flunk("an unresolved reference reached the network") end
+
+      assert {:error, :no_key} =
+               Doctor.probe_voice_key(openai_voice(), req_options: [adapter: adapter])
+    end
+
+    test "Grok reads the SpaceXAI model list with the SpaceXAI key, never OpenAI's" do
+      put_provider(:openai, api_key: "sk-other")
+      put_provider(:xai, api_key: "xai-test")
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert conn.method == "GET"
+        assert conn.host == "api.x.ai"
+        assert conn.request_path == "/v1/models"
+        assert body == ""
+        assert ["Bearer xai-test"] = Plug.Conn.get_req_header(conn, "authorization")
+        json(conn, 200, ~s({"object":"list","data":[]}))
+      end
+
+      assert {:ok, %{latency_ms: ms}} =
+               Doctor.probe_voice_key(grok_voice(), req_options: [plug: plug])
+
+      assert is_integer(ms) and ms >= 0
+    end
+
+    # SpaceXAI answers a key it does not accept with 400 and a message that
+    # quotes the key, so only the status crosses.
+    test "a refused SpaceXAI key answers its status, never SpaceXAI's message" do
+      put_provider(:xai, api_key: "xai-bad-wxyz")
+
+      body =
+        Jason.encode!(%{
+          "code" => "Client specified an invalid argument",
+          "error" => "Incorrect API key provided: xa***yz."
+        })
+
+      for status <- [400, 401, 403] do
+        plug = fn conn -> json(conn, status, body) end
+        result = Doctor.probe_voice_key(grok_voice(), req_options: [plug: plug])
+
+        assert result == {:error, {:refused, status, nil}}
+        refute inspect(result) =~ "Incorrect"
+      end
+    end
+
+    test "a SpaceXAI refusal keeps a code that is an identifier" do
+      put_provider(:xai, api_key: "xai-test")
+
+      plug = fn conn -> json(conn, 403, ~s({"code":"permission_denied","error":"no"})) end
+
+      assert {:error, {:refused, 403, "permission_denied"}} =
+               Doctor.probe_voice_key(grok_voice(), req_options: [plug: plug])
+    end
+
+    test "any other SpaceXAI status is a server error carrying no body" do
+      put_provider(:xai, api_key: "xai-test")
+
+      plug = fn conn -> Plug.Conn.send_resp(conn, 503, ~s({"error":"busy"})) end
+
+      assert {:error, {:server_error, 503}} =
+               Doctor.probe_voice_key(grok_voice(), req_options: [plug: plug])
+    end
+
+    test "a SpaceXAI sign-in with no API key makes no request" do
+      Application.put_env(:fermix_core, :providers, xai: [auth_mode: :oauth])
+      adapter = fn _req -> flunk("a sign-in reached the voice key probe") end
+
+      assert {:error, :no_key} =
+               Doctor.probe_voice_key(grok_voice(), req_options: [adapter: adapter])
+    end
+
+    defp openai_voice, do: RealtimeConfig.normalize(enabled: true)
+    defp grok_voice, do: RealtimeConfig.normalize(enabled: true, engine: "xai_realtime")
 
     # OpenAI answers errors as JSON, which is what lets Req decode the code.
     defp json(conn, status, body) do
@@ -324,6 +426,22 @@ defmodule FermixCore.Setup.DoctorTest do
 
       assert {:ok, %{provider: :anthropic, model: "claude-sonnet-4-6"}} =
                Doctor.probe_provider(:anthropic, req_options: [plug: plug])
+    end
+
+    # `fermix setup --anthropic-base-url` writes a root, as the adapter reads it.
+    test "probes a configured root base_url at the /messages endpoint (matches the adapter)" do
+      put_provider(:anthropic, api_key: "sk-ant-test", base_url: "http://127.0.0.1:18080/v1")
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:probed, conn.host, conn.port, conn.request_path})
+        Plug.Conn.send_resp(conn, 200, ~s({"id":"x"}))
+      end
+
+      assert {:ok, %{provider: :anthropic}} =
+               Doctor.probe_provider(:anthropic, req_options: [plug: plug])
+
+      assert_received {:probed, "127.0.0.1", 18_080, "/v1/messages"}
     end
 
     test "returns auth_scope_mismatch on 401 with anthropic-specific hint" do
@@ -1281,14 +1399,25 @@ defmodule FermixCore.Setup.DoctorTest do
     end
   end
 
+  # Builds by what they carry (M72 §14.1): the Mac app's engine has the Apple
+  # Maps helper; a Linux package has none.
+  @mac_app %{profile: :app_engine, os: :darwin}
+  @linux %{profile: :linux_package_cli, os: :linux}
+  @brew_mac %{profile: :standalone_cli, os: :darwin}
+
+  # Brave as the Linux build's default (`host: @linux`) unless a case names
+  # another build or backend; M72 §14.1 made the backend the build's.
   describe "place_search_report/1 (M31 §14.3)" do
-    test "offline reports the Brave key, the active web backend, and advertisement" do
+    test "offline reports the backend, the Brave key, the active web backend, and advertisement" do
       put_web_search(backend: :duckduckgo, brave_api_key: "brave-secret")
 
-      report = Doctor.place_search_report()
+      report = Doctor.place_search_report(host: @linux)
 
-      assert report.backend == :duckduckgo
+      assert report.backend == :brave
+      assert report.backend_source == :build_default
+      assert report.web_backend == :duckduckgo
       assert report.credential_present? == true
+      assert report.ready == :ok
       assert report.advertised? == true
       refute Map.has_key?(report, :probe_result)
     end
@@ -1296,16 +1425,18 @@ defmodule FermixCore.Setup.DoctorTest do
     test "offline reports a missing key as hidden" do
       put_web_search(backend: :duckduckgo)
 
-      report = Doctor.place_search_report()
+      report = Doctor.place_search_report(host: @linux)
 
       assert report.credential_present? == false
+      assert {:error, "auth_failed: missing Brave API key"} = report.ready
       assert report.advertised? == false
     end
 
     test "offline treats an unresolved @keyring sentinel as missing" do
       put_web_search(brave_api_key: "@keyring")
 
-      assert %{credential_present?: false, advertised?: false} = Doctor.place_search_report()
+      assert %{credential_present?: false, advertised?: false} =
+               Doctor.place_search_report(host: @linux)
     end
 
     test "offline never reaches the network" do
@@ -1313,11 +1444,98 @@ defmodule FermixCore.Setup.DoctorTest do
       put_web_search(brave_api_key: "brave-secret")
 
       Doctor.place_search_report(
+        host: @linux,
         req_options: [plug: {Req.Test, id}],
         net_resolver: place_resolver()
       )
 
       refute_received {:place_probe_request, _query}
+    end
+
+    test "in the Mac app with nothing set, the backend is Apple Maps, ready with its helper and no key" do
+      put_web_search(backend: :duckduckgo)
+
+      report = Doctor.place_search_report(host: @mac_app, apple_maps: [helper_path: "/bin/sh"])
+
+      assert report.backend == :apple_maps
+      assert report.backend_source == :build_default
+      assert report.credential_present? == false
+      assert report.ready == :ok
+      assert report.advertised? == true
+    end
+
+    test "Apple Maps without its helper, or on a build without one, is not ready and says why" do
+      put_web_search(backend: :duckduckgo)
+
+      missing =
+        Doctor.place_search_report(
+          host: @mac_app,
+          apple_maps: [helper_path: "/nonexistent/fermix-maps"]
+        )
+
+      assert {:error, "provider_error: the Apple Maps helper (fermix-maps) is missing" <> _} =
+               missing.ready
+
+      refute missing.advertised?
+
+      Application.put_env(:fermix_core, :tools,
+        web_search: [backend: :duckduckgo],
+        place_search: [backend: "apple_maps"]
+      )
+
+      off_mac = Doctor.place_search_report(host: @linux, apple_maps: [helper_path: "/bin/sh"])
+
+      assert off_mac.backend == :apple_maps
+      assert off_mac.backend_source == :configured
+
+      assert {:error, "provider_error: this build (the Linux package) carries no Apple Maps" <> _} =
+               off_mac.ready
+
+      brew = Doctor.place_search_report(host: @brew_mac, apple_maps: [helper_path: "/bin/sh"])
+
+      assert {:error, reason} = brew.ready
+      assert reason =~ "the standalone Fermix that Homebrew installs"
+    end
+
+    test "Homebrew on a Mac defaults to Brave, the build's default, and asks for its key" do
+      put_web_search(backend: :duckduckgo)
+
+      report = Doctor.place_search_report(host: @brew_mac, apple_maps: [helper_path: "/bin/sh"])
+
+      assert report.backend == :brave
+      assert report.backend_source == :build_default
+      assert {:error, "auth_failed: missing Brave API key"} = report.ready
+      refute report.advertised?
+    end
+
+    test "--full on Apple Maps runs one free search through the helper, never Brave" do
+      id = unique_place_plug(self())
+      put_web_search(brave_api_key: "brave-secret")
+      helper = apple_probe_helper(%{"places" => [apple_probe_place(), apple_probe_place()]})
+
+      report =
+        Doctor.place_search_report(
+          full: true,
+          host: @mac_app,
+          apple_maps: [helper_path: helper],
+          req_options: [plug: {Req.Test, id}],
+          net_resolver: place_resolver()
+        )
+
+      assert report.probe_result == :ok
+      assert report.result_count == 1
+      refute_received {:place_probe_request, _query}
+    end
+
+    test "--full on Apple Maps names a throttle independently" do
+      put_web_search([])
+      helper = apple_probe_helper(%{"error" => %{"message" => "GEOErrorDomain -3"}}, 66)
+
+      report =
+        Doctor.place_search_report(full: true, host: @mac_app, apple_maps: [helper_path: helper])
+
+      assert report.probe_result == :rate_limited
+      assert report.probe_error =~ "rate_limited"
     end
 
     test "--full probes the place endpoint once with the fixed query and count 1" do
@@ -1327,6 +1545,7 @@ defmodule FermixCore.Setup.DoctorTest do
       report =
         Doctor.place_search_report(
           full: true,
+          host: @linux,
           req_options: [plug: {Req.Test, id}],
           net_resolver: place_resolver()
         )
@@ -1381,6 +1600,7 @@ defmodule FermixCore.Setup.DoctorTest do
       report =
         Doctor.place_search_report(
           full: true,
+          host: @linux,
           req_options: [plug: {Req.Test, id}],
           net_resolver: private_place_resolver()
         )
@@ -1396,6 +1616,7 @@ defmodule FermixCore.Setup.DoctorTest do
       report =
         Doctor.place_search_report(
           full: true,
+          host: @linux,
           req_options: [plug: {Req.Test, id}],
           net_resolver: place_resolver()
         )
@@ -1834,9 +2055,39 @@ defmodule FermixCore.Setup.DoctorTest do
   defp full_place_report(id) do
     Doctor.place_search_report(
       full: true,
+      host: @linux,
       req_options: [plug: {Req.Test, id}],
       net_resolver: place_resolver()
     )
+  end
+
+  # A shell script standing in for `fermix-maps`: it reads the one request line
+  # and prints the canned object.
+  defp apple_probe_helper(stdout, status \\ 0) do
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-apple-maps")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+    path = Path.join(dir, "fermix-maps")
+    File.write!(Path.join(dir, "stdout"), Jason.encode!(stdout))
+
+    File.write!(path, """
+    #!/bin/sh
+    IFS= read -r line
+    cat '#{Path.join(dir, "stdout")}'
+    exit #{status}
+    """)
+
+    File.chmod!(path, 0o755)
+    path
+  end
+
+  defp apple_probe_place do
+    %{
+      "name" => "Tour Eiffel",
+      "latitude" => 48.8584,
+      "longitude" => 2.2945,
+      "identifier" => "I6E2A1C0F00000001",
+      "category" => "MKPOICategoryLandmark"
+    }
   end
 
   # Reports the query params back to the test so the probe's shape (one call,
@@ -1930,6 +2181,15 @@ defmodule FermixCore.Setup.DoctorTest do
 
       assert {:ok, ["anthropic_oauth"]} = Doctor.stale_token_profiles()
       assert {:ok, %{tokens: %{access_token: "at"}}} = Store.read("openai_codex")
+    end
+
+    # An MCP server's grant is refreshed when its server next connects, and its
+    # row says when it needs a sign-in (M74 E5), so it is not a stale profile.
+    test "an MCP server's grant is not reported" do
+      :ok = Store.write(Store.mcp_profile("linear"), token_entry(-7200))
+      :ok = Store.write("xai_oauth", token_entry(-7200))
+
+      assert {:ok, ["xai_oauth"]} = Doctor.stale_token_profiles()
     end
 
     test "propagates a read error instead of swallowing it", %{home: home} do

@@ -1,0 +1,7 @@
+{"type":"client_hello","protocol_version":1}
+{"type":"attached","host_version":"0.6.0"}
+{"type":"capabilities","notifications":"not_asked"}
+{"type":"capabilities","notifications":"granted"}
+{"type":"capabilities","notifications":"not_granted"}
+{"type":"notification.action","reminder_id":"rem_8Kf2xQ1vT0w","action":"snooze_10m"}
+{"type":"host_stopping"}

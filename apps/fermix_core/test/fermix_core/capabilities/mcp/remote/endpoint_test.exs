@@ -116,12 +116,163 @@ defmodule FermixCore.Capabilities.MCP.Remote.EndpointTest do
     end
   end
 
+  describe "operator/1 accepts the URL the owner typed (M74 E4)" do
+    test "an HTTPS URL with a path and a query, the query riding the request target" do
+      assert {:ok, endpoint} = Endpoint.operator("https://MCP.Linear.app/v1/mcp?team=core")
+      assert endpoint.scheme == :https
+      assert endpoint.source == :operator
+      assert endpoint.host == "mcp.linear.app"
+      assert endpoint.port == 443
+      assert endpoint.path == "/v1/mcp?team=core"
+      assert Endpoint.uri(endpoint) == "https://mcp.linear.app/v1/mcp?team=core"
+    end
+
+    test "an absent path is the root" do
+      assert {:ok, %{path: "/"}} = Endpoint.operator("https://mcp.example.com")
+    end
+
+    test "an IP literal, on a private network or this machine, with its port" do
+      assert {:ok, endpoint} = Endpoint.operator("https://10.0.0.5:8443/mcp")
+      assert {endpoint.host, endpoint.port} == {"10.0.0.5", 8443}
+
+      assert {:ok, endpoint} = Endpoint.operator("https://[fd12::1]/mcp")
+      assert endpoint.host == "fd12::1"
+      assert Endpoint.origin(endpoint) == "https://[fd12::1]"
+    end
+
+    test "plain http to this machine, by name or literal" do
+      for url <- [
+            "http://localhost:3000/mcp",
+            "http://127.0.0.1:3000/mcp",
+            "http://[::1]:3000/mcp"
+          ] do
+        assert {:ok, %{scheme: :http} = endpoint} = Endpoint.operator(url), url
+        assert endpoint.port == 3000
+      end
+
+      assert {:ok, endpoint} = Endpoint.operator("http://localhost/mcp")
+      assert endpoint.port == 80
+      assert Endpoint.origin(endpoint) == "http://localhost"
+    end
+  end
+
+  describe "operator/1 refuses" do
+    test "plain http anywhere but this machine" do
+      for url <- [
+            "http://mcp.example.com/mcp",
+            "http://10.0.0.5/mcp",
+            "http://localhost.example/mcp"
+          ] do
+        assert {:error, {:invalid_url, :http_only_to_loopback}} = Endpoint.operator(url), url
+      end
+    end
+
+    test "userinfo, a key in it or a host pretending to be one" do
+      assert {:error, {:invalid_url, :userinfo_not_allowed}} =
+               Endpoint.operator("https://user:key@mcp.example.com/mcp")
+
+      assert {:error, {:invalid_url, :userinfo_not_allowed}} =
+               Endpoint.operator("https://mcp.linear.app@evil.example/mcp")
+    end
+
+    test "a fragment, even an empty one" do
+      assert {:error, {:invalid_url, :fragment_not_allowed}} =
+               Endpoint.operator("https://mcp.example.com/mcp#tools")
+
+      assert {:error, {:invalid_url, :fragment_not_allowed}} =
+               Endpoint.operator("https://mcp.example.com/mcp#")
+    end
+
+    test "a template or wildcard anywhere in it" do
+      for url <- [
+            "https://{tenant}.example.com/mcp",
+            "https://*.example.com/mcp",
+            "https://mcp.example.com/{tenant}/mcp",
+            "https://mcp.example.com/mcp?team={team}"
+          ] do
+        assert {:error, {:invalid_url, :template}} = Endpoint.operator(url), url
+      end
+    end
+
+    test "another scheme, no host, whitespace, or not text" do
+      assert {:error, {:invalid_url, :scheme_not_http_or_https}} =
+               Endpoint.operator("ws://mcp.example.com/mcp")
+
+      assert {:error, {:invalid_url, :scheme_not_http_or_https}} =
+               Endpoint.operator("mcp.example.com")
+
+      assert {:error, {:invalid_url, :empty_host}} = Endpoint.operator("https:///mcp")
+
+      assert {:error, {:invalid_url, :whitespace_or_control}} =
+               Endpoint.operator("https://a.example/ mcp")
+
+      assert {:error, {:invalid_url, :empty}} = Endpoint.operator("")
+      assert {:error, {:invalid_url, :not_text}} = Endpoint.operator(nil)
+    end
+
+    test "a path the manifest rules refuse" do
+      assert {:error, {:invalid_url, :dot_segment}} =
+               Endpoint.operator("https://mcp.example.com/a/../mcp")
+
+      assert {:error, {:invalid_url, :encoded_slash}} =
+               Endpoint.operator("https://mcp.example.com/mcp%2Fadmin")
+    end
+  end
+
+  describe "resolve/2 for an operator endpoint" do
+    test "an IP literal is its own peer, a private one included" do
+      resolver = fn host -> flunk("#{host} must not be looked up") end
+
+      {:ok, endpoint} = Endpoint.operator("https://10.0.0.5/mcp")
+      assert {:ok, [{10, 0, 0, 5}]} = Endpoint.resolve(endpoint, resolver: resolver)
+
+      {:ok, endpoint} = Endpoint.operator("http://[::1]:3000/mcp")
+      assert {:ok, [{0, 0, 0, 0, 0, 0, 0, 1}]} = Endpoint.resolve(endpoint, resolver: resolver)
+    end
+
+    test "a name's every answer is a peer, in the resolver's order" do
+      {:ok, endpoint} = Endpoint.operator("https://nas.local/mcp")
+      resolver = fn "nas.local" -> {:ok, [{192, 168, 1, 20}]} end
+      assert {:ok, [{192, 168, 1, 20}]} = Endpoint.resolve(endpoint, resolver: resolver)
+
+      {:ok, endpoint} = Endpoint.operator("http://localhost:3000/mcp")
+      resolver = fn "localhost" -> {:ok, [{0, 0, 0, 0, 0, 0, 0, 1}, {127, 0, 0, 1}]} end
+
+      assert {:ok, [{0, 0, 0, 0, 0, 0, 0, 1}, {127, 0, 0, 1}]} =
+               Endpoint.resolve(endpoint, resolver: resolver)
+    end
+
+    test "a metadata or link-local address is a security block, literal or answered" do
+      {:ok, endpoint} = Endpoint.operator("https://169.254.169.254/latest")
+
+      assert {:error, {:remote_security_blocked, {:blocked_host, :link_local_address}}} =
+               Endpoint.resolve(endpoint)
+
+      {:ok, endpoint} = Endpoint.operator("https://metadata.example/mcp")
+      resolver = fn "metadata.example" -> {:ok, [{10, 0, 0, 5}, {169, 254, 169, 254}]} end
+
+      assert {:error,
+              {:remote_security_blocked, {:resolved_to_link_local_address, {169, 254, 169, 254}}}} =
+               Endpoint.resolve(endpoint, resolver: resolver)
+    end
+
+    # The manifest source keeps its public-only rule: an owner's URL widens
+    # nothing for a plugin.
+    test "a manifest endpoint still refuses the owner's own network" do
+      {:ok, endpoint} = Endpoint.new(@base, "/mcp")
+      resolver = fn _host -> {:ok, [{192, 168, 1, 20}]} end
+
+      assert {:error, {:remote_security_blocked, {:resolved_to_private_address, _ip}}} =
+               Endpoint.resolve(endpoint, resolver: resolver)
+    end
+  end
+
   describe "resolve/2" do
     test "returns the validated peer for a public answer" do
       {:ok, endpoint} = Endpoint.new(@base, "/mcp")
       resolver = fn _host -> {:ok, [{93, 184, 216, 34}]} end
 
-      assert {:ok, {93, 184, 216, 34}} = Endpoint.resolve(endpoint, resolver: resolver)
+      assert {:ok, [{93, 184, 216, 34}]} = Endpoint.resolve(endpoint, resolver: resolver)
     end
 
     # The gate has to run in the world the connection runs in: if resolution

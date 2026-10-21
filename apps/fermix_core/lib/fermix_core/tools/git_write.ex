@@ -77,9 +77,9 @@ defmodule FermixCore.Tools.GitWrite do
          repo = Map.get(args, "repo", File.cwd!()),
          git_args = Support.optional_string_list(args, "args"),
          {:ok, repo_dir} <- sandbox_repo_path(repo, context),
-         {:ok, repo_root} <- git_root(repo_dir),
+         {:ok, repo_root} <- git_root(repo_dir, context),
          {:ok, _allowed_root} <- sandbox_repo_root(repo_root, repo_dir, context),
-         {:ok, output} <- GitCommand.run(repo_dir, command, git_args) do
+         {:ok, output} <- GitCommand.run(repo_dir, command, git_args, context) do
       {:ok, Tool.success(output)}
     else
       {:error, reason} -> Support.error(format_error(reason))
@@ -100,10 +100,12 @@ defmodule FermixCore.Tools.GitWrite do
     end
   end
 
-  defp git_root(repo) do
-    with {:ok, git} <- GitCommand.executable() do
-      git
-      |> CommandRunner.run(["rev-parse", "--show-toplevel"],
+  defp git_root(repo, context) do
+    with {:ok, git} <- GitCommand.executable(),
+         {:ok, {executable, argv}} <-
+           Sandbox.confine(git, ["rev-parse", "--show-toplevel"], context) do
+      executable
+      |> CommandRunner.run(argv,
         cwd: repo,
         timeout_ms: @rev_parse_timeout_ms
       )
@@ -134,14 +136,12 @@ defmodule FermixCore.Tools.GitWrite do
 
   defp format_error({:repo_path_denied, {:outside_root, path}}) do
     "Sandbox denied git_write repo path outside roots: #{path}. " <>
-      "To allow this repository path, run: fermix grant path #{path}, " <>
-      "or call the request_directory_access tool to ask the owner to approve it."
+      Sandbox.grant_hint(path)
   end
 
   defp format_error({:repo_root_denied, {:outside_root, root}, repo_dir}) do
     "Sandbox denied git_write repo root outside roots: #{root} " <>
-      "(resolved from input #{repo_dir}). To allow this repository, run: fermix grant path #{root}, " <>
-      "or call the request_directory_access tool to ask the owner to approve it."
+      "(resolved from input #{repo_dir}). " <> Sandbox.grant_hint(root)
   end
 
   defp format_error({:repo_path_denied, reason}), do: format_error(reason)
@@ -149,8 +149,7 @@ defmodule FermixCore.Tools.GitWrite do
 
   defp format_error({:outside_root, path}) do
     "Sandbox denied git_write outside roots: #{path}. " <>
-      "To allow this repository, run: fermix grant path #{path}, " <>
-      "or call the request_directory_access tool to ask the owner to approve it."
+      Sandbox.grant_hint(path)
   end
 
   defp format_error({:protected_path, path}),
@@ -159,5 +158,6 @@ defmodule FermixCore.Tools.GitWrite do
   defp format_error({:blocked_root, path}),
     do: "Sandbox denied blocked root: #{path}. Run: fermix sandbox explain"
 
+  defp format_error({:os_sandbox_unavailable, sentence}), do: sentence
   defp format_error(reason), do: reason
 end

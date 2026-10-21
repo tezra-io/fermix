@@ -122,19 +122,15 @@ defmodule FermixCore.Agents.VoiceCallTest do
   # M56 §4.7: one list per mode, read by both surfaces (`LivePrompt` and
   # `TurnRunner`). A call in the chat may launch a coding run, whose outcome
   # re-enters the chat it was launched from; a private call's conversation
-  # ends with the call, so it never may.
+  # ends with the call, so it never may. Either mode sends pictures and files,
+  # which go to the owner's chat.
   describe "excluded_categories/1" do
-    test "a call in the chat excludes channel sends, media and fan-out, not coding runs" do
-      assert VoiceCall.excluded_categories("chat") == [:channel, :media, :delegation]
+    test "a call in the chat excludes fan-out alone" do
+      assert VoiceCall.excluded_categories("chat") == [:delegation]
     end
 
     test "a private call excludes coding runs too" do
-      assert VoiceCall.excluded_categories("private") == [
-               :channel,
-               :media,
-               :delegation,
-               :harness
-             ]
+      assert VoiceCall.excluded_categories("private") == [:delegation, :harness]
     end
 
     test "no other mode has a list" do

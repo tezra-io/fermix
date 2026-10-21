@@ -147,6 +147,54 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
     assert result.detail =~ "tailnet detected"
     assert result.detail =~ "APNs ready"
     assert result.detail =~ "2 paired devices"
+    assert result.detail =~ "reach from anywhere ready via us1.relay.fermix.ai"
+  end
+
+  # M62 §8: reach from anywhere is a sub-line of this check, as the rail reports
+  # it; a rail that is not working never hides the rest of the channel's facts.
+  test "reach from anywhere is said as the rail reports it", %{mobile_dir: mobile_dir} do
+    write_identity_files(mobile_dir)
+    Application.put_env(:fermix_channels, :mobile, enabled: true)
+
+    cases = [
+      {%{"state" => "off"}, :ok, "reach from anywhere off"},
+      {%{"state" => "dormant"}, :ok, "reach from anywhere waits for the first pairing"},
+      {%{"state" => "starting"}, :ok, "reach from anywhere starting"},
+      {%{"state" => "helper_missing"}, :warn,
+       "reach from anywhere unavailable: this build carries no fermix-iroh helper"},
+      {%{"state" => "ready", "connected" => false, "relay_error" => "connection refused"}, :warn,
+       "reach from anywhere not connected to a relay (connection refused)"},
+      {%{"state" => "ready", "connected" => false, "relay_error" => nil}, :warn,
+       "reach from anywhere not connected to a relay yet"},
+      {%{"state" => "failed", "failure" => "fermix-iroh exited with status 101"}, :fail,
+       "reach from anywhere failed: fermix-iroh exited with status 101"},
+      # A newer daemon's state is a warning, never a crash of this check.
+      {%{"state" => "paused"}, :warn,
+       "reach from anywhere reports a state this CLI does not know: paused"}
+    ]
+
+    for {remote, status, words} <- cases do
+      client =
+        live_client(%{
+          "listener" => %{"status" => "ready", "candidates" => ["wss://lan:4031/ws"]},
+          "mdns" => "disabled",
+          "tailnet" => %{"detected" => false, "candidates" => []},
+          "apns" => %{"enabled" => false, "credentials" => "missing"},
+          "paired_devices" => 1,
+          "remote" => remote
+        })
+
+      result =
+        Checks.mobile(
+          mobile_dir: mobile_dir,
+          client: client,
+          health_probe: fn _url, _ms -> :ok end
+        )
+
+      assert result.status == status, "#{inspect(remote)}: #{result.detail}"
+      assert result.detail =~ words
+      assert result.detail =~ "1 paired device"
+    end
   end
 
   test "enabled mobile requires one bounded TLS health candidate", %{mobile_dir: mobile_dir} do
@@ -496,8 +544,21 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
 
   # The daemon's report for a channel that runs: the facts each case sets, plus
   # the lifecycle every running channel publishes.
+  @reach_ready %{
+    "state" => "ready",
+    "relay" => "https://us1.relay.fermix.ai/",
+    "connected" => true,
+    "relay_error" => nil,
+    "failure" => nil
+  }
+
   defp live_client(report) do
-    report = Map.merge(%{"enabled" => true, "started" => true, "refused" => false}, report)
+    report =
+      Map.merge(
+        %{"enabled" => true, "started" => true, "refused" => false, "remote" => @reach_ready},
+        report
+      )
+
     fn "mobile_status" -> {:ok, %{"status" => "ok", "result" => report}} end
   end
 

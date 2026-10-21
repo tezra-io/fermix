@@ -44,7 +44,7 @@ the checks that show a property needs it):
   fires `{:failed, _}` (`queue.ex:914-922`).
 - `TurnsShareQueueFate`: turn tasks run under a `Task.Supervisor` that
   `QueueSupervisor` (`:one_for_all`) terminates before it restarts the Queue
-  (`queue_supervisor.ex:46-51`, `application.ex:60`).
+  (`queue_supervisor.ex:46-51`, `application.ex:64`).
 - `CrashClosesUserMessage`: a crashed turn's `:DOWN` writes the stopped marker
   before the next message starts (`queue.ex:873`, `:887-893`).
 - `StopSparesClaimedTurn`: a stop leaves a turn that has claimed its outcome
@@ -199,6 +199,10 @@ watch was added to the model).
 - The boot pass that writes the chat rows Live calls still owe
   (`Voice.CallRowSweep`, M56 §4.2). `application.ex` starts it after every
   other child; it writes timeline rows and never reaches the Queue.
+- The timeline's media store and the link-preview task supervisor (M72),
+  which `application.ex` starts on every real boot after the Voice supervisor
+  and before the companion socket; they store files and preview written rows
+  and never reach the Queue.
 - Consumers other than `Acp.Peer`. `Companion.Turns`, the settlement owner of
   the companion socket's turns and the phone's alike, watches the Queue it
   handed each turn to and answers the turn the Peer's way, with one
@@ -231,7 +235,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
     while the new Queue's turn ran, and nobody could stop it.
 - **Fix:** `FermixChannels.Gateway.QueueSupervisor` (`queue_supervisor.ex`)
   runs `{Task.Supervisor, name: FermixChannels.Gateway.TurnTasks}` and the
-  Queue, in that order, `:one_for_all`; `application.ex:60` starts it in the
+  Queue, in that order, `:one_for_all`; `application.ex:64` starts it in the
   Queue's slot. `:task_supervisor` is a required Queue option
   (`queue.ex:199`), so no Queue runs turns under a supervisor that outlives
   it. When the Queue dies, the supervisor terminates the task supervisor, and

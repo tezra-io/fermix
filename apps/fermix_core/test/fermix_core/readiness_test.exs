@@ -675,6 +675,100 @@ defmodule FermixCore.ReadinessTest do
     end
   end
 
+  # M70 §06: the voice key is the voice provider's own, read through the one
+  # resolver, so the row names the provider whose key is missing and a key of
+  # the other provider never satisfies it.
+  describe "voice on the Grok engine" do
+    setup do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-readiness-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      Application.put_env(:fermix_core, :agent, name: "fermix")
+      Application.put_env(:fermix_core, :personalization, seeded_personalization())
+      Application.put_env(:fermix_channels, :telegram, enabled: false)
+      :ok
+    end
+
+    test "a fresh SpaceXAI-only home that picks Grok is ready with no voice row" do
+      Application.put_env(:fermix_core, :providers, xai: [api_key: "xai-test", primary: true])
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "xai_realtime")
+
+      report = Readiness.report()
+
+      assert report.status == :ready
+      refute Enum.any?(report.failures, &String.starts_with?(&1.component, "realtime:"))
+    end
+
+    test "a missing SpaceXAI key is an advisory realtime:xai row, whatever OpenAI holds" do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test", primary: true])
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "xai_realtime")
+
+      report = Readiness.report()
+
+      assert report.status == :ready
+
+      assert [failure] = Enum.filter(report.failures, &(&1.component == "realtime:xai"))
+
+      assert failure == %{
+               component: "realtime:xai",
+               detail_key: "realtime:xai",
+               action: "Add the SpaceXAI API key in Voice settings, or turn voice off.",
+               gating: false,
+               pane: "voice"
+             }
+
+      refute Enum.any?(report.failures, &(&1.component == "realtime:openai"))
+    end
+
+    # A SpaceXAI sign-in carries chat, not voice: the realtime endpoint takes an
+    # API key, so an account signed in with no key is still missing one.
+    test "a SpaceXAI sign-in with no API key still misses the voice key" do
+      Application.put_env(:fermix_core, :providers, xai: [auth_mode: :oauth, primary: true])
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "xai_realtime")
+
+      assert :ok =
+               Store.write(Store.profile(:xai), %{
+                 auth_mode: "oauth_pkce",
+                 provider: "xai",
+                 tokens: %{access_token: "xai-at", refresh_token: "xai-rt"},
+                 expires_at: DateTime.add(DateTime.utc_now(), 3_600),
+                 last_refresh: nil,
+                 status: "ready"
+               })
+
+      report = Readiness.report()
+
+      assert report.status == :ready
+      assert Enum.any?(report.failures, &(&1.component == "realtime:xai"))
+    end
+
+    # An unresolved keychain reference is a marker, not a key.
+    test "an unresolved secret reference is no voice key" do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "@keyring", primary: true])
+
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "openai_live")
+
+      assert Enum.any?(Readiness.report().failures, &(&1.component == "realtime:openai"))
+    end
+
+    test "both providers' voice-key sentences are published, and the provider row is gone" do
+      actions = Map.new(Readiness.published_actions())
+
+      assert actions["realtime:openai"] ==
+               "Add the OpenAI API key in Providers settings, or turn voice off."
+
+      assert actions["realtime:xai"] ==
+               "Add the SpaceXAI API key in Voice settings, or turn voice off."
+
+      refute Enum.any?(Readiness.published_actions(), fn {_key, action} ->
+               action =~ "voice provider"
+             end)
+    end
+  end
+
   # The ACP surface has no credential and no external dependency: the whole
   # config is one boolean, so enabling it can never make setup incomplete
   # (M29 §9 item 6). Pinned so a future credential-bearing check on this

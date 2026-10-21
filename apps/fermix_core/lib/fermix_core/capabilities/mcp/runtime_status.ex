@@ -27,6 +27,28 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
   dying is the diagnosis; the death that follows it is a consequence, not a
   second, vaguer explanation.
 
+  ## Owners, and the two facts beside a status
+
+  The owner is the process that holds a source's connection: `Remote.Owner`
+  for a remote source, a plugin's or an operator `http` server's (M74 E4),
+  `StdioTransport` for an operator stdio one (M74 E3). A plugin's stdio source
+  has none. `MCP.Server` writes into the generation the
+  owner installed. The status words were minted for the remote rail and a
+  stdio source uses the same ones: what is new for it is a class, here in
+  `classify/1`, not a status, because every status is published in the plugin
+  row's vocabulary.
+
+  Two facts ride beside a status. `stderr_tail`, the last lines a stdio
+  program wrote to its stderr before it exited (`put_exited/4`), is written
+  with its status and cleared by the next write; that text is the program's
+  own, bounded by its transport, published on the owner's row and never
+  logged. `discovery`, what the last discovery found (`put_ready/4`: how many
+  tools the server listed, its `serverInfo` and its tools described, M74 E9),
+  is the one place a discovery's result is kept: it outlives the statuses and
+  the generations that follow it, so a server that is turned off or starting
+  again still shows what it last listed, and only the next discovery or
+  `clear/2` replaces it.
+
   ## Why `detail` is an atom, and what `subject` may hold
 
   A crash reason can carry the crashing process's state, and a remote session's
@@ -54,6 +76,7 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
 
   use GenServer
 
+  alias FermixCore.Capabilities.MCP.Discoverer
   alias FermixCore.Capabilities.MCP.Telemetry
 
   @statuses [
@@ -83,11 +106,17 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
           status: status(),
           detail: atom() | nil,
           subject: subject(),
+          discovery: Discoverer.discovery() | nil,
+          stderr_tail: [String.t()],
           generation: generation(),
           owner: pid() | nil,
           plugin: String.t() | nil,
           updated_at: integer()
         }
+
+  # The fact a write carries beside its status, cleared by a write that names
+  # none. `discovery` is not among them: only a discovery replaces it.
+  @no_facts %{stderr_tail: []}
 
   @typedoc "The capability a refusal names, when it names one."
   @type subject :: String.t() | nil
@@ -168,7 +197,31 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
       when is_atom(kind) and is_binary(name) and is_reference(generation) and
              status in @statuses and is_atom(detail) and
              (is_nil(subject) or is_binary(subject)) do
-    GenServer.call(server, {:put, source_id, generation, status, detail, bounded(subject)})
+    write = {status, detail, bounded(subject), @no_facts}
+    GenServer.call(server, {:put, source_id, generation, write})
+  end
+
+  @doc "`put/6` of `:ready`, with what the discovery found (`Discoverer.discovery/2`)."
+  @spec put_ready(GenServer.server(), source_id(), generation(), Discoverer.discovery()) ::
+          :ok | {:error, :stale_generation}
+  def put_ready(server, {kind, name} = source_id, generation, %{tool_count: count} = discovery)
+      when is_atom(kind) and is_binary(name) and is_reference(generation) and
+             is_integer(count) and count >= 0 do
+    write = {:ready, nil, nil, Map.put(@no_facts, :discovery, discovery)}
+    GenServer.call(server, {:put, source_id, generation, write})
+  end
+
+  @doc """
+  A stdio program's exit, `remote_unreachable/exited`, with the last lines it
+  wrote to its stderr, which its transport bounded.
+  """
+  @spec put_exited(GenServer.server(), source_id(), generation(), [String.t()]) ::
+          :ok | {:error, :stale_generation}
+  def put_exited(server, {kind, name} = source_id, generation, lines)
+      when is_atom(kind) and is_binary(name) and is_reference(generation) and is_list(lines) do
+    true = Enum.all?(lines, &is_binary/1)
+    write = {:remote_unreachable, :exited, nil, %{@no_facts | stderr_tail: lines}}
+    GenServer.call(server, {:put, source_id, generation, write})
   end
 
   # The guard admits any binary so a caller cannot crash the daemon by passing a
@@ -232,7 +285,20 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
     do: {:insufficient_credential_scope, nil, nil}
 
   def classify({:invalid_remote_config, detail}), do: {:invalid_remote_config, class(detail), nil}
+
+  # An operator's remote server (M74 E4) says which credential was refused: the
+  # key its `header` mode sent, or none at all where its `auto` mode is asked to
+  # sign in. A plugin's refusal carries its host, which is dropped.
+  def classify({:reauthorization_required, class})
+      when class in [:key_refused, :sign_in_required],
+      do: {:reauthorization_required, class, nil}
+
   def classify({:reauthorization_required, _host}), do: {:reauthorization_required, nil, nil}
+
+  # A header an operator's remote server declares that could not be read when
+  # its session started. The payload names it, so only the class survives.
+  def classify({:header_unavailable, _name}),
+    do: {:invalid_remote_config, :header_unavailable, nil}
 
   def classify({:remote_security_blocked, detail}),
     do: {:remote_security_blocked, class(detail), nil}
@@ -257,6 +323,20 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
 
   def classify({:remote_http_error, _status}), do: {:remote_unreachable, :http_error, nil}
   def classify({:rate_limited, _ms}), do: {:remote_unreachable, :rate_limited, nil}
+
+  # A stdio program that cannot be started as configured (`StdioTransport`):
+  # no program by that name, no such working folder, or a declared variable
+  # that could not be read. The payload names it, so only the class survives.
+  def classify({:command_not_found, _command}),
+    do: {:invalid_remote_config, :command_not_found, nil}
+
+  def classify({:cwd_not_found, _cwd}), do: {:invalid_remote_config, :cwd_not_found, nil}
+  def classify({:env_unavailable, _name}), do: {:invalid_remote_config, :env_unavailable, nil}
+  def classify({:spawn_failed, _class}), do: {:remote_unreachable, :spawn_failed, nil}
+
+  # A stdio program that ran and never answered within `MCP.Server`'s
+  # discovery attempts. (Its exit is `put_exited/4`, which keeps its lines.)
+  def classify(:retries_exhausted), do: {:remote_unreachable, :retries_exhausted, nil}
 
   # Everything the transport could not deliver — DNS, TLS, connect, timeout,
   # a closed socket — is unreachability. The class stays visible so an
@@ -327,10 +407,10 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
     {:reply, {:ok, generation}, state}
   end
 
-  def handle_call({:put, source_id, generation, status, detail, subject}, _from, state) do
+  def handle_call({:put, source_id, generation, write}, _from, state) do
     case Map.fetch(state.entries, source_id) do
       {:ok, %{generation: ^generation} = entry} ->
-        {:reply, :ok, write(state, source_id, entry, status, detail, subject)}
+        {:reply, :ok, write(state, source_id, entry, write)}
 
       _replaced_or_absent ->
         {:reply, {:error, :stale_generation}, state}
@@ -377,19 +457,23 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
     {:noreply, drop_waiter(state, source_id, waiter_id, {:error, :timeout})}
   end
 
+  # A new generation starts over at `:connecting` and keeps what the last
+  # discovery found, which only the next one replaces.
   defp install(state, source_id, owner, plugin, generation) do
     ref = Process.monitor(owner)
 
-    entry = %{
-      status: :connecting,
-      detail: nil,
-      subject: nil,
-      generation: generation,
-      owner: owner,
-      monitor: ref,
-      plugin: plugin,
-      updated_at: System.system_time(:millisecond)
-    }
+    entry =
+      Map.merge(@no_facts, %{
+        discovery: last_discovery(Map.get(state.entries, source_id)),
+        status: :connecting,
+        detail: nil,
+        subject: nil,
+        generation: generation,
+        owner: owner,
+        monitor: ref,
+        plugin: plugin,
+        updated_at: System.system_time(:millisecond)
+      })
 
     %{
       state
@@ -398,14 +482,19 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
     }
   end
 
-  defp write(state, source_id, entry, status, detail, subject) do
-    entry = %{
+  defp last_discovery(%{discovery: discovery}), do: discovery
+  defp last_discovery(nil), do: nil
+
+  defp write(state, source_id, entry, {status, detail, subject, facts}) do
+    entry =
       entry
-      | status: status,
+      |> Map.merge(facts)
+      |> Map.merge(%{
+        status: status,
         detail: detail,
         subject: subject,
         updated_at: System.system_time(:millisecond)
-    }
+      })
 
     %{state | entries: Map.put(state.entries, source_id, entry)}
     |> settle(source_id, entry)
@@ -444,10 +533,11 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
   # A classified terminal status is the diagnosis the owner already wrote;
   # the death that followed must not overwrite it with a vaguer one.
   defp record_down(state, source_id, entry, reason) do
-    {status, detail, subject} =
+    {status, detail, _subject, _facts} =
+      write =
       if terminal?(entry.status),
-        do: {entry.status, entry.detail, entry.subject},
-        else: {:remote_unreachable, class(reason), nil}
+        do: {entry.status, entry.detail, entry.subject, Map.take(entry, Map.keys(@no_facts))},
+        else: {:remote_unreachable, class(reason), nil, @no_facts}
 
     Telemetry.emit_lifecycle(
       :owner_down,
@@ -456,7 +546,7 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
       0
     )
 
-    write(state, source_id, %{entry | owner: nil, monitor: nil}, status, detail, subject)
+    write(state, source_id, %{entry | owner: nil, monitor: nil}, write)
   end
 
   defp retire(state, source_id, reply) do

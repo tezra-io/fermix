@@ -31,12 +31,15 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Net.Egress
+  alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.OpenAI.ChatGPTPlan
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.RouteResolver
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
   alias FermixCore.Tools.PlaceSearch
+  alias FermixCore.Tools.PlaceSearch.AppleMaps, as: PlaceAppleMaps
   alias FermixCore.Tools.PlaceSearch.Brave, as: PlaceBrave
   alias FermixCore.Tools.SearchCredential
   alias FermixCore.Tools.WebSearch
@@ -88,8 +91,11 @@ defmodule FermixCore.Setup.Doctor do
           optional(:result_count) => non_neg_integer()
         }
   @type place_search_report :: %{
-          :backend => atom(),
+          :backend => :apple_maps | :brave,
+          :backend_source => :configured | :build_default,
+          :web_backend => atom(),
           :credential_present? => boolean(),
+          :ready => :ok | {:error, String.t()},
           :advertised? => boolean(),
           optional(:probe_result) => atom(),
           optional(:probe_error) => String.t(),
@@ -132,22 +138,25 @@ defmodule FermixCore.Setup.Doctor do
   @type probe_error ::
           {:misconfigured, reason :: String.t()}
           | {:auth_scope_mismatch, surface :: String.t(), hint :: String.t()}
-          | {:server_error, status :: pos_integer(), body :: term()}
+          | {:server_error, status :: pos_integer(), message :: String.t()}
           | {:network, reason :: term()}
   @type key_probe_error ::
           :no_key
-          | {:refused, status :: 401 | 403, code :: String.t() | nil}
+          | {:refused, status :: 400 | 401 | 403, code :: String.t() | nil}
           | {:server_error, status :: pos_integer()}
           | {:network, reason :: term()}
 
-  @openai_default_url "https://api.openai.com/v1/responses"
-  # The host both voice engines dial. Listing models is free and sends no prompt.
-  @openai_models_url "https://api.openai.com/v1/models"
-  @anthropic_default_url "https://api.anthropic.com/v1/messages"
-  # xAI base_url is a ROOT (the adapter appends /responses); the probe must
-  # do the same so a configured/overlaid root base_url hits the same URL the
-  # runtime does. OpenAI/Anthropic keep full default URLs because their
-  # blocks don't persist a base_url through setup.
+  @openai_default_base_url "https://api.openai.com/v1"
+  # The host each voice provider's engines dial. Listing models is free and
+  # sends no prompt.
+  @voice_models_urls %{
+    "openai" => "https://api.openai.com/v1/models",
+    "xai" => "https://api.x.ai/v1/models"
+  }
+  @anthropic_default_base_url "https://api.anthropic.com/v1"
+  # Every base_url is a ROOT (the adapters append /responses or /messages);
+  # the probes do the same, so a configured root base_url (`fermix setup
+  # --openai-base-url` and its siblings) hits the same URL the runtime does.
   @xai_default_base_url "https://api.x.ai/v1"
   @openrouter_default_base_url "https://openrouter.ai/api/v1"
   @mistral_default_base_url "https://api.mistral.ai/v1"
@@ -223,51 +232,69 @@ defmodule FermixCore.Setup.Doctor do
   end
 
   @doc """
-  Whether OpenAI accepts the `openai` provider key, the one a voice call dials
-  with whatever the primary provider is. One GET of the model list: free, no
-  prompt, and no model named, so any key OpenAI would accept passes.
+  Whether the voice provider accepts the key a voice call dials with, whatever
+  the primary provider is: the `openai` provider key for both OpenAI engines,
+  the `xai` provider key for Grok, read through `RealtimeConfig.api_key/1`. One
+  GET of the model list: free, no prompt, and no model named, so any key the
+  vendor would accept passes.
 
-  A refusal carries its status and OpenAI's error code, never the message or the
-  body: for a refused key OpenAI's message quotes the key's tail.
+  A refusal carries its status and the vendor's error code, never the message or
+  the body: for a refused key both vendors' messages quote the key's tail.
+  SpaceXAI refuses a key it does not accept with 400 as well as 401.
   """
-  @spec probe_openai_key(keyword()) ::
+  @spec probe_voice_key(RealtimeConfig.t(), keyword()) ::
           {:ok, %{latency_ms: non_neg_integer()}} | {:error, key_probe_error()}
-  def probe_openai_key(opts \\ []) when is_list(opts) do
-    case FermixCore.Config.provider_api_key(:openai) do
-      {:ok, key} -> request_openai_models(key, opts)
-      {:error, :not_configured} -> {:error, :no_key}
+  def probe_voice_key(%RealtimeConfig{} = config, opts \\ []) when is_list(opts) do
+    case RealtimeConfig.api_key(config) do
+      {:ok, key} -> request_voice_models(config.provider, key, opts)
+      {:error, {:missing_api_key, _provider}} -> {:error, :no_key}
     end
   end
 
-  defp request_openai_models(key, opts) do
+  defp request_voice_models(provider, key, opts) do
     start = System.monotonic_time(:millisecond)
+    url = Map.fetch!(@voice_models_urls, provider)
 
-    Req.new(url: @openai_models_url, method: :get, headers: [{"authorization", "Bearer #{key}"}])
+    Req.new(url: url, method: :get, headers: [{"authorization", "Bearer #{key}"}])
     |> Req.merge(probe_req_options(opts))
     |> Egress.attach(:direct)
     |> Req.request()
-    |> classify_key_probe(start)
+    |> classify_key_probe(provider, start)
   end
 
-  defp classify_key_probe({:ok, %Req.Response{status: status}}, start) when status in 200..299,
-    do: {:ok, %{latency_ms: elapsed_ms(start)}}
+  defp classify_key_probe({:ok, %Req.Response{status: status}}, _provider, start)
+       when status in 200..299,
+       do: {:ok, %{latency_ms: elapsed_ms(start)}}
 
-  defp classify_key_probe({:ok, %Req.Response{status: status, body: body}}, _start)
+  defp classify_key_probe({:ok, %Req.Response{status: status, body: body}}, "openai", _start)
        when status in [401, 403],
        do: {:error, {:refused, status, openai_error_code(body)}}
 
-  defp classify_key_probe({:ok, %Req.Response{status: status}}, _start),
+  defp classify_key_probe({:ok, %Req.Response{status: status, body: body}}, "xai", _start)
+       when status in [400, 401, 403],
+       do: {:error, {:refused, status, xai_error_code(body)}}
+
+  defp classify_key_probe({:ok, %Req.Response{status: status}}, _provider, _start),
     do: {:error, {:server_error, status}}
 
-  defp classify_key_probe({:error, reason}, _start), do: {:error, {:network, reason}}
+  defp classify_key_probe({:error, reason}, _provider, _start), do: {:error, {:network, reason}}
 
   # OpenAI's `code` is a fixed identifier such as `invalid_api_key`; anything
   # else in that field is dropped rather than repeated.
-  defp openai_error_code(%{"error" => %{"code" => code}}) when is_binary(code) do
-    if Regex.match?(~r/\A[a-z0-9_.]{1,64}\z/, code), do: code
-  end
+  defp openai_error_code(%{"error" => %{"code" => code}}) when is_binary(code),
+    do: error_identifier(code)
 
   defp openai_error_code(_body), do: nil
+
+  # SpaceXAI answers at the top level, and its `code` is usually a sentence
+  # (`Client specified an invalid argument`), which is dropped like any other
+  # non-identifier: the status says enough.
+  defp xai_error_code(%{"code" => code}) when is_binary(code), do: error_identifier(code)
+  defp xai_error_code(body), do: openai_error_code(body)
+
+  defp error_identifier(code) do
+    if Regex.match?(~r/\A[a-z0-9_.]{1,64}\z/, code), do: code
+  end
 
   @doc """
   Offline freshness sweep over the auth store: the sorted profile names whose
@@ -276,7 +303,9 @@ defmodule FermixCore.Setup.Doctor do
   setup doctor pane so both define "stale" the same way.
 
   Only profiles Fermix still reads are reported: a provider's auth profile
-  (`Store.profile/1`) and a plugin's own profile. An entry stored under a bare
+  (`Store.profile/1`) and a plugin's own profile. An MCP server's grant
+  (`mcp:<name>`) is not: it is refreshed when its server next connects, and its
+  row says when it needs a sign-in. An entry stored under a bare
   provider id is one an older build wrote (the Codex-client grant under
   `openai_codex`, whose provider now signs in under `chatgpt`); nothing reads it,
   so asking to renew it would send the operator after a credential that does
@@ -300,7 +329,8 @@ defmodule FermixCore.Setup.Doctor do
   # provider id is a leftover, and every remaining name is a plugin's profile.
   defp read_profile?(profile) do
     profile in Enum.map(Store.profiled_providers(), &Store.profile/1) or
-      profile not in Enum.map(ModelCatalog.providers(), &Atom.to_string/1)
+      (profile not in Enum.map(ModelCatalog.providers(), &Atom.to_string/1) and
+         not Store.mcp_profile?(profile))
   end
 
   @doc """
@@ -579,48 +609,60 @@ defmodule FermixCore.Setup.Doctor do
   end
 
   @doc """
-  Reports `place_search` readiness: the shared Brave key, the active `web_search`
-  backend, and whether the tool is advertised (MILESTONE_31 §14.3).
+  Reports `place_search` readiness (MILESTONE_31 §14.3, M72 §14.1): the backend
+  in force and whether configuration or the platform chose it, whether it is
+  ready, whether the tool is advertised, the shared Brave key and the active
+  `web_search` backend.
 
   Offline by default — no network call, whatever the config says. With
-  `full: true` and a present key it runs **one** metered live request against the
-  place endpoint (fixed query, `count: 1`, result discarded) and adds
-  `:probe_result` / `:probe_error` / `:result_count`. Each §10.4 failure kind
-  keeps its own tag, and no probe ever switches provider: there is one adapter
-  and no fallback. Inject `req_options`/`net_resolver` to stub the probe in
-  tests.
+  `full: true` and a ready backend it runs **one** live search on that backend
+  (fixed query, `count: 1`, result discarded): metered on Brave, free on Apple
+  Maps. It adds `:probe_result` / `:probe_error` / `:result_count`. Each §10.4
+  failure kind keeps its own tag, and no probe ever switches backend.
+  `host:` names the build and `apple_maps:` the helper's options for a test;
+  `req_options`/`net_resolver` stub the Brave probe.
 
-  Advertisement is asked of the tool itself so a doctor row and the runtime
-  surface cannot drift; the probe never reads the owner's saved default
-  location (§13.2 — an unattended caller may not, and a health check has no
-  business sending it).
+  Readiness and advertisement are asked of the tool itself so a doctor row and
+  the runtime surface cannot drift; the probe never reads the owner's saved
+  default location (§13.2 — an unattended caller may not, and a health check
+  has no business sending it).
   """
   @spec place_search_report(keyword()) :: place_search_report()
   def place_search_report(opts \\ []) do
     config = WebSearch.config()
-    {backend, _module} = WebSearch.active_backend(config)
-    present? = match?({:ok, _key}, SearchCredential.brave(config))
+    {web_backend, _module} = WebSearch.active_backend(config)
+    context = opts |> Keyword.take([:host, :apple_maps]) |> Map.new()
+    resolution = PlaceSearch.resolution(context)
+    ready = PlaceSearch.readiness(context)
 
     base = %{
-      backend: backend,
-      credential_present?: present?,
-      advertised?: PlaceSearch.advertise?(%{})
+      backend: resolution.name,
+      backend_source: resolution.source,
+      web_backend: web_backend,
+      credential_present?: match?({:ok, _key}, SearchCredential.brave(config)),
+      ready: ready,
+      advertised?: PlaceSearch.advertise?(context)
     }
 
-    if Keyword.get(opts, :full, false) and present? do
-      Map.merge(base, place_search_probe(config, opts))
+    if Keyword.get(opts, :full, false) and ready == :ok do
+      Map.merge(base, place_search_probe(resolution.name, config, opts))
     else
       base
     end
   end
 
-  defp place_search_probe(config, opts) do
-    probe_opts = Keyword.put(config, :context, probe_context(opts))
+  defp place_search_probe(:brave, config, opts),
+    do: place_probe(PlaceBrave, Keyword.put(config, :context, probe_context(opts)))
+
+  defp place_search_probe(:apple_maps, _config, opts),
+    do: place_probe(PlaceAppleMaps, Keyword.get(opts, :apple_maps, []))
+
+  defp place_probe(backend, backend_opts) do
     request = %{query: @place_probe_query, count: 1}
 
-    case PlaceBrave.search(request, probe_opts) do
+    case backend.search(request, backend_opts) do
       {:ok, places, _trace} ->
-        %{probe_result: :ok, result_count: length(places)}
+        %{probe_result: :ok, result_count: length(Enum.take(places, request.count))}
 
       {:error, reason, _trace} ->
         %{probe_result: place_probe_tag(reason), probe_error: reason, result_count: 0}
@@ -927,7 +969,7 @@ defmodule FermixCore.Setup.Doctor do
         err
 
       {:ok, bearer} ->
-        url = base_url(config, :openai, @openai_default_url)
+        url = "#{base_url(config, :openai, @openai_default_base_url)}/responses"
         model = ModelCatalog.effective_model(:openai, config)
 
         body = %{
@@ -1343,7 +1385,7 @@ defmodule FermixCore.Setup.Doctor do
   end
 
   defp post_anthropic_probe(config, body_extra, headers, surface, opts) do
-    url = base_url(config, :anthropic, @anthropic_default_url)
+    url = "#{base_url(config, :anthropic, @anthropic_default_base_url)}/messages"
     model = ModelCatalog.effective_model(:anthropic, config)
 
     body =
@@ -1456,6 +1498,9 @@ defmodule FermixCore.Setup.Doctor do
     {:error, {:auth_scope_mismatch, surface, hint_for(surface)}}
   end
 
+  # Any other answer carries the message every failed call carries
+  # (`Providers.Error.status_message/2`), never the body itself: an HTML error
+  # page from a proxy in front of the provider is kilobytes of markup.
   defp classify(
          {:ok, %Req.Response{status: status, body: body}},
          _provider,
@@ -1463,7 +1508,7 @@ defmodule FermixCore.Setup.Doctor do
          _surface,
          _start
        ) do
-    {:error, {:server_error, status, body}}
+    {:error, {:server_error, status, ProviderError.status_message(status, body)}}
   end
 
   defp classify({:error, reason}, _provider, _model, _surface, _start) do

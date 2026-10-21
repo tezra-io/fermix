@@ -1,0 +1,265 @@
+# The Fermix desktop app on Linux — M76 §4.10 and §4.11 stage 1, graded through
+# the real agent path.
+#
+# WHAT ROTS HERE. A Linux owner with the Flatpak desktop app (`io.tezra.Fermix`)
+# changes settings, keeps the service running and restarts it from the app's own
+# pages and panes. General Linux knowledge says the opposite ("a daemon is
+# managed with systemctl and a config file"), and the self-knowledge skill used
+# to give every Linux owner `fermix setup` and `config.toml`. The app's labels
+# live in the skill's `linux_app` reference, which the model has to reach and
+# read. ExUnit proves the labels are in the file; this suite proves an owner
+# asking in their own words gets them.
+#
+# WHY BEHAVIORAL AND NOT CAPABILITY. There is no end state to check: the answer
+# is advice, and the capability runner scores ground truth.
+#
+# THE DAEMON UNDER TEST IS NOT A LINUX INSTALL. `~/.fermix-dev` is a source run
+# on macOS, so its `## This Fermix` section names a development run on a Mac.
+# Every prompt states the Linux-app premise itself: a question about another
+# install is answered for that install. A reply that answers for the Mac app or
+# for a bare package install is the exact failure this suite exists to catch.
+#
+# ROUTE ASSERTIONS. Exactly one, the labelled sanity case. Everything else gates
+# on the outcome.
+# The reminder cases also forbid the temporal writes: a safety gate keeping a
+# stored reminder off the development home, not a route assertion.
+#
+# FLOORS, NOT VOCABULARIES. Each `reply_matches` is a label any correct answer
+# must contain (the pane, the switch, the button). `reply_not_matches` names
+# only what a Linux-app answer has no reason to say in any polarity: setup-wizard
+# flags and a CLI sign-in for a provider the app connects, and macOS service
+# managers or Login Items for a Linux desktop. It does NOT try to catch "run
+# `fermix setup`": a correct answer may say it is not needed, and a pattern
+# cannot tell the two apart. That is the rubric's.
+#
+# NO NEW CONSENT GATE. Nothing here is gated on a human decision, so
+# `bin/seed_capability_home.py` needs no pre-grant for this suite (and these are
+# `host_readonly` cases, which run against the development home anyway).
+suite: linux_app
+risk: host_readonly
+title: "The Linux desktop app — answered with its own pages, panes and switches"
+description: >
+  Ordinary owner questions from someone who runs Fermix on Linux with the
+  Fermix desktop app installed: changing the provider, adding a key, keeping
+  Fermix running after logout, opening the app at login, starting a fresh
+  chat, finding out what is wrong, restarting after a change, and whether a
+  timer pops up on the desktop. Each case gates on a label any correct answer
+  contains plus the wrong-surface refusals; the rubric owns the wording. One labelled sanity case pins that
+  the answer comes from the self-knowledge skill rather than from what the
+  model assumes about Linux daemons.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: linux_app_providers
+    title: "The provider is changed in the app's Providers pane, not with the setup wizard"
+    severity: normal
+    risk: host_readonly
+    tags: [linux-app, providers, self-knowledge]
+    cases:
+      # SANITY CASE — the one route assertion in this suite. The Linux app's
+      # labels are not general knowledge; they are in the skill's `linux_app`
+      # reference, so this case pins that the model opened the skill.
+      - id: switch_provider_sanity
+        query: >
+          I run Fermix on my Ubuntu laptop and use the Fermix desktop app for
+          it. How do I make Fermix answer with Anthropic instead of OpenAI?
+        expect:
+          tools_any: [skill_view]
+          reply_matches: '(?i)\bproviders\b'
+          reply_not_matches: '(?i)(--provider\b|--anthropic-|fermix\s+auth\s+login)'
+          max_tool_calls: 8
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Answers with the Linux desktop app's own labels: Settings > Providers,
+          where Anthropic is connected through its row (a sign-in, a setup token
+          or an API key) and made the primary provider with Make primary from
+          that row's menu, then a restart when Fermix asks for one. Does not send
+          the user to `fermix setup`, another `fermix` command, browser setup or
+          config.toml to do it, and does not answer with the Mac app's labels.
+      - id: add_openrouter_key
+        query: >
+          The Fermix desktop app is installed on my Fedora machine. I have an
+          OpenRouter API key. Where do I put it so Fermix can use OpenRouter?
+        expect:
+          reply_matches: '(?i)\bproviders\b'
+          reply_not_matches: '(?i)(--provider\b|--openrouter-|fermix\s+auth\s+login)'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Points at the Linux desktop app's Settings > Providers, where the
+          OpenRouter row takes the key through Use an API key…, and says Make
+          primary in that row's menu is how OpenRouter becomes the one that
+          answers, with a restart when Fermix asks. Saying the key is stored in
+          the system keyring rather than in a settings file is correct and must
+          never be penalized. Does not send the user to `fermix setup`, another
+          `fermix` command or config.toml to do it.
+
+  - id: linux_app_background
+    title: "Home's Background switches keep Fermix running and open the app at login"
+    severity: normal
+    risk: host_readonly
+    tags: [linux-app, service, self-knowledge]
+    cases:
+      - id: keep_running_after_logout
+        query: >
+          I use the Fermix desktop app on my Linux laptop. I want Fermix to keep
+          answering me on Telegram after I close the window and even after I
+          log out. What do I switch on?
+        expect:
+          reply_matches: '(?i)run in the background'
+          reply_not_matches: '(?i)\b(launchctl|brew\s+services|login\s+items)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Points at Run in the background on the app's Home page, and says it
+          keeps the Fermix service (the `fermix.service` systemd user unit)
+          running with the window closed and after logout, turning on linger for
+          that. Does not tell the user to write a systemd unit or to run
+          systemctl or loginctl by hand, and does not describe a Mac.
+      - id: open_app_at_login
+        query: >
+          Can the Fermix desktop app on my Linux machine open by itself when I
+          log in, so it's sitting in the tray?
+        expect:
+          reply_matches: '(?i)open at login'
+          reply_not_matches: '(?i)(\.config/autostart|\blaunchctl\b|\blogin\s+items\b)'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says yes: Open at login on the app's Home page opens the app in the
+          tray at login (through the desktop's Background portal). Mentioning
+          that the Fermix service itself runs whether or not the app opens, when
+          Run in the background is on, is correct and must never be penalized.
+          Does not tell the user to write an autostart file by hand.
+
+  - id: linux_app_chat
+    title: "The app's chat starts afresh with New conversation"
+    severity: normal
+    risk: host_readonly
+    tags: [linux-app, chat, self-knowledge]
+    cases:
+      - id: fresh_conversation_new_did_nothing
+        query: >
+          In the Fermix desktop app's chat on Linux, how do I start a fresh
+          conversation? Typing /new didn't do anything.
+        expect:
+          reply_matches: '(?i)new conversation'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says the Linux app's chat does not run slash commands, and that New
+          conversation, at the top of the Chat page, starts a fresh one. Saying
+          that each conversation there is its own, apart from other chats such
+          as Telegram, is correct and must never be penalized. Does not claim
+          /new works there or tell the user to restart Fermix to clear it.
+      - id: clear_chat_like_telegram
+        query: >
+          On Telegram I clear my chat with Fermix using /new. Is there a way to
+          do the same in the Fermix desktop app on my Linux box?
+        expect:
+          reply_matches: '(?i)new conversation'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says the desktop app's chat has New conversation for this, at the top
+          of the Chat page, since slash commands do not run in that chat. Does
+          not claim /new works in the app, and does not suggest deleting files
+          or restarting Fermix to clear it.
+
+  - id: linux_app_troubleshoot
+    title: "What is wrong, and a restart, are found in the app"
+    severity: normal
+    risk: host_readonly
+    tags: [linux-app, doctor, restart, self-knowledge]
+    cases:
+      - id: stopped_answering
+        query: >
+          Fermix stopped answering me in the Fermix desktop app on my Ubuntu
+          laptop. How do I find out what's wrong from inside the app?
+        expect:
+          reply_matches: '(?i)\bdoctor\b'
+          reply_not_matches: '(?i)\b(launchctl|brew\s+services)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Points at the app's own surfaces: Home, which says what needs
+          attention with the button that fixes it and offers Start Fermix when
+          the service is not running, the Doctor page (Run checks, or Run Doctor
+          from the tray) and the Logs page. Mentioning `journalctl --user -u
+          fermix` for a service that will not start is correct and must never be
+          penalized. Does not describe a Mac.
+      - id: restart_after_change
+        query: >
+          I changed the sandbox mode in the Fermix desktop app on Linux and it
+          says the change needs a restart. How do I restart Fermix from the app?
+        expect:
+          reply_matches: '(?i)restart fermix'
+          reply_not_matches: '(?i)\b(launchctl|brew\s+services)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Points at Restart Fermix… in the app (the window's header, Home's
+          attention row, or the tray menu). Mentioning that `fermix restart` in a
+          terminal does the same is correct and must never be penalized. Does
+          not tell the user to kill the process or run systemctl by hand.
+
+  # M76 stage 2: on Linux a reminder rings as a desktop notification the daemon
+  # posts itself on the session bus, so the app needs nothing for it: no grant,
+  # no setting. The floor is the notification. The wrong-surface gates are the
+  # Mac's notification and login-item paths, which a Linux answer has no reason
+  # to name in any polarity. A timer question may be acted on instead of
+  # answered, and a timer stored on the development home would come due there:
+  # `tools_none` on the temporal writes is the safety gate, not a route
+  # assertion.
+  - id: linux_desktop_reminders
+    title: "A timer on the Linux desktop rings as a desktop notification, with nothing to grant in the app"
+    severity: normal
+    risk: host_readonly
+    tags: [linux-app, reminders, this-computer, self-knowledge]
+    cases:
+      - id: timer_pops_up_on_the_desktop
+        query: >
+          I use the Fermix desktop app on my Fedora laptop. If I ask it for a 20
+          minute timer, will it actually pop up on my screen when it's done? Do
+          I need to allow something in the app's Permissions first?
+        expect:
+          reply_matches: '(?i)notification'
+          reply_not_matches: '(?i)(osascript|terminal-notifier|login\s+items|launchctl)'
+          tools_none: [event_store, event_update, schedule_job]
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says yes: a timer asked from this computer, such as in the app's chat,
+          rings on this machine as a desktop notification while a desktop
+          session is running, posted by the Fermix service itself, and there is
+          nothing to grant in the app's Permissions or anywhere else. Saying the
+          notification has no Snooze button and that "snooze that" in the chat
+          pushes it back is correct and must never be penalized. Does not point
+          at a Notifications permission in the app, at the Mac's System
+          Settings, or at installing a notification tool.
+      - id: reminders_on_this_screen
+        query: >
+          I'm on Ubuntu with the Fermix desktop app. I'd like a reminder to show
+          up on this computer's screen instead of in Telegram. Can Fermix do
+          that, and is there a setting I have to turn on?
+        expect:
+          reply_matches: '(?i)notification'
+          reply_not_matches: '(?i)(osascript|terminal-notifier|login\s+items|launchctl)'
+          tools_none: [event_store, event_update, schedule_job]
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says yes: asking for the reminder on this computer makes it ring here
+          as a desktop notification while a desktop session is running, and no
+          setting or permission has to be turned on for it. Saying that a
+          reminder asked without naming this computer keeps going to Telegram,
+          or that a timer asked in the app's chat rings here on its own, is
+          correct and must never be penalized. Does not point at a
+          Notifications permission in the app, at the Mac's System Settings, or
+          at installing a notification tool.

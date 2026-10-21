@@ -15,12 +15,13 @@ defmodule FermixCore.Prompt.TemplateReconcilerTest do
 
   @agent_id "main"
 
-  # The four reconciled resources and the file each one owns on disk.
+  # The five reconciled resources and the file each one owns on disk.
   @resources [
     {:fermix, :fermix_md, "FERMIX.md"},
     {:soul, :soul_md, "SOUL.md"},
     {:realtime, :realtime_md, "REALTIME.md"},
-    {:live, :live_md, "LIVE.md"}
+    {:live, :live_md, "LIVE.md"},
+    {:grok, :grok_md, "GROK.md"}
   ]
 
   # Never reconciled (§9.4 memory-exclusion invariant), written beside the
@@ -100,11 +101,14 @@ defmodule FermixCore.Prompt.TemplateReconcilerTest do
 
       assert {:ok, report} = TemplateReconciler.run(ctx.opts)
 
-      assert Enum.map(report.resources, & &1.outcome) == [:adopted, :adopted, :adopted, :adopted]
+      assert Enum.map(report.resources, & &1.outcome) ==
+               [:adopted, :adopted, :adopted, :adopted, :adopted]
+
       assert read(ctx, :fermix) == Defaults.fermix_md()
       assert read(ctx, :soul) == Defaults.soul_md()
       assert read(ctx, :realtime) == Defaults.realtime_md()
       assert read(ctx, :live) == Defaults.live_md()
+      assert read(ctx, :grok) == Defaults.grok_md()
     end
 
     test "a second run is a no-op with no new revisions", ctx do
@@ -114,7 +118,9 @@ defmodule FermixCore.Prompt.TemplateReconcilerTest do
       assert {:ok, _first} = TemplateReconciler.run(ctx.opts)
       assert {:ok, second} = TemplateReconciler.run(ctx.opts)
 
-      assert Enum.map(second.resources, & &1.outcome) == [:current, :absent, :absent, :absent]
+      assert Enum.map(second.resources, & &1.outcome) ==
+               [:current, :absent, :absent, :absent, :absent]
+
       assert revision_count(ctx, :fermix_md) == 2
       assert read(ctx, :fermix) == Defaults.fermix_md()
     end
@@ -135,6 +141,23 @@ defmodule FermixCore.Prompt.TemplateReconcilerTest do
       assert entry.baseline_revision == 1
       assert read(ctx, :fermix) == mine
       assert revision_count(ctx, :fermix_md) == 1
+    end
+
+    # GROK.md is the owner's file once installed (M70 §07): an edit survives an
+    # upgrade that moves the shipped template.
+    test "a customized GROK.md is preserved and reported", ctx do
+      mine = "my own grok rules\n"
+      install(ctx, :grok, mine)
+      seed(ctx, :grok, "an older grok template render\n")
+
+      assert {:ok, report} = TemplateReconciler.run(ctx.opts)
+      entry = resource(report, :grok)
+
+      assert entry.state == :customized
+      assert entry.outcome == :customized
+      assert entry.default_moved? == true
+      assert read(ctx, :grok) == mine
+      assert revision_count(ctx, :grok_md) == 1
     end
 
     test "a file already equal to the shipped default is left alone", ctx do
@@ -168,8 +191,11 @@ defmodule FermixCore.Prompt.TemplateReconcilerTest do
     test "an absent file is never created", ctx do
       assert {:ok, report} = TemplateReconciler.run(ctx.opts)
 
-      assert Enum.map(report.resources, & &1.state) == [:absent, :absent, :absent, :absent]
-      assert Enum.map(report.resources, & &1.outcome) == [:absent, :absent, :absent, :absent]
+      assert Enum.map(report.resources, & &1.state) ==
+               [:absent, :absent, :absent, :absent, :absent]
+
+      assert Enum.map(report.resources, & &1.outcome) ==
+               [:absent, :absent, :absent, :absent, :absent]
 
       for {_name, _type, file} <- @resources do
         refute File.exists?(Path.join(ctx.agent_dir, file))
@@ -267,8 +293,12 @@ defmodule FermixCore.Prompt.TemplateReconcilerTest do
 
       assert {:ok, report} = TemplateReconciler.run(opts)
 
-      assert Enum.map(report.resources, & &1.state) == [:skipped, :skipped, :skipped, :skipped]
-      assert Enum.map(report.resources, & &1.outcome) == [:skipped, :skipped, :skipped, :skipped]
+      assert Enum.map(report.resources, & &1.state) ==
+               [:skipped, :skipped, :skipped, :skipped, :skipped]
+
+      assert Enum.map(report.resources, & &1.outcome) ==
+               [:skipped, :skipped, :skipped, :skipped, :skipped]
+
       assert read(ctx, :fermix) == old
     end
 
@@ -286,8 +316,8 @@ defmodule FermixCore.Prompt.TemplateReconcilerTest do
 
       assert {:ok, entries} = TemplateReconciler.classify(@agent_id, ctx.opts)
 
-      assert Enum.map(entries, & &1.name) == [:fermix, :soul, :realtime, :live]
-      assert Enum.map(entries, & &1.state) == [:untouched, :absent, :absent, :absent]
+      assert Enum.map(entries, & &1.name) == [:fermix, :soul, :realtime, :live, :grok]
+      assert Enum.map(entries, & &1.state) == [:untouched, :absent, :absent, :absent, :absent]
       refute Enum.any?(entries, &Map.has_key?(&1, :outcome))
       assert read(ctx, :fermix) == old
       assert revision_count(ctx, :fermix_md) == 1
@@ -348,7 +378,7 @@ defmodule FermixCore.Prompt.TemplateReconcilerTest do
     test "the boot child reports what it did" do
       assert {:ok, report} = TemplateReconciler.report()
       assert report.agent_id == "main"
-      assert Enum.map(report.resources, & &1.name) == [:fermix, :soul, :realtime, :live]
+      assert Enum.map(report.resources, & &1.name) == [:fermix, :soul, :realtime, :live, :grok]
     end
   end
 

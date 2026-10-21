@@ -9,13 +9,17 @@ defmodule FermixCore.Setup.ConfigStore do
 
   alias FermixCore.Browser.Config, as: BrowserConfig
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
+  alias FermixCore.Capabilities.MCP.OAuth.Grant, as: McpGrant
+  alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
+  alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.IMessage
-  alias FermixCore.MCP.Inbound.Config, as: InboundMcpConfig
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Net.Egress
+  alias FermixCore.Plugins.Dist.Lock
+  alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Plugins.Retired
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ReasoningEffort
@@ -28,6 +32,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Setup.WebListener
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
+  alias FermixCore.Tools.PlaceSearch.Config, as: PlaceSearchConfig
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
 
   require Logger
@@ -60,8 +65,13 @@ defmodule FermixCore.Setup.ConfigStore do
     "unsupported" => :unsupported
   }
 
-  @mobile_keys ~w(enabled mode port bind advertise_mdns streaming max_media_bytes media_store_max_bytes push)
+  @mobile_keys ~w(enabled iroh mode port bind advertise_mdns streaming max_media_bytes media_store_max_bytes push)
   @mobile_push_keys ~w(enabled team_id key_id key topic environment)
+
+  # What a writer that re-renders the file from its own parse says when the
+  # file carries a section the renderer would drop.
+  @web_port_remedy "Set the web listener port by editing config.toml."
+  @mcp_remedy "Remove that section from config.toml, then change the server again."
 
   @type runtime_config :: %{
           fermix_core: keyword(),
@@ -215,13 +225,29 @@ defmodule FermixCore.Setup.ConfigStore do
   never decides whether this write may happen. In a tree-less process there is
   no `RestartState` and the call is a no-op, so an out-of-process write is still
   detected by the daemon that did not make it.
+
+  The `[mcp.*]` blocks are not in the snapshot: the file owns them (M74 §4), so
+  they are read from the file this write replaces and written back with every
+  key they held, except a retired `[mcp.inbound*]` block, which has no reader
+  and is dropped (M73). A file that exists and cannot be read is refused rather
+  than replaced, because replacing it would drop whatever it held.
+
+  The whole read, change and write runs under the config lock, which every
+  writer of the file takes, so a save never lands between an MCP server write's
+  read and its write, whichever VM made either.
   """
   @spec save_snapshot(runtime_config(), keyword()) :: :ok | {:error, term()}
   def save_snapshot(snapshot, opts \\ []) do
-    with {:ok, persisted} <- persisted_snapshot(snapshot, opts),
+    with_config_lock(fermix_home(), fn -> write_snapshot(snapshot, opts) end)
+  end
+
+  defp write_snapshot(snapshot, opts) do
+    with {:ok, contents} <- read_home_document(fermix_home()),
+         mcp = mcp_document(contents),
+         {:ok, persisted} <- persisted_snapshot(snapshot, opts),
          :ok <- File.mkdir_p(fermix_home()),
          :ok <- ensure_workspace(),
-         :ok <- File.write(path(), dump_snapshot(persisted)) do
+         :ok <- File.write(path(), dump_snapshot(Map.put(persisted, :mcp, mcp))) do
       RestartState.record_persisted_baseline()
     end
   end
@@ -360,31 +386,183 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   # Every `:fermix_core` key the boot writes: the snapshot's sections, the sandbox
-  # (carried at the snapshot's top level), and the two MCP keys `apply_mcp_config/0`
+  # (carried at the snapshot's top level), and the MCP key `apply_mcp_config/0`
   # reads straight from the file.
   defp hydrated_keys do
-    Keyword.keys(empty_runtime_config().fermix_core) ++ [:sandbox, :mcp_servers, :mcp_inbound]
+    Keyword.keys(empty_runtime_config().fermix_core) ++ [:sandbox, :mcp_servers]
   end
 
   @spec apply_mcp_config() :: :ok | {:error, term()}
   def apply_mcp_config do
     case File.read(path()) do
       {:ok, contents} ->
+        warn_retired_mcp_sections(contents)
         servers = McpConfig.from_toml(contents)
-        inbound = InboundMcpConfig.from_toml(contents)
         Application.put_env(:fermix_core, :mcp_servers, servers)
-        Application.put_env(:fermix_core, :mcp_inbound, inbound)
+        warn_unread_mcp_keys(contents)
+        warn_mcp_rule_breaks(servers)
         :ok
 
       {:error, :enoent} ->
         Application.put_env(:fermix_core, :mcp_servers, [])
-        Application.put_env(:fermix_core, :mcp_inbound, InboundMcpConfig.default())
         :ok
 
       {:error, reason} ->
         {:error, reason}
     end
   end
+
+  # The inbound MCP server was retired before it was ever started (M73), so a
+  # `[mcp.inbound*]` block has no reader. It is said once per load, and
+  # `mcp_document/1` leaves it out, so the next settings save drops it.
+  defp warn_retired_mcp_sections(contents) do
+    if McpConfig.retired_sections(contents) != [] do
+      Logger.warning(
+        "config.toml [mcp.inbound] is retired: this build has no inbound MCP server, so the " <>
+          "section is ignored, and the next settings save writes the file without it."
+      )
+    end
+
+    :ok
+  end
+
+  # A key the reader does not read stays in the file and is said once per load,
+  # never a refusal: refusing would turn a hand-written server that carries one
+  # into a daemon that does not boot (M74 E2).
+  defp warn_unread_mcp_keys(contents) do
+    case McpConfig.unread_keys(contents) do
+      [] ->
+        :ok
+
+      keys ->
+        Logger.warning(
+          "config.toml MCP keys Fermix does not read, kept as written: " <> Enum.join(keys, ", ")
+        )
+    end
+  end
+
+  # The name rules bind a server being added; a file that already breaks them
+  # loads as it did before them, and the load says once what it breaks.
+  defp warn_mcp_rule_breaks(servers) do
+    case McpConfig.rule_breaks(servers) do
+      [] ->
+        :ok
+
+      breaks ->
+        Logger.warning(
+          "config.toml MCP servers Fermix loaded as before but would not add today: " <>
+            Enum.join(breaks, "; ")
+        )
+    end
+  end
+
+  @doc """
+  Adds MCP server `name`, its `[mcp.servers.<name>]` keys from `attrs`, and
+  applies it (M74 E2). A name the file already holds is refused under the
+  same lock as the write, so two adds of one name never merge.
+  `McpConfig.add_server/4` decides what is refused, as `{:invalid_params,
+  field, sentence}`.
+  """
+  @spec add_mcp_server(String.t(), %{String.t() => term()}, keyword()) :: :ok | {:error, term()}
+  def add_mcp_server(name, attrs, opts \\ [])
+      when is_binary(name) and is_map(attrs) and is_list(opts) do
+    write_mcp(opts, fn servers ->
+      with {:ok, plugins} <- PluginRegistry.list() do
+        McpConfig.add_server(servers, name, attrs, Enum.map(plugins, & &1.name))
+      end
+    end)
+  end
+
+  @doc """
+  Changes MCP server `name` by `attrs`, merged over what it holds, `nil`
+  removing a key, and applies it (M74 E2). `McpConfig.put_server/3` decides
+  what is refused, a name the file does not hold included.
+  """
+  @spec put_mcp_server(String.t(), %{String.t() => term()}, keyword()) :: :ok | {:error, term()}
+  def put_mcp_server(name, attrs, opts \\ [])
+      when is_binary(name) and is_map(attrs) and is_list(opts) do
+    write_mcp(opts, &McpConfig.put_server(&1, name, attrs))
+  end
+
+  @doc """
+  Removes MCP server `name` and applies it. The values it declares are deleted
+  from the secret store first, by its declared names, and its sign-in grant
+  from the auth store, so a refused delete keeps the block that names what is
+  left.
+  """
+  @spec delete_mcp_server(String.t(), keyword()) :: :ok | {:error, term()}
+  def delete_mcp_server(name, opts \\ []) when is_binary(name) and is_list(opts) do
+    write_mcp(opts, fn servers ->
+      with {:ok, rest, server} <- McpConfig.delete_server(servers, name),
+           :ok <- McpSecrets.delete_declared(server),
+           :ok <- McpGrant.delete(name) do
+        {:ok, rest}
+      end
+    end)
+  end
+
+  @doc """
+  Switches one tool of MCP server `name` on or off and applies it. The switch
+  is not in the server's child identity, so the server keeps running and only
+  its tools register again (`McpSupervisor.reload/0`).
+  """
+  @spec put_mcp_tool(String.t(), String.t(), boolean(), keyword()) :: :ok | {:error, term()}
+  def put_mcp_tool(name, tool, enabled?, opts \\ [])
+      when is_binary(name) and is_binary(tool) and is_boolean(enabled?) and is_list(opts) do
+    write_mcp(opts, &McpConfig.put_tool(&1, name, tool, enabled?))
+  end
+
+  # The one write path (M74 E2), in this order, all but the apply under the
+  # config lock: the outside-edit guard a settings save also asks, asked under
+  # the lock so a write that just landed is never taken for an outside edit; the
+  # read, the edit and the write, rendered by the settings renderer; the
+  # baseline, or the next save would read this write as an outside edit; then
+  # the apply, whose reload restarts only the server whose spec changed.
+  # `:mcp_supervisor` names the module that reloads, for a test.
+  defp write_mcp(opts, edit) do
+    home = fermix_home()
+
+    with :ok <- with_config_lock(home, fn -> guarded_commit_mcp(home, edit) end),
+         :ok <- apply_mcp_config(),
+         {:ok, _summary} <- Keyword.get(opts, :mcp_supervisor, McpSupervisor).reload() do
+      :ok
+    end
+  end
+
+  defp guarded_commit_mcp(home, edit) do
+    with :ok <- RestartState.writable(), do: commit_mcp(home, edit)
+  end
+
+  defp commit_mcp(home, edit) do
+    with {:ok, contents} <- read_home_document(home),
+         :ok <- renderable_document(contents, @mcp_remedy),
+         {:ok, servers} <- edit.(McpConfig.document(contents)),
+         :ok <-
+           File.write(
+             home_document_path(home),
+             render_document(parse_document(contents), servers)
+           ) do
+      RestartState.record_persisted_baseline()
+    end
+  end
+
+  # The one config lock: every writer of `config.toml` holds it from its read to
+  # its write, and a CLI VM's `fermix setup` takes the same lockfile, so no two
+  # writes interleave. It is not reentrant, so nothing under it writes the file
+  # through another entry point.
+  defp with_config_lock(home, fun) do
+    with :ok <- File.mkdir_p(home) do
+      home
+      |> Path.join("config.toml.lock")
+      |> Lock.with_lock(fn -> {:locked, fun.()} end)
+      |> unlocked()
+    end
+  end
+
+  # `fun`'s result is wrapped, so an error it returns is never taken for the
+  # lock's own.
+  defp unlocked({:locked, result}), do: result
+  defp unlocked({:error, reason}), do: {:error, reason}
 
   @spec persistable_snapshot(runtime_config()) :: runtime_config()
   def persistable_snapshot(snapshot) do
@@ -699,22 +877,34 @@ defmodule FermixCore.Setup.ConfigStore do
   refuses rather than being replaced by a fresh one, because overwriting a
   settings file nobody could parse is how a recoverable fault becomes data loss.
 
-  The renderer emits the sections this module owns, and a settings file may also
-  carry `[mcp.*]` blocks that a different parser reads and this one never sees.
-  Re-rendering such a file would drop them, so this write **refuses** it and
-  names the section instead: setting a port is not a reason to delete an
-  operator's MCP servers.
+  The renderer emits the sections this module owns and the `[mcp.servers.*]`
+  blocks their own reader returns. A settings file carrying any other section
+  would lose it in a re-render, so this write **refuses** it and names the
+  section instead. It runs under the config lock, like every writer of the file.
   """
   @spec put_web_port(Path.t(), pos_integer()) :: :ok | {:error, term()}
   def put_web_port(home, port) when is_binary(home) and is_integer(port) do
-    with :ok <- validate_web_port(port),
-         {:ok, contents} <- read_home_document(home),
-         :ok <- renderable_document(contents),
-         :ok <- File.mkdir_p(home) do
+    with :ok <- validate_web_port(port) do
+      with_config_lock(home, fn -> write_web_port(home, port) end)
+    end
+  end
+
+  defp write_web_port(home, port) do
+    with {:ok, contents} <- read_home_document(home),
+         :ok <- renderable_document(contents, @web_port_remedy) do
       document = contents |> parse_document() |> Map.put(:fermix_web, port: port)
 
-      File.write(home_document_path(home), dump_snapshot(persistable_snapshot(document)))
+      File.write(
+        home_document_path(home),
+        render_document(document, McpConfig.document(contents))
+      )
     end
+  end
+
+  # One settings document with its `[mcp.servers.*]` blocks, through the one
+  # renderer every save uses.
+  defp render_document(document, servers) do
+    document |> persistable_snapshot() |> Map.put(:mcp, %{servers: servers}) |> dump_snapshot()
   end
 
   defp validate_web_port(port) do
@@ -725,18 +915,18 @@ defmodule FermixCore.Setup.ConfigStore do
 
   # The top-level section names `dump_snapshot/1` can produce. A document
   # carrying anything else is one this renderer cannot round-trip.
-  @renderable_sections ~w(fermix_core sandbox fermix_channels fermix_web)
+  @renderable_sections ~w(fermix_core sandbox fermix_channels fermix_web mcp)
 
-  defp renderable_document(contents) do
+  defp renderable_document(contents, remedy) do
     case contents |> section_names() |> Enum.reject(&(&1 in @renderable_sections)) do
       [] -> :ok
-      [name | _rest] -> {:error, {:unrenderable_settings, unrenderable_sentence(name)}}
+      [name | _rest] -> {:error, {:unrenderable_settings, unrenderable_sentence(name, remedy)}}
     end
   end
 
-  defp unrenderable_sentence(name) do
+  defp unrenderable_sentence(name, remedy) do
     "the settings file carries a [#{name}] section this command cannot rewrite " <>
-      "without dropping it. Set the web listener port by editing config.toml."
+      "without dropping it. " <> remedy
   end
 
   defp section_names(contents) do
@@ -1127,6 +1317,10 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "meetings"], meetings),
       render_section(["fermix_core", "tools", "web_search"], Keyword.get(tools, :web_search, [])),
       render_section(
+        ["fermix_core", "tools", "place_search"],
+        Keyword.get(tools, :place_search, [])
+      ),
+      render_section(
         ["fermix_core", "tools", "tool_search"],
         Keyword.get(tools, :tool_search, [])
       ),
@@ -1146,7 +1340,8 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_channels", "acp"], Keyword.get(channels, :acp, [])),
       render_mobile(Keyword.get(channels, :mobile, [])),
       render_section(["fermix_channels", "imessage"], Keyword.get(channels, :imessage, [])),
-      render_section(["fermix_web"], web)
+      render_section(["fermix_web"], web),
+      render_mcp(Map.fetch!(snapshot, :mcp))
     ]
     |> List.flatten()
     |> Enum.reject(&(&1 in [nil, ""]))
@@ -1303,6 +1498,80 @@ defmodule FermixCore.Setup.ConfigStore do
   defp escape_char("\t"), do: "\\t"
   defp escape_char("\r"), do: "\\r"
   defp escape_char(<<byte>>), do: "\\u" <> String.pad_leading(Integer.to_string(byte, 16), 4, "0")
+
+  # The `[mcp.*]` blocks of a settings file, by the reader that owns them:
+  # `Capabilities.MCP.Config` reads `[mcp.servers.*]`. Every key it stored is
+  # here, the ones it ignores today included, because none of it is this
+  # module's to drop. A retired `[mcp.inbound*]` block is not read, so it is not
+  # written back (`warn_retired_mcp_sections/1`).
+  defp mcp_document(contents) do
+    %{servers: McpConfig.document(contents)}
+  end
+
+  # One order whatever order the owner wrote: servers by name, each followed by
+  # its tool blocks by tool name; keys by name in each. A value the reader read
+  # is written in its dialect and reads back as it was, and the MCP writers
+  # refuse a value the dialect cannot hold (`McpConfig.add_server/4`,
+  # `put_server/3`), so what is written here reads back without a second check
+  # (M74 E2).
+  defp render_mcp(%{servers: servers}) do
+    servers
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.flat_map(&render_mcp_server/1)
+    |> Enum.join("\n\n")
+  end
+
+  # A server block is written when the reader stored one; it stores no header
+  # alone, so a server with only tool blocks gets only those.
+  defp render_mcp_server({name, blocks}) do
+    server =
+      case Map.fetch(blocks, :server) do
+        {:ok, keys} -> [render_mcp_block(["servers", name], keys)]
+        :error -> []
+      end
+
+    server ++ render_mcp_tools(["servers", name, "tools"], blocks)
+  end
+
+  defp render_mcp_tools(path, blocks) do
+    blocks
+    |> Map.get(:tools, %{})
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map(fn {tool, keys} -> render_mcp_block(path ++ [tool], keys) end)
+  end
+
+  defp render_mcp_block(path, keys) do
+    header = "[" <> Enum.join(["mcp" | path], ".") <> "]"
+    lines = keys |> Enum.sort_by(&elem(&1, 0)) |> Enum.map(&render_mcp_key/1)
+    Enum.join([header | lines], "\n")
+  end
+
+  defp render_mcp_key({key, value}), do: "#{key} = #{encode_mcp_value(value)}"
+
+  # The inverse of the MCP readers' own scalar parse, which is not this module's
+  # TOML. A quoted value is unquoted with only `\"` unescaped, so a backslash is
+  # written as it was read (`encode_value/1` would double it), and with every
+  # trailing quote trimmed, so a value ending in one was read bare and is written
+  # bare. An array is decoded as JSON and is written as JSON on one line, and an
+  # inline table is split on its commas.
+  defp encode_mcp_value(value) when is_boolean(value) or is_integer(value), do: to_string(value)
+  defp encode_mcp_value(value) when is_float(value), do: :erlang.float_to_binary(value, [:short])
+
+  defp encode_mcp_value(value) when is_list(value),
+    do: "[#{Enum.map_join(value, ", ", &Jason.encode!/1)}]"
+
+  defp encode_mcp_value(value) when value == %{}, do: "{}"
+
+  defp encode_mcp_value(value) when is_map(value) do
+    pairs = value |> Enum.sort_by(&elem(&1, 0)) |> Enum.map_join(", ", &render_mcp_key/1)
+    "{ " <> pairs <> " }"
+  end
+
+  defp encode_mcp_value(value) when is_binary(value) do
+    if String.ends_with?(value, "\""),
+      do: value,
+      else: "\"" <> String.replace(value, "\"", "\\\"") <> "\""
+  end
 
   defp parse_document(contents) do
     document =
@@ -1821,6 +2090,10 @@ defmodule FermixCore.Setup.ConfigStore do
       normalize_web_search_tool(lookup(config, "web_search", :web_search))
     )
     |> put_if_present(
+      :place_search,
+      normalize_place_search_tool(lookup(config, "place_search", :place_search))
+    )
+    |> put_if_present(
       :tool_search,
       normalize_tool_search(lookup(config, "tool_search", :tool_search))
     )
@@ -2010,6 +2283,16 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   defp normalize_web_search_tool(_config), do: []
+
+  # `[fermix_core.tools.place_search]` (M72 §14.1): the one backend choice. An
+  # unknown key or backend refuses the load by name (there is no backend to
+  # limp along on that the operator did not choose), and the persist path
+  # writes the string back through `to_keyword/1`, so a save round-trips.
+  defp normalize_place_search_tool(config) do
+    config
+    |> PlaceSearchConfig.normalize()
+    |> PlaceSearchConfig.to_keyword()
+  end
 
   defp normalize_web_search_backend(nil), do: nil
   defp normalize_web_search_backend(:duckduckgo), do: :duckduckgo
@@ -2708,6 +2991,7 @@ defmodule FermixCore.Setup.ConfigStore do
 
     []
     |> put_if_present(:enabled, normalize_mobile_boolean(config, :enabled))
+    |> put_if_present(:iroh, normalize_mobile_boolean(config, :iroh))
     |> put_if_present(:mode, normalize_mobile_mode(lookup(config, "mode", :mode)))
     |> put_if_present(:port, normalize_mobile_port(lookup(config, "port", :port)))
     |> put_if_present(:bind, normalize_mobile_bind(config))

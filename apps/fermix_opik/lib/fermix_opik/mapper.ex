@@ -237,7 +237,14 @@ defmodule FermixOpik.Mapper do
             # person). Two closed words — never a window title and never an
             # application name, which are content and stay off the row.
             :target_kind,
-            :cu_mode
+            :cu_mode,
+            # A voice call's task function (M70 §09): one span per call the
+            # model made, refused and cancelled ones included, so the terminal
+            # word and the Fermix-minted task id are what tell them apart. A
+            # closed enum and an opaque id; the request the model sent is
+            # content and is never a field.
+            :status,
+            :task_id
           ])
         )
     }
@@ -342,6 +349,11 @@ defmodule FermixOpik.Mapper do
       metadata:
         drop_nil(%{
           device_id: Map.get(metadata, :device_id),
+          # Both task engines share this run kind and these phases (M70 §09):
+          # the engine and the voice provider are what tell a Grok call from a
+          # GPT Live one on every span, not only on the root.
+          engine: Map.get(metadata, :engine),
+          provider: Map.get(metadata, :provider),
           model: Map.get(metadata, :model),
           voice: Map.get(metadata, :voice),
           provider_session_id: Map.get(metadata, :provider_session_id),

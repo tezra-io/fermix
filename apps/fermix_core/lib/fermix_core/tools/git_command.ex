@@ -2,6 +2,7 @@ defmodule FermixCore.Tools.GitCommand do
   @moduledoc false
 
   alias FermixCore.CommandRunner
+  alias FermixCore.Sandbox
 
   # Audit F-01 follow-up (shared boundary): even when the resolved repo path
   # is sandbox-checked, git accepts flags that escape the `cd: repo` boundary.
@@ -70,21 +71,33 @@ defmodule FermixCore.Tools.GitCommand do
   # containment invariant, not an operator setting.
   @timeout_ms 120_000
 
-  @spec run(String.t(), String.t(), [String.t()], keyword()) ::
+  # `context` is the turn's: git runs under the kernel sandbox for it, because a
+  # repo the agent can write can name a hook, an fsmonitor or a diff driver that
+  # git runs as a program of its own.
+  @spec run(String.t(), String.t(), [String.t()], map(), keyword()) ::
           {:ok, String.t()} | {:error, String.t()}
-  def run(repo, command, args, opts \\ [])
-      when is_binary(repo) and is_binary(command) and is_list(args) and is_list(opts) do
+  def run(repo, command, args, context, opts \\ [])
+      when is_binary(repo) and is_binary(command) and is_list(args) and is_map(context) and
+             is_list(opts) do
     with :ok <- validate_repo(repo),
          :ok <- validate_args(args),
          :ok <- validate_flags(command, args),
-         {:ok, git} <- resolve_executable(opts) do
-      git
-      |> CommandRunner.run([command | args],
+         {:ok, git} <- resolve_executable(opts),
+         {:ok, {executable, argv}} <- confine(git, [command | args], context) do
+      executable
+      |> CommandRunner.run(argv,
         cwd: repo,
         env: [{"GIT_ALLOW_PROTOCOL", @allowed_protocols}],
         timeout_ms: Keyword.get(opts, :timeout_ms, @timeout_ms)
       )
       |> translate(command)
+    end
+  end
+
+  defp confine(git, argv, context) do
+    case Sandbox.confine(git, argv, context) do
+      {:ok, spawn} -> {:ok, spawn}
+      {:error, {:os_sandbox_unavailable, sentence}} -> {:error, sentence}
     end
   end
 

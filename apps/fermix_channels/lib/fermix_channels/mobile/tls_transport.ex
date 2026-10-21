@@ -14,7 +14,7 @@ defmodule FermixChannels.Mobile.TlsTransport do
   drains, held its slot just as long. So the handshake starts a deadline for
   the whole connection up to its WebSocket upgrade, and every read waits no
   longer than what is left of it. `Mobile.SocketHandler` ends it once the
-  socket is upgraded, where its own handshake deadline takes over.
+  socket is upgraded, where the session's own handshake deadline takes over.
 
   Every other call is the stock one.
   """

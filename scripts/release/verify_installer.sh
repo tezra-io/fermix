@@ -51,7 +51,7 @@ cosign_path="$(command -v cosign)" ||
 feed_latest=""
 for attempt in $(seq 1 12); do
   feed="$(curl -fsSL "$feed_url")" || feed=""
-  feed_latest="$(python3 -c '
+  feed_latest="$(uv run --no-project python -c '
 import json, sys
 try:
     print(json.loads(sys.argv[1]).get("latest", ""))

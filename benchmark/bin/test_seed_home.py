@@ -337,5 +337,29 @@ def test_browser_and_harness_state_are_part_of_the_baseline():
     assert "browser" in seed.STATE_DIRS and "harness" in seed.STATE_DIRS
 
 
+def test_voice_turns_grok_voice_on_with_its_engine_and_no_key():
+    cfg = seed.render_config(
+        "/tmp/x-eval", "openai", {"default_model": "gpt-5.6-luna"}, None, voice=True)
+    doc = tomllib.loads(cfg)
+
+    # The parser refuses a Grok model under the default openai_realtime engine,
+    # so the engine is written beside the model; the provider follows from it.
+    assert doc["fermix_core"]["realtime"] == {
+        "enabled": True, "engine": "xai_realtime", "model": "grok-voice-3.0",
+        "max_session_minutes": 5}
+    # The voice key arrives as XAI_API_KEY at daemon boot, never on disk: no
+    # xai provider block, and no key in any block that is written.
+    assert "xai" not in doc["fermix_core"]["providers"]
+    assert "api_key" not in cfg
+    # Turning voice on grants nothing else: computer history stays off.
+    assert doc["fermix_core"]["computer_history"]["enabled"] is False
+
+
+def test_without_voice_the_eval_home_has_no_realtime_section():
+    cfg = seed.render_config(
+        "/tmp/x-eval", "openai", {"default_model": "gpt-5.6-luna"}, None)
+    assert "realtime" not in tomllib.loads(cfg)["fermix_core"]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

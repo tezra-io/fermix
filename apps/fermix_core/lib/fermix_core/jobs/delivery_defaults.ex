@@ -6,6 +6,8 @@ defmodule FermixCore.Jobs.DeliveryDefaults do
   later config edits do not silently retarget existing jobs.
   """
 
+  alias FermixCore.Native.Notifications
+
   @valid_modes ~w(none origin channel local)
   @destination_keys ~w(chat_id channel_id recipient target reply_target)
 
@@ -14,6 +16,11 @@ defmodule FermixCore.Jobs.DeliveryDefaults do
   # origin" is refused when the job is created rather than failing silently at
   # every run (MILESTONE_29_ACP_AGENT_SURFACE §4/§9).
   @no_origin_channels ["acp"]
+
+  # This computer (M76 §4.6) shares the delivery channels map and the configured
+  # default target with reminders, but it takes reminders alone: a job's results
+  # are text for a chat, and a notification has no room for them.
+  @computer Notifications.platform()
 
   @doc """
   Resolve delivery for a newly created job: an explicit `delivery_mode`, an
@@ -149,6 +156,14 @@ defmodule FermixCore.Jobs.DeliveryDefaults do
     cond do
       not Map.has_key?(target, "platform") ->
         {:error, {:invalid_delivery_target, ~s(delivery_target is missing "platform")}}
+
+      Map.get(target, "platform") == @computer ->
+        {:error,
+         {:invalid_delivery_target,
+          ~s(this computer \(platform "computer"\) takes reminders only, never a job's ) <>
+            ~s(results: pass a chat platform's delivery_target, or delivery_mode "none" for a ) <>
+            ~s(silent job. A configured default_delivery_target of "computer" serves ) <>
+            "reminders alone."}}
 
       not Enum.any?(@destination_keys, &Map.has_key?(target, &1)) ->
         {:error,

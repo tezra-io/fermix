@@ -48,7 +48,6 @@ config :phoenix,
 config :fermix_core,
   providers: [
     openai: [
-      base_url: "https://api.openai.com/v1",
       default_model: "gpt-5.4-mini",
       default_temperature: 0.7
     ]
@@ -123,7 +122,8 @@ config :fermix_core, :jobs,
     "imessage" => FermixChannels.Channels.IMessage,
     "mobile" => FermixChannels.Channels.Mobile,
     "companion" => FermixChannels.Channels.Companion,
-    "cli" => FermixChannels.CLI
+    "cli" => FermixChannels.CLI,
+    "computer" => FermixCore.Native.Notifications
   }
 
 # Coding-harness completion continuation (CODING_HARNESS_ORCHESTRATION §23.2): the

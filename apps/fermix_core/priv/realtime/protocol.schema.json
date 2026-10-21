@@ -3,8 +3,8 @@
   "$id": "https://fermix.sh/realtime/protocol.schema.json",
   "title": "Fermix Realtime voice socket protocol",
   "description": "Newline-delimited JSON wire contract between the Fermix daemon and the FermixPet companion. Source of truth: FermixCore.Realtime.Protocol. See PROTOCOL.md.",
-  "x-protocol-version": 2,
-  "x-supported-version-range": { "min": 1, "max": 2 },
+  "x-protocol-version": 3,
+  "x-supported-version-range": { "min": 1, "max": 3 },
   "$defs": {
     "clientEvent": {
       "type": "object",
@@ -18,7 +18,8 @@
             "interrupt",
             "mute",
             "call_stop",
-            "task_cancel"
+            "task_cancel",
+            "playback_progress"
           ]
         }
       },
@@ -38,6 +39,10 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "task_cancel" } } },
           "then": { "$ref": "#/$defs/task_cancel" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "playback_progress" } } },
+          "then": { "$ref": "#/$defs/playback_progress" }
         }
       ]
     },
@@ -67,6 +72,10 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "server_hello" } } },
           "then": { "$ref": "#/$defs/server_hello" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "audio_delta" } } },
+          "then": { "$ref": "#/$defs/audio_delta" }
         },
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "error" } } },
@@ -116,11 +125,34 @@
     },
     "task_cancel": {
       "type": "object",
-      "description": "Cancels one backend delegation of a Live call. Refused with error(unsupported_by_engine) under the Realtime engine.",
+      "description": "Cancels one backend delegation of a task-engine call (openai_live, xai_realtime). Refused with error(unsupported_by_engine) under openai_realtime.",
       "required": ["type", "delegation_id"],
       "properties": {
         "type": { "const": "task_cancel" },
         "delegation_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "playback_progress": {
+      "type": "object",
+      "description": "v3, xai_realtime only: how much of one playback_id's audio the client has rendered. Sent at most every 100 ms while it plays, and at once when it drains or playback stops. Refused with error(unsupported_by_engine) under the OpenAI engines.",
+      "required": ["type", "playback_id", "played_ms", "drained"],
+      "properties": {
+        "type": { "const": "playback_progress" },
+        "playback_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "An id the daemon sent on audio_delta in this call, echoed as received; at most 64 bytes."
+        },
+        "played_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Milliseconds of this id's audio rendered so far. Never decreases, and never exceeds the audio sent under the id."
+        },
+        "drained": {
+          "type": "boolean",
+          "description": "True when everything sent under this id so far has played."
+        }
       }
     },
     "server_hello": {
@@ -132,26 +164,41 @@
         "max_version": { "type": "integer", "minimum": 1 }
       }
     },
+    "audio_delta": {
+      "type": "object",
+      "description": "A chunk of assistant voice output.",
+      "required": ["type", "audio"],
+      "properties": {
+        "type": { "const": "audio_delta" },
+        "audio": { "type": "string", "contentEncoding": "base64" },
+        "playback_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "v3, xai_realtime only: the call-local id the client reports playback_progress against. Absent on every OpenAI-engine call."
+        }
+      }
+    },
     "call_ready": {
       "type": "object",
       "description": "The provider session is established and the call can carry audio.",
       "required": ["type", "engine", "call_id", "captions"],
       "properties": {
         "type": { "const": "call_ready" },
-        "engine": { "enum": ["openai_realtime", "openai_live"] },
+        "engine": { "enum": ["openai_realtime", "openai_live", "xai_realtime"] },
         "call_id": { "type": "string", "minLength": 1 },
         "call_uuid": {
           "type": "string",
           "format": "uuid",
-          "description": "The Live call's durable identity, the key of its record. call_id stays the trace session id."
+          "description": "The task-engine call's durable identity, the key of its record. call_id stays the trace session id."
         },
         "conversation": {
           "enum": ["chat", "private"],
-          "description": "Live only: chat when the call's hand-offs run in the chat's own conversation, private when they keep to a conversation of the call's own."
+          "description": "Task engines (openai_live, xai_realtime) only: chat when the call's hand-offs run in the chat's own conversation, private when they keep to a conversation of the call's own."
         },
         "tasks_outlive_call": {
           "type": "boolean",
-          "description": "Live only: true for a call in the chat, whose task still running when the call ends finishes into the chat; false for a private call, whose tasks end with it."
+          "description": "Task engines (openai_live, xai_realtime) only: true for a call in the chat, whose task still running when the call ends finishes into the chat; false for a private call, whose tasks end with it."
         },
         "provider_session_id": { "type": "string" },
         "expires_at": {
@@ -185,7 +232,7 @@
         "call_uuid": {
           "type": "string",
           "format": "uuid",
-          "description": "The Live call's durable identity, the key of its record. call_id stays the trace session id."
+          "description": "The task-engine call's durable identity, the key of its record. call_id stays the trace session id."
         },
         "delegation_id": { "type": "string", "minLength": 1 },
         "revision": { "type": "integer", "minimum": 1 },
@@ -194,11 +241,11 @@
         "server_seq": {
           "type": "integer",
           "minimum": 1,
-          "description": "Live, a call in the chat: the chat timeline row the result was shown at. Absent when nothing was shown."
+          "description": "A task-engine call in the chat: the chat timeline row the result was shown at. Absent when nothing was shown."
         },
         "detached": {
           "type": "boolean",
-          "description": "Live, a call in the chat: true on the one running frame sent as the call ends, for a task that will finish into the chat instead of being cancelled. Absent otherwise."
+          "description": "A task-engine call in the chat: true on the one running frame sent as the call ends, for a task that will finish into the chat instead of being cancelled. Absent otherwise."
         }
       }
     },
@@ -210,13 +257,18 @@
         "call_uuid": {
           "type": "string",
           "format": "uuid",
-          "description": "Live only: the durable identity of the call the bill belongs to."
+          "description": "Task engines only: the durable identity of the call the bill belongs to."
         },
         "status": { "type": "string" },
         "input_tokens": { "type": "integer" },
         "output_tokens": { "type": "integer" },
         "voice_seconds": { "type": "number" },
         "voice_cost_cents": { "type": "number" },
+        "voice_text_items": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "xai_realtime only: text items the call sent the voice provider, each billed as a text event."
+        },
         "backend_turns": { "type": "integer" },
         "backend_cost": { "const": "unknown" },
         "accounting": { "enum": ["complete", "incomplete", "running"] }
@@ -229,7 +281,7 @@
         "type": { "const": "error" },
         "reason": {
           "type": "string",
-          "description": "The failure's code. call_in_progress refuses a call_start while another Live call is up or still settling; the connection closes after it."
+          "description": "The failure's code. call_in_progress refuses a call_start while another task-engine call is up or still settling; the connection closes after it. On an xai_realtime call, unknown_playback, playback_regressed and playback_beyond_sent refuse a playback_progress (an id never sent, an offset that went backwards, an offset beyond the audio sent) and close the connection; playback_stalled ends a call whose sent audio went unacknowledged for 2 seconds, playback_overflow one whose reply outgrew the audio the daemon holds, and call_ids_exhausted one that raised more function calls than it can remember."
         },
         "kind": {
           "enum": [
@@ -248,7 +300,7 @@
           "description": "The vendor's own sentence, bounded. Present when the provider explained the failure."
         },
         "required_for": {
-          "enum": ["openai_live"],
+          "enum": ["openai_live", "xai_realtime"],
           "description": "On update_required: the engine that needs the higher protocol version."
         },
         "direction": { "enum": ["client_too_old", "client_too_new"] },

@@ -11,6 +11,7 @@ defmodule FermixCore.Management.SecretsTest do
 
   use ExUnit.Case, async: false
 
+  alias FermixCore.Auth.AnthropicLogin
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Management.Secrets
@@ -96,8 +97,42 @@ defmodule FermixCore.Management.SecretsTest do
       assert {:ok, view} = Secrets.set("openai_api_key", "sk-live")
 
       assert %{"required" => _required, "reasons" => _reasons} = view["restart"]
-      assert Map.keys(view) |> Enum.sort() == ~w(id present restart)
+      assert Map.keys(view) |> Enum.sort() == ~w(environment_override id present restart)
       refute inspect(view) =~ "sk-live"
+    end
+
+    # config/runtime.exs layers a nonblank MISTRAL_API_KEY over the stored key
+    # at every start, so storing one does not make it the key in use. The
+    # result names the variable instead of reporting a plain success.
+    test "names the variable this daemon uses instead of the value it stored" do
+      Application.put_env(:fermix_core, :providers, mistral: [])
+
+      with_env("MISTRAL_API_KEY", "proxy-managed", fn ->
+        assert {:ok, stored} = Secrets.set("mistral_api_key", "sk-stored")
+        assert stored["present"]
+        assert stored["environment_override"] == "MISTRAL_API_KEY"
+
+        assert {:ok, cleared} = Secrets.clear("mistral_api_key")
+        assert cleared["environment_override"] == "MISTRAL_API_KEY"
+      end)
+    end
+
+    test "carries a null override when the stored value is the one in use" do
+      Application.put_env(:fermix_core, :providers, mistral: [])
+
+      with_env("MISTRAL_API_KEY", nil, fn ->
+        assert {:ok, stored} = Secrets.set("mistral_api_key", "sk-stored")
+        assert Map.fetch(stored, "environment_override") == {:ok, nil}
+      end)
+    end
+
+    # TELEGRAM_BOT_TOKEN only labels the stored item; nothing reads it from the
+    # environment, so an exported one is not reported as overriding anything.
+    test "a variable that only labels the stored item is not an override" do
+      with_env("TELEGRAM_BOT_TOKEN", "9:from-the-shell", fn ->
+        assert {:ok, stored} = Secrets.set("telegram_bot_token", "1:abc")
+        assert stored["environment_override"] == nil
+      end)
     end
 
     test "a channel token lands in its own channel block" do
@@ -176,6 +211,57 @@ defmodule FermixCore.Management.SecretsTest do
 
       assert {:error, {:external_change, _sections}} = Secrets.set("openai_api_key", "sk-live")
     end
+
+    # The refusal is the whole answer, so the CLI's "nothing was saved" is true.
+    # The store used to be written before the guard ran: a refused rotation
+    # still replaced the stored key, which the next start then loaded.
+    # Seeded rather than stored through `set/2`: a write re-records the restart
+    # state, whose one-second read cache would then hide the outside edit.
+    test "a write refused for an outside edit leaves the stored value as it was", %{home: home} do
+      :ok = SecretWriterStub.put(:openai_api_key, "sk-old")
+      write_outside_edit(home)
+
+      assert {:error, {:external_change, _sections}} = Secrets.set("openai_api_key", "sk-new")
+      assert SecretWriter.get(:openai_api_key) == {:ok, "sk-old"}
+    end
+
+    # The banner read caches its answer for a second. A write decided from that
+    # cache passed an outside edit made inside the window: the key was stored
+    # and the commit then saved over the edit.
+    test "a primed restart-state cache does not let a write pass an outside edit", %{home: home} do
+      :ok = SecretWriterStub.put(:openai_api_key, "sk-old")
+      assert RestartState.config_state() == :clear
+      write_outside_edit(home)
+
+      assert {:error, {:external_change, _sections}} = Secrets.set("openai_api_key", "sk-new")
+      assert SecretWriter.get(:openai_api_key) == {:ok, "sk-old"}
+      assert File.read!(Path.join(home, "config.toml")) =~ "review_interval_hours = 12"
+    end
+
+    test "a forget refused for an outside edit keeps the stored value", %{home: home} do
+      :ok = SecretWriterStub.put(:openai_api_key, "sk-old")
+      write_outside_edit(home)
+
+      assert {:error, {:external_change, _sections}} = Secrets.clear("openai_api_key")
+      assert SecretWriter.get(:openai_api_key) == {:ok, "sk-old"}
+    end
+
+    test "a setup token forget refused for an outside edit keeps the token", %{home: home} do
+      assert {:ok, _entry} = AnthropicLogin.store_setup_token("sk-ant-oat-kept")
+      write_outside_edit(home)
+
+      assert {:error, {:external_change, _sections}} = Secrets.clear("anthropic_setup_token")
+      assert {:ok, %{auth_mode: "setup_token"}} = AuthStore.read(AuthStore.profile(:anthropic))
+    end
+
+    test "a setup token refused for an outside edit is not stored", %{home: home} do
+      write_outside_edit(home)
+
+      assert {:error, {:external_change, _sections}} =
+               Secrets.set("anthropic_setup_token", "sk-ant-oat-refused")
+
+      assert {:error, _absent} = AuthStore.read(AuthStore.profile(:anthropic))
+    end
   end
 
   test "every published id is a registry key, so a client can enumerate them" do
@@ -249,6 +335,7 @@ defmodule FermixCore.Management.SecretsTest do
 
       assert view["id"] == "anthropic_setup_token"
       assert view["present"]
+      assert Map.fetch(view, "environment_override") == {:ok, nil}
 
       assert {:ok, entry} = AuthStore.read(AuthStore.profile(:anthropic))
       assert entry.auth_mode == "setup_token"
@@ -337,6 +424,28 @@ defmodule FermixCore.Management.SecretsTest do
   defp provider_block(provider) do
     Application.get_env(:fermix_core, :providers, []) |> Keyword.get(provider, [])
   end
+
+  defp write_outside_edit(home) do
+    path = Path.join(home, "config.toml")
+    existing = if File.exists?(path), do: File.read!(path), else: ""
+    File.write!(path, existing <> "\n[fermix_core.memory]\nreview_interval_hours = 12\n")
+  end
+
+  # The variable is this VM's own environment, which the daemon code reads; the
+  # module is sync, so nothing else observes it while a case holds it.
+  defp with_env(name, value, fun) do
+    previous = System.get_env(name)
+    put_or_delete_env(name, value)
+
+    try do
+      fun.()
+    after
+      put_or_delete_env(name, previous)
+    end
+  end
+
+  defp put_or_delete_env(name, nil), do: System.delete_env(name)
+  defp put_or_delete_env(name, value), do: System.put_env(name, value)
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)
   defp restore(app, key, value), do: Application.put_env(app, key, value)

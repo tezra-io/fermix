@@ -31,22 +31,14 @@ defmodule FermixCore.Browser.HostLauncher do
   learns only that its launch did not attach, and does not open it again for a
   while rather than on every task.
 
-  `launch/1` is the one real launcher: `open -g -j -b <bundle id> --args
-  --background`. The engine release carries no bundle identifier, because one
-  engine tree ships inside both the app and its development identity, which
-  is applied when the app is staged. So the identifier is read from the bundle
-  this engine runs inside (`EngineOwner.app_bundle_path/0`): its `Info.plist`,
-  which the app's staging proves agrees with the product configuration it
-  staged. The development app therefore opens the development app.
+  The one real launcher is `FermixCore.AppLauncher.launch/1`, which owns
+  opening the app for every wire it serves the daemon on.
   """
 
+  alias FermixCore.AppLauncher
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.HostAvailability
-  alias FermixCore.CommandRunner
-  alias FermixCore.Setup.EngineOwner
 
-  @open "/usr/bin/open"
-  @plutil "/usr/bin/plutil"
   @not_connected "the app was opened but did not connect in time"
 
   @type decision :: :fermix_app | {:managed, String.t()}
@@ -78,7 +70,7 @@ defmodule FermixCore.Browser.HostLauncher do
     deps = %{
       host: fn -> HostAvailability.current(host) end,
       launching: fn until_ms -> HostAvailability.launching(host, until_ms) end,
-      launcher: Keyword.get(opts, :launcher, &launch/1),
+      launcher: Keyword.get(opts, :launcher, &AppLauncher.launch/1),
       now: Keyword.get(opts, :now, fn -> System.monotonic_time(:millisecond) end),
       sleep: Keyword.get(opts, :sleep, &Process.sleep/1),
       launch_app: config.launch_app,
@@ -176,48 +168,5 @@ defmodule FermixCore.Browser.HostLauncher do
   defp wait(deps, deadline, polls, remaining) do
     deps.sleep.(min(deps.poll_ms, remaining))
     run(deps, deadline, polls - 1)
-  end
-
-  @doc """
-  Open the app this engine runs inside, in the background and without taking
-  focus. Its browser host attaches on its own; `decide/2` waits for that.
-  """
-  @spec launch(pos_integer()) :: :ok | {:error, String.t()}
-  def launch(timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0 do
-    with {:ok, bundle} <- running_bundle(),
-         {:ok, bundle_id} <- bundle_identifier(bundle, timeout_ms) do
-      open_app(bundle_id, timeout_ms)
-    end
-  end
-
-  defp running_bundle do
-    case EngineOwner.app_bundle_path() do
-      bundle when is_binary(bundle) -> {:ok, bundle}
-      nil -> {:error, "this engine is not running inside the app"}
-    end
-  end
-
-  defp bundle_identifier(bundle, timeout_ms) do
-    plist = Path.join([bundle, "Contents", "Info.plist"])
-    args = ["-extract", "CFBundleIdentifier", "raw", "-o", "-", plist]
-
-    case CommandRunner.run(@plutil, args, timeout_ms: timeout_ms) do
-      {:ok, %{exit: 0, stdout: out}} -> identifier(String.trim(out), plist)
-      {:ok, %{exit: code, stdout: out}} -> {:error, "plutil exited #{code}: #{String.trim(out)}"}
-      {:error, reason} -> {:error, "plutil could not run: #{inspect(reason)}"}
-    end
-  end
-
-  defp identifier("", plist), do: {:error, "#{plist} names no bundle identifier"}
-  defp identifier(bundle_id, _plist), do: {:ok, bundle_id}
-
-  defp open_app(bundle_id, timeout_ms) do
-    args = ["-g", "-j", "-b", bundle_id, "--args", "--background"]
-
-    case CommandRunner.run(@open, args, timeout_ms: timeout_ms) do
-      {:ok, %{exit: 0}} -> :ok
-      {:ok, %{exit: code, stdout: out}} -> {:error, "open exited #{code}: #{String.trim(out)}"}
-      {:error, reason} -> {:error, "open could not run: #{inspect(reason)}"}
-    end
   end
 end

@@ -11,12 +11,17 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Realtime.Config
+  alias FermixCore.Realtime.LiveFrames
   alias FermixCore.Realtime.Protocol
 
   @schema_path Application.app_dir(:fermix_core, "priv/realtime/protocol.schema.json")
   @client_fixtures Application.app_dir(:fermix_core, "priv/realtime/fixtures/client_events.jsonl")
   @server_fixtures Application.app_dir(:fermix_core, "priv/realtime/fixtures/server_events.jsonl")
   @uuid_v4 ~r/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+  # The reasons a Grok call closes the connection on its playback feedback, or
+  # ends on a bound of its own.
+  @playback_reasons ~w(unknown_playback playback_regressed playback_beyond_sent playback_stalled
+                       playback_overflow call_ids_exhausted)
 
   setup_all do
     %{schema: @schema_path |> File.read!() |> Jason.decode!()}
@@ -78,8 +83,8 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
     end
   end
 
-  # Additive and optional: an older companion ignores a field it does not know,
-  # so the wire stays at version 2. A Realtime call's frames never carry it.
+  # Additive and optional: an older companion ignores a field it does not know.
+  # A Realtime call's frames never carry it.
   test "call_ready, task and usage publish the call UUID as an optional field", %{
     schema: schema
   } do
@@ -181,7 +186,7 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
           (frame["type"] == "usage" and frame["status"] == "live")
       end)
 
-    assert length(live_frames) == 5
+    assert length(live_frames) == 7
 
     for frame <- live_frames do
       assert frame["call_uuid"] =~ @uuid_v4, "golden #{frame["type"]} has no call_uuid"
@@ -197,26 +202,94 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
                            provider_disconnected))
 
     assert error["detail"]["type"] == "string"
-    assert error["required_for"]["enum"] == ["openai_live"]
+    assert error["required_for"]["enum"] == ["openai_live", "xai_realtime"]
   end
 
-  test "the golden fixtures carry both handshake versions and every v2 frame" do
+  test "call_ready publishes every engine the daemon runs", %{schema: schema} do
+    assert MapSet.new(schema["$defs"]["call_ready"]["properties"]["engine"]["enum"]) ==
+             MapSet.new(Config.valid_engines())
+  end
+
+  # v3, the Grok engine: the companion reports playback against the id the
+  # daemon sent, so both ends of the id carry the same bound.
+  test "the v3 defs require the fields the daemon enforces", %{schema: schema} do
+    defs = schema["$defs"]
+    config = Config.normalize([])
+
+    for field <- ~w(playback_id played_ms drained) do
+      assert field in defs["playback_progress"]["required"]
+    end
+
+    assert %{"type" => "integer", "minimum" => 0} =
+             defs["playback_progress"]["properties"]["played_ms"]
+
+    assert %{"type" => "boolean"} = defs["playback_progress"]["properties"]["drained"]
+
+    refute "playback_id" in defs["audio_delta"]["required"]
+    sent = defs["audio_delta"]["properties"]["playback_id"]
+    echoed = defs["playback_progress"]["properties"]["playback_id"]
+    assert %{"type" => "string", "minLength" => 1, "maxLength" => max} = sent
+    assert Map.delete(echoed, "description") == Map.delete(sent, "description")
+
+    longest = String.duplicate("p", max)
+    assert %{playback_id: ^longest} = LiveFrames.audio_delta("AAAA", longest)
+    assert_raise FunctionClauseError, fn -> LiveFrames.audio_delta("AAAA", longest <> "p") end
+
+    frame = &~s({"type":"playback_progress","playback_id":"#{&1}","played_ms":0,"drained":true})
+    assert {:ok, _event} = Protocol.decode_client_event(frame.(longest), config)
+
+    assert {:error, :missing_playback_id} =
+             Protocol.decode_client_event(frame.(longest <> "p"), config)
+  end
+
+  test "the playback refusals are published error reasons with golden rows", %{schema: schema} do
+    description = schema["$defs"]["error"]["properties"]["reason"]["description"]
+
+    golden =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+
+    for reason <- @playback_reasons do
+      assert description =~ reason, "the error def does not publish #{reason}"
+      assert %{"type" => "error", "reason" => reason} in golden, "no golden #{reason} row"
+    end
+  end
+
+  test "the golden Grok audio frame is the one the daemon builds" do
+    golden =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.find(&(&1["type"] == "audio_delta" and Map.has_key?(&1, "playback_id")))
+
+    built =
+      LiveFrames.audio_delta(golden["audio"], golden["playback_id"])
+      |> Jason.encode!()
+      |> Jason.decode!()
+
+    assert built == golden
+  end
+
+  test "the golden fixtures carry every handshake version and every v2 and v3 frame" do
     client_types =
       @client_fixtures
       |> fixture_lines()
       |> Enum.map(&Jason.decode!/1)
 
-    assert Enum.any?(
-             client_types,
-             &(&1["type"] == "client_hello" and &1["protocol_version"] == 1)
-           )
+    {min, max} = Protocol.supported_version_range()
 
-    assert Enum.any?(
-             client_types,
-             &(&1["type"] == "client_hello" and &1["protocol_version"] == 2)
-           )
+    for version <- min..max do
+      assert Enum.any?(
+               client_types,
+               &(&1["type"] == "client_hello" and &1["protocol_version"] == version)
+             ),
+             "no golden client_hello at version #{version}"
+    end
 
     assert Enum.any?(client_types, &(&1["type"] == "task_cancel"))
+    assert Enum.any?(client_types, &(&1["type"] == "playback_progress" and &1["drained"]))
+    assert Enum.any?(client_types, &(&1["type"] == "playback_progress" and not &1["drained"]))
 
     server_frames =
       @server_fixtures
@@ -230,8 +303,22 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
     assert Enum.any?(server_frames, &(&1["type"] == "usage" and &1["status"] == "live")),
            "no golden Live usage frame"
 
-    assert Enum.any?(server_frames, &(&1["kind"] == "update_required")),
-           "no golden update_required refusal"
+    for engine <- ~w(openai_live xai_realtime) do
+      assert Enum.any?(
+               server_frames,
+               &(&1["kind"] == "update_required" and &1["required_for"] == engine)
+             ),
+             "no golden update_required refusal for #{engine}"
+
+      assert Enum.any?(server_frames, &(&1["type"] == "call_ready" and &1["engine"] == engine)),
+             "no golden call_ready for #{engine}"
+    end
+
+    assert Enum.any?(
+             server_frames,
+             &(&1["type"] == "usage" and is_integer(&1["voice_text_items"]))
+           ),
+           "no golden Grok usage frame"
   end
 
   test "the golden server_hello advertises the module's live window", %{schema: _schema} do

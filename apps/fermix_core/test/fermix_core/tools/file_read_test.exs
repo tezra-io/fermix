@@ -1,6 +1,8 @@
 defmodule FermixCore.Tools.FileReadTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Sandbox
+  alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Tools.FileRead
 
   setup do
@@ -175,6 +177,21 @@ defmodule FermixCore.Tools.FileReadTest do
       assert {:ok, result} = FileRead.execute(%{"path" => "/etc/passwd"}, context)
       assert result.success == false
       assert result.error =~ "protected" or result.error =~ "outside the sandbox"
+    end
+
+    test "a file outside the roots sends the model to the owner for a grant", %{context: context} do
+      outside = FermixTestSupport.SafeRm.make_tmp_dir!("file-read-outside")
+      path = Path.join(outside, "notes.txt")
+      File.write!(path, "notes")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(outside) end)
+
+      assert {:ok, result} = FileRead.execute(%{"path" => path}, context)
+      assert result.success == false
+
+      assert String.ends_with?(
+               result.error,
+               Sandbox.grant_hint(PathPolicy.canonical_path(outside))
+             )
     end
 
     test "rejects relative path that escapes the sandbox", %{context: context} do

@@ -11,6 +11,7 @@ defmodule FermixCore.Plugins.RegistryProvenanceTest do
   alias FermixCore.Plugins.CanonicalJson
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Registry
+  alias FermixCore.Plugins.Retired
   alias FermixTestSupport.DistFixtures
   alias FermixTestSupport.DistVerifierStub
   alias FermixTestSupport.SafeRm
@@ -78,6 +79,31 @@ defmodule FermixCore.Plugins.RegistryProvenanceTest do
       assert Enum.any?(plugins, &(&1.name == "remotedemo"))
     end
 
+    # A retired plugin (`Plugins.Retired`) can still sit in an install's plugin
+    # store, and the registry used to load it on every listing: re-verifying its
+    # signature, so a verifier that stopped accepting an old certificate took the
+    # whole registry down, and with it boot. The store is the registry's to read,
+    # so the registry is where a retired name stops; the files stay for the
+    # operator to remove.
+    test "a retired plugin in the store is never loaded, so its signature cannot fail the registry",
+         %{store: store, fixtures: fixtures} do
+      retired = hd(Retired.names())
+
+      :ok =
+        DistFixtures.install_remote_plugin(
+          store,
+          fixtures,
+          retired,
+          "1.0.0",
+          remote_manifest(retired)
+        )
+
+      # DistVerifierStub denies by default: the signature would fail if it were checked.
+      assert {:ok, plugins} = Registry.list(installed_root: store, dev_local: nil)
+      refute Enum.any?(plugins, &(&1.name == retired))
+      assert retired in Enum.map(DistStore.list(store), & &1.name), "the files stay put"
+    end
+
     # The on-disk manifest decides only "is this remote"; what gets DECODED is
     # the signed copy, so editing the installed file cannot redirect the
     # credential to another origin.
@@ -135,7 +161,7 @@ defmodule FermixCore.Plugins.RegistryProvenanceTest do
 
   # A minimal but VALID plugin-api-3 remote manifest: the gate runs before
   # decoding, so an invalid one would mask a gate result behind a decode error.
-  defp remote_manifest do
+  defp remote_manifest(name \\ "remotedemo") do
     %{
       "plugin_api" => 3,
       "min_core_version" => "0.1.0",
@@ -154,13 +180,13 @@ defmodule FermixCore.Plugins.RegistryProvenanceTest do
           "default" => true,
           "required_credential_scope" => "read",
           "scope_visibility" => "none",
-          "tools" => ["remotedemo_search"]
+          "tools" => ["#{name}_search"]
         }
       ],
-      "setup_tools" => ["remotedemo_list_workspaces"],
+      "setup_tools" => ["#{name}_list_workspaces"],
       "resource_scope" => %{
         "kind" => "single_workspace",
-        "discovery_tool" => "remotedemo_list_workspaces",
+        "discovery_tool" => "#{name}_list_workspaces",
         "id_field" => "id",
         "label_field" => "name",
         "argument" => "workspaceId"
@@ -172,7 +198,7 @@ defmodule FermixCore.Plugins.RegistryProvenanceTest do
         "status_field" => "status",
         "message_field" => "message"
       },
-      "tools" => [sign_tool("remotedemo_search"), sign_tool("remotedemo_list_workspaces", %{})]
+      "tools" => [sign_tool("#{name}_search"), sign_tool("#{name}_list_workspaces", %{})]
     }
   end
 

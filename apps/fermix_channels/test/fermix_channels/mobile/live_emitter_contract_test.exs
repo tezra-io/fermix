@@ -19,6 +19,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
   alias FermixChannels.Channels.Mobile
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Output
+  alias FermixChannels.LinkPreviews
   alias FermixChannels.Mobile.EventRouter
   alias FermixChannels.Mobile.MediaStore
   alias FermixChannels.Mobile.PairManager
@@ -113,9 +114,9 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
     rows = seed_rows!()
     photo = hd(rows)
 
-    Mobile.schedule_unfurl("main", photo.server_seq, "see https://example.com",
-      unfurl: fn _text, _thumbnail -> {:ok, unfurled_previews(), []} end,
-      unfurl_launcher: fn task -> task.() && :ok end,
+    LinkPreviews.schedule("main", photo.server_seq, ["https://example.com"],
+      resolver: fn _links, _thumbnail -> {:ok, unfurled_previews(), []} end,
+      launcher: fn task -> task.() && :ok end,
       event_sink: ctx.sink,
       store: RepoTimeline
     )
@@ -123,6 +124,13 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
     previews = received_sink_events("link_preview")
     assert length(previews) == 2
     for preview <- previews, do: assert_on_the_wire!(preview, schema)
+
+    # Each stored preview also tells the Mac its row changed, an event this
+    # wire does not carry (`Companion.Fanout` sends it to the Mac alone).
+    seq = photo.server_seq
+
+    assert [%{"server_seq" => ^seq}, %{"server_seq" => ^seq}] =
+             received_sink_events("row_updated")
 
     for row <- rows, do: assert_on_the_wire!(Output.row("main", row), schema)
 
@@ -540,7 +548,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
         pending_approvals: fn "main" -> [] end
       })
       |> Map.merge(Map.new(overrides))
-      |> SocketHandler.init()
+      |> init_socket()
 
     state
   end
@@ -561,7 +569,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
         end
       })
       |> Map.merge(Map.new(overrides))
-      |> SocketHandler.init()
+      |> init_socket()
 
     state
   end
@@ -578,7 +586,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
         schedule_handshake_deadline: fn _message, _delay -> make_ref() end,
         cancel_handshake_deadline: fn _ref -> false end
       })
-      |> SocketHandler.init()
+      |> init_socket()
 
     state
   end
@@ -669,6 +677,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
   defp unfurled_previews do
     [
       %{
+        link: "https://example.com",
         url: "https://example.com",
         site: String.duplicate("s", 200),
         title: String.duplicate("t", 400),
@@ -676,12 +685,18 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
         image: nil
       },
       %{
+        link: "https://example.org/post",
         url: "https://example.org/post",
         site: "Example Org",
         title: "A post",
         image: %{ref: String.duplicate("d", 64), mime: "image/png", size_bytes: 1_024}
       },
-      %{url: "https://example.net/" <> String.duplicate("p", 2_100), site: "Net", title: "Long"}
+      %{
+        link: "https://example.net/long",
+        url: "https://example.net/" <> String.duplicate("p", 2_100),
+        site: "Net",
+        title: "Long"
+      }
     ]
   end
 
@@ -736,4 +751,8 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
 
   defp restore_env({key, {:ok, value}}), do: Application.put_env(:fermix_channels, key, value)
   defp restore_env({key, :error}), do: Application.delete_env(:fermix_channels, key)
+
+  # The peer `Mobile.Router` names for every WebSocket: the session requires one.
+  defp init_socket(opts),
+    do: opts |> Map.new() |> Map.put_new(:peer, {127, 0, 0, 1}) |> SocketHandler.init()
 end

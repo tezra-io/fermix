@@ -46,7 +46,7 @@ shows up as a broken `ChatAccounted` instead.
 
 | Switch | When `TRUE` |
 |---|---|
-| `SocketsCanFreeze` | The OS suspends an app with no clean close. The daemon keeps its socket registered until the 150 s idle timeout (`router.ex:20`, `:61-68`). |
+| `SocketsCanFreeze` | The OS suspends an app with no clean close. The daemon keeps its socket registered until the 150 s idle timeout (`Session.idle_timeout_ms`, `session.ex:136`), which the WebSocket (`router.ex:53-60`) and the iroh bridge connection (`bridge_connection.ex:199-206`) both apply. |
 | `DispatchCanFail` | A dispatcher call returns a transient error. |
 | `AnswerCanBeLost` | The platform accepted a push and the daemon saw a timeout instead. |
 | `DaemonCanCrash` | The daemon dies with push tasks in flight, and boots again. |
@@ -155,7 +155,10 @@ none of the three. What it changed around them:
   for one that did not. A request settles on one of the two paths, so a row
   has one task.
 - A proactive row is pushed only while the phone subtree runs
-  (`phone_effects`). The spec models the channel switched on.
+  (`delivered_effects`, `phone_effects` until 5e9ec545). The spec models the
+  channel switched on. Since 5e9ec545 the same function previews the row's
+  links whether or not the subtree runs (`LinkPreviews`), which no push rule
+  reads, so nothing the spec models changed.
 - An approval is now pushed too, with no content, in one attempt, and
   suppressed while any device of the profile has a socket
   (`push.ex:133-151`). The spec does not model approvals (see "Not

@@ -37,7 +37,8 @@ defmodule FermixCore.Tools.EventRemove do
   def description do
     "Cancel a stored event and its unsent reminders — by id, or with no id for " <>
       "\"cancel that\", which cancels the event behind the most recent reminder Fermix " <>
-      "delivered in this conversation. Delivered reminder history is kept."
+      "delivered in this conversation, or the one that rang on this computer when asked " <>
+      "from this computer's own chat, a terminal, an editor or a voice call. Delivered reminder history is kept."
   end
 
   @impl true
@@ -52,7 +53,8 @@ defmodule FermixCore.Tools.EventRemove do
           description:
             "The stored event's id from event_list. Leave it out for \"cancel that\" or " <>
               "\"stop reminding me about this\": the event behind the last reminder " <>
-              "delivered in this conversation within the past 24 hours. With nothing " <>
+              "delivered in this conversation within the past 24 hours, or the one that rang " <>
+              "on this computer when asked from its own surfaces. With nothing " <>
               "delivered here the tool says so and you ask the owner which event they mean."
         }
       }

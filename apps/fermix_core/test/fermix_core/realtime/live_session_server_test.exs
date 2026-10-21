@@ -1213,7 +1213,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
         history_tainted: true
       }
 
-      :ok = LiveSessionServer.chat_answered(session, answer)
+      :ok = SessionControl.chat_answered(session, answer)
       :ok = SessionControl.call_stop(session)
 
       assert %{gist_tainted: true} = await_record(repo, uuid, &(&1.row_state == "row_written"))
@@ -1261,7 +1261,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       uuid = :sys.get_state(session).call_uuid
       start_provider_session(session)
       speak(session, "hello", 1_000, 2_000)
-      :ok = LiveSessionServer.chat_answered(session, %{role: "assistant", content: "Saved."})
+      :ok = SessionControl.chat_answered(session, %{role: "assistant", content: "Saved."})
       :ok = SessionControl.call_stop(session)
 
       assert %{gist_tainted: false, gist_status: "written"} =
@@ -1678,8 +1678,8 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     } do
       session = listening_session(clock)
 
-      :ok = LiveSessionServer.chat_typed(session, "use https://x.test/lease")
-      :ok = LiveSessionServer.chat_answered(session, %{role: "assistant", content: "Saved it."})
+      :ok = SessionControl.chat_typed(session, "use https://x.test/lease")
+      :ok = SessionControl.chat_answered(session, %{role: "assistant", content: "Saved it."})
       sync(session)
 
       assert [typed, answered] = Enum.filter(FakeLiveClient.events(), &mirror?/1)
@@ -1705,7 +1705,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
         history_tainted: true
       }
 
-      :ok = LiveSessionServer.chat_answered(session, tainted)
+      :ok = SessionControl.chat_answered(session, tainted)
       sync(session)
 
       assert Enum.filter(FakeLiveClient.events(), &mirror?/1) == []
@@ -1715,7 +1715,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       session = start_session(clock: clock)
       :ok = SessionControl.call_start(session)
 
-      :ok = LiveSessionServer.chat_typed(session, "too early")
+      :ok = SessionControl.chat_typed(session, "too early")
       sync(session)
 
       assert [%{type: "session.start"}] = FakeLiveClient.events()
@@ -1725,7 +1725,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     test "nothing is mirrored into a private call", %{clock: clock} do
       session = listening_session(clock, config: live_config(conversation: "private"))
 
-      :ok = LiveSessionServer.chat_typed(session, "use https://x.test/lease")
+      :ok = SessionControl.chat_typed(session, "use https://x.test/lease")
       sync(session)
 
       assert Enum.filter(FakeLiveClient.events(), &mirror?/1) == []
@@ -1746,7 +1746,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}
       Agent.update(clock, fn _ms -> 372_000 end)
 
-      assert {:ok, context} = LiveSessionServer.call_context(session, 1_000)
+      assert {:ok, context} = SessionControl.call_context(session, 1_000)
 
       assert context.started_at == started_at
       assert context.elapsed_ms == 372_000
@@ -1776,7 +1776,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
         )
       end
 
-      assert {:ok, %{speech: speech}} = LiveSessionServer.call_context(session, 1_000)
+      assert {:ok, %{speech: speech}} = SessionControl.call_context(session, 1_000)
       assert CallSpeech.text(speech) =~ ~r/^user:  word1 word2 .* word200$/
       assert length(LiveTranscript.fragments(:sys.get_state(session).transcript)) == 128
     end
@@ -1787,7 +1787,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       session = listening_session(clock, config: live_config(conversation: "private"))
       speak(session, "a private aside", 1_000, 2_000)
 
-      assert {:ok, %{speech: speech}} = LiveSessionServer.call_context(session, 1_000)
+      assert {:ok, %{speech: speech}} = SessionControl.call_context(session, 1_000)
       assert CallSpeech.text(speech) == ""
     end
   end
@@ -2007,7 +2007,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
              end)
 
       assert FakeBridge.cancels() == []
-      assert :sys.get_state(session).delegations.active.id == "dg_1"
+      assert :sys.get_state(session).tasks.delegations.active.id == "dg_1"
     end
   end
 

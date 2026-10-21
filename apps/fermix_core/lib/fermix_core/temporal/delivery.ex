@@ -12,6 +12,11 @@ defmodule FermixCore.Temporal.Delivery do
   are resolved live by `ChannelSend` at send time; nothing about the live channel
   account is ever snapshotted on a reminder row (§11.1).
 
+  Every send, on every platform, also carries the event's title from the row's
+  payload snapshot as `:title` and the reminder's id as `:reminder_id`: a
+  notification on this computer is summarised by the one and snoozed by the
+  other (M76 §4.6), and a chat adapter reads only the options it knows.
+
   Thread normalization is the closed §11.1 table — Telegram's decimal
   `message_thread_id`, Slack's `thread_ts`, and nothing for the platforms whose
   destination already *is* the thread. A scope that contradicts its platform is a
@@ -60,9 +65,10 @@ defmodule FermixCore.Temporal.Delivery do
   def attempt(row, text, timeout_ms, opts, delivery_kind)
       when is_map(row) and is_binary(text) and is_integer(timeout_ms) and timeout_ms > 0 and
              is_list(opts) and delivery_kind in [:reminder, :followup] do
-    case thread_opts(row) do
-      {:ok, send_opts} -> send_once(row, text, send_opts, timeout_ms, opts, delivery_kind)
-      {:error, reason} -> {:error, reason}
+    with {:ok, thread} <- thread_opts(row),
+         {:ok, title} <- event_title(row) do
+      send_opts = thread ++ [title: title, reminder_id: row.id]
+      send_once(row, text, send_opts, timeout_ms, opts, delivery_kind)
     end
   end
 
@@ -89,6 +95,18 @@ defmodule FermixCore.Temporal.Delivery do
   defp proactive_key(%{id: id}, :followup) when is_binary(id) and id != "" do
     "temporal:#{id}:followup"
   end
+
+  # The title comes from the row's own payload snapshot, never the event. The
+  # renderer refuses a payload with no title before any attempt, so a row that
+  # reaches here without one broke that invariant: terminal and loud, as a
+  # thread scope that contradicts its platform is.
+  defp event_title(%{payload: %{"title" => title}}) when is_binary(title) and title != "",
+    do: {:ok, title}
+
+  defp event_title(row), do: malformed(platform_name(row), "row carries no event title")
+
+  defp platform_name(%{delivery_platform: platform}) when is_binary(platform), do: platform
+  defp platform_name(_row), do: "unknown"
 
   @doc """
   The §11.1 send option for a row's snapshotted thread scope.

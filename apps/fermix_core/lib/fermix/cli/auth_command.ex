@@ -20,10 +20,13 @@ defmodule Fermix.CLI.AuthCommand do
   state.
 
   `run/2` takes test seams: `:login`, `:read_line` and `:browser` for the
-  ChatGPT sign-in (`TerminalLogin.run/1`), and `:logout` for its sign-out.
+  ChatGPT sign-in (`TerminalLogin.run/1`), `:logout` for its sign-out, and
+  `:restart_route` (default `RestartCommand.route/0`) for how a restart hint
+  names the restart that works for this home's daemon.
   """
 
   alias Fermix.CLI.Daemon.Client, as: DaemonClient
+  alias Fermix.CLI.RestartCommand
   alias FermixCore.Auth.AnthropicLogin
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.ChatGPT.TerminalLogin
@@ -46,7 +49,7 @@ defmodule Fermix.CLI.AuthCommand do
   @anthropic_profile Store.profile(:anthropic)
   @xai_profile Store.profile(:xai)
   @codex_profile Store.profile(:openai_codex)
-  @seams [:login, :read_line, :browser, :logout, :live_model]
+  @seams [:login, :read_line, :browser, :logout, :live_model, :restart_route]
 
   @spec run([String.t()], keyword()) :: non_neg_integer()
   def run(argv, seams \\ []) when is_list(argv) and is_list(seams) do
@@ -70,8 +73,8 @@ defmodule Fermix.CLI.AuthCommand do
 
   defp dispatch_login(nil, opts, seams), do: chatgpt_login(opts, seams)
   defp dispatch_login("codex", opts, seams), do: chatgpt_login(opts, seams)
-  defp dispatch_login("anthropic", opts, _seams), do: anthropic_login(opts)
-  defp dispatch_login("xai", opts, _seams), do: xai_login(opts)
+  defp dispatch_login("anthropic", opts, seams), do: anthropic_login(opts, seams)
+  defp dispatch_login("xai", opts, seams), do: xai_login(opts, seams)
 
   defp dispatch_login(other, _opts, _seams),
     do: error("unknown login provider #{inspect(other)}; expected codex, anthropic, or xai")
@@ -96,8 +99,18 @@ defmodule Fermix.CLI.AuthCommand do
   defp signed_in(account, seams) do
     IO.puts("Signed in to ChatGPT#{account_suffix(account)}. Tokens saved to #{Store.path()}.")
     ensure_live_model(seams)
-    IO.puts("Restart the daemon to pick up new credentials: `fermix restart`.")
+    IO.puts(pick_up_credentials(seams))
     0
+  end
+
+  # The daemon reads credentials at start; how to restart it depends on how it
+  # runs, so the hint comes from the one resolver `fermix restart` acts on.
+  defp pick_up_credentials(seams),
+    do: "The daemon picks up new credentials when it restarts. " <> restart_hint(seams)
+
+  defp restart_hint(seams) do
+    route = Keyword.get(seams, :restart_route, &RestartCommand.route/0)
+    RestartCommand.hint(route.())
   end
 
   # The configured model must be one the account lists (`Setup.LiveModel`); a
@@ -121,16 +134,16 @@ defmodule Fermix.CLI.AuthCommand do
   defp account_suffix(nil), do: ""
   defp account_suffix(account), do: " as #{account}"
 
-  defp anthropic_login(opts) do
+  defp anthropic_login(opts, seams) do
     cond do
       token = Keyword.get(opts, :setup_token) ->
-        anthropic_result(AnthropicLogin.store_setup_token(token))
+        anthropic_result(AnthropicLogin.store_setup_token(token), seams)
 
       Keyword.get(opts, :import_claude_code, false) ->
-        anthropic_result(AnthropicLogin.import_claude_code())
+        anthropic_result(AnthropicLogin.import_claude_code(), seams)
 
       token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN") ->
-        anthropic_result(AnthropicLogin.store_setup_token(token))
+        anthropic_result(AnthropicLogin.store_setup_token(token), seams)
 
       true ->
         error(
@@ -140,7 +153,7 @@ defmodule Fermix.CLI.AuthCommand do
     end
   end
 
-  defp anthropic_result({:ok, entry}) do
+  defp anthropic_result({:ok, entry}, seams) do
     case select_route(:anthropic, :oauth) do
       :ok ->
         IO.puts(
@@ -148,7 +161,7 @@ defmodule Fermix.CLI.AuthCommand do
             "Tokens saved to #{Store.path()}."
         )
 
-        IO.puts("Restart the daemon to pick up new credentials: `fermix restart`.")
+        IO.puts(pick_up_credentials(seams))
         0
 
       {:error, reason} ->
@@ -156,10 +169,10 @@ defmodule Fermix.CLI.AuthCommand do
     end
   end
 
-  defp anthropic_result({:error, reason}),
+  defp anthropic_result({:error, reason}, _seams),
     do: error("anthropic login failed: #{reason_text(reason)}")
 
-  defp xai_login(opts) do
+  defp xai_login(opts, seams) do
     login_opts =
       []
       |> maybe_set_no_browser(Keyword.get(opts, :no_browser, false))
@@ -175,7 +188,7 @@ defmodule Fermix.CLI.AuthCommand do
                 "Tokens saved to #{Store.path()}."
             )
 
-            IO.puts("Restart the daemon to pick up new credentials: `fermix restart`.")
+            IO.puts(pick_up_credentials(seams))
             0
 
           {:error, reason} ->
@@ -276,7 +289,7 @@ defmodule Fermix.CLI.AuthCommand do
 
   defp do_logout({:error, message}, _seams), do: error(message)
   defp do_logout({:ok, @codex_profile}, seams), do: chatgpt_logout(seams)
-  defp do_logout({:ok, profile}, _seams), do: delete_logout(profile)
+  defp do_logout({:ok, profile}, seams), do: delete_logout(profile, seams)
 
   # ChatGPT's own sign-out revokes the session upstream, clears the tokens and
   # keeps the registration, so the next sign-in reuses it; a revoke OpenAI did
@@ -288,25 +301,25 @@ defmodule Fermix.CLI.AuthCommand do
     case ChatGPT.summary() do
       %{state: :not_connected} ->
         IO.puts("Already logged out (no ChatGPT sign-in in #{path}).")
-        tell_daemon(0, @codex_profile, "no ChatGPT sign-in was stored in #{path}")
+        tell_daemon(0, @codex_profile, "no ChatGPT sign-in was stored in #{path}", seams)
 
       %{state: _signed_in} ->
         logout.([])
-        |> chatgpt_logged_out(path)
+        |> chatgpt_logged_out(path, seams)
     end
   end
 
-  defp chatgpt_logged_out({:ok, %{revoked: true}}, path) do
+  defp chatgpt_logged_out({:ok, %{revoked: true}}, path, seams) do
     IO.puts("Logged out of ChatGPT. Cleared its tokens in #{path}.")
-    tell_daemon(0, @codex_profile, "cleared the ChatGPT tokens in #{path}")
+    tell_daemon(0, @codex_profile, "cleared the ChatGPT tokens in #{path}", seams)
   end
 
-  defp chatgpt_logged_out({:ok, %{revoked: false}}, path) do
+  defp chatgpt_logged_out({:ok, %{revoked: false}}, path, seams) do
     IO.puts(ChatGPT.failure_sentence(:revoke_not_confirmed))
-    tell_daemon(0, @codex_profile, "cleared the ChatGPT tokens in #{path}")
+    tell_daemon(0, @codex_profile, "cleared the ChatGPT tokens in #{path}", seams)
   end
 
-  defp chatgpt_logged_out({:error, reason}, _path),
+  defp chatgpt_logged_out({:error, reason}, _path, _seams),
     do: error("logout failed: #{ChatGPT.failure_sentence(reason)}")
 
   # The logout is the same whether or not a daemon runs: the entry is deleted
@@ -314,20 +327,20 @@ defmodule Fermix.CLI.AuthCommand do
   # then told to let go of them, the way the plugin verbs ask it to re-apply
   # their config. With no daemon there is nothing to tell and nothing more is
   # printed.
-  defp delete_logout(profile) do
+  defp delete_logout(profile, seams) do
     path = Store.path()
 
     case Store.delete_provider(profile, path) do
       :ok ->
         profile
         |> logged_out(path)
-        |> tell_daemon(profile, "removed the #{profile} entry from #{path}")
+        |> tell_daemon(profile, "removed the #{profile} entry from #{path}", seams)
 
       {:error, :no_auth_file} ->
-        already_logged_out(profile, path)
+        already_logged_out(profile, path, seams)
 
       {:error, {:provider_missing, _provider}} ->
-        already_logged_out(profile, path)
+        already_logged_out(profile, path, seams)
 
       {:error, reason} ->
         error("logout failed: #{reason_text(reason)}")
@@ -358,7 +371,7 @@ defmodule Fermix.CLI.AuthCommand do
   # `status` is the local logout's own exit status; the daemon's answer can only
   # make it worse. A daemon that cannot let go is a failed logout, because it
   # keeps calling as the account until it restarts.
-  defp tell_daemon(status, profile, local) do
+  defp tell_daemon(status, profile, local, seams) do
     case DaemonClient.forget_auth_profile(to_string(profile)) do
       :ok ->
         IO.puts(:stderr, "The running daemon dropped any tokens it held for #{profile}.")
@@ -369,9 +382,8 @@ defmodule Fermix.CLI.AuthCommand do
 
       {:error, reason} ->
         error(
-          "#{local}, but the running daemon could not drop its #{profile} tokens: #{reason}. " <>
-            "Restart the daemon (from the Fermix app, or `fermix restart` for a daemon you " <>
-            "run yourself)."
+          "#{local}, but the running daemon could not drop its #{profile} tokens: #{reason}, " <>
+            "so it keeps them until it restarts. " <> restart_hint(seams)
         )
     end
   end
@@ -386,9 +398,9 @@ defmodule Fermix.CLI.AuthCommand do
 
   # Still tells a running daemon: a logout whose notice failed leaves the entry
   # gone and the tokens live, and running it again is how the operator retries.
-  defp already_logged_out(profile, path) do
+  defp already_logged_out(profile, path, seams) do
     IO.puts("Already logged out (no #{profile} entry in #{path}).")
-    tell_daemon(0, profile, "no #{profile} entry was stored in #{path}")
+    tell_daemon(0, profile, "no #{profile} entry was stored in #{path}", seams)
   end
 
   defp maybe_put(opts, _key, nil), do: opts

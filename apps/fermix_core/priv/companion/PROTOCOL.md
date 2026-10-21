@@ -16,8 +16,11 @@ the ones it shares (`msg`, `command`, `cancel`, `read_state`, `accepted`,
 `approval`, `approval_resolved`) through the same module. This wire adds
 `history_search`, `search_results`, and a backward cursor on `history_pull`
 and `history_page`. The phone's `row` carries more than this wire's: the whole
-history message. This wire's `row` carries the message's `kind` and `metadata`
-beside its own fields.
+history message. This wire's `row` carries the message's `kind`, `metadata`,
+`media_refs`, `link_previews` and `blocks` beside its own fields. This wire's
+`media_fetch` (version 3) is not the phone's: the phone's streams the bytes in
+chunks inside its envelope, and this one grants a managed file on the same
+machine, so neither it nor its answers are shared.
 
 ## Transport
 
@@ -55,9 +58,9 @@ previous one (or the same value while only one version exists).
 
 | Field | Value |
 |---|---|
-| `protocol_version` (companion declares) | `2` |
-| daemon `min_version` | `1` |
-| daemon `max_version` | `2` |
+| `protocol_version` (companion declares) | `3` |
+| daemon `min_version` | `2` |
+| daemon `max_version` | `3` |
 
 ### Version 2: a turn that ends with no reply
 
@@ -79,8 +82,42 @@ Version 2 also adds one client field, `cancel.task_ref`, which stops a
 GPT-Live task that outlived its call (see *A Live call's rows*). A version 1
 client never sends it.
 
-A version 1 client is served as before and never sees `turn_done`. Every
-version 1 event, field and rule holds unchanged on version 2.
+A version 1 client was served as before and never saw `turn_done`. Every
+version 1 event, field and rule holds unchanged on version 2. Since version 3
+the window is {2, 3}, so a version 1 client is refused and every connection
+reads `turn_done`.
+
+### Version 3: phone-side media and rows that change
+
+Version 3 lets the Mac's chat show what the phones put in the timeline: a
+voice note, a picture or a file sent from a phone, a picture Fermix sent to
+one, and the picture of a link preview stored on a row. A picture or file
+Fermix sends in the Mac's chat, or from a voice call, is the same: an
+assistant row of `kind: "media"` whose `media_refs[]` names it, announced as a
+`row`. Their bytes are in the daemon's media store, by `ref`, the sha256 of
+the bytes. It adds:
+
+- two client events: `media_fetch { profile_id, ref }` asks for a managed
+  local file holding the bytes of a ref, and `media_release { profile_id,
+  ref }` lets it go (see *Managed media files*);
+- three server events: `media_path`, the grant, or `media_missing`, in answer
+  to `media_fetch`, and `row_updated { profile_id, server_seq }`, which says a
+  row already written changed (see *When a row changes*).
+
+Each of the five names version 3 as its `x-since-version`. The three server
+events reach version 3 connections only, and a version 2 connection that sends
+`media_fetch` or `media_release` is refused with `error: unknown_event` and
+closed, as for any event its version does not have.
+
+A `row` now carries the row's `media_refs[]` (always, possibly empty) and
+`link_previews[]` (only when it has one, at most 4), in the shapes a
+`history_page` message carries them (see *Timeline shapes*). They are
+additive, so they are sent on every version and an older client ignores them;
+a new row needs no history read for its media.
+
+Every version 2 event, field and rule holds unchanged on version 3. A version
+1 client is refused with `error: unsupported_protocol_version`
+(`client_too_old`).
 
 ## Handshake state machine
 
@@ -142,9 +179,11 @@ in a fixed order:
 | `history_pull` | `profile_id`, `limit` (1–200), and exactly one of `after_seq` (≥ 0) or `before_seq` (≥ 1) | `after_seq` pages forward (the catch-up read); `before_seq` pages backward from it (scroll to the top). Either is any unsigned 64-bit value. |
 | `history_search` | `profile_id`, `query` (1–256 characters), `limit` (1–50); `before_seq?` | Full-text search of the timeline, newest first, below `before_seq` when given. |
 | `read_state` | `profile_id`, `read_up_to_seq` | Advances the monotonic read frontier, never past the newest row. |
+| `media_fetch` | `profile_id`, `ref` (64 lowercase hex digits) | Version 3. Asks for a managed local file holding the bytes of `ref`, a media ref a row of the profile names. Answered by `media_path`, `media_missing`, or `error: request_failed` with `ref`. Any other `ref` is refused with `error: invalid_field` (`ref`) and the connection is closed. See *Managed media files*. |
+| `media_release` | `profile_id`, `ref` (64 lowercase hex digits) | Version 3. The client has finished with the file `media_path` granted for `ref`. Never answered. Releasing a ref this connection does not hold changes nothing. |
 
 `profile_id` is `main`, the one profile; any other is refused with
-`error: unsupported_profile`.
+`error: unsupported_profile`, and the connection stays open.
 
 ## Server events (daemon → companion)
 
@@ -155,28 +194,36 @@ in a fixed order:
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | A turn began answering `in_reply_to`. |
 | `text_delta` | `turn_id`, `text` | Text to append to the turn's draft, exactly as sent. |
 | `tool_event` | `turn_id`, `tool`, `phase`; `detail?` | `phase` is `start` or `stop`. `detail` is at most 512 bytes. |
-| `text_done` | `turn_id`, `server_seq`, `text` | A reply's canonical text at its timeline row, sent once the turn has completed; replaces the draft. A turn may send more than one. |
+| `text_done` | `turn_id`, `server_seq`, `text`; `blocks[]?` | A reply's canonical text at its timeline row, sent once the turn has completed; replaces the draft. A turn may send more than one. `blocks` are the row's, present only when it has one; see *Blocks under a reply*. |
 | `turn_error` | `turn_id`, `code`, `message` | The turn's terminal failure: `code` is `cancelled` after a `cancel`, `interrupted` when the daemon lost the turn. `message` is at most 512 bytes. |
 | `turn_done` | `turn_id` | Version 2. The turn completed and wrote no reply: it ends the turn, and nothing of its draft is kept. Sent only to a connection on version 2; see *Version 2*. |
-| `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`; `client_msg_id?`, `kind?`, `metadata?` | A timeline row this socket did not stream, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, and a Live call's row. `kind` and `metadata` are the history message's, as a `history_page` carries them; a Live call's row carries `metadata.call` (see *A Live call's rows*). |
+| `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`, `media_refs[]`; `client_msg_id?`, `kind?`, `metadata?`, `link_previews[]?`, `blocks[]?` | A timeline row this socket did not stream, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, and a Live call's row. `kind`, `metadata`, `media_refs`, `link_previews` and `blocks` are the history message's, as a `history_page` carries them (see *Timeline shapes*); a Live call's row carries `metadata.call` (see *A Live call's rows*). |
+| `row_updated` | `profile_id`, `server_seq` | Version 3. A row already written changed: its text, its media refs or its link previews. Carries no content; see *When a row changes*. Sent only to a connection on version 3. |
 | `approval` | `approval_id`, `kind`, `text`, `token`, `ttl_s`, `approve_command`, `deny_command`; `detail?` | An owner-approval card raised by a turn on this socket. The token is submitted, never rendered. Routes are nonempty and at most 1,024 characters. Sent again after `server_hello` while it waits; see *Approvals*. |
 | `approval_resolved` | `approval_id`, `outcome` | `approved` or `denied` when the owner answered, `expired` when its `ttl_s` ran out. |
 | `read_state` | `profile_id`, `read_up_to_seq` | The read frontier, sent to every connection, whichever client (the Mac or a phone) moved it. |
 | `history_page` | `profile_id`, `messages[]`, `history_head_seq`; `next_after_seq?`, `next_before_seq?` | Messages oldest first, at most `limit` and about 60 KiB of them. |
 | `search_results` | `profile_id`, `query`, `hits[]`; `next_before_seq?` | Hits newest first. |
-| `error` | `reason`; `message?`, `field?`, `event?`, `client_msg_id?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | A refusal; see *Errors*. |
+| `media_path` | `ref`, `path`, `kind`, `mime`, `size_bytes`, `sha256` | Version 3. The grant answering `media_fetch`: an absolute path to a managed file holding the ref's bytes, held for this connection; see *Managed media files*. Sent only to a connection on version 3. |
+| `media_missing` | `ref` | Version 3. Nothing to grant for `ref`; see *Managed media files*. Sent only to a connection on version 3. |
+| `error` | `reason`; `message?`, `field?`, `event?`, `client_msg_id?`, `ref?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | A refusal; see *Errors*. |
 
 ### Timeline shapes
 
 A `history_page` message is the exported timeline row and nothing else:
 `server_seq`, `role`, `content`, `ts` (RFC 3339, UTC), `media_refs[]`, plus
-optional `kind`, `client_msg_id`, `in_reply_to`, `metadata` and
-`link_previews[]`. A `media_refs[]` entry carries `ref`, `kind`, `mime`, and
+optional `kind`, `client_msg_id`, `in_reply_to`, `metadata`,
+`link_previews[]` and `blocks[]` (see *Blocks under a reply*). A
+`media_refs[]` entry carries `ref`, `kind`, `mime`, and
 `size_bytes`, plus optional `sha256`, `filename`, and `caption`. A
-`link_previews[]` entry is a link preview the phone channel stored on the row:
-`url` (at most 2,048 bytes), `site` (120), `title` (300), and optional
-`description` (600) and `image_ref`; a row carries at most 4, and has the key
-only when it has one. `metadata` never holds a null. Internal storage columns
+`link_previews[]` entry is a link preview stored on the row once it was
+written, whichever client's row it is: `url` (at most 2,048 bytes), where the
+page answered from after redirects, `site` (120), `title` (300), and optional
+`link` (2,048), the address the row's text wrote, which is what a client pairs
+the card with (a preview stored before links were kept has none, and pairs by
+its `url`), `description` (600) and `image_ref`; a row carries at most 4, and
+has the key only when it has one. A reply's previews are of the links its
+`blocks[]` do not draw. `metadata` never holds a null. Internal storage columns
 are never shipped.
 
 A `search_results` hit carries `server_seq`, `role`, `ts`, `excerpt` (plain
@@ -198,7 +245,9 @@ decided and left open; or, when the gist could not be made, the call's tasks,
 one a line, each its state and summary (`Still running` for a task that
 outlived the call); or nothing more when the call had neither. It is written
 once the gist is made or has failed, so it always carries the settled cost.
-A private call writes no row.
+A private call writes no row. A picture or file a call's task sends, in a call
+in the chat or a private one, is not a call row: it is a media row like any
+other (see *Version 3*), with no `metadata.call`.
 
 A task still running when a call in the chat ends is not cancelled: it
 finishes into the chat, so it writes two rows of its own. The first, as the
@@ -226,7 +275,7 @@ row's `metadata.call` says what it is about:
 | `task_id` | string | The task, the realtime wire's `delegation_id`. Present on `shared`, `task_running` and `task_done`. |
 | `revision` | int ≥ 1 | The task's revision, beside `task_id`. |
 | `state` | `completed` \| `failed` \| `cancelled` \| `timed_out` | A task's terminal state. Present on `task_done`. |
-| `engine` | string | The call's voice engine, `openai_live`. Present on `ended`. |
+| `engine` | string | The call's voice engine, `openai_live` or `xai_realtime`. Present on `ended`. |
 | `duration_s` | int ≥ 0 | The call's length. Present on `ended`. |
 | `voice_cost_cents` | number ≥ 0 | The call's settled voice cost. On `ended` when it is known. |
 | `accounting` | `complete` \| `incomplete` | Whether that cost is settled. Present on `ended`. |
@@ -236,6 +285,123 @@ No other key appears in it. A call's row is written once: a write repeated for
 the same task revision and event, or for the same call's end, finds the row
 already written, and the realtime wire's `task.server_seq` names a task's, so
 the app can say the result is in the chat.
+
+## Managed media files
+
+A `media_fetch` names a ref a row of the profile names, in its `media_refs` or
+as a link preview's `image_ref`. The daemon answers with one of:
+
+- `media_path { ref, path, kind, mime, size_bytes, sha256 }`, the grant.
+  `path` is absolute: the managed file `$FERMIX_HOME/companion/media/<ref><ext>`,
+  its extension taken from the mime the way every inbound copy is named
+  (`audio/ogg` is `.ogg`). `kind`, `mime` and `size_bytes` are the ones the row
+  names for the ref, and `sha256` equals `ref`: the file's bytes were checked
+  against it when the file was made.
+- `media_missing { ref }`: nothing to grant. No row of the profile names the
+  ref, the media store no longer holds its bytes, its bytes no longer match the
+  row, or the phone channel whose store keeps them is off.
+- `error { reason: "request_failed", message, ref }`: the daemon could not
+  serve it for a reason of its own, such as a disk error making the copy. The
+  connection stays open.
+
+A `media_release` is never answered. The daemon owns the files and keeps these
+rules:
+
+1. **One file per ref.** Asking again returns the same path while the file
+   exists, so repeated viewing piles nothing up. A file that has disappeared
+   (removed from outside) is made again at the same path.
+2. **Held while in use.** A `media_path` holds the file for its connection
+   until that connection sends `media_release` for the ref or closes. A
+   connection holds a ref once, however many times it fetched it.
+3. **Held means held.** A held file is never removed or rewritten, whatever
+   the budget says.
+4. **Kept after release.** A file no connection holds stays at least 60 s
+   after its last release, so a reconnect takes back what was playing or
+   showing: on reconnect a client sends `media_fetch` again for every ref it
+   still holds, and gets the same path.
+5. **Reclaimed under a budget.** Beyond that, the daemon keeps its managed
+   files within 512 MiB, removing the least recently released first.
+6. **The budget gives way.** When held and kept files alone pass the budget,
+   the daemon removes every other file, still grants the next `media_fetch`
+   (viewing never fails for the budget's sake), logs the overage once with the
+   held total, and comes back under the budget as files are released and their
+   60 s pass.
+7. **Fresh at start.** Every managed file is removed when the daemon starts,
+   which also clears what a crash left. A path granted before a restart is
+   gone, and the client asks again.
+8. **No processing.** The daemon makes no thumbnails, and decodes and
+   transcodes nothing. The file is a reusable copy of the stored blob (a
+   filesystem clone may replace the copy later, behind the same rules); the
+   stored original is never handed out.
+
+The two numbers are the schema's `x-media-budget-bytes` (536,870,912) and
+`x-media-release-grace-s` (60).
+
+## When a row changes
+
+`row_updated { profile_id, server_seq }` (version 3) says a row already
+written changed, and carries none of it: a client that holds the row reads it
+again from history (`history_pull { after_seq: server_seq - 1, limit: 1 }`),
+and one that does not drops the notice, since it reads that row as it stands
+when it pages it in. The daemon sends it to every version 3 connection
+watching the profile:
+
+- when a phone's voice note's transcript replaces its user row's text, and
+  only when the stored text did change: a Mac message, which has nothing to
+  transcribe, passes through the same step unchanged and sends none;
+- when a link preview is stored on a row, after it is stored.
+
+The phones are not sent it: their wire has `link_preview`, which reaches them
+as before. A notice sent while a client was disconnected is lost, so a client
+that reconnects reads again the rows it shows.
+
+## Blocks under a reply
+
+A reply can carry `blocks[]`: records its text links, which a client draws
+beside the text. Its `text_done`, its `row` and its history message carry the
+same `blocks`, and have the key only when the reply has one. The rules:
+
+- **The text stands alone.** Every reply is complete as text, each place it
+  recommends linked by name. A block adds to the text and never replaces it,
+  so a client that draws no blocks, every other channel and the transcript
+  search lose nothing.
+- **A client skips a block `type` it does not know.** `places` is the only
+  type so far, and `blocks` holds at most one block of each type.
+- **Additive, so no version bump.** An older client ignores the key (*Absent
+  is absent*, under *Transport*).
+- **Places, in first-link order.** A `places` block holds the places a
+  `place_search` in the same conversation found in the last 30 minutes that
+  the reply's text links, one to ten, in the order the text first links them,
+  each once. A link names a place when it is the place's `canonical_url` or
+  `source_url`, compared with the scheme and host in lower case, without the
+  fragment and without a trailing slash on the path. A place found but not
+  linked is not in it, and a reply that links none has no block.
+- **A place is the search's own record**, cut to these fields under the
+  record's own names: `name` and `location {latitude, longitude}`, always (a
+  place without coordinates stays a link in the text); at least one of
+  `canonical_url` and `source_url`, HTTPS addresses exactly as returned; and,
+  each only when the source gave it, `apple_place_id`, `address`, `rating
+  {value?, best?, count?}`, `price_range`, `categories[]` (at most 5),
+  `opening_hours {current_day}` and `distance {value, units}`. The
+  description, contact details, cuisines, the other days' hours and the
+  picture are left out. The coordinates are the place's, never the person's.
+- **Two sources, one record.** The Fermix Mac app's engine searches Apple
+  Maps and the Homebrew and Linux builds Brave, or whichever its settings name. A place Apple Maps found
+  carries `apple_place_id`, Apple Maps' identifier for it, by which a Mac opens
+  Apple's own place card; its `source_url` is Apple's page for the place
+  (`https://maps.apple.com/place?place-id=` and the identifier), and it has a
+  kind and an address but no rating, price or hours. A `distance` is present
+  only when the search was anchored on coordinates. A client draws what a place
+  has, and opens a place without an identifier from its name and coordinates.
+- **Hours as given.** `opening_hours.current_day` is today's hours as the
+  source wrote them (`Thursday 07:00-19:00`); a client shows it as it is and
+  never works out whether the place is open now.
+- **Bounds.** The counts are the search's own: at most 10 places and 5
+  categories a place. Strings are as the source gave them, inside its 1 MiB
+  response.
+
+The phones' `row` carries the history message whole, so it carries `blocks`
+too, and a phone app may ignore them.
 
 ## One timeline with the phone
 
@@ -405,18 +571,22 @@ is `command{name: "confirm", args: "TOKEN"}`, and `/soul apply TOKEN` is
 | `client_message_conflict` | `client_msg_id` | open |
 | `unsupported_profile` | `client_msg_id?` | open |
 | `request_backlog_full` | — | open |
-| `request_failed` | `message` (at most 512 bytes), `client_msg_id?` | open |
+| `request_failed` | `message` (at most 512 bytes), `client_msg_id?`, `ref?` | open |
+
+`unknown_event` also refuses an event newer than the version the connection's
+`client_hello` declared. `ref` is set only on the `request_failed` that answers
+a `media_fetch`.
 
 ## Chat sequence
 
 ```
-companion -> daemon:  client_hello { protocol_version: 2 }
-daemon -> companion:  server_hello { min_version: 1, max_version: 2 }
+companion -> daemon:  client_hello { protocol_version: 3 }
+daemon -> companion:  server_hello { min_version: 2, max_version: 3 }
 companion -> daemon:  history_pull { profile_id: "main", after_seq: 12, limit: 200 }
 daemon -> companion:  history_page { messages: [...], next_after_seq: 12, history_head_seq: 12 }
 companion -> daemon:  msg { client_msg_id: "mac-1", profile_id: "main", text, attach_ids: [] }
 daemon -> companion:  accepted { client_msg_id: "mac-1", duplicate: false }
-daemon -> companion:  row { server_seq: 13, role: "user", text, ts, client_msg_id: "mac-1" }
+daemon -> companion:  row { server_seq: 13, role: "user", text, ts, media_refs: [], client_msg_id: "mac-1" }
 daemon -> companion:  turn_started { turn_id: "turn-mac-1", in_reply_to: "mac-1" }
 daemon -> companion:  tool_event { turn_id, tool, phase: "start" } / { phase: "stop" }
 daemon -> companion:  text_delta { turn_id, text } …
@@ -426,4 +596,17 @@ daemon -> companion:  read_state { profile_id: "main", read_up_to_seq: 14 }
                       (reconnect; the outbox resends "mac-1")
 companion -> daemon:  msg { client_msg_id: "mac-1", … }
 daemon -> companion:  accepted { client_msg_id: "mac-1", duplicate: true, server_seq: 14 }
+```
+
+A phone's voice note, on version 3:
+
+```
+daemon -> companion:  row { server_seq: 21, role: "user", text: "", ts, kind: "media",
+                            media_refs: [{ ref: "<64 hex>", kind: "audio", mime: "audio/ogg", size_bytes: 48213, sha256: "<same>" }] }
+daemon -> companion:  row_updated { profile_id: "main", server_seq: 21 }        (the transcript was stored)
+companion -> daemon:  history_pull { profile_id: "main", after_seq: 20, limit: 1 }
+daemon -> companion:  history_page { messages: [{ server_seq: 21, content: "Pick up milk", ... }], ... }
+companion -> daemon:  media_fetch { profile_id: "main", ref: "<64 hex>" }          (the person pressed play)
+daemon -> companion:  media_path { ref, path: "/Users/me/.fermix/companion/media/<ref>.ogg", kind: "audio", mime: "audio/ogg", size_bytes: 48213, sha256: "<same>" }
+companion -> daemon:  media_release { profile_id: "main", ref: "<64 hex>" }        (the player let it go)
 ```

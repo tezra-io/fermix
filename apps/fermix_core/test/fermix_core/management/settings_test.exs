@@ -55,8 +55,8 @@ defmodule FermixCore.Management.SettingsTest do
   @channel_keys [:telegram, :whatsapp, :discord, :slack, :signal, :acp, :mobile, :imessage]
 
   @row_fields ~w(
-    key kind label footer info value present options min max step restart read_only suggestions
-    unit format
+    key kind label footer info advanced value present options min max step restart read_only
+    suggestions unit format
   )
 
   setup do
@@ -168,6 +168,17 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert_raise ArgumentError, ~r/row k declared/, fn ->
         Row.new("k", :text, "Label", restart: false, info: :venice)
+      end
+    end
+
+    test "a row is not advanced unless its call site says so" do
+      assert Row.new("k", :text, "Label", restart: false)["advanced"] == false
+      assert Row.new("k", :text, "Label", restart: false, advanced: true)["advanced"] == true
+    end
+
+    test "a non-boolean advanced flag fails at build time" do
+      assert_raise ArgumentError, ~r/row k declared a non-boolean advanced/, fn ->
+        Row.new("k", :text, "Label", restart: false, advanced: "yes")
       end
     end
 
@@ -527,8 +538,27 @@ defmodule FermixCore.Management.SettingsTest do
                "gpt-realtime-2.1-mini · Realtime, integrated tools",
                "gpt-realtime-2.1 · Realtime, integrated tools",
                "gpt-realtime-2 · Realtime, integrated tools",
-               "gpt-live-1 · Live, with your Fermix agent"
+               "gpt-live-1 · Live, with your Fermix agent",
+               "grok-voice-3.0 · Grok, with your Fermix agent"
              ]
+    end
+
+    # Two vendors now speak, so the switch rows name both, and the model footer
+    # names both task engines (M70 §06).
+    test "the switch rows name both voice vendors and both task engines" do
+      Application.put_env(:fermix_core, :realtime, enabled: true)
+
+      assert %{
+               "footer" =>
+                 "Lets the companion talk with you using OpenAI or SpaceXAI voice models."
+             } =
+               row("realtime", "realtime_enabled")
+
+      assert %{
+               "footer" =>
+                 "Live and Grok hand tools, memory and reasoning to your Fermix agent " <>
+                   "and bill by the minute."
+             } = row("realtime", "realtime_model")
     end
 
     test "the Live engine publishes Live's voices and no reasoning effort row" do
@@ -638,6 +668,61 @@ defmodule FermixCore.Management.SettingsTest do
       Application.put_env(:fermix_core, :realtime, enabled: true, engine: "openai_realtime")
 
       refute "realtime_conversation" in Enum.map(rows("realtime"), & &1["key"])
+    end
+
+    # M70 §06: Grok is a task engine like Live, so it publishes the same backend
+    # and conversation rows, its own voices, and the SpaceXAI provider's key slot
+    # in place of OpenAI's.
+    test "the Grok engine publishes the task-engine rows and the SpaceXAI key" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [primary: true, default_model: "gpt-5.4", api_key: "sk-test"]
+      )
+
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "xai_realtime")
+
+      assert Enum.map(rows("realtime"), & &1["key"]) == [
+               "realtime_enabled",
+               "realtime_model",
+               "realtime_voice",
+               "realtime_backend",
+               "realtime_conversation",
+               "xai_api_key",
+               "realtime_max_session_minutes",
+               "realtime_max_cost_cents",
+               "realtime_persist_transcripts"
+             ]
+
+      assert %{"value" => "grok-voice-3.0"} = row("realtime", "realtime_model")
+      assert option_values("realtime", "realtime_voice") == ~w(eve ara rex sal leo)
+      assert %{"value" => "eve"} = row("realtime", "realtime_voice")
+
+      assert %{
+               "read_only" => true,
+               "value" => "OpenAI · gpt-5.4",
+               "footer" => "Grok speaks; your primary provider answers. Change it in Providers."
+             } = row("realtime", "realtime_backend")
+
+      assert %{"value" => "chat"} = row("realtime", "realtime_conversation")
+
+      assert %{
+               "kind" => "secret",
+               "label" => "SpaceXAI key",
+               "footer" =>
+                 "The same key the SpaceXAI provider uses. " <>
+                   "A SpaceXAI sign-in does not authorize voice.",
+               "present" => false
+             } = row("realtime", "xai_api_key")
+
+      Application.put_env(:fermix_core, :providers, xai: [api_key: "xai-test"])
+
+      assert %{"present" => true} = row("realtime", "xai_api_key")
+    end
+
+    test "the Live backend row keeps naming Live as the engine that speaks" do
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "openai_live")
+
+      assert %{"footer" => "Live speaks; your primary provider answers. Change it in Providers."} =
+               row("realtime", "realtime_backend")
     end
   end
 
@@ -792,9 +877,112 @@ defmodule FermixCore.Management.SettingsTest do
       refute Enum.any?(result["side_effects"], &(&1 =~ "The voice changed"))
     end
 
+    # M70 §06: a model of another provider moves the provider with the engine,
+    # resets a voice the new engine does not ship, turns off the screen sharing
+    # Grok cannot do, and keeps the conversation, budget and transcript choices.
+    # Each change the operator did not type is named.
+    test "Live to Grok to Realtime moves provider, voice and screen sharing, and says so",
+         %{home: home} do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1",
+        voice: "beacon",
+        conversation: "private",
+        max_session_minutes: 30,
+        max_estimated_cost_cents_per_session: 250,
+        persist_transcripts: true
+      )
+
+      assert {:ok, grok} = Settings.apply("realtime", %{"realtime_model" => "grok-voice-3.0"})
+
+      realtime = Application.get_env(:fermix_core, :realtime)
+
+      assert Keyword.take(realtime, [:provider, :engine, :model, :voice, :screen_share]) == [
+               provider: "xai",
+               engine: "xai_realtime",
+               model: "grok-voice-3.0",
+               voice: "eve",
+               screen_share: false
+             ]
+
+      assert Keyword.get(realtime, :conversation) == "private"
+      assert Keyword.get(realtime, :max_session_minutes) == 30
+      assert Keyword.get(realtime, :max_estimated_cost_cents_per_session) == 250
+      assert Keyword.get(realtime, :persist_transcripts) == true
+
+      assert Enum.sort(grok["applied"]) == ["realtime_engine", "realtime_model", "realtime_voice"]
+
+      assert grok["side_effects"] == [
+               "The engine changed to Grok, with your Fermix agent.",
+               "The voice changed to eve.",
+               "Screen sharing during calls was turned off because this engine does not support it."
+             ]
+
+      assert {:ok, persisted} = ConfigStore.load_runtime_config()
+
+      assert persisted.fermix_core |> Keyword.get(:realtime) |> RealtimeConfig.normalize() ==
+               RealtimeConfig.current()
+
+      assert File.read!(Path.join(home, "config.toml")) =~ ~s(provider = "xai")
+
+      assert {:ok, realtime_result} =
+               Settings.apply("realtime", %{"realtime_model" => "gpt-realtime-2"})
+
+      back = Application.get_env(:fermix_core, :realtime)
+
+      assert Keyword.get(back, :provider) == "openai"
+      assert Keyword.get(back, :engine) == "openai_realtime"
+      assert Keyword.get(back, :voice) == "marin"
+      assert Keyword.get(back, :reasoning_effort) == "low"
+      # Grok's move turned screen sharing off; the move back puts it on again.
+      assert Keyword.get(back, :screen_share) == true
+      refute Keyword.has_key?(back, :conversation)
+      assert Keyword.get(back, :max_session_minutes) == 30
+      assert Keyword.get(back, :persist_transcripts) == true
+
+      assert Enum.sort(realtime_result["applied"]) == [
+               "realtime_conversation",
+               "realtime_engine",
+               "realtime_model",
+               "realtime_reasoning_effort",
+               "realtime_voice"
+             ]
+
+      assert realtime_result["side_effects"] == [
+               "The engine changed to Realtime, integrated tools.",
+               "The voice changed to marin.",
+               "Reasoning effort was restored because this engine uses it.",
+               "Whether voice calls join the chat was reset because this engine does not use it.",
+               "Screen sharing during calls was turned back on."
+             ]
+
+      assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+
+      assert reloaded.fermix_core |> Keyword.get(:realtime) |> RealtimeConfig.normalize() ==
+               RealtimeConfig.current()
+    end
+
     # The combined menu is the whole value space, so a slug no engine ships is
     # still refused against the published options rather than reaching the
     # configuration boundary.
+    # Leaving Grok drops the switch its move turned off, whatever engine comes
+    # next; Live takes no images, so the switch coming back is not news there.
+    test "Grok to Live drops Grok's screen-sharing override without announcing it" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "xai_realtime",
+        model: "grok-voice-3.0",
+        voice: "eve",
+        screen_share: false
+      )
+
+      assert {:ok, result} = Settings.apply("realtime", %{"realtime_model" => "gpt-live-1"})
+
+      assert Keyword.get(Application.get_env(:fermix_core, :realtime), :screen_share) == true
+      refute Enum.any?(result["side_effects"], &(&1 =~ "Screen sharing"))
+    end
+
     test "a model no engine ships is refused against the published options" do
       Application.put_env(:fermix_core, :realtime, enabled: true, engine: "openai_realtime")
 
@@ -1165,7 +1353,7 @@ defmodule FermixCore.Management.SettingsTest do
   # no credential, and its rows are a switch, a port and an address. The switch
   # is applied the moment it is written (M51 §5.5); the rest is read at boot.
   describe "the phone section" do
-    test "publishes the live switch and three boot-bound rows with the shipped defaults" do
+    test "publishes the live switches and three boot-bound rows with the shipped defaults" do
       Application.delete_env(:fermix_channels, :mobile)
 
       assert %{id: "channels.mobile", pane: "channels", title: "Phone"} in Settings.sections()
@@ -1174,6 +1362,7 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert Enum.map(rows, &{&1["key"], &1["kind"], &1["value"]}) == [
                {"mobile_enabled", "toggle", false},
+               {"mobile_iroh", "toggle", true},
                {"mobile_port", "number", 4031},
                {"mobile_bind", "text", "0.0.0.0"},
                {"mobile_advertise_mdns", "toggle", false}
@@ -1181,12 +1370,38 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert Enum.map(rows, &{&1["key"], &1["restart"]}) == [
                {"mobile_enabled", false},
+               {"mobile_iroh", false},
                {"mobile_port", true},
                {"mobile_bind", true},
                {"mobile_advertise_mdns", true}
              ]
 
       refute Enum.any?(rows, & &1["read_only"])
+
+      # The network rows are for the few who need them; the switches are not.
+      assert Enum.map(rows, &{&1["key"], &1["advanced"]}) == [
+               {"mobile_enabled", false},
+               {"mobile_iroh", false},
+               {"mobile_port", true},
+               {"mobile_bind", true},
+               {"mobile_advertise_mdns", true}
+             ]
+
+      # Each footer the Mac's Phone sheet draws is one line there, in a column
+      # of about 55 characters; the longer story is the switch's `info`. The
+      # channel's own switch is drawn on the Channels row, not in the sheet.
+      for %{"key" => key, "footer" => footer} <- rows,
+          key != "mobile_enabled",
+          do: assert(String.length(footer) <= 55, "#{key}'s footer wraps: #{footer}")
+
+      assert row("channels.mobile", "mobile_iroh")["info"] =~
+               "Off keeps your phone to your home network and Tailscale."
+
+      # The phone channel runs on Linux too, so none of its rows names the Mac.
+      for %{"key" => key} = row <- rows,
+          text <- [row["footer"], row["info"]],
+          is_binary(text),
+          do: refute(text =~ "Mac", "#{key} names the Mac: #{text}")
 
       assert %{"min" => 1024, "max" => 65_535, "step" => 1, "format" => "integer", "unit" => nil} =
                row("channels.mobile", "mobile_port")
@@ -1195,6 +1410,7 @@ defmodule FermixCore.Management.SettingsTest do
     test "each row reads its own key of the block" do
       Application.put_env(:fermix_channels, :mobile,
         enabled: true,
+        iroh: false,
         port: 4040,
         bind: "127.0.0.1",
         advertise_mdns: false
@@ -1204,6 +1420,7 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert values == [
                {"mobile_enabled", true},
+               {"mobile_iroh", false},
                {"mobile_port", 4040},
                {"mobile_bind", "127.0.0.1"},
                {"mobile_advertise_mdns", false}
@@ -1213,6 +1430,7 @@ defmodule FermixCore.Management.SettingsTest do
     test "each key is written and reads back" do
       writes = [
         {"mobile_enabled", true, :enabled},
+        {"mobile_iroh", false, :iroh},
         {"mobile_port", 4040, :port},
         {"mobile_bind", "127.0.0.1", :bind},
         {"mobile_advertise_mdns", false, :advertise_mdns}
@@ -1220,7 +1438,10 @@ defmodule FermixCore.Management.SettingsTest do
 
       for {key, value, config_key} <- writes do
         assert {:ok, result} =
-                 Settings.apply("channels.mobile", %{key => value}, mobile_switch: &switched/1)
+                 Settings.apply("channels.mobile", %{key => value},
+                   mobile_switch: &switched/1,
+                   mobile_reach_switch: &reach_switched/1
+                 )
 
         assert result["applied"] == [key]
 
@@ -1306,6 +1527,61 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert result["side_effects"] == [sentence]
       assert Application.get_env(:fermix_channels, :mobile)[:enabled] == true
+    end
+
+    # Reach from anywhere is live within a running phone channel (M62 D4).
+    test "moving reach while the phone channel is on applies it at once" do
+      Application.put_env(:fermix_channels, :mobile, enabled: true, port: 4031)
+
+      assert {:ok, off} =
+               Settings.apply("channels.mobile", %{"mobile_iroh" => false},
+                 mobile_reach_switch: &reach_switched/1
+               )
+
+      assert_received {:reach_switch, false}
+      assert off["side_effects"] == []
+
+      assert {:ok, _on} =
+               Settings.apply("channels.mobile", %{"mobile_iroh" => true},
+                 mobile_reach_switch: &reach_switched/1
+               )
+
+      assert_received {:reach_switch, true}
+    end
+
+    # A channel that is off has no reach to switch, and turning the channel on
+    # or off carries its reach with it: only the phone switch is called.
+    test "reach is not switched on its own while the channel is off or moving" do
+      Application.put_env(:fermix_channels, :mobile, enabled: false, port: 4031)
+
+      assert {:ok, _result} =
+               Settings.apply("channels.mobile", %{"mobile_iroh" => false},
+                 mobile_reach_switch: &reach_switched/1
+               )
+
+      assert {:ok, _result} =
+               Settings.apply(
+                 "channels.mobile",
+                 %{"mobile_enabled" => true, "mobile_iroh" => true},
+                 mobile_switch: &switched/1,
+                 mobile_reach_switch: &reach_switched/1
+               )
+
+      assert_received {:mobile_switch, true}
+      refute_received {:reach_switch, _on?}
+    end
+
+    test "a reach switch the rail did not follow is said as a side effect" do
+      Application.put_env(:fermix_channels, :mobile, enabled: true, port: 4031)
+      sentence = "Reach from anywhere is on but could not start. See the daemon log."
+
+      assert {:ok, result} =
+               Settings.apply("channels.mobile", %{"mobile_iroh" => false},
+                 mobile_reach_switch: fn false -> {:error, sentence} end
+               )
+
+      assert result["side_effects"] == [sentence]
+      assert Application.get_env(:fermix_channels, :mobile)[:iroh] == false
     end
 
     # A reload is the other way the switch reaches the running config, and it
@@ -1908,6 +2184,11 @@ defmodule FermixCore.Management.SettingsTest do
   # The phone channel's switch as settings call it, without starting anything.
   defp switched(on?) do
     send(self(), {:mobile_switch, on?})
+    :ok
+  end
+
+  defp reach_switched(on?) do
+    send(self(), {:reach_switch, on?})
     :ok
   end
 

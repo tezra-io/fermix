@@ -1,10 +1,13 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Unit tests for sync_plugin_catalog's pure functions.
 
 No network, no gh, no cosign — fixture dicts, plus the committed catalog for
 the one invariant that is about the catalog itself. Run with:
-  python3 -m unittest scripts.release.test_sync_plugin_catalog
-  python3 scripts/release/test_sync_plugin_catalog.py
+  uv run scripts/release/test_sync_plugin_catalog.py
 """
 
 import base64

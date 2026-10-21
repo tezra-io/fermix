@@ -40,6 +40,11 @@ defmodule FermixCore.Auth.Store do
   profile lock's threshold is 120 s, and `store_test.exs` ("lock bounds")
   holds these bounds.
 
+  Profiles are the providers' fixed ones (`profile/1`), a plugin's own, and one
+  open family: `mcp:<name>`, the grant an MCP server the owner added signed in
+  for (`mcp_profile/1`, M74 E5). Its entry carries what only that grant has
+  under `mcp` (`Capabilities.MCP.OAuth.Grant` writes and reads it).
+
   A file that does not parse is `{:invalid_json, byte_offset}`. The parse
   error's own `:data` is the whole file, every profile's tokens, so it never
   leaves this module: the reason is logged, traced and shown by doctor, and a
@@ -67,8 +72,32 @@ defmodule FermixCore.Auth.Store do
           optional(:region_actual) => String.t() | nil,
           optional(:client_id) => String.t() | nil,
           optional(:subject) => String.t() | nil,
-          optional(:earliest_refresh_at) => DateTime.t() | nil
+          optional(:earliest_refresh_at) => DateTime.t() | nil,
+          optional(:mcp) => mcp_grant() | nil
         }
+
+  @typedoc """
+  What an `mcp:<name>` grant holds beside the token set: the issuer that
+  minted it, the resource it was minted for, the token endpoint and the
+  client that refresh it (with the loopback port a registered client's
+  redirect names), the scopes granted and the scopes the server asked
+  for since, and the account it names.
+  """
+  @type mcp_grant :: %{
+          issuer: String.t() | nil,
+          resource: String.t() | nil,
+          token_endpoint: String.t() | nil,
+          client_kind: String.t() | nil,
+          token_auth: String.t() | nil,
+          client_secret: String.t() | nil,
+          redirect_port: :inet.port_number() | nil,
+          scopes: [String.t()] | nil,
+          wanted_scopes: [String.t()] | nil,
+          account_label: String.t() | nil
+        }
+
+  @mcp_prefix "mcp:"
+  @mcp_keys ~w(issuer resource token_endpoint client_kind token_auth client_secret redirect_port scopes wanted_scopes account_label)a
 
   @spec read(provider(), Path.t()) :: {:ok, entry()} | {:error, term()}
   def read(provider, path \\ default_path()) when is_atom(provider) or is_binary(provider) do
@@ -246,6 +275,14 @@ defmodule FermixCore.Auth.Store do
   @spec profile(atom()) :: String.t() | nil
   def profile(provider) when is_atom(provider), do: Map.get(@auth_profiles, provider)
 
+  @doc "The auth profile an MCP server's grant lives under: the open `mcp:` family."
+  @spec mcp_profile(String.t()) :: String.t()
+  def mcp_profile(server) when is_binary(server), do: @mcp_prefix <> server
+
+  @doc "Whether `profile` is an MCP server's grant."
+  @spec mcp_profile?(String.t()) :: boolean()
+  def mcp_profile?(profile) when is_binary(profile), do: String.starts_with?(profile, @mcp_prefix)
+
   @doc "Every provider that stores credentials under an auth profile, ordered."
   @spec profiled_providers() :: [atom()]
   def profiled_providers, do: @auth_profiles |> Map.keys() |> Enum.sort()
@@ -380,9 +417,14 @@ defmodule FermixCore.Auth.Store do
       # not be refreshed. `nil` for every other provider.
       client_id: Map.get(entry, "client_id"),
       subject: Map.get(entry, "subject"),
-      earliest_refresh_at: parse_iso8601(Map.get(entry, "earliest_refresh_at"))
+      earliest_refresh_at: parse_iso8601(Map.get(entry, "earliest_refresh_at")),
+      mcp: normalize_mcp(Map.get(entry, "mcp"))
     }
   end
+
+  # Only the keys an MCP grant defines are read, so a file never mints an atom.
+  defp normalize_mcp(%{} = mcp), do: Map.new(@mcp_keys, &{&1, Map.get(mcp, Atom.to_string(&1))})
+  defp normalize_mcp(_absent), do: nil
 
   defp normalize_account(account) when is_map(account) do
     account
@@ -544,6 +586,7 @@ defmodule FermixCore.Auth.Store do
         "earliest_refresh_at",
         encode_datetime(entry_value(entry, :earliest_refresh_at))
       )
+      |> put_serialized("mcp", stringify_mcp(entry_value(entry, :mcp)))
 
     merged = existing |> drop_cleared(entry) |> Map.merge(serialized)
     %{"version" => @schema_version, "providers" => Map.put(providers, provider_key, merged)}
@@ -584,6 +627,9 @@ defmodule FermixCore.Auth.Store do
   defp stringify_account(account) when is_map(account) do
     Enum.into(account, %{}, fn {key, value} -> {account_key(key), value} end)
   end
+
+  defp stringify_mcp(nil), do: nil
+  defp stringify_mcp(%{} = mcp), do: Map.new(@mcp_keys, &{Atom.to_string(&1), Map.get(mcp, &1)})
 
   defp account_key(key) when is_atom(key), do: Atom.to_string(key)
   defp account_key(key) when is_binary(key), do: key

@@ -11,6 +11,7 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Companion.Protocol
+  alias FermixCore.ReplyBlocks
 
   @priv_dir Application.app_dir(:fermix_core, "priv/companion")
   @schema_path Path.join(@priv_dir, "protocol.schema.json")
@@ -19,9 +20,12 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   @server_fixtures Path.join(@priv_dir, "fixtures/server_events.jsonl")
   @mobile_schema_path Application.app_dir(:fermix_core, "priv/mobile/protocol.schema.json")
   @inert_keywords ~w($schema $id $defs title description)
-  # The phone's `row` is this wire's `row` carrying the whole history message,
-  # whose `media_refs` it always has.
-  @phone_only_required %{"row" => ["media_refs"]}
+  # The fields the phone's wire requires of a shared event beyond this wire's.
+  # None since version 3, when this wire's `row` came to require `media_refs`.
+  @phone_only_required %{}
+  # The events version 3 brought (M66): the media grant and the changed row.
+  @version_3_client_events ~w(media_fetch media_release)
+  @version_3_server_events ~w(row_updated media_path media_missing)
 
   setup_all do
     %{
@@ -54,6 +58,52 @@ defmodule FermixCore.Companion.ProtocolContractTest do
                Protocol.server_event_version(type),
              "#{type} names a different version than the protocol module"
     end
+  end
+
+  # A connection that sends an event newer than its hello declared is
+  # refused, so the export names that version as the module does.
+  test "each client event def names the version that brought it", %{schema: schema} do
+    for type <- Protocol.client_events() do
+      assert Map.get(schema["$defs"][type], "x-since-version", 1) ==
+               Protocol.client_event_version(type),
+             "#{type} names a different version than the protocol module"
+    end
+  end
+
+  # M66: the grant and the changed row are version 3's, on this wire alone:
+  # the phone's own `media_fetch` streams bytes rather than granting a file.
+  test "the media grant and row_updated are version 3 events this wire does not share", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    assert Protocol.protocol_version() == 3
+
+    for type <- @version_3_client_events do
+      assert Protocol.client_event_version(type) == 3, "#{type} is not a version 3 event"
+      assert schema["$defs"][type]["x-since-version"] == 3
+      refute type in Protocol.shared_client_events()
+    end
+
+    for type <- @version_3_server_events do
+      assert Protocol.server_event_version(type) == 3, "#{type} is not a version 3 event"
+      assert schema["$defs"][type]["x-since-version"] == 3
+      refute type in Protocol.shared_server_events()
+    end
+
+    assert protocol =~ "### Version 3: phone-side media and rows that change"
+    assert protocol =~ "streams the bytes"
+  end
+
+  test "the schema publishes the managed media files' budget and grace", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    assert schema["x-media-budget-bytes"] == Protocol.media_budget_bytes()
+    assert schema["x-media-release-grace-s"] == Protocol.media_release_grace_s()
+
+    [_before, files] = String.split(protocol, "## Managed media files", parts: 2)
+    assert files =~ "#{div(Protocol.media_budget_bytes(), 1_024 * 1_024)} MiB"
+    assert files =~ "#{Protocol.media_release_grace_s()} s"
   end
 
   test "every per-event def is reachable from a discriminator" do
@@ -119,7 +169,7 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   test "a timeline row has one exported shape on both wires", %{schema: schema} do
     mobile = @mobile_schema_path |> File.read!() |> Jason.decode!()
 
-    for def <- ~w(mediaRef linkPreviewCard) do
+    for def <- ~w(mediaRef linkPreviewCard replyBlock placesBlock place) do
       assert schema["$defs"][def] == mobile["$defs"][def], "#{def} differs between the wires"
     end
 
@@ -168,6 +218,132 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     end
 
     refute protocol =~ "This wire's `row` is unchanged"
+  end
+
+  # M66: a row carries the history message's media refs, always, and its link
+  # previews when it has one, on every version, so a new row needs no read.
+  test "every golden row carries its media refs, one a voice note, one a picture and a preview",
+       %{schema: schema} do
+    rows = @server_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "row"))
+
+    assert Enum.all?(rows, &is_list(&1["media_refs"]))
+
+    assert Enum.any?(
+             rows,
+             &match?([%{"kind" => "audio", "mime" => "audio/ogg"}], &1["media_refs"])
+           )
+
+    assert Enum.any?(rows, fn row ->
+             row["media_refs"] != [] and match?([%{"image_ref" => _ref}], row["link_previews"])
+           end)
+
+    row = schema["$defs"]["row"]
+    message = schema["$defs"]["historyMessage"]["properties"]
+
+    for field <- ~w(media_refs link_previews) do
+      assert row["properties"][field] == message[field], "row #{field} is not the message's"
+    end
+
+    assert "media_refs" in row["required"]
+    refute "link_previews" in row["required"]
+  end
+
+  # M72 §8.3: a reply's blocks have one shape wherever the reply is carried, the
+  # caps are the ones the builder keeps, and a golden of each is exactly what
+  # the builder makes of its places for its text.
+  test "a reply's blocks have one shape on text_done, row and history, with goldens", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    defs = schema["$defs"]
+    blocks = defs["historyMessage"]["properties"]["blocks"]
+
+    for type <- ~w(text_done row) do
+      assert defs[type]["properties"]["blocks"] == blocks, "#{type} blocks differ from history"
+      refute "blocks" in defs[type]["required"]
+    end
+
+    assert blocks["maxItems"] == length(ReplyBlocks.types())
+    assert defs["replyBlock"]["properties"]["type"]["enum"] == ReplyBlocks.types()
+    assert defs["placesBlock"]["properties"]["places"]["maxItems"] == ReplyBlocks.max_places()
+    assert defs["place"]["properties"]["categories"]["maxItems"] == ReplyBlocks.max_categories()
+
+    server = jsonl(@server_fixtures)
+    done = Enum.find(server, &(&1["type"] == "text_done" and Map.has_key?(&1, "blocks")))
+
+    paged =
+      server
+      |> Enum.filter(&(&1["type"] == "history_page"))
+      |> Enum.flat_map(& &1["messages"])
+      |> Enum.find(&Map.has_key?(&1, "blocks"))
+
+    assert %{"blocks" => [%{"type" => "places", "places" => [_ | _] = places}]} = done
+    assert paged["blocks"] == done["blocks"]
+    assert paged["content"] == done["text"]
+    assert ReplyBlocks.build(done["text"], Enum.map(places, &record/1)) == done["blocks"]
+
+    [_before, section] = String.split(protocol, "## Blocks under a reply", parts: 2)
+    assert section =~ "skips a block `type` it does not know"
+    assert section =~ "no version bump"
+  end
+
+  # M72 §14.1: an Apple Maps place adds its identifier, optional and additive,
+  # and its golden is exactly what the builder makes of the search's records.
+  test "an Apple Maps place's golden carries its identifier and is the builder's own", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    place = schema["$defs"]["place"]
+
+    assert place["properties"]["apple_place_id"] == %{"type" => "string", "minLength" => 1}
+    refute "apple_place_id" in place["required"]
+
+    done =
+      @server_fixtures
+      |> jsonl()
+      |> Enum.find(
+        &get_in(&1, ["blocks", Access.at(0), "places", Access.at(0), "apple_place_id"])
+      )
+
+    assert %{"type" => "text_done", "blocks" => [%{"places" => [_ | _] = places}]} = done
+    assert ReplyBlocks.build(done["text"], Enum.map(places, &record/1)) == done["blocks"]
+    assert :ok = Protocol.validate_server_payload("text_done", Map.delete(done, "type"))
+
+    for golden <- places do
+      assert golden["source_url"] ==
+               "https://maps.apple.com/place?place-id=" <> golden["apple_place_id"]
+    end
+
+    [_before, section] = String.split(protocol, "## Blocks under a reply", parts: 2)
+    assert section =~ "`apple_place_id`"
+  end
+
+  test "the codec refuses blocks the export rules out" do
+    place = %{"name" => "Example Coffee", "location" => %{"latitude" => 1, "longitude" => 2}}
+    places = %{"type" => "places", "places" => [place]}
+    done = %{"turn_id" => "t", "server_seq" => 1, "text" => "x"}
+
+    assert :ok = Protocol.validate_server_payload("text_done", Map.put(done, "blocks", [places]))
+
+    for blocks <- [
+          [],
+          [places, places],
+          [%{"type" => "events", "events" => [place]}],
+          [%{places | "places" => []}],
+          [%{places | "places" => List.duplicate(place, ReplyBlocks.max_places() + 1)}],
+          %{"type" => "places"}
+        ] do
+      for type <- ~w(text_done row) do
+        payload =
+          if type == "row",
+            do: row_payload() |> Map.put("blocks", blocks),
+            else: Map.put(done, "blocks", blocks)
+
+        assert {:error, {:invalid_field, "blocks"}} =
+                 Protocol.validate_server_payload(type, payload),
+               "#{type} accepted blocks #{inspect(blocks)}"
+      end
+    end
   end
 
   # M56 §4.2: the call's one row when it ends, as the Mac hears it and as a
@@ -369,9 +545,28 @@ defmodule FermixCore.Companion.ProtocolContractTest do
       "cancel" => %{"profile_id" => "main", "client_msg_id" => "c"},
       "history_pull" => %{"profile_id" => "main", "limit" => 5},
       "history_search" => %{"profile_id" => "main", "query" => "q", "limit" => 5},
-      "read_state" => %{"profile_id" => "main", "read_up_to_seq" => 0}
+      "read_state" => %{"profile_id" => "main", "read_up_to_seq" => 0},
+      "media_fetch" => %{"profile_id" => "main", "ref" => String.duplicate("a", 64)},
+      "media_release" => %{"profile_id" => "main", "ref" => String.duplicate("a", 64)}
     }
   end
+
+  defp row_payload do
+    %{
+      "profile_id" => "main",
+      "server_seq" => 1,
+      "role" => "assistant",
+      "text" => "x",
+      "ts" => "2026-09-25T09:00:00Z",
+      "media_refs" => []
+    }
+  end
+
+  # A golden place back as the search's record: the same names, atom keyed.
+  defp record(place) when is_map(place),
+    do: Map.new(place, fn {key, value} -> {String.to_existing_atom(key), record(value)} end)
+
+  defp record(value), do: value
 
   defp fixture_payloads(path) do
     path

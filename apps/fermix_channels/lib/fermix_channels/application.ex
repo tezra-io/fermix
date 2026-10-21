@@ -9,6 +9,8 @@ defmodule FermixChannels.Application do
   alias FermixChannels.Companion
   alias FermixChannels.Gateway.AlbumBuffer
   alias FermixChannels.Gateway.ChannelRegistry
+  alias FermixChannels.LinkPreviews
+  alias FermixChannels.Mobile.MediaStore
   alias FermixCore.Readiness
 
   require Logger
@@ -62,25 +64,39 @@ defmodule FermixChannels.Application do
         FermixChannels.Gateway.QueueSupervisor,
         # After the queue, deliberately: the bridge ingests through it, so a
         # delegation accepted before the queue is up has nowhere to run.
-        FermixChannels.Voice.Supervisor,
-        # The companion chat socket, after the queue for the same reason. Its
-        # registry is always present, its turns' settlement runs on every real
-        # boot (the phone's requests settle there too), and the socket runs
-        # whenever the daemon does.
-        {Companion.Supervisor,
-         serve?: daemon_boot?(), settle?: settles?(), boot_epoch: request_boot_epoch},
-        # The Fermix app's browser host socket; it runs whenever the daemon does.
-        {BrowserHost.Supervisor, serve?: daemon_boot?()},
-        FermixChannels.Gateway.BackgroundSupervisor,
-        FermixChannels.Gateway.Commands.Sandbox.Confirmations,
-        FermixChannels.Gateway.Commands.Soul.Confirmations,
-        FermixChannels.Gateway.Idempotency
+        FermixChannels.Voice.Supervisor
       ] ++
+        timeline_media() ++
+        [
+          # The companion chat socket, after the queue for the same reason. Its
+          # registry is always present, its turns' settlement runs on every real
+          # boot (the phone's requests settle there too), and the socket runs
+          # whenever the daemon does.
+          {Companion.Supervisor,
+           serve?: daemon_boot?(), settle?: settles?(), boot_epoch: request_boot_epoch},
+          # The Fermix app's browser host socket; it runs whenever the daemon does.
+          {BrowserHost.Supervisor, serve?: daemon_boot?()},
+          FermixChannels.Gateway.BackgroundSupervisor,
+          FermixChannels.Gateway.Commands.Sandbox.Confirmations,
+          FermixChannels.Gateway.Commands.Soul.Confirmations,
+          FermixChannels.Gateway.Idempotency
+        ] ++
         album_buffers() ++
         transport_children(readiness, request_boot_epoch) ++ call_row_sweep(settles?())
 
     opts = [strategy: :one_for_one, name: FermixChannels.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  # The timeline's media store and the bounded supervisor its rows' link
+  # previews resolve under (M72): the phone and the Mac share both, so they run
+  # whether or not a phone is paired, before the companion socket that grants
+  # the store's files and previews its replies. A test tree starts the ones it
+  # needs under its own names.
+  defp timeline_media do
+    if @compiled_env == :test,
+      do: [],
+      else: [MediaStore.boot_child(), LinkPreviews.supervisor_spec()]
   end
 
   # The chat rows Live calls still owe after a restart (M56 §4.2), written

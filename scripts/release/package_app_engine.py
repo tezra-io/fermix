@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Validate and reproducibly package one assembled Fermix app-engine release."""
 
 import argparse
@@ -240,8 +244,10 @@ def _validate_identity(
 
 
 def _validate_protocols(protocols):
-    _exact_keys(protocols, {"management", "realtime", "companion", "browser_host"}, "protocols")
-    for name in ("management", "realtime", "companion", "browser_host"):
+    _exact_keys(
+        protocols, {"management", "realtime", "companion", "browser_host", "native_host"}, "protocols"
+    )
+    for name in ("management", "realtime", "companion", "browser_host", "native_host"):
         value = protocols[name]
         _exact_keys(value, {"current_version", "minimum_version", "maximum_version"}, name)
         current = _positive_integer(value["current_version"], f"{name}.current_version")

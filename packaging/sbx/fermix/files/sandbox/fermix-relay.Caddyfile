@@ -1,0 +1,35 @@
+# The provider relay, run by fermix-sandbox-relay. Fermix speaks plain
+# HTTP to one loopback port per provider; Caddy speaks TLS to the provider
+# through the sandbox's credential proxy, which writes the stored key into the
+# request, so the key stays with Docker and out of this VM. Fermix cannot use
+# that proxy itself: Erlang/OTP refuses its certificate, whose issuer name is
+# longer than the 64 characters X.520 allows.
+#
+# fermix-sandbox-boot points each provider's base_url at its port here.
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+(provider) {
+	bind 127.0.0.1
+	reverse_proxy https://{args[0]} {
+		header_up Host {args[0]}
+		transport http {
+			network_proxy url {$HTTPS_PROXY}
+		}
+	}
+}
+
+http://127.0.0.1:18080 {
+	import provider api.anthropic.com
+}
+
+http://127.0.0.1:18081 {
+	import provider api.openai.com
+}
+
+http://127.0.0.1:18082 {
+	import provider api.x.ai
+}

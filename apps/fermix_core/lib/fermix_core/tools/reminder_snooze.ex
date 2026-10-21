@@ -36,8 +36,9 @@ defmodule FermixCore.Tools.ReminderSnooze do
   def description do
     "Push a reminder to a later time — \"snooze that for two hours\", or defer a " <>
       "specific stored reminder by id. Without an id the tool resolves the reminder " <>
-      "Fermix most recently delivered in this conversation. It never moves the event " <>
-      "itself; use event_update for that."
+      "Fermix most recently delivered in this conversation, or, asked from this computer's " <>
+      "own chat, a terminal, an editor or a voice call, the one that rang on this computer. It never moves " <>
+      "the event itself; use event_update for that."
   end
 
   @impl true
@@ -51,7 +52,8 @@ defmodule FermixCore.Tools.ReminderSnooze do
           type: "string",
           description:
             "The reminder to defer, from event_list. Leave it out for \"snooze that\", " <>
-              "which resolves the last reminder delivered in this conversation."
+              "which resolves the last reminder delivered in this conversation, or the one " <>
+              "that rang on this computer when asked from this computer's own surfaces."
         },
         snooze: %{
           type: "object",

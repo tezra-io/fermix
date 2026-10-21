@@ -10,8 +10,8 @@ defmodule FermixCore.Resource.Registry do
 
   require Logger
 
-  @resource_types ~w(identity_md fermix_md soul_md realtime_md live_md user_md memory_md checkpoint)
-  @file_resource_types ~w(identity_md fermix_md soul_md realtime_md live_md user_md memory_md)
+  @resource_types ~w(identity_md fermix_md soul_md realtime_md live_md grok_md user_md memory_md checkpoint)
+  @file_resource_types ~w(identity_md fermix_md soul_md realtime_md live_md grok_md user_md memory_md)
   @mutation_sources ~w(seed imported manual_edit unreviewed_edit extraction_rebuild scheduler_rebuild compaction rollback soul_curation template_adopt)
   @max_commit_attempts 4
 
@@ -304,6 +304,10 @@ defmodule FermixCore.Resource.Registry do
 
   defp default_resource_path(agent_id, "live_md", opts) do
     {:ok, Path.join([bootstrap_dir(opts), agent_id, "LIVE.md"])}
+  end
+
+  defp default_resource_path(agent_id, "grok_md", opts) do
+    {:ok, Path.join([bootstrap_dir(opts), agent_id, "GROK.md"])}
   end
 
   defp default_resource_path(agent_id, "user_md", opts) do

@@ -11,11 +11,19 @@ defmodule FermixCore.Tools.EventStore do
 
   Attended-owner-only at both advertisement and execution through the one
   `Temporal.Access` predicate.
+
+  `delivery: "computer"` (M76 §4.6) rings the reminder on this computer
+  instead of the default target. The schema publishes it, and `when_to_use/1`
+  the rule for choosing it, only where the build offers this computer
+  (`Native.Notifications.offered?/1`), a fact of the build, so both are stable
+  for the daemon's life. A test names the host as the context's `:host`
+  (`BootProfile.host/0`'s shape), as `place_search` takes it.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Native.Notifications
   alias FermixCore.Temporal.Access
   alias FermixCore.Temporal.Registry
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
@@ -48,64 +56,104 @@ defmodule FermixCore.Tools.EventStore do
       "the reminder, so a wrong call is visible the moment it is made."
   end
 
+  @doc "The schema for this build (`dynamic_parameters/1`)."
   @impl true
   @spec parameters() :: map()
-  def parameters do
+  def parameters, do: dynamic_parameters(%{})
+
+  @doc "The provider-visible schema, with `delivery` only where this build offers this computer."
+  @spec dynamic_parameters(map()) :: map()
+  def dynamic_parameters(context) when is_map(context) do
     %{
       type: "object",
       required: ["title", "kind", "when"],
-      properties: %{
-        title: %{type: "string", description: "Short event title, e.g. \"Sarah's birthday\"."},
-        description: %{type: "string", description: "Optional extra detail."},
-        kind: %{type: "string", enum: @kinds, description: "The event's shape."},
-        when: %{
-          type: "object",
-          description:
-            ~s(One tagged time form: {"type":"date","date":"YYYY-MM-DD"}, ) <>
-              ~s({"type":"datetime","date":"YYYY-MM-DD","time":"HH:MM:SS"} with an ) <>
-              ~s(optional "utc_offset" when the local time is ambiguous, ) <>
-              ~s({"type":"relative","amount":2,"unit":"days"|"weeks"} with an optional ) <>
-              ~s("time", or {"type":"annual","month":9,"day":14} for a yearly date.)
-        },
-        timezone: %{
-          type: "string",
-          description:
-            "IANA zone, only when the owner explicitly named one. Otherwise the tool " <>
-              "reads the configured personalization timezone itself."
-        },
-        leap_day_policy: %{
-          type: "string",
-          enum: ["feb_28", "mar_1"],
-          description: "Required for a yearly February 29 event. Ask the owner first."
-        },
-        reminders: %{
-          type: "array",
-          description:
-            "Optional explicit plan that REPLACES the defaults. Each rule is " <>
-              ~s({"type":"days_before","days":7,"at":"09:00:00"}, ) <>
-              ~s({"type":"duration_before","minutes":60}, or {"type":"at_time"}.),
-          items: %{type: "object"}
-        },
-        no_reminders: %{
-          type: "boolean",
-          description: "Store the date with no notifications. Only when the owner asks."
-        },
-        followup: %{
-          type: "boolean",
-          description:
-            "Set this for an occasion the owner would plausibly want help acting on — a " <>
-              "message to send, something to prepare or decide — and leave it off for a " <>
-              "logistics ping that needs only the fact."
-        }
+      properties: Map.merge(properties(), delivery_property(context))
+    }
+  end
+
+  defp properties do
+    %{
+      title: %{type: "string", description: "Short event title, e.g. \"Sarah's birthday\"."},
+      description: %{type: "string", description: "Optional extra detail."},
+      kind: %{type: "string", enum: @kinds, description: "The event's shape."},
+      when: %{
+        type: "object",
+        description:
+          ~s(One tagged time form: {"type":"date","date":"YYYY-MM-DD"}, ) <>
+            ~s({"type":"datetime","date":"YYYY-MM-DD","time":"HH:MM:SS"} with an ) <>
+            ~s(optional "utc_offset" when the local time is ambiguous, ) <>
+            ~s({"type":"relative","amount":2,"unit":"minutes"|"hours"|"days"|"weeks"}, ) <>
+            ~s(days and weeks with an optional "time", or ) <>
+            ~s({"type":"annual","month":9,"day":14} for a yearly date.)
+      },
+      timezone: %{
+        type: "string",
+        description:
+          "IANA zone, only when the owner explicitly named one. Otherwise the tool " <>
+            "reads the configured personalization timezone itself."
+      },
+      leap_day_policy: %{
+        type: "string",
+        enum: ["feb_28", "mar_1"],
+        description: "Required for a yearly February 29 event. Ask the owner first."
+      },
+      reminders: %{
+        type: "array",
+        description:
+          "Optional explicit plan that REPLACES the defaults. Each rule is " <>
+            ~s({"type":"days_before","days":7,"at":"09:00:00"}, ) <>
+            ~s({"type":"duration_before","minutes":60}, or {"type":"at_time"}.),
+        items: %{type: "object"}
+      },
+      no_reminders: %{
+        type: "boolean",
+        description: "Store the date with no notifications. Only when the owner asks."
+      },
+      followup: %{
+        type: "boolean",
+        description:
+          "Set this for an occasion the owner would plausibly want help acting on — a " <>
+            "message to send, something to prepare or decide — and leave it off for a " <>
+            "logistics ping that needs only the fact."
       }
     }
   end
 
-  @impl true
-  def when_to_use do
-    "Store a date the owner stated whose only future action is notifying them: a " <>
-      "birthday, anniversary, appointment, deadline, or an explicit reminder."
+  defp delivery_property(context) do
+    if Notifications.offered?(native_opts(context)) do
+      %{
+        delivery: %{
+          type: "string",
+          enum: ["computer"],
+          description:
+            "Ring on this computer instead of the default target. Leave it out to use the " <>
+              "default."
+        }
+      }
+    else
+      %{}
+    end
   end
+
+  @impl true
+  def when_to_use, do: when_to_use(%{})
+
+  @doc "The catalog rule, with the rule for choosing this computer only where it is offered."
+  @spec when_to_use(map()) :: String.t()
+  def when_to_use(context) when is_map(context) do
+    "Store a date the owner stated whose only future action is notifying them: a " <>
+      "birthday, anniversary, appointment, deadline, or an explicit reminder." <>
+      computer_rule(Notifications.offered?(native_opts(context)))
+  end
+
+  defp computer_rule(true) do
+    " Pass delivery \"computer\" when the owner asks for it to ring on this computer, or " <>
+      "for a timer or a reminder minutes or hours away asked from this computer's own chat, " <>
+      "a terminal, an editor, or a voice call; from a phone or a chat app, leave it out " <>
+      "unless they name this computer."
+  end
+
+  defp computer_rule(false), do: ""
 
   @impl true
   def examples do
@@ -176,7 +224,7 @@ defmodule FermixCore.Tools.EventStore do
   end
 
   defp store(args, context) do
-    case Registry.create_event(params(args), context) do
+    case Registry.create_event(params(args), context, registry_opts(context)) do
       {:ok, stored} -> {:ok, Tool.success(Jason.encode!(view(stored)))}
       {:error, reason} -> {:ok, Tool.error(Registry.describe_error(reason))}
     end
@@ -192,9 +240,16 @@ defmodule FermixCore.Tools.EventStore do
       leap_day_policy: Map.get(args, "leap_day_policy"),
       reminders: Map.get(args, "reminders"),
       no_reminders: Map.get(args, "no_reminders"),
-      followup: Map.get(args, "followup")
+      followup: Map.get(args, "followup"),
+      delivery: Map.get(args, "delivery")
     }
   end
+
+  # The host a test names; a turn names none, and this build's host decides.
+  defp registry_opts(context), do: [native: native_opts(context)]
+
+  defp native_opts(%{host: %{profile: _profile, os: _os} = host}), do: [host: host]
+  defp native_opts(_context), do: []
 
   # `similar_events` is the owner's other active events of this kind: a twin
   # stored under a different title is invisible to the dedupe key, so the

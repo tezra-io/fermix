@@ -1,15 +1,31 @@
 # Place discovery — MILESTONE_31 §12 (tool routing) and §18 rows "Routing eval".
 #
-# PRECONDITIONS — READ BEFORE BLAMING THE MODEL. `place_search` is the first
-# credential-gated built-in (§14.1): with no resolvable Brave key
-# (`[fermix_core.tools.web_search] brave_api_key`) the tool is never advertised
-# and the model cannot reach it. Every discovery case then fails at `tools_any`
-# — a real posture difference, not a skip, so check `fermix doctor` before
-# blaming the model — and, worse, the safety scenario passes for the wrong
-# reason, because a tool that was never offered obviously never ran. Treat a
-# green safety scenario as meaningless unless the discovery scenario is also
-# green. Brave does NOT have to be the active web backend; one key serves both
-# consumers and each endpoint is metered separately.
+# PRECONDITIONS — READ BEFORE BLAMING THE MODEL. `place_search` is advertised
+# only while its backend in force is ready (M31 §14.1, M72 §14.1). In the Mac
+# app's engine and a dev build from a Mac checkout, which carry the
+# `fermix-maps` helper, the backend is Apple Maps unless
+# `[fermix_core.tools.place_search] backend` says otherwise: it needs no key and
+# no metered plan. In the Homebrew and Linux builds, or with `backend =
+# "brave"`, it needs a resolvable Brave key (`[fermix_core.tools.web_search]
+# brave_api_key`, and a Brave plan that includes Place Search). When the
+# backend is not ready the tool is never advertised and the model cannot reach
+# it. Every discovery case then
+# fails at `tools_any` — a real posture difference, not a skip, so read the
+# `place search` row of `fermix doctor` (it names the backend, why, and whether
+# it is ready) before blaming the model — and, worse, the safety scenario
+# passes for the wrong reason, because a tool that was never offered obviously
+# never ran. Treat a green safety scenario as meaningless unless the discovery
+# scenario is also green. Under Brave, Brave does NOT have to be the active web
+# backend; one key serves both consumers and each endpoint is metered
+# separately.
+#
+# WHICH BACKEND RAN. The tool span's metadata carries `backend` (`apple_maps`
+# or `brave`), but no gate here reads span metadata and a case cannot set the
+# eval home's config, so "Brave never spawns the helper" is held by
+# ExUnit (`PlaceSearchTest`, the Apple Maps block) rather than by a case here.
+# The rubrics and `reply_urls_in_evidence` hold for both backends: an Apple
+# Maps place's returned URL is Apple's page for it (`maps.apple.com/place?...`)
+# or its own HTTPS site, and either is the link the reply must keep.
 #
 # WHY BEHAVIORAL AND NOT CAPABILITY. The capability runner scores against ground
 # truth. Place results are live vendor data that changes hour to hour and shifts
@@ -38,8 +54,9 @@
 # of checking, so the rubric clause is backed by the deterministic inventory
 # gate on every discovery case.
 #
-# COST. One Brave Place Search request per invocation; M31 makes no detail
-# follow-up call. Model spend is a normal short research turn.
+# COST. Under Apple Maps, one search per invocation, unmetered; under Brave,
+# one metered Brave Place Search request. Neither makes a detail follow-up call.
+# Model spend is a normal short research turn.
 suite: places
 risk: host_readonly
 title: "Place discovery — local search that keeps its anchor and its sources"
@@ -196,6 +213,75 @@ scenarios:
           The place_search tool evidence shows a search_anchor whose source is
           "named", never "query_only", and each place keeps the exact URL the
           tool returned for it.
+
+  # M72: the Mac chat draws the places a reply links as cards and a map beside
+  # the text, and a place gets its card only when the reply links it by the
+  # URL `place_search` returned for it (the link is the reference). So in that
+  # chat the routing proof above is also the card proof: every recommended
+  # place linked by its returned URL. Its presentation note asks for a line on
+  # why each place fits rather than the rating and hours the card shows, so the
+  # rubric holds the text to standing alone: a name and a link per place, never
+  # a reply that leans on cards it cannot see.
+  #
+  # Driven over the companion socket as the Mac app drives it, so it writes the
+  # eval home's companion timeline: `isolated_mutation`, as `companion.yaml`.
+  # The cards themselves (the reply's `blocks`) are not graded here: the wire
+  # gates read event types, and ExUnit holds the block to the links.
+  - id: mac_chat_links_each_place
+    title: "In the Mac chat, every recommended place is linked so its card can attach"
+    severity: critical
+    risk: isolated_mutation
+    tags: [places, place-search, companion, cards]
+    cases:
+      - id: marais_bakeries_in_the_mac_chat
+        drive: companion
+        query: >
+          I'm wandering around Le Marais in Paris this afternoon. Which bakeries
+          there are worth a detour?
+        expect:
+          status: ok
+          no_tool_errors: true
+          tools_any: [place_search]
+          reply_matches: '(?i)https?://'
+          reply_urls_in_evidence: true
+          max_cost_usd: 1.5
+          max_duration_ms: 150000
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+            text_done_blocks: [places]
+        rubric: >
+          Recommends bakeries in Le Marais, Paris, the area the user named, and
+          links every place it recommends to the exact URL the place_search
+          result returned for it, on the place's name or right beside it, so a
+          reader can tell which link belongs to which place. No recommended
+          place is left without its link, and no URL appears that is absent
+          from the tool evidence. Each place gets its own reason it is worth
+          the detour, and the answer reads complete as text on its own.
+      - id: shimokitazawa_records_in_the_mac_chat
+        drive: companion
+        query: >
+          I'll be in Shimokitazawa in Tokyo on Saturday. Where should I dig for
+          secondhand records?
+        expect:
+          status: ok
+          no_tool_errors: true
+          tools_any: [place_search]
+          reply_matches: '(?i)https?://'
+          reply_urls_in_evidence: true
+          max_cost_usd: 1.5
+          max_duration_ms: 150000
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+            text_done_blocks: [places]
+        rubric: >
+          Recommends record shops in Shimokitazawa, Tokyo, and links every shop
+          it recommends to the exact URL the place_search result returned for
+          it, on the shop's name or right beside it. No recommended shop is
+          left without its link, and none of the links is invented or rebuilt
+          from a name. Each shop gets its own reason to visit, and the answer
+          reads complete as text on its own.
 
   - id: general_knowledge_needs_no_place_lookup
     title: "A pure knowledge question triggers no place lookup"

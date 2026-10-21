@@ -249,18 +249,36 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   WHERE json_type(timeline.media_refs_json, refs.fullkey || '.ref') = 'text';
   """
 
+  # Migration 41, a reply's blocks (M72): the records its text links, kept in
+  # their own row beside the timeline row as link previews are, so no column
+  # is added and an older engine reads the timeline as before. A row's blocks
+  # are written in the transaction that writes the row, and never change.
+  @reply_blocks_schema_sql """
+  CREATE TABLE IF NOT EXISTS mobile_timeline_blocks (
+    agent_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    server_seq INTEGER NOT NULL CHECK (server_seq > 0),
+    blocks_json TEXT NOT NULL,
+    PRIMARY KEY (agent_id, owner_id, profile_id, server_seq)
+  ) WITHOUT ROWID;
+  """
+
   # A timeline row as this engine reads it: its columns by name, and its link
-  # previews from their own table. A column a later migration adds is never
-  # decoded by position here.
+  # previews and blocks from their own tables. A column a later migration adds
+  # is never decoded by position here.
   @timeline_row_sql """
   SELECT t.agent_id, t.owner_id, t.profile_id, t.server_seq, t.kind, t.role, t.content,
          t.client_msg_id, t.in_reply_to, t.media_refs_json, t.metadata_json, t.proactive_key,
          t.created_at, t.request_client_msg_id, t.request_attempt, t.output_key,
-         COALESCE(p.previews_json, '[]')
+         COALESCE(p.previews_json, '[]'), COALESCE(b.blocks_json, '[]')
   FROM mobile_timeline AS t
   LEFT JOIN mobile_timeline_link_previews AS p
     ON p.agent_id = t.agent_id AND p.owner_id = t.owner_id
    AND p.profile_id = t.profile_id AND p.server_seq = t.server_seq
+  LEFT JOIN mobile_timeline_blocks AS b
+    ON b.agent_id = t.agent_id AND b.owner_id = t.owner_id
+   AND b.profile_id = t.profile_id AND b.server_seq = t.server_seq
   """
 
   # A request row as this engine reads and returns it, its columns by name.
@@ -318,6 +336,9 @@ defmodule FermixCore.Memory.Repo.MobileSql do
 
   @spec media_index_schema_sql() :: String.t()
   def media_index_schema_sql, do: @media_index_schema_sql
+
+  @spec reply_blocks_schema_sql() :: String.t()
+  def reply_blocks_schema_sql, do: @reply_blocks_schema_sql
 
   @doc "The claim's prior-attempt query, whose plan a test pins to its index."
   @spec prior_attempt_high_water_sql() :: String.t()
@@ -738,6 +759,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
     with :ok <- ensure_profile(conn, timeline, timeline.created_at),
          {:ok, server_seq} <- next_server_seq(conn, timeline),
          :ok <- insert_timeline(conn, timeline, server_seq),
+         :ok <- insert_blocks(conn, timeline, server_seq),
          :ok <- increment_server_seq(conn, timeline, server_seq),
          do: fetch_timeline(conn, timeline, server_seq)
   end
@@ -780,6 +802,20 @@ defmodule FermixCore.Memory.Repo.MobileSql do
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       """,
       timeline_insert_params(timeline, server_seq)
+    )
+  end
+
+  # A row with no blocks has no row of them.
+  defp insert_blocks(_conn, %{blocks: []}, _server_seq), do: :ok
+
+  defp insert_blocks(conn, timeline, server_seq) do
+    execute(
+      conn,
+      """
+      INSERT INTO mobile_timeline_blocks (agent_id, owner_id, profile_id, server_seq, blocks_json)
+      VALUES (?, ?, ?, ?, ?)
+      """,
+      profile_params(timeline) ++ [server_seq, Jason.encode!(timeline.blocks)]
     )
   end
 
@@ -1339,6 +1375,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
       client_msg_id: optional_string!(attrs, :client_msg_id),
       in_reply_to: optional_string!(attrs, :in_reply_to),
       media_refs: media_refs!(Map.get(attrs, :media_refs, [])),
+      blocks: blocks!(Map.get(attrs, :blocks, [])),
       metadata: Map.get(attrs, :metadata),
       proactive_key: optional_string!(attrs, :proactive_key),
       request_client_msg_id: optional_string!(attrs, :request_client_msg_id),
@@ -1483,12 +1520,15 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   defp nonnegative_integer?(value), do: is_integer(value) and value >= 0
   defp valid_digest?(value), do: is_binary(value) and Regex.match?(@sha256, value)
 
-  # What a stored preview may hold: a url, a site and a title, text when
-  # present, and an image that is a well-formed media descriptor of its own
-  # ref. An absent field is an absent key, never a null.
+  # What a stored preview may hold: a url, a site and a title, the link the
+  # row wrote when present (a preview stored before links were kept has
+  # none), a description as text when present, and an image that is a
+  # well-formed media descriptor of its own ref. An absent field is an absent
+  # key, never a null.
   defp validate_link_preview(preview) when is_map(preview) do
     with :ok <- known_preview_keys(preview),
          :ok <- required_preview_text(preview, ~w(url site title)),
+         :ok <- optional_preview_link(preview),
          :ok <- optional_preview_text(preview, "description") do
       preview_image(Map.fetch(preview, "image"))
     end
@@ -1497,7 +1537,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   defp validate_link_preview(_preview), do: invalid_preview(:not_a_map)
 
   defp known_preview_keys(preview) do
-    case Map.keys(preview) -- ~w(url site title description image) do
+    case Map.keys(preview) -- ~w(link url site title description image) do
       [] -> :ok
       [key | _rest] -> invalid_preview({:unknown_field, key})
     end
@@ -1507,6 +1547,16 @@ defmodule FermixCore.Memory.Repo.MobileSql do
     case Enum.find(keys, &(not nonempty_string?(Map.get(preview, &1)))) do
       nil -> :ok
       key -> invalid_preview({:invalid_field, key})
+    end
+  end
+
+  defp optional_preview_link(preview) do
+    case Map.fetch(preview, "link") do
+      :error ->
+        :ok
+
+      {:ok, link} ->
+        if nonempty_string?(link), do: :ok, else: invalid_preview({:invalid_field, "link"})
     end
   end
 
@@ -1531,11 +1581,11 @@ defmodule FermixCore.Memory.Repo.MobileSql do
 
   defp invalid_preview(reason), do: {:error, {:invalid_link_preview, reason}}
 
-  # The unfurler asks for at most two previews a row; this bounds what any
-  # caller can pile onto one row.
+  # The previewer asks for at most four previews a row, as many as this
+  # bounds any caller to; a link already previewed keeps its first card.
   defp append_link_preview(conn, profile, row, preview) do
     cond do
-      Enum.any?(row.link_previews, &(&1["url"] == preview["url"])) ->
+      Enum.any?(row.link_previews, &(preview_key(&1) == preview_key(preview))) ->
         {:ok, row}
 
       length(row.link_previews) >= @max_link_previews ->
@@ -1545,6 +1595,8 @@ defmodule FermixCore.Memory.Repo.MobileSql do
         update_link_previews(conn, profile, row, row.link_previews ++ [preview])
     end
   end
+
+  defp preview_key(preview), do: Map.get(preview, "link", preview["url"])
 
   # A row's previews are one row of their own, keyed like it; its triggers
   # index their images.
@@ -1589,7 +1641,8 @@ defmodule FermixCore.Memory.Repo.MobileSql do
          request_client_msg_id,
          request_attempt,
          output_key,
-         previews_json
+         previews_json,
+         blocks_json
        ]) do
     %{
       agent_id: agent_id,
@@ -1608,6 +1661,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
       request_attempt: request_attempt,
       output_key: output_key,
       link_previews: Jason.decode!(previews_json),
+      blocks: Jason.decode!(blocks_json),
       created_at: parse_timestamp!(created_at)
     }
   end
@@ -1753,6 +1807,16 @@ defmodule FermixCore.Memory.Repo.MobileSql do
 
   defp media_refs!(value),
     do: raise(ArgumentError, "expected media_refs to be a list, got: #{inspect(value)}")
+
+  defp blocks!(blocks) when is_list(blocks) do
+    Enum.map(blocks, fn
+      block when is_map(block) -> block
+      value -> raise ArgumentError, "expected blocks to contain maps, got: #{inspect(value)}"
+    end)
+  end
+
+  defp blocks!(value),
+    do: raise(ArgumentError, "expected blocks to be a list, got: #{inspect(value)}")
 
   defp digest!(attrs, key) do
     value = string!(attrs, key)

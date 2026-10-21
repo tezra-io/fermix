@@ -237,6 +237,82 @@ defmodule FermixCore.Prompt.BootstrapLoaderTest do
     refute Map.has_key?(result, :live)
   end
 
+  test "load_grok/2 prefers the installed GROK.md and captures a revision", %{
+    agent_id: agent_id,
+    repo: repo
+  } do
+    File.mkdir_p!(BootstrapPaths.agent_dir(agent_id))
+    File.write!(BootstrapPaths.grok_path(agent_id), "operator grok rules")
+
+    assert {:ok, file} = BootstrapLoader.load_grok(agent_id, repo: repo)
+
+    assert file.name == :grok
+    assert file.path == BootstrapPaths.grok_path(agent_id)
+    assert file.content == "operator grok rules"
+    assert file.status == :present
+    assert file.approx_size == byte_size("operator grok rules")
+
+    assert {:ok, [revision]} = Registry.list_revisions(agent_id, :grok_md, "global", repo: repo)
+    assert revision.mutation_source == "imported"
+    assert revision.content == "operator grok rules"
+  end
+
+  test "load_grok/2 falls back to the shipped template when GROK.md is missing", %{
+    agent_id: agent_id,
+    repo: repo
+  } do
+    assert {:ok, file} = BootstrapLoader.load_grok(agent_id, repo: repo)
+
+    assert file.content == Defaults.grok_md()
+    assert file.status == :fallback
+    assert {:error, :not_found} = Registry.current_hash(agent_id, :grok_md, "global", repo: repo)
+  end
+
+  test "load_grok/2 treats a blank GROK.md as missing", %{agent_id: agent_id, repo: repo} do
+    File.mkdir_p!(BootstrapPaths.agent_dir(agent_id))
+    File.write!(BootstrapPaths.grok_path(agent_id), "  \n\t\n")
+
+    assert {:ok, file} = BootstrapLoader.load_grok(agent_id, repo: repo)
+
+    assert file.content == Defaults.grok_md()
+    assert file.status == :fallback
+  end
+
+  test "load_grok/2 rejects agent IDs that can escape the bootstrap directory" do
+    assert {:error, {:invalid_agent_id, "../../etc"}} = BootstrapLoader.load_grok("../../etc")
+  end
+
+  # GROK.md is the Grok voice frontend's prompt (M70 §07); like LIVE.md it must
+  # never reach a Core text prompt.
+  test "load/2 never returns GROK.md", %{agent_id: agent_id} do
+    File.mkdir_p!(BootstrapPaths.agent_dir(agent_id))
+    File.write!(BootstrapPaths.grok_path(agent_id), "operator grok rules")
+
+    assert {:ok, result} = BootstrapLoader.load(agent_id, realtime?: true)
+    refute Map.has_key?(result, :grok)
+    refute Enum.any?(Map.values(result), &(is_map(&1) and &1.content == "operator grok rules"))
+  end
+
+  # The shipped template follows the provider's prompting guide (M70 §07):
+  # H2 sections in its order, no title line, and the one function the Grok
+  # session registers. A screen or an image is nothing that session has.
+  test "the shipped GROK.md is the guide's H2 sections and names fermix_task" do
+    content = Defaults.grok_md()
+
+    assert Regex.scan(~r/^## (.+)$/m, content, capture: :all_but_first) == [
+             ["Role & Persona"],
+             ["Objective"],
+             ["Conversation Flow"],
+             ["Guardrails & Escalation"],
+             ["Voice & Communication Style"],
+             ["CRITICAL INSTRUCTIONS"]
+           ]
+
+    refute content =~ ~r/^# /m
+    assert content =~ "`fermix_task`"
+    refute content =~ ~r/screen|image/i
+  end
+
   defp unique do
     System.unique_integer([:positive, :monotonic])
   end

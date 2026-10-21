@@ -618,7 +618,8 @@ calibrates them.
   non-zero; missing telemetry/judge evidence, zero cases, or required skips are
   `INCOMPLETE` (exit 4). Opik failures after preflight are preserved as incomplete
   report evidence instead of escaping as a traceback. Report prompts, replies,
-  judge rationale, and all error strings are redacted unless `--include-content`.
+  judge rationale, each numbered requirement's `why`, and all error strings are
+  redacted unless `--include-content`; which numbered requirement failed is kept.
 
 ## Authoring / editing suites
 

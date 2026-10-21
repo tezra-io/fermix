@@ -68,6 +68,20 @@
     "auth_kinds": ["oauth", "api_key"],
     "setting_kinds": ["text", "boolean"]
   },
+  "x-mcp-server-vocabulary": {
+    "description": "The closed sets an MCP server row (`mcpServerRow`) draws on. `status` is published for logs and support; a client renders `status_sentence` and switches on `primary_action` and `actions`.",
+    "statuses": [
+      "off",
+      "needs_secret",
+      "needs_sign_in",
+      "starting",
+      "connected",
+      "retrying",
+      "failed"
+    ],
+    "actions": ["sign_in", "sign_out", "check", "enable", "disable"],
+    "auth_states": ["not_needed", "signed_out", "signed_in", "expired"]
+  },
   "x-method-minimum-versions": {
     "hello": 1,
     "overview.get": 1,
@@ -121,7 +135,19 @@
     "browser.install.start": 2,
     "imessage.permissions.get": 2,
     "imessage.grant.start": 2,
-    "imessage.policy.confirm": 2
+    "imessage.policy.confirm": 2,
+    "mcp.servers.list": 2,
+    "mcp.servers.get": 2,
+    "mcp.servers.draft": 2,
+    "mcp.servers.add": 2,
+    "mcp.servers.update": 2,
+    "mcp.servers.remove": 2,
+    "mcp.servers.enable": 2,
+    "mcp.servers.disable": 2,
+    "mcp.servers.tool.set": 2,
+    "mcp.servers.check.start": 2,
+    "mcp.servers.import.scan": 2,
+    "mcp.servers.import": 2
   },
   "$defs": {
     "request": {
@@ -185,7 +211,19 @@
             "browser.install.start",
             "imessage.permissions.get",
             "imessage.grant.start",
-            "imessage.policy.confirm"
+            "imessage.policy.confirm",
+            "mcp.servers.list",
+            "mcp.servers.get",
+            "mcp.servers.draft",
+            "mcp.servers.add",
+            "mcp.servers.update",
+            "mcp.servers.remove",
+            "mcp.servers.enable",
+            "mcp.servers.disable",
+            "mcp.servers.tool.set",
+            "mcp.servers.check.start",
+            "mcp.servers.import.scan",
+            "mcp.servers.import"
           ]
         },
         "params": { "type": "object" }
@@ -534,6 +572,90 @@
             "properties": { "method": { "const": "imessage.policy.confirm" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/imessage_policy_confirm_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mcp.servers.list" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mcp_servers_list_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mcp.servers.get" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mcp_servers_get_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mcp.servers.draft" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mcp_servers_draft_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mcp.servers.add" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mcp_servers_add_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mcp.servers.update" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mcp_servers_update_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mcp.servers.remove" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mcp_servers_remove_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mcp.servers.enable" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mcp_servers_enable_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mcp.servers.disable" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mcp_servers_disable_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mcp.servers.tool.set" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mcp_servers_tool_set_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mcp.servers.check.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mcp_servers_check_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mcp.servers.import.scan" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mcp_servers_import_scan_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mcp.servers.import" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mcp_servers_import_params" } } }
         }
       ]
     },
@@ -648,7 +770,19 @@
         { "$ref": "#/$defs/browser_install_start_result" },
         { "$ref": "#/$defs/imessage_permissions_get_result" },
         { "$ref": "#/$defs/imessage_grant_start_result" },
-        { "$ref": "#/$defs/imessage_policy_confirm_result" }
+        { "$ref": "#/$defs/imessage_policy_confirm_result" },
+        { "$ref": "#/$defs/mcp_servers_list_result" },
+        { "$ref": "#/$defs/mcp_servers_get_result" },
+        { "$ref": "#/$defs/mcp_servers_draft_result" },
+        { "$ref": "#/$defs/mcp_servers_add_result" },
+        { "$ref": "#/$defs/mcp_servers_update_result" },
+        { "$ref": "#/$defs/mcp_servers_remove_result" },
+        { "$ref": "#/$defs/mcp_servers_enable_result" },
+        { "$ref": "#/$defs/mcp_servers_disable_result" },
+        { "$ref": "#/$defs/mcp_servers_tool_set_result" },
+        { "$ref": "#/$defs/mcp_servers_check_start_result" },
+        { "$ref": "#/$defs/mcp_servers_import_scan_result" },
+        { "$ref": "#/$defs/mcp_servers_import_result" }
       ]
     },
     "hello_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -1460,6 +1594,7 @@
         "label",
         "footer",
         "info",
+        "advanced",
         "value",
         "present",
         "options",
@@ -1481,6 +1616,10 @@
         "info": {
           "description": "A longer explanation a surface keeps behind an info control rather than showing inline; the footer stays the short inline line. Null on every row with nothing more to say.",
           "type": ["string", "null"]
+        },
+        "advanced": {
+          "description": "A row most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. False on every other row.",
+          "type": "boolean"
         },
         "value": { "$ref": "#/$defs/settingValue" },
         "present": {
@@ -1618,7 +1757,12 @@
       "properties": {
         "id": { "type": "string" },
         "present": { "type": "boolean" },
-        "restart": { "$ref": "#/$defs/restartState" }
+        "restart": { "$ref": "#/$defs/restartState" },
+        "environment_override": {
+          "description": "The environment variable this daemon uses in place of the stored value, because a nonblank one overrides the stored value at every start; null when the stored value is the one in use. Absent from an older daemon, which reported no override.",
+          "type": ["string", "null"],
+          "minLength": 1
+        }
       }
     },
     "secret_clear_params": {
@@ -1634,7 +1778,12 @@
       "properties": {
         "id": { "type": "string" },
         "present": { "type": "boolean" },
-        "restart": { "$ref": "#/$defs/restartState" }
+        "restart": { "$ref": "#/$defs/restartState" },
+        "environment_override": {
+          "description": "The environment variable this daemon uses in place of the stored value, because a nonblank one overrides the stored value at every start; null when the stored value is the one in use. Absent from an older daemon, which reported no override.",
+          "type": ["string", "null"],
+          "minLength": 1
+        }
       }
     },
     "jobKind": {
@@ -1652,7 +1801,8 @@
         "computer_use_grant",
         "browser_install",
         "imessage_grant",
-        "imessage_policy_confirm"
+        "imessage_policy_confirm",
+        "mcp_check"
       ]
     },
     "jobStatus": {
@@ -1849,6 +1999,7 @@
     },
     "auth_start_params": {
       "type": "object",
+      "description": "`provider` is a provider with a browser sign-in, `plugin:<name>` for a plugin's own, or `mcp:<name>` for an MCP server the owner added whose `auth` is `auto`.",
       "required": ["provider"],
       "additionalProperties": false,
       "properties": { "provider": { "type": "string", "minLength": 1, "maxLength": 256 } }
@@ -1897,6 +2048,7 @@
     "auth_import_start_result": { "$ref": "#/$defs/jobView" },
     "auth_logout_params": {
       "type": "object",
+      "description": "`provider` is a provider with a stored sign-in, or `mcp:<name>` for an MCP server the owner added.",
       "required": ["provider"],
       "additionalProperties": false,
       "properties": { "provider": { "type": "string", "minLength": 1, "maxLength": 256 } }
@@ -2219,6 +2371,463 @@
       "additionalProperties": false
     },
     "imessage_policy_confirm_result": { "$ref": "#/$defs/jobView" },
+    "mcpServerAction": {
+      "description": "Which method a row's button runs. `check` is `mcp.servers.check.start`, `enable` and `disable` the methods of those names; `sign_in` and `sign_out` are `auth.start` and `auth.logout` with the provider `mcp:<name>`, which this daemon does not publish on any row yet. Edit and remove are always available and are a client's own controls, not row actions.",
+      "enum": ["sign_in", "sign_out", "check", "enable", "disable"]
+    },
+    "mcpServerName": {
+      "type": "object",
+      "description": "One value a server declares, by name, and whether it is stored. Never the value.",
+      "required": ["name", "present"],
+      "additionalProperties": false,
+      "properties": { "name": { "type": "string" }, "present": { "type": "boolean" } }
+    },
+    "mcpServerTool": {
+      "type": "object",
+      "description": "One tool the server listed, in its order. Only a tool whose name is at most 128 bytes is described; a longer one is counted in the row's `tool_count` and as on in `tools_on`. `read_only` and `destructive` are the server's own `readOnlyHint` and `destructiveHint` as it declared them, an absent hint being false, not the MCP specification's default, and a tool declared read-only is never destructive; they inform and decide nothing. `enabled` is false where the owner hid the tool from the agent.",
+      "required": ["name", "title", "description", "read_only", "destructive", "enabled"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "maxLength": 128 },
+        "title": { "type": ["string", "null"], "maxLength": 128 },
+        "description": { "type": ["string", "null"], "maxLength": 512 },
+        "read_only": { "type": "boolean" },
+        "destructive": { "type": "boolean" },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "mcpServerRow": {
+      "type": "object",
+      "description": "One MCP server the owner added, imported or wrote by hand in `config.toml`, in the daemon's own words. Every field is always present, null where the transport has none, except `tools`, which only `mcp.servers.get` carries.",
+      "required": [
+        "name",
+        "transport",
+        "enabled",
+        "status",
+        "status_sentence",
+        "primary_action",
+        "actions",
+        "consent_sentence",
+        "location",
+        "url",
+        "resolved_command",
+        "cwd",
+        "env",
+        "headers",
+        "auth",
+        "oauth_client",
+        "server_info",
+        "tool_count",
+        "tools_on",
+        "last_error",
+        "origin"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "transport": { "enum": ["stdio", "http"] },
+        "enabled": { "type": "boolean" },
+        "status": { "type": "string" },
+        "status_sentence": { "type": "string" },
+        "primary_action": {
+          "description": "The one action the row leads with, or null where it leads with none.",
+          "oneOf": [{ "$ref": "#/$defs/mcpServerAction" }, { "type": "null" }]
+        },
+        "actions": {
+          "type": "array",
+          "maxItems": 5,
+          "items": { "$ref": "#/$defs/mcpServerAction" }
+        },
+        "consent_sentence": {
+          "description": "Where the server's code runs and what leaves this Mac. Always present.",
+          "type": "string"
+        },
+        "location": {
+          "description": "The host of a remote server, or a local server's command line as written.",
+          "type": "string"
+        },
+        "url": { "type": ["string", "null"] },
+        "resolved_command": {
+          "description": "The program a local server's command runs, found on the login shell's PATH; null where it was not found, before the daemon has read that PATH for a command without a slash, or where the server is remote.",
+          "type": ["string", "null"]
+        },
+        "cwd": { "type": ["string", "null"] },
+        "env": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/mcpServerName" } },
+        "headers": {
+          "description": "The headers a remote server declares besides the key's own, which is `auth.key_header`.",
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/mcpServerName" }
+        },
+        "auth": {
+          "type": "object",
+          "required": ["mode", "state", "key_header", "account_label", "issuer"],
+          "additionalProperties": false,
+          "properties": {
+            "mode": { "enum": ["auto", "header", "none"] },
+            "state": { "enum": ["not_needed", "signed_out", "signed_in", "expired"] },
+            "key_header": { "type": ["string", "null"] },
+            "account_label": { "type": ["string", "null"] },
+            "issuer": { "type": ["string", "null"] }
+          }
+        },
+        "oauth_client": {
+          "type": "object",
+          "required": ["client_id", "secret_present"],
+          "additionalProperties": false,
+          "properties": {
+            "client_id": { "type": ["string", "null"] },
+            "secret_present": { "type": "boolean" }
+          }
+        },
+        "server_info": {
+          "description": "The server's own `serverInfo` from its last connection, kept while it is off or starting again; null before it first connected.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["name", "title", "version"],
+              "additionalProperties": false,
+              "properties": {
+                "name": { "type": ["string", "null"] },
+                "title": { "type": ["string", "null"] },
+                "version": { "type": ["string", "null"] }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "tool_count": { "type": "integer", "minimum": 0 },
+        "tools_on": { "type": "integer", "minimum": 0 },
+        "tools": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/mcpServerTool" }
+        },
+        "last_error": {
+          "description": "Why the server is not connected, while it is `retrying` or `failed`.",
+          "type": ["string", "null"]
+        },
+        "origin": {
+          "description": "`added`, `imported:<source>`, or null for a server written by hand. A label, never a behaviour.",
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "mcpServerRowResult": {
+      "type": "object",
+      "required": ["server"],
+      "additionalProperties": false,
+      "properties": { "server": { "$ref": "#/$defs/mcpServerRow" } }
+    },
+    "mcpServerNameParams": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "mcp_servers_list_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false
+    },
+    "mcp_servers_list_result": {
+      "type": "object",
+      "required": ["servers", "limits", "can_add"],
+      "additionalProperties": false,
+      "properties": {
+        "servers": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/mcpServerRow" } },
+        "limits": {
+          "type": "object",
+          "required": ["max_servers"],
+          "additionalProperties": false,
+          "properties": { "max_servers": { "type": "integer", "minimum": 1 } }
+        },
+        "can_add": { "type": "boolean" }
+      }
+    },
+    "mcp_servers_get_params": { "$ref": "#/$defs/mcpServerNameParams" },
+    "mcp_servers_get_result": {
+      "type": "object",
+      "required": ["server"],
+      "additionalProperties": false,
+      "properties": {
+        "server": { "allOf": [{ "$ref": "#/$defs/mcpServerRow" }, { "required": ["tools"] }] }
+      }
+    },
+    "mcpServerDraft": {
+      "type": "object",
+      "description": "One server a paste describes, as the add form takes it, in the daemon's words. Every field is present, null where the transport has none. `command_line` is written back as the words that will run, a leading `~` written out as the home folder. `resolved_command` is the program a local command runs, null for a remote server and while the login shell's PATH is still being read; `command_sentence` is \"Runs <program>\", the sentence a row says of a command this Mac does not have, or null when `resolved_command` is null for either reason. `env` and `headers` name every value the server declares, the key's header included (`key_header` names it), and `present` says the paste carried its value. `consent_sentence` is the row's own. `summary` is \"Remote, <host>\", or the program and the package it starts. `conflict` is true where an MCP server here already has this name, or one that gives its tools the same names. `draft_id` names the values this draft carried, for `mcp.servers.add`; null when it carried none.",
+      "required": [
+        "name",
+        "transport",
+        "url",
+        "command_line",
+        "resolved_command",
+        "command_sentence",
+        "cwd",
+        "env",
+        "headers",
+        "auth",
+        "key_header",
+        "oauth_client_id",
+        "consent_sentence",
+        "summary",
+        "conflict",
+        "draft_id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "transport": { "enum": ["stdio", "http"] },
+        "url": { "type": ["string", "null"] },
+        "command_line": { "type": ["string", "null"] },
+        "resolved_command": { "type": ["string", "null"] },
+        "command_sentence": { "type": ["string", "null"] },
+        "cwd": { "type": ["string", "null"] },
+        "env": { "type": "array", "items": { "$ref": "#/$defs/mcpServerName" } },
+        "headers": { "type": "array", "items": { "$ref": "#/$defs/mcpServerName" } },
+        "auth": { "enum": ["auto", "header", "none"] },
+        "key_header": { "type": ["string", "null"] },
+        "oauth_client_id": { "type": ["string", "null"] },
+        "consent_sentence": { "type": "string" },
+        "summary": { "type": "string" },
+        "conflict": { "type": "boolean" },
+        "draft_id": { "type": ["string", "null"] }
+      }
+    },
+    "mcp_servers_draft_params": {
+      "type": "object",
+      "required": ["text"],
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "description": "What the owner typed or pasted: a URL, a command line, an `mcpServers` or `servers` JSON map, one server object, a `claude mcp add` line or a Codex `[mcp_servers.<name>]` block. At most 65536 bytes.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        }
+      }
+    },
+    "mcp_servers_draft_result": {
+      "type": "object",
+      "required": ["drafts"],
+      "additionalProperties": false,
+      "properties": {
+        "drafts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/mcpServerDraft" }
+        }
+      }
+    },
+    "mcp_servers_add_params": {
+      "description": "The fields of `mcp.servers.update`, with `transport` required, and `draft_id`: the draft whose pasted values the add stores for the names the form still declares.",
+      "type": "object",
+      "required": ["name", "transport"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/mcp_servers_update_params/properties/name" },
+        "transport": { "$ref": "#/$defs/mcp_servers_update_params/properties/transport" },
+        "command_line": { "$ref": "#/$defs/mcp_servers_update_params/properties/command_line" },
+        "url": { "$ref": "#/$defs/mcp_servers_update_params/properties/url" },
+        "cwd": { "$ref": "#/$defs/mcp_servers_update_params/properties/cwd" },
+        "env_names": { "$ref": "#/$defs/mcp_servers_update_params/properties/env_names" },
+        "auth": { "$ref": "#/$defs/mcp_servers_update_params/properties/auth" },
+        "key_header": { "$ref": "#/$defs/mcp_servers_update_params/properties/key_header" },
+        "header_names": { "$ref": "#/$defs/mcp_servers_update_params/properties/header_names" },
+        "oauth_client_id": {
+          "$ref": "#/$defs/mcp_servers_update_params/properties/oauth_client_id"
+        },
+        "draft_id": { "type": ["string", "null"], "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "mcp_servers_add_result": {
+      "type": "object",
+      "required": ["server", "job_id"],
+      "additionalProperties": false,
+      "properties": {
+        "server": { "$ref": "#/$defs/mcpServerRow" },
+        "job_id": {
+          "description": "The `mcp_check` job the add started. Null when the server does not start yet, because a value it declares is not stored, or when no check could start beside the jobs already running.",
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "mcp_servers_update_params": {
+      "description": "A server as a form writes it: on an update, the fields given change and the rest stay, and `name` and `transport` cannot change. A local server takes `command_line`, `cwd` and `env_names`; a remote one `url`, `auth`, `key_header`, `header_names` and `oauth_client_id`; the other transport's fields are refused. A null clears a nullable field, and a list replaces the one it names. Values never ride here: they arrive through `secret.set` under `mcp:<name>/…`, or, on an add, from the paste its `draft_id` names.",
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "transport": { "enum": ["stdio", "http"] },
+        "command_line": {
+          "description": "The command and its arguments as one line, split as a shell splits one simple command, with nothing expanded.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "url": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "cwd": { "type": ["string", "null"], "minLength": 1, "maxLength": 1024 },
+        "env_names": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+        },
+        "auth": { "enum": ["auto", "header", "none"] },
+        "key_header": { "type": ["string", "null"], "minLength": 1, "maxLength": 64 },
+        "header_names": {
+          "description": "The headers besides the key's own, which `key_header` names.",
+          "type": "array",
+          "maxItems": 32,
+          "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+        },
+        "oauth_client_id": { "type": ["string", "null"], "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "mcp_servers_update_result": { "$ref": "#/$defs/mcpServerRowResult" },
+    "mcp_servers_remove_params": { "$ref": "#/$defs/mcpServerNameParams" },
+    "mcp_servers_remove_result": {
+      "type": "object",
+      "required": ["name", "removed"],
+      "additionalProperties": false,
+      "properties": { "name": { "type": "string" }, "removed": { "const": true } }
+    },
+    "mcp_servers_enable_params": { "$ref": "#/$defs/mcpServerNameParams" },
+    "mcp_servers_enable_result": { "$ref": "#/$defs/mcpServerRowResult" },
+    "mcp_servers_disable_params": { "$ref": "#/$defs/mcpServerNameParams" },
+    "mcp_servers_disable_result": { "$ref": "#/$defs/mcpServerRowResult" },
+    "mcp_servers_tool_set_params": {
+      "type": "object",
+      "required": ["name", "tool", "enabled"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "tool": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "mcp_servers_tool_set_result": { "$ref": "#/$defs/mcpServerRowResult" },
+    "mcp_servers_check_start_params": { "$ref": "#/$defs/mcpServerNameParams" },
+    "mcp_servers_check_start_result": { "$ref": "#/$defs/jobView" },
+    "mcpImportSource": {
+      "description": "The app whose settings a server was read from: Claude Desktop, Claude Code (its user servers in `~/.claude.json`), Cursor, VS Code, Windsurf or Codex. `source_label` is the daemon's name for it.",
+      "enum": ["claude_desktop", "claude_code", "cursor", "vscode", "windsurf", "codex"]
+    },
+    "mcpImportCandidate": {
+      "type": "object",
+      "description": "One server another app's settings on this Mac hold, as the import page lists it, in the words a draft of it would carry. `command_line` and `resolved_command`/`command_sentence` are a local server's, `url` a remote one's, null otherwise; a bare command's resolution follows the draft's rule, null while the login shell's PATH is read. `secret_names` names every value the server declares, the key's header included, and never carries one; a placeholder in the other app's settings is a name too, which the server then waits for. `conflict` is true where an MCP server here already has the name, or one that gives its tools the same names.",
+      "required": [
+        "source",
+        "source_label",
+        "name",
+        "transport",
+        "summary",
+        "command_line",
+        "url",
+        "consent_sentence",
+        "resolved_command",
+        "command_sentence",
+        "secret_names",
+        "conflict"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "$ref": "#/$defs/mcpImportSource" },
+        "source_label": { "type": "string" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "transport": { "enum": ["stdio", "http"] },
+        "summary": { "type": "string" },
+        "command_line": { "type": ["string", "null"] },
+        "url": { "type": ["string", "null"] },
+        "consent_sentence": { "type": "string" },
+        "resolved_command": { "type": ["string", "null"] },
+        "command_sentence": { "type": ["string", "null"] },
+        "secret_names": { "type": "array", "items": { "type": "string" } },
+        "conflict": { "type": "boolean" }
+      }
+    },
+    "mcpImportSkipped": {
+      "type": "object",
+      "description": "What a scan could not offer, with the daemon's sentence: a settings file that could not be read (`name` null), a server one holds that could not be added as it is written (`name` its key there), or the servers past the first 32 of one file (`name` null).",
+      "required": ["source", "source_label", "name", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "$ref": "#/$defs/mcpImportSource" },
+        "source_label": { "type": "string" },
+        "name": { "type": ["string", "null"], "maxLength": 128 },
+        "sentence": { "type": "string" }
+      }
+    },
+    "mcp_servers_import_scan_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false
+    },
+    "mcp_servers_import_scan_result": {
+      "type": "object",
+      "required": ["candidates", "skipped"],
+      "additionalProperties": false,
+      "properties": {
+        "candidates": {
+          "type": "array",
+          "maxItems": 192,
+          "items": { "$ref": "#/$defs/mcpImportCandidate" }
+        },
+        "skipped": { "type": "array", "items": { "$ref": "#/$defs/mcpImportSkipped" } }
+      }
+    },
+    "mcp_servers_import_params": {
+      "type": "object",
+      "required": ["servers"],
+      "additionalProperties": false,
+      "properties": {
+        "servers": {
+          "description": "The candidates to add, each by its `source` and the `name` the scan offered it under. At most 32.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "required": ["source", "name"],
+            "additionalProperties": false,
+            "properties": {
+              "source": { "$ref": "#/$defs/mcpImportSource" },
+              "name": { "type": "string", "minLength": 1, "maxLength": 128 }
+            }
+          }
+        }
+      }
+    },
+    "mcp_servers_import_result": {
+      "type": "object",
+      "required": ["servers", "refused"],
+      "additionalProperties": false,
+      "properties": {
+        "servers": {
+          "description": "The new rows, in the order asked, each with `origin` `imported:<source>`.",
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/mcpServerRow" }
+        },
+        "refused": {
+          "description": "Each server asked for that was not added, with the daemon's sentence: a name already here, a server its source no longer holds or can no longer be added as written, a settings file that cannot be read now.",
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "required": ["source", "name", "sentence"],
+            "additionalProperties": false,
+            "properties": {
+              "source": { "$ref": "#/$defs/mcpImportSource" },
+              "name": { "type": "string" },
+              "sentence": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
     "imessagePermissions": {
       "type": "object",
       "description": "The Fermix Messages helper's non-prompting probe. With `installed: false` every other field is null. `signed_in` is null while Automation is not granted, because the helper cannot ask Messages without it. `policy_matches_config` is false unless the confirmed recipients are exactly the saved ones: that is the state \"Awaiting confirmation\". A grant or confirmation job completes with this same object as its `result`; a confirmation adds `outcome`.",
@@ -2341,6 +2950,7 @@
         "mdns",
         "tailnet",
         "identity",
+        "remote",
         "apns",
         "paired_devices",
         "protocol_version",
@@ -2383,6 +2993,30 @@
           "properties": {
             "present": { "type": "boolean" },
             "fingerprint": { "type": ["string", "null"] }
+          }
+        },
+        "remote": {
+          "type": "object",
+          "description": "Reach from anywhere (M62): the rail that lets a paired phone reach this daemon from any network through Fermix's relays. `state` is `off` (switched off, or the channel is not running), `dormant` (no phone paired yet; the first pairing window starts it), `helper_missing` (this build carries no fermix-iroh), `starting`, `ready` or `failed`. While `ready`, `endpoint_id` is the daemon's iroh endpoint id and `relay` the relay it is connected through, with `connected` and the relay's last error in `relay_error`; while `failed`, `failure` is the reason in the helper's or the daemon's words. `refused` counts the connections the helper refused, by reason, since it started.",
+          "required": ["state", "endpoint_id", "relay", "connected", "relay_error", "failure", "refused"],
+          "additionalProperties": false,
+          "properties": {
+            "state": { "enum": ["off", "dormant", "helper_missing", "starting", "ready", "failed"] },
+            "endpoint_id": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "relay": { "type": ["string", "null"], "maxLength": 2048 },
+            "connected": { "type": "boolean" },
+            "relay_error": { "type": ["string", "null"], "maxLength": 512 },
+            "failure": { "type": ["string", "null"], "maxLength": 2048 },
+            "refused": {
+              "type": "object",
+              "required": ["busy", "alpn", "bridge_unreachable"],
+              "additionalProperties": false,
+              "properties": {
+                "busy": { "type": "integer", "minimum": 0 },
+                "alpn": { "type": "integer", "minimum": 0 },
+                "bridge_unreachable": { "type": "integer", "minimum": 0 }
+              }
+            }
           }
         },
         "apns": {

@@ -9,11 +9,12 @@ defmodule FermixChannels.Companion.Fanout do
   Each watcher gets only the events its own wire carries
   (`FermixCore.Companion.Protocol.server_events/0`,
   `Mobile.Protocol.server_events/0`): a phone-only `link_preview` never reaches
-  the Mac. A `row` is announced in the phone's shape (`Companion.Output.row/2`),
-  and the Mac hears only the fields its own `row` carries: its own, and the
-  message's `kind` and `metadata` (M56 §6), never a phone's media refs or link
-  previews. The sender is not left out, since every client deduplicates by
-  `server_seq`.
+  the Mac, and a Mac-only `row_updated` never reaches a phone. A `row` is
+  announced in the phone's shape (`Companion.Output.row/2`), and the Mac hears
+  only the fields its own `row` carries: its own, and the message's `kind` and
+  `metadata` (M56 §6), its `media_refs` and its `link_previews` (companion
+  protocol 3), its `blocks` (M72), never the phone's `in_reply_to`. The sender is not left out,
+  since every client deduplicates by `server_seq`.
 
   What is announced to everyone: every timeline row as a `row` (a user's
   message from either transport, a slash command's answer, a delivery) and
@@ -35,7 +36,10 @@ defmodule FermixChannels.Companion.Fanout do
 
   @type audience :: transport() | :all
 
-  @companion_row_fields ~w(t profile_id server_seq role text ts client_msg_id kind metadata)
+  @companion_row_fields ~w(
+    t profile_id server_seq role text ts client_msg_id kind metadata media_refs link_previews
+    blocks
+  )
 
   @doc """
   Announce one logical event to the profile's watchers. Options:

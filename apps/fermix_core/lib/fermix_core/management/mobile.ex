@@ -33,6 +33,7 @@ defmodule FermixCore.Management.Mobile do
   @outcome_reasons ~w(denied timeout cancelled)a
   @build_roles ~w(release development)a
   @listener_states ~w(ready down unavailable)a
+  @remote_states [:off, :dormant, :helper_missing, :starting, :ready, :failed]
   @listener_reasons ~w(address_unavailable address_in_use permission_denied listen_failed)a
   @mdns_states ~w(advertising disabled down)a
   @credential_states ~w(ready missing)a
@@ -80,6 +81,8 @@ defmodule FermixCore.Management.Mobile do
   @switch_not_started_sentence "The phone channel is on but could not start. See the daemon log."
   @switch_not_ready_sentence "The phone channel starts the next time Fermix starts."
   @switch_failed_sentence "The phone channel's switch could not be applied. See the daemon log."
+  @reach_not_started_sentence "Reach from anywhere is on but could not start. See the daemon log."
+  @reach_failed_sentence "Reach from anywhere could not be switched. See the daemon log."
 
   @type refusal ::
           {:busy, String.t()}
@@ -110,7 +113,9 @@ defmodule FermixCore.Management.Mobile do
         @owner_only_sentence,
         @switch_not_started_sentence,
         @switch_not_ready_sentence,
-        @switch_failed_sentence
+        @switch_failed_sentence,
+        @reach_not_started_sentence,
+        @reach_failed_sentence
       ]
   end
 
@@ -143,6 +148,27 @@ defmodule FermixCore.Management.Mobile do
       {:ok, {:error, :not_ready}} -> {:error, @switch_not_ready_sentence}
       other -> switch_failed(enabled?, other)
     end
+  end
+
+  @doc """
+  Starts or stops the phone channel's reach from anywhere while the daemon
+  runs, once settings have written `[fermix_channels.mobile] iroh` (M62 D4).
+  Settings call it only while the phone channel is on; a channel that is not
+  running has no reach to switch, and it reads the switch when it starts.
+  """
+  @spec apply_iroh(boolean(), keyword()) :: :ok | {:error, String.t()}
+  def apply_iroh(on?, opts \\ []) when is_boolean(on?) and is_list(opts) do
+    case call(opts, :apply_iroh, [on?]) do
+      {:ok, {:ok, state}} when state in [:started, :stopped] -> :ok
+      {:ok, {:error, :not_ready}} -> :ok
+      {:ok, {:ok, :not_started}} -> {:error, @reach_not_started_sentence}
+      other -> reach_failed(on?, other)
+    end
+  end
+
+  defp reach_failed(on?, reply) do
+    Logger.error("management mobile: apply_iroh(#{on?}) answered #{Redaction.format(reply)}")
+    {:error, @reach_failed_sentence}
   end
 
   defp switch_failed(enabled?, reply) do
@@ -399,6 +425,7 @@ defmodule FermixCore.Management.Mobile do
         "present" => status.identity.present,
         "fingerprint" => status.identity.fingerprint
       },
+      "remote" => remote_view(status.remote),
       "apns" => apns_view(status.apns),
       "paired_devices" => status.paired_devices,
       "protocol_version" => status.protocol_version,
@@ -415,6 +442,29 @@ defmodule FermixCore.Management.Mobile do
       "candidates" => listener.candidates
     }
   end
+
+  # Reach from anywhere (M62), as the rail reports it: a state, and while it is
+  # ready the endpoint id and the relay it uses, or while it is failed the
+  # helper's own words, and the connections the helper refused by reason.
+  defp remote_view(remote) do
+    refused = Map.get(remote, :refused, %{busy: 0, alpn: 0, bridge_unreachable: 0})
+
+    %{
+      "state" => remote_word(remote.state),
+      "endpoint_id" => Map.get(remote, :endpoint_id),
+      "relay" => Map.get(remote, :relay),
+      "connected" => Map.get(remote, :connected, false),
+      "relay_error" => Map.get(remote, :relay_error),
+      "failure" => Map.get(remote, :failure),
+      "refused" => %{
+        "busy" => refused.busy,
+        "alpn" => refused.alpn,
+        "bridge_unreachable" => refused.bridge_unreachable
+      }
+    }
+  end
+
+  defp remote_word(state) when state in @remote_states, do: Atom.to_string(state)
 
   defp apns_view(apns) do
     %{

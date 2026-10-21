@@ -21,7 +21,10 @@ defmodule FermixChannels.Companion.Turns do
       draft and `send_message`), so here it is settled and ended;
     * `{:completed}` writes each held reply as a timeline row, announces it as
       `text_done` at its `server_seq` to the companion connections and as a
-      `row` to the phones, and completes the request; a companion turn that
+      `row` to the phones, and completes the request. The place records the
+      conversation's searches returned are taken once for the turn, and each
+      reply is written with the blocks its text makes of them, in the row's
+      own write (`FermixCore.ReplyBlocks`, M72). A companion turn that
       holds no reply ends with `turn_done` instead (companion protocol 2),
       and a phone turn always does, after the rows it wrote (mobile protocol
       2);
@@ -92,10 +95,12 @@ defmodule FermixChannels.Companion.Turns do
   alias FermixChannels.Companion.Output
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Queue
+  alias FermixChannels.LinkPreviews
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixChannels.Voice.ChatMirror
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.LiveCallTurn
+  alias FermixCore.ReplyBlocks
   alias FermixCore.Telemetry
 
   @max_ended 64
@@ -233,6 +238,7 @@ defmodule FermixChannels.Companion.Turns do
     {:ok,
      %{
        store: Keyword.get(opts, :store),
+       reply_blocks: Keyword.get(opts, :reply_blocks, ReplyBlocks),
        queues: %{},
        turns: %{},
        ended: []
@@ -255,7 +261,7 @@ defmodule FermixChannels.Companion.Turns do
       silent_ending?(state, key, attempt, text) -> {:reply, :ok, state}
       tracked?(state, key, attempt) -> {:reply, :ok, hold(state, key, text)}
       {key, attempt} in state.ended -> {:reply, :ok, state}
-      true -> {:reply, write_untracked(message, text), state}
+      true -> {:reply, write_untracked(state, message, text), state}
     end
   end
 
@@ -465,7 +471,8 @@ defmodule FermixChannels.Companion.Turns do
     do: update_in(state.turns[key].replies, &[text | &1])
 
   defp finish(state, turn, {:completed}) do
-    turn.replies |> Enum.reverse() |> Enum.each(&write_reply(state, turn, &1))
+    records = reply_records(state, turn)
+    turn.replies |> Enum.reverse() |> Enum.each(&write_reply(state, turn, &1, records))
     :ok = announce_completed(turn)
     :ok = mirror_answer(turn)
     {settle_completed(state, turn), ended(state, turn)}
@@ -498,14 +505,42 @@ defmodule FermixChannels.Companion.Turns do
     ended(state, turn)
   end
 
-  # One held reply becomes its row, fenced to the turn's attempt, and is
-  # announced at that row: as the turn's `text_done` to the connections that
-  # streamed it, and as a `row` to the phones, which did not. A failed write is
-  # the operator's to read: the turn still completes, as it did in the
-  # conversation's own history. The row is the outbound message, counted as
+  # The place records the conversation's searches returned, taken once for a
+  # companion turn's replies (M72 §8.4). A phone turn writes its own rows and
+  # takes none. A holder that cannot answer is the operator's to read: the
+  # replies are written as text alone, which stands on its own.
+  defp reply_records(_state, %{transport: :mobile}), do: []
+  defp reply_records(_state, %{replies: []}), do: []
+
+  defp reply_records(state, turn),
+    do: take_records(state, turn.client_id, turn.conversation)
+
+  defp take_records(state, client_id, conversation) do
+    take = fn -> ReplyBlocks.take(state.reply_blocks, conversation) end
+
+    case guarded(client_id, "reply blocks", take) do
+      {:error, _exit} -> []
+      records -> records
+    end
+  end
+
+  # One held reply becomes its row, fenced to the turn's attempt, with the
+  # blocks its text makes of the turn's place records, and is announced at
+  # that row: as the turn's `text_done` to the connections that streamed it,
+  # and as a `row` to the phones, which did not. Then the links no block
+  # draws are previewed, as every row's are. A failed write is the operator's
+  # to read: the turn still completes, as it did in the conversation's own
+  # history. The row is the outbound message, counted as
   # `Companion.send_message/3` counts its own.
-  defp write_reply(state, turn, text) do
-    attrs = %{in_reply_to: turn.client_id, attempt: turn.attempt, turn_id: turn.turn_id}
+  defp write_reply(state, turn, text, records) do
+    blocks = ReplyBlocks.build(text, records)
+
+    attrs = %{
+      in_reply_to: turn.client_id,
+      attempt: turn.attempt,
+      turn_id: turn.turn_id,
+      blocks: blocks
+    }
 
     write = fn -> Output.persist_text(store(state, turn), turn.profile, text, attrs) end
     {written, duration_us} = Telemetry.timed_us(fn -> guarded(turn.client_id, "reply", write) end)
@@ -513,9 +548,11 @@ defmodule FermixChannels.Companion.Turns do
     case written do
       {:ok, {:created, row}} ->
         ChannelTelemetry.emit_message(:companion, :outbound, 1, duration_us)
-        done = Output.text_done(turn.turn_id, row.server_seq, text)
+        done = Output.text_done(turn.turn_id, row.server_seq, text, blocks)
         :ok = Fanout.announce(turn.profile, done, audience: :companion)
-        Fanout.announce(turn.profile, Output.row(turn.profile, row), audience: :mobile)
+        _ = Fanout.announce(turn.profile, Output.row(turn.profile, row), audience: :mobile)
+        links = ReplyBlocks.links(text, blocks)
+        LinkPreviews.schedule(turn.profile, row.server_seq, links, store: store(state, turn))
 
       {:ok, {:existing, _row}} ->
         :ok
@@ -587,12 +624,14 @@ defmodule FermixChannels.Companion.Turns do
     )
   end
 
-  # Not a queue turn: a slash command's answer, written as the request's
-  # output and announced at once, exactly as a delivery is.
-  defp write_untracked(message, text) do
-    write = fn ->
-      Companion.send_message(message.reply_target, text, Companion.reply_opts(message))
-    end
+  # Not a queue turn: a slash command's answer or a background run's result,
+  # written as the request's output with the blocks its text makes of the
+  # conversation's place records, and announced at once, exactly as a
+  # delivery is.
+  defp write_untracked(state, message, text) do
+    records = take_records(state, message.id, ConversationKey.from(message))
+    opts = [blocks: ReplyBlocks.build(text, records)] ++ Companion.reply_opts(message)
+    write = fn -> Companion.send_message(message.reply_target, text, opts) end
 
     guarded(message.id, "reply", write)
   end

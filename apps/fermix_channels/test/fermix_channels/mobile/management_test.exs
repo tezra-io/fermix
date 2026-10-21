@@ -11,6 +11,8 @@ defmodule FermixChannels.Mobile.ManagementTest do
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
   alias FermixTestSupport.SafeRm
 
+  @endpoint_id "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664"
+
   test "begin_pairing returns a canonical secret-bearing URI and terminal QR only" do
     identity = %{
       gateway_public_key: <<1::256>>,
@@ -56,6 +58,34 @@ defmodule FermixChannels.Mobile.ManagementTest do
     assert Base.decode64!(query["gateway_pk"]) == <<1::256>>
     assert Base.decode64!(query["secret"]) == <<3::256>>
     assert query["tls_fp"] == Base.encode16(<<2::256>>, case: :lower)
+  end
+
+  # M62 §4.2: a ready rail adds its endpoint id, its relays in compact
+  # `host:quic_port` form, and that list's revision; a rail that is not ready
+  # adds nothing, and the phone learns the route at hello once it is.
+  test "begin_pairing carries the rail's route only while it is ready" do
+    candidate = %{
+      "kind" => "iroh",
+      "node_id" => @endpoint_id,
+      "relays" => [
+        %{"url" => "https://us1.relay.fermix.ai/", "quic_port" => 7842},
+        %{"url" => "https://eu1.relay.fermix.ai/", "quic_port" => 7842}
+      ],
+      "relays_rev" => "0123456789abcdef"
+    }
+
+    ready = start_opts(iroh_helper: :rail, iroh_candidate: fn :rail -> {:ok, candidate} end)
+    assert {:ok, %{uri: uri}} = Management.begin_pairing(ready)
+    query = uri |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+
+    assert query["iroh"] == @endpoint_id
+    assert query["relays"] == "us1.relay.fermix.ai:7842,eu1.relay.fermix.ai:7842"
+    assert query["relays_rev"] == "0123456789abcdef"
+
+    not_ready = start_opts(iroh_helper: :rail, iroh_candidate: fn :rail -> :none end)
+    assert {:ok, %{uri: uri}} = Management.begin_pairing(not_ready)
+    query = uri |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+    refute Enum.any?(~w(iroh relays relays_rev), &Map.has_key?(query, &1))
   end
 
   # D1(e): a host with many bridges counted as LAN put every one in the QR
@@ -866,6 +896,14 @@ defmodule FermixChannels.Mobile.ManagementTest do
     end
   end
 
+  # Reach from anywhere is live too (M62 D4), within a running phone subtree.
+  describe "apply_iroh/2" do
+    test "with no phone subtree running there is no rail to switch" do
+      assert {:error, :not_ready} = Management.apply_iroh(true, parent: :no_phone_here)
+      assert {:ok, :stopped} = Management.apply_iroh(false, parent: :no_phone_here)
+    end
+  end
+
   # The switch is live (M51 §5.5): core calls this after it writes the switch.
   describe "apply_enabled/2" do
     test "answers what the subtree's switch did" do
@@ -907,11 +945,34 @@ defmodule FermixChannels.Mobile.ManagementTest do
                mdns: :disabled,
                tailnet: %{detected: false, candidates: []},
                identity: %{present: false, fingerprint: nil},
+               remote: %{state: :off},
                apns: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
                paired_devices: 0,
                protocol_version: FermixChannels.Mobile.Protocol.protocol_version(),
                pairing: nil
              }
+    end
+
+    # Reach from anywhere (M62) is read from the rail only while the subtree
+    # runs, and reported as the rail reports it.
+    test "a running channel reports its reach as the rail does" do
+      ready = %{
+        state: :ready,
+        endpoint_id: @endpoint_id,
+        relay: "https://us1.relay.fermix.ai/",
+        connected: true,
+        relay_error: nil,
+        refused: %{busy: 0, alpn: 0, bridge_unreachable: 0}
+      }
+
+      opts =
+        serving_opts(
+          iroh_helper: :rail,
+          iroh_status: fn :rail -> ready end,
+          list_devices: fn :store -> {:ok, []} end
+        )
+
+      assert {:ok, %{started: true, remote: ^ready}} = Management.status(opts)
     end
 
     test "a refused surface or a subtree not started yet answers without a process call" do

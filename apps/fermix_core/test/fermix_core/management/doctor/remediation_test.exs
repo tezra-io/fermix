@@ -17,6 +17,21 @@ defmodule FermixCore.Management.Doctor.RemediationTest do
     assert Remediation.fetch("no_such_check", "failed") == nil
   end
 
+  # Every recent call failing is an outage the operator can route around by
+  # making another provider primary; one failed call can be a blip, so the
+  # warning has nothing to press.
+  test "provider health names its remedy for a failure and a warning" do
+    assert %{"title" => _title, "body" => _body, "action" => failed} =
+             Remediation.fetch("provider_health", "failed")
+
+    assert failed == %{"kind" => "settings_pane", "target" => "providers"}
+
+    assert %{"title" => _title, "body" => _body, "action" => warning} =
+             Remediation.fetch("provider_health", "warning")
+
+    assert warning == %{"kind" => "none", "target" => nil}
+  end
+
   test "an entry carries a title, a body and one action" do
     assert %{"title" => title, "body" => body, "action" => action} =
              Remediation.fetch("legacy_service_unit", "warning")
@@ -87,6 +102,17 @@ defmodule FermixCore.Management.Doctor.RemediationTest do
   test "a refused voice key opens the Voice pane" do
     assert %{"action" => %{"kind" => "settings_pane", "target" => "voice"}} =
              Remediation.fetch("realtime_key", "failed")
+  end
+
+  # The check asks whichever vendor the engine dials (M70), so the remedy names
+  # the voice key rather than one vendor's.
+  test "a refused voice key's remedy names no single vendor" do
+    %{"title" => title, "body" => body} = Remediation.fetch("realtime_key", "failed")
+
+    assert title == "Replace the voice API key"
+
+    assert body ==
+             "The voice provider does not accept the saved key, so a voice call cannot start."
   end
 
   test "a none action still names a kind so a surface never guesses" do

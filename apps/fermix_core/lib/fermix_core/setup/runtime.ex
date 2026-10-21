@@ -10,6 +10,7 @@ defmodule FermixCore.Setup.Runtime do
   and the packaged CLI binary.
   """
 
+  alias Fermix.CLI.SecretInput
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.ChatGPT.TerminalLogin
   alias FermixCore.Providers.Descriptor
@@ -19,6 +20,7 @@ defmodule FermixCore.Setup.Runtime do
   alias FermixCore.Setup.Doctor
   alias FermixCore.Setup.LiveModel
   alias FermixCore.Setup.SecretMigration
+  alias FermixCore.Setup.SecretPaths
   alias FermixCore.Setup.SecretWriter
   alias FermixCore.Setup.Wizard
 
@@ -69,29 +71,64 @@ defmodule FermixCore.Setup.Runtime do
                    :acp_enabled,
                    :proxy,
                    :proxy_bypass,
+                   :openai_base_url,
+                   :anthropic_base_url,
+                   :xai_base_url,
                    :secret_store
                  ]
 
   @type puts_fun :: (String.t() -> any())
   @type prompt_fun :: (String.t() -> String.t())
-  @type io_opts :: [puts: puts_fun(), prompt: prompt_fun()]
+  @type io_opts :: [puts: puts_fun(), prompt: prompt_fun(), secret_prompt: prompt_fun()]
+
+  # The answers stored as secrets: every setup secret, plus the voice and
+  # transcription keys, which setup files under their provider's secret.
+  @secret_answer_keys [:realtime_api_key, :transcription_api_key] ++
+                        Enum.map(SecretPaths.all(), & &1.key)
 
   @spec run(keyword(), io_opts()) :: :ok | {:error, String.t()}
   def run(opts, io_opts \\ []) when is_list(opts) and is_list(io_opts) do
     puts = Keyword.get(io_opts, :puts, &IO.puts/1)
     prompt = Keyword.get(io_opts, :prompt, &default_prompt/1)
+    ask = asker(prompt, secret_prompt(io_opts, prompt))
 
     if Keyword.get(opts, :migrate_secrets, false) do
       SecretMigration.run(opts, puts: puts, prompt: prompt)
     else
       with {:ok, report} <- load_report() do
-        dispatch(report, opts, puts, prompt)
+        dispatch(report, opts, puts, ask)
       end
+    end
+  end
+
+  # The terminal reads a secret answer with echo off: most are pasted, and a
+  # pasted key left on screen stays in the scrollback. An injected `:prompt`
+  # stands in for the terminal, so it answers secret questions too unless a
+  # `:secret_prompt` is injected beside it.
+  defp secret_prompt(io_opts, prompt) do
+    cond do
+      Keyword.has_key?(io_opts, :secret_prompt) -> Keyword.fetch!(io_opts, :secret_prompt)
+      Keyword.has_key?(io_opts, :prompt) -> prompt
+      true -> &default_secret_prompt/1
+    end
+  end
+
+  # One reader for every caller below: a question asking for a secret comes as
+  # `{:secret, label}` (see `interactive_answer/2`), any other as its label.
+  defp asker(prompt, secret_prompt) do
+    fn
+      {:secret, label} -> secret_prompt.(label)
+      label when is_binary(label) -> prompt.(label)
     end
   end
 
   defp dispatch(report, opts, puts, prompt) do
     cond do
+      # A base URL flag the adapters could not dial fails the run before any
+      # branch below can write, the store choice included.
+      refusal = Wizard.base_url_refusal(opts) ->
+        {:error, refusal}
+
       Keyword.get(opts, :print_state) ->
         print_report(report, puts)
         :ok
@@ -516,15 +553,18 @@ defmodule FermixCore.Setup.Runtime do
     end
   end
 
-  defp interactive_answer(%{key: key, label: label, default: default}, prompt) do
-    value = label |> prompt.() |> to_string() |> String.trim()
+  defp interactive_answer(%{key: key, default: default} = prompt_info, prompt) do
+    value = prompt_info |> question() |> prompt.() |> to_string() |> String.trim()
     if value == "", do: [{key, default}], else: [{key, value}]
   end
 
-  defp interactive_answer(%{key: key, label: label}, prompt) do
-    value = label |> prompt.() |> to_string() |> String.trim()
+  defp interactive_answer(%{key: key} = prompt_info, prompt) do
+    value = prompt_info |> question() |> prompt.() |> to_string() |> String.trim()
     if value == "", do: [], else: [{key, value}]
   end
+
+  defp question(%{key: key, label: label}) when key in @secret_answer_keys, do: {:secret, label}
+  defp question(%{label: label}), do: label
 
   defp answered?(answers, key), do: Keyword.get(answers, key) not in [nil, ""]
 
@@ -541,8 +581,10 @@ defmodule FermixCore.Setup.Runtime do
     end
   end
 
-  defp irrelevant_prompt?(%{key: :realtime_api_key}, answers) do
-    realtime_enabled_answer(answers) == false or selected_provider(answers) == :openai
+  # The voice key is the voice provider's own key: when that provider is the one
+  # just set up, its key prompt has already asked for it.
+  defp irrelevant_prompt?(%{key: :realtime_api_key, provider: provider}, answers) do
+    realtime_enabled_answer(answers) == false or selected_provider(answers) == provider
   end
 
   defp irrelevant_prompt?(%{key: key}, answers)
@@ -640,6 +682,16 @@ defmodule FermixCore.Setup.Runtime do
       :eof -> ""
       {:error, _reason} -> ""
       value -> value
+    end
+  end
+
+  # A terminal that cannot turn its echo off fails setup rather than show the
+  # secret; an end of input is a blank answer, as it is for any question.
+  defp default_secret_prompt(label) do
+    case SecretInput.read_answer(label) do
+      {:ok, value} -> value
+      {:error, :no_input} -> ""
+      {:error, reason} -> raise "fermix setup could not read #{label}: #{inspect(reason)}"
     end
   end
 end

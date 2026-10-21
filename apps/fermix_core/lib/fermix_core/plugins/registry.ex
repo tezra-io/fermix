@@ -51,6 +51,7 @@ defmodule FermixCore.Plugins.Registry do
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Http.Template
   alias FermixCore.Plugins.Plugin
+  alias FermixCore.Plugins.Retired
   alias FermixCore.Setup.ConfigStore
 
   @manifest_fields ~w(
@@ -78,6 +79,7 @@ defmodule FermixCore.Plugins.Registry do
   @config_kinds %{"text" => :text, "boolean" => :boolean}
   @config_key_regex ~r/^[A-Z][A-Z0-9_]*$/
   @runtime_kinds ~w(node python binary escript)
+  @runtime_floor_regex ~r/^\d+(\.\d+){0,2}$/
   @name_regex ~r/^[a-z][a-z0-9_]{0,63}$/
   @tool_name_regex ~r/^[A-Za-z0-9_-]{1,64}$/
   @max_tool_description_bytes 100
@@ -301,12 +303,14 @@ defmodule FermixCore.Plugins.Registry do
   # Installed plugins read through `installed/<name>/current/plugin.json`.
   # Incompatible entries (plugin_api window / min_core_version, §13) are
   # excluded, not fatal — an upgrade that moved the support window must not
-  # take the whole registry down. A `:ready` entry whose manifest is missing
-  # or invalid IS fatal: the store is corrupt, fail loud.
+  # take the whole registry down. A retired name (`Plugins.Retired`) is
+  # excluded too: this build no longer offers it, so its manifest is never
+  # read and a remote one is never re-verified. A `:ready` entry whose manifest
+  # is missing or invalid IS fatal: the store is corrupt, fail loud.
   defp load_installed_plugins(root) do
     root
     |> DistStore.list()
-    |> Enum.filter(&(&1.status == :ready))
+    |> Enum.filter(&(&1.status == :ready and not Retired.retired?(&1.name)))
     |> Enum.reduce_while({:ok, []}, fn entry, {:ok, acc} ->
       case load_installed_plugin(root, entry.name) do
         {:ok, plugin} -> {:cont, {:ok, [plugin | acc]}}
@@ -555,6 +559,7 @@ defmodule FermixCore.Plugins.Registry do
          :ok <- validate_scopes(plugin),
          :ok <- validate_api3(plugin),
          :ok <- validate_runtime(plugin),
+         :ok <- validate_runtime_floor(plugin),
          :ok <- validate_tools(plugin),
          :ok <- validate_skills(plugin) do
       :ok
@@ -589,6 +594,19 @@ defmodule FermixCore.Plugins.Registry do
   end
 
   defp validate_runtime_block(runtime, _plugin), do: {:error, {:invalid_runtime, runtime}}
+
+  # `min_version` is the floor `Dist.RuntimeProbe` holds the host runtime's own
+  # `--version` to on every status read, for any plugin that declares a runtime.
+  # A floor that does not read as a version is this manifest's defect, so it is
+  # refused here, at install and at load, rather than surfacing later as a broken
+  # runtime on the owner's machine.
+  defp validate_runtime_floor(%Plugin{runtime: %{"min_version" => floor} = runtime}) do
+    if is_binary(floor) and floor =~ @runtime_floor_regex,
+      do: :ok,
+      else: {:error, {:invalid_runtime, runtime}}
+  end
+
+  defp validate_runtime_floor(%Plugin{}), do: :ok
 
   # The runtime half of the `requires_setting` gate (M8 §9.3): a local plugin
   # process may gate itself on one of its own manifest's `config` keys, so an

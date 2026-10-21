@@ -5,6 +5,7 @@ defmodule Fermix.CLI.SandboxCommandTest do
 
   alias Fermix.CLI.SandboxCommand
   alias FermixCore.Sandbox.Config
+  alias FermixCore.Sandbox.OsSandbox
   alias FermixCore.Sandbox.PathPolicy
 
   setup do
@@ -85,6 +86,40 @@ defmodule Fermix.CLI.SandboxCommandTest do
     assert output =~ "effective roots:"
     assert output =~ "  - #{PathPolicy.canonical_path(granted)} (granted)"
     assert output =~ "  - #{PathPolicy.canonical_path(workspace)} (mode)"
+
+    FermixTestSupport.SafeRm.rm_rf!(home)
+  end
+
+  test "explain lists what commands cannot read, and open leaves the owner's credentials readable" do
+    home = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-explain-reads")
+    {:ok, resolved_home} = PathPolicy.resolve_links(home)
+    fermix_home = Path.join(resolved_home, ".fermix")
+
+    reads =
+      for mode <- [:strict, :open], into: %{} do
+        Application.put_env(
+          :fermix_core,
+          :sandbox,
+          Config.normalize(
+            home: Path.join(home, ".fermix"),
+            os_home: home,
+            mode: mode,
+            workspace_root: Path.join(home, ".fermix/workspace")
+          )
+        )
+
+        output = capture_io(fn -> assert SandboxCommand.run(["explain"]) == 0 end)
+        assert output =~ "commands: #{OsSandbox.enforcement()}\n"
+        {mode, section(output, "commands cannot read:")}
+      end
+
+    for mode <- [:strict, :open] do
+      assert reads[mode] =~ "  - #{fermix_home}/secrets\n"
+      assert reads[mode] =~ "  - #{fermix_home}/auth.json*\n"
+    end
+
+    assert reads.strict =~ "  - #{resolved_home}/.ssh\n"
+    refute reads.open =~ "/.ssh"
 
     FermixTestSupport.SafeRm.rm_rf!(home)
   end
@@ -189,5 +224,11 @@ defmodule Fermix.CLI.SandboxCommandTest do
     assert grant_output =~ "command granted: echo_test"
     assert Config.current().commands.explicit["echo_test"].command == "/bin/echo"
     assert Config.current().commands.explicit["echo_test"].args == ["hello"]
+  end
+
+  # The lines under `heading`, up to the blank line that ends its block.
+  defp section(output, heading) do
+    [_before, rest] = String.split(output, heading <> "\n", parts: 2)
+    rest |> String.split("\n\n", parts: 2) |> hd() |> Kernel.<>("\n")
   end
 end

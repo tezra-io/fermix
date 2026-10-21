@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Checker (json): a live-web task about the real Formula 1 calendar, graded against
 the calendar as it stands when the trial is graded, so no answer is stored anywhere.
 

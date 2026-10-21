@@ -48,12 +48,14 @@ defmodule FermixChannels.Channels.Companion do
   alias FermixChannels.Companion.Turns
   alias FermixChannels.Gateway.Channel
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.LinkPreviews
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Agents.LiveCallTurn
   alias FermixCore.Companion.Protocol
   alias FermixCore.Companion.Timeline
   alias FermixCore.Reply
+  alias FermixCore.ReplyBlocks
   alias FermixCore.Telemetry
   alias FermixCore.Text
 
@@ -258,7 +260,9 @@ defmodule FermixChannels.Channels.Companion do
   key, and anything else (a scheduled job's result) is a plain row; whether or
   not a client is connected, the row is the delivery. A delivery, one that
   answers no request, is pushed to the phones as well while their channel
-  runs (M56 D9), as one through the phone's own channel is.
+  runs (M56 D9), as one through the phone's own channel is. A reply's
+  `:blocks` (M72) are stored and announced with its row, and the links they
+  do not draw are previewed, as every row's are.
   """
   @impl true
   @spec send_message(String.t(), String.t()) :: :ok | {:error, term()}
@@ -272,6 +276,7 @@ defmodule FermixChannels.Channels.Companion do
                Output.persist_text(store(), profile_id, text, Map.new(opts)) do
           announce_written(status, profile_id, row)
           push_delivered(status, profile_id, row, opts)
+          preview_written(status, profile_id, row, text, opts)
           {:ok, status}
         end
       end)
@@ -342,15 +347,21 @@ defmodule FermixChannels.Channels.Companion do
   end
 
   @doc """
-  Attachments do not travel on this socket in version 1, so a media reply is
-  refused rather than written as a row the client could never fetch.
+  Write one picture or file Fermix sends into the timeline and announce it. The
+  Mac draws it from the row's media ref, whose bytes it fetches with
+  `media_fetch` (protocol 3), and the phones get it as they get one sent through
+  their own channel: `Mobile.write_media/4` is the one write for a media reply,
+  here through this channel's store, counted as this channel's delivery.
   """
   @impl true
   @spec send_media(String.t(), Reply.media_part()) :: :ok | {:error, term()}
   @spec send_media(String.t(), Reply.media_part(), Channel.send_opts()) :: :ok | {:error, term()}
   def send_media(profile_id, media, opts \\ [])
       when is_binary(profile_id) and is_map(media) and is_list(opts) do
-    {:error, :unsupported_media}
+    {result, duration_us} =
+      Telemetry.timed_us(fn -> Mobile.write_media(store(), profile_id, media, opts) end)
+
+    emit_outbound(result, duration_us)
   end
 
   # A row written here is no turn's completion (a slash command's answer, a
@@ -376,6 +387,14 @@ defmodule FermixChannels.Channels.Companion do
   end
 
   defp push_delivered(:existing, _profile, _row, _opts), do: :ok
+
+  # A row the store deduplicated was previewed when it was written.
+  defp preview_written(:created, profile, row, text, opts) do
+    links = ReplyBlocks.links(text, Keyword.get(opts, :blocks, []))
+    LinkPreviews.schedule(profile, row.server_seq, links, store: store())
+  end
+
+  defp preview_written(:existing, _profile, _row, _text, _opts), do: :ok
 
   # One durable timeline row is one delivered outbound message; a row the store
   # deduplicated was counted when it was created.

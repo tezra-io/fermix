@@ -32,8 +32,9 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
   when a pooled socket was already dead — the family's stale-socket retry, not a
   second query.
 
-  This is not a `PlaceSearch.Backend` behaviour and must not become one — §21.6
-  rejects a shared callback while there is exactly one approved raw provider.
+  One of the two `PlaceSearch.Backend`s (M72 §14.1): it runs when
+  `[fermix_core.tools.place_search] backend` is `brave`, or unset on a build
+  without the Apple Maps helper (Homebrew, Linux).
 
   `opts` is the resolved `[fermix_core.tools.web_search]` keyword (the one Brave
   credential, §8.1) plus `:context` — the same shape the `web_search` Brave
@@ -41,6 +42,8 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
   the request contract below is re-checked here because a malformed outbound
   request must fail locally rather than buy a metered 4xx.
   """
+
+  @behaviour FermixCore.Tools.PlaceSearch.Backend
 
   alias FermixCore.Net.Guard
   alias FermixCore.Net.HttpClient
@@ -66,6 +69,11 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
   # Not a §10.2 cap: a day is one string, and this bounds the ranges joined
   # into it so a pathological payload cannot build an unbounded label.
   @max_day_ranges 8
+  # What of a refusal's ErrorResponse a failure carries: its code and each
+  # rejected field's name, its detail sentence, and at most this many fields.
+  @max_refusal_code_chars 64
+  @max_refusal_detail_chars 200
+  @max_refusal_fields 5
 
   @type anchor :: {:location, String.t()} | {:coordinates, number(), number()}
 
@@ -82,6 +90,17 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
   @type place :: %{required(:name) => String.t(), optional(atom()) => term()}
   @type trace_metadata :: %{optional(atom()) => term()}
 
+  @impl true
+  @spec name() :: :brave
+  def name, do: :brave
+
+  @doc "Ready when the shared Brave key resolves from `opts` (§8.1)."
+  @impl true
+  @spec ready(keyword()) :: :ok | {:error, String.t()}
+  def ready(opts) when is_list(opts) do
+    with {:ok, _api_key} <- SearchCredential.brave(opts), do: :ok
+  end
+
   @doc """
   Runs one place search.
 
@@ -90,6 +109,7 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
   `invalid_query`, `invalid_location`, `auth_failed`, `rate_limited`,
   `provider_error`, `parser_changed`, `response_too_large`, `network`.
   """
+  @impl true
   @spec search(request(), keyword()) ::
           {:ok, [place()], trace_metadata()} | {:error, String.t(), trace_metadata()}
   def search(request, opts) when is_map(request) and is_list(opts) do
@@ -263,7 +283,11 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
   end
 
   # Status first: on a 4xx/5xx the status is the actionable fact, and the body
-  # is the provider's error page rather than a place list.
+  # is the provider's error page rather than a place list. Brave answers a
+  # refusal with its own ErrorResponse, whose short code and detail sentence
+  # are the vendor's words for why; they are carried, sanitized and cut, with
+  # the names of the fields it rejected, but never the body itself (§16). Brave
+  # answers a wrong key with 422, so its code, not the status, says so.
   defp response_json(%{status: status} = response) when status in 200..299 do
     with :ok <- within_cap(response), do: decode_body(response.body)
   end
@@ -272,11 +296,72 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
     {:error, "provider_error: HTTP #{status} redirect refused (place search never follows one)"}
   end
 
-  defp response_json(%{status: status}) when status in [401, 403],
-    do: {:error, "auth_failed: HTTP #{status}"}
+  defp response_json(%{status: status} = response) do
+    refusal = brave_refusal(response.body)
+    {:error, "#{refusal_tag(status, refusal)}: HTTP #{status}#{refusal_words(refusal)}"}
+  end
 
-  defp response_json(%{status: 429}), do: {:error, "rate_limited: HTTP 429"}
-  defp response_json(%{status: status}), do: {:error, "provider_error: HTTP #{status}"}
+  defp refusal_tag(_status, %{code: "SUBSCRIPTION_TOKEN_INVALID"}), do: "auth_failed"
+  defp refusal_tag(status, _refusal) when status in [401, 403], do: "auth_failed"
+  defp refusal_tag(429, _refusal), do: "rate_limited"
+  defp refusal_tag(_status, _refusal), do: "provider_error"
+
+  # Brave's ErrorResponse, or nil for any other body (a CDN page, a body cut
+  # at the cap).
+  defp brave_refusal(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, %{"error" => %{"code" => code} = error}} when is_binary(code) ->
+        %{code: code, detail: Map.get(error, "detail"), fields: rejected_fields(error)}
+
+      _other ->
+        nil
+    end
+  end
+
+  defp brave_refusal(_body), do: nil
+
+  defp rejected_fields(%{"meta" => %{"errors" => errors}}) when is_list(errors) do
+    errors
+    |> Enum.flat_map(&rejected_field/1)
+    |> Enum.uniq()
+    |> Enum.take(@max_refusal_fields)
+  end
+
+  defp rejected_fields(_error), do: []
+
+  # A validation entry names the field it rejected last in its `loc`.
+  defp rejected_field(%{"loc" => [_ | _] = loc}) do
+    case List.last(loc) do
+      field when is_binary(field) -> [refusal_text(field, @max_refusal_code_chars)]
+      _other -> []
+    end
+  end
+
+  defp rejected_field(_entry), do: []
+
+  defp refusal_words(nil), do: ""
+
+  defp refusal_words(%{code: code, detail: detail, fields: fields}) do
+    " " <>
+      refusal_text(code, @max_refusal_code_chars) <>
+      detail_words(detail) <> field_words(fields)
+  end
+
+  defp detail_words(detail) when is_binary(detail) do
+    case refusal_text(detail, @max_refusal_detail_chars) do
+      "" -> ""
+      words -> ": " <> words
+    end
+  end
+
+  defp detail_words(_detail), do: ""
+
+  defp field_words([]), do: ""
+  defp field_words(fields), do: " (" <> Enum.join(fields, ", ") <> ")"
+
+  defp refusal_text(text, max_chars) do
+    text |> SnippetSanitizer.sanitize() |> String.trim() |> String.slice(0, max_chars)
+  end
 
   defp within_cap(%{private: %{fermix_body_cap: :too_large}}),
     do: {:error, "response_too_large: body exceeded #{@max_body_bytes} bytes"}

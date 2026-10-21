@@ -94,6 +94,7 @@ defmodule FermixCore.Prompt.SetupSeederTest do
                :soul,
                :realtime,
                :live,
+               :grok,
                :user,
                :memory
              ]
@@ -106,6 +107,7 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       soul_path = BootstrapPaths.soul_path(agent_id)
       realtime_path = BootstrapPaths.realtime_path(agent_id)
       live_path = BootstrapPaths.live_path(agent_id)
+      grok_path = BootstrapPaths.grok_path(agent_id)
       user_path = PromptFiles.user_path(agent_id)
       memory_path = PromptFiles.memory_path(agent_id)
 
@@ -114,6 +116,7 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       assert File.read!(soul_path) == Defaults.soul_md()
       assert File.read!(realtime_path) == Defaults.realtime_md()
       assert File.read!(live_path) == Defaults.live_md()
+      assert File.read!(grok_path) == Defaults.grok_md()
 
       user_content = File.read!(user_path)
       assert user_content =~ "name: Sujeeth"
@@ -130,7 +133,8 @@ defmodule FermixCore.Prompt.SetupSeederTest do
             {:fermix_md, Defaults.fermix_md()},
             {:soul_md, Defaults.soul_md()},
             {:realtime_md, Defaults.realtime_md()},
-            {:live_md, Defaults.live_md()}
+            {:live_md, Defaults.live_md()},
+            {:grok_md, Defaults.grok_md()}
           ] do
         assert {:ok, [revision]} =
                  Registry.list_revisions(agent_id, resource_type, "global", repo: repo)
@@ -196,6 +200,23 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       assert File.read!(BootstrapPaths.realtime_path(agent_id)) == Defaults.realtime_md()
     end
 
+    test "seeds GROK.md on a fresh install and preserves an existing one", %{
+      agent_id: agent_id,
+      repo: repo
+    } do
+      File.mkdir_p!(BootstrapPaths.agent_dir(agent_id))
+      File.write!(BootstrapPaths.grok_path(agent_id), "operator grok rules")
+
+      assert {:ok, results} = SetupSeeder.seed(%{user_name: "Aira"}, repo: repo)
+
+      assert %{name: :grok, outcome: :skipped_exists, revision_id: nil} =
+               Enum.find(results, &(&1.name == :grok))
+
+      assert %{name: :live, outcome: :seeded} = Enum.find(results, &(&1.name == :live))
+      assert File.read!(BootstrapPaths.grok_path(agent_id)) == "operator grok rules"
+      assert File.read!(BootstrapPaths.live_path(agent_id)) == Defaults.live_md()
+    end
+
     test "skips files that already exist and emits skipped_exists telemetry", %{
       agent_id: agent_id,
       repo: repo
@@ -228,6 +249,7 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       assert_received {:seed, %{name: :soul, outcome: :skipped_exists}}
       assert_received {:seed, %{name: :realtime, outcome: :skipped_exists}}
       assert_received {:seed, %{name: :live, outcome: :skipped_exists}}
+      assert_received {:seed, %{name: :grok, outcome: :skipped_exists}}
       assert_received {:seed, %{name: :user, outcome: :skipped_exists}}
       assert_received {:seed, %{name: :memory, outcome: :skipped_exists}}
     end

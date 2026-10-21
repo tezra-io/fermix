@@ -1,0 +1,55 @@
+#!/bin/bash
+# The kit image's entrypoint: the command a sandbox session runs. It waits for
+# the daemon the boot hook starts to answer, and says whether Fermix is up. It
+# writes no settings.
+#
+#   fermix-sandbox-session          a headless run: follows the daemon log
+#   fermix-sandbox-session --shell  a TTY session (`sbx run`, `sbx --cloud
+#                                   attach`): hands over to a login shell
+#
+# The kit's lifecycle@1 `interactive: [--shell]` tail selects the second form.
+set -euo pipefail
+
+readonly boot_log="$HOME/.fermix-sandbox-boot.log"
+readonly wait_seconds=60
+
+case "$*" in
+  "") mode=headless ;;
+  --shell) mode=shell ;;
+  *)
+    echo "usage: fermix-sandbox-session [--shell]" >&2
+    exit 2
+    ;;
+esac
+
+# The control socket opens before the rest of the daemon, so wait for an
+# answer, not for the socket.
+running=0
+status_out=""
+for ((waited = 0; waited <= wait_seconds; waited++)); do
+  if status_out="$(fermix status 2>&1)"; then
+    running=1
+    break
+  fi
+  if ((waited < wait_seconds)); then
+    sleep 1
+  fi
+done
+
+if ((running)); then
+  echo "$status_out"
+else
+  echo "Fermix did not start within ${wait_seconds} seconds: ${status_out}" >&2
+  echo "The end of ${boot_log}:" >&2
+  tail -n 20 "$boot_log" >&2 || echo "(${boot_log} does not exist: the boot hook never ran)" >&2
+  if [ "$mode" = headless ]; then
+    exit 1
+  fi
+fi
+
+if [ "$mode" = headless ]; then
+  exec fermix logs -f
+fi
+
+echo "Type fermix ask \"...\" to talk to Fermix, or fermix settings to change it."
+exec bash -l

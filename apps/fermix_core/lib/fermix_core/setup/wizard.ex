@@ -27,6 +27,7 @@ defmodule FermixCore.Setup.Wizard do
   alias FermixCore.Setup.SecretWriter
   alias FermixCore.Setup.WizardState
   alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
+  alias FermixCore.Tools.PlaceSearch.Config, as: PlaceSearchConfig
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
 
   require Logger
@@ -43,6 +44,9 @@ defmodule FermixCore.Setup.Wizard do
           | {:mistral_api_key, String.t()}
           | {:venice_api_key, String.t()}
           | {:ollama_base_url, String.t()}
+          | {:openai_base_url, String.t()}
+          | {:anthropic_base_url, String.t()}
+          | {:xai_base_url, String.t()}
           | {:anthropic_auth_mode, auth_mode() | String.t()}
           | {:xai_auth_mode, auth_mode() | String.t()}
           | {:provider, provider() | String.t()}
@@ -66,6 +70,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:computer_history_enabled, boolean() | String.t()}
           | {:computer_history_apps, [String.t()] | String.t()}
           | {:web_search_backend, atom() | String.t()}
+          | {:place_search_backend, atom() | String.t()}
           | {:tavily_api_key, String.t()}
           | {:exa_api_key, String.t()}
           | {:parallel_api_key, String.t()}
@@ -103,6 +108,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:signal_enabled, boolean() | String.t()}
           | {:acp_enabled, boolean() | String.t()}
           | {:mobile_enabled, boolean() | String.t()}
+          | {:mobile_iroh, boolean() | String.t()}
           | {:mobile_port, pos_integer()}
           | {:mobile_bind, String.t()}
           | {:mobile_advertise_mdns, boolean() | String.t()}
@@ -119,8 +125,20 @@ defmodule FermixCore.Setup.Wizard do
                            |> Enum.filter(&FermixCore.Providers.Descriptor.multi_auth_mode?/1)
                            |> Enum.map(&{&1.id, :"#{&1.id}_auth_mode"})
 
+  # The hosted providers whose `base_url` setup writes from a flag
+  # (`fermix setup --openai-base-url` and its two siblings), to point one at a
+  # relay. They are not descriptor setup fields, so no question asks for them.
+  @base_url_answer_keys [
+    openai_base_url: :openai,
+    anthropic_base_url: :anthropic,
+    xai_base_url: :xai
+  ]
+
   @realtime_true_values ~w(true yes y 1)
   @realtime_false_values ~w(false no n 0)
+  # The settings only the Realtime engine takes; a move onto a task engine
+  # drops them (`RealtimeConfig.normalize/1` refuses them there).
+  @realtime_only_keys [:reasoning_effort, :transcription_model, :max_response_output_tokens]
   @realtime_followup_prompt_keys [
     :realtime_api_key,
     :realtime_voice,
@@ -290,7 +308,6 @@ defmodule FermixCore.Setup.Wizard do
       model_unset?: model_unset?,
       effort_unset?: effort_unset?,
       field_unset: field_unset,
-      realtime_api_key_unset?: canonical_openai_api_key_unpersisted?(persisted),
       realtime_unconfigured?: not ConfigStore.realtime_configured?(),
       default_model: ModelCatalog.default_model_for(prompt_provider)
     }
@@ -455,16 +472,15 @@ defmodule FermixCore.Setup.Wizard do
     ]
   end
 
-  defp realtime_prompts(%{
-         persisted: persisted,
-         realtime_api_key_unset?: realtime_api_key_unset?,
-         realtime_unconfigured?: realtime_unconfigured?
-       }) do
+  defp realtime_prompts(%{persisted: persisted, realtime_unconfigured?: realtime_unconfigured?}) do
     config =
       persisted
       |> Map.get(:fermix_core, [])
       |> Keyword.get(:realtime, [])
       |> RealtimeConfig.normalize()
+
+    voice_provider = voice_provider(config.engine)
+    voice_key_unset? = provider_api_key_unpersisted?(persisted, voice_provider)
 
     [
       %{
@@ -475,8 +491,9 @@ defmodule FermixCore.Setup.Wizard do
       },
       %{
         key: :realtime_api_key,
-        label: realtime_api_key_label(realtime_api_key_unset?),
-        required?: realtime_api_key_unset?
+        provider: voice_provider,
+        label: voice_api_key_label(voice_provider, voice_key_unset?),
+        required?: voice_key_unset?
       },
       %{
         key: :realtime_voice,
@@ -510,11 +527,17 @@ defmodule FermixCore.Setup.Wizard do
   defp yes_no(true), do: "yes"
   defp yes_no(false), do: "no"
 
-  defp realtime_api_key_label(true),
-    do: "OpenAI API key for Realtime (only OpenAI is supported in V1)"
+  # The voice key is the key of the provider the voice model dials, so the
+  # prompt names that provider (`put_voice_api_key/2` writes its slot).
+  defp voice_api_key_label(:openai, true), do: "OpenAI API key for voice"
 
-  defp realtime_api_key_label(false),
-    do: "OpenAI API key for Realtime (blank = use the existing OpenAI provider key)"
+  defp voice_api_key_label(:openai, false),
+    do: "OpenAI API key for voice (blank = use the existing OpenAI provider key)"
+
+  defp voice_api_key_label(:xai, true), do: "SpaceXAI API key for Grok voice"
+
+  defp voice_api_key_label(:xai, false),
+    do: "SpaceXAI API key for Grok voice (blank = use the existing SpaceXAI provider key)"
 
   defp realtime_setup_followup?(%{key: :realtime_api_key, required?: required?}, specs, answers) do
     required? and realtime_resolves_enabled?(specs, answers)
@@ -743,7 +766,7 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   # Derived from the registry, not hand-listed, plus the one answer key that is
-  # not its own secret key: the Realtime prompt writes the OpenAI provider key.
+  # not its own secret key: the voice key writes the voice provider's key.
   defp secret_answer_keys do
     MapSet.new([:realtime_api_key | Enum.map(SecretPaths.all(), & &1.key)])
   end
@@ -758,13 +781,10 @@ defmodule FermixCore.Setup.Wizard do
       state.config_snapshot
       |> drop_unanswered_env_only_secrets(answers)
       |> put_provider_field_answers(answers)
+      |> put_provider_base_url_answers(answers)
       |> put_provider_auth_mode_answers(answers)
-      |> put_openai_api_key(Keyword.get(answers, :realtime_api_key))
       |> put_primary_selection(Keyword.get(answers, :provider))
-      |> maybe_promote_newly_configured(
-        blank?(Keyword.get(answers, :provider)),
-        promotion_excluded_providers(answers)
-      )
+      |> maybe_promote_newly_configured(blank?(Keyword.get(answers, :provider)))
       |> put_default_model(Keyword.get(answers, :default_model), target)
       |> put_subagent_model(Keyword.get(answers, :subagent_model))
       |> put_harness_default_vendor(Keyword.get(answers, :harness_default_vendor))
@@ -773,9 +793,11 @@ defmodule FermixCore.Setup.Wizard do
       |> put_compaction_config(answers)
       |> put_memory_config(answers)
       |> put_realtime_config(answers)
+      |> put_voice_api_key(Keyword.get(answers, :realtime_api_key))
       |> put_computer_use_config(answers)
       |> put_computer_history_config(answers)
       |> put_web_search_config(answers)
+      |> put_place_search_config(answers)
       |> put_image_config(answers)
       |> put_transcription_config(answers)
       |> put_telegram_bot_token(Keyword.get(answers, :telegram_bot_token))
@@ -924,19 +946,31 @@ defmodule FermixCore.Setup.Wizard do
 
   A keyring failure is returned, never logged and swallowed: the operator typed
   a new credential and has to be told it did not land.
+
+  The settings file's write guard (`RestartState.writable/0`) runs before the
+  store is asked, so a write refused for an outside edit changes nothing: the
+  refusal says nothing was saved, and the stored value stays the one it was.
   """
   @spec put_secret(atom(), String.t()) ::
           {:ok, report()} | {:error, {:secret_store_failed, atom(), term()} | term()}
   def put_secret(key, value) when is_atom(key) and is_binary(value) and value != "" do
     secret = SecretPaths.fetch!(key)
-    verdict = SecretWriter.probe()
 
-    # The store is asked first, as every other writer asks it: a store with
-    # nothing to answer is refused with its verdict, and a locked keyring gets
-    # the write, which raises the unlock prompt for the person saving.
-    with :ok <- attemptable_or_verdict(key, verdict),
-         :ok <- SecretWriteLog.put(key, value) do
+    # The guard `commit_snapshot/2` consults, asked before the store is touched,
+    # so a refusal never follows a write it reports as not made.
+    with :ok <- RestartState.writable(),
+         :ok <- store_secret(key, value) do
       commit_secret_reference(secret, SecretWriter.current_sentinel())
+    end
+  end
+
+  # The store is asked first, as every other writer asks it: a store with
+  # nothing to answer is refused with its verdict, and a locked keyring gets
+  # the write, which raises the unlock prompt for the person saving.
+  defp store_secret(key, value) do
+    with :ok <- attemptable_or_verdict(key, SecretWriter.probe()),
+         :ok <- SecretWriteLog.put(key, value) do
+      :ok
     else
       {:error, {:secret_store_failed, _key, _reason} = failure} -> {:error, failure}
       {:error, reason} -> {:error, {:secret_store_failed, key, reason}}
@@ -1012,15 +1046,24 @@ defmodule FermixCore.Setup.Wizard do
 
   Keyring first is the order that cannot orphan a credential. A helper failure
   is reported rather than followed by dropping the reference, which would leave
-  the value on the machine with nothing naming it.
+  the value on the machine with nothing naming it. The settings file's write
+  guard runs before either, so a forget refused for an outside edit deletes
+  nothing and leaves no reference pointing at a deleted item.
   """
   @spec clear_secret(atom()) ::
           {:ok, report()} | {:error, {:secret_store_failed, atom(), term()} | term()}
   def clear_secret(key) when is_atom(key) do
     secret = SecretPaths.fetch!(key)
 
+    with :ok <- RestartState.writable(),
+         :ok <- delete_secret(key) do
+      commit_secret_reference(secret, nil)
+    end
+  end
+
+  defp delete_secret(key) do
     case SecretWriter.delete(key) do
-      :ok -> commit_secret_reference(secret, nil)
+      :ok -> :ok
       {:error, reason} -> {:error, {:secret_store_failed, key, reason}}
     end
   end
@@ -1089,17 +1132,17 @@ defmodule FermixCore.Setup.Wizard do
   # code at all — primary promotion is a setup-save decision only. Codex
   # never trips this diff (its credentials live in the auth store, not the
   # snapshot); it becomes primary via the explicit provider answer.
-  defp maybe_promote_newly_configured(snapshot, false, _excluded), do: snapshot
+  defp maybe_promote_newly_configured(snapshot, false), do: snapshot
 
   # Auto-promote ONLY during initial setup, i.e. when no primary has been chosen
   # yet — the first provider configured becomes primary. Once a primary exists,
   # a newly configured provider stays a FALLBACK; promotion is then an explicit
   # "Set primary" action (which sends a :provider answer -> put_primary_selection).
-  defp maybe_promote_newly_configured(snapshot, true, excluded) do
+  defp maybe_promote_newly_configured(snapshot, true) do
     if primary_established?(snapshot) do
       snapshot
     else
-      case newly_configured_providers(snapshot, excluded) do
+      case newly_configured_providers(snapshot) do
         [] -> snapshot
         # Catalog order — deterministic when one save configures several.
         [provider | _rest] -> mark_primary_provider(snapshot, provider)
@@ -1125,24 +1168,11 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  # The Realtime key shares the OpenAI provider api_key slot (put_openai_api_key
-  # at the :realtime_api_key step). A realtime-only save therefore makes :openai
-  # *look* newly configured without being a provider-tab decision, so it must not
-  # steal an existing primary. A genuine :openai_api_key answer is unaffected.
-  defp promotion_excluded_providers(answers) do
-    if answered?(answers, :realtime_api_key) and not answered?(answers, :openai_api_key) do
-      [:openai]
-    else
-      []
-    end
-  end
-
-  defp newly_configured_providers(snapshot, excluded) do
+  defp newly_configured_providers(snapshot) do
     persisted = persisted_snapshot()
 
     Enum.filter(ModelCatalog.providers(), fn provider ->
-      provider not in excluded and
-        Selection.configured?(provider, provider_config(snapshot, provider)) and
+      Selection.configured?(provider, provider_config(snapshot, provider)) and
         not Selection.configured?(provider, provider_config(persisted, provider))
     end)
   end
@@ -1296,9 +1326,9 @@ defmodule FermixCore.Setup.Wizard do
     |> Keyword.get(provider, [])
   end
 
-  defp canonical_openai_api_key_unpersisted?(persisted) do
+  defp provider_api_key_unpersisted?(persisted, provider) do
     persisted
-    |> provider_config(:openai)
+    |> provider_config(provider)
     |> Keyword.get(:api_key)
     |> blank?()
   end
@@ -1404,25 +1434,100 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
+  # One writer per base URL answer, into that provider's own block whichever
+  # provider is primary. An absent answer changes nothing; a value
+  # `base_url_refusal/1` refuses raises with its sentence before anything is
+  # saved. The value is written trimmed, otherwise as given.
+  defp put_provider_base_url_answers(snapshot, answers) do
+    Enum.reduce(@base_url_answer_keys, snapshot, fn {key, provider}, acc ->
+      case Keyword.get(answers, key) do
+        nil -> acc
+        value -> update_provider_block(acc, provider, :base_url, valid_base_url!(key, value))
+      end
+    end)
+  end
+
+  defp valid_base_url!(key, value) do
+    case base_url_refusal([{key, value}]) do
+      nil -> String.trim(value)
+      sentence -> raise ArgumentError, sentence
+    end
+  end
+
+  @doc """
+  The sentence refusing the first provider base URL answer in `answers`
+  (`openai_base_url`, `anthropic_base_url`, `xai_base_url`) that is not an
+  absolute `http://` or `https://` URL with a host, or `nil` when every one
+  given is. An absent or `nil` answer is not checked. `fermix setup` asks this
+  before it writes anything, so a refused flag leaves the settings file as it
+  was. The sentence does not repeat the value.
+  """
+  @spec base_url_refusal(keyword()) :: String.t() | nil
+  def base_url_refusal(answers) when is_list(answers) do
+    Enum.find_value(@base_url_answer_keys, fn {key, provider} ->
+      value = Keyword.get(answers, key)
+      if is_nil(value) or http_url?(value), do: nil, else: base_url_sentence(key, provider)
+    end)
+  end
+
+  defp http_url?(value) when is_binary(value) do
+    case URI.new(String.trim(value)) do
+      {:ok, %URI{scheme: scheme, host: host}} ->
+        scheme in ["http", "https"] and host not in [nil, ""]
+
+      {:error, _part} ->
+        false
+    end
+  end
+
+  defp http_url?(_value), do: false
+
+  defp base_url_sentence(key, provider) do
+    flag = key |> Atom.to_string() |> String.replace("_", "-")
+
+    "--#{flag} must be an absolute http:// or https:// URL with a host, such as " <>
+      "#{Descriptor.fetch!(provider).default_base_url}."
+  end
+
   defp put_provider_auth_mode_answers(snapshot, answers) do
     Enum.reduce(@provider_auth_mode_keys, snapshot, fn {provider, answer_key}, acc ->
       put_provider_auth_mode(acc, provider, Keyword.get(answers, answer_key))
     end)
   end
 
-  # The Realtime key shares the OpenAI provider api_key slot
-  # (docs/MILESTONE_9_1_REALTIME_VOICE.md — Realtime V1 is OpenAI-only).
-  defp put_openai_api_key(snapshot, value) when value in [nil, ""], do: snapshot
+  # The voice key is the api_key of the provider the voice model dials: OpenAI's
+  # for both OpenAI engines, SpaceXAI's for Grok. It is written after the
+  # realtime answers, so the engine it reads is the one this save leaves (a model
+  # picked in the same save decides), and after primary promotion, so a voice key
+  # never makes its provider the primary chat provider.
+  defp put_voice_api_key(snapshot, value) when value in [nil, ""], do: snapshot
 
-  defp put_openai_api_key(snapshot, api_key) do
-    sentinel = secret_snapshot_value(:openai_api_key, api_key)
+  defp put_voice_api_key(snapshot, api_key) do
+    provider =
+      snapshot
+      |> Map.get(:fermix_core, [])
+      |> Keyword.get(:realtime, [])
+      |> realtime_engine()
+      |> voice_provider()
+
+    sentinel = secret_snapshot_value(voice_key_slot(provider), api_key)
 
     if is_nil(sentinel) do
       snapshot
     else
-      update_provider_block(snapshot, :openai, :api_key, sentinel)
+      update_provider_block(snapshot, provider, :api_key, sentinel)
     end
   end
+
+  defp voice_provider(engine) do
+    case RealtimeConfig.provider_for_engine(engine) do
+      "openai" -> :openai
+      "xai" -> :xai
+    end
+  end
+
+  defp voice_key_slot(:openai), do: :openai_api_key
+  defp voice_key_slot(:xai), do: :xai_api_key
 
   # blank/nil → no-op; an invalid value raises rather than silently dropping
   # (a bad auth_mode would leave the route on api_key and confuse the operator).
@@ -1847,32 +1952,56 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   # The one seam every door reaches: an explicit engine switch carries the keys
-  # the engine owns with it. Live refuses the Realtime-only settings at the
-  # configuration boundary and a Realtime engine refuses a Live model, so
-  # answering the operator's switch with a validation error is the defect this
-  # exists to prevent. It rewrites what they did NOT type: an answer naming one
-  # of these keys is merged on top and is refused by name if it disagrees.
+  # the engine owns with it. A task engine refuses the Realtime-only settings at
+  # the configuration boundary, a Realtime engine refuses a Live model, and each
+  # engine refuses a provider other than its own, so answering the operator's
+  # switch with a validation error is the defect this exists to prevent. It
+  # rewrites what they did NOT type: an answer naming one of these keys is
+  # merged on top and is refused by name if it disagrees. Conversation, budget
+  # and transcript choices are the owner's and survive every move.
   defp switch_realtime_engine(existing, nil), do: existing
 
   defp switch_realtime_engine(existing, engine) do
-    if realtime_engine(existing) == engine do
+    from = realtime_engine(existing)
+
+    if from == engine do
       existing
     else
-      move_realtime_engine(existing, engine)
+      existing |> leave_realtime_engine(from) |> move_realtime_engine(engine)
     end
   end
 
+  # The move onto Grok turned screen sharing off, so the move off it puts the
+  # default back: otherwise only a hand edit of config.toml could restore it.
+  defp leave_realtime_engine(existing, "xai_realtime"),
+    do: Keyword.delete(existing, :screen_share)
+
+  defp leave_realtime_engine(existing, _from), do: existing
+
   defp move_realtime_engine(existing, "openai_live") do
     existing
-    |> Keyword.drop([:reasoning_effort, :transcription_model, :max_response_output_tokens])
+    |> Keyword.drop(@realtime_only_keys)
+    |> put_realtime_provider("openai_live")
     |> put_realtime_model("openai_live")
     |> put_realtime_voice("openai_live")
+  end
+
+  # Grok has no continuous screen perception (M70 §07), so the move turns it off
+  # rather than leaving a value the configuration refuses.
+  defp move_realtime_engine(existing, "xai_realtime") do
+    existing
+    |> Keyword.drop(@realtime_only_keys)
+    |> Keyword.put(:screen_share, false)
+    |> put_realtime_provider("xai_realtime")
+    |> put_realtime_model("xai_realtime")
+    |> put_realtime_voice("xai_realtime")
   end
 
   defp move_realtime_engine(existing, "openai_realtime") do
     existing
     |> Keyword.drop([:conversation])
     |> Keyword.put_new(:reasoning_effort, "low")
+    |> put_realtime_provider("openai_realtime")
     |> put_realtime_model("openai_realtime")
     |> put_realtime_voice("openai_realtime")
   end
@@ -1890,14 +2019,19 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  # Live ships every Realtime voice plus twelve of its own, so only the return
-  # journey can strand one. The struct default is the voice both catalogs open
-  # with, which is what makes it the one value a switch can always land on.
+  # The provider follows from the engine, so a move writes the new engine's.
+  defp put_realtime_provider(existing, engine),
+    do: Keyword.put(existing, :provider, RealtimeConfig.provider_for_engine(engine))
+
+  # Live ships every Realtime voice plus twelve of its own, so between the OpenAI
+  # engines only the return journey can strand one; Grok shares none of them.
+  # A stranded voice lands on the default voice of the engine it moved to, the
+  # one value that engine's catalog always opens with.
   defp put_realtime_voice(existing, engine) do
     if Keyword.get(existing, :voice) in RealtimeConfig.valid_voices(engine) do
       existing
     else
-      Keyword.put(existing, :voice, %RealtimeConfig{}.voice)
+      Keyword.put(existing, :voice, RealtimeConfig.default_voice(engine))
     end
   end
 
@@ -2129,6 +2263,28 @@ defmodule FermixCore.Setup.Wizard do
       snapshot,
       :fermix_core,
       Keyword.put(fermix_core, :tools, Keyword.put(tools, :web_search, web_search))
+    )
+  end
+
+  # `[fermix_core.tools.place_search] backend` (M72 §14.1). An absent answer
+  # changes nothing; a word the section does not know raises its own sentence.
+  defp put_place_search_config(snapshot, answers) do
+    case Keyword.get(answers, :place_search_backend) do
+      nil -> snapshot
+      backend -> update_place_search_config(snapshot, backend)
+    end
+  end
+
+  defp update_place_search_config(snapshot, backend) do
+    values = [backend: backend] |> PlaceSearchConfig.normalize() |> PlaceSearchConfig.to_keyword()
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    tools = Keyword.get(fermix_core, :tools, [])
+    place_search = tools |> Keyword.get(:place_search, []) |> Keyword.merge(values)
+
+    Map.put(
+      snapshot,
+      :fermix_core,
+      Keyword.put(fermix_core, :tools, Keyword.put(tools, :place_search, place_search))
     )
   end
 
@@ -2477,14 +2633,15 @@ defmodule FermixCore.Setup.Wizard do
     value |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
   end
 
-  # The phone channel's four operator settings (M51 management pairing §6). Each
-  # answer is one key merged into `[fermix_channels.mobile]`, so the keys no
-  # pane writes (`push`, `streaming`, the media bounds) survive the write, and
-  # an absent answer changes nothing. The two refusals are the sentences a pane
+  # The phone channel's five operator settings (M51 management pairing §6, and
+  # M62's reach from anywhere). Each answer is one key merged into
+  # `[fermix_channels.mobile]`, so the keys no pane writes (`push`, `streaming`,
+  # the media bounds) survive the write, and an absent answer changes nothing. The two refusals are the sentences a pane
   # shows under the control, so they are written for the operator.
   defp put_mobile_config(snapshot, answers) do
     [
       enabled: normalize_realtime_bool(Keyword.get(answers, :mobile_enabled), :mobile_enabled),
+      iroh: normalize_realtime_bool(Keyword.get(answers, :mobile_iroh), :mobile_iroh),
       port: normalize_mobile_port(Keyword.get(answers, :mobile_port)),
       bind: normalize_mobile_bind(Keyword.get(answers, :mobile_bind)),
       advertise_mdns:

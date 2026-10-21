@@ -89,9 +89,17 @@ defmodule Fermix.CLI.SettingsCommandTest do
     {:ok, stdout} = StringIO.open("")
     {:ok, stderr} = StringIO.open("")
 
+    # The restart route is a host fact (an installed unit, a bound service), so
+    # every case pins it; the foreground cases pass their own.
     opts =
       Keyword.merge(
-        [client: client, stdout: stdout, stderr: stderr, app_managed?: fn -> false end],
+        [
+          client: client,
+          stdout: stdout,
+          stderr: stderr,
+          app_managed?: fn -> false end,
+          restart_route: fn -> {:service, :user} end
+        ],
         extra
       )
 
@@ -197,8 +205,9 @@ defmodule Fermix.CLI.SettingsCommandTest do
 
       assert stdout ==
                "Saved memory: compaction_threshold, review_interval_hours\n" <>
-                 "Restart to apply (fermix restart):\n" <>
-                 "  - Memory settings changed since Fermix started.\n"
+                 "Restart to apply:\n" <>
+                 "  - Memory settings changed since Fermix started.\n" <>
+                 "Restart it with `fermix restart`.\n"
 
       assert [
                {"settings.get", %{"section" => "memory"}, get_opts},
@@ -296,6 +305,7 @@ defmodule Fermix.CLI.SettingsCommandTest do
             "env:ACME_TOKEN",
             "plugin:acme",
             "oauth_client:github",
+            "mcp:files/env/GITHUB_TOKEN",
             "anthropic_setup_token"
           ] do
         {status, stdout, stderr} =
@@ -427,6 +437,75 @@ defmodule Fermix.CLI.SettingsCommandTest do
       assert opts[:timeout] >= 121_000
       assert_received {:secret_input_echo, false}
       assert_received {:secret_input_echo, true}
+    end
+
+    # The 0.15.0 report, end to end through the verb: a packaged engine run in
+    # the foreground with `fermix run`, inside a sandbox that exports
+    # ANTHROPIC_API_KEY=proxy-managed into every process. The result names the
+    # variable the daemon keeps using, and the restart hint names a restart that
+    # works for a daemon no background service runs.
+    test "a value the daemon's environment overrides, on a foreground daemon, says both" do
+      {:ok, device} = StringIO.open("sk-ant-typed\n")
+
+      stored =
+        {:ok,
+         %{
+           "id" => "anthropic_api_key",
+           "present" => true,
+           "restart" => %{
+             "required" => true,
+             "reasons" => [
+               %{
+                 "section" => "providers",
+                 "sentence" => "Provider settings changed since Fermix started."
+               }
+             ]
+           },
+           "environment_override" => "ANTHROPIC_API_KEY"
+         }}
+
+      replies = %{"settings.sections" => {:ok, @sections}, "secret.set" => stored}
+
+      capture_io(:stderr, fn ->
+        send(
+          self(),
+          {:result,
+           run(["secret", "set", "anthropic_api_key"], client(replies),
+             secret_input: [device: device, terminal: TtyTerminal],
+             restart_route: fn -> :foreground end
+           )}
+        )
+      end)
+
+      assert_received {:result, {0, stdout, ""}}
+
+      assert stdout ==
+               "Stored anthropic_api_key.\n" <>
+                 "The daemon uses ANTHROPIC_API_KEY from its environment instead of the stored " <>
+                 "value. Start it without that variable to use what is stored here.\n" <>
+                 "Restart to apply:\n" <>
+                 "  - Provider settings changed since Fermix started.\n" <>
+                 "No Fermix background service runs this daemon, so `fermix restart` cannot " <>
+                 "restart it. Stop it where it runs, such as with Ctrl+C in the terminal running " <>
+                 "`fermix run`, and start it again.\n"
+    end
+
+    test "a write that needs no restart never resolves the restart route" do
+      {:ok, device} = StringIO.open("sk-test-xyz\n")
+      replies = %{"settings.sections" => {:ok, @sections}, "secret.set" => @stored}
+
+      capture_io(:stderr, fn ->
+        send(
+          self(),
+          {:result,
+           run(["secret", "set", "openai_api_key"], client(replies),
+             secret_input: [device: device, terminal: TtyTerminal],
+             restart_route: fn -> raise "the restart route was resolved" end
+           )}
+        )
+      end)
+
+      assert_received {:result, {0, "Stored openai_api_key.\n", ""}}
     end
 
     test "--stdin reads a piped value with one trailing newline stripped" do
@@ -599,8 +678,9 @@ defmodule Fermix.CLI.SettingsCommandTest do
 
       assert stdout ==
                "Primary provider is now openai.\n" <>
-                 "Restart to apply (fermix restart):\n" <>
-                 "  - Memory settings changed since Fermix started.\n"
+                 "Restart to apply:\n" <>
+                 "  - Memory settings changed since Fermix started.\n" <>
+                 "Restart it with `fermix restart`.\n"
 
       assert [{"providers.set_primary", %{"provider" => "openai"}, opts}] = calls()
       assert opts[:timeout] == 30_000
@@ -663,6 +743,10 @@ defmodule Fermix.CLI.SettingsCommandTest do
       too_old = fn _method, _params, _opts -> mgmt("client_too_old", %{}) end
       {1, "", stderr} = run(["reload"], too_old)
       assert stderr =~ "`fermix restart`"
+
+      {1, "", stderr} = run(["list"], old, restart_route: fn -> :foreground end)
+      assert stderr =~ "`fermix run`"
+      refute stderr =~ "Restart it with `fermix restart`"
     end
 
     test "under --json every failure leaves at most one JSON object on stdout" do

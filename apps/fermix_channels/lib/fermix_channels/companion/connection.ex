@@ -23,9 +23,21 @@ defmodule FermixChannels.Companion.Connection do
 
   The version its hello declared is the connection's value in that registry,
   and it is never sent a server event a later version brought
-  (`Protocol.server_event_version/1`): a version 1 client never sees
-  `turn_done`, and whoever asks whether a turn may end with no reply reads the
-  versions attached there (M56 §6).
+  (`Protocol.server_event_version/1`): a version 2 client never sees
+  `row_updated`, `media_path` or `media_missing`. A client event a later
+  version brought (`Protocol.client_event_version/1`) is refused as unknown.
+  Whoever asks whether a turn may end with no reply reads the versions
+  attached there (M56 §6).
+
+  ## Media (version 3, M66)
+
+  A `media_fetch` is served only for a ref a row of the profile names, read
+  with the query the phone's own `media_fetch` uses
+  (`Timeline.media_descriptor/3`), and granted as a managed file through
+  `Companion.MediaGrants` (`:media_grants`), which holds it for this process
+  until a `media_release` for the ref or this process's exit. Nothing to grant
+  is answered `media_missing`; a failure of the daemon's own is answered
+  `request_failed` naming the ref, and the connection stays open.
 
   ## Who is on the other end (SIDE-V1)
 
@@ -46,10 +58,12 @@ defmodule FermixChannels.Companion.Connection do
   alias FermixChannels.Channels.Companion
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Fanout
+  alias FermixChannels.Companion.MediaGrants
   alias FermixChannels.Companion.Output
   alias FermixChannels.Companion.Requests
   alias FermixChannels.Companion.Turns
   alias FermixCore.Companion.Protocol
+  alias FermixCore.Companion.Timeline
   alias FermixCore.SocketPeer
 
   @profile "main"
@@ -113,6 +127,9 @@ defmodule FermixChannels.Companion.Connection do
       approvals: Keyword.get(opts, :approvals, Approvals.server()),
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
       request_opts: Keyword.get(opts, :request_opts, []),
+      # The grants server, and the module that speaks to it (a test's stand-in).
+      media_grants: Keyword.get(opts, :media_grants, MediaGrants),
+      media_grants_module: Keyword.get(opts, :media_grants_module, MediaGrants),
       # Placed once at handover, before any line is read (moduledoc); the
       # daemon's process and platform are seams a test stands in for.
       daemon_os_pid: Keyword.get(opts, :daemon_os_pid, String.to_integer(System.pid())),
@@ -230,20 +247,31 @@ defmodule FermixChannels.Companion.Connection do
   defp dispatch(%{type: "client_hello", payload: payload}, state), do: hello(payload, state)
   defp dispatch(_event, %{version: nil} = state), do: refuse(:handshake_required, state)
 
-  defp dispatch(%{type: type} = event, state) when type in ["msg", "command"],
+  # An event a later version brought is not in the vocabulary of a connection
+  # whose hello declared an older one.
+  defp dispatch(%{type: type} = event, state) do
+    if Protocol.client_event_version(type) <= state.version,
+      do: serve(event, state),
+      else: refuse({:unknown_event, type}, state)
+  end
+
+  defp serve(%{type: type} = event, state) when type in ["msg", "command"],
     do: queue_request(event, state)
 
-  defp dispatch(%{type: "cancel", payload: payload}, state),
+  defp serve(%{type: "cancel", payload: payload}, state),
     do: answer(Requests.cancel(payload, request_opts(state)), state)
 
-  defp dispatch(%{type: "history_pull", payload: payload}, state),
+  defp serve(%{type: "history_pull", payload: payload}, state),
     do: answer(Requests.history(payload, transport(self()), read_opts(state)), state)
 
-  defp dispatch(%{type: "history_search", payload: payload}, state),
+  defp serve(%{type: "history_search", payload: payload}, state),
     do: answer(Requests.search(payload, transport(self()), read_opts(state)), state)
 
-  defp dispatch(%{type: "read_state", payload: payload}, state),
+  defp serve(%{type: "read_state", payload: payload}, state),
     do: answer(Requests.read_state(payload, request_opts(state)), state)
+
+  defp serve(%{type: "media_fetch", payload: payload}, state), do: media_fetch(payload, state)
+  defp serve(%{type: "media_release", payload: payload}, state), do: media_release(payload, state)
 
   # A repeat hello is a protocol violation: the handshake is one transition.
   defp hello(_payload, %{version: version} = state) when is_integer(version),
@@ -318,6 +346,64 @@ defmodule FermixChannels.Companion.Connection do
       :ok -> {:cont, state}
       {:error, _reason} -> {:stop, state}
     end
+  end
+
+  # The grant is answered in the step that made it, as a page is (moduledoc).
+  defp media_fetch(%{"profile_id" => @profile, "ref" => ref}, state) do
+    {type, payload} = ref |> grant_media(state) |> media_answer(ref)
+
+    case send_event(type, payload, state) do
+      :ok -> {:cont, state}
+      {:error, _reason} -> {:stop, state}
+    end
+  end
+
+  defp media_fetch(_payload, state), do: answer({:error, :unsupported_profile}, state)
+
+  # Never answered: releasing a ref this connection does not hold changes
+  # nothing.
+  defp media_release(%{"profile_id" => @profile, "ref" => ref}, state) do
+    :ok = state.media_grants_module.release(state.media_grants, ref, self())
+    {:cont, state}
+  end
+
+  defp media_release(_payload, state), do: answer({:error, :unsupported_profile}, state)
+
+  defp grant_media(ref, state) do
+    with {:ok, descriptor} <- media_descriptor(ref, state),
+         {:ok, media} <- Timeline.normalize_media_descriptor(descriptor, ref),
+         grant = Map.take(media, [:ref, :kind, :mime, :size_bytes]),
+         {:ok, path} <- state.media_grants_module.grant(state.media_grants, grant, self()) do
+      {:ok, path, media}
+    end
+  end
+
+  defp media_descriptor(ref, state) do
+    store = Keyword.get(state.request_opts, :store, Timeline)
+    store.media_descriptor(@profile, ref, Keyword.get(state.request_opts, :store_opts, []))
+  end
+
+  defp media_answer({:ok, path, media}, ref) do
+    {"media_path",
+     %{
+       "ref" => ref,
+       "path" => path,
+       "kind" => media.kind,
+       "mime" => media.mime,
+       "size_bytes" => media.size_bytes,
+       "sha256" => ref
+     }}
+  end
+
+  # No row names the ref, or the grant found nothing to copy.
+  defp media_answer({:error, reason}, ref) when reason in [:not_found, :media_missing],
+    do: {"media_missing", %{"ref" => ref}}
+
+  defp media_answer({:error, reason}, ref) do
+    Logger.warning("companion connection could not grant media #{ref}: #{inspect(reason)}")
+
+    {"error",
+     %{"reason" => "request_failed", "message" => Output.error_message(reason), "ref" => ref}}
   end
 
   defp queue_request(_event, %{pending: pending} = state)

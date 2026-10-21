@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Checker (json): the final reply's terms against the task's gold (`checker.expect`):
 
   include_all  every term must appear

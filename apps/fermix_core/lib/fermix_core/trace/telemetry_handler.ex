@@ -148,20 +148,6 @@ defmodule FermixCore.Trace.TelemetryHandler do
     }
   ]
 
-  @mcp_inbound_events [
-    %{
-      event: [:fermix, :mcp, :inbound, :tools_listed],
-      trace_type: :agent_event,
-      agent_field: :client_name,
-      trace_event: "mcp_inbound_tools_listed"
-    },
-    %{
-      event: [:fermix, :mcp, :inbound, :call],
-      trace_type: :tool_exec,
-      agent_field: :client_name
-    }
-  ]
-
   # Realtime voice lifecycle (its own WebSocket session). Tool calls and the
   # model turn reuse `[:fermix, :tool, :exec]` / `[:fermix, :provider, :call]`;
   # only these provider-lifecycle markers are realtime-specific.
@@ -272,7 +258,6 @@ defmodule FermixCore.Trace.TelemetryHandler do
 
   defp event_definitions do
     @core_events ++
-      @mcp_inbound_events ++
       @realtime_events ++
       LifecycleTelemetry.trace_event_definitions() ++
       JobTelemetry.trace_event_definitions() ++

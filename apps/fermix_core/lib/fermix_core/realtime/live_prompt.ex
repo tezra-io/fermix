@@ -11,12 +11,13 @@ defmodule FermixCore.Realtime.LivePrompt do
   that text conversations use.
 
   Between the two halves of the frontend prompt sits what the voice model knows
-  about the owner when a call starts (M56 §4.3, D5): the assistant's name, the
-  owner's name, time zone and style, today's date, and `USER.md` and
-  `MEMORY.md` in the memory-context frame a turn gets. It is generated here,
-  never written into `LIVE.md`, because an owner's edit to that file would
-  shadow a template change (M43). `SOUL.md` is left out: `LIVE.md` is the
-  voice's own persona.
+  about the owner when a call starts (M56 §4.3, D5): which Fermix this is
+  (`HostFacts.prompt_section/0`, the section an owner's turn carries, M76 D12),
+  the assistant's name, the owner's name, time zone and style, today's date,
+  and `USER.md` and `MEMORY.md` in the memory-context frame a turn gets. It is
+  generated here, never written into `LIVE.md`, because an owner's edit to
+  that file would shadow a template change (M43). `SOUL.md` is left out:
+  `LIVE.md` is the voice's own persona.
 
   Capability lines carry NAMES ONLY: no schemas, no descriptions, no JSON.
   The voice model does not dispatch tools under Live — Core does — so a schema
@@ -29,6 +30,7 @@ defmodule FermixCore.Realtime.LivePrompt do
   alias FermixCore.Agents.VoiceCall
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.HostFacts
   alias FermixCore.Memory.PromptFiles
   alias FermixCore.Prompt.BootstrapLoader
   alias FermixCore.Prompt.CurrentDate
@@ -94,6 +96,12 @@ defmodule FermixCore.Realtime.LivePrompt do
   credentials, and do not instruct the voice model to promise unverified success.
   """
 
+  @addendum_media """
+  A picture or file you send with send_attachment or generate_image appears in
+  the owner's chat, since the voice cannot show it. Send it there when the owner
+  asks to see one, and say in your reply that it is in the chat.
+  """
+
   @addendum_chat_reply """
   Return what is verified: result, pending work, failure, or a necessary question.
   Include exact identifiers and units when relevant. Report cancellation only when
@@ -103,15 +111,17 @@ defmodule FermixCore.Realtime.LivePrompt do
 
   @typedoc """
   What a call starts knowing (`context/2`): the configured assistant name
-  (`nil` when unset), the personalization config as it stands, the date note a
-  turn carries, the memory files as `PromptFiles` reads them, and the call's
-  conversation (`"chat"` or `"private"`, M56 §5), which says whether a result
-  can be shown in the chat.
+  (`nil` when unset), the personalization config as it stands, the
+  `## This Fermix` section an owner's turn carries, the date note a turn carries, the
+  memory files as `PromptFiles` reads them, and the call's conversation
+  (`"chat"` or `"private"`, M56 §5), which says whether a result can be shown
+  in the chat.
   """
   @type context :: %{
           agent_id: String.t(),
           assistant_name: String.t() | nil,
           personalization: keyword(),
+          host_section: String.t(),
           date_note: String.t(),
           prompt_memory: PromptFiles.prompt_memory(),
           conversation: String.t()
@@ -119,10 +129,11 @@ defmodule FermixCore.Realtime.LivePrompt do
 
   @doc """
   The Live frontend instructions, in this order: `live_md`, the pet the owner
-  talks to (`VoicePresence`), the assistant's name, the owner's details that
-  are set, the date, the memory files in their memory-context frame, the
-  backend tool categories available on this call, and, for a call in the
-  chat, that a result it cannot say is put in the chat (M56 §4.5).
+  talks to (`VoicePresence`), which Fermix this is (`## This Fermix`), the
+  assistant's name, the owner's details that are set, the date, the memory
+  files in their memory-context frame, the backend tool categories available
+  on this call, and, for a call in the chat, that a result it cannot say is
+  put in the chat (M56 §4.5).
 
   Bounded by `instructions_max_bytes/0`: past it MEMORY.md is left out, then
   USER.md, and the omission is logged. Nothing else is cut, so a `live_md`
@@ -136,6 +147,7 @@ defmodule FermixCore.Realtime.LivePrompt do
         [
           String.trim_trailing(live_md),
           VoicePresence.text(),
+          context.host_section,
           name_line(context.assistant_name),
           owner_block(context.personalization),
           context.date_note
@@ -161,9 +173,10 @@ defmodule FermixCore.Realtime.LivePrompt do
 
   @doc """
   What a call is told, read as it starts: the configured name
-  (`IdentityName.configured_name/0`), `[fermix_core.personalization]`, today's
-  date note (`CurrentDate.note/0`), `USER.md` and `MEMORY.md` for `agent_id`,
-  and the call's `conversation`.
+  (`IdentityName.configured_name/0`), `[fermix_core.personalization]`, the
+  `## This Fermix` section from the facts boot read
+  (`HostFacts.prompt_section/0`), today's date note (`CurrentDate.note/0`),
+  `USER.md` and `MEMORY.md` for `agent_id`, and the call's `conversation`.
   """
   @spec context(String.t(), String.t()) :: {:ok, context()} | {:error, term()}
   def context(agent_id, conversation)
@@ -174,6 +187,7 @@ defmodule FermixCore.Realtime.LivePrompt do
          agent_id: agent_id,
          assistant_name: IdentityName.configured_name(),
          personalization: Application.get_env(:fermix_core, :personalization, []),
+         host_section: HostFacts.prompt_section(),
          date_note: CurrentDate.note(),
          prompt_memory: prompt_memory,
          conversation: conversation
@@ -204,8 +218,11 @@ defmodule FermixCore.Realtime.LivePrompt do
       is shown in the chat instead (§4.6); a result the owner asks to have
       sent to one of their channels goes out with `send_to_channel`, and the
       line said names where (§4.7);
-    * `"private"`: today's wording, verbatim, since a private call shows
-      nothing (M56 §5).
+    * `"private"`: today's wording, since a private call shows nothing
+      (M56 §5).
+
+  In either, a picture or file the turn sends goes to the owner's chat
+  (`Channels.Voice.send_media/3`), so the reply says it is there.
   """
   @spec backend_addendum(String.t()) :: String.t()
   def backend_addendum("chat") do
@@ -223,12 +240,18 @@ defmodule FermixCore.Realtime.LivePrompt do
       their own channels, send it with send_to_channel and say in the short line
       where it went.
       """
-      |> String.trim()
+      |> String.trim(),
+      String.trim(@addendum_media)
     ])
   end
 
   def backend_addendum("private"),
-    do: join([String.trim(@addendum_task), String.trim(@addendum_private_reply)])
+    do:
+      join([
+        String.trim(@addendum_task),
+        String.trim(@addendum_private_reply),
+        String.trim(@addendum_media)
+      ])
 
   @doc """
   The capabilities a Live call in `conversation` (`"chat"` or `"private"`)
@@ -238,11 +261,11 @@ defmodule FermixCore.Realtime.LivePrompt do
 
   That list is shared with `TurnRunner`, which builds the delegation turn's
   profile from it, so what the voice model is told about and what its delegation
-  is actually given cannot drift apart. A call in the chat keeps the Realtime
-  engine's boundary (`SessionServer.default_capabilities/1`), coding runs
-  included: a run it launches reports back into the chat (M56 §4.7). A private
-  call additionally drops `:harness`, because its conversation ends with it
-  and a run's completion would have nothing left to answer it.
+  is actually given cannot drift apart. A call in the chat keeps coding runs: a
+  run it launches reports back into the chat (M56 §4.7). Either mode keeps
+  attachments and media generation, whose pictures and files go to the owner's
+  chat. A private call additionally drops `:harness`, because its conversation
+  ends with it and a run's completion would have nothing left to answer it.
   """
   @spec eligible_capabilities(GenServer.server(), String.t()) :: [Capability.t()]
   def eligible_capabilities(registry, conversation)

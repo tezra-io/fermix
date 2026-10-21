@@ -102,8 +102,10 @@ scenarios:
             - 'benchmark/suites/fixtures/chief_of_staff/launch_tracker\.md'
             - 'benchmark/suites/fixtures/chief_of_staff/launch_notes\.md'
           # Evidence unique to each of the four dossiers must reach the brief;
-          # the hold/conditional wording is the rubric's.
-          reply_matches: '(?is)(?=.*P1)(?=.*Northstar)(?=.*board[ -]memo)(?=.*Tuesday.{0,40}11:30|.*11:30.{0,40}Tuesday)(?=.*10:30)(?=.*18 (?:of|/) 20)(?=.*provisional|.*assumption)'
+          # the hold/conditional wording is the rubric's. 2026-10-14: the
+          # calendar names days relative to today, not weekdays, so its anchor
+          # is the 11:30 escalation alone, not "Tuesday 11:30".
+          reply_matches: '(?is)(?=.*P1)(?=.*Northstar)(?=.*board[ -]memo)(?=.*11:30)(?=.*10:30)(?=.*18 (?:of|/) 20)(?=.*provisional|.*assumption)'
           reply_not_matches: '(?is)\bnot at risk\b|\bno (?:need|reason) to (?:hold|delay)\b|\bdoes not need (?:a |to )?(?:be held|hold|delay)\b'
           max_cost_usd: 30
           max_duration_ms: 900000

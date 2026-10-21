@@ -1,6 +1,7 @@
 defmodule FermixCore.Tools.ShellTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Sandbox
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.Env
   alias FermixCore.Sandbox.EnvHealth
@@ -152,7 +153,11 @@ defmodule FermixCore.Tools.ShellTest do
 
       assert result.success == false
       assert result.error =~ "outside roots"
-      assert result.error =~ "fermix grant path #{PathPolicy.canonical_path(outside)}"
+
+      assert String.ends_with?(
+               result.error,
+               Sandbox.grant_hint(PathPolicy.canonical_path(outside))
+             )
 
       FermixTestSupport.SafeRm.rm_rf!(root)
       FermixTestSupport.SafeRm.rm_rf!(outside)
@@ -421,9 +426,11 @@ defmodule FermixCore.Tools.ShellTest do
 
       assert {:ok, %{success: true}} = Shell.execute(%{"command" => "printf ok"}, ctx.context)
 
+      # On macOS the command runs under `sandbox-exec`, whose own arguments are
+      # paths; the command's argv is the tail either way.
       {executable, args, opts} = RunnerCallTrace.call_with("printf ok")
-      assert Path.basename(executable) == "sh"
-      assert args == ["-c", "printf ok"]
+      assert [shell, "-c", "printf ok"] = Enum.take([executable | args], -3)
+      assert Path.basename(shell) == "sh"
       refute Enum.any?([executable | args], &String.contains?(&1, @token))
       assert Keyword.fetch!(opts, :env_mode) == :replace
       assert {@token_name, @token} in Keyword.fetch!(opts, :env)

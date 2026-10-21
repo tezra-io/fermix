@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Stage and build the `fermix` deb and rpm from one Burrito release (M38 §2.2).
 
 The Burrito wrapper is already built when this runs. What is left is the part a

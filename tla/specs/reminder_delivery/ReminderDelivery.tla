@@ -30,17 +30,17 @@
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/temporal/scheduler.ex @ 0a264754d567
 \* SOURCE: apps/fermix_core/lib/fermix_core/temporal/delivery_worker.ex @ 35e1b4be4964
-\* SOURCE: apps/fermix_core/lib/fermix_core/temporal/delivery.ex @ f0cf3e71c8ff
+\* SOURCE: apps/fermix_core/lib/fermix_core/temporal/delivery.ex @ 7c7619d41cf8
 \* SOURCE: apps/fermix_core/lib/fermix_core/temporal/delivery_supervisor.ex @ f4c7d9dd90a1
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/temporal_sql.ex @ c322fb1ca6bc
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,call_or_timeout_error,periodic_opts,claim_due_reminders,recover_delivering_reminder,sweep_delivering_reminders,update_temporal_event @ ebd91fdc0e6f
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 9b06289e25ae
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/error.ex @ a3cd3a75d3ca
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex @ 7ba02aa96383
-\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,temporal_scheduler_opts @ 80543c3e238b
-\* SOURCE: apps/fermix_core/lib/fermix_core/temporal/registry.ex @ ee0831d5019c
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex @ 96f0f91b0e80
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex @ 27101bebdc5c
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex @ 9e95a610b074
+\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,temporal_scheduler_opts @ ece44c7a42c3
+\* SOURCE: apps/fermix_core/lib/fermix_core/temporal/registry.ex @ 5f277965a35e
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex @ 93284120b282
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex @ 214348321d4a
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
@@ -78,9 +78,9 @@ CONSTANTS
                              \* status = 'pending' (temporal_sql.ex:1582). The
                              \* per-row re-read (:1602) and the UPDATE's WHERE
                              \* (:1042) repeat it inside the same Repo call
-                             \* (repo.ex:3026-3029), so they add nothing here.
+                             \* (repo.ex:3029-3032), so they add nothing here.
     WorkersDieWithScheduler, \* DeliverySupervisor starts after the scheduler under
-                             \* :rest_for_one (application.ex:246-247, :264)
+                             \* :rest_for_one (application.ex:256-257, :274)
     SendsDieWithWorker,      \* a worker's send process is spawned linked to it
                              \* (Process.spawn [:link, :monitor], channel_send.ex:219-224),
                              \* so a worker killed mid-send takes its send with it
@@ -169,10 +169,10 @@ RecoverRow ==
 \* scheduler.ex:376-380; the boot sweep, :220).
 \* A call that times out is not this. Every scheduler call passes
 \* Repo.periodic_opts/2 (scheduler.ex:177-185), so a timeout returns
-\* {:error, :repo_timeout} (call_or_timeout_error, repo.ex:3946-3954) and
+\* {:error, :repo_timeout} (call_or_timeout_error, repo.ex:3949-3957) and
 \* takes the same error branch, but the request is not cancelled: the Repo
 \* serves requests in order, so it still runs, ahead of anything the
-\* scheduler sends next (repo.ex:3931-3935). Its write lands whole, and no
+\* scheduler sends next (repo.ex:3934-3938). Its write lands whole, and no
 \* scheduler step can read the row in between. At every site but the claim
 \* that is the site's success step taken where the write lands; the claim is
 \* ClaimTimesOut.
@@ -189,8 +189,8 @@ SweptTo ==
     ELSE "pending"
 
 \* The platform puts the reminder in front of the user. The companion timeline
-\* drops a second message with the same key (output.ex:238-240, which the
-\* mobile and companion adapters write through -> mobile_sql.ex:356-366,
+\* drops a second message with the same key (output.ex:257-259, which the
+\* mobile and companion adapters write through -> mobile_sql.ex:377-387,
 \* unique index :49-51); no other platform reads the key.
 AlreadyShownUnderKey == PlatformDedupes /\ StableKey /\ seen > 0
 Show ==
@@ -234,7 +234,7 @@ Claimable ==
     /\ due /\ valid /\ eventLive
 
 \* :due_tick or :reconcile_tick -> run_due -> claim_due (scheduler.ex:251-261)
-\* -> Repo.claim_due_reminders, ONE Repo callback (repo.ex:3026-3029) that
+\* -> Repo.claim_due_reminders, ONE Repo callback (repo.ex:3029-3032) that
 \* runs the due scan and every per-row claim (temporal_sql.ex:1010-1047):
 \* delivering and attempt_count + 1 before any I/O. The free-slot guard is
 \* the spec's bound, not free_slots/1 (DeliverySupervisor allows 4).
@@ -356,7 +356,7 @@ Boot ==
 (* Crashes *)
 
 \* The scheduler, or any earlier child of FermixCore.Supervisor (Repo,
-\* MainAgent, JobScheduler, ...), crashes. :rest_for_one (application.ex:264)
+\* MainAgent, JobScheduler, ...), crashes. :rest_for_one (application.ex:274)
 \* terminates every later child, DeliverySupervisor and its workers included
 \* (:245-246), before init runs again. The workers do not trap exits, so they
 \* die at once. Each worker's send process is linked to it
@@ -368,9 +368,10 @@ Boot ==
 \* workers die every send dies. A worker killed in the few instructions
 \* between its watchdog's unlink and kill (channel_send.ex:281-287) would
 \* leave its send running; that is below this spec's step granularity.
-\* Capabilities.AccessGate.Pending (application.ex:222) is one more earlier
-\* child: its crash is this step. The owner confirmations it parks are never
-\* read by the reminder rail, so they are not modelled.
+\* Capabilities.AccessGate.Pending (application.ex:228) and ReplyBlocks
+\* (:232) are two more earlier children: a crash of either is this step. The
+\* owner confirmations one parks and the place records the other holds are
+\* never read by the reminder rail, so they are not modelled.
 \* A scheduler Repo call that times out is no longer a cause: it returns an
 \* error and the scheduler keeps running (RepoFails, ClaimTimesOut).
 SendsDie == WorkersDieWithScheduler /\ SendsDieWithWorker
@@ -665,7 +666,7 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 \* never attempt six."
 NeverAttemptSix == attempts <= 5
 
-\* delivery_supervisor.ex:5-10 and application.ex:233-239: "no delivery
+\* delivery_supervisor.ex:5-10 and application.ex:243-249: "no delivery
 \* worker can outlive the scheduler", which is "what lets claims be
 \* serialized in one process"; M30 design §6.3 (:335-337): "two workers for
 \* the same row cannot exist".

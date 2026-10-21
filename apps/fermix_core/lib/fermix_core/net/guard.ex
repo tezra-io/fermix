@@ -1,6 +1,17 @@
 defmodule FermixCore.Net.Guard do
   @moduledoc """
-  Public-web URL guard shared by outbound tools.
+  Public-web URL guard shared by outbound tools, and the owner policy an
+  address the owner typed is checked under.
+
+  `resolve_and_validate/2` is the public policy: only globally routable peers.
+  `owner_peers/2` is for an address the owner typed (an MCP server's URL, M74
+  E4). The owner's own machine and network are theirs to name, so loopback,
+  private ranges and IP literals pass, and only what no server is reached at is
+  refused: the link-local and cloud metadata addresses
+  `metadata_or_link_local?/1` answers, written as a literal or among any of a
+  name's answers. A name is looked up the way every other program on the
+  owner's machine looks it up, through the operating system's resolver, so
+  the hosts file, `localhost` and mDNS `.local` names resolve as they do there.
   """
 
   import Bitwise
@@ -11,6 +22,9 @@ defmodule FermixCore.Net.Guard do
   # The Linux system unit denies the metadata endpoints themselves
   # (`Fermix.CLI.Service.Templates`): an endpoint added here is added there too.
   @aws_ipv6_metadata {0xFD00, 0x0EC2, 0, 0, 0, 0, 0, 0x0254}
+
+  # One bound for each address family's system lookup.
+  @owner_lookup_ms 10_000
 
   @type resolver :: (String.t() -> {:ok, [:inet.ip_address()]} | {:error, term()})
   @type opts :: [resolver: resolver()]
@@ -63,6 +77,81 @@ defmodule FermixCore.Net.Guard do
       end
     end
   end
+
+  @doc """
+  Every peer an address the owner typed may be dialled at, in order: an IP
+  literal itself, or each answer the operating system's resolver gives for a
+  name (IPv6 first, then IPv4). Any answer that is link-local or a metadata
+  address refuses the whole set. `:resolver` replaces the system lookup.
+  """
+  @spec owner_peers(String.t(), opts()) :: {:ok, [:inet.ip_address(), ...]} | {:error, term()}
+  def owner_peers(url, opts \\ []) when is_binary(url) do
+    with :ok <- validate_text(url),
+         %URI{} = uri <- URI.parse(url),
+         :ok <- validate_scheme(uri.scheme),
+         {:ok, host} <- fetch_host(uri) do
+      case parse_ip(host) do
+        {:ok, ip} -> owner_literal(ip)
+        {:error, :einval} -> owner_lookup(host, Keyword.get(opts, :resolver) || (&os_resolve/1))
+      end
+    end
+  end
+
+  @doc """
+  Whether `host` names this machine: a `localhost` name (RFC 6761) or a
+  loopback literal (127.0.0.0/8, `::1`, or an IPv4-mapped loopback address).
+  """
+  @spec loopback_host?(String.t()) :: boolean()
+  def loopback_host?(host) when is_binary(host) do
+    host = String.downcase(host)
+
+    case parse_ip(host) do
+      {:ok, ip} -> loopback_ip?(ip)
+      {:error, :einval} -> host == "localhost" or String.ends_with?(host, ".localhost")
+    end
+  end
+
+  defp loopback_ip?({127, _b, _c, _d}), do: true
+  defp loopback_ip?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+  defp loopback_ip?({0, 0, 0, 0, 0, 65_535, high, _low}), do: high >>> 8 == 127
+  defp loopback_ip?(_ip), do: false
+
+  defp owner_lookup(host, resolver) do
+    case resolver.(host) do
+      {:ok, []} -> {:error, {:dns_resolution_failed, :nxdomain}}
+      {:ok, ips} -> ips |> Enum.uniq() |> owner_answers()
+      {:error, reason} -> {:error, {:dns_resolution_failed, reason}}
+    end
+  end
+
+  defp owner_literal(ip) do
+    if metadata_or_link_local?(ip),
+      do: {:error, {:blocked_host, :link_local_address}},
+      else: {:ok, [ip]}
+  end
+
+  defp owner_answers(ips) do
+    case Enum.find(ips, &metadata_or_link_local?/1) do
+      nil -> {:ok, ips}
+      ip -> {:error, {:resolved_to_link_local_address, ip}}
+    end
+  end
+
+  # The native lookup: the hosts file, mDNS and the system's DNS, as every
+  # other program on this machine sees them. One family answering is a name
+  # that resolves; neither is the IPv4 lookup's failure.
+  defp os_resolve(host) do
+    name = String.to_charlist(host)
+
+    case {:inet.getaddrs(name, :inet6, @owner_lookup_ms),
+          :inet.getaddrs(name, :inet, @owner_lookup_ms)} do
+      {{:error, _v6}, {:error, reason}} -> {:error, reason}
+      {v6, v4} -> {:ok, family_answers(v6) ++ family_answers(v4)}
+    end
+  end
+
+  defp family_answers({:ok, ips}), do: ips
+  defp family_answers({:error, _absent}), do: []
 
   @doc """
   The A and AAAA answers for `host`: the lookup `validate/2` makes when it is

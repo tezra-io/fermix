@@ -55,6 +55,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Setup.Wizard
   alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
+  alias FermixCore.Tools.PlaceSearch
   alias FermixCore.Transcription.Local, as: LocalTranscription
   alias FermixCore.Transcription.Local.ModelStore, as: LocalModelStore
   alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
@@ -1638,7 +1639,7 @@ defmodule FermixWebWeb.SetupLive do
   defp realtime_effort_answer(answers, "openai_realtime", params),
     do: maybe_put_string(answers, :realtime_reasoning_effort, params["reasoning_effort"])
 
-  defp realtime_effort_answer(answers, "openai_live", _params), do: answers
+  defp realtime_effort_answer(answers, _task_engine, _params), do: answers
 
   defp build_realtime_form(snapshot) do
     config = snapshot |> get_fermix_core(:realtime) |> RealtimeConfig.normalize()
@@ -1650,7 +1651,10 @@ defmodule FermixWebWeb.SetupLive do
       max_session_minutes: config.max_session_minutes,
       max_cost_cents: config.max_estimated_cost_cents_per_session,
       persist_transcripts: config.persist_transcripts?,
-      api_key_set: api_key_configured?(snapshot)
+      api_keys_set: %{
+        "openai" => provider_api_key_set?(snapshot, :openai),
+        "xai" => provider_api_key_set?(snapshot, :xai)
+      }
     }
     |> Map.merge(realtime_model_scope(config.model, config.voice, config.reasoning_effort))
   end
@@ -1678,38 +1682,40 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   # The model is the one voice choice the pane offers, so it is the axis
-  # everything else hangs off: the engine it belongs to, the voices that engine
-  # speaks, and whether reasoning effort is a setting at all. One derivation
-  # serves the saved config and an unsaved pick, so what the pane offers before
-  # a save is exactly what the save seam keeps.
+  # everything else hangs off: the engine it belongs to, the provider whose key
+  # it dials with, the voices that engine speaks, and whether reasoning effort
+  # is a setting at all. One derivation serves the saved config and an unsaved
+  # pick, so what the pane offers before a save is exactly what the save seam
+  # keeps.
   defp realtime_model_scope(model, voice, effort) do
     {:ok, engine} = RealtimeConfig.engine_for_model(model)
     voices = RealtimeConfig.valid_voices(engine)
 
     %{
       engine: engine,
-      # `live?/1` reads the one field; asking Config keeps the engine's name out
-      # of this module.
-      live?: RealtimeConfig.live?(%RealtimeConfig{engine: engine}),
+      provider: RealtimeConfig.provider_for_engine(engine),
+      # `hands_off_tasks?/1` reads the one field; asking Config keeps the
+      # engines' names out of this module.
+      hands_off_tasks?: RealtimeConfig.hands_off_tasks?(%RealtimeConfig{engine: engine}),
       model: model,
-      voice: if(voice in voices, do: voice, else: %RealtimeConfig{}.voice),
+      voice: if(voice in voices, do: voice, else: RealtimeConfig.default_voice(engine)),
       voices: voices,
       reasoning_effort: realtime_effort_for(engine, effort)
     }
   end
 
-  # Reasoning effort exists only under Realtime; Live normalizes it away. A
-  # return to a Realtime model therefore has nothing to restore and opens on the
-  # same default the save seam writes.
-  defp realtime_effort_for("openai_live", _effort), do: nil
-
+  # Reasoning effort exists only under Realtime; the task engines normalize it
+  # away. A return to a Realtime model therefore has nothing to restore and
+  # opens on the same default the save seam writes.
   defp realtime_effort_for("openai_realtime", effort) do
     if effort in RealtimeConfig.valid_reasoning_efforts(),
       do: effort,
       else: %RealtimeConfig{}.reasoning_effort
   end
 
-  # Both engines' models in one list, each option naming the engine it speaks
+  defp realtime_effort_for(_task_engine, _effort), do: nil
+
+  # Every engine's models in one list, each option naming the engine it speaks
   # through. The engine is a property of the model, never a second control the
   # operator has to keep in agreement with the first.
   defp realtime_model_options do
@@ -1844,7 +1850,9 @@ defmodule FermixWebWeb.SetupLive do
       parallel_api_key_set: secret_set?(web_search, :parallel_api_key),
       brave_api_key_set: secret_set?(web_search, :brave_api_key),
       perplexity_api_key_set: secret_set?(web_search, :perplexity_api_key),
-      firecrawl_api_key_set: secret_set?(web_search, :firecrawl_api_key)
+      firecrawl_api_key_set: secret_set?(web_search, :firecrawl_api_key),
+      place_backend: PlaceSearch.resolution(%{}).name,
+      place_ready: PlaceSearch.readiness(%{}) == :ok
     }
   end
 
@@ -4233,8 +4241,6 @@ defmodule FermixWebWeb.SetupLive do
       ModelCatalog.models_for(:openai)
     end
   end
-
-  defp api_key_configured?(snapshot), do: provider_api_key_set?(snapshot, :openai)
 
   defp secret_set?(config, key), do: config |> Keyword.get(key) |> present?()
   defp channel_enabled?(config, default), do: Keyword.get(config, :enabled, default) == true

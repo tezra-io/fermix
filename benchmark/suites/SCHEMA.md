@@ -214,7 +214,7 @@ the `query` shorthand; multi-turn uses `turns`.
   alphanumeric, so they are equally valid in a regex gate and an exact-match
   one); the repo root is regex-escaped, since a path may carry a `+` or `(`.
 - `drive` (string, optional) — `ask` (default; drives `fermix ask`),
-  `companion`, or `telegram_operator`. `telegram_operator`: the runner prompts
+  `companion`, `telegram_operator`, or `voice`. `telegram_operator`: the runner prompts
   the operator to send ONE marked message to the dedicated eval Telegram bot,
   correlates the resulting `telegram:*` trace by the embedded marker, and
   grades it like any other case. Single-turn `query` only. Such cases run only
@@ -222,7 +222,10 @@ the `query` shorthand; multi-turn uses `turns`.
   `stream:*` spans precheck Telegram `streaming = "draft" | "block"`;
   multimodal operator cases do not. `companion`: the runner is the Mac app's
   chat client on the eval home's `companion.sock` and runs unattended; see
-  *`drive: companion`* below. Single-turn `query` only, no `image`.
+  *`drive: companion`* below. Single-turn `query` only, no `image`. `voice`:
+  the runner is a voice call on the eval home's `realtime.sock`, saying fixture
+  audio; see *`drive: voice`* below. No `query`, `turns` or `image`: the words
+  are the case's `voice.clips`. Such cases run only with `--voice`.
 - `image` (string, optional) — path to a known local attachment (a picture, or
   any file: a GIF, a video, a PDF, a text file, a file Fermix cannot read)
   relative to the suite file and physically contained under `suites/fixtures/`.
@@ -240,12 +243,38 @@ the `query` shorthand; multi-turn uses `turns`.
   When the suite/case has `judge: true`, selecting that case requires `--judge`;
   `judge: false` leaves the rubric as manual review guidance and the automated
   outcome is `INCOMPLETE`, never PASS. Multi-turn
-  judging receives the full ordered transcript plus span-backed tool evidence.
+  judging receives the full ordered transcript plus span-backed tool evidence,
+  and, as a reference fact, the current-date note the daemon put in front of
+  each turn, so a weekday or date the model derived from it is not graded as
+  invented.
   The judge is the **external OpenAI API**, called directly by the harness — there
   is no in-daemon judge. `judge.backend` in this benchmark's config takes exactly
   two values, `openai` and `none`; the model is `judge.model`, and actual candidate
   and judge model equality is refused. Ordinary agent turns are never used as
   judges.
+  A rubric is **numbered** when it lists its requirements on lines starting
+  `1. `, `2. `, … (use a `|` block so the lines survive YAML folding). The judge
+  then decides each requirement (`met` and a one-sentence `why`) and the harness
+  computes the verdict: pass when every requirement is met, score the fraction
+  met. results.json records them as `rubric.requirements`; a redacted report
+  keeps each `n` and `met` and drops the `why`, so it still reads "judge: failed
+  requirement 2 of 5". A line indented under a requirement continues it; a closing
+  unindented line such as `Not required: …` is guidance the judge must not
+  demand. The numbering must run 1..N in order, each once, with nothing but
+  indented continuation or blank lines between items, or the suite fails to
+  load. Any other rubric is prose and gets one whole verdict.
+- `watch` (list, optional; numbered rubric only) — requirements the judge still
+  decides and the report still shows, but that do not decide pass:
+  `watch: [{n: 4, reason: "…"}]`. Watch a requirement only when the nightly
+  candidate model is shown to miss it with nothing broken, and say so in
+  `reason` with the measurement and `Revisit when the candidate model changes.`
+  The score still counts a watched requirement, the report gives a watched miss
+  its own line with the reason ("judge: watched, not met requirement 4 of 4"),
+  and the run's summary line counts them as `watched unmet`. At least one
+  requirement must stay unwatched, each `n` must be one of the rubric's numbers
+  and appear once, and every entry needs a reason, or the suite fails to load.
+  A watch is not a mute: the requirement still runs every night, and a rising
+  `watched unmet` is the signal to fix the product or the case.
 - `timeout_ms` (int, optional) — overrides `defaults.timeout_ms` for this case.
   The value bounds `fermix ask`; trace discovery and a bounded settlement window
   follow. The measured duration gate uses the driver's end-to-end wall clock,
@@ -296,7 +325,7 @@ spans have `metadata.status`).
 | `max_cost_usd` | float | reported `total_estimated_cost` ≤ N; missing is incomplete |
 | `max_duration_ms` | int | driver wall-clock duration ≤ N; missing is incomplete |
 | `max_tokens` | int | reported `usage.total_tokens` ≤ N; missing is incomplete |
-| `wire` | map | `drive: companion` only: every key holds against what the companion socket said (see below) |
+| `wire` | map | `drive: companion` or `drive: voice` only: every key holds against what that socket said (see below) |
 
 ### `fixture_state` — what the page recorded
 
@@ -399,8 +428,11 @@ around that message:
 `accepted`, `row` (the message's own row, announced as it is written),
 `turn_started`, `text_delta`, `tool_event`, `text_done`, `turn_error`), `error_code` (the `turn_error`'s code), `blocker_events_all`
 (needs `cancel: waiting`), `reads_find_marker: true` (every declared read found
-the marker; needs `reads`), and `offline_row_matches` (a regex some row written
-while offline matches; needs `offline_wait_s`). Run placeholders render inside
+the marker; needs `reads`), `offline_row_matches` (a regex some row written
+while offline matches; needs `offline_wait_s`), and `media_row: true` (the turn
+sent a picture or file into the chat: a media `row`, which names no request on
+the wire, so it is credited to the one message still open and to none when two
+are). Run placeholders render inside
 it as in every gate. It is case-level only and required on every companion
 case.
 
@@ -412,6 +444,113 @@ on the wire alone: it completed nothing, and one cancelled while it waited
 never ran, so a cancel case may carry no other expect key and no `rubric`. A
 socket that cannot be reached, closes, or goes silent past `timeout_ms` is
 `INCOMPLETE`, never a failed gate.
+
+### `drive: voice` — a call on the voice socket
+
+```yaml
+- id: correction_supersedes
+  drive: voice
+  voice:
+    clips:
+      - say: stocktake_13_chickpeas        # a key in suites/fixtures/voice/manifest.json
+      - say: correct_to_20
+        after: task_running                # wait for a task frame saying running
+        gap_ms: 3000                       # then this much silence
+    quiet_ms: 5000                         # optional
+  expect:
+    reply_matches: "(?i)osprey"            # graded against what the voice SAID
+    wire:
+      engine: xai_realtime
+      task_statuses_all: [superseded, completed]
+      task_statuses_none: [failed]
+      max_tasks: 1
+      task_terminal_once: true
+      caption_not_matches: "(?i)kestrel|heron|plover"
+```
+
+The runner (`bin/evallib/voice.py`) is the Mac app's voice call on
+`<FERMIX_HOME>/realtime.sock`, protocol v3 as `apps/fermix_core/priv/realtime/PROTOCOL.md`
+documents it: `client_hello`, `call_start`, then from the daemon's `listening`
+a continuous microphone of 100 ms `audio_chunk`s (24 kHz mono PCM16) at
+real-time pace, silence included, until `call_stop`. The voice's audio goes to
+a simulated speaker that plays it in real time, in arrival order, and sends
+`playback_progress` for every `audio_delta.playback_id` at most every 100 ms
+while it plays and at once when it drains or a `playback_stop` cuts it. It
+proves the protocol logic, not physical latency.
+
+The case's `voice:` map is the call:
+
+- `clips` (1–4) — what the owner says, in order. `say` names a clip in
+  `suites/fixtures/voice/manifest.json`, whose WAVs `bin/make_voice_fixtures.py`
+  generates (macOS `say` + `afconvert`); the loader refuses a clip whose WAV is
+  missing, is not 24 kHz mono PCM16, or no longer matches its manifest sha256.
+  Each clip waits `gap_ms` (0–30000, default 1500) of silence, counted from
+  `call_ready` for the first clip and from the end of the one before for the
+  rest. `after: task_running` (not on the first clip) also waits for a `task`
+  frame saying `running` since the previous clip began, so "while that runs",
+  "cancel that" and "I meant the twentieth" are said while the task is in
+  flight; a clip whose `after` does not hold within 30 s is abandoned with the
+  clips after it, and the call goes on.
+- `quiet_ms` (1000–20000, default 5000) — the call has settled once every clip
+  was said, every task's newest revision ended (`completed`, `failed`,
+  `cancelled`), the speaker has played everything, and no `audio_delta`,
+  `caption`, `task` or `playback_stop` arrived for this long. The runner then
+  sends `call_stop` and reads until the final `usage`, at most 10 s.
+
+The case's one turn is its clips' fixture texts, so reports and the judge see
+what was said. Everything the daemon sends is recorded in arrival order with
+its time since `call_start`: `state`, `call_ready`, `caption`, `task`, `usage`,
+`error`, `playback_stop`, and `audio_delta` by size only; a frame type the
+runner does not know is kept by its type. `expect.wire` is graded against that
+record, one `wire.<key>` gate per key, and is required on every voice case:
+
+| Key | Type | Passes when |
+|---|---|---|
+| `engine` | str | `call_ready.engine` equals it (`xai_realtime` for Grok) |
+| `events_all` | [str] | every listed frame type arrived; drawn from `state`, `call_ready`, `caption`, `audio_delta`, `playback_stop`, `task`, `usage`, `error` |
+| `events_none` | [str] | none of the listed frame types arrived |
+| `task_statuses_all` | [str] | every listed status is how some task revision ended; drawn from `pending`, `running`, `completed`, `failed`, `cancelled`, `superseded` |
+| `task_statuses_none` | [str] | no task revision ended in a listed status |
+| `caption_not_matches` | regex | what the voice said aloud (its `assistant` captions, concatenated as received) does not match: the leak check that a cancelled or superseded result never speaks. Make it match the protected material only |
+| `max_tasks` | int ≥ 1 | the call handed off at most this many tasks (distinct `delegation_id`s) |
+| `task_terminal_once` | `true` | no task revision ended twice, and no task completed twice |
+| `spoke_while_task_running` | `true` | an `assistant` caption arrived after the last clip ended while some task's newest revision had not ended: the voice talked while a task was pending |
+
+How a revision *ended* is its last `task` frame's status, except that a
+`cancelled` revision a newer revision of the same `delegation_id` replaced
+reads `superseded`: the frame the daemon sends for a corrected task. A
+revision still `running` or `pending` when the call was over (a task detached
+into the chat) ended that way.
+
+The call's Opik trace is found by its name, the call's `call_ready.call_id`
+(`voice_live:<n>`), started at or after the call and carrying its
+`provider_session_id` when the trace records one; every backend task turn
+(`voice_delegation_<n>`, whose `parent_session` is the call) nests inside it.
+The ordinary gates grade that trace against the time from `call_start` to the
+call settling. A call carries no reply text of its own, so the reply the
+`reply_*` gates and the judge read is what the voice said aloud; the judge
+also receives the call's timeline (each clip, each caption, each task frame,
+in milliseconds) and the clips' texts as reference facts. Route assertions
+follow the usual rule: `tools_any: [fermix_task]`, the call's bridge function
+on the call's own session, belongs in one labelled sanity case.
+
+A failed `wire.*` gate fails the case even when the trace is missing or
+incomplete: it is what the socket said during a call that settled, which no
+trace can unprove. Positive trace gates keep the incomplete downgrade. A socket
+that cannot be reached, refuses `call_start` (`call_in_progress`, an
+`update_required` refusal), closes, or does not settle within `timeout_ms` is
+`INCOMPLETE`, never a failed gate; the runner sends `call_stop` on every path
+once it sent `call_start`.
+
+Every voice case opens one paid voice call, so it runs only with `--voice`.
+Named by `--suite`, `--scenario`, `--case` or `--tag` without it, the case is
+skipped with a notice and the run is incomplete; a bare `--all` leaves voice
+cases out and says how many. With `--voice` the run needs a disposable eval
+home whatever the case's risk (`--confirm-daemon-isolated
+--confirm-isolated-env`, a strict home-scoped sandbox, an eval Opik project),
+its config must have `[fermix_core.realtime] enabled = true`, and its daemon
+must answer on `realtime.sock`; all three are checked before anything is
+driven. `--dry-run` validates the fixtures and prints the plan, opening no call.
 
 Every turn also receives mandatory `trace_complete` and `telemetry_complete`
 gates. A trace must be closed, have a stable span count, and expose all spans;

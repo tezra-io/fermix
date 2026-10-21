@@ -125,7 +125,8 @@ defmodule FermixChannels.Mobile.ProtocolTest do
       "server_seq" => 11,
       "role" => "assistant",
       "text" => String.duplicate("x", 1_100_000),
-      "ts" => "2026-09-27T12:00:00Z"
+      "ts" => "2026-09-27T12:00:00Z",
+      "media_refs" => []
     }
 
     assert {:ok, frames} = Protocol.encode_server_event("row", payload, 1, <<>>, [])
@@ -178,6 +179,26 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     assert event.seq == 1
     assert event.bytes == <<>>
     assert event.payload["future"] == %{"ok" => true}
+  end
+
+  test "a hello's relay list revision is 16 lowercase hex digits, or absent" do
+    hello = fn rev ->
+      client_frame("hello", 1, %{
+        "device_id" => "device-1",
+        "app_version" => "1.0.0",
+        "last_server_seq" => 0,
+        "protocol_v" => 2,
+        "relay_list_rev" => rev
+      })
+    end
+
+    assert {:ok, %{payload: %{"relay_list_rev" => "0123456789abcdef"}}} =
+             Protocol.decode_client_frame(hello.("0123456789abcdef"))
+
+    for bad <- ["0123456789ABCDEF", "0123", 42] do
+      assert {:error, {:invalid_field, "relay_list_rev"}} =
+               Protocol.decode_client_frame(hello.(bad))
+    end
   end
 
   test "requires a positive u64 session sequence and matching protocol version" do
@@ -565,13 +586,16 @@ defmodule FermixChannels.Mobile.ProtocolTest do
       "server_seq" => 7,
       "role" => "user",
       "text" => "from the Mac",
-      "ts" => "2026-09-27T09:00:00Z"
+      "ts" => "2026-09-27T09:00:00Z",
+      "media_refs" => []
     }
 
     assert {:ok, _frame} = Protocol.encode_server_frame("row", row, 1)
 
-    assert {:error, {:missing_field, "ts"}} =
-             Protocol.encode_server_frame("row", Map.delete(row, "ts"), 1)
+    for field <- ~w(ts media_refs) do
+      assert {:error, {:missing_field, ^field}} =
+               Protocol.encode_server_frame("row", Map.delete(row, field), 1)
+    end
   end
 
   # Mobile protocol 2 ends every turn: `turn_done` is this wire's own event,

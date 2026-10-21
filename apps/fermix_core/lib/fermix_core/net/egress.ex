@@ -65,6 +65,22 @@ defmodule FermixCore.Net.Egress do
   connector, the APNs socket) asks `ensure_direct/2` and refuses to start on a
   proxied route rather than dial around the proxy.
 
+  ## Address family
+
+  A direct dial tries IPv6 first and falls back to IPv4 when that fails, the
+  order curl and browsers use (`prefer_ipv6/1`, Mint's `inet6: true`). The
+  shared pools and every site-owned direct hop carry it, so a destination whose
+  IPv4 path is down while IPv6 works stays reachable: in October 2026 OpenAI
+  answered Sign in with ChatGPT tokens with HTTP 520 over IPv4 alone
+  (tezra-io/fermix#139). A name with no IPv6 address, an IPv4 literal and a host
+  without IPv6 fail the first attempt at once. On a network that silently drops
+  IPv6, each new connection waits out its connect budget there first: Mint tries
+  the two families in turn and does not race them.
+
+  A proxied hop dials only the proxy, by name or IPv4 address as before, and the
+  proxy picks the origin's family. The transports that dial with Mint themselves
+  keep their own options.
+
   ## When the proxy fails
 
   A failed proxy hop comes back as a `%Req.TransportError{}` whose reason is one
@@ -248,7 +264,8 @@ defmodule FermixCore.Net.Egress do
   The `Req` `:connect_options` for a request to `url`, built from the options
   the caller already had.
 
-  A direct route returns `base` untouched. A proxied HTTPS route makes three
+  A direct route returns `base` with the IPv6-first dial added
+  (`prefer_ipv6/1`), and nothing else changed. A proxied HTTPS route makes three
   timed steps where a direct one makes one, so the caller's connect budget is
   shared between them: a fifth for the TCP connect to the proxy (a neighbour on
   the network), two fifths for the `CONNECT` exchange (the proxy resolves and
@@ -260,15 +277,26 @@ defmodule FermixCore.Net.Egress do
   @spec connect_options(t(), String.t() | URI.t(), keyword()) :: keyword()
   def connect_options(%__MODULE__{} = egress, url, base) when is_list(base) do
     case route(egress, url) do
-      :direct -> base
+      :direct -> prefer_ipv6(base)
       {:proxy, proxy} -> proxied_options(base, proxy, scheme(url))
     end
   end
 
   @doc """
+  `options` (a request's `:connect_options` or a pool's `:conn_opts`) with the
+  dial set to try IPv6 first and fall back to IPv4 (see "Address family"). The
+  caller's other transport options are kept.
+  """
+  @spec prefer_ipv6(keyword()) :: keyword()
+  def prefer_ipv6(options) when is_list(options) do
+    transport = Keyword.get(options, :transport_opts, [])
+    Keyword.put(options, :transport_opts, Keyword.put(transport, :inet6, true))
+  end
+
+  @doc """
   The pool table for proxied destinations: `pools` with the proxy added to every
-  entry, each entry's idle caps, counts and connect budget kept. `nil` when no
-  proxy is configured, so no second pool is started.
+  entry, each entry's idle caps, counts and connect budget kept and its IPv6-first
+  dial dropped. `nil` when no proxy is configured, so no second pool is started.
   """
   @spec proxied_pools(t(), map()) :: map() | nil
   def proxied_pools(%__MODULE__{proxy: nil}, _pools), do: nil
@@ -344,13 +372,7 @@ defmodule FermixCore.Net.Egress do
   defp put_route(hop, :pooled, {:proxy, _proxy}, _egress, _base),
     do: put_option(hop, :finch, @proxied_pool)
 
-  defp put_route(hop, :direct, :direct, _egress, nil),
-    do: %{hop | options: Map.delete(hop.options, :connect_options)}
-
-  defp put_route(hop, :direct, :direct, _egress, base),
-    do: put_option(hop, :connect_options, base)
-
-  defp put_route(hop, :direct, {:proxy, _proxy}, egress, base),
+  defp put_route(hop, :direct, _route, egress, base),
     do: put_option(hop, :connect_options, connect_options(egress, hop.url, base || []))
 
   defp put_option(hop, key, value), do: %{hop | options: Map.put(hop.options, key, value)}
@@ -398,8 +420,10 @@ defmodule FermixCore.Net.Egress do
 
   defp proxied_options(base, proxy, _tunnelled_scheme), do: tunnel_options(base, proxy)
 
+  # The hop dials the proxy with `proxy_opts`, so a pool's IPv6-first dial is
+  # dropped here: the proxy picks the origin's family.
   defp tunnel_options(base, proxy) do
-    transport = Keyword.get(base, :transport_opts, [])
+    transport = base |> Keyword.get(:transport_opts, []) |> Keyword.delete(:inet6)
 
     budget =
       Keyword.get(transport, :timeout) || Keyword.get(base, :timeout) ||

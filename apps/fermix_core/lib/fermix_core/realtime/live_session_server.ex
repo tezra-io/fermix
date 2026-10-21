@@ -20,9 +20,12 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       enforced on a local tick as well as on provider snapshots, because a
       silent call still costs money.
 
-  A hand-off's reply is said as one line, and in a call in the chat what
-  cannot be said (a link, code, a table, a long answer) is shown in the chat
-  through the bridge, the voice told so only once the row is written
+  The call's tasks, their results and what the call leaves behind are
+  `CallTasks`, shared with the Grok engine (M70 §03); this server says what
+  they tell the voice on Live's own wire, a spoken commentary or a quiet
+  thinking line. A hand-off's reply is said as one line, and in a call in the
+  chat what cannot be said (a link, code, a table, a long answer) is shown in
+  the chat through the bridge, the voice told so only once the row is written
   (`LiveText.split/2`, M56 §4.5). A reply its turn said is drawn from Computer
   History is shown, never said, unless OpenAI may carry it (M56 §9); a private
   call shows nothing.
@@ -54,21 +57,18 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   use GenServer
 
-  alias FermixCore.Capabilities.AccessGate
-  alias FermixCore.Capabilities.AccessGate.Pending, as: AccessPending
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerHistory.Taint
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
-  alias FermixCore.Realtime.CallGist
   alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.CallSpeech
+  alias FermixCore.Realtime.CallTasks
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.ConversationRecorder
   alias FermixCore.Realtime.DeviceIdentity
   alias FermixCore.Realtime.LiveChat
-  alias FermixCore.Realtime.LiveDelegation
   alias FermixCore.Realtime.LiveFrames
   alias FermixCore.Realtime.LiveLedger
   alias FermixCore.Realtime.LivePrompt
@@ -88,7 +88,6 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   @start_deadline_ms 5_000
   @close_deadline_ms 15_000
   @usage_tick_ms 5_000
-  @context_wait_ms 1_000
   # How long after its audio has had time to play a reply counts as over: the
   # pet buffers a little before it plays.
   @reply_margin_ms 300
@@ -98,25 +97,10 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   # start that hangs can hold before the deadline ends the call.
   @max_held_audio_bytes 480_000
 
-  # How far back a delegation's request reads. Long enough for a correction and
-  # a confirmation, short enough that an unrelated earlier topic cannot be
-  # mistaken for the current request. A private call's request is this window;
-  # every call's sufficiency check reads it.
-  @context_window_ms 30_000
-
-  # The bound on a hand-off's request in the chat's conversation (M56 §4.1):
-  # the exchange since the previous hand-off, cut from the front, since its end
-  # is the ask.
-  @exchange_max_bytes 4_096
-
-  # Live caps an append at 500 tokens. These byte bounds sit under that with
-  # room for multibyte text, and they are what stops a 40 KB tool dump from
-  # being read aloud.
+  # Live caps an append at 500 tokens. This byte bound sits under that with
+  # room for multibyte text, and it is what stops a 40 KB progress dump from
+  # being read aloud (`CallTasks` bounds what is said of a result).
   @thinking_max_bytes 1_200
-  @commentary_max_bytes 1_500
-  # The wire's own bound on `task.summary` (protocol v2).
-  @summary_max_chars 240
-  @tool_progress_interval_ms 2_000
   # Unacked appends are kept only to explain a provider error. Bounded: this
   # process lives for a whole call.
   @max_pending_appends 64
@@ -127,24 +111,10 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   @submit_failed_line "I could not start that task."
   @busy_line "I am already working on a task and one more is waiting."
 
-  # What the voice is told about a result shown in the chat (M56 §4.5), after
-  # the line it says, only once the row is written.
-  @in_chat_line "The full result is in the chat."
-  # What it says instead of a reply drawn from Computer History it may not
-  # carry (M56 §9): the product's own words, never the reply's.
-  @withheld_shown_line "The result is in the chat."
-  @withheld_unshown_line "The result could not be put in the chat."
-  @withheld_private_line "That result draws on your computer history, so it cannot be said on this call."
-
-  # A task that outlives its call (M56 §4.6): what its frame and record say,
-  # what the voice is told once before the call closes, and why a waiting
-  # task, or one its new owner will not take, ended with the call.
-  @detached_summary "The result will be in the chat."
+  # What the voice is told, once before the call closes, when work it handed
+  # off goes on into the chat (M56 §4.6).
   @detached_line "The call is ending. The work you handed off goes on, and its result " <>
                    "will be in the owner's chat."
-  @dropped_summary "Dropped when the call ended: its words were not heard."
-  @not_kept_full_summary "Not kept after the call: too many tasks were still running."
-  @not_kept_summary "Not kept after the call: it could not be handed over."
   # The events of handed-over tasks forwarded as this process exits. A task
   # sends a handful, and its route is gone by then.
   @max_forwarded 256
@@ -167,45 +137,6 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   @doc "The provider socket process, or `nil` before `call_start`."
   @spec live_pid(GenServer.server()) :: pid() | nil
   def live_pid(server), do: GenServer.call(server, :live_pid)
-
-  @doc """
-  The owner typed `text` in the chat (M56 §4.3). Sent, never awaited: the
-  session tells the voice model as quiet context while a call in the chat is
-  up, and drops it otherwise. Channels finds the session (`CallRegistry`).
-  """
-  @spec chat_typed(GenServer.server(), String.t()) :: :ok
-  def chat_typed(session, text) when is_binary(text),
-    do: GenServer.cast(session, {:chat, {:typed, text}})
-
-  @doc """
-  The chat answered the owner's typed message: `message` is that answer as the
-  chat's store holds it, its Computer History marker included. Sent, never
-  awaited, and told or dropped as `chat_typed/2` is.
-  """
-  @spec chat_answered(GenServer.server(), map()) :: :ok
-  def chat_answered(session, %{role: "assistant", content: content} = message)
-      when is_binary(content),
-      do: GenServer.cast(session, {:chat, {:answered, message}})
-
-  @typedoc """
-  What a typed chat turn may read of the call in progress (M56 §4.4): when it
-  started and how long it has run, its tasks as its record holds them, and what
-  was said, the whole call (`CallSpeech`), never written anywhere.
-  """
-  @type context :: %{
-          call_uuid: String.t(),
-          started_at: DateTime.t(),
-          elapsed_ms: non_neg_integer(),
-          tasks: [CallRecord.task()],
-          speech: CallSpeech.t()
-        }
-
-  @doc """
-  The call's context, for `voice_call_context`. The caller bounds the wait:
-  a session settling its call answers nothing until it is done.
-  """
-  @spec call_context(GenServer.server(), timeout()) :: {:ok, context()}
-  def call_context(session, timeout), do: GenServer.call(session, :call_context, timeout)
 
   @impl true
   def init(opts) do
@@ -246,30 +177,45 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   defp initial_state(opts, config) do
     clock = Keyword.get(opts, :clock, &monotonic_ms/0)
     session_scope = Keyword.get(opts, :session_scope, "voice_live:unknown")
+    companion = Keyword.fetch!(opts, :companion)
+    # The trace session id, a counter that restarts with the VM.
+    call_id = to_string(session_scope)
+    # The call's durable identity: the key of its record, on every frame and
+    # telemetry event that names the call.
+    call_uuid = DeviceIdentity.generate_uuid()
+    device_id = Keyword.get(opts, :device_id, "unknown")
 
     %{
-      companion: Keyword.fetch!(opts, :companion),
+      companion: companion,
       config: config,
-      # The trace session id, a counter that restarts with the VM.
-      call_id: to_string(session_scope),
-      # The call's durable identity: the key of its record, on every frame and
-      # telemetry event that names the call.
-      call_uuid: DeviceIdentity.generate_uuid(),
+      call_id: call_id,
+      call_uuid: call_uuid,
       # When the call started: the claim's and the record's one start, and the
       # same moment on this session's clock, for how long it has run.
       started_at: DateTime.utc_now(),
       started_ms: clock.(),
       call_registry: Keyword.get(opts, :call_registry, CallRegistry),
-      # The call's durable record (`CallRecord`), `nil` until the call starts.
-      call_record: nil,
-      record_opts: CallRecord.repo_opts(Keyword.get(opts, :record_repo, Repo)),
       api_key: Keyword.get(opts, :api_key),
-      device_id: Keyword.get(opts, :device_id, "unknown"),
+      device_id: device_id,
       agent_id: Keyword.get(opts, :agent_id, MemoryConfig.agent_id()),
       live_client: Keyword.get(opts, :live_client, OpenAILiveClient),
       live_pid: nil,
       voice_bridge: Keyword.get(opts, :voice_bridge),
-      bridge_handle: nil,
+      # The call's tasks, their record and what the call leaves the chat.
+      tasks:
+        [
+          call_id: call_id,
+          call_uuid: call_uuid,
+          conversation: Config.conversation(config),
+          device_id: device_id,
+          voice_provider: :openai,
+          meta: telemetry_meta(config, call_id, call_uuid, device_id),
+          clock: clock,
+          record_opts: CallRecord.repo_opts(Keyword.get(opts, :record_repo, Repo)),
+          persist?: config.persist_transcripts?
+        ]
+        |> Keyword.merge(Keyword.take(opts, [:context_wait_ms]))
+        |> CallTasks.new(),
       capability_registry: Keyword.get(opts, :capability_registry, CapabilityRegistry),
       prompt: Keyword.get(opts, :prompt),
       recorder_module: Keyword.get(opts, :recorder_module, ConversationRecorder),
@@ -279,7 +225,6 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       start_deadline_ms: Keyword.get(opts, :start_deadline_ms, @start_deadline_ms),
       close_deadline_ms: Keyword.get(opts, :close_deadline_ms, @close_deadline_ms),
       usage_tick_ms: Keyword.get(opts, :usage_tick_ms, @usage_tick_ms),
-      context_wait_ms: Keyword.get(opts, :context_wait_ms, @context_wait_ms),
       reply_margin_ms: Keyword.get(opts, :reply_margin_ms, @reply_margin_ms),
       provider_ready?: false,
       provider_session_id: nil,
@@ -295,23 +240,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       transcript: LiveTranscript.new(),
       # The whole call's speech, for a call in the chat (M56 §4.4).
       speech: CallSpeech.new(),
-      # Where the next hand-off's exchange starts (M56 §4.1): the end of the
-      # newest speech when the previous request was handed to the bridge, `nil`
-      # until then (the exchange since the call started).
-      exchange_since_ms: nil,
-      delegations: LiveDelegation.new(),
-      # Delegations whose turn read Computer History content, as each turn's
-      # runner told it before its reply (M56 §9). Forgotten as each settles.
-      history_tainted: MapSet.new(),
-      # Whether anything drawn from Computer History reached this call: what
-      # it started with, a mirrored answer, a task's reply (M56 §9). Never
-      # forgotten: the call's gist inherits it.
-      call_tainted?: false,
       # The gist's summariser seams (`CallGist.run/2`'s opts); a test names a
       # route, the daemon names none and the primary chain is used.
       gist_opts: Keyword.get(opts, :gist, []),
-      turn_sessions: %{},
-      last_activity_ms: %{},
       pending_appends: [],
       # The microphone from `listening` until the provider session is up,
       # newest first, and its size (`@max_held_audio_bytes`).
@@ -323,18 +254,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       start_timer: nil,
       max_session_timer: nil,
       usage_timer: nil,
-      reply_timer: nil,
-      context_timers: %{},
-      # `{intent_id, since_ms}`: the parked access-sensitive command the last
-      # settled delegation's OWN turn asked the owner about, and when the owner
-      # had last stopped speaking as that reply was delivered. Only speech after
-      # it answers (`Capabilities.AccessGate`'s spoken yes); `nil` otherwise.
-      access_window: nil,
-      # Confirmed access-sensitive runs in flight: task ref -> delegation id.
-      access_confirms: %{},
-      # Tasks handed over as the call ended (M56 §4.6): delegation id -> the
-      # forward to their new owner.
-      detached: %{}
+      reply_timer: nil
     }
   end
 
@@ -395,9 +315,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   # handed-over task (at most `@max_forwarded` events, none waited for), and
   # casts the socket close.
   def handle_call({:cancel_task, delegation_id}, _from, state) do
-    case LiveDelegation.fetch(state.delegations, delegation_id) do
-      {:ok, record} -> {:reply, :ok, start_next(cancel_delegation(state, record))}
-      :error -> {:reply, {:error, :unknown_delegation}, state}
+    case CallTasks.cancel(state.tasks, delegation_id, state.transcript) do
+      {:ok, tasks, told} -> {:reply, :ok, tell(%{state | tasks: tasks}, told)}
+      {:error, :unknown_delegation} -> {:reply, {:error, :unknown_delegation}, state}
     end
   end
 
@@ -419,7 +339,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       call_uuid: state.call_uuid,
       started_at: state.started_at,
       elapsed_ms: max(0, now(state) - state.started_ms),
-      tasks: recorded_tasks(state.call_record),
+      tasks: CallTasks.recorded_tasks(state.tasks),
       speech: state.speech
     }
 
@@ -448,7 +368,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   def handle_info({:openai_live_error, reason}, state) do
     Logger.warning("voice_live: provider frame unreadable: #{inspect(reason)}")
-    LiveTelemetry.provider_error(telemetry_meta(state), inspect(reason))
+    LiveTelemetry.provider_error(state.tasks.meta, inspect(reason))
     {:noreply, state}
   end
 
@@ -495,43 +415,27 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   def handle_info({:reply_played_out, _stale_token}, state), do: {:noreply, state}
 
-  def handle_info({:context_wait_expired, delegation_id}, state) do
-    state = %{state | context_timers: Map.delete(state.context_timers, delegation_id)}
+  def handle_info({:context_wait_expired, delegation_id, revision}, state) do
+    {tasks, told} =
+      CallTasks.context_wait_expired(state.tasks, delegation_id, revision, state.transcript)
 
-    case LiveDelegation.fetch(state.delegations, delegation_id) do
-      {:ok, record} -> {:noreply, submit_or_clarify(state, record)}
-      :error -> {:noreply, state}
-    end
+    {:noreply, tell(%{state | tasks: tasks}, told)}
   end
 
-  def handle_info({:delegation_event, delegation_id, event}, state) do
-    case LiveDelegation.fetch(state.delegations, delegation_id) do
-      {:ok, record} ->
-        delegation_event(event, record, state)
+  def handle_info({:delegation_event, delegation_id, revision, event}, state) do
+    {tasks, told} =
+      CallTasks.delegation_event(state.tasks, delegation_id, revision, event, state.transcript)
 
-      :error ->
-        Logger.debug("voice_live: dropped stale event for delegation #{delegation_id}")
-        {:noreply, state}
-    end
+    {:noreply, tell(%{state | tasks: tasks}, told)}
   end
 
-  # A confirmed access-sensitive command finished: its outcome answers the task
-  # that carried the owner's yes, like any delegation result.
-  def handle_info({ref, {status, outcome}}, %{access_confirms: confirms} = state)
-      when is_reference(ref) and is_map_key(confirms, ref) and status in [:ok, :error] and
-             is_binary(outcome) do
-    Process.demonitor(ref, [:flush])
-    {delegation_id, confirms} = Map.pop(confirms, ref)
-    access_result(%{state | access_confirms: confirms}, delegation_id, spoken(status, outcome))
-  end
+  # A confirmed access-sensitive command finished, or crashed: its outcome
+  # answers the task that carried the owner's yes, like any task's result.
+  def handle_info({ref, _outcome} = message, state) when is_reference(ref),
+    do: access_message(message, state)
 
-  def handle_info({:DOWN, ref, :process, _pid, reason}, %{access_confirms: confirms} = state)
-      when is_map_key(confirms, ref) do
-    Logger.error("voice_live: a confirmed access-sensitive command crashed: #{inspect(reason)}")
-    {delegation_id, confirms} = Map.pop(confirms, ref)
-    unknown = {:error, AccessGate.outcome_unknown_text()}
-    access_result(%{state | access_confirms: confirms}, delegation_id, unknown)
-  end
+  def handle_info({:DOWN, ref, :process, _pid, _reason} = message, state) when is_reference(ref),
+    do: access_message(message, state)
 
   def handle_info(message, state) do
     Logger.debug("voice_live: unexpected message #{inspect(message)}")
@@ -540,9 +444,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   @impl true
   def terminate(_reason, %{companion: _companion} = state) do
-    cancel_timers(state)
-    close_bridge_call(state)
-    forward_detached(state, @max_forwarded)
+    state = cancel_timers(state)
+    tasks = CallTasks.close_bridge_call(state.tasks)
+    CallTasks.forward_detached(tasks, @max_forwarded)
     close_socket(state)
     :ok
   end
@@ -559,7 +463,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
          {:ok, {input, input_tainted?}} <- resolve_input(state, bridge),
          {:ok, api_key} <- require_binary(state.api_key, :api_key),
          {:ok, pid} <- open_socket(state, api_key) do
-      state = %{state | voice_bridge: bridge, live_pid: pid, call_tainted?: input_tainted?}
+      tasks = state.tasks |> CallTasks.put_bridge(bridge) |> taint_if(input_tainted?)
+      state = %{state | voice_bridge: bridge, live_pid: pid, tasks: tasks}
       send_session_start(state, instructions, input)
     else
       {:error, {:provider_refused, reason}} -> refuse_start(state, reason)
@@ -585,7 +490,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   defp refuse_start(state, reason) do
     detail = LiveText.reason(reason)
     Logger.warning("voice_live: the provider refused the session: #{detail}")
-    LiveTelemetry.provider_error(telemetry_meta(state), detail)
+    LiveTelemetry.provider_error(state.tasks.meta, detail)
     notify(state, LiveFrames.error(:provider_refused, detail))
     {:error, :provider_refused, state}
   end
@@ -600,7 +505,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     case send_event(state, event) do
       :ok ->
         LiveTelemetry.call_start(
-          telemetry_meta(state),
+          state.tasks.meta,
           state.max_duration_ms,
           Map.put(LiveChat.input_size(input), :instructions_bytes, byte_size(instructions))
         )
@@ -646,9 +551,12 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   defp chat_input(bridge) do
     with {:ok, window} <- bridge.conversation_window(LiveChat.window_bounds()) do
-      {:ok, {LiveChat.input(window), LiveChat.carries_taint?(window)}}
+      {:ok, {LiveChat.input(window), LiveChat.carries_taint?(window, :openai)}}
     end
   end
+
+  defp taint_if(tasks, true), do: CallTasks.mark_tainted(tasks)
+  defp taint_if(tasks, false), do: tasks
 
   # Tagged, because `start_call/1`'s `with` gathers five different failures and
   # only this one is the provider's: the others (no bridge, no key) are local
@@ -667,13 +575,17 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   ## Provider events
 
   defp handle_live_event({:session_started, %{id: id, expires_at: expires_at}}, state) do
+    tasks = CallTasks.put_meta(state.tasks, %{provider_session_id: id})
+
     state =
       %{state | provider_ready?: true, provider_session_id: id, expires_at: expires_at}
+      |> Map.put(:tasks, tasks)
       |> cancel_start_timer()
 
-    case open_bridge_call(state) do
-      {:ok, state} ->
-        LiveTelemetry.session_started(telemetry_meta(state))
+    case CallTasks.open_bridge_call(state.tasks) do
+      {:ok, tasks} ->
+        state = %{state | tasks: tasks}
+        LiveTelemetry.session_started(state.tasks.meta)
 
         state =
           state
@@ -720,17 +632,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   end
 
   defp handle_live_event({:delegation_created, id, offset_ms}, state) do
-    case LiveDelegation.create(state.delegations, id, offset_ms, now(state)) do
-      {:ok, delegations} ->
-        {:noreply, admit_delegation(%{state | delegations: delegations}, id)}
-
-      {:duplicate, _delegations} ->
-        Logger.debug("voice_live: ignored duplicate delegation #{id}")
-        {:noreply, state}
-
-      {:rejected, :too_many_pending, _delegations} ->
-        {:noreply, refuse_delegation(state, id)}
-    end
+    {_admitted, tasks, told} = CallTasks.create(state.tasks, id, offset_ms, state.transcript)
+    {:noreply, tell(%{state | tasks: tasks}, told)}
   end
 
   defp handle_live_event({:usage_updated, seconds}, state) do
@@ -762,7 +665,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       {:noreply, start_without_input(state, error)}
     else
       Logger.warning("voice_live: provider error: #{inspect(error)}")
-      LiveTelemetry.provider_error(telemetry_meta(state), provider_error_text(error))
+      LiveTelemetry.provider_error(state.tasks.meta, provider_error_text(error))
       {:noreply, fail_pending_append(state, Map.get(error, "client_event_id"))}
     end
   end
@@ -824,7 +727,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       "voice_live: the provider refused the call's input, starting without it: #{detail}"
     )
 
-    LiveTelemetry.provider_error(telemetry_meta(state), detail)
+    LiveTelemetry.provider_error(state.tasks.meta, detail)
 
     event =
       OpenAILiveClient.session_start_event(state.config, state.start.instructions,
@@ -853,7 +756,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   defp mirror_line(%{provider_ready?: true, closing?: false} = state, event) do
     case Config.conversation(state.config) do
-      "chat" -> LiveChat.mirror_line(event)
+      "chat" -> LiveChat.mirror_line(event, :openai)
       "private" -> :drop
     end
   end
@@ -863,7 +766,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   # An answer is mirrored stamped only while the voice may carry it, and then
   # the call has heard something drawn from Computer History (M56 §9).
   defp mirrored_taint(state, {:answered, message}),
-    do: %{state | call_tainted?: state.call_tainted? or Taint.tainted?(message)}
+    do: %{state | tasks: taint_if(state.tasks, Taint.tainted?(message))}
 
   defp mirrored_taint(state, {:typed, _text}), do: state
 
@@ -872,481 +775,55 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   defp sync_mute(%{muted?: true} = state), do: send_mute(state, true)
   defp sync_mute(state), do: state
 
-  ## Delegations
+  ## What the call's tasks tell the voice
 
-  defp admit_delegation(state, id) do
-    {:ok, record} = LiveDelegation.fetch(state.delegations, id)
-    state = record_task(state, record, "created")
+  # `CallTasks` decides what the voice is told; Live says it as a spoken
+  # commentary on the task, or as a quiet thinking line it may use without
+  # saying. Live never revises a task, so `{:superseded, _}` has no clause:
+  # it would be a defect, and it fails loud.
+  defp tell(state, told), do: Enum.reduce(told, state, &say/2)
 
-    case LiveDelegation.active(state.delegations) do
-      %{id: ^id} -> submit_or_wait(state, record)
-      _other -> notify_task(state, record, "pending", nil)
-    end
+  defp say({:clarify, record}, state),
+    do: send_append(state, commentary(record.id, @insufficient_context), :commentary, record.id)
+
+  defp say({:submit_failed, record}, state),
+    do: send_append(state, commentary(record.id, @submit_failed_line), :commentary, record.id)
+
+  defp say({:progress, record, text}, state),
+    do: send_thinking(state, record.id, LiveText.one_line(text, @thinking_max_bytes))
+
+  defp say({:tool_started, record, name}, state),
+    do: send_thinking(state, record.id, "Using " <> name)
+
+  # A completed task is a backend turn the ledger counts, never prices.
+  defp say({:completed, record, spoken}, state) do
+    %{state | ledger: LiveLedger.record_backend_turn(state.ledger, %{})}
+    |> send_append(commentary(record.id, spoken), :commentary, record.id)
   end
 
-  defp submit_or_wait(state, record) do
-    if LiveTranscript.sufficient?(state.transcript, record.offset_ms, @context_window_ms) do
-      submit_delegation(state, record)
-    else
-      arm_context_wait(state, record.id)
-    end
-  end
+  defp say({:cancelled, record}, state), do: send_thinking(state, record.id, @cancelled_line)
 
-  # The ONE bounded wait. A delegation arrives a moment before the transcript
-  # delta that explains it, so waiting once is right — waiting twice, or
-  # guessing, is how a partial sentence becomes a consequential action.
-  defp submit_or_clarify(state, record) do
-    if LiveTranscript.sufficient?(state.transcript, record.offset_ms, @context_window_ms) do
-      submit_delegation(state, record)
-    else
-      state
-      |> send_append(commentary(record.id, @insufficient_context), :commentary, record.id)
-      |> settle_delegation(record, :failed, "insufficient_context")
-      |> start_next()
-    end
-  end
+  defp say({:failed, record, sentence}, state),
+    do: send_append(state, commentary(record.id, sentence), :commentary, record.id)
 
-  defp submit_delegation(state, record) do
-    case access_answer(state, record) do
-      {:confirmed, intent_id} -> confirm_access(%{state | access_window: nil}, record, intent_id)
-      :declined -> submit_to_bridge(%{state | access_window: nil}, record)
-      _no_window_or_no_answer -> submit_to_bridge(state, record)
-    end
-  end
+  # The third task. Live is told out loud that Fermix is busy, so it can say so.
+  defp say({:busy, id}, state), do: send_thinking(state, id, @busy_line)
 
-  defp submit_to_bridge(state, record) do
-    case submit(state, record) do
-      {:ok, state} ->
-        state
+  defp say(:handed_over, state), do: send_thinking(state, nil, @detached_line)
 
-      {:error, state} ->
-        state
-        |> send_append(commentary(record.id, @submit_failed_line), :commentary, record.id)
-        |> settle_delegation(record, :failed, "submit_failed")
-        |> start_next()
-    end
-  end
-
-  # The text is built once: what the bridge is given is what the turn persists
-  # and what the record keeps (M56 §4.1).
-  defp submit(state, record) do
-    turn_session_id = mint_turn_session_id()
-    text = request_text(state, record)
-    request = delegation_request(state, record, turn_session_id, text)
-    state = %{state | turn_sessions: Map.put(state.turn_sessions, record.id, turn_session_id)}
-
-    case state.voice_bridge.submit(state.bridge_handle, request, delegation_callbacks(record.id)) do
-      {:ok, task_ref} ->
-        {:ok, state |> close_exchange() |> run_delegation(record, task_ref, text)}
-
-      {:error, reason} ->
-        Logger.warning(
-          "voice_live: the bridge refused delegation #{record.id}: #{inspect(reason)}"
-        )
-
-        {:error, state}
-    end
-  end
-
-  # A task Live raises after a delegation's reply asked the owner to confirm the
-  # command that delegation's own turn parked is read against what the owner
-  # said since (`Capabilities.AccessGate`). A whole-utterance yes runs the
-  # recorded command here, with no Fermix turn that could issue it again;
-  # anything else drops the command and the task goes to Fermix as usual. A task
-  # with no owner speech behind it (raised before the question) is no answer,
-  # and the command waits.
-  defp access_answer(%{access_window: {intent_id, since}} = state, %{offset_ms: offset_ms})
-       when offset_ms > since do
-    case LiveTranscript.user_text_since(state.transcript, since) do
-      "" -> :no_answer
-      text -> AccessGate.answer_spoken(intent_id, text)
-    end
-  end
-
-  defp access_answer(_state, _record), do: :no_window
-
-  # Every settle decides the answer window afresh. Only a delegation that
-  # completed, and whose own turn parked a command still waiting, opens one: its
-  # reply is what asked the owner. A failed or cancelled one (its reply, if any,
-  # asked nothing) and a reply from a turn that parked nothing close it, so a
-  # yes the owner said to something else can never confirm the command.
-  defp settle_access_window(state, record, :completed),
-    do: %{state | access_window: parked_by(state, record)}
-
-  defp settle_access_window(state, _record, _failed_or_cancelled),
-    do: %{state | access_window: nil}
-
-  defp parked_by(state, record) do
-    with {:ok, turn_session_id} <- Map.fetch(state.turn_sessions, record.id),
-         {:ok, intent_id} <- AccessPending.pending_from(turn_session_id),
-         since when is_integer(since) <- LiveTranscript.latest_user_end_ms(state.transcript) do
-      {intent_id, since}
-    else
-      _nothing_parked -> nil
-    end
-  end
-
-  # The same bookkeeping and bookends as a submitted task. No bridge task backs
-  # it (`bridge_ref: nil`), so cancelling it makes no bridge call.
-  defp confirm_access(state, record, intent_id) do
-    task =
-      Task.Supervisor.async_nolink(FermixCore.TaskSupervisor, fn ->
-        AccessGate.confirm(intent_id)
-      end)
-
-    state = %{state | access_confirms: Map.put(state.access_confirms, task.ref, record.id)}
-    run_delegation(state, record, nil, request_text(state, record))
-  end
-
-  defp spoken(:ok, outcome), do: {:ok, "The owner said yes. " <> outcome}
-  defp spoken(:error, outcome), do: {:error, outcome}
-
-  # A cancelled task is already settled; its late outcome is dropped.
-  defp access_result(state, delegation_id, result) do
-    case LiveDelegation.fetch(state.delegations, delegation_id) do
-      {:ok, record} -> delegation_event({:result, result}, record, state)
-      :error -> {:noreply, state}
-    end
-  end
-
-  defp delegation_request(state, record, turn_session_id, text) do
-    %{
-      call_id: state.call_id,
-      delegation_id: record.id,
-      revision: record.revision,
-      turn_session_id: turn_session_id,
-      text: text,
-      screen_frame: nil
-    }
-  end
-
-  # In the chat's conversation a hand-off's request is the exchange since the
-  # previous one, speaker labelled and bounded (M56 §4.1): it is persisted in
-  # the chat's history, where the overlapping window would store the same words
-  # twice. A private call keeps the window it always had.
-  defp request_text(state, record) do
-    case Config.conversation(state.config) do
-      "chat" -> LiveText.tail(exchange_text(state, record), @exchange_max_bytes)
-      "private" -> window_text(state, record)
-    end
-  end
-
-  defp exchange_text(%{exchange_since_ms: nil} = state, _record),
-    do: LiveTranscript.exchange_since(state.transcript, nil)
-
-  # Live can raise two tasks from one sentence, and the second then has no
-  # word of the owner's after the first went out. A request without the words
-  # that asked for it is no request, so it is sent the window, the sentence
-  # included, as a private call's would be.
-  defp exchange_text(state, record) do
-    case LiveTranscript.user_text_since(state.transcript, state.exchange_since_ms) do
-      "" -> window_text(state, record)
-      _new_words -> LiveTranscript.exchange_since(state.transcript, state.exchange_since_ms)
-    end
-  end
-
-  defp window_text(state, record),
-    do: LiveTranscript.context_since(state.transcript, record.offset_ms, @context_window_ms)
-
-  # The request is with the bridge: the next one starts after what it carried.
-  defp close_exchange(state) do
-    case LiveTranscript.latest_end_ms(state.transcript) do
-      nil -> state
-      end_ms -> %{state | exchange_since_ms: end_ms}
-    end
-  end
-
-  # The record keeps the words the task ran with: what was submitted to the
-  # bridge, or, for a confirmed command, what the owner said around the yes. A
-  # private call is kept apart from the chat, and its record keeps none.
-  defp run_delegation(state, record, task_ref, text) do
-    {:ok, delegations} =
-      LiveDelegation.start(state.delegations, record.id, task_ref, record.revision)
-
-    state = %{state | delegations: delegations}
-    LiveTelemetry.delegation_start(telemetry_meta(state), delegation_meta(state, record))
-
+  defp say({:frame, frame}, state) do
+    notify(state, frame)
     state
-    |> record_task(record, "running", recorded_request(state, text))
-    |> notify_task(record, "running", nil)
   end
 
-  defp recorded_request(state, text) do
-    case Config.conversation(state.config) do
-      "chat" -> %{request: text}
-      "private" -> %{}
-    end
-  end
+  defp access_message(message, state) do
+    case CallTasks.access_message(state.tasks, message, state.transcript) do
+      {:ok, tasks, told} ->
+        {:noreply, tell(%{state | tasks: tasks}, told)}
 
-  # The closures run in the BRIDGE's process, so they do exactly one thing:
-  # forward to this session's mailbox. Anything heavier would run a voice call's
-  # work inside an agent turn's process.
-  defp delegation_callbacks(delegation_id) do
-    session = self()
-
-    %{
-      progress: fn text ->
-        send(session, {:delegation_event, delegation_id, {:progress, text}})
-      end,
-      activity: fn event ->
-        send(session, {:delegation_event, delegation_id, {:activity, event}})
-      end,
-      history_tainted: fn ->
-        send(session, {:delegation_event, delegation_id, :history_tainted})
-      end,
-      result: fn result ->
-        send(session, {:delegation_event, delegation_id, {:result, result}})
-      end
-    }
-  end
-
-  defp delegation_event({:progress, text}, record, state) when is_binary(text) do
-    {:noreply, send_thinking(state, record.id, LiveText.one_line(text, @thinking_max_bytes))}
-  end
-
-  defp delegation_event({:activity, {:tool_start, name}}, record, state) when is_binary(name) do
-    if throttled?(state, record.id) do
-      {:noreply, state}
-    else
-      state = %{state | last_activity_ms: Map.put(state.last_activity_ms, record.id, now(state))}
-      {:noreply, send_thinking(state, record.id, "Using " <> name)}
-    end
-  end
-
-  defp delegation_event({:activity, _event}, _record, state), do: {:noreply, state}
-
-  # Sent by the turn's own process before its reply, so it is here first. The
-  # call keeps the mark after the task settles: its gist inherits it.
-  defp delegation_event(:history_tainted, record, state) do
-    tainted = MapSet.put(state.history_tainted, record.id)
-    {:noreply, %{state | history_tainted: tainted, call_tainted?: true}}
-  end
-
-  defp delegation_event({:result, {:ok, text}}, record, state) when is_binary(text) do
-    state = %{state | ledger: LiveLedger.record_backend_turn(state.ledger, %{})}
-    answer = answer(state, record, text)
-
-    state =
-      state
-      |> send_append(commentary(record.id, answer.spoken), :commentary, record.id)
-      |> settle_delegation(record, :completed, answer.summary, answer.shown)
-      |> start_next()
-
-    {:noreply, state}
-  end
-
-  defp delegation_event({:result, {:cancelled}}, record, state) do
-    state =
-      state
-      |> send_thinking(record.id, @cancelled_line)
-      |> settle_delegation(record, :cancelled, "cancelled")
-      |> start_next()
-
-    {:noreply, state}
-  end
-
-  defp delegation_event({:result, {:error, reason}}, record, state) do
-    text = reason_text(reason)
-
-    state =
-      state
-      |> send_append(
-        commentary(record.id, LiveText.sentence(text, @commentary_max_bytes)),
-        :commentary,
-        record.id
-      )
-      |> settle_delegation(record, :failed, LiveText.summary(text, @summary_max_chars))
-      |> start_next()
-
-    {:noreply, state}
-  end
-
-  defp delegation_event(event, record, state) do
-    Logger.debug("voice_live: unhandled delegation event #{inspect(event)} for #{record.id}")
-    {:noreply, state}
-  end
-
-  ## A hand-off's reply: what is said and what is shown
-
-  # M56 §4.5 and §9: what of a hand-off's reply the voice is given to say, the
-  # summary its task frame carries, and the chat row its result was shown at.
-  # A reply drawn from Computer History reaches the voice only when OpenAI may
-  # carry it, and a private call shows nothing.
-  defp answer(state, record, text) do
-    parts = LiveText.split(text, @commentary_max_bytes)
-
-    case {Config.conversation(state.config), voice_may_carry?(state, record)} do
-      {"private", true} -> said(text)
-      {"private", false} -> withheld(@withheld_private_line, nil)
-      {"chat", true} -> said_and_shown(state, record, parts)
-      {"chat", false} -> shown_only(state, record, parts)
-    end
-  end
-
-  defp voice_may_carry?(state, record),
-    do: not MapSet.member?(state.history_tainted, record.id) or LiveChat.history_permitted?()
-
-  # Every result of a private call, as every result was before: the reply cut
-  # to a sentence, nothing shown.
-  defp said(text) do
-    %{
-      spoken: LiveText.sentence(text, @commentary_max_bytes),
-      summary: LiveText.summary(text, @summary_max_chars),
-      shown: nil
-    }
-  end
-
-  defp said_and_shown(_state, _record, {spoken, nil}), do: said(spoken)
-
-  # The voice is told the rest is in the chat only once it is: a write that
-  # failed leaves the line it says as it was.
-  defp said_and_shown(state, record, {spoken, shown}) do
-    case show(state, record, shown) do
-      {:ok, row} ->
-        budget = @commentary_max_bytes - byte_size(@in_chat_line) - 1
-
-        %{
-          spoken: LiveText.sentence(spoken, budget) <> " " <> @in_chat_line,
-          summary: LiveText.summary(spoken, @summary_max_chars),
-          shown: row
-        }
-
-      :error ->
-        said(spoken)
-    end
-  end
-
-  # The whole reply is shown (the chat is local) and none of it is said.
-  defp shown_only(state, record, parts) do
-    case show(state, record, whole(parts)) do
-      {:ok, row} -> withheld(@withheld_shown_line, row)
-      :error -> withheld(@withheld_unshown_line, nil)
-    end
-  end
-
-  defp withheld(line, shown), do: %{spoken: line, summary: line, shown: shown}
-
-  # The reply as written, its delimiter line aside.
-  defp whole({spoken, nil}), do: spoken
-  defp whole({spoken, spoken}), do: spoken
-  defp whole({spoken, shown}), do: spoken <> "\n\n" <> shown
-
-  # One row per task revision, written through the bridge, which answers the
-  # row's `server_seq`. A write that fails is logged and the call goes on.
-  defp show(state, record, text) do
-    call = %{
-      "uuid" => state.call_uuid,
-      "event" => "shared",
-      "task_id" => record.id,
-      "revision" => record.revision
-    }
-
-    case bridge_call(fn -> state.voice_bridge.show(call, text) end) do
-      {:ok, server_seq} when is_integer(server_seq) and server_seq > 0 ->
-        {:ok, %{server_seq: server_seq, bytes: byte_size(text)}}
-
-      {:error, reason} ->
-        Logger.error(
-          "voice_live: the result of #{record.id} could not be shown in the chat: " <>
-            inspect(reason)
-        )
-
-        :error
-    end
-  end
-
-  # The third delegation. Live is told out loud that Fermix is busy (so it can
-  # say so), and the companion gets the refusal as a task frame rather than
-  # nothing at all.
-  defp refuse_delegation(state, id) do
-    refused = %{id: id, revision: 1}
-
-    state
-    |> send_thinking(id, @busy_line)
-    |> record_task(refused, "failed", %{summary: "busy"})
-    |> notify_task(refused, "failed", "busy")
-  end
-
-  defp cancel_delegation(state, record) do
-    cancel_on_bridge(state, record)
-    settle_delegation(state, record, :cancelled, "cancelled")
-  end
-
-  defp cancel_on_bridge(%{bridge_handle: nil}, _record), do: :ok
-  defp cancel_on_bridge(_state, %{bridge_ref: nil}), do: :ok
-
-  defp cancel_on_bridge(state, record) do
-    case bridge_call(fn -> state.voice_bridge.cancel(state.bridge_handle, record.bridge_ref) end) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("voice_live: cancel of #{record.id} failed: #{inspect(reason)}")
-        :ok
-    end
-  end
-
-  # `shown` is the chat row a completed result was shown at, `nil` when nothing
-  # was shown (M56 §4.5).
-  defp settle_delegation(state, record, status, summary, shown \\ nil) do
-    meta = delegation_meta(state, record)
-
-    state =
-      case terminal(state.delegations, record.id, status, summary) do
-        {:ok, finished, delegations} ->
-          LiveTelemetry.delegation_stop(
-            telemetry_meta(state),
-            meta,
-            Atom.to_string(status),
-            duration_ms(state, record),
-            shown
-          )
-
-          %{state | delegations: delegations}
-          |> record_task(finished, Atom.to_string(status), %{summary: summary})
-          |> notify_task(finished, Atom.to_string(status), summary, shown_seq(shown))
-
-        {:error, :unknown_delegation} ->
-          state
-      end
-
-    state
-    |> settle_access_window(record, status)
-    |> forget_delegation(record.id)
-  end
-
-  defp terminal(delegations, id, :completed, summary),
-    do: LiveDelegation.complete(delegations, id, summary)
-
-  defp terminal(delegations, id, :failed, summary),
-    do: LiveDelegation.fail(delegations, id, summary)
-
-  defp terminal(delegations, id, :cancelled, _summary), do: LiveDelegation.cancel(delegations, id)
-
-  defp start_next(state) do
-    case LiveDelegation.next_to_start(state.delegations) do
-      {:ok, record, delegations} -> submit_or_wait(%{state | delegations: delegations}, record)
-      :none -> state
-    end
-  end
-
-  defp shown_seq(nil), do: nil
-  defp shown_seq(%{server_seq: server_seq}), do: server_seq
-
-  defp forget_delegation(state, id) do
-    %{
-      state
-      | history_tainted: MapSet.delete(state.history_tainted, id),
-        turn_sessions: Map.delete(state.turn_sessions, id),
-        last_activity_ms: Map.delete(state.last_activity_ms, id),
-        context_timers: cancel_context_timer(state.context_timers, id)
-    }
-  end
-
-  defp throttled?(state, id) do
-    case Map.get(state.last_activity_ms, id) do
-      nil -> false
-      last -> now(state) - last < @tool_progress_interval_ms
+      :unknown ->
+        Logger.debug("voice_live: unexpected message #{inspect(message)}")
+        {:noreply, state}
     end
   end
 
@@ -1364,17 +841,37 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       %{state | closing?: true}
       |> notify_state("idle")
       |> notify_terminal(reason)
-      |> leave_in_flight_delegations()
-      |> close_bridge_call()
+      |> leave_tasks()
+
+    state = %{state | tasks: CallTasks.close_bridge_call(state.tasks)}
 
     {seconds, state} = graceful_close(state)
     state = %{state | ledger: LiveLedger.finalize(state.ledger, seconds)}
 
-    owes = close_record(state, reason)
+    ending = ending(state, reason)
+    owes = CallTasks.close_record(state.tasks, ending)
     notify_usage(state)
-    LiveTelemetry.call_stop(telemetry_meta(state), call_measurements(state), reason)
-    leave_for_chat(state, owes)
+    LiveTelemetry.call_stop(state.tasks.meta, call_measurements(state), reason)
+    CallTasks.leave_for_chat(state.tasks, ending, owes)
     cancel_timers(state)
+  end
+
+  # A private call's tasks are cancelled; a call in the chat hands its running
+  # one over (M56 §4.6), and the voice is told once that the work goes on.
+  defp leave_tasks(state) do
+    {tasks, told} = CallTasks.leave(state.tasks, state.transcript)
+    tell(%{state | tasks: tasks}, told)
+  end
+
+  defp ending(state, reason) do
+    %{
+      reason: reason,
+      usage: LiveLedger.usage_payload(state.ledger),
+      speech: state.speech,
+      started_at: state.started_at,
+      provider_started?: not is_nil(state.provider_session_id),
+      gist_opts: state.gist_opts
+    }
   end
 
   defp notify_terminal(state, :call_stop), do: state
@@ -1386,164 +883,6 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   end
 
   defp notify_terminal(state, reason), do: notify_error(state, reason)
-
-  defp leave_in_flight_delegations(state) do
-    case Config.conversation(state.config) do
-      "private" -> cancel_in_flight_delegations(state)
-      "chat" -> hand_over_in_flight_delegations(state)
-    end
-  end
-
-  defp cancel_in_flight_delegations(state) do
-    state.delegations
-    |> LiveDelegation.in_flight()
-    |> Enum.reduce(state, fn record, acc -> cancel_delegation(acc, record) end)
-  end
-
-  ## A task that outlives its call (M56 §4.6)
-
-  # The running task first, then the waiting one, which runs behind it. The
-  # voice is told once, before the call closes, when anything was handed over.
-  defp hand_over_in_flight_delegations(state) do
-    state =
-      state.delegations
-      |> LiveDelegation.in_flight()
-      |> Enum.reduce(state, &hand_over/2)
-
-    if state.detached == %{}, do: state, else: send_thinking(state, nil, @detached_line)
-  end
-
-  # A confirmed access-sensitive command has no turn to hand over, and is
-  # cancelled as before; a task not yet submitted is started now when its
-  # words were heard, and dropped otherwise.
-  defp hand_over(%{status: :running, bridge_ref: nil} = record, state),
-    do: cancel_delegation(state, record)
-
-  defp hand_over(%{status: :running} = record, state), do: detach_delegation(state, record)
-
-  defp hand_over(record, state) do
-    if LiveTranscript.sufficient?(state.transcript, record.offset_ms, @context_window_ms),
-      do: submit_at_end(state, record),
-      else: settle_delegation(state, record, :failed, @dropped_summary)
-  end
-
-  defp submit_at_end(state, record) do
-    case submit(state, record) do
-      {:ok, state} ->
-        {:ok, running} = LiveDelegation.fetch(state.delegations, record.id)
-        detach_delegation(state, running)
-
-      {:error, state} ->
-        settle_delegation(state, record, :failed, "submit_failed")
-    end
-  end
-
-  # The ordered transfer: (1) the record says the task is detached, its result
-  # going to the chat; (2) the bridge's owner registers the task's route and
-  # (3) the session's own is released; the call closes after. A reply finds
-  # one route or the other throughout (`VoiceBridge.detach/3`). A task the
-  # owner will not take stays this call's, and is cancelled.
-  defp detach_delegation(state, record) do
-    state =
-      record_task(state, record, "detached", %{summary: @detached_summary, destination: "chat"})
-
-    handover = fn ->
-      state.voice_bridge.detach(
-        state.bridge_handle,
-        record.bridge_ref,
-        detached_task(state, record)
-      )
-    end
-
-    case bridge_call(handover) do
-      {:ok, forward} when is_function(forward, 1) -> detached(state, record, forward)
-      {:error, reason} -> not_kept(state, record, reason)
-    end
-  end
-
-  defp detached(state, record, forward) do
-    {:ok, _detached, delegations} = LiveDelegation.detach(state.delegations, record.id)
-
-    %{state | delegations: delegations, detached: Map.put(state.detached, record.id, forward)}
-    |> notify_task(record, "running", @detached_summary, nil, true)
-    |> forget_delegation(record.id)
-  end
-
-  defp not_kept(state, record, reason) do
-    Logger.warning(
-      "voice_live: #{record.id} could not be handed over as the call ended " <>
-        "(#{inspect(reason)}); it is cancelled"
-    )
-
-    cancel_on_bridge(state, record)
-    settle_delegation(state, record, :cancelled, not_kept_summary(reason))
-  end
-
-  defp not_kept_summary(:full), do: @not_kept_full_summary
-  defp not_kept_summary(_reason), do: @not_kept_summary
-
-  defp detached_task(state, record) do
-    %{
-      delegation_id: record.id,
-      revision: record.revision,
-      request: task_request(state.call_record, record),
-      turn_session_id: Map.fetch!(state.turn_sessions, record.id),
-      elapsed_ms: duration_ms(state, record),
-      record_opts: state.record_opts
-    }
-  end
-
-  # The words the task ran with, as its record keeps them. A task the record
-  # no longer holds (past its newest 64) has none to show.
-  defp task_request(%CallRecord{tasks: tasks}, record) do
-    Enum.find_value(tasks, "", fn task ->
-      if task["task_id"] == record.id and task["revision"] == record.revision,
-        do: task["request"] || ""
-    end)
-  end
-
-  # Each event of a handed-over task that reached this session before its
-  # route was released goes to its new owner, in the order it came.
-  defp forward_detached(%{detached: detached} = state, left)
-       when map_size(detached) > 0 and left > 0 do
-    receive do
-      {:delegation_event, id, event} when is_map_key(detached, id) ->
-        :ok = Map.fetch!(detached, id).(event)
-        forward_detached(state, left - 1)
-    after
-      0 -> :ok
-    end
-  end
-
-  defp forward_detached(_state, _left), do: :ok
-
-  defp close_bridge_call(%{bridge_handle: nil} = state), do: state
-
-  defp close_bridge_call(state) do
-    case bridge_call(fn -> state.voice_bridge.close_call(state.bridge_handle) end) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("voice_live: the bridge left the call open: #{inspect(reason)}")
-    end
-
-    %{state | bridge_handle: nil}
-  end
-
-  # Teardown has to finish even when the bridge process is already gone: the
-  # ledger, the `call_stop` telemetry and the companion's final frames are what
-  # is left of the call, and losing them to a dead peer is a worse outcome than
-  # a logged close failure. A result shown in the chat is the same: a write
-  # that raised or exited is a write that failed, and the call goes on.
-  # Reported, never silent.
-  defp bridge_call(fun) do
-    fun.()
-  rescue
-    error -> {:error, error}
-  catch
-    kind, reason -> {:error, {kind, reason}}
-  end
 
   # A call whose provider session already closed, or never opened, has nothing
   # to hand back — asking anyway would block the whole close deadline on a
@@ -1633,23 +972,6 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     state
   end
 
-  defp notify_task(state, record, status, summary, server_seq \\ nil, detached? \\ false) do
-    notify(
-      state,
-      LiveFrames.task(
-        state.call_uuid,
-        record.id,
-        record.revision,
-        status,
-        summary,
-        server_seq,
-        detached?
-      )
-    )
-
-    state
-  end
-
   defp notify_usage(state, status \\ nil) do
     notify(
       state,
@@ -1722,7 +1044,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   # down here would race it.
   defp report_send_error(state, reason) do
     Logger.warning("voice_live: provider send failed: #{inspect(reason)}")
-    LiveTelemetry.provider_error(telemetry_meta(state), inspect(reason))
+    LiveTelemetry.provider_error(state.tasks.meta, inspect(reason))
     state
   end
 
@@ -1800,124 +1122,14 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   ## The call record
 
-  # Opened as the call starts, before any task can exist. A write that fails is
-  # logged and the call goes on: the record is what a call leaves behind, and
-  # a database hiccup must not end the conversation it records.
-  defp open_record(state) do
-    record = CallRecord.new(state.call_uuid, state.config.engine)
-    report_record(CallRecord.open(record, state.started_at, state.record_opts), "open")
-    %{state | call_record: record}
-  end
-
-  defp recorded_tasks(nil), do: []
-  defp recorded_tasks(%CallRecord{tasks: tasks}), do: tasks
-
-  # Every task state is written as it happens, so a crash loses nothing the
-  # call had already done.
-  defp record_task(state, record, task_state, fields \\ %{}) do
-    call_record =
-      CallRecord.put_task(state.call_record, record.id, record.revision, task_state, fields)
-
-    report_record(CallRecord.write_tasks(call_record, state.record_opts), "write")
-    %{state | call_record: call_record}
-  end
-
-  # Written before the final `usage` frame goes out, from the same settled
-  # ledger, so the record is the source that frame agrees with, and with what
-  # the call owes the chat, which it answers. A call that never reached
-  # `session.start` has no record to close and owes nothing.
-  defp close_record(%{call_record: nil}, _reason), do: :nothing
-
-  defp close_record(state, reason) do
-    usage = LiveLedger.usage_payload(state.ledger)
-    owes = owes(state)
-
-    state.call_record
-    |> CallRecord.close(reason, usage, DateTime.utc_now(), state.record_opts, owes)
-    |> owed_once_closed(owes)
-  end
-
-  # M56 §4.2: a call in the chat owes the chat its row, and its gist when it
-  # said or handed off anything; a private call (M56 §5), and one whose
-  # provider session never started, owe nothing.
-  defp owes(%{provider_session_id: nil}), do: :nothing
-
-  defp owes(state) do
-    case Config.conversation(state.config) do
-      "private" -> :nothing
-      "chat" -> if said_anything?(state), do: :gist, else: :row
-    end
-  end
-
-  defp said_anything?(state),
-    do: not CallSpeech.empty?(state.speech) or recorded_tasks(state.call_record) != []
-
-  # A close that failed leaves no record to settle a gist or a row against.
-  defp owed_once_closed(:ok, owes), do: owes
-
-  defp owed_once_closed(failed, _owes) do
-    report_record(failed, "close")
-    :nothing
-  end
-
-  # The gist and the row are made by a task under the task supervisor, from a
-  # snapshot: the session is going, and its stop callers wait on it with no
-  # timeout. A task that cannot start leaves both owed, for the next boot.
-  defp leave_for_chat(_state, :nothing), do: :ok
-
-  defp leave_for_chat(state, owes) do
-    case CallGist.start(gist_job(state, owes), state.gist_opts) do
-      {:ok, _pid} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.error(
-          "voice_live: the gist of call #{state.call_uuid} could not be started " <>
-            "(#{inspect(reason)}); the next boot writes its row"
-        )
-    end
-  end
-
-  defp gist_job(state, owes) do
-    bridge = state.voice_bridge
-
-    %{
-      call_uuid: state.call_uuid,
-      speech: state.speech,
-      tasks: recorded_tasks(state.call_record),
-      tainted?: state.call_tainted?,
-      duration_s: max(0, DateTime.diff(DateTime.utc_now(), state.started_at)),
-      gist?: owes == :gist,
-      write_row: &bridge.show/2,
-      repo_opts: state.record_opts
+  # Opened as `session.start` goes out, before any task can exist.
+  defp open_record(state),
+    do: %{
+      state
+      | tasks: CallTasks.open_record(state.tasks, state.config.engine, state.started_at)
     }
-  end
-
-  defp report_record(:ok, _action), do: :ok
-
-  # Memory off is a configuration: there is no table to write.
-  defp report_record({:error, :disabled}, _action), do: :ok
-
-  defp report_record({:error, reason}, action) do
-    Logger.error("voice_live: could not #{action} the call record: #{inspect(reason)}")
-  end
 
   ## Bridge, recorder, timers
-
-  defp open_bridge_call(state) do
-    call = %{
-      call_id: state.call_id,
-      call_uuid: state.call_uuid,
-      conversation: Config.conversation(state.config),
-      device_id: state.device_id,
-      persist?: state.config.persist_transcripts?,
-      session_scope: state.call_id
-    }
-
-    with {:ok, handle} <- state.voice_bridge.open_call(call) do
-      {:ok, %{state | bridge_handle: handle}}
-    end
-  end
 
   defp record_caption(%{config: %Config{persist_transcripts?: false}}, _s, _d, _from, _to),
     do: :ok
@@ -1983,33 +1195,15 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     %{state | usage_timer: Process.send_after(self(), :usage_tick, state.usage_tick_ms)}
   end
 
-  defp arm_context_wait(state, delegation_id) do
-    timer =
-      Process.send_after(self(), {:context_wait_expired, delegation_id}, state.context_wait_ms)
-
-    %{state | context_timers: Map.put(state.context_timers, delegation_id, timer)}
-  end
-
-  defp cancel_context_timer(timers, id) do
-    case Map.pop(timers, id) do
-      {nil, timers} -> timers
-      {timer, timers} -> cancel_timer(timer) && timers
-    end
-  end
-
   defp cancel_timers(state) do
-    Enum.each(
-      [state.start_timer, state.max_session_timer, state.usage_timer] ++
-        Map.values(state.context_timers),
-      &cancel_timer/1
-    )
+    Enum.each([state.start_timer, state.max_session_timer, state.usage_timer], &cancel_timer/1)
 
     %{
       cancel_reply_timer(state)
       | start_timer: nil,
         max_session_timer: nil,
         usage_timer: nil,
-        context_timers: %{}
+        tasks: CallTasks.cancel_timers(state.tasks)
     }
   end
 
@@ -2053,22 +1247,18 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   ## Telemetry and text shaping
 
-  defp telemetry_meta(state) do
+  # The call's telemetry metadata, held by its tasks from here on: the
+  # provider session id joins it once the session starts.
+  defp telemetry_meta(config, call_id, call_uuid, device_id) do
     %{
-      session_id: state.call_id,
-      call_uuid: state.call_uuid,
-      device_id: state.device_id,
-      model: state.config.model,
-      voice: state.config.voice,
-      provider_session_id: state.provider_session_id
-    }
-  end
-
-  defp delegation_meta(state, record) do
-    %{
-      delegation_id: record.id,
-      revision: record.revision,
-      turn_session_id: Map.get(state.turn_sessions, record.id, "voice_delegation_unstarted")
+      session_id: call_id,
+      call_uuid: call_uuid,
+      device_id: device_id,
+      engine: config.engine,
+      provider: config.provider,
+      model: config.model,
+      voice: config.voice,
+      provider_session_id: nil
     }
   end
 
@@ -2081,18 +1271,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     }
   end
 
-  defp duration_ms(state, record), do: max(0, now(state) - record.created_at_ms)
-
-  defp mint_turn_session_id do
-    "voice_delegation_" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
-  end
-
   defp provider_error_text(error) when is_map(error) do
     Map.get(error, "message") || Map.get(error, "type") || inspect(error)
   end
-
-  defp reason_text(reason) when is_binary(reason), do: reason
-  defp reason_text(reason), do: inspect(reason)
 
   defp require_binary(value, _name) when is_binary(value) and value != "", do: {:ok, value}
   defp require_binary(_value, name), do: {:error, {:missing, name}}

@@ -1,6 +1,8 @@
 defmodule FermixCore.Providers.OpenAI.ChatGPTPlanTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
+
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Prompt.ModelOverlays
   alias FermixCore.Providers.OpenAI.ChatGPTPlan
@@ -501,6 +503,30 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlanTest do
 
       assert {:error, {:provider_error, %{kind: :quota, stage: :before_response}}} =
                ChatGPTPlan.chat(messages(), [], opts(stub))
+    end
+
+    # Cloudflare answered every call with HTTP 520 and its HTML page
+    # (2026-10-14), and the whole page became the daemon log line.
+    test "an HTML error page is logged as one sentence with its status" do
+      stub = stub_id()
+      page = File.read!(Path.expand("../../../fixtures/providers/cloudflare_520.html", __DIR__))
+
+      Req.Test.stub(stub, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "text/html")
+        |> Plug.Conn.send_resp(520, page)
+      end)
+
+      {result, log} = with_log(fn -> ChatGPTPlan.chat(messages(), [], opts(stub)) end)
+
+      assert {:error, {:provider_error, %{kind: :provider_unavailable, status: 520}}} = result
+
+      assert log =~
+               "OpenAI Codex call failed: kind=provider_unavailable code=nil " <>
+                 "stage=before_response — HTTP 520 from Cloudflare in front of the " <>
+                 "provider, with an HTML error page instead of an API answer"
+
+      refute log =~ "DOCTYPE"
     end
   end
 

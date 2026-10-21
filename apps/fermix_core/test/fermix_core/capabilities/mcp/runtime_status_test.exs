@@ -201,7 +201,99 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatusTest do
     end
   end
 
+  # M74 E3: one table feeds the plugin rows and the MCP rows, so the facts an
+  # operator stdio server's row needs ride beside its status.
+  describe "facts beside a status" do
+    # M74 E9: what a discovery found is shown while the server is off or
+    # starting again, so it outlives the statuses and generations after it.
+    test "ready carries the discovery, which only the next discovery or a clear replaces", %{
+      status: status
+    } do
+      {:ok, generation} = RuntimeStatus.register_owner(status, @other, fake_owner())
+      assert {:ok, %{discovery: nil, stderr_tail: []}} = RuntimeStatus.fetch(status, @other)
+
+      :ok = RuntimeStatus.put_ready(status, @other, generation, discovery(4))
+      assert {:ok, %{status: :ready, discovery: %{tool_count: 4}}} = fetch(status)
+
+      :ok = RuntimeStatus.put(status, @other, generation, :remote_unreachable, :retries_exhausted)
+
+      assert {:ok,
+              %{
+                status: :remote_unreachable,
+                detail: :retries_exhausted,
+                discovery: %{tool_count: 4}
+              }} =
+               fetch(status)
+
+      {:ok, next} = RuntimeStatus.register_owner(status, @other, fake_owner())
+      assert {:ok, %{status: :connecting, discovery: %{tool_count: 4}}} = fetch(status)
+
+      :ok = RuntimeStatus.put_ready(status, @other, next, discovery(2))
+      assert {:ok, %{discovery: %{tool_count: 2}}} = fetch(status)
+
+      :ok = RuntimeStatus.clear(status, @other)
+      {:ok, _fresh} = RuntimeStatus.register_owner(status, @other, fake_owner())
+      assert {:ok, %{discovery: nil}} = fetch(status)
+    end
+
+    test "an exit keeps the program's last lines through the owner's death", %{status: status} do
+      owner = fake_owner()
+      {:ok, generation} = RuntimeStatus.register_owner(status, @other, owner)
+      :ok = RuntimeStatus.put_exited(status, @other, generation, ["boom", "the end"])
+
+      Process.exit(owner, :kill)
+
+      assert eventually(
+               fn ->
+                 match?(
+                   {:ok,
+                    %{
+                      status: :remote_unreachable,
+                      detail: :exited,
+                      stderr_tail: ["boom", "the end"],
+                      owner: nil
+                    }},
+                   RuntimeStatus.fetch(status, @other)
+                 )
+               end,
+               2_000
+             )
+    end
+
+    test "a replaced generation writes neither fact", %{status: status} do
+      {:ok, old} = RuntimeStatus.register_owner(status, @other, fake_owner())
+      {:ok, _current} = RuntimeStatus.register_owner(status, @other, fake_owner())
+
+      assert {:error, :stale_generation} =
+               RuntimeStatus.put_ready(status, @other, old, discovery(3))
+
+      assert {:error, :stale_generation} = RuntimeStatus.put_exited(status, @other, old, ["x"])
+      assert {:ok, %{status: :connecting, discovery: nil}} = RuntimeStatus.fetch(status, @other)
+    end
+  end
+
+  defp fetch(status), do: RuntimeStatus.fetch(status, @other)
+
+  defp discovery(count), do: %{tool_count: count, server_info: nil, tools: []}
+
   describe "classify/1" do
+    test "a stdio program that cannot start is classified without what it names" do
+      assert {:invalid_remote_config, :command_not_found, nil} =
+               RuntimeStatus.classify({:command_not_found, "npx"})
+
+      assert {:invalid_remote_config, :cwd_not_found, nil} =
+               RuntimeStatus.classify({:cwd_not_found, "/nowhere"})
+
+      assert {:invalid_remote_config, :env_unavailable, nil} =
+               RuntimeStatus.classify({:env_unavailable, "API_TOKEN"})
+
+      assert {:remote_unreachable, :spawn_failed, nil} =
+               RuntimeStatus.classify({:spawn_failed, :emfile})
+
+      assert {:remote_unreachable, :retries_exhausted, nil} =
+               RuntimeStatus.classify(:retries_exhausted)
+    end
+
     test "maps the remote rail's reasons onto statuses with atom-only detail" do
       assert {:needs_secret, nil, nil} = RuntimeStatus.classify({:needs_secret, "acme"})
 

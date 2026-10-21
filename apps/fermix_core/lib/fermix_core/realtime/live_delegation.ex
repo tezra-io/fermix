@@ -84,6 +84,31 @@ defmodule FermixCore.Realtime.LiveDelegation do
 
   def next_to_start(%__MODULE__{}), do: :none
 
+  @doc """
+  A delegation still in flight was asked for again in new words (Grok's
+  `fermix_task` with a `task_id`): it keeps its id and its slot and takes the
+  next revision, back to where a new one starts (`:created` in the active slot,
+  `:pending` in the waiting one) with no bridge task until it is submitted
+  again. The caller cancels the earlier revision's bridge task first; its late
+  answer is fenced by the revision it carries.
+  """
+  @spec revise(t(), String.t(), non_neg_integer(), integer()) ::
+          {:ok, t()} | {:error, :unknown_delegation}
+  def revise(%__MODULE__{} = state, id, offset_ms, now_ms)
+      when is_binary(id) and is_integer(offset_ms) and offset_ms >= 0 and is_integer(now_ms) do
+    update(state, id, fn record ->
+      %{
+        record
+        | revision: record.revision + 1,
+          offset_ms: offset_ms,
+          created_at_ms: now_ms,
+          status: revised_status(record.status),
+          bridge_ref: nil,
+          summary: nil
+      }
+    end)
+  end
+
   @doc "Record that the delegation was submitted to the bridge under `revision`."
   @spec start(t(), String.t(), term(), pos_integer()) ::
           {:ok, t()} | {:error, :unknown_delegation}
@@ -169,6 +194,9 @@ defmodule FermixCore.Realtime.LiveDelegation do
       :error -> {:error, :unknown_delegation}
     end
   end
+
+  defp revised_status(:pending), do: :pending
+  defp revised_status(_created_or_running), do: :created
 
   defp put_slot(%{active: %{id: id}} = state, %{id: id} = record), do: %{state | active: record}
   defp put_slot(%{pending: %{id: id}} = state, %{id: id} = record), do: %{state | pending: record}

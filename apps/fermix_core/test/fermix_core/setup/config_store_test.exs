@@ -3,7 +3,6 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
   import ExUnit.CaptureLog
 
-  alias FermixCore.MCP.Inbound.Config, as: InboundConfig
   alias FermixCore.Meetings.Config, as: MeetingsConfig
   alias FermixCore.Setup.ConfigStore
 
@@ -26,7 +25,6 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     oauth = Application.get_env(:fermix_core, :oauth, %{})
     sandbox = Application.get_env(:fermix_core, :sandbox)
     mcp_servers = Application.get_env(:fermix_core, :mcp_servers, [])
-    mcp_inbound = Application.get_env(:fermix_core, :mcp_inbound, InboundConfig.default())
     secret_writer = Application.get_env(:fermix_core, :secret_writer)
     mobile = Application.get_env(:fermix_channels, :mobile, [])
 
@@ -51,7 +49,6 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       Application.put_env(:fermix_core, :oauth, oauth)
       restore_sandbox(sandbox)
       Application.put_env(:fermix_core, :mcp_servers, mcp_servers)
-      Application.put_env(:fermix_core, :mcp_inbound, mcp_inbound)
       restore_secret_writer(secret_writer)
       Application.put_env(:fermix_channels, :mobile, mobile)
       FermixTestSupport.SecretWriterStub.reset()
@@ -1204,19 +1201,40 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       assert ConfigStore.web_port(Path.join(home, "nowhere")) == {:ok, nil}
     end
 
-    # `[mcp.servers.*]` and `[mcp.inbound]` are read by their own parsers and
-    # are not in this renderer's snapshot, so re-rendering a settings file that
-    # carries one would delete it. Setting a port is not a reason to do that.
+    # `[mcp.servers.*]` blocks are read by their own parser, and the renderer
+    # writes them back from it (M74 E2), so a port write keeps an operator's
+    # MCP servers rather than refusing the file.
+    test "put_web_port keeps the [mcp.servers.*] blocks", %{home: home} do
+      kept = Path.join(home, "mcp-home")
+      File.mkdir_p!(kept)
+
+      mcp =
+        "[mcp.servers.github]\ncommand = \"npx\"\n\n[mcp.servers.github.tools.create_issue]\n" <>
+          "hidden_from_agent = true\n"
+
+      File.write!(Path.join(kept, "config.toml"), mcp)
+
+      assert :ok = ConfigStore.put_web_port(kept, 4602)
+
+      written = File.read!(Path.join(kept, "config.toml"))
+      assert written =~ "[fermix_web]\nport = 4602"
+      assert String.ends_with?(written, "\n\n" <> mcp)
+    end
+
+    # Any other section is not in this renderer's snapshot, so re-rendering a
+    # settings file that carries one would delete it. Setting a port is not a
+    # reason to do that.
     test "put_web_port refuses a settings file it cannot re-render", %{home: home} do
-      guarded = Path.join(home, "mcp-home")
+      guarded = Path.join(home, "custom-home")
       File.mkdir_p!(guarded)
-      original = "[mcp.servers.github]\ncommand = \"npx\"\n"
+      original = "[custom]\nkey = \"kept\"\n"
       File.write!(Path.join(guarded, "config.toml"), original)
 
       assert {:error, {:unrenderable_settings, sentence}} =
                ConfigStore.put_web_port(guarded, 4602)
 
-      assert sentence =~ "[mcp]"
+      assert sentence =~ "[custom]"
+      assert sentence =~ "Set the web listener port by editing config.toml."
       assert File.read!(Path.join(guarded, "config.toml")) == original
     end
 
@@ -2927,6 +2945,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       fermix_channels: [
         mobile: [
           enabled: true,
+          iroh: false,
           mode: :listener,
           port: 4_031,
           bind: "0.0.0.0",
@@ -2950,6 +2969,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert :ok = ConfigStore.save_snapshot(snapshot)
     contents = File.read!(Path.join(tmp_home, "config.toml"))
     assert contents =~ "[fermix_channels.mobile]"
+    assert contents =~ "iroh = false"
     assert contents =~ "mode = \"listener\""
     assert contents =~ "port = 4031"
     assert contents =~ "streaming = \"draft\""
@@ -2960,6 +2980,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
     mobile = Keyword.fetch!(loaded.fermix_channels, :mobile)
+    assert Keyword.get(mobile, :iroh) == false
     assert Keyword.get(mobile, :mode) == :listener
     assert Keyword.get(mobile, :port) == 4_031
     assert Keyword.get(mobile, :max_media_bytes) == 20_971_520
@@ -2972,6 +2993,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     invalid_configs = [
       {[port: 0], ~r/mobile.port/},
       {[mode: :gateway], ~r/mobile.mode/},
+      {[iroh: "yes"], ~r/mobile.iroh/},
       {[bind: "0.0.0"], ~r/mobile.bind/},
       {[bind: "localhost"], ~r/mobile.bind/},
       {[max_media_bytes: -1], ~r/mobile.max_media_bytes/},
@@ -3469,46 +3491,6 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     personalization = Application.get_env(:fermix_core, :personalization, [])
     assert Keyword.get(personalization, :user_name) == "preserved"
-    assert %InboundConfig{enabled?: false} = Application.get_env(:fermix_core, :mcp_inbound)
-  end
-
-  test "bootstrap_runtime_config hydrates inbound MCP config alongside outbound servers" do
-    tmp_home =
-      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
-
-    on_exit(fn ->
-      FermixTestSupport.SafeRm.rm_rf!(tmp_home)
-      System.delete_env("FERMIX_INBOUND_TOKEN_TEST")
-    end)
-
-    System.put_env("FERMIX_HOME", tmp_home)
-    System.put_env("FERMIX_INBOUND_TOKEN_TEST", "secret-token")
-    File.mkdir_p!(tmp_home)
-
-    File.write!(Path.join(tmp_home, "config.toml"), """
-    [mcp.servers.github]
-    command = "npx"
-    args = ["-y", "@modelcontextprotocol/server-github"]
-
-    [mcp.inbound]
-    enabled = true
-    transport = "streamable_http"
-    expose_kinds = ["builtin", "mcp"]
-
-    [mcp.inbound.http]
-    auth_token = "$env:FERMIX_INBOUND_TOKEN_TEST"
-    """)
-
-    assert :ok = ConfigStore.bootstrap_runtime_config()
-
-    assert [%{name: "github", command: "npx"}] = Application.get_env(:fermix_core, :mcp_servers)
-
-    assert %InboundConfig{
-             enabled?: true,
-             transport: :streamable_http,
-             expose_kinds: [:builtin, :mcp],
-             http: %{path: "/mcp", auth_token: "secret-token"}
-           } = Application.get_env(:fermix_core, :mcp_inbound)
   end
 
   test "bootstrap_runtime_config persists provider selection under :agent" do
@@ -3774,6 +3756,67 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     assert Keyword.get(reloaded.fermix_core, :providers) ==
              Keyword.get(loaded.fermix_core, :providers)
+  end
+
+  # `fermix setup --openai-base-url` and its two siblings write `base_url` into
+  # the three hosted providers' blocks. Seeded with the shape a running daemon
+  # holds (the atoms the loader makes), saved and read back unchanged.
+  test "the openai, anthropic and xai blocks round-trip a base_url from the app-env shape" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    providers = Application.get_env(:fermix_core, :providers)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    on_exit(fn -> restore_env(:fermix_core, :providers, providers) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    Application.put_env(:fermix_core, :providers,
+      openai: [
+        base_url: "http://127.0.0.1:18081/v1",
+        default_model: "gpt-5.5",
+        reasoning_effort: :high
+      ],
+      anthropic: [
+        auth_mode: :api_key,
+        base_url: "http://127.0.0.1:18080/v1",
+        default_model: "claude-sonnet-5-5",
+        reasoning_effort: :high,
+        primary: true
+      ],
+      xai: [auth_mode: :oauth, base_url: "http://127.0.0.1:18082/v1", default_model: "grok-4.3"]
+    )
+
+    current = ConfigStore.current_snapshot()
+    assert :ok = ConfigStore.save_snapshot(current)
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    providers = Keyword.fetch!(loaded.fermix_core, :providers)
+
+    assert providers == Keyword.fetch!(current.fermix_core, :providers)
+    assert providers[:openai][:base_url] == "http://127.0.0.1:18081/v1"
+    assert providers[:anthropic][:base_url] == "http://127.0.0.1:18080/v1"
+    assert providers[:xai][:base_url] == "http://127.0.0.1:18082/v1"
+  end
+
+  @config_exs Path.expand("../../../../../config/config.exs", __DIR__)
+
+  # A compiled default under a persisted key would be written into every
+  # config.toml by the next save, so the shipped openai block carries none.
+  test "the shipped openai block seeds no base_url, so a save from it writes none" do
+    shipped_openai =
+      @config_exs
+      |> Config.Reader.read!(env: :prod, target: :host)
+      |> Keyword.fetch!(:fermix_core)
+      |> Keyword.fetch!(:providers)
+      |> Keyword.fetch!(:openai)
+
+    persisted =
+      ConfigStore.persistable_snapshot(%{
+        fermix_core: [providers: [openai: shipped_openai]],
+        fermix_channels: [],
+        fermix_web: []
+      })
+
+    refute Keyword.has_key?(persisted.fermix_core[:providers][:openai], :base_url)
   end
 
   test "a venice block round-trips through dump -> parse -> normalize" do

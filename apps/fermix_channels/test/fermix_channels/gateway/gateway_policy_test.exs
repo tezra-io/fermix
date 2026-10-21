@@ -448,7 +448,7 @@ defmodule FermixChannels.Gateway.PolicyTest do
       Process.register(self(), :phone_timeline_test)
       test_pid = self()
       put_channels_env(:mobile_store, PhoneTimeline)
-      put_channels_env(:mobile_unfurl_launcher, fn _resolution -> :ok end)
+      put_channels_env(:link_preview_launcher, fn _resolution -> :ok end)
 
       put_channels_env(:mobile_event_sink, fn profile_id, event ->
         send(test_pid, {:phone_event, profile_id, event})

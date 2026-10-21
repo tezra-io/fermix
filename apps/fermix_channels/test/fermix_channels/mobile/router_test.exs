@@ -7,6 +7,7 @@ defmodule FermixChannels.Mobile.RouterTest do
   alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Router
+  alias FermixChannels.Mobile.SocketHandler
 
   test "health endpoint exposes only the fixed liveness envelope" do
     conn = Router.call(conn(:get, "/healthz"), Router.init([]))
@@ -76,8 +77,9 @@ defmodule FermixChannels.Mobile.RouterTest do
     assert socket_opts[:timeout] > PairManager.max_ttl_ms()
   end
 
-  # SEC-8: pairing failures are counted per source address, so the socket's
-  # pairing calls carry the address the connection came from.
+  # SEC-8: pairing failures are counted per source address, so the router names
+  # the address the connection came from as the session's peer, and the
+  # session's pairing calls carry it.
   test "ws binds the socket's pairing calls to the connection's source address" do
     manager =
       start_supervised!(
@@ -95,13 +97,15 @@ defmodule FermixChannels.Mobile.RouterTest do
     Router.call(request, Router.init(max_media_bytes: 1_024))
 
     assert_receive {^request_ref, :upgrade, {:websocket, {_handler, state, _socket_opts}}}
-    assert {:ok, _window} = state.current_pair.(manager)
+    assert state.peer == request.remote_ip
+    assert {:ok, session} = SocketHandler.init(Map.put(state, :pair_manager, manager))
+    assert {:ok, _window} = session.current_pair.(manager, session.peer)
 
     for _attempt <- 1..5 do
-      state.record_pair_failure.(manager, window.session_id)
+      session.record_pair_failure.(manager, window.session_id, session.peer)
     end
 
-    assert :none = state.current_pair.(manager)
+    assert :none = session.current_pair.(manager, session.peer)
     assert :none = PairManager.current(manager, request.remote_ip)
     assert {:ok, _window} = PairManager.current(manager, {10, 0, 0, 9})
 

@@ -15,4 +15,8 @@
 # single commit. A test that asserts LATENCY still owns its own bound: this does not
 # touch `refute_receive` (499 uses, whose whole meaning is a window) and it does not
 # touch an explicit timeout anywhere.
-ExUnit.start(capture_log: true, assert_receive_timeout: 2_000)
+#
+# `mapkit_live` runs the real `fermix-maps` helper against Apple Maps over the
+# network: opt in on a Mac with `--only mapkit_live` (see
+# `Tools.PlaceSearch.HelperTest`).
+ExUnit.start(capture_log: true, assert_receive_timeout: 2_000, exclude: [:mapkit_live])

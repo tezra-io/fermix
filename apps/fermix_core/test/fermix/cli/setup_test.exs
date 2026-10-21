@@ -139,6 +139,34 @@ defmodule Fermix.CLI.SetupTest do
     assert Keyword.get(opts, :proxy_bypass) == "a.test,.corp.test"
   end
 
+  # A cloud sandbox points each hosted provider at a loopback relay in the one
+  # headless call that also names the primary provider.
+  test "the three provider base URL flags are answers that route to the terminal runtime" do
+    parent = self()
+
+    assert 0 =
+             Setup.run(
+               [
+                 "--openai-base-url",
+                 "http://127.0.0.1:18081/v1",
+                 "--anthropic-base-url",
+                 "http://127.0.0.1:18080/v1",
+                 "--xai-base-url",
+                 "http://127.0.0.1:18082/v1"
+               ],
+               standalone?: fn -> true end,
+               display?: fn -> true end,
+               setup_ready?: fn -> false end,
+               runtime: runtime(parent),
+               web_launcher: unexpected_web_launcher(parent)
+             )
+
+    assert_receive {:runtime, opts}
+    assert Keyword.get(opts, :openai_base_url) == "http://127.0.0.1:18081/v1"
+    assert Keyword.get(opts, :anthropic_base_url) == "http://127.0.0.1:18080/v1"
+    assert Keyword.get(opts, :xai_base_url) == "http://127.0.0.1:18082/v1"
+  end
+
   test "--acp-enabled is a recognized answer that routes to the terminal runtime" do
     parent = self()
 

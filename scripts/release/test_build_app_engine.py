@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Hermetic tests for native app-engine release orchestration."""
 
 import os
@@ -27,7 +31,7 @@ class BuildAppEngineTest(unittest.TestCase):
         self._write_fake_uname("arm64")
         self._write_fake_git(SOURCE_COMMIT)
         self._write_fake_mix()
-        self._write_fake_python()
+        self._write_fake_uv()
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -217,12 +221,13 @@ fi
 """,
         )
 
-    def _write_fake_python(self):
+    def _write_fake_uv(self):
         self._write_executable(
-            "python3",
+            "uv",
             """#!/bin/sh
 set -eu
-shift
+[ "$1" = "run" ]
+shift 2
 [ "$1" = "--release-root" ]; release_root="$2"; shift 2
 [ "$1" = "--target" ]; target="$2"; shift 2
 [ "$1" = "--output-dir" ]; output="$2"; shift 2

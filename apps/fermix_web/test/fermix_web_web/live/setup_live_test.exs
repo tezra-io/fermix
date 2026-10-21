@@ -1698,6 +1698,8 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
 
     test "the place posture is stated whatever the web backend (M31 §13.4)", %{conn: conn} do
+      Application.put_env(:fermix_core, :tools, web_search: [], place_search: [backend: "brave"])
+
       {:ok, view, _html} = live(conn, "/setup")
 
       html = view |> element("button[phx-value-tab=\"search\"]") |> render_click()
@@ -1711,7 +1713,10 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
 
     test "place readiness follows the saved Brave key", %{conn: conn} do
-      Application.put_env(:fermix_core, :tools, web_search: [brave_api_key: "brave-secret"])
+      Application.put_env(:fermix_core, :tools,
+        web_search: [brave_api_key: "brave-secret"],
+        place_search: [backend: "brave"]
+      )
 
       {:ok, view, _html} = live(conn, "/setup")
       html = view |> element("button[phx-value-tab=\"search\"]") |> render_click()
@@ -1721,12 +1726,31 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
 
     test "place readiness reports the missing key", %{conn: conn} do
-      Application.put_env(:fermix_core, :tools, web_search: [])
+      Application.put_env(:fermix_core, :tools, web_search: [], place_search: [backend: "brave"])
 
       {:ok, view, _html} = live(conn, "/setup")
       html = view |> element("button[phx-value-tab=\"search\"]") |> render_click()
 
       assert html =~ ~s(data-place-search="unconfigured")
+    end
+
+    # M72 §14.1: Apple Maps needs no key and is not metered, so the note says so
+    # rather than asking for a Brave key. Whether it is ready is the host's
+    # (a Mac with the helper), which the tool's own suite holds with the
+    # platform named; this case holds only what the note says either way.
+    test "under Apple Maps the note asks for no key and states no metering", %{conn: conn} do
+      Application.put_env(:fermix_core, :tools,
+        web_search: [],
+        place_search: [backend: "apple_maps"]
+      )
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"search\"]") |> render_click()
+
+      assert html =~ "Apple Maps"
+      assert html =~ "not metered"
+      refute html =~ "needs a Brave Search API key"
+      refute html =~ "metered separately"
     end
   end
 
@@ -2861,9 +2885,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       # catalog order, each option naming the engine that model speaks through.
       # The engine is a property of the model, never a second control the
       # operator has to keep in agreement with the first.
-      assert option_values(view, "model") ==
-               FermixCore.Realtime.Config.valid_models("openai_realtime") ++
-                 FermixCore.Realtime.Config.valid_models("openai_live")
+      assert option_values(view, "model") == FermixCore.Realtime.Config.all_models()
 
       assert option_labels(view, "model") ==
                Enum.map(
@@ -2873,6 +2895,10 @@ defmodule FermixWebWeb.SetupLiveTest do
                  Enum.map(
                    FermixCore.Realtime.Config.valid_models("openai_live"),
                    &(&1 <> " · Live, with your Fermix agent")
+                 ) ++
+                 Enum.map(
+                   FermixCore.Realtime.Config.valid_models("xai_realtime"),
+                   &(&1 <> " · Grok, with your Fermix agent")
                  )
 
       view
@@ -3024,6 +3050,110 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       refute live_html =~ ~s(name="realtime_form[reasoning_effort]")
       assert live_html =~ "beacon"
+    end
+
+    # M70 §06: Grok is a task engine on SpaceXAI, so picking it re-scopes the
+    # voices, withdraws reasoning effort as Live does, and points the key field
+    # at the SpaceXAI provider's slot.
+    test "choosing the Grok model re-scopes the pane to Grok without saving", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      openai_html =
+        view
+        |> element("button[phx-value-tab=\"realtime\"]")
+        |> render_click()
+
+      assert openai_html =~ "OpenAI API key for Realtime"
+
+      grok_html =
+        view
+        |> form("form[phx-submit=\"save_realtime\"]", realtime_form: %{model: "grok-voice-3.0"})
+        |> render_change()
+
+      assert selected_options(view, "model") == ["grok-voice-3.0"]
+      assert option_values(view, "voice") == ~w(eve ara rex sal leo)
+      assert selected_options(view, "voice") == ["eve"]
+      refute grok_html =~ ~s(name="realtime_form[reasoning_effort]")
+      assert grok_html =~ "SpaceXAI API key for Grok voice"
+      refute grok_html =~ "OpenAI API key for Realtime"
+      assert Application.get_env(:fermix_core, :realtime) == []
+    end
+
+    # A field's hint is one short line: anything longer runs out of the
+    # pane, so the explanation sits behind the label's info icon.
+    test "the voice pane's explanations sit behind info icons, not under the fields", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view
+      |> element("button[phx-value-tab=\"realtime\"]")
+      |> render_click()
+
+      grok_html =
+        view
+        |> form("form[phx-submit=\"save_realtime\"]", realtime_form: %{model: "grok-voice-3.0"})
+        |> render_change()
+
+      assert has_element?(view, ~s(span.tooltip[data-tip*="bill by the minute"]))
+      assert has_element?(view, ~s(span.tooltip[data-tip*="SpaceXAI sign-in does not"]))
+
+      hints =
+        grok_html
+        |> Floki.parse_fragment!()
+        |> Floki.find("form[phx-submit=\"save_realtime\"] span.label.text-xs")
+        |> Enum.map(&Floki.text/1)
+
+      assert hints != []
+      assert Enum.all?(hints, &(String.length(String.trim(&1)) <= 48))
+    end
+
+    test "submitting the Grok model persists SpaceXAI's engine and stores the key in its slot", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view
+      |> element("button[phx-value-tab=\"realtime\"]")
+      |> render_click()
+
+      view
+      |> form("form[phx-submit=\"save_realtime\"]", realtime_form: %{model: "grok-voice-3.0"})
+      |> render_change()
+
+      view
+      |> form("form[phx-submit=\"save_realtime\"]",
+        realtime_form: %{
+          enabled: "true",
+          model: "grok-voice-3.0",
+          voice: "rex",
+          api_key: "xai-voice-key"
+        }
+      )
+      |> render_submit()
+
+      assert render(view) =~ "Realtime saved."
+
+      realtime = Application.get_env(:fermix_core, :realtime, [])
+      assert Keyword.get(realtime, :provider) == "xai"
+      assert Keyword.get(realtime, :engine) == "xai_realtime"
+      assert Keyword.get(realtime, :model) == "grok-voice-3.0"
+      assert Keyword.get(realtime, :voice) == "rex"
+      assert Keyword.get(realtime, :screen_share) == false
+      refute Keyword.has_key?(realtime, :reasoning_effort)
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ ~s(engine = "xai_realtime")
+      assert contents =~ "[fermix_core.providers.xai]"
+      refute contents =~ "[fermix_core.providers.openai]"
+      refute contents =~ "xai-voice-key"
+
+      assert {:ok, "xai-voice-key"} = FermixTestSupport.SecretWriterStub.get(:xai_api_key)
+
+      # A voice key never makes its provider the primary chat provider.
+      xai = :fermix_core |> Application.get_env(:providers, []) |> Keyword.get(:xai, [])
+      refute Keyword.get(xai, :primary) == true
     end
   end
 
@@ -4181,7 +4311,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       {view, _html} = open_codex_card(conn)
       view |> element(~s(button[phx-click="chatgpt_login"])) |> render_click()
 
-      html = render_until(view, "OpenAI Codex connected. Its model is now gpt-plan-alpha.", 80)
+      html = render_until(view, "OpenAI Codex connected. Its model is now gpt-plan-alpha.")
 
       assert html =~ "Eligible usage in Fermix uses your ChatGPT plan."
       assert html =~ "mara@example.test · Connected · Using ChatGPT plan"
@@ -4208,7 +4338,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       {view, _html} = open_codex_card(conn)
       view |> element(~s(button[phx-click="chatgpt_login"])) |> render_click()
-      html = render_until(view, "OpenAI Codex connected.", 80)
+      html = render_until(view, "OpenAI Codex connected.")
 
       refute html =~ "Its model is now"
       assert PrimaryConfig.primary() == {:ok, :openai_codex}
@@ -4230,7 +4360,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       {view, _html} = open_codex_card(conn)
       view |> element(~s(button[phx-click="chatgpt_login"])) |> render_click()
-      render_until(view, "OpenAI Codex connected. Its model is now gpt-plan-alpha.", 80)
+      render_until(view, "OpenAI Codex connected. Its model is now gpt-plan-alpha.")
 
       contents = File.read!(Path.join(tmp_home, "config.toml"))
       assert contents =~ ~s(default_model = "gpt-plan-alpha")
@@ -5787,14 +5917,13 @@ defmodule FermixWebWeb.SetupLiveTest do
 
   # `status_pill_class/1` + `status_pill_label/1` are the only place a status atom
   # becomes UI, and a missing clause is silent — the pill just reads "Unknown".
-  # Per the CLAUDE.md "gate on the whole feature surface" rule, the invariant is
-  # written over the WHOLE vocabulary, and its local half is read from
-  # `Plugins.Status`'s own source (via the module's compile-time path, so no repo
-  # layout is assumed) instead of being spelled out: a status added there later
-  # either joins this test or fails it.
+  # Per the AGENTS.md "gate on the whole feature surface" rule, the invariant is
+  # written over the WHOLE vocabulary, and its local half is the ladder's own
+  # published list (`Plugins.Status.statuses/0`) instead of being spelled out
+  # here: a status added there later joins this test.
   describe "status vocabulary" do
     test "no status Plugins.Status returns, and no remote status, renders as Unknown" do
-      statuses = plugins_status_returns()
+      statuses = PluginStatus.statuses()
 
       # Anchors: a silently-broken extraction would otherwise pass an empty loop.
       assert length(statuses) >= 11
@@ -5812,7 +5941,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
 
     test "every pill label is sentence-cased" do
-      for status <- plugins_status_returns() ++ @remote_statuses do
+      for status <- PluginStatus.statuses() ++ @remote_statuses do
         label = Components.status_pill_label(status)
         first = String.first(label)
 
@@ -5827,18 +5956,6 @@ defmodule FermixWebWeb.SetupLiveTest do
                "#{inspect(status)} falls back to the generic Enable verb"
       end
     end
-  end
-
-  # Every atom `Plugins.Status` can return: each of its clause/branch returns is
-  # written `-> :atom`, so the returns are exactly the atoms in that position.
-  defp plugins_status_returns do
-    source = to_string(PluginStatus.module_info(:compile)[:source])
-    assert File.exists?(source), "Plugins.Status source not found at #{source}"
-
-    ~r/->\s*:([a-z_]+)\b/
-    |> Regex.scan(File.read!(source))
-    |> Enum.map(fn [_match, name] -> String.to_existing_atom(name) end)
-    |> Enum.uniq()
   end
 
   # Build + wire a catalog plugin artifact behind the dist stubs; returns the
@@ -6276,31 +6393,36 @@ defmodule FermixWebWeb.SetupLiveTest do
     Map.put(tool, "descriptor_sha256", digest)
   end
 
-  # A catalog install runs off the LiveView in a task (fetch, verify, extract,
-  # enable) and "Plugin enabled." lands only once it finishes. On a loaded macOS
-  # runner that overran the default half second, so this wait allows five; the
-  # poll still returns as soon as the flash renders.
-  defp render_until_enabled(view), do: render_until(view, "Plugin enabled.", 200)
+  # A sentence's arrival on a loaded runner. What a click starts runs off the
+  # LiveView in a task (an install's fetch, checksum, extract and enable; a
+  # sign-in's job) and renders only after that file and process work. The old
+  # half-second default overran on a loaded macOS runner for "Plugin enabled."
+  # and on the release pull request's stress step for "checksum mismatch"
+  # (2026-10-21). The poll still returns as soon as the sentence renders.
+  @arrival_ms 10_000
 
-  defp render_until(view, expected, attempts \\ 20)
+  defp render_until_enabled(view), do: render_until(view, "Plugin enabled.")
 
-  defp render_until(view, expected, attempts) when attempts > 0 do
+  defp render_until(view, expected),
+    do: render_until(view, expected, System.monotonic_time(:millisecond) + @arrival_ms)
+
+  defp render_until(view, expected, deadline) do
     html = render(view)
 
-    if html =~ expected do
-      html
-    else
-      Process.sleep(25)
-      render_until(view, expected, attempts - 1)
+    cond do
+      html =~ expected ->
+        html
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("expected rendered LiveView to include #{inspect(expected)}")
+
+      true ->
+        Process.sleep(25)
+        render_until(view, expected, deadline)
     end
   end
 
-  defp render_until(view, expected, 0) do
-    render(view)
-    flunk("expected rendered LiveView to include #{inspect(expected)}")
-  end
-
-  # The inverse of `render_until/3`: poll until `expected` is GONE. Returns
+  # The inverse of `render_until/2`: poll until `expected` is GONE. Returns
   # false once the budget is spent, so the caller still asserts.
   defp render_until_missing(view, expected, attempts \\ 40)
 

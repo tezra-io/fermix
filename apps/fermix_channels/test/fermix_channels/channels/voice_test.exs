@@ -109,26 +109,94 @@ defmodule FermixChannels.Channels.VoiceTest do
     end
   end
 
+  # The chat's timeline, as the companion channel writes it: reports each row
+  # to the test by name.
+  defmodule ChatStore do
+    def append(profile, attrs, _opts) do
+      send(:voice_media_test, {:chat_row, profile, attrs})
+
+      {:ok,
+       Map.merge(attrs, %{profile_id: profile, server_seq: 7, created_at: DateTime.utc_now()})}
+    end
+  end
+
+  # A picture or file a delegation sends goes to the owner's chat, whichever
+  # mode the call is in, under the same fence as its answer.
   describe "media" do
-    test "an attachment is refused rather than dropped" do
-      id = call_id()
+    setup do
+      env = ~w(companion_store mobile_media_resolver mobile_event_sink)a
+      previous = Map.new(env, &{&1, Application.fetch_env(:fermix_channels, &1)})
+      Process.register(self(), :voice_media_test)
 
-      log =
-        capture_log(fn ->
-          assert Voice.send_media(id, %{kind: :image, data: "bytes"}) ==
-                   {:error, :unsupported_in_voice}
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("voice-media")
+      path = Path.join(dir, "dog.png")
+      File.write!(path, "image")
+
+      Application.put_env(:fermix_channels, :companion_store, ChatStore)
+      Application.put_env(:fermix_channels, :mobile_event_sink, fn _profile, _event -> :ok end)
+
+      Application.put_env(:fermix_channels, :mobile_media_resolver, fn media ->
+        {:ok,
+         %{
+           "ref" => String.duplicate("b", 64),
+           "kind" => Atom.to_string(media.kind),
+           "mime" => media.mime_type,
+           "size_bytes" => 5,
+           "path" => media.path
+         }}
+      end)
+
+      on_exit(fn ->
+        FermixTestSupport.SafeRm.rm_rf!(dir)
+
+        Enum.each(previous, fn
+          {key, {:ok, value}} -> Application.put_env(:fermix_channels, key, value)
+          {key, :error} -> Application.delete_env(:fermix_channels, key)
         end)
+      end)
 
-      assert log =~ "the Live wire carries no media"
+      {:ok, media: %{kind: :image, path: path, mime_type: "image/png", caption: "A dog"}}
     end
 
-    test "the media reply closure refuses the same way" do
+    test "a delegation's attachment is written to the owner's chat", %{media: media} do
       id = call_id()
-      reply = Voice.build_media_reply(message(id, "d-1", 1))
+      :ok = register(id, "d-1", 1)
 
-      capture_log(fn ->
-        assert reply.(%{kind: :image, data: "bytes"}) == {:error, :unsupported_in_voice}
-      end)
+      assert Voice.build_media_reply(message(id, "d-1", 1)).(media) == :ok
+
+      assert_receive {:chat_row, "main",
+                      %{role: "assistant", kind: "media", content: "A dog", media_refs: [_ref]}}
+    end
+
+    test "a task that outlived its call still sends its attachment to the chat", %{media: media} do
+      id = call_id()
+      :ok = register_detached("d-1", 1)
+
+      assert Voice.build_media_reply(message(id, "d-1", 1)).(media) == :ok
+      assert_receive {:chat_row, "main", %{kind: "media"}}
+    end
+
+    test "a superseded revision's or a closed call's attachment is dropped", %{media: media} do
+      id = call_id()
+      :ok = register(id, "d-1", 2)
+
+      assert Voice.build_media_reply(message(id, "d-1", 1)).(media) ==
+               {:error, :superseded_revision}
+
+      assert Voice.build_media_reply(message(call_id(), "d-9", 1)).(media) ==
+               {:error, :call_closed}
+
+      refute_received {:chat_row, _profile, _attrs}
+    end
+
+    test "a send with no delegation fence is refused", %{media: media} do
+      log =
+        capture_log(fn ->
+          assert Voice.send_media(call_id(), media) == {:error, :missing_delegation_fence}
+        end)
+
+      assert log =~ "no delegation fence"
+      refute_received {:chat_row, _profile, _attrs}
     end
   end
 

@@ -1,4 +1,4 @@
-{"type":"client_hello","protocol_version":2}
+{"type":"client_hello","protocol_version":3}
 {"type":"msg","client_msg_id":"mac-1","profile_id":"main","text":"What is on my calendar today?","attach_ids":[]}
 {"type":"command","client_msg_id":"mac-2","profile_id":"main","name":"confirm","args":"opaque-token"}
 {"type":"cancel","profile_id":"main","client_msg_id":"mac-3"}
@@ -8,3 +8,5 @@
 {"type":"history_search","profile_id":"main","query":"dentist","limit":20}
 {"type":"history_search","profile_id":"main","query":"dentist friday","limit":20,"before_seq":88}
 {"type":"read_state","profile_id":"main","read_up_to_seq":13}
+{"type":"media_fetch","profile_id":"main","ref":"9879f6d3c9efefe8c4f4aabe9d3269762264be52794e96f62ab8ffa53b7fadec"}
+{"type":"media_release","profile_id":"main","ref":"9879f6d3c9efefe8c4f4aabe9d3269762264be52794e96f62ab8ffa53b7fadec"}

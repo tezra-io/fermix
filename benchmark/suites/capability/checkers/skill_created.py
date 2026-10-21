@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Checker (json): the agent must author the `eval-echo` skill, reload so it is live,
 and write its CURRENT skill list to skills.txt.
 

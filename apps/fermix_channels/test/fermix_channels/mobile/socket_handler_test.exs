@@ -10,14 +10,14 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
   alias FermixChannels.Mobile.TlsTransport
 
   test "only binary frames can enter the Noise state machine" do
-    assert {:ok, state} = SocketHandler.init(device_registry: :registry)
+    assert {:ok, state} = init_socket(device_registry: :registry)
 
     assert {:stop, :unsupported_frame, {1003, "binary frames required"}, ^state} =
              SocketHandler.handle_in({"hello", opcode: :text}, state)
   end
 
   test "rejects an unknown outer handshake prelude before crypto initialization" do
-    assert {:ok, state} = SocketHandler.init(device_registry: :registry)
+    assert {:ok, state} = init_socket(device_registry: :registry)
 
     assert {:stop, :invalid_prelude, {1002, "invalid mobile prelude"}, ^state} =
              SocketHandler.handle_in({<<"NOPE", 1, 0, 1>>, opcode: :binary}, state)
@@ -94,7 +94,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     }
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :await_hello,
         authenticated_device: %{device_id: "paired-device"},
         device_registry: :registry,
@@ -139,7 +139,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     }
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :await_hello,
         authenticated_device: %{device_id: "paired-device"},
         device_registry: :registry,
@@ -177,7 +177,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     seen_at = ~U[2026-08-12 19:00:00Z]
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :await_hello,
         authenticated_device: %{device_id: "paired-device", last_seen: nil},
         device_registry: :registry,
@@ -225,7 +225,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :await_hello,
         authenticated_device: %{device_id: "paired-device"},
         device_registry: :registry,
@@ -270,7 +270,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
       )
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         media_store: store,
@@ -296,7 +296,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     assert accepted.client_seq == 1
 
     {:ok, oversized_state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         media_store: store,
@@ -335,7 +335,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     }
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         profile_id: "work",
@@ -406,7 +406,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     }
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         profile_id: "main",
@@ -465,7 +465,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     }
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         profile_id: "main",
@@ -505,7 +505,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, state} =
-      SocketHandler.init(
+      init_socket(
         media_fetch_state(store, digest, bytes, %{
           event_router: fn event, _context, _opts ->
             send(test_pid, {:routed, event.type})
@@ -547,7 +547,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     }
 
     {:ok, state} =
-      SocketHandler.init(
+      init_socket(
         media_fetch_state(store, first_digest, first_bytes, %{
           media_descriptor: fn "main", ref -> Map.fetch(descriptors, ref) end
         })
@@ -579,7 +579,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     {store, digest, bytes} = stored_blob("socket-media-backlog", 3)
 
     {:ok, state} =
-      SocketHandler.init(
+      init_socket(
         media_fetch_state(store, digest, bytes, %{
           encode_server: fn "error", payload, 1 ->
             assert payload["code"] == "media_fetch_backlog_full"
@@ -608,7 +608,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     assert {:ok, blob} = MediaStore.fetch(store, digest)
     File.write!(blob.path, "PDF")
 
-    {:ok, state} = SocketHandler.init(media_fetch_state(store, digest, bytes, %{}))
+    {:ok, state} = init_socket(media_fetch_state(store, digest, bytes, %{}))
 
     assert {:ok, state} =
              SocketHandler.handle_in({fetch_frame(digest, 1), opcode: :binary}, state)
@@ -625,7 +625,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
 
   test "a transfer cut short by the socket closing releases its open blob" do
     {store, digest, bytes} = stored_blob("socket-media-close", 3)
-    {:ok, state} = SocketHandler.init(media_fetch_state(store, digest, bytes, %{}))
+    {:ok, state} = init_socket(media_fetch_state(store, digest, bytes, %{}))
 
     assert {:ok, state} =
              SocketHandler.handle_in({fetch_frame(digest, 1), opcode: :binary}, state)
@@ -643,7 +643,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
@@ -682,7 +682,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
@@ -713,7 +713,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
 
   test "an authenticated application error still consumes its client sequence" do
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
@@ -744,7 +744,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
@@ -778,7 +778,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
@@ -824,7 +824,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
@@ -863,7 +863,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
       )
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
@@ -904,7 +904,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
@@ -948,7 +948,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     on_exit(fn -> send(worker, :stop) end)
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
@@ -979,7 +979,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
 
   test "a repeated hello emits a typed terminal error and closes" do
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
@@ -1022,7 +1022,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     status = encode_client_frame("request_status", %{"client_msg_ids" => ["c1", "c2"]}, 1)
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
@@ -1046,7 +1046,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     unknown = encode_client_frame("future_event", %{}, 1)
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
@@ -1072,7 +1072,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
@@ -1128,7 +1128,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         media_store: store,
@@ -1161,7 +1161,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
 
   test "the first application event pins the protocol version for the session" do
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
@@ -1204,15 +1204,15 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     gateway = %{private: <<1::256>>, public: <<2::256>>}
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         gateway_keypair: gateway,
         pair_manager: :pair,
-        current_pair: fn :pair ->
+        current_pair: fn :pair, _peer ->
           {:ok, %{session_id: "pair-session", secret: <<1::256>>}}
         end,
         noise_initialize: fn :responder, :ikpsk2, _opts -> {:ok, :noise} end,
         noise_read: fn :noise, _wire -> {:error, :authentication_failed} end,
-        record_pair_failure: fn :pair, "pair-session" ->
+        record_pair_failure: fn :pair, "pair-session", _peer ->
           send(test_pid, :failure_recorded)
           {:ok, 1}
         end
@@ -1232,7 +1232,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :await_pair_decision,
         pair_manager: :pair,
         pairing_session_id: "pair-session",
@@ -1245,7 +1245,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         end,
         encode_server: fn "pong", %{}, 1, <<>>, 2 -> {:ok, "pong-frame"} end,
         encrypt: fn :noise1, "pong-frame" -> {:ok, "encrypted-pong", :noise2} end,
-        record_pair_failure: fn :pair, "pair-session" ->
+        record_pair_failure: fn :pair, "pair-session", _peer ->
           send(test_pid, :failure_recorded)
           {:ok, 1}
         end
@@ -1262,7 +1262,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
 
   test "a pending pairing decision still refuses any other event" do
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :await_pair_decision,
         pair_manager: :pair,
         pairing_session_id: "pair-session",
@@ -1280,7 +1280,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
              bytes: <<>>
            }}
         end,
-        record_pair_failure: fn :pair, "pair-session" -> {:ok, 1} end
+        record_pair_failure: fn :pair, "pair-session", _peer -> {:ok, 1} end
       })
 
     assert {:stop, :pairing_decision_pending, {1002, "mobile protocol error"}, _next} =
@@ -1291,11 +1291,11 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :await_pair_decision,
         pair_manager: :pair,
         pairing_session_id: "pair-session",
-        record_pair_failure: fn :pair, "pair-session" ->
+        record_pair_failure: fn :pair, "pair-session", _peer ->
           send(test_pid, :failure_recorded)
           {:ok, 1}
         end
@@ -1334,7 +1334,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     gateway = %{private: <<1::256>>, public: <<2::256>>}
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         gateway_keypair: gateway,
         device_store: :store,
         noise_initialize: fn :responder, :ik, static_keypair: ^gateway -> {:ok, :noise0} end,
@@ -1372,7 +1372,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "revoked-device",
         device_registry: :registry,
@@ -1397,7 +1397,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
   end
 
   test "a replacement notification cleanly closes the old Bandit-owned socket" do
-    assert {:ok, state} = SocketHandler.init(device_registry: :registry)
+    assert {:ok, state} = init_socket(device_registry: :registry)
 
     assert {:stop, :replaced, {4001, "connection replaced"}, ^state} =
              SocketHandler.handle_info({:mobile_replaced, self()}, state)
@@ -1475,7 +1475,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     event = %{"t" => "text_done", "turn_id" => "turn-1", "server_seq" => 7, "text" => text}
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "device",
         noise: 0,
@@ -1500,7 +1500,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
 
   test "a part that cannot be encrypted closes the session: the send nonce already moved" do
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "device",
         noise: 0,
@@ -1523,7 +1523,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     :ok = TlsTransport.start_upgrade_deadline(60_000)
     assert is_integer(TlsTransport.upgrade_deadline())
 
-    assert {:ok, _state} = SocketHandler.init(device_registry: :registry)
+    assert {:ok, _state} = init_socket(device_registry: :registry)
 
     assert TlsTransport.upgrade_deadline() == nil
   end
@@ -1532,7 +1532,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         device_registry: :registry,
         schedule_handshake_deadline: fn message, 10_000 ->
           send(test_pid, {:deadline_armed, message})
@@ -1562,13 +1562,13 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         pair_manager: :pair,
         schedule_handshake_deadline: fn message, 10_000 ->
           send(test_pid, {:deadline_armed, message})
           make_ref()
         end,
-        record_pair_failure: fn :pair, "pair-session" ->
+        record_pair_failure: fn :pair, "pair-session", _peer ->
           send(test_pid, :failure_recorded)
           {:ok, 1}
         end
@@ -1606,7 +1606,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     }
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         pair_manager: :pair,
         noise: :noise,
         schedule_handshake_deadline: fn message, 10_000 ->
@@ -1779,7 +1779,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
             send(test_pid, {:refused, refusal})
             {:error, :request_pending}
           end,
-          record_pair_failure: fn :pair, "pair-session" ->
+          record_pair_failure: fn :pair, "pair-session", _peer ->
             send(test_pid, :failure_recorded)
             {:ok, 0}
           end
@@ -1878,10 +1878,12 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
       secret = :crypto.strong_rand_bytes(32)
 
       {:ok, state} =
-        SocketHandler.init(%{
+        init_socket(%{
           gateway_keypair: %{private: <<1::256>>, public: <<2::256>>},
           pair_manager: :pair,
-          current_pair: fn :pair -> {:ok, %{session_id: "pair-session", secret: secret}} end,
+          current_pair: fn :pair, _peer ->
+            {:ok, %{session_id: "pair-session", secret: secret}}
+          end,
           noise_initialize: fn :responder, :ikpsk2, opts ->
             assert opts[:psk] == secret
             {:ok, :noise}
@@ -1905,7 +1907,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, state} =
-      SocketHandler.init(
+      init_socket(
         hello_state(%{
           phase: :prelude,
           hello_ack_builder: fn _state -> {:ok, %{"session_id" => "session"}} end,
@@ -1940,7 +1942,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, _state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         schedule_handshake_deadline: fn _message, _ms -> send(test_pid, :deadline_armed) end
       })
@@ -1960,7 +1962,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
       })
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :await_hello,
         authenticated_device: %{device_id: "paired-device"},
         device_registry: :registry,
@@ -1991,7 +1993,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     request = client_frame(1, "pair_request", 1, %{"device_name" => "a", "model" => "b"})
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :await_pair_request,
         pair_manager: :pair,
         pairing_session_id: "pair-session",
@@ -1999,7 +2001,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         decrypt: fn :noise, ^request -> {:ok, request, :noise} end,
         encrypt: fn :noise, plaintext -> {:ok, plaintext, :noise} end,
         submit_pair: fn _pair, _session, _attrs -> send(test_pid, :submitted) end,
-        record_pair_failure: fn :pair, "pair-session" ->
+        record_pair_failure: fn :pair, "pair-session", _peer ->
           send(test_pid, :failure_recorded)
           {:ok, 1}
         end
@@ -2022,7 +2024,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
       for last <- 1..20, do: %{address: "10.0.0.#{last}", interface: "en0", scope: :lan}
 
     {:ok, state} =
-      SocketHandler.init(
+      init_socket(
         hello_state(%{
           discover: fn -> {:ok, candidates} end,
           encode_server: fn "hello_ack", payload, 1 ->
@@ -2044,6 +2046,75 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
              SocketHandler.handle_in({"ciphertext", opcode: :binary}, state)
   end
 
+  # M62 §2: the rail's candidate comes last, and the host candidates give up
+  # one place so the list stays within 16.
+  test "hello_ack ends with the rail's candidate when remote reach is ready" do
+    candidates =
+      for last <- 1..20, do: %{address: "10.0.0.#{last}", interface: "en0", scope: :lan}
+
+    iroh = %{"kind" => "iroh", "node_id" => String.duplicate("a", 64)}
+
+    {:ok, state} =
+      init_socket(
+        hello_state(%{
+          discover: fn -> {:ok, candidates} end,
+          iroh_candidate: fn -> {:ok, iroh} end,
+          encode_server: fn "hello_ack", payload, 1 ->
+            assert length(payload["candidates"]) == 16
+            assert List.last(payload["candidates"]) == iroh
+            assert Enum.at(payload["candidates"], 14)["host"] == "10.0.0.15"
+            {:ok, "encoded"}
+          end
+        })
+      )
+
+    assert {:push, {:binary, "ciphertext-out"}, _next} =
+             SocketHandler.handle_in({"ciphertext", opcode: :binary}, state)
+  end
+
+  # M62 §3.1: a hello names the relay list the phone stored; the device row
+  # records it, and a change tells the rail to recompute its relays.
+  test "a hello's relay list revision is recorded, and a new one reaches the rail" do
+    test_pid = self()
+
+    hello = %{
+      version: 2,
+      type: "hello",
+      seq: 1,
+      payload: %{
+        "device_id" => "paired-device",
+        "app_version" => "1.0",
+        "last_server_seq" => 0,
+        "protocol_v" => 2,
+        "relay_list_rev" => "0123456789abcdef"
+      },
+      bytes: <<>>
+    }
+
+    {:ok, state} =
+      init_socket(
+        hello_state(%{
+          decode_client: fn "plaintext", _opts -> {:ok, hello} end,
+          update_device: fn _store, "paired-device", attrs ->
+            send(test_pid, {:updated, attrs})
+            {:ok, %{device_id: "paired-device", relay_list_rev: attrs[:relay_list_rev]}}
+          end,
+          relay_list_acknowledged: fn ->
+            send(test_pid, :relays_acknowledged)
+            :ok
+          end,
+          discover: fn -> {:ok, []} end,
+          encode_server: fn "hello_ack", _payload, 1 -> {:ok, "encoded"} end
+        })
+      )
+
+    assert {:push, _frames, _next} =
+             SocketHandler.handle_in({"ciphertext", opcode: :binary}, state)
+
+    assert_receive {:updated, %{relay_list_rev: "0123456789abcdef", last_seen: %DateTime{}}}
+    assert_receive :relays_acknowledged
+  end
+
   # FEAT-2: a phone that was away when an approval went out gets it right
   # after its hello_ack, in the same push.
   test "an approval still waiting follows the hello_ack" do
@@ -2059,7 +2130,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     }
 
     {:ok, state} =
-      SocketHandler.init(
+      init_socket(
         hello_state(%{
           discover: fn -> {:ok, []} end,
           pending_approvals: fn "main" -> [approval] end,
@@ -2084,7 +2155,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
   # the ones it was given: a failed enumeration must not close the reconnect.
   test "hello_ack still acks, with no candidates, when discovery fails" do
     {:ok, state} =
-      SocketHandler.init(
+      init_socket(
         hello_state(%{
           discover: fn -> {:error, :eaddrnotavail} end,
           encode_server: fn "hello_ack", payload, 1 ->
@@ -2116,7 +2187,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
       )
 
     {:ok, state} =
-      SocketHandler.init(
+      init_socket(
         hello_state(%{
           discovery: discovery,
           encode_server: fn "hello_ack", payload, 1 ->
@@ -2135,7 +2206,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
       for last <- 1..20, do: %{address: "10.0.0.#{last}", interface: "en0", scope: :lan}
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :await_pair_decision,
         pairing_session_id: "pair-session",
         noise: :noise,
@@ -2317,7 +2388,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
@@ -2403,7 +2474,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     {:ok, state} =
-      SocketHandler.init(%{
+      init_socket(%{
         pair_manager: manager,
         noise: :noise,
         decrypt: fn :noise, "request" -> {:ok, "request", :noise} end,
@@ -2423,4 +2494,8 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
       pairing_challenge: Attestation.challenge(window.secret)
     })
   end
+
+  # The peer `Mobile.Router` names for every WebSocket: the session requires one.
+  defp init_socket(opts),
+    do: opts |> Map.new() |> Map.put_new(:peer, {127, 0, 0, 1}) |> SocketHandler.init()
 end

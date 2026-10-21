@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Hermetic tests for app-engine archive and runtime verification."""
 
 import hashlib
@@ -24,6 +28,7 @@ TARGET = "macos_aarch64"
 ARCHITECTURE = "arm64"
 VERSION = "0.9.0"
 SOURCE_COMMIT = "a" * 40
+MAPS_HELPER = "lib/fermix_nif-0.9.0/priv/fermix-maps"
 
 
 class VerifyAppEngineTest(unittest.TestCase):
@@ -72,6 +77,47 @@ class VerifyAppEngineTest(unittest.TestCase):
         self.assertEqual(result["mode"], "native")
         self.assertGreater(int(result["pid"]), 0)
         self.assertFalse(Path(result["fermix_home"]).exists())
+
+    def test_reports_the_apple_maps_helper_it_checked(self):
+        with self._darwin_host("arm64"):
+            result = verify.verify_app_engine(
+                self.archive,
+                TARGET,
+                VERSION,
+                "native",
+                temp_parent=self.base,
+                timeouts=self.timeouts,
+            )
+
+        self.assertEqual(result["maps_helper"], MAPS_HELPER)
+
+    def test_rejects_an_engine_without_the_apple_maps_helper_before_launching(self):
+        (self.release / MAPS_HELPER).unlink()
+        self._write_manifest(with_helper=False)
+        archive = package.package_release(self.release, TARGET, self.base / "out-no-helper", VERSION)
+
+        with self._darwin_host("arm64"), mock.patch.object(verify, "_start_engine") as start:
+            with self.assertRaisesRegex(verify.VerificationError, "exactly one Apple Maps helper"):
+                verify.verify_app_engine(
+                    archive, TARGET, VERSION, "native", temp_parent=self.base, timeouts=self.timeouts
+                )
+
+        start.assert_not_called()
+
+    def test_rejects_a_helper_whose_self_check_fails(self):
+        self._write_helper("#!/bin/sh\necho 'dyld: missing MapKit' >&2\nexit 70\n")
+        self._write_manifest()
+        archive = package.package_release(self.release, TARGET, self.base / "out-broken", VERSION)
+
+        with self._darwin_host("arm64"), mock.patch.object(verify, "_start_engine") as start:
+            with self.assertRaisesRegex(
+                verify.VerificationError, r"self-check failed \(exit 70\): dyld: missing MapKit"
+            ):
+                verify.verify_app_engine(
+                    archive, TARGET, VERSION, "native", temp_parent=self.base, timeouts=self.timeouts
+                )
+
+        start.assert_not_called()
 
     def test_archive_validation_does_not_eagerly_load_every_member(self):
         with mock.patch.object(
@@ -252,6 +298,22 @@ class VerifyAppEngineTest(unittest.TestCase):
                     timeouts=self.timeouts,
                 )
 
+    # The app engine serves the native host socket (M76), and its listener
+    # removes the file when the engine stops, as every other socket's does.
+    def test_fails_when_shutdown_leaves_the_native_host_socket(self):
+        archive = self._archive_with_control("stale-native_host")
+
+        with self._darwin_host("arm64"):
+            with self.assertRaisesRegex(verify.VerificationError, "native_host.sock remained"):
+                verify.verify_app_engine(
+                    archive,
+                    TARGET,
+                    VERSION,
+                    "native",
+                    temp_parent=self.base,
+                    timeouts=self.timeouts,
+                )
+
     def test_startup_timeout_reports_health_when_only_realtime_socket_is_missing(self):
         short = verify.Timeouts(
             startup_attempts=50,
@@ -334,6 +396,37 @@ class VerifyAppEngineTest(unittest.TestCase):
                     timeouts=short,
                 )
 
+    # A packaged app engine whose native host socket cannot bind boots on
+    # without it (the listener logs and ignores), so nothing would ring on the
+    # Mac: the smoke run is where that is caught.
+    def test_startup_timeout_reports_when_only_the_native_host_socket_is_missing(self):
+        short = verify.Timeouts(
+            startup_attempts=50,
+            shutdown_attempts=3,
+            poll_interval_seconds=0.02,
+            health_timeout_seconds=0.02,
+            management_timeout_seconds=0.1,
+            stop_timeout_seconds=0.1,
+            cleanup_timeout_seconds=1.0,
+        )
+
+        archive = self._archive_with_control("no-native_host")
+
+        with self._darwin_host("arm64"), self._start_after_fixture_ready():
+            with self.assertRaisesRegex(
+                verify.VerificationError,
+                r"daemon_socket=true.*realtime_socket=true.*companion_socket=true.*"
+                r"browser_host_socket=true.*native_host_socket=false.*health=true",
+            ):
+                verify.verify_app_engine(
+                    archive,
+                    TARGET,
+                    VERSION,
+                    "native",
+                    temp_parent=self.base,
+                    timeouts=short,
+                )
+
     def test_startup_timeout_reports_each_missing_runtime_surface(self):
         short = verify.Timeouts(
             startup_attempts=50,
@@ -351,7 +444,7 @@ class VerifyAppEngineTest(unittest.TestCase):
             with self.assertRaisesRegex(
                 verify.VerificationError,
                 r"daemon_socket=false.*realtime_socket=false.*companion_socket=false.*"
-                r"browser_host_socket=false.*health=false",
+                r"browser_host_socket=false.*native_host_socket=false.*health=false",
             ):
                 verify.verify_app_engine(
                     archive,
@@ -367,9 +460,11 @@ class VerifyAppEngineTest(unittest.TestCase):
         popen = verify.subprocess.Popen
         force_cleanup = verify._force_cleanup
 
+        # The engine's process only: the helper's self-check runs before it.
         def capture_process(*args, **kwargs):
             process = popen(*args, **kwargs)
-            processes.append(process)
+            if any(str(part).endswith("bin/fermix_app_engine") for part in args[0]):
+                processes.append(process)
             return process
 
         with self._darwin_host("arm64"), mock.patch.object(
@@ -436,9 +531,28 @@ class VerifyAppEngineTest(unittest.TestCase):
         script.parent.mkdir(parents=True)
         shutil.copyfile(fixture, script)
         script.chmod(0o755)
+        self._write_helper("#!/bin/sh\necho 'fermix-maps: ok'\n")
 
-    def _write_manifest(self):
+    # A script standing in for the Mach-O helper the native build makes.
+    def _write_helper(self, contents):
+        helper = self.release / MAPS_HELPER
+        helper.parent.mkdir(parents=True, exist_ok=True)
+        helper.write_text(contents, encoding="utf-8")
+        helper.chmod(0o755)
+
+    def _write_manifest(self, with_helper=True):
         script = self.release / "bin/fermix_app_engine"
+        helper_entries = []
+        if with_helper:
+            helper_entries.append(
+                {
+                    "path": MAPS_HELPER,
+                    "kind": "script",
+                    "mode": "0755",
+                    "interpreter": "/bin/sh",
+                    "sha256": self._sha256(self.release / MAPS_HELPER),
+                }
+            )
         manifest = {
             "schema_version": 1,
             "identity": {
@@ -471,6 +585,11 @@ class VerifyAppEngineTest(unittest.TestCase):
                     "minimum_version": 1,
                     "maximum_version": 1,
                 },
+                "native_host": {
+                    "current_version": 1,
+                    "minimum_version": 1,
+                    "maximum_version": 1,
+                },
             },
             "provenance": {
                 "oidc_issuer": "https://token.actions.githubusercontent.com",
@@ -490,7 +609,8 @@ class VerifyAppEngineTest(unittest.TestCase):
                         "mode": "0755",
                         "interpreter": "/usr/bin/env",
                         "sha256": self._sha256(script),
-                    }
+                    },
+                    *helper_entries,
                 ],
             },
         }

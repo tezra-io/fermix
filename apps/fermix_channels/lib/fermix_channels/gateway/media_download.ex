@@ -22,6 +22,29 @@ defmodule FermixChannels.Gateway.MediaDownload do
   # moment the file exists.
   @temp_file_mode 0o600
 
+  # The mime types whose subtype is not the extension the file's readers know
+  # it by: a transcription provider and macOS's players and previews read the
+  # format from the name, and refuse `.x_m4a`, `.x_wav` and `.quicktime`, while
+  # `.mpeg` reads as a video. Every other type is named by its subtype.
+  @extension_by_mime %{
+    "audio/x-m4a" => ".m4a",
+    "audio/m4a" => ".m4a",
+    "audio/mpeg" => ".mp3",
+    "audio/mp3" => ".mp3",
+    "audio/x-wav" => ".wav",
+    "audio/wave" => ".wav",
+    "audio/vnd.wave" => ".wav",
+    "video/quicktime" => ".mov",
+    "image/svg+xml" => ".svg",
+    "text/plain" => ".txt",
+    "application/msword" => ".doc",
+    "application/vnd.ms-excel" => ".xls",
+    "application/vnd.ms-powerpoint" => ".ppt",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => ".docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => ".xlsx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation" => ".pptx"
+  }
+
   @doc "Reject before any fetch when the attachment's declared size exceeds `max`."
   @spec preflight_cap(map(), pos_integer()) :: :ok | {:error, term()}
   def preflight_cap(attachment, max) when is_map(attachment) and is_integer(max) do
@@ -222,8 +245,10 @@ defmodule FermixChannels.Gateway.MediaDownload do
 
   @doc """
   The temp-file extension for an attachment, from its mime type (`.bin` when it
-  has none). A transcription provider reads the media's format from the file
-  name, so every inbound copy is named with this, the mobile store's included.
+  has none). A transcription provider, and the Mac app's players and previews
+  of a file the companion socket grants, read the media's format from the file
+  name, so every inbound copy is named with this, the mobile store's and the
+  granted files included.
   """
   @spec extension(map()) :: String.t()
   def extension(attachment) when is_map(attachment) do
@@ -235,11 +260,17 @@ defmodule FermixChannels.Gateway.MediaDownload do
   defp normalize_extension(nil), do: ".bin"
 
   defp normalize_extension(mime_type) when is_binary(mime_type) do
-    mime_type
-    |> String.split(";", parts: 2)
-    |> hd()
-    |> String.split("/", parts: 2)
-    |> case do
+    essence =
+      mime_type |> String.split(";", parts: 2) |> hd() |> String.trim() |> String.downcase()
+
+    case Map.fetch(@extension_by_mime, essence) do
+      {:ok, extension} -> extension
+      :error -> subtype_extension(essence)
+    end
+  end
+
+  defp subtype_extension(essence) do
+    case String.split(essence, "/", parts: 2) do
       [_type, subtype] when subtype != "" ->
         "." <> String.replace(subtype, ~r/[^a-zA-Z0-9]+/, "_")
 

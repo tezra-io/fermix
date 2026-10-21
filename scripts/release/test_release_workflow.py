@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Structural tests for native app-engine release automation."""
 
 import re
@@ -9,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 RELEASE_WORKFLOW = ROOT / ".github/workflows/release.yml"
 CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 LINUX_PACKAGES_WORKFLOW = ROOT / ".github/workflows/linux-packages.yml"
+NIF_MAKEFILE = ROOT / "apps/fermix_nif/Makefile"
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 USES = re.compile(r"^\s*-?\s*uses:\s*([^\s#]+)", re.MULTILINE)
 
@@ -79,9 +84,28 @@ class ReleaseWorkflowTest(unittest.TestCase):
 
     def test_ci_runs_intel_and_release_script_tests_as_required_gates(self):
         self.assertIn("macos-15-intel", self.ci)
-        self.assertIn("python3 -m unittest discover -s scripts/release", self.ci)
+        self.assertIn('for t in scripts/release/test_*.py; do echo "== $t =="; uv run "$t" || exit 1; done', self.ci)
         self.assertRegex(self.ci, r"needs:\s*\[[^\]]*release-scripts[^\]]*\]")
         self.assertIn("${{ needs.release-scripts.result }}", self.ci)
+
+    # The Apple Maps helper is built by the Makefile on CI's macOS legs and on
+    # the app-engine release runners alike; the CI step's own copy of the flags
+    # is what holds the line if the Makefile's are loosened.
+    def test_ci_compiles_the_apple_maps_helper_with_the_makefile_flags(self):
+        makefile = NIF_MAKEFILE.read_text(encoding="utf-8")
+        flags = re.search(r"^MAPS_SWIFTFLAGS = (.+)$", makefile, re.MULTILINE)
+        self.assertIsNotNone(flags, "the Makefile names no MAPS_SWIFTFLAGS")
+        expected = flags.group(1).replace("$(MAPS_ARCH)", "$(uname -m)")
+        self.assertIn("-warnings-as-errors", expected)
+        self.assertIn("-apple-macos15.0", expected)
+        compiles = [
+            line.strip().replace('"', "").rstrip(" \\")
+            for line in self.ci.splitlines()
+            if line.strip().startswith("swiftc -") and "--version" not in line
+        ]
+        self.assertEqual(compiles, [f"swiftc {expected}"])
+        self.assertIn("if: runner.os == 'macOS'", self.ci)
+        self.assertIn('"$helper" --check', self.ci)
 
     def test_refuses_to_replace_an_already_published_release(self):
         self.assertGreaterEqual(

@@ -2085,9 +2085,21 @@ defmodule FermixOpik.AggregationTest do
         device_id: "dev-1",
         model: "gpt-live-1",
         voice: "marin",
-        engine: "openai_live"
+        engine: "openai_live",
+        provider: "openai"
       },
       extra
+    )
+  end
+
+  # The same emitter on the other task engine (M70 §09): one run kind and one
+  # event family, told apart by the engine, provider and pinned model it names.
+  defp grok_meta(extra) do
+    voice_live_meta(
+      Map.merge(
+        %{engine: "xai_realtime", provider: "xai", model: "grok-voice-3.0", voice: "eve"},
+        extra
+      )
     )
   end
 
@@ -2182,7 +2194,144 @@ defmodule FermixOpik.AggregationTest do
       assert trace.metadata.accounting_complete == 1
       assert trace.metadata.reason == "call_stop"
       assert trace.metadata.engine == "openai_live"
+      assert trace.metadata.provider == "openai"
       assert trace.metadata.model == "gpt-live-1"
+      assert started.metadata.engine == "openai_live"
+      assert started.metadata.provider == "openai"
+    end
+
+    # M70 §09: a Grok call reuses the run kind and every event, so the engine,
+    # provider and model are all that tell it from a GPT Live call, on the root
+    # and on each phase span. Its own work rides the shared emitters on the
+    # call's session: one `fermix_task` tool span per function call the model
+    # made, and one llm span per Grok response carrying the vendor's token
+    # counts. The backend task is a turn of its own under the call.
+    test "a Grok call is one root that names its engine and nests its task, tool and model spans" do
+      {_state, closed} =
+        run([
+          {@voice_live_start, %{}, grok_meta(%{max_duration_ms: 900_000})},
+          {@voice_live_session_started, %{}, grok_meta(%{provider_session_id: "sess_grok_1"})},
+          {@voice_live_delegation_start, %{},
+           grok_meta(%{
+             delegation_id: "task_1",
+             revision: 1,
+             turn_session_id: @voice_delegation_session
+           })},
+          {[:fermix, :provider, :call], %{duration_ms: 900},
+           %{
+             provider: :anthropic,
+             model: "claude-opus-4-8",
+             status: :ok,
+             agent: "main",
+             session_id: @voice_delegation_session,
+             parent_session: @voice_live_call,
+             tokens: %{prompt: 120, completion: 40}
+           }},
+          {@voice_live_delegation_stop, %{duration_ms: 1_200},
+           grok_meta(%{
+             delegation_id: "task_1",
+             revision: 1,
+             turn_session_id: @voice_delegation_session,
+             status: "completed"
+           })},
+          {[:fermix, :tool, :exec], %{duration_ms: 1_400},
+           %{
+             tool: "fermix_task",
+             agent: "voice_live",
+             success: true,
+             session_id: @voice_live_call,
+             status: "completed",
+             task_id: "task_1",
+             action: "submit"
+           }},
+          # A refused call is still one tool span: its status is the record.
+          {[:fermix, :tool, :exec], %{duration_ms: 0},
+           %{
+             tool: "fermix_task",
+             agent: "voice_live",
+             success: false,
+             session_id: @voice_live_call,
+             status: "rejected",
+             action: "invalid"
+           }},
+          {[:fermix, :provider, :call], %{duration_ms: 700},
+           %{
+             provider: :xai,
+             model: "grok-voice-3.0",
+             status: :ok,
+             agent: "voice_live",
+             session_id: @voice_live_call,
+             tokens: %{prompt: 310, completion: 52, total: 362}
+           }},
+          {@voice_live_stop,
+           %{
+             voice_seconds: 95.5,
+             voice_cost_millicents: 13_533,
+             voice_text_items: 3,
+             backend_turns: 1,
+             accounting_complete: 0,
+             user_turns: 4,
+             generation_latency_ms_median: 640,
+             generation_latency_ms_max: 1_310,
+             audible_latency_ms_median: 820,
+             audible_latency_ms_max: 1_650
+           }, grok_meta(%{reason: "call_stop", provider_session_id: "sess_grok_1"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == @voice_live_call
+      assert trace.tags == ["voice_live"]
+
+      assert trace.metadata.engine == "xai_realtime"
+      assert trace.metadata.provider == "xai"
+      assert trace.metadata.model == "grok-voice-3.0"
+      assert trace.metadata.voice == "eve"
+      assert trace.metadata.provider_session_id == "sess_grok_1"
+
+      # The ledger: duration plus billable text items, and no vendor terminal
+      # usage to settle against, so the accounting stays visibly incomplete.
+      assert trace.metadata.voice_seconds == 95.5
+      assert trace.metadata.voice_cost_millicents == 13_533
+      assert trace.metadata.voice_text_items == 3
+      assert trace.metadata.backend_turns == 1
+      assert trace.metadata.accounting_complete == 0
+
+      # How long the owner waited, kept apart from the backend task's time:
+      # the provider's generation and the audible end-to-end latency.
+      assert trace.metadata.user_turns == 4
+      assert trace.metadata.generation_latency_ms_median == 640
+      assert trace.metadata.generation_latency_ms_max == 1_310
+      assert trace.metadata.audible_latency_ms_median == 820
+      assert trace.metadata.audible_latency_ms_max == 1_650
+
+      root = span_named(spans, @voice_live_call)
+      refute Map.has_key?(root, :parent_span_id)
+
+      for phase <- ~w(session_started delegation_start delegation_stop) do
+        span = span_named(spans, "voice_live:#{phase}")
+        assert span.parent_span_id == root.id
+        assert span.metadata.engine == "xai_realtime"
+        assert span.metadata.provider == "xai"
+        assert span.metadata.model == "grok-voice-3.0"
+      end
+
+      delegation = span_named(spans, @voice_delegation_session)
+      assert delegation.parent_span_id == root.id
+
+      [backend, grok] = spans_of_type(spans, "llm")
+      assert backend.parent_span_id == delegation.id
+      assert grok.parent_span_id == root.id
+      assert grok.name == "llm:grok-voice-3.0"
+      assert grok.provider == "xai"
+      assert grok.usage == %{prompt_tokens: 310, completion_tokens: 52, total_tokens: 362}
+      refute Map.has_key?(grok, :input)
+      refute Map.has_key?(grok, :output)
+
+      [submitted, rejected] = spans_of_type(spans, "tool")
+      assert Enum.all?([submitted, rejected], &(&1.name == "fermix_task"))
+      assert Enum.all?([submitted, rejected], &(&1.parent_span_id == root.id))
+      assert submitted.metadata == %{status: "completed", task_id: "task_1", action: "submit"}
+      assert rejected.metadata == %{status: "rejected", action: "invalid"}
     end
 
     test "a provider_error is a phase span, never a terminal event" do

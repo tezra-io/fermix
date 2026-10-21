@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Checker (json mode) for the CSV->JSON task. Computes the expected region totals
 AND descending order FROM the seeded sales.csv (no hardcoded gold — so it auto-adapts
 if the fixture is changed/randomized and can't be memorized by an eval-iterating

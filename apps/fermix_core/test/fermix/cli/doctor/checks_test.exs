@@ -1,6 +1,8 @@
 defmodule Fermix.CLI.Doctor.ChecksTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
+
   alias Fermix.CLI.Doctor.Checks
   alias FermixCore.Acp.Identity
   alias FermixCore.Acp.IdentityStore
@@ -741,6 +743,25 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert Checks.network_proxy(env: %{}).detail =~ "read when Fermix starts"
     end
 
+    # Grok dials SpaceXAI, so the host a bypass has to name follows the engine.
+    test "the voice warning follows the host the engine dials" do
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "xai_realtime")
+
+      Application.put_env(:fermix_core, :network,
+        proxy: "http://proxy.corp.test:3128",
+        proxy_bypass: ["api.openai.com"]
+      )
+
+      assert Checks.network_proxy(env: %{}).detail =~ "voice"
+
+      Application.put_env(:fermix_core, :network,
+        proxy: "http://proxy.corp.test:3128",
+        proxy_bypass: ["api.x.ai"]
+      )
+
+      refute Checks.network_proxy(env: %{}).detail =~ "voice"
+    end
+
     test "says a bypass list with no proxy has no effect" do
       Application.put_env(:fermix_core, :network, proxy_bypass: ["ollama.internal"])
 
@@ -879,6 +900,12 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  # Builds by what they carry (M72 §14.1): the Mac app's engine has the Apple
+  # Maps helper; a Linux package has none.
+  @mac_app %{profile: :app_engine, os: :darwin}
+  @linux %{profile: :linux_package_cli, os: :linux}
+  @brew_mac %{profile: :standalone_cli, os: :darwin}
+
   describe "place_search/0 (M31 §14.3)" do
     setup do
       original = Application.get_env(:fermix_core, :tools, [])
@@ -886,15 +913,16 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       :ok
     end
 
-    test "reports the key, the active web backend, and the advertised tool" do
+    test "reports Brave, why it is the backend, the key, the web backend, and the tool" do
       Application.put_env(:fermix_core, :tools,
         web_search: [backend: :duckduckgo, brave_api_key: "brave-secret"]
       )
 
-      result = Checks.place_search()
+      result = Checks.place_search(host: @linux)
 
       assert result.name == "place search"
       assert result.status == :ok
+      assert result.detail =~ "Brave (the default in this build)"
       assert result.detail =~ "advertised"
       assert result.detail =~ "duckduckgo"
       assert result.detail =~ "metered"
@@ -904,17 +932,73 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     test "reports a missing key as hidden and optional, not a warning" do
       Application.put_env(:fermix_core, :tools, web_search: [backend: :duckduckgo])
 
-      result = Checks.place_search()
+      result = Checks.place_search(host: @linux)
 
       assert result.status == :ok
       assert result.detail =~ "hidden"
       assert result.detail =~ "brave_api_key"
     end
 
+    test "Brave chosen with no key warns, since the choice cannot run" do
+      Application.put_env(:fermix_core, :tools,
+        web_search: [backend: :duckduckgo],
+        place_search: [backend: "brave"]
+      )
+
+      result = Checks.place_search(host: @mac_app)
+
+      assert result.status == :warn
+      assert result.detail =~ "Brave (set in [fermix_core.tools.place_search])"
+      assert result.detail =~ "brave_api_key"
+    end
+
+    test "reports Apple Maps in the Mac app as ready with no key, the build's default" do
+      Application.put_env(:fermix_core, :tools, web_search: [backend: :duckduckgo])
+
+      result = Checks.place_search(host: @mac_app, apple_maps: [helper_path: "/bin/sh"])
+
+      assert result.status == :ok
+      assert result.detail =~ "Apple Maps (the default in this build), ready with no key"
+      assert result.detail =~ "advertised"
+    end
+
+    test "warns when Apple Maps cannot run, and says how to search Brave instead" do
+      Application.put_env(:fermix_core, :tools, web_search: [backend: :duckduckgo])
+
+      missing =
+        Checks.place_search(host: @mac_app, apple_maps: [helper_path: "/nonexistent/fermix-maps"])
+
+      assert missing.status == :warn
+      assert missing.detail =~ "the Apple Maps helper (fermix-maps) is missing"
+      assert missing.detail =~ "reinstall"
+
+      Application.put_env(:fermix_core, :tools,
+        web_search: [backend: :duckduckgo],
+        place_search: [backend: "apple_maps"]
+      )
+
+      linux = Checks.place_search(host: @linux, apple_maps: [helper_path: "/bin/sh"])
+
+      assert linux.status == :warn
+      assert linux.detail =~ "Apple Maps (set in [fermix_core.tools.place_search]) is not ready"
+      assert linux.detail =~ "carries no Apple Maps helper; the Fermix Mac app does"
+      assert linux.detail =~ ~s(backend = "brave")
+    end
+
+    test "Homebrew on a Mac with no key is ok, Brave the build's default and the tool hidden" do
+      Application.put_env(:fermix_core, :tools, web_search: [backend: :duckduckgo])
+
+      result = Checks.place_search(host: @brew_mac, apple_maps: [helper_path: "/bin/sh"])
+
+      assert result.status == :ok
+      assert result.detail =~ "Brave (the default in this build): no Brave key"
+      assert result.detail =~ "hidden"
+    end
+
     test "the default check reports no probe outcome" do
       Application.put_env(:fermix_core, :tools, web_search: [brave_api_key: "brave-secret"])
 
-      result = Checks.place_search()
+      result = Checks.place_search(host: @linux)
 
       refute result.detail =~ "probe"
     end
@@ -1067,6 +1151,40 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "Codex"
     end
 
+    # Grok reads the SpaceXAI provider's key, so the row names that vendor and
+    # Grok's own engine and model.
+    test "names SpaceXAI's key, Grok's engine and its model when Grok is selected" do
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "xai_realtime")
+      Application.put_env(:fermix_core, :providers, xai: [api_key: "xai-test"])
+
+      result = Checks.realtime()
+
+      assert result.status == :ok
+
+      assert result.detail ==
+               "enabled; SpaceXAI voice key saved (engine xai_realtime, model grok-voice-3.0); " <>
+                 "the network checks test it"
+    end
+
+    # A SpaceXAI sign-in carries chat, not voice; an OpenAI key carries neither.
+    # Production is set up in the app, so the fix names the pane, not a command.
+    test "warns when Grok is on with only a SpaceXAI sign-in and an OpenAI key" do
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "xai_realtime")
+
+      Application.put_env(:fermix_core, :providers,
+        xai: [auth_mode: :oauth],
+        openai: [api_key: "sk-test"]
+      )
+
+      result = Checks.realtime()
+
+      assert result.status == :warn
+      assert result.detail =~ "no SpaceXAI API key"
+      assert result.detail =~ "sign-in does not authorize it"
+      assert result.detail =~ "Voice settings"
+      refute result.detail =~ "fermix setup"
+    end
+
     test "reports :ok and disabled when realtime is off" do
       Application.put_env(:fermix_core, :realtime, enabled: false)
 
@@ -1163,6 +1281,62 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :warn
       assert result.detail =~ "no OpenAI API key"
+    end
+
+    # Grok's key is asked of SpaceXAI. SpaceXAI refuses a bad key with 400 or
+    # 401, which fails; a 403 can be a team without credits, which warns.
+    test "asks SpaceXAI about Grok's key and passes when it is accepted" do
+      grok_with_key()
+
+      result = Checks.realtime_key(req_options: [plug: answer(200, ~s({"data":[]}))])
+
+      assert result.status == :ok
+      assert result.detail =~ "SpaceXAI accepted the API key"
+    end
+
+    test "fails when SpaceXAI refuses Grok's key" do
+      grok_with_key()
+      body = ~s({"code":"Client specified an invalid argument","error":"Incorrect API key"})
+
+      for status <- [400, 401] do
+        result = Checks.realtime_key(req_options: [plug: answer(status, body)])
+
+        assert result.status == :fail
+        assert result.detail == "SpaceXAI did not accept the API key (HTTP #{status})."
+      end
+    end
+
+    test "warns when SpaceXAI refuses this check for another reason" do
+      grok_with_key()
+
+      result = Checks.realtime_key(req_options: [plug: answer(403, ~s({"code":"x y"}))])
+
+      assert result.status == :warn
+      assert result.detail =~ "SpaceXAI refused this check (HTTP 403)"
+    end
+
+    test "warns when SpaceXAI is down or unreachable, or no key is saved" do
+      grok_with_key()
+
+      assert Checks.realtime_key(req_options: [plug: answer(503, "{}")]).detail ==
+               "SpaceXAI answered HTTP 503; try again later"
+
+      adapter = fn req -> {req, %Req.TransportError{reason: :nxdomain}} end
+
+      assert Checks.realtime_key(req_options: [adapter: adapter]).detail =~
+               "could not reach SpaceXAI"
+
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test"])
+      offline = fn _req -> flunk("a probe with no key reached the network") end
+      result = Checks.realtime_key(req_options: [adapter: offline])
+
+      assert result.status == :warn
+      assert result.detail == "no SpaceXAI API key is saved, so a voice call cannot start"
+    end
+
+    defp grok_with_key do
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "xai_realtime")
+      Application.put_env(:fermix_core, :providers, xai: [api_key: "xai-test"])
     end
 
     defp answer(status, body) do
@@ -2444,6 +2618,127 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.status == :warn
       assert result.detail =~ "503"
     end
+
+    defp cloudflare_520(conn) do
+      page = File.read!(Path.expand("../../../fixtures/providers/cloudflare_520.html", __DIR__))
+
+      conn
+      |> Plug.Conn.put_resp_content_type("text/html")
+      |> Plug.Conn.send_resp(520, page)
+    end
+
+    # One probe cannot tell a blip from an outage, so a 5xx stays a warning;
+    # `provider_health` judges the history. The detail is the sentence every
+    # failed call carries, never the page Cloudflare answered with.
+    test "a 520 with Cloudflare's page warns with the sentence" do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test"])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
+
+      result = Checks.auth_probe(req_options: [plug: &cloudflare_520/1])
+
+      assert result.status == :warn
+
+      assert result.detail ==
+               "OpenAI answered HTTP 520 from Cloudflare in front of the provider, " <>
+                 "with an HTML error page instead of an API answer"
+
+      refute result.detail =~ "transient"
+    end
+
+    # The owner's case (2026-10-14): the OpenAI Codex probe is a real turn
+    # through the adapter, and Cloudflare answered it with the same page.
+    test "an OpenAI Codex 520 warns with the same sentence" do
+      Application.put_env(:fermix_core, :providers, openai_codex: [default_model: "gpt-6.1-sol"])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
+
+      {result, _log} =
+        with_log(fn ->
+          Checks.auth_probe(
+            chatgpt_route_status: fn _opts -> :ok end,
+            access_token: "plan-token",
+            req_options: [plug: &cloudflare_520/1]
+          )
+        end)
+
+      assert result.status == :warn
+
+      assert result.detail ==
+               "OpenAI Codex answered HTTP 520 from Cloudflare in front of the provider, " <>
+                 "with an HTML error page instead of an API answer"
+    end
+  end
+
+  # The local Doctor's view of the primary provider: the calls the trace already
+  # recorded, read from a temporary trace directory.
+  describe "provider_health/1" do
+    setup do
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("checks-provider-health")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+      %{dir: dir, now: ~U[2026-10-14 03:00:00Z]}
+    end
+
+    # A row is written as JSON; a string is written as the raw line it is.
+    defp health(dir, now, rows) do
+      day = Path.join(dir, "2026-10-14")
+      File.mkdir_p!(day)
+      File.write!(Path.join(day, "llm_call.jsonl"), Enum.map(rows, &[jsonl(&1), "\n"]))
+      Checks.provider_health(trace_dir: dir, now: now, provider: :openai_codex)
+    end
+
+    defp jsonl(raw) when is_binary(raw), do: raw
+    defp jsonl(row), do: Jason.encode!(row)
+
+    defp call(now, minutes_ago, status, fields \\ %{}) do
+      ts = now |> DateTime.add(-minutes_ago * 60) |> DateTime.to_iso8601()
+
+      Map.merge(
+        %{"provider" => "openai_codex", "status" => status, "ts" => ts},
+        fields
+      )
+    end
+
+    test "passes when the latest call succeeded", %{dir: dir, now: now} do
+      result = health(dir, now, [call(now, 3, "ok")])
+
+      assert result.name == "provider health"
+      assert result.status == :ok
+      assert result.detail =~ "3 minutes ago"
+    end
+
+    test "warns when the latest call failed after one that worked", %{dir: dir, now: now} do
+      failed = call(now, 2, "error", %{"error_status" => 520, "error" => "bad gateway"})
+      result = health(dir, now, [call(now, 9, "ok"), failed])
+
+      assert result.status == :warn
+      assert result.detail =~ "HTTP 520: bad gateway"
+    end
+
+    test "fails when every call failed", %{dir: dir, now: now} do
+      failed = call(now, 2, "error", %{"error_status" => 520, "error" => "bad gateway"})
+      result = health(dir, now, [call(now, 9, "error"), failed])
+
+      assert result.status == :fail
+      assert result.detail =~ "all 2 calls"
+    end
+
+    test "names the unreadable lines it skipped", %{dir: dir, now: now} do
+      result = health(dir, now, [call(now, 9, "ok"), "{\"cut", call(now, 3, "ok")])
+
+      assert result.status == :ok
+      assert result.detail =~ "3 minutes ago"
+      assert result.detail =~ "1 unreadable line"
+    end
+
+    test "warns, naming the file, when the call record cannot be read", %{dir: dir, now: now} do
+      not_a_dir = Path.join(dir, "file")
+      File.write!(not_a_dir, "")
+
+      result = Checks.provider_health(trace_dir: not_a_dir, now: now, provider: :openai_codex)
+
+      assert result.status == :warn
+      assert result.detail =~ Path.join([not_a_dir, "2026-10-14", "llm_call.jsonl"])
+      assert result.detail =~ "not a directory"
+    end
   end
 
   # Under `macos_app` the release feed is not this engine's update source, so a
@@ -2989,6 +3284,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
   defp place_probe_opts(id) do
     [
+      host: @linux,
       req_options: [plug: {Req.Test, id}],
       net_resolver: fn "api.search.brave.com" -> {:ok, [{93, 184, 216, 34}]} end
     ]

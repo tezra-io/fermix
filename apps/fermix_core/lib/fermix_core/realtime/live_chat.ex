@@ -1,7 +1,9 @@
 defmodule FermixCore.Realtime.LiveChat do
   @moduledoc """
-  What a Live call is given of the chat (M56 §4.3, D5, D6): the `session.input`
-  a call in the chat's conversation starts with.
+  What a voice call that hands its tasks to Fermix is given of the chat (M56
+  §4.3, D5, D6): the context a call in the chat's conversation starts with,
+  GPT Live's `session.input` (`input/1`) and Grok's conversation items
+  (`context/2`, M70 §07).
 
   The voice model has no tools, so it is given a pointer, not the content: the
   six newest chat messages, each cut to 500 characters, and the gists of the
@@ -26,6 +28,9 @@ defmodule FermixCore.Realtime.LiveChat do
   Anything given to the voice provider may be said aloud, so an assistant
   message stamped as Computer History content is masked against the voice
   provider's chain, the mask a turn's own history gets (`Taint.mask_for_chain/3`).
+  The chain is the call's own voice provider, never a fixed one: OpenAI being
+  granted history says nothing about SpaceXAI (M70 §07), and the backend that
+  answers a task is a separate recipient again.
   A mirrored answer so stamped is dropped instead: a line saying something was
   omitted would tell the voice model nothing, and so is a gist made from such
   content (M56 §9). `carries_taint?/1` says whether what a call starts with
@@ -58,9 +63,8 @@ defmodule FermixCore.Realtime.LiveChat do
   @answered_prefix "Fermix answered in the chat: "
   @mirror_max_chars 300
 
-  # The route the taint gate reads for the Live voice: one OpenAI hop, which is
-  # never local, so a tainted reply passes only when OpenAI is granted history.
-  @live_chain [%{provider: :openai}]
+  @typedoc "One line of what a call starts with, before any wire shapes it."
+  @type entry :: %{role: :context | :user | :assistant, text: String.t()}
 
   @type item :: %{
           type: String.t(),
@@ -69,13 +73,14 @@ defmodule FermixCore.Realtime.LiveChat do
         }
 
   @doc """
-  Whether text stamped as Computer History content may be given to the voice
-  (M56 §9): only when OpenAI, the Live voice's one hop, is granted history,
-  the rule a turn's own history is masked by. A hand-off's reply so stamped
-  is shown in the chat instead of said.
+  Whether text stamped as Computer History content may be given to a voice
+  spoken by `provider` (M56 §9): only when that provider, the voice's one hop,
+  is granted history, the rule a turn's own history is masked by. A
+  hand-off's reply so stamped is shown in the chat instead of said.
   """
-  @spec history_permitted?() :: boolean()
-  def history_permitted?, do: Gate.chain_permits_history?(@live_chain)
+  @spec history_permitted?(atom()) :: boolean()
+  def history_permitted?(provider) when is_atom(provider),
+    do: Gate.chain_permits_history?(chain(provider))
 
   @doc "How much of the chat a call asks the bridge for."
   @spec window_bounds() :: %{messages: pos_integer(), gists: pos_integer()}
@@ -86,36 +91,48 @@ defmodule FermixCore.Realtime.LiveChat do
   def input_max_bytes, do: @input_max_bytes
 
   @doc """
-  The `session.input` for a window: the gists of earlier calls as one
-  `developer` item, oldest first; the chat messages as `user` and `assistant`
-  items, oldest first; and a closing `developer` line. `[]` when there is no
-  context at all. Only the newest `window_bounds/0` of each are used, whatever
-  the window holds, and a gist drawn from Computer History is left out unless
-  the voice may carry it (`history_permitted?/0`).
+  What a call whose voice `provider` speaks starts with: the gists of earlier
+  calls as one `:context` line, oldest first; the chat messages as `:user` and
+  `:assistant` lines, oldest first; and a closing `:context` line. `[]` when
+  there is no context at all. Only the newest `window_bounds/0` of each are
+  used, whatever the window holds, and a gist drawn from Computer History is
+  left out unless the voice may carry it (`history_permitted?/1`).
 
   Raises `ArgumentError` on a message whose role is not `user` or `assistant`:
   a window holding anything else broke the bridge's contract.
   """
-  @spec input(%{messages: [map()], gists: [CallRecord.gist()]}) :: [item()]
-  def input(%{messages: messages, gists: gists}) when is_list(messages) and is_list(gists) do
-    context = gist_items(given_gists(gists)) ++ chat_items(Enum.take(messages, -@messages))
+  @spec context(%{messages: [map()], gists: [CallRecord.gist()]}, atom()) :: [entry()]
+  def context(%{messages: messages, gists: gists}, provider)
+      when is_list(messages) and is_list(gists) and is_atom(provider) do
+    context =
+      gist_entries(given_gists(gists, provider)) ++
+        chat_entries(Enum.take(messages, -@messages), provider)
 
     case within_bound(context) do
       [] -> []
-      kept -> kept ++ [item("developer", "input_text", @closing)]
+      kept -> kept ++ [entry(:context, @closing)]
     end
   end
 
   @doc """
-  Whether the input built from `window` gives the voice anything drawn from
-  Computer History (M56 §9): only when the voice may carry it, and then when a
-  message or a gist the input uses is stamped. A call that starts so passes
-  the mark to its gist.
+  GPT Live's `session.input` for a window (`context/2` for OpenAI): the
+  `:context` lines as `developer` items, the chat as `user` and `assistant`
+  items.
   """
-  @spec carries_taint?(%{messages: [map()], gists: [CallRecord.gist()]}) :: boolean()
-  def carries_taint?(%{messages: messages, gists: gists})
-      when is_list(messages) and is_list(gists) do
-    history_permitted?() and
+  @spec input(%{messages: [map()], gists: [CallRecord.gist()]}) :: [item()]
+  def input(%{messages: _messages, gists: _gists} = window),
+    do: window |> context(:openai) |> Enum.map(&live_item/1)
+
+  @doc """
+  Whether the context built from `window` gives a voice spoken by `provider`
+  anything drawn from Computer History (M56 §9): only when that voice may
+  carry it, and then when a message or a gist the context uses is stamped. A
+  call that starts so passes the mark to its gist.
+  """
+  @spec carries_taint?(%{messages: [map()], gists: [CallRecord.gist()]}, atom()) :: boolean()
+  def carries_taint?(%{messages: messages, gists: gists}, provider)
+      when is_list(messages) and is_list(gists) and is_atom(provider) do
+    history_permitted?(provider) and
       (Enum.any?(Enum.take(messages, -@messages), &Taint.tainted?/1) or
          Enum.any?(Enum.take(gists, @gists), & &1.tainted))
   end
@@ -123,21 +140,30 @@ defmodule FermixCore.Realtime.LiveChat do
   @doc "The size of an input, for telemetry: its items and their text bytes, never the text."
   @spec input_size([item()]) :: %{input_items: non_neg_integer(), input_bytes: non_neg_integer()}
   def input_size(items) when is_list(items) do
-    %{input_items: length(items), input_bytes: items |> Enum.map(&text_bytes/1) |> Enum.sum()}
+    %{input_items: length(items), input_bytes: items |> Enum.map(&item_bytes/1) |> Enum.sum()}
+  end
+
+  @doc "The size of a context (`context/2`), for telemetry: its lines and their bytes, never the text."
+  @spec context_size([entry()]) ::
+          %{input_items: non_neg_integer(), input_bytes: non_neg_integer()}
+  def context_size(entries) when is_list(entries) do
+    %{input_items: length(entries), input_bytes: entries |> Enum.map(&text_bytes/1) |> Enum.sum()}
   end
 
   @doc """
   The line a call is told when the owner types in the chat (`{:typed, text}`)
   or the chat answers (`{:answered, message}`, the chat's assistant message as
   its store holds it), cut to 300 characters; `:drop` for a message with no
-  text or an answer the voice provider may not be given.
+  text or an answer a voice spoken by `provider` may not be given.
   """
-  @spec mirror_line({:typed, String.t()} | {:answered, map()}) :: {:ok, String.t()} | :drop
-  def mirror_line({:typed, text}) when is_binary(text), do: mirrored(@typed_prefix, text)
+  @spec mirror_line({:typed, String.t()} | {:answered, map()}, atom()) ::
+          {:ok, String.t()} | :drop
+  def mirror_line({:typed, text}, provider) when is_binary(text) and is_atom(provider),
+    do: mirrored(@typed_prefix, text)
 
-  def mirror_line({:answered, %{role: "assistant", content: content} = message})
-      when is_binary(content) do
-    case Taint.mask_for_chain([message], @live_chain) do
+  def mirror_line({:answered, %{role: "assistant", content: content} = message}, provider)
+      when is_binary(content) and is_atom(provider) do
+    case Taint.mask_for_chain([message], chain(provider)) do
       [^message] -> mirrored(@answered_prefix, content)
       [_masked] -> :drop
     end
@@ -150,29 +176,34 @@ defmodule FermixCore.Realtime.LiveChat do
     end
   end
 
+  # The route the taint gate reads for a voice: one hop, the provider that
+  # speaks it, which is never local, so a tainted line passes only when that
+  # provider is granted history.
+  defp chain(provider), do: [%{provider: provider}]
+
   # The newest three, less any the voice may not carry.
-  defp given_gists(gists) do
-    permitted? = history_permitted?()
+  defp given_gists(gists, provider) do
+    permitted? = history_permitted?(provider)
 
     gists
     |> Enum.take(@gists)
     |> Enum.reject(&(&1.tainted and not permitted?))
   end
 
-  # Read newest first, told oldest first, so the whole input runs in time order.
-  defp gist_items([]), do: []
+  # Read newest first, told oldest first, so the whole context runs in time order.
+  defp gist_entries([]), do: []
 
-  defp gist_items(gists) do
+  defp gist_entries(gists) do
     lines = gists |> Enum.reverse() |> Enum.map_join("\n", &("- " <> String.trim(&1.gist)))
-    [item("developer", "input_text", @gists_heading <> "\n" <> lines)]
+    [entry(:context, @gists_heading <> "\n" <> lines)]
   end
 
-  defp chat_items(messages) do
+  defp chat_entries(messages, provider) do
     messages
     |> Enum.map(&chat_message!/1)
     |> Enum.reject(&silent_reply?/1)
-    |> Taint.mask_for_chain(@live_chain)
-    |> Enum.flat_map(&chat_item/1)
+    |> Taint.mask_for_chain(chain(provider))
+    |> Enum.flat_map(&chat_entry/1)
   end
 
   defp silent_reply?(%{role: "assistant", content: content}),
@@ -190,33 +221,40 @@ defmodule FermixCore.Realtime.LiveChat do
             inspect(Map.get(message, :role))
   end
 
-  defp chat_item(%{role: role, content: content}) do
+  defp chat_entry(%{role: role, content: content}) do
     case LiveText.summary(content, @message_max_chars) do
       "" -> []
-      text -> [item(role, part_type(role), text)]
+      text -> [entry(chat_role(role), text)]
     end
   end
 
-  defp part_type("user"), do: "input_text"
-  defp part_type("assistant"), do: "output_text"
+  defp chat_role("user"), do: :user
+  defp chat_role("assistant"), do: :assistant
 
-  # Keeps the newest items that fit beside the closing line; the first one
+  # Keeps the newest lines that fit beside the closing line; the first one
   # that does not fit ends the walk, so everything older goes with it.
-  defp within_bound(items) do
+  defp within_bound(entries) do
     budget = @input_max_bytes - byte_size(@closing)
 
-    items
+    entries
     |> Enum.reverse()
-    |> Enum.reduce_while({[], 0}, fn item, {kept, used} ->
-      next = used + text_bytes(item)
-      if next <= budget, do: {:cont, {[item | kept], next}}, else: {:halt, {kept, used}}
+    |> Enum.reduce_while({[], 0}, fn entry, {kept, used} ->
+      next = used + text_bytes(entry)
+      if next <= budget, do: {:cont, {[entry | kept], next}}, else: {:halt, {kept, used}}
     end)
     |> elem(0)
   end
+
+  defp entry(role, text), do: %{role: role, text: text}
+
+  defp live_item(%{role: :context, text: text}), do: item("developer", "input_text", text)
+  defp live_item(%{role: :user, text: text}), do: item("user", "input_text", text)
+  defp live_item(%{role: :assistant, text: text}), do: item("assistant", "output_text", text)
 
   defp item(role, part_type, text) do
     %{type: "message", role: role, content: [%{type: part_type, text: text}]}
   end
 
-  defp text_bytes(%{content: [%{text: text}]}), do: byte_size(text)
+  defp text_bytes(%{text: text}), do: byte_size(text)
+  defp item_bytes(%{content: [%{text: text}]}), do: byte_size(text)
 end

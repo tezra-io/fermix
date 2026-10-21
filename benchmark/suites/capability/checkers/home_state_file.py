@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Checker (json): a file in the eval home must hold an exact value after the turn.
 Gold (`checker.expect`): `path` (relative to the eval home) and `equals` (the file's
 stripped content). For actions whose only trace is the state a local script leaves,

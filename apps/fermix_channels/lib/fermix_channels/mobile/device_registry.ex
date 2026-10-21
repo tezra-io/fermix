@@ -12,13 +12,16 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
   (`Companion.Turns.revoke_device/2`), so none runs, is answered or is
   recovered after the revocation. That work is handed to `Companion.Turns`,
   never done here: a store call that stalls or exits must not stop this
-  process, whose restart would drop every phone's socket.
+  process, whose restart would drop every phone's socket. A revocation also
+  asks the remote-reach rail to recompute the relays it uses (M62 §5), a cast
+  that never waits on the rail.
   """
 
   use GenServer
 
   alias FermixChannels.Companion.Turns
   alias FermixChannels.Mobile.DeviceStore
+  alias FermixChannels.Mobile.Iroh.Helper
 
   @type device_id :: String.t()
   @type profile_id :: String.t()
@@ -111,7 +114,9 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
        device_store: Keyword.get(opts, :device_store, DeviceStore),
        authorize_device: Keyword.get(opts, :authorize_device, &DeviceStore.fetch/2),
        delete_device: Keyword.get(opts, :delete_device, &DeviceStore.delete/2),
-       revoke_requests: Keyword.get(opts, :revoke_requests, &Turns.revoke_device(Turns, &1))
+       revoke_requests: Keyword.get(opts, :revoke_requests, &Turns.revoke_device(Turns, &1)),
+       relays_changed:
+         Keyword.get(opts, :relays_changed, fn -> Helper.relays_acknowledged(Helper) end)
      }}
   end
 
@@ -166,6 +171,7 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
       :ok ->
         state = revoke_presence(state, device_id)
         :ok = state.revoke_requests.(device_id)
+        :ok = state.relays_changed.()
         {:reply, :ok, state}
 
       {:error, {:device_not_found, ^device_id}} = missing ->

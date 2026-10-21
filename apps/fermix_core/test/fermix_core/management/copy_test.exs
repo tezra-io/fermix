@@ -14,8 +14,10 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.Redaction
+  alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Doctor.Remediation
+  alias FermixCore.Management.McpServers.Row, as: McpRow
   alias FermixCore.Management.Mobile
   alias FermixCore.Management.Plugins
   alias FermixCore.Management.Plugins.Row, as: PluginRow
@@ -195,6 +197,34 @@ defmodule FermixCore.Management.CopyTest do
       end
     end
 
+    # Grok publishes the task-engine rows under its own words and the SpaceXAI
+    # key row in place of OpenAI's (M70 §06), so they are walked from a Grok
+    # snapshot too.
+    test "every row only the Grok voice engine publishes obeys the rules" do
+      realtime = [enabled: true, engine: "xai_realtime", model: "grok-voice-3.0"]
+
+      snapshot =
+        Map.update(ConfigStore.current_snapshot(), :fermix_core, [realtime: realtime], fn core ->
+          Keyword.put(core, :realtime, realtime)
+        end)
+
+      {:ok, view} = Settings.get("realtime", snapshot: snapshot)
+      keys = Enum.map(view["rows"], & &1["key"])
+
+      assert "realtime_backend" in keys and "xai_api_key" in keys
+
+      for row <- view["rows"] do
+        where = "realtime.#{row["key"]}"
+
+        assert_clean(row["label"], :prose, [], "row label #{where}")
+        assert_clean(row["footer"], :prose, [], "row footer #{where}")
+
+        for option <- row["options"] do
+          assert_clean(option["label"], :name, [], "option label #{where}")
+        end
+      end
+    end
+
     test "every remediation title and body obeys the rules" do
       for key <- Remediation.keys() do
         [id, status] = String.split(key, ".")
@@ -242,6 +272,23 @@ defmodule FermixCore.Management.CopyTest do
         for setting <- row["settings"] do
           assert_clean(setting["label"], :prose, names, "plugin setting #{where}")
         end
+      end
+    end
+
+    # An MCP server row names what the owner typed and what its program said:
+    # a command, a host, a folder, a variable, a stderr line. Those are data the
+    # row reflects, declared at the call site; the words around them are copy.
+    test "every MCP server row sentence obeys the rules, with what it names declared" do
+      rows = mcp_rows()
+
+      assert length(rows) >= 20
+
+      for {row, names} <- rows do
+        where = "mcp row #{row["name"]} #{row["status"]}"
+
+        assert_clean(row["status_sentence"], :prose, names, "#{where} status")
+        assert_clean(row["consent_sentence"], :prose, names, "#{where} consent")
+        assert_clean(row["last_error"], :prose, names, "#{where} last error")
       end
     end
 
@@ -455,6 +502,101 @@ defmodule FermixCore.Management.CopyTest do
     snapshot = Map.put(ConfigStore.current_snapshot(), :sandbox, sandbox)
     {:ok, view} = Settings.get("sandbox", snapshot: snapshot)
     Enum.filter(view["rows"], &String.starts_with?(&1["key"], "env:"))
+  end
+
+  @mcp_servers ~S"""
+  [mcp.servers.files]
+  command = "npx"
+  args = ["-y", "server-filesystem"]
+  cwd = "/Users/owner/mcp"
+  env_secrets = ["GITHUB_TOKEN"]
+
+  [mcp.servers.linear]
+  transport = "http"
+  url = "https://mcp.linear.app/mcp"
+  auth = "header"
+  key_header = "Authorization"
+  header_secrets = ["X-Workspace", "Authorization"]
+  oauth_client_id = "fermix"
+
+  [mcp.servers.notion]
+  transport = "http"
+  url = "https://mcp.notion.com/mcp"
+  """
+
+  # One row for every status and every class a failed server can end in, for a
+  # local and a remote server, each with the names it reflects.
+  defp mcp_rows do
+    servers = McpConfig.from_toml(@mcp_servers)
+    tail = ["the server said: fatal error"]
+
+    entries =
+      [nil, {:connecting, nil}, {:ready, nil}, {:reauthorization_required, :sign_in_required}] ++
+        [{:insufficient_credential_scope, nil}] ++
+        for(
+          detail <- ~w(command_not_found cwd_not_found env_unavailable header_unavailable
+                       reserved_header invalid_url other)a,
+          do: {:invalid_remote_config, detail}
+        ) ++
+        for(
+          detail <- ~w(exited retries_exhausted spawn_failed rate_limited econnrefused)a,
+          do: {:remote_unreachable, detail}
+        ) ++
+        [
+          {:reauthorization_required, :key_refused},
+          {:reauthorization_required, nil},
+          {:remote_protocol_error, :legacy_sse_transport},
+          {:remote_protocol_error, :jsonrpc_error},
+          {:remote_security_blocked, :link_local},
+          {:capability_conflict, nil},
+          {:upstream_contract_mismatch, :missing_tool}
+        ]
+
+    for server <- servers,
+        enabled? <- [true, false],
+        stored? <- [true, false],
+        entry <- entries,
+        alive? <- [true, false],
+        grant <- mcp_grants() do
+      row =
+        McpRow.build(%{server | enabled?: enabled?}, %{
+          presence: mcp_presence(server, stored?),
+          entry: mcp_entry(entry, tail),
+          alive?: alive?,
+          resolution: nil,
+          grant: grant
+        })
+
+      names = ["npx", "mcp.linear.app", "mcp.notion.com", "/Users/owner/mcp", "GITHUB_TOKEN"]
+      {row, names ++ ["X-Workspace"] ++ tail}
+    end
+  end
+
+  # Every state an `auto` server's grant reads as on its row (M74 E5).
+  defp mcp_grants do
+    grant = %{
+      state: :signed_in,
+      account_label: "owner@example.com",
+      issuer: "https://auth.example.com",
+      wanted_scopes: []
+    }
+
+    [nil, grant, %{grant | state: :expired}, %{grant | wanted_scopes: ["admin"]}]
+  end
+
+  defp mcp_presence(server, stored?) do
+    %{
+      env: Enum.map(Map.get(server, :env_secrets, []), &{&1, stored?}),
+      headers: Enum.map(Map.get(server, :header_secrets, []), &{&1, stored?}),
+      client_secret: stored?
+    }
+  end
+
+  defp mcp_entry(nil, _tail), do: nil
+
+  defp mcp_entry({status, detail}, tail) do
+    discovery = %{tool_count: 3, server_info: nil, tools: []}
+    %{status: status, detail: detail, subject: nil, discovery: discovery, stderr_tail: tail}
   end
 
   defp plugin_rows do

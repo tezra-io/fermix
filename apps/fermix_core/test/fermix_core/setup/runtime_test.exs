@@ -856,6 +856,83 @@ defmodule FermixCore.Setup.RuntimeTest do
     end
   end
 
+  # Most secrets are pasted, and a pasted key the terminal echoes stays in the
+  # scrollback: the terminal reads every secret answer with echo off, so a
+  # secret question goes to the secret reader and never to the plain one.
+  describe "secret questions" do
+    setup do
+      FermixTestSupport.SecretWriterStub.reset()
+      on_exit(fn -> FermixTestSupport.SecretWriterStub.reset() end)
+      :ok
+    end
+
+    test "go to the secret reader, and every other question to the plain one" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+      test_pid = self()
+
+      prompt = fn label ->
+        send(test_pid, {:plain, label})
+        if String.starts_with?(label, "Provider"), do: "anthropic", else: ""
+      end
+
+      secret_prompt = fn label ->
+        send(test_pid, {:secret, label})
+        if label == "Anthropic API key", do: "sk-ant-pasted", else: ""
+      end
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run([skip_probe: true],
+                 puts: puts,
+                 prompt: prompt,
+                 secret_prompt: secret_prompt
+               )
+
+      secret_labels = received_labels(:secret)
+      plain_labels = received_labels(:plain)
+
+      assert "Anthropic API key" in secret_labels
+      assert Enum.any?(plain_labels, &String.starts_with?(&1, "Provider"))
+      refute Enum.any?(plain_labels, &(&1 =~ ~r/API key|token|secret/i))
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      anthropic = snapshot.fermix_core |> Keyword.fetch!(:providers) |> Keyword.fetch!(:anthropic)
+      assert Keyword.get(anthropic, :api_key) == "sk-ant-pasted"
+    end
+
+    test "an injected plain reader answers them when no secret reader comes with it" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+
+      prompt = fn label ->
+        cond do
+          String.starts_with?(label, "Provider") -> "anthropic"
+          label == "Anthropic API key" -> "sk-ant-typed"
+          true -> ""
+        end
+      end
+
+      {puts, _collector} = puts_collector()
+      assert :ok = Runtime.run([skip_probe: true], puts: puts, prompt: prompt)
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      anthropic = snapshot.fermix_core |> Keyword.fetch!(:providers) |> Keyword.fetch!(:anthropic)
+      assert Keyword.get(anthropic, :api_key) == "sk-ant-typed"
+    end
+  end
+
+  defp received_labels(kind, acc \\ []) do
+    receive do
+      {^kind, label} -> received_labels(kind, [label | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
   describe "provided_answers/1 — provider/model/effort flags" do
     test "extracts provider/default_model/reasoning_effort opts as answers" do
       opts = [
@@ -1540,6 +1617,110 @@ defmodule FermixCore.Setup.RuntimeTest do
       realtime = snapshot.fermix_core |> Keyword.get(:realtime, [])
       assert Keyword.get(realtime, :enabled) == true
       assert Keyword.get(realtime, :voice) == "marin"
+    end
+  end
+
+  # `--openai-base-url`, `--anthropic-base-url` and `--xai-base-url` point a
+  # hosted provider at a relay (a cloud sandbox's loopback reverse proxy). One
+  # headless call passes all three beside `--provider`, so each lands in its own
+  # provider's block whichever provider is primary; a later run without them
+  # keeps them; a value that is not an absolute http(s) URL with a host fails
+  # the run before anything is written.
+  describe "the provider base URL flags" do
+    @base_urls [
+      openai: "http://127.0.0.1:18081/v1",
+      anthropic: "http://127.0.0.1:18080/v1",
+      xai: "http://127.0.0.1:18082/v1"
+    ]
+
+    defp persisted_base_urls do
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      providers = Keyword.fetch!(snapshot.fermix_core, :providers)
+      for {provider, _url} <- @base_urls, do: {provider, providers[provider][:base_url]}
+    end
+
+    test "are answers" do
+      answers =
+        Runtime.provided_answers(
+          openai_base_url: @base_urls[:openai],
+          anthropic_base_url: @base_urls[:anthropic],
+          xai_base_url: @base_urls[:xai]
+        )
+
+      assert answers[:openai_base_url] == @base_urls[:openai]
+      assert answers[:anthropic_base_url] == @base_urls[:anthropic]
+      assert answers[:xai_base_url] == @base_urls[:xai]
+    end
+
+    test "write each provider's base_url and survive a later run that does not pass them" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [
+                   provider: "anthropic",
+                   anthropic_api_key: "sk-ant-test",
+                   default_model: "claude-sonnet-5-5",
+                   openai_base_url: @base_urls[:openai],
+                   anthropic_base_url: @base_urls[:anthropic],
+                   xai_base_url: @base_urls[:xai],
+                   skip_probe: true
+                 ],
+                 puts: puts,
+                 prompt: fn _label -> "" end
+               )
+
+      assert persisted_base_urls() == @base_urls
+
+      assert :ok =
+               Runtime.run([default_model: "claude-sonnet-4-6", skip_probe: true],
+                 puts: puts,
+                 prompt: fn _label -> "" end
+               )
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      providers = Keyword.fetch!(snapshot.fermix_core, :providers)
+      assert providers[:anthropic][:default_model] == "claude-sonnet-4-6"
+      assert providers[:anthropic][:primary] == true
+      assert persisted_base_urls() == @base_urls
+    end
+
+    test "refuse a value that is not an absolute http(s) URL with a host, and write nothing" do
+      home = tmp_home()
+      secret_store = Application.fetch_env(:fermix_core, :secret_store)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      on_exit(fn -> restore(:fermix_core, :secret_store, secret_store) end)
+      prepare(home)
+      before = File.read!(ConfigStore.path())
+      {puts, _collector} = puts_collector()
+
+      for {flag, value} <- [
+            openai_base_url: "",
+            anthropic_base_url: "ftp://relay.example/v1",
+            xai_base_url: "localhost:18082/v1",
+            anthropic_base_url: "http://"
+          ] do
+        assert {:error, sentence} =
+                 Runtime.run(
+                   [
+                     {flag, value},
+                     secret_store: "file",
+                     provider: "anthropic",
+                     anthropic_api_key: "sk-ant-test",
+                     skip_probe: true
+                   ],
+                   puts: puts,
+                   prompt: fn label -> flunk("setup asked #{inspect(label)} before refusing") end
+                 )
+
+        name = flag |> Atom.to_string() |> String.replace("_", "-")
+        assert sentence =~ "--#{name} must be an absolute http:// or https:// URL with a host"
+      end
+
+      assert File.read!(ConfigStore.path()) == before
     end
   end
 end

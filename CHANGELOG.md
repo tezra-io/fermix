@@ -4,6 +4,353 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-10-21
+
+### Added
+
+- **Fermix knows which Fermix it is, and the machine it runs on.** Every
+  conversation with you, voice calls included, is now told whether this is
+  the Mac app, a standalone install on a Mac, the Linux package (and whether the
+  Fermix desktop app was installed when it started), a standalone Linux
+  binary or a development run, and which version of macOS or which Linux
+  distribution it runs on, on which processor. So "how do I…" is answered for
+  the install you have, without asking which one: a Mac app owner gets the
+  app's own settings, a Linux desktop app owner that app's pages and panes,
+  and a package or standalone install the `fermix` command and browser setup.
+  Fermix reads no machine name, account name, serial number or address for
+  it, and a guest you let talk to Fermix is told none of it. A desktop app
+  installed after Fermix started is known at its next restart.
+- **A reminder or a timer can ring on this computer (engine side).** Ask for
+  it on this Mac or here, or set a timer from the Mac chat, a terminal, an
+  editor or a voice call, and it rings on the computer Fermix runs on instead
+  of in a chat: on a Mac as a notification from the Fermix app, with sound,
+  opening the app in the background when it is not running; on Linux as a
+  desktop notification while a desktop session is running. A reminder you ask
+  for from your phone or a chat app still goes where your reminders go unless
+  you name this computer, and when Fermix has no chat to reach you on, it
+  rings here. On a Mac it needs the Fermix app's Notifications permission,
+  which Fermix asks for only when you ask from the Mac itself; asked from
+  anywhere else before you have granted it, it says where to grant it and
+  stores nothing. A ring that fails is tried again on this computer like any
+  reminder and never moves to a chat. A headless Linux host, a system-wide
+  Linux service and a standalone Fermix on a Mac cannot ring, and say why
+  when asked, a standalone Mac naming `fermix migrate-to-app` as the move to
+  the app. No released Fermix.app rings yet: the app half ships in the next
+  app release.
+- **Timers, in minutes and hours.** "Remind me in 20 minutes" and "set a two
+  hour timer" are reminders at that exact moment in your time zone, up to a
+  day ahead in minutes and a week ahead in hours, and Fermix confirms the
+  clock time it will ring. Two timers with the same name minutes apart are
+  both kept.
+- **Snooze 10 minutes, from the Mac notification itself.** A reminder that
+  rings on your Mac carries a Snooze 10 minutes button, which moves that
+  reminder ten minutes on with nothing to type and no reply from Fermix. It
+  arrives with the same Fermix app release. A Linux desktop notification has
+  no button; say "snooze that" instead.
+- **"Snooze that" and "cancel that" after it rang on this computer.** Right
+  after a reminder rings on this computer, "snooze that" or "cancel that" in
+  the Mac chat, a terminal, an editor, the Linux app's chat or a voice call
+  finds it with no id, as it already does in the chat a reminder arrived in.
+  From your phone or a chat app it never reaches one that rang here.
+- **MCP servers you add yourself, managed over the management socket (engine
+  side).** The daemon now owns the MCP servers you add, so the Mac app can
+  offer them with no terminal and no hand edit: add one by its URL, with a key
+  sent as a header where it needs one, or by the command that starts it on
+  this Mac, then list, change, turn off or remove it, all applied at once with
+  no restart. Keys and other values go to the Keychain under the server's own
+  name, never into the settings file, and a server starts once the last value
+  it needs is stored. A server you add that asks you to sign in signs in
+  through your browser, from the app or over the management socket: Fermix
+  finds how the server signs people in, registers itself with it where the
+  server asks, and keeps the sign-in, renewing it, until you sign out or
+  remove the server. A client ID and secret you give a server stay with the
+  sign-in service you first used them with: if the server later names
+  another, Fermix sends that service nothing and says so, until you enter the
+  client ID it issued or remove the server and add it again. Instead of
+  typing, paste what a README or another app
+  gives: a URL, a command line, the `mcpServers` or `servers` block Claude
+  Desktop, Claude Code, Cursor, Windsurf or VS Code use, a `claude mcp add`
+  line or a Codex `[mcp_servers]` block. Fermix fills in the form, names the
+  server, and keeps a key the paste carried in memory for the add, so it never
+  travels back to the app; a paste of several servers fills one form each.
+  Each tool can be switched off for the agent while its server keeps running,
+  and a check connects a server and counts its tools. Every server says where
+  its code runs and what leaves this Mac, its state in a sentence ("Waiting
+  for GITHUB_TOKEN.", "Connected. 23 tools."), and what a local one last said
+  when it stopped. A local server runs with your login shell's PATH and only
+  the environment it declares; a remote one may be on this Mac or your
+  network, never a cloud metadata address, and no redirect is followed.
+  The servers Claude Desktop, Claude Code, Cursor, VS Code, Windsurf and Codex
+  already have on this Mac can be imported in one step, each named as a paste
+  would name it, with the keys their settings hold copied into the Keychain
+  and a placeholder left for you to fill in; Fermix reads those apps' settings
+  only when you ask, and never writes to them. No released Fermix.app has the
+  Integrations tab for them yet.
+
+- **Grok Voice as a voice model, beside GPT-Live (opt-in, engine side).**
+  Settings > Voice now offers `grok-voice-3.0`, SpaceXAI's voice model. Like
+  GPT-Live it listens and speaks while your Fermix agent does the work, with
+  the same tools, permissions, chat and private calls, results shown in the
+  chat and tasks that finish into the chat after a call ends. Grok hands each
+  task over through one function and keeps talking with you while it runs; a
+  correction replaces the running task and a spoken "stop that" cancels it.
+  It needs a SpaceXAI API key (a SpaceXAI sign-in covers chat only), which
+  Settings > Voice asks for when Grok is picked (`fermix setup` and its
+  `--realtime-api-key` store it as SpaceXAI's key when Grok is the model);
+  picking it also sets its own voice (Eve by default) and turns screen sharing
+  off, which Grok does not have, and picking an OpenAI model again turns
+  screen sharing back on. Grok bills by connected time plus each line of chat context Fermix
+  sends it, so a call's cost is Fermix's own estimate, marked incomplete, and
+  a call lasts at most two hours. Computer history reaches Grok only when
+  SpaceXAI is granted it; granting OpenAI says nothing about SpaceXAI. Calls
+  need a Fermix app that speaks the newer voice wire; an older app is told to
+  update before anything is billed, and keeps its OpenAI calls as before.
+
+- **Place search works in the Mac app with no key, through Apple Maps.** In
+  the Fermix Mac app, `place_search` now searches Apple Maps through a small
+  helper the app's engine carries, so "quiet coffee shops in SoHo" finds real
+  places without a Brave Search API key or a metered plan. Each place comes
+  back with its address, phone, kind, coordinates, its own site and Apple's
+  page for it, which the Mac chat's cards open in Maps; Apple Maps has no
+  ratings, prices or hours to give. The Homebrew and Linux builds keep Brave.
+  A new Place search choice in the Search settings
+  (`[fermix_core.tools.place_search] backend`, `apple_maps` or `brave`) picks
+  one on purpose where the build carries both, the Homebrew and Linux builds
+  offer Brave alone, and the Brave key row shows whenever web or place search
+  uses Brave. Doctor's place search row says which backend is in force, why,
+  and whether it is ready. Nothing falls back from one backend to the other,
+  and the helper never asks for or reads this Mac's location.
+
+- **Links in a Mac reply get previews, phone or no phone.** Once a reply in
+  the Mac app is written, Fermix reads up to four of the pages it links, from
+  this Mac, through the same guarded fetch a phone's replies already used
+  (every address and redirect checked, a size cap and a deadline), and keeps
+  each page's title, site and picture on the reply, so the chat's link cards
+  show them. The pages a reply's place cards already stand for are never
+  fetched, and your own messages typed on the Mac are not either. The media
+  store and the previews now run whether or not a phone is paired, so the
+  Mac's uploads and previews no longer need the phone channel on. A stored
+  preview keeps the link as the reply wrote it (`link` in both companion
+  wires), which a client pairs its card with, and the previewer reads a
+  bolded markdown link whole.
+
+- **Doctor says when your provider is down.** A new `provider health` row
+  judges the primary provider from the calls Fermix already made in the last
+  24 hours, so it sends nothing and runs in every Doctor run, the app's
+  included. When every recent call failed it fails and says how many, over
+  what time and what the latest got, such as "OpenAI Codex: all 6 calls in the
+  last 41 minutes failed; the latest got HTTP 520 from Cloudflare in front of
+  the provider, with an HTML error page instead of an API answer". When only
+  the latest failed it warns, since one failure can be a blip. A refusal of
+  one request, such as a conversation too long for the model, does not count
+  against the provider.
+- **The phone channel can reach Fermix from any network (groundwork).** A
+  new "Reach from anywhere" switch in the phone channel's settings, on by
+  default and applied at once, lets a paired phone reach this Fermix through
+  Fermix's own relays, with no Tailscale and no account; the phone's session
+  stays end-to-end encrypted, so a relay sees addresses and timing, never
+  messages. It needs the `fermix-iroh` helper, which no build carries yet:
+  until one does, the phone channel status and `fermix doctor` say the helper
+  is missing, and phones connect over the local network or Tailscale exactly
+  as before. Relay contact starts only once a phone is paired. The listen
+  address and the local-network announcement do not limit it: an install
+  that listens only on its Tailscale address to keep phones on Tailscale is
+  reachable through the relays too once the helper ships, unless "Reach from
+  anywhere" is turned off. The phone settings now keep the port, the listen
+  address and the announcement under Advanced, through a new `advanced` flag
+  on every settings row.
+- **The Mac chat can show a phone's media (groundwork).** The chat socket
+  now hands the Mac app a read-only copy of a voice note, picture or link
+  preview image a row names, kept under `companion/media/` in Fermix's home
+  within 512 MiB and cleared at every start, and says when a row changes
+  after it is written, such as a voice note's transcript or a stored link
+  preview, so the app reads it again. No released Fermix.app has the chat
+  window yet.
+
+- **`fermix setup` can point OpenAI, Anthropic or SpaceXAI at a relay.**
+  `--openai-base-url URL`, `--anthropic-base-url URL` and `--xai-base-url URL`
+  write that provider's `base_url` (a root such as `http://127.0.0.1:18080/v1`)
+  into `config.toml`, so a host whose provider traffic must go through a local
+  reverse proxy, such as a cloud sandbox, no longer needs a hand edit. Each
+  flag writes its own provider's block whichever provider `--provider` names,
+  a later `fermix setup` without the flag keeps it, and the wizard never asks
+  for one. A value that is not an absolute `http://` or `https://` URL with a
+  host fails setup and writes nothing. An `openai` block now accepts
+  `base_url`, which it used to refuse at load; OpenAI pointed anywhere but
+  `https://api.openai.com` uses Chat Completions rather than Responses. Doctor's
+  OpenAI and Anthropic probes now add `/responses` and `/messages` to a
+  configured `base_url` as the turns do, instead of posting to the bare root.
+
+### Changed
+
+- **On a Mac, the sandbox mode now holds for commands, not just the file
+  tools.** Every shell command, operator command and git run the agent starts,
+  and every program it starts in turn, runs inside a macOS sandbox built from
+  the mode. A command can write only in the mode's folders, your grants and the
+  temp folders; in `open` it can write anywhere except the protected paths. In
+  every mode a command can no longer write Fermix's own files (its workspace and
+  skills folders aside), rename its home, change its installed engine or your
+  launch agents, read its stored keys, logs or browser profiles, talk to the
+  running service, run its plugin binaries, or mount a disk image over any of
+  them. In `strict` and `standard` a command can't read your own SSH keys,
+  cloud logins or tokens either (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`,
+  `~/.docker`, `~/.npmrc`, `~/.netrc`, `~/.git-credentials`,
+  `~/.config/git/credentials`, gcloud's credentials), so `git push` over SSH,
+  signed commits, `aws` and `kubectl` from a command need `open`, and `npm`
+  runs without your `~/.npmrc` (its registry, proxy and tokens). In every mode
+  no command can write those files, so `npm login`, `gcloud auth login` and
+  saving a git password are yours to run, and `gcloud` from a command fails
+  once it needs to save a refreshed token. The file tools now refuse the new
+  files in every mode, as they already did `~/.ssh`. So a command the agent
+  was talked into can't change Fermix's settings or take its credentials;
+  before, a command started in an allowed folder could write anything your
+  account could. Tool caches (`npm`, `pip`, `uv`, `go`,
+  `yarn`, Playwright) now live in the workspace's `.cache`. If something you
+  ask for now fails with `Operation not permitted`, grant the folder or switch
+  to `open`: `brew install`, `cargo` and other tools that write outside your
+  folders need one of the two. The `codex` and `claude_code` command presets
+  and coding runs are not held yet, and Linux keeps the old behaviour until its
+  own sandbox lands. There is no setting: the mode is the setting.
+- **`fermix sandbox explain` shows what a command cannot read.** Beside the
+  roots and protected paths it now lists every path no command may read in the
+  current mode (an entry ending in `*` covers every file whose name begins
+  with it), and says whether this system's kernel holds commands at all.
+- **A refusal outside the roots sends the agent to you.** When a file tool,
+  `shell`, `git_write` or an operator command is refused a folder, the agent
+  is told to ask you through `request_directory_access`, and that only you
+  grant a folder (`/grant path` in chat, `fermix grant path` in your terminal).
+  It was told to run `fermix grant` itself: a grant is not the agent's to
+  give, and on a Mac a command cannot write one.
+
+### Removed
+
+- **Inbound MCP, which was never started.** Fermix connects to MCP servers
+  but does not act as one, and the unused server code is gone. An
+  `[mcp.inbound]` section in an existing config is accepted, ignored with a
+  warning, and dropped by the next settings save.
+
+### Fixed
+
+- **Pictures and files reach the Mac chat, from a voice call too.** A picture
+  Fermix makes or a file it sends in the Mac app's chat used to fail with
+  "unsupported media", and a GPT-Live or Grok call could not make one at all:
+  asked for a picture, the agent drew around the missing tool and you got
+  text. Now a file or image Fermix sends in the chat appears there, drawn as
+  the phone's pictures are, and reaches your phone too. Ask for one on a call,
+  private or in the chat, and it is made or sent and lands in the chat, while
+  the voice tells you it is there.
+- **What Fermix says about itself is current again.** It no longer tells a
+  Mac app owner that the app has no chat window, and it names iMessage among
+  the places a reminder can go, and among the inboxes it picks from when no
+  reminder target is set.
+- **A plugin's broken runtime is no longer reported as missing.** A local
+  plugin's host runtime check failed the same way whether `node` was absent,
+  too old, or present and crashing, and the Integrations row said "the runtime
+  it needs is not on this Mac" for all three, sending the owner to install a
+  node they already had (a Homebrew node whose library was upgraded under it
+  crashes this way). The row now names the runtime it found when that one is
+  too old or fails its version check, by its path, and an install from the Mac
+  app refused for either reason says the same. A plugin whose own manifest
+  names a minimum version that is not a version is now refused when it is
+  installed.
+- **A retired plugin left installed can no longer stop Fermix from starting.**
+  A plugin this build no longer offers was dropped from the config, but its
+  installed copy was still loaded, and a hosted one's signature re-checked, on
+  every plugin listing; when that check failed, the plugin list failed with
+  it, and so did startup. An installed retired plugin is now left unread; its
+  files stay where they are.
+- **The catalog offers Obsidian 1.0.4, which accepts a vault path written
+  from your home folder.** A path such as `~/Documents/Vault` reached the
+  plugin as typed, nothing expanded the `~`, and the plugin stopped at start
+  with "OBSIDIAN_VAULT_PATH does not exist". A new install gets 1.0.4; an
+  installed copy moves with `fermix plugins upgrade obsidian`, and the Mac app
+  has no plugin update yet, so there an absolute vault path is the fix.
+- **Changing a setting no longer deletes the MCP servers you added by hand.**
+  Every settings save, from the Mac app, `fermix setup`, a plugin's settings or
+  the agent's model routing tool, rewrote `config.toml` without its
+  `[mcp.servers.*]` blocks, so a server added there was gone the next time any
+  setting changed. A save now writes those blocks back with every key and
+  value they held, the servers in name order and each one's tool settings
+  after it.
+- **Audio and video sent under an alias type keep a name their readers know.**
+  An attachment's copy was named after its mime type's subtype, so an M4A or
+  WAV sent as `audio/x-m4a` or `audio/x-wav` became `.x_m4a` or `.x_wav`, a
+  QuickTime video `.quicktime` and an MP3 `.mpeg`, names transcription and the
+  Mac's players do not read. They are now `.m4a`, `.wav`, `.mov` and `.mp3`,
+  as are Word, Excel, PowerPoint, plain text and SVG files by their own
+  extensions.
+- **Fermix connects to a provider over IPv6 first.** Outbound connections now
+  try IPv6 first and fall back to IPv4 when the IPv6 connection cannot be
+  made, the order curl and browsers use; Fermix used to dial IPv4 only. Since
+  14 October 2026 OpenAI has answered Sign in with ChatGPT requests with HTTP
+  520 over IPv4 on some networks while the same requests work over IPv6
+  (#139), which left OpenAI Codex with no model list and every message
+  failing; where IPv6 works they go through again. Where OpenAI answers 520
+  over IPv6 too, they still fail: an HTTP error is never retried over IPv4. A
+  machine without IPv6 connects as before. On a network that silently drops
+  IPv6, a new connection waits out its connect timeout before it tries IPv4.
+  Connections through a configured proxy are unchanged.
+- **"What changed" matches what was said before.** Asked to redo an answer
+  against an earlier one, the assistant could report a move that never
+  happened, such as calling an item "no longer the top priority" when its own
+  first answer had ranked it second, though that answer was in front of it.
+  Its operating rules now say to read the earlier state off the conversation,
+  its own replies included, and to check every earlier position, time or
+  status and every move it describes against it. New installs and untouched
+  FERMIX.md files get the new text; an edited file keeps the operator's copy.
+- **A provider's HTML error page is no longer the error.** When something in
+  front of a provider, such as Cloudflare, answered with an HTML error page,
+  the whole page became the error: the daemon log line and the trace carried
+  kilobytes of markup and no status. The error is now one line naming the
+  status, and Cloudflare when the page names it. `fermix doctor --full`'s auth
+  probe says the same line instead of "(transient?)", and the new provider
+  health row judges whether it keeps happening.
+- **A place search Brave refuses says why.** A refused Brave place search said
+  only "HTTP 400", so a key whose Brave plan does not include Place Search
+  looked like a broken request. The error now carries Brave's own code and
+  sentence, such as `OPTION_NOT_IN_PLAN`, and the names of the fields it
+  rejected, and a wrong key reads as an authentication failure instead of a
+  provider error.
+- **Signing in with ChatGPT says when the model was not checked.** When the
+  account's model list could not be read during sign-in, the app reported a
+  plain success and the default model was left unchecked. The sign-in still
+  completes, and its result now says the model was not checked and why
+  (`model_warning`), as `fermix auth login` already did.
+- **A secret can be typed without echo on a real terminal again.** The Linux
+  packages and the Homebrew binary run an Erlang runtime built without
+  terminal-capability support, so `fermix settings secret set` and
+  `fermix plugins auth set` refused masked entry on every terminal while
+  `--stdin` refused the same terminal too, leaving no way to type a key. Both
+  now ask one fact, whether stdin is a terminal, and hide the typed value by
+  turning the terminal's own echo off for the read and restoring it after.
+  The terminal wizard (`fermix setup`) hides its secret questions the same
+  way; it used to show every key and token as it was typed or pasted. A
+  hidden prompt now ends by showing how many characters arrived, never what
+  they were, so a paste that missed is plain to see.
+- **A key the daemon's environment overrides says so.** For the provider API
+  keys, the WhatsApp, Discord and Slack channel secrets and the APNs key, a
+  variable of the key's own name in the daemon's environment (such as
+  `ANTHROPIC_API_KEY`) is used instead of the stored value at every start.
+  `fermix settings secret set` and `secret clear` now say which variable is in
+  use, and an API-key authentication failure names that variable instead of
+  pointing at `fermix setup`. Exported empty, `OPENAI_API_KEY`,
+  `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET`,
+  `DISCORD_BOT_TOKEN`, `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET` now keep
+  the stored value instead of blanking it, as every other key's variable
+  already did.
+- **Restart hints name a restart that works for how the daemon runs.** After a
+  settings change, a sign-in or a failed sign-out, Fermix said
+  `fermix restart`, which refuses a daemon no background service runs. The
+  hint now names `fermix restart` for an installed service, the Fermix app for
+  a home the app manages, and stopping `fermix run` and running it again
+  otherwise.
+- **A save refused for an outside edit changes nothing.** When `config.toml`
+  had been edited outside Fermix, `fermix settings secret set` said "nothing
+  was saved" but had already replaced the stored secret, and a refused
+  `secret clear`, plugin key removal or Anthropic or SpaceXAI sign-out had
+  already deleted the stored credential. The settings file is now checked,
+  fresh, before anything is written.
+
 ## [0.15.0] - 2026-10-13
 
 ### Added

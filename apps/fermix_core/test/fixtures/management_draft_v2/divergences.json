@@ -565,6 +565,156 @@
       "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
     },
     {
+      "method": "settings.get",
+      "field": "channels.discord:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.signal:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.slack:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.telegram:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.whatsapp:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "computer_history:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "computer_use:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "editors:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "generate_image:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "harness:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "meetings:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "memory:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "personalization:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.anthropic:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.mistral:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.ollama:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.openai:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.openai_codex:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.openrouter:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.xai:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "realtime:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "routing:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "sandbox:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "transcription:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "web_search:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
       "method": "settings.get:computer_use",
       "field": "rows:computer_use_background",
       "kind": "engine_only",
@@ -635,6 +785,12 @@
       "field": "rows:tavily_api_key",
       "kind": "draft_only",
       "why": "This section publishes the key row for the backend in force plus the Brave key, not one row per backend that exists. The golden fixture was taken with a Brave backend selected, so the Tavily row is absent there; select Tavily and the daemon publishes tavily_api_key instead. A client must render the rows it is handed rather than a fixed set."
+    },
+    {
+      "method": "settings.get:web_search",
+      "field": "rows:place_search_backend",
+      "kind": "engine_only",
+      "why": "M72 section 14 makes place search's backend a choice (Apple Maps in the Fermix Mac app, Brave in the Homebrew and Linux builds) after the draft was written, and publishes it in this section after the web backend. It is the ordinary choice row with the options this host can run, so the app draws it through the descriptor form with no Swift work; the Brave key row now stands only while web or place search uses Brave."
     },
     {
       "method": "plugins.list",
@@ -938,6 +1094,12 @@
     },
     {
       "method": "settings.get:channels.mobile",
+      "field": "rows:mobile_iroh",
+      "kind": "engine_only",
+      "why": "M62 adds the phone channel's reach from anywhere to its section: a switch, on by default and applied the moment it is written, that lets a paired phone reach this daemon from any network through Fermix's relays. The draft predates it; the row is the ordinary toggle shape."
+    },
+    {
+      "method": "settings.get:channels.mobile",
       "field": "rows:mobile_port",
       "kind": "engine_only",
       "why": "M51 gives the phone channel its own settings section, channels.mobile: the enable switch, applied the moment it is written, and three boot-bound rows: the port, the address it listens on and the local-network announcement. The draft predates it and draws no such section; the rows are the ordinary row shape."
@@ -1109,6 +1271,378 @@
       "field": "rows:imessage_owner_user_id",
       "kind": "engine_only",
       "why": "M54: the channels.imessage section postdates the draft. The owner is a text row, the guests a list row and the switch the ordinary toggle; the account is not asked, because the helper derives it when it confirms the recipients. It exists only on a Mac. The rows are the ordinary row shape."
+    },
+    {
+      "method": "secret.set",
+      "field": "environment_override",
+      "kind": "engine_only",
+      "why": "The daemon names the environment variable it uses in place of the stored value (null when the stored value is the one in use), because config/runtime.exs layers a nonblank provider key, channel secret or APNs key from the daemon's environment over the stored one at every start; without it a write the next start ignores reads as a plain success. The field is optional and an older daemon omits it, so a decoder that ignores unknown keys is unaffected; the app shows it when it re-vendors."
+    },
+    {
+      "method": "secret.clear",
+      "field": "environment_override",
+      "kind": "engine_only",
+      "why": "The daemon names the environment variable it uses in place of the stored value (null when the stored value is the one in use), because config/runtime.exs layers a nonblank provider key, channel secret or APNs key from the daemon's environment over the stored one at every start; without it a write the next start ignores reads as a plain success. The field is optional and an older daemon omits it, so a decoder that ignores unknown keys is unaffected; the app shows it when it re-vendors."
+    },
+    {
+      "method": "(schema)",
+      "field": "job_kinds:mcp_check",
+      "kind": "engine_only",
+      "why": "M74: an MCP server check connects the server and lists its tools once, so it is a job of its own kind with a 75000 ms budget and the phases connecting and listing. The draft predates the kind; a client that has not re-vendored never starts one."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.add",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.check.start",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.disable",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.draft",
+      "kind": "engine_only",
+      "why": "M74: mcp.servers.draft postdates the draft. It reads what the owner typed or pasted into the add form (a URL, a command line, a configuration block from a README or another app), writes nothing, and answers drafts that fill the form. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls it; the app finds it in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.enable",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.get",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.import",
+      "kind": "engine_only",
+      "why": "M74: the import methods postdate the draft. mcp.servers.import.scan reads the MCP servers other apps' settings on this Mac hold, only when the owner opens the import page, and answers them as candidates with names only; mcp.servers.import reads them again and adds the ones named, with their values in the Keychain. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.import.scan",
+      "kind": "engine_only",
+      "why": "M74: the import methods postdate the draft. mcp.servers.import.scan reads the MCP servers other apps' settings on this Mac hold, only when the owner opens the import page, and answers them as candidates with names only; mcp.servers.import reads them again and adds the ones named, with their values in the Keychain. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.list",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.remove",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.tool.set",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.update",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.add=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.check.start=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.disable=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.draft=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.enable=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.get=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.import.scan=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.import=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.list=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.remove=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.tool.set=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.update=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "x-extensions:x-mcp-server-vocabulary",
+      "kind": "engine_only",
+      "why": "M74: the closed sets an MCP server row draws on (statuses, action ids, sign-in states), published beside the plugin vocabulary so a reader can enumerate them. The draft predates the row."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.add",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.check.start",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.disable",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.draft",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.enable",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.get",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.import",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.import.scan",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.list",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.remove",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.tool.set",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.update",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "job.get",
+      "field": "result.tool_count",
+      "kind": "engine_only",
+      "why": "M74: a finished `mcp_check` job's result carries `tool_count` beside `latency_ms`, how many tools the server listed. The draft predates the kind, and a job result is a flat map of scalars a client reads by key."
+    },
+    {
+      "method": "job.get",
+      "field": "result.account_label",
+      "kind": "engine_only",
+      "why": "M74 E5: a finished `auth` job that signed in an MCP server carries `account_label`, the account its grant names, as a provider's sign-in does. The draft illustrates only a provider probe's result, and a job result is a flat map of scalars a client reads by key."
+    },
+    {
+      "method": "mcp.servers.add",
+      "field": "params:auth",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.add",
+      "field": "params:command_line",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.add",
+      "field": "params:draft_id",
+      "kind": "engine_only",
+      "why": "M74: an add made from a paste names the draft whose values the paste carried. The daemon held them in memory under that draft_id when it answered mcp.servers.draft, so the app never holds a pasted key again, and the add stores them for the names the form still declares. The draft predates the paste."
+    },
+    {
+      "method": "mcp.servers.add",
+      "field": "params:env_names",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.add",
+      "field": "params:key_header",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.add",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.add",
+      "field": "params:transport",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.add",
+      "field": "params:url",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.check.start",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.disable",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.draft",
+      "field": "params:text",
+      "kind": "engine_only",
+      "why": "M74: mcp.servers.draft takes the one text the add form's field holds, whatever was typed or pasted into it, at most 64 KiB. The draft predates the method."
+    },
+    {
+      "method": "mcp.servers.enable",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.get",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.import",
+      "field": "params:servers",
+      "kind": "engine_only",
+      "why": "M74: an import names each candidate to add by its source and the name the scan offered it under, every app at once in one call, at most 32. The draft predates the method."
+    },
+    {
+      "method": "mcp.servers.remove",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.tool.set",
+      "field": "params:enabled",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.tool.set",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.tool.set",
+      "field": "params:tool",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.update",
+      "field": "params:command_line",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.update",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
     }
   ]
 }

@@ -10,10 +10,17 @@ defmodule Fermix.CLI.SecretInput do
     * `read_stdin/1` — reads the secret from a pipe (`--stdin`).
 
   Each refuses the other's world instead of degrading: masked entry needs a
-  terminal, `--stdin` needs a pipe. Both strip a single trailing newline and
-  nothing else, so a credential with meaningful surrounding characters
-  survives; validating the value's shape belongs to the caller that knows
-  which credential it is.
+  terminal, `--stdin` needs a pipe. One fact decides both, whether stdin is a
+  terminal, so the two can never both refuse the same stdin. Both strip a
+  single trailing newline and nothing else, so a credential with meaningful
+  surrounding characters survives; validating the value's shape belongs to the
+  caller that knows which credential it is.
+
+  `fermix setup` asks its secret questions among its other questions, on one
+  stdin, so it reads them with `read_answer/2`: masked on a terminal, the next
+  line of a pipe. A masked read ends by showing how many characters arrived,
+  never what they were, because most secrets are pasted into a prompt that
+  shows nothing.
 
   Deps are explicit. `:device` is the IO device the secret is read from
   (default `:standard_io`, which `IO` maps to the group leader, so
@@ -30,13 +37,10 @@ defmodule Fermix.CLI.SecretInput do
   @type result :: {:ok, String.t()} | {:error, term()}
 
   @doc """
-  Hands the terminal to the VM so it, rather than the kernel tty driver,
-  owns echoing. Answers `{:error, :enotsup}` when stdin is not a terminal.
+  Turns terminal echo on stdin on or off and answers whether it was on before,
+  so the read restores exactly what it found.
   """
-  @callback enter_raw() :: :ok | {:error, term()}
-
-  @doc "Turns terminal echo on or off."
-  @callback set_echo(boolean()) :: :ok | {:error, term()}
+  @callback set_echo(boolean()) :: {:ok, boolean()} | {:error, term()}
 
   @doc "Whether stdin is a terminal rather than a pipe or a file."
   @callback stdin_terminal?() :: boolean()
@@ -52,8 +56,30 @@ defmodule Fermix.CLI.SecretInput do
     device = Keyword.get(opts, :device, :standard_io)
     terminal = terminal(opts)
 
-    with :ok <- enter_interactive(terminal) do
+    if terminal.stdin_terminal?() do
       read_unechoed(device, terminal, label)
+    else
+      {:error, :not_a_terminal}
+    end
+  end
+
+  @doc """
+  Reads the answer to one `fermix setup` question that asks for a secret.
+
+  Setup reads its answers a line at a time from whatever stdin is: on a
+  terminal the answer is read as `read_masked/2` reads it, and from a pipe it
+  is the next line, which nothing echoes, so a script that pipes its answers in
+  keeps every later answer for the questions after this one.
+  """
+  @spec read_answer(String.t(), keyword()) :: result()
+  def read_answer(label, opts \\ []) when is_binary(label) and is_list(opts) do
+    device = Keyword.get(opts, :device, :standard_io)
+    terminal = terminal(opts)
+
+    if terminal.stdin_terminal?() do
+      read_unechoed(device, terminal, label)
+    else
+      device |> IO.gets("#{label}: ") |> input()
     end
   end
 
@@ -78,22 +104,38 @@ defmodule Fermix.CLI.SecretInput do
   # from the device — because a CLI that dies with echo off leaves the
   # operator's shell silently swallowing keystrokes.
   defp read_unechoed(device, terminal, label) do
-    with :ok <- terminal.set_echo(false) do
-      try do
-        IO.write(@prompt_device, "#{label}: ")
-        device |> IO.gets("") |> input()
-      after
-        restore_echo(terminal)
-      end
+    case terminal.set_echo(false) do
+      {:ok, echo_before?} ->
+        try do
+          IO.write(@prompt_device, "#{label}: ")
+          result = device |> IO.gets("") |> input()
+          IO.write(@prompt_device, received(result))
+          result
+        after
+          restore_echo(terminal, echo_before?)
+        end
+
+      {:error, reason} ->
+        {:error, {:terminal_setup_failed, reason}}
     end
   end
 
+  # Most secrets are pasted into a prompt that shows nothing, so the length is
+  # the operator's one sign the paste landed. It says how much arrived, never
+  # what; an empty line shows no count.
+  defp received({:ok, ""}), do: ""
+  defp received({:ok, value}), do: "(#{characters(String.length(value))})"
+  defp received({:error, _reason}), do: ""
+
+  defp characters(1), do: "1 character"
+  defp characters(count), do: "#{count} characters"
+
   # The newline closes the line the operator typed into but never saw.
-  defp restore_echo(terminal) do
+  defp restore_echo(terminal, echo_before?) do
     IO.write(@prompt_device, "\n")
 
-    case terminal.set_echo(true) do
-      :ok ->
+    case terminal.set_echo(echo_before?) do
+      {:ok, _echo} ->
         :ok
 
       {:error, reason} ->
@@ -101,14 +143,6 @@ defmodule Fermix.CLI.SecretInput do
           @prompt_device,
           "fermix: terminal echo could not be restored (#{inspect(reason)}) — run `stty echo`"
         )
-    end
-  end
-
-  defp enter_interactive(terminal) do
-    case terminal.enter_raw() do
-      :ok -> :ok
-      {:error, :enotsup} -> {:error, :not_a_terminal}
-      {:error, reason} -> {:error, {:terminal_setup_failed, reason}}
     end
   end
 
@@ -130,27 +164,22 @@ end
 
 defmodule Fermix.CLI.SecretInput.Terminal do
   @moduledoc """
-  The real terminal, driven through OTP's io server.
+  The real terminal: stdin's terminal fact from OTP's io server, and the
+  kernel terminal driver's echo flag through `FermixNif`.
 
-  `enter_raw/0` is both the setup step and the gate. A shipped `fermix` runs
-  under `-noshell`, where the tty stays in cooked mode: the kernel — not the
-  VM — echoes, so `:io.setopts(echo: false)` returns `:ok` and changes
-  nothing. `:shell.start_interactive({:noshell, :raw})` hands the terminal to
-  the VM's line editor, which does honour the echo option, and it answers
-  `{:error, :enotsup}` when stdin is not a terminal — so the gate probes
-  exactly the capability the masked read depends on. It is idempotent and
-  one-way: raw mode lasts for the rest of the OS process, which for a CLI
-  verb is the handful of lines it still prints (the VM keeps translating
-  `\\n` for them).
+  A shipped `fermix` runs under `-noshell` on an ERTS built without termcap,
+  so the tty stays in cooked mode and the kernel, not the VM, echoes and
+  assembles the line. That makes the kernel's ECHO flag the one switch that
+  hides input there, and it is the same switch on a VM that has termcap.
+  OTP's own no-echo mode (`shell:start_interactive({noshell, raw})` and
+  `io:get_password/0`) needs termcap, so on a shipped binary it answers
+  `{:error, :enotsup}` on every terminal; it is not used.
   """
 
   @behaviour Fermix.CLI.SecretInput
 
   @impl true
-  def enter_raw, do: :shell.start_interactive({:noshell, :raw})
-
-  @impl true
-  def set_echo(echo?) when is_boolean(echo?), do: :io.setopts(:standard_io, echo: echo?)
+  def set_echo(echo?) when is_boolean(echo?), do: FermixNif.set_stdin_echo(echo?)
 
   # `stdin` (not `terminal`) is the field that answers the question asked:
   # with stdout on a tty and stdin redirected from a file, `terminal` is still

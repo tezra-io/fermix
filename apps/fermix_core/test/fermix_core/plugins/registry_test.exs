@@ -278,6 +278,32 @@ defmodule FermixCore.Plugins.RegistryTest do
       assert {:ok, _plugin} = Registry.decode_manifest(ok, "/tmp/obsidian/plugin.json")
     end
 
+    # The host-runtime probe compares the runtime's own `--version` against this
+    # floor on every status read. A floor that does not read as a version is the
+    # plugin's defect, so it is refused when the manifest is read, not reported
+    # later as a broken runtime on the owner's machine.
+    test "a runtime floor must read as a version" do
+      base =
+        v2_manifest("obsidian")
+        |> Map.put("tools", [mcp_tool("obsidian_read")])
+        |> Map.put("auth", %{"type" => "none"})
+
+      runtime = %{"kind" => "node", "command" => "node", "args" => ["src/index.js"]}
+
+      for floor <- ["latest", "v20", ">=20", "", 20] do
+        manifest = Map.put(base, "runtime", Map.put(runtime, "min_version", floor))
+
+        assert {:error, {:invalid_runtime, _}} =
+                 Registry.decode_manifest(manifest, "/tmp/obsidian/plugin.json"),
+               "#{inspect(floor)} was accepted as a floor"
+      end
+
+      for floor <- ["20", "20.11", "20.11.1"] do
+        manifest = Map.put(base, "runtime", Map.put(runtime, "min_version", floor))
+        assert {:ok, _plugin} = Registry.decode_manifest(manifest, "/tmp/obsidian/plugin.json")
+      end
+    end
+
     test "an interface asset may not escape the plugin dir" do
       plugin_root = FermixTestSupport.SafeRm.make_tmp_dir!("registry-asset")
       manifest_path = Path.join([plugin_root, "evil", "plugin.json"])

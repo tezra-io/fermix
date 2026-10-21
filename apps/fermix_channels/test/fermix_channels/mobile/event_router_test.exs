@@ -284,17 +284,18 @@ defmodule FermixChannels.Mobile.EventRouterTest do
       end,
       agent: FermixChannels.Gateway.Queue,
       agent_server: self(),
-      unfurl_launcher: fn task ->
-        send(test_pid, :unfurl_started)
+      link_preview_launcher: fn task ->
+        send(test_pid, :previews_started)
         task.()
         :ok
       end,
-      unfurl: fn text, _store_thumbnail ->
-        send(test_pid, {:unfurl_resolved, text})
+      link_preview_resolver: fn links, _store_thumbnail ->
+        send(test_pid, {:previews_resolved, links})
 
         {:ok,
          [
            %{
+             link: "https://example.com",
              url: "https://example.com",
              site: "Example",
              title: "Example title",
@@ -333,7 +334,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
       decoded("msg", %{
         "client_msg_id" => "client-1",
         "profile_id" => "main",
-        "text" => "look",
+        "text" => "look at https://example.com",
         "attach_ids" => ["photo-1"]
       })
 
@@ -342,7 +343,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
 
     assert_received {:appended, "main",
                      %{
-                       content: "look",
+                       content: "look at https://example.com",
                        media_refs: [ref]
                      }}
 
@@ -372,8 +373,8 @@ defmodule FermixChannels.Mobile.EventRouterTest do
                      }, :mobile}
 
     refute approval_id =~ token
-    assert_received :unfurl_started
-    assert_received {:unfurl_resolved, "look"}
+    assert_received :previews_started
+    assert_received {:previews_resolved, ["https://example.com"]}
     assert_received {:preview_attached, "main", 12, %{"url" => "https://example.com"}}
 
     assert_received {:event, {:profile, "main"},
@@ -385,6 +386,39 @@ defmodule FermixChannels.Mobile.EventRouterTest do
 
     refute Map.has_key?(preview, "description")
     refute Map.has_key?(preview, "image_ref")
+
+    # The stored preview changed the row, which the Mac hears as `row_updated`.
+    assert_received {:event, {:profile, "main"},
+                     %{"t" => "row_updated", "profile_id" => "main", "server_seq" => 12}}
+  end
+
+  # M66: a voice note's transcript replaces its row's text through the
+  # gateway's enrichment, and the Mac hears that the row changed; a text the
+  # enrichment leaves as it was announces nothing.
+  test "an enrichment that changes the row's text announces row_updated, and only then", ctx do
+    event =
+      decoded("msg", %{
+        "client_msg_id" => "client-1",
+        "profile_id" => "main",
+        "text" => "",
+        "attach_ids" => ["clip-1"]
+      })
+
+    assert :ok = EventRouter.route(event, ctx.context, ctx.opts)
+    assert_received {:gateway_ingest, [message], gateway_opts}
+    enrich = gateway_opts[:ingest_enriched_fn]
+
+    assert :ok = enrich.(message)
+    assert_received {:enriched, "main", "client-1", 3, %{content: ""}}
+    refute_received {:event, _target, %{"t" => "row_updated"}}
+
+    assert :ok = enrich.(%{message | content: "Pick up milk"})
+    assert_received {:enriched, "main", "client-1", 3, %{content: "Pick up milk"}}
+
+    assert_received {:event, {:profile, "main"},
+                     %{"t" => "row_updated", "profile_id" => "main", "server_seq" => 12}}
+
+    refute_received {:event, _target, %{"t" => "row_updated"}}
   end
 
   # The Mac's companion connections and every phone share the phone's
@@ -820,7 +854,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
     assert_received {:appended, "main", %{content: "recover"}}
     assert_received {:gateway_ingest, [message], _gateway_opts}
     assert message.metadata.mobile_attempt == 3
-    refute_received :unfurl_started
+    refute_received :previews_started
   end
 
   test "a durable duplicate is acknowledged without running Gateway twice", ctx do
@@ -1035,7 +1069,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
       media_store: GatedMediaStore,
       media_server: test_pid,
       agent_server: test_pid,
-      unfurl_launcher: fn _task -> :ok end,
+      link_preview_launcher: fn _task -> :ok end,
       event_sink: fn _target, _event -> :ok end
     ]
 

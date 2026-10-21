@@ -15,8 +15,9 @@ description: >
   within 24h — no such row can exist in a fresh eval home). Those paths are
   pinned by the hermetic ExUnit tier (temporal/ + tools/ suites). Events created
   here resolve to dates outside any eval window (the next occurrence of a month
-  and day, weeks to months out) and every management case ends by removing
-  what it created, so nothing comes due while a run is in progress.
+  and day, weeks to months out), and every management case, timers included,
+  ends by removing what it created, so nothing comes due while a run is in
+  progress.
 defaults:
   timeout_ms: 180000
   judge: true
@@ -299,3 +300,59 @@ scenarios:
           Same lifecycle under different phrasing: store, list (mentions the
           pickup), move to November 6 with the change acknowledged, then a
           confirmed removal.
+
+  # M76 §4.7: a timer is a reminder minutes or hours away. The date note names
+  # no time of day, so a timer's one correct `when` is relative in minutes or
+  # hours, which the tool resolves to the exact moment in the owner's zone:
+  # that unit is the first turn's gate, and a datetime the model computed
+  # fails it. The eval home is a source run on a Mac, which rings nothing on
+  # this computer, so the timer is stored for the configured target; where it
+  # rings on this computer is ExUnit's and a real machine's, like every
+  # delivery (see above). Each case cancels its timer in its second turn, so
+  # nothing it stored comes due in a run.
+  - id: timers
+    title: "Stores a timer minutes or hours away at its exact moment, then cancels it"
+    severity: normal
+    risk: isolated_mutation
+    tags: [temporal, timers]
+    cases:
+      - id: pasta_timer_minutes
+        turns:
+          - query: "Set a 12 minute timer for the pasta."
+            expect:
+              tools_any: [event_store]
+              tools_none: [schedule_job]
+              tool_inputs_match_all: ['"unit":\s*"minutes"']
+          - query: "Never mind, cancel the pasta timer."
+            expect:
+              tools_any: [event_remove]
+              reply_matches: "(?i)cancel|remov"
+        expect:
+          max_cost_usd: 2.0
+        rubric: >
+          On the first turn it stores one timer twelve minutes from now and
+          confirms the time it will go off as the tool stated it, the clock time
+          and not only "in 12 minutes", without creating a scheduled job. On the
+          second turn it cancels that timer and says so by name. Read the tool
+          span evidence: a timer stored for another moment than twelve minutes
+          from the request is a fail however the reply describes it.
+      - id: laundry_reminder_hours
+        turns:
+          - query: "Remind me in 2 hours to move the laundry to the dryer."
+            expect:
+              tools_any: [event_store]
+              tools_none: [schedule_job]
+              tool_inputs_match_all: ['"unit":\s*"hours"']
+          - query: "I already did it, cancel the laundry reminder."
+            expect:
+              tools_any: [event_remove]
+              reply_matches: "(?i)cancel|remov"
+        expect:
+          max_cost_usd: 2.0
+        rubric: >
+          On the first turn it stores one reminder two hours from now and
+          confirms the time it will go off as the tool stated it, the clock time
+          and not only "in 2 hours", without creating a scheduled job. On the
+          second turn it cancels that reminder and says so by name. Read the
+          tool span evidence: a reminder stored for another moment than two
+          hours from the request is a fail however the reply describes it.

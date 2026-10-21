@@ -5,6 +5,16 @@
 # Schedules execute the workflow file on the DEFAULT branch (main) — this file
 # must exist on main to fire, and it checks out `dev` explicitly so nightly
 # results track active development, not the last release.
+#
+# A night spends nothing when nothing it evaluates changed: the `changes` job
+# names dev's commit, the commit main's workflows ran from and the ISO week in
+# one cache key, and the tiers run only when no green night saved that key.
+# `record-green` saves it after every tier is green. The week in the key
+# re-runs unchanged code once a week. Cache eviction can't provide that re-run:
+# the nightly's own lookup is an access (a lookup-only restore sends the
+# service the same request as a full restore), so an entry checked every night
+# never goes unused for the 7 days after which GitHub evicts it. Superseded
+# keys do expire 7 days after their last lookup. A manual dispatch always runs.
 name: eval-nightly
 
 on:
@@ -28,7 +38,72 @@ permissions:
 # with its own still-running run (the documented reusable-workflow footgun).
 
 jobs:
+  changes:
+    name: skip the night if a green night this week evaluated the same commits
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      # The tiers check out this commit, not `dev`: dev can move while the box
+      # waits for the eval-box group, and the saved key must name what ran.
+      dev_sha: ${{ steps.key.outputs.dev_sha }}
+      key: ${{ steps.key.outputs.key }}
+      changed: ${{ steps.decide.outputs.changed }}
+    steps:
+      - name: Name the commits tonight would evaluate
+        id: key
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          # The commit this workflow file (and the eval-box it calls) ran from:
+          # main's on a schedule.
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          dev_sha="$(gh api "repos/$REPO/git/ref/heads/dev" --jq .object.sha)"
+          for sha in "$dev_sha" "$WORKFLOW_SHA"; do
+            if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::'$sha' is not a commit SHA, so tonight cannot be compared with a green night."
+              exit 1
+            fi
+          done
+          echo "dev_sha=$dev_sha" >> "$GITHUB_OUTPUT"
+          echo "key=eval-nightly-green-dev-$dev_sha-workflows-$WORKFLOW_SHA-$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      # Only an exact key skips a night, so no restore-keys. A cache service that
+      # cannot answer reads as a miss, and the night runs.
+      - name: Look for a green night on these commits this week
+        id: lookup
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: eval-nightly-green.txt
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
+
+      - name: Decide
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          HIT: ${{ steps.lookup.outputs.cache-hit }}
+          KEY: ${{ steps.key.outputs.key }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = workflow_dispatch ]; then
+            changed=true
+            why="A manual dispatch always runs ($KEY)."
+          elif [ "$HIT" = true ]; then
+            changed=false
+            why="Skipped: a green night this week already evaluated these commits ($KEY)."
+            echo "::notice::$why"
+          else
+            changed=true
+            why="Running: no green night this week evaluated these commits ($KEY)."
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "$why" >> "$GITHUB_STEP_SUMMARY"
+
   regression:
+    needs: changes
+    if: needs.changes.outputs.changed == 'true'
     uses: ./.github/workflows/eval-box.yml
     # The regression tier is judged by Claude, signed in through Workload Identity
     # Federation, so this job grants id-token: write; eval-box inherits its
@@ -38,11 +113,13 @@ jobs:
       id-token: write
     with:
       tier: regression
-      ref: dev
+      ref: ${{ needs.changes.outputs.dev_sha }}
     secrets: inherit
 
   macos-smoke:
     name: macos daemon smoke (ungraded)
+    needs: changes
+    if: needs.changes.outputs.changed == 'true'
     runs-on: macos-15
     timeout-minutes: 45
     env:
@@ -51,7 +128,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: dev
+          ref: ${{ needs.changes.outputs.dev_sha }}
 
       - uses: erlef/setup-beam@v1
         with:
@@ -84,13 +161,43 @@ jobs:
         if: failure()
         run: tail -n 200 "${RUNNER_TEMP}/fermix-smoke-eval/daemon.log" || true
 
+  record-green:
+    name: remember that these commits passed this week
+    needs: [changes, regression, macos-smoke]
+    # Every tier green, and the regression runner's own exit code a positive 0. A
+    # red, cancelled or skipped tier saves nothing, so tomorrow runs again.
+    if: >-
+      needs.regression.result == 'success' && needs.regression.outputs.exit_code == '0'
+      && needs.macos-smoke.result == 'success'
+    # The same runner image and path as the lookup: the cache version hashes the
+    # path and the compression method, so any other save is one the lookup never finds.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Write the record
+        env:
+          KEY: ${{ needs.changes.outputs.key }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: printf '%s\n%s\n' "$KEY" "$RUN_URL" > eval-nightly-green.txt
+
+      - name: Save it under the night's key
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: eval-nightly-green.txt
+          key: ${{ needs.changes.outputs.key }}
+
   alert:
     name: file an issue for any tier that failed or left no evidence
-    needs: [regression, macos-smoke]
+    needs: [changes, regression, macos-smoke]
     # always(), not !cancelled(): a cancelled or evicted tier is the ABSENCE of
     # evidence, and absence used to file nothing at all (2026-08-22: a nightly
     # evicted from the eval-box queue reported zero steps and zero alerts).
-    if: ${{ always() }}
+    #
+    # The one exception is the night the `changes` job skipped on purpose: it
+    # succeeded and found these commits green this week, so its tiers were skipped
+    # by design. A gate that failed or was cancelled is not that night: the tiers
+    # it skipped produced no evidence and file an issue exactly as before.
+    if: ${{ always() && !(needs.changes.result == 'success' && needs.changes.outputs.changed == 'false') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -111,6 +218,9 @@ jobs:
             // caller cannot read it from the job status, because `make` collapses every
             // runner outcome to 2.
             const needs = JSON.parse(process.env.NEEDS);
+            // `changes` is the skip gate, not a tier: when it fails, the tiers it
+            // skipped are what this run reports.
+            delete needs.changes;
             // Only the capability runner defines 5, and its 3/4 causes differ from the
             // behavioral runner's, so the explanation is keyed on the tier.
             const CAPABILITY_TIERS = new Set(["capability"]);

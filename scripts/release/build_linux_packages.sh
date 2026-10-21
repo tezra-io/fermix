@@ -186,7 +186,7 @@ mix compile --warnings-as-errors
 )
 mix release fermix_linux_package --overwrite
 
-python3 "$source_root/scripts/release/linux_packages.py" \
+uv run "$source_root/scripts/release/linux_packages.py" \
   --target "$target" \
   --version "$version" \
   --output-dir "$output_dir" \

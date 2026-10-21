@@ -16,9 +16,11 @@ defmodule FermixChannels.Mobile.EventRouter do
   alias FermixChannels.Companion.Fanout
   alias FermixChannels.Companion.Output
   alias FermixChannels.Companion.Requests
+  alias FermixChannels.LinkPreviews
   alias FermixChannels.Mobile.DeviceRegistry
-  alias FermixChannels.Mobile.SocketHandler
+  alias FermixChannels.Mobile.Session
   alias FermixCore.Companion.Timeline
+  alias FermixCore.ReplyBlocks
 
   # A page above the 4 KiB header travels as continuation frames; this bounds
   # the one event they carry.
@@ -142,9 +144,9 @@ defmodule FermixChannels.Mobile.EventRouter do
       ingress_context: context,
       reply_to: reply_to,
       # A request that fails after its worker returned is told to the device
-      # as the socket tells a failed worker's (`SocketHandler.request_error/2`).
+      # as the socket tells a failed worker's (`Session.request_error/2`).
       report_failure: fn client_msg_id, cause ->
-        sink.(reply_to, SocketHandler.request_error({:request_failed, cause}, client_msg_id))
+        sink.(reply_to, Session.request_error({:request_failed, cause}, client_msg_id))
       end,
       attempt_key: :mobile_attempt,
       max_page_bytes: @max_page_bytes,
@@ -161,13 +163,13 @@ defmodule FermixChannels.Mobile.EventRouter do
   defp after_user_append(profile, row, text, opts) do
     :ok = Keyword.fetch!(opts, :event_sink).({:profile, profile}, Output.row(profile, row))
 
-    schedule_user_unfurl(profile, row, text, opts)
+    schedule_previews(profile, row, text, opts)
   end
 
-  defp schedule_user_unfurl(profile, row, text, opts) do
-    Mobile.schedule_unfurl(profile, row.server_seq, text,
-      unfurl: Keyword.get(opts, :unfurl),
-      unfurl_launcher: Keyword.get(opts, :unfurl_launcher),
+  defp schedule_previews(profile, row, text, opts) do
+    LinkPreviews.schedule(profile, row.server_seq, ReplyBlocks.links(text),
+      resolver: Keyword.get(opts, :link_preview_resolver),
+      launcher: Keyword.get(opts, :link_preview_launcher),
       event_sink: Keyword.get(opts, :event_sink),
       store: store(opts),
       store_opts: Keyword.get(opts, :store_opts, [])

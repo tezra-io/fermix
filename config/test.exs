@@ -141,7 +141,6 @@ config :fermix_core, :prompt_bootstrap,
 config :fermix_core,
   providers: [
     openai: [
-      base_url: "https://api.openai.com/v1",
       default_model: "gpt-5.4-mini",
       api_key: "test-key"
     ]
@@ -152,10 +151,12 @@ config :fermix_channels,
     enabled: false,
     bot_token: "test-token"
   ],
-  # Never bind a mobile listener or advertise mDNS from the suite. Tests that
-  # exercise mobile start isolated instances on ephemeral ports.
+  # Never bind a mobile listener, advertise mDNS or reach a relay from the
+  # suite. Tests that exercise mobile start isolated instances on ephemeral
+  # ports, and the ones that exercise remote reach turn it on themselves.
   mobile: [
     enabled: false,
+    iroh: false,
     mode: :listener,
     port: 4_031,
     bind: "127.0.0.1",
@@ -200,6 +201,11 @@ config :fermix_core, :prompt_seeder, FermixTestSupport.PromptSeederStub
 # zone, the account's full name) must not come from the host running the suite.
 config :fermix_core, :machine_facts, FermixTestSupport.MachineFactsStub
 
+# Hermetic default: the host facts boot reads for the prompt's `## This Fermix`
+# section (the OS version, whether the Linux desktop app is installed) must not
+# come from the host running the suite.
+config :fermix_core, :host_facts_reader, FermixTestSupport.HostFactsStub
+
 # The remote_mcp provenance gate under test. DENY-BY-DEFAULT: a test that wants a
 # remote plugin to load must allow-list it explicitly (DistVerifierStub.allow/2),
 # so a gate that stopped verifying fails here instead of passing quietly. Never
@@ -210,6 +216,11 @@ config :fermix_core, :plugin_provenance_verifier, FermixTestSupport.DistVerifier
 # `--version` processes. The mcp host-runtime probe (RuntimeProbe) denies by
 # default; tests stub success per-call via :find_executable / :version_fetch.
 config :fermix_core, :runtime_probe_host, FermixTestSupport.HostRuntimeStub
+
+# Hermetic default: the suite never runs the owner's login shell. The PATH an
+# operator stdio MCP server runs with (`Capabilities.MCP.LoginPath`) is the
+# suite's own; a test of the reading injects its own.
+config :fermix_core, :mcp_login_shell, FermixTestSupport.LoginShellStub
 
 # A real daemon captures prompt/response/tool bodies in traces (resolved in
 # config/runtime.exs, which honours this value). The suite pins the LEAN posture

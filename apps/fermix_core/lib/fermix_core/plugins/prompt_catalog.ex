@@ -119,7 +119,8 @@ defmodule FermixCore.Plugins.PromptCatalog do
 
   defp remediation(:missing_host_runtime, name),
     do:
-      "its host runtime is missing or too old — install it, then run `fermix plugins doctor #{name}`"
+      "its host runtime is missing, too old or fails its version check — install or repair it, " <>
+        "then run `fermix plugins doctor #{name}`"
 
   defp remediation(:not_installed, name),
     do: "run `fermix plugins install #{name}`"

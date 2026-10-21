@@ -22,7 +22,8 @@ defmodule FermixChannels.Gateway.Channel do
           attempt: non_neg_integer() | nil,
           request_type: String.t() | nil,
           proactive_key: String.t(),
-          proactive_part_id: String.t()
+          proactive_part_id: String.t(),
+          blocks: [map()]
         ]
 
   @type media_part :: Reply.media_part()

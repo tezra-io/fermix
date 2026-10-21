@@ -103,3 +103,5 @@ packaging/linux/out/
 # package build refuses a checkout that is not exactly the commit.
 /.zig-cache/
 packaging/*
+# The Docker Sandboxes kit is tracked.
+!packaging/sbx/

@@ -244,6 +244,8 @@ defmodule FermixChannels.Voice.DetachedTest do
       turn_session_id: "voice_delegation_9",
       elapsed_ms: 5_000,
       record_opts: CallRecord.repo_opts(@repo),
+      engine: "openai_live",
+      provider: "openai",
       conversation_key: @chat_key,
       message_id: "voice-delegation-dg_2-1",
       queue: ctx.queue,

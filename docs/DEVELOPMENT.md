@@ -51,11 +51,16 @@ with paths:
 mix test                                              # full umbrella (hermetic — config/test.exs pins FERMIX_HOME)
 mix test apps/fermix_core/test/fermix_core/management # one area
 mix compile --warnings-as-errors && mix credo --strict && mix format --check-formatted
-python3 -m pytest scripts/release/ -q                 # release-script suite
+for t in scripts/release/test_*.py; do uv run "$t" || break; done  # release-script suite
+for t in scripts/ci/test_*.py; do uv run "$t" || break; done  # CI-script suite
+uv run scripts/ci/stress_changed_tests.py --base origin/dev --log-dir /tmp/stress  # CI's stress step
+uv run scripts/ci/flaky_report.py                    # tests CI flagged flaky, most often first
 ```
 
 All four Elixir gates plus the release-script suite must be green before calling any
-change done.
+change done. CI reruns up to five failed tests once and flags the ones that then pass
+("Flaky test"); fix anything flagged twice, and never by raising a bound. Write tests for a
+loaded runner from the start: AGENTS.md, *Tests under load*.
 
 ## The packaged app engine (occasional — not the dev loop)
 
@@ -78,7 +83,7 @@ export FERMIX_HOME=$HOME/.fermix-apptest PORT=4530
 _build/prod/rel/fermix_app_engine/bin/fermix_app_engine daemon
 curl http://127.0.0.1:4530/health/live      # ok when up
 curl http://127.0.0.1:4530/health/ready     # 503 until configured — correct
-FERMIX_HOME=$HOME/.fermix-apptest python3 scripts/dev/engine_stop.py   # bin stop needs distribution, which is off
+FERMIX_HOME=$HOME/.fermix-apptest uv run scripts/dev/engine_stop.py   # bin stop needs distribution, which is off
 ```
 
 The identity lives in compile-time literals inside `_build/prod` only — dev and test
@@ -89,10 +94,10 @@ To exercise the management plane without the macOS app, `scripts/dev/management_
 sends one v1 request and prints the reply:
 
 ```bash
-FERMIX_HOME=$HOME/.fermix-apptest python3 scripts/dev/management_request.py hello
-FERMIX_HOME=$HOME/.fermix-apptest python3 scripts/dev/management_request.py setup.session.create
-FERMIX_HOME=$HOME/.fermix-apptest python3 scripts/dev/management_request.py doctor.start '{"scope":"local"}'
-FERMIX_HOME=$HOME/.fermix-apptest python3 scripts/dev/management_request.py logs.query '{"limit":20}'
+FERMIX_HOME=$HOME/.fermix-apptest uv run scripts/dev/management_request.py hello
+FERMIX_HOME=$HOME/.fermix-apptest uv run scripts/dev/management_request.py setup.session.create
+FERMIX_HOME=$HOME/.fermix-apptest uv run scripts/dev/management_request.py doctor.start '{"scope":"local"}'
+FERMIX_HOME=$HOME/.fermix-apptest uv run scripts/dev/management_request.py logs.query '{"limit":20}'
 ```
 
 `setup.session.create` mints the one-use tokenized `/setup` URL (open it in a browser to
@@ -105,7 +110,7 @@ Release-grade build + smoke (requires a clean tree at a real commit):
 ```bash
 FERMIX_BUILD_ID=<id> FERMIX_BUILD_SOURCE_COMMIT=$(git rev-parse HEAD) \
   scripts/release/build_app_engine.sh macos_aarch64 <out-dir> <version>
-python3 scripts/release/verify_app_engine.py <archive> macos_aarch64 <version> $(git rev-parse HEAD) native
+uv run scripts/release/verify_app_engine.py <archive> macos_aarch64 <version> $(git rev-parse HEAD) native
 ```
 
 ## Evals
@@ -115,7 +120,7 @@ Behavioral suites live in `benchmark/suites/` (vocabulary: `benchmark/suites/SCH
 validates and plans without spending anything:
 
 ```bash
-python3 benchmark/bin/run_eval.py --suite <name> --dry-run --judge <judge>
+uv run benchmark/bin/run_eval.py --suite <name> --dry-run --judge <judge>
 ```
 
 `make regression` runs the behavioral tier; `make capability-auto` the capability tier

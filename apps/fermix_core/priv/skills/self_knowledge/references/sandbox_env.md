@@ -22,7 +22,7 @@ A background service never reads a shell profile. A variable exported only in `~
 
 A headless Linux host has no app to store values from and usually no keyring; there `fermix settings secret set env:NAME` stores one in the configured secret store (usually the file store). The Linux service unit also loads an optional environment file: `~/.config/fermix/env` for a user-scope unit and for the distribution package's unit, `/etc/fermix/env` for a system-scope unit. Write one `NAME=value` per line, allow the name, and restart Fermix: the file is read only when the service starts. Fermix never writes the file, and its file tools cannot read or write it (the directory is a protected path), so the owner edits it. A missing file is fine. A unit installed before the file existed picks the line up when `fermix setup` rewrites the drifted unit or `fermix service install` runs again; the package's unit carries it from the package.
 
-A variable in the service's environment is inherited by every process the daemon starts without building a sandbox environment (a helper, an MCP server), the same exposure any service variable has.
+A variable in the service's environment is inherited by every process the daemon starts without building a sandbox environment (a helper, a plugin's MCP server), the same exposure any service variable has. An MCP server the owner adds is not one of them: it gets `HOME`, `LOGNAME`, `SHELL`, `TERM` and `USER`, the login shell's `PATH`, and the names it declares, nothing else.
 
 ## Redaction
 

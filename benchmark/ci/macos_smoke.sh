@@ -9,7 +9,7 @@
 set -euo pipefail
 
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd)"
-SMOKE_MODEL="${SMOKE_MODEL:-gpt-5.6-luna}"
+SMOKE_MODEL="${SMOKE_MODEL:-gpt-6-luna}"
 
 export FERMIX_CAP_HOME="${FERMIX_CAP_HOME:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fermix-smoke-eval}"
 export FERMIX_CAP_OPIK=0
@@ -29,7 +29,7 @@ trap cleanup EXIT
 ask() {
   local out
   out=$(shim ask --json --session "$1" --timeout 120000 "$2") || fail "turn '$1' errored: $out"
-  python3 -c 'import json,sys
+  uv run --no-project python -c 'import json,sys
 d = json.load(sys.stdin)
 assert d.get("status") == "ok" and (d.get("response") or "").strip(), d
 print(d["response"])' <<<"$out" || fail "turn '$1' returned no usable reply: $out"

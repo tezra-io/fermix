@@ -276,6 +276,23 @@ defmodule FermixChannels.Mobile.PairManagerTest do
     assert {:ok, 1} = PairManager.record_failure(ctx.manager, "pair-session", {10, 0, 0, 3})
   end
 
+  # M62 §7: an iroh peer is a key that costs nothing to replace, so failures
+  # summed over every iroh peer refuse iroh peers for the rest of the window,
+  # and nobody else.
+  test "past 64 failures from iroh peers, iroh peers get no window; addresses still do", ctx do
+    assert {:ok, _window} = PairManager.open(ctx.manager)
+
+    for n <- 1..64 do
+      peer = {:iroh, n |> Integer.to_string() |> String.pad_leading(64, "0")}
+      assert {:ok, 1} = PairManager.record_failure(ctx.manager, "pair-session", peer)
+    end
+
+    fresh = {:iroh, String.duplicate("f", 64)}
+    assert :none = PairManager.current(ctx.manager, fresh)
+    assert {:ok, %{session_id: "pair-session"}} = PairManager.current(ctx.manager, {10, 0, 0, 2})
+    assert {:ok, %{status: :awaiting_scan}} = PairManager.session(ctx.manager, "pair-session")
+  end
+
   # R1-5: handshake garbage needs neither the pairing secret nor the gateway
   # key, so a window-wide failure budget let anyone with a few addresses end
   # every window before the owner's phone scanned it.

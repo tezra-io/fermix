@@ -1,0 +1,73 @@
+{
+  "clips": {
+    "cancel_never_mind": {
+      "duration_ms": 4803,
+      "file": "cancel_never_mind.wav",
+      "sha256": "0cec367bde37bf544a562f01e092a9f2ed11ed45367e3f81b5f235af872a2e4f",
+      "text": "Actually, never mind. Cancel that, I don't need the stocktake anymore."
+    },
+    "cancel_stop": {
+      "duration_ms": 4437,
+      "file": "cancel_stop.wav",
+      "sha256": "b40fcc444469a534db0875c8fb974c7ad2a2076ad40297f4b6b4c4dcc605be43",
+      "text": "Stop the stocktake, please. I'll go and look at the shelves myself."
+    },
+    "correct_to_13": {
+      "duration_ms": 5133,
+      "file": "correct_to_13.wav",
+      "sha256": "2a2ec1333fc47d9b74e5ea85f20b92559ef13ceac3d6acff5d2f55aa842a935b",
+      "text": "Wait, wrong day. I need the stocktake for the thirteenth of March, not the twentieth."
+    },
+    "correct_to_20": {
+      "duration_ms": 5865,
+      "file": "correct_to_20.wav",
+      "sha256": "e5f7203c83d73d1a30a9b7c83e93ed4173e2ba476a35d57bebb0022eac913538",
+      "text": "Sorry, I said the wrong date. I meant the stocktake for the twentieth of March, not the thirteenth."
+    },
+    "followup_brown_rice": {
+      "duration_ms": 4571,
+      "file": "followup_brown_rice.wav",
+      "sha256": "4e0cd63333e8cfd6ef8755faf3334e1895f08c41638c566827f4ec9a3712cae5",
+      "text": "Quick question while you wait. How long does uncooked brown rice keep in the cupboard?"
+    },
+    "followup_curry": {
+      "duration_ms": 3752,
+      "file": "followup_curry.wav",
+      "sha256": "74271b8e97290c2d97bd1303bbfef7ea90b0f31657355cf49983f83977858b5f",
+      "text": "While that runs, what can I use instead of chickpeas in a curry?"
+    },
+    "rota_intake_13": {
+      "duration_ms": 8861,
+      "file": "rota_intake_13.wav",
+      "sha256": "fc21e2f0374b02b4810c0b655d55578e2fd6d4d2e6a06ecdd6f10e954194a767",
+      "text": "Hey, who's on intake at the pantry on Saturday the thirteenth of March, twenty twenty-seven? The rota is in the voice fixtures folder in my workspace."
+    },
+    "rota_van_20": {
+      "duration_ms": 9392,
+      "file": "rota_van_20.wav",
+      "sha256": "105ab48dfbbc4aa57e321777a6c5d40f8677a1fe72acc243c72cf54affaa757e",
+      "text": "Can you check the pantry rota in the voice fixtures folder of my workspace? I need to know who's driving the van on Saturday the twentieth of March, twenty twenty-seven."
+    },
+    "stocktake_13_chickpeas": {
+      "duration_ms": 9158,
+      "file": "stocktake_13_chickpeas.wav",
+      "sha256": "eff81a9bd5103e4438e7632dc707380d1b61dfd91c191fb221e1ed6aa33ebc8f",
+      "text": "Please run the stocktake script in the voice fixtures folder of my workspace for the thirteenth of March, twenty twenty-seven, and tell me which shelf the chickpeas are on."
+    },
+    "stocktake_20_rice": {
+      "duration_ms": 9692,
+      "file": "stocktake_20_rice.wav",
+      "sha256": "9032ee052de0175bdb46fc2b4b706d699dc3f1c19d0ed0bd4684f6c96a6f4163",
+      "text": "Could you run the pantry stocktake script from the voice fixtures folder in my workspace for the twentieth of March, twenty twenty-seven? I want to know which shelf the rice is on."
+    }
+  },
+  "format": {
+    "channels": 1,
+    "container": "wav",
+    "sample_bits": 16,
+    "sample_rate": 24000
+  },
+  "generator": "bin/make_voice_fixtures.py",
+  "rate_wpm": 180,
+  "voice": "Samantha"
+}

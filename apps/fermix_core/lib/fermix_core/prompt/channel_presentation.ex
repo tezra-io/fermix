@@ -15,7 +15,9 @@ defmodule FermixCore.Prompt.ChannelPresentation do
   to the provider's prompt-cache invalidation (`TurnRunner` splices it *before*
   the date note, so the date's once-a-day change stays the only change).
 
-  Only chat surfaces get a note. `nil` for `acp`, `cli`, an unknown channel, or
+  Only chat surfaces get a note. The Mac's chat window (`companion`) is not
+  phone-width, so it gets one line of its own (M72 decision 5) and none of the
+  shared core. `nil` for `acp`, `cli`, an unknown channel, or
   no channel at all is the correct answer rather than an error: those are
   machine and terminal surfaces (an editor client, a terminal, a scheduled run)
   where a phone-width bubble posture is simply false — a terminal renders tables
@@ -57,6 +59,19 @@ defmodule FermixCore.Prompt.ChannelPresentation do
       "- iMessage shows plain text only: no headings, bold or tables survive, so lead with the answer and keep lists short."
   }
 
+  # Chat surfaces that are not phone-width, each with the one line it earns
+  # alone, whatever the chat type: the core above is false of them. The Mac
+  # chat draws the places a reply links as cards and a map (M72). A card shows
+  # what the place's record has, which differs by backend (M72 §14.1): Brave
+  # gives ratings, hours and prices, Apple Maps a kind and an address.
+  @window_lines %{
+    "companion" =>
+      "Presentation: this chat shows each place from `place_search` that your reply links as a " <>
+        "card with the facts the search returned for it (its kind, address, rating, hours or " <>
+        "distance) and on a map, so say in a line why each place fits rather than repeating " <>
+        "those facts, and still link every place by name."
+  }
+
   # Chat types the channels report for a shared room (telegram: group/supergroup/
   # channel, slack: channel/group/mpim, discord: guild). Listed positively so an
   # unknown or absent chat type omits the line instead of guessing "group" —
@@ -77,7 +92,7 @@ defmodule FermixCore.Prompt.ChannelPresentation do
              (is_binary(chat_type) or is_nil(chat_type)) do
     case Map.fetch(@channel_lines, channel) do
       {:ok, channel_line} -> compose(channel_line, chat_type)
-      :error -> nil
+      :error -> Map.get(@window_lines, channel)
     end
   end
 

@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Hermetic tests for scripts/install.sh, the script served at fermix.ai/install.
 
 Nothing here reaches the network, a package manager or /usr: the script runs

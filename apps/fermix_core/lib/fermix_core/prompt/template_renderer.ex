@@ -14,9 +14,9 @@ defmodule FermixCore.Prompt.TemplateRenderer do
   require EEx
 
   @type template_name ::
-          :identity | :fermix | :soul | :user | :memory | :realtime | :live
+          :identity | :fermix | :soul | :user | :memory | :realtime | :live | :grok
 
-  @templates [:identity, :fermix, :soul, :user, :memory, :realtime, :live]
+  @templates [:identity, :fermix, :soul, :user, :memory, :realtime, :live, :grok]
 
   for name <- @templates do
     path =

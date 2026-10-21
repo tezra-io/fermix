@@ -15,11 +15,17 @@ defmodule FermixCore.Tools.EventUpdate do
 
   Attended-owner-only at both advertisement and execution through the one
   `Temporal.Access` predicate.
+
+  `delivery: "computer"` (M76 §4.6) moves the event's unsent reminders to this
+  computer; the schema publishes it only where the build offers this computer
+  (`Native.Notifications.offered?/1`), a fact of the build. A test names the host
+  as the context's `:host`, as `event_store` takes it.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Native.Notifications
   alias FermixCore.Temporal.Access
   alias FermixCore.Temporal.Registry
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
@@ -37,6 +43,7 @@ defmodule FermixCore.Tools.EventUpdate do
     {"no_reminders", :no_reminders},
     {"followup", :followup},
     {"rebind_delivery_to_default", :rebind_delivery_to_default},
+    {"delivery", :delivery},
     {"owner_direction", :owner_direction}
   ]
 
@@ -58,55 +65,80 @@ defmodule FermixCore.Tools.EventUpdate do
       "to the owner instead of resolving it."
   end
 
+  @doc "The schema for this build (`dynamic_parameters/1`)."
   @impl true
   @spec parameters() :: map()
-  def parameters do
+  def parameters, do: dynamic_parameters(%{})
+
+  @doc "The provider-visible schema, with `delivery` only where this build offers this computer."
+  @spec dynamic_parameters(map()) :: map()
+  def dynamic_parameters(context) when is_map(context) do
     %{
       type: "object",
       required: ["event_id"],
-      properties: %{
-        event_id: %{type: "string", description: "The stored event's id from event_list."},
-        title: %{type: "string", description: "New title."},
-        description: %{type: "string", description: "New description."},
-        kind: %{type: "string", enum: @kinds, description: "New event kind."},
-        when: %{
-          type: "object",
-          description:
-            "New time, in the same tagged forms event_store accepts (date, datetime, " <>
-              "relative, annual)."
-        },
-        timezone: %{type: "string", description: "New IANA zone for the event."},
-        leap_day_policy: %{type: "string", enum: ["feb_28", "mar_1"]},
-        reminders: %{
-          type: "array",
-          items: %{type: "object"},
-          description: "A replacement reminder plan; it replaces the stored one entirely."
-        },
-        no_reminders: %{type: "boolean", description: "Drop every reminder for this event."},
-        followup: %{
-          type: "boolean",
-          description:
-            "Set this for an occasion the owner would plausibly want help acting on — a " <>
-              "message to send, something to prepare or decide — and clear it for a " <>
-              "logistics ping that needs only the fact."
-        },
-        rebind_delivery_to_default: %{
-          type: "boolean",
-          description:
-            "Re-snapshot the current configured default delivery target and regenerate " <>
-              "unsent reminders on it. Only on the owner's explicit request."
-        },
-        owner_direction: %{
-          type: "string",
-          description:
-            "Required to change the date: the owner's words that explicitly directed this " <>
-              "date change, excerpted near-verbatim as just the directing clause. The " <>
-              "owner stating their own new date, or asking to move a named event, counts. " <>
-              "When the owner merely restated a date under a stored name, there is nothing " <>
-              "here to quote — leave it absent and ask them which event they mean."
-        }
+      properties: Map.merge(properties(), delivery_property(context))
+    }
+  end
+
+  defp properties do
+    %{
+      event_id: %{type: "string", description: "The stored event's id from event_list."},
+      title: %{type: "string", description: "New title."},
+      description: %{type: "string", description: "New description."},
+      kind: %{type: "string", enum: @kinds, description: "New event kind."},
+      when: %{
+        type: "object",
+        description:
+          "New time, in the same tagged forms event_store accepts (date, datetime, " <>
+            "relative, annual)."
+      },
+      timezone: %{type: "string", description: "New IANA zone for the event."},
+      leap_day_policy: %{type: "string", enum: ["feb_28", "mar_1"]},
+      reminders: %{
+        type: "array",
+        items: %{type: "object"},
+        description: "A replacement reminder plan; it replaces the stored one entirely."
+      },
+      no_reminders: %{type: "boolean", description: "Drop every reminder for this event."},
+      followup: %{
+        type: "boolean",
+        description:
+          "Set this for an occasion the owner would plausibly want help acting on — a " <>
+            "message to send, something to prepare or decide — and clear it for a " <>
+            "logistics ping that needs only the fact."
+      },
+      rebind_delivery_to_default: %{
+        type: "boolean",
+        description:
+          "Re-snapshot the current configured default delivery target and regenerate " <>
+            "unsent reminders on it. Only on the owner's explicit request."
+      },
+      owner_direction: %{
+        type: "string",
+        description:
+          "Required to change the date: the owner's words that explicitly directed this " <>
+            "date change, excerpted near-verbatim as just the directing clause. The " <>
+            "owner stating their own new date, or asking to move a named event, counts. " <>
+            "When the owner merely restated a date under a stored name, there is nothing " <>
+            "here to quote — leave it absent and ask them which event they mean."
       }
     }
+  end
+
+  defp delivery_property(context) do
+    if Notifications.offered?(native_opts(context)) do
+      %{
+        delivery: %{
+          type: "string",
+          enum: ["computer"],
+          description:
+            "Move this event's unsent reminders to ring on this computer. Only on the " <>
+              "owner's request; not together with rebind_delivery_to_default."
+        }
+      }
+    else
+      %{}
+    end
   end
 
   @impl true
@@ -187,11 +219,17 @@ defmodule FermixCore.Tools.EventUpdate do
   end
 
   defp apply_patch(id, args, context) do
-    case Registry.update_event(id, patch(args), context) do
+    case Registry.update_event(id, patch(args), context, registry_opts(context)) do
       {:ok, updated} -> {:ok, Tool.success(Jason.encode!(view(updated)))}
       {:error, reason} -> {:ok, Tool.error(Registry.describe_error(reason))}
     end
   end
+
+  # The host a test names; a turn names none, and this build's host decides.
+  defp registry_opts(context), do: [native: native_opts(context)]
+
+  defp native_opts(%{host: %{profile: _profile, os: _os} = host}), do: [host: host]
+  defp native_opts(_context), do: []
 
   defp patch(args) do
     Enum.reduce(@patch_keys, %{}, fn {key, field}, acc ->

@@ -5,7 +5,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   A plugin manifest marks a changing tool `"access_sensitive": true` (a car
   unlock); the flag reaches the capability as `metadata.access_sensitive?` on
   both plugin rails. `Capability.execute/3` — the single invoke boundary for the
-  agent loop, the realtime voice bridge and inbound MCP — asks `admit/3` first,
+  agent loop and the realtime voice bridge — asks `admit/3` first,
   and every other capability returns on that one map lookup.
 
   For a flagged call, in order:

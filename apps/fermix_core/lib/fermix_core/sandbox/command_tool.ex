@@ -9,6 +9,7 @@ defmodule FermixCore.Sandbox.CommandTool do
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.Env
   alias FermixCore.Sandbox.Mode
+  alias FermixCore.Sandbox.OsSandbox
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   # `Env.apply_session_env/2` below is the client-session overlay
@@ -23,10 +24,14 @@ defmodule FermixCore.Sandbox.CommandTool do
          {:ok, extra_args} <- optional_args(args),
          {:ok, policy_env} <- Env.build_command(config, spec.pass_env),
          secrets = Env.values_for(policy_env, spec.pass_env),
-         env = Env.apply_session_env(policy_env, Map.get(context, :session_env)),
+         env =
+           policy_env
+           |> OsSandbox.with_cache_env(config, Map.get(context, :os_sandbox, []))
+           |> Env.apply_session_env(Map.get(context, :session_env)),
          {:ok, cwd} <- working_dir(config, context),
          argv = spec.args ++ extra_args ++ [prompt],
-         {:ok, output} <- run_command(spec, argv, {cwd, env}, secrets) do
+         {:ok, output} <-
+           run_command(spec, argv, {cwd, env}, secrets, sandbox_context(context, config)) do
       {:ok, Tool.success(output)}
     else
       {:error, reason} -> {:ok, Tool.error(format_error(reason))}
@@ -60,8 +65,9 @@ defmodule FermixCore.Sandbox.CommandTool do
   # The env list is the child's whole environment (`env_mode: :replace`), so no
   # value travels as argv. Output is scrubbed here, before it becomes any
   # message the model reads.
-  defp run_command(spec, argv, {cwd, env}, secrets) do
-    with {:ok, executable} <- resolve_command(spec.command, env) do
+  defp run_command(spec, argv, {cwd, env}, secrets, context) do
+    with {:ok, executable} <- resolve_command(spec.command, env),
+         {:ok, {executable, argv}} <- confine(spec, executable, argv, context) do
       case CommandRunner.run(executable, argv,
              cwd: cwd,
              timeout_ms: spec.timeout_ms,
@@ -82,6 +88,16 @@ defmodule FermixCore.Sandbox.CommandTool do
       end
     end
   end
+
+  # The codex and claude presets apply their own Seatbelt profile, which cannot
+  # nest inside Fermix's, and write their own state folders, which are
+  # protected: they run unconfined until they get a profile of their own
+  # (OS_SANDBOX_ENFORCEMENT §4.1, stage C).
+  defp confine(%{confined?: false}, executable, argv, _context), do: {:ok, {executable, argv}}
+  # The command's policy roots take no request folder (`working_dir/2`), so the
+  # kernel's take none either.
+  defp confine(_spec, executable, argv, context),
+    do: Sandbox.confine(executable, argv, Map.delete(context, :cwd))
 
   # Searched on the child's own PATH, the lookup `env` made when it exec'd the
   # command, so an overlay PATH (an ACP session's) still decides what runs.
@@ -111,12 +127,12 @@ defmodule FermixCore.Sandbox.CommandTool do
     do: "Command not found on the command's PATH: #{command}"
 
   defp format_error({:missing_working_dir, dir}), do: "Working directory does not exist: #{dir}"
+  defp format_error({:os_sandbox_unavailable, sentence}), do: sentence
 
   defp format_error({:outside_root, path}),
     do:
       "Sandbox denied command capability working_dir outside roots: #{path}. " <>
-        "To allow this directory, run: fermix grant path #{path}, " <>
-        "or call the request_directory_access tool to ask the owner to approve it."
+        Sandbox.grant_hint(path)
 
   defp format_error({:protected_path, path}),
     do: "Sandbox denied protected path: #{path}. Run: fermix sandbox explain"

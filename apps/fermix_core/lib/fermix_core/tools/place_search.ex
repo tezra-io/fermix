@@ -1,12 +1,21 @@
 defmodule FermixCore.Tools.PlaceSearch do
   @moduledoc """
-  Find places — businesses, landmarks, addresses — through one bounded Brave
-  Place Search request (MILESTONE_31 §10).
+  Find places — businesses, landmarks, addresses — through one bounded search
+  on the backend in force (MILESTONE_31 §10, M72 §14).
 
   The tool owns the provider-visible schema (§10.1) and the anchor decision
-  (§10.5); `PlaceSearch.Brave` owns the request, the parser, and the tagged
-  failures (§10.2–§10.4). Nothing here falls back to web search, a browser, or
-  another provider: a failure is returned with its tag.
+  (§10.5). `PlaceSearch.Backend.resolve/2` picks the backend once per call:
+  `[fermix_core.tools.place_search] backend` when set, otherwise the build's
+  default: Apple Maps where the build carries the `fermix-maps` helper (the
+  Fermix Mac app's engine; `PlaceSearch.AppleMaps`, no key), Brave in the
+  Homebrew and Linux builds (`PlaceSearch.Brave`). The backend owns the request, the parser
+  and the tagged failures (§10.2–§10.4), and both yield the one record. Nothing
+  here falls back to web search, a browser, or the other backend: a failure is
+  returned with its tag.
+
+  `country` and `language` are Brave's knobs: the schema publishes them only
+  while Brave is the backend (`dynamic_parameters/1`), and under Apple Maps a
+  call that passes one anyway is refused rather than run without it.
 
   ## The anchor, in strict precedence
 
@@ -30,21 +39,31 @@ defmodule FermixCore.Tools.PlaceSearch do
   SOURCE; telemetry records `location_mode` (`query_only` / `named` /
   `explicit_coordinates`), never a location value (§13.2).
 
-  ## Credential gating
+  ## The places a reply is drawn with
+
+  On success, the places handed to the model are also kept under the turn's
+  conversation key in `FermixCore.ReplyBlocks` (M72 §8.4), so the companion
+  turn writer can draw the ones the reply links. The context names the holder
+  as `:reply_blocks` only when it is not the application's.
+
+  ## Readiness gating
 
   This is the first credential-gated built-in (§14.1). `advertise?/1` hides the
-  tool from a daemon with no resolvable Brave key, and `execute/2` repeats the
-  guard: advertisement is a readiness signal, never the only barrier.
+  tool whenever the backend in force is not ready (Brave with no resolvable
+  key; Apple Maps on a build without its helper, or missing a part it should
+  carry), and `execute/2` repeats
+  the guard: advertisement is a readiness signal, never the only barrier.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
-  alias FermixCore.Tools.PlaceSearch.Brave
+  alias FermixCore.ReplyBlocks
+  alias FermixCore.Tools.PlaceSearch.Backend
+  alias FermixCore.Tools.PlaceSearch.Config
   alias FermixCore.Tools.SearchCredential
   alias FermixCore.Tools.Support
 
-  @backend "brave"
   @max_query_chars 400
   @max_location_chars 200
   @max_radius_meters 50_000
@@ -84,6 +103,9 @@ defmodule FermixCore.Tools.PlaceSearch do
   @self_anchored_alternation Enum.map_join(@self_anchored_markers, "|", &Regex.escape/1)
   @self_anchored_pattern Regex.compile!("(*UCP)\\b(?:#{@self_anchored_alternation})\\b", "u")
 
+  @brave_only_locale "invalid_query: country and language are options of the Brave place " <>
+                       "search; this search runs on Apple Maps, so pass neither"
+
   @location_required "location_required: this query is anchored to the user's own " <>
                        "position, but no location was supplied. Ask which area to search, " <>
                        "then pass it as `location` or as `latitude`/`longitude`."
@@ -95,36 +117,53 @@ defmodule FermixCore.Tools.PlaceSearch do
   @impl true
   @spec description() :: String.t()
   def description do
-    "Find places — businesses, landmarks, addresses — with hours, ratings, contact " <>
-      "details, distance, and a source link per result. Pass a place the user names as " <>
+    "Find places — businesses, landmarks, addresses — each with a source link and the " <>
+      "details its source holds: address, phone and kind, plus hours, ratings and distance " <>
+      "where the source gives them. Pass a place the user names as " <>
       "`location` (or as `latitude`/`longitude`); do NOT leave it inside `query`. " <>
-      "`radius_meters` biases ranking around explicit coordinates — it is not a hard geofence."
+      "`radius_meters` sets how far around explicit coordinates to search, and a result may " <>
+      "still fall outside it."
   end
 
+  @doc "The schema for the backend in force on this host (`dynamic_parameters/1`)."
   @impl true
   @spec parameters() :: map()
-  def parameters do
+  def parameters, do: dynamic_parameters(%{})
+
+  @doc """
+  The provider-visible schema (§10.1) for the backend `context` resolves to:
+  `country` and `language` only while it is Brave, whose knobs they are.
+  """
+  @spec dynamic_parameters(map()) :: map()
+  def dynamic_parameters(context) when is_map(context) do
     %{
       type: "object",
       required: ["query"],
-      properties: %{
-        query: %{type: "string", maxLength: @max_query_chars},
-        location: %{type: "string", maxLength: @max_location_chars},
-        latitude: %{type: "number", minimum: -@latitude_limit, maximum: @latitude_limit},
-        longitude: %{type: "number", minimum: -@longitude_limit, maximum: @longitude_limit},
-        radius_meters: %{type: "integer", minimum: 1, maximum: @max_radius_meters},
-        count: %{type: "integer", minimum: 1, maximum: @max_count},
-        country: %{type: "string", minLength: @country_chars, maxLength: @country_chars},
-        language: %{
-          type: "string",
-          minLength: @min_language_chars,
-          maxLength: @max_language_chars
-        },
-        units: %{type: "string", enum: ["metric", "imperial"]}
-      },
+      properties: Map.merge(common_properties(), locale_properties(resolution(context).name)),
       additionalProperties: false
     }
   end
+
+  defp common_properties do
+    %{
+      query: %{type: "string", maxLength: @max_query_chars},
+      location: %{type: "string", maxLength: @max_location_chars},
+      latitude: %{type: "number", minimum: -@latitude_limit, maximum: @latitude_limit},
+      longitude: %{type: "number", minimum: -@longitude_limit, maximum: @longitude_limit},
+      radius_meters: %{type: "integer", minimum: 1, maximum: @max_radius_meters},
+      count: %{type: "integer", minimum: 1, maximum: @max_count},
+      units: %{type: "string", enum: ["metric", "imperial"]}
+    }
+  end
+
+  defp locale_properties(:brave) do
+    %{
+      country: %{type: "string", minLength: @country_chars, maxLength: @country_chars},
+      language: %{type: "string", minLength: @min_language_chars, maxLength: @max_language_chars}
+    }
+  end
+
+  defp locale_properties(:apple_maps), do: %{}
 
   @impl true
   @spec when_to_use() :: String.t()
@@ -153,7 +192,7 @@ defmodule FermixCore.Tools.PlaceSearch do
           "longitude" => 139.7671,
           "radius_meters" => 1500
         },
-        note: "coordinates the user supplied; radius biases ranking around them"
+        note: "coordinates the user supplied; radius sets how far around them to search"
       },
       %{
         args: %{"query" => "ramen", "location" => "Kreuzberg, Berlin"},
@@ -184,7 +223,9 @@ defmodule FermixCore.Tools.PlaceSearch do
       %{tag: "rate_limited", description: "the place provider returned a rate limit"},
       %{
         tag: "provider_error",
-        description: "the place provider returned an unexpected HTTP status"
+        description:
+          "the place provider failed or is not ready (an unexpected HTTP status, Apple Maps " <>
+            "on a build without its helper)"
       },
       %{
         tag: "parser_changed",
@@ -202,9 +243,11 @@ defmodule FermixCore.Tools.PlaceSearch do
       credential: "brave_api_key",
       config_path: "[fermix_core.tools.web_search] brave_api_key",
       description:
-        "A Brave Search API key. One key serves both consumers: web_search's Brave " <>
-          "backend and place_search. Brave does not have to be the active web backend, " <>
-          "and each endpoint call is separately metered."
+        "A Brave Search API key, needed only while place_search runs on Brave " <>
+          "(`[fermix_core.tools.place_search] backend`: the Homebrew and Linux builds use " <>
+          "Brave, and the Fermix Mac app searches Apple Maps with no key). One key serves " <>
+          "both consumers: web_search's Brave backend and place_search. Brave does not have " <>
+          "to be the active web backend, and each endpoint call is separately metered."
     }
   end
 
@@ -213,14 +256,30 @@ defmodule FermixCore.Tools.PlaceSearch do
   def category, do: :web
 
   @doc """
-  Advertise the tool only when the shared Brave credential resolves (§14.1).
+  Advertise the tool only when the backend in force is ready (§14.1, M72
+  §14.1): Brave's key resolves, or the Apple Maps helper can be spawned on a
+  build that carries it.
 
-  Discovered via `function_exported?` at `AgentLoop.build_state`. A daemon with
-  no key never shows a tool whose every call would refuse; `execute/2` repeats
-  the guard, so this is readiness, not the security barrier.
+  Discovered via `function_exported?` at `AgentLoop.build_state`. A daemon
+  whose every call would refuse never shows the tool; `execute/2` repeats the
+  guard, so this is readiness, not the security barrier. `context` may name
+  the host as `:host` (`BootProfile.host/0`'s shape) and the helper's options
+  as `:apple_maps` for a test.
   """
   @spec advertise?(map()) :: boolean()
-  def advertise?(context) when is_map(context), do: match?({:ok, _key}, SearchCredential.brave())
+  def advertise?(context) when is_map(context), do: readiness(context) == :ok
+
+  @doc "The backend in force for `context` and whether it is ready, as `advertise?/1` asks."
+  @spec readiness(map()) :: :ok | {:error, String.t()}
+  def readiness(context) when is_map(context) do
+    resolution = resolution(context)
+    Backend.ready(resolution, backend_opts(resolution, context))
+  end
+
+  @doc "The backend `context` resolves to (`PlaceSearch.Backend.resolve/2`)."
+  @spec resolution(map()) :: Backend.resolution()
+  def resolution(context) when is_map(context),
+    do: Backend.resolve(Config.current(), host(context))
 
   @impl true
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
@@ -228,60 +287,89 @@ defmodule FermixCore.Tools.PlaceSearch do
     Support.run(name(), Map.delete(context, :tool_trace), fn -> run(args, context) end)
   end
 
-  # The credential is re-resolved on every call: advertisement can never be the
-  # only readiness/security barrier (§14.1).
+  # The backend is resolved and its readiness re-checked on every call:
+  # advertisement can never be the only readiness/security barrier (§14.1).
   defp run(args, context) do
-    with {:ok, api_key} <- SearchCredential.brave(),
-         {:ok, fields} <- validate(args),
+    resolution = resolution(context)
+    opts = backend_opts(resolution, context)
+
+    with :ok <- Backend.ready(resolution, opts),
+         {:ok, fields} <- validate(args, resolution.name),
          {:ok, anchor} <- anchor(fields) do
-      search(fields, anchor, api_key, context)
+      search(resolution, fields, anchor, opts, context)
     else
-      {:error, reason} -> error_result(reason, %{})
+      {:error, reason} -> error_result(reason, resolution.name, %{})
     end
   end
 
-  defp search(fields, anchor, api_key, context) do
-    request = request(fields, anchor)
+  defp search(resolution, fields, anchor, opts, context) do
+    case resolution.module.search(request(fields, anchor), opts) do
+      {:ok, places, trace} ->
+        success(resolution.name, fields, anchor, places, trace, context)
 
-    case Brave.search(request, brave_api_key: api_key, context: context) do
-      {:ok, places, trace} -> success(fields, anchor, places, trace)
-      {:error, reason, trace} -> error_result(reason, Map.put(trace, :location_mode, anchor.mode))
+      {:error, reason, trace} ->
+        error_result(reason, resolution.name, Map.put(trace, :location_mode, anchor.mode))
     end
   end
+
+  # Brave reads the one shared key from its opts (§8.1); Apple Maps reads the
+  # helper's options a test names, and the host for its build check.
+  defp backend_opts(%{name: :brave}, context) do
+    case SearchCredential.brave() do
+      {:ok, api_key} -> [brave_api_key: api_key, context: context]
+      {:error, _missing} -> [context: context]
+    end
+  end
+
+  defp backend_opts(%{name: :apple_maps}, context) do
+    [context: context] ++ host(context) ++ Map.get(context, :apple_maps, [])
+  end
+
+  defp host(%{host: %{profile: _profile, os: _os} = host}), do: [host: host]
+  defp host(_context), do: []
 
   # Truncated to `count` BEFORE encoding: the provider may return more than it
   # was asked for, and the model must never be handed rows the caller capped out.
-  defp success(fields, anchor, places, trace) do
+  # Exactly the places it is handed are kept for a reply to be drawn with.
+  defp success(backend, fields, anchor, places, trace, context) do
     kept = Enum.take(places, fields.count)
+    :ok = remember_places(context, kept)
 
     output = %{query: fields.query, search_anchor: anchor.search_anchor, places: kept}
 
-    Support.success_json(output, metadata(anchor.mode, kept, trace))
+    Support.success_json(output, metadata(backend, anchor.mode, kept, trace))
   end
 
-  defp metadata(location_mode, places, trace) do
+  defp remember_places(context, places) do
+    context
+    |> Map.get(:reply_blocks, ReplyBlocks)
+    |> ReplyBlocks.put_places(Map.fetch!(context, :conversation_key), places)
+  end
+
+  defp metadata(backend, location_mode, places, trace) do
     Map.merge(trace, %{
-      backend: @backend,
+      backend: Atom.to_string(backend),
       location_mode: location_mode,
       result_count: length(places),
       has_media_count: Enum.count(places, &(Map.get(&1, :media, []) != []))
     })
   end
 
-  defp error_result(reason, metadata) do
+  defp error_result(reason, backend, metadata) do
     {:ok, result} = Support.error(reason)
-    {:ok, result, Map.put(metadata, :backend, @backend)}
+    {:ok, result, Map.put(metadata, :backend, Atom.to_string(backend))}
   end
 
   # -- validation (§10.1) ----------------------------------------------------
 
-  defp validate(args) do
+  defp validate(args, backend) do
     with {:ok, query} <- query(args),
          {:ok, coordinates} <- coordinates(args),
          {:ok, location} <- location(args),
          :ok <- exclusive(location, coordinates),
          {:ok, radius} <- radius(args, coordinates),
          {:ok, count} <- count(args),
+         :ok <- locale_for(backend, args),
          {:ok, locale} <- locale(args) do
       {:ok,
        Map.merge(locale, %{
@@ -385,6 +473,14 @@ defmodule FermixCore.Tools.PlaceSearch do
       _other -> {:error, "invalid_query: count must be an integer 1..#{@max_count}"}
     end
   end
+
+  defp locale_for(:apple_maps, args) do
+    if Map.has_key?(args, "country") or Map.has_key?(args, "language"),
+      do: {:error, @brave_only_locale},
+      else: :ok
+  end
+
+  defp locale_for(:brave, _args), do: :ok
 
   defp locale(args) do
     with {:ok, country} <- country(args),

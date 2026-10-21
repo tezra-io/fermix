@@ -19,6 +19,7 @@ defmodule FermixChannels.Mobile.ShippedDefaultTest do
   use ExUnit.Case, async: false
 
   alias FermixChannels.Gateway.ChannelRegistry
+  alias FermixChannels.Mobile.Iroh
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
@@ -104,6 +105,26 @@ defmodule FermixChannels.Mobile.ShippedDefaultTest do
     assert :ok = ConfigStore.bootstrap_runtime_config(supervised: false)
 
     assert Keyword.fetch!(mobile_config(), :advertise_mdns) == false
+  end
+
+  # Remote reach (M62 D4) is on unless the operator turns it off: the code
+  # holds the default, so the shipped config names no `iroh` key at all.
+  test "a home with no mobile section hydrates with remote reach on", %{home: home} do
+    refute Keyword.has_key?(shipped_mobile_default(:prod), :iroh)
+    write_config!(home, @no_mobile_toml)
+
+    assert :ok = ConfigStore.bootstrap_runtime_config(supervised: false)
+
+    assert Iroh.switch_on?()
+  end
+
+  test "an explicit iroh = false turns remote reach off", %{home: home} do
+    write_config!(home, @no_mobile_toml <> "\n[fermix_channels.mobile]\niroh = false\n")
+
+    assert :ok = ConfigStore.bootstrap_runtime_config(supervised: false)
+
+    refute Iroh.switch_on?()
+    assert mobile_enabled?()
   end
 
   test "an explicit advertise_mdns = true turns the announcement on", %{home: home} do

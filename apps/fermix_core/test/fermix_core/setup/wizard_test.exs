@@ -132,8 +132,8 @@ defmodule FermixCore.Setup.WizardTest do
 
   # The mobile channel has no setup prompt: setup never asks, and a hand-written
   # section survives a save that knows nothing about it. Since M51 the
-  # management `channels.mobile` section writes its four rows through this
-  # pipeline, so those four answers land and every other mobile answer (the
+  # management `channels.mobile` section writes its five rows through this
+  # pipeline, so those five answers land and every other mobile answer (the
   # push credentials above all) is still ignored.
   describe "mobile has no wizard surface" do
     test "no setup or reconfigure prompt mentions mobile, on a fresh or enabled install" do
@@ -176,10 +176,11 @@ defmodule FermixCore.Setup.WizardTest do
       assert Keyword.get(mobile, :push) |> Keyword.get(:team_id) == nil
     end
 
-    test "the four channels.mobile answers are written, merged into the block" do
+    test "the five channels.mobile answers are written, merged into the block" do
       assert {:ok, _report} =
                Wizard.save_answers(Wizard.report().wizard,
                  mobile_enabled: "true",
+                 mobile_iroh: false,
                  mobile_port: 4040,
                  mobile_bind: "127.0.0.1",
                  mobile_advertise_mdns: false,
@@ -192,6 +193,7 @@ defmodule FermixCore.Setup.WizardTest do
       assert {:ok, snapshot} = ConfigStore.load_runtime_config()
       mobile = snapshot.fermix_channels |> Keyword.fetch!(:mobile)
       assert Keyword.get(mobile, :enabled) == true
+      assert Keyword.get(mobile, :iroh) == false
       assert Keyword.get(mobile, :port) == 4040
       assert Keyword.get(mobile, :bind) == "127.0.0.1"
       assert Keyword.get(mobile, :advertise_mdns) == false
@@ -979,6 +981,72 @@ defmodule FermixCore.Setup.WizardTest do
     assert contents =~ ~s(base_url = "http://tail.example:11434/v1")
   end
 
+  # `fermix setup --openai-base-url` and its two siblings: answers with no
+  # descriptor setup field, so the wizard never asks for them, each written into
+  # its own provider's block whichever provider is primary.
+  test "save_answers writes each hosted provider's base URL answer into its own block" do
+    start_memory_repo!()
+
+    assert {:ok, _report} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "anthropic",
+               anthropic_api_key: "sk-ant-test",
+               openai_base_url: "http://127.0.0.1:18081/v1",
+               anthropic_base_url: " http://127.0.0.1:18080/v1 ",
+               xai_base_url: "https://xai-relay.example/v1"
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    providers = Keyword.fetch!(persisted.fermix_core, :providers)
+
+    assert providers[:openai][:base_url] == "http://127.0.0.1:18081/v1"
+    assert providers[:anthropic][:base_url] == "http://127.0.0.1:18080/v1"
+    assert providers[:xai][:base_url] == "https://xai-relay.example/v1"
+    assert providers[:anthropic][:primary] == true
+    refute providers[:openai][:primary] == true
+    refute providers[:xai][:primary] == true
+  end
+
+  test "save_answers refuses a base URL that is not an absolute http(s) URL with a host" do
+    start_memory_repo!()
+
+    for value <- [
+          "",
+          "ftp://relay.example/v1",
+          "localhost:18080/v1",
+          "127.0.0.1:18080/v1",
+          "http://",
+          "http:relay.example",
+          "/v1"
+        ] do
+      error =
+        assert_raise ArgumentError, fn ->
+          Wizard.save_answers(Wizard.report().wizard, anthropic_base_url: value)
+        end
+
+      assert error.message =~
+               "--anthropic-base-url must be an absolute http:// or https:// URL with a host"
+    end
+
+    refute File.exists?(ConfigStore.path())
+  end
+
+  test "no setup or reconfigure question asks for a hosted provider's base URL" do
+    keys = [:openai_base_url, :anthropic_base_url, :xai_base_url]
+    state = Wizard.report().wizard
+
+    asked =
+      for provider <- ["openai", "anthropic", "xai"],
+          prompt <-
+            Wizard.prompts(state, provider: provider) ++
+              Wizard.reconfigure_prompts(state, provider: provider),
+          prompt.key in keys,
+          do: prompt.key
+
+    assert asked == []
+  end
+
   test "M15 image fields persist: generate_image backend + model + google key (sentinel)" do
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-m15-image")
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
@@ -1235,6 +1303,42 @@ defmodule FermixCore.Setup.WizardTest do
     refute Keyword.get(providers[:openai], :primary) == true
     # The Realtime key still lands in the shared OpenAI slot (behavior preserved).
     assert Keyword.get(providers[:openai], :api_key) == "sk-realtime"
+  end
+
+  # M70: the voice key is the key of the provider the voice model dials, so with
+  # Grok it fills SpaceXAI's slot, and like every voice key it promotes no one.
+  test "a voice key saved with the Grok model fills the SpaceXAI slot and promotes no one" do
+    realtime_engine_home!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               realtime_enabled: "true",
+               realtime_model: "grok-voice-3.0",
+               realtime_api_key: "xai-voice-key"
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(persisted.fermix_core, :providers, [])
+
+    assert Keyword.get(providers[:xai], :api_key) == "xai-voice-key"
+    refute Keyword.get(providers[:xai], :primary) == true
+    assert providers |> Keyword.get(:openai, []) |> Keyword.get(:api_key) == nil
+  end
+
+  test "the voice-key prompt asks for the key of the voice model's own provider" do
+    realtime_engine_home!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(realtime_enabled: "true", realtime_model: "grok-voice-3.0")
+
+    prompt =
+      Wizard.report().wizard
+      |> Wizard.reconfigure_prompts(realtime_enabled: true)
+      |> Enum.find(&(&1.key == :realtime_api_key))
+
+    assert %{provider: :xai, label: "SpaceXAI API key for Grok voice"} = prompt
   end
 
   test "a genuine OpenAI API-key save still auto-promotes openai" do
@@ -1664,6 +1768,131 @@ defmodule FermixCore.Setup.WizardTest do
       Wizard.report().wizard
       |> Wizard.save_answers(realtime_engine: "openai_realtime", realtime_voice: "beacon")
     end
+  end
+
+  # M70 §06: Grok is on SpaceXAI, so the journey onto it moves the provider with
+  # the engine, drops what only the Realtime engine takes, lands on Grok's own
+  # model and default voice, and turns off the screen sharing Grok cannot do.
+  # Budget and transcript choices are the owner's and survive every move.
+  test "save_answers moving to Grok carries the provider, model, voice and screen sharing" do
+    tmp_home = realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        realtime_enabled: "yes",
+        realtime_voice: "cedar",
+        realtime_reasoning_effort: "high",
+        realtime_max_session_minutes: "20",
+        realtime_max_cost_cents: "250",
+        realtime_persist_transcripts: "true"
+      )
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_model: "grok-voice-3.0")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    realtime = Keyword.get(persisted.fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :provider) == "xai"
+    assert Keyword.get(realtime, :engine) == "xai_realtime"
+    assert Keyword.get(realtime, :model) == "grok-voice-3.0"
+    assert Keyword.get(realtime, :voice) == "eve"
+    assert Keyword.get(realtime, :screen_share) == false
+    refute Keyword.has_key?(realtime, :reasoning_effort)
+    assert Keyword.get(realtime, :max_session_minutes) == 20
+    assert Keyword.get(realtime, :max_estimated_cost_cents_per_session) == 250
+    assert Keyword.get(realtime, :persist_transcripts) == true
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~s(provider = "xai")
+    assert contents =~ "screen_share = false"
+    refute contents =~ "reasoning_effort"
+
+    assert RealtimeConfig.normalize(realtime) == RealtimeConfig.current()
+    assert %{provider: "xai", engine: "xai_realtime", voice: "eve"} = RealtimeConfig.current()
+  end
+
+  test "save_answers takes an explicit Grok voice while moving onto Grok" do
+    realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_enabled: "yes", realtime_engine: "openai_live")
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_model: "grok-voice-3.0", realtime_voice: "rex")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    assert persisted.fermix_core |> Keyword.get(:realtime, []) |> Keyword.get(:voice) == "rex"
+  end
+
+  test "save_answers moving from Grok to Live puts OpenAI back and keeps the conversation" do
+    realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        realtime_enabled: "yes",
+        realtime_model: "grok-voice-3.0",
+        realtime_conversation: "private"
+      )
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_model: "gpt-live-1")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    realtime = Keyword.get(persisted.fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :provider) == "openai"
+    assert Keyword.get(realtime, :engine) == "openai_live"
+    assert Keyword.get(realtime, :voice) == "marin"
+    assert Keyword.get(realtime, :conversation) == "private"
+    # Leaving Grok drops the screen-sharing switch its move turned off.
+    assert Keyword.get(realtime, :screen_share) == true
+  end
+
+  test "save_answers moving from Grok to Realtime drops the conversation and restores effort" do
+    realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        realtime_enabled: "yes",
+        realtime_model: "grok-voice-3.0",
+        realtime_conversation: "chat"
+      )
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_engine: "openai_realtime")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    realtime = Keyword.get(persisted.fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :provider) == "openai"
+    assert Keyword.get(realtime, :engine) == "openai_realtime"
+    assert Keyword.get(realtime, :model) == RealtimeConfig.default_model("openai_realtime")
+    assert Keyword.get(realtime, :voice) == "marin"
+    assert Keyword.get(realtime, :reasoning_effort) == "low"
+    refute Keyword.has_key?(realtime, :conversation)
+  end
+
+  test "save_answers refuses Grok's model with an OpenAI engine, naming both" do
+    realtime_engine_home!()
+
+    assert_raise ArgumentError,
+                 ~r/grok-voice-3.0 requires engine "xai_realtime", got "openai_live"/,
+                 fn ->
+                   Wizard.report().wizard
+                   |> Wizard.save_answers(
+                     realtime_engine: "openai_live",
+                     realtime_model: "grok-voice-3.0"
+                   )
+                 end
   end
 
   defp realtime_engine_home! do
@@ -2120,6 +2349,7 @@ defmodule FermixCore.Setup.WizardTest do
              :soul,
              :realtime,
              :live,
+             :grok,
              :user,
              :memory
            ]
@@ -2131,6 +2361,7 @@ defmodule FermixCore.Setup.WizardTest do
     assert File.exists?(Path.join([bootstrap_dir, "main", "FERMIX.md"]))
     assert File.exists?(Path.join([bootstrap_dir, "main", "SOUL.md"]))
     assert File.exists?(Path.join([bootstrap_dir, "main", "LIVE.md"]))
+    assert File.exists?(Path.join([bootstrap_dir, "main", "GROK.md"]))
   end
 
   # The prompt files depend on the personalization alone, and the first boot

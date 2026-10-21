@@ -6,6 +6,8 @@ import html
 import json
 import os
 
+from .rubric import numbered_requirements
+
 
 def _pct(n: int, d: int) -> str:
     return f"{(100.0 * n / d):.0f}%" if d else "n/a"
@@ -180,7 +182,8 @@ def _markdown(r: dict) -> str:
         f"({_pct(t.get('first_attempt_passed', 0), t['cases'])}), before any "
         "`--fail-retries` re-drive",
         f"- Structural gates: {t['gates_passed']}/{t['gates']} ({_pct(t['gates_passed'], t['gates'])})  ·  "
-        f"Rubrics: {t['rubrics_passed']}/{t['rubrics']} ({_pct(t['rubrics_passed'], t['rubrics'])})",
+        f"Rubrics: {t['rubrics_passed']}/{t['rubrics']} ({_pct(t['rubrics_passed'], t['rubrics'])})  ·  "
+        f"watched unmet: {t.get('watched_unmet', 0)}",
         f"- Turns driven: {t['turns']}  ·  Candidate trace cost: **${t['cost_usd']:.4f}**  ·  "
         f"Wall time on turns: {t['duration_ms_total'] / 1000:.0f}s",
         f"- Judge calls: **{t['judge_calls']}**  ·  API-reported judge tokens: "
@@ -239,6 +242,8 @@ def _markdown(r: dict) -> str:
                         sc = f" ({rb['score']:.2f})" if rb["score"] is not None else ""
                         lines.append(
                             f"  - judge {rm}{sc} [{_judge_route(rb)}]: {rb['rationale']}")
+                        lines.extend(f"    - {line}"
+                                     for _kind, line in _requirement_lines(rb, _retained(r)))
                     else:
                         lines.append(f"  - judge: not evaluated ({rb.get('error')})")
             lines.append("")
@@ -255,6 +260,55 @@ def _judge_route(rubric: dict) -> str:
              rubric.get("judge_reasoning_effort")]
     route = "/".join(str(item) for item in parts if item)
     return route or rubric.get("backend") or "unknown"
+
+
+def _retained(results: dict) -> bool:
+    """Only a run that kept content shows the judge's words; run_eval redacts the
+    rest before they reach this module."""
+    return results["config"].get("content_retained") is True
+
+
+def _requirement_lines(rubric: dict, retained: bool) -> list[tuple[str, str]]:
+    """(css class, line) for each numbered requirement the judge decided unmet.
+
+    A redacted report (what CI publishes) still names their numbers; with content
+    retained each one's text and the judge's why follow. A watched requirement
+    the judge decided unmet did not decide the verdict, so it gets its own line
+    with the suite's reason instead of reading as a failure. A prose rubric, or a
+    numbered one with every requirement met, adds nothing to the judge line."""
+    verdicts = rubric.get("requirements") or []
+    count = len(verdicts)
+    failed = [v for v in verdicts if not v["met"] and not v.get("watched")]
+    watched = [v for v in verdicts if not v["met"] and v.get("watched")]
+    if not failed and not watched:
+        return []
+    texts = _requirement_texts(rubric, count) if retained else None
+    if texts is None and failed:
+        noun = "requirement" if len(failed) == 1 else "requirements"
+        numbers = ", ".join(str(v["n"]) for v in failed)
+        lines = [("no", f"judge: failed {noun} {numbers} of {count}")]
+    else:
+        lines = [("no", _spelled("failed", v, count, texts)) for v in failed]
+    reasons = {item["n"]: item["reason"] for item in rubric.get("watch") or []}
+    lines += [("skip", f"{_spelled('watched, not met', v, count, texts)} "
+                       f"(watched: {reasons.get(v['n'], 'no reason recorded')})")
+              for v in watched]
+    return lines
+
+
+def _requirement_texts(rubric: dict, count: int) -> list[str]:
+    texts, error = numbered_requirements(rubric["text"])
+    if error or texts is None or len(texts) != count:
+        raise ValueError(f"the rubric text does not number the {count} requirement(s) "
+                         "the judge decided")
+    return texts
+
+
+def _spelled(label: str, verdict: dict, count: int, texts: list[str] | None) -> str:
+    head = f"judge: {label} requirement {verdict['n']} of {count}"
+    if texts is None:
+        return head
+    return f"{head}: {texts[verdict['n'] - 1]} Why: {verdict['why']}"
 
 
 # --- html -------------------------------------------------------------------
@@ -353,6 +407,7 @@ def _html(r: dict) -> str:
                  (f"{t.get('first_attempt_passed', 0)}/{t['cases']}", "first-attempt passes"),
                  (f"{t['gates_passed']}/{t['gates']}", "gates passed"),
                  (f"{t['rubrics_passed']}/{t['rubrics']}", "rubrics passed"),
+                 (t.get("watched_unmet", 0), "watched unmet"),
                  (f"${t['cost_usd']:.4f}", "candidate trace cost"),
                  (t["judge_calls"], "judge calls"),
                  (t["judge_tokens_reported"],
@@ -410,6 +465,8 @@ def _html(r: dict) -> str:
                         sc = f" ({rb['score']:.2f})" if rb["score"] is not None else ""
                         out.append(f"<div class='gate {cls}'>judge {('✓' if rb['passed'] else '✗')}{_e(sc)} "
                                    f"({_e(_judge_route(rb))}): {_e(rb['rationale'])}</div>")
+                        out.extend(f"<div class='gate {kind}'>{_e(line)}</div>"
+                                   for kind, line in _requirement_lines(rb, _retained(r)))
                     else:
                         out.append(f"<div class='gate skip'>judge: not evaluated ({_e(rb.get('error'))})</div>")
                 out.append("</div>")

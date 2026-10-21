@@ -21,22 +21,22 @@ what is left out and every step folded into another.
   what the platform took survive. This also covers a crash of any core child
   started before the `RunnerSupervisor` (`CommandHostSupervisor` through
   `MainAgent`, `Memory.Repo`, `Trace` and `Finch` among them,
-  `application.ex:169-230`) or of the `RunnerSupervisor` itself, since
-  `:rest_for_one` restarts every job process in each case (`:268`). A
+  `application.ex:168-234`) or of the `RunnerSupervisor` itself, since
+  `:rest_for_one` restarts every job process in each case (`:274`). A
   runner's send helper and its AgentLoop are linked to it, so none outlives
   the restart; `LoopDiesWithRunner` off lets the loop outlive it (JOB-8).
 - `SchedulerCrashes`: how many times the Scheduler alone may die, at any point
   of any callback, including its own init. A Repo timeout no longer kills it
   (`SchedulerTimeouts`); another cause still does, such as `:rest_for_one`
   restarting it when `MeetingsSupervisor`, started between the
-  `RunnerSupervisor` and the Scheduler, dies (`application.ex:230-237`).
+  `RunnerSupervisor` and the Scheduler, dies (`application.ex:235-242`).
   Runners keep running. When it dies waiting on the reaper's write, that write
   may still land (see late writes).
 - `SchedulerTimeouts`: how many of the Scheduler's Repo calls may time out.
   Every call its process makes passes `Repo.periodic_opts` (`on_timeout:
-  :error`, `repo.ex:1152-1154`, `scheduler.ex:135-138`), so a call the Repo
+  :error`, `repo.ex:1155-1157`, `scheduler.ex:135-138`), so a call the Repo
   does not answer within 5 s returns `{:error, :repo_timeout}`
-  (`repo.ex:3946-3954`). The Scheduler takes that call site's error branch and
+  (`repo.ex:3949-3957`). The Scheduler takes that call site's error branch and
   keeps its monitors and timers; it does not restart, so no init
   reconciliation follows. The request is not cancelled (see late writes).
 - `RunnerCanCrash`: a runner dies at one of its Repo calls (a call timeout, a
@@ -51,8 +51,8 @@ what is left out and every step folded into another.
 **Late writes.** `Memory.Repo` serves one request at a time. A call it does
 not answer within 5 s (`Timeouts.repo_call`, `timeouts.ex:225-229`) times out,
 but the request stays in the Repo's mailbox and lands later, still before any
-later request from the same caller (`repo.ex:3931-3944`). `PRAGMA
-busy_timeout=5000` (`repo.ex:3986`) equals that budget, so one SQLite lock
+later request from the same caller (`repo.ex:3934-3947`). `PRAGMA
+busy_timeout=5000` (`repo.ex:3989`) equals that budget, so one SQLite lock
 wait is enough.
 - A runner dies on the timeout. The spec therefore has two kinds of crash at a
   runner's Repo write: the write lands late, or it never lands (a kill, or a
@@ -109,7 +109,7 @@ code, 2 in the checks), `OwnerMoves` (pause/resume requests), `OwnerEdits`
 **Mechanism switches** (`TRUE` is the real code; each is switched off by the
 checks listed under it):
 - `AtomicRaceStop`: the claim transaction refuses while a run is queued or
-  running (`ensure_no_active_job_run`, `repo.ex:6018`, `:6071-6089`). Check 02.
+  running (`ensure_no_active_job_run`, `repo.ex:6040`, `:6071-6089`). Check 02.
 - `RetriesOnlyUnsent`: a send is retried only when it never reached the
   platform (`channel_send.ex:140-143`, `:194-202`). This is the mechanism for
   platforms that do not dedupe. The runner tags its send with the proactive
@@ -124,7 +124,7 @@ checks listed under it):
 - `DeliveryWatchdog`: the runner stops waiting for a send after
   `delivery_timeout_ms` (`channel_send.ex:219-241`). Check 05.
 - `AtomicSettle`: a run's final row and its job's release are one
-  transaction, `Repo.settle_job_run` (`repo.ex:2369`, `:6106-6175`), used by
+  transaction, `Repo.settle_job_run` (`repo.ex:2372`, `:6106-6175`), used by
   the runner (`runner.ex:264`, `:327`) and the reaper (`scheduler.ex:713-729`).
   The release is a column-targeted `UPDATE` that turns `running` back into
   `scheduled` and keeps any other state. Switched off, the spec runs the code
@@ -132,7 +132,7 @@ checks listed under it):
   job row, in the runner and in the reaper. Checks 12, 22, 23, 24.
 - `ReconcilesPending`: the reconcile pass reads every unsettled run, the
   queued/running rows and then the rows whose delivery is still pending
-  (`unsettled_job_runs`, `repo.ex:2378-2411`; `scheduler.ex:243`). Switched
+  (`unsettled_job_runs`, `repo.ex:2381-2414`; `scheduler.ex:243`). Switched
   off, it reads queued/running rows only. Checks 14, 15, 35.
 - `RefusalBacksOff`: a due claim refused as `:already_running` returns
   `{:busy, state}`, so the re-arm floors at the 5 s backoff
@@ -140,7 +140,7 @@ checks listed under it):
   clean drain and a past-due job re-arms at 0 ms. Check 19.
 - `OwnerWritesColumns`: pause, resume and `update_job` write only the columns
   they own, in place (`registry.ex:93-116`;
-  `Repo.update_scheduled_job_fields`, `repo.ex:2312`, `:6318-6325`, the owner
+  `Repo.update_scheduled_job_fields`, `repo.ex:2315`, `:6318-6325`, the owner
   field list `:7221-7262`). Switched off, pause and `update_job` upsert the
   whole row they read. Check 27.
 - `LoopDiesWithRunner`: a runner's AgentLoop is spawned linked to it and
@@ -295,17 +295,17 @@ shortest and can change between runs.
     left queued/running, so no later reconcile sees the job. Check 22 now
     reaches the same wedge through the reaper's late write.
 - **Code (before the fix):**
-  - The claim sets the job to `running` (`repo.ex:5559-5566`,
+  - The claim sets the job to `running` (`repo.ex:5581-5588`,
     `scheduler.ex:602-606`). Only `finalize_job` (`runner.ex:357-381`), the
     crash path (`scheduler.ex:664-679`) and `resume_job`
     (`registry.ex:47-59`) ever set it back.
   - Each writer first made the run row final, then wrote the job row in a
     separate Repo call: the runner at `runner.ex:254` then `:370` (and `:314`
     then `:423`), the reaper at `scheduler.ex:667`/`:722` then `:772`/`:782`.
-  - Reconciliation read only queued/running rows (`repo.ex:5900-5915`), so a
+  - Reconciliation read only queued/running rows (`repo.ex:5922-5937`), so a
     run already marked `ok` or `error` was invisible to it, and the due scan
     and the timer lookup need `state = 'scheduled'`.
-- **Fix:** `Repo.settle_job_run/2` (`repo.ex:2369`, `:6106-6175`) writes the
+- **Fix:** `Repo.settle_job_run/2` (`repo.ex:2372`, `:6106-6175`) writes the
   final run row and releases the job in one `BEGIN IMMEDIATE` transaction, the
   mirror of the claim. It refuses with `{:error, :run_not_active}` unless the
   row is still queued/running, so only the run holding the job can release
@@ -315,7 +315,7 @@ shortest and can change between runs.
   `error` through it (`scheduler.ex:713-729`); on `:run_not_active` it re-reads
   the row and settles only a still-pending delivery (`:737-750`). The old
   reaper job writers are gone. A one-time migration (version 31,
-  `repo.ex:324-336`) releases every job an older release left `running` with
+  `repo.ex:325-337`) releases every job an older release left `running` with
   no queued/running run, by the settle's rule (JOB-4's **Fix**): a one-off
   its claim consumed (`next_run_at` NULL) `completed` and disabled, any other
   job back to `scheduled`. Before this change a manual claim kept a one-off's
@@ -343,12 +343,12 @@ shortest and can change between runs.
   "pending"` (`runner.ex:250`, `delivery.ex:24-31`). Only `mark_delivery`
   (`runner.ex:333-355`) or a monitored crash (`scheduler.ex:686-687`) settled
   it. Reconciliation and adoption read only queued/running rows
-  (`repo.ex:5900-5915`, `scheduler.ex:241-246`).
+  (`repo.ex:5922-5937`, `scheduler.ex:241-246`).
 - **Fix:** `Repo.unsettled_job_runs` replaces `active_job_runs`
-  (`repo.ex:2378-2411`, `:6442-6446`): two index reads combined with
+  (`repo.ex:2381-2414`, `:6442-6446`): two index reads combined with
   `UNION ALL`, the queued/running rows first and then the rows whose delivery
   is pending, oldest first within each, under the same limit. A partial index
-  (version 30, `idx_job_runs_pending_delivery`, `repo.ex:312-315`) keeps the
+  (version 30, `idx_job_runs_pending_delivery`, `repo.ex:313-316`) keeps the
   pending read off the never-pruned run history; a test asserts the query plan
   has no `SCAN job_runs`. `reconcile_active_runs` reads it
   (`scheduler.ex:243`), so a live runner past its settle is adopted after a
@@ -421,7 +421,7 @@ shortest and can change between runs.
   `:413-425`). The crash path's job write had the same shape
   (`scheduler.ex:735-745`, `:772-782`).
 - **Fix:** the settle's release is one column-targeted `UPDATE`
-  (`release_settled_job`, `repo.ex:6136-6161`): `running` becomes `scheduled`
+  (`release_settled_job`, `repo.ex:6158-6183`): `running` becomes `scheduled`
   and any other state is kept. It never writes `next_run_at`. It completes
   and disables a one-off only when that one-off's claim consumed it: the due
   claim (`scheduler.ex:615-617`) and a manual claim (`manual_claim_patch`,
@@ -538,9 +538,9 @@ shortest and can change between runs.
 - **Code (before the fix):** `update_job`, `pause_job` and `resume_job` read
   the row and upserted all of it (`registry.ex:61-70`, `:93-116`), and
   `upsert_scheduled_job_row` writes every column.
-- **Fix:** `Repo.update_scheduled_job_fields/3` (`repo.ex:2312`,
+- **Fix:** `Repo.update_scheduled_job_fields/3` (`repo.ex:2315`,
   `:6318-6325`) writes only the given columns in place and returns the row.
-  It accepts only the owner-editable fields (`repo.ex:7221-7262`), never
+  It accepts only the owner-editable fields (`repo.ex:7243-7284`), never
   `last_*`, and raises in the caller on anything else. Pause writes `enabled`
   and `state`; resume writes `enabled`, `state` and `next_run_at`;
   `update_job` writes only the edited columns, never `state`, `enabled` or
@@ -568,7 +568,7 @@ shortest and can change between runs.
   runs of one job.
 - **Code (before the fix, at `35a6acdc`):** a crash of any core child started
   before `JobRunnerSupervisor` restarts the job subtree under `:rest_for_one`
-  (`application.ex:169-226`, `:265`): not only `Memory.Repo` and the children
+  (`application.ex:168-234`, `:274`): not only `Memory.Repo` and the children
   after it, but also `CommandHostSupervisor`, `Finch`, `Trace`,
   `TokenSupervisor`, `CapabilityRegistry`, `McpSupervisor` and the rest. The
   runner dies with its supervisor, but its AgentLoop was `spawn_monitor`ed,
@@ -647,8 +647,10 @@ shortest and can change between runs.
   write or Scheduler call (`job_registry_support.ex:33-38`): a request the owner
   never made. That check's job-row read feeds no modelled column. The store
   of parked confirmations (`Capabilities.AccessGate.Pending`,
-  `application.ex:227`) is one more core child started before the
-  `RunnerSupervisor`, so its crash is the daemon crash above.
+  `application.ex:228`) and the holder of a conversation's place records
+  (`ReplyBlocks`, `:232`, which no job process reads) are two more core
+  children started before the `RunnerSupervisor`, so a crash of either is the
+  daemon crash above.
 - The run-row value `unset` stands for the `"none"` the claim writes before a
   result exists (`scheduler.ex:642`). The final `"none"` of `delivery_mode
   "none"` is modelled as `skipped`.

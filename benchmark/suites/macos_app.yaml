@@ -20,10 +20,13 @@
 # so every prompt here states the app-managed premise itself rather than relying
 # on the daemon to be in that mode. A reply that answers for a standalone
 # install is the exact failure this suite exists to catch, not a posture
-# mismatch to explain away.
+# mismatch to explain away. Its `## This Fermix` section names that source run
+# (M76); the skill answers a question about another install for that install.
 #
 # ROUTE ASSERTIONS. Exactly one — the labelled sanity case below. Everything
-# else gates on the outcome and lets the model reach it however it likes.
+# else gates on the outcome and lets the model reach it however it likes. The
+# reminder cases also forbid the temporal writes: that is a safety gate keeping
+# a stored timer off the development home, not a route assertion.
 #
 # WRONG-MODE GATES. `reply_not_matches` names service managers the app-managed
 # answer has no reason to mention in any polarity (`launchctl`, `systemctl`,
@@ -44,7 +47,8 @@ description: >
   a binary, why two `fermix doctor` rows read not-applicable, how a Homebrew
   formula install moves to the app, how an app user connects Telegram, and how
   the app's Browser pane sets how browser tasks run and downloads Chromium when
-  the Mac has no browser. Each case gates on a phrasing-independent
+  the Mac has no browser, where a timer or a reminder rings on the app, and why
+  a standalone Mac rings none. Each case gates on a phrasing-independent
   floor plus the wrong-mode refusals; the rubric owns the wording. One labelled
   sanity case pins that the answer comes from the self-knowledge skill rather
   than from the model's own guess about how a macOS daemon is usually managed.
@@ -157,6 +161,50 @@ scenarios:
           sheet with the Telegram switch on, that Fermix then needs a restart,
           and that the first message is opening the bot and pressing Start. Does
           not tell the user to run `fermix setup` or edit config.toml.
+
+  # M76 stage 1: the prompt names the install and the skill keys on it, where
+  # it used to guess and could hand a Mac app owner `fermix setup`. Neither
+  # question names a `fermix` command or a pane, so nothing but the stated
+  # premise points the answer at the app. The wrong-mode gates are the setup
+  # wizard's provider flags and a CLI sign-in, and hand-rolled downloads.
+  - id: app_owner_how_do_i
+    title: "A Mac app owner's everyday \"how do I\" is answered with the app's labels"
+    severity: normal
+    risk: host_readonly
+    tags: [macos-app, providers, upgrade, self-knowledge]
+    cases:
+      - id: switch_primary_provider
+        query: >
+          I use the Fermix app on my Mac. How do I make Fermix answer with
+          Anthropic instead of OpenAI?
+        expect:
+          reply_matches: '(?i)\bproviders\b'
+          reply_not_matches: '(?i)(--provider\b|--anthropic-|fermix\s+auth\s+login)'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Points at the app's Settings > Providers: Anthropic connected there
+          (Import Claude Code sign-in, Add setup token, or Add key… then Verify
+          and save), then the provider's Details… > Use as primary, confirmed,
+          with a restart when the app asks for one (Restart Fermix…). Does not
+          send the user to `fermix setup`, another `fermix` command, browser
+          setup or config.toml.
+      - id: update_from_the_app
+        query: >
+          I have the Fermix app on my MacBook. How do I get the newest version
+          of Fermix onto it?
+        expect:
+          reply_matches: '(?i)check for updates'
+          reply_not_matches: '(?i)\b(curl|wget|launchctl)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Points at the app's Check for Updates… (the Fermix menu or the menu
+          bar item) and Install, then quitting and reopening the app once Home
+          says the update installs when Fermix quits. Mentioning `brew upgrade
+          --cask tezra-io/tap/fermix` for a cask install is correct and must
+          never be penalized. Does not tell the user to run `fermix upgrade`,
+          to download a binary by hand, or to upgrade a Homebrew formula.
 
   - id: brew_formula_to_app_migration
     title: "Moving a Homebrew formula install to the app"
@@ -306,3 +354,111 @@ scenarios:
           Testing); if that row still says none, the Browser pane's download
           (or re-running the notetaker's install) puts it in place. Does not
           tell the user to run a Playwright install by hand.
+
+  # M76 stage 2: a timer or a reminder on this Mac. The daemon under test is a
+  # source run, which rings nothing here (its `## This Fermix` says so), so the
+  # premise is stated and the answer is advice: where a timer asked in the app's
+  # chat goes off and what it needs, and where a dated reminder goes when
+  # Telegram is connected too. The floors are the permission's own name and the
+  # channel the premise names. The wrong-mode gates are a notification poster
+  # of the model's own and the setup paths an app owner is never sent to. A
+  # timer question may be acted on instead of answered, and a timer stored on
+  # the development home would come due there: `tools_none` on the temporal
+  # writes is the safety gate, not a route assertion.
+  - id: this_mac_rings
+    title: "In the Mac app a timer rings on this Mac, and a dated reminder goes where the owner reads it"
+    severity: normal
+    risk: host_readonly
+    tags: [macos-app, reminders, this-computer, self-knowledge]
+    cases:
+      - id: timer_in_the_app_chat
+        query: >
+          How do timers work in the Fermix Mac app? If I ask its chat for a 10
+          minute timer while I cook, where does it go off, and is there anything
+          I have to allow first?
+        expect:
+          reply_matches: '(?i)notification'
+          reply_not_matches: '(?i)(osascript|terminal-notifier|launchctl|fermix\s+setup|config\.toml)'
+          tools_none: [event_store, event_update, schedule_job]
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says a timer asked in the Mac app's chat rings on this Mac as a
+          notification from the Fermix app, with sound, and that it needs the
+          app's Notifications permission: Settings > Permissions >
+          Notifications > Grant…, or System Settings > Notifications > Fermix
+          once it was refused. Saying that Fermix raises the macOS prompt itself
+          the first time a timer is set from the Mac, that the notification has a
+          Snooze 10 minutes button, or that the app is opened in the background
+          to ring when it is not running, is correct and must never be
+          penalized. Does not say the timer goes to Telegram or another chat
+          channel, and does not send the user to a `fermix` command or
+          config.toml.
+      - id: reminder_with_telegram_connected
+        query: >
+          I use the Fermix app on my Mac and I've connected Telegram too. If I
+          ask Fermix to remind me on December 4 at 9am to call the bank, where
+          will that reminder reach me? Could it pop up on the Mac instead?
+        expect:
+          reply_matches: '(?i)telegram'
+          reply_not_matches: '(?i)(osascript|terminal-notifier|launchctl)'
+          tools_none: [event_store, event_update, schedule_job]
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says the reminder reaches the owner on Telegram (the inbox Fermix
+          derives from the connected channel, or a configured default target)
+          and stays there, and that asking for it on this Mac ("remind me on my
+          Mac") makes it ring as a notification from the Fermix app instead,
+          which needs the app's Notifications permission in Settings >
+          Permissions. Does not say a reminder moves between Telegram and the
+          Mac by itself, and does not say it goes to both.
+
+  # A standalone Fermix on a Mac has no app attached, so nothing rings here
+  # (M76 §4.9), and the answer says why. The floor is the app, which every
+  # correct answer names as what can ring on this Mac. The wrong-mode gates are
+  # the stand-ins a model reaches for, a notification poster of its own, which
+  # no correct answer names in any polarity. `tools_none` is the same safety
+  # gate as above.
+  - id: standalone_mac_cannot_ring
+    title: "A standalone Fermix on a Mac rings nothing here, and says why"
+    severity: normal
+    risk: host_readonly
+    tags: [macos-app, homebrew, reminders, this-computer, self-knowledge]
+    cases:
+      - id: homebrew_reminder_popup
+        query: >
+          I run Fermix from the Homebrew formula on my Mac, no Fermix app. Can a
+          reminder pop up as a notification on this Mac when it's due?
+        expect:
+          reply_matches: '(?i)\bapp\b'
+          reply_not_matches: '(?i)(osascript|terminal-notifier|notify-send|display\s+notification)'
+          tools_none: [event_store, event_update, schedule_job]
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says no: the standalone install cannot ring anything on this Mac,
+          because no Fermix app is attached and the app is what shows Fermix's
+          notifications, so its reminders go to a chat channel such as Telegram.
+          Says the Fermix app can ring on this Mac and that `fermix
+          migrate-to-app` moves the install to it, keeping the Fermix home.
+          Does not offer a stand-in such as an AppleScript notification,
+          terminal-notifier or a script of its own.
+      - id: homebrew_timer_ring
+        query: >
+          Fermix on my Mac is the standalone binary I installed with brew. If I
+          ask it for a 15 minute timer, can it ring on the Mac itself?
+        expect:
+          reply_matches: '(?i)\bapp\b'
+          reply_not_matches: '(?i)(osascript|terminal-notifier|notify-send|display\s+notification)'
+          tools_none: [event_store, event_update, schedule_job]
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says no: nothing can ring on this Mac from the standalone install,
+          since no Fermix app is attached to show it, so a timer goes to a chat
+          channel such as Telegram instead. Names the Fermix app as what can
+          ring on this Mac and `fermix migrate-to-app` as how the install moves
+          to it, keeping its home. Does not offer a stand-in such as an
+          AppleScript notification, terminal-notifier or a script of its own,
+          and does not say the timer will ring on the Mac.

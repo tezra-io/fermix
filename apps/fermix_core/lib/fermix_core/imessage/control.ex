@@ -387,7 +387,7 @@ defmodule FermixCore.IMessage.Control do
 
   defp spawn_and_wait(binary, args, timeout_ms, kind) do
     port = Port.open({:spawn_executable, binary}, [:binary, :exit_status, :hide, {:args, args}])
-    {:os_pid, os_pid} = Port.info(port, :os_pid)
+    os_pid = os_pid(port)
     deadline = System.monotonic_time(:millisecond) + timeout_ms
 
     try do
@@ -417,8 +417,23 @@ defmodule FermixCore.IMessage.Control do
 
   defp more(port, deadline, acc, kind), do: collect(port, deadline, acc, kind)
 
+  # A helper that exited at once (seen under load) has closed its port before
+  # its pid is read, and Port.info/2 answers nil. Its output and exit status
+  # are still in the mailbox, so the call reads them as usual.
+  defp os_pid(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, os_pid} -> os_pid
+      nil -> nil
+    end
+  end
+
   # Close the port, then kill the helper's process group: at the bound it is a
-  # call nobody is waiting for. `:esrch` (already gone) is silent success.
+  # call nobody is waiting for. `:esrch` (already gone) is silent success. A
+  # helper whose pid was never read had already exited, and names no group.
+  defp teardown(port, nil) do
+    if Port.info(port), do: Port.close(port)
+  end
+
   defp teardown(port, os_pid) do
     if Port.info(port), do: Port.close(port)
     ProcessGroup.signal(os_pid, :sigkill)

@@ -188,6 +188,37 @@ defmodule FermixCore.HealthTest do
     assert report.realtime.socket_alive == false
   end
 
+  # The readiness row is named for the voice provider (M70 §06), so health reads
+  # the one for the provider in force and a row of the other provider is not it.
+  test "reports realtime setup_required from the configured provider's key row" do
+    tmp_home = Path.join(System.tmp_dir!(), "fermix-health-#{System.unique_integer([:positive])}")
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    Application.put_env(:fermix_core, :realtime, enabled: true, engine: "xai_realtime")
+
+    report_with = fn component ->
+      Health.report(
+        boot_report: %{
+          status: :ready,
+          failures: [%{component: component, action: "Add the key."}],
+          config_path: ConfigStore.path(),
+          restart_required?: false
+        },
+        process_resolver: fn _name -> nil end
+      )
+    end
+
+    grok = report_with.("realtime:xai")
+
+    assert grok.realtime.status == :setup_required
+    assert grok.realtime.provider == "xai"
+    assert grok.realtime.engine == "xai_realtime"
+    assert grok.realtime.model == "grok-voice-3.0"
+
+    # No listener runs here, so a report not held back by setup is degraded.
+    assert report_with.("realtime:openai").realtime.status == :degraded
+  end
+
   # The ACP surface is a transport like any other channel, so /health lists it
   # (M29 §9 item 7): disabled when off, degraded when enabled with no listener.
   test "lists the acp transport and marks it degraded when its listener is absent" do

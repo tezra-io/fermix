@@ -11,19 +11,27 @@ defmodule FermixCore.Plugins.Retired do
   has moved on logs a discovery failure on every boot, forever, and that error
   reads as "this plugin is broken" when the truth is "this plugin is gone".
 
-  So the name has to be known at runtime too. `FermixCore.Setup.ConfigStore`
-  drops a retired plugin out of `enabled`, out of its `[fermix_core.plugins
-  .<name>]` section and out of its `[fermix_core.plugin_secrets]` entry as the
-  config is read, naming it at warning. Dropping it at that one boundary is
-  what makes the rest hold: every reader downstream — the MCP source that
-  starts the rail, the registry's skill dirs, status, the management surface,
-  `fermix plugins`, doctor — resolves from the config it never entered, so none
-  of them needs a filter of its own, and the next save renders the file without
-  it.
+  So the name has to be known at runtime too, at the two places an install
+  keeps a plugin. `FermixCore.Setup.ConfigStore` drops a retired plugin out of
+  `enabled`, out of its `[fermix_core.plugins.<name>]` section and out of its
+  `[fermix_core.plugin_secrets]` entry as the config is read, naming it at
+  warning. `FermixCore.Plugins.Registry` leaves it out of the plugin store as
+  the store is read, so its manifest is never loaded and a remote one's
+  signature is never checked again: a verifier that stops accepting an old
+  certificate once took the whole registry down with it, and boot with the
+  registry. Dropping it at those two boundaries is what makes the rest hold:
+  every reader downstream — the MCP source that starts the rail, the registry's
+  skill dirs, status, the management surface, `fermix plugins`, doctor —
+  resolves from config and a registry it never entered, so none of them needs a
+  filter of its own, and the next save renders the file without it. (A
+  `dev_local` checkout is the plugin author's own directory and is read as it
+  is: a retired name there loads, and stays off because config drops it.)
 
-  A stored credential is NOT touched. Deleting a secret is the operator's
-  decision and an irreversible one, so the warning names the plugin instead and
-  leaves revoking it at the source to them.
+  Nothing stored is touched: not the credential, and not the installed files
+  (`fermix plugins installed` still lists them, and `fermix plugins uninstall`
+  still removes them). Deleting either is the operator's decision and an
+  irreversible one, so the warning names the plugin instead and leaves revoking
+  it at the source to them.
 
   This list and the release script's `RETIRED_PLUGINS` are the same set, pinned
   by a test: the script decides what a new install is offered, this decides

@@ -26,7 +26,8 @@ description: >
   it runs or waits (and never the turn ahead of it), history pages forward and
   backward and full-text search finds the message, and a job scheduled from
   this chat with origin delivery lands in the companion timeline while no
-  client is connected.
+  client is connected, and a picture Fermix makes is sent into the chat as a
+  media row.
 defaults:
   timeout_ms: 180000
   judge: false
@@ -194,3 +195,35 @@ scenarios:
           wire:
             events_all: [accepted, turn_started, text_done]
             offline_row_matches: "(?i)bread-__EVAL_RUN_ID__-__EVAL_TRIAL__"
+
+  - id: picture_into_the_chat
+    title: "A picture Fermix makes in the chat is sent into it as a media row"
+    severity: critical
+    tags: [companion, media, delivery]
+    cases:
+      - id: teal_square_here
+        drive: companion
+        # The picture must exist before it can be sent, so the request makes
+        # it, by whatever route the model picks (an image backend or a
+        # script). The media row the turn sends is the proof the chat carried
+        # it: a reply saying it was sent proves nothing.
+        query: "Make me a small PNG picture, a plain teal square about 64 pixels wide, and send it to me here in this chat."
+        expect:
+          status: ok
+          max_cost_usd: 1.5
+          reply_not_matches: "(?i)\\b(can(no|')t|unable to|not able to)\\b.{0,60}\\b(send|attach|share|show)"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+            media_row: true
+      - id: red_circle_shown_here
+        drive: companion
+        query: "Draw a simple red circle on a white background as a PNG and show it to me here."
+        expect:
+          status: ok
+          max_cost_usd: 1.5
+          reply_not_matches: "(?i)\\b(can(no|')t|unable to|not able to)\\b.{0,60}\\b(send|attach|share|show)"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+            media_row: true

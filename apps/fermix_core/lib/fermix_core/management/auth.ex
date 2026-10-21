@@ -22,6 +22,11 @@ defmodule FermixCore.Management.Auth do
   revoked upstream, except for `openai_codex`, which signs in with ChatGPT: its
   sign-out revokes the session at OpenAI and keeps the registration, so the
   next sign-in reuses it (M57 §6.3).
+
+  An MCP server the owner added signs in as `mcp:<name>` (M74 E5): only a
+  remote one whose `auth` is `auto`, through `MCP.OAuth.SignIn`, and the
+  sign-in that completes starts that server. Its sign-out forgets the grant
+  locally, revokes nothing upstream, and starts the server again without it.
   """
 
   alias FermixCore.Auth.AnthropicLogin
@@ -31,12 +36,17 @@ defmodule FermixCore.Management.Auth do
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Auth.XAILogin
+  alias FermixCore.Capabilities.MCP.Config, as: McpConfig
+  alias FermixCore.Capabilities.MCP.OAuth.Grant, as: McpGrant
+  alias FermixCore.Capabilities.MCP.OAuth.SignIn, as: McpSignIn
+  alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Settings
   alias FermixCore.Plugins.Auth, as: PluginAuth
   alias FermixCore.Plugins.Plugin
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Setup.LiveModel
+  alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.Wizard
 
   require Logger
@@ -52,6 +62,9 @@ defmodule FermixCore.Management.Auth do
   # publishes for it. The plugin's own OAuth client, scopes and loopback port
   # are the manifest's and the operator's; nothing about them is repeated here.
   @plugin_prefix "plugin:"
+  # An MCP server the owner added, by its name (M74 E5).
+  @mcp_prefix "mcp:"
+  @no_mcp_server "There is no MCP server by that name."
   # A provider whose route is auth-mode driven reverts to its key on sign-out;
   # a single-mode provider has no route to revert.
   @reverting_providers [:anthropic, :xai]
@@ -71,6 +84,10 @@ defmodule FermixCore.Management.Auth do
   @spec plugin_prefix() :: String.t()
   def plugin_prefix, do: @plugin_prefix
 
+  @doc "The `auth.start` provider prefix that addresses one MCP server's sign-in."
+  @spec mcp_prefix() :: String.t()
+  def mcp_prefix, do: @mcp_prefix
+
   @doc "Every source `auth.import.start` can adopt an existing sign-in from."
   @spec import_sources() :: [String.t()]
   def import_sources, do: @import_sources
@@ -88,6 +105,13 @@ defmodule FermixCore.Management.Auth do
   def start(@plugin_prefix <> name, opts) when is_binary(name) and is_list(opts) do
     with {:ok, plugin} <- fetch_oauth_plugin(name) do
       start_flow(@plugin_prefix <> plugin.name, opts)
+    end
+  end
+
+  def start(@mcp_prefix <> name, opts) when is_list(opts) do
+    with {:ok, server} <- fetch_mcp_server(name, opts),
+         :ok <- mcp_signs_in(server) do
+      start_flow(@mcp_prefix <> name, Keyword.put(opts, :mcp_server, server))
     end
   end
 
@@ -122,6 +146,32 @@ defmodule FermixCore.Management.Auth do
     end
   end
 
+  defp fetch_mcp_server(name, opts) do
+    servers = Keyword.get(opts, :servers, &McpConfig.configured/0).()
+
+    case Enum.find(servers, &(&1.name == name)) do
+      nil -> {:error, {:invalid_params, "provider", @no_mcp_server}}
+      server -> {:ok, server}
+    end
+  end
+
+  # Only a remote server that signs in by itself has a browser sign-in; each
+  # other kind is named, since each has its own fix.
+  defp mcp_signs_in(%{transport: :stdio}),
+    do:
+      {:error, {:invalid_params, "provider", "This server runs on this Mac and has no sign-in."}}
+
+  defp mcp_signs_in(%{auth: :header}),
+    do: {:error, {:invalid_params, "provider", "This server signs in with a key, not a browser."}}
+
+  defp mcp_signs_in(%{auth: :none}),
+    do: {:error, {:invalid_params, "provider", "This server is set to need no sign-in."}}
+
+  defp mcp_signs_in(%{url: url}) when is_binary(url), do: :ok
+
+  defp mcp_signs_in(_server),
+    do: {:error, {:invalid_params, "provider", "It has no address. Add one in its settings."}}
+
   @doc """
   Adopts a sign-in this Mac already has, from Claude Code. The Codex CLI is
   refused by field with the sentence that names the way in instead.
@@ -143,10 +193,26 @@ defmodule FermixCore.Management.Auth do
   @doc """
   Forgets one provider's local session, drops its live tokens, and reverts the
   route it fed.
+
+  A provider whose route is reverted writes the settings file, so the file's
+  write guard (`:writable`, default `RestartState.writable/0`) runs before the
+  session is forgotten: a sign-out refused for an outside edit changes nothing,
+  rather than deleting the session and leaving the route pointing at it.
   """
   @spec logout(String.t(), keyword()) :: {:ok, map()} | {:error, error()}
-  def logout(provider, opts \\ []) when is_binary(provider) and is_list(opts) do
+  def logout(provider, opts \\ [])
+
+  def logout(@mcp_prefix <> name, opts) when is_list(opts) do
+    with {:ok, server} <- fetch_mcp_server(name, opts),
+         :ok <- forget_mcp_grant(server, opts) do
+      :ok = restart_mcp_server(server, opts)
+      {:ok, %{"restart" => Settings.restart()}}
+    end
+  end
+
+  def logout(provider, opts) when is_binary(provider) and is_list(opts) do
     with {:ok, id, profile} <- fetch_signed_in(provider),
+         :ok <- route_writable(id, opts),
          :ok <- sign_out(id, provider, profile, opts),
          :ok <- revert_route(id, opts) do
       {:ok, %{"restart" => Settings.restart()}}
@@ -196,6 +262,18 @@ defmodule FermixCore.Management.Auth do
     end
   end
 
+  defp sign_in_run(@mcp_prefix <> _name, opts) do
+    login = Keyword.get(opts, :mcp_login, &McpSignIn.login/2)
+    server = Keyword.fetch!(opts, :mcp_server)
+    login_opts = Keyword.take(opts, [:mcp_supervisor])
+
+    fn _job_id, report ->
+      server
+      |> login.(login_opts ++ [opener: opener(report), phase: &report.({:phase, &1})])
+      |> finish_mcp()
+    end
+  end
+
   defp sign_in_run("xai", opts) do
     login = Keyword.get(opts, :login, &XAILogin.login/1)
 
@@ -223,10 +301,10 @@ defmodule FermixCore.Management.Auth do
   # connection completes as every other one does.
   defp finish_chatgpt({:ok, %{plan_usage: :on, account: account}}, report, opts) do
     report.({:phase, "verifying"})
-    :ok = ensure_live_model(opts)
+    model_warning = ensure_live_model(opts)
 
     with :ok <- complete_connection(:openai_codex, opts) do
-      {:ok, %{"account_label" => account}}
+      {:ok, put_model_warning(%{"account_label" => account}, model_warning)}
     end
   end
 
@@ -237,20 +315,24 @@ defmodule FermixCore.Management.Auth do
     do: {:error, {:unavailable, chatgpt_sentence(reason)}}
 
   # A configured model the account does not list is replaced by one it does
-  # (`Setup.LiveModel`). The job result has no field a client renders for a
-  # listing that failed, so that is logged and the sign-in still completes: the
-  # account is connected either way.
+  # (`Setup.LiveModel`). A check that failed is logged and answered as the
+  # result's `model_warning`, the same words `fermix auth login` prints, and the
+  # sign-in still completes: the account is connected either way.
   defp ensure_live_model(opts) do
     ensure = Keyword.get(opts, :live_model, &LiveModel.ensure/2)
 
     case ensure.(:openai_codex, []) do
       {:ok, %{model: _model}} ->
-        :ok
+        nil
 
       {:error, sentence} ->
         Logger.warning("management auth: the ChatGPT model list was not read: #{sentence}")
+        "The default model was not checked against your ChatGPT account. #{sentence}"
     end
   end
+
+  defp put_model_warning(result, nil), do: result
+  defp put_model_warning(result, warning), do: Map.put(result, "model_warning", warning)
 
   # A stored token is inert until the route selects it, so connecting and
   # switching the route are one operation: reporting success without the second
@@ -276,6 +358,37 @@ defmodule FermixCore.Management.Auth do
 
   defp finish_plugin({:error, reason}, _report),
     do: {:error, {:unavailable, plugin_sentence(reason)}}
+
+  defp finish_mcp({:ok, %{account_label: label}}), do: {:ok, %{"account_label" => label}}
+  defp finish_mcp({:error, reason}), do: {:error, {:unavailable, mcp_sentence(reason)}}
+
+  # Forgetting a grant that is already gone is the state the caller asked for.
+  # A server that switched away from `auto` may still hold one, so any server's
+  # is forgotten.
+  defp forget_mcp_grant(server, opts) do
+    forget = Keyword.get(opts, :mcp_forget, &McpGrant.forget/1)
+
+    case forget.(server.name) do
+      :ok -> :ok
+      {:error, :profile_busy} -> {:error, {:busy, "auth"}}
+      {:error, reason} -> refuse("the MCP server's sign-in could not be removed", reason)
+    end
+  end
+
+  # A running server holds the token it connected with until it next asks for
+  # one, so it is started again without it, as a sign-in starts it with one.
+  defp restart_mcp_server(server, opts) do
+    if McpSupervisor.runs?(server) do
+      supervisor = Keyword.get(opts, :mcp_supervisor, McpSupervisor)
+
+      case supervisor.restart_server({:operator, server.name}, server) do
+        {:ok, _pid} -> :ok
+        {:error, reason} -> log("the MCP server did not start again after its sign-out", reason)
+      end
+    else
+      :ok
+    end
+  end
 
   defp set_auth_mode(opts),
     do: Keyword.get(opts, :set_auth_mode, &Wizard.set_provider_auth_mode/2)
@@ -427,6 +540,11 @@ defmodule FermixCore.Management.Auth do
 
   defp revert_route(_id, _opts), do: :ok
 
+  defp route_writable(id, opts) when id in @reverting_providers,
+    do: Keyword.get(opts, :writable, &RestartState.writable/0).()
+
+  defp route_writable(_id, _opts), do: :ok
+
   # A request-path refusal names a capability, not a sentence, so the reason is
   # logged rather than dropped: the wire has nowhere to carry it and losing it
   # would leave the operator and the log both without the cause.
@@ -521,6 +639,84 @@ defmodule FermixCore.Management.Auth do
   defp sign_in_sentence(reason) do
     log("the sign-in could not be completed", reason)
     "The sign-in could not be completed. See the daemon log."
+  end
+
+  # An MCP server's sign-in (M74 E5): where its discovery, registration or
+  # exchange stopped, in the owner's words. The loopback listener's and the
+  # store's own refusals keep the sentences every sign-in shares.
+  defp mcp_sentence({:sign_in_discovery, :no_metadata}),
+    do: "This server does not say how to sign in to it."
+
+  defp mcp_sentence({:sign_in_discovery, :resource_mismatch}),
+    do: "This server's sign-in is for another address, so Fermix did not use it."
+
+  defp mcp_sentence({:sign_in_discovery, :issuer_mismatch}),
+    do: "The server's sign-in service answered for another address, so Fermix did not use it."
+
+  defp mcp_sentence({:sign_in_discovery, :pkce_unsupported}),
+    do: "The server's sign-in service does not support the secure browser sign-in Fermix uses."
+
+  defp mcp_sentence({:sign_in_discovery, _invalid}),
+    do: "The server described its sign-in in a way Fermix does not understand."
+
+  defp mcp_sentence(:no_client_registration),
+    do:
+      "The server's sign-in accepts no client Fermix can use. Add its client ID in the server's settings."
+
+  defp mcp_sentence(:unsupported_client_auth),
+    do: "The server's sign-in asks for a kind of client Fermix does not support."
+
+  defp mcp_sentence({:client_registration_refused, _detail}),
+    do: "The server's sign-in service refused to register Fermix."
+
+  defp mcp_sentence(:issuer_mismatch),
+    do: "The sign-in reply came from another service, so Fermix did not use it."
+
+  defp mcp_sentence({:owner_client_issuer_changed, bound, issuer}) do
+    {now, was} = {sign_in_host(issuer), sign_in_host(bound)}
+
+    "This server now signs in at #{now}, not at #{was} where its client ID was used, so Fermix " <>
+      "sent #{now} nothing. If the server really moved, enter the client ID #{now} issued in " <>
+      "the server's settings, or remove the server and add it again."
+  end
+
+  defp mcp_sentence(:issuer_missing),
+    do: "The sign-in reply did not say which service sent it, so Fermix did not use it."
+
+  defp mcp_sentence({:token_refused, code}) do
+    Logger.warning("management auth: an MCP server's sign-in refused the code (#{code})")
+    "The server's sign-in service refused the sign-in. Sign in again."
+  end
+
+  defp mcp_sentence(:access_denied), do: "The sign-in was declined in the browser."
+  defp mcp_sentence(:callback_timeout), do: "The sign-in was not completed in time."
+
+  defp mcp_sentence({:authorization_error, code}) do
+    Logger.warning("management auth: an MCP server's sign-in answered #{code}")
+    "The server's sign-in service did not complete the sign-in. Sign in again."
+  end
+
+  defp mcp_sentence({:remote_security_blocked, reason}) do
+    log("an MCP server's sign-in named an address Fermix will not reach", reason)
+    "The server's sign-in uses an address Fermix will not connect to."
+  end
+
+  defp mcp_sentence({:invalid_remote_config, reason}) do
+    log("an MCP server's sign-in named an address Fermix will not reach", reason)
+    "The server's sign-in uses an address Fermix will not connect to."
+  end
+
+  defp mcp_sentence({tag, reason}) when tag in [:remote_unreachable, :remote_http_error] do
+    log("an MCP server's sign-in could not be reached", reason)
+    "Fermix could not reach the server's sign-in. Check your connection and sign in again."
+  end
+
+  defp mcp_sentence(reason), do: sign_in_sentence(reason)
+
+  # An issuer by its host, and its port where it is not the scheme's own.
+  defp sign_in_host(issuer) do
+    uri = URI.parse(issuer)
+    if uri.port == URI.default_port(uri.scheme), do: uri.host, else: "#{uri.host}:#{uri.port}"
   end
 
   # The absent case in the two spellings that reach it: an injected importer's

@@ -1,0 +1,11 @@
+{
+  "description": "Every relay list a Fermix release has shipped, oldest first (M62 §3.1, relay spec §5). Append a revision; never edit or remove one, and never drop a relay a revision named: relay names are repointed, not removed. A revision's id is the first 16 hex digits of the SHA-256 of its relays as canonical JSON. `iroh` is the iroh version the relays run, which the bundled helper must match.",
+  "revisions": [
+    {
+      "iroh": "1.3.0",
+      "relays": [
+        {"url": "https://us1.relay.fermix.ai/", "quic_port": 7842}
+      ]
+    }
+  ]
+}

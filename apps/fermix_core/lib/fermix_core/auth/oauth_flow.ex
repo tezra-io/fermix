@@ -57,8 +57,18 @@ defmodule FermixCore.Auth.OAuthFlow do
   """
   @type redeem :: ((-> {:ok, map()} | {:error, term()}) -> {:ok, term()} | {:error, term()})
 
+  @typedoc """
+  Registers the client for the port the listener bound, before the authorize
+  url names it: `{:ok, client_id, registration}`, `registration` being what
+  the authorization carries back (M74 E5: a registration that names the exact
+  loopback redirect).
+  """
+  @type register :: (:inet.port_number() -> {:ok, String.t(), term()} | {:error, term()})
+
   @type loopback_opts :: [
           port: :inet.port_number(),
+          preferred_port: :inet.port_number() | nil,
+          register: register(),
           opener: (String.t() -> :ok | {:error, term()}) | nil,
           timeout_ms: pos_integer(),
           port_fallbacks: non_neg_integer(),
@@ -70,15 +80,18 @@ defmodule FermixCore.Auth.OAuthFlow do
 
   @typedoc """
   A settled callback: the code, the client the provider issued (`nil` for a
-  `:static` client), the callback's own `scope`, and what the exchange must
-  repeat.
+  `:static` client), the callback's own `scope` and `iss` (RFC 9207, `nil`
+  when it names none, which the caller judges), what the exchange must
+  repeat, and what `:register` answered (`nil` without it).
   """
   @type authorization :: %{
           code: String.t(),
           client_id: String.t() | nil,
           scope: String.t() | nil,
+          iss: String.t() | nil,
           redirect_uri: String.t(),
-          code_verifier: String.t()
+          code_verifier: String.t(),
+          registration: term()
         }
 
   # Every OAuth `error` code is a short identifier; anything else in that field
@@ -101,6 +114,12 @@ defmodule FermixCore.Auth.OAuthFlow do
   `{paste_message, url}` message to the calling process. An opener that fails
   only prints the url; the wait goes on. Spends nothing: the caller exchanges
   the code.
+
+  Two options serve a client registered for one exact redirect (M74 E5).
+  `:preferred_port` binds that port when it is free and one the system picks
+  when it is not; without it a provider binds as it always has. `:register` is
+  called with the port bound, before the authorize url exists, and the client
+  id it answers is the one the url names.
   """
   @spec await_authorization(OAuthProvider.t(), loopback_opts()) ::
           {:ok, authorization()} | {:error, term()}
@@ -121,12 +140,31 @@ defmodule FermixCore.Auth.OAuthFlow do
     pkce = generate_pkce()
     {:ok, actual_port} = :inet.port(listener)
     redirect_uri = redirect_uri(provider, actual_port)
-    spec = callback_spec(provider, pkce.state, actual_port)
 
-    with :ok <-
+    with {:ok, provider, registration} <- register_for(provider, actual_port, opts),
+         spec = callback_spec(provider, pkce.state, actual_port),
+         :ok <-
            announce_and_open_optional(puts, opener, authorize_url(provider, pkce, redirect_uri)),
          {:ok, callback} <- await_callback(listener, spec, timeout_ms, opts) do
-      {:ok, Map.merge(callback, %{redirect_uri: redirect_uri, code_verifier: pkce.code_verifier})}
+      {:ok,
+       Map.merge(callback, %{
+         redirect_uri: redirect_uri,
+         code_verifier: pkce.code_verifier,
+         registration: registration
+       })}
+    end
+  end
+
+  # The client the authorize url names: the provider's own, or the one
+  # `:register` registered for the port the listener bound.
+  defp register_for(provider, port, opts) do
+    case Keyword.get(opts, :register) do
+      nil ->
+        {:ok, provider, nil}
+
+      register ->
+        with {:ok, client_id, registration} <- register.(port),
+             do: {:ok, %{provider | client_id: client_id}, registration}
     end
   end
 
@@ -157,6 +195,10 @@ defmodule FermixCore.Auth.OAuthFlow do
     %{code_verifier: code_verifier, code_challenge: code_challenge, state: state}
   end
 
+  @doc """
+  The authorize url. A provider with no scopes sends no `scope`: an MCP
+  server that names none is asked for none (M74 E5).
+  """
   @spec authorize_url(OAuthProvider.t(), pkce(), String.t()) :: String.t()
   def authorize_url(
         %OAuthProvider{} = provider,
@@ -168,15 +210,18 @@ defmodule FermixCore.Auth.OAuthFlow do
         "response_type" => "code",
         "client_id" => provider.client_id,
         "redirect_uri" => redirect_uri,
-        "scope" => Enum.join(provider.scopes, " "),
         "code_challenge" => code_challenge,
         "code_challenge_method" => "S256",
         "state" => state
       }
+      |> put_scope(provider.scopes)
       |> Map.merge(provider.extra_authorize_params)
 
     provider.authorize_url <> "?" <> URI.encode_query(params)
   end
+
+  defp put_scope(params, []), do: params
+  defp put_scope(params, scopes), do: Map.put(params, "scope", Enum.join(scopes, " "))
 
   @spec parse_callback_path(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
   def parse_callback_path(path, expected_state)
@@ -328,7 +373,19 @@ defmodule FermixCore.Auth.OAuthFlow do
   end
 
   defp listen_for(%OAuthProvider{} = _provider, port, opts) do
-    listen_with_fallback(port, Keyword.get(opts, :port_fallbacks, 5))
+    case Keyword.get(opts, :preferred_port) do
+      nil -> listen_with_fallback(port, Keyword.get(opts, :port_fallbacks, 5))
+      preferred -> listen_preferred(preferred)
+    end
+  end
+
+  # The port a registration named, when it can be bound; else one the system
+  # picks, which the caller registers anew.
+  defp listen_preferred(port) do
+    case listen(port) do
+      {:ok, listener} -> {:ok, listener}
+      {:error, {:listen_failed, ^port, _reason}} -> listen(0)
+    end
   end
 
   defp listen_with_fallback(0, _fallbacks), do: listen(0)
@@ -645,7 +702,7 @@ defmodule FermixCore.Auth.OAuthFlow do
       # A genuine callback (valid code+state, an error param, or a state
       # mismatch) is terminal — only its parse result ends the wait.
       case parse_callback_path(path, spec.state) do
-        {:ok, code} -> {:ok, %{code: code, client_id: nil, scope: nil}}
+        {:ok, code} -> {:ok, %{code: code, client_id: nil, scope: nil, iss: nil}}
         {:error, _reason} = error -> error
       end
     end
@@ -708,10 +765,18 @@ defmodule FermixCore.Auth.OAuthFlow do
   end
 
   defp settle_client(params, code, spec) do
-    with {:ok, client_id} <- issued_client(values(params, "client_id"), spec) do
-      {:ok, %{code: code, client_id: client_id, scope: List.first(values(params, "scope"))}}
+    with {:ok, client_id} <- issued_client(values(params, "client_id"), spec),
+         {:ok, iss} <- at_most_one(values(params, "iss")) do
+      {:ok,
+       %{code: code, client_id: client_id, scope: List.first(values(params, "scope")), iss: iss}}
     end
   end
+
+  # RFC 9207 §2: one `iss`, or none for the caller to judge; two is a forged
+  # or broken callback.
+  defp at_most_one([]), do: {:ok, nil}
+  defp at_most_one([value]), do: {:ok, value}
+  defp at_most_one(_duplicated), do: {:error, :invalid_callback}
 
   # A first registration must come back naming the client it issued; a
   # re-authorization may leave it out, but never names another.

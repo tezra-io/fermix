@@ -5,11 +5,14 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
   This is the dedicated per-origin connector the design calls for, and it is
   deliberately *not* the shared `FermixCore.Finch` pool:
 
-    * **Pinned peer.** It connects to the address `Endpoint.resolve/2`
+    * **Pinned peer.** It connects to an address `Endpoint.resolve/2`
       validated, while presenting the signed hostname for the `Host` header,
       TLS SNI, and certificate verification. Handing a hostname to a pooled
       client would let the socket layer resolve it a second time, behind the
-      guard — validating a name you then don't connect to is not a gate.
+      guard — validating a name you then don't connect to is not a gate. An
+      operator endpoint may have several validated addresses (`localhost` is
+      `::1` and `127.0.0.1`); they are dialled in order until one connects,
+      at most four, and nothing else is.
     * **Streaming caps.** The universal response cap has to bite *before* a
       body is buffered, which a request/response client cannot express. Mint in
       passive mode gives byte-level control and never touches the owner's
@@ -20,7 +23,9 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
       manifest did not name.
 
   The connection is HTTP/1 only. Streamable HTTP is defined over either
-  version, but one wire shape means one code path to audit (Rule #12).
+  version, but one wire shape means one code path to audit (Rule #12). It is
+  TLS, verified as below, except to an operator endpoint on this machine,
+  which `Endpoint.operator/1` alone admits over plain `http`.
 
   The caller owns the returned struct and must `close/1` it on every path.
   """
@@ -30,6 +35,12 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
   alias FermixCore.Capabilities.MCP.Remote.SSE
   alias FermixCore.Net.Egress
   alias FermixCore.Timeouts
+
+  require Logger
+
+  # The most validated addresses one open dials, each under the connect
+  # timeout.
+  @max_peers 4
 
   @type t :: %__MODULE__{
           conn: Mint.HTTP.t(),
@@ -56,8 +67,24 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
   @spec open(Endpoint.t(), keyword()) :: {:ok, t()} | {:error, term()}
   def open(%Endpoint{} = endpoint, opts \\ []) when is_list(opts) do
     with :ok <- ensure_direct(endpoint, opts),
-         {:ok, peer} <- Endpoint.resolve(endpoint, opts) do
-      connect(endpoint, peer, opts)
+         {:ok, peers} <- Endpoint.resolve(endpoint, opts) do
+      dial(endpoint, Enum.take(peers, @max_peers), opts)
+    end
+  end
+
+  # The validated addresses in order until one connects; the last one's
+  # failure when none does. A failed address is named by its class only.
+  defp dial(endpoint, [peer | rest], opts) do
+    case connect(endpoint, peer, opts) do
+      {:ok, connection} ->
+        {:ok, connection}
+
+      {:error, reason} when rest != [] ->
+        Logger.debug("remote MCP dial failed, trying the next address: #{inspect(reason)}")
+        dial(endpoint, rest, opts)
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -76,19 +103,26 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
     end
   end
 
+  # `hostname:` is what the `Host` header carries; certificate checking takes
+  # the bare host from `tls_opts/2`.
   defp connect(endpoint, peer, opts) do
     connect_opts = [
-      hostname: endpoint.host,
+      hostname: Endpoint.authority_host(endpoint),
       mode: :passive,
       protocols: [:http1],
-      transport_opts: tls_opts(endpoint.host, opts)
+      transport_opts: transport_opts(endpoint, opts)
     ]
 
-    case Mint.HTTP.connect(:https, peer, endpoint.port, connect_opts) do
+    case Mint.HTTP.connect(endpoint.scheme, peer, endpoint.port, connect_opts) do
       {:ok, conn} -> {:ok, %__MODULE__{conn: conn, endpoint: endpoint, peer: peer}}
       {:error, reason} -> {:error, {:remote_unreachable, transport_class(reason)}}
     end
   end
+
+  defp transport_opts(%Endpoint{scheme: :https, host: host}, opts), do: tls_opts(host, opts)
+
+  defp transport_opts(%Endpoint{scheme: :http}, opts),
+    do: [timeout: Keyword.get(opts, :connect_timeout_ms, Timeouts.mcp_remote_connect())]
 
   # `hostname:` above already drives Host/SNI/cert checking in Mint; these are
   # spelled out anyway because this is the audited path — an implicit default
@@ -110,17 +144,37 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
 
   Returns the updated connection so the caller can reuse it, or an error. On
   error the connection is unusable and the caller must `close/1`.
+
+  `stop: :first_event` answers as soon as an event stream has delivered one
+  complete event, with that event as the body, for a stream that may never
+  end (the older SSE transport's, M74 D7). The response is then unfinished,
+  so that connection is unusable too and the caller must `close/1` it.
+
+  `max_bytes` lowers the universal response cap for a caller whose answers
+  are small documents (a sign-in's metadata and tokens, M74 E5); it bites
+  while the body streams, as the universal one does, and never raises it.
   """
-  @spec request(t(), String.t(), [{String.t(), String.t()}], binary() | nil, pos_integer()) ::
-          {:ok, t(), response()} | {:error, t(), term()}
-  def request(%__MODULE__{} = connection, method, headers, body, timeout_ms)
-      when is_binary(method) and is_list(headers) and is_integer(timeout_ms) and timeout_ms > 0 do
+  @spec request(
+          t(),
+          String.t(),
+          [{String.t(), String.t()}],
+          binary() | nil,
+          pos_integer(),
+          keyword()
+        ) :: {:ok, t(), response()} | {:error, t(), term()}
+  def request(%__MODULE__{} = connection, method, headers, body, timeout_ms, opts \\ [])
+      when is_binary(method) and is_list(headers) and is_integer(timeout_ms) and timeout_ms > 0 and
+             is_list(opts) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     target = connection.endpoint.path
+    stop = Keyword.get(opts, :stop, :done)
+
+    max_bytes =
+      min(Keyword.get(opts, :max_bytes, Limits.max_response_bytes()), Limits.max_response_bytes())
 
     case Mint.HTTP.request(connection.conn, method, target, headers, body) do
       {:ok, conn, ref} ->
-        read(%{connection | conn: conn}, ref, deadline, timeout_ms)
+        read(%{connection | conn: conn}, ref, deadline, timeout_ms, {stop, max_bytes})
 
       # The send itself failed, so the peer never saw this request. That is a
       # materially different fact from a close mid-response: resending is not a
@@ -139,8 +193,11 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
     :ok
   end
 
-  defp read(connection, ref, deadline, budget_ms) do
+  defp read(connection, ref, deadline, budget_ms, {stop, max_bytes})
+       when stop in [:done, :first_event] do
     acc = %{
+      stop: stop,
+      max_bytes: max_bytes,
       status: nil,
       headers: [],
       header_bytes: 0,
@@ -175,11 +232,15 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
 
   defp apply_responses(connection, ref, responses, acc, deadline, budget_ms) do
     case Enum.reduce_while(responses, {:cont, acc}, &fold_response(&1, &2, ref)) do
+      {:cont, %{stop: :first_event, events: [_ | _]} = acc} -> first_event(connection, acc)
       {:cont, acc} -> recv_loop(connection, ref, acc, deadline, budget_ms)
       {:done, acc} -> finish(connection, acc)
       {:halt, reason} -> {:error, connection, reason}
     end
   end
+
+  defp first_event(connection, acc),
+    do: {:ok, connection, %{status: acc.status, headers: acc.headers, body: {:sse, acc.events}}}
 
   defp fold_response({:status, ref, status}, {:cont, acc}, ref) do
     if status in 300..399 do
@@ -250,7 +311,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
   defp absorb_data(acc, data) do
     received = acc.received + byte_size(data)
 
-    if received > Limits.max_response_bytes() do
+    if received > acc.max_bytes do
       {:error, {:remote_protocol_error, {:response_too_large, received}}}
     else
       absorb_body(%{acc | received: received}, data)

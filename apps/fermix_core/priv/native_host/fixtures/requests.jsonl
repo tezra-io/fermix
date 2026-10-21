@@ -1,0 +1,20 @@
+{"type":"server_hello","min_version":1,"max_version":1}
+{"type":"error","reason":"invalid_json"}
+{"type":"error","reason":"invalid_frame"}
+{"type":"error","reason":"missing_type"}
+{"type":"error","reason":"unknown_event","event":"tab.closed"}
+{"type":"error","reason":"missing_field","field":"host_version"}
+{"type":"error","reason":"invalid_field","field":"notifications"}
+{"type":"error","reason":"line_too_large"}
+{"type":"error","reason":"handshake_required"}
+{"type":"error","reason":"unexpected_client_hello"}
+{"type":"error","reason":"attach_required"}
+{"type":"error","reason":"unexpected_attached"}
+{"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":2,"min_version":1,"max_version":1}
+{"type":"error","reason":"host_already_attached"}
+{"type":"error","reason":"untrusted_host","message":"the native host must be a process the daemon did not start: a process placed as daemon_descendant"}
+{"id":1,"type":"host.status"}
+{"id":2,"type":"notifications.authorize"}
+{"id":3,"type":"notifications.post","reminder_id":"rem_8Kf2xQ1vT0w","title":"Tea","body":"Tea, today at 16:05 (in 10 minutes).","sound":true,"actions":[{"id":"snooze_10m","title":"Snooze 10 minutes"}]}
+{"id":4,"type":"notifications.post","title":"Laundry","body":"Laundry, today at 18:30.","sound":false,"actions":[]}
+{"id":5,"type":"host.stop_ack"}

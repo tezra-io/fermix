@@ -4,12 +4,12 @@ defmodule FermixCore.MixProject do
   def project do
     [
       app: :fermix_core,
-      version: "0.15.0",
+      version: "0.16.0",
       build_path: "../../_build",
       config_path: "../../config/config.exs",
       deps_path: "../../deps",
       lockfile: "../../mix.lock",
-      elixir: "~> 1.17",
+      elixir: "~> 1.18",
       elixirc_paths: elixirc_paths(Mix.env()),
       elixirc_options: [warnings_as_errors: true],
       start_permanent: Mix.env() == :prod,
@@ -36,7 +36,7 @@ defmodule FermixCore.MixProject do
     [
       {:burrito, "~> 1.5"},
       {:exqlite, "~> 0.36.0"},
-      {:anubis_mcp, "~> 1.6"},
+      {:anubis_mcp, "~> 2.0.0"},
       {:floki, "~> 0.36"},
       {:jason, "~> 1.4"},
       {:compux, github: "tezra-io/compux", ref: "d043c66569d8c3480712146dcfa6ccf4b781d6d2"},
@@ -56,6 +56,10 @@ defmodule FermixCore.MixProject do
       {:qr_code, "~> 3.2"},
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.0"},
+      # Reads a Codex `[mcp_servers.<name>]` block an owner pastes or imports
+      # (`McpServers.Interchange`). Already in the release through
+      # `fermix_channels`; declared here because this app reads it too.
+      {:toml_elixir, "~> 3.0"},
       # Compile-time-embedded IANA tz database (no runtime network fetch, unlike
       # :tzdata) so scheduled-job cron timezones resolve in the Burrito binary.
       {:tz, "~> 0.28"},

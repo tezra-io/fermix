@@ -125,6 +125,34 @@ defmodule FermixChannels.Mobile.DeviceRegistryTest do
     assert_received {:requests_revoked, "gone"}
   end
 
+  # M62 §5: the relays the daemon's endpoint uses are those every paired phone
+  # acknowledged, so a phone that leaves may widen them.
+  test "a revocation asks the remote rail to recompute its relays" do
+    test_pid = self()
+
+    registry =
+      start_supervised!(
+        {DeviceRegistry,
+         name: :"relay_registry_#{System.unique_integer([:positive])}",
+         device_store: :store,
+         delete_device: fn :store, id ->
+           if id == "gone", do: {:error, {:device_not_found, id}}, else: :ok
+         end,
+         revoke_requests: fn _id -> :ok end,
+         relays_changed: fn ->
+           send(test_pid, :relays_changed)
+           :ok
+         end},
+        id: make_ref()
+      )
+
+    assert :ok = DeviceRegistry.revoke(registry, "offline")
+    assert_received :relays_changed
+
+    assert {:error, {:device_not_found, "gone"}} = DeviceRegistry.revoke(registry, "gone")
+    refute_received :relays_changed
+  end
+
   test "refuses a dead socket and one socket claiming two device identities", %{
     registry: registry
   } do

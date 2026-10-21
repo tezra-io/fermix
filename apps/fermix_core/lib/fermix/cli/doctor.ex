@@ -97,6 +97,7 @@ defmodule Fermix.CLI.Doctor do
   defp collect_results(full?) do
     base = [
       Checks.readiness(),
+      Checks.provider_health(),
       Checks.fallback_providers(),
       Checks.workspace_layout(),
       Checks.service_unit(),

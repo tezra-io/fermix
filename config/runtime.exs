@@ -218,7 +218,17 @@ existing_ollama = Keyword.get(existing_providers, :ollama, [])
 existing_mistral = Keyword.get(existing_providers, :mistral, [])
 existing_venice = Keyword.get(existing_providers, :venice, [])
 
-openai_api_key = System.get_env("OPENAI_API_KEY") || Keyword.get(existing_openai, :api_key, "")
+# The one environment rule for credentials and auth modes: a nonblank variable
+# overlays the TOML-hydrated value, and an empty or absent one leaves it
+# untouched. `System.get_env(name) || stored` would let an exported empty
+# variable blank a stored secret, so every overlay below goes through here.
+put_env_overlay = fn config, key, env_name ->
+  case System.get_env(env_name) do
+    nil -> config
+    "" -> config
+    value -> Keyword.put(config, key, value)
+  end
+end
 
 # Provider, model, and reasoning effort are config-only (set via the wizard /
 # web setup), never env overlays. An env var that silently re-points the active
@@ -228,19 +238,10 @@ openai_api_key = System.get_env("OPENAI_API_KEY") || Keyword.get(existing_openai
 merged_openai =
   existing_openai
   |> Keyword.delete(:auth_mode)
-  |> Keyword.merge(api_key: openai_api_key)
+  |> Keyword.put_new(:api_key, "")
+  |> put_env_overlay.(:api_key, "OPENAI_API_KEY")
 
 merged_openai_codex = existing_openai_codex
-
-# Optional env overlays for API keys and auth modes; empty/absent vars
-# leave the TOML-hydrated values untouched.
-put_env_overlay = fn config, key, env_name ->
-  case System.get_env(env_name) do
-    nil -> config
-    "" -> config
-    value -> Keyword.put(config, key, value)
-  end
-end
 
 merged_anthropic =
   existing_anthropic
@@ -457,18 +458,19 @@ whatsapp_mode =
     _ -> Keyword.get(existing_whatsapp, :mode, :webhook)
   end
 
-whatsapp_overrides = [
-  access_token:
-    System.get_env("WHATSAPP_ACCESS_TOKEN") || Keyword.get(existing_whatsapp, :access_token, ""),
-  phone_number_id:
-    System.get_env("WHATSAPP_PHONE_NUMBER_ID") ||
-      Keyword.get(existing_whatsapp, :phone_number_id, ""),
-  verify_token:
-    System.get_env("WHATSAPP_VERIFY_TOKEN") || Keyword.get(existing_whatsapp, :verify_token, ""),
-  app_secret:
-    System.get_env("WHATSAPP_APP_SECRET") || Keyword.get(existing_whatsapp, :app_secret, ""),
-  mode: whatsapp_mode
-]
+whatsapp_overrides =
+  [
+    access_token: Keyword.get(existing_whatsapp, :access_token, ""),
+    phone_number_id:
+      System.get_env("WHATSAPP_PHONE_NUMBER_ID") ||
+        Keyword.get(existing_whatsapp, :phone_number_id, ""),
+    verify_token: Keyword.get(existing_whatsapp, :verify_token, ""),
+    app_secret: Keyword.get(existing_whatsapp, :app_secret, ""),
+    mode: whatsapp_mode
+  ]
+  |> put_env_overlay.(:access_token, "WHATSAPP_ACCESS_TOKEN")
+  |> put_env_overlay.(:verify_token, "WHATSAPP_VERIFY_TOKEN")
+  |> put_env_overlay.(:app_secret, "WHATSAPP_APP_SECRET")
 
 whatsapp_overrides =
   case System.get_env("WHATSAPP_ALLOWED_SENDER_IDS") do
@@ -498,12 +500,14 @@ discord_mode =
     _ -> Keyword.get(existing_discord, :mode, :gateway)
   end
 
-discord_overrides = [
-  bot_token: System.get_env("DISCORD_BOT_TOKEN") || Keyword.get(existing_discord, :bot_token, ""),
-  bot_user_id:
-    System.get_env("DISCORD_BOT_USER_ID") || Keyword.get(existing_discord, :bot_user_id, ""),
-  mode: discord_mode
-]
+discord_overrides =
+  [
+    bot_token: Keyword.get(existing_discord, :bot_token, ""),
+    bot_user_id:
+      System.get_env("DISCORD_BOT_USER_ID") || Keyword.get(existing_discord, :bot_user_id, ""),
+    mode: discord_mode
+  ]
+  |> put_env_overlay.(:bot_token, "DISCORD_BOT_TOKEN")
 
 discord_overrides =
   case System.get_env("DISCORD_ALLOWED_USER_IDS") do
@@ -533,13 +537,14 @@ slack_mode =
     _ -> Keyword.get(existing_slack, :mode, :webhook)
   end
 
-slack_overrides = [
-  bot_token: System.get_env("SLACK_BOT_TOKEN") || Keyword.get(existing_slack, :bot_token, ""),
-  signing_secret:
-    System.get_env("SLACK_SIGNING_SECRET") ||
-      Keyword.get(existing_slack, :signing_secret, ""),
-  mode: slack_mode
-]
+slack_overrides =
+  [
+    bot_token: Keyword.get(existing_slack, :bot_token, ""),
+    signing_secret: Keyword.get(existing_slack, :signing_secret, ""),
+    mode: slack_mode
+  ]
+  |> put_env_overlay.(:bot_token, "SLACK_BOT_TOKEN")
+  |> put_env_overlay.(:signing_secret, "SLACK_SIGNING_SECRET")
 
 slack_overrides =
   case System.get_env("SLACK_ALLOWED_USER_IDS") do
@@ -616,11 +621,7 @@ config :fermix_channels, imessage: Application.get_env(:fermix_channels, :imessa
 existing_mobile = Application.get_env(:fermix_channels, :mobile, [])
 existing_mobile_push = Keyword.get(existing_mobile, :push, [])
 
-mobile_push =
-  case System.get_env("FERMIX_APNS_KEY") do
-    value when is_binary(value) and value != "" -> Keyword.put(existing_mobile_push, :key, value)
-    _unset_or_blank -> existing_mobile_push
-  end
+mobile_push = existing_mobile_push |> put_env_overlay.(:key, "FERMIX_APNS_KEY")
 
 config :fermix_channels, mobile: Keyword.put(existing_mobile, :push, mobile_push)
 

@@ -24,6 +24,8 @@ defmodule FermixChannels.Mobile.DeviceStore do
     `platform`, `signer_role`, `version_code`, `boot_state` and
     `device_locked` are what the phone's key attestation proved when it was
     approved; a phone paired before attestation was verified has them `nil`.
+    `relay_list_rev` is the relay list revision the phone last acknowledged in
+    its `hello` (M62 §3.1), `nil` until it names one.
     """
 
     @enforce_keys [:device_id, :name, :model, :noise_pk, :created_at, :apns_key_salt]
@@ -35,7 +37,8 @@ defmodule FermixChannels.Mobile.DeviceStore do
                   signer_role: nil,
                   version_code: nil,
                   boot_state: nil,
-                  device_locked: nil
+                  device_locked: nil,
+                  relay_list_rev: nil
                 ]
 
     @type t :: %__MODULE__{
@@ -51,7 +54,8 @@ defmodule FermixChannels.Mobile.DeviceStore do
             signer_role: :development | :release | nil,
             version_code: non_neg_integer() | nil,
             boot_state: :verified | nil,
-            device_locked: true | nil
+            device_locked: true | nil,
+            relay_list_rev: String.t() | nil
           }
   end
 
@@ -68,11 +72,13 @@ defmodule FermixChannels.Mobile.DeviceStore do
     :signer_role,
     :version_code,
     :boot_state,
-    :device_locked
+    :device_locked,
+    :relay_list_rev
   ]
   @platforms ~w(android ios)
   @signer_roles %{"development" => :development, "release" => :release}
-  @update_fields [:name, :model, :push_token, :last_seen]
+  @update_fields [:name, :model, :push_token, :last_seen, :relay_list_rev]
+  @relay_list_rev_regex ~r/\A[0-9a-f]{16}\z/
   # last_seen is informational, and every hello records it: a newer value
   # inside this window is not worth a durable, fsync'd rewrite of the store.
   @last_seen_granularity_s 300
@@ -443,7 +449,8 @@ defmodule FermixChannels.Mobile.DeviceStore do
       signer_role: decode_signer_role(row["signer_role"]),
       version_code: row["version_code"],
       boot_state: decode_boot_state(row["boot_state"]),
-      device_locked: row["device_locked"]
+      device_locked: row["device_locked"],
+      relay_list_rev: row["relay_list_rev"]
     }
 
     validate_decoded(attrs)
@@ -501,6 +508,7 @@ defmodule FermixChannels.Mobile.DeviceStore do
          :ok <- validate_datetime(:created_at, attrs[:created_at]),
          :ok <- validate_optional_datetime(:last_seen, attrs[:last_seen]),
          :ok <- validate_binary32(:apns_key_salt, attrs[:apns_key_salt]),
+         :ok <- validate_relay_list_rev(:relay_list_rev, attrs[:relay_list_rev]),
          :ok <- validate_attestation_facts(attrs) do
       {:ok, struct!(Device, Map.take(attrs, @required_fields ++ @optional_fields))}
     end
@@ -532,7 +540,8 @@ defmodule FermixChannels.Mobile.DeviceStore do
          :ok <- validate_present(attrs, :name, &validate_text/2),
          :ok <- validate_present(attrs, :model, &validate_text/2),
          :ok <- validate_present(attrs, :push_token, &validate_optional_text/2),
-         :ok <- validate_present(attrs, :last_seen, &validate_optional_datetime/2) do
+         :ok <- validate_present(attrs, :last_seen, &validate_optional_datetime/2),
+         :ok <- validate_present(attrs, :relay_list_rev, &validate_relay_list_rev/2) do
       {:ok, attrs}
     end
   end
@@ -579,6 +588,17 @@ defmodule FermixChannels.Mobile.DeviceStore do
   defp validate_optional_datetime(_field, nil), do: :ok
   defp validate_optional_datetime(field, value), do: validate_datetime(field, value)
 
+  defp validate_relay_list_rev(_field, nil), do: :ok
+
+  defp validate_relay_list_rev(field, value) when is_binary(value) do
+    if Regex.match?(@relay_list_rev_regex, value),
+      do: :ok,
+      else: {:error, {:invalid_device, field, :invalid_relay_list_rev}}
+  end
+
+  defp validate_relay_list_rev(field, _value),
+    do: {:error, {:invalid_device, field, :invalid_relay_list_rev}}
+
   defp apply_updates(device, updates) do
     updates = settle_last_seen(device.last_seen, updates)
     updated = struct!(device, updates)
@@ -586,7 +606,8 @@ defmodule FermixChannels.Mobile.DeviceStore do
     with :ok <- validate_text(:name, updated.name),
          :ok <- validate_text(:model, updated.model),
          :ok <- validate_optional_text(:push_token, updated.push_token),
-         :ok <- validate_optional_datetime(:last_seen, updated.last_seen) do
+         :ok <- validate_optional_datetime(:last_seen, updated.last_seen),
+         :ok <- validate_relay_list_rev(:relay_list_rev, updated.relay_list_rev) do
       {:ok, updated}
     end
   end
@@ -700,6 +721,7 @@ defmodule FermixChannels.Mobile.DeviceStore do
     |> maybe_put("version_code", device.version_code)
     |> maybe_put("boot_state", encode_atom(device.boot_state))
     |> maybe_put("device_locked", device.device_locked)
+    |> maybe_put("relay_list_rev", device.relay_list_rev)
   end
 
   defp encode_atom(nil), do: nil

@@ -55,6 +55,7 @@ defmodule FermixCore.Memory.Repo do
   @voice_calls_migration_version 37
   @voice_call_gist_taint_migration_version 38
   @phone_joins_chat_migration_version 39
+  @reply_blocks_migration_version 41
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -772,6 +773,7 @@ defmodule FermixCore.Memory.Repo do
           optional(:client_msg_id) => String.t() | nil,
           optional(:in_reply_to) => String.t() | nil,
           optional(:media_refs) => [map()],
+          optional(:blocks) => [map()],
           optional(:metadata) => map() | nil,
           optional(:proactive_key) => String.t() | nil,
           optional(:created_at) => DateTime.t()
@@ -794,6 +796,7 @@ defmodule FermixCore.Memory.Repo do
           request_attempt: non_neg_integer() | nil,
           output_key: String.t() | nil,
           link_previews: [map()],
+          blocks: [map()],
           created_at: DateTime.t()
         }
 
@@ -4287,8 +4290,27 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_mobile_media_index_migration(conn, versions),
          :ok <- apply_voice_calls_migration(conn, versions),
          :ok <- apply_voice_call_gist_taint_migration(conn, versions),
-         :ok <- apply_phone_joins_chat_migration(conn, versions) do
+         :ok <- apply_phone_joins_chat_migration(conn, versions),
+         :ok <- apply_reply_blocks_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # A reply's blocks beside the timeline (M72), their table and version in one
+  # transaction. No row is rewritten: a row written before has none.
+  defp apply_reply_blocks_migration(conn, versions) do
+    if Enum.member?(versions, @reply_blocks_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MobileSql.reply_blocks_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@reply_blocks_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 

@@ -12,6 +12,10 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretWriter.File, as: SecretFile
 
+  # A resolution's arrival on a loaded runner; it never comes when it waits on
+  # a suspended file server.
+  @arrival_ms 10_000
+
   test "an empty FERMIX_HOME yields absolute protected paths, not cwd-relative ones" do
     previous = System.get_env("FERMIX_HOME")
     System.put_env("FERMIX_HOME", "")
@@ -94,6 +98,35 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
     FermixTestSupport.SafeRm.rm_rf!(root)
   end
 
+  # A decision listed every ancestor of its path through the VM's one file
+  # server, which runs each call to its end, so on a slow runner every other
+  # file call in the VM waited past a minute behind those listings (macos-x64,
+  # 2026-10-21). Resolving reads the kernel from the caller's own process.
+  # Sync, like this module: it suspends a server every test uses.
+  test "resolves a path, its casing included, without the VM's file server" do
+    tmp = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-no-file-server")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp) end)
+    # Resolved first, so no link on the way sends the call to `File.read_link/1`.
+    {:ok, root} = PathPolicy.resolve_links(tmp)
+    File.mkdir_p!(Path.join(root, "Folder/inner"))
+    path = Path.join(root, "folder/inner/new.txt")
+
+    server = Process.whereis(:file_server_2)
+    :ok = :sys.suspend(server)
+
+    resolved =
+      try do
+        task =
+          Task.async(fn -> {PathPolicy.resolve_links(path), PathPolicy.canonical_path(path)} end)
+
+        Task.yield(task, @arrival_ms) || Task.shutdown(task, :brutal_kill)
+      after
+        :ok = :sys.resume(server)
+      end
+
+    assert resolved == {:ok, {{:ok, path}, Path.join(root, "Folder/inner/new.txt")}}
+  end
+
   test "blocks a case-variant of a protected home dir" do
     home = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-home")
     File.mkdir_p!(Path.join(home, ".ssh"))
@@ -101,6 +134,29 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
 
     assert {:error, {:protected_path, _path}} =
              PathPolicy.allowed_path?(Path.join(home, ".SSH/evil_key"), config)
+
+    FermixTestSupport.SafeRm.rm_rf!(home)
+  end
+
+  # gh's `hosts.yml` stays reachable: gh cannot start without reading it, and on
+  # a Mac the token it guards lives in the keychain, not in the file.
+  test "credential files beside ordinary config are protected, the config beside them is not" do
+    home = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-credential-files")
+    config = Config.normalize(mode: :open, os_home: home, workspace_root: home)
+
+    for file <- ~w(.npmrc .netrc .git-credentials .config/git/credentials
+                   .config/gcloud/credentials.db .config/gcloud/access_tokens.db-wal
+                   .config/gcloud/legacy_credentials/a/adc.json
+                   .config/gcloud/application_default_credentials.json) do
+      assert {:error, {:protected_path, _path}} =
+               PathPolicy.allowed_path?(Path.join(home, file), config),
+             file
+    end
+
+    for file <- ~w(.gitconfig .zshrc .config/git/config
+                   .config/gcloud/configurations/config_default .config/gh/hosts.yml) do
+      assert :ok = PathPolicy.allowed_path?(Path.join(home, file), config), file
+    end
 
     FermixTestSupport.SafeRm.rm_rf!(home)
   end
@@ -275,6 +331,7 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
       "browser_bridge.sock",
       "companion.sock",
       "browser_host.sock",
+      "native_host.sock",
       "memory.db-wal",
       "memory.db-shm",
       "memory.db-journal",

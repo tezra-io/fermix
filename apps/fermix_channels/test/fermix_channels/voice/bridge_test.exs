@@ -705,7 +705,9 @@ defmodule FermixChannels.Voice.BridgeTest do
         request: "user: what is on my calendar",
         turn_session_id: "voice_delegation_1",
         elapsed_ms: 1_000,
-        record_opts: ctx.record_opts
+        record_opts: ctx.record_opts,
+        engine: "openai_live",
+        provider: "openai"
       }
     end
   end

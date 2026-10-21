@@ -9,6 +9,7 @@ defmodule FermixCore.Sandbox do
   alias FermixCore.Sandbox.Env
   alias FermixCore.Sandbox.Hardline
   alias FermixCore.Sandbox.Mode
+  alias FermixCore.Sandbox.OsSandbox
   alias FermixCore.Sandbox.PathPolicy
 
   @type decision :: Decision.decision()
@@ -36,7 +37,8 @@ defmodule FermixCore.Sandbox do
           env: [{String.t(), String.t()}],
           env_resolved: [String.t()],
           env_unresolved: [Env.unresolved()],
-          redact_values: [String.t()]
+          redact_values: [String.t()],
+          roots: [String.t()]
         }
 
   @spec shell_plan(String.t(), String.t() | nil, map()) :: {:ok, shell_plan()} | {:error, term()}
@@ -56,13 +58,21 @@ defmodule FermixCore.Sandbox do
       # so a Buzz session's PATH and relay credentials have to land here or the
       # model can never run the `buzz` CLI it is instructed to answer with.
       # Absent on every other surface.
+      # The tool caches point into the workspace where the kernel sandbox
+      # applies (`OsSandbox.with_cache_env/3`).
+      env =
+        built.env
+        |> OsSandbox.with_cache_env(config, Map.get(context, :os_sandbox, []))
+        |> Env.apply_session_env(Map.get(context, :session_env))
+
       {:ok,
        %{
          working_dir: working_dir,
-         env: Env.apply_session_env(built.env, Map.get(context, :session_env)),
+         env: env,
          env_resolved: built.resolved,
          env_unresolved: built.unresolved,
-         redact_values: Env.values_for(built.env, built.resolved)
+         redact_values: Env.values_for(built.env, built.resolved),
+         roots: effective_roots
        }}
     else
       {:hardline, reason} -> {:error, {:hardline, reason}}
@@ -93,6 +103,40 @@ defmodule FermixCore.Sandbox do
       do: %{source: "sandbox", decision: "deny", phase: "pre_execution"}
 
   def pre_execution_denial(_other), do: nil
+
+  @doc """
+  What a refusal outside the roots tells the model to do about `path`: ask the
+  owner. A grant changes Fermix's own config, which a command cannot write, so
+  the model is never told to run one.
+  """
+  @spec grant_hint(String.t()) :: String.t()
+  def grant_hint(path) when is_binary(path) do
+    "Call the request_directory_access tool to ask the owner to approve it. Only the owner " <>
+      "can grant a folder: /grant path #{path} in chat, or fermix grant path #{path} in their own terminal."
+  end
+
+  @doc """
+  `executable args` as the kernel runs it for the turn `context` names
+  (`Sandbox.OsSandbox`): built from the same config and request directory as
+  every decision in this module, so the kernel is never narrower than the
+  policy. `roots` are those decisions' effective roots when the caller already
+  has them (a `shell_plan/3`'s), so the folder walk runs once.
+  `context[:os_sandbox]` carries `OsSandbox.wrap/5`'s options (tests). A profile
+  that cannot be built is one sentence, never a command run without it.
+  """
+  @spec confine(String.t(), [String.t()], map(), [String.t()] | nil) ::
+          {:ok, OsSandbox.spawn()} | {:error, {:os_sandbox_unavailable, String.t()}}
+  def confine(executable, args, context, roots \\ nil)
+      when is_binary(executable) and is_list(args) and is_map(context) and
+             (is_list(roots) or is_nil(roots)) do
+    opts = Map.get(context, :os_sandbox, [])
+    opts = if roots, do: Keyword.put(opts, :roots, roots), else: opts
+
+    case OsSandbox.wrap(executable, args, config_from(context), Map.get(context, :cwd), opts) do
+      {:ok, spawn} -> {:ok, spawn}
+      {:error, reason} -> {:error, {:os_sandbox_unavailable, OsSandbox.describe(reason)}}
+    end
+  end
 
   @doc "The workspace root of the sandbox config `context` names (the live one by default)."
   @spec workspace_root(map()) :: String.t()

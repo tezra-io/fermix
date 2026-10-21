@@ -1654,13 +1654,48 @@ defmodule FermixCore.Agents.TurnRunnerTest do
              status: 401,
              kind: :auth,
              message: "invalid x-api-key"
-           }}
+           }},
+          get_env: &no_env/1
         )
 
       assert reply =~ "Anthropic"
       assert reply =~ "API key"
       refute reply =~ "fermix auth login"
       refute reply == "Sorry, I encountered an error processing your message."
+    end
+
+    # The 0.15.0 report: a sandbox exported ANTHROPIC_API_KEY=proxy-managed into
+    # every process, config/runtime.exs layered it over the stored key at every
+    # start, and every turn said to check the key in `fermix setup`, where the
+    # key had been stored correctly. The reply names the key actually used.
+    test "an API key the daemon's environment supplies is named instead of setup" do
+      env = %{"ANTHROPIC_API_KEY" => "proxy-managed"}
+
+      reply =
+        TurnRunner.error_reply(
+          {:provider_error,
+           %{provider: :anthropic, adapter: :messages, status: 401, kind: :auth, message: "no"}},
+          get_env: &Map.get(env, &1)
+        )
+
+      assert reply ==
+               "Anthropic authentication failed with the API key from ANTHROPIC_API_KEY in the " <>
+                 "daemon's environment, which Fermix uses instead of a stored key. Correct that " <>
+                 "variable, or start the daemon without it to use the stored key, then retry."
+
+      refute reply =~ "fermix setup"
+    end
+
+    test "an override is reported only for the provider whose key it replaces" do
+      env = %{"OPENAI_API_KEY" => "sk-from-env"}
+
+      reply =
+        TurnRunner.error_reply(
+          {:provider_error, %{provider: :anthropic, status: 401, kind: :auth, message: "no"}},
+          get_env: &Map.get(env, &1)
+        )
+
+      assert reply =~ "check the Anthropic API key in `fermix setup`"
     end
 
     test "maps Anthropic OAuth auth failures to a subscription reconnect hint" do
@@ -1693,7 +1728,8 @@ defmodule FermixCore.Agents.TurnRunnerTest do
              kind: :auth,
              auth_mode: :api_key,
              message: "invalid api key"
-           }}
+           }},
+          get_env: &no_env/1
         )
 
       assert reply =~ "SpaceXAI"
@@ -2906,19 +2942,25 @@ defmodule FermixCore.Agents.TurnRunnerTest do
                "a private call's delegation must not advertise a #{excluded} capability"
       end
 
-      # The boundary excludes categories, not the whole surface.
+      # The boundary excludes categories, not the whole surface: a picture or
+      # file it sends goes to the owner's chat.
       assert :system in categories
+      assert :channel in categories
+      assert :media in categories
     end
 
     # M56 §4.7: a hand-off in the chat launches a coding run in the chat's own
     # conversation, so the run's outcome re-enters the chat and is answered
-    # there; channel sends, media and fan-out stay out.
-    test "a hand-off in the chat is built with coding runs, and without the rest" do
+    # there; pictures and files it sends are written to the chat; fan-out
+    # stays out.
+    test "a hand-off in the chat is built with coding runs, pictures and files, and without fan-out" do
       registry = boundary_registry()
       categories = boundary_categories(chat_hand_off("fix the flaky test"), registry)
 
       assert :harness in categories
       assert :system in categories
+      assert :channel in categories
+      assert :media in categories
 
       for excluded <- VoiceCall.excluded_categories("chat") do
         refute excluded in categories,
@@ -3027,6 +3069,30 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert row.channel == "companion"
       assert row.content == "from the phone"
       assert row.metadata == %{"client_msg_id" => "c-1", "mobile_request_type" => "msg"}
+    end
+
+    # M72 §8.4: `place_search` keeps the places it returns under its tool
+    # context's key, and the companion turn writer takes them under
+    # `ConversationKey.from/1` of the message it handed the queue, so the two
+    # are one key, on a Mac turn and on a phone turn alike.
+    test "a Mac turn's tools run under the key its replies take places under" do
+      Process.put(:record_cwd_step, 0)
+      msg = mac_msg("any quiet coffee nearby?")
+
+      %{context: context} = run_record_cwd_turn(:operator, "/tmp/fermix-mac-places", msg)
+
+      assert context.conversation_key == ConversationKey.from(msg)
+      assert context.conversation_key == @chat_key
+    end
+
+    test "a phone turn's tools run under the chat's key, the one its places are taken under" do
+      Process.put(:record_cwd_step, 0)
+      msg = phone_msg("any quiet coffee nearby?")
+
+      %{context: context} = run_record_cwd_turn(:operator, "/tmp/fermix-phone-places", msg)
+
+      assert context.conversation_key == ConversationKey.from(msg)
+      assert context.conversation_key == @chat_key
     end
 
     # One conversation, one review: the reviewer keys its state on the key
@@ -3167,7 +3233,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     name = :"tr_boundary_reg_#{System.unique_integer([:positive])}"
     start_supervised!({CapabilityRegistry, name: name}, id: name)
 
-    for category <- [:system | VoiceCall.excluded_categories("private")] do
+    for category <- [:system, :channel, :media | VoiceCall.excluded_categories("private")] do
       :ok = CapabilityRegistry.register(name, boundary_capability(category))
     end
 
@@ -3607,4 +3673,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
     Enum.reduce(overrides, base, fn {key, value}, acc -> Map.put(acc, key, value) end)
   end
+
+  # No variable is set: the stored key is the one in use.
+  defp no_env(_name), do: nil
 end

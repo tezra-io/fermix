@@ -638,6 +638,31 @@ defmodule FermixOpik.MapperTest do
     assert Jason.encode!(span.metadata.outcome) == ~s("refused")
   end
 
+  # M70 §09: a Grok voice call's `fermix_task` function call is one tool span
+  # per call the model made, refused and cancelled ones included, and its
+  # terminal word and the Fermix task id are what tell them apart. A closed enum
+  # and an opaque id; the request the model sent is content and never a field.
+  test "tool_span keeps a voice task call's status and task id, and never the request" do
+    metadata = %{
+      tool: "fermix_task",
+      agent: "voice_live",
+      success: true,
+      status: "cancelled",
+      task_id: "task_1",
+      action: "cancel",
+      request: "book a table for two at 8"
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 12},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{status: "cancelled", task_id: "task_1", action: "cancel"}
+  end
+
   test "computer_use_span records the phase inside the session's own run" do
     metadata = %{
       agent: "main",
@@ -808,6 +833,33 @@ defmodule FermixOpik.MapperTest do
 
       assert span.metadata.server_seq == 42
       assert span.metadata.shown_bytes == 913
+    end
+
+    # M70 §09: both task engines share the run kind and these phases, so every
+    # phase span names the engine and the voice provider it ran on.
+    test "a phase span names the engine and provider the call runs on" do
+      span =
+        Mapper.voice_live_span(
+          %{
+            engine: "xai_realtime",
+            provider: "xai",
+            model: "grok-voice-3.0",
+            provider_session_id: "sess_grok_1"
+          },
+          %{},
+          trace_id: "trace-1",
+          parent_span_id: "wrap-1",
+          project_name: "fermix",
+          ended: @ended,
+          phase: :session_started
+        )
+
+      assert span.metadata == %{
+               engine: "xai_realtime",
+               provider: "xai",
+               model: "grok-voice-3.0",
+               provider_session_id: "sess_grok_1"
+             }
     end
 
     test "a phase with no duration is a point span and drops absent keys" do

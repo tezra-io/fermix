@@ -4,7 +4,17 @@ defmodule FermixCore.SandboxTest do
   alias FermixCore.Sandbox
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.Env
+  alias FermixCore.Sandbox.OsSandbox
   alias FermixCore.Sandbox.PathPolicy
+
+  test "a refusal outside the roots sends the model to the owner, never to run a grant itself" do
+    hint = Sandbox.grant_hint("/work/repo")
+
+    assert hint =~ "Call the request_directory_access tool"
+    assert hint =~ "/grant path /work/repo in chat"
+    assert hint =~ "fermix grant path /work/repo in their own terminal"
+    refute hint =~ "run: fermix grant"
+  end
 
   test "standard mode admits the request cwd for an operator context and denies it without" do
     os_home = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-request-cwd")
@@ -156,7 +166,9 @@ defmodule FermixCore.SandboxTest do
       assert {:ok, %{env: env}} =
                Sandbox.shell_plan("echo hi", ctx.root, %{sandbox_config: ctx.config})
 
-      assert {:ok, %{env: expected}} = Env.build(ctx.config)
+      # On macOS the plan also points the tool caches into the workspace.
+      assert {:ok, %{env: built}} = Env.build(ctx.config)
+      expected = OsSandbox.with_cache_env(built, ctx.config)
       assert Enum.sort(env) == Enum.sort(expected)
     end
 

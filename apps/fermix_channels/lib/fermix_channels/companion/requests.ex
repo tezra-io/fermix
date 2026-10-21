@@ -289,7 +289,7 @@ defmodule FermixChannels.Companion.Requests do
          {:ok, {append_status, row}} <-
            append_user(run.profile, message, run.client_id, media_refs, opts),
          :ok <- after_user_append(run.transport, append_status, run.profile, row, message, opts),
-         :ok <- ingest_gateway(message, run, opts) do
+         :ok <- ingest_gateway(message, row.content, run, opts) do
       settle_after_ingest(run, opts)
     end
   end
@@ -513,7 +513,9 @@ defmodule FermixChannels.Companion.Requests do
 
   defp after_settle(_transport, _profile, _request, _opts), do: :ok
 
-  defp ingest_gateway(message, run, opts) do
+  # `stored_text` is the user row's text as the timeline holds it before the
+  # gateway enriches the message.
+  defp ingest_gateway(message, stored_text, run, opts) do
     gateway(opts).ingest([message],
       channel: run.transport.channel,
       agent: Keyword.get(opts, :agent, Turns),
@@ -521,7 +523,8 @@ defmodule FermixChannels.Companion.Requests do
       ingress_context: run.transport.ingress_context,
       defer_command_fn: run.defer_command_fn,
       approval_resolution_fn: approval_resolution_fn(message.chat_id, run.transport.name, opts),
-      ingest_enriched_fn: enrichment_fn(message.chat_id, run.client_id, run.attempt, opts)
+      ingest_enriched_fn:
+        enrichment_fn(message.chat_id, run.client_id, run.attempt, stored_text, opts)
     )
   end
 
@@ -561,7 +564,12 @@ defmodule FermixChannels.Companion.Requests do
     end
   end
 
-  defp enrichment_fn(profile, client_id, attempt, opts) do
+  # The gateway's enrichment writes the message's text to its row: a voice
+  # note's transcript replaces it. Only a text that changed is announced, as
+  # `row_updated` (companion protocol 3); a message with nothing to transcribe,
+  # every Mac message among them, passes through unchanged and announces none.
+  # The row is stored either way, so a failed announcement fails no turn.
+  defp enrichment_fn(profile, client_id, attempt, stored_text, opts) do
     fn message ->
       store(opts).update_client_message(
         profile,
@@ -571,11 +579,14 @@ defmodule FermixChannels.Companion.Requests do
         store_opts(opts)
       )
       |> case do
-        {:ok, _row} -> :ok
+        {:ok, %{content: ^stored_text}} -> :ok
+        {:ok, row} -> best_effort_emit(opts, {:profile, profile}, row_updated(profile, row))
         {:error, reason} -> {:error, reason}
       end
     end
   end
+
+  defp row_updated(profile, row), do: Output.row_updated(profile, row.server_seq)
 
   defp recovered_event(row) do
     type = Map.get(row, :request_type)

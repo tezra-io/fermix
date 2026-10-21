@@ -89,7 +89,19 @@ defmodule FermixCore.Management.Protocol do
     {"browser.install.start", 2},
     {"imessage.permissions.get", 2},
     {"imessage.grant.start", 2},
-    {"imessage.policy.confirm", 2}
+    {"imessage.policy.confirm", 2},
+    {"mcp.servers.list", 2},
+    {"mcp.servers.get", 2},
+    {"mcp.servers.draft", 2},
+    {"mcp.servers.add", 2},
+    {"mcp.servers.update", 2},
+    {"mcp.servers.remove", 2},
+    {"mcp.servers.enable", 2},
+    {"mcp.servers.disable", 2},
+    {"mcp.servers.tool.set", 2},
+    {"mcp.servers.check.start", 2},
+    {"mcp.servers.import.scan", 2},
+    {"mcp.servers.import", 2}
   ]
   @methods Enum.map(@method_minimums, fn {method, _minimum} -> method end)
   @method_minimum_versions Map.new(@method_minimums)

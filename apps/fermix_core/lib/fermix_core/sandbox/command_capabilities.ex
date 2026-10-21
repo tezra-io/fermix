@@ -10,6 +10,8 @@ defmodule FermixCore.Sandbox.CommandCapabilities do
 
   require Logger
 
+  # `confined?: false`: the AI tools run outside the kernel sandbox for now (see
+  # `CommandTool`); every other command runs inside it.
   @preset_specs %{
     "ai_tools" => [
       %{
@@ -17,14 +19,16 @@ defmodule FermixCore.Sandbox.CommandCapabilities do
         command: "codex",
         args: [],
         pass_env: ["OPENAI_API_KEY"],
-        description: "Run Codex with a one-shot prompt."
+        description: "Run Codex with a one-shot prompt.",
+        confined?: false
       },
       %{
         name: "claude_code",
         command: "claude",
         args: [],
         pass_env: ["ANTHROPIC_API_KEY"],
-        description: "Run Claude Code with a one-shot prompt."
+        description: "Run Claude Code with a one-shot prompt.",
+        confined?: false
       }
     ],
     "dev_tools" => [
@@ -94,7 +98,8 @@ defmodule FermixCore.Sandbox.CommandCapabilities do
       args: Map.get(spec, :args, []),
       pass_env: Map.get(spec, :pass_env, []),
       timeout_ms: Map.get(spec, :timeout_ms, 30_000),
-      description: Map.get(spec, :description) || "Run #{Map.fetch!(spec, :command)}."
+      description: Map.get(spec, :description) || "Run #{Map.fetch!(spec, :command)}.",
+      confined?: Map.get(spec, :confined?, true)
     }
   end
 

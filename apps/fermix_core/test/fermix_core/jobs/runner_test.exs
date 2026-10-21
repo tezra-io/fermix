@@ -15,6 +15,16 @@ defmodule FermixCore.Jobs.RunnerTest do
   alias FermixCore.Memory.Repo
   alias FermixCore.Net.Egress
 
+  # How long to wait for a runner's own exit. It is an arrival bound, so a run
+  # that ends early returns at once; a loaded runner (attachment read gates, the
+  # file server) can take seconds to get there.
+  @runner_exit_ms 10_000
+
+  # How long an adapter hangs in a test whose watchdog must end the run. Only
+  # the watchdog's kill ends it early; a hang a stall can outlast lets the
+  # adapter answer first, and a loaded runner stalled past 180 ms that way.
+  @adapter_hang_ms 30_000
+
   defmodule RecordingAdapter do
     @behaviour FermixCore.Providers.Adapter
 
@@ -702,7 +712,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       capability_registry: capability_registry,
       output_base_dir: output_base_dir,
       inactivity_timeout_ms: 20,
-      adapter_opts: [sleep_ms: 200],
+      adapter_opts: [sleep_ms: @adapter_hang_ms],
       script: [%{content: "too late"}]
     )
 
@@ -735,6 +745,9 @@ defmodule FermixCore.Jobs.RunnerTest do
     # Own the exit observation from the spawn: see assert_runner_exits_normally.
     Process.flag(:trap_exit, true)
 
+    # The window must outlast the real work between activity events (the chat
+    # reply, the tool's dispatch), which a loaded runner stretched past 20 ms,
+    # ending the run before the tool; the silence after the tool outlasts it.
     {:ok, pid} =
       Runner.start_link(
         repo: repo,
@@ -743,15 +756,15 @@ defmodule FermixCore.Jobs.RunnerTest do
         notify: parent,
         capability_registry: capability_registry,
         adapter: ToolThenSilentAdapter,
-        adapter_opts: [test_pid: parent, silence_ms: 2_000],
+        adapter_opts: [test_pid: parent, silence_ms: @adapter_hang_ms],
         output_base_dir: output_base_dir,
-        inactivity_timeout_ms: 20,
+        inactivity_timeout_ms: 1_000,
         network_readiness_enabled: false
       )
 
     assert_receive {:tool_then_silent, :chat}
     assert_receive {:tool_then_silent, :continue}
-    assert_receive {:EXIT, ^pid, :normal}, 2_000
+    assert_receive {:EXIT, ^pid, :normal}, @runner_exit_ms
 
     assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
     assert timed_out_run.status == "timeout"
@@ -777,7 +790,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       capability_registry: capability_registry,
       output_base_dir: output_base_dir,
       default_timeout_ms: 20,
-      adapter_opts: [sleep_ms: 200],
+      adapter_opts: [sleep_ms: @adapter_hang_ms],
       script: [%{content: "too late"}]
     )
 
@@ -806,9 +819,8 @@ defmodule FermixCore.Jobs.RunnerTest do
       capability_registry: capability_registry,
       output_base_dir: output_base_dir,
       timeout_ms: nil,
-      adapter_opts: [sleep_ms: 5_000],
-      script: [%{content: "too late"}],
-      exit_timeout_ms: 3_000
+      adapter_opts: [sleep_ms: @adapter_hang_ms],
+      script: [%{content: "too late"}]
     )
 
     assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
@@ -837,9 +849,8 @@ defmodule FermixCore.Jobs.RunnerTest do
       capability_registry: capability_registry,
       output_base_dir: output_base_dir,
       inactivity_timeout_ms: nil,
-      adapter_opts: [sleep_ms: 5_000],
-      script: [%{content: "too late"}],
-      exit_timeout_ms: 3_000
+      adapter_opts: [sleep_ms: @adapter_hang_ms],
+      script: [%{content: "too late"}]
     )
 
     assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
@@ -867,7 +878,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       capability_registry: capability_registry,
       output_base_dir: output_base_dir,
       timeout_ms: 20,
-      adapter_opts: [sleep_ms: 200],
+      adapter_opts: [sleep_ms: @adapter_hang_ms],
       script: [%{content: "too late"}]
     )
 
@@ -1419,7 +1430,7 @@ defmodule FermixCore.Jobs.RunnerTest do
         delivery_timeout_ms: Keyword.get(opts, :delivery_timeout_ms)
       )
 
-    assert_receive {:EXIT, ^pid, :normal}, Keyword.get(opts, :exit_timeout_ms, 1_000)
+    assert_receive {:EXIT, ^pid, :normal}, Keyword.get(opts, :exit_timeout_ms, @runner_exit_ms)
   end
 
   defp create_claimed_job(repo, attrs) do
@@ -2485,7 +2496,7 @@ defmodule FermixCore.Jobs.RunnerTest do
         capability_registry: capability_registry,
         output_base_dir: output_base_dir,
         inactivity_timeout_ms: 20,
-        adapter_opts: [sleep_ms: 200],
+        adapter_opts: [sleep_ms: @adapter_hang_ms],
         delivery_adapter: RecordingDelivery,
         delivery_opts: [test_pid: self()],
         script: [%{content: "too late"}]

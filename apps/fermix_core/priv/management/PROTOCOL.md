@@ -198,8 +198,8 @@ daemon onto anything else.
 | `settings.get` | `section` | One section's rows. Exactly one section per call, which is what keeps every result inside the published depth budget. Minimum version `2`. |
 | `settings.apply` | `section`, `values` | Applies the changed keys of one section and answers with what landed, the restart state, a readiness summary, and the changes the operator did not type. Minimum version `2`. |
 | `settings.reload` | none | Re-reads the settings file, pushes it into the running configuration, and re-records the baseline. The one action behind `Reload settings from disk`. Minimum version `2`. |
-| `secret.set` | `id`, `value` | Stores one secret and answers with its presence, never its value. Minimum version `2`. |
-| `secret.clear` | `id` | Forgets one secret: the keyring item, the reference that reads it, and the value in force. Minimum version `2`. |
+| `secret.set` | `id`, `value` | Stores one secret and answers with its presence, never its value, and the environment variable that overrides it, if any. Minimum version `2`. |
+| `secret.clear` | `id` | Forgets one secret: the keyring item, the reference that reads it, and the value in force. Answers with the environment variable still in use, if any. Minimum version `2`. |
 | `setup.detect` | `targets` | One row per target asked for: whether this Mac already has it, and a short detail where there is one. The harness target also reports vendor installation, version and authentication status, with guidance. The `meetbot` target reports whether both halves of the meeting notetaker are installed, its detail carries the state of the notetaker's Google sign-in as a sentence, and `signed_in` carries the same state as a boolean, null while the notetaker is absent. Never a credential value. Minimum version `2`. |
 | `providers.set_primary` | `provider` | Makes one configured provider the primary and answers with the restart state and any change the operator did not type. Minimum version `2`. |
 | `providers.models.list` | `provider`, `live`, `query`, `cursor`, `limit` | One page of models, from the catalog this build ships or from the provider's own live listing, with the cursor for the next page. Minimum version `2`. |
@@ -207,9 +207,9 @@ daemon onto anything else.
 | `job.get` | `job_id` | One job's uniform view. Minimum version `2`. |
 | `job.cancel` | `job_id` | Stops a running job and answers its terminal view. Cancelling a finished job is a no-op, not an error. Minimum version `2`. |
 | `job.list` | none | Every job this daemon retains, oldest first. What lets a reopened surface find a run it started rather than starting a second one. Minimum version `2`. |
-| `auth.start` | `provider` | Starts a browser sign-in and answers with the job plus the authorize url and its lifetime, returned once. `openai_codex` signs in with ChatGPT: a sign-in that leaves ChatGPT plan usage off fails the job with its sentence, and a completed one first makes sure the default model is one the account lists. Minimum version `2`. |
+| `auth.start` | `provider` | Starts a browser sign-in and answers with the job plus the authorize url and its lifetime, returned once. `openai_codex` signs in with ChatGPT: a sign-in that leaves ChatGPT plan usage off fails the job with its sentence, and a completed one first makes sure the default model is one the account lists. When that check cannot be made (the account's model list could not be read, or the model could not be saved), the sign-in still completes and its result carries `model_warning`, the daemon's sentence saying the default model was not checked and why, beside `account_label`. The field is optional: absent means the check was made, and a client that does not know it shows the sign-in as completed. `mcp:<name>` signs in one MCP server the owner added, a remote one whose `auth` is `auto`, and is refused with `invalid_params` on `provider` and a sentence for a name no server has, a server on this Mac, one that sends a key and one set to need no sign-in. Minimum version `2`. |
 | `auth.import.start` | `source` | Adopts a sign-in this Mac already has, from Claude Code. A job, because reading the keychain can prompt. `codex_cli` is still accepted as a source and refused with `invalid_params` and a sentence: a Codex CLI sign-in is no longer adopted, and `openai_codex` signs in with ChatGPT through `auth.start`. Minimum version `2`. |
-| `auth.logout` | `provider` | Forgets one provider's local session and reverts the route it fed. Nothing is revoked upstream, except for `openai_codex`: its sign-out revokes the ChatGPT session and keeps the registration, so the next sign-in reuses it. Minimum version `2`. |
+| `auth.logout` | `provider` | Forgets one provider's local session and reverts the route it fed. Nothing is revoked upstream, except for `openai_codex`: its sign-out revokes the ChatGPT session and keeps the registration, so the next sign-in reuses it. `mcp:<name>` forgets one MCP server's sign-in, revokes nothing upstream, and starts the server again without it; a client its sign-in registered is kept for the next one. Minimum version `2`. |
 | `plugins.list` | none | Every integration this daemon can show, installed or not, in one row shape, plus one entry per sign-in client a published plugin needs, each carrying the account region it is bound to and the regions this daemon offers for it. Every word on a row is the daemon's. Minimum version `2`. |
 | `plugins.install.start` | `name` | Fetches, verifies and activates one catalog plugin. A job. Minimum version `2`. |
 | `plugins.check.start` | `name` | Runs one plugin's own health check, live probe included. A job. Minimum version `2`. |
@@ -224,7 +224,7 @@ daemon onto anything else.
 | `meetings.signin.start` | none | Starts the notetaker's one-time interactive sign-in. A job, because it waits for a person. Minimum version `2`. |
 | `computer_use.grant.start` | none | Raises the OS permission prompts and answers with what was granted. A job, and only ever on an explicit ask. Minimum version `2`. |
 | `computer_use.permissions.get` | none | The current, non-prompting permission state: whether the helper is installed, which grants it holds, and when they were read. Minimum version `2`. |
-| `mobile.status` | none | The phone channel as it stands: whether it is enabled, whether it started, whether it was refused this boot and the class of that refusal, the listener (`status`, `reason`, `port`, `bind`, `candidates`), the local-network announcement, detected tailnet addresses, the gateway identity's presence and fingerprint, push credentials and delivery, the paired-phone count, the mobile protocol version this daemon serves, and the pairing session open or newest retained. Answers with the channel off. Minimum version `2`. |
+| `mobile.status` | none | The phone channel as it stands: whether it is enabled, whether it started, whether it was refused this boot and the class of that refusal, the listener (`status`, `reason`, `port`, `bind`, `candidates`), the local-network announcement, detected tailnet addresses, the gateway identity's presence and fingerprint, remote reach, push credentials and delivery, the paired-phone count, the mobile protocol version this daemon serves, and the pairing session open or newest retained. Answers with the channel off. Minimum version `2`. |
 | `mobile.pair.start` | none | Opens the pairing window and answers with the pairing session view plus, once, the pairing link as `uri`. `busy` while a window is open. Minimum version `2`. |
 | `mobile.pair.get` | `session_id` | The pairing session as it stands. The pane polls it until the session is terminal. Minimum version `2`. |
 | `mobile.pair.decide` | `session_id`, `approved` (boolean) | Approves or denies the phone waiting in the session and answers the terminal view. Minimum version `2`. |
@@ -235,6 +235,18 @@ daemon onto anything else.
 | `imessage.permissions.get` | none | The Fermix Messages helper's non-prompting state: whether it is installed, its version, Full Disk Access, the Messages database, Automation, whether Messages runs and is signed in, the user session, the confirmed recipient policy, whether that policy is exactly the saved settings, and when it was read. Minimum version `2`. |
 | `imessage.grant.start` | `service` (`automation` or `full_disk_access`) | Asks for one grant: `automation` raises the one system prompt, `full_disk_access` registers the helper, opens the Full Disk Access pane and reveals the helper for drag-in. A job that completes with the permissions view. Minimum version `2`. |
 | `imessage.policy.confirm` | none | Asks the helper to confirm the saved recipients; when they differ from the ones it holds, the helper shows its own dialog naming every handle. A job that completes with the permissions view plus `outcome`. Minimum version `2`. |
+| `mcp.servers.list` | none | Every MCP server the owner added, imported or wrote by hand in `config.toml`, as rows without their tools, plus `limits` (`max_servers`) and `can_add`. Minimum version `2`. |
+| `mcp.servers.get` | `name` | One server's row with its `tools`, at most 256, in the server's order. Minimum version `2`. |
+| `mcp.servers.draft` | `text` | Reads what the owner typed or pasted into the add form (a URL, a command line, an `mcpServers` or `servers` JSON map, one server object, a `claude mcp add` line or a Codex `[mcp_servers.<name>]` block), writes nothing, and answers `{drafts}`: at most 32, each a server as the form takes it, with the `draft_id` that holds the values it carried. Minimum version `2`. |
+| `mcp.servers.add` | `name`, `transport`, `command_line` or `url`, `cwd`, `env_names`, `auth`, `key_header`, `header_names`, `oauth_client_id`, `draft_id` | Writes one server and answers `{server, job_id}`: its row, and the `mcp_check` it started, or a null `job_id` where the server waits for a value and so did not start. With a `draft_id`, the values that draft carried are stored for the names the form still declares. Minimum version `2`. |
+| `mcp.servers.update` | `name` and any field `add` takes but `draft_id` | Changes the fields given and answers `{server}`. The name and transport cannot change, and a value the server no longer declares is deleted. Minimum version `2`. |
+| `mcp.servers.remove` | `name` | Removes one server, every value it declares and its live status, and answers `{name, removed: true}`. Minimum version `2`. |
+| `mcp.servers.enable` | `name` | Turns one server on and answers `{server}`. Minimum version `2`. |
+| `mcp.servers.disable` | `name` | Turns one server off and answers `{server}`. Minimum version `2`. |
+| `mcp.servers.tool.set` | `name`, `tool`, `enabled` (boolean) | Switches one tool on or off for the agent and answers `{server}`. The server's program keeps running. Minimum version `2`. |
+| `mcp.servers.check.start` | `name` | Connects one server and lists its tools once. A job, kind `mcp_check`, whose result carries `tool_count` and `latency_ms`. Minimum version `2`. |
+| `mcp.servers.import.scan` | none | Reads the MCP servers in Claude Desktop's, Claude Code's, Cursor's, VS Code's, Windsurf's and Codex's settings on this Mac, now and only now, and answers `candidates`, each with its `source`, `source_label`, name, transport, summary, command line or URL, consent sentence, resolved program and `secret_names` (never a value), and `skipped`, what could not be offered with the daemon's sentence. Minimum version `2`. |
+| `mcp.servers.import` | `servers` (`[{source, name}]`, at most 32) | Reads those settings again and adds each server named through the add path, with the values its settings held stored in the Keychain and `origin` `imported:<source>`, and answers `{servers, refused}`: the new rows, and each server not added with its sentence. Minimum version `2`. |
 
 Notes that the shapes alone do not carry:
 
@@ -251,19 +263,21 @@ Notes that the shapes alone do not carry:
   `plugin_workspaces_discover` 60000 ms, `plugin_workspace_select` 60000 ms,
   `capability_install` 900000 ms, `meetings_signin` 660000 ms,
   `computer_use_grant` 120000 ms, `browser_install` 900000 ms, `imessage_grant`
-  120000 ms, `imessage_policy_confirm` 180000 ms. At most 4 jobs run at once, at most one per
+  120000 ms, `imessage_policy_confirm` 180000 ms, `mcp_check` 75000 ms. At most 4 jobs run at once, at most one per
   kind and name (`busy` beyond either), and at most 16 finished jobs are
   retained, none older than 600000 ms. A `job_id` this daemon does not retain
   answers `unknown_job`.
 - **`phase` is display copy, never a state.** It names the current step from a
   closed per-kind vocabulary — `provider_probe`: `calling`; `auth`: `binding`,
-  `awaiting_browser`, `verifying`; `auth_import`: `reading_keychain`,
+  `discovering`, `registering`, `awaiting_browser`, `verifying` (an MCP server's
+  sign-in discovers and registers before the browser opens, and binds nothing
+  first); `auth_import`: `reading_keychain`,
   `verifying`; `plugin_install`: `downloading`; `plugin_check`: `probing`;
   `plugin_workspaces_discover`: `listing`; `plugin_workspace_select`: `binding`;
   `capability_install`: `sidecar_downloading`, `downloading`,
   `verifying`; `meetings_signin`: `awaiting_signin`; `computer_use_grant`: none;
   `browser_install`: `sidecar_downloading`, `downloading`; `imessage_grant`: none;
-  `imessage_policy_confirm`: none.
+  `imessage_policy_confirm`: none; `mcp_check`: `connecting`, `listing`.
   `status` is the state a client switches on. A terminal job clears its phase
   unless it `failed` or `timed_out`, where the step it stopped in is part of the
   diagnosis. A run that reports a phase outside its vocabulary fails the job:
@@ -354,6 +368,24 @@ Notes that the shapes alone do not carry:
   dispatcher runs: the channel is not running, push is off, or its
   credentials did not resolve. A connect is given up after ten seconds, and
   the status answers while one runs.
+- **Remote reach lets a paired phone reach this daemon from any network**,
+  through Fermix's relays (M62). `remote.state` is `off` (its switch is off,
+  or the channel is not running), `dormant` (no phone has been paired yet;
+  relay contact starts with the first pairing window), `helper_missing` (this
+  build carries no `fermix-iroh`; the daemon log names the path),
+  `starting`, `ready` or `failed`. While `ready`, `endpoint_id` is the
+  daemon's iroh endpoint id, `relay` the URL of the relay it is reached
+  through, `connected` whether it is connected to that relay right now, and
+  `relay_error` the relay connection's last error, at most 512 bytes; while
+  `failed`, `failure` is why, in the helper's own words where it gave them.
+  Both have control characters removed, so a client shows them as written.
+  Each is null, and `connected` false, in every other state. `refused` counts the remote
+  connections the helper turned away by reason: `busy` (64 already
+  connected), `alpn` (not a Fermix phone) and `bridge_unreachable` (the
+  daemon was not taking them). A rail that fails is retried on its own, from
+  one second doubling to a minute, and given up after a day until the next
+  restart; a helper that disagrees with this daemon's protocol, iroh version
+  or key is not retried.
 - **Pairing and forgetting a phone are the owner's decisions.**
   `mobile.pair.start`, `mobile.pair.decide`, `mobile.pair.cancel` and
   `mobile.devices.revoke` answer `unavailable` {`capability`: `mobile`,
@@ -364,9 +396,15 @@ Notes that the shapes alone do not carry:
   sentence is what tells this refusal from a channel that is not running.
   Reading a session and the status stay open to every caller.
 - **`channels.mobile` is the phone channel's settings section**: the enable
-  switch, applied the moment it is written (its row's `restart` is false), and
-  the port, the address it listens on and the local-network announcement,
-  which are read when the channel starts and are boot-bound. It is a section of its own rather than a
+  switch and the remote-reach switch `mobile_iroh` (on by default), each
+  applied the moment it is written (their rows' `restart` is false), and the
+  port, the address it listens on and the local-network announcement, which
+  are read when the channel starts, are boot-bound and are `advanced`. Neither
+  the address nor the announcement reaches remote reach: only its own switch
+  keeps a phone to the home network and Tailscale. Remote reach is
+  switched within a running channel: with the channel off it is read when the
+  channel starts, and a write says in `side_effects` when the rail did not
+  follow it. It is a section of its own rather than a
   channels-inventory entry, because the phone channel has no credential.
   `setup.state.get` carries a `mobile` channel row after the inventory
   channels, always `configured`, with mode `listener` while it is enabled.
@@ -390,6 +428,20 @@ Notes that the shapes alone do not carry:
   browser already running takes a new tab cap when it next starts.
   `settings.apply` refuses a value the browser would refuse at launch, in the
   browser's own sentence.
+- **`web_search` also carries place search's backend.** After
+  `web_search_backend`, the row `place_search_backend` (a choice, `Place
+  search`) is `[fermix_core.tools.place_search] backend`, and its `value` is the
+  backend in force: the one the file names, or the build's default when it
+  names none (`apple_maps` in the Fermix Mac app's engine, which carries the
+  Apple Maps helper, `brave` in the Homebrew and Linux builds). Its options are
+  the ones this build can run: `apple_maps` (`Apple Maps`, hint `Needs no key`)
+  and `brave` (`Brave`) where the build carries the helper, `brave` alone
+  everywhere else, where `settings.apply` refuses `apple_maps` as a value the
+  row does not publish. The `brave_api_key`
+  row stands whenever web search or place search uses Brave, its footer
+  `Also powers place search.` when both do and `Powers place search.` when only
+  place search does; with neither on Brave it is not published. A call reads
+  the section when it runs, so the row carries the section's usual `restart`.
 - **`browser.install.start` completes only once the launcher finds a
   browser.** It runs the meeting notetaker's own install step (the notetaker's
   helper, then the Chromium build that helper is pinned to, about 150 MB, and a
@@ -517,10 +569,17 @@ Notes that the shapes alone do not carry:
   the one short line under the control and is always shown; `info` is a
   paragraph a client puts behind an `(i)` beside the row and reveals on demand.
   It is `null` on every row with nothing more to say, which is most of them.
-  Today two rows carry it: the Venice model row, where the privacy tier in each
-  model's label is two words that mean materially different things, and the
-  secrets section's store row, where the choice trades a keyring password for
-  a file that is not encrypted.
+  A row carries one when its choice has a consequence its label cannot say,
+  such as the Venice model row, where the privacy tier in each model's label is two
+  words that mean materially different things; the secrets section's store
+  row, where the choice trades a keyring password for a file that is not
+  encrypted; and the phone channel's reach-from-anywhere switch, which says
+  what turning it off keeps the phone to.
+- **`advanced` marks a row most people never need to change.** A client draws
+  a section's advanced rows after its other rows, under one disclosure that
+  starts closed; a section with none draws no disclosure. It says nothing about
+  how the row applies, which is `restart`'s job. Today the phone channel's
+  port, listen address and local-network announcement carry it.
 - **The secrets section chooses where a new secret is kept.** Section
   `secrets`, pane `secrets`, publishes one closed choice row, `secret_store`:
   `keyring` (the default, and what a home that never chose reads as) or `file`,
@@ -548,39 +607,57 @@ Notes that the shapes alone do not carry:
   the allow list keeps its stored value, so its row stays reachable: allowing
   the name again reuses the value, and `secret.clear` removes it.
 - **The voice section's model row selects its engine.** `realtime_model`
-  publishes every model both engines ship, in one list, each option labelled
+  publishes every model the engines ship, in one list, each option labelled
   with the engine it selects: `openai_realtime` (the Realtime API, which runs
-  tools inside the voice session) or `openai_live` (the Live API, which
+  tools inside the voice session), `openai_live` (the Live API, which
   delegates every tool call, memory read and reasoning step back to the Fermix
-  agent and bills by the minute). There is no engine row; the engine is derived
-  from the model and stored as `realtime.engine`, and `settings.apply` refuses
+  agent and bills by the minute) or `xai_realtime` (Grok Voice on SpaceXAI,
+  which delegates the same way and bills by the minute). `openai_live` and
+  `xai_realtime` are the task engines. There is no engine row; the engine is
+  derived from the model and stored as `realtime.engine`, with the provider it
+  dials as `realtime.provider` (`openai` or `xai`), and `settings.apply` refuses
   `realtime_engine` as a key this section does not have. The rest of the section
   is scoped to the engine that model implies: `realtime_voice` publishes the
   voices of that engine and nothing else, `realtime_reasoning_effort` is a
-  Realtime session setting with no Live equivalent and is absent under Live, and
-  `realtime_backend` is present only under Live, is read-only, and names the
-  primary provider and model that answer while Live speaks.
-  `realtime_conversation` ("Voice calls join the chat") is present only under
-  Live too, a choice of `chat` or `private` stored as `realtime.conversation`:
-  `chat`, the value in force while the key is unset, runs a call's hand-offs in
-  the chat's own conversation, and `private` keeps them in one of the call's
-  own. Applying a model of the other engine therefore moves the engine with it,
+  Realtime session setting with no task-engine equivalent and is absent under
+  both task engines, and `realtime_backend` is present only under a task engine,
+  is read-only, and names the primary provider and model that answer while the
+  engine speaks. `realtime_conversation` ("Voice calls join the chat") is present
+  only under a task engine too, a choice of `chat` or `private` stored as
+  `realtime.conversation`: `chat`, the value in force while the key is unset,
+  runs a call's hand-offs in the chat's own conversation, and `private` keeps
+  them in one of the call's own. The key row is the voice provider's own slot:
+  `openai_api_key` under both OpenAI engines and `xai_api_key` under Grok, which
+  takes an API key only (a SpaceXAI sign-in does not authorize voice). Applying a
+  model of another engine therefore moves the engine and its provider with it,
   adds or removes the reasoning effort, moves a voice the new engine does not
-  ship, and drops a chosen `realtime_conversation` on the way to Realtime. The
-  result names every key the daemon derived in `applied` — including `realtime_engine`,
-  which is a derived key rather than a row — with a sentence for each in
-  `side_effects`; reload the section when one of those keys appears, because its
-  row list has changed. `overview.get` reports the same selection as
+  ship to that engine's default, drops a chosen `realtime_conversation` on the
+  way to Realtime, and on the way to Grok turns off screen sharing during calls,
+  which Grok does not support. The result names every key the daemon derived in
+  `applied` — including `realtime_engine`, which is a derived key rather than a
+  row — with a sentence for each in `side_effects` (screen sharing has a
+  sentence and no row); reload the section when one of those keys appears,
+  because its row list has changed. `overview.get` reports the same selection as
   `realtime.engine`, null while voice is disabled.
 - **Secrets travel inbound only, in `secret.set`, one per call.** Every other
   method reports presence as a boolean. "Present" means a reference or a value
   sits at that key's own path, never "the keyring holds an item": a key stored
   without its reference is never read back, so calling it present would describe
   a credential the runtime cannot use.
-- **`id` names one of five families.** A bare registry key (`openai_api_key`,
+- **A stored value is not always the value in use.** For the provider API
+  keys, the WhatsApp, Discord and Slack channel secrets and the APNs key, a
+  nonblank environment variable of the key's own name (`ANTHROPIC_API_KEY`,
+  `DISCORD_BOT_TOKEN`, …) in the daemon's environment overrides the stored value
+  at every start. `secret.set` and `secret.clear` name that variable in
+  `environment_override` (null when the stored value is the one in use, and
+  null for every other family), so storing a value the daemon will not use
+  still succeeds and says so. The field is optional: an older daemon omits it,
+  which a client renders as no override reported.
+- **`id` names one of six families.** A bare registry key (`openai_api_key`,
   `telegram_bot_token`, …), `plugin:<name>` for a plugin's own token,
   `oauth_client:<provider>` for a sign-in client's secret,
-  `anthropic_setup_token`, and `env:<NAME>` for a sandbox environment variable.
+  `anthropic_setup_token`, `env:<NAME>` for a sandbox environment variable, and
+  `mcp:<name>/…` for a value an MCP server declares.
   The first three take the same keychain-first write.
   The fourth is a different mechanism and is documented as such: a
   `claude setup-token` value is a long-lived subscription credential, so it is
@@ -607,6 +684,25 @@ Notes that the shapes alone do not carry:
   started with. Neither ever asks for a restart. Where no OS secret store
   exists, `secret.set` answers `secret_store_failed` with reason `unavailable`.
   `present` is "the settings file points this name at a stored value".
+- **`mcp:<name>/env/<NAME>`, `mcp:<name>/header/<Header-Name>` and
+  `mcp:<name>/client_secret` store the values an MCP server declares**: a local
+  server's `env_names`, a remote server's headers (`header_names` and its
+  `key_header`), and the secret of its `oauth_client_id`, which is optional: a
+  client ID with no secret is a pre-registered public client, so a server
+  never waits for it, and `oauth_client.secret_present` says whether one is
+  stored. The family is open,
+  like `env:`: an id is accepted only when the server exists and declares that
+  name, and the server's block in `config.toml` is the reference, so storing
+  writes nothing else and `present` is "the store reads the value back". The
+  value is one line of 1 to 8,192 bytes; an `Authorization` key is sent as
+  `Bearer <value>`, so a pasted `Bearer …` is stored as what follows it.
+  Storing the last value a server needs starts it, storing a new one
+  restarts it, and clearing one it runs with stops it. Both answer the shape
+  `env:` answers, with `environment_override` null. A value pasted into the
+  add form never travels back: `mcp.servers.draft` holds it under a
+  `draft_id`, and `mcp.servers.add` stores it. A server whose name was
+  written by hand outside the name rule holds no values, and the refusal says to
+  add it again under a lowercase name.
 - **A plugin row is one shape for two halves.** An installed plugin and a
   catalog entry that has never been fetched publish the same fields, so a client
   decodes one record rather than two. `installed` is what separates them.
@@ -656,6 +752,179 @@ Notes that the shapes alone do not carry:
   history and the meeting notetaker are settings sections with their own panes
   and their own switches, so they never appear as plugin rows even where the
   catalog carries an entry for their helper.
+- **An MCP server row is the daemon's, like a plugin row.** One row shape
+  serves every operator MCP server, whether the owner added it here, imported
+  it, or wrote its `[mcp.servers.<name>]` block by hand (`origin` null). Every
+  field is present on every row, null where the transport has none, except
+  `tools`, which only `mcp.servers.get` carries: 32 servers of 256 described
+  tools would pass the result bound, so the list carries `tool_count` and
+  `tools_on` alone. `consent_sentence` always says where the code runs and what
+  leaves this Mac: a local server runs on this Mac as a separate program with
+  the owner's access, a remote one on the host its URL names.
+- **The status is derived in one order, and the row switches on actions.** `off`
+  (turned off), `failed` for a server that names nothing to start (a local one
+  without its command, a remote one without its URL, which only a hand edit
+  writes; its sentence says what to add, and it offers only `disable`),
+  `needs_secret` (a value it needs is not stored, so the server does not start;
+  the sentence names what it waits for), `needs_sign_in` (an `auto` server the
+  server itself asked to sign in), `starting` (connecting, or no status yet for
+  a server that runs), `connected`, `retrying` (the last connection failed and
+  the daemon is starting it again), `failed` (it stopped trying). The first that
+  holds wins. The status is published for logs and support; a client draws
+  `status_sentence` and switches on `primary_action` and `actions`, which are
+  `check`, `enable`, `disable`, `sign_in` and `sign_out`, in that order. `check`
+  is offered while a server is `connected`, `retrying` or `failed`, and a
+  `failed` server leads with it; an `off` server offers and leads with `enable`
+  alone. `needs_sign_in` also covers an `auto` server that asked to be signed
+  in again for more access. `last_error` is the daemon's sentence for the
+  failure while a server is `retrying` or `failed`, and null otherwise.
+- **An `auto` server's sign-in is on its row.** `auth.state` is `signed_in`
+  with a grant the server can use, `expired` when its authorization server
+  refused to refresh it, `signed_out` where the server asked for a sign-in and
+  there is no grant, and `not_needed` otherwise; `account_label` (the
+  account's email, user name or name, else the authorization server's host)
+  and `issuer` (the authorization server) name the grant, and are null without
+  one. `sign_in` is offered, and led with, where the server asks for a sign-in,
+  where the grant expired, and where one of its tools asked for more access than
+  the grant gives (`status_sentence` then says so beside its tools); `sign_out`
+  is offered while signed in. A `header` or `none` server offers neither.
+- **An MCP server signs in through `auth.start mcp:<name>`.** The job discovers
+  the server's authorization server the way the MCP authorization
+  specification orders it (the server's `401` challenge, its protected resource
+  metadata, then its authorization server's metadata), with no redirect
+  followed and every address held to the rule its own URL is. It registers
+  with the server's `oauth_client_id` (and `mcp:<name>/client_secret` when
+  stored; without one it is a public client), which stays bound to the
+  authorization server it was signed in with: through a sign-out, and through
+  a server that names another, where a sign-in with the same client ID fails
+  the job with a sentence naming both before the secret is read or the browser
+  opens, until the owner enters another client ID or removes and adds the
+  server again; else with Fermix's client metadata document
+  (`https://fermix.ai/oauth/mcp-client.json`) where the authorization server
+  takes one, else by dynamic client registration, which names the exact
+  loopback redirect the sign-in uses, port included; its client and port are
+  kept for the next sign-in to the same authorization server, which uses that
+  port again, or registers again where the port is taken. The browser sign-in uses PKCE
+  and names the server as the resource; a reply from another authorization
+  server is refused. A sign-in that completes starts the server once and its
+  result carries `account_label`. The grant lives in the daemon's auth store,
+  never in `config.toml` and never on the wire; it is refreshed before it
+  expires and once when the server refuses it, is not used once the server
+  names another authorization server, and is deleted with the server.
+- **`server_info` and the tools are what the server last said.** Both come from
+  the server's last connection, so a server that is off or starting again still
+  shows them; `server_info` is null before a server first connects. A tool's
+  `read_only` and `destructive` are the server's own `readOnlyHint` and
+  `destructiveHint` as it declared them, an absent hint being false; they inform
+  the owner and decide nothing. This is not the MCP specification's default,
+  which takes a tool that declares nothing as destructive, and a tool declared
+  read-only is never destructive. `enabled` is false for a tool the owner hid
+  from the agent, and `tools_on` counts the rest. Only a tool whose name is at
+  most 128 bytes is described, so a tool with a longer name is counted in
+  `tool_count`, not listed in `tools`, and counted as on in `tools_on`.
+- **A form writes a server as fields, and a refusal names the field.**
+  `command_line` is one line, split as a shell splits one simple command: blanks
+  separate words, quotes and `\` keep what they cover, and a line that needs a
+  shell (a pipe, a redirection, a list, `$`, a leading `NAME=value`) is refused
+  rather than run as something else. The one expansion is a shell's `~`: an
+  unquoted `~` that starts a word, alone or before a `/`, is the home folder, in
+  `command_line` and in `cwd`, and the server is written with the absolute path
+  that runs, which the row's `location` shows; a quoted `~` stays as it is, and
+  `~name` is refused. A local server takes `command_line`, `cwd` and
+  `env_names`; a remote one `url`, `auth` (`auto`, the default, `header` or
+  `none`), `key_header`, `header_names` and `oauth_client_id`; the other
+  transport's fields are refused. `header_names` are the headers besides the
+  key's own, which `key_header` names and the row reports as `auth.key_header`.
+  A URL is `https`, or `http` only to this Mac. On an update a null clears a
+  nullable field (`cwd`, `key_header`, `oauth_client_id`) and a list replaces
+  the one it names. Every refusal is `invalid_params` with the daemon's
+  `sentence` and the `field` a form marks, named as the form names it. Values
+  never ride these methods: they follow through `secret.set mcp:<name>/…`, or
+  an add's `draft_id`, and the server starts once the last one is stored. Every write applies to the one
+  server it names, with no restart, and refuses with `external_change` while the
+  settings file was changed outside Fermix.
+- **A draft fills the add form, and writes nothing.** `mcp.servers.draft`
+  reads one `text` of at most 65536 bytes: a URL (`https`, or `http` only to
+  this Mac), a command line (split as `command_line` is, with its refusals and
+  its `~`), JSON (an `mcpServers` map as Claude Desktop, Claude Code, Cursor and
+  Windsurf write it, a `servers` map as VS Code writes it, a bare map of names to
+  servers, or one server object, with `command`, `args`, `env` and `cwd`, or
+  `url` or `serverUrl` with `headers`, and `type` or `transport` of `stdio`,
+  `http`, `streamable-http` or `sse`), a `claude mcp add` line (`--transport`,
+  `--scope`, `-e`, `-H`, a name, then a URL or `--` and a command) or a `claude
+  mcp add-json` line, or a Codex block of `[mcp_servers.<name>]` tables. It
+  answers at most 32 drafts, in the text's order (a Codex block's by name).
+  Every field of a draft is present, null where the transport has none.
+  `command_line` is the words that will run, a leading `~` written out;
+  `resolved_command` is the program a local command runs and `command_sentence`
+  says `Runs <program>` or the row's own sentence for a program this Mac does
+  not have. The first draft after the daemon starts may begin reading the login
+  shell's PATH and waits for it only briefly, so a bare command's
+  `resolved_command` and `command_sentence` may be null, and the next draft has
+  them. A server keeps the name its source gives it where a new server may take
+  that name; otherwise the name comes from the URL's host, the label before its
+  public suffix (`mcp.linear.app` is `linear`, `eu.mcp.sentry.io` is `sentry`),
+  or the command's package (`uvx mcp-server-fetch` is `fetch`).
+  `conflict` is true where an MCP server here already has the name, or one that
+  gives its tools the same names. `summary` is `Remote, <host>`, or the program
+  and the package it starts.
+- **A pasted value is held, never returned.** A variable's or a header's
+  value in the text is held in the daemon's memory, and `env` and `headers` say
+  which names it carried (`present`); the key's header is among `headers`, and
+  `key_header` names it. A placeholder (`${input:…}`, `${env:…}`, `${NAME}`,
+  `${NAME:-default}`, an empty value, a Codex variable name, and in a `claude
+  mcp add` line, written for a shell, `$NAME` or anything the shell would fill
+  in, `Bearer $NAME` included) declares its name and carries no value, so the
+  server waits for it. In such a line a `$` in the name, the address or the
+  command needs a shell and is refused, as in a command line.
+  `Authorization: Bearer <token>` is the key, sent as `Bearer <value>`, its value the token; otherwise
+  a remote server's first header is its key and the rest its other headers, and
+  a remote server with no header signs in by itself (`auto`). Each draft that
+  carried a value has its own `draft_id`, null for one that carried none, so
+  one paste may give two servers one name with two values. A `draft_id` is
+  opaque, belongs to this boot, expires 10 minutes after its draft, is used
+  once, and at most 64 are held, a newer one dropping the oldest. An add with it
+  stores, under the name the form chose, the values for the names the form
+  still declares, and drops the rest; the server starts once, with all of them,
+  and its row then waits only for what the paste did not carry. A refused add
+  stores nothing and leaves the `draft_id` for the next try. An unknown,
+  expired or used `draft_id` is `invalid_params` with `field` `draft_id`.
+- **A paste Fermix cannot add as given is refused whole.** Text that is none of
+  the shapes, and a placeholder inside a command, its arguments, a working
+  folder or an address (nothing there is filled in), are `invalid_params` with
+  `field` `text` and a sentence; in a paste of several servers the sentence
+  names the server, and the paste answers no drafts.
+- **Import reads another app's settings only when asked.** `mcp.servers.import.scan`
+  and `mcp.servers.import` each read the settings files then, and nothing is
+  kept between them, so an import adds what the files hold when it runs. The
+  sources are fixed files under the home folder: Claude Desktop's
+  `claude_desktop_config.json`, Claude Code's `~/.claude.json` (its user
+  servers, not a project's), Cursor's `~/.cursor/mcp.json`, VS Code's user
+  `mcp.json`, Windsurf's `mcp_config.json` and Codex's `~/.codex/config.toml`,
+  each read whole up to 8 MiB, its servers taken out and translated one by
+  one as a paste is. VS Code's is read as VS Code reads it, JSON with `//` and
+  `/* */` comments and trailing commas; the others as JSON, as their apps read
+  them. A missing file holds no servers; one that cannot be
+  opened, is too large, does not parse or holds its servers in another shape
+  is one `skipped` entry with `name` null, and a server that could not be added
+  as it is written (a placeholder in its command, say) is one with its name;
+  neither hides the rest. At most 32 servers are read from one file. A
+  candidate is named as a draft is, and `conflict` says the name, or its
+  tools' names, is taken here. Neither method ever carries a value: an import
+  stores what the file held under `mcp:<name>/…` as a paste's values are
+  stored, a placeholder declares a name the server waits for, and the other
+  app's file is never written. One refused server leaves the others; a
+  settings file changed outside Fermix refuses the whole import with
+  `external_change` before anything is added.
+- **A check connects, then lists once.** `mcp.servers.check.start` waits for a
+  server that is starting, starts again one that is not running or has failed,
+  then asks it for its tools; `tool_count` is what it listed and `latency_ms`
+  how long that took. Its wait for a connection outlasts a first start's own
+  60 s, so a server that downloads its package on first run ends the job with
+  how that start ended. A server the daemon does not run (off, naming nothing to
+  start, or waiting for a value) is refused with its own row's sentence, and a
+  connection that fails ends the job with that sentence. After an add or an
+  update, `mcp.servers.get` reads the row as it connects.
 - **A sign-in client appears only where a plugin needs one.** `oauth_clients` is
   derived from the providers the published rows name, so a client row for a
   family this Mac has no plugin for is never drawn. `client_id` is the public

@@ -1,6 +1,7 @@
 defmodule FermixChannels.Voice.ChatMirror do
   @moduledoc """
-  What is typed in the chat during a Live call, told to the call (M56 §4.3).
+  What is typed in the chat during a task-engine call, told to the call (M56
+  §4.3).
 
   A message the owner types in the chat, and the chat's answer to it, reach
   the voice model as one quiet line each, so "use that link" said aloud has
@@ -10,7 +11,7 @@ defmodule FermixChannels.Voice.ChatMirror do
   answered without a turn, or a request cancelled before it was queued, is
   never told. The call is found in Core's registry, whose claim says whether
   it is in the chat, so a private call is never told and its chat never read;
-  `LiveSessionServer` drops what a call not yet up must not hear.
+  the session drops what a call not yet up must not hear.
 
   Only the chat's own conversation is mirrored, because only it is what a
   hand-off can read. The phone's turns run in it too (M56 D9), so a message
@@ -26,7 +27,7 @@ defmodule FermixChannels.Voice.ChatMirror do
   alias FermixChannels.Voice.Bridge
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Realtime.CallRegistry
-  alias FermixCore.Realtime.LiveSessionServer
+  alias FermixCore.Realtime.SessionControl
 
   require Logger
 
@@ -34,7 +35,7 @@ defmodule FermixChannels.Voice.ChatMirror do
   @spec typed(ConversationKey.t(), String.t()) :: :ok
   def typed(key, text) when is_tuple(key) and is_binary(text) do
     case chat_call(key) do
-      {:ok, session} -> LiveSessionServer.chat_typed(session, text)
+      {:ok, session} -> SessionControl.chat_typed(session, text)
       :none -> :ok
     end
   end
@@ -48,7 +49,7 @@ defmodule FermixChannels.Voice.ChatMirror do
   def answered(key) when is_tuple(key) do
     with {:ok, session} <- chat_call(key),
          {:ok, message} <- newest_answer() do
-      LiveSessionServer.chat_answered(session, message)
+      SessionControl.chat_answered(session, message)
     else
       :none -> :ok
     end

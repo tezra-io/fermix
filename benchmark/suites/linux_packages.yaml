@@ -22,6 +22,8 @@
 #
 # ROUTE ASSERTIONS. Exactly one — the labelled sanity case. Everything else
 # gates on the outcome.
+# The reminder cases also forbid the temporal writes: a safety gate keeping a
+# stored reminder off the development home, not a route assertion.
 #
 # FLOORS, NOT VOCABULARIES. The `reply_matches` values are literals any correct
 # answer must contain — the installer's address, the restart command — not a
@@ -37,11 +39,12 @@ risk: host_readonly
 title: "Linux packages — the one-command install, and how a packaged install updates"
 description: >
   Ordinary owner questions about running Fermix from the `.deb` or `.rpm`: how
-  to install it on a Debian, Ubuntu or Fedora machine, and how to update it
-  once it is there. Each case gates on a literal any correct answer contains
-  plus the wrong-channel refusal; the rubric owns the wording. One labelled
-  sanity case pins that the answer comes from the self-knowledge skill rather
-  than from what the model assumes about packages in general.
+  to install it on a Debian, Ubuntu or Fedora machine, how to update it once
+  it is there, and why a headless host rings no reminder. Each case gates on
+  a literal any correct answer contains plus the wrong-channel refusal; the
+  rubric owns the wording. One labelled sanity case pins that the answer
+  comes from the self-knowledge skill rather than from what the model assumes
+  about packages in general.
 defaults:
   timeout_ms: 180000
   judge: true
@@ -282,3 +285,55 @@ scenarios:
           to see the choices, and says `fermix restart` applies it. Does not
           tell the user to switch to another provider, and does not invent a
           command or flag that does not exist.
+
+  # M76 stage 2: a Linux machine rings a reminder only as a desktop
+  # notification, and a headless host runs no notification server, so a
+  # reminder asked to ring there is refused when it is stored. The floor is the
+  # desktop or its notifications, which no correct "why not" leaves out. The
+  # wrong-surface gates name a notification poster of the model's own and the
+  # Mac's service manager. A reminder question may be acted on instead of
+  # answered, and a reminder stored on the development home would come due
+  # there: `tools_none` on the temporal writes is the safety gate, not a route
+  # assertion.
+  - id: headless_host_cannot_ring
+    title: "A headless Linux host has no desktop notifications, so a reminder for it is refused"
+    severity: normal
+    risk: host_readonly
+    tags: [linux-packages, reminders, this-computer, self-knowledge]
+    cases:
+      - id: headless_server_reminder
+        query: >
+          Fermix runs from the .deb on my headless Ubuntu server that I only
+          reach over SSH. If I ask it to remind me in an hour, can it ring on
+          that server itself?
+        expect:
+          reply_matches: '(?i)desktop|notification'
+          reply_not_matches: '(?i)(notify-send|osascript|launchctl)'
+          tools_none: [event_store, event_update, schedule_job]
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says no: a Linux machine rings a reminder only as a desktop
+          notification while a desktop session is running, and a headless
+          server has none, so a reminder asked to ring on that machine is
+          refused when it is stored and nothing is stored; reminders reach the
+          owner through a chat channel such as Telegram instead. Does not
+          suggest a stand-in (notify-send, wall, a script or a cron job of its
+          own), and does not say the server will ring.
+      - id: closet_box_timer
+        query: >
+          My Fermix is the Linux package on a little box in a closet with no
+          monitor, and I talk to it over Telegram. Could a timer I set go off on
+          that box itself?
+        expect:
+          reply_matches: '(?i)desktop|notification'
+          reply_not_matches: '(?i)(notify-send|osascript|launchctl)'
+          tools_none: [event_store, event_update, schedule_job]
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says no: with no monitor and no one logged in to a desktop there is no
+          desktop session to show a notification, so a timer asked to ring on
+          that box is refused when it is stored; a timer set from Telegram rings
+          in Telegram. Does not suggest a stand-in (notify-send, wall, a script
+          or a cron job of its own), and does not say the box will ring.

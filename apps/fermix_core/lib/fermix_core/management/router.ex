@@ -19,6 +19,7 @@ defmodule FermixCore.Management.Router do
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Logs
+  alias FermixCore.Management.McpServers
   alias FermixCore.Management.Meetings
   alias FermixCore.Management.Mobile
   alias FermixCore.Management.Plugins
@@ -37,6 +38,7 @@ defmodule FermixCore.Management.Router do
     settings.sections settings.reload job.list plugins.list meetings.signin.start
     computer_use.grant.start computer_use.permissions.get mobile.status mobile.pair.start
     mobile.devices.list browser.install.start imessage.permissions.get imessage.policy.confirm
+    mcp.servers.list mcp.servers.import.scan
   )
   @lease_params ~w(lease_id)
   @doctor_session_params ~w(session_id)
@@ -60,6 +62,14 @@ defmodule FermixCore.Management.Router do
   @mobile_decide_params ~w(session_id approved)
   @mobile_device_params ~w(device_id)
   @imessage_grant_params ~w(service)
+  @mcp_name_params ~w(name)
+  @mcp_server_params ~w(
+    name transport command_line url cwd env_names auth key_header header_names oauth_client_id
+  )
+  @mcp_add_params ["draft_id" | @mcp_server_params]
+  @mcp_draft_params ~w(text)
+  @mcp_import_params ~w(servers)
+  @mcp_tool_params ~w(name tool enabled)
   # A published name, an opaque workspace id and a display label are all bounded
   # strings; the widest of them is the workspace id's own 256-byte bound.
   @max_text_bytes 256
@@ -188,6 +198,39 @@ defmodule FermixCore.Management.Router do
 
   defp route_known("imessage.policy.confirm", %{}, opts),
     do: operation_result(IMessage.policy_confirm(operation_opts(opts)))
+
+  defp route_known("mcp.servers.list", %{}, opts),
+    do: operation_result(McpServers.list(operation_opts(opts)))
+
+  defp route_known("mcp.servers.get", params, opts),
+    do: mcp_by_name(&McpServers.get/2, params, opts)
+
+  defp route_known("mcp.servers.draft", params, opts), do: mcp_draft(params, opts)
+
+  defp route_known("mcp.servers.add", params, opts),
+    do: mcp_server(&McpServers.add/2, params, @mcp_add_params, opts)
+
+  defp route_known("mcp.servers.update", params, opts),
+    do: mcp_server(&McpServers.update/2, params, @mcp_server_params, opts)
+
+  defp route_known("mcp.servers.remove", params, opts),
+    do: mcp_by_name(&McpServers.remove/2, params, opts)
+
+  defp route_known("mcp.servers.enable", params, opts),
+    do: mcp_by_name(&McpServers.enable/2, params, opts)
+
+  defp route_known("mcp.servers.disable", params, opts),
+    do: mcp_by_name(&McpServers.disable/2, params, opts)
+
+  defp route_known("mcp.servers.tool.set", params, opts), do: mcp_tool_set(params, opts)
+
+  defp route_known("mcp.servers.import.scan", %{}, opts),
+    do: operation_result(McpServers.import_scan(operation_opts(opts)))
+
+  defp route_known("mcp.servers.import", params, opts), do: mcp_import(params, opts)
+
+  defp route_known("mcp.servers.check.start", params, opts),
+    do: mcp_by_name(&McpServers.check_start/2, params, opts)
 
   defp setup_detect(params, opts) do
     with :ok <- reject_unknown_params(params, @detect_params),
@@ -392,6 +435,56 @@ defmodule FermixCore.Management.Router do
   defp mobile_revoke(params, opts) do
     with {:ok, device_id} <- fetch_string(params, "device_id", @mobile_device_params) do
       operation_result(Mobile.devices_revoke(device_id, mobile_opts(opts)))
+    end
+  end
+
+  # Five methods take one server name and nothing else, so the parameter check
+  # is written once and the method chooses only which verb runs.
+  defp mcp_by_name(verb, params, opts) when is_function(verb, 2) do
+    with {:ok, name} <- fetch_string(params, "name", @mcp_name_params) do
+      operation_result(verb.(name, operation_opts(opts)))
+    end
+  end
+
+  # A server's fields are typed by the operation, which names the field a form
+  # marks in its refusal; this only closes the set. Only an add takes a
+  # `draft_id`.
+  defp mcp_server(verb, params, allowed, opts) when is_function(verb, 2) do
+    with :ok <- reject_unknown_params(params, allowed) do
+      operation_result(verb.(params, operation_opts(opts)))
+    end
+  end
+
+  # The text's length and what it says are the translator's to refuse, with a
+  # sentence the form shows under the field.
+  defp mcp_draft(params, opts) do
+    with :ok <- reject_unknown_params(params, @mcp_draft_params) do
+      case Map.get(params, "text") do
+        text when is_binary(text) ->
+          operation_result(McpServers.draft(text, operation_opts(opts)))
+
+        _invalid ->
+          invalid_params("text")
+      end
+    end
+  end
+
+  # Each entry is typed by the operation, which refuses the list with the
+  # sentence a client shows.
+  defp mcp_import(params, opts) do
+    with :ok <- reject_unknown_params(params, @mcp_import_params) do
+      operation_result(
+        McpServers.import_servers(Map.get(params, "servers"), operation_opts(opts))
+      )
+    end
+  end
+
+  defp mcp_tool_set(params, opts) do
+    with :ok <- reject_unknown_params(params, @mcp_tool_params),
+         {:ok, name} <- fetch_text(params, "name", 1),
+         {:ok, tool} <- fetch_text(params, "tool", 1),
+         {:ok, enabled} <- fetch_boolean(params, "enabled") do
+      operation_result(McpServers.tool_set(name, tool, enabled, operation_opts(opts)))
     end
   end
 

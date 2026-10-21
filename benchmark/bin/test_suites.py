@@ -5,7 +5,7 @@
 # ///
 """Specs for the suite schema keys that make a measurement trustworthy: sticky
 safety gates, the all-of tool-provenance key, the per-trial checker reset list,
-single-number scoring, and multi-turn capability cases.
+single-number scoring, multi-turn capability cases, and numbered rubrics.
 Also covers the shared session-id helper. Pure: no daemon, no Opik, no spend.
 Run: `uv run bin/test_suites.py`."""
 from __future__ import annotations
@@ -20,7 +20,7 @@ import pytest  # noqa: E402
 import yaml  # noqa: E402
 
 import run_eval  # noqa: E402
-from evallib import session_ids, suites  # noqa: E402
+from evallib import rubric, session_ids, suites  # noqa: E402
 
 SUITES_DIR = os.path.join(os.path.dirname(HERE), "suites")
 CAP_DIR = os.path.join(SUITES_DIR, "capability")
@@ -340,6 +340,145 @@ def test_sess_refuses_an_untruncatable_tail():
 def test_sess_refuses_no_parts():
     with pytest.raises(ValueError):
         session_ids.sess()
+
+
+# --- numbered rubrics ---------------------------------------------------------
+#
+# A rubric that numbers its requirements gets one verdict per requirement, and
+# the harness computes pass and score from them; any other rubric is prose and
+# keeps the whole-verdict path. The numbering is checked at load, so a list the
+# harness would miscount fails `--dry-run` instead of grading as prose.
+
+NUMBERED = """It passes only when every numbered requirement holds:
+1. The reply names the deadline.
+2. It keeps the level settled. It fails if it
+   reopens the level in any form.
+3. It invents nothing.
+Not required: any particular wording.
+"""
+
+
+def test_a_rubric_without_a_numbered_list_is_prose():
+    assert rubric.numbered_requirements("Grounds the brief in all four files.") == (None, None)
+    assert rubric.numbered_requirements("Line one.\nLine two.\n") == (None, None)
+
+
+def test_a_numbered_rubric_yields_each_requirement_with_its_continuation():
+    texts, error = rubric.numbered_requirements(NUMBERED)
+    assert error is None
+    assert texts == ["The reply names the deadline.",
+                     "It keeps the level settled. It fails if it reopens the level in any form.",
+                     "It invents nothing."]
+
+
+def test_the_not_required_line_is_never_a_requirement():
+    texts, _error = rubric.numbered_requirements(NUMBERED)
+    assert not any("Not required" in text for text in texts)
+
+
+def test_blank_lines_may_separate_numbered_requirements():
+    texts, error = rubric.numbered_requirements("1. First.\n\n2. Second.\n")
+    assert (texts, error) == (["First.", "Second."], None)
+
+
+@pytest.mark.parametrize(("text", "found"), [
+    ("2. First.\n3. Second.\n", "2, 3"),
+    ("1. First.\n3. Second.\n", "1, 3"),
+    ("1. First.\n2. Second.\n2. Again.\n", "1, 2, 2"),
+    ("2. Second.\n1. First.\n", "2, 1"),
+])
+def test_a_numbering_that_is_not_one_to_n_in_order_is_refused(text, found):
+    texts, error = rubric.numbered_requirements(text)
+    assert texts is None
+    assert f"numbers its requirements {found}" in error
+    assert "1..N" in error
+
+
+def test_a_numbered_requirement_with_no_text_is_refused():
+    texts, error = rubric.numbered_requirements("1. First.\n2.   \n")
+    assert texts is None and "requirement 2 has no text" in error
+
+
+def test_an_unindented_line_inside_the_list_is_refused():
+    # The harness would cut requirement 1 short and the judge would read a
+    # sentence the report never shows, so the line must be indented under it.
+    texts, error = rubric.numbered_requirements("1. The reply uses facts\nfrom all files.\n"
+                                                "2. Second.\n")
+    assert texts is None
+    assert "line 2" in error and "requirement 1" in error
+
+
+def test_a_numbered_rubric_loads(tmp_path):
+    scn = _load_one_scenario(tmp_path, cases=[dict(BASE_CASE, rubric=NUMBERED),
+                                              dict(FILLER_CASE)])
+    assert scn.cases[0].rubric == NUMBERED
+
+
+def test_a_malformed_numbering_is_a_suite_validation_error(tmp_path):
+    problems = _problems(tmp_path, cases=[dict(BASE_CASE, rubric="1. First.\n3. Third.\n"),
+                                          dict(FILLER_CASE)])
+    assert len(problems) == 1
+    assert "case_a" in problems[0] and "`rubric`" in problems[0]
+    assert "numbers its requirements 1, 3" in problems[0]
+
+
+def test_a_watch_on_a_numbered_rubric_loads(tmp_path):
+    watch = [{"n": 2, "reason": " The candidate misses it 2 of 12. "}]
+    scn = _load_one_scenario(tmp_path, cases=[dict(BASE_CASE, rubric=NUMBERED, watch=watch),
+                                              dict(FILLER_CASE)])
+    assert scn.cases[0].watch == ((2, "The candidate misses it 2 of 12."),)
+    assert scn.cases[1].watch == ()
+
+
+@pytest.mark.parametrize("rubric_text, watch, defect", [
+    ("Prose.", [{"n": 1, "reason": "r"}], "only a numbered rubric"),
+    (None, [{"n": 1, "reason": "r"}], "only a numbered rubric"),
+    (NUMBERED, [], "non-empty list"),
+    (NUMBERED, [{"n": 4, "reason": "r"}], "n must be a requirement number 1..3"),
+    (NUMBERED, [{"n": True, "reason": "r"}], "n must be a requirement number 1..3"),
+    (NUMBERED, [{"n": 2, "reason": "  "}], "reason must say why requirement 2"),
+    (NUMBERED, [{"n": 2}], "exactly the keys n and reason"),
+    (NUMBERED, [{"n": 2, "reason": "r", "until": "x"}], "exactly the keys n and reason"),
+    (NUMBERED, [{"n": 2, "reason": "r"}, {"n": 2, "reason": "s"}], "watched more than once"),
+    (NUMBERED, [{"n": n, "reason": "r"} for n in (1, 2, 3)], "none would decide the verdict"),
+])
+def test_an_impossible_watch_is_a_suite_validation_error(tmp_path, rubric_text, watch, defect):
+    case = dict(BASE_CASE, watch=watch)
+    if rubric_text is not None:
+        case["rubric"] = rubric_text
+    problems = _problems(tmp_path, cases=[case, dict(FILLER_CASE)])
+    assert any("case_a" in problem and "watch" in problem and defect in problem
+               for problem in problems), problems
+
+
+def test_the_shipped_watches_each_name_one_requirement_and_a_reason():
+    watches = {case.id: case.watch
+               for suite in suites.load_all(SUITES_DIR, include_dangerous=True)
+               for scenario in suite.scenarios for case in scenario.cases if case.watch}
+    assert {case_id: [n for n, _reason in watch] for case_id, watch in watches.items()} == \
+        {"people_and_customer_update": [4], "hiring_decision": [2]}
+    assert all("Revisit when the candidate model changes." in reason
+               for watch in watches.values() for _n, reason in watch)
+
+
+def test_the_shipped_numbered_rubrics_parse():
+    counts = {}
+    for suite in suites.load_all(SUITES_DIR, include_dangerous=True):
+        for scenario in suite.scenarios:
+            for case in scenario.cases:
+                texts, error = rubric.numbered_requirements(case.rubric or "")
+                assert error is None, (case.id, error)
+                if texts:
+                    counts[case.id] = len(texts)
+    assert counts == {"launch_day_update": 5, "people_and_customer_update": 4,
+                      "hiring_decision": 5,
+                      # grok_voice.yaml
+                      "intake_on_the_thirteenth": 2, "van_on_the_twentieth": 2,
+                      "curry_question_while_stocktake_runs": 3,
+                      "rice_question_while_stocktake_runs": 3,
+                      "never_mind_cancel": 2, "stop_the_stocktake": 2,
+                      "thirteenth_corrected_to_twentieth": 3,
+                      "twentieth_corrected_to_thirteenth": 3}
 
 
 if __name__ == "__main__":

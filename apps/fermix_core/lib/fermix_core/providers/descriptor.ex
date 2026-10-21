@@ -147,10 +147,9 @@ defmodule FermixCore.Providers.Descriptor do
       locality: :remote,
       auth_modes: [:api_key],
       secrets: [:openai_api_key],
-      # No :base_url here: config.exs seeds a baseline base_url into the
-      # openai app-env block, so persisting it would make every
-      # current-vs-persisted snapshot diff (restart_required?) dirty.
-      config_keys: [:api_key, :default_model, :reasoning_effort, :primary],
+      # `base_url` is written only when set (`fermix setup --openai-base-url`);
+      # config.exs seeds none, or every save would write the default.
+      config_keys: [:api_key, :base_url, :default_model, :reasoning_effort, :primary],
       setup_fields: [
         %{
           key: :openai_api_key,

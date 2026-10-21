@@ -7,6 +7,8 @@ defmodule FermixCore.Realtime.LiveTelemetryTest do
 
   @meta %{
     session_id: "voice_live:7",
+    engine: "openai_live",
+    provider: "openai",
     call_uuid: @call_uuid,
     device_id: "dev-1",
     model: "gpt-live-1",
@@ -213,7 +215,11 @@ defmodule FermixCore.Realtime.LiveTelemetryTest do
   end
 
   test "absent optional metadata is dropped, never emitted as nil" do
-    LiveTelemetry.call_start(%{session_id: "voice_live:8"}, 60_000, @start_size)
+    LiveTelemetry.call_start(
+      %{session_id: "voice_live:8", engine: "openai_live", provider: "openai"},
+      60_000,
+      @start_size
+    )
 
     assert_receive {:vl, [:fermix, :voice_live, :call_start], %{}, meta}
     refute Map.has_key?(meta, :provider_session_id)
@@ -233,7 +239,29 @@ defmodule FermixCore.Realtime.LiveTelemetryTest do
 
   test "a call without a session id fails loud rather than emitting an orphan" do
     assert_raise KeyError, fn ->
-      LiveTelemetry.call_start(%{model: "gpt-live-1"}, 60_000, @start_size)
+      LiveTelemetry.call_start(
+        %{model: "gpt-live-1", engine: "openai_live", provider: "openai"},
+        60_000,
+        @start_size
+      )
+    end
+  end
+
+  # M70 §09: the engine is the caller's to name on every event. A Grok call
+  # rides the same run kind and the same events, told apart by its engine,
+  # provider and pinned model, and a caller that names no engine fails loud
+  # rather than being filed under GPT Live.
+  test "a Grok call carries its own engine, provider and model" do
+    grok = %{@meta | engine: "xai_realtime", provider: "xai", model: "grok-voice-3.0"}
+    LiveTelemetry.call_start(grok, 900_000, @start_size)
+
+    assert_receive {:vl, [:fermix, :voice_live, :call_start], %{}, meta}
+    assert meta.engine == "xai_realtime"
+    assert meta.provider == "xai"
+    assert meta.model == "grok-voice-3.0"
+
+    assert_raise KeyError, fn ->
+      LiveTelemetry.session_started(Map.delete(@meta, :engine))
     end
   end
 

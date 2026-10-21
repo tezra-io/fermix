@@ -1,8 +1,9 @@
 defmodule FermixCore.Tools.VoiceCallContextTest do
   @moduledoc """
-  M56 §4.4: `voice_call_context`, what a turn reads of the Live call in the
-  chat. The call is a fake session holding the claim in a registry of this
-  test's own, answering what a `LiveSessionServer` answers.
+  M56 §4.4: `voice_call_context`, what a turn reads of the task-engine call
+  in the chat. The call is a fake session holding the claim in a registry of
+  this test's own, answering `SessionControl.call_context/2` as a task-engine
+  session does.
   """
 
   use ExUnit.Case, async: true

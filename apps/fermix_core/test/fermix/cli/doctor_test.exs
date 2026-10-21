@@ -25,6 +25,7 @@ defmodule Fermix.CLI.DoctorTest do
     assert output =~ "fermix doctor"
     assert output =~ "setup secrets"
     assert output =~ "secret store"
+    assert output =~ "provider health"
     assert output =~ "ok,"
     assert output =~ "warning(s)"
     assert output =~ "failure(s)"

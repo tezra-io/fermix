@@ -27,12 +27,14 @@ defmodule FermixChannels.Companion.TurnsTest do
   alias FermixChannels.Mobile.Management
   alias FermixChannels.Mobile.Protocol, as: MobileProtocol
   alias FermixChannels.Mobile.RequestCoordinator
+  alias FermixCore.Agents.ConversationKey
   alias FermixCore.Companion.Protocol, as: CompanionProtocol
   alias FermixCore.Companion.Timeline
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.DeviceIdentity
+  alias FermixCore.ReplyBlocks
 
   @repo :companion_turns_test_repo
   @work_registry :companion_turns_test_work
@@ -49,6 +51,10 @@ defmodule FermixChannels.Companion.TurnsTest do
 
     def append_proactive(p, key, a, o), do: Timeline.append_proactive(p, key, a, o ++ @opts)
     def history_page(p, o), do: Timeline.history_page(p, o ++ @opts)
+
+    def attach_link_preview(p, seq, preview, o),
+      do: Timeline.attach_link_preview(p, seq, preview, o ++ @opts)
+
     def get_client_request(p, id, o), do: Timeline.get_client_request(p, id, o ++ @opts)
     def cancel_client_request(p, id, o), do: Timeline.cancel_client_request(p, id, o ++ @opts)
     def cancel_device_requests(device, o), do: Timeline.cancel_device_requests(device, o ++ @opts)
@@ -213,7 +219,7 @@ defmodule FermixChannels.Companion.TurnsTest do
   end
 
   @app_env ~w(companion_store mobile_store mobile_event_sink mobile_push mobile_push_launcher
-              mobile_unfurl_launcher companion_approvals mobile_approval_push)a
+              link_preview_launcher link_preview_resolver companion_approvals mobile_approval_push)a
 
   setup do
     test_pid = self()
@@ -232,7 +238,7 @@ defmodule FermixChannels.Companion.TurnsTest do
     end)
 
     Application.put_env(:fermix_channels, :mobile_push_launcher, fn task -> task.() end)
-    Application.put_env(:fermix_channels, :mobile_unfurl_launcher, fn _task -> :ok end)
+    Application.put_env(:fermix_channels, :link_preview_launcher, fn _task -> :ok end)
 
     Application.put_env(:fermix_channels, :mobile_approval_push, fn profile ->
       send(test_pid, {:approval_push, profile})
@@ -252,7 +258,9 @@ defmodule FermixChannels.Companion.TurnsTest do
       {Repo, name: @repo, enabled: true, database_path: Path.join(dir, "memory.db")}
     )
 
-    start_supervised!(Turns)
+    # The place records a turn's replies are drawn with, held for this test.
+    reply_blocks = start_supervised!({ReplyBlocks, name: nil})
+    start_supervised!({Turns, reply_blocks: reply_blocks})
     {:ok, _owner} = Registry.register(Companion.registry(), "main", nil)
     queue = start_supervised!({QueueSink, test_pid})
 
@@ -262,7 +270,126 @@ defmodule FermixChannels.Companion.TurnsTest do
          name: nil, store: RepoTimeline, boot_epoch: "boot-#{unique()}", recover?: false}
       )
 
-    %{queue: queue, coordinator: coordinator, device_id: pair_device!(), approvals: approvals}
+    %{
+      queue: queue,
+      coordinator: coordinator,
+      device_id: pair_device!(),
+      approvals: approvals,
+      reply_blocks: reply_blocks
+    }
+  end
+
+  # M72: a companion turn's reply is drawn with the places its run's searches
+  # found that the text links. The tool keeps them under its context's key,
+  # which `TurnRunner` derives from the message the queue was handed
+  # (`ConversationKey.from/1`, held to the tool context in its own tests); here
+  # the test keeps them there in the tool's stead.
+  describe "a reply drawn with the places it links (M72)" do
+    test "a Mac turn that searched ends with text_done carrying them, stored and paged", ctx do
+      id = unique()
+      msg = %{type: "msg", payload: msg_payload(id, "somewhere quiet for coffee?")}
+
+      assert :ok = Requests.request(msg, companion_transport(), request_opts(ctx))
+      assert_receive {:enqueued, turn}
+
+      conversation = ConversationKey.from(turn)
+      assert conversation == Companion.chat_conversation_key()
+      :ok = ReplyBlocks.put_places(ctx.reply_blocks, conversation, [place(1), place(2), place(3)])
+
+      reply =
+        "Two quiet ones: [Cafe 2](https://cafe2.example/) has long tables, and " <>
+          "[Cafe 1](https://cafe1.example/) opens early."
+
+      assert :ok = turn.reply_fn.({:text, reply})
+      turn.turn_result_fn.({:completed})
+
+      assert_receive {:companion_event,
+                      %{"t" => "text_done", "server_seq" => seq, "blocks" => blocks} = done}
+
+      assert done["text"] == reply
+      assert [%{"type" => "places", "places" => places}] = blocks
+      assert Enum.map(places, & &1["name"]) == ["Cafe 2", "Cafe 1"]
+      assert {:ok, _line} = CompanionProtocol.encode_server_event("text_done", done)
+
+      # The phones hear the reply as its row, the whole history message.
+      assert_receive {:mobile_event, "main",
+                      %{"t" => "row", "server_seq" => ^seq, "blocks" => ^blocks}}
+
+      # The row holds them, and a history pull returns them.
+      assert {:ok, %{messages: [%{blocks: ^blocks}]}} =
+               RepoTimeline.history_page("main", after_seq: seq - 1, limit: 1)
+
+      assert :ok =
+               Requests.history(
+                 %{"profile_id" => "main", "after_seq" => seq - 1, "limit" => 1},
+                 companion_transport(),
+                 request_opts(ctx)
+               )
+
+      assert_receive {:reply, _target, %{"t" => "history_page", "messages" => [message]}}
+      assert %{"server_seq" => ^seq, "blocks" => ^blocks} = message
+
+      # The turn took the records: the next reply finds none.
+      assert ReplyBlocks.take(ctx.reply_blocks, conversation) == []
+    end
+
+    test "a reply that links no place it found carries no blocks key", ctx do
+      id = unique()
+      msg = %{type: "msg", payload: msg_payload(id, "what is a flat white?")}
+
+      assert :ok = Requests.request(msg, companion_transport(), request_opts(ctx))
+      assert_receive {:enqueued, turn}
+      :ok = ReplyBlocks.put_places(ctx.reply_blocks, ConversationKey.from(turn), [place(1)])
+
+      reply = "A flat white is espresso with steamed milk; see https://coffee.example/guide."
+      assert :ok = turn.reply_fn.({:text, reply})
+      turn.turn_result_fn.({:completed})
+
+      assert_receive {:companion_event, %{"t" => "text_done", "server_seq" => seq} = done}
+      refute Map.has_key?(done, "blocks")
+      assert_receive {:mobile_event, "main", %{"t" => "row", "server_seq" => ^seq} = row}
+      refute Map.has_key?(row, "blocks")
+
+      assert {:ok, %{messages: [%{blocks: []}]}} =
+               RepoTimeline.history_page("main", after_seq: seq - 1, limit: 1)
+    end
+
+    # With no phone paired: the links are the timeline's, previewed on every
+    # reply, less the pages its places' cards already stand for.
+    test "a Mac reply's other links are previewed on its row, never its places' pages", ctx do
+      test_pid = self()
+      Application.put_env(:fermix_channels, :link_preview_launcher, &Task.start/1)
+
+      Application.put_env(:fermix_channels, :link_preview_resolver, fn links, _thumbnail ->
+        send(test_pid, {:previewing, links})
+        guide = "https://guide.example/soho"
+        {:ok, [%{link: guide, url: guide <> "/", site: "Guide", title: "SoHo on foot"}], []}
+      end)
+
+      id = unique()
+      msg = %{type: "msg", payload: msg_payload(id, "coffee and a walk?")}
+
+      assert :ok = Requests.request(msg, companion_transport(), request_opts(ctx))
+      assert_receive {:enqueued, turn}
+      :ok = ReplyBlocks.put_places(ctx.reply_blocks, ConversationKey.from(turn), [place(1)])
+
+      reply =
+        "[Cafe 1](https://cafe1.example/) has its [menu](https://cafe1.example/menu) online, " <>
+          "and the [guide](https://guide.example/soho) has a walk from there."
+
+      assert :ok = turn.reply_fn.({:text, reply})
+      turn.turn_result_fn.({:completed})
+
+      assert_receive {:companion_event, %{"t" => "text_done", "server_seq" => seq}}
+      assert_receive {:previewing, ["https://cafe1.example/menu", "https://guide.example/soho"]}
+      assert_receive {:companion_event, %{"t" => "row_updated", "server_seq" => ^seq}}
+
+      assert {:ok, %{messages: [%{link_previews: [preview]}]}} =
+               RepoTimeline.history_page("main", after_seq: seq - 1, limit: 1)
+
+      assert preview["link"] == "https://guide.example/soho"
+      assert preview["url"] == "https://guide.example/soho/"
+    end
   end
 
   describe "a command that becomes a turn (STB-3)" do
@@ -511,6 +638,34 @@ defmodule FermixChannels.Companion.TurnsTest do
       assert done =~ "pong"
       assert_receive {:settled, ^id, "completed"}
       assert {:ok, %{status: "completed", result_server_seq: ^seq}} = request(id)
+    end
+
+    # M72: a background run's result is written outside any queue turn, and is
+    # drawn with the places its searches found that it links, as a reply is.
+    test "on the Mac, a /bg result that links a place it found carries the place", ctx do
+      id = unique()
+      msg = %{type: "msg", payload: msg_payload(id, "/bg find a quiet cafe")}
+      chat = Companion.chat_conversation_key()
+
+      assert :ok =
+               Requests.request(msg, companion_transport(settled_to: self()), command_opts(ctx))
+
+      assert_receive {:companion_event, %{"t" => "row", "text" => "Started background work" <> _}}
+      assert_receive {:background_running, "find a quiet cafe", run}
+
+      :ok = ReplyBlocks.put_places(ctx.reply_blocks, chat, [place(1), place(2)])
+      send(run, {:release, {:ok, "Try [Cafe 2](https://cafe2.example/) before ten."}})
+
+      assert_receive {:companion_event,
+                      %{"t" => "row", "server_seq" => seq, "text" => "Background work " <> _} =
+                        row}
+
+      assert [%{"type" => "places", "places" => [%{"name" => "Cafe 2"}]}] = row["blocks"]
+      assert {:ok, _line} = CompanionProtocol.encode_server_event("row", Map.delete(row, "t"))
+      assert_receive {:settled, ^id, "completed"}
+
+      assert {:ok, %{messages: [%{blocks: [_block]}]}} =
+               RepoTimeline.history_page("main", after_seq: seq - 1, limit: 1)
     end
 
     test "on the phone, a /bg typed as a message posts its result, and settles only then", ctx do
@@ -1096,9 +1251,11 @@ defmodule FermixChannels.Companion.TurnsTest do
   # One announcer for everyone watching a profile (STB-9).
   describe "fan-out across the transports" do
     # The Mac's row carries the message's kind and metadata too (M56 §6), and
-    # never a field its wire does not have (media refs, link previews).
+    # its media refs and link previews (companion protocol 3), never a field
+    # its wire does not have.
     test "a phone hears a row as the history message it renders, the Mac its own fields (R1-6)" do
       image = String.duplicate("c", 64)
+      thumbnail = String.duplicate("d", 64)
 
       media = %{
         "ref" => image,
@@ -1117,8 +1274,22 @@ defmodule FermixChannels.Companion.TurnsTest do
         in_reply_to: nil,
         media_refs: [media],
         metadata: %{"turn_id" => nil, "source" => "phone"},
-        link_previews: [],
+        link_previews: [
+          %{
+            "url" => "https://shop.test/lamp",
+            "site" => "Shop",
+            "title" => "Lamp",
+            "image" => %{"ref" => thumbnail, "kind" => "image", "mime" => "image/png"}
+          }
+        ],
         created_at: ~U[2026-09-27 09:00:00Z]
+      }
+
+      card = %{
+        "url" => "https://shop.test/lamp",
+        "site" => "Shop",
+        "title" => "Lamp",
+        "image_ref" => thumbnail
       }
 
       assert :ok = Fanout.announce("main", Output.row("main", row))
@@ -1134,7 +1305,9 @@ defmodule FermixChannels.Companion.TurnsTest do
                "ts" => "2026-09-27T09:00:00Z",
                "client_msg_id" => "phone-1",
                "kind" => "media",
-               "metadata" => %{"source" => "phone"}
+               "metadata" => %{"source" => "phone"},
+               "media_refs" => [media],
+               "link_previews" => [card]
              }
 
       assert_receive {:mobile_event, "main", phone_row}
@@ -1149,7 +1322,8 @@ defmodule FermixChannels.Companion.TurnsTest do
                "client_msg_id" => "phone-1",
                "kind" => "media",
                "media_refs" => [media],
-               "metadata" => %{"source" => "phone"}
+               "metadata" => %{"source" => "phone"},
+               "link_previews" => [card]
              }
 
       assert {:ok, _frames} =
@@ -1196,7 +1370,7 @@ defmodule FermixChannels.Companion.TurnsTest do
              } = mac_row
 
       assert Map.keys(mac_row) |> Enum.sort() ==
-               ~w(client_msg_id kind profile_id role server_seq t text ts)
+               ~w(client_msg_id kind media_refs profile_id role server_seq t text ts)
 
       assert {:ok, _line} = CompanionProtocol.encode_server_event("row", Map.delete(mac_row, "t"))
 
@@ -1304,6 +1478,18 @@ defmodule FermixChannels.Companion.TurnsTest do
 
       assert log == ""
     end
+  end
+
+  # A place as `PlaceSearch.Brave` normalizes it (M31 §10.2).
+  defp place(n) do
+    %{
+      name: "Cafe #{n}",
+      canonical_url: "https://cafe#{n}.example/",
+      source_url: "https://search.brave.com/local/place/#{n}",
+      location: %{latitude: 40.72 + n / 1_000, longitude: -74.0},
+      rating: %{value: 4.5, best: 5, count: 100 + n},
+      opening_hours: %{current_day: "Thursday 07:00-19:00"}
+    }
   end
 
   # A reply to one client comes back here; a profile event goes to every

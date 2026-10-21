@@ -15,12 +15,15 @@ defmodule FermixCore.Temporal.Registry do
       resolved occurrence;
     * **the delivery-target snapshot** — the existing
       `[fermix_core.jobs] default_delivery_mode`/`default_delivery_target` pair
-      read exactly as `Jobs.DeliveryDefaults` reads it, narrowed to the five
+      read exactly as `Jobs.DeliveryDefaults` reads it, narrowed to the
       proactive platforms and normalized through the §11.1 thread table; with
       no target configured, the owner's inbox is derived through the shared
       `Delivery.OwnerInbox` ladder (the same one skill-curation proposals use)
       and validated by those same §11.1 rules, so a fresh install with a
-      configured channel can store events without a second config step;
+      configured channel can store events without a second config step. This
+      computer (M76 §4.6) is a target when the owner names it
+      (`delivery: "computer"`) and the ladder's last rung where the build
+      offers it, accepted only on `Native.Notifications.ready/2`;
     * **the compound Repo calls** — `Memory.Repo` owns every transaction; this
       module never opens one;
     * **the post-commit scheduler signal** — a best-effort cast that can never
@@ -34,7 +37,10 @@ defmodule FermixCore.Temporal.Registry do
 
   alias FermixCore.Delivery.ChannelSend
   alias FermixCore.Delivery.OwnerInbox
+  alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
+  alias FermixCore.Native
+  alias FermixCore.Native.Notifications
   alias FermixCore.Temporal.Defaults
   alias FermixCore.Temporal.Planner
   alias FermixCore.Temporal.Renderer
@@ -45,7 +51,12 @@ defmodule FermixCore.Temporal.Registry do
   @scheduler FermixCore.Temporal.Scheduler
 
   @kinds ~w(birthday anniversary appointment deadline event follow_up explicit_reminder)
-  @platforms ~w(telegram slack discord signal whatsapp imessage)
+  @chat_platforms ~w(telegram slack discord signal whatsapp imessage)
+  # This computer (M76 §4.6): its notification server, reached through the
+  # `Native.Notifications` adapter, with one destination and no thread field.
+  @computer Notifications.platform()
+  @computer_destination Notifications.destination()
+  @platforms @chat_platforms ++ [@computer]
   @leap_policies ~w(feb_28 mar_1)
   @destination_keys ~w(chat_id channel_id recipient target reply_target)
   @ephemeral_keys ~w(reply_to req_options)
@@ -53,6 +64,9 @@ defmodule FermixCore.Temporal.Registry do
   @rejected_modes ["none", "origin", "local"]
   @relative_units %{"days" => 1, "weeks" => 7}
   @max_relative_days 3_650
+  # Timers (M76 §4.7): a relative time in these units names a moment, not a
+  # day: each unit's length in seconds and the most of it one timer may span.
+  @clock_units %{"minutes" => {60, 1_440}, "hours" => {3_600, 168}}
 
   # Snooze (§20). The lookback is what "that" may reach; the cap is what one
   # deferral may span before it stops being a snooze and becomes an event edit.
@@ -127,6 +141,11 @@ defmodule FermixCore.Temporal.Registry do
 
   `:stated_as` is the stored occurrence rendered absolutely, weekday included —
   what the confirmation must say instead of echoing the owner's relative word.
+
+  `:delivery` is the owner's own choice of target: `"computer"`, this
+  computer, is the one choice (M76 §4.6). Without it the default target is
+  resolved. `opts[:native]` names the provider, the host and the backend's
+  seams as `Native.Notifications.ready/2` takes them.
   """
   @spec create_event(map(), map(), keyword()) ::
           {:ok,
@@ -143,7 +162,7 @@ defmodule FermixCore.Temporal.Registry do
     now = now(opts)
 
     with {:ok, spec} <- build_spec(params, now, opts),
-         {:ok, target} <- default_target(opts),
+         {:ok, target} <- delivery_target(params, context, opts),
          {:ok, plan} <- materialize(spec, now),
          {:ok, origin} <- created_by_origin(context),
          attrs = create_attrs(spec, target, context, origin),
@@ -167,7 +186,8 @@ defmodule FermixCore.Temporal.Registry do
   Applies an owner edit (§7.3): merges the patch over the stored event,
   re-resolves its time, and re-materializes the bounded plan under a new
   revision. `rebind_delivery_to_default: true` snapshots the current configured
-  default target instead of keeping the stored one.
+  default target instead of keeping the stored one; `delivery: "computer"`
+  snapshots this computer, as a create does, and the two together are refused.
 
   `:previous` carries the prior value of every user-facing field this edit
   actually changed, so the acknowledgement can state was-and-now from stored
@@ -192,7 +212,7 @@ defmodule FermixCore.Temporal.Registry do
          {:ok, fields} <- confirmed_patch(patch, existing),
          {:ok, params} <- merge_params(existing, fields),
          {:ok, spec} <- build_spec(params, now, opts),
-         {:ok, target} <- patched_target(existing, fields, opts),
+         {:ok, target} <- patched_target(existing, fields, context, opts),
          {:ok, plan} <- materialize(spec, now),
          {:ok, {event, reminders}} <-
            Repo.update_temporal_event(id, column_map(spec, target), plan, now, server: server) do
@@ -290,6 +310,55 @@ defmodule FermixCore.Temporal.Registry do
       emit_snooze(outcome, event)
       notify(context)
       {:ok, snooze_result(outcome, source, event, zone)}
+    end
+  end
+
+  @typedoc "What `snooze_reminder/3` answers on success, and `snooze_from_notification/3`."
+  @type snooze_result :: %{
+          status: :created | :existing,
+          reminder: map(),
+          source: map(),
+          event: map(),
+          timezone: String.t(),
+          superseded: [String.t()]
+        }
+
+  @doc """
+  Snoozes the reminder `reminder_id` by `minutes` from the notification it
+  rang as on this computer (M76 D6): the owner's own act, pressed on the
+  notification, with no model turn. It is `snooze_reminder/3` with that
+  explicit id, so it is the one snooze path and answers what that answers.
+
+  Only a reminder delivered to this computer is snoozed here, since that is
+  where it rang; one sent to a chat is refused. The press is made on a
+  reminder the owner has already seen, so it is their consent to one that
+  lands after the event itself (`confirm_past_boundary`), which a timer's
+  at-time reminder always does.
+
+  There is no turn, so the owner is the configured one
+  (`Memory.Config.owner_id/1`, which reads `opts[:owner_id]`), and
+  `opts[:memory_repo]` and `opts[:temporal_scheduler]` name the Repo and the
+  scheduler where a turn's context would. The rest of `opts` are
+  `snooze_reminder/3`'s (`:now`, `:personalization`).
+  """
+  @spec snooze_from_notification(String.t(), pos_integer(), keyword()) ::
+          {:ok, snooze_result()} | {:error, term()}
+  def snooze_from_notification(reminder_id, minutes, opts \\ [])
+      when is_binary(reminder_id) and reminder_id != "" and is_integer(minutes) and minutes > 0 and
+             is_list(opts) do
+    context = owner_context(opts)
+
+    with {:ok, source} <- Repo.get_temporal_reminder(reminder_id, server: repo(context)),
+         :ok <- rung_on_this_computer(source) do
+      snooze_reminder(
+        %{
+          reminder_id: reminder_id,
+          snooze: %{"type" => "duration", "amount" => minutes, "unit" => "minutes"},
+          confirm_past_boundary: true
+        },
+        context,
+        opts
+      )
     end
   end
 
@@ -533,9 +602,10 @@ defmodule FermixCore.Temporal.Registry do
     )
   end
 
-  # `:configured` or `:derived` — the two rungs `default_target/1` can answer
-  # from. Rendered as-is rather than matched against that pair, so an unexpected
-  # value would be visible in the payload instead of silently vanishing from it.
+  # `:configured` or `:derived` — the two rungs `default_target/2` can answer
+  # from — or `:computer`, the owner naming this computer (M76 §4.6). Rendered
+  # as-is rather than matched against that set, so an unexpected value would
+  # be visible in the payload instead of silently vanishing from it.
   defp delivery_source_view(%{delivery_source: source}) when is_atom(source) do
     %{"source" => Atom.to_string(source)}
   end
@@ -592,6 +662,44 @@ defmodule FermixCore.Temporal.Registry do
       "Fermix never falls back to this conversation."
   end
 
+  # D3: the build offers this computer as the last rung, so it is the third
+  # remedy, named in its backend's own sentence (a grant on a Mac, a
+  # notification server on Linux).
+  def describe_error({:no_default_delivery_target, computer_sentence})
+      when is_binary(computer_sentence) do
+    "No delivery target could be resolved. Either configure [fermix_core.jobs] " <>
+      "default_delivery_target (platform plus a destination such as chat_id), configure " <>
+      "a channel with an owner id so Fermix can derive your inbox, or let this computer " <>
+      "ring, which it cannot now because #{computer_sentence}. Fermix never falls back " <>
+      "to this conversation."
+  end
+
+  def describe_error({:computer_not_ready, sentence}) when is_binary(sentence) do
+    "Nothing was stored: this computer cannot ring for this reminder now, because " <>
+      "#{sentence}."
+  end
+
+  def describe_error({:unsupported_delivery_choice, choice}) do
+    "#{inspect(choice)} is not a delivery choice. Pass delivery \"computer\" to ring on " <>
+      "this computer, or leave delivery out to use the default target."
+  end
+
+  def describe_error({:computer_destination, destination}) do
+    "The configured default_delivery_target for this computer names " <>
+      "#{inspect(destination)}; this computer has one destination, " <>
+      "#{inspect(@computer_destination)}."
+  end
+
+  def describe_error(:conflicting_delivery_change) do
+    "Pass delivery \"computer\" or rebind_delivery_to_default, not both: one moves the " <>
+      "reminders to this computer, the other to the default target."
+  end
+
+  def describe_error(:not_rung_on_this_computer) do
+    "That reminder was not delivered to this computer, so a notification here cannot " <>
+      "snooze it."
+  end
+
   def describe_error(:no_default_delivery_destination) do
     "The configured [fermix_core.jobs] default_delivery_target has no destination. " <>
       "Add one of: #{Enum.join(@destination_keys, ", ")}."
@@ -607,7 +715,7 @@ defmodule FermixCore.Temporal.Registry do
     "The configured default delivery platform is #{inspect(platform)}, which is a valid " <>
       "schedule_job target but not a durable reminder destination — the CLI is an " <>
       "interaction surface with nobody listening later. Configure a chat platform " <>
-      "(#{Enum.join(@platforms, ", ")}) to store events."
+      "(#{Enum.join(@chat_platforms, ", ")}) to store events."
   end
 
   def describe_error({:unsupported_delivery_platform, platform}) do
@@ -781,8 +889,20 @@ defmodule FermixCore.Temporal.Registry do
     "#{inspect(raw)} is not a supported time form. Use " <>
       ~s({"type":"date","date":"YYYY-MM-DD"}, ) <>
       ~s({"type":"datetime","date":"YYYY-MM-DD","time":"HH:MM:SS"}, ) <>
-      ~s({"type":"relative","amount":2,"unit":"weeks"}, or ) <>
+      ~s({"type":"relative","amount":2,"unit":"minutes"|"hours"|"days"|"weeks"}, or ) <>
       ~s({"type":"annual","month":9,"day":14}.)
+  end
+
+  def describe_error({:relative_too_far, amount, unit}) when is_map_key(@clock_units, unit) do
+    {_seconds, max} = Map.fetch!(@clock_units, unit)
+
+    "#{amount} #{unit} is more than a timer in #{unit} spans (at most #{max}). For a time " <>
+      "that far out, use days or weeks, or a datetime."
+  end
+
+  def describe_error({:relative_time_not_allowed, unit}) do
+    "A relative time in #{unit} already names its moment, so it takes no \"time\". Drop " <>
+      "\"time\", or give the moment as a datetime."
   end
 
   def describe_error({:invalid_kind, kind}) do
@@ -939,6 +1059,14 @@ defmodule FermixCore.Temporal.Registry do
     end
   end
 
+  defp resolve_when(%{"type" => "relative", "amount" => amount, "unit" => unit} = form, zone, now)
+       when is_map_key(@clock_units, unit) do
+    with :ok <- no_clock_time(form, unit),
+         {:ok, seconds} <- clock_seconds(amount, unit) do
+      timer_occurrence(DateTime.add(now, seconds, :second), zone)
+    end
+  end
+
   defp resolve_when(%{"type" => "relative", "amount" => amount, "unit" => unit} = form, zone, now) do
     with {:ok, days} <- relative_days(amount, unit),
          {:ok, today} <- local_today(now, zone) do
@@ -993,6 +1121,47 @@ defmodule FermixCore.Temporal.Registry do
 
   defp relative_days(amount, unit),
     do: {:error, {:invalid_when, %{"amount" => amount, "unit" => unit}}}
+
+  # A timer (M76 §4.7) is its own moment, so a wall time beside it would be a
+  # second, contradicting answer to "when".
+  defp no_clock_time(form, unit) do
+    if is_nil(Map.get(form, "time")),
+      do: :ok,
+      else: {:error, {:relative_time_not_allowed, unit}}
+  end
+
+  defp clock_seconds(amount, unit) when is_integer(amount) and amount > 0 do
+    {unit_seconds, max} = Map.fetch!(@clock_units, unit)
+
+    if amount > max,
+      do: {:error, {:relative_too_far, amount, unit}},
+      else: {:ok, amount * unit_seconds}
+  end
+
+  defp clock_seconds(amount, unit),
+    do: {:error, {:invalid_when, %{"amount" => amount, "unit" => unit}}}
+
+  # The instant is the source and the owner's wall clock is read off it in
+  # their zone, never a wall time resolved back through the zone: that would
+  # refuse a moment inside a DST gap or fold that plainly exists. Whole
+  # seconds, so the stored wall time and the dedupe key carry no fraction.
+  defp timer_occurrence(at, zone) do
+    at = DateTime.truncate(at, :second)
+
+    case DateTime.shift_zone(at, zone) do
+      {:ok, local} -> {:ok, timed_occurrence(local, at)}
+      {:error, _reason} -> {:error, {:invalid_timezone, zone}}
+    end
+  end
+
+  defp timed_occurrence(local, at) do
+    %{
+      one_time_date(DateTime.to_date(local))
+      | time_kind: "datetime",
+        local_time: DateTime.to_time(local),
+        occurrence_at: at
+    }
+  end
 
   defp annual_month_day(month, day)
        when is_integer(month) and month in 1..12 and is_integer(day) and day in 1..31 do
@@ -1145,7 +1314,20 @@ defmodule FermixCore.Temporal.Registry do
   # The ingress conversation key and the outbound delivery triple are the same
   # canonical (platform, destination, thread) identity (§11.1); that is what lets
   # this match a target without drifting from routing.
+  #
+  # One rule more (M76 D6): a reminder that rang on this computer has no
+  # conversation, and it is matched from this computer's own surfaces alone
+  # (`Native.local_surface?/1`), where the person saw it, never from a remote
+  # chat. Those surfaces' own conversations (the Mac chat, a terminal, an
+  # editor, a voice call) are no reminder platform, so this computer is the
+  # only target a caller there could mean.
   defp caller_target(context) do
+    if Native.local_surface?(context),
+      do: {:ok, computer_triple()},
+      else: conversation_target(context)
+  end
+
+  defp conversation_target(context) do
     case Map.get(context, :conversation_key) do
       {channel, chat_id, scope} ->
         {:ok,
@@ -1170,6 +1352,19 @@ defmodule FermixCore.Temporal.Registry do
 
   defp ensure_owner(%{owner_id: owner_id} = event, owner_id), do: {:ok, event}
   defp ensure_owner(_event, _owner_id), do: {:error, :not_found}
+
+  # A notification's press carries no turn, so it acts for the configured
+  # owner, as a scheduled run does, against the Repo and scheduler `opts` name.
+  defp owner_context(opts) do
+    %{
+      memory_owner_id: MemoryConfig.owner_id(opts),
+      memory_repo: Keyword.get(opts, :memory_repo, Repo),
+      temporal_scheduler: Keyword.get(opts, :temporal_scheduler, @scheduler)
+    }
+  end
+
+  defp rung_on_this_computer(%{delivery_platform: @computer}), do: :ok
+  defp rung_on_this_computer(_reminder), do: {:error, :not_rung_on_this_computer}
 
   # --- snooze (§20) --------------------------------------------------------
 
@@ -1413,46 +1608,117 @@ defmodule FermixCore.Temporal.Registry do
 
   # --- default delivery target (§11.1) -------------------------------------
 
+  # The owner naming this computer (M76 §4.6) takes it over every default;
+  # otherwise the default precedence below decides.
+  defp delivery_target(params, context, opts) do
+    case Map.get(params, :delivery) do
+      nil -> default_target(context, opts)
+      choice -> chosen_target(choice, context, opts)
+    end
+  end
+
+  defp chosen_target(@computer, context, opts) do
+    with :ok <- computer_ready(context, opts), do: {:ok, computer_target(:computer)}
+  end
+
+  defp chosen_target(choice, _context, _opts),
+    do: {:error, {:unsupported_delivery_choice, choice}}
+
   # One precedence, resolved once at acceptance: the explicitly configured
-  # target, else the owner's inbox derived from a configured channel, else a
-  # loud refusal naming both remedies. A hostile delivery MODE is answered
-  # before either — `none`/`origin`/`local` is the operator saying background
-  # delivery is off, and deriving an inbox would silently overrule that.
-  defp default_target(opts) do
+  # target, else the owner's inbox derived from a configured channel, else
+  # this computer where the build offers it (D3), else a loud refusal naming
+  # the remedies. A hostile delivery MODE is answered before any of them —
+  # `none`/`origin`/`local` is the operator saying background delivery is off,
+  # and deriving an inbox would silently overrule that.
+  defp default_target(context, opts) do
     jobs = jobs_config(opts)
 
     case configured_target(jobs) do
-      {:ok, raw} -> snapshot_configured(raw, jobs)
-      :absent -> derived_target(opts, jobs)
+      {:ok, raw} -> snapshot_configured(raw, context, jobs, opts)
+      :absent -> derived_target(context, jobs, opts)
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp snapshot_configured(raw, jobs) do
+  defp snapshot_configured(raw, context, jobs, opts) do
     with :ok <- reject_ephemeral_fields(raw),
          {:ok, platform} <- target_platform(raw),
          {:ok, destination} <- target_destination(raw),
          {:ok, scope} <- thread_scope(platform, raw),
-         {:ok, _adapter} <- resolve_adapter(platform, jobs) do
+         :ok <- deliverable(platform, destination, context, jobs, opts) do
       {:ok, target(platform, destination, scope, :configured)}
     end
   end
 
+  # The acceptance step a snapshotted target passes: a chat platform's adapter
+  # must resolve. This computer's adapter always resolves, so what can fail is
+  # whether it can ring now (`Native.Notifications.ready/2`), with the turn's
+  # context, and it has one destination.
+  defp deliverable(@computer, destination, context, _jobs, opts) do
+    with :ok <- computer_destination(destination), do: computer_ready(context, opts)
+  end
+
+  defp deliverable(platform, _destination, _context, jobs, _opts) do
+    with {:ok, _adapter} <- resolve_adapter(platform, jobs), do: :ok
+  end
+
+  defp computer_destination(@computer_destination), do: :ok
+  defp computer_destination(other), do: {:error, {:computer_destination, other}}
+
   # A derived candidate passes the same §11.1 validation the configured target
-  # passes — the five-platform allowlist (so `cli` and any other interaction
+  # passes — the platform allowlist (so `cli` and any other interaction
   # surface is excluded here exactly as it is there) plus a resolvable adapter.
   # A candidate that fails is not a candidate: resolution moves deterministically
   # to the next one rather than reporting an error that would hide a valid later
   # channel. Derived inboxes are root-scoped, so there is no thread to normalize.
-  defp derived_target(opts, jobs) do
+  defp derived_target(context, jobs, opts) do
     opts
     |> OwnerInbox.derived_candidates()
     |> Enum.find_value(&derivable_target(&1, jobs))
     |> case do
-      nil -> {:error, :no_default_delivery_target}
+      nil -> derived_computer(context, opts)
       target -> {:ok, target}
     end
   end
+
+  # D3: this computer is the last rung, asked only once every chat rung is
+  # empty, so a chat inbox always keeps its reminders and nothing is asked of
+  # this computer while one exists. `OwnerInbox` never names it: a
+  # notification is no inbox a two-button proposal could reach. A build that
+  # offers none keeps the two-remedy refusal; one that offers it but cannot
+  # ring now names it as the third remedy, in its backend's own sentence.
+  defp derived_computer(context, opts) do
+    if Notifications.offered?(native_opts(opts)),
+      do: ringing_computer(context, opts),
+      else: {:error, :no_default_delivery_target}
+  end
+
+  defp ringing_computer(context, opts) do
+    case Notifications.ready(context, native_opts(opts)) do
+      :ok -> {:ok, computer_target(:derived)}
+      {:error, sentence} -> {:error, {:no_default_delivery_target, sentence}}
+    end
+  end
+
+  # Readiness is asked with the turn's own tool context: the backend decides
+  # from it whether the person is at this computer, and so whether it may
+  # raise a permission prompt (D13). A refusal is its sentence, whole.
+  defp computer_ready(context, opts) do
+    case Notifications.ready(context, native_opts(opts)) do
+      :ok -> :ok
+      {:error, sentence} -> {:error, {:computer_not_ready, sentence}}
+    end
+  end
+
+  defp computer_target(source) do
+    Map.put(computer_triple(), :source, source)
+  end
+
+  defp computer_triple do
+    %{platform: @computer, destination: @computer_destination, thread_scope: "root"}
+  end
+
+  defp native_opts(opts), do: Keyword.get(opts, :native, [])
 
   defp derivable_target(%{platform: platform, destination: destination}, jobs) do
     if platform in @platforms and match?({:ok, _adapter}, resolve_adapter(platform, jobs)) do
@@ -1670,17 +1936,21 @@ defmodule FermixCore.Temporal.Registry do
 
   defp stored_offset(_event), do: {:error, {:invalid_event, :occurrence_at}}
 
-  defp patched_target(existing, patch, opts) do
-    if Map.get(patch, :rebind_delivery_to_default) == true do
-      default_target(opts)
-    else
-      {:ok,
-       %{
-         platform: existing.delivery_platform,
-         destination: existing.delivery_destination,
-         thread_scope: existing.delivery_thread_scope
-       }}
+  defp patched_target(existing, patch, context, opts) do
+    case {Map.get(patch, :delivery), Map.get(patch, :rebind_delivery_to_default) == true} do
+      {nil, false} -> {:ok, stored_target(existing)}
+      {nil, true} -> default_target(context, opts)
+      {choice, false} -> chosen_target(choice, context, opts)
+      {_choice, true} -> {:error, :conflicting_delivery_change}
     end
+  end
+
+  defp stored_target(existing) do
+    %{
+      platform: existing.delivery_platform,
+      destination: existing.delivery_destination,
+      thread_scope: existing.delivery_thread_scope
+    }
   end
 
   # --- listing -------------------------------------------------------------

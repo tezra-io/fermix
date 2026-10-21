@@ -21,15 +21,17 @@ Each provider is `[fermix_core.providers.<name>]` with `primary`, `default_model
 | Provider | Wire | Auth and extra keys |
 |---|---|---|
 | `openai_codex` | OpenAI Responses (public `api.openai.com/v1`) | Sign in with ChatGPT (Plus/Pro plan usage); `reasoning_effort`; models listed live. A `fast` key from an older config is dropped at load with a warning |
-| `openai` | OpenAI Responses | `api_key`; `reasoning_effort` |
-| `anthropic` | Messages | `auth_mode = "api_key"` (`api_key`) or `"oauth"` (Claude subscription); `reasoning_effort` |
-| `xai` (SpaceXAI Grok) | OpenAI Responses shape | `auth_mode = "api_key"` (`api_key`, `XAI_API_KEY`) or `"oauth"` (Grok Build); `reasoning_effort` |
+| `openai` | OpenAI Responses | `api_key`, `base_url`; `reasoning_effort` |
+| `anthropic` | Messages | `auth_mode = "api_key"` (`api_key`) or `"oauth"` (Claude subscription), `base_url`; `reasoning_effort` |
+| `xai` (SpaceXAI Grok) | OpenAI Responses shape | `auth_mode = "api_key"` (`api_key`, `XAI_API_KEY`) or `"oauth"` (Grok Build), `base_url`; `reasoning_effort` |
 | `openrouter` | Chat Completions | `api_key` (`OPENROUTER_API_KEY`), `base_url` |
 | `mistral` | Chat Completions | `api_key` (`MISTRAL_API_KEY`), `base_url` |
 | `venice` | Chat Completions | `api_key` (`VENICE_API_KEY`), `base_url` |
 | `ollama` | Chat Completions (local) | keyless; `base_url` (`OLLAMA_BASE_URL`, default `http://localhost:11434/v1`; remote and Tailscale hosts work) is what marks it configured |
 
 An unknown key in any provider block, or an unknown legacy provider, fails loud at config load.
+
+**A relay in front of OpenAI, Anthropic or SpaceXAI** (Linux and dev installs; no Mac pane): `fermix setup --openai-base-url URL`, `--anthropic-base-url URL` and `--xai-base-url URL` write that provider's `base_url`, a root such as `http://127.0.0.1:18080/v1` (Fermix adds `/messages` or `/responses` itself). Each lands in its own provider's block whichever provider `--provider` names, a later `fermix setup` without the flag keeps it, and the wizard never asks for one. A value that is not an absolute `http://` or `https://` URL with a host fails setup and writes nothing. Restart to apply. With a `base_url` anywhere but `https://api.openai.com`, OpenAI turns use Chat Completions instead of Responses. OpenAI transcription and Doctor's provider probe follow the `base_url`; image generation, SpaceXAI transcription, voice and Doctor's voice-key check still reach the vendor's own address.
 
 - **OpenAI Codex**: a conversation on a GPT-6 model compacts at 500,000 tokens whatever the threshold; the GPT-5 models compact as they do on the `openai` API route. That route keeps the GPT-6 models at 272,000, because OpenAI bills an API request over 272,000 input tokens at twice the price.
 - **Anthropic**: subscription requests identify as Claude Code and auto-refresh with one 401 retry. Every request sends prompt-cache breakpoints and asks for adaptive thinking where the model supports it (none for Haiku 4.5). Output caps at 16,384 tokens.
@@ -53,6 +55,7 @@ Only OpenAI, OpenAI Codex, Anthropic and SpaceXAI take `reasoning_effort`; the o
 - **Failover** (to the next configured provider in order `openai_codex`, `openai`, `anthropic`, `xai`, `openrouter`, `mistral`, `venice`, `ollama`) happens only on a turn's first model call and only for transient errors: timeout, transport, 5xx, rate limit, quota, or an OAuth failure left after refresh. Never for API-key auth, context length, tool errors, mid-loop calls, or after visible streamed output. `fermix doctor` lists the fallbacks; agent status shows `primary_provider`/`fallback_providers`; each hop emits `[:fermix, :provider, :failover]`.
 - **Same-provider retry first.** The first call retries briefly on pool-checkout (`connection_unavailable`, which never fails over), transport timeout, close, network error and 5xx, so a flake does not move the turn to a weaker model. Scheduled jobs skip this retry and keep their own deadline-bounded backoff, so a job fails over on the first transient of any other kind.
 - **Continuation calls** (mid tool loop) that fail transiently are re-issued in place on the same route, replaying no tools, only when the failed attempt showed nothing: a pre-response timeout the adapter measured (OpenAI Codex), `connection_unavailable`, a transport cut or network error, a provider-declared overload. Everything else surfaces at once. A rate limit whose body names a reset time becomes "usage limit, try again in ~N min".
+- **Is the provider down?** Doctor's `provider health` row (plain `fermix doctor` and the app's Doctor, no network) reads the primary provider's last 20 calls of the past 24 hours from the `llm_call` trace rows: it fails when every one of at least two failed, naming the count, the span and what the latest got, and warns when only the latest failed or it was the only call. A refusal of the request itself (context length, invalid request) or of this machine's connection or proxy does not count. An HTML error page from something in front of the provider (Cloudflare's HTTP 520) is recorded and logged as one line naming the status, never the page. `fermix doctor --full`'s `auth probe` makes one live call and warns on a 5xx.
 
 ## Transport and OpenAI Codex responses
 

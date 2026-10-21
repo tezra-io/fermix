@@ -103,7 +103,7 @@ mix compile --warnings-as-errors
 )
 mix release fermix_app_engine --path "$release_root"
 
-python3 scripts/release/package_app_engine.py \
+uv run scripts/release/package_app_engine.py \
   --release-root "$release_root" \
   --target "$target" \
   --output-dir "$output_dir" \

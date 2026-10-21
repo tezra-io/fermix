@@ -233,8 +233,12 @@ defmodule FermixCore.Plugins.Config do
   def forget_plugin_secret(name, opts \\ []) when is_binary(name) and is_list(opts) do
     snapshot = ConfigStore.current_snapshot()
 
+    # The write guard `persist/2` consults runs before the delete too, so a
+    # forget refused for an outside edit deletes nothing and leaves no
+    # reference naming an item that is gone.
     with {:ok, _plugin} <- fetch_plugin(name),
          {:ok, secret} <- fetch_plugin_secret(name),
+         :ok <- RestartState.writable(),
          :ok <- delete_keychain_item(secret, snapshot, opts) do
       snapshot
       |> SecretStore.delete_snapshot_value(secret.path)

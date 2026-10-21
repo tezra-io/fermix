@@ -1,6 +1,6 @@
 # Sandbox
 
-The sandbox bounds what the file, image, search, git, attachment and shell tools reach. It does not limit plugins, web search, memory or provider calls, and it sets computer use's `access` (`strict` is look-only). One gap: a shell command is checked only for the folder it runs in and for destructive patterns, not for the files it names, so a command run from an allowed folder can still read `~/.ssh` as the owner.
+The sandbox bounds what the file, image, search, git, attachment and shell tools reach. It does not limit plugins, web search, memory or provider calls, and it sets computer use's `access` (`strict` is look-only). On a Mac the operating system holds every command to the mode as well (below); on Linux a command is still checked only for the folder it runs in and for destructive patterns, not for the files it names, so a command run from an allowed folder can write anywhere the owner can.
 
 ## Modes and roots
 
@@ -15,8 +15,18 @@ The sandbox bounds what the file, image, search, git, attachment and shell tools
 
 ## Always refused
 
-- **Protected paths**, in every mode and even inside a grant (file, search and git tools cannot open them; no shell command runs from inside one): `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.docker`, `~/.kube`, `~/.codex` (or its configured home), `~/.anthropic`, `~/.config/fermix` (a Linux service's env file), Claude Code's `~/.claude.json` and the `.credentials.json`/`.claude.json` in its config folder (the rest of `~/.claude` stays reachable); Fermix's `config.toml`, `auth.json`, `chatgpt_host.json` (the Sign in with ChatGPT install id), `secrets/`, `secret_key_base`, `setup-token`, `setup-launch-token.json`, `acp_identities/`, `mobile/`, `plugins/run/`, `browser/profiles/`, `bootstrap/`, `memory.db`, `grants/`, `logs/`, `traces/` and its sockets; OS roots (`/etc`, `/usr`, `/bin`, `/sbin`, `/System`, `/Library`). Names match with a `.` or `-` suffix (`memory.db-wal`) and case-insensitively (`~/.SSH`). A grant for a protected path, the home folder, the Fermix home or `/` is refused as `unsafe_root`.
+- **Protected paths**, in every mode and even inside a grant (file, search and git tools cannot open them; no shell command runs from inside one): `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.docker`, `~/.kube`, `~/.codex` (or its configured home), `~/.anthropic`, `~/.config/fermix` (a Linux service's env file), `~/.npmrc`, `~/.netrc`, `~/.git-credentials`, `~/.config/git/credentials`, gcloud's `credentials.db`, `access_tokens.db`, `legacy_credentials/` and `application_default_credentials.json` in `~/.config/gcloud` (the rest of `~/.config/gcloud` stays reachable), Claude Code's `~/.claude.json` and the `.credentials.json`/`.claude.json` in its config folder (the rest of `~/.claude` stays reachable); Fermix's `config.toml`, `auth.json`, `chatgpt_host.json` (the Sign in with ChatGPT install id), `secrets/`, `secret_key_base`, `setup-token`, `setup-launch-token.json`, `acp_identities/`, `mobile/`, `plugins/run/`, `browser/profiles/`, `bootstrap/`, `memory.db`, `grants/`, `logs/`, `traces/` and its sockets; OS roots (`/etc`, `/usr`, `/bin`, `/sbin`, `/System`, `/Library`). Names match with a `.` or `-` suffix (`memory.db-wal`) and case-insensitively (`~/.SSH`). A grant for a protected path, the home folder, the Fermix home or `/` is refused as `unsafe_root`.
 - **Catastrophic commands**, before any shell command runs: recursive delete of a protected root, `mkfs`, `dd of=/dev/…`, a fork bomb, mass kill, shutdown or reboot, `sudo -S`. A pattern check for common mistakes, not a complete boundary.
+
+## What commands can reach (Mac)
+
+On a Mac, every `shell` command, operator command (`[sandbox.commands]`, the `dev_tools` presets) and `git_read`/`git_write` run, and every program it starts, runs inside a macOS sandbox built from the mode. Linux does not have this yet.
+
+- **Writes** go only to the mode's roots and grants, plus the temp folders. In `open`, a command may write anywhere the account can except what is listed below, so `brew install` works there and not in `standard` or `strict`. Tool caches (`npm`, `pip`, `uv`, `go`, `yarn`, Playwright, `XDG_CACHE_HOME`) point into the workspace's `.cache`, never your own caches; `cargo`, SwiftPM and `xcodebuild` keep theirs in your home, so they need a grant or `open`.
+- **Never, in any mode:** writing Fermix's home except its workspace and skills folders, or renaming it; writing the protected paths, Fermix's installed engine, `~/Library/LaunchAgents` or `~/Library/Application Support/Fermix`; reading Fermix's secrets, `auth.json`, browser profiles, `memory.db`, `logs/` or `traces/` (`config.toml` stays readable); connecting to Fermix's sockets; running a program under its `plugins/` folder directly; mounting a disk image anywhere but `/Volumes`.
+- **Reads in `strict` and `standard`:** a command also cannot read your credential paths (the home-folder entries of the protected list: `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.docker`, `~/.kube`, `~/.npmrc`, gcloud's credentials and the rest), so `ssh`, `git push`/`pull` over SSH, signed commits, `aws` and `kubectl` work from a command only in `open`. `npm` still runs, but without your `~/.npmrc`: its registry, proxy and tokens are skipped without a warning. `gcloud` can read its login only in `open`, and even there it cannot save a refreshed token, so expect it to fail from a command. No command, in any mode, can write these files: `npm login`, `npm config set` for your user config, `gcloud auth login` and git's `store` helper saving a password are for you to run in your own terminal. Every other hidden file and folder (`~/.gitconfig`, `~/.config/git/config`, `~/.zshrc`, gh's `~/.config/gh`) stays readable.
+- A refused write or read is the program's own `Operation not permitted`. The fix is a grant (`/grant path PATH`) or `open`, never a different command. Because commands cannot reach Fermix's files or sockets, `fermix sandbox`, `fermix grant`, `fermix setup`, `fermix settings`, `fermix status` or `fermix ask` run as a command fail: tell the owner what to run in their own terminal or the app. If the sandbox itself cannot start a command, the result says "could not start inside Fermix's sandbox".
+- Not held yet: the `codex` and `claude_code` presets, coding runs (`codex_run`, `claude_code_run`) and plugin or MCP server processes. `codex` and `claude` run through `shell` fail, because their own state folders are protected.
 
 ## Changing it
 
@@ -30,7 +40,7 @@ The sandbox bounds what the file, image, search, git, attachment and shell tools
 
 - Mac app and browser setup changes to mode and profile need a restart; variable changes apply to the next command. Chat changes apply at once (after `/confirm` where one is asked). A terminal edit reaches a running daemon only after a restart; on an app-managed home it also makes the app refuse saves until **Reload settings from disk**, so on a Mac use the app or chat.
 - The Mac pane's one-line mode hints are approximate; the table above is what each mode reaches.
-- Inspect: `/sandbox status|explain`, `fermix sandbox status`, `fermix sandbox explain` (each root marked `(granted)` or `(mode)`, plus the protected paths).
+- Inspect: `/sandbox status|explain` in chat (the mode, each root marked `(granted)` or `(mode)`, the variable names); `fermix sandbox status|explain` in a terminal, whose `explain` adds the protected paths, whether this system holds commands, and what a command cannot read in the current mode (an entry ending in `*` covers every file whose name begins with it).
 
 ## What needs `/confirm`
 
@@ -51,4 +61,4 @@ A change that adds a root, an allowed variable, a preset or a command asks for `
 
 ## Diagnosing
 
-Every refusal is written to the day's `sandbox_event.jsonl` trace. Doctor's sandbox trace check (in the Mac app's **Doctor**, or the `sandbox traces` row of `fermix doctor`) reads the last 7 days and names each refused folder with the grant that would allow it. `outside_root` means approve or grant the folder; `protected_path` cannot be granted.
+Every refusal is written to the day's `sandbox_event.jsonl` trace. Doctor's sandbox trace check (in the Mac app's **Doctor**, or the `sandbox traces` row of `fermix doctor`) reads the last 7 days and names each refused folder with the grant that would allow it. `outside_root` means approve or grant the folder; `protected_path` cannot be granted. `Operation not permitted` inside a command's own output on a Mac is the operating system's sandbox, and is not in that trace.

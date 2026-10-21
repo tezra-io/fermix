@@ -76,6 +76,7 @@ defmodule FermixCore.Management.Copy do
     "Realtime",
     "Providers",
     "Channels",
+    "Voice",
     "Telegram",
     "WhatsApp",
     "Discord",
@@ -91,7 +92,8 @@ defmodule FermixCore.Management.Copy do
     "Chromium",
     "Chrome",
     "Google",
-    "Android"
+    "Android",
+    "Node.js"
   ]
 
   @doc """

@@ -1,27 +1,29 @@
 defmodule FermixChannels.Mobile.Unfurl do
   @moduledoc """
-  SSRF-safe host-side link-preview resolution for mobile messages.
+  SSRF-safe host-side link-preview resolution for the links a timeline row
+  names, which `FermixChannels.LinkPreviews` chooses.
 
-  The phone never fetches page or thumbnail URLs. Every target and redirect is
+  No client ever fetches page or thumbnail URLs. Every target and redirect is
   resolved and pinned through `FermixCore.Net.Guard`; Host and TLS SNI retain
-  the original hostname. Resolution is bounded to two links, five redirects,
-  and a one-MiB body per response.
+  the original hostname. Resolution is bounded to four links, as many as a row
+  keeps, five redirects, and a one-MiB body per response. A preview keeps the
+  link it was read for (`link`) beside the address its page answered from
+  after redirects (`url`), so a client pairs it with the link as written.
   """
 
   alias FermixCore.Net.Egress
   alias FermixCore.Net.Guard
   alias FermixCore.Net.TimeoutPolicy
 
-  @max_links 2
+  @max_links 4
   @max_redirects 5
   @max_body_bytes 1_048_576
-  @url_regex ~r{https?://[^\s<>"']+}iu
-  @trailing_punctuation ~r/[),.;!?\]}]+\z/u
 
   @typedoc "A stored thumbnail: its content ref, image type and size."
   @type image :: %{ref: String.t(), mime: String.t(), size_bytes: non_neg_integer()}
 
   @type preview :: %{
+          required(:link) => String.t(),
           required(:url) => String.t(),
           required(:site) => String.t(),
           required(:title) => String.t(),
@@ -29,12 +31,13 @@ defmodule FermixChannels.Mobile.Unfurl do
           required(:image) => image() | nil
         }
 
-  @spec resolve(String.t(), keyword()) ::
+  @spec resolve([String.t()], keyword()) ::
           {:ok, [preview()], [{String.t(), term()}]} | {:error, term()}
-  def resolve(text, opts \\ []) when is_binary(text) and is_list(opts) do
+  def resolve(links, opts \\ []) when is_list(links) and is_list(opts) do
     with :ok <- validate_options(opts) do
-      text
-      |> links()
+      links
+      |> Enum.uniq()
+      |> Enum.take(@max_links)
       |> Enum.reduce({[], []}, &resolve_link(&1, &2, opts))
       |> then(fn {previews, warnings} ->
         {:ok, Enum.reverse(previews), Enum.reverse(warnings)}
@@ -42,19 +45,10 @@ defmodule FermixChannels.Mobile.Unfurl do
     end
   end
 
-  defp links(text) do
-    text
-    |> then(&Regex.scan(@url_regex, &1, capture: :first))
-    |> List.flatten()
-    |> Enum.map(&String.replace(&1, @trailing_punctuation, ""))
-    |> Enum.uniq()
-    |> Enum.take(@max_links)
-  end
-
   defp resolve_link(url, {previews, warnings}, opts) do
     case fetch_page(url, opts, 0) do
       {:ok, final_url, response} ->
-        case build_preview(final_url, response, opts) do
+        case build_preview(url, final_url, response, opts) do
           {:ok, preview, thumbnail_warnings} ->
             {[preview | previews], Enum.reverse(thumbnail_warnings, warnings)}
 
@@ -94,7 +88,7 @@ defmodule FermixChannels.Mobile.Unfurl do
   defp handle_page_response(_url, %{status: status}, _opts, _redirects),
     do: {:error, {:http_status, status}}
 
-  defp build_preview(url, %{body: body}, opts) when is_binary(body) do
+  defp build_preview(link, url, %{body: body}, opts) when is_binary(body) do
     with {:ok, document} <- Floki.parse_document(valid_utf8(body)),
          {:ok, title} <- preview_title(document),
          {:ok, image, warnings} <- preview_image(document, url, opts) do
@@ -102,6 +96,7 @@ defmodule FermixChannels.Mobile.Unfurl do
 
       {:ok,
        %{
+         link: link,
          url: url,
          site: site,
          title: title,
@@ -113,7 +108,7 @@ defmodule FermixChannels.Mobile.Unfurl do
     end
   end
 
-  defp build_preview(_url, _response, _opts), do: {:error, :invalid_body}
+  defp build_preview(_link, _url, _response, _opts), do: {:error, :invalid_body}
 
   defp preview_title(document) do
     value = meta(document, "og:title") || document |> Floki.find("title") |> Floki.text()

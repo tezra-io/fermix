@@ -91,7 +91,7 @@ defmodule FermixCore.Management.Settings do
   def apply(section, values, opts \\ [])
       when is_binary(section) and is_map(values) and is_list(opts) do
     with {:ok, module} <- fetch_family(section, opts),
-         rows = module.rows(section, snapshot(opts)),
+         rows = family_rows(module, section, snapshot(opts), opts),
          {:ok, answers} <- answers(section, rows, values) do
       write(section, answers, Map.keys(values), opts)
     end
@@ -146,7 +146,9 @@ defmodule FermixCore.Management.Settings do
     :ok = ConfigStore.apply_snapshot(persisted, Keyword.take(opts, [:supervised]))
     :ok = RestartState.record_persisted_baseline()
 
-    for sentence <- phone_switch(before, ConfigStore.current_snapshot(), opts),
+    current = ConfigStore.current_snapshot()
+
+    for sentence <- phone_switch(before, current, opts) ++ reach_switch(before, current, opts),
         do: Logger.warning("settings reload: #{sentence}")
 
     {:ok,
@@ -170,7 +172,7 @@ defmodule FermixCore.Management.Settings do
     snapshot = snapshot(opts)
     %{id: id, title: title} = Enum.find(family_sections(module, opts), &(&1.id == section))
 
-    %{"id" => id, "title" => title, "rows" => module.rows(section, snapshot)}
+    %{"id" => id, "title" => title, "rows" => family_rows(module, section, snapshot, opts)}
   end
 
   defp answers(section, rows, values) do
@@ -269,7 +271,8 @@ defmodule FermixCore.Management.Settings do
       "applied" => keys ++ derived_keys(keys, switch),
       "restart" => restart(),
       "readiness" => readiness(),
-      "side_effects" => side_effects(before, current, switch) ++ phone
+      "side_effects" =>
+        side_effects(before, current, switch) ++ phone ++ reach_switch(before, current, opts)
     }
   end
 
@@ -291,6 +294,25 @@ defmodule FermixCore.Management.Settings do
 
   defp phone_on?(snapshot),
     do: snapshot |> Source.channel(:mobile) |> Keyword.get(:enabled, false) == true
+
+  # Reach from anywhere is live too (M62 D4), within a phone channel that runs:
+  # a channel that is off has no reach to switch and reads it when it starts,
+  # and turning the channel itself on or off carries its reach with it.
+  defp reach_switch(before, current, opts) do
+    now = reach_on?(current)
+
+    if phone_on?(before) and phone_on?(current) and reach_on?(before) != now do
+      case Keyword.get(opts, :mobile_reach_switch, &PhoneChannel.apply_iroh/1).(now) do
+        :ok -> []
+        {:error, sentence} when is_binary(sentence) -> [sentence]
+      end
+    else
+      []
+    end
+  end
+
+  defp reach_on?(snapshot),
+    do: snapshot |> Source.channel(:mobile) |> Keyword.get(:iroh, true) == true
 
   # The voice engine before and after the write, or `nil` when it did not move.
   # It is the one write in this daemon that rewrites keys of its own section, so
@@ -329,8 +351,8 @@ defmodule FermixCore.Management.Settings do
   # both are real: choosing a transcription backend snaps the shared model key to
   # that backend's default (the key is shared across backends and an
   # OpenAI-shaped model on Deepgram fails at the provider), and choosing a voice
-  # model of the other engine moves the engine, the voice and the reasoning
-  # effort with it.
+  # model of another engine moves the engine, the voice, the reasoning effort
+  # and, onto Grok, screen sharing with it.
   defp side_effects(before, current, switch) do
     transcription_side_effects(before, current) ++ engine_side_effects(switch)
   end
@@ -358,7 +380,8 @@ defmodule FermixCore.Management.Settings do
       conversation_sentence(
         Keyword.has_key?(previous, :conversation),
         Keyword.has_key?(now, :conversation)
-      )
+      ) ++
+      screen_share_sentence(screen_share?(previous), screen_share?(now), realtime_engine(now))
   end
 
   # The model is what the operator picked, so naming it back would only repeat
@@ -366,8 +389,9 @@ defmodule FermixCore.Management.Settings do
   # rows below the model changed.
   defp engine_sentence(engine), do: ["The engine changed to #{Voice.engine_label(engine)}."]
 
-  # Unlike the model, a voice usually survives a switch: only a Live-only voice
-  # has to move, so the sentence fires on the change rather than on the switch.
+  # Unlike the model, a voice usually survives a switch between the OpenAI
+  # engines: only a Live-only voice has to move, so the sentence fires on the
+  # change rather than on the switch.
   defp voice_sentence(same, same), do: []
   defp voice_sentence(_previous, voice), do: ["The voice changed to #{voice}."]
 
@@ -379,12 +403,32 @@ defmodule FermixCore.Management.Settings do
   defp effort_sentence(false, true),
     do: ["Reasoning effort was restored because this engine uses it."]
 
-  # Live-only, so only the journey to Realtime moves it, and only a value the
-  # owner chose is there to lose: back on Live an unset key means the chat.
+  # A task-engine setting, so only the journey to Realtime moves it, and only a
+  # value the owner chose is there to lose: back on a task engine an unset key
+  # means the chat.
   defp conversation_sentence(true, false),
     do: ["Whether voice calls join the chat was reset because this engine does not use it."]
 
   defp conversation_sentence(_previous, _now), do: []
+
+  # Grok has no continuous screen perception, so the journey onto it turns the
+  # switch off and the journey off it turns it back on. Only Realtime shares the
+  # screen, so the switch coming back on is news only there: a task engine
+  # takes no images whatever it says.
+  defp screen_share_sentence(true, false, _engine),
+    do: ["Screen sharing during calls was turned off because this engine does not support it."]
+
+  defp screen_share_sentence(false, true, engine) do
+    if RealtimeConfig.hands_off_tasks?(%RealtimeConfig{engine: engine}),
+      do: [],
+      else: ["Screen sharing during calls was turned back on."]
+  end
+
+  defp screen_share_sentence(_previous, _now, _engine), do: []
+
+  # An absent key is the struct default, which is on.
+  defp screen_share?(block),
+    do: Keyword.get(block, :screen_share, %RealtimeConfig{}.screen_share?) == true
 
   defp transcription_model(snapshot) do
     snapshot
@@ -427,4 +471,11 @@ defmodule FermixCore.Management.Settings do
 
   defp family_sections(Channels, opts), do: Channels.sections(opts)
   defp family_sections(module, _opts), do: module.sections()
+
+  # The search section offers place search's backends as this build can run
+  # them, so Tools is also handed the build's host value when a caller names it.
+  defp family_rows(Tools, section, snapshot, opts),
+    do: Tools.rows(section, snapshot, Keyword.take(opts, [:host]))
+
+  defp family_rows(module, section, snapshot, _opts), do: module.rows(section, snapshot)
 end

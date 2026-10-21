@@ -5,11 +5,12 @@ defmodule FermixCore.Management.Jobs do
 
   A sign-in, an import, a provider probe, a plugin install, a plugin check, a
   workspace discovery, a workspace binding, a capability install, a meetings
-  sign-in, a computer-use grant and a browser download all take longer than a
-  management request may be held open, so each is a *job*: the starting method
-  mints an id and returns at once, `job.get` reports progress, and `job.cancel`
-  stops it. One shape covers every family, so a client writes one poller, one
-  progress row and one failure sentence rather than one per operation.
+  sign-in, a computer-use grant, a browser download and an MCP server check
+  all take longer than a management request may be held open, so each is a
+  *job*: the starting method mints an id and returns at once, `job.get`
+  reports progress, and `job.cancel` stops it. One shape covers every family,
+  so a client writes one poller, one progress row and one failure sentence
+  rather than one per operation.
 
   Every bound is explicit and monotonic:
 
@@ -37,7 +38,12 @@ defmodule FermixCore.Management.Jobs do
   # per-kind budget, and the phases a run of that kind may report.
   @kinds [
     provider_probe: %{budget_ms: 15_000, phases: ["calling"]},
-    auth: %{budget_ms: 300_000, phases: ["binding", "awaiting_browser", "verifying"]},
+    # M74 E5: an MCP server's sign-in finds its authorization server and its
+    # client before the browser opens.
+    auth: %{
+      budget_ms: 300_000,
+      phases: ["binding", "discovering", "registering", "awaiting_browser", "verifying"]
+    },
     auth_import: %{budget_ms: 60_000, phases: ["reading_keychain", "verifying"]},
     plugin_install: %{budget_ms: 600_000, phases: ["downloading"]},
     plugin_check: %{budget_ms: 30_000, phases: ["probing"]},
@@ -53,7 +59,11 @@ defmodule FermixCore.Management.Jobs do
     # M54 §12: a person answers the Automation prompt, and reads the helper's
     # own recipient dialog, so both budgets are a person's, not a machine's.
     imessage_grant: %{budget_ms: 120_000, phases: []},
-    imessage_policy_confirm: %{budget_ms: 180_000, phases: []}
+    imessage_policy_confirm: %{budget_ms: 180_000, phases: []},
+    # M74 §5: connecting a server the owner added, then one tool listing. A
+    # first `npx -y` or `uvx` start downloads its package, and `MCP.Server`
+    # gives that 60 s, so the connecting wait outlasts it.
+    mcp_check: %{budget_ms: 75_000, phases: ["connecting", "listing"]}
   ]
   @kind_names Keyword.keys(@kinds)
   # The closed failure vocabulary a run may answer with. `timed_out` and
@@ -89,6 +99,7 @@ defmodule FermixCore.Management.Jobs do
           | :browser_install
           | :imessage_grant
           | :imessage_policy_confirm
+          | :mcp_check
   @type view :: %{String.t() => term()}
   @type report :: ({:phase, String.t()} | {:progress, map()} | {:ready, map()} -> any())
   @type outcome :: {:ok, map()} | {:error, {:unavailable | :refused, String.t()}}

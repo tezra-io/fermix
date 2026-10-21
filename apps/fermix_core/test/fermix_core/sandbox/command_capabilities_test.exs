@@ -50,4 +50,15 @@ defmodule FermixCore.Sandbox.CommandCapabilitiesTest do
     assert {:ok, %{success: true, output: "visible::hello"}} =
              Capability.execute(capability, %{"prompt" => "hello"}, %{sandbox_config: config})
   end
+
+  # Only the codex and claude presets run outside the kernel sandbox for now; a
+  # command the owner declares never does.
+  test "an operator's command is confined by default" do
+    config =
+      Config.normalize(
+        commands: [explicit: %{"probe" => [enabled: true, command: "/bin/sh", args: []]}]
+      )
+
+    assert [%{name: "probe", confined?: true}] = CommandCapabilities.descriptors(config)
+  end
 end

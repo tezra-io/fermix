@@ -191,8 +191,12 @@ defmodule FermixCore.Capabilities.MCP.Capability do
       # output happens to contain the word "error" tells the agent the call
       # worked and records `success: true` in the exec event, so a plugin that
       # fails every call reads as a healthy one in every trace.
-      {:ok, %Anubis.MCP.Response{is_error: true} = response} ->
-        {:ok, Tool.error(child_error_message(spec, response))}
+      {:ok, %Anubis.MCP.Response{is_error: true, result: result}} ->
+        {:ok, Tool.error(child_error_message(spec, result))}
+
+      # An operator's remote server answers with its bare `CallToolResult`.
+      {:ok, %{"isError" => true} = result} ->
+        {:ok, Tool.error(child_error_message(spec, result))}
 
       {:ok, result} ->
         {:ok, Tool.success(format_result(result))}
@@ -280,13 +284,20 @@ defmodule FermixCore.Capabilities.MCP.Capability do
     end
   end
 
+  defp format_result(%{"content" => content} = result) when is_list(content) do
+    case child_error_text(result) do
+      nil -> inspect(result, pretty: true, limit: :infinity)
+      text -> text
+    end
+  end
+
   defp format_result(result), do: inspect(result, pretty: true, limit: :infinity)
 
   # The child's own words are what let the agent act ("vehicle is asleep — wake
   # it first") instead of blind-retrying into the same wall, so they ride the
   # tool result. They are redacted first: a child that echoes a bearer token
   # back in its failure message must not put one in the trace.
-  defp child_error_message(spec, %Anubis.MCP.Response{result: result}) do
+  defp child_error_message(spec, result) do
     prefix = "MCP tool '#{spec.server_name}/#{spec.original}' reported an error"
 
     case child_error_text(result) do

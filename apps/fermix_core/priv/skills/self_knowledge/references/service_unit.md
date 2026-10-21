@@ -8,6 +8,8 @@
 
 After any update the daemon keeps running the old engine until it restarts: "upgraded but behavior unchanged" almost always means no restart. `fermix status` warns when the running daemon differs from the installed binary, and `fermix doctor`'s `engine alignment` row names the restart.
 
+**Ringing on this computer.** A standalone Fermix on a Mac cannot ring a reminder or timer on this Mac: no Fermix app is attached, so its reminders go to a chat channel, and `fermix migrate-to-app` moves the install to the app, which can. On Linux a reminder rings as a desktop notification while the account's desktop session is running, under the package's unit or a standalone user unit; a `--system` unit has no session bus for the account, so it cannot ring either, and a reminder asked to ring on this computer is refused when it is stored.
+
 ## Standalone installs
 
 - `fermix upgrade` swaps in the cosign-verified binary, restarts and health-checks the daemon, and rolls back on failure. On a package-manager install (Homebrew) it refuses and names the package manager's command.
@@ -21,7 +23,7 @@ After any update the daemon keeps running the old engine until it restarts: "upg
 
 - **Install:** `curl -fsSL https://fermix.ai/install | sh` picks the package for the machine from the latest release, checks its sha256 and (when a `cosign` is present) its cosign signature, installs it with `apt`, `dnf` or `zypper` through `sudo`, then runs `fermix setup` in the terminal (under `sudo` or with no terminal it prints `fermix setup` as the next step). `.deb` for Debian and Ubuntu, `.rpm` for Fedora, RHEL and openSUSE; `x86_64` and `arm64`. The packages are release assets, not a repository: no `apt`/`dnf` source is configured, and `sudo apt install ./<file>.deb` or `sudo dnf install ./<file>.rpm` from the release page is the same result. `--standalone`, macOS, or a host with none of the three managers gets the standalone binary. An older standalone `fermix` first on `PATH` is named, and no setup starts.
 - **Unit and binding.** The package ships `/usr/lib/systemd/user/fermix.service` (runs `fermix service run`) and nothing in Fermix rewrites it. Each account's home is recorded in `~/.config/fermix/service.json` (`$XDG_CONFIG_HOME`); the service refuses to boot without it rather than guess a home.
-- **Port.** `[fermix_web] port` (1024-65535, default 4030), set with `fermix service install --port N` or in `config.toml`; restart to apply. A packaged engine refuses a `PORT` environment variable. `--port` refuses a `config.toml` holding a hand-written `[mcp.*]` block; edit the file instead.
+- **Port.** `[fermix_web] port` (1024-65535, default 4030), set with `fermix service install --port N` or in `config.toml`; restart to apply. A packaged engine refuses a `PORT` environment variable.
 
 | Verb | Does |
 |---|---|

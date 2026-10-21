@@ -35,13 +35,14 @@ defmodule FermixCore.Agents.VoiceCall do
   # turn's profile from the same list. A category here is one a voice call
   # cannot honestly deliver, whatever its mode:
   #
-  #   * `:channel` — no `reply_fn`; the call speaks, it does not post.
-  #   * `:media` — generation egresses through a channel reply the call has not got.
   #   * `:delegation` — a blocking fan-out does not fit a live conversation.
   #
-  # `:delivery` is never here: a send to the owner's named channel
-  # (`send_to_channel`) goes out on that channel, not the call's.
-  @excluded_categories [:channel, :media, :delegation]
+  # `:channel` and `:media` are never here: the call speaks, and a picture or
+  # file its delegation sends is written to the owner's chat
+  # (`Channels.Voice.send_media/3`), in a private call as in one in the chat.
+  # Nor is `:delivery`: a send to the owner's named channel (`send_to_channel`)
+  # goes out on that channel, not the call's.
+  @excluded_categories [:delegation]
 
   # A coding run outlives the call that launched it and reports back into the
   # conversation it was launched from (its delivery snapshot is that

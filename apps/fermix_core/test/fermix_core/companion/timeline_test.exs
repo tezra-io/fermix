@@ -1035,6 +1035,85 @@ defmodule FermixCore.Companion.TimelineTest do
              Timeline.media_descriptor("main", @media_ref, store_opts(repo))
   end
 
+  # M72 §8.4: a reply's blocks ride the write of its row, in a row of their own
+  # as link previews are, and history carries them; a row without any has none.
+  test "a reply's blocks are stored with its row in the same write and paged with it", %{
+    db_path: db_path,
+    repo: repo
+  } do
+    assert {:ok, {:claimed, _request}} = claim_request(repo, "places")
+    assert {:ok, {:started, %{attempt: 1}}} = start_request(repo, "places")
+
+    assert {:ok, {:created, reply}} =
+             Timeline.append_client_output(
+               "main",
+               "places",
+               1,
+               "text:final",
+               %{
+                 content: "Try [Example Coffee](https://example.coffee/).",
+                 blocks: reply_blocks()
+               },
+               store_opts(repo, now: at(1))
+             )
+
+    assert reply.blocks == reply_blocks()
+
+    assert {:ok, plain} =
+             Timeline.append(
+               "main",
+               %{role: "assistant", content: "None nearby."},
+               store_opts(repo)
+             )
+
+    assert plain.blocks == []
+
+    assert {:ok, %{messages: [paged, unpaged]}} =
+             Timeline.history_page(
+               "main",
+               store_opts(repo, after_seq: reply.server_seq - 1, limit: 2)
+             )
+
+    assert paged.blocks == reply_blocks()
+    assert unpaged.blocks == []
+
+    with_raw_conn(db_path, fn conn ->
+      assert {:ok, [[1]]} = fetch_all(conn, "SELECT COUNT(*) FROM mobile_timeline_blocks")
+    end)
+  end
+
+  test "the reply blocks migration adds its table to a database written before it", context do
+    %{db_path: db_path, repo: repo} = context
+
+    assert {:ok, %{server_seq: 1}} =
+             Timeline.append("main", %{role: "assistant", content: "before"}, store_opts(repo))
+
+    stop_supervised!(Repo)
+
+    with_raw_conn(db_path, fn conn ->
+      assert :ok =
+               Sqlite3.execute(conn, """
+               DROP TABLE mobile_timeline_blocks;
+               DELETE FROM schema_migrations WHERE version = 41;
+               """)
+    end)
+
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+    assert {:ok, versions} = Repo.migration_versions(server: repo)
+    assert 41 in versions
+
+    assert {:ok, %{messages: [%{content: "before", blocks: []}]}} =
+             Timeline.history_page("main", store_opts(repo))
+
+    assert {:ok, %{blocks: [_block]}} =
+             Timeline.append(
+               "main",
+               %{role: "assistant", content: "after", blocks: reply_blocks()},
+               store_opts(repo)
+             )
+  end
+
   test "a link preview names a url, a site and a title, and a well-formed image", %{repo: repo} do
     assert {:ok, parent} =
              Timeline.append("main", %{role: "assistant", content: "x"}, store_opts(repo))
@@ -1058,6 +1137,30 @@ defmodule FermixCore.Companion.TimelineTest do
                without_image,
                store_opts(repo)
              )
+  end
+
+  # M72: a preview keeps the link the row wrote, which a client pairs it with;
+  # two links landing on one page keep a card each, and a link previewed again
+  # keeps its first.
+  test "a link preview keeps the link the row wrote, and each link keeps its first card", %{
+    repo: repo
+  } do
+    assert {:ok, parent} =
+             Timeline.append("main", %{role: "assistant", content: "x"}, store_opts(repo))
+
+    short = Map.put(link_preview(), "link", "https://t.example/a")
+    full = Map.put(link_preview(), "link", "https://example.test/post")
+    attach = &Timeline.attach_link_preview("main", parent.server_seq, &1, store_opts(repo))
+
+    assert {:ok, %{link_previews: [^short]}} = attach.(short)
+    assert {:ok, %{link_previews: [^short, ^full]}} = attach.(full)
+    assert {:ok, %{link_previews: [^short, ^full]}} = attach.(Map.put(short, "title", "Again"))
+
+    assert {:ok, %{messages: [%{link_previews: [^short, ^full]}]}} =
+             Timeline.history_page("main", store_opts(repo, after_seq: 0, limit: 1))
+
+    assert {:error, {:invalid_link_preview, {:invalid_field, "link"}}} =
+             attach.(Map.put(link_preview(), "link", ""))
   end
 
   test "a link preview on a request output from an older attempt is refused", %{repo: repo} do
@@ -1485,6 +1588,21 @@ defmodule FermixCore.Companion.TimelineTest do
       "description" => "What it says",
       "image" => media_descriptor(%{"kind" => "image", "mime" => "image/webp", "size_bytes" => 9})
     }
+  end
+
+  defp reply_blocks do
+    [
+      %{
+        "type" => "places",
+        "places" => [
+          %{
+            "name" => "Example Coffee",
+            "canonical_url" => "https://example.coffee/",
+            "location" => %{"latitude" => 40.7233, "longitude" => -74.003}
+          }
+        ]
+      }
+    ]
   end
 
   defp fetch_all(conn, sql) do

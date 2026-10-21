@@ -232,6 +232,62 @@ defmodule Mix.Tasks.Fermix.SetupTest do
     refute Keyword.has_key?(codex, :fast)
   end
 
+  # The base URL switches are declared twice too (this wrapper and
+  # `Fermix.CLI.Setup`), so the wrapper's copy is driven to the settings file.
+  test "accepts the provider base URL flags through the Mix wrapper" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-setup-task-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    Application.put_env(:fermix_core, :providers,
+      openai: [api_key: "sk-test-123", default_model: "gpt-5.5", reasoning_effort: :high]
+    )
+
+    Application.put_env(:fermix_channels, :telegram, enabled: true, mode: :webhook)
+
+    Application.put_env(:fermix_core, :personalization,
+      user_name: "Test",
+      timezone: "UTC",
+      communication_style: "neutral and direct"
+    )
+
+    Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
+
+    Mix.Task.reenable("fermix.setup")
+
+    SetupTask.run([
+      "--provider",
+      "anthropic",
+      "--anthropic-api-key",
+      "sk-ant-test",
+      "--default-model",
+      "claude-sonnet-5-5",
+      "--reasoning-effort",
+      "high",
+      "--openai-base-url",
+      "http://127.0.0.1:18081/v1",
+      "--anthropic-base-url",
+      "http://127.0.0.1:18080/v1",
+      "--xai-base-url",
+      "http://127.0.0.1:18082/v1",
+      "--telegram-bot-token",
+      "bot-token",
+      "--telegram-owner-user-id",
+      "test-owner",
+      "--no-realtime-enabled",
+      "--skip-probe"
+    ])
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(persisted.fermix_core, :providers, [])
+
+    assert providers[:openai][:base_url] == "http://127.0.0.1:18081/v1"
+    assert providers[:anthropic][:base_url] == "http://127.0.0.1:18080/v1"
+    assert providers[:xai][:base_url] == "http://127.0.0.1:18082/v1"
+  end
+
   # The `--acp-enabled` switch is declared twice (this Mix wrapper and
   # `Fermix.CLI.Setup`); OptionParser is strict, so a one-sided addition makes
   # the other entrypoint reject the flag. Both copies are covered by a test.

@@ -11,6 +11,7 @@ defmodule FermixCore.Realtime.LiveFramesTest do
     frames = [
       LiveFrames.state("listening"),
       LiveFrames.audio_delta("AAAA"),
+      LiveFrames.audio_delta("AAAA", "p1"),
       LiveFrames.playback_stop(),
       LiveFrames.caption("user", "hi", 0, 100),
       LiveFrames.call_ready("openai_live", "voice_live:1", @call_uuid, "chat", nil, nil),
@@ -21,6 +22,31 @@ defmodule FermixCore.Realtime.LiveFramesTest do
 
     for %{type: type} <- frames do
       assert type in Protocol.server_events()
+    end
+  end
+
+  describe "audio_delta" do
+    test "stays the v2 shape without a playback id" do
+      assert LiveFrames.audio_delta("AAAA") == %{type: "audio_delta", audio: "AAAA"}
+    end
+
+    # v3, the Grok engine: the id the companion reports `playback_progress`
+    # against, bounded as the daemon bounds the id a companion echoes back.
+    test "carries the playback id a v3 companion reports progress against" do
+      assert LiveFrames.audio_delta("AAAA", "p17") == %{
+               type: "audio_delta",
+               audio: "AAAA",
+               playback_id: "p17"
+             }
+
+      longest = String.duplicate("p", 64)
+      assert LiveFrames.audio_delta("AAAA", longest).playback_id == longest
+    end
+
+    test "refuses a playback id the companion could not echo back" do
+      for id <- ["", String.duplicate("p", 65), :p1, nil] do
+        assert_raise FunctionClauseError, fn -> LiveFrames.audio_delta("AAAA", id) end
+      end
     end
   end
 

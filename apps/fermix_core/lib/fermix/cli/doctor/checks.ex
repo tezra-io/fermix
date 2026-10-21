@@ -46,6 +46,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Plugins.Status, as: PluginStatus
   alias FermixCore.Prompt.TemplateReconciler
+  alias FermixCore.Providers.Descriptor, as: ProviderDescriptor
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Providers.Selection
@@ -55,6 +56,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Setup.Coexistence
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor, as: ProviderProbe
+  alias FermixCore.Setup.ProviderHealth
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretMigration
   alias FermixCore.Setup.SecretPaths
@@ -641,8 +643,11 @@ defmodule Fermix.CLI.Doctor.Checks do
       {:error, {:auth_scope_mismatch, surface, hint}} ->
         fail("auth probe", "auth rejected by #{surface}: #{hint}")
 
-      {:error, {:server_error, status, _body}} ->
-        warn("auth probe", "provider returned HTTP #{status} (transient?)")
+      # One probe cannot tell a blip from an outage, so a refusal that is not
+      # about the credential stays a warning; `provider_health` judges the
+      # calls the provider has been answering.
+      {:error, {:server_error, status, message}} ->
+        warn("auth probe", server_error_detail(status, message))
 
       {:error, {:network, reason}} ->
         warn("auth probe", "network error: #{inspect(reason)}")
@@ -651,6 +656,56 @@ defmodule Fermix.CLI.Doctor.Checks do
     # E.g. hand-edited config with multiple primary providers — report it
     # as a failed check instead of aborting the whole --full run.
     error in ArgumentError -> fail("auth probe", Exception.message(error))
+  end
+
+  # The message already names the status when it is the floor ("HTTP 503") or
+  # the sentence for an HTML error page, so it is not named twice.
+  defp server_error_detail(status, message) do
+    label = ProviderDescriptor.fetch!(ProviderProbe.active_provider()).label
+
+    if String.starts_with?(message, "HTTP #{status}"),
+      do: "#{label} answered #{message}",
+      else: "#{label} answered HTTP #{status}: #{message}"
+  end
+
+  @doc """
+  Whether the primary provider has been answering, judged from the calls Fermix
+  already made (`Setup.ProviderHealth`), so it sends nothing and belongs in the
+  local run. `:trace_dir`, `:now` and `:provider` are injectable; they default
+  to the directory the Trace child writes, the clock and the primary provider.
+  """
+  @spec provider_health(keyword()) :: result()
+  def provider_health(opts \\ []) when is_list(opts) do
+    provider = Keyword.get_lazy(opts, :provider, &ProviderProbe.active_provider/0)
+    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+    trace_dir = Keyword.get_lazy(opts, :trace_dir, &FermixCore.Application.trace_dir/0)
+
+    case ProviderHealth.read(trace_dir, provider, now) do
+      {:ok, record} ->
+        record.rows
+        |> ProviderHealth.summarize(provider, now)
+        |> provider_health_result(record.undecodable)
+
+      {:error, {path, reason}} ->
+        warn("provider health", "could not read #{path}: #{:file.format_error(reason)}")
+    end
+  rescue
+    # The primary provider is unreadable (two marked primary, or an unknown one):
+    # the row says so instead of ending the whole run.
+    error in ArgumentError -> fail("provider health", Exception.message(error))
+  end
+
+  defp provider_health_result({status, detail}, 0),
+    do: %{name: "provider health", status: status, detail: detail}
+
+  defp provider_health_result({status, detail}, undecodable) do
+    lines = if undecodable == 1, do: "line", else: "lines"
+
+    %{
+      name: "provider health",
+      status: status,
+      detail: "#{detail}; #{undecodable} unreadable #{lines} in the call record skipped"
+    }
   end
 
   # Fallback health (§8): configured non-primary providers are listed as
@@ -805,50 +860,85 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   @doc """
-  `place_search` readiness (M31 §14.3): the shared Brave key, the active
-  `web_search` backend, and whether the tool is advertised.
+  `place_search` readiness (M31 §14.3, M72 §14.1): the backend in force, why it
+  is the one (`[fermix_core.tools.place_search] backend`, or this build's
+  default: Apple Maps where the build carries its helper, the Fermix Mac app's
+  engine, Brave in the Homebrew and Linux builds), and whether it is ready.
 
-  Offline, always — this check takes no `full?` flag, so the default run cannot
-  reach the network by any argument. The metered live probe is `place_probe/1`,
-  which `Fermix.CLI.Doctor` calls only from its `--full` block. Having no Brave
-  key is a normal configuration (the tool is optional and simply hidden), so it
-  reports `:ok`, not a warning.
+  Offline, always — this check reaches no network by any argument. The live
+  probe is `place_probe/1`, which `Fermix.CLI.Doctor` calls only from its
+  `--full` block. Brave with no key, as the build's default, is a normal
+  configuration (the tool is optional and simply hidden), so it reports `:ok`;
+  a backend chosen and not ready, or Apple Maps not ready where the build
+  defaults to it, warns. `opts` names the build (`host:`) and the helper
+  (`apple_maps:`) for a test.
   """
-  @spec place_search() :: result()
-  def place_search do
-    []
+  @spec place_search(keyword()) :: result()
+  def place_search(opts \\ []) when is_list(opts) do
+    opts
+    |> Keyword.take([:host, :apple_maps])
     |> ProviderProbe.place_search_report()
     |> format_place_search()
   end
 
-  # Advertisement is the row's one fact: the tool answers it from the same
-  # credential seam a `place_search` call would, so the row cannot claim a
-  # readiness the runtime does not have. A missing key is a normal, optional
-  # configuration, so it reads `:ok` and says how to enable the tool.
-  defp format_place_search(%{advertised?: false} = report) do
+  # Readiness is the row's one fact: the tool answers it from the same seam a
+  # `place_search` call would, so the row cannot claim a readiness the runtime
+  # does not have.
+  defp format_place_search(%{backend: :apple_maps, ready: :ok} = report) do
     ok(
       "place search",
-      "no Brave key — place_search hidden (optional; web backend #{report.backend}). " <>
-        "Set [fermix_core.tools.web_search] brave_api_key in setup to enable it."
+      "Apple Maps (#{place_why(report)}), ready with no key; place_search advertised"
     )
+  end
+
+  defp format_place_search(%{backend: :apple_maps, ready: {:error, reason}} = report) do
+    warn(
+      "place search",
+      "Apple Maps (#{place_why(report)}) is not ready — place_search hidden: #{reason}"
+    )
+  end
+
+  defp format_place_search(%{backend: :brave, ready: {:error, _reason}} = report) do
+    place_brave_missing(report.backend_source, report)
   end
 
   defp format_place_search(report) do
     ok(
       "place search",
-      "Brave key present, place_search advertised; web backend #{report.backend}. " <>
-        "Web and place calls are metered separately."
+      "Brave (#{place_why(report)}), key present, place_search advertised; web backend " <>
+        "#{report.web_backend}. Web and place calls are metered separately."
     )
   end
 
+  defp place_brave_missing(:build_default, report) do
+    ok(
+      "place search",
+      "Brave (#{place_why(report)}): no Brave key — place_search hidden (optional; web " <>
+        "backend #{report.web_backend}). Set [fermix_core.tools.web_search] brave_api_key " <>
+        "in setup to enable it."
+    )
+  end
+
+  defp place_brave_missing(:configured, report) do
+    warn(
+      "place search",
+      "Brave (#{place_why(report)}): no Brave key — place_search hidden (web backend " <>
+        "#{report.web_backend}). Set [fermix_core.tools.web_search] brave_api_key in setup."
+    )
+  end
+
+  defp place_why(%{backend_source: :configured}), do: "set in [fermix_core.tools.place_search]"
+  defp place_why(%{backend_source: :build_default}), do: "the default in this build"
+
   @doc """
-  One metered live request to the place endpoint (M31 §14.3), for `--full` only.
+  One live search on the place backend in force (M31 §14.3), for `--full` only:
+  metered on Brave, free on Apple Maps.
 
   Fixed innocuous query, `count: 1`, result discarded, never anchored to the
   owner's saved location. Auth, rate-limit, schema, and transport failures each
-  keep their own name, and a failure never switches provider — there is one
-  adapter and no fallback. `opts` carries the `req_options`/`net_resolver`
-  injection seam so tests stub the transport.
+  keep their own name, and a failure never switches backend. `opts` carries the
+  `req_options`/`net_resolver` seam for the Brave transport, and `host:` and
+  `apple_maps:` for the build and the helper, so tests stub both.
   """
   @spec place_probe(keyword()) :: result()
   def place_probe(opts \\ []) when is_list(opts) do
@@ -858,20 +948,27 @@ defmodule Fermix.CLI.Doctor.Checks do
     |> format_place_probe()
   end
 
-  defp format_place_probe(%{probe_result: :ok, result_count: count}) do
+  defp format_place_probe(%{probe_result: :ok, result_count: count} = report) do
     ok(
       "place probe",
-      "live place probe ok (#{count} result(s), discarded) — this probe is metered"
+      "live place probe ok (#{count} result(s), discarded) — #{place_probe_cost(report)}"
     )
   end
 
-  defp format_place_probe(%{probe_error: reason}) do
-    warn("place probe", "live place probe failed: #{reason} — this probe is metered")
+  defp format_place_probe(%{probe_error: reason} = report) do
+    warn("place probe", "live place probe failed: #{reason} — #{place_probe_cost(report)}")
+  end
+
+  defp format_place_probe(%{backend: :brave}) do
+    ok("place probe", "skipped — no Brave key configured, so no metered call was made")
   end
 
   defp format_place_probe(_report) do
-    ok("place probe", "skipped — no Brave key configured, so no metered call was made")
+    ok("place probe", "skipped — Apple Maps is not ready, so no search was made")
   end
+
+  defp place_probe_cost(%{backend: :brave}), do: "this probe is metered"
+  defp place_probe_cost(%{backend: :apple_maps}), do: "Apple Maps, not metered"
 
   @doc """
   Image-generation backend health: which backend is selected and whether its
@@ -919,30 +1016,42 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
-  # Realtime uses the plain `openai` provider key, not the Codex provider. A
-  # Codex subscription / OAuth login configures `openai_codex` and does NOT
-  # authorize the Realtime API, so an enabled companion with only Codex auth
-  # fails at call time with no obvious cause. Surface it here.
+  # Voice uses the voice provider's plain API key, read through the one
+  # resolver: OpenAI's engines the `openai` provider key, not the Codex
+  # provider, and Grok the `xai` provider key, not a SpaceXAI sign-in. Neither
+  # sign-in authorizes a voice call, so an enabled companion with only one fails
+  # at call time with no obvious cause. Surface it here.
   defp realtime_key_status(config) do
-    case FermixCore.Config.provider_api_key(:openai) do
+    case RealtimeConfig.api_key(config) do
       {:ok, _key} ->
         ok(
           "realtime voice",
-          "enabled; OpenAI voice key saved " <>
+          "enabled; #{voice_vendor(config.provider)} voice key saved " <>
             "(engine #{config.engine}, model #{config.model}); the network checks test it"
         )
 
-      {:error, _reason} ->
-        warn(
-          "realtime voice",
-          "enabled but no OpenAI API key — the Realtime API needs an OpenAI Platform key (sk-...); " <>
-            "a Codex subscription/OAuth login does not authorize it. Set the OpenAI provider key via `fermix setup`."
-        )
+      {:error, {:missing_api_key, provider}} ->
+        warn("realtime voice", missing_voice_key(provider))
     end
   end
 
+  defp missing_voice_key("openai") do
+    "enabled but no OpenAI API key — the Realtime API needs an OpenAI Platform key (sk-...); " <>
+      "a Codex subscription/OAuth login does not authorize it. Set the OpenAI provider key via `fermix setup`."
+  end
+
+  # Production voice is set up in the app, so the fix names its pane.
+  defp missing_voice_key("xai") do
+    "enabled but no SpaceXAI API key; Grok voice needs the SpaceXAI provider's API key, " <>
+      "and a SpaceXAI sign-in does not authorize it. Add the key in Voice settings."
+  end
+
+  defp voice_vendor("openai"), do: "OpenAI"
+  defp voice_vendor("xai"), do: "SpaceXAI"
+
   @doc """
-  Whether OpenAI accepts the voice key, asked of OpenAI (network scope).
+  Whether the voice provider accepts the voice key, asked of that provider
+  (network scope): OpenAI for both OpenAI engines, SpaceXAI for Grok.
 
   `realtime/0` can only say a key is saved; a wrong or revoked one reads as
   present there and fails only when a call starts. Only a refused key fails: a
@@ -951,19 +1060,21 @@ defmodule Fermix.CLI.Doctor.Checks do
   """
   @spec realtime_key(keyword()) :: result() | nil
   def realtime_key(opts \\ []) when is_list(opts) do
-    if RealtimeConfig.current().enabled? do
-      opts |> ProviderProbe.probe_openai_key() |> format_realtime_key()
+    config = RealtimeConfig.current()
+
+    if config.enabled? do
+      config |> ProviderProbe.probe_voice_key(opts) |> format_realtime_key(config.provider)
     end
   end
 
   # The refused-key sentence is the one a refused call shows, word for word.
-  defp format_realtime_key({:ok, %{latency_ms: ms}}),
-    do: ok("realtime voice key", "OpenAI accepted the API key (#{ms}ms)")
+  defp format_realtime_key({:ok, %{latency_ms: ms}}, provider),
+    do: ok("realtime voice key", "#{voice_vendor(provider)} accepted the API key (#{ms}ms)")
 
-  defp format_realtime_key({:error, {:refused, _status, "invalid_api_key"}}),
+  defp format_realtime_key({:error, {:refused, _status, "invalid_api_key"}}, "openai"),
     do: fail("realtime voice key", "OpenAI did not accept the API key (invalid_api_key).")
 
-  defp format_realtime_key({:error, {:refused, status, code}}) do
+  defp format_realtime_key({:error, {:refused, status, code}}, "openai") do
     warn(
       "realtime voice key",
       "OpenAI refused this check (#{refusal_label(status, code)}); " <>
@@ -971,17 +1082,38 @@ defmodule Fermix.CLI.Doctor.Checks do
     )
   end
 
-  defp format_realtime_key({:error, {:server_error, status}}),
-    do: warn("realtime voice key", "OpenAI answered HTTP #{status}; try again later")
+  # SpaceXAI refuses a key it does not accept with 400 or 401; a 403 is the key
+  # or its team being refused this request, which a call may still pass.
+  defp format_realtime_key({:error, {:refused, status, _code}}, "xai") when status in [400, 401],
+    do: fail("realtime voice key", "SpaceXAI did not accept the API key (HTTP #{status}).")
 
-  defp format_realtime_key({:error, {:network, reason}}),
-    do: warn("realtime voice key", "could not reach OpenAI: #{inspect(reason)}")
+  defp format_realtime_key({:error, {:refused, status, code}}, "xai") do
+    warn(
+      "realtime voice key",
+      "SpaceXAI refused this check (#{refusal_label(status, code)}); " <>
+        "check the key's permissions and the team's credits in the SpaceXAI console"
+    )
+  end
 
-  defp format_realtime_key({:error, :no_key}),
-    do: warn("realtime voice key", "no OpenAI API key is saved, so a voice call cannot start")
+  defp format_realtime_key({:error, {:server_error, status}}, provider) do
+    vendor = voice_vendor(provider)
+    warn("realtime voice key", "#{vendor} answered HTTP #{status}; try again later")
+  end
+
+  defp format_realtime_key({:error, {:network, reason}}, provider) do
+    vendor = voice_vendor(provider)
+    warn("realtime voice key", "could not reach #{vendor}: #{inspect(reason)}")
+  end
+
+  defp format_realtime_key({:error, :no_key}, provider) do
+    vendor = voice_vendor(provider)
+    warn("realtime voice key", "no #{vendor} API key is saved, so a voice call cannot start")
+  end
 
   defp refusal_label(status, nil), do: "HTTP #{status}"
   defp refusal_label(status, code), do: "HTTP #{status}, #{code}"
+
+  @no_helper "this build carries no fermix-iroh helper"
 
   @doc "Reports mobile identity permissions and daemon-owned listener state."
   @spec mobile(keyword()) :: result()
@@ -1107,6 +1239,7 @@ defmodule Fermix.CLI.Doctor.Checks do
       mobile_listener(report, opts),
       mobile_mdns(report, config),
       mobile_tailnet(report),
+      mobile_remote(report),
       mobile_apns(report, config),
       mobile_device_count(report)
     ]
@@ -1224,6 +1357,33 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp mobile_tailnet(%{"tailnet" => %{"detected" => true}}), do: {:ok, "tailnet detected"}
   defp mobile_tailnet(_report), do: {:ok, "tailnet not detected (LAN still available)"}
+
+  # Reach from anywhere (M62 §8), as the daemon's rail reports it. A missing
+  # helper is a warning while builds carry none; a failed rail is a failure in
+  # the helper's own words, which the rail has already stripped of control
+  # characters.
+  defp mobile_remote(%{"remote" => %{"state" => state} = remote}) do
+    case state do
+      "off" -> {:ok, "reach from anywhere off"}
+      "dormant" -> {:ok, "reach from anywhere waits for the first pairing"}
+      "starting" -> {:ok, "reach from anywhere starting"}
+      "helper_missing" -> {:warn, "reach from anywhere unavailable: " <> @no_helper}
+      "ready" -> mobile_relay(remote)
+      "failed" -> {:fail, "reach from anywhere failed: #{remote["failure"]}"}
+      other -> {:warn, "reach from anywhere reports a state this CLI does not know: #{other}"}
+    end
+  end
+
+  defp mobile_remote(_report),
+    do: {:warn, "reach from anywhere not reported: the running daemon predates it"}
+
+  defp mobile_relay(%{"connected" => true, "relay" => relay}) when is_binary(relay),
+    do: {:ok, "reach from anywhere ready via #{URI.parse(relay).host}"}
+
+  defp mobile_relay(%{"relay_error" => error}) when is_binary(error),
+    do: {:warn, "reach from anywhere not connected to a relay (#{error})"}
+
+  defp mobile_relay(_remote), do: {:warn, "reach from anywhere not connected to a relay yet"}
 
   # Push connects lazily and stays up when Apple is unreachable, so credentials
   # that resolve are not yet delivery: the daemon says which it is.
@@ -3177,8 +3337,10 @@ defmodule Fermix.CLI.Doctor.Checks do
   # (`Egress.ensure_direct/2`), asked of the route itself, so a host listed in
   # `proxy_bypass` clears the warning.
   defp features_refused_by_proxy(egress) do
+    realtime = RealtimeConfig.current()
+
     [
-      {"voice", "wss://api.openai.com", RealtimeConfig.enabled?()},
+      {"voice", voice_wire(realtime.provider), realtime.enabled?},
       {"Discord", "wss://gateway.discord.gg", channel_enabled?(:discord)},
       {"Zoom capture", "wss://ws.zoom.us", MeetingsConfig.enabled?()}
     ]
@@ -3187,6 +3349,10 @@ defmodule Fermix.CLI.Doctor.Checks do
     end)
     |> Enum.map(fn {name, _url, _enabled?} -> name end)
   end
+
+  # The host the voice engines of each provider dial.
+  defp voice_wire("openai"), do: "wss://api.openai.com"
+  defp voice_wire("xai"), do: "wss://api.x.ai"
 
   defp channel_enabled?(channel) do
     case CoreConfig.channel(channel) do

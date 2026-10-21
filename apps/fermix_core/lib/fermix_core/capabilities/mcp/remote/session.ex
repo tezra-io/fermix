@@ -2,9 +2,10 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
   @moduledoc """
   One authenticated MCP session over Streamable HTTP (M27 §7.4, §7.8).
 
-  This process is the only place a resolved bearer credential exists. It is
-  passed an opaque `AuthRef` and resolves it in `init/1`, so no supervisor
-  child spec, crash report, or registry entry can carry the value.
+  This process is the only place a resolved credential exists. It is passed an
+  opaque `AuthRef` and resolves it in `init/1`, so no supervisor child spec,
+  crash report, or registry entry can carry the value, and `format_status/1`
+  keeps it out of this process's own reports.
 
   A started session is an *initialized* session: `init/1` resolves, connects,
   runs `initialize`, checks the negotiated protocol version, and sends
@@ -19,8 +20,34 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
   request. Admission, queueing, pacing, and backpressure belong to the caller
   above (`Remote.Client`), which is why they are not here.
 
-  MCP `2025-06-18` is pinned. A server that negotiates any other version is
-  refused rather than silently driven with different semantics.
+  ## The protocol window, per endpoint source (M74 E4)
+
+  This module is the one place the versions are written. A plugin offers and
+  accepts its manifest's `2025-06-18`, which the signature covers
+  (`protocol_version/0`, which `Plugins.Dist.McpSource` holds a manifest to).
+  An operator server is offered `2025-11-25` and may answer `2025-06-18` or
+  `2025-11-25`. A server that negotiates anything else is refused rather than
+  silently driven with different semantics. The negotiated version rides every
+  request after `initialize`, whether or not the server issued a session id.
+
+  An operator URL may name a server on the older HTTP+SSE transport, which
+  this rail does not speak (M74 D7). It is told apart the way the transport
+  specification's backwards-compatibility section describes: `initialize` is
+  answered `400`, `404` or `405`, and a `GET` of the same URL opens an event
+  stream whose first event is `endpoint`. That server is refused with
+  `{:remote_protocol_error, :legacy_sse_transport}`; any other answer keeps
+  the `initialize` failure.
+
+  ## A grant's token (M74 E5)
+
+  An operator server signed in with OAuth (`AuthRef` `:mcp_oauth`) sends the
+  token its grant holds now: `AuthRef.current/2` before every request, which
+  refreshes one about to expire. A `401` to a request that carried one is
+  renewed once (`AuthRef.renew/3`) and the request sent again, which repeats
+  nothing: the server ran nothing it did not authenticate. A request refused
+  for a sign-in tells the owner (`{:mcp_session, {:refused, reason}}`), so the
+  server's status says so rather than every later call failing behind a
+  connected row.
 
   ## Server-initiated notifications
 
@@ -35,6 +62,8 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
 
   use GenServer
 
+  require Logger
+
   alias FermixCore.Capabilities.MCP.Remote.AuthRef
   alias FermixCore.Capabilities.MCP.Remote.Connection
   alias FermixCore.Capabilities.MCP.Remote.Endpoint
@@ -42,7 +71,12 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
   alias FermixCore.Capabilities.MCP.Remote.Limits
   alias FermixCore.Timeouts
 
-  @protocol_version "2025-06-18"
+  @manifest_version "2025-06-18"
+  @operator_offer "2025-11-25"
+  @operator_versions ["2025-06-18", "2025-11-25"]
+
+  # The `initialize` answers after which the older transport is looked for.
+  @legacy_sse_statuses [400, 404, 405]
 
   @type opt ::
           {:endpoint, Endpoint.t()}
@@ -53,9 +87,9 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
           | {:transport, module()}
           | {:notify, pid() | nil}
 
-  @doc "The MCP protocol version this rail pins."
+  @doc "The MCP protocol version a plugin manifest declares and this rail pins for it."
   @spec protocol_version() :: String.t()
-  def protocol_version, do: @protocol_version
+  def protocol_version, do: @manifest_version
 
   @spec start_link([opt()]) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
@@ -77,6 +111,13 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
       call_timeout(timeout_ms)
     )
   end
+
+  @doc """
+  The `serverInfo` the server answered `initialize` with, as it sent it, or
+  `nil` when it sent none (M74 E9).
+  """
+  @spec server_info(GenServer.server()) :: map() | nil
+  def server_info(session), do: GenServer.call(session, :server_info)
 
   @doc """
   Best-effort authenticated session teardown, then close.
@@ -107,17 +148,20 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
 
     transport = Keyword.get(opts, :transport, Connection)
 
-    with {:ok, credential} <- AuthRef.resolve(auth_ref, resolver_opts(opts)),
+    with {:ok, auth_headers} <- AuthRef.resolve(auth_ref, resolver_opts(opts)),
          {:ok, connection} <- open(transport, endpoint, opts) do
       state = %{
         endpoint: endpoint,
         transport: transport,
         connect_opts: Keyword.get(opts, :connect_opts, []),
-        credential: credential,
+        auth_ref: auth_ref,
+        auth_headers: auth_headers,
         connection: connection,
         client_info: Keyword.get(opts, :client_info, default_client_info()),
         notify: Keyword.get(opts, :notify),
         session_id: nil,
+        protocol_version: nil,
+        server_info: nil,
         next_id: 1
       }
 
@@ -160,41 +204,97 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
   # always has the post-exchange connection to close. A validation step that
   # returned a bare `{:error, reason}` would leave the socket unowned.
   defp initialize(state, deadline) do
+    {offer, _accepted} = window(state.endpoint)
+
     params = %{
-      "protocolVersion" => @protocol_version,
+      "protocolVersion" => offer,
       "capabilities" => %{},
       "clientInfo" => state.client_info
     }
 
     case exchange(state, "initialize", params, initialize_timeout(deadline)) do
-      {:ok, state, result, headers} -> finish_initialize(state, result, headers, deadline)
-      {:error, state, reason} -> {:error, state, reason}
+      {:ok, state, result, headers} ->
+        finish_initialize(state, result, headers, deadline)
+
+      {:error, state, {:remote_http_error, status} = reason}
+      when status in @legacy_sse_statuses ->
+        refuse_legacy_sse(state, reason, deadline)
+
+      {:error, state, reason} ->
+        {:error, state, reason}
     end
   end
 
+  # The one place the versions this rail speaks are chosen: what it offers and
+  # what it accepts back, by where the endpoint came from.
+  defp window(%Endpoint{source: :manifest}), do: {@manifest_version, [@manifest_version]}
+  defp window(%Endpoint{source: :operator}), do: {@operator_offer, @operator_versions}
+
   defp finish_initialize(state, result, headers, deadline) do
-    with :ok <- check_negotiated_version(result),
-         {:ok, state} <- adopt_session_id(state, headers) do
+    with {:ok, version} <- check_negotiated_version(result, state.endpoint),
+         {:ok, state} <- adopt_session_id(initialized(state, version, result), headers) do
       send_initialized(state, deadline)
     else
       {:error, reason} -> {:error, state, reason}
     end
   end
 
+  defp initialized(state, version, result) do
+    %{state | protocol_version: version, server_info: server_info_of(result)}
+  end
+
+  defp server_info_of(%{"serverInfo" => info}) when is_map(info), do: info
+  defp server_info_of(_result), do: nil
+
+  # Only an operator URL can name a server on the older transport: a manifest
+  # declares and signs `streamable_http`.
+  defp refuse_legacy_sse(%{endpoint: %Endpoint{source: :operator}} = state, reason, deadline) do
+    headers = state.auth_headers ++ [{"accept", "text/event-stream"}]
+    timeout = initialize_timeout(deadline)
+
+    case state.transport.request(state.connection, "GET", headers, nil, timeout,
+           stop: :first_event
+         ) do
+      {:ok, connection, response} ->
+        {:error, %{state | connection: connection}, legacy_sse_verdict(response, reason)}
+
+      {:error, connection, probe_reason} ->
+        Logger.debug("MCP older-transport check failed: #{inspect(error_class(probe_reason))}")
+        {:error, %{state | connection: connection}, reason}
+    end
+  end
+
+  defp refuse_legacy_sse(state, reason, _deadline), do: {:error, state, reason}
+
+  defp legacy_sse_verdict(%{status: 200, body: {:sse, [%{event: "endpoint"} | _rest]}}, _reason),
+    do: {:remote_protocol_error, :legacy_sse_transport}
+
+  defp legacy_sse_verdict(_response, reason), do: reason
+
+  defp error_class(reason) when is_tuple(reason) and tuple_size(reason) > 0, do: elem(reason, 0)
+  defp error_class(reason), do: reason
+
   defp initialize_timeout(deadline) do
     min(Timeouts.mcp_remote_initialize(), max(deadline - System.monotonic_time(:millisecond), 1))
   end
 
-  # The version is a hard gate, not a hint: `2025-06-18` fixes the signed
-  # descriptor boundary (no `execution.taskSupport` field), so accepting a
-  # different negotiated version would silently change what a signed hash
-  # covers.
-  defp check_negotiated_version(%{"protocolVersion" => @protocol_version}), do: :ok
+  # The version is a hard gate, not a hint. For a plugin, `2025-06-18` fixes
+  # the signed descriptor boundary (no `execution.taskSupport` field), so
+  # accepting a different negotiated version would silently change what a
+  # signed hash covers.
+  defp check_negotiated_version(%{"protocolVersion" => version}, endpoint)
+       when is_binary(version) do
+    {_offer, accepted} = window(endpoint)
 
-  defp check_negotiated_version(%{"protocolVersion" => other}),
+    if version in accepted,
+      do: {:ok, version},
+      else: {:error, {:remote_protocol_error, {:unsupported_protocol_version, version}}}
+  end
+
+  defp check_negotiated_version(%{"protocolVersion" => other}, _endpoint),
     do: {:error, {:remote_protocol_error, {:unsupported_protocol_version, other}}}
 
-  defp check_negotiated_version(_result),
+  defp check_negotiated_version(_result, _endpoint),
     do: {:error, {:remote_protocol_error, :missing_protocol_version}}
 
   defp send_initialized(state, deadline) do
@@ -213,8 +313,14 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
   @impl true
   def handle_call({:request, method, params, timeout_ms, _opts}, _from, state) do
     case exchange(state, method, params, timeout_ms) do
-      {:error, state, :session_expired} -> renew_and_resend(state, method, params, timeout_ms)
-      result -> reply(result)
+      {:error, state, :session_expired} ->
+        renew_and_resend(state, method, params, timeout_ms)
+
+      {:error, state, {:reauthorization_required, :sign_in_required} = reason} ->
+        refused(state, reason)
+
+      result ->
+        reply(result)
     end
   end
 
@@ -222,8 +328,19 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
     {:reply, delete_session(state), state}
   end
 
+  def handle_call(:server_info, _from, state), do: {:reply, state.server_info, state}
+
   defp reply({:ok, state, result, _headers}), do: {:reply, {:ok, result}, state}
   defp reply({:error, state, reason}), do: {:reply, {:error, reason}, state}
+
+  # The owner turns the refusal into the server's status and ends the subtree;
+  # a bare session (probe, unit test) has nobody to tell.
+  defp refused(%{notify: notify} = state, reason) when is_pid(notify) do
+    send(notify, {:mcp_session, {:refused, reason}})
+    {:reply, {:error, reason}, state}
+  end
+
+  defp refused(state, reason), do: {:reply, {:error, reason}, state}
 
   # MCP 2025-06-18: a 404 answering a request that carried `Mcp-Session-Id` means
   # the server has terminated that session, and the client MUST start a new one.
@@ -241,7 +358,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
   defp renew_and_resend(state, method, params, timeout_ms) do
     deadline = System.monotonic_time(:millisecond) + Timeouts.mcp_remote_startup()
 
-    case initialize(%{state | session_id: nil}, deadline) do
+    case initialize(%{state | session_id: nil, protocol_version: nil}, deadline) do
       {:ok, state} -> reply(exchange(state, method, params, timeout_ms))
       {:error, state, reason} -> {:reply, {:error, reason}, state}
     end
@@ -256,6 +373,16 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
 
   def terminate(_reason, _state), do: :ok
 
+  # A crash report prints a process's state, and this one holds the resolved
+  # credential and the socket's buffers: only where it was connected and what
+  # it negotiated are printed.
+  @impl true
+  def format_status(status) do
+    Map.replace_lazy(status, :state, fn state ->
+      Map.take(state, [:endpoint, :session_id, :protocol_version, :next_id])
+    end)
+  end
+
   defp exchange(state, method, params, timeout_ms) do
     id = state.next_id
     payload = %{"jsonrpc" => "2.0", "id" => id, "method" => method, "params" => params}
@@ -267,6 +394,29 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
   end
 
   defp post_and_classify(state, body, timeout_ms, id) do
+    case post(state, body, timeout_ms) do
+      {:ok, state, %{status: 401} = response} ->
+        renew_or_classify(state, response, body, timeout_ms, id)
+
+      {:ok, state, response} ->
+        classify(state, response, id)
+
+      {:error, state, reason} ->
+        {:error, state, reason}
+    end
+  end
+
+  # Once per request: the answer to the request sent again is classified as it
+  # is, a second `401` included.
+  defp renew_or_classify(state, response, body, timeout_ms, id) do
+    case AuthRef.renew(state.auth_ref, state.auth_headers, response.headers) do
+      {:ok, headers} -> resend(%{state | auth_headers: headers}, body, timeout_ms, id)
+      :none -> classify(state, response, id)
+      {:error, reason} -> {:error, state, reason}
+    end
+  end
+
+  defp resend(state, body, timeout_ms, id) do
     case post(state, body, timeout_ms) do
       {:ok, state, response} -> classify(state, response, id)
       {:error, state, reason} -> {:error, state, reason}
@@ -297,9 +447,18 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
   end
 
   defp post(state, body, timeout_ms) do
-    case send_once(state, body, timeout_ms) do
-      {:error, state, {:not_sent, _class}} -> reconnect_and_send(state, body, timeout_ms)
-      result -> result
+    with {:ok, state} <- current_credential(state) do
+      case send_once(state, body, timeout_ms) do
+        {:error, state, {:not_sent, _class}} -> reconnect_and_send(state, body, timeout_ms)
+        result -> result
+      end
+    end
+  end
+
+  defp current_credential(state) do
+    case AuthRef.current(state.auth_ref, state.auth_headers) do
+      {:ok, headers} -> {:ok, %{state | auth_headers: headers}}
+      {:error, reason} -> {:error, state, reason}
     end
   end
 
@@ -333,24 +492,25 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
   # Streamable HTTP POSTs advertise BOTH response forms; the server chooses.
   # Advertising only JSON is how a client silently loses every streamed reply.
   defp headers(state) do
-    [
-      AuthRef.header(state.credential),
-      {"accept", "application/json, text/event-stream"},
-      {"content-type", "application/json"}
-    ]
+    (state.auth_headers ++
+       [
+         {"accept", "application/json, text/event-stream"},
+         {"content-type", "application/json"}
+       ])
     |> put_session(state.session_id)
-    |> put_protocol_version(state.session_id)
+    |> put_protocol_version(state.protocol_version)
   end
 
   defp put_session(headers, nil), do: headers
   defp put_session(headers, id), do: headers ++ [{"mcp-session-id", id}]
 
-  # The negotiated version rides every request AFTER initialization; during
-  # initialize there is nothing negotiated yet.
+  # The negotiated version rides every request AFTER initialization, whether or
+  # not the server issued a session id; during initialize there is nothing
+  # negotiated yet.
   defp put_protocol_version(headers, nil), do: headers
 
-  defp put_protocol_version(headers, _id),
-    do: headers ++ [{"mcp-protocol-version", @protocol_version}]
+  defp put_protocol_version(headers, version),
+    do: headers ++ [{"mcp-protocol-version", version}]
 
   defp classify(state, %{status: status, body: body, headers: headers}, id)
        when status in 200..299 do
@@ -365,7 +525,11 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
   defp accept_notification(state, %{status: status}) when status in 200..299, do: {:ok, state}
   defp accept_notification(state, response), do: {:error, state, http_error(state, response)}
 
-  defp http_error(state, %{status: 401}), do: {:reauthorization_required, state.endpoint.host}
+  defp http_error(state, %{status: status, headers: headers}) when status in [401, 403] do
+    challenge = header_value(headers, "www-authenticate")
+    AuthRef.refusal(state.auth_ref, status, challenge, state.endpoint.host)
+  end
+
   defp http_error(%{session_id: id}, %{status: 404}) when is_binary(id), do: :session_expired
   defp http_error(_state, %{status: 429} = response), do: rate_limited(response)
   defp http_error(_state, %{status: status}), do: {:remote_http_error, status}

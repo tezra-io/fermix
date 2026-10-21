@@ -19,6 +19,10 @@ defmodule FermixCore.Management.Settings.Row do
   other row carries `null`, because a control the operator has to open for one
   more sentence costs more than the sentence saves.
 
+  `advanced` marks a row most people never need to change, which a surface draws
+  after the section's other rows under one disclosure that starts closed. It
+  says nothing about how the row applies; that is `restart`'s job.
+
   `suggestions` says whether a choice row's `options` are the WHOLE value space
   or only what a client may offer inline. It is the field `settings.apply`
   validates against: without it every choice row accepted any string, and an
@@ -54,6 +58,7 @@ defmodule FermixCore.Management.Settings.Row do
       when is_binary(key) and kind in @kinds and is_binary(label) and is_list(opts) do
     restart = validate_restart!(key, Keyword.fetch!(opts, :restart))
     format = validate_format!(key, Keyword.get(opts, :format))
+    advanced = validate_advanced!(key, Keyword.get(opts, :advanced, false))
 
     %{
       "key" => key,
@@ -61,6 +66,7 @@ defmodule FermixCore.Management.Settings.Row do
       "label" => label,
       "footer" => Keyword.get(opts, :footer),
       "info" => validate_info!(key, Keyword.get(opts, :info)),
+      "advanced" => advanced,
       "value" => value(Keyword.get(opts, :value)),
       "present" => Keyword.get(opts, :present),
       "options" => Keyword.get(opts, :options, []),
@@ -133,6 +139,12 @@ defmodule FermixCore.Management.Settings.Row do
 
   defp validate_restart!(key, restart) do
     raise ArgumentError, "row #{key} declared a non-boolean restart: #{inspect(restart)}"
+  end
+
+  defp validate_advanced!(_key, advanced) when is_boolean(advanced), do: advanced
+
+  defp validate_advanced!(key, advanced) do
+    raise ArgumentError, "row #{key} declared a non-boolean advanced: #{inspect(advanced)}"
   end
 
   defp validate_format!(_key, nil), do: nil

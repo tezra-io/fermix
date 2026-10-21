@@ -11,10 +11,8 @@ defmodule FermixCore.Capabilities.MCP.Telemetry do
   - `[:fermix, :capability, :mcp_name_collision]` — two distinct `{server, tool}`
     pairs sanitizing to the same agent-facing name (`Naming.register/3`).
 
-  The `mcp_client` root is deliberate: inbound MCP (Fermix as a *server*) owns
-  `[:fermix, :mcp, :inbound, :tools_listed]` / `[:fermix, :mcp, :inbound, :call]`,
-  and the outbound client lifecycle must not share a prefix with server-side
-  events. One **stable** event name carries every phase — a dynamic
+  The `mcp_client` root names the side Fermix is on: the client of a server it
+  connects to. One **stable** event name carries every phase — a dynamic
   `[:fermix, :mcp_client, <phase>]` tail would never be delivered, because both
   `FermixCore.Trace.TelemetryHandler` and `FermixOpik.Reporter` bind exact names.
 

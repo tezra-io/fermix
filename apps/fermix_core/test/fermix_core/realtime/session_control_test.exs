@@ -1,10 +1,10 @@
 defmodule FermixCore.Realtime.SessionControlTest do
   @moduledoc """
-  `SessionControl` is the one client API the listener and the session supervisor
-  use for either engine's session process, so the thing under test is the exact
-  set of GenServer messages it sends: both `SessionServer` and (later)
-  `LiveSessionServer` are written against that list, and a drift here silently
-  breaks one of them.
+  `SessionControl` is the one client API the listener, the session supervisor
+  and the chat use for every engine's session process, so the thing under test
+  is the exact set of GenServer messages it sends: `SessionServer`,
+  `LiveSessionServer` and `GrokSessionServer` are written against that list, and
+  a drift here silently breaks one of them.
   """
 
   use ExUnit.Case, async: true
@@ -35,6 +35,7 @@ defmodule FermixCore.Realtime.SessionControlTest do
     end
 
     defp reply_for(:reload_runtime), do: {:ok, %{tools: 0, applies: :next_call}}
+    defp reply_for(:call_context), do: {:ok, %{call_uuid: "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b"}}
     defp reply_for(_message), do: :ok
   end
 
@@ -85,11 +86,61 @@ defmodule FermixCore.Realtime.SessionControlTest do
     assert_receive {:called, :reload_runtime}
   end
 
+  test "playback_progress carries the id, the played milliseconds and the drain flag", %{
+    session: session
+  } do
+    assert :ok = SessionControl.playback_progress(session, "p17", 420, false)
+    assert_receive {:called, {:playback_progress, "p17", 420, false}}
+
+    assert :ok = SessionControl.playback_progress(session, "p17", 870, true)
+    assert_receive {:called, {:playback_progress, "p17", 870, true}}
+  end
+
+  # The task engines' chat API (M56 §4.3, §4.4), one place for Live and Grok.
+  test "chat_typed is a cast of what the owner typed", %{session: session} do
+    assert :ok = SessionControl.chat_typed(session, "use https://x.test/lease")
+    assert_receive {:cast, {:chat, {:typed, "use https://x.test/lease"}}}
+  end
+
+  test "chat_answered is a cast of the chat's answer", %{session: session} do
+    answer = %{role: "assistant", content: "Saved the lease.", metadata: %{}}
+
+    assert :ok = SessionControl.chat_answered(session, answer)
+    assert_receive {:cast, {:chat, {:answered, ^answer}}}
+  end
+
+  test "call_context asks the session and returns its answer", %{session: session} do
+    assert {:ok, %{call_uuid: "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b"}} =
+             SessionControl.call_context(session, 1_000)
+
+    assert_receive {:called, :call_context}
+  end
+
   test "every verb refuses an argument the session contract does not allow", %{session: session} do
     assert_raise FunctionClauseError, fn -> SessionControl.audio_chunk(session, :not_binary) end
     assert_raise FunctionClauseError, fn -> SessionControl.interrupt(session, -1) end
     assert_raise FunctionClauseError, fn -> SessionControl.mute(session, "yes") end
     assert_raise FunctionClauseError, fn -> SessionControl.cancel_task(session, "") end
+
+    assert_raise FunctionClauseError, fn ->
+      SessionControl.playback_progress(session, "", 0, true)
+    end
+
+    assert_raise FunctionClauseError, fn ->
+      SessionControl.playback_progress(session, "p1", -1, true)
+    end
+
+    assert_raise FunctionClauseError, fn ->
+      SessionControl.playback_progress(session, "p1", 0, "yes")
+    end
+
+    assert_raise FunctionClauseError, fn -> SessionControl.chat_typed(session, :not_binary) end
+
+    assert_raise FunctionClauseError, fn ->
+      SessionControl.chat_answered(session, %{role: "user", content: "hello"})
+    end
+
+    assert_raise FunctionClauseError, fn -> SessionControl.call_context(session, -1) end
   end
 
   test "engine_module names the engine's session module" do
@@ -98,16 +149,24 @@ defmodule FermixCore.Realtime.SessionControlTest do
 
     assert SessionControl.engine_module(Config.normalize(engine: "openai_live")) ==
              FermixCore.Realtime.LiveSessionServer
+
+    assert SessionControl.engine_module(Config.normalize(engine: "xai_realtime")) ==
+             FermixCore.Realtime.GrokSessionServer
   end
 
-  test "session_scope is engine-scoped so a Live call is recognisable in a trace" do
+  # Grok runs under the Live run kind: both are task engines, and the trace's
+  # `engine` metadata tells them apart.
+  test "session_scope is engine-scoped so a task-engine call is recognisable in a trace" do
     realtime = SessionControl.session_scope(Config.normalize(engine: "openai_realtime"))
     live = SessionControl.session_scope(Config.normalize(engine: "openai_live"))
+    grok = SessionControl.session_scope(Config.normalize(engine: "xai_realtime"))
 
     assert "session:" <> realtime_id = realtime
     assert "voice_live:" <> live_id = live
+    assert "voice_live:" <> grok_id = grok
     assert Integer.parse(realtime_id) != :error
     assert Integer.parse(live_id) != :error
+    assert Integer.parse(grok_id) != :error
   end
 
   test "session_scope never repeats within one daemon" do

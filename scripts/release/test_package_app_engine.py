@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Hermetic tests for app-engine release packaging."""
 
 import hashlib
@@ -266,6 +270,11 @@ class PackageAppEngineTest(unittest.TestCase):
                     "maximum_version": 1,
                 },
                 "browser_host": {
+                    "current_version": 1,
+                    "minimum_version": 1,
+                    "maximum_version": 1,
+                },
+                "native_host": {
                     "current_version": 1,
                     "minimum_version": 1,
                     "maximum_version": 1,

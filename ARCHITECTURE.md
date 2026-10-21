@@ -209,7 +209,8 @@ listener; `AnthropicLogin`, `XAILogin`, and plugin providers through
 retrying once on a stale socket and never on a timeout. `Net.Egress` decides how
 each connection leaves: direct, or through the HTTP proxy `[fermix_core.network]`
 names, in which case pooled requests use the `FermixCore.Finch.Proxied` twin and
-HTTPS is tunnelled with `CONNECT`. `Net.TimeoutPolicy`
+HTTPS is tunnelled with `CONNECT`. A direct dial tries IPv6 first and falls back
+to IPv4 (`Net.Egress.prefer_ipv6/1`). `Net.TimeoutPolicy`
 holds the receive timeout for each request kind, `Net.Tls` the verified TLS
 options for WebSockets, and `Net.Guard` the public-URL checks.
 `FermixCore.Timeouts` names the non-HTTP deadlines.
@@ -242,7 +243,7 @@ guidance, `execute/2`), with optional `advertise?/1` and `dynamic_parameters/1`
 hooks that decide per turn whether and how a tool is offered.
 
 Architecture Invariant: `Capability.execute/3` is the one invoke boundary (the
-agent loop, the realtime voice bridge, inbound MCP), and it asks
+agent loop and the realtime voice bridge), and it asks
 `Capabilities.AccessGate.admit/3` before the executor. A capability whose plugin
 manifest marks it `access_sensitive` runs there only on an attended owner turn,
 not from a shared Buzz channel (`Acp.Identity.multi_principal?/1`), that read no
@@ -337,8 +338,8 @@ spoken, and no review reads it either.
 
 Bootstrap files live in `FERMIX_HOME/bootstrap/<agent_id>/`: `IDENTITY.md`,
 optional `SOUL.md`, `FERMIX.md` (operating rules; `BootstrapRename` renames a
-legacy `AGENTS.md` at boot), `REALTIME.md` for realtime voice sessions, and
-`LIVE.md` for the Live voice frontend.
+legacy `AGENTS.md` at boot), `REALTIME.md` for realtime voice sessions,
+`LIVE.md` for the Live voice frontend, and `GROK.md` for the Grok one.
 
 `PromptComposer` exports prompt parts by cache tier, stable first: identity,
 soul, operating rules, realtime rules when relevant, the generated runtime
@@ -380,7 +381,11 @@ second resource-store process to coordinate.
 standard workspace paths (workspace, grants, bootstrap, skills, plugins,
 browser, journals, realtime, mobile, traces, logs, and `memory.db`); it keeps
 `mobile` at 0700, the only mode the phone's trust store reads. Secrets live in
-the OS keychain, named by profile rather than by home.
+the OS keychain, named by profile rather than by home. Every write of
+`config.toml` (a settings save, the web port, an MCP server write) holds one
+cross-VM lockfile from its read to its write, and the `[mcp.servers.*]` blocks
+are read, edited and checked by `Capabilities.MCP.Config` and rendered back by
+the same renderer, so no save drops an operator's servers.
 
 `Setup.Wizard` is the shared setup engine. `fermix setup` and `mix fermix.setup`
 (through `Setup.Runtime`), the setup LiveView, and the management protocol's
@@ -400,6 +405,9 @@ events into those files. `FermixCore.Telemetry` owns correlation IDs and content
 capture, which is on unless `FERMIX_TRACE_CONTENT=0`. Tools emit through
 `Tools.Telemetry.exec/5` and provider calls through
 `Providers.Telemetry.emit_call/3`; `docs/TELEMETRY_CONTRACT.md` is the contract.
+The local Doctor reads the `llm_call` rows back: `Setup.ProviderHealth` judges
+the primary provider from its recent calls, and finds them through
+`FermixCore.Application.trace_dir/0`, the resolver the `Trace` child starts with.
 
 Architecture Invariant: trace writes are best-effort. Failure to write a trace is
 logged and should not take down the runtime.
@@ -441,7 +449,12 @@ sets, command profiles (`bare`, `assistant`, `extended`) pick the allowed
 commands, and `Hardline` refuses catastrophic commands. `Sandbox.Env` resolves
 `[sandbox.env] allow` one name at a time, and `EnvHealth` records misses for
 readiness. The owner-gated `request_directory_access` tool plus `/confirm
-<token>` can grant a denied directory. There is no OS-level jail.
+<token>` can grant a denied directory. On macOS, `Sandbox.OsSandbox` also
+wraps every command a turn runs (the shell tool, the command tool, the git
+tools) in `sandbox-exec` with a Seatbelt profile built from the same roots, so
+the kernel holds the command to the mode and keeps Fermix's home and secrets
+out of its reach; `Sandbox.confine/3` is the one entry point. Linux has no
+kernel enforcement yet.
 
 `CommandRunner` is the entry point for spawning external commands. In the daemon
 each command runs in a temporary `CommandHost` under `CommandHost.Supervisor`,
@@ -482,9 +495,32 @@ A plugin's tools use one of two rails. The `http` rail runs inside the VM
 through an HTTP template interpreter, with credentials resolved outside model
 input. The `mcp` rail becomes a local stdio server (`local_stdio`) or a remote
 Streamable-HTTP endpoint (`remote_mcp`). `Capabilities.MCP.Supervisor` runs
-those servers and the operator's own `[mcp.servers.*]` in isolated subtrees. An
-inbound MCP server (`FermixCore.MCP.Inbound`) exists in the code, but nothing
-starts it.
+those servers and the operator's own `[mcp.servers.*]` in isolated subtrees.
+An operator stdio server runs over `Capabilities.MCP.StdioTransport`, which
+reads its secrets in its own process, builds its environment, finds its program
+on the login shell's `PATH` (`Capabilities.MCP.LoginPath`) and is its
+`RuntimeStatus` owner; a plugin's `local_stdio` server runs over Anubis's own.
+An operator `http` server runs on the same remote rail as a `remote_mcp`
+plugin, one `Remote.Owner` and `Remote.Session`, with its endpoint from the URL
+the owner typed (`Remote.Endpoint.operator/1`, checked under `Net.Guard`'s
+owner policy) and its headers from `Capabilities.MCP.Secrets`; with no signed
+contract, its tools register as a stdio server's do.
+The owner manages operator servers over `daemon.sock` (`mcp.servers.*`,
+`Management.McpServers`): every write goes through the one `ConfigStore` MCP
+writer, and `Management.McpServers.Row` is the one owner of a server's row,
+composed from its block, its stored values, its `RuntimeStatus` entry (which
+keeps what its last discovery found, the server's `serverInfo` and its tools
+described) and whether its subtree still runs. What the owner pastes into the
+add form (a URL, a command line, another app's configuration block) goes
+through one translator, `Management.McpServers.Interchange`, which takes text
+and never reads a file; the values a paste carried are held in memory only, by
+`Management.McpServers.DraftValues`, under a boot-bound `draft_id` an add
+redeems. An import reads other apps' settings files only when the owner asks
+(`Management.McpServers.ImportSources`, fixed paths under the home folder,
+each bounded and parsed whole), translates each server it finds with the same
+translator, and adds it through the same add path.
+Fermix is only ever an MCP client: it does not expose its own tools as an MCP
+server.
 
 Architecture Invariant: MCP clients are keyed by source (`{:plugin, name}` or
 `{:operator, name}`), and a `remote_mcp` plugin loads only from a
@@ -564,15 +600,26 @@ fixtures).
 
 `Realtime` serves local full-duplex voice on `FERMIX_HOME/realtime.sock`
 (newline-delimited JSON defined by `Realtime.Protocol`, exported in
-`priv/realtime/`). `SessionServer` runs OpenAI Realtime with tools through
-`ToolBridge` and optional screen perception; `LiveSessionServer` runs OpenAI
-Live, which executes no tools and delegates every task to an agent turn through
-the `VoiceBridge` behaviour, implemented in channels by `Voice.Bridge`. A Live
-call's instructions are `LIVE.md` with what `LivePrompt` generates around it
+`priv/realtime/`). The configured model picks the engine, and
+`SessionControl` the session that owns the call. `SessionServer` runs OpenAI
+Realtime with tools through `ToolBridge` and optional screen perception. The
+two task engines execute no tools and hand every task to an agent turn through
+the `VoiceBridge` behaviour, implemented in channels by `Voice.Bridge`:
+`LiveSessionServer` runs OpenAI Live, and `GrokSessionServer` runs SpaceXAI's
+Grok Voice behind its one `fermix_task` function (`GrokTaskCall`), with
+`GrokTurn` the one arbiter of a continuation, client-reported playback
+(`GrokPlayback`, wire v3) and its own ledger (`GrokLedger`). Each speaks its
+own provider wire (`OpenAILiveClient`, `XAIRealtimeClient`); what their tasks
+share, admission, the request built from the call's transcript, results said
+and shown, hand-over at the end, the call's record and gist, is one
+`CallTasks`, which answers what the voice must be told and never names a
+wire. A Live call's instructions are `LIVE.md` (Grok's `GROK.md`) with what
+`LivePrompt` generates around it
 (the assistant's name, the owner's details, the date, the memory files in the
 `<memory-context>` frame `PromptComposer` owns), and a call in the chat starts
 with the chat's newest messages as provider input, read through the bridge
-before the call has a handle and shaped by `LiveChat`. A call in the chat
+before the call has a handle and shaped by `LiveChat`, which masks Computer
+History content against the call's own voice provider. A call in the chat
 leaves a gist: its settle closes the `voice_calls` record (`CallRecord`) with
 the settled cost and what the call owes the chat, then `CallGist` makes the
 gist in a task the session never waits on and writes the call's one chat row
@@ -693,8 +740,7 @@ Current channels:
   draw has one agent history and one queue lane, while the channel stays
   `mobile` for the phone's authorization, approval cards, stream and push.
   `Mobile.Supervisor` (`:rest_for_one`) starts, in order,
-  the device store and registry, `PairManager`, `MediaStore`, the bounded
-  link-preview task supervisor (`Mobile.UnfurlSupervisor`), the APNs
+  the device store and registry, `PairManager`, the APNs
   dispatcher when push is configured (it connects on the first push, never at
   boot, and a push waits for that connect only until its deadline), the
   transport's `RequestCoordinator`, `Mobile.Discovery` (a cached list of the
@@ -708,8 +754,19 @@ Current channels:
   memory is off or the identity, attachment manifest or trust store cannot be
   read. Whether the channel runs has one answer, `Mobile.Supervisor.running?/1`
   (the supervisor's name is registered): the management verbs and a delivered
-  row's push and link previews read it, so a job delivered while the channel
-  is off is only a row of the shared timeline.
+  row's push read it, so a job delivered while the channel is off is only a
+  row of the shared timeline.
+- The timeline's media and its link previews belong to both companion
+  transports, so the channels application starts them on every real boot,
+  whether or not the phone channel runs: `Mobile.MediaStore` (a phone's
+  attachments, the Mac's own uploads and every preview's picture; a manifest it
+  cannot read starts no store, `MediaStore.start_admitted/1`) and the bounded
+  task supervisor `LinkPreviews` resolves under. Once a row is durable,
+  `LinkPreviews.schedule/4` previews the links `FermixCore.ReplyBlocks.links/2`
+  reads from it (a reply's, less the ones its blocks draw, and a phone user's
+  own message's, never the Mac user's), the first four through `Mobile.Unfurl`,
+  stores each card on its row with the link it was read for, and announces it,
+  to the phones as `link_preview` and to the Mac as `row_updated`.
 - The two companion transports share one request path (`Companion.Requests`:
   the durable `client_msg_id` claim, the attempt fence, ingest, history, search,
   read state and cancel) and one set of turn outputs (`Companion.Output`); each

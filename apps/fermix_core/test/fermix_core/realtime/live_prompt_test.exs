@@ -4,6 +4,7 @@ defmodule FermixCore.Realtime.LivePromptTest do
   alias FermixCore.Agents.VoiceCall
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.HostFacts
   alias FermixCore.Prompt.BootstrapPaths
   alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Prompt.Defaults
@@ -31,12 +32,16 @@ defmodule FermixCore.Realtime.LivePromptTest do
     %{agent_id: "main", bootstrap_dir: bootstrap_dir}
   end
 
+  @host_section "## This Fermix\n- Install: the Fermix app on this Mac.\n" <>
+                  "- Machine: macOS 26.1 on Apple silicon (arm64)."
+
   # What a call is told about the owner when nothing is known: the date only.
   # A private call, so nothing about the chat is added either.
   @bare %{
     agent_id: "main",
     assistant_name: nil,
     personalization: [],
+    host_section: @host_section,
     date_note: "Current date: Friday, 2026-10-02 (UTC).",
     prompt_memory: %{user: nil, memory: nil},
     conversation: "private"
@@ -106,6 +111,8 @@ defmodule FermixCore.Realtime.LivePromptTest do
                  "\n\n" <>
                  VoicePresence.text() <>
                  "\n\n" <>
+                 @host_section <>
+                 "\n\n" <>
                  @bare.date_note <>
                  "\n\nBackend tools:\n- File & Code: read_file\n- Web: web_search\n- Memory: recall"
     end
@@ -113,7 +120,9 @@ defmodule FermixCore.Realtime.LivePromptTest do
     # M56 §4.3 (D5): who the owner is, what day it is and the memory files,
     # generated after LIVE.md and the presence text and before the tools, in
     # this order. SOUL.md is not among them: LIVE.md is the voice's persona.
-    test "names the assistant, the owner, the date and the memory, in that order" do
+    # Which Fermix this is (M76 D12) follows the presence text: the same
+    # `## This Fermix` section a typed turn's prompt carries.
+    test "names this Fermix, the assistant, the owner, the date and the memory, in that order" do
       context = %{
         @bare
         | assistant_name: "Nova",
@@ -130,6 +139,7 @@ defmodule FermixCore.Realtime.LivePromptTest do
       sections = [
         @title,
         VoicePresence.text(),
+        @host_section,
         "Your name is Nova.",
         "## The owner\n\n- Name: Sujeeth\n- Time zone: Europe/London\n" <>
           "- Communication style: Balanced",
@@ -211,22 +221,25 @@ defmodule FermixCore.Realtime.LivePromptTest do
       refute user_only =~ memory
       assert byte_size(user_only) <= max
 
-      # Room for neither: the frame goes, LIVE.md and the presence text stay.
+      # Room for neither: the frame goes, LIVE.md, the presence text and this
+      # Fermix stay.
       tight = @title <> "\n" <> String.duplicate("p", max - base - 200)
       neither = LivePrompt.compose(tight, [], context)
       refute neither =~ "<memory-context>"
       assert neither =~ tight
       assert neither =~ VoicePresence.text()
+      assert neither =~ @host_section
       assert byte_size(neither) <= max
     end
 
-    test "LIVE.md and the presence text are never cut, however long" do
+    test "LIVE.md, the presence text and this Fermix are never cut, however long" do
       huge = @title <> "\n" <> String.duplicate("p", LivePrompt.instructions_max_bytes())
 
       prompt = LivePrompt.compose(huge, [], %{@bare | prompt_memory: %{user: "- u", memory: nil}})
 
       assert prompt =~ huge
       assert prompt =~ VoicePresence.text()
+      assert prompt =~ @host_section
       refute prompt =~ "<memory-context>"
     end
   end
@@ -276,6 +289,7 @@ defmodule FermixCore.Realtime.LivePromptTest do
       assert context.conversation == "chat"
       assert context.assistant_name == "Nova"
       assert context.personalization == [user_name: "Sujeeth", timezone: "UTC"]
+      assert context.host_section == HostFacts.prompt_section()
       assert context.date_note == CurrentDate.note()
 
       assert context.prompt_memory == %{
@@ -368,14 +382,29 @@ defmodule FermixCore.Realtime.LivePromptTest do
                  "send it with send_to_channel and say in the short line where it went."
     end
 
-    # M56 §5: a private call is today's behaviour in full, its addendum included.
+    # M56 §5: a private call shows nothing of its own, so it keeps its wording,
+    # with no delimiter; the pictures and files it sends are the exception.
     test "a private call keeps its wording, with no delimiter and nothing shown" do
       addendum = LivePrompt.backend_addendum("private")
 
       assert addendum =~ "Keep the portion sent to\nthe voice model concise"
       refute addendum =~ LiveText.shown_delimiter()
-      refute addendum =~ "chat"
       refute addendum =~ "send_to_channel"
+      refute one_spaced(addendum) =~ "your reply is shown in the owner's chat"
+    end
+
+    # The voice cannot show a picture, so in either call one the turn sends goes
+    # to the owner's chat, and the reply says it is there.
+    test "either call sends pictures and files to the owner's chat and says so" do
+      for conversation <- ~w(chat private) do
+        addendum = one_spaced(LivePrompt.backend_addendum(conversation))
+
+        assert addendum =~
+                 "A picture or file you send with send_attachment or generate_image appears " <>
+                   "in the owner's chat, since the voice cannot show it."
+
+        assert addendum =~ "say in your reply that it is in the chat."
+      end
     end
 
     test "no other conversation has an addendum" do
@@ -401,32 +430,37 @@ defmodule FermixCore.Realtime.LivePromptTest do
   describe "eligible_capabilities/2" do
     # M56 §4.7: a call in the chat launches a coding run in the chat's own
     # conversation, so its outcome re-enters the chat and is answered there.
-    test "a call in the chat keeps operator tools, sends and coding runs" do
+    test "a call in the chat keeps operator tools, sends, media and coding runs" do
       registry = eligible_registry()
 
-      assert names(registry, "chat") == ["codex_run", "read_file", "send_to_channel"]
+      assert names(registry, "chat") ==
+               ["codex_run", "generate_image", "read_file", "send_message", "send_to_channel"]
     end
 
     # A private call's conversation ends with the call, and a run launched
     # there would report back into a conversation nobody reads (M41 §5.1).
-    test "a private call drops coding runs too, and keeps sends" do
+    test "a private call drops coding runs too, and keeps sends and media" do
       registry = eligible_registry()
 
-      assert names(registry, "private") == ["read_file", "send_to_channel"]
+      assert names(registry, "private") ==
+               ["generate_image", "read_file", "send_message", "send_to_channel"]
     end
 
-    test "the voice model is told the categories its call keeps, delivery among them" do
+    test "the voice model is told the categories its call keeps, delivery and media among them" do
       registry = eligible_registry()
       chat = registry |> LivePrompt.eligible_capabilities("chat") |> LivePrompt.capability_lines()
 
       assert chat ==
-               "- File & Code: read_file\n- Coding Harness: codex_run\n" <>
-                 "- Delivery: send_to_channel"
+               "- File & Code: read_file\n- Media Generation: generate_image\n" <>
+                 "- Coding Harness: codex_run\n- Delivery: send_to_channel\n" <>
+                 "- Channel: send_message"
 
       private =
         registry |> LivePrompt.eligible_capabilities("private") |> LivePrompt.capability_lines()
 
-      assert private == "- File & Code: read_file\n- Delivery: send_to_channel"
+      assert private ==
+               "- File & Code: read_file\n- Media Generation: generate_image\n" <>
+                 "- Delivery: send_to_channel\n- Channel: send_message"
     end
 
     test "the exclusion list is the shared one the delegation turn also reads" do
@@ -434,14 +468,8 @@ defmodule FermixCore.Realtime.LivePromptTest do
       # profile from it): a disagreement between them would advertise a
       # capability the delegation would not be given, and nothing would report
       # it.
-      assert VoiceCall.excluded_categories("chat") == [:channel, :media, :delegation]
-
-      assert VoiceCall.excluded_categories("private") == [
-               :channel,
-               :media,
-               :delegation,
-               :harness
-             ]
+      assert VoiceCall.excluded_categories("chat") == [:delegation]
+      assert VoiceCall.excluded_categories("private") == [:delegation, :harness]
     end
   end
 

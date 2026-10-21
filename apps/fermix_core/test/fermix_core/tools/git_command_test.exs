@@ -3,6 +3,7 @@ defmodule FermixCore.Tools.GitCommandTest do
   # (global) CommandHost supervisor and polls it; serial runs keep timing steady.
   use ExUnit.Case, async: false
 
+  alias FermixCore.Sandbox.Config
   alias FermixCore.Tools.GitCommand
 
   # Bounded liveness polling (mirrors command_host_test): the stub git is its own
@@ -37,7 +38,10 @@ defmodule FermixCore.Tools.GitCommandTest do
     # is observed on a process this test saw alive.
     task =
       Task.async(fn ->
-        GitCommand.run(dir, "status", ["--short"], executable: stub, timeout_ms: 3_000)
+        GitCommand.run(dir, "status", ["--short"], context(dir),
+          executable: stub,
+          timeout_ms: 3_000
+        )
       end)
 
     pid = await_pidfile(pidfile)
@@ -49,6 +53,11 @@ defmodule FermixCore.Tools.GitCommandTest do
 
     assert await_death(pid) == :dead
   end
+
+  # On macOS git runs under `sandbox-exec`, which execs in place: the stub's `$$`
+  # is still the group leader the sweep signals.
+  defp context(dir),
+    do: %{sandbox_config: Config.normalize(mode: :strict, workspace_root: dir)}
 
   # A stub `git` that writes its own pid ($$, the group leader) then sleeps long
   # enough that only the sweep can end it. Executable so CommandRunner can spawn it.

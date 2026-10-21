@@ -1,17 +1,24 @@
 name: ci
 
+# Pull requests and main. A change reaches main through a pull request, which
+# runs every job, and main's push proves the merged tree again; a push to dev or
+# a release branch runs nothing. `gh workflow run ci --ref <branch>` runs it on
+# any branch by hand.
 on:
   pull_request:
     branches: [main, dev, "release/**"]
   push:
-    branches: [main, dev, "release/**"]
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# A newer commit cancels a pull request's older run. Main's runs queue instead,
+# so a merge's validation is never cut short.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
@@ -20,7 +27,9 @@ jobs:
     # this matrix only linux_x86_64 ever ran the suite. The `gate` job below
     # aggregates these legs so legs can be renamed/added/removed without
     # touching branch protection — but only once protection actually requires
-    # `gate`. See the note on that job for what is required today.
+    # `gate`. See the note on that job for what is required today. That is
+    # also why every leg keeps this name although only linux-x64 runs format
+    # and credo.
     name: compile · format · credo · test (${{ matrix.leg }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.timeout }}
@@ -28,16 +37,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04, leg: linux-x64, timeout: 30 }
-          - { os: ubuntu-24.04-arm, leg: linux-arm64, timeout: 30 }
-          - { os: macos-15, leg: macos-arm64, timeout: 45 }
-          - { os: macos-15-intel, leg: macos-x64, timeout: 45 }
+          # linux-x64 also stresses the change's test files, so it needs the
+          # history to diff against and the time to repeat them. It alone
+          # checks formatting and credo, which read source only.
+          - { os: ubuntu-24.04, leg: linux-x64, timeout: 45, fetch_depth: 0 }
+          - { os: ubuntu-24.04-arm, leg: linux-arm64, timeout: 30, fetch_depth: 1 }
+          - { os: macos-15, leg: macos-arm64, timeout: 45, fetch_depth: 1 }
+          - { os: macos-15-intel, leg: macos-x64, timeout: 45, fetch_depth: 1 }
     env:
       MIX_ENV: test
       ELIXIR_VERSION: "1.19.5"
       OTP_VERSION: "28"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: ${{ matrix.fetch_depth }}
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
@@ -60,22 +76,87 @@ jobs:
       - name: Compile (warnings as errors)
         run: mix compile --warnings-as-errors
 
+      - name: Apple Maps helper (macOS)
+        # `mix compile` above built `fermix-maps` through apps/fermix_nif's
+        # Makefile, as the app-engine release build does. This compiles it again
+        # with the flags written here, kept in lockstep with MAPS_SWIFTFLAGS, so
+        # loosening the Makefile's (dropping -warnings-as-errors, or raising the
+        # macOS 15 deployment target past the app's floor) fails this leg, then
+        # self-checks the build mix made. Its fixture requests run in the test
+        # step (Tools.PlaceSearch.HelperTest); the live MapKit search is opt-in
+        # (`--only mapkit_live`) and never runs in CI.
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          swiftc --version
+          swiftc -O -swift-version 5 -warnings-as-errors -target "$(uname -m)-apple-macos15.0" \
+            apps/fermix_nif/swift_src/fermix_maps.swift -o "${RUNNER_TEMP}/fermix-maps"
+          helper=_build/test/lib/fermix_nif/priv/fermix-maps
+          if [ ! -x "$helper" ]; then
+            echo "::error title=Apple Maps helper missing::mix compile built no ${helper}"
+            exit 1
+          fi
+          file "$helper"
+          "$helper" --check
+
+      # Same source, same result on every platform: one leg is enough. Each leg
+      # still compiles with warnings as errors and runs the whole suite.
       - name: Check formatting
+        if: matrix.leg == 'linux-x64'
         run: mix format --check-formatted
 
       - name: Credo (strict)
+        if: matrix.leg == 'linux-x64'
         run: mix credo --strict
 
       - name: Test
+        id: test
         # `mix compile --warnings-as-errors` above covers lib/ only; warnings
         # raised while loading the .exs suite (a drifted test double, an
         # unimplemented behaviour callback) reach no gate without the flag here.
-        # tee keeps the ExUnit banner — seed and max_cases are the two facts
-        # every ordering investigation starts from, and a red run whose seed
-        # lives only in scrolled Actions output cannot be replayed at all.
-        run: |
-          set -euo pipefail
-          mix test --warnings-as-errors 2>&1 | tee "${RUNNER_TEMP}/mix-test.log"
+        # The script tees the output to mix-test.log, which keeps the ExUnit
+        # banner: seed and max_cases are the two facts every ordering
+        # investigation starts from. When at most five tests fail and nothing
+        # else is wrong, it reruns only those tests once, per app; tests that
+        # pass then are flagged "Flaky test" (annotation, job summary,
+        # flaky-tests.json) and the leg passes. `scripts/ci/flaky_report.py`
+        # counts the flags across runs: fix anything flagged twice.
+        run: >-
+          uv run scripts/ci/mix_test_retry.py
+          --log "${RUNNER_TEMP}/mix-test.log"
+          --flaky-json "${RUNNER_TEMP}/flaky-tests.json"
+
+      - name: Stress the change's test files under load
+        # A flaky test usually passes the change that wrote it and fails an
+        # unrelated PR a month later. Repeating the change's own test files
+        # with every core busy makes the change that wrote it the one that
+        # sees it. See AGENTS.md, Tests under load.
+        # No run starts after --budget-s, and a later run starts only when its
+        # app's previous run would still end inside it. 720 s of the 15-minute
+        # timeout leaves 3 minutes for uv's start, the burners' stop and the
+        # overrun of the last run started, which the budget never cuts short.
+        # A run takes at most 30 of an app's files, so that overrun stays one
+        # chunk long however large the change. Raise the two together.
+        if: matrix.leg == 'linux-x64'
+        timeout-minutes: 15
+        env:
+          STRESS_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: >-
+          uv run scripts/ci/stress_changed_tests.py
+          --base "${STRESS_BASE}"
+          --budget-s 720
+          --log-dir "${RUNNER_TEMP}/stress"
+
+      - name: Upload flaky-test evidence
+        if: success() && steps.test.outputs.flaky == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: flaky-tests-${{ matrix.leg }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/flaky-tests.json
+            ${{ runner.temp }}/mix-test*.log
+          retention-days: 30
+          if-no-files-found: error
 
       - name: Record failure evidence
         if: failure()
@@ -102,7 +183,8 @@ jobs:
           name: ci-evidence-${{ matrix.leg }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/ci-evidence.txt
-            ${{ runner.temp }}/mix-test.log
+            ${{ runner.temp }}/mix-test*.log
+            ${{ runner.temp }}/stress/*.log
           retention-days: 14
           if-no-files-found: warn
 
@@ -200,16 +282,24 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       - name: Run hermetic release tests
-        run: python3 -m unittest discover -s scripts/release -p 'test_*.py'
+        run: for t in scripts/release/test_*.py; do echo "== $t =="; uv run "$t" || exit 1; done
+      - name: Run hermetic CI script tests
+        run: for t in scripts/ci/test_*.py; do echo "== $t =="; uv run "$t" || exit 1; done
 
   disclaim-shim:
     # The macOS disclaim exec shim ships inside release payloads, cross-compiled
     # by `zig cc` under strict flags — while dev macOS builds use the lenient
     # host cc. That split already shipped one release-only C break (the v0.6.0
     # NIF), so compile the shim here with the release-exact zig flags on every
-    # push. Keep the flags in lockstep with DISCLAIM_CFLAGS in
+    # run. Keep the flags in lockstep with DISCLAIM_CFLAGS in
     # apps/fermix_nif/Makefile and ZIG_VERSION with release.yml.
+    #
+    # The NIF (fermix_nif.c) is cross-compiled by zig for every release target
+    # too, so it is compiled here the same way, for all four, under the same
+    # strict flags (a superset of the Makefile's NIF CFLAGS, which this step
+    # must keep including) and against the release's OTP headers.
     name: disclaim shim cross-compile (release zig flags)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -226,6 +316,21 @@ jobs:
             zig cc -target "$target" -std=c99 -O2 -Wall -Wextra -Werror \
               apps/fermix_nif/c_src/fermix_disclaim.c -o "${RUNNER_TEMP}/disclaim_${target}"
             echo "built ${target}"
+          done
+      # erl_nif.h only; the OTP the release builds with (release.yml).
+      - name: Install Erlang/OTP headers
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: "28.4.1"
+      - name: Compile the NIF for every release target
+        run: |
+          set -euo pipefail
+          erts_include="$(erl -noshell -eval 'io:format("~s/erts-~s/include", [code:root_dir(), erlang:system_info(version)]), halt().')"
+          for target in aarch64-linux-musl x86_64-linux-musl aarch64-macos x86_64-macos; do
+            zig cc -target "$target" -std=c99 -O2 -Wall -Wextra -Werror -fPIC \
+              -I"$erts_include" -c apps/fermix_nif/c_src/fermix_nif.c \
+              -o "${RUNNER_TEMP}/fermix_nif_${target}.o"
+            echo "compiled ${target}"
           done
 
   # Aggregate gate: one stable check name (`compile · format · credo · test`),

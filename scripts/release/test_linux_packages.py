@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Hermetic tests for Linux package staging and orchestration."""
 
 import contextlib
@@ -535,7 +539,7 @@ class BuildTest(unittest.TestCase):
 
 
 class BuildScriptTest(unittest.TestCase):
-    """The orchestration script, with mix, python3 and the host faked."""
+    """The orchestration script, with mix, uv and the host faked."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="fermix-linux-build-")
@@ -551,7 +555,7 @@ class BuildScriptTest(unittest.TestCase):
 
         self._write_executable("uname", '#!/bin/sh\n[ "$1" = "-s" ] && printf "Linux\\n" || printf "aarch64\\n"\n')
         self._write_fake_mix()
-        self._write_fake_python()
+        self._write_fake_uv()
 
     def test_dev_mode_stamps_a_build_identity_that_says_so(self):
         result = self._run(TARGET, VERSION, "--dev")
@@ -691,11 +695,13 @@ fi
 """,
         )
 
-    def _write_fake_python(self):
+    def _write_fake_uv(self):
         self._write_executable(
-            "python3",
+            "uv",
             """#!/bin/sh
 set -eu
+[ "$1" = "run" ]
+shift
 helper="$1"
 shift
 case "$helper" in

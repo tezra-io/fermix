@@ -24,7 +24,11 @@ defmodule FermixCore.Capabilities.MCP.Server do
 
   When the supervisor supplies a source-qualified identity and a
   `RuntimeStatus` sink, this process also writes the generation-qualified
-  `:ready` and classified terminal statuses for that source. It pins its
+  `:ready` (with what the discovery found: the tools counted and described and
+  the server's `serverInfo`, M74 E9) and classified terminal
+  statuses for that source, into the generation its owner installed: the
+  remote owner, or an operator stdio server's `StdioTransport`. A stdio
+  source that gives up on discovery is `retries_exhausted`. It pins its
   generation once, at init: if a replacement owner is installed mid-discovery,
   every write from this process is refused as stale rather than overwriting the
   replacement's status.
@@ -41,7 +45,10 @@ defmodule FermixCore.Capabilities.MCP.Server do
   failed registration never leaves a partial tool set or a stale name.
 
   Local stdio servers keep their existing prefixing, per-tool tolerance, and
-  discovery behaviour unchanged.
+  discovery behaviour unchanged. An operator's remote server (M74 E4) carries
+  no signed contract, so it registers the way they do, while its discovery is
+  bounded and its failures classified by its `Remote.Owner`, as a remote
+  plugin's are.
   """
 
   use GenServer
@@ -50,6 +57,7 @@ defmodule FermixCore.Capabilities.MCP.Server do
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.MCP.Capability, as: McpCapability
+  alias FermixCore.Capabilities.MCP.Discoverer
   alias FermixCore.Capabilities.MCP.Naming
   alias FermixCore.Capabilities.MCP.Registry, as: McpRegistry
   alias FermixCore.Capabilities.MCP.Remote.Budget
@@ -82,6 +90,18 @@ defmodule FermixCore.Capabilities.MCP.Server do
           | {:runtime_status, GenServer.server() | nil}
           | {:main_agent, GenServer.server() | nil}
           | {:realtime_supervisor, GenServer.server() | nil}
+
+  # How long an operator's stdio server has to answer its first `initialize`
+  # and `tools/list`: the initialize timeout MCP clients give, long enough for
+  # a first `npx -y` or `uvx` start to download its package.
+  @first_connection_ms 60_000
+
+  @doc """
+  How long an operator's stdio server has to answer its first `initialize`
+  and `tools/list`, in milliseconds: the window this process retries in.
+  """
+  @spec first_connection_ms() :: pos_integer()
+  def first_connection_ms, do: @first_connection_ms
 
   @spec start_link([opt()]) :: GenServer.on_start()
   def start_link(opts) do
@@ -151,11 +171,27 @@ defmodule FermixCore.Capabilities.MCP.Server do
       discovery_attempts: 0,
       max_discovery_attempts: Keyword.get(opts, :max_discovery_attempts, 5),
       retry_base_ms: Keyword.get(opts, :retry_base_ms, 500),
+      first_connection_deadline: first_connection_deadline(opts, source_id),
       fail_fast?: Keyword.get(opts, :fail_fast?, false)
     }
 
     %{state | generation: pin_generation(state)}
   end
+
+  # An operator's stdio server is retried until its first-connection window
+  # closes rather than for `max_discovery_attempts`: a first `npx -y` or `uvx`
+  # start downloads its package before it answers anything. A remote source is
+  # bounded by its owner's startup budget, a plugin's stdio server by its
+  # attempts. `:first_connection_ms` is a test seam.
+  defp first_connection_deadline(opts, {:operator, _name}) do
+    if Keyword.get(opts, :discoverer) == RemoteOwner,
+      do: nil,
+      else: now_ms() + Keyword.get(opts, :first_connection_ms, @first_connection_ms)
+  end
+
+  defp first_connection_deadline(_opts, _source_id), do: nil
+
+  defp now_ms, do: System.monotonic_time(:millisecond)
 
   # A remote source without a compilable signed contract is an invalid install,
   # not a server to start with weaker rules than the ones that were signed.
@@ -294,7 +330,7 @@ defmodule FermixCore.Capabilities.MCP.Server do
          :ok <- watch_upstream(state),
          {:ok, descriptors} <- list_tools(state),
          {:ok, state} <- register_tools(descriptors, state) do
-      {:ok, complete_registration(%{state | discovery_attempts: 0})}
+      {:ok, complete_registration(%{state | discovery_attempts: 0}, descriptors)}
     end
   end
 
@@ -334,8 +370,8 @@ defmodule FermixCore.Capabilities.MCP.Server do
 
   # The shared registration-completion point: the agent's tool list is only now
   # what the registry says it is.
-  defp complete_registration(state) do
-    _ = put_status(state, :ready, nil, nil)
+  defp complete_registration(state, descriptors) do
+    _ = put_ready(state, descriptors)
     emit_lifecycle(state, :ready, :ok, 0, 1)
     if state.proxy, do: Proxy.resume(state.proxy, state.contract)
     refresh_runtime_context(state)
@@ -346,20 +382,43 @@ defmodule FermixCore.Capabilities.MCP.Server do
     attempts = state.discovery_attempts + 1
     state = %{state | discovery_attempts: attempts}
 
-    if attempts >= state.max_discovery_attempts or terminal_contract_error?(reason) do
+    if out_of_tries?(state) or terminal_contract_error?(reason) do
       Logger.error(
         "MCP server #{state.server_name} discovery failed #{attempts} times, giving up: " <>
           RuntimeStatus.describe(RuntimeStatus.classify(reason))
       )
 
-      {:stop, :normal, record_terminal(state, reason)}
+      {:stop, :normal, record_terminal(state, give_up_reason(state, reason))}
     else
-      delay = state.retry_base_ms * round(:math.pow(2, attempts - 1))
-      log_retry(reason, state.server_name, attempts, state.max_discovery_attempts, delay)
+      delay = retry_delay(state, attempts)
+      log_retry(reason, state.server_name, tries(state, attempts), delay)
       Process.send_after(self(), :retry_discovery, delay)
       {:noreply, state}
     end
   end
+
+  defp out_of_tries?(%{first_connection_deadline: nil} = state),
+    do: state.discovery_attempts >= state.max_discovery_attempts
+
+  defp out_of_tries?(state), do: window_left_ms(state) == 0
+
+  # Doubling from `retry_base_ms`; inside a first-connection window the last
+  # retry lands as it closes, never after.
+  defp retry_delay(state, attempts) do
+    backoff = state.retry_base_ms * round(:math.pow(2, attempts - 1))
+
+    case state.first_connection_deadline do
+      nil -> backoff
+      _deadline -> min(backoff, window_left_ms(state))
+    end
+  end
+
+  defp window_left_ms(state), do: max(state.first_connection_deadline - now_ms(), 0)
+
+  defp tries(%{first_connection_deadline: nil} = state, attempts),
+    do: "attempt #{attempts}/#{state.max_discovery_attempts}"
+
+  defp tries(_state, attempts), do: "attempt #{attempts}, within its first-connection window"
 
   # A contract mismatch or a name collision cannot become success by repetition:
   # the same signed hashes will disagree with the same live descriptors next
@@ -369,14 +428,22 @@ defmodule FermixCore.Capabilities.MCP.Server do
   defp terminal_contract_error?({class, _detail}) when class in @terminal_classes, do: true
   defp terminal_contract_error?(_reason), do: false
 
+  # A remote source's last failure is already classified by its rail, with or
+  # without a signed contract. A stdio program's is whatever its client said
+  # while it never answered, so the status names what happened: the attempts
+  # ran out (the log line above keeps the client's class).
+  defp give_up_reason(%{discoverer: RemoteOwner}, reason), do: reason
+  defp give_up_reason(%{contract: nil}, _reason), do: :retries_exhausted
+  defp give_up_reason(_state, reason), do: reason
+
   # `Server capabilities not set` is the expected response while the MCP
   # client is still racing through `initialize` — log at debug, not warning,
   # so a noisy `npx`-backed startup doesn't surface as a red flag to the
   # operator. Real errors (transport closed, unexpected response shape,
   # tool schema errors) keep the warning level.
-  defp log_retry(reason, server_name, attempts, max_attempts, delay) do
+  defp log_retry(reason, server_name, tries, delay) do
     message =
-      "MCP server #{server_name} discovery failed (attempt #{attempts}/#{max_attempts}); " <>
+      "MCP server #{server_name} discovery failed (#{tries}); " <>
         "retrying in #{delay}ms: #{inspect(error_class(reason))}"
 
     if expected_startup_error?(reason),
@@ -658,7 +725,8 @@ defmodule FermixCore.Capabilities.MCP.Server do
   defp current_generation(state) do
     case RuntimeStatus.owner(state.runtime_status, state.source_id) do
       {:ok, _owner, generation} -> generation
-      # No owner: a stdio server has none, so it has no live status to write.
+      # No owner: a plugin's stdio server has none, so it has no live status to
+      # write.
       :error -> nil
     end
   end
@@ -672,6 +740,23 @@ defmodule FermixCore.Capabilities.MCP.Server do
     end
 
     state
+  end
+
+  defp put_ready(%{generation: nil}, _descriptors), do: :no_status_sink
+
+  # The `serverInfo` is asked for only where a status will carry it.
+  defp put_ready(state, descriptors) do
+    discovery = Discoverer.discovery(descriptors, state.discoverer.server_info(state.client))
+
+    case RuntimeStatus.put_ready(
+           state.runtime_status,
+           state.source_id,
+           state.generation,
+           discovery
+         ) do
+      :ok -> :ok
+      {:error, :stale_generation} -> :stale_generation
+    end
   end
 
   defp put_status(%{generation: nil}, _status, _detail, _subject), do: :no_status_sink

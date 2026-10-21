@@ -166,7 +166,16 @@ defmodule FermixCore.Net.HttpClientTest do
     for host <- hosts do
       assert pools[host][:conn_max_idle_time] == 15_000, "#{host} is missing the idle cap"
       assert pools[host][:count] == 2, "#{host} is missing the multi-process pool"
-      assert pools[host][:conn_opts] == [transport_opts: [timeout: 3_000]]
+      assert Keyword.keys(pools[host][:conn_opts]) == [:transport_opts]
+      assert Enum.sort(pools[host][:conn_opts][:transport_opts]) == [inet6: true, timeout: 3_000]
+    end
+  end
+
+  # `Egress.prefer_ipv6/1` on every pool. EgressTest's "a name whose IPv6
+  # address alone answers" proves the option reaches the dial.
+  test "every shared pool dials IPv6 first and falls back to IPv4" do
+    for {origin, pool} <- FermixCore.Application.finch_pools() do
+      assert pool[:conn_opts][:transport_opts][:inet6] == true, "#{inspect(origin)} is IPv4 only"
     end
   end
 

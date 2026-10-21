@@ -71,9 +71,27 @@ defmodule FermixCore.Management.Doctor.Remediation do
       body: "A saved sign-in has expired, so this provider cannot answer.",
       action: %{kind: "settings_pane", target: "providers"}
     },
+    # Every recent call failing is an outage nothing on this machine can fix;
+    # making another provider primary is the one way around it, as the turn's
+    # own reply says. One failure can be a blip, so the warning has no action.
+    "provider_health.failed" => %{
+      title: "The primary provider is not answering",
+      body:
+        "Every recent call to it failed, so Fermix cannot reply. Wait for it to recover, " <>
+          "or make another provider primary.",
+      action: %{kind: "settings_pane", target: "providers"}
+    },
+    "provider_health.warning" => %{
+      title: "Run Doctor again later",
+      body:
+        "A recent call to the primary provider failed, or the record of its calls could " <>
+          "not be read. One failed call can be a blip; this check fails if the next ones " <>
+          "fail too.",
+      action: %{kind: "none", target: nil}
+    },
     "realtime_key.failed" => %{
-      title: "Replace the OpenAI API key",
-      body: "OpenAI does not accept the saved key, so a voice call cannot start.",
+      title: "Replace the voice API key",
+      body: "The voice provider does not accept the saved key, so a voice call cannot start.",
       action: %{kind: "settings_pane", target: "voice"}
     },
     "engine_alignment.warning" => %{

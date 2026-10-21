@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Checker (json): the reminders the turn created in the eval home.
 
 Reads memory.db read-only. `checker.state` cancels every reminder and seeds the task's

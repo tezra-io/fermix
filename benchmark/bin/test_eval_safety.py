@@ -205,7 +205,7 @@ def test_explicit_openai_refuses_configured_candidate_model_before_dispatch(monk
     assert "matches candidate" in result.error
 
 
-def test_multi_turn_rubric_passes_every_observed_candidate_route(monkeypatch):
+def test_multi_turn_rubric_passes_every_observed_candidate_route(monkeypatch, tmp_path):
     observed = []
 
     def fake_judge(*_args, **kwargs):
@@ -215,8 +215,10 @@ def test_multi_turn_rubric_passes_every_observed_candidate_route(monkeypatch):
             backend="openai", provider="openai", model="judge-model", called=True)
 
     monkeypatch.setattr(judge, "judge_case", fake_judge)
-    cfg = SimpleNamespace(judge=SimpleNamespace(backend="openai", model="gpt-5.4-mini"))
-    case = SimpleNamespace(id="case", rubric="Judge.", judge=True)
+    (tmp_path / "config.toml").write_text("")
+    cfg = SimpleNamespace(judge=SimpleNamespace(backend="openai", model="gpt-5.4-mini"),
+                          daemon=SimpleNamespace(fermix_home=str(tmp_path)))
+    case = SimpleNamespace(id="case", rubric="Judge.", judge=True, watch=())
     scn = SimpleNamespace(id="multi")
     candidates = [
         {"provider": "openai_codex", "model": "candidate-a", "reasoning_effort": "high"},
@@ -226,10 +228,105 @@ def test_multi_turn_rubric_passes_every_observed_candidate_route(monkeypatch):
     record = run_eval._rubric_record(
         cfg, case, scn, "run", 1, True,
         [{"role": "user", "content": "q"},
-         {"role": "assistant", "content": "a"}], [], candidates)
+         {"role": "assistant", "content": "a"}], [], candidates,
+        turn_records=[{"started_at": "2026-10-14T03:17:47Z"}])
 
     assert observed == candidates
     assert record["judge_model"] == "judge-model"
+
+
+def test_judge_is_told_the_date_the_candidate_was_told():
+    """The daemon puts `Prompt.CurrentDate`'s note in front of every turn, so a
+    reply that turns "the day after tomorrow" into "Friday, October 16" is grounded.
+    A judge that never saw the date graded exactly that as an invented time."""
+    records = [{"started_at": "2026-10-14T03:17:47.261Z"},
+               {"started_at": "2026-10-14T03:17:57.508Z"}]
+    facts = run_eval.judge_date_facts(records, "America/New_York")
+    assert facts == [
+        "On every turn, the assistant's system prompt carried this note: \"Current "
+        "date: Wednesday, 2026-10-14 (UTC). The user's timezone is America/New_York "
+        "— their local date can differ from UTC near midnight.\" Words like today "
+        "and tomorrow in the conversation are relative to that date."]
+
+
+def test_judge_date_facts_follow_a_conversation_across_utc_midnight():
+    records = [{"started_at": "2026-10-13T23:59:58Z"}, {"started_at": "2026-10-14T00:00:03Z"}]
+    facts = run_eval.judge_date_facts(records, None)
+    assert len(facts) == 2
+    assert facts[0].startswith("On the turns sent that day, ")
+    assert "\"Current date: Tuesday, 2026-10-13 (UTC).\"" in facts[0]
+    assert "\"Current date: Wednesday, 2026-10-14 (UTC).\"" in facts[1]
+
+
+def test_judge_date_facts_refuse_a_turn_without_a_trace_start():
+    with pytest.raises(ValueError, match="start time"):
+        run_eval.judge_date_facts([{"started_at": None}], None)
+    with pytest.raises(ValueError, match="no graded turn"):
+        run_eval.judge_date_facts([], None)
+
+
+def test_configured_timezone_reads_the_daemons_personalization_label(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('[fermix_core.personalization]\ntimezone = "America/New_York"\n')
+    assert run_eval.configured_timezone(str(tmp_path)) == "America/New_York"
+    config_path.write_text('[sandbox]\nmode = "strict"\n')
+    assert run_eval.configured_timezone(str(tmp_path)) is None
+
+
+def test_rubric_record_sends_the_candidates_date_to_the_judge(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_judge(*_args, **kwargs):
+        seen.update(kwargs)
+        return judge.JudgeResult(
+            evaluated=True, passed=True, score=1.0, rationale="ok",
+            backend="anthropic", provider="anthropic", model="judge-model", called=True)
+
+    monkeypatch.setattr(judge, "judge_case", fake_judge)
+    (tmp_path / "config.toml").write_text(
+        '[fermix_core.personalization]\ntimezone = "America/New_York"\n')
+    cfg = SimpleNamespace(judge=SimpleNamespace(backend="anthropic", model="claude-opus-5-5"),
+                          daemon=SimpleNamespace(fermix_home=str(tmp_path)))
+    case = SimpleNamespace(id="case", rubric="Judge.", judge=True, watch=())
+    records = [{"started_at": "2026-10-14T03:17:47.261Z"}]
+    run_eval._rubric_record(
+        cfg, case, SimpleNamespace(id="scn"), "run", 1, True,
+        [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}], [],
+        [{"provider": "openai", "model": "candidate"}], turn_records=records)
+    assert seen["reference_facts"] == run_eval.judge_date_facts(records, "America/New_York")
+
+
+_NUMBERED_RUBRIC = """It passes only when every numbered requirement holds:
+1. The reply names the deadline.
+2. It keeps the level settled. It fails if it
+   reopens the level in any form.
+3. It invents nothing.
+Not required: any particular wording.
+"""
+_REQUIREMENT_VERDICTS = [{"n": 1, "met": True, "why": "WHY-ONE quotes the reply"},
+                         {"n": 2, "met": False, "why": "WHY-TWO quotes the reply"},
+                         {"n": 3, "met": True, "why": "WHY-THREE quotes the reply"}]
+
+
+def test_rubric_record_carries_each_requirement_verdict(monkeypatch, tmp_path):
+    def fake_judge(*_args, **_kwargs):
+        return judge.JudgeResult(
+            evaluated=True, passed=False, score=2 / 3, rationale="R-RATIONALE",
+            backend="anthropic", provider="anthropic", model="judge-model", called=True,
+            requirements=[dict(item) for item in _REQUIREMENT_VERDICTS])
+
+    monkeypatch.setattr(judge, "judge_case", fake_judge)
+    (tmp_path / "config.toml").write_text("")
+    cfg = SimpleNamespace(judge=SimpleNamespace(backend="anthropic", model="claude-opus-5-5"),
+                          daemon=SimpleNamespace(fermix_home=str(tmp_path)))
+    case = SimpleNamespace(id="case", rubric=_NUMBERED_RUBRIC, judge=True, watch=())
+    record = run_eval._rubric_record(
+        cfg, case, SimpleNamespace(id="scn"), "run", 1, True,
+        [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}], [],
+        [{"provider": "openai", "model": "candidate"}],
+        turn_records=[{"started_at": "2026-10-14T03:17:47Z"}])
+    assert record["requirements"] == _REQUIREMENT_VERDICTS
+    assert (record["passed"], record["score"]) == (False, 2 / 3)
 
 
 def test_judge_accounting_counts_only_dispatched_calls():
@@ -565,8 +662,10 @@ def test_both_runner_configs_judge_with_claude_away_from_the_candidate(monkeypat
     cfg = config.load(skill_dir, os.path.join(skill_dir, name))
     assert (cfg.judge.backend, cfg.judge.model) == ("anthropic", "claude-opus-5-5")
     workflow = pathlib.Path(skill_dir).parent / ".github" / "workflows" / "eval-box.yml"
-    candidate = re.search(r"default: (gpt-[\w.-]+)", workflow.read_text()).group(1)
-    assert judge._model_key(candidate) != judge._model_key(cfg.judge.model)
+    # The scheduled tiers (workflow_call) and a direct dispatch run one candidate.
+    candidates = re.findall(r"default: (gpt-[\w.-]+)", workflow.read_text())
+    assert candidates == ["gpt-6-luna", "gpt-6-luna"]
+    assert judge._model_key(candidates[0]) != judge._model_key(cfg.judge.model)
 
 
 def test_behavioral_config_rejects_non_finite_budget(tmp_path):
@@ -838,7 +937,7 @@ def test_judge_payload_has_a_deterministic_byte_cap():
 
 def test_openai_judge_request_bounds_verdict_output_tokens():
     cfg = SimpleNamespace(judge=SimpleNamespace(model="judge-model"))
-    body = json.loads(judge._openai_request_body(cfg, {"rubric": "x"}))
+    body = json.loads(judge._openai_request_body(cfg, {"rubric": "x"}, None))
     assert body["max_completion_tokens"] == judge._MAX_JUDGE_OUTPUT_TOKENS
     assert body["max_completion_tokens"] >= 2_048
 
@@ -1809,6 +1908,19 @@ def test_routing_boundary_cases_forbid_the_config_mutation_tool():
 _ROUTE_GATES = {"tools_any", "tools_all", "tools_in_order", "tools_none",
                 "tools_none_succeeded"}
 
+# The writes a host_readonly reminder question must never make: it runs against
+# the development home, where a stored timer comes due and is sent. A
+# `tools_none` naming only these is that safety gate, not a route assertion.
+_TEMPORAL_WRITES = {"event_store", "event_update", "event_remove", "reminder_snooze",
+                    "schedule_job"}
+
+
+def _route_gates(case: suites.Case) -> set[str]:
+    gates = _ROUTE_GATES & set(case.expect)
+    if set(case.expect.get("tools_none", [])) <= _TEMPORAL_WRITES:
+        gates.discard("tools_none")
+    return gates
+
 
 def test_macos_app_scenarios_declare_risk_and_keep_one_labelled_route_assertion():
     suite = _suite_by_name("macos_app")
@@ -1818,7 +1930,7 @@ def test_macos_app_scenarios_declare_risk_and_keep_one_labelled_route_assertion(
     assert all(len(scenario.cases) >= 2 for scenario in suite.scenarios)
 
     routed = [case.id for scenario in suite.scenarios for case in scenario.cases
-              if _ROUTE_GATES & set(case.expect)]
+              if _route_gates(case)]
     assert routed == ["stop_background_service_sanity"]
 
 
@@ -1880,6 +1992,14 @@ def test_macos_app_wrong_mode_gates_accept_a_correct_app_managed_reply():
         "The app will not start while the Homebrew launch agent is there. Run "
         "`fermix migrate-to-app --yes`: it retires the formula and that agent, "
         "keeps your home, and opens the copy already in Applications.")
+    assert _reply_regexes_pass(
+        cases["switch_primary_provider"], 0,
+        "Open Settings > Providers, add Anthropic with Add key…, then its "
+        "Details… > Use as primary, and restart when the app asks.")
+    assert _reply_regexes_pass(
+        cases["update_from_the_app"], 0,
+        "Choose Check for Updates… in the Fermix menu and Install, then quit and "
+        "reopen; `brew upgrade --cask tezra-io/tap/fermix` also works for a cask.")
 
 
 def test_macos_app_wrong_mode_gates_reject_the_standalone_answer():
@@ -1907,6 +2027,210 @@ def test_macos_app_wrong_mode_gates_reject_the_standalone_answer():
         cases["brew_uninstall_alone"], 0,
         "That is fine on systemd hosts: `systemctl --user disable fermix`, then "
         "`fermix migrate-to-app` later if you want.")
+    # M76 stage 1: the standalone answer to an app owner's "how do I", each
+    # still naming the floor, so only the wrong-mode gate refuses it.
+    assert not _reply_regexes_pass(
+        cases["switch_primary_provider"], 0,
+        "Run `fermix setup --provider anthropic`, then check Settings > Providers.")
+    assert not _reply_regexes_pass(
+        cases["switch_primary_provider"], 0,
+        "Run `fermix auth login anthropic`; it then shows in Providers.")
+    assert not _reply_regexes_pass(
+        cases["update_from_the_app"], 0,
+        "Skip Check for Updates and pull the release yourself with "
+        "`curl -fsSL https://fermix.ai/install | sh`.")
+
+
+def test_linux_app_scenarios_declare_risk_and_keep_one_labelled_route_assertion():
+    suite = _suite_by_name("linux_app")
+    # An omitted scenario risk becomes `unclassified` and is silently skipped,
+    # so assert the value rather than trusting suite-level inheritance.
+    assert {scenario.risk for scenario in suite.scenarios} == {"host_readonly"}
+    assert all(len(scenario.cases) >= 2 for scenario in suite.scenarios)
+
+    routed = [case.id for scenario in suite.scenarios for case in scenario.cases
+              if _route_gates(case)]
+    assert routed == ["switch_provider_sanity"]
+
+
+def test_linux_app_gates_accept_the_app_answer():
+    cases = _suite_cases("linux_app")
+    correct = {
+        "switch_provider_sanity":
+            "In the desktop app open Settings > Providers, sign in on the Anthropic "
+            "row, choose Make primary from its menu, and restart when asked. You "
+            "do not need `fermix setup` for this.",
+        "add_openrouter_key":
+            "Settings > Providers > OpenRouter > Use an API key…, then Make primary. "
+            "The key goes to your keyring, not a settings file.",
+        "keep_running_after_logout":
+            "Turn on Run in the background on Home: it turns on linger and keeps "
+            "fermix.service running after you close the window or log out.",
+        "open_app_at_login":
+            "Yes: switch on Open at login on Home and the app opens in the tray "
+            "when you log in.",
+        "fresh_conversation_new_did_nothing":
+            "Slash commands do not run in the app's chat; New conversation at the "
+            "top of the Chat page starts a fresh one.",
+        "clear_chat_like_telegram":
+            "Use New conversation at the top of Chat: /new is not run there.",
+        "stopped_answering":
+            "Check Home for what needs attention, then open Doctor and Run checks; "
+            "Logs follows the daemon log. `journalctl --user -u fermix` says why a "
+            "service will not start.",
+        "restart_after_change":
+            "Click Restart Fermix… in the window's header; `fermix restart` in a "
+            "terminal does the same.",
+        "timer_pops_up_on_the_desktop":
+            "Yes: it shows as a desktop notification while you are logged in to "
+            "the desktop. There is nothing to grant in Permissions.",
+        "reminders_on_this_screen":
+            "Ask for it on this computer and it rings here as a desktop "
+            "notification; no setting has to be turned on.",
+    }
+    assert set(correct) == set(cases)
+    for case_id, reply in correct.items():
+        assert _reply_regexes_pass(cases[case_id], 0, reply), case_id
+
+
+def test_linux_app_gates_reject_the_wrong_surface():
+    cases = _suite_cases("linux_app")
+    # Each wrong answer still names its case's floor where it has a wrong-surface
+    # gate, which isolates the refusal to that gate.
+    wrong = {
+        "switch_provider_sanity":
+            "Run `fermix setup --provider anthropic`, then look at Settings > Providers.",
+        "add_openrouter_key":
+            "Run `fermix auth login openrouter`; it then shows under Providers.",
+        "keep_running_after_logout":
+            "Turn on Run in the background, then `launchctl load` the agent.",
+        "open_app_at_login":
+            "Open at login is flaky, so write ~/.config/autostart/fermix.desktop.",
+        "fresh_conversation_new_did_nothing":
+            "Type /new again, it works there too.",
+        "clear_chat_like_telegram":
+            "Yes, /new works the same in the app.",
+        "stopped_answering":
+            "Open Doctor, then run `brew services restart fermix`.",
+        "restart_after_change":
+            "Restart Fermix with `launchctl kickstart -k gui/$UID/io.tezra.fermix`.",
+        "timer_pops_up_on_the_desktop":
+            "It pops up as a notification once Fermix is allowed in Login Items.",
+        "reminders_on_this_screen":
+            "I can show a notification myself with "
+            "`osascript -e 'display notification \"call the bank\"'`.",
+    }
+    assert set(wrong) == set(cases)
+    for case_id, reply in wrong.items():
+        assert not _reply_regexes_pass(cases[case_id], 0, reply), case_id
+
+
+# M76 stage 2: where a reminder or a timer rings on this computer, asked of
+# the development home with the install stated in the prompt.
+_THIS_COMPUTER_CASES = {
+    "macos_app": ["timer_in_the_app_chat", "reminder_with_telegram_connected",
+                  "homebrew_reminder_popup", "homebrew_timer_ring"],
+    "linux_app": ["timer_pops_up_on_the_desktop", "reminders_on_this_screen"],
+    "linux_packages": ["headless_server_reminder", "closet_box_timer"],
+}
+
+
+def test_this_computer_reminder_questions_cannot_store_one_on_the_development_home():
+    # host_readonly runs against the development home, where a timer the model
+    # set instead of answering would come due and be sent. Each question
+    # forbids the temporal writes, and its scenario declares its risk.
+    for suite_name, case_ids in _THIS_COMPUTER_CASES.items():
+        suite = _suite_by_name(suite_name)
+        scenarios = {case.id: scenario for scenario in suite.scenarios
+                     for case in scenario.cases}
+        cases = _suite_cases(suite_name)
+        for case_id in case_ids:
+            assert scenarios[case_id].risk == "host_readonly", case_id
+            forbidden = set(cases[case_id].expect.get("tools_none", []))
+            assert {"event_store", "event_update", "schedule_job"} <= forbidden, case_id
+
+
+def test_this_computer_gates_accept_the_answer_for_the_stated_install():
+    macos = _suite_cases("macos_app")
+    packages = _suite_cases("linux_packages")
+    correct = [
+        (macos["timer_in_the_app_chat"],
+         "It rings on this Mac as a notification from the Fermix app. Allow it once "
+         "in Settings > Permissions > Notifications > Grant…"),
+        (macos["reminder_with_telegram_connected"],
+         "It reaches you on Telegram. Say \"remind me on my Mac\" and it rings here as "
+         "a notification from the Fermix app instead."),
+        (macos["homebrew_reminder_popup"],
+         "No: nothing can ring on this Mac without the Fermix app, so reminders go to "
+         "a chat channel. `fermix migrate-to-app` moves you to the app, which can."),
+        (macos["homebrew_timer_ring"],
+         "Not from the standalone install: its timers go to Telegram. The Fermix app "
+         "can ring on this Mac."),
+        (packages["headless_server_reminder"],
+         "No. On Linux a reminder rings only as a desktop notification, and a "
+         "headless server runs no desktop session, so it goes to Telegram."),
+        (packages["closet_box_timer"],
+         "No desktop session runs on that box, so nothing there can show a "
+         "notification; a timer you set from Telegram rings in Telegram."),
+    ]
+    for case, reply in correct:
+        assert _reply_regexes_pass(case, 0, reply), case.id
+
+
+def test_this_computer_gates_reject_a_stand_in_or_another_install():
+    macos = _suite_cases("macos_app")
+    packages = _suite_cases("linux_packages")
+    # Each still names its case's floor, so only the wrong-mode gate refuses it:
+    # a notification poster of the model's own, or another install's answer.
+    wrong = [
+        (macos["timer_in_the_app_chat"],
+         "I'll post the notification myself with `osascript -e 'display notification'`."),
+        (macos["timer_in_the_app_chat"],
+         "Run `fermix setup` and the notification goes to your default channel."),
+        (macos["reminder_with_telegram_connected"],
+         "Telegram, unless you load a launch agent with `launchctl` to show it here."),
+        (macos["homebrew_reminder_popup"],
+         "No app needed: `brew install terminal-notifier` and I will post it."),
+        (macos["homebrew_timer_ring"],
+         "Yes without the app: an AppleScript display notification rings it here."),
+        (packages["headless_server_reminder"],
+         "Yes: I'll post a desktop notification with notify-send when it is due."),
+        (packages["closet_box_timer"],
+         "It can: a notification goes out through `notify-send` on that box."),
+    ]
+    for case, reply in wrong:
+        assert not _reply_regexes_pass(case, 0, reply), case.id
+
+
+def _store_gates_pass(case: suites.Case, when: dict, tool: str = "event_store") -> bool:
+    trace = {
+        "_eval_trace_complete": True,
+        "total_estimated_cost": 0.0,
+        "usage": {"total_tokens": 1},
+        "metadata": {"iterations": 1},
+        "output": "Set.",
+    }
+    spans = [{"type": "tool", "name": tool,
+              "input": {"title": "pasta", "kind": "explicit_reminder", "when": when}}]
+    gates = grade.grade(trace, spans, case.turns[0].expect, elapsed_ms=1.0)
+    return all(gate.passed for gate in gates)
+
+
+def test_timer_cases_take_the_relative_unit_the_tool_resolves():
+    # The date note carries no time of day, so a timer's one correct `when` is
+    # relative in minutes or hours: a datetime the model computed, a whole day,
+    # or a scheduled job each fail the first turn.
+    cases = _suite_cases("temporal_events")
+    for case_id, unit in (("pasta_timer_minutes", "minutes"),
+                          ("laundry_reminder_hours", "hours")):
+        case = cases[case_id]
+        relative = {"type": "relative", "amount": 2, "unit": unit}
+        assert _store_gates_pass(case, relative), case_id
+        assert not _store_gates_pass(
+            case, {"type": "datetime", "date": "2026-11-20", "time": "18:12:00"}), case_id
+        assert not _store_gates_pass(
+            case, {"type": "relative", "amount": 1, "unit": "days"}), case_id
+        assert not _store_gates_pass(case, relative, tool="schedule_job"), case_id
 
 
 def test_only_stream_span_operator_cases_require_telegram_streaming():
@@ -2515,6 +2839,156 @@ def test_report_omits_both_sections_when_nothing_qualifies(tmp_path):
     assert "## Unconfirmed fails" not in md
     assert "<h2>Safety violations (sticky)</h2>" not in html
     assert "<h2>Unconfirmed fails</h2>" not in html
+
+
+def _numbered_rubric_case(outcome: str = "fail") -> dict:
+    return _case_result(outcome, rubric={
+        "text": _NUMBERED_RUBRIC, "evaluated": True, "passed": outcome == "pass",
+        "score": 2 / 3, "rationale": "R-RATIONALE quotes the reply", "error": None,
+        "backend": "anthropic", "called": True, "judge_provider": "anthropic",
+        "judge_model": "claude-opus-5-5", "judge_reasoning_effort": "medium",
+        "finish_reason": "end_turn", "input_tokens": 10, "output_tokens": 5,
+        "total_tokens": 15,
+        "requirements": [dict(item) for item in _REQUIREMENT_VERDICTS]})
+
+
+def test_redaction_keeps_which_requirement_failed_but_not_why():
+    raw = _report_results([_numbered_rubric_case()])
+    raw["config"]["content_retained"] = True
+    redacted = run_eval.redact_content(raw)
+    rubric = redacted["suites"][0]["scenarios"][0]["cases"][0]["rubric"]
+    assert [(item["n"], item["met"]) for item in rubric["requirements"]] == \
+        [(1, True), (2, False), (3, True)]
+    assert {item["why"] for item in rubric["requirements"]} == {"[redacted by default]"}
+    assert rubric["rationale"] == "[redacted by default]"
+    assert "WHY-" not in json.dumps(redacted)
+    # The unredacted results keep every why.
+    assert raw["suites"][0]["scenarios"][0]["cases"][0]["rubric"]["requirements"][1]["why"] \
+        == "WHY-TWO quotes the reply"
+
+
+def test_a_redacted_report_names_the_failed_requirement(tmp_path):
+    raw = _report_results([_numbered_rubric_case()])
+    raw["config"]["content_retained"] = True
+    paths = report.write(run_eval.redact_content(raw), str(tmp_path / "out"))
+    md = pathlib.Path(paths["md"]).read_text()
+    html = pathlib.Path(paths["html"]).read_text()
+    assert "\n    - judge: failed requirement 2 of 3\n" in md
+    assert "<div class='gate no'>judge: failed requirement 2 of 3</div>" in html
+    for text in (md, html):
+        assert "WHY-" not in text and "R-RATIONALE" not in text
+
+
+def test_an_unredacted_report_gives_the_failed_requirement_and_why(tmp_path):
+    raw = _report_results([_numbered_rubric_case()])
+    raw["config"]["content_retained"] = True
+    paths = report.write(raw, str(tmp_path / "out"))
+    md = pathlib.Path(paths["md"]).read_text()
+    html = pathlib.Path(paths["html"]).read_text()
+    line = ("judge: failed requirement 2 of 3: It keeps the level settled. It fails "
+            "if it reopens the level in any form. Why: WHY-TWO quotes the reply")
+    assert line in md
+    assert report._e(line) in html
+    # Only the failed requirement is spelled out; the met ones are in results.json.
+    assert "WHY-ONE" not in md and "WHY-THREE" not in md
+
+
+def test_a_report_lists_every_failed_requirement(tmp_path):
+    case = _numbered_rubric_case()
+    case["rubric"]["requirements"][0]["met"] = False
+    raw = _report_results([case])
+    raw["config"]["content_retained"] = True
+    paths = report.write(run_eval.redact_content(raw), str(tmp_path / "out"))
+    assert "\n    - judge: failed requirements 1, 2 of 3\n" in pathlib.Path(paths["md"]).read_text()
+
+
+def _watched_rubric_case() -> dict:
+    """Requirement 2 watched and unmet, the rest met: the case passes."""
+    case = _numbered_rubric_case("pass")
+    rubric = case["rubric"]
+    for item in rubric["requirements"]:
+        item["watched"] = item["n"] == 2
+    rubric["watch"] = [{"n": 2, "reason": "REASON-TWO: the candidate misses it 2 of 12"}]
+    return case
+
+
+def test_rubric_record_sends_the_watch_and_records_its_reasons(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_judge(*_args, **kwargs):
+        seen.update(kwargs)
+        return judge.JudgeResult(
+            evaluated=True, passed=True, score=2 / 3, rationale="R", backend="anthropic",
+            called=True,
+            requirements=[dict(item, watched=item["n"] == 2) for item in _REQUIREMENT_VERDICTS])
+
+    monkeypatch.setattr(judge, "judge_case", fake_judge)
+    (tmp_path / "config.toml").write_text("")
+    cfg = SimpleNamespace(judge=SimpleNamespace(backend="anthropic", model="claude-opus-5-5"),
+                          daemon=SimpleNamespace(fermix_home=str(tmp_path)))
+    case = SimpleNamespace(id="case", rubric=_NUMBERED_RUBRIC, judge=True,
+                           watch=((2, "REASON-TWO"),))
+    record = run_eval._rubric_record(
+        cfg, case, SimpleNamespace(id="scn"), "run", 1, True,
+        [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}], [],
+        [{"provider": "openai", "model": "candidate"}],
+        turn_records=[{"started_at": "2026-10-14T03:17:47Z"}])
+    assert seen["watched"] == frozenset({2})
+    assert record["watch"] == [{"n": 2, "reason": "REASON-TWO"}]
+    assert record["passed"] is True
+
+
+def test_suite_totals_count_a_watched_miss_without_failing_the_case():
+    totals = run_eval.suite_totals([{"severity": "critical", "cases": [_watched_rubric_case()]}])
+    assert totals["watched_unmet"] == 1
+    assert (totals["cases_passed"], totals["cases_failed"], totals["rubrics_passed"]) == (1, 0, 1)
+
+
+def test_redaction_keeps_the_watch_and_its_reason():
+    raw = _report_results([_watched_rubric_case()])
+    raw["config"]["content_retained"] = True
+    rubric = run_eval.redact_content(raw)["suites"][0]["scenarios"][0]["cases"][0]["rubric"]
+    assert [(item["n"], item["met"], item["watched"]) for item in rubric["requirements"]] == \
+        [(1, True, False), (2, False, True), (3, True, False)]
+    assert rubric["watch"] == [{"n": 2, "reason": "REASON-TWO: the candidate misses it 2 of 12"}]
+
+
+def test_a_redacted_report_shows_a_watched_miss_apart_from_failures(tmp_path):
+    raw = _report_results([_watched_rubric_case()])
+    raw["config"]["content_retained"] = True
+    paths = report.write(run_eval.redact_content(raw), str(tmp_path / "out"))
+    md = pathlib.Path(paths["md"]).read_text()
+    html = pathlib.Path(paths["html"]).read_text()
+    line = ("judge: watched, not met requirement 2 of 3 "
+            "(watched: REASON-TWO: the candidate misses it 2 of 12)")
+    assert f"\n    - {line}\n" in md
+    assert f"<div class='gate skip'>{report._e(line)}</div>" in html
+    assert "failed requirement" not in md and "failed requirement" not in html
+    assert "watched unmet: 1" in md
+
+
+def test_an_unredacted_report_spells_a_watched_miss_beside_a_failure(tmp_path):
+    case = _watched_rubric_case()
+    case["rubric"]["requirements"][2]["met"] = False
+    raw = _report_results([case])
+    raw["config"]["content_retained"] = True
+    md = pathlib.Path(report.write(raw, str(tmp_path / "out"))["md"]).read_text()
+    assert ("judge: failed requirement 3 of 3: It invents nothing. "
+            "Why: WHY-THREE quotes the reply") in md
+    assert ("judge: watched, not met requirement 2 of 3: It keeps the level settled. "
+            "It fails if it reopens the level in any form. Why: WHY-TWO quotes the reply "
+            "(watched: REASON-TWO: the candidate misses it 2 of 12)") in md
+
+
+def test_a_prose_rubric_report_line_is_unchanged(tmp_path):
+    case = _numbered_rubric_case()
+    case["rubric"].update(text="Prose rubric.", requirements=None, score=0.5)
+    raw = _report_results([case])
+    raw["config"]["content_retained"] = True
+    md = pathlib.Path(report.write(raw, str(tmp_path / "out"))["md"]).read_text()
+    assert ("  - judge ✗ (0.50) [anthropic/claude-opus-5-5/medium]: "
+            "R-RATIONALE quotes the reply\n") in md
+    assert "requirement" not in md
 
 
 def test_default_report_redaction_reaches_retained_attempts():

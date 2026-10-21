@@ -2,12 +2,14 @@ defmodule FermixCore.Setup.SecretWriter do
   @moduledoc """
   Facade for setup-managed secret storage.
 
-  A key is one of two shapes. A registry atom names a `SecretPaths` entry and
+  A key is one of three shapes. A registry atom names a `SecretPaths` entry and
   is stored under that entry's environment name. `{:external_env, name}` is a
   skill's own credential (M45 §4.1), stored under `external_env:<NAME>` so it
   can never share an item with a provider key of the same variable name. The
   name never becomes an atom, and it is validated by `Sandbox.ExternalEnv`
-  before it becomes an address.
+  before it becomes an address. `{:mcp, id}` is a value an operator MCP server
+  declares (M74 E6), stored under its id, `mcp:<server>/env/<NAME>` and its
+  siblings, which `Capabilities.MCP.Secrets` validates the same way.
 
   There are two stores, and `config.toml` says which one a home writes to
   (`[fermix_core] secret_store`, default `keyring`) and which one each secret
@@ -21,6 +23,7 @@ defmodule FermixCore.Setup.SecretWriter do
   verdict, not a hung `secret-tool` and an unlock dialog nobody asked for.
   """
 
+  alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
   alias FermixCore.Sandbox.ExternalEnv
   alias FermixCore.Setup.SecretPaths
 
@@ -32,7 +35,8 @@ defmodule FermixCore.Setup.SecretWriter do
   @compiled_env Mix.env()
   @external_prefix "external_env:"
   @type external_key :: {:external_env, String.t()}
-  @type secret_key :: atom() | external_key()
+  @type mcp_key :: {:mcp, String.t()}
+  @type secret_key :: atom() | external_key() | mcp_key()
   @type writer_error :: {:error, term()}
   @type store :: :keyring | :file
 
@@ -57,11 +61,11 @@ defmodule FermixCore.Setup.SecretWriter do
           optional(:evidence) => String.t()
         }
 
-  @doc "Whether `key` is one of the two key shapes every writer accepts."
+  @doc "Whether `key` is one of the three key shapes every writer accepts."
   defguard is_secret_key(key)
            when is_atom(key) or
-                  (is_tuple(key) and tuple_size(key) == 2 and elem(key, 0) == :external_env and
-                     is_binary(elem(key, 1)))
+                  (is_tuple(key) and tuple_size(key) == 2 and
+                     elem(key, 0) in [:external_env, :mcp] and is_binary(elem(key, 1)))
 
   @callback put(secret_key(), String.t(), keyword()) :: :ok | writer_error()
   @callback get(secret_key(), keyword()) :: {:ok, String.t()} | writer_error()
@@ -226,9 +230,9 @@ defmodule FermixCore.Setup.SecretWriter do
 
   @doc """
   The name an OS store files `key` under, before the profile prefix: a
-  registry key's environment name, or `external_env:<NAME>`. Raises for an
-  external name that fails validation, so an unvalidated name can never reach
-  a keychain address.
+  registry key's environment name, `external_env:<NAME>`, or an MCP server's
+  id. Raises for an external name or an id that fails validation, so an
+  unvalidated name can never reach a keychain address.
   """
   @spec item_name(secret_key()) :: String.t()
   def item_name(key) when is_atom(key), do: SecretPaths.fetch!(key).env
@@ -237,6 +241,13 @@ defmodule FermixCore.Setup.SecretWriter do
     case ExternalEnv.validate_name(name) do
       :ok -> @external_prefix <> name
       {:error, reason} -> raise ArgumentError, "external env name refused (#{reason})"
+    end
+  end
+
+  def item_name({:mcp, id}) when is_binary(id) do
+    case McpSecrets.parse_id(id) do
+      {:ok, _server, _ref} -> id
+      :error -> raise ArgumentError, "MCP secret id refused"
     end
   end
 

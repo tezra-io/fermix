@@ -17,6 +17,7 @@ defmodule FermixCore.Application do
   alias FermixCore.BootProfile
   alias FermixCore.BuildInfo
   alias FermixCore.Capabilities.BuiltinSeeder
+  alias FermixCore.Capabilities.MCP.LoginPath, as: McpLoginPath
   alias FermixCore.Capabilities.MCP.RuntimeStatus, as: McpRuntimeStatus
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
@@ -25,19 +26,22 @@ defmodule FermixCore.Application do
   alias FermixCore.ComputerHistory.Supervisor, as: ComputerHistorySupervisor
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.Supervisor, as: ComputerUseSupervisor
-  alias FermixCore.Config, as: CoreConfig
   alias FermixCore.Harness.Supervisor, as: HarnessSupervisor
+  alias FermixCore.HostFacts
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
   alias FermixCore.Jobs.Scheduler, as: JobScheduler
   alias FermixCore.Log.RedactingFormatter
   alias FermixCore.Management.Doctor, as: ManagementDoctor
   alias FermixCore.Management.Jobs, as: ManagementJobs
   alias FermixCore.Management.Lifecycle, as: ManagementLifecycle
+  alias FermixCore.Management.McpServers.DraftValues, as: McpDraftValues
   alias FermixCore.Management.Plugins.Discovery, as: ManagementPluginDiscovery
   alias FermixCore.Meetings.Supervisor, as: MeetingsSupervisor
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Store
+  alias FermixCore.Native.Provider, as: NativeProvider
+  alias FermixCore.NativeHost.Supervisor, as: NativeHostSupervisor
   alias FermixCore.Net.Egress
   alias FermixCore.Plugins.CapabilitySeeder, as: PluginCapabilitySeeder
   alias FermixCore.Plugins.Dist.Installer, as: PluginInstaller
@@ -74,6 +78,7 @@ defmodule FermixCore.Application do
         &BurritoUtil.running_standalone?/0
       )
 
+    :ok = BootProfile.remember(profile)
     start_profile(profile)
   end
 
@@ -148,6 +153,7 @@ defmodule FermixCore.Application do
   end
 
   defp start_supervision_tree do
+    :ok = HostFacts.remember()
     remember_launch_cwd()
     :ok = ConfigStore.ensure_workspace()
     :ok = BootstrapRename.run()
@@ -183,6 +189,9 @@ defmodule FermixCore.Application do
         # is `:temporary`, so a status table living inside it would vanish
         # exactly when it holds the only explanation of why the client is gone.
         McpRuntimeStatus,
+        # The login shell's PATH, read the first time an operator stdio server
+        # starts, never at boot: most homes have none.
+        McpLoginPath,
         {McpSupervisor, capability_registry: CapabilityRegistry},
         Repo,
         # Prompt-template reconciliation (M43 §9.3) runs here and nowhere else:
@@ -222,6 +231,10 @@ defmodule FermixCore.Application do
         # (`Capabilities.AccessGate`). Before every process that dispatches a
         # tool; a restart forgets them, which asks the owner again.
         FermixCore.Capabilities.AccessGate.Pending,
+        # The place records a conversation's searches returned, kept for the
+        # reply that links them (M72). Before every process that dispatches a
+        # tool; a restart forgets them, and a reply then carries its text alone.
+        FermixCore.ReplyBlocks,
         AgentSupervisor,
         MainAgent,
         JobRunnerSupervisor,
@@ -256,6 +269,7 @@ defmodule FermixCore.Application do
         # precedent), disabled in `config/test.exs`, never by omission.
         {HarnessSupervisor, harness_worker_opts()},
         maybe_daemon_socket(),
+        maybe_native_host(),
         maybe_realtime_supervisor(),
         maybe_computer_use_supervisor(),
         maybe_computer_history_supervisor(),
@@ -309,12 +323,19 @@ defmodule FermixCore.Application do
 
   # Public (@doc false) because Finch has no API to read pool config back,
   # so tests pin these literals here — a regression to the :infinity / count:1
-  # defaults would otherwise be invisible to the suite.
+  # defaults would otherwise be invisible to the suite. Every pool dials IPv6
+  # first and falls back to IPv4 (`Egress.prefer_ipv6/1`).
   @doc false
   @spec finch_pools() :: %{(atom() | String.t()) => keyword()}
   def finch_pools do
     Map.merge(
-      %{:default => [conn_max_idle_time: @http_conn_max_idle_ms, count: @http_pool_count]},
+      %{
+        :default => [
+          conn_max_idle_time: @http_conn_max_idle_ms,
+          count: @http_pool_count,
+          conn_opts: Egress.prefer_ipv6([])
+        ]
+      },
       Map.new(@web_search_hosts, &{&1, web_search_pool()})
     )
   end
@@ -323,7 +344,7 @@ defmodule FermixCore.Application do
     [
       conn_max_idle_time: @http_conn_max_idle_ms,
       count: @http_pool_count,
-      conn_opts: [transport_opts: [timeout: @web_search_connect_timeout_ms]]
+      conn_opts: Egress.prefer_ipv6(transport_opts: [timeout: @web_search_connect_timeout_ms])
     ]
   end
 
@@ -396,11 +417,23 @@ defmodule FermixCore.Application do
         # Beside the job family it serves: a workspace discovery is a job, and
         # what it found is republished on the plugin row rather than in the job.
         ManagementPluginDiscovery,
+        # The values a pasted MCP server carried, held in memory under their
+        # draft_id until an add stores them; a restart forgets every one.
+        McpDraftValues,
         Daemon
       ]
     else
       []
     end
+  end
+
+  # The Fermix app's native host socket (M76 §4.4): served by a daemon whose
+  # provider is the app, the one build an app attaches to for this Mac's own
+  # services. Every other build serves nothing an app could attach to.
+  defp maybe_native_host do
+    if daemon_boot?() and NativeProvider.current() == :mac_app,
+      do: [NativeHostSupervisor],
+      else: []
   end
 
   defp maybe_realtime_supervisor do
@@ -487,14 +520,10 @@ defmodule FermixCore.Application do
   defp realtime_ready? do
     config = RealtimeConfig.current()
 
-    config.enabled? and config.provider == "openai" and
-      match?({:ok, _api_key}, CoreConfig.provider_api_key(:openai))
+    config.enabled? and RealtimeConfig.api_key_present?(config)
   end
 
-  defp trace_opts do
-    trace_config = Application.get_env(:fermix_core, :trace, [])
-    [base_dir: Keyword.get(trace_config, :base_dir, default_trace_dir())]
-  end
+  defp trace_opts, do: [base_dir: trace_dir()]
 
   defp jobs_scheduler_opts do
     Application.get_env(:fermix_core, :jobs, [])
@@ -554,6 +583,21 @@ defmodule FermixCore.Application do
       {:error, reason} ->
         Logger.warning("Failed to install log redaction on default handler: #{inspect(reason)}")
     end
+  end
+
+  @doc """
+  The directory `FermixCore.Trace` writes its JSONL rows under:
+  `[:fermix_core, :trace] :base_dir`, else the workspace's `traces` directory.
+
+  Public so the Doctor's provider health check
+  (`FermixCore.Setup.ProviderHealth`) reads the rows the Trace child writes:
+  one resolver for "where are the traces", not two that can drift.
+  """
+  @spec trace_dir() :: Path.t()
+  def trace_dir do
+    :fermix_core
+    |> Application.get_env(:trace, [])
+    |> Keyword.get_lazy(:base_dir, &default_trace_dir/0)
   end
 
   defp default_trace_dir, do: ConfigStore.workspace_paths().traces

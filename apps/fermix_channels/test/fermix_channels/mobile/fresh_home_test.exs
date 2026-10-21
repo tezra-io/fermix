@@ -68,7 +68,6 @@ defmodule FermixChannels.Mobile.FreshHomeTest do
         device_registry: "Registry",
         pair_manager: "Pair",
         media_store: "Media",
-        unfurl_supervisor: "Unfurl",
         discovery: "Discovery",
         request_coordinator: "Coordinator",
         listener: "Listener",

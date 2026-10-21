@@ -56,7 +56,7 @@ esac
 # One reader for the shared envelope: a string prints as itself and everything
 # else as its JSON spelling, so `true` is `true` and a missing key is empty.
 json_field() {
-  python3 -c '
+  uv run --no-project python -c '
 import json, sys
 cursor = json.loads(sys.argv[1])
 for key in sys.argv[2].split("."):
@@ -116,7 +116,7 @@ esac
 # The engine reads this file and reports it beside its own compiled identity;
 # a mismatch is what `service status` calls an integrity failure.
 [ -f /usr/share/fermix/engine.json ] || fail "the package installed no engine manifest"
-python3 -c '
+uv run --no-project python -c '
 import json, sys
 manifest = json.load(open("/usr/share/fermix/engine.json"))
 assert manifest["distribution_identity"] == "linux_package", manifest

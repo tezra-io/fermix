@@ -263,7 +263,7 @@ defmodule FermixCore.Health do
 
     status =
       cond do
-        failure_status(failures, "realtime:openai") -> :setup_required
+        failure_status(failures, "realtime:#{config.provider}") -> :setup_required
         not socket_alive or not session_alive -> :degraded
         true -> :ready
       end

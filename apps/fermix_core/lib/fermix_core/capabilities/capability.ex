@@ -100,8 +100,8 @@ defmodule FermixCore.Capabilities.Capability do
   @doc """
   Run the capability. The runtime owns dispatch — adapters never call this.
 
-  The one invoke boundary for every caller (the agent loop, the realtime voice
-  bridge, inbound MCP), so `Capabilities.AccessGate` decides here whether an
+  The one invoke boundary for every caller (the agent loop and the realtime voice
+  bridge), so `Capabilities.AccessGate` decides here whether an
   access-sensitive command may run; a held call returns its result without the
   executor ever being called.
   """

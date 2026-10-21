@@ -9,6 +9,15 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
   `failed_to_start_child` report or a crash dump cannot print a bearer token.
   Start errors and refusals log `redacted/1`, never the spec.
 
+  Two specs reach it, one per endpoint source, through the one session: a
+  plugin's (`transport: :streamable_http`, its signed manifest endpoint and
+  bearer) and an operator server's (`transport: :http`, `[mcp.servers.*]`: its
+  URL through `Endpoint.operator/1` and its declared headers through
+  `AuthRef.operator/1`, M74 E4). A spec it cannot take is refused after
+  `init/1`, like every other refusal, so a hand-written URL it refuses ends
+  this subtree with a visible status and never fails the MCP supervisor's
+  start.
+
   Connecting happens in `handle_continue/2`, not `init/1`. A remote endpoint
   that is merely unreachable would otherwise hold the whole MCP supervisor's
   synchronous start for the full 60-second startup budget, and daemon boot with
@@ -84,6 +93,15 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
   to the operator's own data and has no place in a log line (§11.1).
   """
   @spec redacted(map()) :: map()
+  def redacted(%{transport: :http} = spec) do
+    %{
+      source_id: Map.get(spec, :source_id),
+      transport: :http,
+      auth: Map.get(spec, :auth),
+      origin: url_origin(Map.get(spec, :url))
+    }
+  end
+
   def redacted(spec) when is_map(spec) do
     %{
       source_id: Map.get(spec, :source_id),
@@ -113,6 +131,20 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
     # the owner already wrote is the explanation, not this exit.
     :exit, {reason, {GenServer, :call, _args}} when reason in [:noproc, :normal, :shutdown] ->
       {:error, :remote_owner_down}
+  end
+
+  @doc """
+  Discoverer callback: the `serverInfo` the owned session's `initialize`
+  answered with, or `nil` while there is no session (M74 E9).
+  """
+  @impl Discoverer
+  def server_info(owner) do
+    GenServer.call(owner, :server_info, Timeouts.mcp_remote_startup() + 5_000)
+  catch
+    # Same contract as `list_tools/1`: a torn-down owner has no session, and its
+    # classified status is the explanation.
+    :exit, {reason, {GenServer, :call, _args}} when reason in [:noproc, :normal, :shutdown] ->
+      nil
   end
 
   @doc """
@@ -195,11 +227,13 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
 
     case configure(spec) do
       {:ok, config} -> {:ok, Map.merge(state, config), {:continue, :connect}}
-      {:error, reason} -> {:stop, record_refusal(state, reason)}
+      {:error, reason} -> {:ok, state, {:continue, {:refuse, reason}}}
     end
   end
 
   @impl true
+  def handle_continue({:refuse, reason}, state), do: give_up(state, reason)
+
   def handle_continue(:connect, state) do
     case attempt_connect(state, 1) do
       {:ok, state} -> {:noreply, state}
@@ -214,6 +248,12 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
 
   def handle_call(:list_tools, _from, state) do
     {:reply, discover(state), state}
+  end
+
+  def handle_call(:server_info, _from, %{session: nil} = state), do: {:reply, nil, state}
+
+  def handle_call(:server_info, _from, state) do
+    {:reply, state.session_module.server_info(state.session), state}
   end
 
   def handle_call({:watch_tools, listener}, _from, state) do
@@ -248,6 +288,11 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
     {:stop, :normal, state}
   end
 
+  # The session's grant can no longer be used (M74 E5): the server asks for a
+  # sign-in, so this owner gives up with that status, as a refused start does,
+  # and a completed sign-in starts the server again.
+  def handle_info({:mcp_session, {:refused, reason}}, state), do: give_up(state, reason)
+
   # Discovery has not run yet, so no registration exists for the notification to
   # invalidate — the watch is armed before the first `tools/list`, so this is
   # only ever the pre-discovery window. Dropping it is the whole correct action,
@@ -276,6 +321,13 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
   end
 
   # --- start -------------------------------------------------------------
+
+  defp configure(%{transport: :http} = spec) do
+    with {:ok, endpoint} <- operator_endpoint(spec),
+         {:ok, auth_ref} <- AuthRef.operator(spec) do
+      {:ok, %{endpoint: endpoint, auth_ref: auth_ref}}
+    end
+  end
 
   defp configure(spec) do
     with :ok <- check_transport(spec),
@@ -307,6 +359,15 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
   end
 
   defp endpoint(_spec), do: {:error, {:invalid_remote_config, :endpoint_missing}}
+
+  defp operator_endpoint(%{url: url}) when is_binary(url) do
+    case Endpoint.operator(url) do
+      {:ok, endpoint} -> {:ok, endpoint}
+      {:error, reason} -> {:error, {:invalid_remote_config, reason}}
+    end
+  end
+
+  defp operator_endpoint(_spec), do: {:error, {:invalid_remote_config, :endpoint_missing}}
 
   defp auth_ref(%{auth_ref: %{type: :plugin_secret, plugin: plugin}}), do: AuthRef.new(plugin)
 
@@ -563,6 +624,20 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
 
   defp plugin_of({:plugin, name}), do: name
   defp plugin_of({_kind, _name}), do: nil
+
+  # An operator URL's path and query may carry a key (some hosted servers put
+  # one there), so a log line names only where it points.
+  defp url_origin(url) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{scheme: scheme, host: host, port: port} when is_binary(host) ->
+        "#{scheme}://#{host}:#{port}"
+
+      %URI{} ->
+        nil
+    end
+  end
+
+  defp url_origin(_url), do: nil
 
   defp message_kind(message) when is_tuple(message) and tuple_size(message) > 0,
     do: elem(message, 0)

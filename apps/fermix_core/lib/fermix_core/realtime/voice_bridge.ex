@@ -1,9 +1,10 @@
 defmodule FermixCore.Realtime.VoiceBridge do
   @moduledoc """
-  The seam between a Live voice session and the Fermix agent that answers for it.
+  The seam between a voice session and the Fermix agent that answers for it.
 
-  Under the `openai_live` engine the provider speaks but never runs a tool: every
-  piece of work is delegated back to Core through this behaviour, which
+  Under the task engines, `openai_live` and `xai_realtime` (M70), the provider
+  speaks but never runs a tool: every piece of work is delegated back to Core
+  through this behaviour, which
   `fermix_channels` implements and registers at boot
   (`Application.put_env(:fermix_core, :voice_bridge, FermixChannels.Voice.Bridge)`,
   the same pattern as `:queue_status_provider`). Core therefore never names a
@@ -103,8 +104,10 @@ defmodule FermixCore.Realtime.VoiceBridge do
 
   @typedoc """
   A running task a call in the chat hands over as it ends (M56 §4.6): its ids,
-  the request it ran with, its turn's session id, how long it had run, and the
-  Repo options of the call's record, which its new owner writes its end to.
+  the request it ran with, its turn's session id, how long it had run, the
+  Repo options of the call's record, which its new owner writes its end to,
+  and the engine and voice provider the call ran on, which its new owner's
+  telemetry names (M70 §09).
   """
   @type detached_task :: %{
           delegation_id: String.t(),
@@ -112,7 +115,9 @@ defmodule FermixCore.Realtime.VoiceBridge do
           request: String.t(),
           turn_session_id: String.t(),
           elapsed_ms: non_neg_integer(),
-          record_opts: keyword()
+          record_opts: keyword(),
+          engine: String.t(),
+          provider: String.t()
         }
 
   @typedoc """

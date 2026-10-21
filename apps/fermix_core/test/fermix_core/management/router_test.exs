@@ -5,6 +5,7 @@ defmodule FermixCore.Management.RouterTest do
   alias FermixCore.Management.Doctor
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Lifecycle
+  alias FermixCore.Management.McpServers.DraftValues
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Router
 
@@ -1003,7 +1004,7 @@ defmodule FermixCore.Management.RouterTest do
 
       assert Enum.sort(Map.keys(view)) ==
                ~w(apns enabled identity listener mdns paired_devices pairing protocol_version
-                  refusal refused started tailnet)
+                  refusal refused remote started tailnet)
     end
 
     test "the no-parameter methods refuse parameters rather than ignoring them" do
@@ -1171,10 +1172,107 @@ defmodule FermixCore.Management.RouterTest do
       tailnet: %{detected: false, candidates: []},
       identity: %{present: false, fingerprint: nil},
       apns: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
+      remote: %{state: :off},
       paired_devices: 0,
       protocol_version: 1,
       pairing: nil
     }
+  end
+
+  # M74 §5: the methods for the MCP servers the owner adds. Each refusal here
+  # is answered before anything is read or written.
+  describe "MCP server operations" do
+    test "the listing takes no parameters" do
+      assert {:error, :invalid_params, %{"method" => "mcp.servers.list"}} =
+               Router.route(v2("mcp.servers.list", %{"name" => "fetch"}))
+    end
+
+    test "every name-only verb refuses a request that names nothing, or more" do
+      for method <- ~w(
+            mcp.servers.get mcp.servers.remove mcp.servers.enable mcp.servers.disable
+            mcp.servers.check.start
+          ) do
+        assert {:error, :invalid_params, %{"field" => "name"}} = Router.route(v2(method, %{})),
+               "#{method} answered a request with no server named"
+
+        assert {:error, :invalid_params, %{"field" => "extra"}} =
+                 Router.route(v2(method, %{"name" => "fetch", "extra" => 1}))
+      end
+    end
+
+    test "a server's fields are a closed set, and a refusal names the field with a sentence" do
+      assert {:error, :invalid_params, %{"field" => "draft_id"}} =
+               Router.route(
+                 v2("mcp.servers.update", %{"name" => "fetch", "draft_id" => "draft:1"})
+               )
+
+      params = %{"name" => "fetch", "transport" => "stdio", "url" => "https://x.dev/mcp"}
+
+      assert {:error, :invalid_params, %{"field" => "url", "sentence" => sentence}} =
+               Router.route(v2("mcp.servers.add", params))
+
+      assert sentence == "A server on this Mac does not take this."
+    end
+
+    # Only an add takes a draft_id, and one no paste holds is refused with the
+    # sentence the form shows.
+    test "an add takes a draft_id, and refuses one no paste holds" do
+      holder = :"router_test_drafts_#{System.unique_integer([:positive])}"
+      start_supervised!({DraftValues, name: holder})
+      params = %{"name" => "fetch", "transport" => "stdio", "command_line" => "sh"}
+
+      assert {:error, :invalid_params, %{"field" => "draft_id", "sentence" => sentence}} =
+               Router.route(v2("mcp.servers.add", Map.put(params, "draft_id", "draft:1")),
+                 operation_opts: [draft_values: holder]
+               )
+
+      assert sentence == "This paste has expired. Paste it again."
+    end
+
+    test "an import scan takes nothing, and an import takes its servers alone" do
+      assert {:error, :invalid_params, %{"method" => "mcp.servers.import.scan"}} =
+               Router.route(v2("mcp.servers.import.scan", %{"source" => "cursor"}))
+
+      assert {:error, :invalid_params, %{"field" => "extra"}} =
+               Router.route(v2("mcp.servers.import", %{"servers" => [], "extra" => 1}))
+
+      assert {:error, :invalid_params,
+              %{"field" => "servers", "sentence" => "This is a list " <> _}} =
+               Router.route(v2("mcp.servers.import", %{}))
+    end
+
+    test "a draft takes text and nothing else" do
+      for params <- [%{}, %{"text" => 1}] do
+        assert {:error, :invalid_params, %{"field" => "text"}} =
+                 Router.route(v2("mcp.servers.draft", params))
+      end
+
+      assert {:error, :invalid_params, %{"field" => "extra"}} =
+               Router.route(v2("mcp.servers.draft", %{"text" => "sh", "extra" => 1}))
+
+      assert {:error, :invalid_params, %{"field" => "text", "sentence" => "Paste " <> _rest}} =
+               Router.route(v2("mcp.servers.draft", %{"text" => " "}))
+    end
+
+    test "a tool switch names its server, its tool and a boolean" do
+      complete = %{"name" => "linear", "tool" => "create_issue", "enabled" => false}
+
+      for field <- ~w(name tool enabled) do
+        assert {:error, :invalid_params, %{"field" => ^field}} =
+                 Router.route(v2("mcp.servers.tool.set", Map.delete(complete, field)))
+      end
+
+      assert {:error, :invalid_params, %{"field" => "enabled"}} =
+               Router.route(v2("mcp.servers.tool.set", %{complete | "enabled" => "off"}))
+
+      assert {:error, :invalid_params, %{"field" => "extra"}} =
+               Router.route(v2("mcp.servers.tool.set", Map.put(complete, "extra", 1)))
+    end
+
+    test "a protocol-1 session is told the methods need version 2" do
+      assert {:error, :method_not_found, %{"method" => "mcp.servers.list", "requires" => 2}} =
+               Router.route(request("mcp.servers.list"))
+    end
   end
 
   defp v2(method, params \\ %{}), do: %{request(method, params) | protocol_version: 2}

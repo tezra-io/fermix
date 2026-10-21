@@ -63,6 +63,12 @@ defmodule FermixCore.Prompt.Defaults do
     content
   end
 
+  @spec grok_md() :: String.t()
+  def grok_md do
+    {:ok, content} = TemplateRenderer.render(:grok, %{})
+    content
+  end
+
   defp agent_name do
     :fermix_core
     |> Application.get_env(:agent, [])

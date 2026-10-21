@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Verify one signed Fermix app-engine archive by launching its native runtime."""
 
 import argparse
@@ -36,6 +40,10 @@ SMOKE_CONFIG = """\
 [fermix_core.realtime]
 enabled = true
 """
+# The engine a Mac app ships searches Apple Maps through this helper (M72
+# section 14); fermix_nif's Makefile builds it on the native macOS runners.
+MAPS_HELPER_GLOB = "lib/fermix_nif-*/priv/fermix-maps"
+MAPS_HELPER_CHECK = "fermix-maps: ok"
 VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[+-][0-9A-Za-z.-]+)?$")
 SOURCE_COMMIT_PATTERN = re.compile(r"^[0-9A-Fa-f]{40}$")
 
@@ -55,6 +63,9 @@ class Timeouts:
     management_timeout_seconds: float = 5.0
     stop_timeout_seconds: float = 15.0
     cleanup_timeout_seconds: float = 5.0
+    # The helper's self-check touches no network; the bound is for a loaded
+    # runner, or Rosetta translating the helper on its first run.
+    helper_check_timeout_seconds: float = 30.0
 
 
 DEFAULT_TIMEOUTS = Timeouts()
@@ -129,6 +140,7 @@ def _verify_in_directories(
     manifest = _validated_manifest(
         release_root, target, version, expected_source_commit
     )
+    maps_helper = _verify_maps_helper(release_root, manifest, command_prefix, timeouts)
     fermix_home, environment = _runtime_environment(runtime_root, scratch)
     executable = release_root / "bin/fermix_app_engine"
     start_command = [*command_prefix, str(executable), "start"]
@@ -145,7 +157,8 @@ def _verify_in_directories(
             timeouts,
             log_path,
         )
-        return _runtime_result(target, version, mode, fermix_home, manifest, runtime)
+        result = _runtime_result(target, version, mode, fermix_home, manifest, runtime)
+        return {**result, "maps_helper": maps_helper}
     except VerificationError:
         raise
     except (OSError, subprocess.SubprocessError) as error:
@@ -154,6 +167,39 @@ def _verify_in_directories(
         cleanup_error = _force_cleanup(process, timeouts)
         if cleanup_error is not None:
             raise VerificationError(f"app-engine process cleanup failed: {cleanup_error}")
+
+
+def _verify_maps_helper(release_root, manifest, command_prefix, timeouts):
+    """The packaged engine carries one inventoried Apple Maps helper that runs here."""
+    helpers = sorted(release_root.glob(MAPS_HELPER_GLOB))
+    if len(helpers) != 1:
+        raise VerificationError(
+            f"the app engine must carry exactly one Apple Maps helper ({MAPS_HELPER_GLOB}), "
+            f"found {len(helpers)}"
+        )
+
+    relative = helpers[0].relative_to(release_root).as_posix()
+    listed = {entry["path"] for entry in manifest["inventory"]["entries"]}
+    if relative not in listed:
+        raise VerificationError(f"the engine manifest does not inventory {relative}")
+
+    try:
+        completed = subprocess.run(
+            [*command_prefix, str(helpers[0]), "--check"],
+            capture_output=True,
+            text=True,
+            timeout=timeouts.helper_check_timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise VerificationError(f"the Apple Maps helper could not run: {error}") from error
+
+    if completed.returncode != 0 or completed.stdout.strip() != MAPS_HELPER_CHECK:
+        words = completed.stderr.strip() or completed.stdout.strip() or "no output"
+        raise VerificationError(
+            f"the Apple Maps helper self-check failed (exit {completed.returncode}): {words}"
+        )
+    return relative
 
 
 def _start_engine(command, release_root, environment, log_path):
@@ -383,6 +429,7 @@ def _validate_timeouts(timeouts):
         timeouts.management_timeout_seconds,
         timeouts.stop_timeout_seconds,
         timeouts.cleanup_timeout_seconds,
+        timeouts.helper_check_timeout_seconds,
     )
     if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in integer_fields):
         raise VerificationError("timeout attempt counts must be positive integers")
@@ -488,10 +535,15 @@ def _await_ready(process, fermix_home, environment, manifest, timeouts, log_path
     realtime_socket = fermix_home / "realtime.sock"
     companion_socket = fermix_home / "companion.sock"
     browser_host_socket = fermix_home / "browser_host.sock"
+    # The app engine on a Mac serves the Fermix app's native host (M76). A
+    # listener that cannot bind lets the engine boot on without it, so only
+    # this wait notices an engine that would ring nothing on the Mac.
+    native_host_socket = fermix_home / "native_host.sock"
     daemon_ready = False
     realtime_ready = False
     companion_ready = False
     browser_host_ready = False
+    native_host_ready = False
     health_ready = False
 
     for _attempt in range(timeouts.startup_attempts):
@@ -503,9 +555,14 @@ def _await_ready(process, fermix_home, environment, manifest, timeouts, log_path
         realtime_ready = _unix_socket(realtime_socket)
         companion_ready = _unix_socket(companion_socket)
         browser_host_ready = _unix_socket(browser_host_socket)
+        native_host_ready = _unix_socket(native_host_socket)
         if not health_ready:
             health_ready = _health_live(environment, manifest, timeouts)
-        if daemon_ready and realtime_ready and companion_ready and browser_host_ready and health_ready:
+        sockets_ready = (
+            daemon_ready and realtime_ready and companion_ready and browser_host_ready
+            and native_host_ready
+        )
+        if sockets_ready and health_ready:
             return
         time.sleep(timeouts.poll_interval_seconds)
 
@@ -516,6 +573,7 @@ def _await_ready(process, fermix_home, environment, manifest, timeouts, log_path
         f"realtime_socket={str(realtime_ready).lower()} "
         f"companion_socket={str(companion_ready).lower()} "
         f"browser_host_socket={str(browser_host_ready).lower()} "
+        f"native_host_socket={str(native_host_ready).lower()} "
         f"health={str(health_ready).lower()}: {excerpt}"
     )
 
@@ -674,7 +732,9 @@ def _await_exit(process, timeouts, log_path):
 
 
 def _verify_socket_cleanup(fermix_home):
-    for name in ("daemon.sock", "realtime.sock", "companion.sock", "browser_host.sock"):
+    for name in (
+        "daemon.sock", "realtime.sock", "companion.sock", "browser_host.sock", "native_host.sock"
+    ):
         path = fermix_home / name
         if os.path.lexists(path):
             raise VerificationError(f"{name} remained after app-engine shutdown")
