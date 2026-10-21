@@ -4311,7 +4311,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       {view, _html} = open_codex_card(conn)
       view |> element(~s(button[phx-click="chatgpt_login"])) |> render_click()
 
-      html = render_until(view, "OpenAI Codex connected. Its model is now gpt-plan-alpha.", 80)
+      html = render_until(view, "OpenAI Codex connected. Its model is now gpt-plan-alpha.")
 
       assert html =~ "Eligible usage in Fermix uses your ChatGPT plan."
       assert html =~ "mara@example.test · Connected · Using ChatGPT plan"
@@ -4338,7 +4338,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       {view, _html} = open_codex_card(conn)
       view |> element(~s(button[phx-click="chatgpt_login"])) |> render_click()
-      html = render_until(view, "OpenAI Codex connected.", 80)
+      html = render_until(view, "OpenAI Codex connected.")
 
       refute html =~ "Its model is now"
       assert PrimaryConfig.primary() == {:ok, :openai_codex}
@@ -4360,7 +4360,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       {view, _html} = open_codex_card(conn)
       view |> element(~s(button[phx-click="chatgpt_login"])) |> render_click()
-      render_until(view, "OpenAI Codex connected. Its model is now gpt-plan-alpha.", 80)
+      render_until(view, "OpenAI Codex connected. Its model is now gpt-plan-alpha.")
 
       contents = File.read!(Path.join(tmp_home, "config.toml"))
       assert contents =~ ~s(default_model = "gpt-plan-alpha")
@@ -6393,31 +6393,36 @@ defmodule FermixWebWeb.SetupLiveTest do
     Map.put(tool, "descriptor_sha256", digest)
   end
 
-  # A catalog install runs off the LiveView in a task (fetch, verify, extract,
-  # enable) and "Plugin enabled." lands only once it finishes. On a loaded macOS
-  # runner that overran the default half second, so this wait allows five; the
-  # poll still returns as soon as the flash renders.
-  defp render_until_enabled(view), do: render_until(view, "Plugin enabled.", 200)
+  # A sentence's arrival on a loaded runner. What a click starts runs off the
+  # LiveView in a task (an install's fetch, checksum, extract and enable; a
+  # sign-in's job) and renders only after that file and process work. The old
+  # half-second default overran on a loaded macOS runner for "Plugin enabled."
+  # and on the release pull request's stress step for "checksum mismatch"
+  # (2026-10-21). The poll still returns as soon as the sentence renders.
+  @arrival_ms 10_000
 
-  defp render_until(view, expected, attempts \\ 20)
+  defp render_until_enabled(view), do: render_until(view, "Plugin enabled.")
 
-  defp render_until(view, expected, attempts) when attempts > 0 do
+  defp render_until(view, expected),
+    do: render_until(view, expected, System.monotonic_time(:millisecond) + @arrival_ms)
+
+  defp render_until(view, expected, deadline) do
     html = render(view)
 
-    if html =~ expected do
-      html
-    else
-      Process.sleep(25)
-      render_until(view, expected, attempts - 1)
+    cond do
+      html =~ expected ->
+        html
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("expected rendered LiveView to include #{inspect(expected)}")
+
+      true ->
+        Process.sleep(25)
+        render_until(view, expected, deadline)
     end
   end
 
-  defp render_until(view, expected, 0) do
-    render(view)
-    flunk("expected rendered LiveView to include #{inspect(expected)}")
-  end
-
-  # The inverse of `render_until/3`: poll until `expected` is GONE. Returns
+  # The inverse of `render_until/2`: poll until `expected` is GONE. Returns
   # false once the budget is spent, so the caller still asserts.
   defp render_until_missing(view, expected, attempts \\ 40)
 
