@@ -794,7 +794,12 @@ Notes that the shapes alone do not carry:
   metadata, then its authorization server's metadata), with no redirect
   followed and every address held to the rule its own URL is. It registers
   with the server's `oauth_client_id` (and `mcp:<name>/client_secret` when
-  stored; without one it is a public client), else with Fermix's client metadata document
+  stored; without one it is a public client), which stays bound to the
+  authorization server it was signed in with: through a sign-out, and through
+  a server that names another, where a sign-in with the same client ID fails
+  the job with a sentence naming both before the secret is read or the browser
+  opens, until the owner enters another client ID or removes and adds the
+  server again; else with Fermix's client metadata document
   (`https://fermix.ai/oauth/mcp-client.json`) where the authorization server
   takes one, else by dynamic client registration, which names the exact
   loopback redirect the sign-in uses, port included; its client and port are

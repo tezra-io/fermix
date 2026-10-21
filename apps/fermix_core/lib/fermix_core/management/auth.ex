@@ -672,6 +672,14 @@ defmodule FermixCore.Management.Auth do
   defp mcp_sentence(:issuer_mismatch),
     do: "The sign-in reply came from another service, so Fermix did not use it."
 
+  defp mcp_sentence({:owner_client_issuer_changed, bound, issuer}) do
+    {now, was} = {sign_in_host(issuer), sign_in_host(bound)}
+
+    "This server now signs in at #{now}, not at #{was} where its client ID was used, so Fermix " <>
+      "sent #{now} nothing. If the server really moved, enter the client ID #{now} issued in " <>
+      "the server's settings, or remove the server and add it again."
+  end
+
   defp mcp_sentence(:issuer_missing),
     do: "The sign-in reply did not say which service sent it, so Fermix did not use it."
 
@@ -704,6 +712,12 @@ defmodule FermixCore.Management.Auth do
   end
 
   defp mcp_sentence(reason), do: sign_in_sentence(reason)
+
+  # An issuer by its host, and its port where it is not the scheme's own.
+  defp sign_in_host(issuer) do
+    uri = URI.parse(issuer)
+    if uri.port == URI.default_port(uri.scheme), do: uri.host, else: "#{uri.host}:#{uri.port}"
+  end
 
   # The absent case in the two spellings that reach it: an injected importer's
   # `:not_found`, and the atom the Claude Code importer answers with.

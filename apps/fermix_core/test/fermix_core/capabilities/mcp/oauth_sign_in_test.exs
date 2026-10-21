@@ -458,6 +458,79 @@ defmodule FermixCore.Capabilities.MCP.OAuthSignInTest do
       assert row["status_sentence"] == "Sign in to finish connecting."
     end
 
+    # The owner's client ID and secret belong to the authorization server they
+    # were first used with. A server that names another loses its grant as any
+    # does, but the sign-in there is refused before the secret is read or the
+    # browser opens, and the binding survives for the next one.
+    test "an owner's client is never sent to an authorization server the server switched to",
+         ctx do
+      {as, other} = owner_client_switched!(ctx)
+
+      {view, log} = with_log(fn -> start_sign_in!(ctx) end)
+
+      assert view["status"] == "failed"
+
+      assert view["failure"]["sentence"] ==
+               "This server now signs in at #{host(other)}, not at #{host(as)} where its client ID " <>
+                 "was used, so Fermix sent #{host(other)} nothing. If the server really moved, enter " <>
+                 "the client ID #{host(other)} issued in the server's settings, or remove the server " <>
+                 "and add it again."
+
+      assert log =~ "now names #{other.base} for sign-in, not #{as.base}"
+      assert LoopbackOAuth.state(other).authorize_requests == []
+      assert LoopbackOAuth.state(other).token_requests == []
+
+      assert {:ok, %{status: "signed_out", client_id: "owner-client", mcp: mcp}} =
+               Grant.read(@server)
+
+      assert {mcp.client_kind, mcp.issuer} == {"owner", as.base}
+    end
+
+    test "an owner's new client ID signs in at the authorization server the server switched to",
+         ctx do
+      {as, other} = owner_client_switched!(ctx)
+
+      reconfigure!(ctx, as.url, ~s(oauth_client_id = "other-client"))
+      :ok = McpSecrets.put(@server, :client_secret, "other-secret")
+
+      # The job, not the server's start: the stand-in MCP endpoint takes only
+      # the tokens its own authorization server minted.
+      assert :ok = sign_in(ctx)
+
+      assert [%{"grant_type" => "authorization_code"} | _refreshes] =
+               requests = LoopbackOAuth.state(other).token_requests
+
+      assert Enum.all?(
+               requests,
+               &(&1["authenticated_as"] == {:basic, "other-client", "other-secret"})
+             )
+
+      assert {:ok, %{client_id: "other-client", mcp: %{client_kind: "owner", issuer: issuer}}} =
+               Grant.read(@server)
+
+      assert issuer == other.base
+    end
+
+    test "an owner's client keeps its issuer through auth.logout, and signs in there again",
+         ctx do
+      as = LoopbackOAuth.start(%{owner_clients: %{"owner-client" => "owner-secret"}})
+      configure!(ctx, as.url, ~s(oauth_client_id = "owner-client"))
+      :ok = McpSecrets.put(@server, :client_secret, "owner-secret")
+      assert :ok = sign_in!(ctx)
+
+      assert {:ok, _restart} = Auth.logout("mcp:#{@server}", auth_opts(ctx))
+
+      assert {:ok, %{status: "signed_out", tokens: tokens, mcp: %{client_kind: "owner"} = mcp}} =
+               Grant.read(@server)
+
+      assert {tokens, mcp.issuer} == {%{access_token: nil, refresh_token: nil}, as.base}
+      assert await_status({:reauthorization_required, :sign_in_required})
+      assert row!(ctx)["auth"]["state"] == "signed_out"
+
+      assert :ok = sign_in!(ctx)
+      assert length(LoopbackOAuth.state(as).token_requests) == 2
+    end
+
     test "survives a restart of the server's subtree, and Auth.Store reads it back whole", ctx do
       as = LoopbackOAuth.start()
       configure!(ctx, as.url)
@@ -537,6 +610,18 @@ defmodule FermixCore.Capabilities.MCP.OAuthSignInTest do
   # --- helpers ----------------------------------------------------------------
 
   defp configure!(ctx, url, extra \\ "") do
+    write_config!(ctx, url, extra)
+    start_supervised!({McpSupervisor, [name: @supervisor, servers: []] ++ @opts})
+    {:ok, _summary} = Restarter.reload()
+  end
+
+  # The owner edits the server the case already configured.
+  defp reconfigure!(ctx, url, extra) do
+    write_config!(ctx, url, extra)
+    {:ok, _summary} = Restarter.reload()
+  end
+
+  defp write_config!(ctx, url, extra) do
     File.write!(Path.join(ctx.home, "config.toml"), """
     [mcp.servers.#{@server}]
     transport = "http"
@@ -546,9 +631,46 @@ defmodule FermixCore.Capabilities.MCP.OAuthSignInTest do
 
     :ok = ConfigStore.apply_mcp_config()
     :ok = RestartState.record_persisted_baseline()
-    start_supervised!({McpSupervisor, [name: @supervisor, servers: []] ++ @opts})
-    {:ok, _summary} = Restarter.reload()
   end
+
+  # Signed in with the owner's client at one authorization server, then the
+  # server names another, which knows the client ID with another secret, and
+  # refuses the token it holds: the row asks for a sign-in.
+  defp owner_client_switched!(ctx) do
+    as = LoopbackOAuth.start(%{owner_clients: %{"owner-client" => "owner-secret"}})
+    configure!(ctx, as.url, ~s(oauth_client_id = "owner-client"))
+    :ok = McpSecrets.put(@server, :client_secret, "owner-secret")
+    assert :ok = sign_in!(ctx)
+
+    other =
+      LoopbackOAuth.start(%{
+        resource: as.url,
+        owner_clients: %{"owner-client" => "other-secret", "other-client" => "other-secret"}
+      })
+
+    LoopbackOAuth.configure(as, %{issuer: other.base})
+    :ok = LoopbackOAuth.revoke_access(as)
+
+    capture_log(fn ->
+      assert {:error, {:reauthorization_required, :sign_in_required}} =
+               Owner.call_tool(owner_pid(), "echo", %{}, 10_000)
+
+      assert await_status({:reauthorization_required, :sign_in_required})
+    end)
+
+    {as, other}
+  end
+
+  # A sign-in refused before it has an authorize url: `auth.start` answers with
+  # the job in its failed state.
+  defp start_sign_in!(ctx) do
+    {:ok, view} = Auth.start("mcp:#{@server}", auth_opts(ctx))
+    refute view["authorize_url"]
+    {:ok, terminal} = eventually_terminal(ctx.jobs, view["job_id"])
+    terminal
+  end
+
+  defp host(%{base: base}), do: base |> URI.parse() |> then(&"#{&1.host}:#{&1.port}")
 
   defp unsigned_jwt(claims) do
     [%{"alg" => "none"}, claims]

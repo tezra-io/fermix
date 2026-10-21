@@ -63,7 +63,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   through your browser, from the app or over the management socket: Fermix
   finds how the server signs people in, registers itself with it where the
   server asks, and keeps the sign-in, renewing it, until you sign out or
-  remove the server. Instead of typing, paste what a README or another app
+  remove the server. A client ID and secret you give a server stay with the
+  sign-in service you first used them with: if the server later names
+  another, Fermix sends that service nothing and says so, until you enter the
+  client ID it issued or remove the server and add it again. Instead of
+  typing, paste what a README or another app
   gives: a URL, a command line, the `mcpServers` or `servers` block Claude
   Desktop, Claude Code, Cursor, Windsurf or VS Code use, a `claude mcp add`
   line or a Codex `[mcp_servers]` block. Fermix fills in the form, names the

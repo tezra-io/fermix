@@ -4,7 +4,9 @@ defmodule FermixCore.Capabilities.MCP.OAuth.SignIn do
   `auth.start mcp:<name>` runs as an `auth` job. Its phases:
 
     1. `discovering`: `OAuth.Discovery` reads how the server is signed in to.
-    2. `registering`: `OAuth.Registration` picks the client (D6). A dynamic
+    2. `registering`: `OAuth.Registration` picks the client (D6). The
+       owner's client is refused where the server now names another issuer
+       than the one it was signed in with (`Grant.owner_issuer/2`). A dynamic
        registration names the exact loopback redirect, so it is made, or a
        kept one reused, once the listener has bound its port: the port a kept
        registration names when it is free, another when it is not.
@@ -77,8 +79,33 @@ defmodule FermixCore.Capabilities.MCP.OAuth.SignIn do
 
   defp register(server, metadata, stored, phase) do
     phase.("registering")
-    Registration.client(server, metadata, Grant.registered_client(stored, metadata.issuer))
+
+    with :ok <- owner_client_bound(server, metadata, stored) do
+      Registration.client(server, metadata, Grant.registered_client(stored, metadata.issuer))
+    end
   end
+
+  # The owner's client ID and secret belong to the authorization server they
+  # were signed in with: a server that now names another is refused before
+  # the secret is read or the browser opens. Another client ID is the owner's
+  # word that it belongs where the server now signs in.
+  defp owner_client_bound(%{oauth_client_id: id} = server, %{issuer: issuer}, stored)
+       when is_binary(id) do
+    case Grant.owner_issuer(stored, id) do
+      bound when bound in [nil, issuer] ->
+        :ok
+
+      bound ->
+        Logger.warning(
+          "MCP server #{server.name} now names #{issuer} for sign-in, not #{bound}, " <>
+            "where its client ID was used; nothing was sent there"
+        )
+
+        {:error, {:owner_client_issuer_changed, bound, issuer}}
+    end
+  end
+
+  defp owner_client_bound(_server, _metadata, _stored), do: :ok
 
   defp requested_scopes(metadata, stored),
     do: Enum.uniq(metadata.scopes ++ Grant.wanted_scopes(stored, metadata.issuer))

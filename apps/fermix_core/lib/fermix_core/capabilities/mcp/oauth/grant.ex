@@ -17,13 +17,16 @@ defmodule FermixCore.Capabilities.MCP.OAuth.Grant do
       account stay, so the row says whose sign-in expired and the next
       sign-in reuses a registered client.
     * `"signed_out"`: `auth.logout` cleared it, and only a client a
-      registration issued is kept, for the next sign-in to its issuer.
+      registration issued, or the owner's client and the issuer it was used
+      with, is kept, for the next sign-in.
 
   Credentials are keyed by issuer and never cross to another: the access
   token goes only to a server the grant's resource covers, and the refresh
   token only to its issuer's token endpoint. When a server refuses the token
   and no longer names that issuer, the grant is deleted, and the server asks
-  for a sign-in again.
+  for a sign-in again. The owner's client keeps the issuer it was used with
+  through that, as through a sign-out, so a sign-in elsewhere is refused
+  before its secret is read (`owner_issuer/2`).
 
   Every refresh runs under the profile lock, from its read of the entry to
   its write (`Auth.Store.with_profile_lock/3`), so two refreshers never spend
@@ -173,6 +176,18 @@ defmodule FermixCore.Capabilities.MCP.OAuth.Grant do
 
   def registered_client(_entry, _issuer), do: nil
 
+  @doc """
+  The issuer the owner's client `client_id` was signed in with, kept on
+  `entry` through an expiry, a sign-out and a server that names another
+  issuer; `nil` when `entry` holds no sign-in of that client.
+  """
+  @spec owner_issuer(Store.entry() | nil, String.t()) :: String.t() | nil
+  def owner_issuer(%{client_id: id, mcp: %{client_kind: "owner", issuer: issuer}}, id)
+      when is_binary(issuer),
+      do: issuer
+
+  def owner_issuer(_entry, _client_id), do: nil
+
   @doc "The scopes a server asked for since `entry` was minted by `issuer`, which a sign-in asks for too."
   @spec wanted_scopes(Store.entry() | nil, String.t()) :: [String.t()]
   def wanted_scopes(%{mcp: %{issuer: issuer, wanted_scopes: [_ | _] = wanted}}, issuer),
@@ -235,9 +250,14 @@ defmodule FermixCore.Capabilities.MCP.OAuth.Grant do
         "MCP server #{server} names another authorization server; its sign-in was deleted"
       )
 
-      with :ok <- delete(server, opts), do: {:error, :issuer_changed}
+      with :ok <- forget_issuer(server, entry, opts), do: {:error, :issuer_changed}
     end
   end
+
+  # The owner's client keeps the issuer it was used with, which the next
+  # sign-in holds it to; any other grant goes whole, its registration with it.
+  defp forget_issuer(server, %{mcp: %{client_kind: "owner"}}, opts), do: keep_client(server, opts)
+  defp forget_issuer(server, _entry, opts), do: delete(server, opts)
 
   @doc "Keeps the scopes a server asked for in a `403 insufficient_scope`, so the next sign-in asks for them too."
   @spec want_scopes(String.t(), [String.t()], keyword()) :: :ok | {:error, term()}
@@ -259,19 +279,27 @@ defmodule FermixCore.Capabilities.MCP.OAuth.Grant do
 
   @doc """
   Forgets `server`'s grant locally (`auth.logout`). Nothing is revoked
-  upstream. A client a registration issued is kept for the next sign-in.
+  upstream. A client a registration issued, and the owner's client with the
+  issuer it was used with, are kept for the next sign-in.
   """
   @spec forget(String.t(), keyword()) :: :ok | {:error, term()}
   def forget(server, opts \\ []) do
     case read(server, opts) do
-      {:ok, nil} -> :ok
-      {:ok, %{mcp: %{client_kind: "registered"}}} -> keep_registration(server, opts)
-      {:ok, _entry} -> delete(server, opts)
-      {:error, _reason} = error -> error
+      {:ok, nil} ->
+        :ok
+
+      {:ok, %{mcp: %{client_kind: kind}}} when kind in ["registered", "owner"] ->
+        keep_client(server, opts)
+
+      {:ok, _entry} ->
+        delete(server, opts)
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
-  defp keep_registration(server, opts) do
+  defp keep_client(server, opts) do
     with_lock(server, opts, fn ->
       case read(server, opts) do
         {:ok, %{} = entry} -> write(server, signed_out(entry), opts)
