@@ -12,6 +12,10 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretWriter.File, as: SecretFile
 
+  # A resolution's arrival on a loaded runner; it never comes when it waits on
+  # a suspended file server.
+  @arrival_ms 10_000
+
   test "an empty FERMIX_HOME yields absolute protected paths, not cwd-relative ones" do
     previous = System.get_env("FERMIX_HOME")
     System.put_env("FERMIX_HOME", "")
@@ -92,6 +96,35 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
              PathPolicy.canonical_path(Path.join(root, ".ssh/authorized_keys"))
 
     FermixTestSupport.SafeRm.rm_rf!(root)
+  end
+
+  # A decision listed every ancestor of its path through the VM's one file
+  # server, which runs each call to its end, so on a slow runner every other
+  # file call in the VM waited past a minute behind those listings (macos-x64,
+  # 2026-10-21). Resolving reads the kernel from the caller's own process.
+  # Sync, like this module: it suspends a server every test uses.
+  test "resolves a path, its casing included, without the VM's file server" do
+    tmp = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-no-file-server")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp) end)
+    # Resolved first, so no link on the way sends the call to `File.read_link/1`.
+    {:ok, root} = PathPolicy.resolve_links(tmp)
+    File.mkdir_p!(Path.join(root, "Folder/inner"))
+    path = Path.join(root, "folder/inner/new.txt")
+
+    server = Process.whereis(:file_server_2)
+    :ok = :sys.suspend(server)
+
+    resolved =
+      try do
+        task =
+          Task.async(fn -> {PathPolicy.resolve_links(path), PathPolicy.canonical_path(path)} end)
+
+        Task.yield(task, @arrival_ms) || Task.shutdown(task, :brutal_kill)
+      after
+        :ok = :sys.resume(server)
+      end
+
+    assert resolved == {:ok, {{:ok, path}, Path.join(root, "Folder/inner/new.txt")}}
   end
 
   test "blocks a case-variant of a protected home dir" do

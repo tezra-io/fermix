@@ -327,7 +327,7 @@ defmodule FermixCore.Sandbox.PathPolicy do
   defp resolve_parts(current, [part | rest], hops_left, name) do
     next = join_part(current, name.(current, part))
 
-    case File.lstat(next) do
+    case lstat(next) do
       {:ok, %{type: :symlink}} -> resolve_symlink(next, rest, hops_left, name)
       {:ok, _stat} -> resolve_parts(next, rest, hops_left, name)
       {:error, :enoent} -> {:ok, append_parts(next, rest)}
@@ -359,13 +359,34 @@ defmodule FermixCore.Sandbox.PathPolicy do
   # match always wins, so genuinely distinct names on a case-sensitive FS are
   # left untouched.
   defp real_case(dir, part) do
-    case File.ls(dir) do
+    case list_dir(dir) do
       {:ok, entries} -> pick_case(entries, part)
       {:error, _reason} -> part
     end
   end
 
   defp keep_case(_dir, part), do: part
+
+  # The same calls `File.lstat/1` and `File.ls/1` make, run in this process.
+  # Those two queue every caller in the VM behind its one file server
+  # (`:file_server_2`), which runs each call to its end, so a decision's
+  # listings (every ancestor of the path, beside a temp folder of tens of
+  # thousands of entries) held every other file call in the VM, and a
+  # command's sandbox resolves about a hundred paths. `:prim_file.list_dir/1`
+  # is what that server runs for `File.ls/1`.
+  defp lstat(path) do
+    case :file.read_link_info(path, [:raw, {:time, :posix}]) do
+      {:ok, info} -> {:ok, File.Stat.from_record(info)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp list_dir(dir) do
+    case :prim_file.list_dir(dir) do
+      {:ok, names} -> {:ok, Enum.map(names, &IO.chardata_to_string/1)}
+      {:error, _reason} = error -> error
+    end
+  end
 
   defp pick_case(entries, part) do
     if part in entries do
