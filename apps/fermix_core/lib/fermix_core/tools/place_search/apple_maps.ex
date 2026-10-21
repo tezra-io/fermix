@@ -203,13 +203,13 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
   # ends the turn running it.
   defp run(executable, args, line, timeout_ms) do
     port = Port.open({:spawn_executable, executable}, [:binary, :exit_status, :hide, args: args])
-    {:os_pid, os_pid} = Port.info(port, :os_pid)
+    os_pid = os_pid(port)
     Process.unlink(port)
     monitor = Port.monitor(port)
     deadline = System.monotonic_time(:millisecond) + timeout_ms
 
     try do
-      Port.command(port, [line, ?\n])
+      :ok = command(port, line)
       collect(port, monitor, deadline, timeout_ms, "")
     after
       teardown(port, monitor, os_pid)
@@ -217,6 +217,24 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
   rescue
     error in [ArgumentError, ErlangError] ->
       {:error, "provider_error: the Apple Maps helper could not be started: #{inspect(error)}"}
+  end
+
+  # A helper that exited at once (seen under load) has closed its port before
+  # its pid is read or its request written: Port.info/2 answers nil and the
+  # write raises. It did start, and what it printed and its exit status are
+  # still in the mailbox, which `collect/5` reads as usual.
+  defp os_pid(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, os_pid} -> os_pid
+      nil -> nil
+    end
+  end
+
+  defp command(port, line) do
+    Port.command(port, [line, ?\n])
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
 
   # One receive loop, bounded by the call's deadline and by the stdout ceiling.
@@ -245,11 +263,12 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
     do: "provider_error: the Apple Maps helper closed before answering (#{inspect(reason)})"
 
   # The call is over whatever ended it: the port is closed and the helper's
-  # process group killed. `:esrch` (already gone) is silent success.
+  # process group killed. `:esrch` (already gone) is silent success. A helper
+  # whose pid was never read had already exited, and names no group.
   defp teardown(port, monitor, os_pid) do
     Port.demonitor(monitor, [:flush])
     if Port.info(port), do: Port.close(port)
-    ProcessGroup.signal(os_pid, :sigkill)
+    if os_pid, do: ProcessGroup.signal(os_pid, :sigkill)
     flush(port)
   end
 
