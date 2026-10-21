@@ -318,14 +318,23 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
         {:env, unset_environment()}
       ])
 
-    {:os_pid, os_pid} = Port.info(port, :os_pid)
-    {:ok, port, os_pid}
+    {:ok, port, os_pid(port)}
   rescue
     # A file that is present but cannot be run: Port.open raises the spawn's
     # errno (`eacces`, `enoexec`), or ArgumentError for a path it rejects.
     error in [ErlangError, ArgumentError] ->
       Logger.warning("fermix-iroh could not be started: #{Exception.message(error)}")
       {:error, {:spawn_failed, executable}}
+  end
+
+  # A helper that exited at once (seen under load) has closed its port before
+  # its pid is read, and Port.info/2 answers nil. It did start: what it printed
+  # and its exit status are still in the mailbox and fail the rail there.
+  defp os_pid(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, os_pid} -> os_pid
+      nil -> nil
+    end
   end
 
   defp buffer(state, chunk) do
