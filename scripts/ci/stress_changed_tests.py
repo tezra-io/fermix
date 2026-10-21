@@ -16,6 +16,13 @@ disk. The load starts when a run's tests start and stops when the run ends:
 Mix's start and the app's boot, which every run repeats, take about a minute
 under load and a few seconds without it.
 
+An app with more than `MANY_FILES` changed files runs them `MANY_FILES` at a
+time, its runs cycling through those chunks, and each chunk gets the repeats a
+whole app would. So no run outlasts the minutes the step timeout leaves past
+the budget, however large the change: one run of a release's 152 fermix_core
+files under load outlasted the whole step. The files of a chunk the budget
+never reached are named.
+
 Runs go round-robin, every app once per round, so a slow app cannot starve the
 rest of their first run under load. `--budget-s` bounds the wall clock from the
 first run: an app's next run starts only when its previous run's duration still
@@ -63,6 +70,26 @@ class AppStress:
     last_s: float | None = None
     # Empty while the app still repeats; FAILED, NO_TESTS or BUDGET once it stops early.
     stopped: str = ""
+
+    @property
+    def chunks(self) -> list[list[str]]:
+        """The files one run takes, in order: at most `MANY_FILES` each."""
+        return [self.files[i : i + MANY_FILES] for i in range(0, len(self.files), MANY_FILES)]
+
+
+def planned_runs(state: AppStress, repeats: int) -> int:
+    return repeats * len(state.chunks)
+
+
+def run_files(state: AppStress) -> list[str]:
+    """The chunk the app's next run takes: every chunk runs once before any runs twice."""
+    chunks = state.chunks
+    return chunks[state.runs % len(chunks)]
+
+
+def unstressed_files(state: AppStress) -> list[str]:
+    """The files of every chunk the app never ran."""
+    return [path for chunk in state.chunks[state.runs :] for path in chunk]
 
 
 def changed_test_files(base: str) -> tuple[list[str], str]:
@@ -113,12 +140,12 @@ RunOnce = Callable[[AppStress], str]
 def round_robin(
     apps: dict[str, list[str]], repeats: int, budget_s: float, run_once: RunOnce, clock: Callable[[], float]
 ) -> list[AppStress]:
-    """Up to `repeats` rounds, each running every still-repeating app once while its next run fits."""
+    """Rounds of every still-repeating app once while its next run fits, until each chunk ran `repeats` times."""
     assert repeats >= 1 and budget_s > 0, (repeats, budget_s)
     states = [AppStress(app, files) for app, files in apps.items()]
     start = clock()
-    for _ in range(repeats):
-        for state in [s for s in states if not s.stopped]:
+    for _ in range(max((planned_runs(s, repeats) for s in states), default=0)):
+        for state in [s for s in states if not s.stopped and s.runs < planned_runs(s, repeats)]:
             _take_turn(state, clock() - start, budget_s, run_once, clock)
     return states
 
@@ -151,8 +178,13 @@ def run_once(state: AppStress, repeats: int, log_dir: Path) -> str:
     """One `mix test` of the app's files into its own log. A run that executes no test is a visible warning."""
     number = state.runs + 1
     log = log_dir / f"stress-{state.app}-{number}.log"
-    command = ["mix", "test", "--warnings-as-errors", "--max-failures", "1", *state.files]
-    print(f"\n== {state.app}: {len(state.files)} file(s), run {number} of up to {repeats} under load ==", flush=True)
+    files = run_files(state)
+    command = ["mix", "test", "--warnings-as-errors", "--max-failures", "1", *files]
+    planned = planned_runs(state, repeats)
+    print(
+        f"\n== {state.app}: {len(files)} of {len(state.files)} file(s), run {number} of up to {planned} under load ==",
+        flush=True,
+    )
     with load_from_first_test() as on_line:
         code = run_teed(command, log, on_line)
     text = log.read_text(errors="replace")
@@ -164,21 +196,22 @@ def run_once(state: AppStress, repeats: int, log_dir: Path) -> str:
     if code != 0:
         return FAILED
     if tests_ran(text) == 0:
-        print(f"::warning title=Stress ran no tests::{escape(state.app)}: {escape(' '.join(state.files))}", flush=True)
+        print(f"::warning title=Stress ran no tests::{escape(state.app)}: {escape(' '.join(files))}", flush=True)
         return NO_TESTS
     return PASSED
 
 
 def describe(state: AppStress, repeats: int) -> str:
     """One summary line: how many runs the app had under load, and why it stopped."""
+    planned = planned_runs(state, repeats)
     if state.stopped == FAILED:
-        return f"{state.app}: failed on run {state.runs} of {repeats}"
+        return f"{state.app}: failed on run {state.runs} of {planned}"
     if state.stopped == NO_TESTS:
         return f"{state.app}: ran no tests"
     if state.stopped == BUDGET and state.runs == 0:
         return f"{state.app}: never ran; the budget was spent before its first run"
     stopped = ", then the budget stopped it" if state.stopped == BUDGET else ""
-    return f"{state.app}: {state.runs} of {repeats} runs passed{stopped}"
+    return f"{state.app}: {state.runs} of {planned} runs passed{stopped}"
 
 
 def budget_annotation(state: AppStress, repeats: int, budget_s: float) -> str:
@@ -192,9 +225,15 @@ def budget_annotation(state: AppStress, repeats: int, budget_s: float) -> str:
         )
         return f"::error title={escape('Stress budget spent', prop=True)}::{escape(message)}"
     message = (
-        f"{state.app}: {state.runs} of {repeats} runs under load passed; another would not fit the "
-        f"{budget_s:g} s budget (its last run took {state.last_s:.0f} s)."
+        f"{state.app}: {state.runs} of {planned_runs(state, repeats)} runs under load passed; another would not "
+        f"fit the {budget_s:g} s budget (its last run took {state.last_s:.0f} s)."
     )
+    unstressed = unstressed_files(state)
+    if unstressed:
+        message += (
+            f" {len(unstressed)} of its {len(state.files)} changed test files never ran under load; "
+            "the step log lists them."
+        )
     return f"::notice title={escape('Stress budget reached', prop=True)}::{escape(message)}"
 
 
@@ -206,6 +245,9 @@ def report(states: list[AppStress], repeats: int, budget_s: float, elapsed_s: fl
     print(f"\n== Stress under load: {elapsed_s:.0f} s of the {budget_s:g} s budget ==", flush=True)
     for state in states:
         print(describe(state, repeats), flush=True)
+    for state in states:
+        for path in unstressed_files(state):
+            print(f"not stressed: {path}", flush=True)
     for state in states:
         annotation = budget_annotation(state, repeats, budget_s)
         if annotation:

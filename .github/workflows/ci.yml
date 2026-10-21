@@ -135,7 +135,8 @@ jobs:
         # app's previous run would still end inside it. 720 s of the 15-minute
         # timeout leaves 3 minutes for uv's start, the burners' stop and the
         # overrun of the last run started, which the budget never cuts short.
-        # Raise the two together.
+        # A run takes at most 30 of an app's files, so that overrun stays one
+        # chunk long however large the change. Raise the two together.
         if: matrix.leg == 'linux-x64'
         timeout-minutes: 15
         env:

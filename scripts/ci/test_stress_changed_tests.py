@@ -50,6 +50,12 @@ NO_TESTS_RUN = "==> fermix_core\nThere are no tests to run\n"
 # needed about 12 minutes on their own.
 CI_RUN_SECONDS = {"fermix_channels": 56, "fermix_core": 145, "fermix_opik": 2, "fermix_web": 100}
 
+# The 0.16.0 release pull request (run 39539072311): every test file dev had
+# changed since main, and the linux-x64 runner's seconds per run of at most 30
+# of them under load. One run of all 152 fermix_core files outlasted the step.
+RELEASE_FILES = {"fermix_channels": 39, "fermix_core": 152, "fermix_nif": 1, "fermix_opik": 3, "fermix_web": 1}
+RELEASE_RUN_SECONDS = {"fermix_channels": 125, "fermix_core": 150, "fermix_nif": 5, "fermix_opik": 5, "fermix_web": 219}
+
 
 def git(cwd, *args):
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
@@ -148,6 +154,14 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(stress.repeats_for(stress.MANY_FILES), stress.REPEATS)
         self.assertEqual(stress.repeats_for(stress.MANY_FILES + 1), stress.REPEATS_WHEN_MANY)
 
+    def test_an_app_with_many_files_runs_them_in_chunks(self):
+        files = [f"apps/fermix_core/test/f{n}_test.exs" for n in range(2 * stress.MANY_FILES + 1)]
+
+        chunks = stress.AppStress("fermix_core", files).chunks
+
+        self.assertEqual([len(chunk) for chunk in chunks], [stress.MANY_FILES, stress.MANY_FILES, 1])
+        self.assertEqual([path for chunk in chunks for path in chunk], files)
+
     def test_counts_tests_across_every_repeat(self):
         self.assertEqual(stress.tests_ran(REPEATED_GREEN), 6)
         self.assertEqual(stress.tests_ran("==> fermix_core\nThere are no tests to run\n"), 0)
@@ -163,8 +177,11 @@ class FitsTest(unittest.TestCase):
         self.assertFalse(stress.fits(145, 575.1, 720))
 
 
-def simulate(seconds, repeats, budget_s, outcomes=None):
-    """Round-robin over fake runs that take `seconds[app]` each; returns states, run order, seconds used."""
+def simulate(seconds, repeats, budget_s, outcomes=None, files=None):
+    """Round-robin over fake runs that take `seconds[app]` each; returns states, run order, seconds used.
+
+    `files[app]` is how many changed test files the app has, one by default.
+    """
     clock = Clock()
     order = []
 
@@ -173,7 +190,8 @@ def simulate(seconds, repeats, budget_s, outcomes=None):
         clock.now += seconds[state.app]
         return (outcomes or {}).get((state.app, state.runs + 1), stress.PASSED)
 
-    apps = {app: [f"apps/{app}/test/x_test.exs"] for app in seconds}
+    counts = files or {}
+    apps = {app: [f"apps/{app}/test/x{n}_test.exs" for n in range(counts.get(app, 1))] for app in seconds}
     states = stress.round_robin(apps, repeats, budget_s, run_once, clock)
     return {s.app: s for s in states}, order, clock.now - 1000.0
 
@@ -226,9 +244,31 @@ class RoundRobinTest(unittest.TestCase):
         self.assertEqual(order, ["a"])
         self.assertEqual(states["a"].stopped, stress.NO_TESTS)
 
+    def test_each_chunk_of_an_app_runs_the_repeats_of_a_whole_app(self):
+        states, order, _ = simulate({"a": 1, "b": 1}, 2, 100, files={"a": stress.MANY_FILES + 1})
 
-def app_state(runs, stopped, last_s=145.0):
-    return stress.AppStress("fermix_core", ["apps/fermix_core/test/x_test.exs"], runs, last_s, stopped)
+        self.assertEqual(order, ["a", "b", "a", "b", "a", "a"])
+        self.assertEqual((states["a"].runs, states["a"].stopped), (4, ""))
+        self.assertEqual((states["b"].runs, states["b"].stopped), (2, ""))
+
+    def test_the_release_that_outran_the_step_timeout_runs_in_chunks_inside_it(self):
+        states, _, used = simulate(
+            RELEASE_RUN_SECONDS, stress.REPEATS_WHEN_MANY, 720, files=RELEASE_FILES
+        )
+
+        # Every app ran; a run that starts inside the budget is never cut short,
+        # so the step ends by the budget plus one run, inside its 15 minutes.
+        self.assertTrue(all(s.runs > 0 for s in states.values()))
+        self.assertLessEqual(used, 720 + max(RELEASE_RUN_SECONDS.values()))
+        self.assertLessEqual(used, 15 * 60 - 60)
+        self.assertEqual(stress.exit_status(list(states.values())), 0)
+        self.assertEqual(states["fermix_core"].stopped, stress.BUDGET)
+        self.assertTrue(stress.unstressed_files(states["fermix_core"]))
+
+
+def app_state(runs, stopped, last_s=145.0, file_count=1):
+    files = [f"apps/fermix_core/test/x{n}_test.exs" for n in range(file_count)]
+    return stress.AppStress("fermix_core", files, runs, last_s, stopped)
 
 
 class ReportTest(unittest.TestCase):
@@ -237,6 +277,16 @@ class ReportTest(unittest.TestCase):
 
         self.assertTrue(annotation.startswith("::notice title=Stress budget reached::fermix_core: 2 of 5 runs"))
         self.assertIn("last run took 145 s", annotation)
+
+    def test_a_budget_stop_before_every_chunk_ran_names_the_files_left_unstressed(self):
+        state = app_state(1, stress.BUDGET, file_count=2 * stress.MANY_FILES + 1)
+
+        annotation = stress.budget_annotation(state, 5, 720)
+
+        self.assertTrue(annotation.startswith("::notice title=Stress budget reached::fermix_core: 1 of 15 runs"))
+        self.assertIn("31 of its 61 changed test files never ran under load", annotation)
+        self.assertEqual(stress.unstressed_files(state), state.files[stress.MANY_FILES :])
+        self.assertEqual(stress.unstressed_files(app_state(3, stress.BUDGET, file_count=61)), [])
 
     def test_an_app_that_never_ran_is_an_error(self):
         annotation = stress.budget_annotation(app_state(0, stress.BUDGET, None), 5, 720)
@@ -264,6 +314,10 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(
             stress.describe(app_state(0, stress.BUDGET, None), 5),
             "fermix_core: never ran; the budget was spent before its first run",
+        )
+        self.assertEqual(
+            stress.describe(app_state(2, stress.BUDGET, file_count=61), 5),
+            "fermix_core: 2 of 15 runs passed, then the budget stopped it",
         )
 
 
@@ -297,8 +351,8 @@ class RunOnceTest(unittest.TestCase):
 
         return self.run_once(fake, runs_before)
 
-    def run_once(self, fake, runs_before=0):
-        state = stress.AppStress("fermix_core", ["apps/fermix_core/test/x_test.exs"], runs_before)
+    def run_once(self, fake, runs_before=0, files=None):
+        state = stress.AppStress("fermix_core", files or ["apps/fermix_core/test/x_test.exs"], runs_before)
         with mock.patch.object(stress, "run_teed", fake), mock.patch.object(
             stress, "start_burners", self.start_burners
         ), contextlib.redirect_stdout(io.StringIO()) as out:
@@ -343,6 +397,20 @@ class RunOnceTest(unittest.TestCase):
             ["mix", "test", "--warnings-as-errors", "--max-failures", "1", "apps/fermix_core/test/x_test.exs"],
         )
         self.assertEqual(self.logs[0], self.log_dir / "stress-fermix_core-3.log")
+
+    def test_each_run_takes_the_next_chunk_and_the_runs_cycle_through_them(self):
+        files = [f"apps/fermix_core/test/f{n}_test.exs" for n in range(stress.MANY_FILES + 1)]
+
+        def fake(command, log, _on_line):
+            self.commands.append(command)
+            log.write_text(GREEN_RUN)
+            return 0
+
+        for runs_before in (0, 1, 2):
+            self.run_once(fake, runs_before, files)
+
+        ran = [command[5:] for command in self.commands]
+        self.assertEqual(ran, [files[: stress.MANY_FILES], files[stress.MANY_FILES :], files[: stress.MANY_FILES]])
 
     def test_a_failure_points_at_the_test_and_the_seed_of_the_run_that_failed(self):
         outcome, out = self.run_app(2, FAILED_RUN, runs_before=1)
