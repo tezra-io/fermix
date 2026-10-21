@@ -19,6 +19,11 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
   @voice_ref "9879f6d3c9efefe8c4f4aabe9d3269762264be52794e96f62ab8ffa53b7fadec"
 
+  # A line's arrival over the socket on a loaded runner. On Linux the
+  # connection reads every process's /proc stat to place its peer before it
+  # answers the hello, and those reads queue behind every other test's files.
+  @arrival_ms 10_000
+
   defmodule GatewayStub do
     def ingest([message], opts) do
       send(Keyword.fetch!(opts, :agent_server), {:gateway_ingest, message, opts})
@@ -1161,9 +1166,9 @@ defmodule FermixChannels.Companion.ConnectionTest do
   defp send_line(socket, map), do: :ok = :gen_tcp.send(socket, Jason.encode!(map) <> "\n")
 
   defp recv(socket) do
-    {:ok, line} = :gen_tcp.recv(socket, 0, 2_000)
+    {:ok, line} = :gen_tcp.recv(socket, 0, @arrival_ms)
     Jason.decode!(line)
   end
 
-  defp closed?(socket), do: :gen_tcp.recv(socket, 0, 2_000) == {:error, :closed}
+  defp closed?(socket), do: :gen_tcp.recv(socket, 0, @arrival_ms) == {:error, :closed}
 end

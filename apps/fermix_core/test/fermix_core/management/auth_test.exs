@@ -21,6 +21,10 @@ defmodule FermixCore.Management.AuthTest do
 
   # What the ChatGPT sign-in answers once plan usage is granted.
   @signed_in %{account: "owner@example.com", plan_usage: :on}
+
+  # A refresh's arrival at its plug on a loaded runner: it takes the profile
+  # lockfile and reads the auth file first, behind every other test's files.
+  @arrival_ms 10_000
   @kept_model {:ok, %{model: "gpt-test", changed?: false}}
 
   setup context do
@@ -519,7 +523,7 @@ defmodule FermixCore.Management.AuthTest do
       )
 
       refresh = Task.async(fn -> TokenManager.refresh(name) end)
-      assert_receive {:in_flight, plug_pid}
+      assert_receive {:in_flight, plug_pid}, @arrival_ms
 
       forget = fn profile ->
         send(owner, :deleting)
@@ -541,7 +545,7 @@ defmodule FermixCore.Management.AuthTest do
           )
         end)
 
-      assert_receive :deleting
+      assert_receive :deleting, @arrival_ms
       refute_receive :deleted, 300
 
       send(plug_pid, :release)
