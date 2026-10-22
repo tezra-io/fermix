@@ -435,6 +435,28 @@ class ImageTest(unittest.TestCase):
         self.assertIn(f'fetch-verified.sh "${{{build_arg}}}"', stages[1])
         self.assertIn(f'"$installed" != "${{{build_arg}}}"', stages[2])
 
+    def test_the_build_unpacks_fermix_for_the_agent_so_no_two_first_runs_race(self) -> None:
+        # The fermix binary unpacks its runtime into the user's home on its
+        # first run, with no lock, so a second fermix started meanwhile reads
+        # half-written files: on every first boot the boot hook's setup and a
+        # session's `fermix status` start together.
+        stage = (KIT / "fermix.dockerfile").read_text().split("\nFROM ")[-1]
+        steps = [line for line in stage.splitlines() if re.match(r"(RUN|USER) ", line)]
+        unpack = next((i for i, line in enumerate(steps) if re.match(r"RUN fermix\b", line)), None)
+        install = next(i for i, line in enumerate(steps) if "dpkg -i" in line)
+
+        self.assertIsNotNone(unpack)
+        self.assertLess(install, unpack)
+        self.assertEqual([line for line in steps[:unpack] if line.startswith("USER ")][-1], "USER agent")
+
+    def test_the_image_carries_no_fermix_home(self) -> None:
+        # Any fermix run writes a web secret_key_base into a new home; baked
+        # into a public image, every sandbox would sign with the same key.
+        dockerfile = (KIT / "fermix.dockerfile").read_text()
+        unpack = re.search(r"^RUN fermix\b(?:.*\\\n)*.*$", dockerfile, re.M).group(0)
+
+        self.assertIn('rmdir "$HOME/.fermix"', unpack)
+
     def test_the_relay_gets_the_sandbox_proxy_and_the_boot_hook_does_not(self) -> None:
         kit = (KIT / "fermix.yaml").read_text()
         startups = re.findall(
