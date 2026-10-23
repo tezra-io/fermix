@@ -217,7 +217,9 @@ defmodule FermixCore.Cues.SweeperTest do
     test "runs every step in chunks when driven by hand", ctx do
       insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref]})
       :ok = accept(ctx, Enum.map(1..5, &"e#{&1}"), @t0)
-      server = start_sweeper(ctx, chunk: 2)
+      # A clock that never moves: on the real one a busy runner spends the
+      # 250 ms budget before the last steps run (the next test covers it).
+      server = start_sweeper(ctx, chunk: 2, monotonic_ms: fn -> 0 end)
 
       assert {:ok, counts} = Sweeper.sweep(server, later(@t0, 7, 1))
       assert counts.expire_lifetime == 5
