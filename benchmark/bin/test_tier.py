@@ -7,7 +7,7 @@
 
 Every assertion goes through `tier.sh --print`, which renders the argv the tier
 would exec instead of execing it: no daemon, no network, no spend. The judge's
-Anthropic credential is exercised with ANTHROPIC_API_KEY exported, and with a stub
+OpenAI credential is exercised with EVAL_JUDGE_API_KEY exported, and with a stub
 `security` first on PATH that answers (or not) for the one keychain item tier.sh
 may read, so no test ever reads the real keychain. Run: `uv run bin/test_tier.py`."""
 from __future__ import annotations
@@ -27,17 +27,18 @@ BENCH = os.path.dirname(HERE)
 CONTROLLED = ("ANTHROPIC_API_KEY", "EVAL_JUDGE_API_KEY", "CONFIRM_DAEMON_ISOLATED",
               "CONFIRM_ISOLATED_ENV", "CONFIRM_COST", "STUB_KEYCHAIN_KEY",
               "STUB_SECURITY_LOG")
-KEYCHAIN_ITEM = "fermix:ANTHROPIC_API_KEY"
+KEYCHAIN_ITEM = "fermix:OPENAI_API_KEY"
 KEYCHAIN_SOURCE = f"<keychain {KEYCHAIN_ITEM}>"
 # An invented key: it may reach the runner's environment, never any output.
-INVENTED_KEY = "invented-anthropic-key-5c1e"
+INVENTED_KEY = "invented-openai-key-5c1e"
+JUDGE_KEY = "EVAL_JUDGE_API_KEY"
 
-# Holds exactly one item, the daemon's Anthropic key, and answers for it only when
-# the test sets STUB_KEYCHAIN_KEY; every lookup is logged when STUB_SECURITY_LOG is set.
+# Holds exactly one item, the daemon's OpenAI key, and answers for it only when the
+# test sets STUB_KEYCHAIN_KEY; every lookup is logged when STUB_SECURITY_LOG is set.
 SECURITY_STUB = """#!/bin/sh
 [ -z "${STUB_SECURITY_LOG:-}" ] || printf '%s\\n' "$*" >> "$STUB_SECURITY_LOG"
 if [ -n "${STUB_KEYCHAIN_KEY:-}" ] && \\
-   [ "$*" = "find-generic-password -s fermix:ANTHROPIC_API_KEY -a fermix -w" ]; then
+   [ "$*" = "find-generic-password -s fermix:OPENAI_API_KEY -a fermix -w" ]; then
   printf '%s\\n' "$STUB_KEYCHAIN_KEY"; exit 0
 fi
 exit 44
@@ -69,7 +70,7 @@ def plan(tier, stub_path, **env_overrides):
     assert p.returncode == 0, p.stderr
     lines = p.stdout.strip().split("\n")
     judge = None
-    if lines and lines[0].startswith("ANTHROPIC_API_KEY="):
+    if lines and lines[0].startswith(f"{JUDGE_KEY}="):
         judge = lines[0].split("=", 1)[1]
         lines = lines[1:]
     return judge, lines
@@ -80,14 +81,14 @@ def plan(tier, stub_path, **env_overrides):
 # silent drift here is a tier that stops measuring what its name claims.
 
 def test_regression_runs_the_host_safe_core_judged_suite(stub_path):
-    judge, argv = plan("regression", stub_path, ANTHROPIC_API_KEY=INVENTED_KEY)
+    judge, argv = plan("regression", stub_path, EVAL_JUDGE_API_KEY=INVENTED_KEY)
     assert argv == ["uv", "run", "bin/run_eval.py", "--tag", "host-safe-core",
                     "--judge", "--fail-retries", "2"]
     assert judge == "<environment>"
 
 
 def test_behavioral_isolated_carries_both_attestations(stub_path):
-    _judge, argv = plan("behavioral-isolated", stub_path, ANTHROPIC_API_KEY=INVENTED_KEY)
+    _judge, argv = plan("behavioral-isolated", stub_path, EVAL_JUDGE_API_KEY=INVENTED_KEY)
     assert argv == ["uv", "run", "bin/run_eval.py", "--profile", "isolated_mutation",
                     "--all", "--judge", "--fail-retries", "2",
                     "--confirm-daemon-isolated", "--confirm-isolated-env"]
@@ -121,7 +122,7 @@ def test_capability_grants_are_independent(stub_path):
 
 
 def test_capability_judged_binarizes_the_taste_axis_at_half(stub_path):
-    judge, argv = plan("capability-judged", stub_path, ANTHROPIC_API_KEY=INVENTED_KEY)
+    judge, argv = plan("capability-judged", stub_path, EVAL_JUDGE_API_KEY=INVENTED_KEY)
     assert argv == ["uv", "run", "bin/run_capability.py", "--suite",
                     "cap_response_quality", "--trials", "5", "--judge",
                     "--threshold", "0.5"]
@@ -135,16 +136,16 @@ def test_capability_readonly_selects_only_the_read_only_suites(stub_path):
     assert judge is None
 
 
-# --- the judge's Anthropic credential ----------------------------------------
+# --- the judge's OpenAI credential -------------------------------------------
 
 def test_the_judge_key_value_is_never_printed(stub_path):
-    for env in ({"ANTHROPIC_API_KEY": INVENTED_KEY}, {"STUB_KEYCHAIN_KEY": INVENTED_KEY}):
+    for env in ({JUDGE_KEY: INVENTED_KEY}, {"STUB_KEYCHAIN_KEY": INVENTED_KEY}):
         p = run_print("regression", stub_path, **env)
         assert p.returncode == 0, p.stderr
         assert INVENTED_KEY not in p.stdout + p.stderr
 
 
-def test_the_keychain_item_is_the_daemons_anthropic_key(stub_path, tmp_path):
+def test_the_keychain_item_is_the_daemons_openai_key(stub_path, tmp_path):
     log = tmp_path / "security.log"
     judge, _argv = plan("regression", stub_path, STUB_KEYCHAIN_KEY=INVENTED_KEY,
                         STUB_SECURITY_LOG=str(log))
@@ -155,26 +156,27 @@ def test_the_keychain_item_is_the_daemons_anthropic_key(stub_path, tmp_path):
 
 def test_an_exported_key_wins_and_the_keychain_is_not_read(stub_path, tmp_path):
     log = tmp_path / "security.log"
-    judge, _argv = plan("regression", stub_path, ANTHROPIC_API_KEY=INVENTED_KEY,
+    judge, _argv = plan("regression", stub_path, EVAL_JUDGE_API_KEY=INVENTED_KEY,
                         STUB_KEYCHAIN_KEY="another-invented-key", STUB_SECURITY_LOG=str(log))
     assert judge == "<environment>"
     assert not log.exists()
 
 
 def test_an_unanswered_keychain_leaves_the_judge_key_unset(stub_path):
-    # Not fatal here: the SDK may still find an `ant auth login` profile (or the
-    # eval box's federation profile), and the runner's judge precondition refuses
-    # the run with a sentence when nothing resolves.
+    # Not fatal here: the runner's judge precondition refuses the run with
+    # "openai judge needs EVAL_JUDGE_API_KEY" when nothing resolves.
     judge, argv = plan("regression", stub_path)
     assert judge == "<unset>"
     assert argv[:3] == ["uv", "run", "bin/run_eval.py"]
 
 
-def test_the_retired_openai_judge_key_is_not_resolved(stub_path):
-    p = run_print("regression", stub_path, EVAL_JUDGE_API_KEY=INVENTED_KEY)
+def test_the_anthropic_key_is_not_the_judges(stub_path):
+    # The Claude judge's credential is no longer resolved: an exported Anthropic
+    # key neither feeds the judge nor is named for it.
+    p = run_print("regression", stub_path, ANTHROPIC_API_KEY=INVENTED_KEY)
     assert p.returncode == 0, p.stderr
-    assert p.stdout.splitlines()[0] == "ANTHROPIC_API_KEY=<unset>"
-    assert "EVAL_JUDGE_API_KEY" not in p.stdout + p.stderr
+    assert p.stdout.splitlines()[0] == f"{JUDGE_KEY}=<unset>"
+    assert "ANTHROPIC" not in p.stdout + p.stderr
 
 
 @pytest.mark.parametrize("tier", ["capability", "capability-readonly"])
@@ -190,7 +192,7 @@ def test_the_keychain_key_reaches_the_runner_and_no_output(stub_path, tmp_path):
     # The real exec path, with a stub `uv` recording the environment it was given.
     seen = tmp_path / "runner-env"
     uv = tmp_path / "uv"
-    uv.write_text(f'#!/bin/sh\nprintf "%s" "${{ANTHROPIC_API_KEY:-}}" > "{seen}"\n')
+    uv.write_text(f'#!/bin/sh\nprintf "%s" "${{EVAL_JUDGE_API_KEY:-}}" > "{seen}"\n')
     uv.chmod(0o755)
     p = run_print(None, str(tmp_path) + os.pathsep + stub_path, args=["regression"],
                   STUB_KEYCHAIN_KEY=INVENTED_KEY)
@@ -288,7 +290,7 @@ def test_a_failed_private_sync_starts_nothing(tmp_path, stub_path):
 
 
 def test_capability_private_runs_the_holdout_judged(stub_path):
-    judge, argv = plan("capability-private", stub_path, ANTHROPIC_API_KEY=INVENTED_KEY,
+    judge, argv = plan("capability-private", stub_path, EVAL_JUDGE_API_KEY=INVENTED_KEY,
                        CONFIRM_DAEMON_ISOLATED="1", CONFIRM_ISOLATED_ENV="1",
                        CONFIRM_COST="1")
     assert judge == "<environment>"

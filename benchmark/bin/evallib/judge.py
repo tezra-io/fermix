@@ -463,11 +463,25 @@ def _model_key(model: str) -> str:
     return _MODEL_DATE_SUFFIX.sub("", key)
 
 
+def same_model(a: str, b: str) -> bool:
+    """Whether two model ids name one model, spelled with or without a vendor
+    prefix, a release date or a different case."""
+    return _model_key(a) == _model_key(b)
+
+
+def separation_error(judge_model: str, candidate_model: str) -> str | None:
+    """The sentence refusing a judge that is the candidate, or None."""
+    if not same_model(judge_model, candidate_model):
+        return None
+    return (f"judge model {judge_model!r} matches candidate model {candidate_model!r}; "
+            "the judge must differ from the candidate: set judge.model to another model")
+
+
 def _same_model_error(route: dict, candidates: list[dict]) -> str | None:
-    judge_key = _model_key(route["model"])
-    if any(_model_key(candidate["model"]) == judge_key for candidate in candidates):
-        return (f"judge model {route['model']!r} matches candidate actual model; "
-                "configure a different judge_model")
+    for candidate in candidates:
+        error = separation_error(route["model"], candidate["model"])
+        if error:
+            return error
     return None
 
 
@@ -803,11 +817,15 @@ _PREFLIGHT_DATA = {
 
 
 def preflight(cfg) -> tuple[str | None, JudgeResult]:
-    """One real verdict through the configured Claude judge, exactly as a tier
-    would send it: (the credential source the SDK selected, the result)."""
-    if cfg.judge.backend != "anthropic":
-        return None, _failure(str(cfg.judge.backend),
-                              "the judge preflight checks the anthropic backend only")
+    """One real verdict through the configured judge, exactly as a tier would send
+    it: (the credential source it used, the result)."""
+    backend = cfg.judge.backend
+    if backend == "openai":
+        source = "EVAL_JUDGE_API_KEY" if os.environ.get("EVAL_JUDGE_API_KEY") else None
+        return source, _judge_openai(cfg, _PREFLIGHT_DATA, [], None)
+    if backend != "anthropic":
+        return None, _failure(str(backend), "the judge preflight checks the anthropic "
+                                            "and openai backends only")
     source, response, failure = _anthropic_exchange(cfg, _PREFLIGHT_DATA, None)
     return source, failure or _anthropic_verdict(response, [], None)
 

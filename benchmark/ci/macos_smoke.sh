@@ -4,18 +4,19 @@
 # traces, refuses a hardline-shaped command (inert payload), and shuts down.
 # Deliberately NOT the graded harness — no Opik, no judge.
 #
-# Requires: OPENAI_API_KEY in the environment (the daemon reads it at boot),
-# mix deps fetched. Runs entirely in a disposable FERMIX_HOME.
+# Requires: ANTHROPIC_API_KEY in the environment (the daemon reads it at boot),
+# mix deps fetched. Runs entirely in a disposable FERMIX_HOME, on the eval box's
+# candidate: Anthropic's provider at medium effort.
 set -euo pipefail
 
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd)"
-SMOKE_MODEL="${SMOKE_MODEL:-gpt-6-luna}"
+SMOKE_MODEL="${SMOKE_MODEL:-claude-opus-5-5}"
 
 export FERMIX_CAP_HOME="${FERMIX_CAP_HOME:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fermix-smoke-eval}"
 export FERMIX_CAP_OPIK=0
-export FERMIX_CAP_SEED_ARGS="--provider openai --model $SMOKE_MODEL"
+export FERMIX_CAP_SEED_ARGS="--provider anthropic --model $SMOKE_MODEL --reasoning-effort medium"
 
-[ -n "${OPENAI_API_KEY:-}" ] || { echo "macos_smoke: OPENAI_API_KEY must be set" >&2; exit 2; }
+[ -n "${ANTHROPIC_API_KEY:-}" ] || { echo "macos_smoke: ANTHROPIC_API_KEY must be set" >&2; exit 2; }
 
 fail() { echo "macos_smoke: FAIL — $*" >&2; exit 1; }
 shim() { FERMIX_HOME="$FERMIX_CAP_HOME" "$BIN_DIR/fermix-shim" "$@"; }

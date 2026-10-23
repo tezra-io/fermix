@@ -20,6 +20,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -652,20 +653,23 @@ def test_anthropic_judge_requires_a_model(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("name", ["config.yaml", "behavioral_config.yaml"])
-def test_both_runner_configs_judge_with_claude_away_from_the_candidate(monkeypatch, name):
+def test_both_runner_configs_judge_with_openai_away_from_the_candidate(monkeypatch, name):
     # run_eval.py loads behavioral_config.yaml and run_capability.py config.yaml;
-    # both tiers sign in to the same judge, and it must never be the candidate
-    # the eval box runs (eval-box.yml's `model` default).
+    # both tiers use the same judge, and it must never be the candidate the eval
+    # box runs (eval-box.yml's `model` input default).
     monkeypatch.delenv("EVAL_JUDGE_BACKEND", raising=False)
     monkeypatch.delenv("EVAL_JUDGE_MODEL", raising=False)
     skill_dir = os.path.dirname(HERE)
     cfg = config.load(skill_dir, os.path.join(skill_dir, name))
-    assert (cfg.judge.backend, cfg.judge.model) == ("anthropic", "claude-opus-5-5")
+    assert (cfg.judge.backend, cfg.judge.model) == ("openai", "gpt-6-luna")
     workflow = pathlib.Path(skill_dir).parent / ".github" / "workflows" / "eval-box.yml"
     # The scheduled tiers (workflow_call) and a direct dispatch run one candidate.
-    candidates = re.findall(r"default: (gpt-[\w.-]+)", workflow.read_text())
-    assert candidates == ["gpt-6-luna", "gpt-6-luna"]
-    assert judge._model_key(candidates[0]) != judge._model_key(cfg.judge.model)
+    # PyYAML reads the bare key `on` as the boolean True.
+    triggers = yaml.safe_load(workflow.read_text())[True]
+    candidates = [triggers[kind]["inputs"]["model"]["default"]
+                  for kind in ("workflow_call", "workflow_dispatch")]
+    assert candidates == ["claude-opus-5-5", "claude-opus-5-5"]
+    assert not judge.same_model(candidates[0], cfg.judge.model)
 
 
 def test_behavioral_config_rejects_non_finite_budget(tmp_path):
@@ -735,8 +739,8 @@ def test_behavioral_config_defaults_to_the_dev_daemon(monkeypatch):
     cfg = config.load(os.path.dirname(HERE), config_path)
     assert cfg.daemon.fermix_home == os.path.expanduser("~/.fermix-dev")
     assert cfg.opik.project == "fermix-dev"
-    assert cfg.judge.backend == "anthropic"
-    assert cfg.judge.model == "claude-opus-5-5"
+    assert cfg.judge.backend == "openai"
+    assert cfg.judge.model == "gpt-6-luna"
 
 
 def test_daemon_sandbox_requires_strict_eval_scoped_workspace(tmp_path):
