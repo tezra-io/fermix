@@ -1,4 +1,4 @@
-{"type":"server_hello","min_version":2,"max_version":3}
+{"type":"server_hello","min_version":3,"max_version":4}
 {"type":"accepted","client_msg_id":"mac-1","duplicate":false}
 {"type":"row","profile_id":"main","server_seq":12,"role":"user","text":"What is on my calendar today?","ts":"2026-09-25T09:00:00Z","client_msg_id":"mac-1","media_refs":[]}
 {"type":"accepted","client_msg_id":"mac-1","duplicate":true,"server_seq":13}
@@ -32,10 +32,19 @@
 {"type":"search_results","profile_id":"main","query":"dentist","hits":[{"server_seq":88,"role":"user","ts":"2026-09-24T09:15:00Z","excerpt":"book the dentist for Friday","ranges":[{"start":9,"length":7}]}],"next_before_seq":88}
 {"type":"media_path","ref":"9879f6d3c9efefe8c4f4aabe9d3269762264be52794e96f62ab8ffa53b7fadec","path":"/Users/me/.fermix/companion/media/9879f6d3c9efefe8c4f4aabe9d3269762264be52794e96f62ab8ffa53b7fadec.ogg","kind":"audio","mime":"audio/ogg","size_bytes":48213,"sha256":"9879f6d3c9efefe8c4f4aabe9d3269762264be52794e96f62ab8ffa53b7fadec"}
 {"type":"media_missing","ref":"b2e10eb78e2f4ea1bd7de2a0600f76f45288aba1b29a6cffbc3ef63b8240771c"}
+{"type":"proposal","profile_id":"main","proposal":{"proposal_id":"cpr_4f1c2a9b7e3d5a60c8b1f2e3","state":"waiting","mandate":"release-issues","tool":"github_create_issue","task":{"job_id":"release_issues","name":"release issues"},"watcher":"release-watch","source_ref":"eng-blogs","created_at":"2026-10-10T12:00:00Z","expires_at":"2026-10-10T12:30:00Z","received_at":"2026-10-10T11:59:00Z","status_sentence":"Waiting for your answer; it runs only if you confirm.","summary":"A task wants to run github_create_issue under your mandate release-issues. It runs only if you confirm.","outside":{"args_text":"{\n  \"labels\": [\n    \"cue\"\n  ],\n  \"owner\": \"example-org\",\n  \"repo\": \"ops\",\n  \"title\": \"Phoenix 2.0\"\n}","cue":{"type":"release","subject":"phoenix","text":"Phoenix 2.0 is out.","occurred_at":"2026-10-10T11:58:30Z"}}}}
+{"type":"proposal","profile_id":"main","proposal":{"proposal_id":"cpr_9a0b1c2d3e4f5a6b7c8d9e0f","state":"waiting","mandate":"release-issues","tool":"github_create_issue","task":{"job_id":"release_issues"},"created_at":"2026-10-09T08:00:00Z","expires_at":"2026-10-10T08:00:00Z","status_sentence":"Waiting for your answer; it runs only if you confirm.","summary":"A task wants to run github_create_issue under your mandate release-issues. It runs only if you confirm.","outside":{"args_text":"{\n  \"owner\": \"example-org\",\n  \"repo\": \"ops\",\n  \"title\": \"Phoenix 1.9\"\n}"}}}
+{"type":"accepted","client_msg_id":"mac-10","duplicate":false}
+{"type":"proposal_resolved","profile_id":"main","proposal_id":"cpr_4f1c2a9b7e3d5a60c8b1f2e3","state":"confirmed","result_status":"ok","sentence":"Confirmed. github_create_issue ran.","result_text":"{\"number\":42}"}
+{"type":"proposal_resolved","profile_id":"main","proposal_id":"cpr_9a0b1c2d3e4f5a6b7c8d9e0f","state":"denied","sentence":"Denied. github_create_issue will not run."}
+{"type":"proposal_resolved","profile_id":"main","proposal_id":"cpr_0e1d2c3b4a5f6e7d8c9b0a1f","state":"refused","sentence":"Not run: the validator refused it.","result_text":"Only issues in the ops repository."}
+{"type":"proposal_resolved","profile_id":"main","proposal_id":"cpr_7b6a5f4e3d2c1b0a9f8e7d6c","state":"expired","sentence":"That proposal expired; nothing ran."}
 {"type":"error","reason":"handshake_required"}
-{"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":4,"min_version":2,"max_version":3}
+{"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":5,"min_version":3,"max_version":4}
 {"type":"error","reason":"client_message_conflict","client_msg_id":"mac-2"}
 {"type":"error","reason":"invalid_field","field":"limit"}
 {"type":"error","reason":"request_failed","message":":timeout","client_msg_id":"mac-4"}
 {"type":"error","reason":"max_clients_reached"}
 {"type":"error","reason":"request_failed","message":"{:media_copy_failed, :enospc}","ref":"586f997a42496291b5d9295745b229ab0754319579aaa610e689d5b25060646c"}
+{"type":"error","reason":"request_failed","message":"That call was already confirmed; it runs at most once.","client_msg_id":"mac-10"}
+{"type":"error","reason":"request_failed","message":"Only the owner can answer a proposal, from the Fermix app or a paired phone.","client_msg_id":"mac-11"}

@@ -1,6 +1,14 @@
 defmodule FermixCore.Jobs.Registry do
   @moduledoc """
   Durable registry for scheduled job definitions and their memory sources.
+
+  A job that runs on cues (M60 §9.1, a watcher's task) has `schedule_kind` and
+  `schedule_expr` `"cue"`, no `next_run_at` and no `expires_at`. Only
+  `create_cue_job/2` makes one: `Schedule.parse/2` has no word for it, so no
+  model can type one into `schedule_job` or `update_job`. Its schedule never
+  changes, it never runs now by hand, and its runs start from cues
+  (`Jobs.Scheduler`'s cue admission), never from the due scan, which never
+  sees a job with neither a next run nor an expiry.
   """
 
   alias FermixCore.Agents.IterationLimits
@@ -10,21 +18,59 @@ defmodule FermixCore.Jobs.Registry do
 
   @default_agent_id "main"
 
+  @cue_kind "cue"
+  @cue_summary "runs on cues"
+  @cue_default_timeout_seconds 600
+  @cue_max_timeout_seconds 1_800
+  @reaching_delivery_modes ["origin", "channel"]
+
+  @cue_no_schedule "A job that runs on cues has no schedule of its own."
+  @cue_no_expiry "A job that runs on cues cannot expire."
+  @cue_timeout_cap "A job that runs on cues may run for at most 30 minutes."
+  @cue_must_report "A watcher's task must reach you: pick where it reports."
+  @cue_schedule_fixed "This job runs on cues; its schedule cannot change."
+  @cue_no_run_now "This job runs on cues."
+  @cue_no_policy "A job that runs on cues uses the cue surface; it takes no capability policy."
+
   @spec create_job(map(), keyword()) :: {:ok, Repo.scheduled_job_row()} | {:error, term()}
   def create_job(attrs, opts \\ []) when is_map(attrs) and is_list(opts) do
     now = Keyword.get(opts, :now, DateTime.utc_now())
 
-    with {:ok, normalized} <- normalize_create_attrs(attrs, now),
-         {:ok, job} <-
-           Repo.create_job_with_source(
-             job_attrs(normalized),
-             source_attrs(normalized),
-             repo_opts(opts)
-           ) do
-      notify_scheduler(opts)
-      {:ok, job}
-    else
-      {:error, reason} -> {:error, reason}
+    with {:ok, normalized} <- normalize_create_attrs(attrs, now) do
+      insert_job(normalized, opts)
+    end
+  end
+
+  @doc """
+  Create a job that runs on cues, for `manage_watcher` (M60 §9.1, §9.5). It
+  takes the attributes `create_job/2` takes, except that a `schedule`,
+  `timezone`, `expires_at` or `capability_policy` (its surface is
+  `Jobs.CueSurface`'s alone) is refused, `timeout_seconds` defaults to 10
+  minutes and is refused above 30, and the delivery must reach the owner: a
+  `delivery_mode` of `"origin"` or `"channel"` with its resolved
+  `delivery_target` (the caller resolves and checks it, as `schedule_job` does
+  through `Jobs.DeliveryDefaults`). Each refusal is a sentence for the owner.
+  """
+  @spec create_cue_job(map(), keyword()) :: {:ok, Repo.scheduled_job_row()} | {:error, term()}
+  def create_cue_job(attrs, opts \\ []) when is_map(attrs) and is_list(opts) do
+    with {:ok, normalized} <- normalize_cue_attrs(attrs) do
+      insert_job(normalized, opts)
+    end
+  end
+
+  @doc "Whether `job` runs on cues rather than on a schedule of its own."
+  @spec cue_job?(map()) :: boolean()
+  def cue_job?(%{schedule_kind: @cue_kind}), do: true
+  def cue_job?(job) when is_map(job), do: false
+
+  @doc """
+  For `run_job_now`: a job that runs on cues never runs now by hand, because a
+  run of it is the run of one cue. `{:error, :not_found}` for an unknown id.
+  """
+  @spec check_run_now(String.t(), keyword()) :: :ok | {:error, term()}
+  def check_run_now(id, opts \\ []) when is_binary(id) and is_list(opts) do
+    with {:ok, job} <- Repo.get_scheduled_job(id, repo_opts(opts)) do
+      if cue_job?(job), do: {:error, @cue_no_run_now}, else: :ok
     end
   end
 
@@ -64,6 +110,7 @@ defmodule FermixCore.Jobs.Registry do
     now = Keyword.get(opts, :now, DateTime.utc_now())
 
     with {:ok, job} <- Repo.get_scheduled_job(id, repo_opts(opts)),
+         :ok <- check_cue_update(job, attrs),
          {:ok, job_patch, source_patch} <- normalize_update_attrs(job, attrs, now) do
       apply_job_update(job, job_patch, source_patch, now, opts)
     end
@@ -89,6 +136,44 @@ defmodule FermixCore.Jobs.Registry do
   def list_memory_sources(opts \\ []) when is_list(opts) do
     Repo.list_memory_sources(memory_source_selector(opts), repo_opts(opts))
   end
+
+  defp insert_job(normalized, opts) do
+    with {:ok, job} <-
+           Repo.create_job_with_source(
+             job_attrs(normalized),
+             source_attrs(normalized),
+             repo_opts(opts)
+           ) do
+      notify_scheduler(opts)
+      {:ok, job}
+    end
+  end
+
+  # A job that runs on cues keeps no schedule of its own, keeps reaching the
+  # owner and keeps the cue surface (M60 §8.8, §9.1, §9.3, §9.5). Every other
+  # job passes untouched here.
+  defp check_cue_update(%{schedule_kind: @cue_kind}, attrs) do
+    cond do
+      Enum.any?([:schedule, :timezone, :expires_at], &given?(attrs, &1)) ->
+        {:error, @cue_schedule_fixed}
+
+      policy_given?(attrs) ->
+        {:error, @cue_no_policy}
+
+      given?(attrs, :delivery_mode) and not reaches_owner?(attrs) ->
+        {:error, @cue_must_report}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp check_cue_update(_job, _attrs), do: :ok
+
+  defp given?(attrs, key), do: fetch_field(attrs, key) not in [nil, ""]
+
+  # An empty list names no policy.
+  defp policy_given?(attrs), do: fetch_field(attrs, :capability_policy) not in [nil, "", []]
 
   # Pause and resume write only the columns they own (enabled, state, and
   # resume's next_run_at), never a whole row from an earlier read: a run's
@@ -175,6 +260,9 @@ defmodule FermixCore.Jobs.Registry do
     end
   end
 
+  # Its runs start from cues, never from a time, so a resume arms no next run.
+  defp next_run_at_for_resume(%{schedule_kind: @cue_kind}, _now), do: {:ok, nil}
+
   defp next_run_at_for_resume(%{schedule_kind: "once"} = job, now) do
     with :ok <- ensure_not_expired(job, now),
          {:ok, parsed} <- Schedule.parse(job.schedule_expr, timezone: job.timezone, now: now) do
@@ -235,44 +323,121 @@ defmodule FermixCore.Jobs.Registry do
 
     with {:ok, parsed} <- Schedule.parse(schedule_expr, timezone: timezone, now: now),
          {:ok, expires_at} <- optional_future_datetime(attrs, :expires_at, now) do
-      id = optional_string(attrs, :id, nil) || generate_job_id(name)
-      memory_source_id = "job:#{id}"
-
       {:ok,
-       %{
-         id: id,
-         name: name,
-         description: optional_string(attrs, :description, nil),
+       attrs
+       |> normalized_job(name, task_prompt)
+       |> Map.merge(%{
          schedule: parsed,
          timezone: timezone,
-         task_prompt: task_prompt,
-         skill_name: optional_string(attrs, :skill_name, nil),
-         session_mode: optional_string(attrs, :session_mode, "isolated"),
-         provider: optional_string(attrs, :provider, nil),
-         model: optional_string(attrs, :model, nil),
-         max_iterations:
-           optional_integer(attrs, :max_iterations, IterationLimits.scheduled_job_default()),
          timeout_seconds: optional_integer(attrs, :timeout_seconds, nil),
-         inactivity_timeout_seconds: optional_integer(attrs, :inactivity_timeout_seconds, nil),
-         capability_policy: list_of_strings(attrs, :capability_policy, []),
-         allowed_tools: list_of_strings(attrs, :allowed_tools, []),
-         memory_source_id: memory_source_id,
-         memory_read_scopes: list_of_strings(attrs, :memory_read_scopes, ["job:self"]),
-         memory_write_scope: optional_string(attrs, :memory_write_scope, "job:self"),
-         main_visible?: optional_boolean(attrs, :main_visible?, true),
          delivery_mode: optional_string(attrs, :delivery_mode, "none"),
-         delivery_target: optional_map(attrs, :delivery_target, nil),
-         silent_marker: optional_string(attrs, :silent_marker, "[SILENT]"),
-         created_by_agent_id: optional_string(attrs, :created_by_agent_id, @default_agent_id),
-         created_by_session_id: optional_string(attrs, :created_by_session_id, nil),
-         created_by_channel: optional_string(attrs, :created_by_channel, nil),
-         created_by_trust: required_trust(attrs),
          expires_at: expires_at
-       }}
+       })}
     end
   rescue
     _error in KeyError -> {:error, :missing_required_job_field}
     error in ArgumentError -> {:error, Exception.message(error)}
+  end
+
+  defp normalize_cue_attrs(attrs) do
+    name = required_string(attrs, :name)
+    task_prompt = required_string(attrs, :task_prompt, fallback: :task)
+
+    with :ok <- refuse_given(attrs, [:schedule, :timezone], @cue_no_schedule),
+         :ok <- refuse_given(attrs, [:expires_at], @cue_no_expiry),
+         :ok <- refuse_policy(attrs),
+         {:ok, timeout_seconds} <- cue_timeout_seconds(attrs),
+         {:ok, delivery_mode} <- cue_delivery_mode(attrs) do
+      {:ok,
+       attrs
+       |> normalized_job(name, task_prompt)
+       |> Map.merge(%{
+         schedule: cue_schedule(),
+         timezone: "UTC",
+         timeout_seconds: timeout_seconds,
+         delivery_mode: delivery_mode,
+         expires_at: nil
+       })}
+    end
+  rescue
+    _error in KeyError -> {:error, :missing_required_job_field}
+    error in ArgumentError -> {:error, Exception.message(error)}
+  end
+
+  # The fields every kind of job takes the same way; the schedule, timezone,
+  # timeout, delivery mode and expiry are each kind's own.
+  defp normalized_job(attrs, name, task_prompt) do
+    id = optional_string(attrs, :id, nil) || generate_job_id(name)
+
+    %{
+      id: id,
+      name: name,
+      description: optional_string(attrs, :description, nil),
+      task_prompt: task_prompt,
+      skill_name: optional_string(attrs, :skill_name, nil),
+      session_mode: optional_string(attrs, :session_mode, "isolated"),
+      provider: optional_string(attrs, :provider, nil),
+      model: optional_string(attrs, :model, nil),
+      max_iterations:
+        optional_integer(attrs, :max_iterations, IterationLimits.scheduled_job_default()),
+      inactivity_timeout_seconds: optional_integer(attrs, :inactivity_timeout_seconds, nil),
+      capability_policy: list_of_strings(attrs, :capability_policy, []),
+      allowed_tools: list_of_strings(attrs, :allowed_tools, []),
+      memory_source_id: "job:#{id}",
+      memory_read_scopes: list_of_strings(attrs, :memory_read_scopes, ["job:self"]),
+      memory_write_scope: optional_string(attrs, :memory_write_scope, "job:self"),
+      main_visible?: optional_boolean(attrs, :main_visible?, true),
+      delivery_target: optional_map(attrs, :delivery_target, nil),
+      silent_marker: optional_string(attrs, :silent_marker, "[SILENT]"),
+      created_by_agent_id: optional_string(attrs, :created_by_agent_id, @default_agent_id),
+      created_by_session_id: optional_string(attrs, :created_by_session_id, nil),
+      created_by_channel: optional_string(attrs, :created_by_channel, nil),
+      created_by_trust: required_trust(attrs)
+    }
+  end
+
+  # What a job that runs on cues stores where a schedule goes: an expression the
+  # parser has no word for, and no next run.
+  defp cue_schedule do
+    %{kind: @cue_kind, expr: @cue_kind, timezone: "UTC", next_run_at: nil, summary: @cue_summary}
+  end
+
+  defp refuse_given(attrs, keys, sentence) do
+    if Enum.any?(keys, &given?(attrs, &1)), do: {:error, sentence}, else: :ok
+  end
+
+  defp refuse_policy(attrs),
+    do: if(policy_given?(attrs), do: {:error, @cue_no_policy}, else: :ok)
+
+  # The watchdog bounds the agent loop only; start-up and delivery add about
+  # three minutes on top (M60 §9.1).
+  defp cue_timeout_seconds(attrs) do
+    case optional_integer(attrs, :timeout_seconds, @cue_default_timeout_seconds) do
+      seconds when seconds > @cue_max_timeout_seconds ->
+        {:error, @cue_timeout_cap}
+
+      seconds when seconds > 0 ->
+        {:ok, seconds}
+
+      seconds ->
+        raise ArgumentError, "expected :timeout_seconds to be positive, got: #{seconds}"
+    end
+  end
+
+  defp cue_delivery_mode(attrs) do
+    if reaches_owner?(attrs),
+      do: {:ok, fetch_field(attrs, :delivery_mode)},
+      else: {:error, @cue_must_report}
+  end
+
+  # A cue run's reply is the only way the owner hears of it, so the task must
+  # report to a chat with a resolved target (M60 §9.5); `none` and `local` are
+  # silent.
+  defp reaches_owner?(attrs) do
+    target = fetch_field(attrs, :delivery_target)
+
+    fetch_field(attrs, :delivery_mode) in @reaching_delivery_modes and is_map(target) and
+      map_size(target) > 0
   end
 
   defp job_attrs(normalized) do

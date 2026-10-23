@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Quillmere Engineering</title>
+  <id>urn:uuid:5c1e0d1a-6f3b-4c55-9a51-0d7f6e2a9b14</id>
+  <updated>2026-10-13T09:30:00Z</updated>
+  <link rel="self" href="https://eng.example.com/atom.xml"/>
+  <author><name>Quillmere Staff</name></author>
+  <entry>
+    <title type="html">Sharding the &lt;em&gt;ledger&lt;/em&gt;</title>
+    <id>tag:eng.example.com,2026:sharding-ledger</id>
+    <link rel="self" href="https://eng.example.com/api/entries/sharding-ledger"/>
+    <link rel="alternate" type="text/html" href="/posts/sharding-ledger"/>
+    <published>2026-10-13T09:30:00+02:00</published>
+    <updated>2026-10-13T11:00:00+02:00</updated>
+    <author><name>Rafael Imbert</name></author>
+    <category term="databases"/>
+    <category term="scaling" label="Scaling"/>
+    <summary type="html">&lt;p&gt;How we split &lt;code&gt;ledger&lt;/code&gt; across four nodes.&lt;/p&gt;</summary>
+  </entry>
+  <entry>
+    <title>Queue depth alerts &lt; 5 minutes</title>
+    <id>tag:eng.example.com,2026:queue-alerts</id>
+    <link href="https://eng.example.com/posts/queue-alerts"/>
+    <updated>2026-10-10T16:45:12.250Z</updated>
+    <content type="xhtml">
+      <div xmlns="http://www.w3.org/1999/xhtml"><p>Alerts now fire within <strong>five</strong> minutes.</p><p>Thresholds are per queue.</p></div>
+    </content>
+  </entry>
+</feed>

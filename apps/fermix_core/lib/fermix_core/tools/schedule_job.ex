@@ -176,7 +176,7 @@ defmodule FermixCore.Tools.ScheduleJob do
       }
 
       case Registry.create_job(attrs, repo: Support.repo(context)) do
-        {:ok, job} -> Support.success_json(Support.job_payload(job))
+        {:ok, job} -> Support.success_json(Support.job_payload(job, Support.repo(context)))
         {:error, reason} -> Support.error(reason)
       end
     else

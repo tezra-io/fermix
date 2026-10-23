@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Broken feed</title>
+    <item>
+      <title>An item that never closes</title>
+      <link>https://broken.example.org/a</link>
+  </channel>
+</rss>

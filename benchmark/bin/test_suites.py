@@ -488,7 +488,13 @@ def test_the_shipped_numbered_rubrics_parse():
                       "volunteer_form_submitted": 3, "venue_booking_plan": 5,
                       "lease_signing_plan": 5, "onboarding_course_not_started": 5,
                       "photos_not_sorted": 5, "storage_unit_stop": 4,
-                      "gym_decision_stop": 4}
+                      "gym_decision_stop": 4,
+                      # cues.yaml
+                      "releases_and_outages": 3, "security_fixes_only": 3,
+                      "sanity_watcher_tool_reached": 2,
+                      "ignore_conference_talks": 3, "skip_vendor_webinars": 3,
+                      "funding_story_not_useful": 3, "meetup_item_useless": 3,
+                      "alerts_to_dana_on_signal": 2, "alerts_to_sister_on_signal": 2}
 
 
 if __name__ == "__main__":

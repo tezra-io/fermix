@@ -52,7 +52,7 @@ defmodule FermixCore.Tools.PauseJob do
   defp do_execute(args, context) do
     with {:ok, job_id} <- Support.required_string(args, "job_id") do
       case Registry.pause_job(job_id, repo: Support.repo(context)) do
-        {:ok, job} -> Support.success_json(Support.job_payload(job))
+        {:ok, job} -> Support.success_json(Support.job_payload(job, Support.repo(context)))
         {:error, reason} -> Support.error(reason)
       end
     else

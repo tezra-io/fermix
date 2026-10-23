@@ -853,6 +853,31 @@ server on an ephemeral port, binds one token, and prints every page's URL plus
 the `state` endpoint, so a page can be opened by hand and its recorded state read
 back. No run uses it.
 
+### Cues and watchers (M60, development builds)
+
+Cues are opt-in, because they add `manage_watcher` and `list_cues` to every owner
+turn of every suite: seed with `--cues` and `seed_capability_home.py` writes the
+door on a free port of its own, the local-push sources with their tokens in the
+`@file` store and the default filter model (the scored model; `--cue-filter-model
+PROVIDER/MODEL` names a cheaper one), and `capability-daemon.sh up` then runs
+`seed_cues.exs` before the daemon starts, which makes the watchers and their
+tasks. Both cue suites declare `requires: [cues]`, so on a home seeded without it
+they are held out as NOT EVALUATED, never scored. The behavioural suite `cues`
+(`drive: companion`, isolated) is selected by `make behavioral-isolated`. The
+capability suite `cap_cues` (`drive: cue`: the runner posts cues to the door and a
+checker grades the rows) is parked under `candidates/`; its two mandate cases
+also need `--cue-mandates`, which adds the stub ticket plugin to every turn of the
+home, and are held out without it:
+
+```sh
+FERMIX_CAP_SEED_ARGS="--cues --cue-mandates" bin/capability-daemon.sh up
+uv run bin/run_capability.py --candidates --suite cap_cues --trials 3 \
+  --confirm-daemon-isolated --confirm-isolated-env
+FERMIX_EVAL_HOME=~/.fermix-capability-eval uv run bin/run_eval.py --suite cues \
+  --profile isolated_mutation --judge --confirm-daemon-isolated --confirm-isolated-env
+bin/capability-daemon.sh down
+```
+
 ---
 
 ## 5e. Configuration arms (`make arms`)

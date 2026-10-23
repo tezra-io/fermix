@@ -19,6 +19,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.ComputerHistory.InstalledApps
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.SidecarInstaller
+  alias FermixCore.Cues
   alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Harness.Vendors, as: HarnessVendors
   alias FermixCore.IMessage
@@ -63,6 +64,8 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
   alias FermixWebWeb.SetupLive.Components
+  alias FermixWebWeb.SetupLive.CuesState
+  alias FermixWebWeb.SetupLive.Phone
 
   # Computer use is a core feature, not a plugin whose branding we receive, so its
   # card name + logo are owned here. The SVG is inlined as a data URI at compile
@@ -230,10 +233,16 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:resource_picker, nil)
       |> assign(:computer_history_picker, nil)
       |> assign(:meetings_config_open?, false)
+      |> assign(:phone, Phone.initial())
       |> assign_report(report)
 
     {:ok, socket}
   end
+
+  # A pairing window this page still shows is cancelled when the page goes away
+  # (the tab closed or the socket dropped).
+  @impl true
+  def terminate(_reason, socket), do: Phone.terminate(socket)
 
   defp setup_authorization(session) do
     session["setup_authorized"] || session[:setup_authorized]
@@ -242,7 +251,12 @@ defmodule FermixWebWeb.SetupLive do
   @impl true
   def handle_event("select_tab", %{"tab" => tab_id}, socket) do
     active_tab = if tab_known?(tab_id), do: tab_id, else: socket.assigns.active_tab
-    {:noreply, assign(socket, :active_tab, active_tab) |> assign(:saved_flash, nil)}
+
+    {:noreply,
+     socket
+     |> assign(:active_tab, active_tab)
+     |> assign(:saved_flash, nil)
+     |> refresh_cues_on(active_tab)}
   end
 
   def handle_event("next_step", _params, socket) do
@@ -417,7 +431,19 @@ defmodule FermixWebWeb.SetupLive do
 
   def handle_event("select_channel", %{"channel" => channel}, socket) do
     channel = parse_channel_field(channel, socket.assigns.channels_form.editing)
-    {:noreply, assign(socket, :channels_form, %{socket.assigns.channels_form | editing: channel})}
+    socket = assign(socket, :channels_form, %{socket.assigns.channels_form | editing: channel})
+
+    # The Phone card reads the phone channel only while it is the one shown.
+    {:noreply, if(channel == :mobile, do: Phone.load(socket), else: socket)}
+  end
+
+  # The Phone card's events. A settings write refreshes the report, so the card,
+  # the banner and the restart notice follow it, and keeps the Phone card shown.
+  def handle_event("phone_" <> _rest = event, params, socket) do
+    case Phone.handle_event(event, params, socket) do
+      {socket, nil} -> {:noreply, socket}
+      {socket, write} -> {:noreply, refresh_after_phone_write(socket, write)}
+    end
   end
 
   def handle_event("search_changed", %{"search_form" => params}, socket) do
@@ -866,6 +892,17 @@ defmodule FermixWebWeb.SetupLive do
      )}
   end
 
+  # The Cues tab (M60 §15): `CuesState` turns each `cues_*` event into a
+  # change and says what follows. A build that does not admit cues has no tab
+  # and no state, so its events are refused.
+  def handle_event("cues_" <> _action, _params, %{assigns: %{cues: nil}} = socket),
+    do: {:noreply, flash_error(socket, "Cues are not part of this build.")}
+
+  def handle_event("cues_" <> action, params, socket) do
+    result = CuesState.handle(action, params, socket.assigns.cues, cues_opts())
+    {:noreply, apply_cues(socket, result)}
+  end
+
   # The one action offered while the settings file has changed outside this
   # VM. It re-reads the file, applies it, and re-records the baseline, which
   # is what clears the refusal; an unreadable file is never offered it,
@@ -958,6 +995,10 @@ defmodule FermixWebWeb.SetupLive do
   def handle_info({:DOWN, ref, :process, _pid, reason}, socket) do
     {:noreply, fail_task(socket, ref, reason)}
   end
+
+  def handle_info({phone_read, _gen} = message, socket)
+      when phone_read in [:phone_poll, :phone_reach],
+      do: {:noreply, Phone.handle_info(message, socket)}
 
   def handle_info(:perform_restart, socket) do
     # Supervised release only (gated in apply_restart): exit non-zero so the OS
@@ -1105,6 +1146,7 @@ defmodule FermixWebWeb.SetupLive do
       active_tab={@active_tab}
       embed?={@embed?}
       channels_form={@channels_form}
+      phone={@phone}
       doctor_result={@doctor_result}
       memory_form={@memory_form}
       personalization_form={@personalization_form}
@@ -1151,6 +1193,7 @@ defmodule FermixWebWeb.SetupLive do
       skill_summary={@skill_summary}
       tabs={@tabs}
       tool_summary={@tool_summary}
+      cues={@cues}
     />
     """
   end
@@ -1189,7 +1232,7 @@ defmodule FermixWebWeb.SetupLive do
 
     socket
     |> assign(:report, report)
-    |> assign(:tabs, @tabs)
+    |> assign(:tabs, tabs())
     |> assign_config_banner()
     |> assign(:provider_form, provider_form)
     |> assign_model_sources(provider_form)
@@ -1211,7 +1254,48 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:tool_summary, tool_summary())
     |> assign(:skill_summary, skill_summary())
     |> assign(:plugin_summary, plugin_summary(snapshot))
+    |> assign(:cues, build_cues(snapshot))
   end
+
+  # --- cues (M60 §15) ---
+
+  # Built with every report, so a save in any tab leaves it current; nil in a
+  # build that does not admit cues.
+  defp build_cues(snapshot) do
+    if Cues.available?(), do: CuesState.build(snapshot, cues_opts())
+  end
+
+  # Opening the tab re-reads what the daemon reports (the door, source rows).
+  defp refresh_cues_on(socket, "cues"),
+    do: assign(socket, :cues, build_cues(socket.assigns.report.wizard.config_snapshot))
+
+  defp refresh_cues_on(socket, _tab), do: socket
+
+  defp apply_cues(socket, {:edit, cues}), do: assign(socket, :cues, cues)
+  defp apply_cues(socket, :refresh), do: refresh_cues_on(socket, "cues")
+
+  # A save re-reads the report (so the section, and any sentinel the change
+  # wrote, come from the daemon), then shows a value meant to be seen once.
+  defp apply_cues(socket, {:saved, message, opts}) do
+    restart? = Keyword.get(opts, :restart?, false)
+
+    socket
+    |> assign(:restart_pending?, socket.assigns.restart_pending? or restart?)
+    |> refresh_report(message, restart_required?: restart?)
+    |> put_cues_reveal(Keyword.get(opts, :reveal))
+  end
+
+  defp apply_cues(socket, {:error, reason, cues}),
+    do: socket |> assign(:cues, cues) |> save_refused(reason)
+
+  defp put_cues_reveal(socket, nil), do: socket
+
+  defp put_cues_reveal(%{assigns: %{cues: cues}} = socket, reveal) when is_map(cues),
+    do: assign(socket, :cues, %{cues | reveal: reveal})
+
+  # The tab's seams for a LiveView test (`:repo`, `:door`, `:now`,
+  # `:mandate_opts`); production reads the daemon's own.
+  defp cues_opts, do: Application.get_env(:fermix_web, :cues_pane_opts, [])
 
   defp assign_config_banner(socket),
     do: assign(socket, :config_banner, config_banner_state(RestartState.config_state()))
@@ -1225,6 +1309,18 @@ defmodule FermixWebWeb.SetupLive do
   # reload re-runs the read that failed, so the button would be a loop.
   defp config_banner_state({:config_unreadable, sentence}),
     do: %{message: sentence, action: nil}
+
+  # After a Phone card write: the card, the banner and the restart notice follow
+  # the new settings, and the Phone card stays the one shown.
+  defp refresh_after_phone_write(socket, write) do
+    editing = socket.assigns.channels_form.editing
+    restart? = get_in(write, ["restart", "required"]) == true
+    socket = assign_report(socket, Wizard.report())
+
+    socket
+    |> assign(:channels_form, %{socket.assigns.channels_form | editing: editing})
+    |> assign(:restart_pending?, socket.assigns.restart_pending? or restart?)
+  end
 
   defp save_answers(socket, answers, message, nav, opts \\ []) do
     socket.assigns.report.wizard
@@ -1308,6 +1404,9 @@ defmodule FermixWebWeb.SetupLive do
   # reported success, so the operator saw a stored key and the runtime had none.
   defp format_config_error({:secret_store_failed, _key, sentence}) when is_binary(sentence),
     do: sentence
+
+  # A cue setting the config refused, with its own sentence (M60 §15).
+  defp format_config_error({:invalid, sentence}) when is_binary(sentence), do: sentence
 
   defp format_config_error(reason), do: Redaction.format(reason)
 
@@ -1755,6 +1854,7 @@ defmodule FermixWebWeb.SetupLive do
       signal: signal_form(channels),
       imessage: imessage_form(channels),
       acp: acp_form(channels),
+      mobile: mobile_form(channels),
       imessage_available?: imessage_available?()
     }
   end
@@ -1831,6 +1931,13 @@ defmodule FermixWebWeb.SetupLive do
   # actually running rather than offering to turn off something already on.
   defp acp_form(channels) do
     %{enabled: channel_enabled?(Keyword.get(channels, :acp, []), true)}
+  end
+
+  # The card's pill only; the Phone panel reads the channel itself
+  # (`FermixWebWeb.SetupLive.Phone`). Off unless the block says on, as the
+  # `channels.mobile` switch row reads it.
+  defp mobile_form(channels) do
+    %{enabled: channel_enabled?(Keyword.get(channels, :mobile, []), false)}
   end
 
   defp build_sandbox_form(snapshot) do
@@ -4123,6 +4230,7 @@ defmodule FermixWebWeb.SetupLive do
   defp parse_channel_field("signal", _default), do: :signal
   defp parse_channel_field("imessage", _default), do: :imessage
   defp parse_channel_field("acp", _default), do: :acp
+  defp parse_channel_field("mobile", _default), do: :mobile
   defp parse_channel_field(_, default), do: default
 
   defp parse_effort_field(field, default) do
@@ -4342,7 +4450,10 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
-  defp tab_known?(tab_id), do: Enum.any?(@tabs, &(&1.id == tab_id))
+  # The Cues tab exists only in a build that admits cues (M60 §15).
+  defp tabs, do: CuesState.visible_tabs(@tabs, Cues.available?())
+
+  defp tab_known?(tab_id), do: Enum.any?(tabs(), &(&1.id == tab_id))
 
   # Honor an explicit `?tab=` only when it names a real tab; otherwise fall
   # through to next_action_tab. Lets apply_restart return the operator to the
@@ -4354,7 +4465,7 @@ defmodule FermixWebWeb.SetupLive do
   defp requested_tab(_params), do: nil
 
   defp next_action_tab(report) do
-    Enum.find_value(@tabs, "provider", fn tab ->
+    Enum.find_value(tabs(), "provider", fn tab ->
       if tab_status(tab, report) == :partial, do: tab.id
     end)
   end
@@ -4363,10 +4474,11 @@ defmodule FermixWebWeb.SetupLive do
   defp previous_tab(tab_id), do: adjacent_tab(tab_id, -1)
 
   defp adjacent_tab(tab_id, delta) do
-    index = Enum.find_index(@tabs, &(&1.id == tab_id)) || 0
+    tabs = tabs()
+    index = Enum.find_index(tabs, &(&1.id == tab_id)) || 0
     next_index = index + delta
-    next_index = max(0, min(next_index, length(@tabs) - 1))
-    Enum.at(@tabs, next_index).id
+    next_index = max(0, min(next_index, length(tabs) - 1))
+    Enum.at(tabs, next_index).id
   end
 
   defp tab_status(%{component: nil}, _report), do: :ready

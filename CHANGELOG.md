@@ -8,6 +8,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Pair a phone from the browser setup.** The Channels tab has a Phone card,
+  with the same steps as the Phone row in the Mac and Linux apps: it turns the
+  phone channel on where it is off, shows a code to scan with the Fermix phone
+  app (or the pairing link, behind "Can't scan the code?"), then the six
+  digits to compare before you Approve or Deny. Change… lists your paired
+  phones with Forget…, and holds Reach from anywhere and the advanced
+  settings. A code still open when you close the tab is cancelled, so it does
+  not wait out its two minutes.
 - **Fermix knows which Fermix it is, and the machine it runs on.** Every
   conversation with you, voice calls included, is now told whether this is
   the Mac app, a standalone install on a Mac, the Linux package (and whether the

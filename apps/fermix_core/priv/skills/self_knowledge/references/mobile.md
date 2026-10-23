@@ -11,16 +11,16 @@ On by default: an absent `[fermix_channels.mobile]` section, or one without `ena
 - the `channels.mobile` settings section: `enabled`, `iroh` (the "Reach from anywhere" row, see *Remote reach*), `port`, `bind` (`0.0.0.0` for every network, or one literal IP such as the Tailscale address; anything else is refused by name) and `advertise_mdns` (the "Announce on the local network" row, off by default). A write lands in `config.toml` at once. `enabled` is live: turning it on starts the channel and turning it off stops it, with no restart (turning it off drops connected phones and closes an open pairing code; paired phones stay paired). `iroh` is live too, within a running channel. `port`, `bind` and `advertise_mdns` are read when the channel starts, so a change to them takes a restart.
 - the `mobile.*` methods: `mobile.status`, the pairing session (`mobile.pair.start`, `mobile.pair.get`, `mobile.pair.decide`, `mobile.pair.cancel`) and paired devices (`mobile.devices.list`, `mobile.devices.revoke`).
 
-The Mac app's Phone row in its Channels settings is built on them: it turns the channel on and pairs a phone in one place. The Linux app has no Phone pane yet. On an app-managed Mac, enabling and pairing belong to the app, never the CLI. On a dev or Linux host, `fermix pair` finds a channel that is off, asks, turns it on and pairs, in one command. To turn it on without pairing, run `fermix settings set channels.mobile mobile_enabled=true`, or set
+The Mac app's and the Linux app's Phone rows in their Channels settings, and the browser setup's Phone card on its Channels tab, are built on them: each turns the channel on and pairs a phone in one place (a code to scan, the six digits to compare, **Approve** or **Deny**), lists the paired phones with **Forget…**, and carries Reach from anywhere and the advanced rows. On an app-managed Mac, enabling and pairing belong to the app, never the CLI. On a dev or Linux host, `fermix pair` finds a channel that is off, asks, turns it on and pairs, in one command. To turn it on without pairing, run `fermix settings set channels.mobile mobile_enabled=true`, or set
 
 ```toml
 [fermix_channels.mobile]
 enabled = true
 ```
 
-in `config.toml` and run `fermix settings reload`; neither needs a restart. The terminal wizard and browser setup have no mobile step or flag.
+in `config.toml` and run `fermix settings reload`; neither needs a restart. The terminal wizard has no mobile step or flag.
 
-**Only the owner pairs or forgets a phone.** Starting, deciding or cancelling a pairing and revoking a phone are taken only from a process the daemon places as the owner's own (the app, or a command typed in a terminal). One Fermix started itself (an agent's shell command, a coding run, a scheduled job), a detached one, or one it cannot place is refused with "Only the owner can pair or forget a phone; run this from your own terminal." So never run `fermix pair` or `fermix devices revoke` through `shell`; tell the owner to. Reading the status, the session and the phone list stays open.
+**Only the owner pairs or forgets a phone.** Starting, deciding or cancelling a pairing and revoking a phone come from the apps, the owner's browser setup session, or a command the daemon places as typed in the owner's terminal. A command Fermix started itself (an agent's shell command, a coding run, a scheduled job), a detached one, or one it cannot place is refused with "Only the owner can pair or forget a phone; run this from your own terminal." So never run `fermix pair` or `fermix devices revoke` through `shell`; tell the owner to. Reading the status, the session and the phone list stays open.
 
 Hand-edit only: `streaming` (draft streaming is the default) and `max_media_bytes`. `media_store_max_bytes` sets the media retention budget (2 GiB by default).
 

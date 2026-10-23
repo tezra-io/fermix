@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<!DOCTYPE rss SYSTEM "file://__TARGET__">
+<rss version="2.0">
+  <channel>
+    <title>External DTD probe</title>
+    <item>
+      <title>&marker;</title>
+      <guid>xxe-dtd-1</guid>
+    </item>
+  </channel>
+</rss>

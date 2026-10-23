@@ -15,7 +15,15 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.Redaction
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
+  alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Cues.Mandates
+  alias FermixCore.Cues.ProposalView
   alias FermixCore.Management.Copy
+  alias FermixCore.Management.Cues, as: ManagementCues
+  alias FermixCore.Management.Cues.MandateRow, as: CueMandateRow
+  alias FermixCore.Management.Cues.SourceForm, as: CueSourceForm
+  alias FermixCore.Management.Cues.SourceRow, as: CueSourceRow
+  alias FermixCore.Management.Cues.WatcherRow, as: CueWatcherRow
   alias FermixCore.Management.Doctor.Remediation
   alias FermixCore.Management.McpServers.Row, as: McpRow
   alias FermixCore.Management.Mobile
@@ -352,6 +360,115 @@ defmodule FermixCore.Management.CopyTest do
   # reading them out of the source cannot go stale the way a list beside it
   # would. Docs are skipped; an interpolated fragment is not a whole sentence
   # and does not reach this set.
+  # The cue surface (M60 app surface §3): every sentence a row, the form, a gap
+  # or a refusal answers, walked out of the producers with what each one names
+  # (a source's ref, a host, a tool) declared as data.
+  describe "the cue copy" do
+    test "every source row sentence and label obeys the rules" do
+      rows = cue_source_rows()
+
+      assert length(rows) >= 30
+
+      for {row, names} <- rows do
+        where = "cue source #{row["ref"]} #{row["state"]}"
+
+        assert_clean(row["status_sentence"], :prose, names, "#{where} status")
+        assert_clean(row["label"], :name, names, "#{where} label")
+
+        for secret <- row["secrets"],
+            do: assert_clean(secret["label"], :name, [], "#{where} secret")
+      end
+    end
+
+    test "every watcher and mandate row sentence obeys the rules" do
+      for row <- cue_watcher_rows() do
+        assert_clean(row["status_sentence"], :prose, [], "cue watcher #{row["state"]}")
+      end
+
+      for row <- cue_mandate_rows() do
+        where = "cue mandate #{row["status_sentence"]}"
+        assert_clean(row["status_sentence"], :prose, [row["job"]["id"]], where)
+        assert_clean(row["consent_sentence"], :prose, [], where)
+        assert_clean(row["approval"]["detail"], :prose, [], where)
+      end
+    end
+
+    test "every form the daemon offers obeys the rules" do
+      forms =
+        for {kind, preset, verify} <- [
+              {nil, nil, nil},
+              {"stream", nil, nil},
+              {"local_push", nil, nil},
+              {"webhook", nil, "hmac"},
+              {"webhook", nil, "shared_secret"},
+              {"webhook", nil, "standard_webhooks"},
+              {nil, "github", nil},
+              {nil, "bluesky_jetstream", nil},
+              {nil, "rss", nil}
+            ] do
+          {:ok, form} = CueSourceForm.form(kind, preset, verify)
+          form
+        end
+
+      for form <- forms do
+        assert_clean(form["consent_sentence"], :prose, [], "cue form consent")
+        Enum.each(form["notes"], &assert_clean(&1, :prose, [], "cue form note"))
+
+        for kind <- form["kinds"] do
+          assert_clean(kind["label"], :name, [], "cue kind label")
+          assert_clean(kind["sentence"], :prose, [], "cue kind sentence")
+        end
+
+        Enum.each(form["presets"], &assert_clean(&1["label"], :name, [], "cue preset label"))
+
+        for row <- form["rows"] do
+          assert_clean(row["label"], :name, [], "cue form row #{row["key"]}")
+          assert_clean(row["footer"], :prose, [], "cue form footer #{row["key"]}")
+          Enum.each(row["options"], &assert_clean(&1["label"], :name, [], "cue form option"))
+        end
+      end
+    end
+
+    test "every gap and refused-request sentence obeys the rules" do
+      for reason <- ~w(disconnect inbox_full rate_limited budget expired stale identity_conflict
+                       watcher_removed read_limit page_limit backfill_limit),
+          count <- [1, 12] do
+        assert_clean(ManagementCues.gap_sentence(count, reason), :prose, [], "gap #{reason}")
+      end
+
+      for reason <- ~w(unauthorized rate_limited busy too_large malformed unsupported_media_type
+                       timeout unavailable invalid stale over_budget elsewhere) do
+        assert_clean(
+          ManagementCues.rejected_sentence(3, reason),
+          :prose,
+          [],
+          "rejected #{reason}"
+        )
+      end
+    end
+
+    # Lane E2's sentences, which reach the app through the proposal methods and
+    # the approve-mode load check: written in core, rendered verbatim here.
+    test "every proposal and reach sentence obeys the rules" do
+      sentences = [
+        Mandates.approve_inbox_sentence(),
+        "Fermix has no proposal with that id; nothing ran.",
+        "Fermix recorded your answer but could not read the proposal back.",
+        "Not run: Fermix could not finish checking it.",
+        ManagementCues.memory_off_sentence(),
+        ManagementCues.unavailable_sentence(),
+        ManagementCues.owner_only_sentence()
+      ]
+
+      for sentence <- sentences, do: assert_clean(sentence, :prose, [], "cue sentence")
+
+      for row <- cue_proposal_rows() do
+        record = ProposalView.record(row)
+        assert_clean(record.status_sentence, :prose, [row.tool], "proposal #{row.state}")
+      end
+    end
+  end
+
   describe "the sentences the management modules write" do
     test "every one obeys the rules" do
       for {file, sentence} <- source_sentences() do
@@ -582,6 +699,158 @@ defmodule FermixCore.Management.CopyTest do
     }
 
     [nil, grant, %{grant | state: :expired}, %{grant | wanted_scopes: ["admin"]}]
+  end
+
+  defp cue_source_rows do
+    cues =
+      CuesConfig.normalize(%{
+        "sources" => %{
+          "eng-blogs" => %{"preset" => "rss", "url" => "https://example.org/feed.xml"},
+          "bsky" => %{"preset" => "bluesky_jetstream", "dids" => ["did:plc:abc"]},
+          "gh-hooks" => %{"preset" => "github", "secret" => "@keyring"},
+          "gh-new" => %{"preset" => "github", "path_secret" => "@keyring"},
+          "shared" => %{
+            "kind" => "webhook",
+            "verify" => "shared_secret",
+            "header" => "X-Token",
+            "id" => "content_hash"
+          },
+          "home-alerts" => %{"kind" => "local_push", "token" => "@keyring"},
+          "new-alerts" => %{"kind" => "local_push"}
+        }
+      })
+
+    statuses = ~w(idle polling connected reconnecting auth_failed over_budget stopped unavailable)
+
+    facts = [
+      %{row: nil, running?: false, cues_on?: false, memory?: false},
+      %{row: nil, running?: false, cues_on?: false, memory?: true},
+      %{row: nil, running?: false, cues_on?: true, memory?: true},
+      %{row: nil, running?: true, cues_on?: true, memory?: true}
+      | Enum.map(statuses, fn status ->
+          %{
+            row: %{status: status, last_accepted_at: ~U[2026-10-17 10:00:00Z]},
+            running?: true,
+            cues_on?: true,
+            memory?: true
+          }
+        end)
+    ]
+
+    for source <- CuesConfig.sources(cues),
+        variant <- [source, %{source | enabled?: false}],
+        fact <- facts do
+      row = CueSourceRow.build(variant, Map.merge(fact, %{summary: nil, window_s: 86_400}))
+      {row, [source.ref, "example.org"]}
+    end
+  end
+
+  defp cue_watcher_rows do
+    base = %{
+      id: "cwt_1",
+      name: "release-watch",
+      enabled?: true,
+      filter: "llm",
+      filter_provider: nil,
+      filter_model: nil,
+      held?: false,
+      waiting: 12,
+      passed: 3,
+      dropped: 41,
+      acted: 2,
+      failed: 0,
+      sources: ["eng-blogs"],
+      task_job_id: "job_1",
+      task_name: "Release watch",
+      task_paused?: false,
+      task_notes?: false,
+      daily_cap: 0,
+      filter_budget: 0,
+      instruction_count: 1,
+      created_at: nil
+    }
+
+    for watcher <- [
+          base,
+          %{base | enabled?: false},
+          %{base | held?: true},
+          %{base | held?: true, waiting: 1},
+          %{base | filter: "none"}
+        ],
+        default? <- [true, false] do
+      CueWatcherRow.build(watcher, %{default_model?: default?, window_s: 86_400})
+    end
+  end
+
+  defp cue_mandate_rows do
+    mandate = %Mandates{
+      name: "release-issues",
+      job: "job_1",
+      mode: :approve,
+      tools: ["github_create_issue"],
+      read_tools: [],
+      approve_within_s: 1_800,
+      max_cue_age_s: 900
+    }
+
+    status = fn state ->
+      {:ok,
+       %{
+         name: "release-issues",
+         state: state,
+         approved_at: nil,
+         approved_from: nil,
+         disabled_at: nil,
+         disabled_reason: nil,
+         detail: nil
+       }}
+    end
+
+    approvals =
+      Enum.map(~w(unapproved approved changed disabled)a, status) ++
+        [{:error, :memory_off}, {:error, :timeout}]
+
+    for variant <- [
+          mandate,
+          %{mandate | mode: :auto},
+          %{mandate | enabled?: false},
+          %{mandate | status: {:inactive, "Job job_1 does not exist."}}
+        ],
+        approval <- approvals do
+      CueMandateRow.build(%{mandate: variant, approval: approval}, %{
+        counts: %{},
+        window_s: 86_400
+      })
+    end
+  end
+
+  defp cue_proposal_rows do
+    base = %{
+      id: "cpr_1",
+      mandate: "release-issues",
+      tool: "github_create_issue",
+      job_id: "job_1",
+      job_name: "Release watch",
+      watcher: "release-watch",
+      source_ref: "eng-blogs",
+      created_at: ~U[2026-10-17 11:50:00Z],
+      expires_at: ~U[2026-10-17 12:20:00Z],
+      decided_at: nil,
+      decided_from: nil,
+      result_status: nil
+    }
+
+    [
+      Map.put(base, :state, "waiting"),
+      Map.merge(base, %{state: "confirmed", decided_from: "management"}),
+      Map.merge(base, %{state: "confirmed", result_status: "ok"}),
+      Map.merge(base, %{state: "confirmed", result_status: "unknown"}),
+      Map.merge(base, %{state: "confirmed", result_status: "error"}),
+      Map.put(base, :state, "denied"),
+      Map.put(base, :state, "expired"),
+      Map.put(base, :state, "refused"),
+      Map.merge(base, %{state: "refused", decided_from: "companion"})
+    ]
   end
 
   defp mcp_presence(server, stored?) do

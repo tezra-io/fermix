@@ -129,7 +129,7 @@ defmodule FermixCore.Management.SettingsTest do
     end
 
     test "every pane a section names is a pane the app routes to" do
-      panes = ~w(providers personality memory channels voice meetings computer coding
+      panes = ~w(providers personality memory channels cues voice meetings computer coding
                  search images sandbox browser secrets)
 
       for section <- Settings.sections() do

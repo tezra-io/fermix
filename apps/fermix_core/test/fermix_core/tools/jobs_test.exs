@@ -3,6 +3,7 @@ defmodule FermixCore.Tools.JobsTest do
 
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Tools.GetJobRun
   alias FermixCore.Tools.ListJobRuns
@@ -1282,6 +1283,78 @@ defmodule FermixCore.Tools.JobsTest do
 
       assert {:ok, updated} = UpdateJob.execute(%{"job_id" => job_id, "task" => "Rain?"}, tainted)
       assert updated.success == true
+    end
+  end
+
+  # M60 §9.1, §15: a watcher's task is a job that runs on cues. The job tools
+  # show it with its label, never run it by hand and never give it a schedule.
+  describe "a job that runs on cues" do
+    setup %{context: context} do
+      {:ok, job} =
+        JobsRegistry.create_cue_job(
+          %{
+            created_by_trust: "operator",
+            name: "Release Notes Task",
+            task_prompt: "Tell me what changed in the release the cue names.",
+            delivery_mode: "origin",
+            delivery_target: %{"platform" => "telegram", "chat_id" => "chat-1"}
+          },
+          repo: context.memory_repo,
+          scheduler: nil
+        )
+
+      %{cue_job_id: job.id}
+    end
+
+    test "run_job_now refuses it before the scheduler is asked", %{
+      context: context,
+      cue_job_id: job_id
+    } do
+      context = Map.put(context, :scheduler, :no_scheduler_is_asked)
+
+      assert {:ok, refused} = RunJobNow.execute(%{"job_id" => job_id}, context)
+      assert refused.success == false
+      assert refused.error == "This job runs on cues."
+      assert {:ok, []} = Repo.list_job_runs(%{job_id: job_id}, server: context.memory_repo)
+    end
+
+    test "update_job refuses a schedule for it and leaves it unchanged", %{
+      context: context,
+      cue_job_id: job_id
+    } do
+      for schedule <- ["2099-05-03T12:00:00Z", "every 15 minutes"] do
+        assert {:ok, refused} =
+                 UpdateJob.execute(%{"job_id" => job_id, "schedule" => schedule}, context)
+
+        assert refused.success == false
+        assert refused.error == "This job runs on cues; its schedule cannot change."
+      end
+
+      assert {:ok, job} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
+      assert job.schedule_kind == "cue"
+      assert job.next_run_at == nil
+    end
+
+    test "list_jobs labels it, and only it, as running on cues", %{
+      context: context,
+      cue_job_id: job_id
+    } do
+      cron_job_id = seed_job(context, "Weather")
+
+      assert {:ok, listed} = ListJobs.execute(%{}, context)
+      jobs = Map.new(Jason.decode!(listed.output)["jobs"], &{&1["id"], &1})
+
+      assert jobs[job_id]["schedule_label"] == "runs on cues"
+      assert jobs[job_id]["next_run_at"] == nil
+      refute Map.has_key?(jobs[cron_job_id], "schedule_label")
+    end
+
+    test "resume_job puts it back with no next run", %{context: context, cue_job_id: job_id} do
+      assert {:ok, %{success: true}} = PauseJob.execute(%{"job_id" => job_id}, context)
+      assert {:ok, resumed} = ResumeJob.execute(%{"job_id" => job_id}, context)
+
+      assert %{"state" => "scheduled", "next_run_at" => nil, "schedule_kind" => "cue"} =
+               Jason.decode!(resumed.output)
     end
   end
 

@@ -187,7 +187,18 @@ defmodule FermixCore.Capabilities.Builtin do
       policy_class: :external_api,
       hidden_from_agent?: false,
       owner_only?: true
-    }
+    },
+    # Watchers (M60 §8): the owner's own settings for what reaches a task. A
+    # write, owner-only; the attended advertise?/execute gate and the consent
+    # turn (S6) are the hard barriers. Only seeded while cues are enabled.
+    "manage_watcher" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: true},
+    # What the watchers received and did (M60 §9.5): the owner's data, read-only,
+    # behind the same attended advertise?/execute gate; it relays cue text, so it
+    # taints the turn (UntrustedContent). Only seeded while cues are enabled.
+    "list_cues" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
+    # A cue run's own watcher's deliveries (M60 §9.10): offered and run only in a
+    # run a cue woke. Only seeded while cues are enabled.
+    "cue_history" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true}
   }
 
   @doc """

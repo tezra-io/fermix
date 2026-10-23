@@ -282,9 +282,16 @@ defmodule FermixCore.Tools.RequestDirectoryAccess do
   # label (a harness completion continuation is synthesized from a ledger row,
   # design §23.2) may well be a group, so the token line is suppressed whenever a
   # private button can carry the token instead. Only an explicit DM label prints it.
-  defp shared_chat?(chat_type) do
-    not (is_binary(chat_type) and chat_type in @dm_chat_types)
-  end
+  defp shared_chat?(chat_type), do: not private_chat?(chat_type)
+
+  @doc """
+  Whether `chat_type` is a direct-message label (Telegram `private`, Slack
+  `im`). Every other value is a shared chat, an absent one included (a Slack
+  channel mention carries none). The one allowlist for that question:
+  `Capabilities.AccessGate.owner_consent_turn?/1` asks it too.
+  """
+  @spec private_chat?(term()) :: boolean()
+  def private_chat?(chat_type), do: is_binary(chat_type) and chat_type in @dm_chat_types
 
   defp canonicalize(path) do
     path |> Path.expand() |> PathPolicy.canonical_path()

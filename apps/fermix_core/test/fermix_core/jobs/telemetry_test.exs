@@ -62,6 +62,30 @@ defmodule FermixCore.Jobs.TelemetryTest do
     refute Map.has_key?(metadata, :max_duration_ms)
   end
 
+  test "a cue run's bookends carry its watcher and delivery", %{job: job, run: run} do
+    cue_run = Map.merge(run, %{trigger: "cue", cue_delivery_id: 42, watcher_id: "cwt_abc"})
+
+    JobTelemetry.run_start(job, cue_run, %{prompt_snapshot: "Report it"})
+    JobTelemetry.run_complete(job, cue_run, %{response: "[SILENT]"})
+    JobTelemetry.run_error(job, cue_run, "error", "boom")
+
+    for event <- [:run_start, :run_complete, :run_error] do
+      assert_receive {:job_event, [:fermix, :job, ^event], _measurements, metadata}
+      assert metadata.trigger == "cue"
+      assert metadata.delivery_id == 42
+      assert metadata.watcher_id == "cwt_abc"
+      refute Map.has_key?(metadata, :cue_count)
+    end
+  end
+
+  test "a run with no cue carries neither key", %{job: job, run: run} do
+    JobTelemetry.run_start(job, Map.put(run, :cue_delivery_id, nil), %{prompt_snapshot: "x"})
+
+    assert_receive {:job_event, [:fermix, :job, :run_start], _measurements, metadata}
+    refute Map.has_key?(metadata, :delivery_id)
+    refute Map.has_key?(metadata, :watcher_id)
+  end
+
   test "run_start carries the run max duration for the exporter sweep bound", %{
     job: job,
     run: run

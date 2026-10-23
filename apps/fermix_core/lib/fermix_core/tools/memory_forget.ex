@@ -6,11 +6,15 @@ defmodule FermixCore.Tools.MemoryForget do
   MEMORY.md and every recall at once, instead of waiting for the background
   reviewer to notice it is unwanted. It is not erased — the row stays in SQLite,
   and the result says so.
+
+  In a run a cue woke it reaches only the task's own notes (`Cues.TaskNotes`,
+  M60 §9.10).
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Cues.TaskNotes
   alias FermixCore.Memory.LongTerm
   alias FermixCore.Tools.MemorySupport
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
@@ -85,6 +89,9 @@ defmodule FermixCore.Tools.MemoryForget do
 
     result
   end
+
+  # A cue run reaches only its task's own notes (M60 §9.10).
+  defp do_execute(args, %{trigger: "cue"} = context), do: TaskNotes.forget(args, context)
 
   defp do_execute(args, context) do
     case MemorySupport.parse_id(Map.get(args, "id")) do

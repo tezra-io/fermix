@@ -114,6 +114,84 @@ defmodule FermixCore.CommandRunnerTest do
     end
   end
 
+  # M60 §10.2: a mandate validator reads its one-line request on stdin and may
+  # read to end of file, so `:input` writes the request and closes stdin.
+  describe ":input" do
+    for supervised <- [true, false] do
+      test "the child reads the input to end of file (supervised: #{supervised})" do
+        cat = System.find_executable("cat") || "/bin/cat"
+
+        assert {:ok, %{exit: 0, stdout: "{\"allow\":true}\n"}} =
+                 CommandRunner.run(cat, [],
+                   input: "{\"allow\":true}\n",
+                   supervised: unquote(supervised),
+                   timeout_ms: 5_000
+                 )
+      end
+    end
+
+    test "the executable keeps its own arguments and a replaced environment", %{sh: sh} do
+      script = ~s(read line; echo "$1:$FERMIX_SUPPLIED:$line")
+
+      assert {:ok, %{exit: 0, stdout: out}} =
+               CommandRunner.run(sh, ["-c", script, "x", "a b"],
+                 input: "the request\n",
+                 env: [{"FERMIX_SUPPLIED", "yes"}, {"PATH", "/usr/bin:/bin"}],
+                 env_mode: :replace,
+                 timeout_ms: 5_000
+               )
+
+      assert out == "a b:yes:the request\n"
+    end
+
+    test "a missing executable is reported by its own path" do
+      path = "/no/such/validator-#{System.unique_integer([:positive])}"
+      assert {:error, {:executable_not_found, ^path}} = CommandRunner.run(path, [], input: "x")
+    end
+
+    test "a child that never reads still times out and is killed", %{sh: sh} do
+      assert {:error, {:timeout, 300}} =
+               CommandRunner.run(sh, ["-c", "sleep 5"], input: "ignored", timeout_ms: 300)
+    end
+
+    test "input that is not a binary, or larger than 1 MiB, is refused before any spawn",
+         %{sh: sh} do
+      assert_raise ArgumentError, ~r/:input/, fn ->
+        CommandRunner.run(sh, ["-c", "true"], input: %{"not" => "a binary"})
+      end
+
+      assert_raise ArgumentError, ~r/:input/, fn ->
+        CommandRunner.run(sh, ["-c", "true"], input: :binary.copy("x", 1_048_577))
+      end
+    end
+
+    test "stderr: :discard keeps standard error out of the captured output", %{sh: sh} do
+      script = ~s(read line; echo "early" 1>&2; echo "$line"; echo "late" 1>&2)
+
+      assert {:ok, %{exit: 0, stdout: "the answer\n"}} =
+               CommandRunner.run(sh, ["-c", script],
+                 input: "the answer\n",
+                 stderr: :discard,
+                 timeout_ms: 5_000
+               )
+
+      assert {:ok, %{exit: 0, stdout: merged}} =
+               CommandRunner.run(sh, ["-c", script], input: "the answer\n", timeout_ms: 5_000)
+
+      assert merged =~ "late"
+    end
+
+    test "stderr: :discard needs :input, and stderr takes only :stdout or :discard", %{sh: sh} do
+      assert_raise ArgumentError, ~r/:stderr/, fn ->
+        CommandRunner.run(sh, ["-c", "true"], stderr: :discard)
+      end
+
+      assert_raise ArgumentError, ~r/:stderr/, fn ->
+        CommandRunner.run(sh, ["-c", "true"], input: "x", stderr: :file)
+      end
+    end
+  end
+
   test "kills the OS child on timeout and returns :timeout", %{sh: sh} do
     marker =
       Path.join(System.tmp_dir!(), "fermix_runner_kill_#{System.unique_integer([:positive])}")

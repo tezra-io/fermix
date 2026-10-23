@@ -388,10 +388,16 @@ defmodule FermixChannels.Channels.Companion do
 
   defp push_delivered(:existing, _profile, _row, _opts), do: :ok
 
-  # A row the store deduplicated was previewed when it was written.
+  # A row the store deduplicated was previewed when it was written. A send that
+  # asks for no previews (every message a cue run causes, M60 §9.5) fetches
+  # nothing it names: the Mac app draws only the previews fetched here.
   defp preview_written(:created, profile, row, text, opts) do
-    links = ReplyBlocks.links(text, Keyword.get(opts, :blocks, []))
-    LinkPreviews.schedule(profile, row.server_seq, links, store: store())
+    if Keyword.get(opts, :link_previews) == false do
+      :ok
+    else
+      links = ReplyBlocks.links(text, Keyword.get(opts, :blocks, []))
+      LinkPreviews.schedule(profile, row.server_seq, links, store: store())
+    end
   end
 
   defp preview_written(:existing, _profile, _row, _text, _opts), do: :ok

@@ -21,25 +21,36 @@ defmodule FermixCore.Capabilities.UntrustedContent do
 
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Tools.GetJobRun
+  alias FermixCore.Tools.ListCues
   alias FermixCore.Tools.ListJobRuns
   alias FermixCore.Tools.SkillRun
 
-  @typedoc "Where outside content came from: a plugin, or one named tool."
-  @type outside_source :: {:plugin, String.t()} | {:tool, String.t()}
+  @typedoc """
+  Where outside content came from: a plugin, one named tool, or a cue source
+  (its `source_ref`). `outside_source/1` returns the first two from a tool's
+  result; a cue run's context arrives seeded with the third (M60 S2), so the run
+  is tainted from its first token. Every reader takes the label from the
+  second element, whatever the kind.
+  """
+  @type outside_source :: {:plugin, String.t()} | {:tool, String.t()} | {:cue, String.t()}
 
   # Tool categories whose result relays what a worker or a coding run read.
   @relaying_categories [:delegation, :harness]
 
   # Tools whose result relays what another run read, whatever their category: a
-  # skill's worker report, and a scheduled run's final response.
-  @relaying_modules [SkillRun, GetJobRun, ListJobRuns]
+  # skill's worker report, a scheduled run's final response, and what the cue
+  # sources sent and the watchers' tasks wrote (`list_cues`, M60 C16).
+  # `manage_watcher` is not one: it returns no outside text (M60 S13).
+  @relaying_modules [SkillRun, GetJobRun, ListJobRuns, ListCues]
 
   # Durable-memory `source_type` values whose stored value derives from an
   # external/attacker-controllable surface (a coding-harness run summarizes
   # untrusted repo/issue/web content, §10.3). A memory row carrying one of these
   # renders inside the untrusted-content frame instead of raw interpolation, so
   # the injection boundary covers recalled records, not just live tool output.
-  @untrusted_source_types ~w(coding_harness)
+  # A cue task's note (`Cues.TaskNotes`, M60 §9.10) was written by a run that
+  # read a cue, so it is framed on every path that returns it.
+  @untrusted_source_types ~w(coding_harness cue_task)
 
   @doc "Whether a capability's output is external/attacker-controllable content."
   @spec external?(Capability.t()) :: boolean()

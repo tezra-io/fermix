@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import yaml
 
-from . import companion, voice
+from . import companion, cue_drive, voice
 from .fixture_server import (FIXTURE_URL_PLACEHOLDER, case_uses_fixture,
                              clause_problems)
 from .rubric import numbered_requirements
@@ -22,15 +22,19 @@ from .scoring import MATCH_METHODS, _parse_number
 _SCORE_KEYS = {"match", "expected", "tolerance", "single"}
 _TOP_KEYS = {
     "suite", "title", "description", "risk", "confirm_cost", "defaults", "scenarios", "soft",
-    "abort_on_tool_error",
+    "abort_on_tool_error", "requires",
 }
+# What a suite may require of the eval home beyond the defaults (`requires:`). A
+# home seeded without it holds the suite's cases out as NOT EVALUATED, never as
+# zeros. `cues`: seeded with `seed_capability_home.py --cues` and seed_cues.exs.
+REQUIREMENTS = ("cues",)
 _DEFAULT_KEYS = {"timeout_ms", "judge", "expect"}
 _SCENARIO_KEYS = {"id", "title", "severity", "risk", "confirm_cost", "tags", "cases",
                   "sticky_gates"}
 _CASE_KEYS = {
     "id", "query", "turns", "expect", "rubric", "judge", "timeout_ms", "drive",
     "image", "images", "score", "checker", "requires_tools", "requires_tools_all",
-    "cross_session", "companion", "watch", "voice",
+    "cross_session", "companion", "watch", "voice", "cue",
 }
 _TURN_KEYS = {"query", "expect"}
 
@@ -81,8 +85,10 @@ EXPECT_SPEC: dict[str, tuple] = {
 
 # `ask` and `companion` run unattended; `telegram_operator` needs a human to
 # send the message, so it runs only with --operator; `voice` spends a paid voice
-# minute against a Grok-enabled eval daemon, so it runs only with --voice.
-DRIVES = ("ask", "companion", "telegram_operator", "voice")
+# minute against a Grok-enabled eval daemon, so it runs only with --voice; `cue`
+# posts cues to the eval daemon's door and is capability-tier only
+# (evallib/cue_drive.py).
+DRIVES = ("ask", "companion", "telegram_operator", "voice", "cue")
 OPERATOR_DRIVES = ("telegram_operator",)
 VOICE_DRIVES = ("voice",)
 
@@ -142,6 +148,8 @@ class Case:
     #   around the message (cancel, reads, an offline wait); evallib/companion.py.
     voice: dict = field(default_factory=dict)  # drive: voice — the clips the call says
     #   and when; evallib/voice.py.
+    cue: dict = field(default_factory=dict)  # drive: cue — the source and the events
+    #   the runner posts to the door; evallib/cue_drive.py.
 
     @property
     def needs_operator(self) -> bool:
@@ -176,6 +184,8 @@ class Suite:
     # Matching one voids the rest of the run rather than failing it — see
     # `run_eval._abort_signal`.
     abort_on_tool_error: list[str] = field(default_factory=list)
+    requires: tuple[str, ...] = ()   # what the eval home must be seeded with (REQUIREMENTS);
+    #   a home without it holds every case out as NOT EVALUATED.
     soft: bool = False               # judge/taste axis: EXCLUDED from the correctness
     #   composite unless named explicitly with --suite (a noisy 0..1 taste score must not
     #   be averaged into task-success or share its tasks_hash — see run_capability).
@@ -533,6 +543,37 @@ def _voice_spec(cs: dict, drive: str, case_expect: dict, cloc: str, fixtures_dir
     return spec, voice.spoken_text(spec, fixtures_dir)
 
 
+def _cue_spec(cs: dict, drive: str, case_expect: dict, suite_name: str, cloc: str,
+              problems: list[str]) -> dict:
+    """Validate a case's `cue:` map. A cue case has no user turn: the runner posts the
+    events to the eval daemon's door and its checker grades the rows they left
+    (deliveries, filter calls, runs, mandate calls) and the runs' tool spans, so it is
+    a capability case with a json checker and nothing else to grade it by."""
+    if drive != "cue":
+        if "cue" in cs:
+            problems.append(f"{cloc}: `cue` needs `drive: cue`")
+        return {}
+    spec = cs.get("cue")
+    if spec is None:
+        problems.append(f"{cloc}: `drive: cue` needs a `cue` map with its `source` and `posts`")
+        return {}
+    found = cue_drive.spec_problems(spec, f"{cloc}.cue")
+    if not suite_name.startswith(CAPABILITY_SUITE_PREFIX):
+        found.append(f"{cloc}: `drive: cue` belongs to a capability suite (cap_*): its "
+                     "outcome is rows a checker grades, not a reply")
+    checker_spec = cs.get("checker")
+    if not isinstance(checker_spec, dict) or checker_spec.get("mode") != "json":
+        found.append(f"{cloc}: a `drive: cue` case is graded by a json-mode `checker`")
+    for key in ("score", "rubric", "image", "images"):
+        if cs.get(key) is not None:
+            found.append(f"{cloc}: a `drive: cue` case takes no `{key}`")
+    if case_expect:
+        found.append(f"{cloc}: a `drive: cue` case declares what it requires in "
+                     f"`checker.expect`, not in `expect` ({sorted(case_expect)})")
+    problems.extend(found)
+    return {} if found else spec
+
+
 def _validate_watch(raw, rubric: str | None, cloc: str, problems: list[str]
                     ) -> tuple[tuple[int, str], ...]:
     """`watch: [{n, reason}]` on a numbered rubric. A watched requirement is still
@@ -703,9 +744,10 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                 drive = "ask"
             has_query = "query" in cs
             has_turns = "turns" in cs
-            if drive == "voice":
+            if drive in ("voice", "cue"):
                 if has_query or has_turns:
-                    problems.append(f"{cloc}: a `drive: voice` case says its `voice.clips`; "
+                    what = "says its `voice.clips`" if drive == "voice" else "posts its `cue.posts`"
+                    problems.append(f"{cloc}: a `drive: {drive}` case {what}; "
                                     "drop `query` and `turns`")
             elif has_query == has_turns:
                 problems.append(f"{cloc}: provide exactly one of `query` or `turns`")
@@ -783,6 +825,9 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
             voice_spec, spoken = _voice_spec(cs, drive, case_expect, cloc, fixtures_dir, problems)
             if spoken is not None:
                 turns = [Turn(query=spoken, expect={})]
+            cue_spec = _cue_spec(cs, drive, case_expect, str(name), cloc, problems)
+            if cue_spec:
+                turns = [Turn(query=text, expect={}) for text in cue_drive.turn_texts(cue_spec)]
 
             # `image: <path>` (single) or `images: [<path>...]` (multi-image /
             # album) names known local fixtures. `drive: ask` passes each one to
@@ -832,7 +877,7 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                         score_spec=score_spec, checker_spec=checker_spec,
                         requires_tools=requires_tools, cross_session=cross_session,
                         requires_tools_all=tuple(requires_all), companion=companion_spec,
-                        watch=watch, voice=voice_spec)
+                        watch=watch, voice=voice_spec, cue=cue_spec)
             _refuse_misplaced_fixture_state(case, cloc, problems)
             cases.append(case)
 
@@ -846,9 +891,21 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
         description = ""
     soft = _boolean(raw.get("soft", False), f"{fname}: top level soft", problems, False)
     aborts = _abort_fragments(raw.get("abort_on_tool_error", []), fname, problems)
+    requires = _requirements(raw.get("requires", []), fname, problems)
+    if "cues" not in requires and any(case.drive == "cue" for scenario in scenarios
+                                      for case in scenario.cases):
+        problems.append(f"{fname}: a `drive: cue` suite declares `requires: [cues]`, so a "
+                        "home seeded without --cues holds it out")
     return Suite(name=name, title=title, description=description,
                  path=path, scenarios=scenarios, soft=soft,
-                 abort_on_tool_error=aborts)
+                 abort_on_tool_error=aborts, requires=requires)
+
+
+def _requirements(value, fname: str, problems: list[str]) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(item not in REQUIREMENTS for item in value):
+        problems.append(f"{fname}: `requires` must be a list drawn from {list(REQUIREMENTS)}")
+        return ()
+    return tuple(dict.fromkeys(value))
 
 
 def _abort_fragments(value, fname: str, problems: list[str]) -> list[str]:

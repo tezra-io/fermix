@@ -367,5 +367,104 @@ def test_without_voice_the_eval_home_has_no_realtime_section():
     assert "realtime" not in tomllib.loads(cfg)["fermix_core"]
 
 
+# --- cues (M60) -------------------------------------------------------------------
+
+def _cues(mandates=False):
+    return {"door_port": 45123, "mandates": mandates, "filter": ("openai", "gpt-cheap")}
+
+
+def test_cues_are_on_with_every_source_its_token_store_and_the_default_filter():
+    doc = tomllib.loads(seed.render_config(
+        "/tmp/x-eval", "openai", {"default_model": "m"}, None, cues=_cues()))
+    cues = doc["fermix_core"]["cues"]
+    assert cues["enabled"] is True and cues["door_port"] == 45123
+    assert sorted(cues["sources"]) == sorted(seed.CUE_SOURCES)
+    for section in cues["sources"].values():
+        assert section == {"kind": "local_push", "token": "@file"}
+    assert doc["fermix_core"]["routing"] == {"filter_provider": "openai",
+                                             "filter_model": "gpt-cheap"}
+    # Without --cue-mandates no plugin is enabled, so no turn sees a ticket tool.
+    assert "plugins" not in doc["fermix_core"]
+
+
+def test_cue_mandates_add_their_sources_and_the_stub_plugin_from_the_home():
+    doc = tomllib.loads(seed.render_config(
+        "/tmp/x-eval", "openai", {"default_model": "m"}, None, cues=_cues(mandates=True)))
+    assert set(seed.CUE_MANDATE_SOURCES) <= set(doc["fermix_core"]["cues"]["sources"])
+    assert doc["fermix_core"]["plugins"] == {
+        "enabled": [seed.CUE_PLUGIN], "dev_local": "/tmp/x-eval/eval-plugins"}
+
+
+def test_cue_fixtures_write_one_private_token_per_source_and_the_manifest(tmp_path):
+    home = tmp_path / "x-eval"
+    home.mkdir()
+    manifest = seed.write_cue_fixtures(str(home), _cues(mandates=True))
+    secrets = home / "secrets"
+    assert secrets.stat().st_mode & 0o777 == 0o700
+    for ref in seed.cue_sources(True):
+        # The name SecretWriter.File reads for {:cue_source, ref, :token}.
+        path = secrets / f"cue_source.{ref}.token"
+        assert path.read_text() == manifest["sources"][ref]["token"]
+        assert path.stat().st_mode & 0o777 == 0o600
+    on_disk = json.loads((home / "eval-fixtures" / "cues.json").read_text())
+    assert on_disk == manifest and on_disk["door_port"] == 45123
+    plugin = json.loads((home / "eval-plugins" / seed.CUE_PLUGIN / "plugin.json").read_text())
+    [tool] = plugin["tools"]
+    assert tool["name"] == seed.CUE_PLUGIN_TOOL and tool["rail"] == "http"
+    assert tool["request"]["url"].startswith("https://tickets.eval.invalid/")
+    assert plugin["auth"] == {"type": "none"}
+
+
+def test_tokens_are_fresh_on_every_seed(tmp_path):
+    home = tmp_path / "x-eval"
+    home.mkdir()
+    first = seed.write_cue_fixtures(str(home), _cues())
+    second = seed.write_cue_fixtures(str(home), _cues())
+    assert first["sources"]["eval-news"]["token"] != second["sources"]["eval-news"]["token"]
+
+
+def test_the_cue_filter_model_is_the_scored_model_unless_named():
+    assert seed.cue_filter_route(None, "openai", {"default_model": "m"}) == ("openai", "m")
+    assert seed.cue_filter_route("anthropic/haiku-x", "openai", {"default_model": "m"}) == (
+        "anthropic", "haiku-x")
+    with pytest.raises(SystemExit):
+        seed.cue_filter_route("just-a-model", "openai", {"default_model": "m"})
+
+
+def _seed_main(monkeypatch, home, *flags):
+    monkeypatch.setattr(sys, "argv", ["seed_capability_home.py", str(home), "--provider",
+                                      "openai", "--model", "gpt-x", *flags])
+    seed.main()
+    return tomllib.loads((home / "config.toml").read_text())
+
+
+def test_a_default_seed_leaves_cues_off_and_no_cue_manifest(tmp_path, monkeypatch):
+    # Cues add manage_watcher and list_cues to every owner turn of every suite, so a
+    # home gets them only when a run asks (--cues); a previous --cues seed's
+    # manifests go, so the runners hold the cue suites out instead of driving them.
+    home = tmp_path / "x-eval"
+    on = _seed_main(monkeypatch, home, "--cues")
+    assert on["fermix_core"]["cues"]["enabled"] is True
+    assert (home / seed.CUE_MANIFEST).is_file()
+    (home / seed.CUE_WATCHERS_MANIFEST).write_text("{}")   # what seed_cues.exs leaves
+
+    off = _seed_main(monkeypatch, home)
+    assert "cues" not in off["fermix_core"]
+    assert "routing" not in off["fermix_core"] and "plugins" not in off["fermix_core"]
+    assert not (home / seed.CUE_MANIFEST).exists()
+    assert not (home / seed.CUE_WATCHERS_MANIFEST).exists()
+
+
+@pytest.mark.parametrize("flags", [["--cue-mandates"], ["--cue-filter-model", "openai/m"]])
+def test_cue_options_need_cues(tmp_path, monkeypatch, flags):
+    with pytest.raises(SystemExit):
+        _seed_main(monkeypatch, tmp_path / "x-eval", *flags)
+
+
+def test_the_door_port_is_free_and_not_the_default():
+    port = seed.free_door_port()
+    assert 1024 < port < 65536 and port != 4032
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

@@ -146,6 +146,19 @@ defmodule FermixCore.BuildInfo do
   @spec linux_package?() :: boolean()
   def linux_package?, do: @distribution_identity == "linux_package"
 
+  # The id the Mac app's local development loop stamps on the engine it builds
+  # (`fermix-macos/scripts/dev_e2e.sh`); published builds are `release-*` and
+  # `pr-*` (`.github/workflows`).
+  @development_build_id "dev-e2e"
+
+  @doc """
+  Whether this artifact is the Mac app's local development build: a prod
+  release built on the developer's machine by the app's dev loop, to try
+  unreleased features with the app before they ship.
+  """
+  @spec development_build?() :: boolean()
+  def development_build?, do: @build_id == @development_build_id
+
   @doc "Returns the management, Realtime, companion, browser host and native host ranges from their wire authorities."
   @spec protocols() :: map()
   def protocols do

@@ -54,6 +54,9 @@ defmodule FermixCore.Tools.Subagents do
     # The owner's grant-approval closure never reaches a delegated worker: a
     # subagent must not be able to widen the sandbox on the owner's behalf.
     :approval_fn,
+    # Nor the owner-inbox one: a worker must not be able to put a prompt in the
+    # owner's own chat (M60 §11, a cue run's worker most of all).
+    :owner_inbox_approval_fn,
     :channel,
     :source_channel,
     :source_trust,

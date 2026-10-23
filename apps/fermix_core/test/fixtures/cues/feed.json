@@ -1,0 +1,32 @@
+{
+  "version": "https://jsonfeed.org/version/1.1",
+  "title": "Brindle Notes",
+  "home_page_url": "https://notes.example.net/",
+  "feed_url": "https://notes.example.net/feed.json",
+  "authors": [{"name": "Odile Fenwick"}],
+  "items": [
+    {
+      "id": "https://notes.example.net/2026/10/tide-tables",
+      "url": "https://notes.example.net/2026/10/tide-tables",
+      "title": "Tide tables, again",
+      "summary": "Why the harbour   tables drift every spring.",
+      "content_html": "<p>Long form that should not be used.</p>",
+      "date_published": "2026-10-11T07:20:00-04:00",
+      "authors": [{"name": "Corin Hale"}],
+      "tags": ["harbour", "data", 7]
+    },
+    {
+      "id": 4417,
+      "url": "https://notes.example.net/2026/10/lantern-repairs",
+      "title": "Lantern repairs",
+      "content_html": "<p>Replaced the <em>wick</em> &amp; the glass.</p>",
+      "date_modified": "2026-10-08T18:00:00Z"
+    },
+    {
+      "url": "https://notes.example.net/2026/10/no-id",
+      "title": "An item without an id",
+      "content_text": "Plain text body.",
+      "date_published": "not a date"
+    }
+  ]
+}

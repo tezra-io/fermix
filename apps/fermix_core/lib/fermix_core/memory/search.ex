@@ -7,6 +7,7 @@ defmodule FermixCore.Memory.Search do
   `memory_recall` tool uses narrower defaults for agent-facing recall.
   """
 
+  alias FermixCore.Cues.TaskNotes
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Scope
@@ -250,8 +251,11 @@ defmodule FermixCore.Memory.Search do
     )
   end
 
+  # Every memory row under the agent except a cue task's notes, which only that
+  # task's runs and `list_cues` read (M60 §9.10).
   defp search_memories(search_term, :all, limit, repo, agent_id, _owner_id, _conversation_key) do
-    repo_search_memories(repo, search_term, %{agent_id: agent_id}, limit)
+    selector = %{agent_id: agent_id, except_source_type: TaskNotes.source_type()}
+    repo_search_memories(repo, search_term, selector, limit)
   end
 
   defp search_messages(

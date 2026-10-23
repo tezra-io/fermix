@@ -91,11 +91,39 @@ const RestartReconnect = {
   },
 }
 
+// Copies the text of the element named by data-copy-from, inside the click, so
+// the browser grants the clipboard. The text is read from the page rather than
+// sent in an event: the Phone dialog's pairing link carries the pairing secret,
+// and LiveView logs event parameters. A browser with no clipboard here (a page
+// served over plain http on a network address) leaves it to be selected.
+const CopyText = {
+  mounted() {
+    this.label = this.el.textContent
+    this.copy = async () => {
+      const source = document.getElementById(this.el.dataset.copyFrom)
+      if (!source) return
+      try {
+        await navigator.clipboard.writeText(source.textContent.trim())
+        this.el.textContent = "Copied"
+      } catch (_error) {
+        this.el.textContent = "Select the link and copy it"
+      }
+      clearTimeout(this.timer)
+      this.timer = setTimeout(() => { this.el.textContent = this.label }, 2000)
+    }
+    this.el.addEventListener("click", this.copy)
+  },
+  destroyed() {
+    this.el.removeEventListener("click", this.copy)
+    clearTimeout(this.timer)
+  },
+}
+
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, UnsavedHint, RestartReconnect},
+  hooks: {...colocatedHooks, UnsavedHint, RestartReconnect, CopyText},
 })
 
 // Show progress bar on live navigation and form submits

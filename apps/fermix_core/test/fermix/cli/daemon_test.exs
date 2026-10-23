@@ -925,6 +925,94 @@ defmodule Fermix.CLI.DaemonTest do
     end
   end
 
+  # M60 app surface §3.6: the cue writes that widen what reaches a task or what
+  # a task may do, the two values handed out, and the answer to a proposal are
+  # the owner's decisions. The refusal names the cues family's own capability
+  # and sentence. The router behind the socket answers as a build without cues
+  # would, so a call that got past the check is told apart by its sentence.
+  describe "owner decisions on cues" do
+    @cue_decisions [
+      {"cues.sources.add", %{"ref" => "a", "kind" => "local_push", "values" => %{}}},
+      {"cues.sources.update", %{"ref" => "a", "values" => %{}}},
+      {"cues.sources.remove", %{"ref" => "a"}},
+      {"cues.sources.enable", %{"ref" => "a"}},
+      {"cues.sources.disable", %{"ref" => "a"}},
+      {"cues.sources.token.new", %{"ref" => "a"}},
+      {"cues.sources.url.get", %{"ref" => "a"}},
+      {"cues.mandates.add", %{"name" => "m", "values" => %{}}},
+      {"cues.mandates.update", %{"name" => "m", "values" => %{}}},
+      {"cues.mandates.remove", %{"name" => "m"}},
+      {"cues.mandates.enable", %{"name" => "m"}},
+      {"cues.mandates.disable", %{"name" => "m"}},
+      {"cues.mandates.approve", %{"name" => "m"}},
+      {"cues.proposals.decide", %{"proposal_id" => "cpr_1", "decision" => "confirm"}}
+    ]
+    @no_cues %{"capability" => "cues", "sentence" => "Cues are not part of this build."}
+
+    test "a process the daemon started is refused, and so is one it cannot place" do
+      for peer <- [[daemon_os_pid: ParentProcess.os_pid()], [os: {:win32, :nt}]] do
+        socket_path = start_peer_daemon([management_opts: cue_management_opts()] ++ peer)
+        assert_cue_decisions_refused(socket_path)
+      end
+    end
+
+    test "a process the daemon did not start reaches the router" do
+      socket_path = start_peer_daemon(management_opts: cue_management_opts())
+
+      for {method, params} <- @cue_decisions do
+        assert {:error, {:management_error, "unavailable", _message, @no_cues}} =
+                 Client.request_v1(method, params, socket_path: socket_path, timeout: 5_000),
+               method
+      end
+    end
+
+    test "every cue read stays open to every caller" do
+      socket_path =
+        start_peer_daemon(
+          management_opts: cue_management_opts(),
+          daemon_os_pid: ParentProcess.os_pid()
+        )
+
+      assert {:ok, %{"available" => false}} =
+               Client.request_v1("cues.status", %{}, socket_path: socket_path, timeout: 5_000)
+
+      for {method, params} <- [{"cues.sources.list", %{}}, {"cues.proposals.list", %{}}] do
+        assert {:error, {:management_error, "unavailable", _message, @no_cues}} =
+                 Client.request_v1(method, params, socket_path: socket_path, timeout: 5_000)
+      end
+    end
+
+    defp cue_management_opts,
+      do: management_opts() ++ [operation_opts: [cues: [available?: false]]]
+
+    defp assert_cue_decisions_refused(socket_path) do
+      golden =
+        :fermix_core
+        |> Application.app_dir("priv/management/fixtures/errors.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["name"] == "unavailable_cues_owner_decision"))
+        |> get_in(["response", "error", "details"])
+
+      assert golden == %{
+               "capability" => "cues",
+               "sentence" =>
+                 "Only the owner can change cues: use the Fermix app or your own terminal."
+             }
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          for {method, params} <- @cue_decisions do
+            assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                     Client.request_v1(method, params, socket_path: socket_path, timeout: 5_000),
+                   method
+          end
+        end)
+
+      assert log =~ "only the owner may"
+    end
+  end
+
   test "agent_message decodes the request cwd param and forwards it to the bridge", %{
     socket_path: socket_path
   } do

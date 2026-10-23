@@ -8,6 +8,8 @@ defmodule FermixWebWeb.SetupLiveTest do
   alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.Store
   alias FermixCore.Capabilities.MCP.RuntimeStatus
+  alias FermixCore.Management.Protocol, as: ManagementProtocol
+  alias FermixCore.Management.Settings, as: ManagementSettings
   alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
   alias FermixCore.Plugins.CanonicalJson
   alias FermixCore.Plugins.Config, as: PluginConfig
@@ -27,6 +29,7 @@ defmodule FermixWebWeb.SetupLiveTest do
   alias FermixTestSupport.DistFixtures
   alias FermixTestSupport.DistVerifierStub
   alias FermixWebWeb.SetupLive.Components
+  alias Phoenix.LiveView.Channel, as: LiveViewChannel
 
   # Hermetic Anthropic backend stub — writes the auth store (tmp FERMIX_HOME) but
   # never touches the real keychain / ~/.claude. Injected via :anthropic_login_impl.
@@ -3159,6 +3162,661 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
   end
 
+  # The phone channel's facts, scripted per case: each answer is one reply, or a
+  # list replied in order with the last one repeated, or a function of the call's
+  # arguments. Every call is told to the case, so it can assert what ran.
+  defmodule PhoneProviderStub do
+    @moduledoc false
+
+    def status(opts), do: take(opts, :status, [])
+    def pair_start(opts), do: take(opts, :start, [])
+    def pair_get(session, opts), do: take(opts, :get, [session])
+    def pair_decide(session, approved, opts), do: take(opts, :decide, [session, approved])
+    def pair_cancel(session, opts), do: take(opts, :cancel, [session])
+    def devices_list(opts), do: take(opts, :devices, [])
+    def devices_revoke(device, opts), do: take(opts, :revoke, [device])
+
+    defp take(opts, call, args) do
+      send(Keyword.fetch!(opts, :test_pid), {:phone_call, call, args})
+
+      Agent.get_and_update(Keyword.fetch!(opts, :script), fn answers ->
+        case Map.fetch!(answers, call) do
+          [next | rest] when rest != [] -> {next, Map.put(answers, call, rest)}
+          [last] -> {last, answers}
+          answer when is_function(answer, 1) -> {answer.(args), answers}
+          answer -> {answer, answers}
+        end
+      end)
+    end
+  end
+
+  # Every case's default: a case that shows the Phone card without `put_phone/2`
+  # fails loudly here rather than reaching the phone channel this VM runs.
+  defmodule UnstubbedPhoneProvider do
+    @moduledoc false
+
+    def status(_opts), do: raise("the Phone card was shown without put_phone/2")
+    def pair_start(_opts), do: raise("the Phone card was shown without put_phone/2")
+    def pair_get(_session, _opts), do: raise("the Phone card was shown without put_phone/2")
+    def pair_decide(_s, _a, _opts), do: raise("the Phone card was shown without put_phone/2")
+    def pair_cancel(_session, _opts), do: raise("the Phone card was shown without put_phone/2")
+    def devices_list(_opts), do: raise("the Phone card was shown without put_phone/2")
+    def devices_revoke(_device, _opts), do: raise("the Phone card was shown without put_phone/2")
+  end
+
+  setup do
+    previous = Application.get_env(:fermix_web, :phone)
+    Application.put_env(:fermix_web, :phone, mobile: [provider: UnstubbedPhoneProvider])
+    on_exit(fn -> restore_env(:fermix_web, :phone, previous) end)
+  end
+
+  @phone_link "fermix://pair?v=2&k=c2VjcmV0LXBhaXJpbmc&h=192.0.2.10:4031"
+  @phone_session "5b0c7d2e-8f41-4a6b-9c3d-2e7f1a8b4c60"
+  @phone_device "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"
+
+  defp phone_status(fields \\ []) do
+    Map.merge(
+      %{
+        enabled: true,
+        started: true,
+        refused: false,
+        refusal: nil,
+        listener: %{status: :ready, reason: nil, port: 4031, bind: "0.0.0.0", candidates: []},
+        mdns: :disabled,
+        tailnet: %{detected: false, candidates: []},
+        identity: %{present: true, fingerprint: "3f9a 1c2e"},
+        apns: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
+        remote: %{state: :off},
+        paired_devices: 0,
+        protocol_version: 1,
+        pairing: nil
+      },
+      Map.new(fields)
+    )
+  end
+
+  defp phone_session(state, fields \\ []) do
+    Map.merge(
+      %{
+        session_id: @phone_session,
+        state: state,
+        ttl_ms: 112_000,
+        request: nil,
+        outcome: nil,
+        failure: nil
+      },
+      Map.new(fields)
+    )
+  end
+
+  defp phone_request do
+    %{
+      device_name: "Sam's phone",
+      model: "Google Pixel 9 Pro",
+      platform: "android",
+      app_version: "1.0.0",
+      sas: "481062",
+      build_role: :release,
+      boot_state: %{verified: true, locked: true},
+      attestation: :verified
+    }
+  end
+
+  defp phone_device do
+    %{
+      device_id: @phone_device,
+      name: "Sam's phone",
+      model: "Google Pixel 9 Pro",
+      platform: "android",
+      signer_role: :release,
+      boot_state: %{verified: true, locked: true},
+      push_registered: false,
+      created_at: "2026-09-26T12:01:05Z",
+      last_seen: nil
+    }
+  end
+
+  # The Phone card's seams for one case: the scripted provider, settings writes
+  # whose live switch is `switch`, and a scheduler that hands every later read to
+  # the case instead of a clock.
+  defp put_phone(script, switch \\ fn _on -> :ok end) do
+    answers =
+      Map.merge(
+        %{
+          status: {:ok, phone_status()},
+          start: {:ok, %{session: phone_session(:awaiting_scan), uri: @phone_link}},
+          get: {:ok, phone_session(:awaiting_scan)},
+          decide: {:ok, phone_session(:approved, request: phone_request())},
+          cancel: {:ok, phone_session(:cancelled, outcome: %{reason: :cancelled})},
+          devices: {:ok, []},
+          revoke: fn [device] -> {:ok, %{device_id: device}} end
+        },
+        script
+      )
+
+    {:ok, agent} = Agent.start_link(fn -> answers end)
+    test_pid = self()
+    previous = Application.get_env(:fermix_web, :phone)
+    on_exit(fn -> restore_env(:fermix_web, :phone, previous) end)
+
+    Application.put_env(:fermix_web, :phone,
+      mobile: [provider: PhoneProviderStub, script: agent, test_pid: test_pid],
+      settings: [mobile_switch: switch, mobile_reach_switch: fn _on -> :ok end],
+      schedule: fn message, wait_ms -> send(test_pid, {:phone_scheduled, message, wait_ms}) end
+    )
+
+    agent
+  end
+
+  defp phone_card(conn) do
+    {:ok, view, _html} = live(conn, "/setup?tab=channels")
+
+    view
+    |> element(~s(button[phx-click="select_channel"][phx-value-channel="mobile"]))
+    |> render_click()
+
+    view
+  end
+
+  defp open_pairing(view),
+    do: view |> element(~s(#phone-panel button[phx-value-intent="pair"])) |> render_click()
+
+  # Drops the calls the case has already seen, so the next assertion is about
+  # what runs after this point. Bounded: a case makes a few dozen calls at most.
+  defp flush_phone_calls(left \\ 200)
+  defp flush_phone_calls(0), do: flunk("more phone calls than a case makes")
+
+  defp flush_phone_calls(left) do
+    receive do
+      {:phone_call, _call, _args} -> flush_phone_calls(left - 1)
+    after
+      0 -> :ok
+    end
+  end
+
+  # The next read the page scheduled, delivered now.
+  defp deliver_read(view) do
+    assert_receive {:phone_scheduled, message, _wait_ms}
+    send(view.pid, message)
+    render(view)
+  end
+
+  describe "the Phone card" do
+    setup %{conn: conn} do
+      {:ok, conn: authorize_setup(conn)}
+    end
+
+    test "is a channel card that reads the phone channel only once it is shown", %{conn: conn} do
+      put_phone(%{})
+      {:ok, view, html} = live(conn, "/setup?tab=channels")
+
+      assert html =~ ~s(phx-value-channel="mobile")
+      refute_received {:phone_call, _call, _args}
+
+      html =
+        view
+        |> element(~s(button[phx-click="select_channel"][phx-value-channel="mobile"]))
+        |> render_click()
+
+      assert_received {:phone_call, :status, []}
+      assert html =~ "No phone paired"
+      assert html =~ "Pair a phone…"
+      refute html =~ ~s(phx-submit="save_channels")
+    end
+
+    test "pairs a phone: the code, the six digits, the decision, the phone listed", %{conn: conn} do
+      agent = put_phone(%{})
+      view = phone_card(conn)
+      html = open_pairing(view)
+
+      assert_received {:phone_call, :start, []}
+      assert html =~ "On your Android phone, open Fermix and scan this code."
+      assert html =~ ~s(aria-label="Pairing code for your phone")
+      assert html =~ "Expires in 1:52"
+      refute html =~ "fermix://pair"
+
+      Agent.update(agent, fn answers ->
+        %{
+          answers
+          | get:
+              {:ok, phone_session(:awaiting_decision, ttl_ms: 60_000, request: phone_request())}
+        }
+      end)
+
+      html = deliver_read(view)
+      assert_received {:phone_call, :get, [@phone_session]}
+      assert html =~ "Sam&#39;s phone wants to pair"
+      assert html =~ "481 062"
+      assert html =~ "Approve only if the phone shows the same six digits."
+      assert html =~ "Secure hardware, locked bootloader, official Fermix build."
+
+      Agent.update(agent, fn answers ->
+        %{
+          answers
+          | status: {:ok, phone_status(paired_devices: 1)},
+            devices: {:ok, [phone_device()]}
+        }
+      end)
+
+      html =
+        view
+        |> form("#phone-dialog form[phx-submit=phone_decide]")
+        |> render_submit(%{"approved" => "true"})
+
+      assert_received {:phone_call, :decide, [@phone_session, true]}
+      assert html =~ "Paired with Sam&#39;s phone."
+
+      html =
+        view |> element(~s(#phone-dialog button[phx-value-intent="phones"])) |> render_click()
+
+      assert html =~ "Google Pixel 9 Pro · Not seen yet"
+      assert html =~ "Pair another phone"
+    end
+
+    test "the link is shown only when asked for, and never as an event's value", %{conn: conn} do
+      put_phone(%{})
+      view = phone_card(conn)
+      open_pairing(view)
+
+      html = view |> element(~s(button[phx-click="phone_show_link"])) |> render_click()
+
+      assert html =~ "Pairing link"
+      assert html =~ "fermix://pair?v=2&amp;k=c2VjcmV0LXBhaXJpbmc"
+      assert html =~ ~s(phx-hook="CopyText")
+      refute html =~ ~r/phx-value-[a-z-]+="fermix:/
+      refute html =~ ~r/id="[^"]*fermix:/
+    end
+
+    test "the page's state never prints the link, as its crash report would", %{conn: conn} do
+      put_phone(%{})
+      view = phone_card(conn)
+      open_pairing(view)
+
+      state = :sys.get_state(view.pid)
+      report = LiveViewChannel.format_status(:terminate, [%{}, state])
+      printed = inspect(report, limit: :infinity, printable_limit: :infinity)
+
+      refute printed =~ "c2VjcmV0LXBhaXJpbmc"
+      # The report did print the step that holds the link.
+      assert printed =~ "#PairingLink<withheld>"
+    end
+
+    test "a channel that is off is turned on, then pairs in the same step", %{conn: conn} do
+      off = phone_status(enabled: false, started: false)
+      parent = self()
+
+      agent =
+        put_phone(%{status: {:ok, off}}, fn on ->
+          send(parent, {:phone_switch, on})
+          :ok
+        end)
+
+      view = phone_card(conn)
+      html = open_pairing(view)
+
+      assert html =~ "Lets a paired phone chat with this Fermix."
+      assert html =~ ~s(phx-click="phone_turn_on")
+      refute_received {:phone_call, :start, []}
+
+      Agent.update(agent, &%{&1 | status: {:ok, phone_status()}})
+      html = view |> element(~s(button[phx-click="phone_turn_on"])) |> render_click()
+
+      assert_received {:phone_switch, true}
+      assert_received {:phone_call, :start, []}
+      assert html =~ "On your Android phone, open Fermix and scan this code."
+    end
+
+    test "a channel that is on but not running offers the setup's own Restart", %{conn: conn} do
+      put_phone(%{status: {:ok, phone_status(started: false)}})
+      view = phone_card(conn)
+      html = open_pairing(view)
+
+      assert html =~ "Fermix stops and starts again."
+
+      assert has_element?(
+               view,
+               ~s(#phone-dialog button[phx-click="apply_restart"]),
+               "Restart Fermix"
+             )
+
+      refute_received {:phone_call, :start, []}
+    end
+
+    test "Cancel closes the window, and a read for the closed dialog is dropped", %{conn: conn} do
+      put_phone(%{})
+      view = phone_card(conn)
+      open_pairing(view)
+      assert_receive {:phone_scheduled, stale_read, _wait_ms}
+
+      html =
+        view
+        |> element(~s(#phone-dialog button[phx-click="phone_close"]), "Cancel")
+        |> render_click()
+
+      assert_received {:phone_call, :cancel, [@phone_session]}
+      refute html =~ ~s(id="phone-dialog")
+
+      send(view.pid, stale_read)
+      render(view)
+      refute_received {:phone_call, :get, _args}
+    end
+
+    test "the page cancels the window it shows when it goes away", %{conn: conn} do
+      put_phone(%{})
+      view = phone_card(conn)
+      open_pairing(view)
+      ref = Process.monitor(view.pid)
+      # The case is linked to the page it stops, as a browser's socket is.
+      Process.flag(:trap_exit, true)
+
+      GenServer.stop(view.pid, {:shutdown, :closed})
+
+      assert_receive {:DOWN, ^ref, :process, _pid, _reason}
+      assert_received {:phone_call, :cancel, [@phone_session]}
+    end
+
+    test "a window open elsewhere with a phone waiting is resumed here", %{conn: conn} do
+      waiting = %{session_id: "s-elsewhere", state: :awaiting_decision}
+
+      put_phone(%{
+        start: {:error, :pairing_active},
+        status: [{:ok, phone_status()}, {:ok, phone_status(pairing: waiting)}],
+        get:
+          {:ok,
+           phone_session(:awaiting_decision, session_id: "s-elsewhere", request: phone_request())}
+      })
+
+      view = phone_card(conn)
+      html = open_pairing(view)
+
+      assert_received {:phone_call, :get, ["s-elsewhere"]}
+      assert html =~ "Sam&#39;s phone wants to pair"
+    end
+
+    test "a code open elsewhere is started over", %{conn: conn} do
+      scanning = %{session_id: "s-elsewhere", state: :awaiting_scan}
+
+      put_phone(%{
+        start: [
+          {:error, :pairing_active},
+          {:ok, %{session: phone_session(:awaiting_scan), uri: @phone_link}}
+        ],
+        status: [
+          {:ok, phone_status()},
+          {:ok, phone_status()},
+          {:ok, phone_status(pairing: scanning)},
+          {:ok, phone_status()}
+        ]
+      })
+
+      view = phone_card(conn)
+      html = open_pairing(view)
+      assert html =~ "A pairing code is already open somewhere else."
+
+      html = view |> element(~s(button[phx-click="phone_start_over"])) |> render_click()
+      assert_received {:phone_call, :cancel, ["s-elsewhere"]}
+      assert html =~ "On your Android phone, open Fermix and scan this code."
+    end
+
+    test "an expired code says how long codes last", %{conn: conn} do
+      agent = put_phone(%{})
+      view = phone_card(conn)
+      open_pairing(view)
+
+      expired = phone_session(:expired, ttl_ms: nil, outcome: %{reason: :timeout})
+      Agent.update(agent, &%{&1 | get: {:ok, expired}})
+
+      assert deliver_read(view) =~ "The code expired. Pairing codes last two minutes."
+      assert render(view) =~ "Pair again"
+    end
+
+    test "Forget asks in the phone's row, then forgets it", %{conn: conn} do
+      agent =
+        put_phone(%{
+          status: {:ok, phone_status(paired_devices: 1)},
+          devices: {:ok, [phone_device()]}
+        })
+
+      view = phone_card(conn)
+      html = view |> element(~s(#phone-panel button[phx-value-intent="phones"])) |> render_click()
+      assert html =~ "Sam&#39;s phone"
+
+      html = view |> element(~s(button[phx-click="phone_forget_ask"])) |> render_click()
+      assert html =~ "Forget this phone"
+      refute_received {:phone_call, :revoke, _args}
+
+      Agent.update(agent, &%{&1 | status: {:ok, phone_status()}, devices: {:ok, []}})
+      html = view |> element(~s(button[phx-click="phone_forget"])) |> render_click()
+
+      assert_received {:phone_call, :revoke, [@phone_device]}
+      refute html =~ "Forget this phone"
+      assert html =~ "Pair a phone…"
+    end
+
+    test "a refused forget stays under that phone, in the daemon's words", %{conn: conn} do
+      put_phone(%{
+        status: {:ok, phone_status(paired_devices: 1)},
+        devices: {:ok, [phone_device()]},
+        revoke: {:error, :device_not_found}
+      })
+
+      view = phone_card(conn)
+      view |> element(~s(#phone-panel button[phx-value-intent="phones"])) |> render_click()
+      view |> element(~s(button[phx-click="phone_forget_ask"])) |> render_click()
+      html = view |> element(~s(button[phx-click="phone_forget"])) |> render_click()
+
+      assert html =~ "No paired phone has that id."
+    end
+
+    test "Deny ends the window and says so", %{conn: conn} do
+      agent = put_phone(%{})
+      view = phone_card(conn)
+      open_pairing(view)
+
+      waiting = phone_session(:awaiting_decision, ttl_ms: 60_000, request: phone_request())
+      Agent.update(agent, &%{&1 | get: {:ok, waiting}})
+      deliver_read(view)
+
+      denied = phone_session(:denied, ttl_ms: nil, outcome: %{reason: :denied})
+      Agent.update(agent, &%{&1 | decide: {:ok, denied}})
+
+      html =
+        view
+        |> form("#phone-dialog form[phx-submit=phone_decide]")
+        |> render_submit(%{"approved" => "false"})
+
+      assert_received {:phone_call, :decide, [@phone_session, false]}
+      assert html =~ "You denied this phone."
+    end
+
+    test "no decision or forget is taken that the dialog did not ask for", %{conn: conn} do
+      agent = put_phone(%{})
+      view = phone_card(conn)
+      open_pairing(view)
+
+      # Scan is showing, not Compare: a decision sent anyway is not taken.
+      render_click(view, "phone_decide", %{"approved" => "true"})
+      refute_received {:phone_call, :decide, _args}
+
+      Agent.update(agent, fn answers ->
+        %{
+          answers
+          | status: {:ok, phone_status(paired_devices: 1)},
+            devices: {:ok, [phone_device()]}
+        }
+      end)
+
+      view
+      |> element(~s(#phone-dialog button[phx-click="phone_close"]), "Cancel")
+      |> render_click()
+
+      view |> element(~s(#phone-panel button[phx-value-intent="phones"])) |> render_click()
+
+      # Forget… was not pressed first: the second press alone forgets nothing.
+      render_click(view, "phone_forget", %{"device" => @phone_device})
+      refute_received {:phone_call, :revoke, _args}
+    end
+
+    test "a window that never ends is given up after 150 reads, and cancelled", %{conn: conn} do
+      put_phone(%{})
+      view = phone_card(conn)
+      open_pairing(view)
+
+      for _read <- 1..150, do: deliver_read(view)
+      refute_received {:phone_call, :cancel, _args}
+
+      html = deliver_read(view)
+      assert_received {:phone_call, :cancel, [@phone_session]}
+      assert html =~ "Fermix answered a pairing code this app cannot show."
+    end
+
+    @tag :capture_log
+    test "a channel status that cannot be read ends the dialog in the daemon's words", %{
+      conn: conn
+    } do
+      put_phone(%{status: [{:ok, phone_status()}, {:error, :mobile_surface_refused_by_test}]})
+      view = phone_card(conn)
+      html = open_pairing(view)
+
+      assert html =~ ManagementProtocol.error_messages().unavailable
+      refute_received {:phone_call, :start, []}
+    end
+
+    test "a switch the channel did not follow stays on Turn on, in the daemon's words", %{
+      conn: conn
+    } do
+      sentence = "The phone channel is on but could not start. See the daemon log."
+      off = phone_status(enabled: false, started: false)
+      put_phone(%{status: {:ok, off}}, fn _on -> {:error, sentence} end)
+
+      view = phone_card(conn)
+      open_pairing(view)
+      html = view |> element(~s(button[phx-click="phone_turn_on"])) |> render_click()
+
+      assert html =~ sentence
+      refute_received {:phone_call, :start, []}
+    end
+
+    @tag :capture_log
+    test "the reach line backs off while the status is refused, then follows again", %{
+      conn: conn
+    } do
+      ready = %{state: :ready, connected: true, endpoint_id: nil, relay: nil, failure: nil}
+      up = {:ok, phone_status(paired_devices: 1, remote: ready)}
+      refused = {:error, :status_refused_by_test}
+
+      put_phone(%{status: [up, up, refused, refused, up], devices: {:ok, [phone_device()]}})
+      view = phone_card(conn)
+      view |> element(~s(#phone-panel button[phx-value-intent="phones"])) |> render_click()
+
+      for expected <- [1_000, 2_000, 4_000] do
+        assert_receive {:phone_scheduled, {:phone_reach, _gen} = tick, ^expected}
+        send(view.pid, tick)
+        render(view)
+      end
+
+      assert_receive {:phone_scheduled, {:phone_reach, _gen}, 1_000}
+      assert render(view) =~ "Connected to Fermix&#39;s relays."
+    end
+
+    test "the switch in the panel turns the phone channel on at once", %{conn: conn} do
+      parent = self()
+
+      put_phone(%{status: {:ok, phone_status(enabled: false, started: false)}}, fn on ->
+        send(parent, {:phone_switch, on})
+        :ok
+      end)
+
+      view = phone_card(conn)
+
+      view
+      |> element(~s(#phone-panel input[phx-value-key="mobile_enabled"]))
+      |> render_click()
+
+      assert_received {:phone_switch, true}
+    end
+
+    test "the Phones step's rows: the Advanced fold, a whole-number port and a key outside it",
+         %{conn: conn} do
+      put_phone(%{
+        status: {:ok, phone_status(paired_devices: 1)},
+        devices: {:ok, [phone_device()]}
+      })
+
+      view = phone_card(conn)
+      html = view |> element(~s(#phone-panel button[phx-value-intent="phones"])) |> render_click()
+      refute html =~ ~s(id="phone-row-mobile_port")
+
+      html = view |> element(~s(button[phx-click="phone_advanced"])) |> render_click()
+      assert html =~ ~s(id="phone-row-mobile_port")
+
+      html = render_click(view, "phone_setting", %{"key" => "mobile_port", "value" => "40x1"})
+      assert html =~ "Enter a whole number."
+
+      html = render_click(view, "phone_setting", %{"key" => "telegram_bot_token", "value" => "x"})
+      assert html =~ "That setting is not part of the phone channel."
+
+      render_click(view, "phone_setting", %{"key" => "mobile_port", "value" => "4040"})
+      assert {:ok, %{"rows" => rows}} = ManagementSettings.get("channels.mobile")
+      assert Enum.find(rows, &(&1["key"] == "mobile_port"))["value"] == 4040
+      # The port is read when the channel starts, so the page owes a restart.
+      assert :sys.get_state(view.pid).socket.assigns.restart_pending?
+    end
+
+    test "turning Reach from anywhere on follows its line again", %{conn: conn} do
+      agent =
+        put_phone(%{
+          status: {:ok, phone_status(paired_devices: 1, remote: %{state: :off})},
+          devices: {:ok, [phone_device()]}
+        })
+
+      Application.put_env(
+        :fermix_channels,
+        :mobile,
+        Keyword.put(Application.get_env(:fermix_channels, :mobile), :iroh, false)
+      )
+
+      view = phone_card(conn)
+      view |> element(~s(#phone-panel button[phx-value-intent="phones"])) |> render_click()
+      refute_received {:phone_scheduled, {:phone_reach, _gen}, _wait_ms}
+
+      starting = %{state: :starting, connected: false, endpoint_id: nil, relay: nil, failure: nil}
+
+      Agent.update(
+        agent,
+        &%{&1 | status: {:ok, phone_status(paired_devices: 1, remote: starting)}}
+      )
+
+      html =
+        view
+        |> element(~s(#phone-dialog input[phx-value-key="mobile_iroh"]))
+        |> render_click()
+
+      assert html =~ "Starting…"
+      assert_receive {:phone_scheduled, {:phone_reach, _gen}, 1_000}
+    end
+
+    test "the reach line says whether this computer reaches Fermix's relays", %{conn: conn} do
+      ready = %{state: :ready, connected: true, endpoint_id: nil, relay: nil, failure: nil}
+
+      put_phone(%{
+        status: {:ok, phone_status(paired_devices: 1, remote: ready)},
+        devices: {:ok, [phone_device()]}
+      })
+
+      view = phone_card(conn)
+      html = view |> element(~s(#phone-panel button[phx-value-intent="phones"])) |> render_click()
+
+      assert html =~ "Reach from anywhere"
+      assert html =~ "Connected to Fermix&#39;s relays."
+
+      # A rail that is up can lose its relay, so the line is followed.
+      flush_phone_calls()
+      deliver_read(view)
+      assert_received {:phone_call, :status, []}
+    end
+  end
+
   describe "channel cards" do
     test "renders a selectable card per channel with status", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/setup?tab=channels")
@@ -3207,11 +3865,12 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert Keyword.get(Application.get_env(:fermix_channels, :acp, []), :enabled) == true
     end
 
-    # The mobile channel ships feature-flagged with NO setup surface: hand-editing
-    # `[fermix_channels.mobile] enabled = true` in config.toml is the only enable
-    # path, so the Channels page must not offer the channel at all — including on
-    # an install where the operator already hand-enabled it.
-    test "the channels page offers no mobile tab and no mobile field", %{conn: conn} do
+    # The phone channel's card pairs and switches through the management calls
+    # (M51 web setup pairing); it has no token form, and nothing of its push
+    # settings, the APNs key least of all, is ever drawn.
+    test "the Phone card has no token form and never draws the push settings", %{conn: conn} do
+      put_phone(%{})
+
       Application.put_env(:fermix_channels, :mobile,
         enabled: true,
         mode: :listener,
@@ -3227,18 +3886,18 @@ defmodule FermixWebWeb.SetupLiveTest do
       )
 
       {:ok, view, html} = live(conn, "/setup?tab=channels")
+      assert html =~ ~s(phx-value-channel="mobile")
 
-      refute html =~ ~s(phx-value-channel="mobile")
-      refute html =~ "Mobile (iOS)"
+      html =
+        view
+        |> element(~s(button[phx-click="select_channel"][phx-value-channel="mobile"]))
+        |> render_click()
+
+      assert html =~ ~s(id="phone-panel")
       refute html =~ "channels_form[mobile_"
       refute html =~ "APNs"
       refute html =~ "private-key-must-not-render"
       refute html =~ "fermix pair"
-
-      # No selector click can reach it either — the tab simply does not exist.
-      assert view
-             |> element(~s(button[phx-click="select_channel"][phx-value-channel="mobile"]))
-             |> has_element?() == false
     end
 
     test "mobile params injected into a save POST are ignored", %{conn: conn} do

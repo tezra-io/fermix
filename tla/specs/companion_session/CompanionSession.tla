@@ -61,10 +61,10 @@
 (* it, its channel writing a reply as it comes, with none held to drop.    *)
 (* Each client's version is fixed here                                     *)
 (* (V1Clients); turn_done itself is read by no client rule, so it is not   *)
-(* put on the wire. Since companion protocol 3 the daemon's window is      *)
-(* {2, 3} and a version 1 hello is refused, so no version 1 client joins   *)
-(* any more: the checks that name one (34, 35) prove the gate the code     *)
-(* still keeps (every_client_reads?), not a client the daemon admits.      *)
+(* put on the wire. Since companion protocol 4 the daemon's window is      *)
+(* {3, 4} and a version 1 or 2 hello is refused, so no version 1 client    *)
+(* joins any more: the checks that name one (34, 35) prove the gate the    *)
+(* code still keeps (every_client_reads?), not a client the daemon admits. *)
 (*                                                                         *)
 (* Not modelled:                                                           *)
 (* - text_delta, tool_event, turn_started, read_state: live-only, never in *)
@@ -134,16 +134,27 @@
 (* moves no cursor, and a client reads that row again below its cursor; a  *)
 (* media_fetch or media_release holds or lets go a file                    *)
 (* (Companion.MediaGrants), with no request, turn or timeline state;       *)
+(* - protocol 4's proposals (M60): proposal and proposal_resolved reach    *)
+(* only the owner's version 4 connections (write_in_version), announced    *)
+(* through Channels.Companion.broadcast (Companion.Proposals) with no seq, *)
+(* request or turn, so they move no cursor; the card of every proposal     *)
+(* still waiting follows the approval cards in the step that joined the    *)
+(* registry (join, send_waiting_proposals), so server_hello and the        *)
+(* approval cards keep their order, and a write there that fails ends the  *)
+(* connection as a drop does; a proposal_answer is served in the           *)
+(* Connection's own step against cue_proposals, which no step here reads,  *)
+(* and its accepted answers no msg or command, so no outbox rule reads it; *)
+(* that a confirmed proposal runs at most once is cue_inbox's;             *)
 (* - other conversations (the Queue keys all state by conversation).       *)
 (*                                                                         *)
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
 (* thing a client or the environment does.                                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 772895b7eef4
+\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ e538371fd2be
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ 682bdb005ef6
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ b14ce70b09b6
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ ba55e94f8827
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,send_pending_approvals,write_pending_approval,write_event,send_event,transport,request_failure_reporter,announce_user_row,request_opts,read_opts,sink @ 78fdfd1faa04
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,send_pending_approvals,write_pending_approval,write_event,send_event,transport,request_failure_reporter,announce_user_row,request_opts,read_opts,sink @ ff2f056369d8
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/fanout.ex @ abddae4baafe
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/approvals.ex @ 59c135c36360
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/endpoint.ex#@max_clients,accept_connection,start_connection,hand_over @ 61148c849930
@@ -628,7 +639,9 @@ Resend(m) ==
 \* Connection joins before it reads the kept cards, so however the two
 \* interleave, a connection gets the
 \* card from the one, the other, or both (a client deduplicates by
-\* approval_id); each is one step here.
+\* approval_id); each is one step here. On the owner's version 4 connection
+\* the cards of the proposals still waiting follow, in the same step
+\* (send_waiting_proposals), which no rule reads (see the header).
 Connect(c) ==
     /\ link[c] = "down"
     /\ link' = [link EXCEPT ![c] = "hello"]

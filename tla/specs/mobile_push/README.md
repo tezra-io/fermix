@@ -61,7 +61,7 @@ one check):
 | `AcksAfterAnnounce` | The app acks a row once it has announced it: shown it on screen, or posted its notification. | The design's first draft: the app acks as soon as the row is persisted (PUSH-2). |
 | `LocalNotify` | The app posts the notification itself for a row that arrives while its chat is off screen. | The row is only listed. |
 | `NotifiedSet` | D22: the app announces an id once, whichever path brought it. | Every arrival alerts. |
-| `RetriesTransient` | D21: a transient dispatcher error is retried. | **Today's code:** one attempt, its failure logged (`channels/mobile.ex:601-608`). |
+| `RetriesTransient` | D21: a transient dispatcher error is retried. | **Today's code:** one attempt, its failure logged (`notify_timeline_row`, `channels/mobile.ex:575-582`). |
 | `AttemptCap` | D21: at most three attempts per device. | The retry has no bound. |
 | `BootCheck` | D21: a boot step reads `push_attempted_seq` and decides once for the newest unread row above it. | **Today's code:** nothing runs at boot. |
 
@@ -165,6 +165,17 @@ none of the three. What it changed around them:
   modelled"); presence is wrong for them for the same reason as for a reply.
 
 Today's app-side rules are the iOS app's and are not pinned here.
+
+Re-read on 2026-10-17 against M60 (cues and watchers, not yet committed on
+`release/0.17.0`), which staled the `mobile.ex` pin: `delivered_effects`
+(`channels/mobile.ex:496-501`) skips the link-preview fetch when a send
+passes `link_previews: false` (a cue run's message, M60 §9.5,
+`schedule_previews`, `:503-506`). The push launch beside it is unchanged, and
+no push rule reads a preview, so nothing the spec models changed. Re-read
+again on 2026-10-23 for the commit of M60 (on dev `b0246d74`): that is the
+only change to the pinned functions, and the comments' `mobile.ex` numbers
+(13 lines low past `build_turn_result` after the move onto dev) now point at
+the committed file.
 
 ## What the spec changed in the design
 

@@ -15,6 +15,7 @@ risk: host_readonly             # required default execution profile
 confirm_cost: false             # optional additive --confirm-cost requirement
 abort_on_tool_error:            # optional; vendor error fragments that END the run
   - out_of_credits
+requires: [cues]                # optional; what the eval home must be seeded with
 defaults:                      # optional, merged into every case
   timeout_ms: 180000           # per-turn fermix-ask timeout
   judge: true                  # a rubric on these cases makes --judge mandatory
@@ -24,6 +25,19 @@ defaults:                      # optional, merged into every case
 scenarios:                     # required, >= 1
   - ...
 ```
+
+### `requires`
+
+What the suite needs the eval home to have been seeded with, beyond the defaults.
+One value today: `cues` — the home was seeded with `seed_capability_home.py
+--cues` and `seed_cues.exs` (`FERMIX_CAP_SEED_ARGS=--cues capability-daemon.sh up`
+does both), which turns cues on, writes the door, the local-push sources and the
+default filter model, and makes the watchers. It is opt-in because cues add
+`manage_watcher` and `list_cues` to every owner turn of every suite. On a home
+seeded without it both runners hold the suite's cases out as **NOT EVALUATED**:
+named, never driven, never scored and never a failure (`run_eval.py` and
+`run_capability.py` read `eval-fixtures/cues.json` and `cue_watchers.json` in the
+home before driving). A `drive: cue` suite must declare it.
 
 ### `abort_on_tool_error`
 
@@ -225,7 +239,11 @@ the `query` shorthand; multi-turn uses `turns`.
   *`drive: companion`* below. Single-turn `query` only, no `image`. `voice`:
   the runner is a voice call on the eval home's `realtime.sock`, saying fixture
   audio; see *`drive: voice`* below. No `query`, `turns` or `image`: the words
-  are the case's `voice.clips`. Such cases run only with `--voice`.
+  are the case's `voice.clips`. Such cases run only with `--voice`. `cue`
+  (capability suites only): the runner posts cues to the eval daemon's door and
+  a checker grades the rows they left; see *`drive: cue`* below. No `query`,
+  `turns`, `image`, `rubric`, `score` or `expect`: the case's posts are its
+  turns and its json `checker` is its grade.
 - `image` (string, optional) — path to a known local attachment (a picture, or
   any file: a GIF, a video, a PDF, a text file, a file Fermix cannot read)
   relative to the suite file and physically contained under `suites/fixtures/`.
@@ -551,6 +569,64 @@ home whatever the case's risk (`--confirm-daemon-isolated
 its config must have `[fermix_core.realtime] enabled = true`, and its daemon
 must answer on `realtime.sock`; all three are checked before anything is
 driven. `--dry-run` validates the fixtures and prints the plan, opening no call.
+
+### `drive: cue` — cues into the eval daemon's door
+
+```yaml
+- id: same_incident_found_in_history
+  drive: cue
+  cue:
+    source: eval-alerts                  # a local-push source the eval home has
+    posts:
+      - type: eval.ops.alert
+        subject: "{trial}-ingest-3"      # optional; must carry {trial}
+        data: {title: "Incident INC-{token}: queue backlog on ingest-3"}
+      - type: eval.ops.alert
+        subject: "{trial}-ingest-3"
+        after: settled                   # wait until the earlier posts settled
+        data: {title: "Update on the ingest-3 queue backlog"}
+  checker:
+    script: suites/capability/checkers/cue_outcome.py
+    mode: json
+    expect:
+      deliveries: [{post: 0, state: acked}, {post: 1, state: acked}]
+      history: {post: 1, finds: "INC-{token}"}
+```
+
+A cue case has no user turn, and its suite declares `requires: [cues]`. The
+capability runner (`bin/evallib/cue_drive.py`) posts each event, one request
+each, to `http://127.0.0.1:<door_port>/cues/v1/<source>` with the source's bearer
+token, both read from the eval home's `eval-fixtures/cues.json`
+(`seed_capability_home.py --cues`); the watchers come from
+`eval-fixtures/cue_watchers.json` (`seed_cues.exs`, which `capability-daemon.sh
+up` runs with the daemon still down when the home was seeded with `--cues`). It then reads memory.db read-only until
+every delivery of the trial's cues is terminal and every run they woke has
+settled, bounded by `timeout_ms`, finds each run's trace in Opik (thread = its job
+id, metadata `run_id`), and runs the checker with the rows and the runs' tool
+spans as evidence (`evidence.cue`: `posts`, `cues`, `deliveries`, `filter_calls`,
+`runs`, `mandate_calls`; each tool span with its `run_id` and metadata).
+
+- `posts` — 1–10 events in all, `repeat` (1–10) included. `type` is required;
+  `data` is a map or a string. Every event gets a per-trial id and, unless the
+  post names one, a per-trial subject, because a delivery waits behind every
+  older live delivery of its subject: a fixed subject would make a trial wait on
+  an earlier trial's item, so a named `subject` must carry `{trial}`.
+- Placeholders, at any depth of `subject` and `data`: `{token}` (the trial's
+  token, also in the checker's gold), `{trial}`, `{n}` (the event's index) and
+  `{ws}` (the trial's scoped workspace, relative to the workspace root, seeded
+  from `checker.seed`).
+- The episode is the runs: their traces carry the usage, the models and the
+  spans. A filter call is not a captured turn, so a case that ends at the filter
+  has unknown cost, never $0.00.
+- A door that does not answer, an event it does not accept, a case that does not
+  settle in time, or a run whose trace never arrives is an INVALID trial, never a
+  0. A home seeded without `--cues`, or a case whose source the home was not
+  seeded with (the mandate sources need `--cues --cue-mandates`), holds the case
+  out as NOT EVALUATED.
+- `checkers/cue_outcome.py` grades refusals on what the engine records for a
+  call that never executed (`success: false` with the loop's "not available" /
+  "not found" error, or the typed `pre_execution` marker), never on the absence
+  of a call; its gold keys are in its docstring.
 
 Every turn also receives mandatory `trace_complete` and `telemetry_complete`
 gates. A trace must be closed, have a stable span count, and expose all spans;
