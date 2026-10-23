@@ -43,6 +43,9 @@ defmodule FermixCore.Application do
   alias FermixCore.Native.Provider, as: NativeProvider
   alias FermixCore.NativeHost.Supervisor, as: NativeHostSupervisor
   alias FermixCore.Net.Egress
+  alias FermixCore.OpenLoops.CheckInSupervisor, as: OpenLoopsCheckInSupervisor
+  alias FermixCore.OpenLoops.Config, as: OpenLoopsConfig
+  alias FermixCore.OpenLoops.Scheduler, as: OpenLoopsScheduler
   alias FermixCore.Plugins.CapabilitySeeder, as: PluginCapabilitySeeder
   alias FermixCore.Plugins.Dist.Installer, as: PluginInstaller
   alias FermixCore.Prompt.BootstrapRename
@@ -261,6 +264,12 @@ defmodule FermixCore.Application do
         {TemporalScheduler, temporal_scheduler_opts()},
         TemporalDeliverySupervisor,
         TemporalFollowupSupervisor,
+        # Open-loop check-ins (M78 §04 stage 3), the temporal shape: the
+        # scheduler starts BEFORE its check-in supervisor, so under
+        # `:rest_for_one` a scheduler crash tears down every in-flight check-in
+        # (and every later child) before it restarts, and its boot sweep then
+        # returns the claims those runs held. Absent unless enabled.
+        maybe_open_loops_children(),
         # Coding-harness local rail (design §6.4 / spec §5): one `:rest_for_one`
         # supervisor (Manager → RunSupervisor → DeliveryWorker) so a Manager crash
         # tears down and re-reconciles live runs instead of orphaning them. Always
@@ -483,6 +492,24 @@ defmodule FermixCore.Application do
     if compiled_env != :test and SkillCurationConfig.enabled?() and
          FermixCore.Memory.Config.enabled?() do
       [SkillCurationScheduler]
+    else
+      []
+    end
+  end
+
+  # Open loops (MILESTONE_78 §10): child-ABSENT when gated out, the
+  # skill-curation precedent. The compile-time env gate (so `mix test` never
+  # starts the rail and `config/test.exs` never needs to reach its timers), the
+  # config switch, default off, and memory persistence (every loop lives in
+  # memory.db; with memory off the scheduler would only log a failed scan every
+  # five seconds). Read once at boot: a switch flipped afterwards takes effect
+  # at the next start. Public (@doc false) so tests can pin the gating; the env
+  # param exists only for the non-test branches.
+  @doc false
+  def maybe_open_loops_children(compiled_env \\ @compiled_env) do
+    if compiled_env != :test and OpenLoopsConfig.enabled?() and
+         FermixCore.Memory.Config.enabled?() do
+      [{OpenLoopsScheduler, [timer_enabled: true]}, OpenLoopsCheckInSupervisor]
     else
       []
     end

@@ -79,6 +79,12 @@ def test_render_config_explicit_mode_has_no_secret_and_parses():
     assert doc["fermix_core"]["skill_curation"]["enabled"] is False
     # M21: meetings is default-off, so eval homes pre-grant the enable gate.
     assert doc["fermix_core"]["meetings"]["enabled"] is True
+    # M78: open loops are default-off; the section carries `enabled` and nothing else,
+    # since any other key stops the daemon booting.
+    assert doc["fermix_core"]["open_loops"] == {"enabled": True}
+    # M78: the configured Telegram target is the owner's own inbox only with the
+    # channel's explicit owner id, or open-loop capture refuses as `:no_target`.
+    assert doc["fermix_channels"]["telegram"] == {"owner_user_id": "100001"}
 
 
 def test_render_config_keyring_mode_unchanged():

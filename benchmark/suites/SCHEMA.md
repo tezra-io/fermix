@@ -646,11 +646,13 @@ checker:
   state: fixtures/state/handle_jobs.json   # optional, under the tasks root
 ```
 
-The jobs and reminders a task starts from, restored **before every trial** by
-`bin/seed_state.exs` (run with `mix run --no-start` from the umbrella root, beside
-the eval daemon): it waits for any job run in flight, deletes every scheduled job,
-cancels every active reminder, then creates the spec's through `Jobs.Registry`,
-the scheduler's claim/settle calls (for past runs) and `Temporal.Registry`. The spec:
+The jobs, reminders and open loops a task starts from, restored **before every
+trial** by `bin/seed_state.exs` (run with `mix run --no-start` from the umbrella
+root, beside the eval daemon): it waits for any job run in flight, deletes every
+scheduled job, cancels every active reminder, closes every live open loop, then
+creates the spec's through `Jobs.Registry`, the scheduler's claim/settle calls (for
+past runs), `Temporal.Registry` and, for open loops, `Memory.Repo` directly. The
+spec:
 
 ```json
 {"jobs": [{"key": "weather", "name": "morning weather", "schedule": "0 7 * * *",
@@ -678,6 +680,46 @@ cancelled reminders are safe: due scans re-query, and a cancelled event's pendin
 deliveries are cancelled with it. The helper refuses to run unless the database it
 would open is `<FERMIX_HOME>/memory.db`, so an inherited `FERMIX_MEMORY_DB_PATH` or
 `MIX_ENV=test` cannot seed some other store.
+
+`open_loops` seeds a loop that is already **due**, for a task that grades the
+check-in run the daemon starts on its own (`open_loop_checkin.py`). No turn can
+start that run and no management verb exists for it, so the row is written through
+`Memory.Repo` directly, not `OpenLoops.Registry`: the Registry would schedule it days
+out. Its values are relative to seed time, because the row must be due now with its
+rung 1 window closed, which only the seed time can say; the dates they produce are
+in the manifest for the checker. One entry:
+
+```json
+{"open_loops": [{"key": "lease",
+                 "intention": "Return the signed Ravelston lease renewal",
+                 "why_it_matters": "the agent re-lets the flat otherwise",
+                 "horizon_class": "medium", "said_days_ago": 10, "matters_in_days": -1,
+                 "touches": 2, "last_touch_days_ago": 2,
+                 "last_message": "Last week you said ...; would a cover note help?",
+                 "due_hours_ago": 4,
+                 "memory_fact": {"key": "...", "value": "..."}}]}
+```
+
+`horizon_class` must be the class `OpenLoops.Defaults.horizon_class/3` gives the two
+dates, or the seed fails. `due_hours_ago` must exceed the 3-hour rung 1 window.
+`last_touch_days_ago` is required when `touches` is above 0, and a `last_message`
+makes that touch a rung 2 send. `memory_fact` is stored at owner scope through
+`Memory.Store`, for a task where memory already holds the outcome. Every loop is
+delivered to the eval home's own `cli` chat, whose adapter needs no credentials, so
+the send, the history write and the touch ledger run the real path. The manifest
+gains `open_loops`: each entry's `key`, `id`, `intention`, `said_on` and
+`matters_on` (local dates), `touches` and `last_message`.
+
+The reset closes each live loop with the reason `dropped` and clears the rung 2
+budget it spent (`last_rung2_at`). Closing alone is not enough: one rung 2 check-in a day is
+the product's rule across every loop of the owner, closed ones included, so the
+first trial's check-in would spend the budget for every later trial that day, and
+each would be a skip, not a measurement. The daemon's `OpenLoops.Scheduler` picks a
+seeded row up on its next reconcile, within a minute, and the run itself is bounded
+at 120 s: give the checker a `timeout_ms` of at least 150000 and its poll budget
+(`expect.wait_s`) at least 10 s less. A sweep must run inside the owner's active
+hours; the checker reports a traced skip (`open_loop_skipped`) as an invalid trial
+naming its reason, never as a 0.
 
 ### `score.single`
 

@@ -867,6 +867,83 @@ defmodule FermixOpik.Aggregation do
     })
   end
 
+  # An open-loop check-in (M78 §09) drives the loop in its own context, so it
+  # owns a session and gets a real root trace with the run's provider/tool spans
+  # nested under it — the follow-up shape.
+  #
+  # `parent_session` is hard-coded nil: the scheduler spawned the run, not
+  # another run, and the turn that captured the loop closed days before. There
+  # is deliberately no `thread_id` either — the family never carries the
+  # delivery destination, so the run is an unthreaded root, found by its
+  # `open_loop_` session prefix and its `open_loop_id`.
+  #
+  # The session id is `open_loop_<id>_<touch>`, and a run that timed out or
+  # failed is retried under the same touch seconds later, inside the
+  # closed-session tombstone window. An opener is a new run by definition, never
+  # a late span of the one that shipped, so it lifts that session's tombstone
+  # before opening; otherwise the retry's provider and tool spans would be
+  # dropped as late arrivals.
+  def apply_event(state, [:fermix, :open_loop, :checkin, :start], _meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: nil,
+          kind: :open_loop_checkin,
+          name: Map.get(meta, :agent),
+          input: nil,
+          max_duration_ms: Map.get(meta, :max_duration_ms),
+          trace_metadata: open_loop_checkin_metadata(meta),
+          at: at.at,
+          mono: at.mono
+        }
+
+        state = %{state | closed_sessions: Map.delete(state.closed_sessions, session_id)}
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  # `complete` closes a run that reached a decision — `spoke`, `silent`,
+  # `closed`, `empty`, `delivery_failed` — and each is a run that finished, so
+  # the status is "ok" and the `outcome` says which. Only a run that never
+  # reached one (`error`) carries its own status word (`timeout`/`error`). The
+  # sent text rides `output` and exists only when content capture is on.
+  def apply_event(state, [:fermix, :open_loop, :checkin, run], _meas, meta, at)
+      when run in [:complete, :error] do
+    status = if run == :error, do: Map.get(meta, :status, "error"), else: "ok"
+
+    close_root(state, meta, at, %{
+      output: Map.get(meta, :output) || Map.get(meta, :error),
+      status: status,
+      metadata: open_loop_checkin_metadata(meta)
+    })
+  end
+
+  # A skipped check-in and a settled loop have no run behind them: a skip never
+  # reached a model, and a settlement is one row write. Each is a point event
+  # that becomes its own self-closing trace, built inline like the reminder
+  # lifecycle and never tracked in state. Correlation is by `open_loop_id`; a
+  # settlement's `session_id` names the settling turn as metadata only, because
+  # nesting under it would resurrect a turn that may already have shipped.
+  def apply_event(state, [:fermix, :open_loop, :skipped], _meas, meta, at) do
+    name = "open_loop:#{stringify(Map.get(meta, :reason))}"
+    {state, [%{trace: open_loop_point_trace(state, name, meta, at), spans: []}]}
+  end
+
+  def apply_event(state, [:fermix, :open_loop, :settled], _meas, meta, at) do
+    {state, [%{trace: open_loop_point_trace(state, "open_loop:settled", meta, at), spans: []}]}
+  end
+
+  # A scheduler fault (a failed scan, claim, release, timer read, boot sweep or
+  # check-in start) is the same kind of point event: its own self-closing trace,
+  # carrying the stage and the emitter's derived `error_class`, never a reason.
+  def apply_event(state, [:fermix, :open_loop, :fault], _meas, meta, at) do
+    {state, [%{trace: open_loop_point_trace(state, "open_loop:fault", meta, at), spans: []}]}
+  end
+
   # A Live call's gist (M56 §4.2, §7) is one bounded summarising call made
   # after the call's own run closed at `call_stop`, minted with its own
   # `voice_gist:<call_uuid>` session: a root of its own, never nested under the
@@ -1557,6 +1634,8 @@ defmodule FermixOpik.Aggregation do
   defp infer_kind("soul_curation:" <> _), do: :soul_curation
   defp infer_kind("memory_review:" <> _), do: :memory_review
   defp infer_kind("followup_" <> _), do: :reminder_followup
+  # An open-loop check-in, minted in `OpenLoops.Telemetry.correlation/2`.
+  defp infer_kind("open_loop_" <> _), do: :open_loop_checkin
   defp infer_kind("meeting_" <> _), do: :meeting
   # A Live voice call and the backend turns it delegates to. Both prefixes are
   # minted outside this app (LocalVoiceSocket / LiveSessionServer); keep them in
@@ -1593,6 +1672,9 @@ defmodule FermixOpik.Aggregation do
   # its session id ("followup_<reminder_id>") is its own fallback — the generic
   # "<kind>:<name>" shape would only say "followup" twice.
   defp wrapper_name(:reminder_followup, name, session), do: name || session
+  # Same shape: the agent name is already "open_loop:<id>", and the session id
+  # ("open_loop_<id>_<touch>") is its own fallback.
+  defp wrapper_name(:open_loop_checkin, name, session), do: name || session
   # Same shape: the run's agent name is already "meeting:<id>", and its session
   # id ("meeting_<id>_<ts>") is its own fallback — the generic "<kind>:<name>"
   # would only say "meeting" twice.
@@ -1701,6 +1783,50 @@ defmodule FermixOpik.Aggregation do
       reminder_id: Map.get(metadata, :reminder_id),
       occurrence_key: Map.get(metadata, :occurrence_key),
       outcome: Map.get(metadata, :outcome)
+    })
+  end
+
+  # The check-in bookends' allowlist, shared by the opener and the closers so a
+  # run whose opener never arrived still carries its ids. The opener's snapshot
+  # (`rung`, `horizon_class`, `active_hours`) survives the closer's merge;
+  # `outcome` exists only on `complete`, and `compact` drops it everywhere else.
+  defp open_loop_checkin_metadata(metadata) do
+    compact(%{
+      component: Map.get(metadata, :component),
+      open_loop_id: Map.get(metadata, :open_loop_id),
+      touch: Map.get(metadata, :touch),
+      rung: Map.get(metadata, :rung),
+      horizon_class: Map.get(metadata, :horizon_class),
+      active_hours: Map.get(metadata, :active_hours),
+      outcome: Map.get(metadata, :outcome)
+    })
+  end
+
+  # A self-closing trace for one open-loop point event (`skipped`/`settled`/
+  # `fault`). None times any work, so the trace is an instant and carries no
+  # duration: a fabricated zero would read as a measurement. The metadata is
+  # exactly the three emitters' fixed keys.
+  defp open_loop_point_trace(state, name, metadata, at) do
+    Mapper.drop_nil(%{
+      id: Mapper.new_id(at.at),
+      project_name: state.project,
+      name: name,
+      start_time: Mapper.iso(at.at),
+      end_time: Mapper.iso(at.at),
+      metadata:
+        compact(%{
+          component: Map.get(metadata, :component),
+          open_loop_id: Map.get(metadata, :open_loop_id),
+          reason: Map.get(metadata, :reason),
+          from: Map.get(metadata, :from),
+          to: Map.get(metadata, :to),
+          answer: Map.get(metadata, :answer),
+          by: Map.get(metadata, :by),
+          session_id: Map.get(metadata, :session_id),
+          stage: Map.get(metadata, :stage),
+          error_class: Map.get(metadata, :error_class)
+        }),
+      tags: ["open_loop"]
     })
   end
 

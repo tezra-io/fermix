@@ -29,6 +29,7 @@ On an app-managed Mac the bundled `fermix logs` returns one bounded page and ref
 | scheduled job | `cron_<job>_<ts>` |
 | coding run | `harness_<run_id>`, linked to the turn that started it by `origin_session_id` |
 | reminder follow-up | `followup_<reminder_id>` |
+| open-loop check-in | `open_loop_<loop_id>_<touch>` |
 | memory review | `memory_review:<agent>:<channel>:<chat>:<thread>:<max_message_id>` |
 | Realtime voice call | `session:<n>` |
 | GPT-Live call | `voice_live:<n>`; each delegated task is its own run with the call as `parent_session` |
@@ -42,6 +43,7 @@ On an app-managed Mac the bundled `fermix logs` returns one bounded page and ref
 - `FERMIX_TRACE_CONTENT=0` in the daemon's environment is the one switch; `FERMIX_OPIK_ENABLED` controls the exporter only. The Mac app has no setting for either.
 - Adapters record the cache split their vendor reports; Opik gets `cached_input_tokens` and `cache_creation_input_tokens` beside a blended `prompt_tokens`, and a count the vendor did not report is dropped rather than written as zero.
 - Reminders: `[:fermix, :reminder, :lifecycle]` phases `materialized`, `claimed`, `delivered`, `retry_scheduled`, `failed`, `expired`, `superseded`, `cancelled`, `event_completed`, `scheduler_error`, `followup_skipped`; a follow-up run has `followup_start`, `followup_complete` and `followup_error` bookends with outcome `sent`, `declined`, `empty`, `delivery_failed`, `timeout` or `error`.
+- Open loops: a check-in run (`open_loop_<loop_id>_<touch>`) has `open_loop_checkin_start`, `open_loop_checkin_complete` and `open_loop_checkin_error` bookends with outcome `spoke`, `silent`, `closed`, `empty` or `delivery_failed`, or status `timeout` or `error`; `open_loop_skipped` (reason `disabled`, `budget`, `active_hours`, `no_target`, `max_children` or `closed_meanwhile`; no session) and `open_loop_settled` (from and to state, answer, and by `main_agent`, `checkin` or `scheduler`) are point events, as is `open_loop_fault` (a scheduler step that failed: stage `scan`, `claim`, `release`, `timer`, `start_checkin` or `sweep`, the loop when there is one, and an error class; no session).
 - Mobile pairing and push write `channel_pair` and `channel_push` rows to `agent_event` (counts, duration, channel and status only).
 
 ## Opik export

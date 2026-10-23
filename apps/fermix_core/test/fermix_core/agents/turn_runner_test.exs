@@ -15,6 +15,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Harness.Delivery, as: HarnessDelivery
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
+  alias FermixCore.OpenLoops.Registry, as: OpenLoopsRegistry
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.LivePrompt
@@ -2225,6 +2226,98 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert first == second
       assert first =~ "Discord caps a single message"
     end
+  end
+
+  # MILESTONE_78 §04 stage 3, rung 1: while an open loop is due, an owner's
+  # private turn carries the due note in its leading system run.
+  defmodule OpenLoopInbox do
+    @moduledoc false
+    def send_message(_destination, _text, _opts), do: :ok
+  end
+
+  describe "the open-loop due note" do
+    setup do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-tr-open-loop-#{unique}.db")
+      repo = :"tr_open_loop_repo_#{unique}"
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path}, id: repo)
+
+      previous = Application.get_env(:fermix_core, :open_loops)
+      Application.put_env(:fermix_core, :open_loops, enabled: true)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:fermix_core, :open_loops)
+          value -> Application.put_env(:fermix_core, :open_loops, value)
+        end
+
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      end)
+
+      %{repo: repo, loop: note_imminent_loop!(repo)}
+    end
+
+    test "an owner's chat turn carries it after the date note", %{repo: repo, loop: loop} do
+      messages = capture_prompt(%{channel: "telegram", chat_id: "40031"}, memory_repo: repo)
+
+      system_run = Enum.take_while(messages, &(&1.role == "system"))
+      note_index = Enum.find_index(system_run, &(&1.content =~ "Open loop due."))
+      date_index = Enum.find_index(system_run, &(&1.content =~ "Current date:"))
+
+      assert is_integer(note_index)
+      assert note_index > date_index
+
+      note = Enum.at(system_run, note_index).content
+      assert note =~ ~s(the owner said: "Post the Quillfeather newsletter draft")
+      assert note =~ "\nopen_loop_id: #{loop.id}"
+    end
+
+    test "a guest's turn does not carry it", %{repo: repo} do
+      messages =
+        capture_prompt(%{channel: "telegram", chat_id: "guest-7", source_trust: :guest},
+          memory_repo: repo
+        )
+
+      refute Enum.any?(messages, &(&1.content =~ "Open loop due."))
+    end
+  end
+
+  # An imminent loop is due from the moment it is noted until its date passes,
+  # so a turn, which reads the real clock, finds it inside its window. The
+  # names and ids are invented.
+  defp note_imminent_loop!(repo) do
+    now = DateTime.utc_now()
+    matters_by = DateTime.add(now, 10 * 3_600, :second)
+
+    params = %{
+      "intention" => "Post the Quillfeather newsletter draft",
+      "timezone" => "Etc/UTC",
+      "matters_by" => %{
+        "type" => "datetime",
+        "date" => matters_by |> DateTime.to_date() |> Date.to_iso8601(),
+        "time" => matters_by |> DateTime.to_time() |> Time.truncate(:second) |> Time.to_iso8601()
+      }
+    }
+
+    attended = %{
+      source_trust: :operator,
+      computer_use_origin: :interactive,
+      conversation_key: {"telegram", "40031", :root},
+      memory_owner_id: "default",
+      memory_agent_id: "main"
+    }
+
+    opts = [
+      repo: repo,
+      now: now,
+      jobs_config: [delivery_channels: %{"telegram" => OpenLoopInbox}],
+      configured_owners: %{"telegram" => "40031"},
+      scheduler: nil
+    ]
+
+    {:ok, %{loop: loop}} = OpenLoopsRegistry.note(params, attended, opts)
+    {:ok, %{due: [_due]}} = Repo.scan_due_open_loops(DateTime.utc_now(), 50, server: repo)
+    loop
   end
 
   # M67: the gateway's attachments become the manifest in the persisted user

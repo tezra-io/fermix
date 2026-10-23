@@ -57,6 +57,7 @@ Reads and changes the same sections the Mac panes show, through the running serv
 | `[fermix_core.meetings]` | `enabled` (off by default), `bot_name`, `announce`, `announce_message`, `transcription_backend`, `retain_audio`, the Zoom RTMS values `zoom_account_id`, `zoom_client_id`, `zoom_client_secret` (kept in the keychain) and `zoom_ws_subscription_id` |
 | `[fermix_core.harness]` | `enabled`, `approved`, `default_vendor`, `cloud_enabled` |
 | `[fermix_core.skill_curation]` | `enabled` |
+| `[fermix_core.open_loops]` | `enabled` (off by default; see the `open_loops` reference); nothing else |
 | `[fermix_core.computer_use]` | includes `background` (experimental, off) |
 | `[fermix_core.jobs\|memory\|realtime\|computer_history\|plugins]` | per-feature settings |
 | `[fermix_core.oauth.<provider>]` | plugin sign-in clients (`google`, `github`, `notion`, `x`, `slack`, `tesla`): `client_id`, `client_secret` (keychain) |

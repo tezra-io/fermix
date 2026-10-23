@@ -19,6 +19,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.ComputerHistory.InstalledApps
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.SidecarInstaller
+  alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Harness.Vendors, as: HarnessVendors
   alias FermixCore.IMessage
   alias FermixCore.IMessage.Control, as: IMessageControl
@@ -31,6 +32,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
   alias FermixCore.Meetings.SignIn
   alias FermixCore.Memory.CompactionConfig
+  alias FermixCore.OpenLoops.Config, as: OpenLoopsConfig
   alias FermixCore.Plugins.Auth, as: PluginAuth
   alias FermixCore.Plugins.Catalog, as: PluginCatalog
   alias FermixCore.Plugins.Config, as: PluginConfig
@@ -168,6 +170,8 @@ defmodule FermixWebWeb.SetupLive do
   # Flipping skill curation adds/removes the Scheduler child (child-absent
   # gating), so it only takes effect on a daemon restart.
   @skill_curation_restart_keys [:skill_curation_enabled]
+  # The open-loops scheduler is gated the same way (child-absent at boot).
+  @open_loops_restart_keys [:open_loops_enabled]
   # `[fermix_core.meetings]` is written as a section rather than through wizard
   # answers, so these never reach `runtime_restart_answers?/1`; they are the keys
   # `Meetings.ready?/0` reads, and tool registration reads it only at boot.
@@ -839,6 +843,7 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:timezone, params["timezone"])
       |> maybe_put_string(:communication_style, params["communication_style"])
       |> maybe_put_skill_curation_enabled(params)
+      |> maybe_put_open_loops_enabled(params)
 
     {:noreply,
      save_answers(socket, answers, "Personalization saved.", Map.get(root, "__nav"),
@@ -1367,7 +1372,8 @@ defmodule FermixWebWeb.SetupLive do
         @realtime_restart_keys ++
         @channel_restart_keys ++
         @harness_restart_keys ++
-        @skill_curation_restart_keys
+        @skill_curation_restart_keys ++
+        @open_loops_restart_keys
 
     Enum.any?(answers, fn {key, _value} -> key in restart_keys end)
   end
@@ -2292,7 +2298,9 @@ defmodule FermixWebWeb.SetupLive do
       communication_style: Keyword.get(personalization, :communication_style, ""),
       skill_curation_enabled:
         snapshot |> get_fermix_core(:skill_curation) |> Keyword.get(:enabled, true),
-      skill_curation_destination: skill_curation_destination()
+      skill_curation_destination: skill_curation_destination(),
+      open_loops_enabled: snapshot |> get_fermix_core(:open_loops) |> OpenLoopsConfig.enabled?(),
+      open_loops_destination: open_loops_destination()
     }
   end
 
@@ -2302,6 +2310,15 @@ defmodule FermixWebWeb.SetupLive do
     case SkillCurationDelivery.resolve_target() do
       {:ok, target} -> "Proposals arrive in #{target.platform}."
       :no_delivery_target -> "Proposals wait in /skills proposals until a channel owner is set."
+    end
+  end
+
+  # Names where check-ins will land (MILESTONE_78_OPEN_LOOPS §10): the owner
+  # inbox they are sent to, pure config reads.
+  defp open_loops_destination do
+    case OwnerInbox.resolve() do
+      {:ok, inbox} -> "Check-ins will arrive in #{inbox.platform}."
+      :no_delivery_target -> "Until a channel has an owner configured, Fermix records no loops."
     end
   end
 
@@ -4292,6 +4309,17 @@ defmodule FermixWebWeb.SetupLive do
     case Map.fetch(params, "skill_curation_enabled") do
       {:ok, "true"} -> [{:skill_curation_enabled, true} | answers]
       {:ok, "false"} -> [{:skill_curation_enabled, false} | answers]
+      _absent -> answers
+    end
+  end
+
+  # The open-loops toggle (MILESTONE_78_OPEN_LOOPS §10), the same hidden-false
+  # pairing; the wizard reducer writes `enabled = true` on accept and deletes
+  # the key on decline (default already false).
+  defp maybe_put_open_loops_enabled(answers, params) do
+    case Map.fetch(params, "open_loops_enabled") do
+      {:ok, "true"} -> [{:open_loops_enabled, true} | answers]
+      {:ok, "false"} -> [{:open_loops_enabled, false} | answers]
       _absent -> answers
     end
   end

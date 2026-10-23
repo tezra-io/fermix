@@ -171,6 +171,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     meetbot_signin_runner = Application.get_env(:fermix_web, :meetbot_signin_runner)
     harness_detector = Application.get_env(:fermix_web, :harness_detector)
     harness = Application.get_env(:fermix_core, :harness, [])
+    open_loops = Application.fetch_env(:fermix_core, :open_loops)
     routing = Application.get_env(:fermix_core, :routing)
     mobile = Application.fetch_env(:fermix_channels, :mobile)
     imessage = Application.fetch_env(:fermix_channels, :imessage)
@@ -285,6 +286,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       restore_env(:fermix_web, :meetbot_signin_runner, meetbot_signin_runner)
       restore_env(:fermix_web, :harness_detector, harness_detector)
       Application.put_env(:fermix_core, :harness, harness)
+      restore_env(:fermix_core, :open_loops, open_loops)
       restore_env(:fermix_core, :routing, routing)
       restore_env(:fermix_channels, :mobile, mobile)
       restore_env(:fermix_channels, :imessage, imessage)
@@ -4663,6 +4665,55 @@ defmodule FermixWebWeb.SetupLiveTest do
       |> render_submit()
 
       refute File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_core.skill_curation]"
+    end
+
+    test "the open-loops toggle renders off by default and names where check-ins land", %{
+      conn: conn
+    } do
+      Application.put_env(:fermix_core, :open_loops, [])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"personalization\"]") |> render_click()
+
+      assert html =~ "Check in on things you plan to do by a date"
+      assert html =~ ~s(name="personalization_form[open_loops_enabled]")
+      assert html =~ ~s(data-open-loops="false")
+      # No channel owner configured in the test home.
+      assert html =~ "Until a channel has an owner configured, Fermix records no loops."
+    end
+
+    test "enabling open loops persists enabled=true; turning it off removes the key", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      Application.put_env(:fermix_core, :open_loops, [])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element("button[phx-value-tab=\"personalization\"]") |> render_click()
+
+      view
+      |> form("form[phx-submit=\"save_personalization\"]",
+        personalization_form: %{open_loops_enabled: "true"}
+      )
+      |> render_submit()
+
+      html = render(view)
+      assert html =~ "Personalization saved."
+      # The scheduler is a child-absent gate, so the change offers a restart.
+      assert html =~ "Apply &amp; restart"
+      assert html =~ ~s(data-open-loops="true")
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ "[fermix_core.open_loops]\nenabled = true"
+
+      # Turning it off writes NOTHING: the default is already off.
+      view
+      |> form("form[phx-submit=\"save_personalization\"]",
+        personalization_form: %{open_loops_enabled: "false"}
+      )
+      |> render_submit()
+
+      refute File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_core.open_loops]"
     end
   end
 

@@ -478,7 +478,17 @@ def test_the_shipped_numbered_rubrics_parse():
                       "rice_question_while_stocktake_runs": 3,
                       "never_mind_cancel": 2, "stop_the_stocktake": 2,
                       "thirteenth_corrected_to_twentieth": 3,
-                      "twentieth_corrected_to_thirteenth": 3}
+                      "twentieth_corrected_to_thirteenth": 3,
+                      # open_loops.yaml
+                      "grant_overhead": 3, "contractor_choice": 3,
+                      "fence_paint_route_sanity": 3, "deadline_question": 2,
+                      "colleague_visa": 2, "hypothetical_race": 2,
+                      "forwarded_school_notice": 2, "allotment_application": 2,
+                      "insurance_renewal": 2, "invoices_sent": 3,
+                      "volunteer_form_submitted": 3, "venue_booking_plan": 5,
+                      "lease_signing_plan": 5, "onboarding_course_not_started": 5,
+                      "photos_not_sorted": 5, "storage_unit_stop": 4,
+                      "gym_decision_stop": 4}
 
 
 if __name__ == "__main__":

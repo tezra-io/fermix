@@ -5,6 +5,7 @@ defmodule FermixCore.Setup.Wizard do
 
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
+  alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Management.Settings.Channels.Inventory
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Net.Egress
@@ -116,6 +117,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:timezone, String.t()}
           | {:communication_style, String.t()}
           | {:skill_curation_enabled, boolean() | String.t()}
+          | {:open_loops_enabled, boolean() | String.t()}
 
   @setup_secret_paths SecretPaths.by_answer_key()
 
@@ -638,6 +640,12 @@ defmodule FermixCore.Setup.Wizard do
         label: skill_curation_label(),
         # Optional: on by default; blank keeps the default (no TOML entry).
         required?: false
+      },
+      %{
+        key: :open_loops_enabled,
+        label: open_loops_label(),
+        # Optional: off by default; blank keeps the current state.
+        required?: false
       }
     ]
   end
@@ -657,6 +665,24 @@ defmodule FermixCore.Setup.Wizard do
 
     "Every couple of weeks, Fermix can look for tasks you repeat and offer to learn " <>
       "them as skills — with your approval each time. #{destination} Enable? (yes/no; blank = yes)"
+  end
+
+  @doc """
+  The setup question for `[fermix_core.open_loops] enabled`
+  (MILESTONE_78_OPEN_LOOPS §10): what the feature does, and where its check-ins
+  will land, resolved from the owner inbox they are sent to. Pure config reads;
+  `opts` are the seams of `FermixCore.Delivery.OwnerInbox.resolve/1`.
+  """
+  @spec open_loops_label(keyword()) :: String.t()
+  def open_loops_label(opts \\ []) when is_list(opts) do
+    destination =
+      case OwnerInbox.resolve(opts) do
+        {:ok, inbox} -> "Check-ins will arrive in #{inbox.platform}."
+        :no_delivery_target -> "Until a channel has an owner configured, Fermix records no loops."
+      end
+
+    "When you mention something you plan to do by a date, Fermix can check in " <>
+      "before it matters. #{destination} Enable? (yes/no; blank = no)"
   end
 
   @spec save_answers(WizardState.t(), [answer()]) :: {:ok, report()} | {:error, term()}
@@ -813,6 +839,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_channel_owner_user_ids(answers)
       |> put_personalization(answers)
       |> put_skill_curation_enabled(Keyword.get(answers, :skill_curation_enabled))
+      |> put_open_loops_enabled(Keyword.get(answers, :open_loops_enabled))
       |> put_bot_name(answers)
       |> ensure_sandbox_env_sources(answers)
 
@@ -2580,6 +2607,30 @@ defmodule FermixCore.Setup.Wizard do
     fermix_core = Map.get(snapshot, :fermix_core, [])
     skill_curation = fermix_core |> Keyword.get(:skill_curation, []) |> Keyword.delete(key)
     Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :skill_curation, skill_curation))
+  end
+
+  # `[fermix_core.open_loops] enabled` (MILESTONE_78_OPEN_LOOPS §10) defaults
+  # to false, so its rule is skill curation's inverted: accepting writes
+  # `enabled = true`; declining writes NOTHING (the key is removed and the
+  # default applies). An absent or blank answer preserves the existing state.
+  defp put_open_loops_enabled(snapshot, answer) do
+    case normalize_realtime_bool(answer, :open_loops_enabled) do
+      nil -> snapshot
+      true -> put_open_loops_key(snapshot, :enabled, true)
+      false -> delete_open_loops_key(snapshot, :enabled)
+    end
+  end
+
+  defp put_open_loops_key(snapshot, key, value) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    open_loops = fermix_core |> Keyword.get(:open_loops, []) |> Keyword.put(key, value)
+    Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :open_loops, open_loops))
+  end
+
+  defp delete_open_loops_key(snapshot, key) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    open_loops = fermix_core |> Keyword.get(:open_loops, []) |> Keyword.delete(key)
+    Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :open_loops, open_loops))
   end
 
   defp put_acp_config(snapshot, answers) do

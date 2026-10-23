@@ -2389,6 +2389,28 @@ defmodule FermixWebWeb.SetupLive.Components do
             approval. {@personalization_form.skill_curation_destination} Applies after restart.
           </p>
         </div>
+        <div
+          class="form-control"
+          data-open-loops={to_string(@personalization_form.open_loops_enabled)}
+        >
+          <label class="label cursor-pointer justify-start gap-3">
+            <input type="hidden" name="personalization_form[open_loops_enabled]" value="false" />
+            <input
+              type="checkbox"
+              name="personalization_form[open_loops_enabled]"
+              value="true"
+              checked={@personalization_form.open_loops_enabled}
+              class="toggle toggle-sm toggle-primary"
+            />
+            <span class="label-text text-sm font-medium">
+              Check in on things you plan to do by a date
+            </span>
+          </label>
+          <p class="max-w-prose pt-1 text-xs leading-relaxed text-base-content/60">
+            When you mention something you plan to do by a date, Fermix checks in before it
+            matters and stops when you say so. {@personalization_form.open_loops_destination} Applies after restart.
+          </p>
+        </div>
         <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save personalization" />
       </form>
     </div>

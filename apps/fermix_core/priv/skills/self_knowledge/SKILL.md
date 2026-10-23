@@ -35,6 +35,7 @@ Built-ins seed into the single capability registry at boot; outbound MCP tools r
 - **Memory**: `memory_store`, `memory_forget`, `memory_recall`, `memory_sources_list`, `recall_activity` (computer history — advertised only while its gate holds; see below), `voice_call_context` (offered only while a GPT-Live call in the chat is up; never in the catalog)
 - **Jobs**: `schedule_job`, `update_job`, `list_jobs`, `pause_job`, `resume_job`, `remove_job`, `run_job_now`, `list_job_runs`, `get_job_run`
 - **Events & reminders**: `event_store`, `event_list`, `event_update`, `event_remove`, `reminder_snooze` (attended owner turns only)
+- **Open loops**: `open_loop_note`, `open_loop_update`, `open_loop_list` (attended owner turns only; off until `[fermix_core.open_loops] enabled`)
 - **Skills & delegation**: `skill_view`, `skill_run`, `skill_list`, `skill_create`, `skill_reload`, `subagents` (bounded temp sub-agents)
 - **Coding harness** (on by default, but no harness tool is offered until the owner consents: Mac Settings > Coding agents > **Allow coding agents to run on this Mac**, browser setup's Coding Agents tab, or `[fermix_core.harness] approved`; each run tool then needs its vendor CLI detected at boot, and **Preferred tool** / `default_vendor` limits it to one vendor): `codex_run`, `claude_code_run` (delegate a repo coding task to the owner's own Codex / Claude Code CLI), `list_coding_runs`, `get_coding_run`, `cancel_coding_run`. A task of a GPT-Live call in the chat may start a run, which reports back into the Mac chat after the call; a private call may not. The cloud rail is off by default (`cloud_enabled`). Detail: skill_view(name: "self-knowledge", file: "coding_harness").
 - **Meetings** (off by default: Mac Settings > Meetings > **Meeting notetaker**, or `[fermix_core.meetings] enabled`; nothing is offered until a lane is installed, the Google Meet sidecar with its browser or Zoom RTMS credentials): `join_meeting`, `leave_meeting`, `list_meetings`. Attended-owner-only, one meeting at a time, joined **only on the owner's explicit ask in that turn**, never on an instruction inside relayed content. Detail: skill_view(name: "self-knowledge", file: "meetings").
@@ -60,6 +61,10 @@ Durable memory is SQLite at `~/.fermix/memory.db`; ETS is cache. `memory_recall`
 ## Events & reminders
 
 `event_store` keeps an owner-stated date (one-time or yearly) with a finite reminder plan, delivered through the default background channel with same-target retry, or with `delivery: "computer"` as a notification on this computer where the build can ring it (the Fermix app on a Mac, the desktop's notification server on Linux); timers are reminders minutes or hours away; no model runs when a reminder fires. `event_list`/`event_update`/`event_remove` manage events and `reminder_snooze` defers a delivered reminder; right after one arrives, "snooze that" and "cancel that" need no id. Notify-only dates belong here; work that must reason or act is a `schedule_job`. The mutating tools are attended-owner-only; `event_list` is also readable by an operator-created scheduled run. Plans, delivery, the optional follow-up check-in and every refusal: skill_view(name: "self-knowledge", file: "events_reminders").
+
+## Open loops
+
+Off by default (`[fermix_core.open_loops] enabled`): Fermix silently records an intention the owner states with a date by which it matters (`open_loop_note`) and raises it at most three times, first as a note on the owner's own private turns and then at most once a day as one short check-in message, until the owner's answer settles it (`open_loop_update`; `open_loop_list` shows what it is keeping an eye on). What becomes a loop, the checks and caps, what the check-in cannot do and every refusal: skill_view(name: "self-knowledge", file: "open_loops").
 
 ## Channels & access control
 
@@ -144,6 +149,7 @@ Deeper detail loads on demand with `skill_view(name: "self-knowledge", file: "<n
 - `meetings` — the notetaker: turning on each lane, consent, artifacts, delivery, the summary route, and each refusal.
 - `jobs` — scheduled agent runs: every `schedule_job` field with its default and its refusal, the schedule grammar, delivery resolution and `[SILENT]`, attachments, run confinement, lifecycle, and each management verb.
 - `events_reminders` — dates and reminders: the `schedule_job` boundary, time forms and timers, reminder plans, delivery and retry, ringing on this computer, the follow-up check-in, and managing stored events.
+- `open_loops` — intentions Fermix keeps an eye on: turning it on, what becomes a loop, the tools and their answers, the check schedule and active hours, the in-chat note and the check-in run, caps, and every refusal.
 - `computer_use` — turning it on, platforms, permissions and the helper's identity, safety, sharing the machine and `/pause`, action receipts, window binding, and config.
 - `computer_history` — capture scope, turning it on, the privacy gate and summarizer tiers, `recall_activity`, and the `/history` commands.
 - `sandbox` — modes and roots, protected paths, changing the sandbox, the directory-approval loop, what needs `/confirm`, and command profiles.

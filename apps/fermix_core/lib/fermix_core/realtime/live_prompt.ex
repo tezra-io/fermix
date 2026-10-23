@@ -294,9 +294,14 @@ defmodule FermixCore.Realtime.LivePrompt do
 
   # Plugins are excluded the way `RuntimeSections.format_capability_summary/1`
   # excludes them: they are named in their own index for the text agent, and
-  # under Live the backend owns plugin routing entirely.
+  # under Live the backend owns plugin routing entirely. Open-loop tools follow
+  # the same catalog's rule (M78 §10): none while the feature is off, and never
+  # the check-in run's own outcome tool.
   defp excluded?(%Capability{name: "screen_share"}), do: true
-  defp excluded?(capability), do: capability.metadata[:category] == :plugin
+
+  defp excluded?(capability),
+    do:
+      capability.metadata[:category] == :plugin or RuntimeSections.open_loop_unlisted?(capability)
 
   defp format_category({category, capabilities}) do
     names =

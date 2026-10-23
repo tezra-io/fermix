@@ -4,6 +4,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   import ExUnit.CaptureLog
 
   alias FermixCore.Meetings.Config, as: MeetingsConfig
+  alias FermixCore.OpenLoops.Config, as: OpenLoopsConfig
   alias FermixCore.Setup.ConfigStore
 
   setup do
@@ -15,6 +16,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     network = Application.get_env(:fermix_core, :network, [])
     harness = Application.get_env(:fermix_core, :harness, [])
     skill_curation = Application.get_env(:fermix_core, :skill_curation, [])
+    open_loops = Application.get_env(:fermix_core, :open_loops, [])
     memory = Application.get_env(:fermix_core, :memory, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
     computer_use = Application.get_env(:fermix_core, :computer_use, [])
@@ -39,6 +41,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       Application.put_env(:fermix_core, :network, network)
       Application.put_env(:fermix_core, :harness, harness)
       Application.put_env(:fermix_core, :skill_curation, skill_curation)
+      Application.put_env(:fermix_core, :open_loops, open_loops)
       Application.put_env(:fermix_core, :memory, memory)
       Application.put_env(:fermix_core, :realtime, realtime)
       Application.put_env(:fermix_core, :computer_use, computer_use)
@@ -843,6 +846,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   allowed_hosts = ["example.com"]
 
   [fermix_core.skill_curation]
+  enabled = true
+
+  [fermix_core.open_loops]
   enabled = true
 
   [fermix_core.memory]
@@ -2590,6 +2596,109 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     """)
 
     assert_raise ArgumentError, ~r/skill_curation\.enabled "yes"/s, fn ->
+      ConfigStore.load_runtime_config()
+    end
+  end
+
+  # `[fermix_core.open_loops]` (MILESTONE_78_OPEN_LOOPS §10) is wired like
+  # skill curation with the inverse default: off until the file says otherwise.
+  test "a fresh home loads an empty open_loops section, which reads as disabled" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    open_loops = Keyword.fetch!(loaded.fermix_core, :open_loops)
+    assert open_loops == []
+    refute OpenLoopsConfig.enabled?(open_loops)
+  end
+
+  test "save/load round-trips the open_loops config section" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [open_loops: [enabled: true]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.open_loops]\nenabled = true"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    assert Keyword.get(loaded.fermix_core, :open_loops) == [enabled: true]
+  end
+
+  test "an empty open_loops section is omitted from the TOML" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    assert :ok =
+             ConfigStore.save_snapshot(%{
+               fermix_core: [open_loops: []],
+               fermix_channels: [],
+               fermix_web: []
+             })
+
+    refute File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_core.open_loops]"
+  end
+
+  test "apply_snapshot replaces open_loops config in Application env" do
+    Application.put_env(:fermix_core, :open_loops, enabled: true)
+
+    ConfigStore.apply_snapshot(%{
+      fermix_core: [open_loops: []],
+      fermix_channels: [],
+      fermix_web: []
+    })
+
+    assert Application.get_env(:fermix_core, :open_loops) == []
+  end
+
+  test "load refuses to boot on an unknown open_loops key" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.open_loops]
+    enabled = true
+    max_touches = 5
+    """)
+
+    assert_raise ArgumentError,
+                 ~r/\[fermix_core.open_loops\].*unknown key\(s\): max_touches/s,
+                 fn -> ConfigStore.load_runtime_config() end
+  end
+
+  test "load refuses to boot on an invalid open_loops value" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.open_loops]
+    enabled = "yes"
+    """)
+
+    assert_raise ArgumentError, ~r/open_loops\.enabled "yes"/s, fn ->
       ConfigStore.load_runtime_config()
     end
   end

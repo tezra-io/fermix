@@ -150,6 +150,22 @@ defmodule FermixCore.Capabilities.Builtin do
       hidden_from_agent?: false,
       owner_only?: true
     },
+    # Open loops (MILESTONE_78 §08). Owner-only because every row is an
+    # intention the owner stated; the advertise?/execute gates (`OpenLoops.Access`
+    # and `[fermix_core.open_loops] enabled`) are the hard barrier, and these
+    # registry fields do not replace it.
+    "open_loop_note" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: true},
+    "open_loop_update" => %{
+      policy_class: :read_write,
+      hidden_from_agent?: false,
+      owner_only?: true
+    },
+    "open_loop_list" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
+    "open_loop_respond" => %{
+      policy_class: :read_write,
+      hidden_from_agent?: false,
+      owner_only?: true
+    },
     # Meetings notetaker (MILESTONE_21 C2 §14.1). `:external_api` sits in the
     # operator's default policy and the guest deny-list, and owner-only keeps
     # the owner's own meetings out of a guest's surface; the attended-operator

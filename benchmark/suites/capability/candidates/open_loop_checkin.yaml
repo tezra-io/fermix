@@ -1,0 +1,132 @@
+suite: cap_open_loop_checkin
+risk: isolated_mutation
+title: "Capability — open-loop check-in run (memory.db ground truth)"
+description: >
+  The MILESTONE_78 check-in run, which no turn can start: rung 2 is an isolated run
+  the daemon's own OpenLoops.Scheduler begins when a loop is due, its rung 1 window
+  has closed, the owner is inside active hours and the day's one unprompted
+  check-in is unspent. Each task's `checker.state` seeds one such loop through
+  bin/seed_state.exs (an `open_loops` entry: the intention, the days since it was
+  said and until it matters, the touches spent, the previous message, the hours
+  since its slot came due, and for one task a memory fact), delivered to the eval
+  home's own cli chat, whose adapter needs no credentials, so the send, the history
+  write and the touch ledger run the real path. The trial's own turn is an
+  unrelated question that never sees the loop; the checker polls memory.db until
+  the run has decided and grades the row, the history row and the message.
+
+  The message is graded by floors only, never wording: at most two sentences, the
+  number of questions, a term from the owner's own intention, the month or weekday
+  the owner said it, none of a short list of duty words, and for a repeat, not the
+  previous message. The behavioural suite open_loops.yaml covers capture and the
+  owner's answers.
+
+  PRECONDITIONS: `[fermix_core.open_loops] enabled = true` (pre-granted by
+  bin/seed_capability_home.py), the scheduler picking up a row another process
+  wrote within a minute, and a sweep that runs inside the owner's active hours
+  (09:00 to 21:00 in the home's timezone until the home holds 40 owner messages,
+  then derived from them). A run the scheduler skips (active hours, the day's
+  budget, the feature off) is traced as `open_loop_skipped`, and the checker
+  reports that trial as an invalid measurement naming the reason, never as a 0.
+  The active-hours precondition ties a result to the hour it ran in, so the suite
+  is parked under candidates/ and stays out of the ranking sweep until the owner
+  promotes it; run it with `--candidates --suite cap_open_loop_checkin`.
+
+  SAFETY: the trial's turn is a neutral question that never sees the loop, so no
+  tool gate on it could trip. The checker's own safety observation is the one this
+  rail can get wrong without the model: a second history row for one check-in is a
+  duplicate unprompted message, reported as a violation.
+defaults:
+  judge: false
+  timeout_ms: 180000
+
+scenarios:
+  - id: checkin_run
+    title: "A due loop gets one short, honest check-in, or none when memory says it is done"
+    severity: normal
+    tags: [capability, open_loops, proactive]
+    cases:
+      # Touch 1 of a long loop: one short message that names what the owner said and
+      # when, one question, no duty words.
+      - id: speaks_when_due
+        query: "How many centimetres are there in a foot?"
+        checker:
+          script: "suites/capability/checkers/open_loop_checkin.py"
+          mode: json
+          state: "suites/capability/fixtures/state/open_loop_speaks_when_due.json"
+          timeout_ms: 180000
+          expect:
+            wait_s: 165
+            outcome: spoke
+            state: asked
+            touches: 1
+            history_row: true
+            message_floors:
+              max_sentences: 2
+              questions: 1
+              include_any: [Thornbury, grant, arts council]
+              include_any_date: true
+              exclude: [must, you should, overdue, late, forgot, "don't forget", reminder, deadline is approaching]
+
+      # Touch 2 after a spoken touch 1: a repeat adds something or asks less, and is
+      # never the previous message again.
+      - id: repeat_makes_smaller_ask
+        query: "What's the capital of New Zealand?"
+        checker:
+          script: "suites/capability/checkers/open_loop_checkin.py"
+          mode: json
+          state: "suites/capability/fixtures/state/open_loop_repeat_makes_smaller_ask.json"
+          timeout_ms: 180000
+          expect:
+            wait_s: 165
+            outcome: spoke
+            state: asked
+            touches: 2
+            history_row: true
+            message_floors:
+              max_sentences: 2
+              questions: 1
+              include_any: [Wren Hall, choir, concert, booking]
+              include_any_date: true
+              exclude: [must, you should, overdue, late, forgot, "don't forget", reminder, deadline is approaching]
+              differs_from_previous: true
+
+      # Memory already holds the owner's report that it is done: the run closes the
+      # loop instead of asking, and nothing reaches the owner.
+      - id: closes_when_memory_holds_completion
+        query: "How many sides does a hexagon have?"
+        checker:
+          script: "suites/capability/checkers/open_loop_checkin.py"
+          mode: json
+          state: "suites/capability/fixtures/state/open_loop_closes_when_memory_holds_completion.json"
+          timeout_ms: 180000
+          expect:
+            wait_s: 165
+            outcome: closed
+            state: closed
+            close_reason: reported_elsewhere
+            touches: 0
+            history_row: false
+
+      # The third and last touch, the day after the date: it hands the loop back,
+      # counts as touch 3, and leaves the owner one day to answer before it expires.
+      # A hand-back need not ask anything, so it carries no question floor.
+      - id: hand_back_says_last
+        query: "How many minutes are there in a day?"
+        checker:
+          script: "suites/capability/checkers/open_loop_checkin.py"
+          mode: json
+          state: "suites/capability/fixtures/state/open_loop_hand_back_says_last.json"
+          timeout_ms: 180000
+          expect:
+            wait_s: 165
+            outcome: spoke
+            state: asked
+            touches: 3
+            history_row: true
+            next_touch_after_touch_hours: [23, 25]
+            message_floors:
+              max_sentences: 2
+              include_any: [Ravelston, lease, letting agent]
+              include_any_date: true
+              exclude: [must, you should, overdue, late, forgot, "don't forget", reminder, deadline is approaching]
+              differs_from_previous: true

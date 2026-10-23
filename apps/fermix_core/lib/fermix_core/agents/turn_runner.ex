@@ -43,6 +43,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Net.Egress
+  alias FermixCore.OpenLoops.DueNote
   alias FermixCore.Prompt.ChannelPresentation
   alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Providers.Descriptor
@@ -646,6 +647,7 @@ defmodule FermixCore.Agents.TurnRunner do
     messages = inject_current_date(messages)
     messages = inject_recent_calls(messages, state, source_trust, voice_call)
     messages = inject_recent_activity(messages, context)
+    messages = inject_open_loop_due(messages, context)
     messages = inject_live_call(messages, Map.get(state, :live_call))
 
     # `/ultra` is now a run-mode of the normal turn (not a separate
@@ -779,6 +781,13 @@ defmodule FermixCore.Agents.TurnRunner do
   # denies it or there is no activity yet.
   defp inject_recent_activity(messages, context),
     do: append_system_note(messages, RecentActivity.note(context))
+
+  # Rung 1 of a due open loop (MILESTONE_78 §04 stage 3): an owner's private turn
+  # carries the note while a loop is due. It changes only when a loop comes due
+  # or settles, so it sits in the leading system run beside the recent-activity
+  # note and ahead of the live-call line; `note/1` is nil on every other turn.
+  defp inject_open_loop_due(messages, context),
+    do: append_system_note(messages, DueNote.note(context))
 
   # A typed chat turn during a Live call in the chat (M56 §4.4): the line exists
   # only while the call the snapshot froze does, and goes last in the leading

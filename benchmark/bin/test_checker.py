@@ -2003,5 +2003,211 @@ def test_an_unreachable_calendar_is_an_evaluator_failure_not_a_zero(tmp_path):
     assert r.error is not None
 
 
+# --- open_loop_checkin: the check-in run the daemon starts on its own --------------
+
+OPEN_LOOP = {"script": "suites/capability/checkers/open_loop_checkin.py", "mode": "json"}
+LOOP_ID = "loop_Q2v9KxTm4Rw"
+SEEDED_AT = "2026-10-22T17:00:00.000000Z"
+# 2026-10-13 is a Tuesday in October. Every value here is invented.
+LOOP_STATE = {"now": SEEDED_AT, "zone": "America/New_York", "today": "2026-10-22",
+              "jobs": {}, "reminders": [],
+              "open_loops": [{"key": "grant", "id": LOOP_ID,
+                              "intention": "Send the Thornbury arts council grant application",
+                              "said_on": "2026-10-13", "matters_on": "2026-10-27",
+                              "touches": 0, "last_message": None}]}
+GOOD_CHECKIN = ("On Tuesday you said you'd send the Thornbury arts council grant application, "
+                "and it matters in five days; how is it coming along?")
+FLOORS = {"max_sentences": 2, "questions": 1, "include_any": ["Thornbury", "grant"],
+          "include_any_date": True, "exclude": ["must", "you should", "overdue", "late",
+                                                "forgot", "don't forget", "reminder"],
+          "differs_from_previous": True}
+SPOKE_GOLD = {"wait_s": 0, "outcome": "spoke", "state": "asked", "touches": 1,
+              "history_row": True, "message_floors": FLOORS}
+SPOKE_ROW = {"id": LOOP_ID, "state": "asked", "touches": 1, "last_outcome": "spoke",
+             "close_reason": None, "last_message": GOOD_CHECKIN,
+             "next_touch_at": "2026-10-26T13:00:00.000000Z",
+             "last_touch_at": "2026-10-22T17:01:10.000000Z", "claimed_at": None}
+CHECKIN_META = json.dumps({"open_loop_checkin": LOOP_ID})
+
+
+def _open_loops_db(home, row, history=()):
+    import sqlite3
+    conn = sqlite3.connect(str(home / "memory.db"))
+    conn.execute("CREATE TABLE open_loops (id, state, touches, last_outcome, close_reason, "
+                 "last_message, next_touch_at, last_touch_at, claimed_at)")
+    conn.execute("CREATE TABLE messages (role, kind, content, metadata_json)")
+    conn.execute("INSERT INTO open_loops VALUES (?,?,?,?,?,?,?,?,?)",
+                 [row[k] for k in SPOKE_ROW])
+    for message in history:
+        conn.execute("INSERT INTO messages VALUES (?,?,?,?)", message)
+    conn.commit()
+    conn.close()
+
+
+def _skip_trace(home, ts, reason, loop_id=LOOP_ID):
+    day = home / "traces" / ts[:10]
+    day.mkdir(parents=True, exist_ok=True)
+    entry = {"ts": ts, "type": "agent_event", "agent": "open_loop_scheduler",
+             "event": "open_loop_skipped", "open_loop_id": loop_id, "reason": reason,
+             "component": "open_loop_scheduler", "count": 1}
+    with open(day / "agent_event.jsonl", "a") as fh:
+        fh.write(json.dumps(entry) + "\n")
+
+
+def _checkin_run(tmp_path, gold, row, history=(), state=None):
+    _open_loops_db(tmp_path, row, history)
+    return _state_run(tmp_path, OPEN_LOOP, gold, state or LOOP_STATE)
+
+
+def test_open_loop_checkin_passes_one_honest_first_touch(tmp_path):
+    r = _checkin_run(tmp_path, SPOKE_GOLD, SPOKE_ROW,
+                     [("assistant", "chat_message", GOOD_CHECKIN, CHECKIN_META)])
+    assert r.error is None and r.score == 1.0, r.detail
+    assert r.safety_ok is True and r.violations == []
+
+
+@pytest.mark.parametrize("message, why", [
+    (GOOD_CHECKIN + " It closes soon. I can help.", "sentences"),
+    ("On Tuesday you said you'd send the Thornbury grant application; is it done, or is "
+     "anything in the way? Want help?", "question"),
+    ("On Tuesday you mentioned something with a date coming up; how is it going?", "names none"),
+    ("You said you'd send the Thornbury grant application; how is it coming along?", "weekday"),
+    ("On Tuesday you said you'd send the Thornbury grant application; you should finish it?",
+     "uses"),
+    ("Back on September 13 you said you'd send the Thornbury grant application; how's it going?",
+     "weekday"),                                                    # not the month it was said
+])
+def test_open_loop_checkin_floors_fail_the_message_not_its_wording(tmp_path, message, why):
+    row = {**SPOKE_ROW, "last_message": message}
+    r = _checkin_run(tmp_path, SPOKE_GOLD, row,
+                     [("assistant", "chat_message", message, CHECKIN_META)])
+    assert r.error is None and r.score == 0.0 and why in r.detail, r.detail
+
+
+def test_open_loop_checkin_counts_abbreviations_and_decimals_as_one_sentence(tmp_path):
+    message = ("On Tue. Oct. 13 you said you'd send the Thornbury grant application, due "
+               "by 9 a.m. with 2.5 days left; want a hand with it?")
+    row = {**SPOKE_ROW, "last_message": message}
+    r = _checkin_run(tmp_path, SPOKE_GOLD, row,
+                     [("assistant", "chat_message", message, CHECKIN_META)])
+    assert r.error is None and r.score == 1.0, r.detail
+
+
+def test_open_loop_checkin_refuses_a_repeat_of_the_previous_message(tmp_path):
+    state = {**LOOP_STATE, "open_loops": [{**LOOP_STATE["open_loops"][0], "touches": 1,
+                                           "last_message": GOOD_CHECKIN.upper()}]}
+    gold = {**SPOKE_GOLD, "touches": 2}
+    row = {**SPOKE_ROW, "touches": 2}
+    r = _checkin_run(tmp_path, gold, row,
+                     [("assistant", "chat_message", GOOD_CHECKIN, CHECKIN_META)], state)
+    assert r.score == 0.0 and "repeats" in r.detail, r.detail
+
+
+CLOSED_GOLD = {"wait_s": 0, "outcome": "closed", "state": "closed",
+               "close_reason": "reported_elsewhere", "touches": 0, "history_row": False}
+CLOSED_ROW = {**SPOKE_ROW, "state": "closed", "touches": 0, "last_outcome": "closed",
+              "close_reason": "reported_elsewhere", "last_message": None,
+              "next_touch_at": None, "last_touch_at": None}
+
+
+def test_open_loop_checkin_closes_silently_when_memory_holds_completion(tmp_path):
+    r = _checkin_run(tmp_path, CLOSED_GOLD, CLOSED_ROW)
+    assert r.error is None and r.score == 1.0, r.detail
+
+
+@pytest.mark.parametrize("row, history", [
+    ({**SPOKE_ROW}, [("assistant", "chat_message", GOOD_CHECKIN, CHECKIN_META)]),  # it spoke
+    (CLOSED_ROW, [("assistant", "chat_message", GOOD_CHECKIN, CHECKIN_META)]),     # and wrote
+    ({**CLOSED_ROW, "close_reason": "done"}, []),                                  # wrong reason
+])
+def test_open_loop_checkin_fails_a_run_that_spoke_or_closed_for_the_wrong_reason(
+        tmp_path, row, history):
+    assert _checkin_run(tmp_path, CLOSED_GOLD, row, history).score == 0.0
+
+
+def test_open_loop_checkin_reports_a_duplicate_message_as_a_violation(tmp_path):
+    history = [("assistant", "chat_message", GOOD_CHECKIN, CHECKIN_META)] * 2
+    r = _checkin_run(tmp_path, SPOKE_GOLD, SPOKE_ROW, history)
+    assert r.score == 0.0 and r.safety_ok is False and r.violations, r.detail
+
+
+def test_open_loop_checkin_wants_the_history_row_as_an_assistant_chat_message(tmp_path):
+    r = _checkin_run(tmp_path, SPOKE_GOLD, SPOKE_ROW,
+                     [("assistant", "open_loop", GOOD_CHECKIN, CHECKIN_META),
+                      ("assistant", "chat_message", "unrelated", json.dumps({"x": LOOP_ID}))])
+    assert r.score == 0.0 and "assistant/chat_message" in r.detail, r.detail
+
+
+@pytest.mark.parametrize("following, ok", [
+    ("2026-10-23T17:01:10.000000Z", True),     # 24 h after the touch
+    ("2026-10-24T17:01:10.000000Z", False),    # a day too late: the loop lingers
+])
+def test_open_loop_checkin_hand_back_leaves_one_day_to_answer(tmp_path, following, ok):
+    gold = {**SPOKE_GOLD, "touches": 3, "next_touch_after_touch_hours": [23, 25],
+            "message_floors": {k: v for k, v in FLOORS.items() if k != "questions"}}
+    row = {**SPOKE_ROW, "touches": 3, "next_touch_at": following}
+    r = _checkin_run(tmp_path, gold, row,
+                     [("assistant", "chat_message", GOOD_CHECKIN, CHECKIN_META)])
+    assert r.error is None and r.score == (1.0 if ok else 0.0), r.detail
+
+
+UNDECIDED_ROW = {**SPOKE_ROW, "state": "due", "touches": 0, "last_outcome": None,
+                 "last_message": None, "last_touch_at": None,
+                 "next_touch_at": "2026-10-22T13:00:00.000000Z"}
+
+
+def test_open_loop_checkin_a_traced_skip_is_an_invalid_trial_not_a_zero(tmp_path):
+    _skip_trace(tmp_path, "2026-10-22T17:00:40.000000Z", "active_hours")
+    r = _checkin_run(tmp_path, SPOKE_GOLD, UNDECIDED_ROW)
+    assert r.error is not None and "active_hours" in r.error
+
+
+def test_open_loop_checkin_a_skip_for_every_loop_counts_too(tmp_path):
+    _skip_trace(tmp_path, "2026-10-22T17:00:40.000000Z", "disabled", loop_id=None)
+    r = _checkin_run(tmp_path, SPOKE_GOLD, UNDECIDED_ROW)
+    assert r.error is not None and "disabled" in r.error
+
+
+@pytest.mark.parametrize("ts, loop_id", [
+    ("2026-10-22T16:59:59.000000Z", LOOP_ID),          # before this trial's seed
+    ("2026-10-22T17:00:40.000000Z", "loop_SomeOther01"),  # another loop's skip
+])
+def test_open_loop_checkin_no_decision_without_a_skip_is_a_plain_zero(tmp_path, ts, loop_id):
+    _skip_trace(tmp_path, ts, "budget", loop_id=loop_id)
+    r = _checkin_run(tmp_path, SPOKE_GOLD, UNDECIDED_ROW)
+    assert r.error is None and r.score == 0.0
+    assert "row state due" in r.detail and "no skip traced" in r.detail
+
+
+@pytest.mark.parametrize("state", [
+    {**LOOP_STATE, "open_loops": []},
+    {**LOOP_STATE, "open_loops": LOOP_STATE["open_loops"] * 2},
+])
+def test_open_loop_checkin_grades_exactly_one_seeded_loop(tmp_path, state):
+    r = _checkin_run(tmp_path, SPOKE_GOLD, SPOKE_ROW, state=state)
+    assert r.error is not None
+
+
+def test_open_loop_checkin_suite_polls_inside_its_checker_timeout():
+    import yaml
+    with open(os.path.join(BENCH, "suites", "capability", "candidates",
+                           "open_loop_checkin.yaml")) as fh:
+        doc = yaml.safe_load(fh)
+    cases = [case for scn in doc["scenarios"] for case in scn["cases"]]
+    assert {case["id"] for case in cases} == {
+        "speaks_when_due", "repeat_makes_smaller_ask", "closes_when_memory_holds_completion",
+        "hand_back_says_last"}
+    for case in cases:
+        spec = case["checker"]
+        # The runner kills a checker at timeout_ms; the poll must end first, with room
+        # to grade, or a slow run reads as an evaluator timeout instead of its result.
+        assert spec["expect"]["wait_s"] * 1000 + 10_000 <= spec["timeout_ms"], case["id"]
+        assert spec["timeout_ms"] >= 150_000, case["id"]
+        with open(checker.resolve_state_spec(BENCH, spec["state"])) as fh:
+            seeded = json.load(fh)["open_loops"]
+        assert len(seeded) == 1, case["id"]
+        assert seeded[0]["due_hours_ago"] > 3, case["id"]   # rung 1 window closed
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

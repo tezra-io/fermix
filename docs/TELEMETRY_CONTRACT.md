@@ -390,6 +390,88 @@ rows. The event tools themselves (`event_store`, `event_list`, `event_update`,
 `event_remove`) are ordinary built-ins riding `[:fermix, :tool, :exec]` with
 `input:` passed explicitly.
 
+## Open loop check-ins
+
+An open loop (M78) is an intention the owner stated with the date it matters
+by. The scheduler decides when one is due, and a **check-in** is the one
+isolated run that may speak about it. A check-in calls `AgentLoop.run/1`, so it
+is a **run kind**, and it is always a **root**:
+`FermixCore.OpenLoops.Telemetry.correlation/2` mints
+`session_id = "open_loop_<id>_<touch>"` (`touch` is the touch the run would
+make, the row's `touches + 1`) and `agent: "open_loop:<id>"`, and the run's loop
+context takes both from it, so its provider and tool spans correlate with the
+bookends by construction. There is no `parent_session`: the scheduler spawned
+the run, not another run, and the turn that captured the loop closed days
+before (the follow-up reason). A retry after a timeout or an error keeps its
+touch, and so its session id. The `followup_` prefix belongs to the reminder
+follow-up and stays there.
+
+Every emission goes through `FermixCore.OpenLoops.Telemetry` — never
+hand-rolled. The bookends are `[:fermix, :open_loop, :checkin, :start |
+:complete | :error]`, with shared metadata `agent`, `session_id`,
+`open_loop_id`, `touch` and `component: "open_loop_checkin"`. `start`
+(`count: 1`) adds `rung` (`1 | 2`), `horizon_class` (`long | medium | short |
+imminent`), `active_hours` (the `HH:MM-HH:MM` hours the run was admitted under,
+snapshotted) and `max_duration_ms`, the run's watchdog and the exporter's sweep
+floor. `complete` (`duration_ms`) adds `outcome`: `spoke | silent | closed |
+empty | delivery_failed`, each a run that finished. `error` (`duration_ms`)
+adds `status` (`timeout | error`) and `error`, a string (a binary as it is, any
+other term inspected). The message a `spoke` run sent rides as `output`, shaped
+by `Telemetry.preview/1`, only when `capture_content?/0` is on. The delivery
+destination reaches no field: no function in the emitter accepts one.
+
+Two point events have no run behind them, so they are sessionless, as the
+reminder rail's pre-run skips are. `[:fermix, :open_loop, :skipped]`
+(`count: 1`) is the scheduler declining to start a check-in: `open_loop_id`
+(absent when the skip concerns no single loop), `reason` (`disabled | budget |
+active_hours | no_target | max_children | closed_meanwhile`) and
+`component: "open_loop_scheduler"`, and never a `session_id`.
+`[:fermix, :open_loop, :settled]` (`count: 1`) is a loop's state moving:
+`open_loop_id`, `from` (the live state the write left: `open | due | asked`),
+`to`, `answer` (`done | plan | not_yet | stop | drop | asked`, absent when no
+answer caused the move), `by` (`main_agent | checkin | scheduler`; every expiry
+is `scheduler`) and `component: "open_loops"`, plus the settling turn's
+`session_id` only when the caller has one. That is the whole allowlist. The
+emitter checks every word against its closed set and raises on anything else
+rather than emit a word no consumer knows, and drops nils rather than emit
+them.
+
+`Trace.TelemetryHandler` registers all five as `agent_event` rows:
+`open_loop_checkin_start`, `_complete` and `_error` keyed on `agent`,
+`open_loop_skipped` and `open_loop_settled` keyed on `component`. `FermixOpik`
+binds all five. The bookends open and close a root of kind `:open_loop_checkin`
+(`infer_kind("open_loop_" <> _)`, so a closer arriving without its opener does
+not read as a `:subagent` phantom root), named by the agent with the session id
+as its fallback, unthreaded, and swept by `max_duration_ms`. `complete` closes
+it with status `ok` and the outcome in its metadata; `error` closes it with its
+`status` word and the error as its output. The root's metadata is the allowlist
+`component`, `open_loop_id`, `touch`, `rung`, `horizon_class`, `active_hours`,
+`outcome`. Because a retry reuses its session id inside the closed-session
+tombstone window, the opener lifts that session's tombstone: an opener is a new
+run, never a late span of the one that shipped. `skipped` and `settled` render
+as self-closing `open_loop:<reason>` and `open_loop:settled` traces tagged
+`open_loop`, correlated by `open_loop_id`; a settlement's `session_id` is
+metadata there, never a parent, because the settling turn may already have
+shipped. `TraceFile.normalize_agent_event/2` is deliberately not extended (the
+reminder precedent): `mix opik.replay` skips open-loop rows. The main agent's
+loop tools and the check-in's `open_loop_respond` are ordinary built-ins riding
+`[:fermix, :tool, :exec]` through `Tools.Telemetry.exec/5`.
+
+`[:fermix, :open_loop, :fault]` (`count: 1`) is the third sessionless point
+event, the open-loop counterpart of the reminder rail's `scheduler_error`
+phase: `OpenLoops.Scheduler` logs and traces every failed step through
+`OpenLoops.Telemetry.fault/3`. Its metadata is `stage` (`scan | claim | release
+| timer | start_checkin | sweep`; a read needed to weigh a due loop is `scan`,
+and a dead run's claim that could not be recovered is `release`),
+`open_loop_id` (absent when the fault concerns no single loop),
+`component: "open_loop_scheduler"` and `error_class`, derived exactly as the
+reminder emitter derives it (an atom, a tagged tuple's atom head, else
+`unclassified`); the reason itself stays in the log line. A full supervisor
+stays the `max_children` skip. It is the trace row `open_loop_fault`, keyed on
+`component`, and in `FermixOpik` a self-closing `open_loop:fault` trace tagged
+`open_loop` carrying `stage`, `open_loop_id` and `error_class`; both consumers
+bind it beside the five above.
+
 ## Meeting notetaker runs
 
 A meeting is a **run kind**: `FermixCore.Meetings.Session` mints

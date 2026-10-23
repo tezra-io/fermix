@@ -180,6 +180,11 @@ defmodule FermixCore.Capabilities.BuiltinTest do
                "list_jobs",
                "list_meetings",
                "memory_sources_list",
+               # Every open loop is an intention the owner stated (MILESTONE_78 §08).
+               "open_loop_list",
+               "open_loop_note",
+               "open_loop_respond",
+               "open_loop_update",
                # On-device computer-history recall is owner data (MILESTONE_32 §11.2).
                "recall_activity",
                "reminder_snooze",

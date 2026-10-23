@@ -96,6 +96,16 @@ defmodule FermixCore.Prompt.ChannelPresentation do
     end
   end
 
+  @doc """
+  Whether `chat_type` names a shared room rather than a private chat, by the
+  same positive list the addressing line keys on: an absent or unrecognised
+  value is not a group. Public so the open-loop due note (MILESTONE_78 §08)
+  stays out of shared chats by this one list.
+  """
+  @spec group_chat?(String.t() | nil) :: boolean()
+  def group_chat?(chat_type) when is_binary(chat_type) or is_nil(chat_type),
+    do: chat_type in @group_chat_types
+
   defp compose(channel_line, chat_type) do
     (@core_lines ++ [channel_line, group_line(chat_type)])
     |> Enum.reject(&is_nil/1)

@@ -107,6 +107,9 @@ config :fermix_core, :temporal, scheduler_enabled: false
 # start their own Scheduler instances with injected seams.
 config :fermix_core, :skill_curation, enabled: false
 
+# Open loops stay off in tests; config.exs never pins the key (its default is off).
+config :fermix_core, :open_loops, enabled: false
+
 # Completion continuation is OFF in tests (config.exs wires the channels-side
 # dispatcher for dev/prod): `mix test` must never re-ingest a synthesized message
 # into the live gateway/agent queue. A terminal run then takes the plain durable

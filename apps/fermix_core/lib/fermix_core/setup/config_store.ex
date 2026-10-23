@@ -18,6 +18,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.IMessage
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Net.Egress
+  alias FermixCore.OpenLoops.Config, as: OpenLoopsConfig
   alias FermixCore.Plugins.Dist.Lock
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Plugins.Retired
@@ -137,6 +138,7 @@ defmodule FermixCore.Setup.ConfigStore do
         harness: Application.get_env(:fermix_core, :harness, []),
         browser: Application.get_env(:fermix_core, :browser, []),
         skill_curation: Application.get_env(:fermix_core, :skill_curation, []),
+        open_loops: Application.get_env(:fermix_core, :open_loops, []),
         memory: Application.get_env(:fermix_core, :memory, []),
         realtime: Application.get_env(:fermix_core, :realtime, []),
         computer_use: Application.get_env(:fermix_core, :computer_use, []),
@@ -277,6 +279,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_harness_config(Keyword.get(persisted.fermix_core, :harness, []))
     apply_browser_config(Keyword.get(persisted.fermix_core, :browser, []))
     apply_skill_curation_config(Keyword.get(persisted.fermix_core, :skill_curation, []))
+    apply_open_loops_config(Keyword.get(persisted.fermix_core, :open_loops, []))
     apply_memory_config(Keyword.get(persisted.fermix_core, :memory, []))
     apply_realtime_config(Keyword.get(persisted.fermix_core, :realtime, []))
     apply_computer_use_config(Keyword.get(persisted.fermix_core, :computer_use, []))
@@ -623,6 +626,11 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:skill_curation, [])
           |> normalize_skill_curation(),
+        open_loops:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:open_loops, [])
+          |> normalize_open_loops(),
         memory:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -823,6 +831,7 @@ defmodule FermixCore.Setup.ConfigStore do
         harness: [],
         browser: [],
         skill_curation: [],
+        open_loops: [],
         memory: [],
         realtime: [],
         computer_use: [],
@@ -1124,6 +1133,12 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  # Replace (not merge), same rationale as harness.
+  defp apply_open_loops_config(open_loops_config) do
+    Application.put_env(:fermix_core, :open_loops, open_loops_config)
+    :ok
+  end
+
   # Memory uses merge (not put) so other in-process keys (extraction_enabled,
   # agent_id, prompt_*_token_cap, loop_detection_*) survive partial TOML edits.
   defp apply_memory_config(memory_config) do
@@ -1266,6 +1281,7 @@ defmodule FermixCore.Setup.ConfigStore do
     harness = Keyword.get(fermix_core, :harness, [])
     browser = Keyword.get(fermix_core, :browser, [])
     skill_curation = Keyword.get(fermix_core, :skill_curation, [])
+    open_loops = Keyword.get(fermix_core, :open_loops, [])
     memory = Keyword.get(fermix_core, :memory, [])
     realtime = Keyword.get(fermix_core, :realtime, [])
     computer_use = Keyword.get(fermix_core, :computer_use, [])
@@ -1309,6 +1325,7 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "harness"], harness),
       render_section(["fermix_core", "browser"], browser),
       render_section(["fermix_core", "skill_curation"], skill_curation),
+      render_section(["fermix_core", "open_loops"], open_loops),
       render_section(["fermix_core", "memory"], memory),
       render_section(["fermix_core", "realtime"], realtime),
       render_section(["fermix_core", "computer_use"], computer_use),
@@ -1623,6 +1640,7 @@ defmodule FermixCore.Setup.ConfigStore do
         browser: normalize_browser(get_in(document, ["fermix_core", "browser"])),
         skill_curation:
           normalize_skill_curation(get_in(document, ["fermix_core", "skill_curation"])),
+        open_loops: normalize_open_loops(get_in(document, ["fermix_core", "open_loops"])),
         memory: normalize_memory(get_in(document, ["fermix_core", "memory"])),
         realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"])),
         computer_use: normalize_computer_use(get_in(document, ["fermix_core", "computer_use"])),
@@ -2679,6 +2697,38 @@ defmodule FermixCore.Setup.ConfigStore do
       config.toml [fermix_core.skill_curation] has unknown key(s): #{Enum.join(unknown, ", ")}.
 
       Allowed keys: #{Enum.map_join(SkillCurationConfig.config_keys(), ", ", &Atom.to_string/1)}.
+      Remove or fix the key(s); the daemon will not boot until this is fixed.
+      """
+    end
+  end
+
+  # `[fermix_core.open_loops]` (MILESTONE_78_OPEN_LOOPS §10), wired as skill
+  # curation is: value validation lives in OpenLoopsConfig.normalize (fail-loud
+  # per key); unknown keys are rejected here at the parse boundary.
+  defp normalize_open_loops(config) do
+    validate_open_loops_section_keys!(config)
+    OpenLoopsConfig.normalize(config)
+  end
+
+  defp validate_open_loops_section_keys!(nil), do: :ok
+
+  defp validate_open_loops_section_keys!(config) when is_map(config) or is_list(config) do
+    allowed = MapSet.new(OpenLoopsConfig.config_keys(), &Atom.to_string/1)
+
+    unknown =
+      config
+      |> section_keys()
+      |> Enum.reject(&MapSet.member?(allowed, &1))
+      |> Enum.sort()
+
+    if unknown == [] do
+      :ok
+    else
+      raise ArgumentError, """
+      config.toml [fermix_core.open_loops] has unknown key(s): #{Enum.join(unknown, ", ")}.
+
+      Allowed keys: #{Enum.map_join(OpenLoopsConfig.config_keys(), ", ", &Atom.to_string/1)}.
+      Check-in timing and caps are internal constants, not config.
       Remove or fix the key(s); the daemon will not boot until this is fixed.
       """
     end

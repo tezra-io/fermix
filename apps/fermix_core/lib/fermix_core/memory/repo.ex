@@ -11,9 +11,11 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Memory.Repo.ComputerHistorySql
   alias FermixCore.Memory.Repo.MeetingsSql
   alias FermixCore.Memory.Repo.MobileSql
+  alias FermixCore.Memory.Repo.OpenLoopsSql
   alias FermixCore.Memory.Repo.TemporalSql
   alias FermixCore.Memory.Repo.VoiceCallsSql
   alias FermixCore.Memory.Scope
+  alias FermixCore.OpenLoops.Defaults, as: OpenLoopsDefaults
   alias FermixCore.Timeouts
 
   @base_migration_version 1
@@ -56,6 +58,7 @@ defmodule FermixCore.Memory.Repo do
   @voice_call_gist_taint_migration_version 38
   @phone_joins_chat_migration_version 39
   @reply_blocks_migration_version 41
+  @open_loops_migration_version 43
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -1028,6 +1031,45 @@ defmodule FermixCore.Memory.Repo do
         }
 
   @type temporal_cursor :: {String.t(), String.t()}
+
+  @type open_loop_row :: %{
+          id: String.t(),
+          agent_id: String.t(),
+          owner_id: String.t(),
+          dedupe_key: String.t(),
+          intention: String.t(),
+          why_it_matters: String.t() | nil,
+          matters_by_kind: String.t(),
+          matters_by_date: Date.t(),
+          matters_by_time: Time.t() | nil,
+          matters_by_at: DateTime.t(),
+          timezone: String.t(),
+          horizon_class: String.t(),
+          said_at: DateTime.t(),
+          source_channel: String.t(),
+          source_chat_id: String.t(),
+          source_thread_scope: String.t(),
+          state: String.t(),
+          touches: 0..3,
+          next_touch_at: DateTime.t() | nil,
+          claimed_at: DateTime.t() | nil,
+          last_touch_at: DateTime.t() | nil,
+          last_touch_rung: 1 | 2 | nil,
+          last_rung2_at: DateTime.t() | nil,
+          last_answer: String.t() | nil,
+          plan_at: DateTime.t() | nil,
+          last_outcome: String.t() | nil,
+          last_outcome_at: DateTime.t() | nil,
+          last_message: String.t() | nil,
+          delivery_platform: String.t(),
+          delivery_destination: String.t(),
+          delivery_thread_scope: String.t(),
+          closed_at: DateTime.t() | nil,
+          close_reason: String.t() | nil,
+          revision: pos_integer(),
+          created_at: DateTime.t(),
+          updated_at: DateTime.t()
+        }
 
   @type resource_selector :: %{
           required(:agent_id) => String.t(),
@@ -2917,6 +2959,203 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  # --- open loops (MILESTONE_78 §06, §18) ----------------------------------
+
+  @doc """
+  Creates an open loop (§18). A live loop of the same owner with the same
+  dedupe key is returned as stored, with no write (`{:existing, row}`);
+  otherwise the owner's live-loop cap (`OpenLoops.Defaults.max_live_loops/0`)
+  is checked and the row inserted (`{:created, row}`), atomically. Bounds and
+  shapes are validated here, in the caller.
+  """
+  @spec create_open_loop(map(), keyword()) ::
+          {:ok, {:created | :existing, open_loop_row()}} | {:error, :too_many_loops | term()}
+  def create_open_loop(attrs, opts \\ []) when is_map(attrs) do
+    with {:ok, row} <- OpenLoopsSql.normalize_create(attrs) do
+      call({:create_open_loop, row}, opts)
+    end
+  end
+
+  @spec get_open_loop(String.t(), keyword()) ::
+          {:ok, open_loop_row()} | {:error, :not_found | term()}
+  def get_open_loop(id, opts \\ []) when is_binary(id) do
+    call({:get_open_loop, id}, opts)
+  end
+
+  @doc """
+  One owner's loops: `state: "live"` (open, due, asked; by date), `"closed"`
+  (the last 25 closed or expired, newest first), or `"any"` (both).
+  """
+  @spec list_open_loops(map(), keyword()) :: {:ok, [open_loop_row()]} | {:error, term()}
+  def list_open_loops(filter, opts \\ []) when is_map(filter) do
+    with {:ok, normalized} <- OpenLoopsSql.normalize_filter(filter) do
+      call({:list_open_loops, normalized}, opts)
+    end
+  end
+
+  @spec count_live_open_loops(String.t(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def count_live_open_loops(owner_id, opts \\ []) when is_binary(owner_id) do
+    call({:count_live_open_loops, owner_id}, opts)
+  end
+
+  @doc """
+  The one write for an owner's answer or a scheduler outcome: applies
+  `changes` (the columns `OpenLoops.Lifecycle` returns) to a live row, clears
+  any claim and bumps `revision`. A closed or expired row is `:not_live` and
+  never reopens. `opts[:now]` stamps `updated_at`.
+  """
+  @spec settle_open_loop(String.t(), map(), keyword()) ::
+          {:ok, open_loop_row()} | {:error, :not_found | :not_live | term()}
+  def settle_open_loop(id, changes, opts \\ []) when is_binary(id) and is_map(changes) do
+    with {:ok, normalized} <- OpenLoopsSql.normalize_changes(changes) do
+      call({:settle_open_loop, id, normalized, write_stamp(opts)}, opts)
+    end
+  end
+
+  @doc """
+  The due scan (§18): at most `limit` live, unclaimed rows whose touch has
+  arrived, each decided by `OpenLoops.Lifecycle.due_decision/2` in its own
+  transaction. Returns the rows it made due, expired, or moved to their
+  hand-back; the due rows it read and left waiting (the rows a rung 2 claim
+  may take); and each expired row's state before the scan, by id.
+  """
+  @spec scan_due_open_loops(DateTime.t(), pos_integer(), keyword()) ::
+          {:ok,
+           %{
+             due: [open_loop_row()],
+             expired: [open_loop_row()],
+             skipped_to_handback: [open_loop_row()],
+             waiting: [open_loop_row()],
+             expired_from: %{String.t() => String.t()}
+           }}
+          | {:error, term()}
+  def scan_due_open_loops(%DateTime{} = now, limit, opts \\ [])
+      when is_integer(limit) and limit > 0 do
+    call({:scan_due_open_loops, now, limit}, opts)
+  end
+
+  @doc "Claims a due, unclaimed loop for a check-in run (compare-and-set)."
+  @spec claim_open_loop_checkin(String.t(), DateTime.t(), keyword()) ::
+          {:ok, open_loop_row()} | {:error, :not_claimable | term()}
+  def claim_open_loop_checkin(id, %DateTime{} = now, opts \\ []) when is_binary(id) do
+    call({:claim_open_loop_checkin, id, OpenLoopsSql.stamp!(now)}, opts)
+  end
+
+  @doc """
+  A check-in's finalising write, a compare-and-set on `(id, state = 'due',
+  claimed_at)` with the claim it holds. `:closed_meanwhile` means the owner
+  settled the loop during the run, and the run must not send. `opts[:now]`
+  stamps `updated_at`.
+  """
+  @spec finalize_open_loop_checkin(String.t(), DateTime.t(), map(), keyword()) ::
+          {:ok, open_loop_row()} | {:error, :closed_meanwhile | term()}
+  def finalize_open_loop_checkin(id, %DateTime{} = claimed_at, changes, opts \\ [])
+      when is_binary(id) and is_map(changes) do
+    with {:ok, normalized} <- OpenLoopsSql.normalize_changes(changes) do
+      claim = OpenLoopsSql.stamp!(claimed_at)
+      call({:finalize_open_loop_checkin, id, claim, normalized, write_stamp(opts)}, opts)
+    end
+  end
+
+  @doc """
+  Spends the owner's daily rung 2 budget for a check-in about to send: stamps
+  `last_rung2_at` and `updated_at` with `now`, a compare-and-set on `(id, state
+  = 'due', claimed_at)` with the claim the run holds, refused `:budget_spent`
+  when any loop of the owner's already carries a stamp since `since`, the
+  owner's local day start (`OpenLoops.ActiveHours.day_start/2`). The check
+  and the stamp are one transaction on the single writer, so two runs can
+  never both spend one day. `revision` and the claim stay, since no answer or
+  outcome moved. `:closed_meanwhile` means the owner settled the loop during
+  the run, or its claim was swept, and the run must not send.
+  """
+  @spec spend_open_loop_budget(
+          String.t(),
+          DateTime.t(),
+          DateTime.t(),
+          DateTime.t(),
+          keyword()
+        ) ::
+          {:ok, open_loop_row()} | {:error, :closed_meanwhile | :budget_spent | term()}
+  def spend_open_loop_budget(
+        id,
+        %DateTime{} = claimed_at,
+        %DateTime{} = since,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_binary(id) do
+    claim = OpenLoopsSql.stamp!(claimed_at)
+
+    request =
+      {:spend_open_loop_budget, id, claim, OpenLoopsSql.stamp!(since), OpenLoopsSql.stamp!(now)}
+
+    call(request, opts)
+  end
+
+  @doc "The boot sweep: clears every check-in claim, returning the ids it cleared."
+  @spec sweep_open_loop_claims(keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  def sweep_open_loop_claims(opts \\ []) do
+    call(:sweep_open_loop_claims, opts)
+  end
+
+  @doc """
+  The earliest moment after `now` at which a live, unclaimed loop can next
+  move (`OpenLoops.Lifecycle.next_wake/2`), or nil. Waiting for the owner's
+  active hours or the next day's budget is the scheduler's own.
+  """
+  @spec next_open_loop_touch_at(DateTime.t(), keyword()) ::
+          {:ok, DateTime.t() | nil} | {:error, term()}
+  def next_open_loop_touch_at(%DateTime{} = now, opts \\ []) do
+    call({:next_open_loop_touch_at, now}, opts)
+  end
+
+  @doc """
+  Due, unclaimed loops of one owner and agent inside their rung 1 window:
+  `next_touch_at <= now < next_touch_at + window`, the window
+  `opts[:window_ms]` (default `OpenLoops.Defaults.rung1_window_ms/0`); an
+  imminent loop until its date has passed (rung 1 only, until the date).
+  """
+  @spec due_open_loops_for_note(String.t(), String.t(), DateTime.t(), keyword()) ::
+          {:ok, [open_loop_row()]} | {:error, term()}
+  def due_open_loops_for_note(owner_id, agent_id, %DateTime{} = now, opts \\ [])
+      when is_binary(owner_id) and is_binary(agent_id) do
+    window_ms = Keyword.get(opts, :window_ms, OpenLoopsDefaults.rung1_window_ms())
+    opened_after = now |> DateTime.add(-window_ms, :millisecond) |> OpenLoopsSql.stamp!()
+
+    request =
+      {:due_open_loops_for_note, owner_id, agent_id, OpenLoopsSql.stamp!(now), opened_after}
+
+    call(request, opts)
+  end
+
+  @doc """
+  Whether the owner's daily rung 2 budget was spent since `since`
+  (`spend_open_loop_budget/5`), on any of the owner's loops, closed and expired
+  ones included.
+  """
+  @spec open_loop_budget_spent_since(String.t(), DateTime.t(), keyword()) ::
+          {:ok, boolean()} | {:error, term()}
+  def open_loop_budget_spent_since(owner_id, %DateTime{} = since, opts \\ [])
+      when is_binary(owner_id) do
+    call({:open_loop_budget_spent_since, owner_id, OpenLoopsSql.stamp!(since)}, opts)
+  end
+
+  @doc """
+  When the owner's own user chat messages were written since `since`, guest
+  rows excluded, newest first and bounded (for `OpenLoops.ActiveHours`).
+  """
+  @spec owner_message_hours(String.t(), String.t(), DateTime.t(), keyword()) ::
+          {:ok, [DateTime.t()]} | {:error, term()}
+  def owner_message_hours(agent_id, owner_id, %DateTime{} = since, opts \\ [])
+      when is_binary(agent_id) and is_binary(owner_id) do
+    call({:owner_message_hours, agent_id, owner_id, OpenLoopsSql.stamp!(since)}, opts)
+  end
+
+  defp write_stamp(opts) do
+    opts |> Keyword.get_lazy(:now, &DateTime.utc_now/0) |> OpenLoopsSql.stamp!()
+  end
+
   @doc """
   Records a requested meeting (M21 §8.2).
 
@@ -3291,6 +3530,73 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:list_temporal_reminders, filter}, _from, state) do
     reply = with_connection(state, &TemporalSql.list_reminders(&1, filter))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:create_open_loop, row}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopsSql.create(&1, row)), state}
+  end
+
+  def handle_call({:get_open_loop, id}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopsSql.fetch(&1, id)), state}
+  end
+
+  def handle_call({:list_open_loops, filter}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopsSql.list(&1, filter)), state}
+  end
+
+  def handle_call({:count_live_open_loops, owner_id}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopsSql.count_live(&1, owner_id)), state}
+  end
+
+  def handle_call({:settle_open_loop, id, changes, now}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopsSql.settle(&1, id, changes, now)), state}
+  end
+
+  def handle_call({:scan_due_open_loops, now, limit}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopsSql.scan_due(&1, now, limit)), state}
+  end
+
+  def handle_call({:claim_open_loop_checkin, id, now}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopsSql.claim(&1, id, now)), state}
+  end
+
+  def handle_call({:finalize_open_loop_checkin, id, claimed_at, changes, now}, _from, state) do
+    reply = with_connection(state, &OpenLoopsSql.finalize(&1, id, claimed_at, changes, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:spend_open_loop_budget, id, claimed_at, since, now}, _from, state) do
+    reply =
+      with_connection(state, &OpenLoopsSql.spend_budget(&1, id, claimed_at, since, now))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(:sweep_open_loop_claims, _from, state) do
+    {:reply, with_connection(state, &OpenLoopsSql.sweep_claims/1), state}
+  end
+
+  def handle_call({:next_open_loop_touch_at, now}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopsSql.next_wake(&1, now)), state}
+  end
+
+  def handle_call({:due_open_loops_for_note, owner_id, agent_id, now, opened}, _from, state) do
+    reply =
+      with_connection(state, &OpenLoopsSql.due_for_note(&1, owner_id, agent_id, now, opened))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:open_loop_budget_spent_since, owner_id, since}, _from, state) do
+    reply = with_connection(state, &OpenLoopsSql.budget_spent_since(&1, owner_id, since))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:owner_message_hours, agent_id, owner_id, since}, _from, state) do
+    reply =
+      with_connection(state, &OpenLoopsSql.owner_message_hours(&1, agent_id, owner_id, since))
+
     {:reply, reply, state}
   end
 
@@ -4291,8 +4597,27 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_voice_calls_migration(conn, versions),
          :ok <- apply_voice_call_gist_taint_migration(conn, versions),
          :ok <- apply_phone_joins_chat_migration(conn, versions),
-         :ok <- apply_reply_blocks_migration(conn, versions) do
+         :ok <- apply_reply_blocks_migration(conn, versions),
+         :ok <- apply_open_loops_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # Open loops (M78 §18), their table and version in one transaction. 42 is
+  # held by M60 on release/0.17.0, so this claims 43.
+  defp apply_open_loops_migration(conn, versions) do
+    if Enum.member?(versions, @open_loops_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{OpenLoopsSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@open_loops_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 

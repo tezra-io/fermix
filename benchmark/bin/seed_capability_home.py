@@ -276,6 +276,14 @@ def render_config(
     # model wanders into it, and keeps suite behavior independent of daemon
     # uptime.
     lines += ["[fermix_core.skill_curation]", "enabled = false", ""]
+    # Open loops (MILESTONE_78) are off until the owner turns them on, and a fresh
+    # eval home has never made that decision — so the open_loop_* tools are not
+    # advertised, the scheduler never starts, and both open-loop suites
+    # (open_loops.yaml, capability/candidates/open_loop_checkin.yaml) score 0 with
+    # nothing wrong in the product. Same rule as the harness consent above:
+    # pre-grant every human-decision gate, scoped to this throwaway home. `enabled`
+    # is the section's only key; any other stops the daemon booting.
+    lines += ["[fermix_core.open_loops]", "enabled = true", ""]
     # Temporal events (MILESTONE_30) hinge on two operator-setup decisions a
     # fresh home lacks, and event_store fails loudly without both — an unseeded
     # home would score every reminder task 0 with nothing wrong in the product
@@ -287,6 +295,14 @@ def render_config(
     lines += ["[fermix_core.jobs]", 'default_delivery_mode = "channel"', ""]
     lines += ["[fermix_core.jobs.default_delivery_target]",
               'platform = "telegram"', 'chat_id = "100001"', ""]
+    # The owner-inbox ladder (`Delivery.OwnerInbox`) accepts that target only when
+    # it IS the owner's own inbox, which it tells by the channel's explicit
+    # `owner_user_id`. Without one, open-loop capture (M78) refuses every loop as
+    # `:no_target` and the behavioural suite scores zero with nothing wrong in the
+    # product: the pre-grant-every-gate rule again. The section carries the owner
+    # id and nothing else; with no `bot_token` the Telegram poller stays in the
+    # same misconfigured posture it has in every eval home today.
+    lines += ["[fermix_channels.telegram]", 'owner_user_id = "100001"', ""]
     lines += ["[fermix_core.personalization]", 'user_name = "Eval Operator"',
               'timezone = "America/New_York"', 'communication_style = "concise"', ""]
     if voice:

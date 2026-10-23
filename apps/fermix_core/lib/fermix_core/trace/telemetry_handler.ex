@@ -18,6 +18,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.Management.Telemetry, as: ManagementTelemetry
   alias FermixCore.Meetings.Telemetry, as: MeetingTelemetry
+  alias FermixCore.OpenLoops.Telemetry, as: OpenLoopTelemetry
   alias FermixCore.Plugins.Auth.Telemetry, as: PluginAuthTelemetry
   alias FermixCore.Realtime.GistTelemetry
   alias FermixCore.Realtime.LiveTelemetry
@@ -270,6 +271,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
       ManagementTelemetry.trace_event_definitions() ++
       TemporalTelemetry.trace_event_definitions() ++
       TemporalFollowupTelemetry.trace_event_definitions() ++
+      OpenLoopTelemetry.trace_event_definitions() ++
       LiveTelemetry.trace_event_definitions() ++
       GistTelemetry.trace_event_definitions() ++
       ComputerUseTelemetry.trace_event_definitions() ++

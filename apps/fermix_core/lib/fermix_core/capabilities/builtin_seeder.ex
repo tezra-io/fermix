@@ -39,6 +39,20 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.ReminderSnooze
   ]
 
+  # Open loops (MILESTONE_78 §07, §10), named as its own list for the same
+  # reason: `open_loop_tools_trust_invariant_test.exs` loops over it and asserts
+  # both directions of its membership for every `open_loop_*` built-in. Seeded
+  # always, like the event family: every member's `advertise?/1` and
+  # `execute/2` gate on `[fermix_core.open_loops] enabled`, so a disabled
+  # install offers none of them, and `open_loop_respond` is offered only inside
+  # a check-in run.
+  @open_loop_tool_modules [
+    FermixCore.Tools.OpenLoopNote,
+    FermixCore.Tools.OpenLoopUpdate,
+    FermixCore.Tools.OpenLoopList,
+    FermixCore.Tools.OpenLoopRespond
+  ]
+
   @builtin_tool_modules [
     FermixCore.Tools.Shell,
     FermixCore.Tools.FileRead,
@@ -94,7 +108,12 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.EventList,
     FermixCore.Tools.EventUpdate,
     FermixCore.Tools.EventRemove,
-    FermixCore.Tools.ReminderSnooze
+    FermixCore.Tools.ReminderSnooze,
+    # The open-loop family; keep `@open_loop_tool_modules` in step.
+    FermixCore.Tools.OpenLoopNote,
+    FermixCore.Tools.OpenLoopUpdate,
+    FermixCore.Tools.OpenLoopList,
+    FermixCore.Tools.OpenLoopRespond
   ]
 
   def child_spec(opts) do
@@ -213,6 +232,14 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   """
   @spec event_tool_modules() :: [module()]
   def event_tool_modules, do: @event_tool_modules
+
+  @doc """
+  The open-loop tool family (MILESTONE_78 §07, §10). Exposed so the
+  whole-surface invariant test gates EVERY member: none is offered while the
+  feature is off, none outside an attended owner turn or a check-in run.
+  """
+  @spec open_loop_tool_modules() :: [module()]
+  def open_loop_tool_modules, do: @open_loop_tool_modules
 
   @doc """
   The meetings notetaker tool family (MILESTONE_21 C2 §14.1). Exposed so the
