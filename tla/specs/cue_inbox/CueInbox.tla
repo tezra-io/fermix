@@ -34,29 +34,26 @@
 (* runs, ahead of anything that caller sends next (repo.ex call/2,         *)
 (* call_or_timeout_error/3).                                               *)
 (*                                                                         *)
-(* The spec follows the code after the review-1 (R1) fixes and lane R3's  *)
-(* fixes of CUE-1 (the sweep reclaims a filtering row no task holds) and   *)
-(* CUE-2 (no cue run is admitted while the run set is unknown).            *)
-(*                                                                         *)
-(* The code is uncommitted (release/0.17.0), so the SOURCE lines carry no  *)
-(* pin yet: the runner reports the spec stale until it is re-pinned after  *)
-(* the commit (make -C tla repin SPECS=cue_inbox). Line numbers below are  *)
-(* those of the working tree on 2026-10-17 and can drift until then.       *)
+(* The spec follows the code as committed in e0be70a6 (M60): the review-1  *)
+(* (R1) fixes, lane R3's fixes of CUE-1 (the sweep reclaims a filtering    *)
+(* row no task holds) and CUE-2 (no cue run is admitted while the run set  *)
+(* is unknown), the review fixes after them, and the owner's devices       *)
+(* answering a proposal. Line numbers below are those of that commit.      *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/ingest.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/filters.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/supervisor.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/sweeper.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/proposals.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_sql.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_filter_sql.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_runs_sql.ex#@open_sql,@cap_room_sql,@eligible_sql,@candidates_sql,@eligible_delivery_sql,@settle_facts_sql,eligible_delivery,settle_delivery,settle_facts,settle_held,settle_move,unspent_retry,spent_retry,move_patch,untouched
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_mandate_sql.ex#mark_tools_started,decide_propose,store_proposal,point_at_existing,decide_waiting,decided_or_why,decide_by_id,decided_by_id,end_denied,settle_proposal,expire_proposals
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/cue_admission.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/scheduler.ex#init,handle_info,handle_cast,maybe_request_admission,request_admission,admit_cue_runs,free_cue_slots,cue_run_attrs,start_cue_run,reconcile_active_runs,reconcile_active_run,adopt_live_run,monitored_run?,reap_orphaned_run,live_runner_pids,put_live_runner,active_run_count,start_or_mark_failed,monitor_entry,mark_run_crashed,mark_run_failed,mark_run_error,fail_delivery_after_settle
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex#complete_run,mark_cue_completed,mark_failed
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,call_or_timeout_error,periodic_opts,claim_cue_run,claim_cue_run_tx,claim_cue_run_in_tx,claim_delivery,claim_in_tx,fetch_claimable_job,ensure_no_active_job_run,settle_cue_run,settle_cue_run_tx,settle_cue_run_in_tx,active_run_trigger,release_cue_job,ensure_job_run_active,finish_job_settle,rollback_job_settle,upsert_job_run_row
-\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,maybe_cues_supervisor
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/ingest.ex @ 05d7fd9c9e51
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/filters.ex @ fed2523b7855
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/supervisor.ex @ 6cd21aac9d1d
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/sweeper.ex @ da4e2d7db65e
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/proposals.ex @ 87edca5814ab
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_sql.ex @ 7480646336d9
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_filter_sql.ex @ 68f8085a8c5d
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_runs_sql.ex#@open_sql,@cap_room_sql,@eligible_sql,@candidates_sql,@eligible_delivery_sql,@settle_facts_sql,eligible_delivery,settle_delivery,settle_facts,settle_held,settle_move,unspent_retry,spent_retry,move_patch,untouched @ f65310ef1716
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_mandate_sql.ex#mark_tools_started,decide_propose,store_proposal,point_at_existing,decide_waiting,decided_or_why,decide_by_id,decided_by_id,end_denied,settle_proposal,expire_proposals @ 029c6975cee1
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/cue_admission.ex @ 94f9aac007e9
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/scheduler.ex#init,handle_info,handle_cast,maybe_request_admission,request_admission,admit_cue_runs,free_cue_slots,cue_run_attrs,start_cue_run,reconcile_active_runs,reconcile_active_run,adopt_live_run,monitored_run?,reap_orphaned_run,live_runner_pids,put_live_runner,active_run_count,start_or_mark_failed,monitor_entry,mark_run_crashed,mark_run_failed,mark_run_error,fail_delivery_after_settle @ b0de1f598583
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex#complete_run,mark_cue_completed,mark_failed @ 4006c75e7387
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,call_or_timeout_error,periodic_opts,claim_cue_run,claim_cue_run_tx,claim_cue_run_in_tx,claim_delivery,claim_in_tx,fetch_claimable_job,ensure_no_active_job_run,settle_cue_run,settle_cue_run_tx,settle_cue_run_in_tx,active_run_trigger,release_cue_job,ensure_job_run_active,finish_job_settle,rollback_job_settle,upsert_job_run_row @ 87275850c2a1
+\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,maybe_cues_supervisor @ 6cf28b8afcde
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
@@ -64,8 +61,8 @@ CONSTANTS
     MaxFaults,       \* how many injected faults one behaviour may contain
     MaxActive,       \* the scheduler's run ceiling (@max_active_runs 4, scheduler.ex:70)
     MaxCue,          \* the cue share of it (@max_cue_runs 3, cue_admission.ex:37)
-    MaxFilterAttempts, \* @max_filter_attempts 3 (cues_filter_sql.ex:65), scaled
-    MaxTaskAttempts, \* @max_task_attempts 3 (cues_runs_sql.ex:45), scaled
+    MaxFilterAttempts, \* @max_filter_attempts 3 (cues_filter_sql.ex:66), scaled
+    MaxTaskAttempts, \* @max_task_attempts 3 (cues_runs_sql.ex:46), scaled
     \* Environment switches: what may happen.
     ProviderCanFail,     \* a filter call fails (provider or content failure) or
                          \* is still running at the 60 s deadline
@@ -93,23 +90,23 @@ CONSTANTS
                          \* Cues.Proposals.decide/4; the answers share the taps
     \* Mechanism switches: TRUE is the real code; each is FALSE in a needs check.
     SubjectRule,                \* the subject clause of @open_sql
-                                \* (cues_runs_sql.ex:91-94)
-    SubjectRuleCoversUndecided, \* ... over pending and filtering rows too (:94,
+                                \* (cues_runs_sql.ex:95-98)
+    SubjectRuleCoversUndecided, \* ... over pending and filtering rows too (:98,
                                 \* PLAN §1; draft 7 read passed and claimed only)
     ExcludesBusyWatchers,       \* the dispatcher passes the watchers whose call it
                                 \* still holds (filters.ex:235)
     SettleFenced,               \* a filter settle needs its call open and the row's
-                                \* filter_call_id (cues_filter_sql.ex:430 open_call,
-                                \* :541 move)
+                                \* filter_call_id (cues_filter_sql.ex:432 open_call,
+                                \* :543 move)
     TasksDieWithDispatcher,     \* FilterSupervisor starts after Filters in the
                                 \* rest_for_one filtering group (FilteringSupervisor,
                                 \* cues/supervisor.ex:44-47, :51, :58-63)
     BootReset,                  \* Filters.init resets filtering rows
-                                \* (filters.ex:102, :159; cues_filter_sql.ex:633)
+                                \* (filters.ex:102, :159; cues_filter_sql.ex:635)
     NonePassesAtAccept,         \* a none watcher's delivery is inserted passed
                                 \* (cues_sql.ex:620)
     ClaimNeedsIdleJob,          \* a cue claim needs the job scheduled with no active
-                                \* run (@open_sql :87-90; repo.ex fetch_claimable_job,
+                                \* run (@open_sql :91-94; repo.ex fetch_claimable_job,
                                 \* ensure_no_active_job_run)
     CueSlotCap,                 \* free = min(max_active - active, 3 - active_cue)
                                 \* (cue_admission.ex:57)
@@ -117,14 +114,14 @@ CONSTANTS
                                 \* are one transaction (repo.ex settle_cue_run_in_tx)
     RunSettleFenced,            \* a run settle needs the run active
                                 \* (repo.ex ensure_job_run_active) and the delivery
-                                \* claimed by it (cues_runs_sql.ex:309)
+                                \* claimed by it (cues_runs_sql.ex:313)
     ReapsOnlyDeadRuns,          \* reconciliation reaps a run only when the runner
                                 \* supervisor no longer holds its runner
                                 \* (scheduler.ex:386, :398)
     ReconcilesRuns,             \* init and the 60 s tick reconcile unsettled runs
                                 \* (scheduler.ex:210, :250, :370)
     ExhaustsAfterAction,        \* a failure once tools_started_at is set ends the
-                                \* delivery exhausted (cues_runs_sql.ex:331)
+                                \* delivery exhausted (cues_runs_sql.ex:335)
     ToolsMarkWriteOnce,         \* the run upsert never clears tools_started_at
                                 \* (repo.ex upsert_job_run_row: coalesce)
     ConfirmFenced,              \* a confirm is one UPDATE on state, token, chat and
@@ -132,7 +129,7 @@ CONSTANTS
     ReclaimsOrphans,            \* every sweep puts back a filtering row whose call
                                 \* the dispatcher does not hold (R3, CUE-1:
                                 \* filters.ex:192-215 reclaim_orphans,
-                                \* cues_filter_sql.ex:668 reclaim_in_tx)
+                                \* cues_filter_sql.ex:670 reclaim_in_tx)
     AdmitsAfterScan,            \* no cue run is admitted while the last reconcile
                                 \* scan failed (R3, CUE-2: scheduler.ex:312
                                 \* free_cue_slots; the flag :374, :382)
@@ -277,8 +274,8 @@ HasFiltering(w) == \E d \in D : Wat[d] = w /\ dstate[d] = "filtering"
 DuePending(w) == {d \in D : Wat[d] = w /\ dstate[d] = "pending" /\ due[d] /\ valid[d]}
 Oldest(S) == CHOOSE d \in S : \A o \in S : d <= o
 
-\* CuesFilterSql eligible/4 (cues_filter_sql.ex:168): an enabled llm
-\* watcher, filter_retry_at null or past, no delivery in filtering (:177),
+\* CuesFilterSql eligible/4 (cues_filter_sql.ex:169): an enabled llm
+\* watcher, filter_retry_at null or past, no delivery in filtering (:179),
 \* not in `exclude`, with a due pending delivery; its oldest one is claimed.
 \* The 16-claim and 4-in-flight caps never bind with two llm deliveries.
 FilterClaimable(w) ==
@@ -288,7 +285,7 @@ FilterClaimable(w) ==
     /\ ~(ExcludesBusyWatchers /\ WatcherBusy(w))
     /\ DuePending(w) /= {}
 
-\* claim_one/3 (cues_filter_sql.ex:209): pending -> filtering with a new
+\* claim_one/3 (cues_filter_sql.ex:211): pending -> filtering with a new
 \* filter_call_id (CuesSql.transition, fence :none) and the call row.
 ClaimFilterRows(w) ==
     LET d == Oldest(DuePending(w))
@@ -327,7 +324,7 @@ FClaimTimesOut(w) ==
                    dispVars, schedVars, staleRunWrite, retriedAfterAction,
                    staleFilterWrite>>
 
-\* The boot reset: CuesFilterSql {:reset, now} (cues_filter_sql.ex:633, :653):
+\* The boot reset: CuesFilterSql {:reset, now} (cues_filter_sql.ex:635, :655):
 \* every filtering row back to pending with its fence cleared and its
 \* attempts unchanged, every open call finished as aborted. One transaction.
 ResetRows ==
@@ -370,11 +367,11 @@ Orphan(d) == dstate[d] = "filtering" /\ fcall[d] \notin inflight
 
 \* The 60 s sweep -> reclaim_orphans/1 (filters.ex:133, :192-215), skipped
 \* while the boot reset is pending: CuesFilterSql {:reclaim_orphans, held,
-\* cutoff, now} (cues_filter_sql.ex:129, reclaim_in_tx :668), one transaction:
+\* cutoff, now} (cues_filter_sql.ex:130, reclaim_in_tx :670), one transaction:
 \* each filtering row whose filter_call_id is not one the dispatcher holds goes
-\* back to pending through the boot reset's fenced move (reset_each/2, :653),
+\* back to pending through the boot reset's fenced move (reset_each/2, :655),
 \* fence cleared and attempts unchanged, and its open call is finished aborted
-\* (abort_orphan_calls/3, :703). The cutoff (a call started more than the 60 s
+\* (abort_orphan_calls/3, :705). The cutoff (a call started more than the 60 s
 \* deadline plus 30 s ago) changes when, not whether: a younger orphan is
 \* reclaimed by a later sweep. A reclaim that fails changes no row and is
 \* tried by the next sweep; one that times out still lands, as this step.
@@ -391,12 +388,12 @@ FReclaim ==
 
 -----------------------------------------------------------------------------
 (* One call's settle: CuesFilterSql {:settle, call_id, result, now}, one   *)
-(* BEGIN IMMEDIATE (cues_filter_sql.ex:115, :398): open_call/2 refuses a  *)
-(* call already finished (:430), apply_result/5 (:480) moves the row       *)
-(* through move/5 (:541), fenced on filtering and filter_call_id. Zero     *)
+(* BEGIN IMMEDIATE (cues_filter_sql.ex:116, :400): open_call/2 refuses a  *)
+(* call already finished (:432), apply_result/5 (:482) moves the row       *)
+(* through move/5 (:543), fenced on filtering and filter_call_id. Zero     *)
 (* rows changed is {:error, :stale}: the row is not written, and since R1  *)
 (* the open call is closed aborted in the same commit (abort_stale_call/3, *)
-(* :419).                                                                   *)
+(* :421).                                                                   *)
 
 Holds(c) == LET d == callDel[c] IN dstate[d] = "filtering" /\ fcall[d] = c /\ callOpen[c]
 Lands(c) == IF SettleFenced THEN Holds(c) ELSE dstate[callDel[c]] = "filtering"
@@ -411,22 +408,22 @@ SettleRows(c, res) ==
        ELSE /\ staleFilterWrite' = (staleFilterWrite \/ ~Holds(c))
             /\ callOpen' = [callOpen EXCEPT ![c] = FALSE]
             /\ CASE res = "pass" ->
-                      \* :480: passed, ready_at = now; the fence is kept
+                      \* :482: passed, ready_at = now; the fence is kept
                       /\ dstate' = [dstate EXCEPT ![d] = "passed"]
                       /\ due' = [due EXCEPT ![d] = TRUE]
                       /\ UNCHANGED <<fcall, fatt, wblocked>>
                  [] res = "drop" ->
-                      \* :489
+                      \* :491
                       /\ dstate' = [dstate EXCEPT ![d] = "dropped"]
                       /\ UNCHANGED <<fcall, due, fatt, wblocked>>
                  [] res = "pfail" ->
-                      \* :498: back to pending unchanged; the watcher backs off
+                      \* :500: back to pending unchanged; the watcher backs off
                       /\ dstate' = [dstate EXCEPT ![d] = "pending"]
                       /\ fcall' = [fcall EXCEPT ![d] = 0]
                       /\ wblocked' = [wblocked EXCEPT ![w] = TRUE]
                       /\ UNCHANGED <<due, fatt>>
                  [] res = "cfail" ->
-                      \* :516: an attempt spent; retried later, or exhausted
+                      \* :518: an attempt spent; retried later, or exhausted
                       /\ fatt' = [fatt EXCEPT ![d] = fatt[d] + 1]
                       /\ IF fatt[d] + 1 >= MaxFilterAttempts
                          THEN /\ dstate' = [dstate EXCEPT ![d] = "exhausted"]
@@ -565,9 +562,9 @@ SubjectStates == IF SubjectRuleCoversUndecided THEN Live ELSE {"passed", "claime
 OlderSameSubjectLive(d) ==
     \E o \in D : o < d /\ Wat[o] = Wat[d] /\ Subj[o] = Subj[d] /\ dstate[o] \in SubjectStates
 
-\* @eligible_sql = @open_sql and @cap_room_sql (cues_runs_sql.ex:80-114), one
-\* rule for the candidates (:119) and the claim's in-transaction re-read
-\* (eligible_delivery/3, :221). The daily cap is 0 here (no cap). Since R1 the
+\* @eligible_sql = @open_sql and @cap_room_sql (cues_runs_sql.ex:81-118), one
+\* rule for the candidates (:123) and the claim's in-transaction re-read
+\* (eligible_delivery/3, :225). The daily cap is 0 here (no cap). Since R1 the
 \* rule does not read cue_watchers.enabled (a paused watcher's passed items
 \* still run); watchers are always enabled here. A delivery past its
 \* valid_until is never claimed (`d.valid_until > ?`): the lifetime sweep's.
@@ -638,12 +635,12 @@ AdmitTimesOut(w) ==
 -----------------------------------------------------------------------------
 (* The settle: Repo.settle_cue_run/3 (repo.ex settle_cue_run_in_tx):       *)
 (* ensure_job_run_active, the run row upserted, release_cue_job (running  *)
-(* -> scheduled), and CuesRunsSql.settle_delivery/4 (cues_runs_sql.ex:250), *)
-(* whose settle_held/5 (:309, :321) moves the delivery only while          *)
+(* -> scheduled), and CuesRunsSql.settle_delivery/4 (cues_runs_sql.ex:254), *)
+(* whose settle_held/5 (:313, :325) moves the delivery only while          *)
 (* it is claimed by this run; otherwise the run settles and the delivery   *)
 (* is left untouched.                                                      *)
 
-\* settle_move/4 (cues_runs_sql.ex:328-340), with `tools` the run row's
+\* settle_move/4 (cues_runs_sql.ex:332-344), with `tools` the run row's
 \* tools_started_at as the upsert left it. how: "ack" (ignored or acted),
 \* "pfail" (provider failure: no attempt spent), "ofail" (any other failure),
 \* "sched" (a reap or a monitored crash: as ofail, the cap being 0).
@@ -819,7 +816,10 @@ ReconcileRun(r) ==
 
 \* Jobs.Scheduler crashes. Its rest_for_one parent restarts it; the runner
 \* supervisor starts before it, so runners survive, unmonitored, and a DOWN
-\* that was in the old mailbox is lost.
+\* that was in the old mailbox is lost. Everything after it restarts too, and
+\* application.ex start_supervision_tree/0 puts the cue tree last, so the
+\* code restarts Cues.Filters with it; the model takes that as FiltersRestart,
+\* a fault of its own, so the two are explored apart and together.
 SchedRestart ==
     /\ SchedulerCanRestart /\ Fault
     /\ sched = "up"
@@ -882,8 +882,8 @@ SchedRescanFails ==
                    monitors, runner, obs>>
 
 -----------------------------------------------------------------------------
-(* One proposal (approve mode), abstract: Cues.Proposals (lane F, being   *)
-(* written on 2026-10-17). The confirm is one Repo call:                  *)
+(* One proposal (approve mode), abstract: Cues.Proposals. The confirm is  *)
+(* one Repo call:                                                         *)
 (* UPDATE ... WHERE token_digest = ? AND state = 'waiting' AND             *)
 (* sent_platform = ? AND sent_chat_id = ? AND sent_user_id = ? AND        *)
 (* expires_at > ? (cues_mandate_sql.ex decide_waiting); the command that  *)
@@ -940,7 +940,7 @@ AppDeny ==
     /\ UNCHANGED <<rowD, wblocked, jstate, callRows, runRows, propLive, confirmers,
                    badConfirm, callRuns, dispVars, schedVars, obs, faults>>
 
-\* The proposal's send fails (send_new/4): it is refused, "could not reach you".
+\* The proposal's send fails (send_new/5): it is refused, "could not reach you".
 \* With an app surface the code keeps it waiting instead (the reach rule); the
 \* refusal is kept here for every check, a superset of the code's steps, so
 \* every safety verdict still covers the app's world.
@@ -966,7 +966,9 @@ PropSweep ==
 
 \* run_confirmed/3: the re-check passes and the executor runs exactly the
 \* recorded call (execute/4), or it refuses (refuse_confirmed/4: confirmed ->
-\* refused). Either way that command is done.
+\* refused), a re-check that raises included (guarded_recheck/3), and so does
+\* a device's confirm whose task could not start (start_run/3). Either way
+\* that command is done.
 ConfirmerStep ==
     /\ confirmers > 0
     /\ confirmers' = confirmers - 1
@@ -977,15 +979,20 @@ ConfirmerStep ==
     /\ UNCHANGED <<rowD, wblocked, jstate, callRows, runRows, propLive, taps, badConfirm,
                    dispVars, schedVars, obs, faults>>
 
-\* The command crashes once its call has started, or dies before it reports:
-\* the proposal stays confirmed with no result; report_unknown/4 tells the
-\* owner once, finishes it unknown and it is never run again. A re-check that
-\* raises is a refusal (guarded_recheck/3), ConfirmerStep's second branch.
+\* The command dies after the confirm and before it writes a result: before
+\* its call (it is killed, or a device's answer was recorded and its task
+\* never started), or once its call has started, which may then have run
+\* (killed mid-call, say; a raise inside the call itself is caught and
+\* finished unknown at once, record_result/3, which is ConfirmerStep's first
+\* branch). The proposal stays confirmed with no result; report_unknown/4
+\* tells the owner once, finishes it unknown and it is never run again.
 ConfirmerCrash ==
     /\ confirmers > 0 /\ TasksCanCrash /\ Fault
     /\ confirmers' = confirmers - 1
+    /\ \/ UNCHANGED callRuns
+       \/ callRuns' = IF callRuns >= 2 THEN 2 ELSE callRuns + 1
     /\ UNCHANGED <<rowD, wblocked, jstate, callRows, runRows, prop, propLive, taps,
-                   badConfirm, callRuns, dispVars, schedVars, obs>>
+                   badConfirm, dispVars, schedVars, obs>>
 
 -----------------------------------------------------------------------------
 (* Type and sanity invariant *)
@@ -1139,7 +1146,7 @@ OneTaskPerWatcher ==
 \* is design §17's "a failed filter never passes or drops a cue".
 FencedFilterMoves == ~staleFilterWrite
 
-\* The same rule for runs (cues_runs_sql.ex:244-247, repo.ex settle_cue_run
+\* The same rule for runs (cues_runs_sql.ex:248-250, repo.ex settle_cue_run
 \* doc): a row leaves claimed only by the run that holds it, while active.
 FencedRunMoves == ~staleRunWrite
 
@@ -1156,7 +1163,7 @@ OneActiveRunPerJob ==
 \* the last slot". Read as: live cue runners never exceed the cue share.
 CueShare == Cardinality(LiveRunners) <= MaxCue
 
-\* cues_runs_sql.ex:234-235, design §17: "no run is retried after an allowed
+\* cues_runs_sql.ex:238-239, design §17: "no run is retried after an allowed
 \* mandate call or a proposal".
 NoRetryAfterAction == ~retriedAfterAction
 

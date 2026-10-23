@@ -95,7 +95,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/registration.ex#read,signed_out,@profile @ 8a05570f216c
 \* SOURCE: apps/fermix_core/lib/fermix/cli/plugins_command.ex @ 7dce15e18d94
 \* SOURCE: apps/fermix_core/lib/fermix/cli/auth_command.ex @ 01985f2dba08
-\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ 668c59db129a
+\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ e9638703c2ae
 \* SOURCE: apps/fermix_core/lib/fermix/cli/daemon/client.ex @ fd0cff9607dc
 EXTENDS Naturals, FiniteSets
 
@@ -123,7 +123,7 @@ CONSTANTS
     StoreLock,              \* auth.json.lock around every Store.write and delete_provider (store.ex:179-185, :195-203)
     ProfileLock,            \* the profile's lock over one refresh, read to write, and over a delete (store.ex:220-226)
     RefusesMissingEntry,    \* a manager whose entry is gone drops its tokens (token_manager.ex:320-328, :381-405)
-    CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:374-389, plugins_command.ex:504-529, cli/daemon.ex:852-882)
+    CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:374-389, plugins_command.ex:504-529, cli/daemon.ex:870-900)
 
 ASSUME /\ CliProfile \in Profiles /\ LogoutProfile \in Profiles
        /\ MaxAttempts \in Nat \ {0} /\ Rounds \in Nat
@@ -524,7 +524,7 @@ Freed(h) == IF h \in Actors /\ Killed(h) THEN None ELSE h
 \*      the profile (plugins_command.ex:262, :504-529; auth_command.ex:
 \*      290-323, :330-348, :374-389): an `auth_forget` request on the
 \*      control socket (cli/daemon/client.ex:60-74), answered by
-\*      forget_signed_out (cli/daemon.ex:628, :852-882). Without
+\*      forget_signed_out (cli/daemon.ex:646, :870-900). Without
 \*      CliLogoutReachesDaemon, or when the daemon does not answer "ok"
 \*      (the CLI then exits non-zero), nothing reaches the manager.
 \*    - The in-daemon plugin logout calls it right after its delete

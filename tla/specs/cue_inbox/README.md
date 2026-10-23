@@ -17,14 +17,12 @@ that ends retries once a run made an allowed mandate call or a proposal; and,
 behind the `Proposals` switch, one proposal of a mandate in approve mode with the
 owner's `/confirm` and `/deny`.
 
-The code it describes is the uncommitted `release/0.17.0` work of M60
-(2026-10-17), as it stands after the review-1 (R1) fixes and lane R3's fixes
-of CUE-1 and CUE-2, so the spec is
-**not pinned yet**: its `\* SOURCE:` lines carry no
-hash, and the runner reports it STALE until the owner commits and runs
-`make -C tla repin SPECS=cue_inbox`. Its line references are those of the
-working tree on 2026-10-17 and can drift until then; re-read them at the
-re-pin.
+The code it describes is M60 as committed in e0be70a6 (`release/0.17.0`):
+the review-1 (R1) fixes, lane R3's fixes of CUE-1 and CUE-2, the review
+fixes after them, and the owner's devices answering a proposal. The spec was
+written against the uncommitted work (2026-10-17, the app's answer
+2026-10-22) and re-read against that commit before its first pin
+(2026-10-23); its line references are that commit's.
 
 A `Topology` constant fixes the deliveries (their watcher, subject and order).
 The delivery id is the arrival order, so a delivery is accepted only after every
@@ -104,13 +102,15 @@ if it was sent, is already in the Repo's mailbox ahead of the reset.
   first action with `Proposals` on; a failed send, the owner's taps (twice, and
   from the wrong chat with `OwnerCanMistap`), the expiry clock and sweep, the
   winning `/confirm` command re-checking and then running the recorded call or
-  refusing it, and that command crashing (the outcome is reported once as
-  unknown and never run again). Lane F was still writing `cues/proposals.ex` and
-  `memory/repo/cues_mandate_sql.ex` when this spec was written; the model follows
-  `decide_waiting/5` (one `UPDATE … WHERE token_digest = ? AND state = 'waiting'
-  AND sent_platform/chat/user = ? AND expires_at > ?`) and `run_confirmed/3` as
-  they stood. The validator, pins, the loop breaker and idempotency are
-  single-call rules for ExUnit.
+  refusing it (a re-check that raises is a refusal, `guarded_recheck/3`), and
+  that command dying before its call or once the call has started, which may
+  have run it (`ConfirmerCrash`): the outcome is reported once as unknown and
+  never run again. That report finishes the proposal and its call row
+  `unknown` and tells every app surface, which changes no state the model
+  reads. The model follows `decide_waiting/5` (one `UPDATE … WHERE
+  token_digest = ? AND state = 'waiting' AND sent_platform/chat/user = ? AND
+  expires_at > ?`) and `run_confirmed/3`. The validator, pins, the grant
+  re-check, the loop breaker and idempotency are single-call rules for ExUnit.
 - **The owner's devices answer too (M60 app surface §3.7, D28; 2026-10-22).**
   With `AppAnswers`, the owner may also answer from the Mac app's socket or
   the management socket: `Cues.Proposals.decide/4`, one `UPDATE … WHERE id = ?
@@ -146,24 +146,24 @@ reconcile scan errors), `LifetimesCanEnd`, `Proposals`, `OwnerCanMistap`,
 
 | Switch | Code |
 |---|---|
-| `SubjectRule` | the subject clause of `@open_sql` (`cues_runs_sql.ex:91-94`), shared by the candidates and the claim's re-read |
+| `SubjectRule` | the subject clause of `@open_sql` (`cues_runs_sql.ex:95-98`), shared by the candidates and the claim's re-read |
 | `SubjectRuleCoversUndecided` | that clause reads `pending` and `filtering` too (PLAN §1; draft 7 read `passed` and `claimed` only) |
 | `ExcludesBusyWatchers` | `Cues.Filters` passes the watchers whose call it still holds (`filters.ex:235`) |
-| `SettleFenced` | a filter settle needs its call open (`open_call/2`, `cues_filter_sql.ex:430`) and the row's `filter_call_id` (`move/5`, `:541`); a refused settle closes the open call `aborted` (R1, `abort_stale_call/3`, `:419`) |
+| `SettleFenced` | a filter settle needs its call open (`open_call/2`, `cues_filter_sql.ex:432`) and the row's `filter_call_id` (`move/5`, `:543`); a refused settle closes the open call `aborted` (R1, `abort_stale_call/3`, `:421`) |
 | `TasksDieWithDispatcher` | the filtering group (`FermixCore.Cues.FilteringSupervisor`, defined inline in `cues/supervisor.ex:44-51`, `:58-63`) is `rest_for_one`, `Cues.Filters` before `FilterSupervisor`; the cue supervisor above the groups is `one_for_one` (`:55`) |
-| `BootReset` | `Filters.init` resets `filtering` rows (`filters.ex:102`, `:159`; `cues_filter_sql.ex:633`) |
+| `BootReset` | `Filters.init` resets `filtering` rows (`filters.ex:102`, `:159`; `cues_filter_sql.ex:635`) |
 | `NonePassesAtAccept` | a `none` watcher's delivery is inserted `passed` (`cues_sql.ex:620`) |
-| `ClaimNeedsIdleJob` | the cue claim needs the job `scheduled` with no active run (`@open_sql :87-90`; `repo.ex` `fetch_claimable_job`, `ensure_no_active_job_run`) |
+| `ClaimNeedsIdleJob` | the cue claim needs the job `scheduled` with no active run (`@open_sql :91-94`; `repo.ex` `fetch_claimable_job`, `ensure_no_active_job_run`) |
 | `CueSlotCap` | `free = min(max_active − active, 3 − active_cue)` (`cue_admission.ex:57`) |
 | `AtomicCueSettle` | the run row, the job's release and the delivery's move are one transaction (`repo.ex` `settle_cue_run_in_tx`) |
-| `RunSettleFenced` | a run settle needs the run active (`ensure_job_run_active`) and the delivery claimed by it (`settle_held/5`, `cues_runs_sql.ex:309`) |
+| `RunSettleFenced` | a run settle needs the run active (`ensure_job_run_active`) and the delivery claimed by it (`settle_held/5`, `cues_runs_sql.ex:313`) |
 | `ReapsOnlyDeadRuns` | reconciliation reaps a run only when the runner supervisor no longer holds its runner (`scheduler.ex:386`, `:398`) |
 | `ReconcilesRuns` | init and the 60 s tick reconcile unsettled runs (`scheduler.ex:210`, `:250`, `:370`) |
-| `ExhaustsAfterAction` | a failure once `tools_started_at` is set ends the delivery `exhausted` (`cues_runs_sql.ex:331`) |
+| `ExhaustsAfterAction` | a failure once `tools_started_at` is set ends the delivery `exhausted` (`cues_runs_sql.ex:335`) |
 | `ToolsMarkWriteOnce` | the run upsert never clears `tools_started_at` (`repo.ex` `upsert_job_run_row`, `coalesce`) |
 | `ConfirmFenced` | the confirm is one `UPDATE` fenced on state, token, chat and expiry (`cues_mandate_sql.ex` `decide_waiting`) |
 | `AppDecideFenced` | a device's answer is one `UPDATE` fenced on id, state and expiry (`cues_mandate_sql.ex` `decide_by_id`) |
-| `ReclaimsOrphans` | every sweep puts back a `filtering` row whose call the dispatcher does not hold, fence cleared, attempts unchanged, its call finished `aborted` (R3, CUE-1: `reclaim_orphans/1`, `filters.ex:192-215`; `{:reclaim_orphans, …}`, `cues_filter_sql.ex:129`, `reclaim_in_tx/4` `:668`) |
+| `ReclaimsOrphans` | every sweep puts back a `filtering` row whose call the dispatcher does not hold, fence cleared, attempts unchanged, its call finished `aborted` (R3, CUE-1: `reclaim_orphans/1`, `filters.ex:192-215`; `{:reclaim_orphans, …}`, `cues_filter_sql.ex:130`, `reclaim_in_tx/4` `:670`) |
 | `AdmitsAfterScan` | no cue run is admitted while the last reconcile scan failed, since the monitors may then miss runners that survived a restart (R3, CUE-2: `free_cue_slots/1`, `scheduler.ex:312`; `runs_known?` set by `reconcile_active_runs/1`, `:374`, `:382`) |
 
 ## Checks
@@ -236,7 +236,7 @@ for 10) and one more fault, on 2026-10-17:
 | 17 | `two_none`, 2 faults | holds, 302 states, 0 s |
 | 19, 30 | see below | |
 | 23 | `two_llm`, 3 faults | holds, 7,477 states, 3 s (R3 model) |
-| 24 | `two_none`, 2 faults | holds, 13,751 states, 2 s; again with `AppAnswers` on 2026-10-22: holds, 13,751 states, 1 s (with its fence on, a device's answer reaches no state a tap from the right chat does not; checks 31 and 32 show what it adds without the fence) |
+| 24 | `two_none`, 2 faults | holds, 13,751 states, 2 s; again with `AppAnswers` on 2026-10-22: holds, 13,751 states, 1 s (with its fence on, a device's answer reaches no state a tap from the right chat does not; checks 31 and 32 show what it adds without the fence); again on 2026-10-23, with a confirm that dies after its call may have run: holds, 14,211 states, 1 s |
 
 Check 19 (liveness) grows fast, so one entity at a time. On the R3 model:
 `mixed3` (a second `llm` delivery of the same subject) with 2 faults holds,
@@ -254,7 +254,7 @@ call, which none of them injects), so their hand runs above stand.
 
 ### CUE-1: a filter claim that times out, or a filter settle that rolls back, strands the delivery and its watcher
 
-**Fixed in lane R3 (2026-10-17, uncommitted; the commit is the owner's).** The
+**Fixed in lane R3 (2026-10-17), committed in e0be70a6.** The
 dispatcher's 60 s sweep now reclaims a `filtering` row no task holds (see
 "Fix" below). Check 23 holds and check 29 (`needs ReclaimsOrphans`) keeps the
 counterexample below.
@@ -265,7 +265,7 @@ is enabled; a held watcher retries until a call succeeds or the lifetime ends.
 `Cues.Filters.claim/2` (`filters.ex:233-247`) calls the Repo with periodic
 options (`repo_opts/1`, `:488`: `on_timeout: :error`). When the claim times out
 it traces `sweep_error` (`filter_claim`) and starts no task (`:243-245`), but the
-request still runs: `claim_one/3` (`cues_filter_sql.ex:209`) moves the delivery
+request still runs: `claim_one/3` (`cues_filter_sql.ex:211`) moves the delivery
 `pending → filtering` with a new `filter_call_id` and an open call row. No task
 holds that call and the dispatcher's `in_flight` does not know it. A task's
 settle (or the dispatcher's own, after a crash or a deadline) that returns an
@@ -275,7 +275,7 @@ same thing: `filtering`, call open, the task reported, the slot freed
 runs, ahead of the dispatcher's next claim.
 
 Nothing then moves the row. The claim query skips a watcher that has a
-`filtering` delivery (`cues_filter_sql.ex:177`), so the watcher takes no more
+`filtering` delivery (`cues_filter_sql.ex:179`), so the watcher takes no more
 calls at all; the lifetime sweep never touches `filtering` (`cues_sql.ex:1091`,
 `sweeper.ex` moduledoc); the dispatcher's 60 s sweep only dispatches; the only
 reset is the boot reset in `Filters.init`. The delivery and every later delivery
@@ -290,7 +290,7 @@ delivery 1.
 R1 re-walk (2026-10-17): still open, unchanged. None of the R1 changes gives
 the row a way out:
 - a stale settle now closes its open call `aborted` (`abort_stale_call/3`,
-  `cues_filter_sql.ex:419`), but only a call that receives a result; the
+  `cues_filter_sql.ex:421`), but only a call that receives a result; the
   stranded call has no task, so no result ever comes;
 - the first-timer rule (`filters.ex:111`, `:129`, `:135`) only delays the
   dispatcher's first claim after a start;
@@ -307,14 +307,14 @@ with no runner, and reconciliation reaps it on its next tick (check 19 holds wit
 
 Fix (R3): every sweep (`handle_info(:sweep)`, `filters.ex:133`) first runs
 `reclaim_orphans/1` (`:192-215`), skipped while the boot reset is pending: one
-`{:reclaim_orphans, held, cutoff, now}` Repo call (`cues_filter_sql.ex:129`,
-`reclaim_in_tx/4` `:668`) with the call ids the dispatcher holds and a cutoff of
+`{:reclaim_orphans, held, cutoff, now}` Repo call (`cues_filter_sql.ex:130`,
+`reclaim_in_tx/4` `:670`) with the call ids the dispatcher holds and a cutoff of
 the 60 s call deadline plus a 30 s margin (`@orphan_margin_ms`, `filters.ex:70`).
 In one transaction, every `filtering` row whose `filter_call_id` is not held and
 whose call started before the cutoff (or whose call row is gone) goes back to
-`pending` through the boot reset's fenced move (`reset_each/2`, `:653`), attempts
+`pending` through the boot reset's fenced move (`reset_each/2`, `:655`), attempts
 unchanged, and its open call is finished `aborted` with "no task held this call
-past its deadline" (`abort_orphan_calls/3`, `:703`). A failure is traced as
+past its deadline" (`abort_orphan_calls/3`, `:705`). A failure is traced as
 `sweep_error` (`filter_reclaim`) and tried by the next sweep. ExUnit:
 `cues/filters_test.exs` "orphaned filter calls" (a claim that commits while the
 dispatcher sees `:repo_timeout` is left alone before the cutoff and freed after
@@ -325,7 +325,7 @@ the reclaim off).
 
 ### CUE-2: after a scheduler restart whose adoption scan fails, cue runs can take every slot
 
-**Fixed in lane R3 (2026-10-17, uncommitted; the commit is the owner's).** No
+**Fixed in lane R3 (2026-10-17), committed in e0be70a6.** No
 cue run is admitted while the last reconcile scan failed (see "Fix" below).
 Check 12 holds and check 28 (`needs AdmitsAfterScan`) keeps the counterexample
 below.

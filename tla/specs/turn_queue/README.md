@@ -44,7 +44,7 @@ the checks that show a property needs it):
   fires `{:failed, _}` (`queue.ex:914-922`).
 - `TurnsShareQueueFate`: turn tasks run under a `Task.Supervisor` that
   `QueueSupervisor` (`:one_for_all`) terminates before it restarts the Queue
-  (`queue_supervisor.ex:46-51`, `application.ex:74`).
+  (`queue_supervisor.ex:46-51`, `application.ex:83`).
 - `CrashClosesUserMessage`: a crashed turn's `:DOWN` writes the stopped marker
   before the next message starts (`queue.ex:873`, `:887-893`).
 - `StopSparesClaimedTurn`: a stop leaves a turn that has claimed its outcome
@@ -235,7 +235,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
     while the new Queue's turn ran, and nobody could stop it.
 - **Fix:** `FermixChannels.Gateway.QueueSupervisor` (`queue_supervisor.ex`)
   runs `{Task.Supervisor, name: FermixChannels.Gateway.TurnTasks}` and the
-  Queue, in that order, `:one_for_all`; `application.ex:74` starts it in the
+  Queue, in that order, `:one_for_all`; `application.ex:83` starts it in the
   Queue's slot. `:task_supervisor` is a required Queue option
   (`queue.ex:199`), so no Queue runs turns under a supervisor that outlives
   it. When the Queue dies, the supervisor terminates the task supervisor, and
