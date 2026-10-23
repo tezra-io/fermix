@@ -121,7 +121,7 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
       end)
     end
 
-    test "a database an engine at version 41 wrote gains the table on the next open", %{
+    test "a database an engine at version 42 wrote gains the table on the next open", %{
       repo: repo,
       db_path: db_path
     } do
@@ -130,7 +130,7 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
       with_raw_conn(db_path, fn conn ->
         :ok = Sqlite3.execute(conn, "DROP TABLE open_loops")
         :ok = Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version = 43")
-        assert [[41]] = query!(conn, "SELECT MAX(version) FROM schema_migrations")
+        assert [[42]] = query!(conn, "SELECT MAX(version) FROM schema_migrations")
       end)
 
       reopened = :"#{repo}_reopened"
