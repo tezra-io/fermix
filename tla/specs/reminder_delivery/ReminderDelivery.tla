@@ -37,7 +37,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 9b06289e25ae
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/error.ex @ a3cd3a75d3ca
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex @ 9e95a610b074
-\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,temporal_scheduler_opts @ ece44c7a42c3
+\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,temporal_scheduler_opts @ 71d05fb9f491
 \* SOURCE: apps/fermix_core/lib/fermix_core/temporal/registry.ex @ 5f277965a35e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex @ 93284120b282
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex @ 214348321d4a
@@ -80,7 +80,7 @@ CONSTANTS
                              \* (:1042) repeat it inside the same Repo call
                              \* (repo.ex:3029-3032), so they add nothing here.
     WorkersDieWithScheduler, \* DeliverySupervisor starts after the scheduler under
-                             \* :rest_for_one (application.ex:256-257, :274)
+                             \* :rest_for_one (application.ex:264-265, :289)
     SendsDieWithWorker,      \* a worker's send process is spawned linked to it
                              \* (Process.spawn [:link, :monitor], channel_send.ex:219-224),
                              \* so a worker killed mid-send takes its send with it
@@ -356,7 +356,7 @@ Boot ==
 (* Crashes *)
 
 \* The scheduler, or any earlier child of FermixCore.Supervisor (Repo,
-\* MainAgent, JobScheduler, ...), crashes. :rest_for_one (application.ex:274)
+\* MainAgent, JobScheduler, ...), crashes. :rest_for_one (application.ex:289)
 \* terminates every later child, DeliverySupervisor and its workers included
 \* (:245-246), before init runs again. The workers do not trap exits, so they
 \* die at once. Each worker's send process is linked to it
@@ -368,8 +368,8 @@ Boot ==
 \* workers die every send dies. A worker killed in the few instructions
 \* between its watchdog's unlink and kill (channel_send.ex:281-287) would
 \* leave its send running; that is below this spec's step granularity.
-\* Capabilities.AccessGate.Pending (application.ex:228) and ReplyBlocks
-\* (:232) are two more earlier children: a crash of either is this step. The
+\* Capabilities.AccessGate.Pending (application.ex:236) and ReplyBlocks
+\* (:240) are two more earlier children: a crash of either is this step. The
 \* owner confirmations one parks and the place records the other holds are
 \* never read by the reminder rail, so they are not modelled.
 \* A scheduler Repo call that times out is no longer a cause: it returns an
@@ -666,7 +666,7 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 \* never attempt six."
 NeverAttemptSix == attempts <= 5
 
-\* delivery_supervisor.ex:5-10 and application.ex:243-249: "no delivery
+\* delivery_supervisor.ex:5-10 and application.ex:251-263: "no delivery
 \* worker can outlive the scheduler", which is "what lets claims be
 \* serialized in one process"; M30 design §6.3 (:335-337): "two workers for
 \* the same row cannot exist".

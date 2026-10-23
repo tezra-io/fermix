@@ -32,11 +32,11 @@
 (* code: the scheduler and check-in pins name files lane E is writing, and *)
 (* every line number below is re-read at the first re-pin.                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/lifecycle.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/defaults.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/open_loops_sql.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/scheduler.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/check_in.ex
+\* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/lifecycle.ex @ 08ba76819bb7
+\* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/defaults.ex @ 59a91aaa03d9
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/open_loops_sql.ex @ a1393b1c6eb2
+\* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/scheduler.ex @ ca94a8aacbbf
+\* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/check_in.ex @ 836c0e9da9c9
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS

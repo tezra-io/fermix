@@ -20,10 +20,11 @@ medium or long, through every party that can move it:
   daemon crash.
 
 **Status.** Written against the stage 1 and stage 3 code before it was
-committed. The five `SOURCE` lines carry no hash, so every run reports the spec
-STALE until the code is committed and the spec re-read and re-pinned (`make -C tla
-repin SPECS=open_loop_lifecycle`). Every `path:line` in the spec names that
-uncommitted code and is re-read at the first re-pin.
+committed, re-read against the commit that landed the feature, `d4c723aa`
+(2026-10-23), and pinned to it. That commit also carries the spend's refusal of
+an already-spent day (`budget_spent`), described under `SpendBeforeSend` below;
+the one-loop model never reaches it. Every `path:line` in the spec names that
+commit.
 
 **Abstractions.** Time is a day in three phases (before, inside and after the
 owner's active hours) and a count of midnights until the loop's date has passed
@@ -151,18 +152,19 @@ nothing for an owner whose run is alive, so one slot serves every claim.
 
 ## Findings
 
-Both were found by the model checker in code not yet committed, walked through
-that code, and fixed by one mechanism before it was committed: the run spends
-the owner's day before its send (`SpendBeforeSend`). To see a counterexample
-from before the fix, run `make -C tla report SPECS=open_loop_lifecycle` once
-the spec is re-pinned, or `tla/bin/check.py open_loop_lifecycle` and open
-`tla/out/open_loop_lifecycle/<check>.txt` for checks 19 to 22.
+Both were found by the model checker in the build before it was committed,
+walked through that code, and fixed by one mechanism inside the same commit,
+`d4c723aa`: the run spends the owner's day before its send
+(`SpendBeforeSend`). To see a counterexample from before the fix, run
+`make -C tla report SPECS=open_loop_lifecycle`, or `tla/bin/check.py
+open_loop_lifecycle` and open `tla/out/open_loop_lifecycle/<check>.txt` for
+checks 19 to 22.
 
 ### OL-1: a message without its touch leaves the day's budget unspent
 - **Severity:** low. Each path needs a narrow window or a second fault, and the
   extra message is one more check-in, not a stream of them.
-- **Status:** fixed by `SpendBeforeSend`, not yet committed; the commit goes
-  here.
+- **Status:** fixed by `SpendBeforeSend` in `d4c723aa`, the commit that landed
+  the feature; the defect never shipped.
 - **Checks:** 10 (a crash), 11 (an answer during the send) and 12 (a lost
   answer) hold; 19, 20 and 21 (`needs SpendBeforeSend`) break with the fix
   switched off. Before the fix checks 10 to 12 were `violated OL-1`.
@@ -209,8 +211,8 @@ the spec is re-pinned, or `tla/bin/check.py open_loop_lifecycle` and open
 ### OL-2: a rung 1 raise erases the day's rung 2 touch from the budget
 - **Severity:** medium-low. It needs a check-in the owner answered with a plan
   for later the same day, or a second loop.
-- **Status:** fixed by `SpendBeforeSend`, not yet committed; the commit goes
-  here.
+- **Status:** fixed by `SpendBeforeSend` in `d4c723aa`, the commit that landed
+  the feature; the defect never shipped.
 - **Checks:** 13 holds; 22 (`needs SpendBeforeSend`) breaks with the fix
   switched off. Before the fix check 13 was `violated OL-2`.
 - **Root cause (before the fix).** The budget read each loop's last touch only.
