@@ -169,6 +169,72 @@ def test_the_request_asks_for_exactly_the_verdict_the_parser_accepts(dispatch):
     assert schema["additionalProperties"] is False
 
 
+def test_the_openai_request_pins_its_reasoning_effort(dispatch):
+    # gpt-6-luna is a reasoning model: the effort is explicit, so neither a model
+    # nor an API default can move the judge's depth (or its token spend) silently.
+    result = dispatch.run([_ok_body()])
+    body = json.loads(dispatch.requests[0].data)
+    assert body["reasoning_effort"] == "medium"
+    assert "temperature" not in body
+    assert result.reasoning_effort == "medium"
+
+
+# 2026-10-23, eval-nightly run 39910831669: the gpt-6-luna judge spent the whole
+# old 2,048-token completion cap reasoning on launch_day_update's numbered
+# rubric (2,569 input tokens) and returned finish_reason "length" with no
+# verdict. A reasoning model's hidden reasoning counts toward
+# max_completion_tokens, so the cap must hold that reasoning AND the verdict.
+_OBSERVED_REASONING_TOKENS = 2_048
+_VERDICT_TOKENS = 400
+
+
+def _reasoning_judge(state):
+    """A scripted endpoint that, like gpt-6-luna, reasons before it answers: it
+    truncates with finish_reason "length" when the cap cannot hold the observed
+    reasoning plus a verdict, and records the timeout it was given."""
+
+    def fake_urlopen(req, *_args, timeout=None, **_kwargs):
+        state.requests.append(req)
+        state.timeouts.append(timeout)
+        cap = json.loads(req.data)["max_completion_tokens"]
+        need = _OBSERVED_REASONING_TOKENS + _VERDICT_TOKENS
+        if cap < need:
+            return _Response(json.dumps({
+                "model": "judge-model",
+                "choices": [{"finish_reason": "length", "message": {"content": ""}}],
+                "usage": {"prompt_tokens": 2_569, "completion_tokens": cap,
+                          "total_tokens": 2_569 + cap}}).encode())
+        return _Response(_ok_body())
+
+    return fake_urlopen
+
+
+def test_the_openai_cap_holds_the_reasoning_the_live_judge_spent(dispatch, monkeypatch):
+    state = SimpleNamespace(requests=[], timeouts=[])
+    fake = _reasoning_judge(state)
+    # dispatch.run installs its own scripted urlopen; this case needs the cap-aware one.
+    cfg = SimpleNamespace(judge=SimpleNamespace(backend="openai", model="judge-model"))
+    monkeypatch.setattr(judge.urllib.request, "urlopen", fake)
+    result = judge.judge_case(cfg, "q", "r", "Judge this.", "case",
+                              candidate_routes=[{"provider": "anthropic",
+                                                 "model": "candidate-model"}])
+    assert result.evaluated is True, result.error
+    assert result.finish_reason == "stop"
+    assert len(state.requests) == 1
+
+
+def test_the_openai_timeout_covers_the_whole_output_budget(dispatch, monkeypatch):
+    # The response arrives only when generation ends, so one attempt's timeout must
+    # outlast the full cap at a conservative 100 completion tokens a second.
+    state = SimpleNamespace(requests=[], timeouts=[])
+    monkeypatch.setattr(judge.urllib.request, "urlopen", _reasoning_judge(state))
+    cfg = SimpleNamespace(judge=SimpleNamespace(backend="openai", model="judge-model"))
+    judge.judge_case(cfg, "q", "r", "Judge this.", "case",
+                     candidate_routes=[{"provider": "anthropic", "model": "candidate-model"}])
+    (timeout,) = state.timeouts
+    assert timeout * 100 >= judge._MAX_JUDGE_OUTPUT_TOKENS
+
+
 def test_a_missing_tool_record_is_sent_as_not_recorded_not_as_no_tools(dispatch):
     dispatch.run([_ok_body()])
     sent = json.loads(json.loads(dispatch.requests[0].data)["messages"][1]["content"])
