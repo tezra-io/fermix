@@ -105,12 +105,12 @@ jobs:
     needs: changes
     if: needs.changes.outputs.changed == 'true'
     uses: ./.github/workflows/eval-box.yml
-    # The regression tier is judged by Claude, signed in through Workload Identity
-    # Federation, so this job grants id-token: write; eval-box inherits its
+    # The regression tier's judge is OpenAI's, on the OPENAI_API_KEY secret, and it
+    # delegates nothing to Claude Code, so it needs no Workload Identity Federation
+    # sign-in and this job grants no id-token: write; eval-box inherits its
     # caller's token.
     permissions:
       contents: read
-      id-token: write
     with:
       tier: regression
       ref: ${{ needs.changes.outputs.dev_sha }}
@@ -154,7 +154,8 @@ jobs:
 
       - name: Run the smoke
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # The smoke's daemon runs on the box's candidate, Anthropic's provider.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: benchmark/ci/macos_smoke.sh
 
       - name: Daemon log tail (failure diagnostics)

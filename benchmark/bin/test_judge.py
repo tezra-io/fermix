@@ -16,6 +16,10 @@ credential): every way it can fail (a refusal, an API error, a failed token
 exchange, no credential at all) must leave the case incomplete with a sentence
 naming the cause, never a pass and never a silent fail. Credential resolution
 itself runs the real SDK against a throwaway HOME.
+
+The preflight (bin/judge_preflight.py) sends one real verdict through either
+backend before a judged tier runs, and refuses a judge that is the candidate
+before it sends anything.
 """
 
 from __future__ import annotations
@@ -782,13 +786,131 @@ def test_the_preflight_fails_with_the_judges_own_sentence(preflight):
     assert "HTTP 401" in r.output and "authentication_error" in r.output
 
 
-def test_the_preflight_refuses_a_backend_that_is_not_anthropic(tmp_path, capsys, monkeypatch):
+def test_the_anthropic_preflight_refuses_a_judge_that_is_the_candidate(preflight, sdk,
+                                                                      tmp_path):
+    sdk.outcomes = [_message()]
+    status = judge_preflight.main(["--config", _preflight_config(tmp_path),
+                                   "--candidate-model", "anthropic/claude-opus-5-5"])
+    assert status == 1
+    assert sdk.requests == []
+
+
+# --- the CI preflight on the openai backend (the eval box's judge) ---------------
+
+OPENAI_JUDGE = "gpt-6-luna"
+
+
+@pytest.fixture
+def openai_preflight(tmp_path, capsys, monkeypatch):
+    """Runs bin/judge_preflight.py's main against a scripted urlopen, with the judge
+    settings an `openai` runner config gives and EVAL_JUDGE_API_KEY set."""
+    for name in ("EVAL_JUDGE_BACKEND", "EVAL_JUDGE_MODEL", "EVAL_JUDGE_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("EVAL_JUDGE_API_KEY", "invented-openai-key")
+    state = SimpleNamespace(requests=[])
+    path = tmp_path / "judge.yaml"
+    path.write_text(f"judge: {{backend: openai, model: {OPENAI_JUDGE}, enabled: false}}\n")
+
+    def run(*outcomes, candidate=None):
+        remaining = list(outcomes)
+
+        def fake_urlopen(req, *_args, **_kwargs):
+            state.requests.append(req)
+            outcome = remaining.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return _Response(outcome)
+
+        monkeypatch.setattr(judge.urllib.request, "urlopen", fake_urlopen)
+        argv = ["--config", str(path)]
+        if candidate is not None:
+            argv += ["--candidate-model", candidate]
+        status = judge_preflight.main(argv)
+        out = capsys.readouterr()
+        return SimpleNamespace(status=status, output=out.out + out.err)
+
+    state.run = run
+    return state
+
+
+def test_the_openai_preflight_sends_one_real_verdict_and_names_the_model(openai_preflight):
+    r = openai_preflight.run(_ok_body(model=OPENAI_JUDGE), candidate="claude-opus-5-5")
+    assert r.status == 0, r.output
+    assert f"judge openai/{OPENAI_JUDGE} answered through EVAL_JUDGE_API_KEY: pass" in r.output
+    # One verdict, in the request shape a tier sends, and never the key in the output.
+    (request,) = openai_preflight.requests
+    body = json.loads(request.data)
+    assert body["model"] == OPENAI_JUDGE
+    assert body["response_format"]["json_schema"]["schema"] == judge._VERDICT_SCHEMA
+    assert request.get_header("Authorization") == "Bearer invented-openai-key"
+    assert "invented-openai-key" not in r.output
+
+
+def test_the_openai_preflight_accepts_the_configured_model_with_its_release_date(
+        openai_preflight):
+    r = openai_preflight.run(_ok_body(model=f"{OPENAI_JUDGE}-2026-09-22"))
+    assert r.status == 0, r.output
+
+
+def test_the_openai_preflight_refuses_another_served_model(openai_preflight):
+    r = openai_preflight.run(_ok_body(model="gpt-6-sol"))
+    assert r.status == 1
+    assert "gpt-6-sol" in r.output and OPENAI_JUDGE in r.output
+
+
+def test_the_openai_preflight_without_a_key_says_so_and_sends_nothing(openai_preflight,
+                                                                     monkeypatch):
+    monkeypatch.delenv("EVAL_JUDGE_API_KEY")
+    r = openai_preflight.run()
+    assert r.status == 1
+    assert "openai judge needs EVAL_JUDGE_API_KEY" in r.output
+    assert openai_preflight.requests == []
+
+
+def test_the_openai_preflight_fails_with_the_judges_own_sentence(openai_preflight):
+    r = openai_preflight.run(_http_error(401))
+    assert r.status == 1
+    assert "openai judge error" in r.output and "401" in r.output
+
+
+@pytest.mark.parametrize("candidate", [OPENAI_JUDGE, f"openai/{OPENAI_JUDGE}",
+                                       "GPT-6-Luna", f"{OPENAI_JUDGE}-2026-09-22"])
+def test_the_preflight_refuses_a_judge_that_is_the_candidate_before_any_call(
+        openai_preflight, candidate):
+    r = openai_preflight.run(candidate=candidate)
+    assert r.status == 1
+    assert openai_preflight.requests == []
+    assert f"judge model {OPENAI_JUDGE!r}" in r.output and candidate in r.output
+    assert "must differ" in r.output and "judge.model" in r.output
+
+
+def test_the_preflight_refuses_a_backend_that_cannot_answer(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("EVAL_JUDGE_BACKEND", raising=False)
     monkeypatch.delenv("EVAL_JUDGE_MODEL", raising=False)
     path = tmp_path / "judge.yaml"
-    path.write_text("judge: {backend: openai, model: gpt-6-luna, enabled: false}\n")
+    path.write_text("judge: {backend: none, enabled: false}\n")
     assert judge_preflight.main(["--config", str(path)]) == 1
-    assert "anthropic" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "anthropic" in out and "openai" in out
+
+
+def test_the_separation_sentence_names_both_models_and_the_setting(sdk):
+    result = sdk.run(_message(), candidates=[{"provider": "openrouter",
+                                              "model": "anthropic/claude-opus-5-5"}])
+    assert result.error == ("judge model 'claude-opus-5-5' matches candidate model "
+                            "'anthropic/claude-opus-5-5'; the judge must differ from the "
+                            "candidate: set judge.model to another model")
+
+
+@pytest.mark.parametrize("a,b,same", [
+    ("gpt-6-luna", "gpt-6-luna-2026-09-22", True),
+    ("openai/gpt-6-luna", "GPT-6-LUNA", True),
+    ("anthropic.claude-opus-5-5", "claude-opus-5-5", True),
+    ("claude-opus-5-5", "gpt-6-luna", False),
+    ("claude-opus-5", "claude-opus-5-5", False),
+])
+def test_same_model_ignores_vendor_prefix_case_and_release_date(a, b, same):
+    assert judge.same_model(a, b) is same
 
 
 if __name__ == "__main__":

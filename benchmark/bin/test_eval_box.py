@@ -3,26 +3,30 @@
 # requires-python = ">=3.11"
 # dependencies = ["pytest>=8", "pyyaml>=6,<7"]
 # ///
-"""Tests for the eval box's Anthropic sign-in in `.github/workflows/eval-box.yml`.
+"""Tests for the eval box's candidate, judge and Anthropic sign-in in
+`.github/workflows/eval-box.yml`.
 
-Every JUDGED tier (regression, capability) grades replies with the Claude judge,
-and the capability tier's coding-harness tasks (suites/capability/harness.yaml)
-also delegate to Claude Code. Both sign in through Workload Identity Federation:
-one step writes an `oidc_federation` profile fed by this job's GitHub OIDC token,
-proves the judge answers through it with one real verdict, and starts a background
-loop that keeps the token fresh. A second step, on the capability tier only,
-installs a pinned, checksum-verified Claude Code binary, pins its model and proves
-it signs in through the same profile before the daemon boots. No API key exists on
-the box.
+The daemon under test runs on Anthropic's provider (the `model` input, at the
+job's CANDIDATE_REASONING_EFFORT) with the ANTHROPIC_API_KEY secret, which only
+the boot step holds. Every JUDGED tier (regression, capability) grades replies with
+the OpenAI judge, whose EVAL_JUDGE_API_KEY comes from the OPENAI_API_KEY secret on
+the judged steps only; one step proves it with a real verdict before anything else
+is spent. The capability tier's coding-harness tasks (suites/capability/harness.yaml)
+delegate to Claude Code, which signs in through Workload Identity Federation: one
+step writes an `oidc_federation` profile fed by this job's GitHub OIDC token and
+starts a background loop that keeps the token fresh, and a second installs a
+pinned, checksum-verified Claude Code binary, pins its model and proves it signs in
+through that profile before the daemon boots.
 
-A judge or CLI that cannot authenticate is worse than none: the judged cases go
-incomplete, or the daemon advertises `claude_code_run` and every delegated run
-scores 0.00 as a candidate failure. So these tests hold the steps to failing
-loudly instead. The structural group reads the workflows; the behavioural group
-runs the steps' own shell against a stub `curl` (release download and OIDC
-endpoint), a stub `uv` standing in for the judge preflight, and a stub Claude Code
-binary. GitHub OIDC tokens are single-use, so both stubs refuse a token that was
-already exchanged. No network, no real credential, no spend.
+A key that is missing, a judge that cannot answer, or a CLI that cannot
+authenticate is worse than none: every turn fails, the judged cases go incomplete,
+or the daemon advertises `claude_code_run` and every delegated run scores 0.00 as a
+candidate failure. So these tests hold the steps to failing loudly instead. The
+structural group reads the workflows; the behavioural group runs the steps' own
+shell against a stub `curl` (release download and OIDC endpoint), a stub `uv`
+standing in for the judge preflight, a stub capability-daemon.sh and a stub Claude
+Code binary. GitHub OIDC tokens are single-use, so the stubs refuse a token that
+was already exchanged. No network, no real credential, no spend.
 
 Run: `uv run bin/test_eval_box.py`."""
 from __future__ import annotations
@@ -48,6 +52,13 @@ EVAL_BOX = WORKFLOWS / "eval-box.yml"
 DANGEROUS_SUITE = HERE.parent / "suites" / "dangerous" / "sandbox_verify.yaml"
 JUDGED_TIERS = ("regression", "capability")
 JUDGED_IF = "inputs.tier == 'regression' || inputs.tier == 'capability'"
+CAPABILITY_IF = "inputs.tier == 'capability'"
+CANDIDATE = "claude-opus-5-5"
+ANTHROPIC_SECRET = "${{ secrets.ANTHROPIC_API_KEY }}"
+OPENAI_SECRET = "${{ secrets.OPENAI_API_KEY }}"
+# Invented keys: they may reach a step's environment, never its output.
+INVENTED_ANTHROPIC_KEY = "invented-anthropic-key-8d2f"
+INVENTED_OPENAI_KEY = "invented-openai-key-3b7c"
 # The judge settings each judged tier's runner loads.
 JUDGE_CONFIGS = {"regression": "behavioral_config.yaml", "capability": "config.yaml"}
 REQUIRED_VARS = ("ANTHROPIC_EVAL_ORGANIZATION_ID", "ANTHROPIC_EVAL_SERVICE_ACCOUNT_ID",
@@ -69,7 +80,6 @@ JWT_RE = re.compile(rf"{JWT_STEM}\.payload(\d{{4}})\.signature\1\n?")
 AUDIENCE = "https://api.anthropic.com"
 OIDC = f"{OIDC_URL}&audience={AUDIENCE}"
 CAPABILITY_TIMEOUT_MINUTES = 180
-PREFLIGHT_SOURCE = "profile fermix-eval (oidc_federation)"
 
 
 @pytest.fixture(scope="module")
@@ -92,6 +102,18 @@ def _step_by_id(steps, step_id):
 def wif_step(steps):
     """The one step that signs in to Anthropic through federation."""
     return _step_by_id(steps, "wif_sign_in")
+
+
+@pytest.fixture(scope="module")
+def judge_step(steps):
+    """The one step that proves the judge answers before anything is spent."""
+    return _step_by_id(steps, "judge_preflight")
+
+
+@pytest.fixture(scope="module")
+def seed_step(steps):
+    """The one step that seeds the eval home and boots the daemon under test."""
+    return steps[_step_index(steps, "capability-daemon.sh up")]
 
 
 @pytest.fixture(scope="module")
@@ -119,9 +141,14 @@ def _condition(step) -> str:
 
 # --- structure ----------------------------------------------------------------
 
-def test_the_sign_in_runs_on_every_judged_tier_and_only_those(wif_step, stop_step):
-    assert _condition(wif_step) == JUDGED_IF
-    assert _condition(stop_step) == f"${{{{ always() && ({JUDGED_IF}) }}}}"
+def test_the_judge_preflight_runs_on_every_judged_tier_and_only_those(judge_step):
+    assert _condition(judge_step) == JUDGED_IF
+
+
+def test_the_sign_in_runs_on_the_capability_tier_only(wif_step, stop_step):
+    # Only Claude Code signs in through federation; the judge uses an API key.
+    assert _condition(wif_step) == CAPABILITY_IF
+    assert _condition(stop_step) == f"${{{{ always() && {CAPABILITY_IF} }}}}"
 
 
 def test_claude_code_is_installed_on_the_capability_tier_only(claude_step):
@@ -146,26 +173,42 @@ def test_the_dangerous_tier_is_never_judged(steps):
             assert case.get("judge", False) is False and "rubric" not in case, case["id"]
 
 
-def test_the_sign_in_precedes_claude_code_and_both_precede_the_daemon(steps, wif_step,
-                                                                       claude_step):
+def test_the_judge_is_proven_first_and_the_sign_in_precedes_claude_code_and_the_daemon(
+        steps, judge_step, wif_step, claude_step):
     boot = _step_index(steps, "capability-daemon.sh up")
+    # The cheapest refusal comes before anything is spent or signed in.
+    assert steps.index(judge_step) < steps.index(wif_step)
     assert steps.index(wif_step) < steps.index(claude_step) < boot, \
         "claude_code_run is advertised from a boot snapshot, so claude must be on PATH first"
 
 
-def test_every_judged_step_comes_after_the_sign_in(steps, wif_step):
+def test_every_judged_step_comes_after_the_judge_preflight(steps, judge_step):
     for step_id in ("regression", "capability_judged"):
-        assert steps.index(wif_step) < steps.index(_step_by_id(steps, step_id)), step_id
+        assert steps.index(judge_step) < steps.index(_step_by_id(steps, step_id)), step_id
 
 
-def test_the_preflight_loads_the_judge_settings_of_the_tiers_runner(wif_step):
-    expression = " ".join(str(wif_step["env"]["JUDGE_CONFIG"]).split())
+def test_the_preflight_loads_the_judge_settings_of_the_tiers_runner(judge_step):
+    expression = " ".join(str(judge_step["env"]["JUDGE_CONFIG"]).split())
     assert expression == ("${{ inputs.tier == 'regression' && 'behavioral_config.yaml'"
                           " || 'config.yaml' }}")
-    assert wif_step["working-directory"] == "benchmark"
-    run = wif_step["run"]
+    assert judge_step["working-directory"] == "benchmark"
+    run = judge_step["run"]
     assert 'uv run bin/judge_preflight.py --config "$JUDGE_CONFIG"' in run
-    assert '--expect-source "profile $WIF_PROFILE (oidc_federation)"' in run
+    # The preflight refuses a judge on the candidate's model before any call.
+    assert '--candidate-model "$CANDIDATE_MODEL"' in run
+    assert "--expect-source" not in run
+
+
+def test_the_candidate_is_anthropic_opus_at_medium_effort(workflow, seed_step):
+    # PyYAML reads the bare key `on` as the boolean True.
+    triggers = workflow[True]
+    for kind in ("workflow_call", "workflow_dispatch"):
+        assert triggers[kind]["inputs"]["model"]["default"] == CANDIDATE, kind
+    env = workflow["jobs"]["box"]["env"]
+    assert env["CANDIDATE_MODEL"] == "${{ inputs.model }}"
+    assert env["CANDIDATE_REASONING_EFFORT"] == "medium"
+    assert ('seed_args="--provider anthropic --model ${CANDIDATE_MODEL} '
+            '--reasoning-effort ${CANDIDATE_REASONING_EFFORT}"') in seed_step["run"]
 
 
 def test_the_federation_ids_come_from_repository_variables(steps, wif_step, claude_step):
@@ -180,26 +223,51 @@ def test_the_federation_ids_come_from_repository_variables(steps, wif_step, clau
     assert others == []
 
 
-def test_no_api_key_path_remains(workflow):
-    # Comments may name the key a `bare` run would need; nothing may provide one.
-    # EVAL_JUDGE_API_KEY belonged to the OpenAI judge, which no tier uses.
-    code = "\n".join(ln for ln in EVAL_BOX.read_text(encoding="utf-8").splitlines()
-                     if not ln.lstrip().startswith("#"))
-    for name in ("EVAL_CODEX_API_KEY", "EVAL_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY",
-                 "EVAL_JUDGE_API_KEY", "apiKeyHelper"):
-        assert name not in code, name
+def test_the_declared_secrets_are_the_candidates_the_judges_and_opiks(workflow):
     # PyYAML reads the bare key `on` as the boolean True.
     declared = workflow[True]["workflow_call"]["secrets"]
-    assert not any("CODEX" in name or "ANTHROPIC" in name or "JUDGE" in name
-                   for name in declared)
+    assert set(declared) == {"ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+                             "FERMIX_OPIK_API_KEY", "FERMIX_OPIK_WORKSPACE"}
+    assert all(spec["required"] is True for spec in declared.values())
 
 
-def test_only_judged_tier_callers_grant_the_id_token_permission(workflow):
+def _steps_naming(steps, needle):
+    return [s for s in steps if needle in yaml.safe_dump(s)]
+
+
+def test_the_candidate_key_reaches_the_daemon_boot_only(steps, seed_step):
+    assert _steps_naming(steps, "secrets.ANTHROPIC_API_KEY") == [seed_step]
+    assert seed_step["env"]["ANTHROPIC_API_KEY"] == ANTHROPIC_SECRET
+    # The daemon never holds the judge's key, so it can neither spend it nor fail
+    # a turn over to OpenAI.
+    assert not any("OPENAI" in name or "JUDGE" in name for name in seed_step["env"])
+
+
+def test_the_judge_key_is_the_openai_secret_on_the_judged_steps_only(steps):
+    judged = [s for s in steps if "EVAL_JUDGE_API_KEY" in s.get("env", {})]
+    assert [s["id"] for s in judged] == ["judge_preflight", "regression",
+                                         "capability_judged"]
+    for step in judged:
+        assert step["env"]["EVAL_JUDGE_API_KEY"] == OPENAI_SECRET, step["id"]
+    assert _steps_naming(steps, "secrets.OPENAI_API_KEY") == judged
+
+
+def test_no_other_api_key_path_remains():
+    # Comments may name a key; no step may read one from anywhere else.
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        code = "\n".join(ln for ln in path.read_text(encoding="utf-8").splitlines()
+                         if not ln.lstrip().startswith("#"))
+        for name in ("EVAL_CODEX_API_KEY", "EVAL_ANTHROPIC_API_KEY",
+                     "secrets.EVAL_JUDGE_API_KEY", "apiKeyHelper"):
+            assert name not in code, (path.name, name)
+
+
+def test_only_the_capability_tier_caller_grants_the_id_token_permission(workflow):
     # The box job declares no permissions, so it inherits its caller's: only the
-    # judged tiers sign in through WIF, and the other tiers, the dangerous one
-    # above all, must never hold the right to mint GitHub OIDC tokens. A direct
-    # dispatch gets the repository's read-only default, and the sign-in step
-    # refuses it.
+    # capability tier signs in through WIF (for Claude Code), and the other tiers,
+    # the dangerous one above all, must never hold the right to mint GitHub OIDC
+    # tokens. A direct dispatch gets the repository's read-only default, and the
+    # sign-in step refuses it.
     assert "permissions" not in workflow["jobs"]["box"]
     callers = {}
     for path in sorted(WORKFLOWS.glob("*.yml")):
@@ -212,7 +280,7 @@ def test_only_judged_tier_callers_grant_the_id_token_permission(workflow):
                             ("eval-weekly.yml", "dangerous"),
                             ("eval-nightly.yml", "regression")}
     for (name, job_id), (tier, permissions) in callers.items():
-        if tier in JUDGED_TIERS:
+        if tier == "capability":
             assert permissions == {"contents": "read", "id-token": "write"}, (name, job_id)
         else:
             assert "id-token" not in (permissions or {}), (name, job_id)
@@ -248,7 +316,7 @@ def test_the_model_is_pinned_to_haiku(claude_step):
     assert claude_step["env"]["CLAUDE_MODEL"] == "claude-haiku-5-5"
 
 
-def test_the_refresher_outlasts_every_judged_tier_and_stops_after_the_daemon(
+def test_the_refresher_outlasts_the_capability_tier_and_stops_after_the_daemon(
         workflow, steps, wif_step, claude_step, stop_step):
     env = wif_step["env"]
     seconds, rounds = int(env["WIF_REFRESH_SECONDS"]), int(env["WIF_REFRESH_MAX"])
@@ -256,7 +324,6 @@ def test_the_refresher_outlasts_every_judged_tier_and_stops_after_the_daemon(
     assert seconds == 60
     timeout = str(workflow["jobs"]["box"]["timeout-minutes"])
     assert f"inputs.tier == 'capability' && {CAPABILITY_TIMEOUT_MINUTES}" in timeout
-    assert "inputs.tier == 'regression' && 60" in timeout
     assert seconds * rounds >= CAPABILITY_TIMEOUT_MINUTES * 60
     # Claude Code waits for one rotation after its preflight, so the bound must
     # cover a whole period with room to spare.
@@ -358,32 +425,37 @@ case "$url" in
 esac
 """
 
-# Stands in for `uv run bin/judge_preflight.py`: exchanges the active profile's
-# identity token as the SDK would (once per token), then reports what the real
-# script prints, or the sentence it fails with.
+# Stands in for `uv run bin/judge_preflight.py`: records its argv and whether the
+# judge's key reached it (never the value), then reports what the real script
+# prints, or the sentence it fails with.
 UV_STUB = """#!/bin/sh
 . "$(dirname "$0")/stub.env"
 printf '%s\\n' "$*" >> "$STUB_UV_LOG"
 case "$*" in
-  "run bin/judge_preflight.py --config "*" --expect-source "*) ;;
+  "run bin/judge_preflight.py --config "*" --candidate-model "*) ;;
   *) echo "unexpected uv call: $*" >&2; exit 64 ;;
 esac
-config="$HOME/.config/anthropic"
-name=$(cat "$config/active_config")
-token=$(jq -r '.authentication.identity_token.path' "$config/configs/$name.json")
-if ! grep -Eqx '[A-Za-z0-9_-]+[.][A-Za-z0-9_-]+[.][A-Za-z0-9_-]+' "$token"; then
-  echo "the judge did not answer: anthropic judge credential failed: no identity token"; exit 1
-fi
-if grep -qxF "$(cat "$token")" "$STUB_SPENT_LOG" 2>/dev/null; then
-  echo "the judge did not answer: anthropic judge credential failed: token exchange failed (HTTP 401)"; exit 1
-fi
-cat "$token" >> "$STUB_SPENT_LOG"
+if [ -n "${EVAL_JUDGE_API_KEY:-}" ]; then echo "key=set" >> "$STUB_UV_LOG"
+else echo "key=unset" >> "$STUB_UV_LOG"; fi
 if [ -e "$STUB_JUDGE_FAIL" ]; then
   echo "Installed 18 packages in 40ms"
-  echo "the judge did not answer: anthropic judge API error (HTTP 404, not_found_error): model: claude-opus-5-5"
+  echo "the judge did not answer: openai judge error: HTTP Error 404: Not Found"
   exit 1
 fi
-echo "judge anthropic/claude-opus-5-5 answered through profile $name (oidc_federation): pass"
+echo "judge openai/gpt-6-luna answered through EVAL_JUDGE_API_KEY: pass (310 input / 41 output tokens)"
+"""
+
+# Stands in for benchmark/bin/capability-daemon.sh: records how the boot step called
+# it, the seed arguments it passed, and which credentials reached the daemon's
+# environment (by name, never by value).
+DAEMON_STUB = """#!/bin/sh
+log="$(dirname "$0")/daemon-stub.log"
+printf 'argv=%s\\n' "$*" >> "$log"
+printf 'seed_args=%s\\n' "${FERMIX_CAP_SEED_ARGS:-}" >> "$log"
+for name in ANTHROPIC_API_KEY OPENAI_API_KEY EVAL_JUDGE_API_KEY ACTIONS_ID_TOKEN_REQUEST_TOKEN; do
+  eval "value=\\${$name:-}"
+  if [ -n "$value" ]; then echo "$name=set" >> "$log"; else echo "$name=unset" >> "$log"; fi
+done
 """
 
 UNAME_STUB = """#!/bin/sh
@@ -410,13 +482,16 @@ def _claude_binary(path: Path, spent: Path, *, auth=AUTH_FROM_PROFILE, call=None
 def _run_steps(workflow, run_steps, root: Path, *, tier="capability", binary=None,
                sha=None, arch="x86_64", vars_=None, oidc=True, oidc_fails=False,
                oidc_slow="", judge_fails=False, refresh_seconds="30", refresh_max="200",
-               rotation_wait=None):
+               rotation_wait=None, judge_key=INVENTED_OPENAI_KEY,
+               anthropic_key=INVENTED_ANTHROPIC_KEY):
     """Executes the given steps' shell in order, the way the runner would, sharing
     one HOME, RUNNER_TEMP and GITHUB_PATH; stops at the first step that fails."""
     root.mkdir()
     stub_bin, home, runner_temp = root / "stubbin", root / "home", root / "runner_temp"
-    for d in (stub_bin, home, runner_temp):
-        d.mkdir()
+    daemon_bin = root / "benchmark" / "bin"
+    for d in (stub_bin, home, runner_temp, daemon_bin):
+        d.mkdir(parents=True)
+    _stub(daemon_bin, "capability-daemon.sh", DAEMON_STUB)
     for name, body in (("curl", CURL_STUB), ("uname", UNAME_STUB), ("uv", UV_STUB)):
         _stub(stub_bin, name, body)
     spent = root / "spent-tokens.log"
@@ -443,14 +518,18 @@ def _run_steps(workflow, run_steps, root: Path, *, tier="capability", binary=Non
     base = {"PATH": f"{stub_bin}{os.pathsep}{os.environ.get('PATH', '')}",
             "HOME": str(home), "RUNNER_TEMP": str(runner_temp),
             "GITHUB_PATH": str(github_path), "STUB_ARCH": arch, "TIER": tier,
-            "WIF_PROFILE": str(job_env["WIF_PROFILE"])}
+            "WIF_PROFILE": str(job_env["WIF_PROFILE"]), "CANDIDATE_MODEL": CANDIDATE,
+            "CANDIDATE_REASONING_EFFORT": str(job_env["CANDIDATE_REASONING_EFFORT"]),
+            "EVAL_HOME": str(root / "eval-home"),
+            "GITHUB_WORKSPACE": str(root / "workspace")}
     if oidc:
         base |= {"ACTIONS_ID_TOKEN_REQUEST_URL": OIDC_URL,
                  "ACTIONS_ID_TOKEN_REQUEST_TOKEN": REQUEST_TOKEN}
     # The steps' own env, with the values a test cannot take from it.
     overrides = {**(VAR_VALUES if vars_ is None else vars_),
                  "CLAUDE_CODE_SHA256": sha or binary_sha,
-                 "WIF_REFRESH_SECONDS": refresh_seconds, "WIF_REFRESH_MAX": refresh_max}
+                 "WIF_REFRESH_SECONDS": refresh_seconds, "WIF_REFRESH_MAX": refresh_max,
+                 "EVAL_JUDGE_API_KEY": judge_key, "ANTHROPIC_API_KEY": anthropic_key}
     output, status = "", 0
     for step in run_steps:
         env = {**base, **{k: str(v) for k, v in step.get("env", {}).items()}}
@@ -472,7 +551,9 @@ def _run_steps(workflow, run_steps, root: Path, *, tier="capability", binary=Non
         wif_dir=runner_temp / "anthropic-wif", oidc_fail=oidc_fail,
         argv_log=argv_log, env_log=env_log,
         uv_calls=uv_log.read_text().splitlines() if uv_log.exists() else [],
-        spent=spent)
+        spent=spent,
+        daemon=(daemon_bin / "daemon-stub.log").read_text().splitlines()
+        if (daemon_bin / "daemon-stub.log").exists() else [])
 
 
 def _stop_refresher(wif_dir: Path) -> None:
@@ -541,15 +622,13 @@ def _await_oidc_fetches(r, n: int, timeout: float = 5.0) -> None:
     raise AssertionError(f"fewer than {n} OIDC fetches within {timeout}s")
 
 
-def test_the_regression_tier_signs_the_judge_in_and_keeps_the_token_fresh(run_box):
-    r = run_box(tier="regression")
+def test_the_sign_in_writes_the_profile_and_keeps_the_token_fresh(run_box):
+    r = run_box()
     assert r.status == 0, r.output
-    # One token for the judge preflight, a fresh one after it; no Claude Code.
-    assert r.urls == [OIDC, OIDC]
+    # One token for Claude Code's first exchange; the judge needs none.
+    assert r.urls == [OIDC]
     assert r.published == ""
-    assert r.uv_calls == ["run bin/judge_preflight.py --config behavioral_config.yaml "
-                          f"--expect-source {PREFLIGHT_SOURCE}"]
-    assert f"answered through {PREFLIGHT_SOURCE}" in r.output
+    assert r.uv_calls == []
     anthropic_dir = r.home / ".config" / "anthropic"
     assert (anthropic_dir / "active_config").read_text() == "fermix-eval\n"
     jwt = r.wif_dir / "github-oidc.jwt"
@@ -563,9 +642,9 @@ def test_the_regression_tier_signs_the_judge_in_and_keeps_the_token_fresh(run_bo
             "identity_token": {"source": "file", "path": str(jwt)}},
         "organization_id": VAR_VALUES["ANTHROPIC_EVAL_ORGANIZATION_ID"],
         "workspace_id": VAR_VALUES[WORKSPACE_VAR]}
-    # The preflight spent the first token; the file holds the unspent second one.
-    assert [JWT_RE.fullmatch(t).group(1) for t in _spent(r)] == ["0001"]
-    assert JWT_RE.fullmatch(jwt.read_text()).group(1) == "0002"
+    # Nothing has exchanged it yet.
+    assert _spent(r) == []
+    assert JWT_RE.fullmatch(jwt.read_text()).group(1) == "0001"
     assert _mode(jwt) == 0o600
     assert _mode(r.wif_dir) == 0o700 and _mode(anthropic_dir) == 0o700
     assert (r.wif_dir / "refresher.pid").exists()
@@ -578,17 +657,16 @@ def test_the_capability_tier_signs_in_then_puts_a_proven_claude_on_path(run_box,
     version = claude_step["env"]["CLAUDE_CODE_VERSION"]
     install_dir = r.runner_temp / f"claude-code-{version}" / "bin"
     assert r.published == f"{install_dir}\n"
-    assert r.urls[:3] == [OIDC, OIDC, f"https://downloads.claude.ai/claude-code-releases/"
-                                      f"{version}/linux-x64/claude"]
-    assert r.uv_calls == ["run bin/judge_preflight.py --config config.yaml "
-                          f"--expect-source {PREFLIGHT_SOURCE}"]
+    assert r.urls[:2] == [OIDC, f"https://downloads.claude.ai/claude-code-releases/"
+                                f"{version}/linux-x64/claude"]
+    assert r.uv_calls == []
     settings = json.loads((r.home / ".claude" / "settings.json").read_text())
     assert settings == {"model": "claude-haiku-5-5",
                         "env": {"DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1"}}
-    # The judge and Claude Code each exchanged a different token, and the step
-    # waited for a rotation, so the file now holds one nobody has spent.
+    # Claude Code's preflight exchanged one token and the step waited for a
+    # rotation, so the file now holds one nobody has spent.
     spent = _spent(r)
-    assert len(spent) == 2 and len(set(spent)) == 2
+    assert len(spent) == 1
     assert (r.wif_dir / "github-oidc.jwt").read_text().strip() not in spent
 
 
@@ -632,11 +710,6 @@ def test_a_failed_first_token_fetch_fails_the_step(run_box):
     assert r.uv_calls == []
 
 
-def test_a_judge_whose_preflight_fails_stops_the_tier(run_box):
-    r = run_box(tier="regression", judge_fails=True)
-    _never_signed_in(r)
-    errors = _error_lines(r.output)
-    assert any("judge preflight failed" in ln and "HTTP 404" in ln for ln in errors), r.output
 
 
 def test_a_binary_that_fails_its_checksum_is_never_installed(run_box, claude_step):
@@ -721,8 +794,8 @@ def test_the_refresher_starts_from_a_wiped_environment(run_box):
     assert r.status == 0, r.output
     _await_oidc_fetches(r, 4)
     envs = r.env_log.read_text().split()
-    # The first two fetches run in the step itself; every later one is the refresher's.
-    assert len(envs) >= 4 and envs[2:] == ["clean"] * len(envs[2:]), envs
+    # The first fetch runs in the step itself; every later one is the refresher's.
+    assert len(envs) >= 4 and envs[1:] == ["clean"] * len(envs[1:]), envs
 
 
 def test_the_refresher_never_exposes_a_partial_token(run_box):
@@ -762,9 +835,64 @@ def test_a_refresh_failure_is_logged_without_ending_the_loop(run_box):
     assert " refresh FAILED" in log and log.rstrip().endswith(" refreshed")
 
 
+# --- behaviour: the judge preflight ----------------------------------------------
+
+@pytest.mark.parametrize("tier", JUDGED_TIERS)
+def test_the_judge_preflight_proves_the_judge_before_anything_is_spent(run_box, judge_step,
+                                                                       tier):
+    r = run_box(steps=[judge_step], tier=tier)
+    assert r.status == 0, r.output
+    assert r.uv_calls == [f"run bin/judge_preflight.py --config {JUDGE_CONFIGS[tier]} "
+                          f"--candidate-model {CANDIDATE}", "key=set"]
+    assert "judge openai/gpt-6-luna answered through EVAL_JUDGE_API_KEY" in r.output
+    assert INVENTED_OPENAI_KEY not in r.output
+    assert r.urls == [] and r.daemon == []
+
+
+def test_an_empty_openai_secret_stops_a_judged_tier_with_a_sentence(run_box, judge_step):
+    r = run_box(steps=[judge_step], tier="regression", judge_key="")
+    assert r.status != 0
+    errors = _error_lines(r.output)
+    assert any("OPENAI_API_KEY is empty" in ln and "EVAL_JUDGE_API_KEY" in ln
+               and "behavioral_config.yaml" in ln for ln in errors), r.output
+    assert r.uv_calls == []
+
+
+def test_a_judge_whose_preflight_fails_stops_the_tier(run_box, judge_step):
+    r = run_box(steps=[judge_step], tier="regression", judge_fails=True)
+    assert r.status != 0
+    errors = _error_lines(r.output)
+    assert any("judge preflight failed" in ln and "HTTP Error 404" in ln
+               for ln in errors), r.output
+
+
+# --- behaviour: the boot of the daemon under test --------------------------------
+
+def test_the_daemon_boots_on_the_anthropic_candidate_at_medium_effort(run_box, seed_step):
+    r = run_box(steps=[seed_step], tier="regression")
+    assert r.status == 0, r.output
+    assert r.daemon[:2] == ["argv=up",
+                            f"seed_args=--provider anthropic --model {CANDIDATE} "
+                            f"--reasoning-effort medium --allow-root {r.home.parent}/workspace"]
+    # The candidate's key, and nothing the judge or the OIDC exchange holds.
+    assert r.daemon[2:] == ["ANTHROPIC_API_KEY=set", "OPENAI_API_KEY=unset",
+                            "EVAL_JUDGE_API_KEY=unset",
+                            "ACTIONS_ID_TOKEN_REQUEST_TOKEN=unset"]
+    assert INVENTED_ANTHROPIC_KEY not in r.output
+
+
+def test_a_missing_anthropic_key_stops_the_boot_with_a_sentence(run_box, seed_step):
+    r = run_box(steps=[seed_step], tier="regression", anthropic_key="")
+    assert r.status != 0
+    errors = _error_lines(r.output)
+    assert any("ANTHROPIC_API_KEY is empty" in ln and CANDIDATE in ln and "medium" in ln
+               for ln in errors), r.output
+    assert r.daemon == []
+
+
 # --- behaviour: the step that stops the refresher -------------------------------
 
-def _run_stop_step(stop_step, runner_temp: Path, tier: str = "regression"):
+def _run_stop_step(stop_step, runner_temp: Path, tier: str = "capability"):
     p = subprocess.run(["bash", "-c", stop_step["run"]], env={
         "PATH": os.environ.get("PATH", ""), "RUNNER_TEMP": str(runner_temp), "TIER": tier},
         capture_output=True, text=True, timeout=30)
@@ -796,8 +924,8 @@ def test_the_stop_step_fails_the_job_when_a_refresh_failed(stop_step, tmp_path):
     proc.wait(timeout=5)
     assert status != 0
     errors = _error_lines(output)
-    assert any("1 identity-token refreshes failed during the regression tier" in ln
-               and "judge" in ln for ln in errors), output
+    assert any("1 identity-token refreshes failed during the capability tier" in ln
+               and "claude_code_run" in ln for ln in errors), output
     assert "returned error: 503" in output
 
 

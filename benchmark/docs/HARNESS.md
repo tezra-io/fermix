@@ -100,17 +100,17 @@ How it scores (see `EVAL_CAPABILITY_SCORING.md`, beside this file):
   is the scoring source. Choose a separate local eval/e2e project when the
   held-out material should not appear in `fermix-dev`.
 - Rubric-only tasks use an **independent external LLM judge** with `--judge` —
-  the Claude API through the official `anthropic` SDK, called directly by the
-  harness (no daemon or core involvement). `judge.backend: anthropic` and
-  `judge.model` live in **this benchmark's config** (`config.yaml` /
-  `behavioral_config.yaml`); the model must differ from the candidate (the harness
-  refuses a match). The SDK resolves the credential: `ANTHROPIC_API_KEY`, which the
-  `make` judged targets export from the same Anthropic key the daemon uses (macOS
-  keychain `fermix:ANTHROPIC_API_KEY`) when it isn't exported, else an `ant auth
-  login` profile; the CI eval box signs in through Workload Identity Federation.
-  `judge.backend: openai` remains selectable (`EVAL_JUDGE_API_KEY`,
-  `EVAL_JUDGE_BASE_URL`). Because it's a different provider from the daemon's
-  candidate model, it is a genuinely independent oracle. The judge scores only
+  the OpenAI API, called directly by the harness (no daemon or core
+  involvement). `judge.backend: openai` and `judge.model` (`gpt-6-luna`) live in
+  **this benchmark's config** (`config.yaml` / `behavioral_config.yaml`); the
+  model must differ from the candidate (the harness refuses a match). The judge
+  reads `EVAL_JUDGE_API_KEY`, which the `make` judged targets export from the same
+  OpenAI key the daemon uses (macOS keychain `fermix:OPENAI_API_KEY`) when it isn't
+  exported; the CI eval box feeds it from the `OPENAI_API_KEY` repository secret.
+  `judge.backend: anthropic` remains selectable (the Claude API through the
+  official SDK, which resolves `ANTHROPIC_API_KEY` or an `ant auth login`
+  profile). Because it's a different provider from the CI candidate
+  (`claude-opus-5-5` on Anthropic), it is a genuinely independent oracle. The judge scores only
   prose; structural gates remain the hard safety/flow signal.
 - Each task runs **k trials**; results aggregate to strict **pass@1** (fraction of
   trials clearing the pass threshold), **pass^k** (reliability — all k pass),
@@ -296,11 +296,11 @@ leaderboard row; the board re-ranks. The matrix of rankable configs comes from
 2. **Opik-enabled development daemon up**: safe/read-only behavioral runs and the
    response-quality capability suite default to `~/.fermix-dev` and Opik project
    `fermix-dev`. The production home `~/.fermix` is always rejected.
-3. **Judge credential for judged runs**: `judge.backend: anthropic` + `judge.model`
-   in the benchmark config; the SDK authenticates with `ANTHROPIC_API_KEY`, which
-   the `make` judged targets export from the daemon's configured Anthropic key
-   (keychain `fermix:ANTHROPIC_API_KEY`), else an `ant auth login` profile. The
-   judge model must differ from the candidate.
+3. **Judge credential for judged runs**: `judge.backend: openai` + `judge.model`
+   in the benchmark config; the judge authenticates with `EVAL_JUDGE_API_KEY`,
+   which the `make` judged targets export from the daemon's configured OpenAI key
+   (keychain `fermix:OPENAI_API_KEY`). The judge model must differ from the
+   candidate.
 4. **uv installed** (`brew install uv`, or the Astral installer). The runner is a
    self-contained `uv run` script — its only dependency (PyYAML) is declared inline
    (PEP 723) and fetched/cached on first run. No venv to set up.
