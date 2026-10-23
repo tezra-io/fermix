@@ -61,6 +61,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
   alias FermixWebWeb.SetupLive.Components
+  alias FermixWebWeb.SetupLive.Phone
 
   # Computer use is a core feature, not a plugin whose branding we receive, so its
   # card name + logo are owned here. The SVG is inlined as a data URI at compile
@@ -226,10 +227,16 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:resource_picker, nil)
       |> assign(:computer_history_picker, nil)
       |> assign(:meetings_config_open?, false)
+      |> assign(:phone, Phone.initial())
       |> assign_report(report)
 
     {:ok, socket}
   end
+
+  # A pairing window this page still shows is cancelled when the page goes away
+  # (the tab closed or the socket dropped).
+  @impl true
+  def terminate(_reason, socket), do: Phone.terminate(socket)
 
   defp setup_authorization(session) do
     session["setup_authorized"] || session[:setup_authorized]
@@ -413,7 +420,19 @@ defmodule FermixWebWeb.SetupLive do
 
   def handle_event("select_channel", %{"channel" => channel}, socket) do
     channel = parse_channel_field(channel, socket.assigns.channels_form.editing)
-    {:noreply, assign(socket, :channels_form, %{socket.assigns.channels_form | editing: channel})}
+    socket = assign(socket, :channels_form, %{socket.assigns.channels_form | editing: channel})
+
+    # The Phone card reads the phone channel only while it is the one shown.
+    {:noreply, if(channel == :mobile, do: Phone.load(socket), else: socket)}
+  end
+
+  # The Phone card's events. A settings write refreshes the report, so the card,
+  # the banner and the restart notice follow it, and keeps the Phone card shown.
+  def handle_event("phone_" <> _rest = event, params, socket) do
+    case Phone.handle_event(event, params, socket) do
+      {socket, nil} -> {:noreply, socket}
+      {socket, write} -> {:noreply, refresh_after_phone_write(socket, write)}
+    end
   end
 
   def handle_event("search_changed", %{"search_form" => params}, socket) do
@@ -954,6 +973,10 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, fail_task(socket, ref, reason)}
   end
 
+  def handle_info({phone_read, _gen} = message, socket)
+      when phone_read in [:phone_poll, :phone_reach],
+      do: {:noreply, Phone.handle_info(message, socket)}
+
   def handle_info(:perform_restart, socket) do
     # Supervised release only (gated in apply_restart): exit non-zero so the OS
     # supervisor relaunches the daemon — launchd KeepAlive on any exit, systemd
@@ -1100,6 +1123,7 @@ defmodule FermixWebWeb.SetupLive do
       active_tab={@active_tab}
       embed?={@embed?}
       channels_form={@channels_form}
+      phone={@phone}
       doctor_result={@doctor_result}
       memory_form={@memory_form}
       personalization_form={@personalization_form}
@@ -1220,6 +1244,18 @@ defmodule FermixWebWeb.SetupLive do
   # reload re-runs the read that failed, so the button would be a loop.
   defp config_banner_state({:config_unreadable, sentence}),
     do: %{message: sentence, action: nil}
+
+  # After a Phone card write: the card, the banner and the restart notice follow
+  # the new settings, and the Phone card stays the one shown.
+  defp refresh_after_phone_write(socket, write) do
+    editing = socket.assigns.channels_form.editing
+    restart? = get_in(write, ["restart", "required"]) == true
+    socket = assign_report(socket, Wizard.report())
+
+    socket
+    |> assign(:channels_form, %{socket.assigns.channels_form | editing: editing})
+    |> assign(:restart_pending?, socket.assigns.restart_pending? or restart?)
+  end
 
   defp save_answers(socket, answers, message, nav, opts \\ []) do
     socket.assigns.report.wizard
@@ -1749,6 +1785,7 @@ defmodule FermixWebWeb.SetupLive do
       signal: signal_form(channels),
       imessage: imessage_form(channels),
       acp: acp_form(channels),
+      mobile: mobile_form(channels),
       imessage_available?: imessage_available?()
     }
   end
@@ -1825,6 +1862,13 @@ defmodule FermixWebWeb.SetupLive do
   # actually running rather than offering to turn off something already on.
   defp acp_form(channels) do
     %{enabled: channel_enabled?(Keyword.get(channels, :acp, []), true)}
+  end
+
+  # The card's pill only; the Phone panel reads the channel itself
+  # (`FermixWebWeb.SetupLive.Phone`). Off unless the block says on, as the
+  # `channels.mobile` switch row reads it.
+  defp mobile_form(channels) do
+    %{enabled: channel_enabled?(Keyword.get(channels, :mobile, []), false)}
   end
 
   defp build_sandbox_form(snapshot) do
@@ -4106,6 +4150,7 @@ defmodule FermixWebWeb.SetupLive do
   defp parse_channel_field("signal", _default), do: :signal
   defp parse_channel_field("imessage", _default), do: :imessage
   defp parse_channel_field("acp", _default), do: :acp
+  defp parse_channel_field("mobile", _default), do: :mobile
   defp parse_channel_field(_, default), do: default
 
   defp parse_effort_field(field, default) do

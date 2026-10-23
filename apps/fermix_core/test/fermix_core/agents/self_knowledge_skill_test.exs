@@ -152,7 +152,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   # that happens to mention setup (e.g. `--migrate-secrets`) stays legal while a
   # re-added mobile setup step or flag, or the withdrawn "no setup surface"
   # claim, fails here.
-  test "documents mobile's management surface and the config route, never a setup step" do
+  test "documents mobile's management surface, its Phone surfaces and the config route" do
     reference = File.read!(mobile_reference_path())
     paragraph = mobile_paragraph()
 
@@ -164,9 +164,11 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
       assert text =~ "fermix pair"
       assert text =~ "never the CLI"
       assert text =~ "Phone row"
+      assert text =~ "Phone card"
+      assert text =~ "browser setup"
       refute text =~ "Phone pane on them yet"
+      refute text =~ "Phone pane yet"
       refute text =~ "Channels page"
-      refute text =~ "Channels tab"
       refute text =~ "--mobile-enabled"
       refute text =~ "--mobile-push"
       refute text =~ "no setup surface"
@@ -297,7 +299,8 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "acp.sock",
           "realtime.sock",
           "fermix.service",
-          "No Phone pane",
+          "**Phone** row",
+          "**Pair a phone…**",
           "read-only"
         ] do
       assert reference =~ fact, "linux_app reference does not say #{fact}"
