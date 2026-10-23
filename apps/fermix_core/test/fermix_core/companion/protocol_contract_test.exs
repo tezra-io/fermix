@@ -11,6 +11,7 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Companion.Protocol
+  alias FermixCore.Cues.ProposalView
   alias FermixCore.ReplyBlocks
 
   @priv_dir Application.app_dir(:fermix_core, "priv/companion")
@@ -26,6 +27,9 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   # The events version 3 brought (M66): the media grant and the changed row.
   @version_3_client_events ~w(media_fetch media_release)
   @version_3_server_events ~w(row_updated media_path media_missing)
+  # The events version 4 brought (M60 app surface §3.7): a mandate's proposals.
+  @version_4_client_events ~w(proposal_answer)
+  @version_4_server_events ~w(proposal proposal_resolved)
 
   setup_all do
     %{
@@ -76,8 +80,6 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     schema: schema,
     protocol: protocol
   } do
-    assert Protocol.protocol_version() == 3
-
     for type <- @version_3_client_events do
       assert Protocol.client_event_version(type) == 3, "#{type} is not a version 3 event"
       assert schema["$defs"][type]["x-since-version"] == 3
@@ -92,6 +94,87 @@ defmodule FermixCore.Companion.ProtocolContractTest do
 
     assert protocol =~ "### Version 3: phone-side media and rows that change"
     assert protocol =~ "streams the bytes"
+  end
+
+  # M60 app surface §3.7: the proposal events are version 4's, on this wire
+  # alone until the phone's wire carries them, and only for the owner.
+  test "the proposal events are version 4 events this wire does not share", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    assert Protocol.protocol_version() == 4
+    assert Protocol.supported_version_range() == {3, 4}
+
+    for type <- @version_4_client_events do
+      assert Protocol.client_event_version(type) == 4, "#{type} is not a version 4 event"
+      assert schema["$defs"][type]["x-since-version"] == 4
+      refute type in Protocol.shared_client_events()
+    end
+
+    for type <- @version_4_server_events do
+      assert Protocol.server_event_version(type) == 4, "#{type} is not a version 4 event"
+      assert schema["$defs"][type]["x-since-version"] == 4
+      refute type in Protocol.shared_server_events()
+    end
+
+    assert Protocol.owner_server_events() == @version_4_server_events
+    assert protocol =~ "### Version 4: proposals on the owner's devices"
+    assert protocol =~ "## Proposals"
+
+    assert String.replace(protocol, ~r/\s+/, " ") =~
+             "Only the owner can answer a proposal, from the Fermix app or a paired phone."
+  end
+
+  # The schema names every field of the card the engine builds, and bounds the
+  # outside text as the codec does; the golden cards are the engine's shape.
+  test "the proposal card's schema is the card Cues.ProposalView builds", %{schema: schema} do
+    card_def = schema["$defs"]["proposalCard"]
+
+    built =
+      ProposalView.card(%{
+        id: "cpr_1",
+        state: "confirmed",
+        mandate: "release-issues",
+        tool: "github_create_issue",
+        job_id: "release_issues",
+        job_name: "release issues",
+        watcher: "release-watch",
+        source_ref: "eng-blogs",
+        created_at: ~U[2026-10-10 12:00:00Z],
+        expires_at: ~U[2026-10-10 12:30:00Z],
+        decided_at: ~U[2026-10-10 12:01:00Z],
+        decided_from: "companion",
+        result_status: "ok",
+        args_json: ~s({"title":"Phoenix 2.0"}),
+        received_at: ~U[2026-10-10 11:59:00Z],
+        occurred_at: ~U[2026-10-10 11:58:30Z],
+        snapshot: ~s({"type":"release","subject":"phoenix","text":"Phoenix 2.0 is out."})
+      })
+
+    assert built |> Map.keys() |> Enum.map(&Atom.to_string/1) |> Enum.sort() ==
+             card_def["properties"] |> Map.keys() |> Enum.sort()
+
+    assert built.task |> Map.keys() |> Enum.map(&Atom.to_string/1) |> Enum.sort() ==
+             card_def["properties"]["task"]["properties"] |> Map.keys() |> Enum.sort()
+
+    assert built.outside.cue |> Map.keys() |> Enum.map(&Atom.to_string/1) |> Enum.sort() ==
+             schema["$defs"]["proposalCue"]["properties"] |> Map.keys() |> Enum.sort()
+
+    outside = card_def["properties"]["outside"]["properties"]
+    assert outside["args_text"]["maxLength"] == Protocol.max_proposal_args_chars()
+    assert Protocol.max_proposal_args_chars() == ProposalView.max_args_chars()
+
+    assert schema["$defs"]["proposal_resolved"]["properties"]["result_text"]["maxLength"] ==
+             Protocol.max_proposal_result_chars()
+
+    goldens = @server_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "proposal"))
+    assert Enum.any?(goldens, &Map.has_key?(&1["proposal"]["outside"], "cue"))
+    refute Enum.all?(goldens, &Map.has_key?(&1["proposal"]["outside"], "cue"))
+
+    for %{"proposal" => golden} <- goldens do
+      assert Map.keys(golden) -- Map.keys(card_def["properties"]) == []
+      assert card_def["required"] -- Map.keys(golden) == []
+    end
   end
 
   test "the schema publishes the managed media files' budget and grace", %{
@@ -547,7 +630,13 @@ defmodule FermixCore.Companion.ProtocolContractTest do
       "history_search" => %{"profile_id" => "main", "query" => "q", "limit" => 5},
       "read_state" => %{"profile_id" => "main", "read_up_to_seq" => 0},
       "media_fetch" => %{"profile_id" => "main", "ref" => String.duplicate("a", 64)},
-      "media_release" => %{"profile_id" => "main", "ref" => String.duplicate("a", 64)}
+      "media_release" => %{"profile_id" => "main", "ref" => String.duplicate("a", 64)},
+      "proposal_answer" => %{
+        "client_msg_id" => "c",
+        "profile_id" => "main",
+        "proposal_id" => "cpr_1",
+        "decision" => "confirm"
+      }
     }
   end
 

@@ -10,6 +10,11 @@ job, then the memory write, the send, and `mark_delivery`. The Scheduler's
 reaper settles a dead runner's run the same way. A Scheduler Repo call that
 times out does not stop the Scheduler: it takes that call's error branch.
 
+With cues on (M60) the Scheduler also admits cue runs, and the one job can be
+a watcher's task: a job that runs on cues, claimed by admission from its
+passed deliveries instead of by the due tick. Checks 36 to 51 cover it; see
+"Cue runs (M60)" below and "Re-read for M60".
+
 Time is a clock of fire times: `now` counts the fire times that have passed,
 and the job row's `next_run_at` is one of them. The AgentLoop is one step that
 ends in text, `[SILENT]` or an error. Two run ids are reused once a run is
@@ -34,9 +39,9 @@ what is left out and every step folded into another.
   may still land (see late writes).
 - `SchedulerTimeouts`: how many of the Scheduler's Repo calls may time out.
   Every call its process makes passes `Repo.periodic_opts` (`on_timeout:
-  :error`, `repo.ex:1155-1157`, `scheduler.ex:135-138`), so a call the Repo
+  :error`, `repo.ex:1219-1221`, `scheduler.ex:158-161`), so a call the Repo
   does not answer within 5 s returns `{:error, :repo_timeout}`
-  (`repo.ex:3949-3957`). The Scheduler takes that call site's error branch and
+  (`repo.ex:4294-4302`). The Scheduler takes that call site's error branch and
   keeps its monitors and timers; it does not restart, so no init
   reconciliation follows. The request is not cancelled (see late writes).
 - `RunnerCanCrash`: a runner dies at one of its Repo calls (a call timeout, a
@@ -48,11 +53,42 @@ what is left out and every step folded into another.
   arrives in time. With `DeliveryWatchdog` off, the model waits forever,
   because the adapters' own HTTP timeouts are outside the sources.
 
+**Configuration** (set per check):
+- `CuesOn`: the cue tree runs (`Cues.running?/0`, which the Scheduler reads
+  before every admission request and every admission), so the Scheduler
+  admits cue runs: one coalesced `:cue_admit` pass on a wake from the cue
+  inbox (`cue_wake/1`), on a run's end (both DOWN handlers) and on
+  `:job_changed`, and admission after the due scan of every due and reconcile
+  tick (`scheduler.ex`, `handle_info(:due_tick | :reconcile_tick |
+  :cue_admit)`, `maybe_request_admission`, `admit_cue_runs`). Checks 01 to 35
+  set it `FALSE`: the Scheduler then does exactly what it did before M60, and
+  those checks find exactly the state counts they found before (every
+  `holds` and every invariant violation; a liveness counterexample's count
+  moves with the order TLC explores in).
+- `CueTask` (with `CuesOn`): the job is a watcher's task (`schedule_kind
+  "cue"`, `Registry.create_cue_job/2`). The due scan and the timer lookup
+  never return it (no `next_run_at`, no expiry), `run_job_now` refuses it
+  before calling the Scheduler (`Registry.check_run_now`) and a job's kind
+  never changes, so it has no manual run. Its runs are claimed by admission
+  from `waiting`, the count of its passed deliveries (`Repo.claim_cue_run`: in
+  one transaction the eligible delivery, the job taken `running` with
+  `next_run_at` left alone, the run inserted with `trigger: "cue"`, the
+  delivery moved to `claimed`). A completed run acks its delivery. A failed
+  run, settled by its runner or by the reaper (`Repo.settle_cue_run`), puts it
+  back (`waiting + 1`) or ends it: a free choice that stands for the attempt
+  count, the provider-failure rule and `tools_started_at`. A retried attempt
+  only marks its run's delivery `skipped` (`finish_cue_failure`). An exhausted
+  run the reaper settled gets its failure text from a task under the shared
+  `TaskSupervisor` (`report_cue_failure` → `CueRun.report_final_failure`),
+  which records the result on the run row after the send.
+- `Cues`: the passed deliveries the cue inbox hands the task, each with its
+  wake (for a cron job, wakes caused by another task's deliveries).
+
 **Late writes.** `Memory.Repo` serves one request at a time. A call it does
 not answer within 5 s (`Timeouts.repo_call`, `timeouts.ex:225-229`) times out,
 but the request stays in the Repo's mailbox and lands later, still before any
-later request from the same caller (`repo.ex:3934-3947`). `PRAGMA
-busy_timeout=5000` (`repo.ex:3989`) equals that budget, so one SQLite lock
+later request from the same caller (`repo.ex:4279-4292`). `PRAGMA
+busy_timeout=5000` (`repo.ex:4334`) equals that budget, so one SQLite lock
 wait is enough.
 - A runner dies on the timeout. The spec therefore has two kinds of crash at a
   runner's Repo write: the write lands late, or it never lands (a kill, or a
@@ -70,35 +106,35 @@ crash or timeout step itself.
 **A Scheduler Repo call that times out**, site by site (`scheduler.ex`):
 - Modelled, because the Scheduler carries on from states a crash and restart
   never left:
-  - The claim (`Repo.claim_due_job`, `:470-472`; `ClaimTimeout`) and "run
-    now"'s claim (`Repo.claim_job_now`, `:506-511`; `ManualRunTimeout`). The
+  - The claim (`Repo.claim_due_job`, `:581-583`; `ClaimTimeout`) and "run
+    now"'s claim (`Repo.claim_job_now`, `:617-622`; `ManualRunTimeout`). The
     claim still lands when it would have, but no runner starts and nothing
     monitors the run: a queued run with no runner holds the job (`running`)
     until the next 60 s reconcile pass reaps it with `reaped: no live runner
     (daemon or scheduler restart, or a memory store that answered too late)`
-    (`:51-55`). That occurrence never runs. A restart would have reaped it in
+    (`:60-64`). That occurrence never runs. A restart would have reaped it in
     init at once. Witness 30 reaches this.
-  - The run lookup in `mark_run_failed` (`Repo.get_job_run`, `:700-703`;
+  - The run lookup in `mark_run_failed` (`Repo.get_job_run`, `:820-823`;
     `ReapLookupTimeout`). After a DOWN the monitor is already gone, so the dead
     runner's run keeps its row: a queued/running row holds the job, and a
     pending delivery stays pending, until the next reconcile pass reaps it with
     the generic text instead of `runner crashed: ...`. In a reconcile pass
     the orphan waits for the next pass. Witness 31 reaches this.
-  - The reconcile scan (`Repo.unsettled_job_runs`, `:248-250`;
+  - The reconcile scan (`Repo.unsettled_job_runs`, `:359-361`;
     `ReconcileRowsTimeout`): the pass reaps and adopts nothing. After a
     restart, a live runner then stays unmonitored until the next pass, so its
     crash sends no DOWN.
-  - The due scan (`:324-326`; `ScanTimeout`), and the timer lookup
-    (`Repo.next_scheduled_job`, `:835-839`; `ArmTimeout`): nothing is written
+  - The due scan (`:435-437`; `ScanTimeout`), and the timer lookup
+    (`Repo.next_scheduled_job`, `:1008-1012`; `ArmTimeout`): nothing is written
     and the due timer is armed at the 5 s backoff. After a timed-out scan or
     claim the tick's outcome is `:error`, so its re-arm floors at the backoff
     whatever its own lookup returns; that re-arm is folded into the timeout
-    step. "Run now"'s lookup (`:481-483`) replies the error and writes nothing.
+    step. "Run now"'s lookup (`:592-594`) replies the error and writes nothing.
 - Folded into an existing step, because the outcome is the same: the reaper's
-  write (`Repo.settle_job_run` or the pending-delivery upsert, `:713-729`,
-  `:752-765`) lands late, before the Scheduler's next call, and its error
-  branch only logs and skips the memory-source mirror (`:726-727`,
-  `:760-763`), which the spec does not model. That is `ReapRun`. The
+  write (`Repo.settle_job_run` or the pending-delivery upsert, `:886-902`,
+  `:925-938`) lands late, before the Scheduler's next call, and its error
+  branch only logs and skips the memory-source mirror (`:899-900`,
+  `:933-936`), which the spec does not model. That is `ReapRun`. The
   `:run_not_active` re-read is unreachable, as before. Adopting a live runner
   and starting one make no Repo call.
 
@@ -109,46 +145,51 @@ code, 2 in the checks), `OwnerMoves` (pause/resume requests), `OwnerEdits`
 **Mechanism switches** (`TRUE` is the real code; each is switched off by the
 checks listed under it):
 - `AtomicRaceStop`: the claim transaction refuses while a run is queued or
-  running (`ensure_no_active_job_run`, `repo.ex:6040`, `:6071-6089`). Check 02.
+  running (`ensure_no_active_job_run`, `repo.ex:6508`, `:6561-6579`). Check 02.
 - `RetriesOnlyUnsent`: a send is retried only when it never reached the
   platform (`channel_send.ex:140-143`, `:194-202`). This is the mechanism for
   platforms that do not dedupe. The runner tags its send with the proactive
-  key `job:<run id>` (`runner.ex:1315`). The mobile channel keeps one row per
+  key `job:<run id>` (`runner.ex:1597`). The mobile channel keeps one row per
   key (`mobile_sql.ex:41-43`), so a retry there would not show twice. Check 04.
 - `ReconcilesRuns`: at init and every 60 s the Scheduler reaps unsettled runs
-  with no live runner and adopts live ones (`scheduler.ex:178`, `:207-283`).
+  with no live runner and adopts live ones (`scheduler.ex:206`, `:241-394`).
   Checks 07, 28, 33.
 - `CrashFailsPendingDelivery`: the crash path marks a dead runner's pending
-  delivery failed, whatever the run's status (`scheduler.ex:731-733`,
-  `:752-765`). Check 09.
+  delivery failed, whatever the run's status (`scheduler.ex:904-906`,
+  `:925-938`). Check 09.
 - `DeliveryWatchdog`: the runner stops waiting for a send after
   `delivery_timeout_ms` (`channel_send.ex:219-241`). Check 05.
 - `AtomicSettle`: a run's final row and its job's release are one
-  transaction, `Repo.settle_job_run` (`repo.ex:2372`, `:6106-6175`), used by
-  the runner (`runner.ex:264`, `:327`) and the reaper (`scheduler.ex:713-729`).
+  transaction, `Repo.settle_job_run` (`repo.ex:2453-2456`, `:6596-6612`, `:6672-6719`), used by
+  the runner (`runner.ex:311`, `:457`) and the reaper (`scheduler.ex:886-902`).
   The release is a column-targeted `UPDATE` that turns `running` back into
   `scheduled` and keeps any other state. Switched off, the spec runs the code
   before the fix: the run row alone, then a read and a whole-row upsert of the
   job row, in the runner and in the reaper. Checks 12, 22, 23, 24.
 - `ReconcilesPending`: the reconcile pass reads every unsettled run, the
   queued/running rows and then the rows whose delivery is still pending
-  (`unsettled_job_runs`, `repo.ex:2381-2414`; `scheduler.ex:243`). Switched
+  (`unsettled_job_runs`, `repo.ex:2492-2526`; `scheduler.ex:354`). Switched
   off, it reads queued/running rows only. Checks 14, 15, 35.
 - `RefusalBacksOff`: a due claim refused as `:already_running` returns
   `{:busy, state}`, so the re-arm floors at the 5 s backoff
-  (`scheduler.ex:461-465`, `:886-892`). Switched off, the refusal counts as a
+  (`scheduler.ex:572-576`, `:1059-1065`). Switched off, the refusal counts as a
   clean drain and a past-due job re-arms at 0 ms. Check 19.
 - `OwnerWritesColumns`: pause, resume and `update_job` write only the columns
-  they own, in place (`registry.ex:93-116`;
-  `Repo.update_scheduled_job_fields`, `repo.ex:2315`, `:6318-6325`, the owner
-  field list `:7221-7262`). Switched off, pause and `update_job` upsert the
+  they own, in place (`registry.ex:178-201`;
+  `Repo.update_scheduled_job_fields`, `repo.ex:2396-2399`, `:6867-6874`, the owner
+  field list `:7782-7820`). Switched off, pause and `update_job` upsert the
   whole row they read. Check 27.
 - `LoopDiesWithRunner`: a runner's AgentLoop is spawned linked to it and
-  reports its own crash as a value (`runner.ex:984-988`, `:1000-1017`), so a
+  reports its own crash as a value (`runner.ex:1235-1239`, `:1251-1268`), so a
   restart that kills the runner kills its loop. Switched off, the code before
   the fix: the loop was only monitored, and a daemon crash (which stands for
   a restart of the job subtree) leaves a runner's loop running as a stray
   loop until it ends by itself. Check 29.
+- `TicksAdmit`: the due and reconcile ticks run cue admission after their due
+  scan. Switched off, only a wake, a run's end and `:job_changed` ask for
+  admission (a starting Scheduler asks for none, see "Re-read for M60"), so a
+  delivery a reap put back inside a reconcile pass, or one whose admission
+  pass timed out, waits for an event that may never come. Check 37.
 
 **What holds.** Every property below is also broken by its `needs` check.
 - **At most one active run per job** (check 01). An active run is a
@@ -212,6 +253,48 @@ due claim landing after its call timed out, with no runner behind it, while the
 Scheduler keeps running; witness 31 shows a crashed runner's run left holding
 its job when the run lookup in the DOWN's handler times out.
 
+**Cue runs (M60).** Every property below is broken by its `needs` check too.
+- **A watcher's task is not stranded** (check 36), with two deliveries, loop
+  errors and a timed-out Scheduler Repo call:
+  - a passed delivery of the enabled task is claimed in the end
+    (`CueClaimedEventually`, the Scheduler's part of M60 §17's "no undecided
+    or passed delivery is stranded"). This rests on `TicksAdmit` (check 37:
+    the admission pass's candidate scan times out and nothing else asks
+    again);
+  - the job always gets back to claimable. This rests on `ReconcilesRuns`
+    (check 38: a cue claim lands after its call timed out, with no runner).
+- **Every pending delivery of a watcher's task reaches a final status**
+  (check 39), with runner crashes (late writes included) and loop errors, a
+  retried attempt's `pending` then `skipped` included. This rests on
+  `CrashFailsPendingDelivery` (check 40: a runner's settle lands late and the
+  reaper leaves the pending delivery).
+- **No text reaches the user twice** (check 41), the reaper's failure report
+  included, with failing and stalling sends, loop errors and runner crashes.
+  This rests on `RetriesOnlyUnsent` (check 42). With a Scheduler restart, a
+  timed-out Scheduler Repo call and an owner move added it ran past the
+  runner's two-minute limit.
+- **One active run of a watcher's task** (check 43), with two deliveries, a
+  mid-run resume, a daemon crash, runner crashes and a timed-out Scheduler
+  Repo call. The claim's no-active-run rule is enforced twice inside one
+  transaction (the eligibility query and `claim_in_tx`'s
+  `ensure_no_active_job_run`), so no single switch breaks it; across a
+  restart of the job subtree the pass rests on `LoopDiesWithRunner` (check
+  44: a stray loop and the next cue claim). Witness 51 shows the case the
+  rule is for is reached: the candidate scan runs while a second delivery
+  waits and the job is `scheduled` again (a resume mid-run) with its run
+  still active.
+- **A cron job in a home with cues on** keeps its rules under the extra
+  admission passes: one active run and no 0 ms re-arm after a refused claim
+  (check 46, with a resume during a run and runner crashes over three fire
+  times), resting on `AtomicRaceStop` (check 47) and `RefusalBacksOff` (check
+  48); and the job gets back to claimable with an owner edit during a run
+  (check 49), resting on `OwnerWritesColumns` (check 50).
+
+The liveness checks were split (36, 39) because one check with every cue
+fault ran past the runner's two-minute limit. Witness 45 shows a cue run's
+final failure report reaching the user while its run row still records no
+delivery (see "Re-read for M60").
+
 **Deadlock checking finds nothing here.** The Scheduler's 60 s reconcile timer
 is always armed, so an idle Scheduler always has a next step and no state is a
 deadlock. `Done` and `Terminated` follow the convention but gate nothing. A
@@ -246,6 +329,107 @@ and checks 32 and 34 have no row yet. They were run by hand with one more
 Scheduler fault instead, and each held: check 32 with a second timeout
 (132,103 states) or a Scheduler restart (186,295); check 34 with a second
 timeout (68,930) or a Scheduler restart (94,439).
+
+The cue checks were run by hand with one more of an entity: check 36 with a
+third delivery held (182,672 states, 238 s); 39 with a second delivery held
+(89,950); with a third run id, 39's states (202,928) were all explored with
+no invariant broken, but its liveness check had not finished after 11
+minutes and was stopped; 41 held with a second delivery (140,202) and with a
+third run id (269,020); 46 held with a second wake (733,455) and 49 with a
+second fire time (60,643). Check 43 (1,512,284
+states) was not run larger.
+
+## Re-read for M60 (2026-10-17)
+
+M60 (cues and watchers), on `release/0.17.0` and not yet committed, staled
+every pin but `runner_supervisor.ex`, `delivery.ex`, `channel_send.ex` and
+`timeouts.ex`. Re-read against the working tree:
+- **Unchanged for the modelled cron job.** With cues off,
+  `maybe_request_admission` and `admit_cue_runs` do nothing, and every cron
+  path keeps its order: the due and reconcile ticks, the claim, the manual
+  run, the reaper and its `settle_job_run` (which now also refuses a cue run,
+  `ensure_not_cue_run`, a read inside the same transaction), the runner's
+  `mark_completed`/`mark_failed`, `upsert_job_run_row` (now write-once on
+  `tools_started_at` and `cue_delivery_id`, two columns the spec does not
+  model), the registry's pause, resume and edit (an extra refusal for cue
+  tasks only), and the core tree (the cue subtree is its LAST child,
+  `application.ex:274`, after `JobRunnerSupervisor`, `MeetingsSupervisor` and
+  `JobScheduler`, which keep their order). The `:clock` option and the
+  session-id suffix change nothing modelled. Checks 01 to 35 set the new
+  constants off and reproduce their earlier verdicts and state counts.
+- **Modelled.** The Scheduler's cue admission (`CuesOn`), the cue claim beside
+  `ManualRun` (`CueTask`, `CueAdmit`, `CueCandidates`, `CueClaim`,
+  `CueStart` and their timeouts), the cue settle in the runner (`Settle`,
+  `RunnerCrashLate`, with the retried attempt's `skipped` delivery) and in the
+  reaper (`ReapWrite`), the reaper's failure report (`ReportSend`,
+  `ReportWrite`), and the requests from a run's end and `:job_changed`.
+  Checks 36 to 51 and the new `SOURCE` lines (`cue_admission.ex`, the cue
+  claim and settle in `repo.ex`, the eligibility rule and `settle_delivery`
+  in `cues_runs_sql.ex`, and `CueRun.report_final_failure`).
+- **Read after the review fixes (R1).** The Scheduler's gate is
+  `Cues.running?/0` (the cue tree is alive), not `Cues.enabled?/0`; the
+  claim's rule no longer reads the watcher's `enabled`; the candidate scan
+  also returns the watchers only their daily cap holds, and admission sends
+  each a `:cap_reached` notice from a task (not modelled: it changes no row
+  the spec reads); scan, claim and settle errors are traced before they are
+  logged; the runner's start options no longer carry the delivery (it reads
+  it from the run row); the runner marks its watcher's gaps at the settle and
+  sends `:task_provider_down` on a retried provider failure (notices, not
+  modelled); and `Cues.Supervisor` is `one_for_one` over its intake and
+  filtering groups and the sweeper, still the core tree's last child. Only
+  the first changed the model: see the first item under "Noticed".
+- **Line numbers.** The comments' numbers now point at the working tree as
+  of this re-read. Several had drifted before M60 (most `repo.ex` ones), and
+  other M60 lanes were still editing `scheduler.ex`, `runner.ex`, `repo.ex`
+  and `cue_admission.ex` while this was written, so the re-read after the
+  commit should check them again before `make -C tla repin SPECS=job_runs`.
+
+**Noticed (code, for the owner):**
+- A starting Scheduler never asks for admission. `init` ends with
+  `maybe_request_admission`, which asks only while `Cues.running?/0`, and the
+  cue subtree starts after `JobScheduler` under `:rest_for_one`, so it is never
+  up then (a boot, or any restart of the Scheduler, which restarts the cue
+  subtree after it). That call is dead code in a real tree. Nothing is lost:
+  the first due or reconcile tick admits (at most 60 s later), which is what
+  `TicksAdmit` and check 37 pin. The spec models the code (no request at
+  init).
+- The reaper's failure report for an exhausted cue run is not recorded before
+  it is sent. The run was settled with the claim's `delivery_status` ("none"),
+  the task sends, then writes "sent" or "failed". A daemon crash between the
+  two leaves a report the user saw on a run row that says nothing was sent,
+  and a crash before the send leaves the owner untold with the same row; no
+  reconcile pass reads either, because neither is "pending". Witness 45
+  reaches the first. A runner's own send writes "pending" first, so
+  `DeliveryReachesFinal` covers it (JOB-6's accepted "failed" aside).
+
+**Owed** (not modelled here; each needs more than one job):
+- **Cue runs never take the last slot** (M60 §17). `free = min(max_active −
+  active, 3 − active_cue)` (`CueAdmission.free_slots`), the due path's
+  `at_capacity?` and "run now" bypassing the ceiling need several jobs and
+  the ceiling, which this one-job spec leaves out. `tla/specs/cue_inbox`
+  already records one way the rule breaks (its CUE-2: after a Scheduler
+  restart whose reconcile scan fails, `active` counts the surviving runners
+  but `active_cue` counts the empty monitors); the model below would carry
+  that finding into the jobs side. To model: at least two
+  cron jobs and one cue task sharing a small ceiling (`max_active_runs` 2,
+  cue share 1), `active` as the runner supervisor's children (a run past its
+  settle still sending counts), `active_cue` from the monitors' `trigger`
+  (adopted runs read it from the row after a restart), and the order "due
+  scan, then admission" inside one callback. Properties: whenever a cue claim
+  commits, the cue runs are within the cue share and a slot is left for a
+  cron run (`CueNeverTakesLastSlot`); a due cron job and a passed delivery
+  competing for one freed slot are decided for the cron job (`CronFirst`);
+  and a due cron job is not starved by cue runs (liveness). Checks: one
+  `holds` per property, with `needs` checks that switch off the cue-share
+  term and the scan-before-admission order. A separate spec (for example
+  `tla/specs/job_slots`) is likely cheaper than widening this one, whose
+  checks already take up to a minute.
+- **Cross-task fairness** (admission takes tasks in the order of their
+  oldest eligible delivery, `@candidates_sql`): several tasks; it belongs with
+  the slot model.
+- **The reaper's report** above, if the owner wants the report recorded as
+  "pending" before its send: a code change first, then this spec's witness
+  45 becomes a `holds` check with a `needs` check.
 
 ## Plan hypotheses
 
@@ -622,7 +806,7 @@ shortest and can change between runs.
   left there (a process the loop links to itself killing the loop, and through
   the link the runner) leaves the rows the `Loop` step and then a crash at
   `complete` or `fail` leave.
-  - The `{:ok, _} = write_run_artifact` writes (`runner.ex:247`, `:313`) are
+  - The `{:ok, _} = write_run_artifact` writes (`runner.ex:294`, `:443`) are
     folded into the final write, so they share the `complete` and `fail`
     crash points.
   - After a loop error, the memory-source calls between the settle and the
@@ -641,10 +825,10 @@ shortest and can change between runs.
   AgentLoop survives it (JOB-8).
 - The access gate is outside the model. A run's access-sensitive tool call
   that its job row does not name is refused inside the one `Loop` step; a
-  scheduled run never parks a call for the owner (`access_gate.ex:261-270`).
+  scheduled run never parks a call for the owner (`access_gate.ex:363-372`).
   An owner edit, resume or run now of a job naming such a tool, from a turn
   that could not run it directly, is refused by the tool before any registry
-  write or Scheduler call (`job_registry_support.ex:33-38`): a request the owner
+  write or Scheduler call (`job_registry_support.ex:36-41`): a request the owner
   never made. That check's job-row read feeds no modelled column. The store
   of parked confirmations (`Capabilities.AccessGate.Pending`,
   `application.ex:228`) and the holder of a conversation's place records
@@ -652,7 +836,7 @@ shortest and can change between runs.
   children started before the `RunnerSupervisor`, so a crash of either is the
   daemon crash above.
 - The run-row value `unset` stands for the `"none"` the claim writes before a
-  result exists (`scheduler.ex:642`). The final `"none"` of `delivery_mode
+  result exists (`scheduler.ex:759`). The final `"none"` of `delivery_mode
   "none"` is modelled as `skipped`.
 - The due timer is modelled from the row as it is now. The code arms it once
   and re-arms it on `:job_changed`, not when a settle releases the job. So the
@@ -673,7 +857,19 @@ shortest and can change between runs.
   completes a one-off only when the one-off's claim consumed it (JOB-4's
   **Fix**), so an edit into a one-off, or to a new instant, made mid-run
   still fires.
-- Fairness: weak on each runner's, send helper's and Scheduler callback's next
-  step, and on the runner's delivery timer. Strong on the Scheduler serving
-  its mailbox and its own timers. None on the clock, the owner, the platform
-  or crashes.
+- A watcher's task (`CueTask`): its passed deliveries are a count, claimable
+  at once; the subject rule, the daily cap, the retry delay (`ready_at`) and
+  the attempt count are `tla/specs/cue_inbox`'s, so a failed cue run's retry
+  is a free choice. The watcher's own `enabled` is not part of the claim's
+  rule (design §8.8). The cue share of the ceiling (three) and the ceiling
+  itself (four) never bind one job, so the candidate scan always runs. The
+  cap notices the candidate scan triggers (a task under the
+  `TaskSupervisor`) send nothing this spec models.
+- A cue tree that crashes and restarts on its own makes `Cues.running?/0`
+  false for a moment, so a request or an admission in that window is
+  skipped; the next tick admits, as after a Scheduler restart. `CuesOn` is a
+  constant: that window is not modelled.
+- Fairness: weak on each runner's, send helper's, report task's and Scheduler
+  callback's next step, and on the runner's delivery timer. Strong on the
+  Scheduler serving its mailbox and its own timers. None on the clock, the
+  owner, the cue inbox, the platform or crashes.

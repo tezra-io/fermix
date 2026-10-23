@@ -1,4 +1,4 @@
-{"type":"client_hello","protocol_version":3}
+{"type":"client_hello","protocol_version":4}
 {"type":"msg","client_msg_id":"mac-1","profile_id":"main","text":"What is on my calendar today?","attach_ids":[]}
 {"type":"command","client_msg_id":"mac-2","profile_id":"main","name":"confirm","args":"opaque-token"}
 {"type":"cancel","profile_id":"main","client_msg_id":"mac-3"}
@@ -10,3 +10,5 @@
 {"type":"read_state","profile_id":"main","read_up_to_seq":13}
 {"type":"media_fetch","profile_id":"main","ref":"9879f6d3c9efefe8c4f4aabe9d3269762264be52794e96f62ab8ffa53b7fadec"}
 {"type":"media_release","profile_id":"main","ref":"9879f6d3c9efefe8c4f4aabe9d3269762264be52794e96f62ab8ffa53b7fadec"}
+{"type":"proposal_answer","client_msg_id":"mac-10","profile_id":"main","proposal_id":"cpr_4f1c2a9b7e3d5a60c8b1f2e3","decision":"confirm"}
+{"type":"proposal_answer","client_msg_id":"mac-11","profile_id":"main","proposal_id":"cpr_9a0b1c2d3e4f5a6b7c8d9e0f","decision":"deny"}

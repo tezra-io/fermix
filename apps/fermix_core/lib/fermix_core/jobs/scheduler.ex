@@ -4,6 +4,11 @@ defmodule FermixCore.Jobs.Scheduler do
 
   Owns due-job discovery, atomic claim, run record creation, and dispatch to
   supervised scheduled-job runners.
+
+  It also admits cue runs (M60 §9.2, `Jobs.CueAdmission`): on a wake
+  (`cue_wake/1`, coalesced into one pass), on every due and reconcile tick, on
+  a run's end and on `job_changed`, always after a due scan, so a cron run
+  takes a freed slot before a cue run.
   """
 
   use GenServer
@@ -11,6 +16,10 @@ defmodule FermixCore.Jobs.Scheduler do
 
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Cues
+  alias FermixCore.Cues.Notices
+  alias FermixCore.Jobs.CueAdmission
+  alias FermixCore.Jobs.CueRun
   alias FermixCore.Jobs.Runner
   alias FermixCore.Jobs.RunnerSupervisor
   alias FermixCore.Jobs.Schedule
@@ -87,7 +96,12 @@ defmodule FermixCore.Jobs.Scheduler do
           due_timer: reference() | nil,
           due_delay_ms: non_neg_integer() | nil,
           reconciliation_timer: reference() | nil,
-          run_monitors: map()
+          run_monitors: map(),
+          runs_known?: boolean(),
+          clock: (-> DateTime.t()),
+          cues_running?: (-> boolean()),
+          cue_notice: (String.t(), atom(), map() -> term()),
+          cue_pending?: boolean()
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -107,6 +121,16 @@ defmodule FermixCore.Jobs.Scheduler do
     GenServer.cast(server, :job_changed)
   catch
     :exit, {:noproc, _call} -> :ok
+  end
+
+  @doc """
+  Wakes cue admission after passed deliveries commit (`Cues.wake_scheduler/0`).
+  A cast: a burst of wakes sets one pending flag and is one admission pass. A
+  scheduler that is not running drops it; the reconcile tick finds the cue.
+  """
+  @spec cue_wake(GenServer.server()) :: :ok
+  def cue_wake(server \\ __MODULE__) do
+    GenServer.cast(server, :cue_wake)
   end
 
   @doc """
@@ -170,21 +194,30 @@ defmodule FermixCore.Jobs.Scheduler do
       due_timer: nil,
       due_delay_ms: nil,
       reconciliation_timer: nil,
-      run_monitors: %{}
+      run_monitors: %{},
+      # Whether the last reconcile scan succeeded, so the monitors hold every
+      # surviving runner; set by `reconcile_active_runs/1`.
+      runs_known?: false,
+      clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
+      cues_running?: Keyword.get(opts, :cues_running?, &Cues.running?/0),
+      cue_notice: Keyword.get(opts, :cue_notice),
+      cue_pending?: false
     }
 
     state =
       state
+      |> put_default_cue_notice()
       |> reconcile_active_runs()
       |> schedule_due_timer()
       |> schedule_reconciliation_timer()
+      |> maybe_request_admission()
 
     {:ok, state}
   end
 
   @impl true
   def handle_call({:tick, %DateTime{} = now}, _from, state) do
-    {:reply, :ok, run_due_and_rearm(state, now)}
+    {:reply, :ok, state |> run_due_and_rearm(now) |> admit_cue_runs(now)}
   end
 
   def handle_call({:run_now, job_id, %DateTime{} = now}, _from, state) do
@@ -194,24 +227,40 @@ defmodule FermixCore.Jobs.Scheduler do
 
   @impl true
   def handle_cast(:job_changed, state) do
-    {:noreply, schedule_due_timer(state)}
+    {:noreply, state |> schedule_due_timer() |> maybe_request_admission()}
+  end
+
+  def handle_cast(:cue_wake, state) do
+    {:noreply, request_admission(state)}
   end
 
   @impl true
   def handle_info(:due_tick, state) do
-    {:noreply, run_due_and_rearm(state, DateTime.utc_now())}
+    now = state.clock.()
+    {:noreply, state |> run_due_and_rearm(now) |> admit_cue_runs(now)}
   end
 
   # Reconcile before scanning: a run freed here puts its job back to "scheduled",
   # so the same tick can claim it instead of waiting a further interval.
   def handle_info(:reconcile_tick, state) do
+    now = state.clock.()
+
     state =
       state
       |> reconcile_active_runs()
-      |> run_due_and_rearm(DateTime.utc_now())
+      |> run_due_and_rearm(now)
+      |> admit_cue_runs(now)
       |> schedule_reconciliation_timer()
 
     {:noreply, state}
+  end
+
+  # The one admission pass a burst of requests coalesced into: a due scan
+  # first, so a cron run takes a freed slot before a cue run.
+  def handle_info(:cue_admit, state) do
+    now = state.clock.()
+    state = %{state | cue_pending?: false}
+    {:noreply, state |> run_due_and_rearm(now) |> admit_cue_runs(now)}
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
@@ -220,13 +269,92 @@ defmodule FermixCore.Jobs.Scheduler do
         {:noreply, %{state | run_monitors: monitors}}
 
       {_run_info, monitors} when reason in [:normal, :shutdown] ->
-        {:noreply, %{state | run_monitors: monitors}}
+        {:noreply, maybe_request_admission(%{state | run_monitors: monitors})}
 
       {%{job_id: job_id, run_id: run_id}, monitors} ->
         state = %{state | run_monitors: monitors}
-        {:noreply, mark_run_crashed(run_id, job_id, reason, state)}
+        {:noreply, run_id |> mark_run_crashed(job_id, reason, state) |> maybe_request_admission()}
     end
   end
+
+  # A freed slot or a changed job may let a cue run start, but only while the
+  # cue tree runs: otherwise nothing changes for a home without it.
+  defp maybe_request_admission(state) do
+    if state.enabled? and state.cues_running?.(), do: request_admission(state), else: state
+  end
+
+  defp request_admission(%{cue_pending?: true} = state), do: state
+
+  defp request_admission(state) do
+    send(self(), :cue_admit)
+    %{state | cue_pending?: true}
+  end
+
+  defp admit_cue_runs(state, now) do
+    if state.enabled? and state.cues_running?.() do
+      opts = [repo_opts: state.repo_opts, cue_notice: state.cue_notice]
+
+      state
+      |> free_cue_slots()
+      |> CueAdmission.claim(now, &cue_run_attrs(&1, now), opts)
+      |> Enum.reduce(state, &start_cue_run/2)
+    else
+      state
+    end
+  end
+
+  # The cue share is counted from the monitors. After a reconcile scan that
+  # failed (at init, a restart, or on a tick) they may miss cue runners that
+  # survived a restart, which the runner supervisor still counts in `active`:
+  # the share would read as free and a cue run could take the last slot (TLA
+  # cue_inbox CUE-2). So no cue run starts until a scan succeeds. Cron runs
+  # keep their own rule, the ceiling on `active`.
+  defp free_cue_slots(%{runs_known?: false}), do: 0
+
+  defp free_cue_slots(state) do
+    state
+    |> active_run_count()
+    |> CueAdmission.free_slots(state.run_monitors, state.max_active_runs)
+  end
+
+  # A watcher notice (C25's cap) is a channel send: it runs under the task
+  # supervisor, so it never holds this loop. `Cues.Notices` sends each once per
+  # window, so a notice asked for on every pass still goes once. Opt
+  # `:cue_notice` replaces it (tests).
+  defp put_default_cue_notice(%{cue_notice: nil} = state) do
+    opts = [
+      repo: state.repo,
+      adapter: state.delivery_adapter,
+      channels: state.delivery_channels,
+      delivery_opts: state.delivery_opts,
+      timeout_ms: state.delivery_timeout_ms
+    ]
+
+    clock = state.clock
+
+    notice = fn watcher_id, kind, data ->
+      send_notice = fn -> Notices.watcher(watcher_id, kind, data, [now: clock.()] ++ opts) end
+
+      case Task.Supervisor.start_child(FermixCore.TaskSupervisor, send_notice) do
+        {:ok, _pid} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.error("Watcher #{watcher_id} #{kind} notice did not start: #{inspect(reason)}")
+      end
+    end
+
+    %{state | cue_notice: notice}
+  end
+
+  defp put_default_cue_notice(state), do: state
+
+  defp cue_run_attrs(job_id, now) do
+    %{id: job_id} |> run_attrs(now) |> Map.put(:trigger, "cue")
+  end
+
+  # The runner reads the delivery from the run row (`cue_delivery_id`).
+  defp start_cue_run(%{job: job, run: run}, state), do: start_or_mark_failed(job, run, state)
 
   # Crash recovery beyond the in-process monitor above. A daemon restart (or a
   # scheduler-subtree restart) drops every monitor while job_runs rows stay
@@ -243,11 +371,15 @@ defmodule FermixCore.Jobs.Scheduler do
     case Repo.unsettled_job_runs([limit: @reconcile_run_limit] ++ state.repo_opts) do
       {:ok, runs} ->
         live = live_runner_pids(state)
-        Enum.reduce(runs, state, &reconcile_active_run(&1, live, &2))
+        Enum.reduce(runs, %{state | runs_known?: true}, &reconcile_active_run(&1, live, &2))
 
       {:error, reason} ->
-        Logger.error("Scheduled job run reconciliation scan failed: #{inspect(reason)}")
-        state
+        Logger.error(
+          "Scheduled job run reconciliation scan failed: #{inspect(reason)}; " <>
+            "no cue run starts until a scan succeeds."
+        )
+
+        %{state | runs_known?: false}
     end
   end
 
@@ -269,7 +401,7 @@ defmodule FermixCore.Jobs.Scheduler do
     else
       Logger.info("Scheduled job run #{run.id} adopted from a surviving runner")
       ref = Process.monitor(pid)
-      put_in(state.run_monitors[ref], %{job_id: run.job_id, run_id: run.id})
+      put_in(state.run_monitors[ref], monitor_entry(run))
     end
   end
 
@@ -604,13 +736,17 @@ defmodule FermixCore.Jobs.Scheduler do
     case start_runner(job, run, state) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
-        put_in(state.run_monitors[ref], %{job_id: job.id, run_id: run.id})
+        put_in(state.run_monitors[ref], monitor_entry(run))
 
       {:error, reason} ->
         Logger.error("Scheduled job #{job.id} runner start failed: #{inspect(reason)}")
         mark_run_crashed(run.id, job.id, reason, state)
     end
   end
+
+  # A monitored run's trigger counts it against the cue share of the slots;
+  # an adopted run's comes from its row, so a restart keeps the count.
+  defp monitor_entry(run), do: %{job_id: run.job_id, run_id: run.id, trigger: run.trigger}
 
   defp claim_job_patch(%{schedule_kind: "once"} = _job, now) do
     {:ok, %{state: "running", next_run_at: nil, updated_at: now}}
@@ -631,11 +767,13 @@ defmodule FermixCore.Jobs.Scheduler do
 
   defp manual_claim_patch(_job, now), do: %{state: "running", updated_at: now}
 
+  # The session id ends in a short random suffix, so two runs started in one
+  # second never share a trace (M60 §9.6).
   defp run_attrs(job, now) do
     %{
       id: "run_#{random_id()}",
       job_id: job.id,
-      session_id: "cron_#{job.id}_#{timestamp_id(now)}",
+      session_id: "cron_#{job.id}_#{timestamp_id(now)}_#{session_suffix()}",
       trigger: "schedule",
       status: "queued",
       claimed_at: now,
@@ -654,25 +792,28 @@ defmodule FermixCore.Jobs.Scheduler do
   end
 
   defp start_runner(job, run, state) do
-    case RunnerSupervisor.start_run(state.runner_supervisor,
-           runner_module: state.runner_module,
-           repo: state.repo,
-           capability_registry: state.capability_registry,
-           skill_registry: state.skill_registry,
-           job: job,
-           run: run,
-           adapter: state.adapter,
-           adapter_opts: state.adapter_opts,
-           delivery_adapter: state.delivery_adapter,
-           delivery_opts: state.delivery_opts,
-           delivery_channels: state.delivery_channels,
-           delivery_timeout_ms: state.delivery_timeout_ms,
-           output_base_dir: state.output_base_dir,
-           timeout_ms: state.timeout_ms,
-           inactivity_timeout_ms: state.inactivity_timeout_ms,
-           notify: state.runner_notify,
-           start_delay_ms: startup_stagger_ms(state)
-         ) do
+    opts =
+      [
+        runner_module: state.runner_module,
+        repo: state.repo,
+        capability_registry: state.capability_registry,
+        skill_registry: state.skill_registry,
+        job: job,
+        run: run,
+        adapter: state.adapter,
+        adapter_opts: state.adapter_opts,
+        delivery_adapter: state.delivery_adapter,
+        delivery_opts: state.delivery_opts,
+        delivery_channels: state.delivery_channels,
+        delivery_timeout_ms: state.delivery_timeout_ms,
+        output_base_dir: state.output_base_dir,
+        timeout_ms: state.timeout_ms,
+        inactivity_timeout_ms: state.inactivity_timeout_ms,
+        notify: state.runner_notify,
+        start_delay_ms: startup_stagger_ms(state)
+      ]
+
+    case RunnerSupervisor.start_run(state.runner_supervisor, opts) do
       {:ok, pid} when is_pid(pid) -> {:ok, pid}
       {:ok, pid, _info} when is_pid(pid) -> {:ok, pid}
       :ignore -> {:error, :runner_ignored}
@@ -688,11 +829,11 @@ defmodule FermixCore.Jobs.Scheduler do
   # the scheduler watched it die (monitor) or found it abandoned (reconciliation).
   # The caller supplies the operator-facing cause; everything after is identical.
   defp mark_run_failed(run_id, job_id, error, state) when is_binary(error) do
-    now = DateTime.utc_now()
+    now = state.clock.()
 
     case Repo.get_job_run(run_id, state.repo_opts) do
       {:ok, run} ->
-        mark_run_error(run, error, now, state.repo_opts)
+        run |> mark_run_error(error, now, state.repo_opts) |> report_cue_failure(state)
 
       {:error, :not_found} ->
         :ok
@@ -706,10 +847,63 @@ defmodule FermixCore.Jobs.Scheduler do
     state
   end
 
+  # A cue run the scheduler settled `exhausted` will never run again, so the
+  # owner gets its failure text once (M60 §9.4), with the mandate calls so far,
+  # through `CueRun.report_final_failure/3`. The send runs under the task
+  # supervisor: a channel send must never hold the scheduler's loop.
+  defp report_cue_failure({:cue_exhausted, job, run}, state) do
+    opts = [
+      repo: state.repo,
+      adapter: state.delivery_adapter,
+      channels: state.delivery_channels,
+      delivery_opts: Keyword.put(state.delivery_opts, :proactive_key, "job:#{run.id}"),
+      timeout_ms: state.delivery_timeout_ms
+    ]
+
+    send_report = fn -> CueRun.report_final_failure(job, run, opts) end
+
+    case Task.Supervisor.start_child(FermixCore.TaskSupervisor, send_report) do
+      {:ok, _pid} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "Cue run #{run.id}: its final failure report did not start: #{inspect(reason)}"
+        )
+    end
+  end
+
+  defp report_cue_failure(_settled, _state), do: :ok
+
   # A run that still holds its job is settled as "error" and its job released
   # in the same write (`Repo.settle_job_run/2`). A settled run whose delivery
   # never finished, whatever its status, gets only its delivery marked failed:
   # its job was released by its own settle. Any other row is already final.
+  #
+  # A cue run settles through `CueAdmission.settle/3`, which moves its delivery
+  # by the run row (M60 §9.4). Only its final failure marks the memory source,
+  # as the runner's own `mark_failed` does: a retried attempt writes nothing
+  # the owner reads.
+  defp mark_run_error(%{status: status, trigger: "cue"} = run, error, now, repo_opts)
+       when status in ["queued", "running"] do
+    attrs = Map.merge(run, %{status: "error", completed_at: now, error: error, updated_at: now})
+
+    case CueAdmission.settle(attrs, :scheduler, repo_opts) do
+      {:ok, {settled, job, %{disposition: :exhausted}}} ->
+        mark_source_error(job, now, repo_opts)
+        {:cue_exhausted, job, settled}
+
+      {:ok, {_run, _job, _retried_or_untouched}} ->
+        :ok
+
+      {:error, :run_not_active} ->
+        fail_delivery_after_settle(run.id, error, now, repo_opts)
+
+      {:error, reason} ->
+        Logger.error("Scheduled job run #{run.id} crash settle failed: #{inspect(reason)}")
+    end
+  end
+
   defp mark_run_error(%{status: status} = run, error, now, repo_opts)
        when status in ["queued", "running"] do
     attrs = Map.merge(run, %{status: "error", completed_at: now, error: error, updated_at: now})
@@ -899,6 +1093,12 @@ defmodule FermixCore.Jobs.Scheduler do
     8
     |> :crypto.strong_rand_bytes()
     |> Base.url_encode64(padding: false)
+  end
+
+  defp session_suffix do
+    3
+    |> :crypto.strong_rand_bytes()
+    |> Base.encode16(case: :lower)
   end
 
   defp timestamp_id(now) do

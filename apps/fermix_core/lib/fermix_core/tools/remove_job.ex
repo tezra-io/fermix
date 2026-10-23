@@ -50,13 +50,15 @@ defmodule FermixCore.Tools.RemoveJob do
   end
 
   defp do_execute(args, context) do
-    with {:ok, job_id} <- Support.required_string(args, "job_id") do
+    with {:ok, job_id} <- Support.required_string(args, "job_id"),
+         :ok <- Support.check_unwatched(job_id, context) do
       case Registry.remove_job(job_id, repo: Support.repo(context)) do
         :ok -> Support.success_json(%{removed: true, job_id: job_id})
         {:error, reason} -> Support.error(reason)
       end
     else
-      {:error, reason} -> {:ok, Tool.error(reason)}
+      {:error, reason} when is_binary(reason) -> {:ok, Tool.error(reason)}
+      {:error, reason} -> Support.error(reason)
     end
   end
 end

@@ -247,6 +247,30 @@ daemon onto anything else.
 | `mcp.servers.check.start` | `name` | Connects one server and lists its tools once. A job, kind `mcp_check`, whose result carries `tool_count` and `latency_ms`. Minimum version `2`. |
 | `mcp.servers.import.scan` | none | Reads the MCP servers in Claude Desktop's, Claude Code's, Cursor's, VS Code's, Windsurf's and Codex's settings on this Mac, now and only now, and answers `candidates`, each with its `source`, `source_label`, name, transport, summary, command line or URL, consent sentence, resolved program and `secret_names` (never a value), and `skipped`, what could not be offered with the daemon's sentence. Minimum version `2`. |
 | `mcp.servers.import` | `servers` (`[{source, name}]`, at most 32) | Reads those settings again and adds each server named through the add path, with the values its settings held stored in the Keychain and `origin` `imported:<source>`, and answers `{servers, refused}`: the new rows, and each server not added with its sentence. Minimum version `2`. |
+| `cues.status` | none | The cue subsystem as it stands: `available` (whether this build admits cues), the switches (`enabled`, `mandates_enabled`), whether the cue tree is `running`, `memory_enabled`, a `state` (`unavailable`, `off`, `needs_memory`, `needs_restart`, `running`) with its `status_sentence`, the `door` (`state` `listening`, `unavailable` or `not_running`, `port`, `reason`, `sentence`), and `counts` (`sources`, `sources_attention`, `watchers`, `watchers_held`, `mandates`, `mandates_attention`, `proposals_waiting`). Answers on every build. Minimum version `2`. |
+| `cues.sources.list` | none | Every source as a row, at most 64, plus `can_add` and `limits` (`max_sources`). Minimum version `2`. |
+| `cues.sources.get` | `ref` | One source's row, its editable fields as settings rows (`values`), its open gaps (at most 20, each with the daemon's sentence) and its refused requests by reason (`rejected`). Minimum version `2`. |
+| `cues.sources.form` | `kind`, `preset`, `verify` (each optional) | The add form for that choice, and writes nothing: `kinds`, `presets`, `rows` (the name first, then the fields of that kind, preset and verification method, a secret field as a `secret` row with `present: false`), `consent_sentence` and `notes`. Minimum version `2`. |
+| `cues.sources.add` | `ref`, `kind` or `preset`, `values` | Saves a new source and answers `{source, token}`: its row, and for a new local push source its first token, returned once; null otherwise. Minimum version `2`. |
+| `cues.sources.update` | `ref`, `values` | Changes the fields `values` names and answers `{source}`. The name, kind and preset cannot change. Minimum version `2`. |
+| `cues.sources.remove` | `ref` | Removes a source and its stored secrets, and answers `{ref, removed: true, left, watchers}`: any secret that could not be deleted, as sentences, and the watchers that listened to it. Minimum version `2`. |
+| `cues.sources.enable` | `ref` | Turns a source on and answers `{source}`. Minimum version `2`. |
+| `cues.sources.disable` | `ref` | Turns a source off and answers `{source}`. Minimum version `2`. |
+| `cues.sources.token.new` | `ref` | A fresh token for a local push source, returned once, as `{ref, token}`. The old one stops working within a minute. Minimum version `2`. |
+| `cues.sources.url.get` | `ref` | A webhook source's address, `{ref, url, path}`: made on the first call and the same on every later one. Minimum version `2`. |
+| `cues.watchers.list` | none | Every watcher as a row, oldest first, at most 200, with `window_s` (86400) and `truncated`. Minimum version `2`. |
+| `cues.watchers.get` | `name` | One watcher's row plus its `purpose`, its `instructions` and how many of its examples are marked each way. Minimum version `2`. |
+| `cues.mandates.list` | none | Every mandate as a row, at most 64, plus `can_add` and `limits` (`max_mandates`). Minimum version `2`. |
+| `cues.mandates.choices` | none | What a mandate form offers: the jobs that run on cues, each with the watcher that wakes it and the mandate that names it, and the installed, enabled `http` plugin tools. Minimum version `2`. |
+| `cues.mandates.add` | `name`, `values` | Saves a new mandate and answers `{mandate}`. Durations travel as whole seconds (`approve_within_s`, `max_cue_age_s`). Minimum version `2`. |
+| `cues.mandates.update` | `name`, `values` | Changes the fields `values` names and answers `{mandate}`. Its approval covers the section, so the row then says `changed` until approved again. Minimum version `2`. |
+| `cues.mandates.remove` | `name` | Removes a mandate and answers `{name, removed: true}`. Minimum version `2`. |
+| `cues.mandates.enable` | `name` | Turns a mandate on and answers `{mandate}`. Minimum version `2`. |
+| `cues.mandates.disable` | `name` | Turns a mandate off and answers `{mandate}`. Minimum version `2`. |
+| `cues.mandates.approve` | `name` | Records the owner's approval of a mandate as it is now, from the Fermix app, and answers `{mandate}`. An inactive mandate is refused with its load sentence. Minimum version `2`. |
+| `cues.proposals.list` | `state` (`waiting`, the default, or `recent`) | Fermix's record of each waiting proposal (oldest first, at most 100) or of the last 7 days (at most 50), and `waiting`. No arguments and no cue text. Minimum version `2`. |
+| `cues.proposals.get` | `proposal_id` | `{proposal}`: the record plus the card, the outside text apart. Minimum version `2`. |
+| `cues.proposals.decide` | `proposal_id`, `decision` (`confirm` or `deny`) | Answers a waiting proposal and returns `{proposal}` once the decision is recorded: `denied`, or `confirmed` with a null `result_status` while the call runs. Minimum version `2`. |
 
 Notes that the shapes alone do not carry:
 
@@ -395,6 +419,17 @@ Notes that the shapes alone do not carry:
   to a caller the daemon cannot place, and the daemon log says so. The
   sentence is what tells this refusal from a channel that is not running.
   Reading a session and the status stay open to every caller.
+- **Cue writes, the two values handed out and a proposal's answer are the
+  owner's decisions too.** `cues.sources.add`, `.update`, `.remove`,
+  `.enable`, `.disable`, `.token.new`, `.url.get`, `cues.mandates.add`,
+  `.update`, `.remove`, `.enable`, `.disable`, `.approve` and
+  `cues.proposals.decide` answer `unavailable` {`capability`: `cues`,
+  `sentence`: "Only the owner can change cues: use the Fermix app or your own
+  terminal."} to the same callers. The capability and the sentence are the
+  method's family's. This raises the bar and authenticates nobody: it stops a
+  model's own command from approving a mandate or answering a proposal. Every
+  cue read stays open, and `settings.apply` on the `cues` section is not an
+  owner decision: its switches narrow or stop.
 - **`channels.mobile` is the phone channel's settings section**: the enable
   switch and the remote-reach switch `mobile_iroh` (on by default), each
   applied the moment it is written (their rows' `restart` is false), and the
@@ -653,11 +688,12 @@ Notes that the shapes alone do not carry:
   null for every other family), so storing a value the daemon will not use
   still succeeds and says so. The field is optional: an older daemon omits it,
   which a client renders as no override reported.
-- **`id` names one of six families.** A bare registry key (`openai_api_key`,
+- **`id` names one of seven families.** A bare registry key (`openai_api_key`,
   `telegram_bot_token`, …), `plugin:<name>` for a plugin's own token,
   `oauth_client:<provider>` for a sign-in client's secret,
-  `anthropic_setup_token`, `env:<NAME>` for a sandbox environment variable, and
-  `mcp:<name>/…` for a value an MCP server declares.
+  `anthropic_setup_token`, `env:<NAME>` for a sandbox environment variable,
+  `mcp:<name>/…` for a value an MCP server declares, and `cue_source:<ref>:…`
+  for what the owner types for a cue source.
   The first three take the same keychain-first write.
   The fourth is a different mechanism and is documented as such: a
   `claude setup-token` value is a long-lived subscription credential, so it is
@@ -703,6 +739,19 @@ Notes that the shapes alone do not carry:
   `draft_id`, and `mcp.servers.add` stores it. A server whose name was
   written by hand outside the name rule holds no values, and the refusal says to
   add it again under a lowercase name.
+- **`cue_source:<ref>:key` and `cue_source:<ref>:secret` store what the owner
+  types for a cue source.** An id is accepted only when the source exists and
+  its kind declares the field (a webhook's signing or shared secret, a feed's
+  or a stream's key and secret). The value is one line of 1 to 8,192 bytes.
+  Storing writes the value and the reference that names it in one settings
+  write, so storing the last secret a source waits for starts it; clearing
+  deletes the value first, then the reference, and a source whose kind needs
+  that secret waits for it again. `present` is "the settings file points this
+  field at a stored value". `cue_source:<ref>:token` and
+  `cue_source:<ref>:path_secret` are Fermix's to make and are refused with
+  `invalid_params` and a sentence: a new token comes from
+  `cues.sources.token.new`, an address from `cues.sources.url.get`. On a build
+  without cues the family answers `unavailable` {`capability`: `cues`}.
 - **A plugin row is one shape for two halves.** An installed plugin and a
   catalog entry that has never been fetched publish the same fields, so a client
   decodes one record rather than two. `installed` is what separates them.
@@ -925,6 +974,80 @@ Notes that the shapes alone do not carry:
   start, or waiting for a value) is refused with its own row's sentence, and a
   connection that fails ends the job with that sentence. After an add or an
   update, `mcp.servers.get` reads the row as it connects.
+- **The cue methods are on every build.** On a build that does not admit cues,
+  `cues.status` answers `available: false` and `state` `unavailable`, every
+  other `cues.*` method answers `unavailable` {`capability`: `cues`,
+  `sentence`: "Cues are not part of this build."}, and `settings.sections`
+  publishes no `cues` section. They are minimum version `2` with no protocol
+  bump, so a client finds them in `hello.capabilities.methods`. With memory
+  off, `cues.status` says `needs_memory`, the source and mandate lists are drawn
+  from the settings file, and the reads that need rows (`cues.watchers.*`,
+  `cues.mandates.choices`, `cues.proposals.*`) answer `unavailable` with the
+  daemon's sentence. An unknown source, watcher, mandate or proposal is
+  `invalid_params` with the field and a sentence ("There is no source named
+  home-alerts.").
+- **`cues` is the cue section**, under pane `cues`: `cues_enabled` (the cue tree
+  starts at boot, so `restart` is true), `cues_mandates_enabled` (read at every
+  mandate call), `filter_provider` and `filter_model` (the default filter
+  model, read at every filter call) and `cues_door_port` (`advanced`, 1024 to
+  65535, always on 127.0.0.1). `filter_provider` offers every provider the
+  engine publishes plus `""` "None", a provider that is not set up disabled
+  with its hint; `filter_model` offers that provider's catalog as
+  suggestions. The two are applied together in one `settings.apply`, both or
+  "None" for both; either alone is refused with "Pick a provider and a model,
+  or clear both." Clearing them while `llm` watchers name no model of their
+  own answers a `side_effects` sentence saying how many now wait for one.
+- **Every cue write goes through the setup page's own path**, so the outside
+  edit refusal (`external_change`), the baseline re-record, the secret
+  take-back and the source workers' reconcile apply identically from either
+  door, and a source or a mandate written here reads back from `config.toml`
+  as a hand edit would hold it, with no secret value in it. At most 64 sources
+  and 64 mandates are added; past that the add is refused with a sentence.
+  A form's refusal is `invalid_params` with `field` (the value's key, or `ref`
+  or `name`) and the daemon's sentence.
+- **A source row is the daemon's.** `state` is `off`, `needs_secret`,
+  `not_running` (cues off, or on and not yet restarted), then the status the
+  source last wrote: `idle`, `polling`, `connected`, `reconnecting`,
+  `auth_failed`, `over_budget`, `stopped` or `unavailable`. A client draws
+  `status_sentence` and switches on `primary_action` and `actions` (closed:
+  `enable`, `disable`, `set_secret`, `new_token`, `get_url`); edit and remove
+  are always available and are the client's controls. `secrets` reports each
+  field's presence and nothing else. Never on the wire: a payload, an item's
+  text or snapshot, a cursor, a secret's value, or a webhook's address.
+- **A source can wait for its secret.** A source whose kind needs a secret (a
+  webhook's signing secret, a local push's token) and has none stored loads
+  as `needs_secret` with `missing_secret` naming the field, for a hand-edited
+  file as much as for a socket write: the door refuses its requests and no
+  worker runs until the secret is stored. So `cues.sources.add` saves a
+  webhook first and the client stores its secret with `secret.set` after.
+- **Two values are handed out.** A new local push source's first token
+  (`cues.sources.add`) and a fresh one (`cues.sources.token.new`) are returned
+  once: never logged, never traced, never retained, and no later read repeats
+  them. A webhook's address is returned by `cues.sources.url.get` alone, on
+  every ask, and is never on a list.
+- **A watcher row is read-only**: watchers are made and changed in a chat with
+  Fermix. `state` is `on`, `paused`, `held` (its filter cannot reach its model)
+  or `no_model` (an `llm` watcher with no model of its own while no default is
+  set). `purpose` and `instructions` are the owner's own words and are on
+  `cues.watchers.get` alone; examples are counted, never shown; reasons and
+  hints never cross.
+- **A mandate row carries its load and its approval.** `load` is `active`, or
+  `inactive` with the check's sentence; `approval.state` is `unapproved`,
+  `approved`, `changed` or `disabled`, null where memory is off. A client
+  switches on `primary_action` (`approve` or null) and `actions` (closed:
+  `approve`, `enable`, `disable`); `consent_sentence` says what the mode lets
+  the task do. `cues.mandates.approve` records the approval as from "Fermix
+  app".
+- **A proposal is Fermix's record, and its card keeps the outside text
+  apart.** A record carries ids, names from the owner's configuration, times,
+  `decided_from` (`telegram`, `signal`, `whatsapp`, `imessage`, `companion`,
+  `mobile` or `management`) and Fermix's `status_sentence`, never an argument or
+  cue text. `cues.proposals.get` adds `received_at`, `summary` (Fermix's
+  sentence) and `outside`: `args_text` (the recorded call's arguments, at most
+  3,500 characters) and `cue` (`type`, `subject`, `text`, `occurred_at`) or
+  null, all outside text a client draws only as such. `cues.proposals.decide`
+  answers by id with no token; the first answer from any surface wins, and a
+  later one is refused with the daemon's sentence and runs nothing.
 - **A sign-in client appears only where a plugin needs one.** `oauth_clients` is
   derived from the providers the published rows name, so a client row for a
   family this Mac has no plugin for is never drawn. `client_id` is the public

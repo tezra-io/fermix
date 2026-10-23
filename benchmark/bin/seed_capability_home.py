@@ -37,6 +37,21 @@ to the sandbox `allowed_roots` (e.g. the repo checkout for behavioral
 repo-read cases); omit it for capability runs, whose preconditions refuse any
 root outside the home (the always-present `<home>/skills` root is in-home).
 
+`--cues` (M60, development builds) turns cues on for the cue suites: `[fermix_core.cues]`
+enabled on a free door port picked at seed time (so two eval homes never share
+one), the local-push sources the cue suites post to with their tokens in the
+`@file` store, and the default filter model (the scored model unless
+`--cue-filter-model PROVIDER/MODEL` names a cheaper one). It is off by default:
+cues add `manage_watcher` and `list_cues` to every owner turn, which would move
+the measured surface of every unrelated suite for a feature no release ships. The
+watchers and their tasks live in memory.db, so `seed_cues.exs` makes them after
+this script, with the daemon still down (`capability-daemon.sh up` runs it when
+`eval-fixtures/cues.json` exists). That manifest records the door port and the
+tokens for the `drive: cue` runner; a seed without `--cues` removes it and the
+watchers' manifest, so the cue suites are held out as NOT EVALUATED, never scored.
+`--cue-mandates` (needs `--cues`) adds the stub `http` plugin and the two
+auto-mode mandates the mandate cases need; without it those cases are held out.
+
 `--voice` turns Grok voice on for the `drive: voice` suite (grok_voice.yaml):
 `[fermix_core.realtime]` enabled, engine `xai_realtime`, model `grok-voice-3.0`.
 The voice key is the xAI provider's api_key slot, filled at daemon boot from
@@ -51,6 +66,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -130,6 +146,21 @@ VOICE_KEY_ENV = "XAI_API_KEY"
 # A spend bound for a disposable home: a voice case's call lasts a few minutes
 # at most, and the daemon ends one that outlives this whatever its client does.
 VOICE_MAX_SESSION_MINUTES = 5
+# Cues (M60). Each local-push source the cue suites post to: the watcher that
+# listens to it is made by seed_cues.exs, one watcher per source so a cue posted
+# for one case never wakes another case's task. `eng-blogs` has no watcher: the
+# behavioral suite's owner asks for one on it.
+CUE_SOURCES = ("eval-news", "eval-alerts", "eval-research", "team-digest", "eng-blogs")
+# With --cue-mandates: one source and watcher per mandate (a job takes one mandate).
+CUE_MANDATE_SOURCES = ("eval-ops", "eval-ops-checked")
+CUE_MANIFEST = os.path.join("eval-fixtures", "cues.json")
+CUE_WATCHERS_MANIFEST = os.path.join("eval-fixtures", "cue_watchers.json")
+# The stub http plugin the mandates grant. Its one tool posts to a host that
+# cannot resolve (`.invalid`, RFC 2606), so an allowed call executes and fails
+# without leaving the machine.
+CUE_PLUGIN_DIR = "eval-plugins"
+CUE_PLUGIN = "eval_tickets"
+CUE_PLUGIN_TOOL = "eval_tickets_file"
 _ENV_KEY_PROVIDERS = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
@@ -175,6 +206,7 @@ def dev_provider(dev: dict, pid: str) -> tuple[str, dict, str | None]:
 def render_config(
     home: str, pid: str, blk: dict, profile: str | None,
     allowed_roots: tuple[str, ...] = (), explicit: bool = False, voice: bool = False,
+    cues: dict | None = None,
 ) -> str:
     workspace = os.path.join(home, "workspace")
     uses_key = "api_key" in blk
@@ -291,7 +323,119 @@ def render_config(
               'timezone = "America/New_York"', 'communication_style = "concise"', ""]
     if voice:
         lines += voice_lines()
+    if cues:
+        lines += cue_lines(home, cues)
     return "\n".join(lines)
+
+
+def cue_lines(home: str, cues: dict) -> list[str]:
+    """Cues on, for the cue suites (`cap_cues`, `cues`): the switch, the door on this
+    home's own port, every source the suites post to with its token in the `@file`
+    store (the sentinel names the store; `write_cue_tokens` writes the files), and
+    the default filter model, which a watcher made without a model of its own uses.
+    With mandates, the stub plugin they grant is enabled from the home's own
+    dev_local directory. The mandate sections themselves name job ids that exist
+    only once seed_cues.exs has made the jobs, so it appends them."""
+    provider, model = cues["filter"]
+    lines = ["# Cues (M60) for the cue suites; watchers and tasks are rows that",
+             "# benchmark/bin/seed_cues.exs makes with the daemon down.",
+             "[fermix_core.cues]", "enabled = true", f"door_port = {cues['door_port']}", ""]
+    for ref in cue_sources(cues["mandates"]):
+        lines += [f"[fermix_core.cues.sources.{ref}]", 'kind = "local_push"',
+                  'token = "@file"', ""]
+    lines += ["[fermix_core.routing]", f"filter_provider = {json.dumps(provider)}",
+              f"filter_model = {json.dumps(model)}", ""]
+    if cues["mandates"]:
+        lines += ["[fermix_core.plugins]", f"enabled = [{json.dumps(CUE_PLUGIN)}]",
+                  f"dev_local = {json.dumps(os.path.join(home, CUE_PLUGIN_DIR))}", ""]
+    return lines
+
+
+def cue_sources(mandates: bool) -> tuple[str, ...]:
+    return CUE_SOURCES + (CUE_MANDATE_SOURCES if mandates else ())
+
+
+def free_door_port() -> int:
+    """A port nothing listens on now, for this home's door. Picked at seed time so
+    two eval homes never share a door; something taking it before the daemon boots
+    leaves the door unavailable, which the cue runner reports as unreachable."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+    finally:
+        probe.close()
+
+
+def cue_filter_route(value: str | None, pid: str, blk: dict) -> tuple[str, str]:
+    """The default filter model: `--cue-filter-model PROVIDER/MODEL`, else the scored
+    provider and model (always a route this home can authenticate)."""
+    if value is None:
+        return pid, blk["default_model"]
+    provider, sep, model = value.partition("/")
+    if not sep or not provider or not model:
+        die(f"--cue-filter-model must be PROVIDER/MODEL, got {value!r}")
+    return provider, model
+
+
+def write_cue_fixtures(home: str, cues: dict) -> dict:
+    """One fresh token per source in the file store (`secrets/cue_source.<ref>.token`,
+    the name `SecretWriter.File` reads, directory 0700, file 0600), the stub plugin
+    with mandates, and the manifest the `drive: cue` runner reads. Rewritten on
+    every seed, so the tokens are the home's setup, not sweep state."""
+    directory = os.path.join(home, "secrets")
+    os.makedirs(directory, exist_ok=True)
+    os.chmod(directory, 0o700)
+    tokens = {}
+    for ref in cue_sources(cues["mandates"]):
+        tokens[ref] = secrets.token_urlsafe(24)
+        write_private(os.path.join(directory, f"cue_source.{ref}.token"), tokens[ref])
+    if cues["mandates"]:
+        write_cue_plugin(home)
+    manifest = {"door_port": cues["door_port"], "mandates": cues["mandates"],
+                "sources": {ref: {"token": token} for ref, token in tokens.items()}}
+    write_private(os.path.join(home, CUE_MANIFEST), json.dumps(manifest, indent=2))
+    return manifest
+
+
+def clear_cue_fixtures(home: str) -> None:
+    """A seed without --cues: remove both cue manifests a previous --cues seed left,
+    so the runners hold the cue suites out instead of driving a home with cues off."""
+    for name in (CUE_MANIFEST, CUE_WATCHERS_MANIFEST):
+        path = os.path.join(home, name)
+        if os.path.isfile(path):
+            os.remove(safe_rm.check(path, home, min_below=1))
+
+
+def write_private(path: str, text: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.chmod(path, 0o600)
+
+
+def write_cue_plugin(home: str) -> str:
+    """The stub `http` plugin the two mandates grant: one tool that files a ticket."""
+    manifest = {
+        "schema_version": 2, "name": CUE_PLUGIN, "display_name": "Eval tickets",
+        "description": "Files a ticket in the eval tracker.", "category": "productivity",
+        "version": "1.0.0", "plugin_api": 2, "auth": {"type": "none"},
+        "tools": [{
+            "name": CUE_PLUGIN_TOOL,
+            "description": "File a ticket in a project of the eval tracker.",
+            "read_only": False, "rail": "http",
+            "parameters": {
+                "type": "object", "required": ["project", "title"],
+                "properties": {"project": {"type": "string"}, "title": {"type": "string"},
+                               "body": {"type": "string"}}},
+            "request": {"method": "POST", "url": "https://tickets.eval.invalid/api/tickets"},
+        }],
+    }
+    path = os.path.join(home, CUE_PLUGIN_DIR, CUE_PLUGIN, "plugin.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2)
+    return path
 
 
 def voice_lines() -> list[str]:
@@ -540,11 +684,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--voice", action="store_true",
                         help="turn Grok voice on for the drive: voice suite (the daemon needs "
                              f"{VOICE_KEY_ENV} in its environment and realtime on)")
+    parser.add_argument("--cues", action="store_true",
+                        help="turn cues on for the cue suites (door, sources, default filter "
+                             "model; seed_cues.exs then makes the watchers); off by default")
+    parser.add_argument("--cue-filter-model", dest="cue_filter_model",
+                        help="PROVIDER/MODEL for the cue watchers' default filter model "
+                             "(default: the scored provider and model)")
+    parser.add_argument("--cue-mandates", dest="cue_mandates", action="store_true",
+                        help="with --cues: add the stub http plugin and the two mandates the "
+                             "cue suite's mandate cases need (they are held out without it)")
     parser.add_argument("--extra-config", dest="extra_config",
                         help="TOML fragment appended to the rendered config (one "
                              "configuration ARM's difference); refused when it "
                              "redefines a table the seeder already writes")
     return parser.parse_args()
+
+
+def cue_spec(args: argparse.Namespace, pid: str, blk: dict) -> dict | None:
+    """The cue seeding `--cues` asks for, or None (the default: cues off)."""
+    if not args.cues:
+        return None
+    return {"door_port": free_door_port(), "mandates": args.cue_mandates,
+            "filter": cue_filter_route(args.cue_filter_model, pid, blk)}
 
 
 def explicit_spec(args: argparse.Namespace) -> tuple[str, dict]:
@@ -569,6 +730,8 @@ def main() -> None:
         die("explicit mode needs both --provider and --model")
     if args.provider and args.dev_provider:
         die("use --provider/--model (explicit mode) or --dev-provider, not both")
+    if not args.cues and (args.cue_mandates or args.cue_filter_model):
+        die("--cue-mandates and --cue-filter-model need --cues")
     allowed_roots = tuple(
         os.path.abspath(os.path.expanduser(p)) for p in args.allow_roots)
 
@@ -594,8 +757,13 @@ def main() -> None:
     install_skills(home, args.private_dir)
     write_skill_token(home)
 
+    cues = cue_spec(args, pid, blk)
+    if cues:
+        write_cue_fixtures(home, cues)
+    else:
+        clear_cue_fixtures(home)
     config = render_config(home, pid, blk, profile, allowed_roots,
-                           explicit=bool(args.provider), voice=args.voice)
+                           explicit=bool(args.provider), voice=args.voice, cues=cues)
     if args.extra_config:
         config += read_extra_config(config, args.extra_config)
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as fh:
@@ -610,6 +778,10 @@ def main() -> None:
         copy_oauth_token(home, pid)
         auth = "oauth (token copied from dev store)"
     print(f"seeded {home}: scoring {pid}/{blk['default_model']} (auth={auth})")
+    if cues:
+        print(f"cues: door on 127.0.0.1:{cues['door_port']}, filter "
+              f"{'/'.join(cues['filter'])}, mandates {'on' if cues['mandates'] else 'off'}; "
+              "run seed_cues.exs next, daemon still down")
     if args.voice:
         print(f"voice: {VOICE_MODEL} on; {VOICE_KEY_ENV} must be set on the daemon process, "
               "started with realtime on (mix fermix.dev, not --no-realtime)")

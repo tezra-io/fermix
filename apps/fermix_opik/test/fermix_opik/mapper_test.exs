@@ -578,6 +578,40 @@ defmodule FermixOpik.MapperTest do
            }
   end
 
+  # A cue run's mandate call (M60 §14): whether a validator decided (a closed
+  # enum), its `cue_mandate_calls` row (an opaque id) and Fermix's own sentence
+  # for a refusal (never a validator's words or the call's arguments).
+  test "tool_span keeps a mandate call's validator, row and reason" do
+    metadata = %{
+      tool: "ops_create_issue",
+      success: false,
+      access_gate: "mandate_refused",
+      validator: "none",
+      mandate_call_id: "cmc_0a1b2c",
+      mandate_reason: "This task reached its hourly action limit.",
+      policy_enforcement: %{source: "access_gate", decision: "deny", phase: "pre_execution"}
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 0},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             access_gate: "mandate_refused",
+             validator: "none",
+             mandate_call_id: "cmc_0a1b2c",
+             mandate_reason: "This task reached its hourly action limit.",
+             policy_enforcement: %{
+               source: "access_gate",
+               decision: "deny",
+               phase: "pre_execution"
+             }
+           }
+  end
+
   test "tool_span keeps the outbound MCP server identity" do
     metadata = %{tool: "acme_get_note_markdown", success: true, mcp_server: "acme"}
 

@@ -42,10 +42,13 @@ defmodule FermixCore.Plugins.Http.Interpreter do
     * `:auth_type` — `:oauth2 | :api_key | :none` (401 classification)
     * `:plugin` — plugin name (for `api_key` reauth guidance)
     * `:max_response_bytes` — response size cap
+    * `:normalized` — `true` when `args` already are `normalize/2`'s result
+      (a mandate call in a cue run: the gate checked exactly that map, M60
+      §10.2), so the request is built from them without normalising again
   """
   @spec run(map(), map(), keyword()) :: {:ok, Tool.tool_result()}
   def run(tool, args, opts \\ []) when is_map(tool) and is_map(args) do
-    with {:ok, params} <- validate_params(tool, args),
+    with {:ok, params} <- params(tool, args, Keyword.get(opts, :normalized, false)),
          {:ok, request} <- build_request(tool, params, opts) do
       execute(tool, request, opts)
     else
@@ -53,12 +56,17 @@ defmodule FermixCore.Plugins.Http.Interpreter do
     end
   end
 
-  defp validate_params(tool, args) do
-    case ParamSchema.validate(Map.get(tool, "parameters", %{}), args) do
-      {:ok, params} -> {:ok, params}
-      {:error, reason} -> {:error, reason}
-    end
-  end
+  @doc """
+  The arguments a tool sends: its manifest `parameters` applied to `args`
+  (`ParamSchema.validate/2`: defaults filled, structured strings decoded,
+  undeclared keys dropped).
+  """
+  @spec normalize(map(), map()) :: {:ok, map()} | {:error, term()}
+  def normalize(tool, args) when is_map(tool) and is_map(args),
+    do: ParamSchema.validate(Map.get(tool, "parameters", %{}), args)
+
+  defp params(_tool, args, true), do: {:ok, args}
+  defp params(tool, args, false), do: normalize(tool, args)
 
   defp build_request(tool, params, opts) do
     Template.build(Map.get(tool, "request", %{}), params, Keyword.get(opts, :auth_header))

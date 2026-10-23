@@ -15,12 +15,18 @@ defmodule FermixCore.Tools.MemoryRecall do
   always reads the conversation it is in, whatever `scope` the model names —
   otherwise the isolation would be conditioned on the very input it is meant to
   constrain. Operators and internal callers are unaffected.
+
+  A run a cue woke reads only its task's own notes, framed (`Cues.TaskNotes`,
+  M60 §9.10). A task's notes are framed on every other path that returns them
+  too (`UntrustedContent.untrusted_source_type?/1`), and the `all` scope leaves
+  them out (`Memory.Search`).
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.UntrustedContent
+  alias FermixCore.Cues.TaskNotes
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Search
@@ -105,6 +111,9 @@ defmodule FermixCore.Tools.MemoryRecall do
 
     result
   end
+
+  # A cue run reads only its task's own notes, whatever scope it names (M60 §9.10).
+  defp do_execute(args, %{trigger: "cue"} = context), do: TaskNotes.recall(args, context)
 
   defp do_execute(%{"search" => search} = args, context) when is_binary(search) do
     lexical_search(search, args, context)

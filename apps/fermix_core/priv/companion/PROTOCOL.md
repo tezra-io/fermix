@@ -20,7 +20,9 @@ history message. This wire's `row` carries the message's `kind`, `metadata`,
 `media_refs`, `link_previews` and `blocks` beside its own fields. This wire's
 `media_fetch` (version 3) is not the phone's: the phone's streams the bytes in
 chunks inside its envelope, and this one grants a managed file on the same
-machine, so neither it nor its answers are shared.
+machine, so neither it nor its answers are shared. The proposal events
+(version 4) are this wire's alone for now: the phone's wire carries them at its
+next version.
 
 ## Transport
 
@@ -58,9 +60,9 @@ previous one (or the same value while only one version exists).
 
 | Field | Value |
 |---|---|
-| `protocol_version` (companion declares) | `3` |
-| daemon `min_version` | `2` |
-| daemon `max_version` | `3` |
+| `protocol_version` (companion declares) | `4` |
+| daemon `min_version` | `3` |
+| daemon `max_version` | `4` |
 
 ### Version 2: a turn that ends with no reply
 
@@ -118,6 +120,31 @@ a new row needs no history read for its media.
 Every version 2 event, field and rule holds unchanged on version 3. A version
 1 client is refused with `error: unsupported_protocol_version`
 (`client_too_old`).
+
+### Version 4: proposals on the owner's devices
+
+Version 4 lets the owner answer a mandate's proposal in the Mac's chat. A task
+running under a mandate in approve mode that wants to act stores a proposal and
+waits for the owner; the owner's Telegram, Signal, WhatsApp or iMessage chat,
+when there is one, still gets its message, and the first answer from any
+surface wins. It adds:
+
+- one client event: `proposal_answer { client_msg_id, profile_id, proposal_id,
+  decision }`, the owner's `confirm` or `deny`, by id (no token: the socket's
+  peer is the proof of who answered);
+- two server events: `proposal`, the card, and `proposal_resolved`, the
+  proposal's end (see *Proposals*).
+
+Each of the three names version 4 as its `x-since-version`. The two server
+events reach version 4 connections only, and only those the daemon placed as
+the owner's (see *Transport*): a client the daemon started, or a detached one,
+is never sent a proposal, and its `proposal_answer` is refused. A version 3
+connection that sends `proposal_answer` is refused with `error: unknown_event`
+and closed, as for any event its version does not have.
+
+Every version 3 event, field and rule holds unchanged on version 4. Since
+version 4 the window is {3, 4}, so a version 2 client is refused with
+`error: unsupported_protocol_version` (`client_too_old`).
 
 ## Handshake state machine
 
@@ -181,6 +208,7 @@ in a fixed order:
 | `read_state` | `profile_id`, `read_up_to_seq` | Advances the monotonic read frontier, never past the newest row. |
 | `media_fetch` | `profile_id`, `ref` (64 lowercase hex digits) | Version 3. Asks for a managed local file holding the bytes of `ref`, a media ref a row of the profile names. Answered by `media_path`, `media_missing`, or `error: request_failed` with `ref`. Any other `ref` is refused with `error: invalid_field` (`ref`) and the connection is closed. See *Managed media files*. |
 | `media_release` | `profile_id`, `ref` (64 lowercase hex digits) | Version 3. The client has finished with the file `media_path` granted for `ref`. Never answered. Releasing a ref this connection does not hold changes nothing. |
+| `proposal_answer` | `client_msg_id`, `profile_id`, `proposal_id`, `decision` (`confirm` or `deny`) | Version 4. The owner's answer to a proposal. Answered `accepted` (`duplicate: false`) once the decision is recorded, then `proposal_resolved`; a refusal is `error: request_failed` with the daemon's sentence and `client_msg_id`. Taken only from a connection placed as the owner's; see *Proposals*. |
 
 `profile_id` is `main`, the one profile; any other is refused with
 `error: unsupported_profile`, and the connection stays open.
@@ -206,6 +234,8 @@ in a fixed order:
 | `search_results` | `profile_id`, `query`, `hits[]`; `next_before_seq?` | Hits newest first. |
 | `media_path` | `ref`, `path`, `kind`, `mime`, `size_bytes`, `sha256` | Version 3. The grant answering `media_fetch`: an absolute path to a managed file holding the ref's bytes, held for this connection; see *Managed media files*. Sent only to a connection on version 3. |
 | `media_missing` | `ref` | Version 3. Nothing to grant for `ref`; see *Managed media files*. Sent only to a connection on version 3. |
+| `proposal` | `profile_id`, `proposal` (the card) | Version 4. A proposal waiting for the owner: sent when it is stored, and again after `server_hello` for each still waiting, oldest first. Sent only to a connection on version 4 placed as the owner's; see *Proposals*. |
+| `proposal_resolved` | `profile_id`, `proposal_id`, `state`, `sentence`; `result_status?`, `result_text?` | Version 4. A proposal left `waiting`: `denied`, `expired` or `refused`, or `confirmed` once its call has finished, whichever surface decided it. Sent only to a connection on version 4 placed as the owner's; see *Proposals*. |
 | `error` | `reason`; `message?`, `field?`, `event?`, `client_msg_id?`, `ref?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | A refusal; see *Errors*. |
 
 ### Timeline shapes
@@ -554,6 +584,58 @@ is `command{name: "confirm", args: "TOKEN"}`, and `/soul apply TOKEN` is
   own `ttl_s` runs out. The daemon keeps at most 64; past that a card still
   goes out live but is not sent again, so a reconnect drops it.
 
+## Proposals
+
+A cue's task running under a mandate in approve mode does not act on its own:
+Fermix stores what it wants to run as a proposal and waits, for the proposal's
+lifetime, for the owner. Version 4 brings it to this socket. The proposal is
+durable (it lives in `memory.db`, not in daemon memory, unlike an approval), so
+it survives a restart.
+
+- **Who.** Proposal events go only to connections the daemon placed as the
+  owner's: a process it did not start, with a terminal or launched by the
+  system (the app). A `proposal_answer` from any other connection is refused
+  with `error: request_failed`, `message` "Only the owner can answer a
+  proposal, from the Fermix app or a paired phone.", and runs nothing.
+- **The card** (`proposal`). Fermix's record: `proposal_id`, `state`,
+  `mandate`, `task { job_id, name? }`, `watcher?`, `source_ref?`, `tool`,
+  `created_at`, `expires_at`, `received_at?` (when Fermix received the cue),
+  `decided_at?`, `decided_from?` (`telegram`, `signal`, `whatsapp`,
+  `imessage`, `companion`, `mobile`, `management`), `result_status?` (`ok`,
+  `error`, `unknown`) and `status_sentence`; `summary`, Fermix's sentence with
+  no outside text in it; and `outside`, everything a model or a stranger wrote,
+  kept apart by structure: `args_text`, the recorded call's arguments as pretty
+  JSON (at most 3,500 characters), and `cue? { type?, subject?, text?,
+  occurred_at? }`, the cue's snapshot, absent when Fermix no longer keeps it
+  (`occurred_at` is the producer's claim, so it is outside text too). A client
+  draws `outside` as outside text, never as Fermix's words. Times are RFC 3339
+  UTC.
+- **When.** A card is sent when the proposal is stored. Right after
+  `server_hello`, the daemon sends the card of every proposal still waiting,
+  oldest first (at most 100). A client keys cards by `proposal_id`, so a card
+  it already shows is replaced, not doubled. When `server_hello` arrives, a
+  client drops every waiting card it shows and keeps the ones the daemon sends
+  after it; a card already resolved stays in the conversation as a record
+  until the chat is reloaded.
+- **The answer** (`proposal_answer`). The first answer from any surface wins:
+  one write moves the proposal out of `waiting`, fenced on its id and its
+  expiry. `deny` runs nothing. `confirm` checks the mandate's switches, its
+  pins, its grant and its validator again, and runs exactly the recorded call,
+  once, with no model. `accepted` comes as soon as the decision is recorded,
+  before the call has run. A second answer, from this socket, a phone, the
+  management socket or the owner's chat, is refused with its sentence ("That
+  call was already confirmed; it runs at most once."); so is an answer after
+  the proposal expired ("That proposal expired; nothing ran.").
+- **The end** (`proposal_resolved`). Sent to every owner connection when a
+  proposal leaves `waiting` for `denied`, `expired` or `refused` (Fermix's
+  checks refused it at the owner's yes), and for `confirmed` once its call has
+  finished, with `result_status`. `sentence` is Fermix's ("Denied.
+  github_create_issue will not run."); `result_text`, when present, is outside
+  text: what the tool answered, or the validator's words, at most 2,000
+  characters. A proposal that ended while the client was away is not sent
+  again: its waiting card is dropped at the next `server_hello`, since the
+  daemon does not send it back.
+
 ## Errors
 
 | `reason` | Context | Connection |
@@ -575,13 +657,14 @@ is `command{name: "confirm", args: "TOKEN"}`, and `/soul apply TOKEN` is
 
 `unknown_event` also refuses an event newer than the version the connection's
 `client_hello` declared. `ref` is set only on the `request_failed` that answers
-a `media_fetch`.
+a `media_fetch`. A refused `proposal_answer` is a `request_failed` whose
+`message` is the daemon's sentence, with the answer's `client_msg_id`.
 
 ## Chat sequence
 
 ```
-companion -> daemon:  client_hello { protocol_version: 3 }
-daemon -> companion:  server_hello { min_version: 2, max_version: 3 }
+companion -> daemon:  client_hello { protocol_version: 4 }
+daemon -> companion:  server_hello { min_version: 3, max_version: 4 }
 companion -> daemon:  history_pull { profile_id: "main", after_seq: 12, limit: 200 }
 daemon -> companion:  history_page { messages: [...], next_after_seq: 12, history_head_seq: 12 }
 companion -> daemon:  msg { client_msg_id: "mac-1", profile_id: "main", text, attach_ids: [] }
@@ -609,4 +692,13 @@ daemon -> companion:  history_page { messages: [{ server_seq: 21, content: "Pick
 companion -> daemon:  media_fetch { profile_id: "main", ref: "<64 hex>" }          (the person pressed play)
 daemon -> companion:  media_path { ref, path: "/Users/me/.fermix/companion/media/<ref>.ogg", kind: "audio", mime: "audio/ogg", size_bytes: 48213, sha256: "<same>" }
 companion -> daemon:  media_release { profile_id: "main", ref: "<64 hex>" }        (the player let it go)
+```
+
+A proposal, on version 4:
+
+```
+daemon -> companion:  proposal { profile_id: "main", proposal: { proposal_id: "cpr_…", state: "waiting", tool: "github_create_issue", summary, outside: { args_text, cue }, … } }
+companion -> daemon:  proposal_answer { client_msg_id: "mac-10", profile_id: "main", proposal_id: "cpr_…", decision: "confirm" }
+daemon -> companion:  accepted { client_msg_id: "mac-10", duplicate: false }
+daemon -> companion:  proposal_resolved { profile_id: "main", proposal_id: "cpr_…", state: "confirmed", result_status: "ok", sentence: "Confirmed. github_create_issue ran.", result_text: "{\"number\":42}" }
 ```

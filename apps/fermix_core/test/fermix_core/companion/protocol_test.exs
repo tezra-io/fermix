@@ -4,25 +4,32 @@ defmodule FermixCore.Companion.ProtocolTest do
   alias FermixCore.Companion.Protocol
 
   test "publishes the version window, the line cap and the ordered catalogs" do
-    assert Protocol.protocol_version() == 3
-    assert Protocol.supported_version_range() == {2, 3}
+    assert Protocol.protocol_version() == 4
+    assert Protocol.supported_version_range() == {3, 4}
     assert Protocol.max_line_bytes() == 65_536
 
     assert Protocol.client_events() ==
              ~w(client_hello msg command cancel history_pull history_search read_state
-                media_fetch media_release)
+                media_fetch media_release proposal_answer)
 
     assert Protocol.server_events() ==
              ~w(server_hello accepted turn_started text_delta tool_event text_done turn_error
                 turn_done row row_updated approval approval_resolved read_state history_page
-                search_results media_path media_missing error)
+                search_results media_path media_missing proposal proposal_resolved error)
   end
 
   # M56 §6: a turn that ends with no reply needs a frame an older client would
   # not survive, so it goes only to a connection that declared version 2; the
   # media grant and the changed row (M66) only to one that declared 3.
   test "every server event names the version that brought it" do
-    later = %{"turn_done" => 2, "row_updated" => 3, "media_path" => 3, "media_missing" => 3}
+    later = %{
+      "turn_done" => 2,
+      "row_updated" => 3,
+      "media_path" => 3,
+      "media_missing" => 3,
+      "proposal" => 4,
+      "proposal_resolved" => 4
+    }
 
     for type <- Protocol.server_events() do
       assert Protocol.server_event_version(type) == Map.get(later, type, 1),
@@ -32,13 +39,16 @@ defmodule FermixCore.Companion.ProtocolTest do
     for type <- Map.keys(later), do: refute(type in Protocol.shared_server_events())
   end
 
-  test "every client event names the version that brought it, the media grant's version 3" do
+  test "every client event names the version that brought it: the media grant 3, the answer 4" do
+    later = %{"media_fetch" => 3, "media_release" => 3, "proposal_answer" => 4}
+
     for type <- Protocol.client_events() do
-      expected = if type in ~w(media_fetch media_release), do: 3, else: 1
-      assert Protocol.client_event_version(type) == expected, "#{type} names the wrong version"
+      assert Protocol.client_event_version(type) == Map.get(later, type, 1),
+             "#{type} names the wrong version"
     end
 
     refute "media_fetch" in Protocol.shared_client_events()
+    refute "proposal_answer" in Protocol.shared_client_events()
     assert_raise ArgumentError, fn -> Protocol.client_event_version("ping") end
   end
 
@@ -62,11 +72,11 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert "row" in Protocol.shared_server_events()
   end
 
-  test "negotiates directionally, version 2 and version 3 both accepted, version 1 too old" do
-    assert :ok = Protocol.negotiate(2)
+  test "negotiates directionally, version 3 and version 4 both accepted, version 2 too old" do
     assert :ok = Protocol.negotiate(3)
-    assert {:error, :client_too_old} = Protocol.negotiate(1)
-    assert {:error, :client_too_new} = Protocol.negotiate(4)
+    assert :ok = Protocol.negotiate(4)
+    assert {:error, :client_too_old} = Protocol.negotiate(2)
+    assert {:error, :client_too_new} = Protocol.negotiate(5)
   end
 
   test "client_hello refuses a missing or malformed version with the Realtime reasons" do
@@ -178,18 +188,18 @@ defmodule FermixCore.Companion.ProtocolTest do
 
   test "the encoder writes one newline-terminated object with its type" do
     assert {:ok, line} =
-             Protocol.encode_server_event("server_hello", %{min_version: 2, max_version: 3})
+             Protocol.encode_server_event("server_hello", %{min_version: 3, max_version: 4})
 
     assert String.ends_with?(line, "\n")
 
     assert Jason.decode!(line) == %{
              "type" => "server_hello",
-             "min_version" => 2,
-             "max_version" => 3
+             "min_version" => 3,
+             "max_version" => 4
            }
 
     assert {:error, {:invalid_field, "version_range"}} =
-             Protocol.encode_server_event("server_hello", %{min_version: 1, max_version: 3})
+             Protocol.encode_server_event("server_hello", %{min_version: 2, max_version: 4})
   end
 
   test "the encoder refuses explicit nulls, a written type and unknown events" do
@@ -392,6 +402,82 @@ defmodule FermixCore.Companion.ProtocolTest do
              Protocol.encode_server_event("error", %{failed | "ref" => ""})
   end
 
+  # M60 app surface §3.7 (D28): a proposal's card, its end, and the owner's answer.
+  describe "proposals (version 4)" do
+    test "proposal_answer names the proposal and a decision, confirm or deny" do
+      answer = %{
+        "type" => "proposal_answer",
+        "client_msg_id" => "mac-9",
+        "profile_id" => "main",
+        "proposal_id" => "cpr_1",
+        "decision" => "confirm"
+      }
+
+      assert {:ok, %{type: "proposal_answer"}} = decode(answer)
+      assert {:ok, _event} = decode(%{answer | "decision" => "deny"})
+      assert {:error, {:invalid_field, "decision"}} = decode(%{answer | "decision" => "maybe"})
+      assert {:error, {:invalid_field, "proposal_id"}} = decode(%{answer | "proposal_id" => ""})
+      assert {:error, {:missing_field, "decision"}} = decode(Map.delete(answer, "decision"))
+    end
+
+    test "a proposal carries its card whole, with no null anywhere in it" do
+      assert {:ok, line} =
+               Protocol.encode_server_event("proposal", %{
+                 profile_id: "main",
+                 proposal: proposal_card()
+               })
+
+      assert %{"type" => "proposal", "proposal" => %{"proposal_id" => "cpr_1"}} =
+               Jason.decode!(line)
+
+      for drift <- [
+            Map.delete(proposal_card(), "summary"),
+            Map.put(proposal_card(), "watcher", nil),
+            put_in(proposal_card(), ["outside", "cue"], nil),
+            Map.put(proposal_card(), "state", "pending"),
+            put_in(proposal_card(), ["outside", "args_text"], String.duplicate("x", 3_501)),
+            Map.delete(proposal_card(), "task"),
+            "not a card"
+          ] do
+        assert {:error, {:invalid_field, "proposal"}} =
+                 Protocol.validate_server_payload("proposal", %{
+                   "profile_id" => "main",
+                   "proposal" => drift
+                 }),
+               "accepted #{inspect(drift)}"
+      end
+    end
+
+    test "proposal_resolved names the proposal, its state and Fermix's sentence" do
+      resolved = %{
+        "profile_id" => "main",
+        "proposal_id" => "cpr_1",
+        "state" => "confirmed",
+        "result_status" => "ok",
+        "sentence" => "Confirmed. github_create_issue ran.",
+        "result_text" => ~s({"number":42})
+      }
+
+      assert {:ok, _line} = Protocol.encode_server_event("proposal_resolved", resolved)
+
+      minimal = Map.drop(resolved, ["result_status", "result_text"])
+      assert :ok = Protocol.validate_server_payload("proposal_resolved", minimal)
+
+      for {field, value} <- [
+            {"state", "waiting"},
+            {"result_status", "fine"},
+            {"sentence", ""},
+            {"result_text", String.duplicate("x", 2_001)}
+          ] do
+        assert {:error, {:invalid_field, ^field}} =
+                 Protocol.validate_server_payload(
+                   "proposal_resolved",
+                   Map.put(resolved, field, value)
+                 )
+      end
+    end
+  end
+
   describe "validate_call_metadata/1" do
     test "a result shown in the chat names the call, the event and its task" do
       assert :ok = Protocol.validate_call_metadata(shared_call())
@@ -505,6 +591,27 @@ defmodule FermixCore.Companion.ProtocolTest do
              Protocol.validate_server_payload("accepted", %{"client_msg_id" => "c"})
 
     assert {:error, {:unknown_event, "hello"}} = Protocol.validate_client_payload("hello", %{})
+  end
+
+  defp proposal_card do
+    %{
+      "proposal_id" => "cpr_1",
+      "state" => "waiting",
+      "mandate" => "release-issues",
+      "tool" => "github_create_issue",
+      "task" => %{"job_id" => "release_issues", "name" => "release issues"},
+      "watcher" => "release-watch",
+      "source_ref" => "eng-blogs",
+      "created_at" => "2026-10-10T12:00:00Z",
+      "expires_at" => "2026-10-10T12:30:00Z",
+      "received_at" => "2026-10-10T11:59:00Z",
+      "status_sentence" => "Waiting for your answer; it runs only if you confirm.",
+      "summary" => "A task wants to run github_create_issue under your mandate release-issues.",
+      "outside" => %{
+        "args_text" => "{\n  \"title\": \"Phoenix 2.0\"\n}",
+        "cue" => %{"type" => "release", "subject" => "phoenix", "text" => "Phoenix 2.0 is out."}
+      }
+    }
   end
 
   defp decode(map), do: map |> Jason.encode!() |> Protocol.decode_client_event()

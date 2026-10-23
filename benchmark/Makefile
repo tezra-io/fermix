@@ -14,7 +14,7 @@ help:
 	@echo "targets: tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly capability-private estimate rank baseline uplift arms gaia lmeval aim aim-calibrate"
 
 tests:        ## developer tests for harness code; does not run behavioral/capability E2E
-	@for t in scoring pricing aggregate leaderboard leaderboard_html halden_ops untrusted_content private_suites release_gate experiments uplift baseline lmeval gaia capability_runner checker grade suites companion judge eval_safety seed_home opik_client tier tier_exit_code eval_box eval_nightly aim fixture_server arms voice; do \
+	@for t in scoring pricing aggregate leaderboard leaderboard_html halden_ops untrusted_content private_suites release_gate experiments uplift baseline lmeval gaia capability_runner checker grade suites companion judge eval_safety seed_home opik_client tier tier_exit_code eval_box eval_nightly aim fixture_server arms voice cue_drive; do \
 	  echo "== $$t =="; $(UV) bin/test_$$t.py || exit 1; done
 
 check:        ## preconditions (Opik + daemon)

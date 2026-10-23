@@ -14,6 +14,8 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
+  alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Cues.SourceManager
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.IMessage
   alias FermixCore.Memory.CompactionConfig
@@ -137,6 +139,7 @@ defmodule FermixCore.Setup.ConfigStore do
         harness: Application.get_env(:fermix_core, :harness, []),
         browser: Application.get_env(:fermix_core, :browser, []),
         skill_curation: Application.get_env(:fermix_core, :skill_curation, []),
+        cues: Application.get_env(:fermix_core, :cues, []),
         memory: Application.get_env(:fermix_core, :memory, []),
         realtime: Application.get_env(:fermix_core, :realtime, []),
         computer_use: Application.get_env(:fermix_core, :computer_use, []),
@@ -277,6 +280,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_harness_config(Keyword.get(persisted.fermix_core, :harness, []))
     apply_browser_config(Keyword.get(persisted.fermix_core, :browser, []))
     apply_skill_curation_config(Keyword.get(persisted.fermix_core, :skill_curation, []))
+    apply_cues_config(Keyword.get(persisted.fermix_core, :cues, []))
     apply_memory_config(Keyword.get(persisted.fermix_core, :memory, []))
     apply_realtime_config(Keyword.get(persisted.fermix_core, :realtime, []))
     apply_computer_use_config(Keyword.get(persisted.fermix_core, :computer_use, []))
@@ -623,6 +627,12 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:skill_curation, [])
           |> normalize_skill_curation(),
+        cues:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:cues, [])
+          |> normalize_cues()
+          |> CuesConfig.to_keyword(),
         memory:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -823,6 +833,7 @@ defmodule FermixCore.Setup.ConfigStore do
         harness: [],
         browser: [],
         skill_curation: [],
+        cues: [],
         memory: [],
         realtime: [],
         computer_use: [],
@@ -1124,6 +1135,17 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  # Replace (not merge): the section has no compile-time baseline. Re-normalized
+  # on the way in, because the persisted snapshot holds `to_keyword/1`'s
+  # spellings and application environment holds `normalize/1`'s atoms, on
+  # every path (the "Config round-trips" rule). Then the source workers are
+  # matched to the new sources (M60 §6.3); a no-op where no cue tree runs
+  # (boot before the tree, a tree-less process, cues off).
+  defp apply_cues_config(cues_config) do
+    Application.put_env(:fermix_core, :cues, CuesConfig.normalize(cues_config))
+    SourceManager.reconcile()
+  end
+
   # Memory uses merge (not put) so other in-process keys (extraction_enabled,
   # agent_id, prompt_*_token_cap, loop_detection_*) survive partial TOML edits.
   defp apply_memory_config(memory_config) do
@@ -1266,6 +1288,7 @@ defmodule FermixCore.Setup.ConfigStore do
     harness = Keyword.get(fermix_core, :harness, [])
     browser = Keyword.get(fermix_core, :browser, [])
     skill_curation = Keyword.get(fermix_core, :skill_curation, [])
+    cues = Keyword.get(fermix_core, :cues, [])
     memory = Keyword.get(fermix_core, :memory, [])
     realtime = Keyword.get(fermix_core, :realtime, [])
     computer_use = Keyword.get(fermix_core, :computer_use, [])
@@ -1309,6 +1332,7 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "harness"], harness),
       render_section(["fermix_core", "browser"], browser),
       render_section(["fermix_core", "skill_curation"], skill_curation),
+      render_cues(cues),
       render_section(["fermix_core", "memory"], memory),
       render_section(["fermix_core", "realtime"], realtime),
       render_section(["fermix_core", "computer_use"], computer_use),
@@ -1377,6 +1401,32 @@ defmodule FermixCore.Setup.ConfigStore do
     [
       render_section(["fermix_channels", "mobile"], Keyword.delete(mobile, :push)),
       render_section(["fermix_channels", "mobile", "push"], Keyword.get(mobile, :push, []))
+    ]
+  end
+
+  # `[fermix_core.cues]`, then each source and each mandate as its own section
+  # by name, a mandate's `pin_args` as its sub-table (the parser reads one
+  # assignment per line, so it has no inline tables).
+  defp render_cues([]), do: nil
+
+  defp render_cues(cues) do
+    [
+      render_section(["fermix_core", "cues"], Keyword.drop(cues, [:sources, :mandates])),
+      render_named_sections(["fermix_core", "cues", "sources"], Keyword.get(cues, :sources, %{})),
+      cues
+      |> Keyword.get(:mandates, %{})
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.map(&render_cue_mandate/1)
+    ]
+  end
+
+  defp render_cue_mandate({name, section}) do
+    path = ["fermix_core", "cues", "mandates", name]
+    pins = section |> Keyword.get(:pin_args, %{}) |> Enum.sort_by(&elem(&1, 0))
+
+    [
+      render_section(path, Keyword.delete(section, :pin_args)),
+      render_section(path ++ ["pin_args"], pins)
     ]
   end
 
@@ -1623,6 +1673,7 @@ defmodule FermixCore.Setup.ConfigStore do
         browser: normalize_browser(get_in(document, ["fermix_core", "browser"])),
         skill_curation:
           normalize_skill_curation(get_in(document, ["fermix_core", "skill_curation"])),
+        cues: normalize_cues(get_in(document, ["fermix_core", "cues"])),
         memory: normalize_memory(get_in(document, ["fermix_core", "memory"])),
         realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"])),
         computer_use: normalize_computer_use(get_in(document, ["fermix_core", "computer_use"])),
@@ -2526,8 +2577,9 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp normalize_routing(nil), do: []
 
-  # subagent_*/cron_*/meeting_* drive delegated-worker, scheduled-job and
-  # meeting-summary model selection (docs/design/SUBAGENT_MODEL_SELECTION.md);
+  # subagent_*/cron_*/meeting_*/filter_* drive delegated-worker, scheduled-job,
+  # meeting-summary and cue-filter model selection (M60 §8.2 for filter_*;
+  # docs/design/SUBAGENT_MODEL_SELECTION.md for the rest);
   # kept lax strings here and validated at the consumption seam by
   # FermixCore.Providers.RoutingOverrides.
   defp normalize_routing(config) do
@@ -2567,6 +2619,18 @@ defmodule FermixCore.Setup.ConfigStore do
     |> put_if_present(
       :meeting_reasoning_effort,
       normalize_string(lookup(config, "meeting_reasoning_effort", :meeting_reasoning_effort))
+    )
+    |> put_if_present(
+      :filter_provider,
+      normalize_string(lookup(config, "filter_provider", :filter_provider))
+    )
+    |> put_if_present(
+      :filter_model,
+      normalize_string(lookup(config, "filter_model", :filter_model))
+    )
+    |> put_if_present(
+      :filter_reasoning_effort,
+      normalize_string(lookup(config, "filter_reasoning_effort", :filter_reasoning_effort))
     )
   end
 
@@ -2683,6 +2747,11 @@ defmodule FermixCore.Setup.ConfigStore do
       """
     end
   end
+
+  # `[fermix_core.cues]` with its source and mandate sections (M60 §6.2,
+  # §10.1). `CuesConfig.normalize/1` refuses an unknown key at every level,
+  # naming the section, and validates every value (fail-loud per key).
+  defp normalize_cues(config), do: CuesConfig.normalize(config)
 
   defp normalize_memory(nil), do: []
 

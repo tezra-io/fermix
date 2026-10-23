@@ -23,7 +23,11 @@ defmodule FermixChannels.Gateway.Channel do
           request_type: String.t() | nil,
           proactive_key: String.t(),
           proactive_part_id: String.t(),
-          blocks: [map()]
+          blocks: [map()],
+          # `false` asks the channel to fetch nothing the text links to: no
+          # embed, unfurl or preview card (every message a cue run causes,
+          # M60 §9.5). Absent means the channel's own default.
+          link_previews: boolean()
         ]
 
   @type media_part :: Reply.media_part()

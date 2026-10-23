@@ -62,8 +62,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
-from evallib import (aggregate, checker, config as cfgmod, driver, grade, judge, leaderboard,
-                     leaderboard_html, pricing, release_gate, safe_rm, scoring, uplift)
+from evallib import (aggregate, checker, config as cfgmod, cue_drive, driver, grade, judge,
+                     leaderboard, leaderboard_html, pricing, release_gate, safe_rm, scoring,
+                     uplift)
 from evallib.experiments import ExperimentWriter, OpikWriteError, stable_id
 from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, PAGE_READY_PATH, FixtureServer,
                                     ServerError, case_uses_fixture, check_state, read_path)
@@ -1170,6 +1171,176 @@ def _cross_session_trial(cfg, opik, s, case, run_id, i, fixtures=None):
     return _finish_trial(case, ep, succ, label)
 
 
+# --- drive: cue ---------------------------------------------------------------------
+
+def _cue_trial(cfg, opik, s, case, run_id, i, task_key, cleanup_root, tasks_root=None):
+    """One cue trial (`drive: cue`): post the case's events to the eval daemon's door,
+    wait for every delivery and run they cause to settle (evallib/cue_drive.py), find
+    each run's trace, then let the case's checker grade the rows and the spans.
+
+    The episode is the runs: their traces carry the usage, the models and the tool
+    spans. A filter call is not a captured turn (its trace is not an agent turn), so
+    a case that ends at the filter has no usage and an unknown cost, never $0.00. A
+    door that does not answer, a post it refuses, a case that does not settle within
+    its timeout or a run whose trace never arrives makes the trial INVALID, not 0."""
+    home = cfg.daemon.fermix_home
+    label = f"{case.id} t{i}"
+    token = trial_token(s.name, case.id, run_id, i)
+    trial = sess("cue", run_id, s.name, case.id, f"t{i}", limit=60)
+    scoped = checker.scoped_dir(home, task_key, i)
+    started = time.monotonic()
+    after = now_utc() - timedelta(seconds=10)
+    try:
+        checker.seed_workspace(scoped, tasks_root or SKILL_DIR, case.checker_spec.get("seed"),
+                               cleanup_root)
+        episode = cue_drive.drive(home, case.cue, token, trial, checker.rel_scoped(task_key, i),
+                                  (case.timeout_ms or 600000) / 1000.0)
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+        if not episode.complete:
+            print(f"    ! {label}: {episode.detail} — trial INVALID (not a model failure)",
+                  file=sys.stderr)
+            return _cue_finish(case, _Episode(caps=[], expects=[]), 0.0, label, elapsed_ms,
+                               invalid_status="incomplete", detail=episode.detail)
+        ep = _cue_episode(cfg, opik, episode, after)
+        return _cue_grade(cfg, case, ep, episode, run_id, i, scoped, token, label, elapsed_ms)
+    except cue_drive.CueDriveError as exc:
+        print(f"    ! {label}: {exc} — trial INVALID (not a model failure)", file=sys.stderr)
+        return _cue_finish(case, _Episode(caps=[], expects=[]), 0.0, label,
+                           (time.monotonic() - started) * 1000.0,
+                           invalid_status="not_running", detail=str(exc))
+    finally:
+        if os.path.isdir(scoped):
+            checker.teardown_workspace(cleanup_root, scoped)
+
+
+def _cue_episode(cfg, opik, episode, after) -> _Episode:
+    """One captured turn per run the trial's cues woke, in the order they ran."""
+    caps = [_capture_cue_run(cfg, opik, run, after) for run in episode.rows["runs"]]
+    return _Episode(caps=caps, expects=[{} for _cap in caps])
+
+
+def _capture_cue_run(cfg, opik, run: dict, after) -> _Captured:
+    # The run's own wall clock; a row without one leaves the view's duration
+    # missing, which makes it incomplete rather than a zero-length turn.
+    elapsed_ms = _run_elapsed_ms(run)
+    try:
+        hit = opik.poll_for_job_run(run["job_id"], run["id"], after,
+                                    cfg.opik.poll_timeout_s, cfg.opik.poll_interval_s)
+        if hit is None:
+            print(f"    ! cue run {run['id']}: no trace found — INVALID, not a zero",
+                  file=sys.stderr)
+            return _Captured("no_trace", None, None, None, elapsed_ms or 0.0)
+        trace, spans = opik.await_complete(hit)
+    except OpikError as exc:
+        print(f"    ! opik read failed for cue run {run['id']}: {exc}", file=sys.stderr)
+        return _Captured("opik_error", None, None, None, elapsed_ms or 0.0)
+    view = grade.TurnView.build(trace, spans, elapsed_ms=elapsed_ms)
+    status = "graded" if _gradeable(view) else "incomplete"
+    return _Captured(status, view, trace, spans, elapsed_ms or 0.0)
+
+
+def _run_elapsed_ms(run: dict) -> float | None:
+    """The run's own wall clock from its row (started to completed), or None."""
+    started, completed = (_parse_stamp(run.get(key)) for key in ("started_at", "completed_at"))
+    if started is None or completed is None:
+        return None
+    return max((completed - started).total_seconds() * 1000.0, 0.0)
+
+
+def _parse_stamp(value):
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _cue_grade(cfg, case, ep: _Episode, episode, run_id, i, scoped, token, label, elapsed_ms):
+    """The checker over the cue rows and the runs' spans, folded into the trial."""
+    unseen = [cap for cap in ep.caps if cap.status != "graded"]
+    if unseen:
+        return _cue_finish(case, ep, 0.0, label, elapsed_ms, invalid_status=unseen[0].status)
+    reply = ep.caps[-1].view.reply if ep.caps else ""
+    evidence = {"schema": 1, "run_id": run_id, "trial": i, "token": token,
+                "expect": case.checker_spec.get("expect"), "reply": reply,
+                "cue": {"source": episode.source, "posts": episode.posts, **episode.rows},
+                "tool_spans": [span for cap, run in zip(ep.caps, episode.rows["runs"])
+                               for span in _cue_spans(cap.view, run["id"])]}
+    cr = checker.run_checker(SKILL_DIR, case.checker_spec, scoped, reply,
+                             cfg.daemon.fermix_home, evidence=evidence)
+    if cr.error:
+        print(f"    ! checker error {label}: {cr.error} — trial INVALID (not a model "
+              "failure)", file=sys.stderr)
+        return _cue_finish(case, ep, 0.0, label, elapsed_ms, invalid_status="checker_error")
+    if cr.violations:
+        print(f"    ⚠️ {label}: checker reported violation(s): {'; '.join(cr.violations)}",
+              file=sys.stderr)
+    if cr.score < 1.0:
+        print(f"    · {label}: checker: {cr.detail}", file=sys.stderr)
+    succ = _provenance_gate(case, ep, cr.score, label)
+    return _cue_finish(case, ep, succ, label, elapsed_ms, checker_safety=cr.safety_ok)
+
+
+def _cue_spans(view, run_id: str) -> list[dict]:
+    """A run's tool spans as checker evidence, with the run they belong to and their
+    metadata, where a refusal's typed `policy_enforcement` marker is carried."""
+    return [{**row, "run_id": run_id, "metadata": span.get("metadata") or {}}
+            for row, span in zip(_evidence_spans(view), view.tool_spans)]
+
+
+def _cue_finish(case, ep: _Episode, succ: float, label: str, elapsed_ms: float,
+                invalid_status: str | None = None, checker_safety: bool | None = None,
+                detail: str = "") -> tuple[aggregate.TrialResult, str | None, list]:
+    """Fold a cue episode into a trial. A settled episode with no run (the filter
+    dropped the item) is a valid observation; its usage is unknown, not zero."""
+    status = invalid_status or "ok"
+    if invalid_status:
+        succ = 0.0
+    usage = _episode_usage(ep)
+    graded = [cap for cap in ep.caps if cap.trace is not None]
+    trace_id = graded[-1].trace.get("id") if graded and not invalid_status else None
+    trial = aggregate.score_trial(
+        case.id, task_success=succ,
+        safety_ok=None if invalid_status else _trial_safety(ep, checker_safety),
+        cost=usage["cost"], duration_ms=elapsed_ms, tokens=usage["tokens"],
+        tool_calls=usage["tool_calls"], status=status, trace_id=trace_id,
+        cost_known=usage["cost_known"], status_detail=detail,
+        main_llm_calls=usage["main_llm_calls"], **_episode_pricing(ep))
+    print(f"    · {label}: cue episode {status}, {len(ep.caps)} run(s)", file=sys.stderr)
+    return (trial, trace_id, _episode_models(ep))
+
+
+def _is_cue(case) -> bool:
+    return getattr(case, "drive", "ask") == "cue"
+
+
+def _needs_cues(suite, case) -> bool:
+    return _is_cue(case) or "cues" in getattr(suite, "requires", ())
+
+
+def _hold_out_unseeded_cues(cfg, cases) -> tuple[list, list]:
+    """Cue cases this eval home was not seeded for (seeded without --cues, or a source
+    with no watcher, as the mandate sources are without --cue-mandates). NOT EVALUATED
+    and named, exactly as an unmet tool precondition: never driven, never a zero."""
+    cue_cases = [row for row in cases if _needs_cues(row[0], row[2])]
+    if not cue_cases:
+        return cases, []
+    try:
+        manifest = cue_drive.load_manifest(cfg.daemon.fermix_home)
+    except cue_drive.CueDriveError as exc:
+        reasons = {(s.name, c.id): str(exc) for s, _scn, c in cue_cases}
+    else:
+        reasons = {(s.name, c.id): problem for s, _scn, c in cue_cases if _is_cue(c)
+                   and (problem := cue_drive.missing_source(manifest, c.cue["source"]))}
+    if not reasons:
+        return cases, []
+    unmet = [(suite, case_id, reason) for (suite, case_id), reason in sorted(reasons.items())]
+    _print_not_evaluated(unmet)
+    kept = [row for row in cases if (row[0].name, row[2].id) not in reasons]
+    return kept, unmet
+
+
 def run_task(cfg, opik, s, scn, case, trials, k, threshold, run_id,
              want_judge, fixtures=None, tasks_root: str | None = None) -> TaskOutcome:
     is_checker = case.checker_spec is not None
@@ -1186,6 +1357,9 @@ def run_task(cfg, opik, s, scn, case, trials, k, threshold, run_id,
             if case.cross_session:
                 tr, trace_id, tmodels = _cross_session_trial(
                     cfg, opik, s, case, run_id, i, fixtures)
+            elif _is_cue(case):
+                tr, trace_id, tmodels = _cue_trial(
+                    cfg, opik, s, case, run_id, i, task_key, cleanup_root, tasks_root)
             else:
                 tr, trace_id, tmodels = _standard_trial(
                     cfg, opik, s, case, run_id, i, is_checker, task_key, fixture_path,
@@ -1218,7 +1392,8 @@ def run_task(cfg, opik, s, scn, case, trials, k, threshold, run_id,
     # so the config CI resamples scenarios, never paraphrases as independent evidence.
     stats = aggregate.aggregate_task(results, k=k, threshold=threshold,
                                      family=f"{s.name}/{scn.id}")
-    method = (f"checker:{os.path.basename(case.checker_spec['script'])}" if is_checker
+    method = (f"cue:{os.path.basename(case.checker_spec['script'])}" if _is_cue(case)
+              else f"checker:{os.path.basename(case.checker_spec['script'])}" if is_checker
               else "cross_session" if case.cross_session
               else case.score_spec.get("match") if case.score_spec else "judge")
     # Every declared prompt, with the per-trial placeholders left TEMPLATED: the
@@ -1844,6 +2019,12 @@ def main(argv=None) -> int:
     cases, not_evaluated, refusal = _hold_out_unmet_preconditions(cfg, cases)
     if refusal is not None:
         return refusal
+    cases, unseeded = _hold_out_unseeded_cues(cfg, cases)
+    not_evaluated = [*not_evaluated, *unseeded]
+    if not cases:
+        print("no capability task is measurable on this daemon: every selected task "
+              "needs cues this eval home was not seeded with (--cues)", file=sys.stderr)
+        return 3
     return _sweep(cfg, args, lb_path, cases, want_judge, not_evaluated, tasks_root)
 
 

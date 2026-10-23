@@ -189,19 +189,19 @@ defmodule FermixChannels.Companion.ConnectionTest do
     assert closed?(early)
 
     client = connect(path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 3})
-    assert recv(client) == %{"type" => "server_hello", "min_version" => 2, "max_version" => 3}
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 4})
+    assert recv(client) == %{"type" => "server_hello", "min_version" => 3, "max_version" => 4}
 
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 3})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 4})
     assert %{"type" => "error", "reason" => "unexpected_client_hello"} = recv(client)
     assert closed?(client)
   end
 
-  # M66: version 3 adds the media grant and `row_updated`, and version 2 is
+  # M60 app surface §3.7: version 4 adds the proposals, and version 3 is
   # still served. Each connection is known by the version its hello declared.
-  test "a version 2 and a version 3 client are both served, each known by its version", ctx do
-    old = hello(ctx.socket_path, 2)
-    new = hello(ctx.socket_path, 3)
+  test "a version 3 and a version 4 client are both served, each known by its version", ctx do
+    old = hello(ctx.socket_path, 3)
+    new = hello(ctx.socket_path, 4)
 
     versions =
       ctx.registry
@@ -209,7 +209,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
       |> Enum.map(fn {_connection, version} -> version end)
       |> Enum.sort()
 
-    assert versions == [2, 3]
+    assert versions == [3, 4]
 
     for client <- [old, new] do
       send_line(client, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 0})
@@ -217,37 +217,54 @@ defmodule FermixChannels.Companion.ConnectionTest do
     end
   end
 
-  # Every client now reads `turn_done` (version 2); `row_updated` is version
-  # 3's, so a version 2 client never sees it.
-  test "row_updated reaches a version 3 client only; turn_done reaches both", ctx do
-    old = hello(ctx.socket_path, 2)
-    new = hello(ctx.socket_path, 3)
+  # Every client now reads `turn_done` (version 2) and `row_updated` (version
+  # 3); a proposal is version 4's, so a version 3 client never sees one.
+  test "turn_done and row_updated reach both; a proposal the version 4 client only", ctx do
+    old = hello(ctx.socket_path, 3)
+    new = hello(ctx.socket_path, 4)
 
     :ok = Companion.broadcast("main", Output.turn_done("turn-quiet"), ctx.registry)
     :ok = Companion.broadcast("main", Output.row_updated("main", 21), ctx.registry)
 
+    resolved = %{
+      "t" => "proposal_resolved",
+      "profile_id" => "main",
+      "proposal_id" => "cpr_1",
+      "state" => "expired",
+      "sentence" => "That proposal expired; nothing ran."
+    }
+
+    :ok = Companion.broadcast("main", resolved, ctx.registry)
+
     done = %{"t" => "text_done", "turn_id" => "turn-next", "server_seq" => 3, "text" => "Hi"}
     :ok = Companion.broadcast("main", done, ctx.registry)
 
-    assert recv(new) == %{"type" => "turn_done", "turn_id" => "turn-quiet"}
-    assert recv(new) == %{"type" => "row_updated", "profile_id" => "main", "server_seq" => 21}
-    assert %{"type" => "text_done", "turn_id" => "turn-next"} = recv(new)
+    for client <- [new, old] do
+      assert recv(client) == %{"type" => "turn_done", "turn_id" => "turn-quiet"}
 
-    assert recv(old) == %{"type" => "turn_done", "turn_id" => "turn-quiet"}
+      assert recv(client) == %{
+               "type" => "row_updated",
+               "profile_id" => "main",
+               "server_seq" => 21
+             }
+    end
+
+    assert %{"type" => "proposal_resolved", "proposal_id" => "cpr_1"} = recv(new)
+    assert %{"type" => "text_done", "turn_id" => "turn-next"} = recv(new)
     assert %{"type" => "text_done", "turn_id" => "turn-next"} = recv(old)
   end
 
-  test "a version 1 client is refused as too old", %{socket_path: path} do
+  test "a version 2 client is refused as too old", %{socket_path: path} do
     client = connect(path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 1})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 2})
 
     assert recv(client) == %{
              "type" => "error",
              "reason" => "unsupported_protocol_version",
              "direction" => "client_too_old",
-             "client_version" => 1,
-             "min_version" => 2,
-             "max_version" => 3
+             "client_version" => 2,
+             "min_version" => 3,
+             "max_version" => 4
            }
 
     assert closed?(client)
@@ -332,15 +349,15 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
   test "a client outside the window learns which side must update", %{socket_path: path} do
     client = connect(path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 4})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 5})
 
     assert recv(client) == %{
              "type" => "error",
              "reason" => "unsupported_protocol_version",
              "direction" => "client_too_new",
-             "client_version" => 4,
-             "min_version" => 2,
-             "max_version" => 3
+             "client_version" => 5,
+             "min_version" => 3,
+             "max_version" => 4
            }
 
     assert closed?(client)
@@ -754,7 +771,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
   # call; one not running under exactly those ids is refused with a sentence,
   # and the connection stays open.
   test "a cancel naming a task that is not running is refused and the connection kept", ctx do
-    client = hello(ctx.socket_path, 2)
+    client = hello(ctx.socket_path, 3)
 
     task_ref = %{
       "call_uuid" => "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b",
@@ -1021,32 +1038,15 @@ defmodule FermixChannels.Companion.ConnectionTest do
       send_line(client, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 0})
       assert %{"type" => "read_state"} = recv(client)
     end
-
-    # A version 2 client has no media events: one it sends is unknown to it,
-    # so it is never granted a file whose answer it could not be sent.
-    test "a version 2 connection is refused the grant and closed", ctx do
-      append_voice_note(ctx)
-      client = hello(ctx.socket_path, 2)
-
-      send_line(client, media_event("media_fetch", @voice_ref))
-
-      assert recv(client) == %{
-               "type" => "error",
-               "reason" => "unknown_event",
-               "event" => "media_fetch"
-             }
-
-      assert closed?(client)
-      refute_received {:granted, _media, _holder}
-    end
   end
 
   # M66: the gateway's enrichment writes a message's text to its row; a Mac
   # message has nothing to transcribe, so its row is unchanged and nothing is
-  # announced, and a text that did change is announced to version 3 alone.
+  # announced, and a text that did change is announced to every connection
+  # (each in the window reads version 3's `row_updated`).
   test "an enrichment announces row_updated only when it changed the row's text", ctx do
-    old = hello(ctx.socket_path, 2)
-    new = hello(ctx.socket_path, 3)
+    old = hello(ctx.socket_path, 3)
+    new = hello(ctx.socket_path, 4)
 
     send_line(new, message("mac-enrich", "pick up milk"))
     assert %{"type" => "accepted", "client_msg_id" => "mac-enrich"} = recv(new)
@@ -1064,9 +1064,16 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
     assert :ok = enrich.(%{message | content: "Pick up milk and eggs"})
     send_line(old, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 0})
-    assert recv(new) == %{"type" => "row_updated", "profile_id" => "main", "server_seq" => seq}
-    assert %{"type" => "read_state"} = recv(new)
-    assert %{"type" => "read_state"} = recv(old)
+
+    for client <- [new, old] do
+      assert recv(client) == %{
+               "type" => "row_updated",
+               "profile_id" => "main",
+               "server_seq" => seq
+             }
+
+      assert %{"type" => "read_state"} = recv(client)
+    end
   end
 
   test "the exported protocol documents every error reason the socket sends" do

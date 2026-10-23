@@ -89,7 +89,7 @@ CONSTANTS
                           \* brought it
     RetriesTransient,     \* D21: a transient dispatcher error is retried.
                           \* FALSE is today's code: one attempt, its failure
-                          \* logged (channels/mobile.ex:601-608)
+                          \* logged (notify_timeline_row, channels/mobile.ex:562-569)
     AttemptCap,           \* D21: at most three attempts per device
     BootCheck,            \* D21: the boot step that reads push_attempted_seq.
                           \* FALSE is today's code: nothing runs at boot
@@ -194,15 +194,15 @@ AckTarget(d) ==
 (* The writer and the push task (Channels.Mobile, Mobile.Push) *)
 
 \* deliver_persisted_text / deliver_persisted_media for a row nobody asked
-\* for (channels/mobile.ex:493-518), and for a request's reply its
-\* settlement: build_turn_result when it became a turn (:205-211,
-\* :1039-1049), Mobile.EventRouter.after_settle -> schedule_settled_push when
+\* for (channels/mobile.ex:450-475), and for a request's reply its
+\* settlement: build_turn_result when it became a turn (:201-207,
+\* :824-834), Mobile.EventRouter.after_settle -> schedule_settled_push when
 \* it did not (event_router.ex:142-168), after the turn_done that ends the
 \* request's turn on the phones (end_phone_turn, :148-153; not a row). The
 \* row's Repo write, then emit_after_commit -> DeviceRegistry.broadcast
-\* (:564-569, :923-936), then schedule_push -> Task.Supervisor.start_child
-\* (:385-391, :584-599). A row nobody asked for reaches the sockets as a
-\* `row`, a reply as its turn's `text_done` (delivered_text, :505-510): either
+\* (:525-530, :708-723), then schedule_push -> Task.Supervisor.start_child
+\* (:342-347, :545-560). A row nobody asked for reaches the sockets as a
+\* `row`, a reply as its turn's `text_done` (delivered_text, :462-467): either
 \* way the phone takes the row.
 \* Three calls folded into one step: a crash between them leaves what a crash
 \* right after them leaves, a durable row with no task, because the registry

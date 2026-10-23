@@ -124,7 +124,31 @@ defmodule FermixCore.Management.ProtocolTest do
              "mcp.servers.tool.set",
              "mcp.servers.check.start",
              "mcp.servers.import.scan",
-             "mcp.servers.import"
+             "mcp.servers.import",
+             "cues.status",
+             "cues.sources.list",
+             "cues.sources.get",
+             "cues.sources.form",
+             "cues.sources.add",
+             "cues.sources.update",
+             "cues.sources.remove",
+             "cues.sources.enable",
+             "cues.sources.disable",
+             "cues.sources.token.new",
+             "cues.sources.url.get",
+             "cues.watchers.list",
+             "cues.watchers.get",
+             "cues.mandates.list",
+             "cues.mandates.choices",
+             "cues.mandates.add",
+             "cues.mandates.update",
+             "cues.mandates.remove",
+             "cues.mandates.enable",
+             "cues.mandates.disable",
+             "cues.mandates.approve",
+             "cues.proposals.list",
+             "cues.proposals.get",
+             "cues.proposals.decide"
            ]
 
     assert Protocol.error_codes() == [

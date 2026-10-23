@@ -1538,6 +1538,91 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert artifact =~ "Tool failures: 1"
   end
 
+  # Every job run's context carries the run's trigger, so a gate can tell a
+  # timed run, a run by hand and a run a cue woke apart (M60 §10.5).
+  test "a run's agent context carries the trigger its run row records", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    probe =
+      Capability.new(%{
+        name: "trigger_probe",
+        description: "records the loop context's trigger",
+        parameters: %{"type" => "object", "properties" => %{}},
+        kind: :builtin,
+        executor: {__MODULE__, :execute_trigger_probe, [self()]},
+        policy_class: :read_only
+      })
+
+    :ok = CapabilityRegistry.register(capability_registry, probe)
+    script = [%{tool_calls: [scripted_call("call_1", "trigger_probe")]}, %{content: "Done."}]
+
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo, name: "Timed", allowed_tools: ["trigger_probe"])
+
+    assert_runner_exits_normally(job, run,
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      script: script
+    )
+
+    assert_receive {:trigger_seen, "schedule"}
+
+    {job, run} = claim_manual_run(repo, name: "By Hand", allowed_tools: ["trigger_probe"])
+    assert run.trigger == "manual"
+
+    assert_runner_exits_normally(job, run,
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      script: script
+    )
+
+    assert_receive {:trigger_seen, "manual"}
+  end
+
+  def execute_trigger_probe(_args, context, test_pid) do
+    send(test_pid, {:trigger_seen, Map.fetch!(context, :trigger)})
+    {:ok, %{success: true, output: "probed"}}
+  end
+
+  defp claim_manual_run(repo, attrs) do
+    now = ~U[2026-05-02 14:00:00Z]
+
+    {:ok, job} =
+      Registry.create_job(
+        Map.merge(
+          %{schedule: "every 15 minutes", task_prompt: "Run.", created_by_trust: "operator"},
+          Map.new(attrs)
+        ),
+        repo: repo,
+        now: now,
+        scheduler: nil
+      )
+
+    {:ok, {claimed_job, run}} =
+      Repo.claim_job_now(
+        job.id,
+        %{state: "running", updated_at: now},
+        %{
+          id: "run_#{System.unique_integer([:positive])}",
+          job_id: job.id,
+          session_id: "cron_#{job.id}_20260502_140000",
+          trigger: "manual",
+          status: "queued",
+          claimed_at: now,
+          delivery_status: "none",
+          created_at: now,
+          updated_at: now
+        },
+        server: repo
+      )
+
+    {claimed_job, run}
+  end
+
   defp scripted_call(call_id, name) do
     %{id: "fc_#{call_id}", call_id: call_id, name: name, arguments: "{}"}
   end

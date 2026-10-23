@@ -35,7 +35,7 @@ SKILL_DIR = os.path.dirname(HERE)
 REPO_ROOT = os.path.dirname(SKILL_DIR)
 sys.path.insert(0, HERE)
 
-from evallib import companion, voice
+from evallib import companion, cue_drive, voice
 from evallib import config as cfgmod
 from evallib import driver, grade, judge, report
 from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, FixtureServer,
@@ -239,6 +239,28 @@ def voice_cases_left_out(suites, args, profiles) -> int:
         return 0
     return sum(1 for suite in suites for scenario in suite.scenarios
                if scenario.risk in profiles for case in scenario.cases if case.needs_voice)
+
+
+def hold_out_unseeded(cfg, chosen) -> tuple[list, list]:
+    """Suites that `requires: [cues]` on an eval home seeded without --cues. They are
+    NOT EVALUATED, named and left out of the run, never driven and never failures:
+    the capability runner's rule for an unmet precondition, so a sweep over a home
+    without cues reports the gap instead of a suite of zeros."""
+    needing = [(suite, scns) for suite, scns in chosen if "cues" in suite.requires]
+    problem = cue_drive.home_problem(cfg.daemon.fermix_home) if needing else None
+    if problem is None:
+        return chosen, []
+    held = [(suite.name, case.id, problem)
+            for suite, scns in needing for scenario in scns for case in scenario.cases]
+    kept = [(suite, scns) for suite, scns in chosen if "cues" not in suite.requires]
+    return kept, held
+
+
+def print_not_evaluated(held: list[tuple[str, str, str]]) -> None:
+    print(f"note: NOT EVALUATED — {len(held)} case(s) this eval home cannot be measured "
+          "on, left out of the run (an unseeded precondition is not a failure):")
+    for suite_name, case_id, reason in held:
+        print(f"  - {suite_name}/{case_id} — {reason}")
 
 
 def select(suites, args, profiles):
@@ -2237,6 +2259,13 @@ def main(argv=None) -> int:
     judge_error = judge_precondition_error(cfg, judge_on)
     if judge_error:
         print(f"judge precondition failed: {judge_error}", file=sys.stderr)
+        return 3
+    chosen, held = hold_out_unseeded(cfg, chosen)
+    if held:
+        print_not_evaluated(held)
+    if not chosen:
+        print("nothing left to run: every selected case needs a precondition this eval "
+              "home was not seeded with", file=sys.stderr)
         return 3
     return _run_selected(cfg, args, chosen, profiles, judge_on)
 

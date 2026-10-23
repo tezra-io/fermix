@@ -5,8 +5,12 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
   alias FermixChannels.Gateway.Commands
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Source
+  alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Cues.Pins
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.PathPolicy
+  alias FermixTestSupport.MandateFixtures
 
   setup do
     home = FermixTestSupport.SafeRm.make_tmp_dir!("channel-sandbox-command")
@@ -272,6 +276,91 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
     assert reply =~ "Sandbox change rejected"
     assert reply =~ "/sandbox explain"
   end
+
+  # M60 §10.9: a mandate proposal's token goes to core, with the message's
+  # origin; core answers only the owner's DM it sent the proposal to (C50).
+  describe "a mandate proposal's token" do
+    setup do
+      proposal_setup()
+    end
+
+    test "/confirm from the owner's DM runs the recorded call and replies with core's words",
+         ctx do
+      assert :ok = dispatch_proposal(dm("/confirm #{ctx.token}"), ctx)
+      assert_receive {:sandbox_reply, "Confirmed. github_create_issue ran:\n" <> framed}
+      assert framed =~ ~s(<untrusted_tool_result source="github_create_issue">)
+      assert_receive {:executed, "github_create_issue", _args, %{access_gate: "confirmed"}}
+
+      assert :ok = dispatch_proposal(dm("/confirm #{ctx.token}"), ctx)
+      assert_receive {:sandbox_reply, "That call was already confirmed; it runs at most once."}
+      refute_received {:executed, _tool, _args, _context}
+    end
+
+    test "/confirm from a group chat is refused, and the token still works from the DM", ctx do
+      group = message("/confirm #{ctx.token}", user_id: "owner-1")
+      assert :ok = dispatch_proposal(group, ctx)
+      assert_receive {:sandbox_reply, "Confirm it from the chat Fermix sent it to; nothing ran."}
+      refute_received {:executed, _tool, _args, _context}
+
+      assert :ok = dispatch_proposal(dm("/confirm #{ctx.token}"), ctx)
+      assert_receive {:sandbox_reply, "Confirmed. " <> _result}
+    end
+
+    test "/confirm from anyone but the owner is refused before core sees it", ctx do
+      stranger = %{dm("/confirm #{ctx.token}") | metadata: %{user_id: "stranger"}}
+      assert {:error, :unauthorized} = dispatch_proposal(stranger, ctx)
+      assert_receive {:sandbox_reply, "This command requires owner permissions."}
+      refute_received {:executed, _tool, _args, _context}
+    end
+
+    test "/deny settles the proposal and nothing runs", ctx do
+      assert :ok = dispatch_proposal(dm("/deny #{ctx.token}"), ctx)
+      assert_receive {:sandbox_reply, "Denied. github_create_issue will not run."}
+
+      assert :ok = dispatch_proposal(dm("/confirm #{ctx.token}"), ctx)
+      assert_receive {:sandbox_reply, "That call was already denied."}
+      refute_received {:executed, _tool, _args, _context}
+    end
+  end
+
+  # A claimed cue run under an approved approve-mode mandate whose owner is
+  # Telegram user owner-1, proposing one call through the access gate.
+  defp proposal_setup do
+    fixture = MandateFixtures.cue_run("gateway_proposal")
+    registry = :"gateway_proposal_caps_#{System.unique_integer([:positive])}"
+    start_supervised!(Supervisor.child_spec({CapabilityRegistry, name: registry}, id: registry))
+    :ok = CapabilityRegistry.register(registry, MandateFixtures.capability())
+    test_pid = self()
+
+    seams = [
+      config: MandateFixtures.config("release-issues", fixture.job.id, %{"mode" => "approve"}),
+      configured_owners: %{"telegram" => "owner-1"},
+      capability_registry: registry,
+      proposal_sender: fn _inbox, _text, token ->
+        send(test_pid, {:proposal_token, token})
+        :ok
+      end
+    ]
+
+    context = MandateFixtures.context(fixture, "release-issues", seams)
+    opts = context.cue_mandate_opts
+    {:ok, _status} = Pins.approve("release-issues", "test", MandateFixtures.now(), opts)
+
+    {:ok, %{success: false}} =
+      Capability.execute(MandateFixtures.capability(), proposal_args(), context)
+
+    assert_receive {:proposal_token, token}
+    %{token: token, opts: Keyword.put(opts, :now, ~U[2026-10-10 12:05:00.000000Z])}
+  end
+
+  defp proposal_args, do: %{"owner" => "example-org", "repo" => "ops", "title" => "Phoenix 2.0"}
+
+  defp dm(content) do
+    %{message(content, user_id: "owner-1") | chat_id: "owner-1", reply_target: "owner-1"}
+  end
+
+  defp dispatch_proposal(message, ctx),
+    do: dispatch_with_context(message, cue_proposal_opts: ctx.opts)
 
   defp propose_grant(root, message) do
     assert :ok = dispatch(message)

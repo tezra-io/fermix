@@ -4,6 +4,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   alias FermixCore.Auth.Redaction
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
+  alias FermixWebWeb.SetupLive.CuesPane
 
   @local_process_consent "Runs a local process with direct access to the folders you configure."
 
@@ -60,6 +61,8 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :tabs, :list, required: true
   attr :tool_summary, :map, required: true
   attr :provider_statuses, :list, required: true
+  # The Cues tab's state (M60 §15); nil in a build that does not admit cues.
+  attr :cues, :map, default: nil
 
   def page(assigns) do
     ~H"""
@@ -168,6 +171,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               skill_summary={@skill_summary}
               tabs={@tabs}
               tool_summary={@tool_summary}
+              cues={@cues}
             />
           </div>
         </section>
@@ -322,6 +326,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :tabs, :list, required: true
   attr :tool_summary, :map, required: true
   attr :provider_statuses, :list, required: true
+  attr :cues, :map, default: nil
 
   defp active_pane(assigns), do: render_active_pane(assigns.active_tab, assigns)
 
@@ -337,6 +342,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp render_active_pane("memory", assigns), do: memory_pane(assigns)
   defp render_active_pane("personalization", assigns), do: personalization_pane(assigns)
   defp render_active_pane("doctor", assigns), do: doctor_pane(assigns)
+  defp render_active_pane("cues", assigns), do: CuesPane.pane(assigns)
 
   defp provider_pane(assigns) do
     ~H"""

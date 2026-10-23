@@ -86,6 +86,9 @@ defmodule FermixCore.Jobs.Telemetry do
     execute(@run_error_event, %{count: 1, duration_ms: run_duration_ms(run)}, metadata)
   end
 
+  # A cue run (trigger "cue", M60 §9.6) also carries the delivery it held (the
+  # run row's `cue_delivery_id`) and its watcher (`watcher_id`, which the runner
+  # puts on the run map it passes here); both are absent for any other run.
   defp base_metadata(job, run) do
     %{
       agent: "scheduled:#{job.id}",
@@ -95,7 +98,9 @@ defmodule FermixCore.Jobs.Telemetry do
       name: Map.get(job, :name),
       schedule_kind: Map.get(job, :schedule_kind),
       schedule_expr: Map.get(job, :schedule_expr),
-      trigger: Map.get(run, :trigger)
+      trigger: Map.get(run, :trigger),
+      delivery_id: Map.get(run, :cue_delivery_id),
+      watcher_id: Map.get(run, :watcher_id)
     }
   end
 

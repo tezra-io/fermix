@@ -24,6 +24,7 @@ defmodule FermixCore.Management.Settings do
   alias FermixCore.Management.Settings.Assistant
   alias FermixCore.Management.Settings.Browser
   alias FermixCore.Management.Settings.Channels
+  alias FermixCore.Management.Settings.Cues, as: CuesSection
   alias FermixCore.Management.Settings.Mobile
   alias FermixCore.Management.Settings.Providers
   alias FermixCore.Management.Settings.Row
@@ -40,7 +41,7 @@ defmodule FermixCore.Management.Settings do
 
   require Logger
 
-  @families [Providers, Assistant, Channels, Mobile, Voice, Tools, Browser, Secrets]
+  @families [Providers, Assistant, Channels, Mobile, CuesSection, Voice, Tools, Browser, Secrets]
 
   @type section :: %{id: String.t(), pane: String.t(), title: String.t()}
   @type write_error ::
@@ -52,8 +53,9 @@ defmodule FermixCore.Management.Settings do
   @doc """
   Every section this daemon can serve, ordered, with the pane it renders under.
 
-  A section that exists only on a Mac (`channels.imessage`) is absent off one.
-  `macos?:` names the host for a test.
+  A section that exists only on a Mac (`channels.imessage`) is absent off one,
+  and the `cues` section is absent from a build that does not admit cues.
+  `macos?:` names the host and `cues_available?:` the build, for a test.
   """
   @spec sections(keyword()) :: [section()]
   def sections(opts \\ []) when is_list(opts),
@@ -230,6 +232,7 @@ defmodule FermixCore.Management.Settings do
   end
 
   defp commit(:meetings, answers), do: MeetingsConfig.save(answers)
+  defp commit(:cues, answers), do: CuesSection.save(answers)
   defp commit(:browser, answers), do: BrowserConfig.save(answers)
 
   defp commit(:sandbox, answers) do
@@ -272,7 +275,9 @@ defmodule FermixCore.Management.Settings do
       "restart" => restart(),
       "readiness" => readiness(),
       "side_effects" =>
-        side_effects(before, current, switch) ++ phone ++ reach_switch(before, current, opts)
+        side_effects(before, current, switch) ++
+          phone ++
+          reach_switch(before, current, opts) ++ CuesSection.side_effects(before, current)
     }
   end
 
@@ -461,15 +466,18 @@ defmodule FermixCore.Management.Settings do
     end
   end
 
-  # Channels is the one family with a section that exists on one platform only,
-  # so it is the one that is handed the host; every other family is the same
-  # everywhere.
+  # Channels has a section that exists on one platform only, and the cues
+  # section exists only on a build that admits cues, so those two are handed
+  # the options that name the host or the build; every other family is the
+  # same everywhere.
   defp family(section, opts), do: Enum.find(@families, &family_owns?(&1, section, opts))
 
   defp family_owns?(Channels, section, opts), do: Channels.owns?(section, opts)
+  defp family_owns?(CuesSection, section, opts), do: CuesSection.owns?(section, opts)
   defp family_owns?(module, section, _opts), do: module.owns?(section)
 
   defp family_sections(Channels, opts), do: Channels.sections(opts)
+  defp family_sections(CuesSection, opts), do: CuesSection.sections(opts)
   defp family_sections(module, _opts), do: module.sections()
 
   # The search section offers place search's backends as this build can run

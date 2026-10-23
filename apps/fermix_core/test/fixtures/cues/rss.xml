@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Larkspur Tools Releases</title>
+    <link>https://releases.example.org/</link>
+    <atom:link href="https://releases.example.org/feed.xml" rel="self" type="application/rss+xml"/>
+    <description>Release notes for Larkspur Tools.</description>
+    <item>
+      <title>Larkspur 4.2 &amp;amp; the new importer</title>
+      <link>https://releases.example.org/posts/larkspur-4-2</link>
+      <guid isPermaLink="false">larkspur-release-4.2</guid>
+      <pubDate>Mon, 12 Oct 2026 14:03:27 GMT</pubDate>
+      <dc:creator>Tamsin Okoro</dc:creator>
+      <category>releases</category>
+      <category>importer</category>
+      <description>&lt;p&gt;The importer now reads &lt;b&gt;three&lt;/b&gt; formats.&lt;/p&gt;&lt;!-- more --&gt;&lt;script&gt;track("view")&lt;/script&gt;&lt;p&gt;Upgrade&amp;nbsp;today &amp;mdash; it&amp;rsquo;s free.&lt;/p&gt;</description>
+    </item>
+    <item>
+      <title>Larkspur 4.1.3 security fix</title>
+      <link>https://releases.example.org/posts/larkspur-4-1-3</link>
+      <guid>https://releases.example.org/posts/larkspur-4-1-3</guid>
+      <pubDate>Fri, 09 Oct 2026 08:15:00 -0500</pubDate>
+      <author>security@example.org (Ilse Varga)</author>
+      <description><![CDATA[<p>Fixes a path check in the <a href="https://releases.example.org/cve">archive reader</a>.</p>]]></description>
+    </item>
+    <item>
+      <title>Roadmap notes</title>
+      <link>https://releases.example.org/posts/roadmap</link>
+      <guid>roadmap-2026-q4</guid>
+      <pubDate>sometime last week</pubDate>
+      <content:encoded><![CDATA[<h2>Next</h2><ul><li>Faster sync</li><li>Offline mode</li></ul>]]></content:encoded>
+    </item>
+  </channel>
+</rss>

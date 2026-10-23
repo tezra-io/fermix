@@ -389,6 +389,30 @@ optional `link`, and `output.ex` carries it. The proactive dedupe the spec
 cites (`output.ex:257-259`, `mobile_sql.ex:377-387`) is unchanged, and no
 reminder platform is either channel, so nothing the spec models changed.
 
+Re-read on 2026-10-17 against M60 (cues and watchers, not yet committed on
+`release/0.17.0`), which staled the `application.ex` and `mobile.ex` pins:
+- `application.ex`: the cue subsystem's supervisor
+  (`maybe_cues_supervisor/0`, `:274`, `:485-491`) joins the core tree as its
+  LAST child, after the harness, realtime, computer-use, computer-history and
+  skill-curation children. It is absent under `:test` and wherever
+  `Cues.enabled?/0` is false. The children the spec relies on keep their
+  order (`Repo` … `JobScheduler`, then `TemporalScheduler`,
+  `DeliverySupervisor`, `FollowupSupervisor`, `:240`, `:254-256`), so a
+  temporal scheduler crash still tears down the delivery supervisor and its
+  workers first. It now also restarts the cue subtree, which runs no reminder
+  code, and a crash inside the cue subtree (its own supervisor is
+  `one_for_one` over its intake and filtering groups and its sweeper)
+  restarts nothing the spec models.
+  The comments' `application.ex` numbers now point at the current file (two
+  new alias lines moved it, on top of earlier drift).
+- `mobile.ex`: `delivered_effects` (`:483-488`) skips the link-preview fetch
+  when a send passes `link_previews: false` (a cue run's message, M60 §9.5).
+  A reminder send passes no such option, the proactive dedupe the spec cites
+  is unchanged, and no reminder platform is either channel.
+
+Nothing the spec models changed. It needs `make -C tla repin
+SPECS=reminder_delivery` once M60 is committed.
+
 ## Code and doc drift
 
 - `delivery_worker.ex:173-176` says a claim past the validity boundary "cannot

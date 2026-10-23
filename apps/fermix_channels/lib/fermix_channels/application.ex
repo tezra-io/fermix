@@ -56,6 +56,25 @@ defmodule FermixChannels.Application do
     # registers itself here and is present iff this application runs.
     Application.put_env(:fermix_core, :voice_bridge, FermixChannels.Voice.Bridge)
 
+    # A mandate proposal (M60 §10.9) goes to the owner's DM through the
+    # gateway's approval delivery. Core must not compile-depend on channels, so
+    # the sender registers itself here and is present iff this application runs;
+    # without it a proposal cannot reach the owner and is refused.
+    Application.put_env(
+      :fermix_core,
+      :cue_proposal_sender,
+      FermixChannels.Gateway.OwnerInboxApproval
+    )
+
+    # Every waiting proposal is offered to the Mac app's chat, and its end told
+    # there (M60 app surface §3.7): core announces through this listener, which
+    # registers itself here for the same reason.
+    Application.put_env(
+      :fermix_core,
+      :cue_proposal_listener,
+      FermixChannels.Companion.Proposals
+    )
+
     request_boot_epoch = request_boot_epoch()
 
     children =

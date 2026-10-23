@@ -8,6 +8,8 @@ defmodule FermixCore.Tools.UpdateJob do
 
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Cues.Mandates
+  alias FermixCore.Cues.Pins
   alias FermixCore.Jobs.DeliveryDefaults
   alias FermixCore.Jobs.Registry
   alias FermixCore.Tools.JobRegistrySupport, as: Support
@@ -129,9 +131,12 @@ defmodule FermixCore.Tools.UpdateJob do
          {:ok, clear_route_pin?} <- validate_clear_route_pin(args),
          {:ok, route_pin} <- Support.validate_route_pin(args),
          {:ok, attrs} <- update_attrs(args, skill_name, delivery, route_pin, clear_route_pin?),
-         :ok <- Support.check_job_access(job_id, context) do
+         :ok <- Support.check_job_access(job_id, context),
+         :ok <- Support.check_watcher_consent(job_id, context),
+         :ok <- Mandates.check_update_consent(job_id, context),
+         :ok <- disable_mandates(job_id, context) do
       case Registry.update_job(job_id, attrs, repo: Support.repo(context)) do
-        {:ok, job} -> Support.success_json(Support.job_payload(job))
+        {:ok, job} -> Support.success_json(Support.job_payload(job, Support.repo(context)))
         {:error, reason} -> Support.error(reason)
       end
     else
@@ -139,6 +144,12 @@ defmodule FermixCore.Tools.UpdateJob do
       {:error, reason} -> Support.error(reason)
     end
   end
+
+  # M60 §10.4: a job a mandate names changes only with the mandate disabled
+  # until the owner approves it again, so the change is written after the
+  # disable (a failed disable leaves the job as it was).
+  defp disable_mandates(job_id, context),
+    do: Pins.disable_for_job(job_id, DateTime.utc_now(), repo: Support.repo(context))
 
   # Clearing a pin and setting one are mutually exclusive: clear_route_pin=true
   # un-pins to default routing, so combining it with a provider/model is an

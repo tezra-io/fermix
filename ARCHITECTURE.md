@@ -107,6 +107,8 @@ redacting logger, attaches telemetry, and starts the core tree under
 10. children gated by config or platform: the daemon socket
     (`Fermix.CLI.Daemon` and the management workers), `Realtime`,
     `ComputerUse`, `ComputerHistory` (macOS only), and `SkillCuration.Scheduler`
+11. `Cues.Supervisor`, last, only in a development build with cues enabled
+    (see `FermixCore.Cues` below)
 
 Architecture Invariant: core is the only place where agent runtime state, memory
 state, prompt composition, capability state, and provider calls meet. Channels
@@ -440,6 +442,90 @@ Architecture Invariant: a job is `running` only while one of its runs is queued
 or running. The claim takes the job and inserts the run in one transaction, and
 `Repo.settle_job_run` writes the run's final row and releases the job in
 another; owner edits write only the columns they own.
+
+### `FermixCore.Cues`: Cues and Watchers
+
+`Cues` turns push input into agent work. It exists only in a build compiled for
+`:dev` or `:test` (`Cues.available?/0`), and its tree starts at boot only when
+`[fermix_core.cues] enabled` and memory are on (`Cues.enabled?/0`); everything
+that asks at runtime (a tool's advertisement, the scheduler's admission) asks
+`Cues.running?/0`, whether the tree is alive, so a live flip of the switch
+changes nothing until a restart. `enabled` and `door_port` are boot-bound
+(`Setup.RestartState` says so); sources are reconciled on every config apply
+(`Cues.SourceManager.reconcile/0`), and mandates and the routing `filter_*`
+keys are read at each call. The path of one item:
+
+1. A source hands items to `Cues.Ingest.accept/3`: the door (`Cues.Door`, Bandit
+   on `127.0.0.1:door_port`, routes in `Cues.Door.Router`: local-push CloudEvents
+   on `/cues/v1/:ref`, webhooks on `/cues/hooks/:ref/:random`, verified by
+   `Cues.Webhook`), or a worker under `Cues.SourceSupervisor` (`Cues.Source.Feed`
+   polls through `Net.HttpClient`, `Cues.Source.Stream` holds a Jetstream
+   WebSocket), which `Cues.SourceManager` starts and stops to match the config.
+2. Accept and route are one Repo transaction: the identity check, the cue row,
+   one `cue_deliveries` row per enabled watcher listening to the source
+   (`pending` for an `llm` watcher, `passed` for a `none` one), inbox eviction
+   with its gap, and the wake-ups after the commit.
+3. `Cues.Filters` claims at most one delivery per `llm` watcher (four calls in
+   all) and runs `Cues.Filter.Llm` under `Cues.FilterSupervisor` on the
+   watcher's filter model or `[fermix_core.routing] filter_*`, never the main
+   route; each call writes its own fenced settle.
+4. `Jobs.Scheduler` admits passed deliveries through `Jobs.CueAdmission`:
+   `Repo.claim_cue_run/4` claims the job and the delivery and inserts the run in
+   one transaction, at most three cue runs at once, oldest eligible delivery
+   first, and a delivery waits behind every older live delivery of its watcher
+   with the same subject. `Jobs.Runner` runs it as a cue run (`Jobs.CueRun`, on
+   the surface `Jobs.CueSurface` names), and `Repo.settle_cue_run/3` writes the
+   run, releases the job and moves the delivery in one transaction.
+5. A mandated tool call meets `Cues.MandateGate`, the first `AccessGate.admit/3`
+   clause for a cue run: switches, freshness, the hourly limit, the pins
+   (`Cues.Pins` holds the owner's approvals), `pin_args`, then the owner's
+   validator (`Cues.Validator`, whose answer is the last line of its standard
+   output). Approve mode goes through `Cues.Proposals` and the gateway's
+   `/confirm`.
+6. `Cues.Sweeper` expires, prunes and reports (retention, proposal expiry,
+   unknown proposal outcomes, gap notices); `Cues.Notices` tells the owner once
+   per episode.
+
+`Cues.Supervisor` is the last child of the core tree, so a crash of the job
+scheduler or anything before it restarts the cue tree, which re-reads its rows,
+and a crash inside it restarts nothing outside. It is `one_for_one` over three
+children: the intake group (`rest_for_one`: `Cues.Buckets`, the ETS owner for
+token buckets, door slots and secret fingerprints, then the source supervisor,
+the source manager and the door), the filtering group (`rest_for_one`:
+`Cues.Filters`, then the filter task supervisor, so a dispatcher crash ends its
+calls) and `Cues.Sweeper`. The door is in core, not in `fermix_web`, so it exists
+under `--no-web` and in eval homes; a port in use leaves it `unavailable`, never
+a crashed tree. Rows are the truth: every durable fact is a row in `memory.db`,
+a process holds only timers and work in flight, and the boot sweeps put a
+`filtering` delivery back to `pending` without spending an attempt and reap the
+runs a stop interrupted. No GenServer callback makes a provider call or a
+channel send: filter calls run as supervised tasks and sends go through the
+delivery layer with their timeouts.
+
+Architecture Invariant: a cue is data, never an owner message. It never enters a
+conversation, and its text reaches a model only framed as outside text
+(`UntrustedContent`, label `cue:<source>`).
+
+Architecture Invariant: a cue run is tainted from its first token: its context
+carries the cue as an outside source, so the access gate refuses every
+access-sensitive command outside an approved mandate, and no consent check
+passes in it.
+
+Architecture Invariant: nothing a cue run reads reaches the owner's memory. A
+cue run writes no memory review input, profile or job summary; task notes are
+their own rows (`source_type` `cue_task`) that only that task reads.
+
+Architecture Invariant: every delivery transition is fenced. `CuesSql.transition/6`
+compares the row's state and its fence (`filter_call_id` or `claimed_run_id`);
+zero rows changed is `{:error, :stale}`, so a late write after a sweep or a
+restart is refused, never retried blindly.
+
+Architecture Invariant: a proposal runs at most once and only on the owner's
+confirm: one update matches `waiting`, the token's digest, the chat and user it
+was sent to, and an unexpired time. A call is proposed at most once per cue (the
+proposal's idempotency key, over the mandate, tool, arguments and cue, is
+unique), so a denied, expired or unreachable proposal is final for that cue. A cue run whose `job_runs.tools_started_at`
+is set (an allowed mandate call or a proposal) is never retried.
 
 ### Sandbox and Command Execution
 

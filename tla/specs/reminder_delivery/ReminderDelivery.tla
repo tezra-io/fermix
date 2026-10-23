@@ -358,7 +358,7 @@ Boot ==
 \* The scheduler, or any earlier child of FermixCore.Supervisor (Repo,
 \* MainAgent, JobScheduler, ...), crashes. :rest_for_one (application.ex:274)
 \* terminates every later child, DeliverySupervisor and its workers included
-\* (:245-246), before init runs again. The workers do not trap exits, so they
+\* (:255-256), before init runs again. The workers do not trap exits, so they
 \* die at once. Each worker's send process is linked to it
 \* (Process.spawn [:link, :monitor], channel_send.ex:219-224), so it dies
 \* too, as in DaemonCrash: a request it already wrote is still processed by

@@ -59,6 +59,18 @@ defmodule FermixCore.Management.Secrets do
   same supervisor's `stop_server/1`, so the value is no longer in use; it
   starts again once the value is stored. Addressing, storage and presence are
   `Capabilities.MCP.Secrets`'s.
+
+  `cue_source:<ref>:key` and `cue_source:<ref>:secret` are the seventh family
+  (M60 app surface §3.5): what the owner types for a cue source, accepted only
+  where the source exists and its kind declares the field. It is written
+  through `Cues.Settings.set_secret/3`, the setup page's own path: the value
+  under `{:cue_source, ref, field}` and the sentinel that names it in one
+  save, so storing the last secret a source waited for starts it. Present
+  means the sentinel is in the settings file. `:token` and `:path_secret`
+  are Fermix's to make and are refused here: a new token comes from
+  `cues.sources.token.new`, an address from `cues.sources.url.get`. On a
+  build without cues the family answers `unavailable`, as every `cues.*`
+  method does.
   """
 
   alias FermixCore.Auth.AnthropicLogin
@@ -68,7 +80,11 @@ defmodule FermixCore.Management.Secrets do
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
+  alias FermixCore.Cues
+  alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Cues.Settings, as: CueSettings
   alias FermixCore.Management.Auth
+  alias FermixCore.Management.Cues, as: ManagementCues
   alias FermixCore.Management.McpServers.PastedValues
   alias FermixCore.Management.Settings
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -106,12 +122,20 @@ defmodule FermixCore.Management.Secrets do
                      "mcp:<server>/header/<Header-Name> or mcp:<server>/client_secret."
   @mcp_legacy_sentence "Fermix keeps no secrets for a server with this name. " <>
                          "Remove the server and add it again under a lowercase name."
+  # The open family of values a cue source's kind declares (M60 app surface §3.5).
+  @cue_prefix "cue_source:"
+  @cue_id_sentence "A cue source's secret is `cue_source:<source>:key` or " <>
+                     "`cue_source:<source>:secret`."
+  @cue_token_sentence "Fermix makes this source's token: ask for a new one instead."
+  @cue_address_sentence "Fermix makes this webhook's address: copy it from the source instead."
+  @cue_line_sentence "A secret is one line."
 
   @type error ::
           {:invalid_params, String.t(), String.t()}
           | {:secret_store_failed, String.t(), String.t()}
           | {:external_change, [String.t()]}
           | {:config_unreadable, String.t()}
+          | {:unavailable, String.t(), String.t()}
 
   @doc """
   Every id this method accepts, as the wire spells them: the registry keys, then
@@ -189,6 +213,17 @@ defmodule FermixCore.Management.Secrets do
     end
   end
 
+  # Every refusal that needs no storage call comes first, the settings file's
+  # write guard among them, so a refused write has stored nothing.
+  def set(@cue_prefix <> _rest = id, value, opts) when is_binary(value) and is_list(opts) do
+    with :ok <- cues_available(opts),
+         {:ok, ref, field} <- cue_target(id),
+         :ok <- validate_cue_value(value),
+         :ok <- writable(id) do
+      cue_result(id, ref, field, CueSettings.set_secret(ref, field, value))
+    end
+  end
+
   def set(id, value, _opts) when is_binary(id) and is_binary(value) do
     with {:ok, key} <- fetch_key(id),
          :ok <- validate_value(value) do
@@ -213,6 +248,14 @@ defmodule FermixCore.Management.Secrets do
 
   def clear(@mcp_prefix <> _rest = id, opts) when is_list(opts) do
     with {:ok, server, ref} <- mcp_target(id), do: forget_mcp(id, server, ref, opts)
+  end
+
+  def clear(@cue_prefix <> _rest = id, opts) when is_list(opts) do
+    with :ok <- cues_available(opts),
+         {:ok, ref, field} <- cue_target(id),
+         :ok <- writable(id) do
+      cue_result(id, ref, field, CueSettings.clear_secret(ref, field))
+    end
   end
 
   def clear(id, _opts) when is_binary(id) do
@@ -526,6 +569,83 @@ defmodule FermixCore.Management.Secrets do
         refusal
     end
   end
+
+  # --- cue sources ---------------------------------------------------------
+
+  defp cues_available(opts) do
+    if Keyword.get_lazy(opts, :cues_available?, &Cues.available?/0),
+      do: :ok,
+      else:
+        {:error,
+         {:unavailable, ManagementCues.capability(), ManagementCues.unavailable_sentence()}}
+  end
+
+  # The ref and the field a `cue_source:` id names. The two values Fermix makes
+  # are refused by name; whether the source exists and its kind declares the
+  # field is `Cues.Settings`' to say.
+  defp cue_target(@cue_prefix <> rest) do
+    case String.split(rest, ":") do
+      [_ref, "token"] -> {:error, {:invalid_params, "id", @cue_token_sentence}}
+      [_ref, "path_secret"] -> {:error, {:invalid_params, "id", @cue_address_sentence}}
+      [ref, field] when field in ["key", "secret"] -> cue_ref(ref, String.to_existing_atom(field))
+      _malformed -> {:error, {:invalid_params, "id", @cue_id_sentence}}
+    end
+  end
+
+  defp cue_ref(ref, field) do
+    if CuesConfig.valid_name?(ref),
+      do: {:ok, ref, field},
+      else: {:error, {:invalid_params, "id", @cue_id_sentence}}
+  end
+
+  defp validate_cue_value(value) do
+    cond do
+      String.trim(value) == "" ->
+        {:error, {:invalid_params, "value", "A secret cannot be empty."}}
+
+      byte_size(value) > @max_value_bytes ->
+        validate_value(value)
+
+      String.match?(value, ~r/[\r\n\x00]/) ->
+        {:error, {:invalid_params, "value", @cue_line_sentence}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp writable(id) do
+    case RestartState.writable() do
+      :ok -> :ok
+      {:error, reason} -> {:error, error(id, reason)}
+    end
+  end
+
+  defp cue_result(id, ref, field, {:ok, _result}) do
+    present =
+      case CuesConfig.source(ref) do
+        {:ok, source} -> Map.has_key?(source.secrets, field)
+        :error -> false
+      end
+
+    {:ok,
+     %{
+       "id" => id,
+       "present" => present,
+       "restart" => Settings.restart(),
+       "environment_override" => nil
+     }}
+  end
+
+  defp cue_result(_id, _ref, _field, {:error, {:invalid, sentence}}),
+    do: {:error, {:invalid_params, "id", sentence}}
+
+  defp cue_result(id, _ref, _field, {:error, {:secret_store_failed, _key, sentence}}) do
+    Logger.warning("secret #{id} failed: #{sentence}")
+    {:error, {:secret_store_failed, id, "unavailable"}}
+  end
+
+  defp cue_result(id, _ref, _field, {:error, reason}), do: {:error, error(id, reason)}
 
   # Whether storing may go ahead, and whether it creates the entry: a name whose
   # value comes from elsewhere is refused, because storing would silently move

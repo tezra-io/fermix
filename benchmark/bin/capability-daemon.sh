@@ -8,14 +8,14 @@
 # operator's live ~/.fermix or ~/.fermix-dev daemon (different home => different
 # control socket; --no-web => no shared port).
 #
-#   capability-daemon.sh up     seed + start (background) + wait ready
+#   capability-daemon.sh up     seed (config; with --cues the cue watchers too) + start + wait ready
 #   capability-daemon.sh down    stop + clean the control socket
 #   capability-daemon.sh run     up, run the capability tier, down; preserve its exit code
 #
 # Override the home with FERMIX_CAP_HOME (leaf must contain 'eval' or 'e2e').
 # CI knobs: FERMIX_CAP_PROJECT overrides the Opik project; FERMIX_CAP_SEED_ARGS
 # passes extra flags to seed_capability_home.py (e.g. the explicit --provider/
-# --model CI mode); FERMIX_CAP_OPIK=0 starts the daemon without the Opik
+# --model CI mode, or --cues for the cue suites); FERMIX_CAP_OPIK=0 starts the daemon without the Opik
 # exporter (macOS smoke boxes have no Opik).
 set -euo pipefail
 
@@ -50,6 +50,15 @@ up() {
   rm -f "$HOME_DIR/daemon.sock"                    # drop any stale socket
   log "compiling once so the readiness window stays tight"
   ( cd "$REPO_ROOT" && mix compile >/dev/null )
+  # With --cues (FERMIX_CAP_SEED_ARGS) the cue suites' watchers and tasks are
+  # memory.db rows, made through the product's own calls while the daemon is
+  # still down (the only writer). Without it the seeder left no cue manifest and
+  # the cue suites are held out as not evaluated.
+  if [ -f "$HOME_DIR/eval-fixtures/cues.json" ]; then
+    log "seeding the cue watchers and tasks (--cues)"
+    ( cd "$REPO_ROOT" && FERMIX_HOME="$HOME_DIR" \
+        mix run --no-start --no-compile benchmark/bin/seed_cues.exs )
+  fi
   # Keep channels running (--no-web/--no-realtime only): the CLI-ask turn queue
   # is FermixChannels.Gateway.Queue, so --no-channels would break every turn. No
   # channel is configured in the seeded home, so no bot adapters actually poll.

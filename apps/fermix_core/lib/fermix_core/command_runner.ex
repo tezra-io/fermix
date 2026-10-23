@@ -35,6 +35,8 @@ defmodule FermixCore.CommandRunner do
           | {:kill_grace_ms, pos_integer()}
           | {:supervised, boolean()}
           | {:dynamic_supervisor, atom() | pid()}
+          | {:input, binary()}
+          | {:stderr, :stdout | :discard}
         ]
 
   @type stream_opts :: [
@@ -68,6 +70,19 @@ defmodule FermixCore.CommandRunner do
   @default_max_output_bytes 1_048_576
   @default_kill_grace_ms 200
 
+  # `:input` reaches the child as its standard input, then end of file. An
+  # Erlang port cannot close only the child's stdin (closing the port closes
+  # its output too), so the input is written to a private file and the child
+  # runs as `/bin/sh -c 'exec "$@" <"$0"' <file> <executable> <args…>`: the
+  # shell replaces itself with the executable, which keeps the port's process
+  # (and group) and reads the file to its end. The file is removed once the
+  # run ends, whatever the ending.
+  @input_shell "/bin/sh"
+  @input_script ~s(exec "$@" <"$0")
+  # The same, with the child's standard error sent nowhere (`stderr: :discard`).
+  @input_script_quiet ~s(exec "$@" <"$0" 2>/dev/null)
+  @max_input_bytes 1_048_576
+
   @doc """
   Runs an external command, returning its captured output once.
 
@@ -88,13 +103,46 @@ defmodule FermixCore.CommandRunner do
   list the child's whole environment: every inherited variable the list does
   not name is unset, so a sandboxed command's variables never have to travel as
   `env -i NAME=value` argv, where any process on the host can read them.
+
+  `:input` (a binary of at most 1 MiB) is written to the child's standard
+  input, which is then at end of file. Without it the buffered path leaves the
+  child's stdin open, as before. With it the child runs through `/bin/sh`'s
+  `exec`, so a POSIX shell may add its own bookkeeping variables (`PWD`,
+  `SHLVL`, `_`) to a replaced environment; it adds no value of the daemon's.
+
+  `:stderr` is `:stdout` (the default: standard error is captured with standard
+  output, as one stream) or `:discard` (standard error goes nowhere, so the
+  captured output is standard output alone). `:discard` needs `:input`: that
+  path's shell makes the redirection; without it this raises.
   """
   @spec run(String.t(), [String.t()], opts()) :: {:ok, result()} | {:error, reason()}
   def run(executable, args, opts \\ [])
       when is_binary(executable) and is_list(args) and is_list(opts) do
     limits = build_limits(opts)
     _mode = env_mode!(opts)
+    {stderr, opts} = Keyword.pop(opts, :stderr, :stdout)
 
+    case {Keyword.pop(opts, :input), stderr!(stderr)} do
+      {{nil, _opts}, :discard} ->
+        raise ArgumentError, stderr_error(stderr)
+
+      {{nil, opts}, :stdout} ->
+        run_command(executable, args, opts, limits)
+
+      {{input, opts}, _stderr} ->
+        run_with_input(executable, args, input!(input), stderr, opts, limits)
+    end
+  end
+
+  defp stderr!(stderr) when stderr in [:stdout, :discard], do: stderr
+  defp stderr!(stderr), do: raise(ArgumentError, stderr_error(stderr))
+
+  defp stderr_error(stderr) do
+    "CommandRunner option :stderr must be :stdout, or :discard together with :input, got: " <>
+      inspect(stderr)
+  end
+
+  defp run_command(executable, args, opts, limits) do
     cond do
       not File.exists?(executable) ->
         {:error, {:executable_not_found, executable}}
@@ -106,6 +154,57 @@ defmodule FermixCore.CommandRunner do
         do_run(executable, args, opts, limits)
     end
   end
+
+  # The executable is checked before anything is written, so a missing one
+  # leaves no file behind and reports its own path, never the shell's.
+  defp run_with_input(executable, args, input, stderr, opts, limits) do
+    script = if stderr == :discard, do: @input_script_quiet, else: @input_script
+
+    if File.exists?(executable) do
+      with_input_file(input, fn path ->
+        run_command(@input_shell, ["-c", script, path, executable | args], opts, limits)
+      end)
+    else
+      {:error, {:executable_not_found, executable}}
+    end
+  end
+
+  defp input!(input) when is_binary(input) and byte_size(input) <= @max_input_bytes, do: input
+
+  defp input!(input) do
+    raise ArgumentError,
+          "CommandRunner option :input must be a binary of at most #{@max_input_bytes} bytes, " <>
+            "got: #{inspect(input, limit: 5, printable_limit: 40)}"
+  end
+
+  # A fresh directory only this user can enter holds the one file; both are
+  # removed on every ending of `fun`, a raise included.
+  defp with_input_file(input, fun) do
+    dir = Path.join(System.tmp_dir!(), "fermix-input-" <> random_suffix())
+
+    with :ok <- File.mkdir(dir),
+         :ok <- File.chmod(dir, 0o700) do
+      path = Path.join(dir, "stdin")
+
+      try do
+        write_input(path, input, fun)
+      after
+        _ = File.rm(path)
+        _ = File.rmdir(dir)
+      end
+    else
+      {:error, reason} -> {:error, {:input_file_failed, reason}}
+    end
+  end
+
+  defp write_input(path, input, fun) do
+    case File.write(path, input, [:exclusive]) do
+      :ok -> fun.(path)
+      {:error, reason} -> {:error, {:input_file_failed, reason}}
+    end
+  end
+
+  defp random_suffix, do: Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
 
   @doc """
   Starts a command in async streaming mode under a supervised `CommandHost`.

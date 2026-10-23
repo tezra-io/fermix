@@ -16,6 +16,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerUse
+  alias FermixCore.Cues
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Harness.Vendors
   alias FermixCore.Meetings
@@ -156,6 +157,18 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.ListMeetings
   ]
 
+  # Cues and watchers (M60 §15): seeded only when `Cues.enabled?()` — a build
+  # that admits cues, `[fermix_core.cues] enabled` and memory on. Off is zero
+  # residue; on, `manage_watcher` and `list_cues` are offered only on an attended
+  # operator turn and `cue_history` only in a run a cue woke, each `execute/2`
+  # refusing any other turn. Re-evaluated each boot, which is when the cue
+  # subsystem itself starts or not.
+  @cue_tool_modules [
+    FermixCore.Tools.ManageWatcher,
+    FermixCore.Tools.ListCues,
+    FermixCore.Tools.CueHistory
+  ]
+
   # Coding harness: seeded only when the harness is enabled (config) AND the
   # relevant vendor CLI is detected at boot — the §7.3 boot snapshot. The two run
   # tools seed per-vendor (codex_run needs `codex`, claude_code_run needs
@@ -204,7 +217,8 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     do:
       @builtin_tool_modules ++
         @bridge_tool_modules ++
-        @computer_use_tool_modules ++ @harness_tool_modules ++ @meetings_tool_modules
+        @computer_use_tool_modules ++
+        @harness_tool_modules ++ @meetings_tool_modules ++ @cue_tool_modules
 
   @doc """
   The temporal-event tool family (MILESTONE_30 §12.1). Exposed so the
@@ -223,6 +237,14 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   @spec meetings_tool_modules() :: [module()]
   def meetings_tool_modules, do: @meetings_tool_modules
 
+  @doc """
+  The cue tool family (M60 §15), seeded only while `Cues.enabled?()`. Exposed so
+  a whole-surface test asserts none of them is advertised on a turn that is
+  neither an attended operator turn nor (for `cue_history`) a cue run.
+  """
+  @spec cue_tool_modules() :: [module()]
+  def cue_tool_modules, do: @cue_tool_modules
+
   defp builtin_modules(opts) do
     case Keyword.fetch(opts, :tool_modules) do
       {:ok, modules} ->
@@ -231,7 +253,8 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
       :error ->
         @builtin_tool_modules ++
           bridge_modules() ++
-          computer_use_modules() ++ auto_harness_modules() ++ meetings_modules()
+          computer_use_modules() ++
+          auto_harness_modules() ++ meetings_modules() ++ cue_modules()
     end
   end
 
@@ -256,6 +279,10 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
 
   defp meetings_modules do
     if Meetings.ready?(), do: @meetings_tool_modules, else: []
+  end
+
+  defp cue_modules do
+    if Cues.enabled?(), do: @cue_tool_modules, else: []
   end
 
   @doc """

@@ -212,6 +212,9 @@ defmodule FermixCore.Plugins.ToolExecutor do
     end
   end
 
+  # A mandate call (M60 §10.2) arrives with the arguments the mandate gate
+  # normalised and checked (`mandate_args_normalized?`); the request is built
+  # from exactly that map.
   defp run_declarative(args, context, plugin, plugin_name, auth_profile, token, tool) do
     cred = credential(plugin.auth, token)
 
@@ -221,7 +224,8 @@ defmodule FermixCore.Plugins.ToolExecutor do
       auth_type: plugin.auth.type,
       plugin: plugin_name,
       requires_scopes: Map.get(tool, "requires_scopes", []),
-      error_classifier: google_error_classifier(plugin, plugin_name, tool)
+      error_classifier: google_error_classifier(plugin, plugin_name, tool),
+      normalized: Map.get(context, :mandate_args_normalized?) == true
     )
   end
 

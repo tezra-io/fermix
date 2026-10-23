@@ -79,7 +79,7 @@ CONSTANTS
     CrashFiresOutcome,  \* a crashed turn's held closure fires {:failed, _} (queue.ex:914-922)
     TurnsShareQueueFate,    \* turn tasks run under a Task.Supervisor that QueueSupervisor
                             \* (:one_for_all) terminates before it restarts the Queue
-                            \* (queue_supervisor.ex:46-51, application.ex:62)
+                            \* (queue_supervisor.ex:46-51, application.ex:74)
     CrashClosesUserMessage, \* a crashed turn's DOWN writes the stopped marker before the
                             \* next message starts (queue.ex:873, :887-893)
     StopSparesClaimedTurn,  \* a stop leaves a turn that claimed its outcome running

@@ -82,6 +82,56 @@
     "actions": ["sign_in", "sign_out", "check", "enable", "disable"],
     "auth_states": ["not_needed", "signed_out", "signed_in", "expired"]
   },
+  "x-cue-vocabulary": {
+    "description": "The closed sets the cue rows (`cueSourceRow`, `cueWatcherRow`, `cueMandateRow`, `cueProposalRecord`) draw on. A state is published for logs and support; a client renders the row's sentence and switches on `primary_action` and `actions`, never on a state.",
+    "source_states": [
+      "off",
+      "needs_secret",
+      "not_running",
+      "idle",
+      "polling",
+      "connected",
+      "reconnecting",
+      "auth_failed",
+      "over_budget",
+      "stopped",
+      "unavailable"
+    ],
+    "source_actions": [
+      "enable",
+      "disable",
+      "set_secret",
+      "new_token",
+      "get_url"
+    ],
+    "watcher_states": [
+      "on",
+      "paused",
+      "held",
+      "no_model"
+    ],
+    "mandate_actions": [
+      "approve",
+      "enable",
+      "disable"
+    ],
+    "proposal_states": [
+      "waiting",
+      "confirmed",
+      "denied",
+      "expired",
+      "refused"
+    ],
+    "decided_from": [
+      "telegram",
+      "signal",
+      "whatsapp",
+      "imessage",
+      "companion",
+      "mobile",
+      "management"
+    ]
+  },
   "x-method-minimum-versions": {
     "hello": 1,
     "overview.get": 1,
@@ -147,7 +197,31 @@
     "mcp.servers.tool.set": 2,
     "mcp.servers.check.start": 2,
     "mcp.servers.import.scan": 2,
-    "mcp.servers.import": 2
+    "mcp.servers.import": 2,
+    "cues.status": 2,
+    "cues.sources.list": 2,
+    "cues.sources.get": 2,
+    "cues.sources.form": 2,
+    "cues.sources.add": 2,
+    "cues.sources.update": 2,
+    "cues.sources.remove": 2,
+    "cues.sources.enable": 2,
+    "cues.sources.disable": 2,
+    "cues.sources.token.new": 2,
+    "cues.sources.url.get": 2,
+    "cues.watchers.list": 2,
+    "cues.watchers.get": 2,
+    "cues.mandates.list": 2,
+    "cues.mandates.choices": 2,
+    "cues.mandates.add": 2,
+    "cues.mandates.update": 2,
+    "cues.mandates.remove": 2,
+    "cues.mandates.enable": 2,
+    "cues.mandates.disable": 2,
+    "cues.mandates.approve": 2,
+    "cues.proposals.list": 2,
+    "cues.proposals.get": 2,
+    "cues.proposals.decide": 2
   },
   "$defs": {
     "request": {
@@ -223,7 +297,31 @@
             "mcp.servers.tool.set",
             "mcp.servers.check.start",
             "mcp.servers.import.scan",
-            "mcp.servers.import"
+            "mcp.servers.import",
+            "cues.status",
+            "cues.sources.list",
+            "cues.sources.get",
+            "cues.sources.form",
+            "cues.sources.add",
+            "cues.sources.update",
+            "cues.sources.remove",
+            "cues.sources.enable",
+            "cues.sources.disable",
+            "cues.sources.token.new",
+            "cues.sources.url.get",
+            "cues.watchers.list",
+            "cues.watchers.get",
+            "cues.mandates.list",
+            "cues.mandates.choices",
+            "cues.mandates.add",
+            "cues.mandates.update",
+            "cues.mandates.remove",
+            "cues.mandates.enable",
+            "cues.mandates.disable",
+            "cues.mandates.approve",
+            "cues.proposals.list",
+            "cues.proposals.get",
+            "cues.proposals.decide"
           ]
         },
         "params": { "type": "object" }
@@ -656,6 +754,174 @@
             "properties": { "method": { "const": "mcp.servers.import" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/mcp_servers_import_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.status" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_status_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.sources.list" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_sources_list_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.sources.get" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_sources_get_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.sources.form" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_sources_form_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.sources.add" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_sources_add_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.sources.update" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_sources_update_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.sources.remove" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_sources_remove_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.sources.enable" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_sources_enable_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.sources.disable" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_sources_disable_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.sources.token.new" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_sources_token_new_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.sources.url.get" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_sources_url_get_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.watchers.list" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_watchers_list_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.watchers.get" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_watchers_get_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.mandates.list" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_mandates_list_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.mandates.choices" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_mandates_choices_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.mandates.add" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_mandates_add_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.mandates.update" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_mandates_update_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.mandates.remove" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_mandates_remove_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.mandates.enable" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_mandates_enable_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.mandates.disable" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_mandates_disable_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.mandates.approve" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_mandates_approve_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.proposals.list" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_proposals_list_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.proposals.get" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_proposals_get_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "cues.proposals.decide" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/cues_proposals_decide_params" } } }
         }
       ]
     },
@@ -782,7 +1048,31 @@
         { "$ref": "#/$defs/mcp_servers_tool_set_result" },
         { "$ref": "#/$defs/mcp_servers_check_start_result" },
         { "$ref": "#/$defs/mcp_servers_import_scan_result" },
-        { "$ref": "#/$defs/mcp_servers_import_result" }
+        { "$ref": "#/$defs/mcp_servers_import_result" },
+        { "$ref": "#/$defs/cues_status_result" },
+        { "$ref": "#/$defs/cues_sources_list_result" },
+        { "$ref": "#/$defs/cues_sources_get_result" },
+        { "$ref": "#/$defs/cues_sources_form_result" },
+        { "$ref": "#/$defs/cues_sources_add_result" },
+        { "$ref": "#/$defs/cues_sources_update_result" },
+        { "$ref": "#/$defs/cues_sources_remove_result" },
+        { "$ref": "#/$defs/cues_sources_enable_result" },
+        { "$ref": "#/$defs/cues_sources_disable_result" },
+        { "$ref": "#/$defs/cues_sources_token_new_result" },
+        { "$ref": "#/$defs/cues_sources_url_get_result" },
+        { "$ref": "#/$defs/cues_watchers_list_result" },
+        { "$ref": "#/$defs/cues_watchers_get_result" },
+        { "$ref": "#/$defs/cues_mandates_list_result" },
+        { "$ref": "#/$defs/cues_mandates_choices_result" },
+        { "$ref": "#/$defs/cues_mandates_add_result" },
+        { "$ref": "#/$defs/cues_mandates_update_result" },
+        { "$ref": "#/$defs/cues_mandates_remove_result" },
+        { "$ref": "#/$defs/cues_mandates_enable_result" },
+        { "$ref": "#/$defs/cues_mandates_disable_result" },
+        { "$ref": "#/$defs/cues_mandates_approve_result" },
+        { "$ref": "#/$defs/cues_proposals_list_result" },
+        { "$ref": "#/$defs/cues_proposals_get_result" },
+        { "$ref": "#/$defs/cues_proposals_decide_result" }
       ]
     },
     "hello_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -1351,6 +1641,7 @@
         "personality",
         "memory",
         "channels",
+        "cues",
         "integrations",
         "voice",
         "meetings",
@@ -3161,6 +3452,1987 @@
       "properties": {
         "device_id": { "type": "string" },
         "revoked": { "const": true }
+      }
+    },
+    "cueName": {
+      "description": "A source ref or a mandate name: lowercase letters, digits and hyphens, starting with a letter or digit.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "cueValues": {
+      "description": "A form's values by row key. Each value takes the shape of its row's kind; the daemon refuses a key or a shape with `invalid_params` naming the key.",
+      "type": "object",
+      "maxProperties": 64
+    },
+    "cueRefParams": {
+      "type": "object",
+      "required": [
+        "ref"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "$ref": "#/$defs/cueName"
+        }
+      }
+    },
+    "cueNameParams": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/cueName"
+        }
+      }
+    },
+    "cueSourceAction": {
+      "enum": [
+        "enable",
+        "disable",
+        "set_secret",
+        "new_token",
+        "get_url"
+      ]
+    },
+    "cueMandateAction": {
+      "enum": [
+        "approve",
+        "enable",
+        "disable"
+      ]
+    },
+    "cueSourceSecret": {
+      "type": "object",
+      "required": [
+        "field",
+        "label",
+        "present"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "enum": [
+            "token",
+            "key",
+            "secret",
+            "path_secret"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "present": {
+          "type": "boolean",
+          "description": "The field's sentinel is in the settings file. Never a value."
+        }
+      }
+    },
+    "cueSourceRow": {
+      "description": "One cue source in the daemon's own words. Every field is always present, null where it does not apply. Never a payload, an item's text, a cursor, a secret's value or a webhook's address.",
+      "type": "object",
+      "required": [
+        "ref",
+        "kind",
+        "preset",
+        "label",
+        "enabled",
+        "state",
+        "status_sentence",
+        "primary_action",
+        "actions",
+        "location",
+        "url",
+        "daily_budget",
+        "secrets",
+        "missing_secret",
+        "has_url",
+        "counts",
+        "last_good_at",
+        "last_accepted_at",
+        "listening"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "local_push",
+            "feed",
+            "stream",
+            "webhook"
+          ]
+        },
+        "preset": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "description": "The preset's or the kind's name."
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "state": {
+          "type": "string",
+          "description": "Published for logs and support; a client draws `status_sentence` and switches on `primary_action` and `actions`."
+        },
+        "status_sentence": {
+          "type": "string"
+        },
+        "primary_action": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/cueSourceAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actions": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "$ref": "#/$defs/cueSourceAction"
+          }
+        },
+        "location": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A feed or stream URL's host; null for local push and webhooks."
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The configured feed or stream URL; null otherwise. Never a webhook's address."
+        },
+        "daily_budget": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Items a UTC day; 0 is none."
+        },
+        "secrets": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/cueSourceSecret"
+          }
+        },
+        "missing_secret": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The field the source waits for, which `set_secret` or `new_token` points at."
+        },
+        "has_url": {
+          "type": "boolean",
+          "description": "A webhook's address is made."
+        },
+        "counts": {
+          "type": "object",
+          "required": [
+            "window_s",
+            "received",
+            "routed",
+            "not_routed",
+            "open_gaps"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "window_s": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "received": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "routed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "not_routed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "open_gaps": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "last_good_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "RFC 3339 UTC."
+        },
+        "last_accepted_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "RFC 3339 UTC."
+        },
+        "listening": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "string"
+          },
+          "description": "The enabled watchers that listen to it."
+        }
+      }
+    },
+    "cueWatcherRow": {
+      "description": "One watcher, read-only: watchers are made and changed in chat. Counts cover the list's `window_s`; never an item's text, a reason or a hint.",
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "enabled",
+        "filter",
+        "filter_model",
+        "state",
+        "status_sentence",
+        "sources",
+        "task",
+        "task_notes",
+        "daily_cap",
+        "filter_budget",
+        "counts",
+        "instruction_count",
+        "created_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "filter": {
+          "enum": [
+            "llm",
+            "none"
+          ]
+        },
+        "filter_model": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "provider",
+                "model"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "provider": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "model": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "type": "string",
+          "description": "Published for logs and support; a client draws `status_sentence`."
+        },
+        "status_sentence": {
+          "type": "string"
+        },
+        "sources": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string"
+          }
+        },
+        "task": {
+          "type": "object",
+          "required": [
+            "job_id",
+            "name",
+            "paused"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "job_id": {
+              "type": "string"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "paused": {
+              "type": "boolean"
+            }
+          }
+        },
+        "task_notes": {
+          "type": "boolean"
+        },
+        "daily_cap": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "0 is none."
+        },
+        "filter_budget": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "0 is none."
+        },
+        "counts": {
+          "type": "object",
+          "required": [
+            "waiting",
+            "passed",
+            "dropped",
+            "acted",
+            "failed"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "waiting": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "passed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "dropped": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "acted": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "failed": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "instruction_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "created_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "RFC 3339 UTC."
+        }
+      }
+    },
+    "cueWatcherDetail": {
+      "description": "A watcher row plus its purpose, its instructions and how many examples are marked each way.",
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "enabled",
+        "filter",
+        "filter_model",
+        "state",
+        "status_sentence",
+        "sources",
+        "task",
+        "task_notes",
+        "daily_cap",
+        "filter_budget",
+        "counts",
+        "instruction_count",
+        "created_at",
+        "purpose",
+        "instructions",
+        "examples"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/cueWatcherRow/properties/id"
+        },
+        "name": {
+          "$ref": "#/$defs/cueWatcherRow/properties/name"
+        },
+        "enabled": {
+          "$ref": "#/$defs/cueWatcherRow/properties/enabled"
+        },
+        "filter": {
+          "$ref": "#/$defs/cueWatcherRow/properties/filter"
+        },
+        "filter_model": {
+          "$ref": "#/$defs/cueWatcherRow/properties/filter_model"
+        },
+        "state": {
+          "$ref": "#/$defs/cueWatcherRow/properties/state"
+        },
+        "status_sentence": {
+          "$ref": "#/$defs/cueWatcherRow/properties/status_sentence"
+        },
+        "sources": {
+          "$ref": "#/$defs/cueWatcherRow/properties/sources"
+        },
+        "task": {
+          "$ref": "#/$defs/cueWatcherRow/properties/task"
+        },
+        "task_notes": {
+          "$ref": "#/$defs/cueWatcherRow/properties/task_notes"
+        },
+        "daily_cap": {
+          "$ref": "#/$defs/cueWatcherRow/properties/daily_cap"
+        },
+        "filter_budget": {
+          "$ref": "#/$defs/cueWatcherRow/properties/filter_budget"
+        },
+        "counts": {
+          "$ref": "#/$defs/cueWatcherRow/properties/counts"
+        },
+        "instruction_count": {
+          "$ref": "#/$defs/cueWatcherRow/properties/instruction_count"
+        },
+        "created_at": {
+          "$ref": "#/$defs/cueWatcherRow/properties/created_at"
+        },
+        "purpose": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The owner's own words, from the consent turn that made the watcher."
+        },
+        "instructions": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "object",
+            "required": [
+              "number",
+              "text",
+              "added_at"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "number": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "text": {
+                "type": "string"
+              },
+              "added_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "RFC 3339 UTC."
+              }
+            }
+          }
+        },
+        "examples": {
+          "description": "Counted, never shown: an example holds a cue's snapshot.",
+          "type": "object",
+          "required": [
+            "pass",
+            "drop"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "pass": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "drop": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "cueMandateRow": {
+      "description": "One mandate. Durations are whole seconds; paths are the owner's own configuration.",
+      "type": "object",
+      "required": [
+        "name",
+        "enabled",
+        "job",
+        "mode",
+        "approve_within_s",
+        "max_cue_age_s",
+        "tools",
+        "read_tools",
+        "validator",
+        "idempotency_arg",
+        "unpinned",
+        "pin_args",
+        "load",
+        "approval",
+        "counts",
+        "consent_sentence",
+        "status_sentence",
+        "primary_action",
+        "actions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "job": {
+          "type": "object",
+          "required": [
+            "id",
+            "name"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "mode": {
+          "enum": [
+            "approve",
+            "auto"
+          ]
+        },
+        "approve_within_s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_cue_age_s": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "0 is none."
+        },
+        "tools": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "string"
+          }
+        },
+        "read_tools": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "string"
+          }
+        },
+        "validator": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "path",
+                "interpreter",
+                "env"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "interpreter": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "env": {
+                  "type": "array",
+                  "maxItems": 200,
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "idempotency_arg": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unpinned": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "string"
+          }
+        },
+        "pin_args": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "object",
+            "required": [
+              "key",
+              "value"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "value": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean"
+                ]
+              }
+            }
+          }
+        },
+        "load": {
+          "type": "object",
+          "required": [
+            "state",
+            "sentence"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "enum": [
+                "active",
+                "inactive"
+              ]
+            },
+            "sentence": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "approval": {
+          "type": "object",
+          "required": [
+            "state",
+            "approved_at",
+            "approved_from",
+            "disabled_at",
+            "disabled_reason",
+            "detail"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "description": "Null where memory is off and the approval cannot be read.",
+              "enum": [
+                "unapproved",
+                "approved",
+                "changed",
+                "disabled",
+                null
+              ]
+            },
+            "approved_at": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "RFC 3339 UTC."
+            },
+            "approved_from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "disabled_at": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "RFC 3339 UTC."
+            },
+            "disabled_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "counts": {
+          "type": "object",
+          "required": [
+            "window_s",
+            "allowed",
+            "proposed",
+            "refused"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "window_s": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "allowed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "proposed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "refused": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "consent_sentence": {
+          "type": "string",
+          "description": "What this mode lets the task do."
+        },
+        "status_sentence": {
+          "type": "string"
+        },
+        "primary_action": {
+          "oneOf": [
+            {
+              "const": "approve"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actions": {
+          "type": "array",
+          "maxItems": 3,
+          "items": {
+            "$ref": "#/$defs/cueMandateAction"
+          }
+        }
+      }
+    },
+    "cueProposalRecord": {
+      "description": "Fermix's record of a proposal: no argument and no cue text.",
+      "type": "object",
+      "required": [
+        "proposal_id",
+        "state",
+        "mandate",
+        "tool",
+        "task",
+        "watcher",
+        "source_ref",
+        "created_at",
+        "expires_at",
+        "decided_at",
+        "decided_from",
+        "result_status",
+        "status_sentence"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "proposal_id": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "waiting",
+            "confirmed",
+            "denied",
+            "expired",
+            "refused"
+          ]
+        },
+        "mandate": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "task": {
+          "type": "object",
+          "required": [
+            "job_id",
+            "name"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "job_id": {
+              "type": "string"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "watcher": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "expires_at": {
+          "type": "string"
+        },
+        "decided_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "RFC 3339 UTC."
+        },
+        "decided_from": {
+          "enum": [
+            "telegram",
+            "signal",
+            "whatsapp",
+            "imessage",
+            "companion",
+            "mobile",
+            "management",
+            null
+          ]
+        },
+        "result_status": {
+          "enum": [
+            "ok",
+            "error",
+            "unknown",
+            null
+          ]
+        },
+        "status_sentence": {
+          "type": "string"
+        }
+      }
+    },
+    "cueProposalCard": {
+      "description": "The card every app surface shows: the record, when the cue arrived, Fermix's summary and the outside text apart.",
+      "type": "object",
+      "required": [
+        "proposal_id",
+        "state",
+        "mandate",
+        "tool",
+        "task",
+        "watcher",
+        "source_ref",
+        "created_at",
+        "expires_at",
+        "decided_at",
+        "decided_from",
+        "result_status",
+        "status_sentence",
+        "received_at",
+        "summary",
+        "outside"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "proposal_id": {
+          "$ref": "#/$defs/cueProposalRecord/properties/proposal_id"
+        },
+        "state": {
+          "$ref": "#/$defs/cueProposalRecord/properties/state"
+        },
+        "mandate": {
+          "$ref": "#/$defs/cueProposalRecord/properties/mandate"
+        },
+        "tool": {
+          "$ref": "#/$defs/cueProposalRecord/properties/tool"
+        },
+        "task": {
+          "$ref": "#/$defs/cueProposalRecord/properties/task"
+        },
+        "watcher": {
+          "$ref": "#/$defs/cueProposalRecord/properties/watcher"
+        },
+        "source_ref": {
+          "$ref": "#/$defs/cueProposalRecord/properties/source_ref"
+        },
+        "created_at": {
+          "$ref": "#/$defs/cueProposalRecord/properties/created_at"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/cueProposalRecord/properties/expires_at"
+        },
+        "decided_at": {
+          "$ref": "#/$defs/cueProposalRecord/properties/decided_at"
+        },
+        "decided_from": {
+          "$ref": "#/$defs/cueProposalRecord/properties/decided_from"
+        },
+        "result_status": {
+          "$ref": "#/$defs/cueProposalRecord/properties/result_status"
+        },
+        "status_sentence": {
+          "$ref": "#/$defs/cueProposalRecord/properties/status_sentence"
+        },
+        "received_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "RFC 3339 UTC."
+        },
+        "summary": {
+          "type": "string",
+          "description": "Fermix's sentence, with no outside text in it."
+        },
+        "outside": {
+          "description": "Everything a model or a stranger wrote, kept apart by structure. Drawn only as outside text.",
+          "type": "object",
+          "required": [
+            "args_text",
+            "cue"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "args_text": {
+              "type": "string",
+              "maxLength": 3500,
+              "description": "Outside text: the recorded call's arguments as pretty JSON, never cut."
+            },
+            "cue": {
+              "oneOf": [
+                {
+                  "description": "Outside text: the cue's snapshot; `occurred_at` is the producer's claim.",
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "subject",
+                    "text",
+                    "occurred_at"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "subject": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "text": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "occurred_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "cues_status_params": {
+      "type": "object",
+      "maxProperties": 0,
+      "additionalProperties": false
+    },
+    "cues_status_result": {
+      "type": "object",
+      "required": [
+        "available",
+        "enabled",
+        "running",
+        "memory_enabled",
+        "mandates_enabled",
+        "state",
+        "status_sentence",
+        "door",
+        "counts"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "memory_enabled": {
+          "type": "boolean"
+        },
+        "mandates_enabled": {
+          "type": "boolean"
+        },
+        "state": {
+          "enum": [
+            "unavailable",
+            "off",
+            "needs_memory",
+            "needs_restart",
+            "running"
+          ]
+        },
+        "status_sentence": {
+          "type": "string"
+        },
+        "door": {
+          "type": "object",
+          "required": [
+            "state",
+            "port",
+            "reason",
+            "sentence"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "enum": [
+                "listening",
+                "unavailable",
+                "not_running"
+              ]
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sentence": {
+              "type": "string"
+            }
+          }
+        },
+        "counts": {
+          "type": "object",
+          "required": [
+            "sources",
+            "sources_attention",
+            "watchers",
+            "watchers_held",
+            "mandates",
+            "mandates_attention",
+            "proposals_waiting"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "sources": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "sources_attention": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "watchers": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "watchers_held": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "mandates": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "mandates_attention": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "proposals_waiting": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "cues_sources_list_params": {
+      "type": "object",
+      "maxProperties": 0,
+      "additionalProperties": false
+    },
+    "cues_sources_list_result": {
+      "type": "object",
+      "required": [
+        "sources",
+        "can_add",
+        "limits"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "sources": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/cueSourceRow"
+          }
+        },
+        "can_add": {
+          "type": "boolean"
+        },
+        "limits": {
+          "type": "object",
+          "required": [
+            "max_sources"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "max_sources": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "cues_sources_get_params": {
+      "$ref": "#/$defs/cueRefParams"
+    },
+    "cues_sources_get_result": {
+      "type": "object",
+      "required": [
+        "source",
+        "values",
+        "gaps",
+        "rejected"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/cueSourceRow"
+        },
+        "values": {
+          "type": "array",
+          "maxItems": 60,
+          "items": {
+            "$ref": "#/$defs/settingsRow"
+          },
+          "description": "The editable fields as settings rows; a secret row carries its presence."
+        },
+        "gaps": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "required": [
+              "reason",
+              "count",
+              "range_from",
+              "range_to",
+              "first_at",
+              "sentence"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "range_from": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "range_to": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "first_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "RFC 3339 UTC."
+              },
+              "sentence": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "rejected": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "required": [
+              "reason",
+              "count",
+              "sentence"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "sentence": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "cues_sources_form_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "preset": {
+          "type": "string"
+        },
+        "verify": {
+          "type": "string"
+        }
+      }
+    },
+    "cues_sources_form_result": {
+      "type": "object",
+      "required": [
+        "kinds",
+        "presets",
+        "rows",
+        "consent_sentence",
+        "notes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kinds": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "label",
+              "sentence"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "sentence": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "presets": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "label",
+              "kind"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "rows": {
+          "type": "array",
+          "maxItems": 60,
+          "items": {
+            "$ref": "#/$defs/settingsRow"
+          }
+        },
+        "consent_sentence": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "cues_sources_add_params": {
+      "type": "object",
+      "required": [
+        "ref",
+        "values"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "$ref": "#/$defs/cueName"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "preset": {
+          "type": "string"
+        },
+        "values": {
+          "$ref": "#/$defs/cueValues"
+        }
+      }
+    },
+    "cues_sources_add_result": {
+      "type": "object",
+      "required": [
+        "source",
+        "token"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/cueSourceRow"
+        },
+        "token": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A new local push source's first token, returned once: never logged, traced or retained. Null otherwise."
+        }
+      }
+    },
+    "cues_sources_update_params": {
+      "type": "object",
+      "required": [
+        "ref",
+        "values"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "$ref": "#/$defs/cueName"
+        },
+        "values": {
+          "$ref": "#/$defs/cueValues"
+        }
+      }
+    },
+    "cues_sources_update_result": {
+      "type": "object",
+      "required": [
+        "source"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/cueSourceRow"
+        }
+      }
+    },
+    "cues_sources_remove_params": {
+      "$ref": "#/$defs/cueRefParams"
+    },
+    "cues_sources_remove_result": {
+      "type": "object",
+      "required": [
+        "ref",
+        "removed",
+        "left",
+        "watchers"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "type": "string"
+        },
+        "removed": {
+          "const": true
+        },
+        "left": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "type": "string"
+          },
+          "description": "Sentences for any secret that could not be deleted."
+        },
+        "watchers": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "cues_sources_enable_params": {
+      "$ref": "#/$defs/cueRefParams"
+    },
+    "cues_sources_enable_result": {
+      "type": "object",
+      "required": [
+        "source"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/cueSourceRow"
+        }
+      }
+    },
+    "cues_sources_disable_params": {
+      "$ref": "#/$defs/cueRefParams"
+    },
+    "cues_sources_disable_result": {
+      "type": "object",
+      "required": [
+        "source"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/cueSourceRow"
+        }
+      }
+    },
+    "cues_sources_token_new_params": {
+      "$ref": "#/$defs/cueRefParams"
+    },
+    "cues_sources_token_new_result": {
+      "type": "object",
+      "required": [
+        "ref",
+        "token"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "type": "string"
+        },
+        "token": {
+          "type": "string",
+          "description": "Returned once: never logged, traced or retained."
+        }
+      }
+    },
+    "cues_sources_url_get_params": {
+      "$ref": "#/$defs/cueRefParams"
+    },
+    "cues_sources_url_get_result": {
+      "type": "object",
+      "required": [
+        "ref",
+        "url",
+        "path"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string",
+          "description": "`http://127.0.0.1:<door port>` and the path. A secret: never on a list, never logged."
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/cues/hooks/"
+        }
+      }
+    },
+    "cues_watchers_list_params": {
+      "type": "object",
+      "maxProperties": 0,
+      "additionalProperties": false
+    },
+    "cues_watchers_list_result": {
+      "type": "object",
+      "required": [
+        "watchers",
+        "window_s",
+        "truncated"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "watchers": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "$ref": "#/$defs/cueWatcherRow"
+          }
+        },
+        "window_s": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "cues_watchers_get_params": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    "cues_watchers_get_result": {
+      "type": "object",
+      "required": [
+        "watcher"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "watcher": {
+          "$ref": "#/$defs/cueWatcherDetail"
+        }
+      }
+    },
+    "cues_mandates_list_params": {
+      "type": "object",
+      "maxProperties": 0,
+      "additionalProperties": false
+    },
+    "cues_mandates_list_result": {
+      "type": "object",
+      "required": [
+        "mandates",
+        "can_add",
+        "limits"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "mandates": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/cueMandateRow"
+          }
+        },
+        "can_add": {
+          "type": "boolean"
+        },
+        "limits": {
+          "type": "object",
+          "required": [
+            "max_mandates"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "max_mandates": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "cues_mandates_choices_params": {
+      "type": "object",
+      "maxProperties": 0,
+      "additionalProperties": false
+    },
+    "cues_mandates_choices_result": {
+      "type": "object",
+      "required": [
+        "jobs",
+        "tools"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "jobs": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "watcher",
+              "mandate"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "watcher": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mandate": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "tools": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "plugin",
+              "title",
+              "read_only"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "plugin": {
+                "type": "string"
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "read_only": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
+    "cues_mandates_add_params": {
+      "type": "object",
+      "required": [
+        "name",
+        "values"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/cueName"
+        },
+        "values": {
+          "$ref": "#/$defs/cueValues"
+        }
+      }
+    },
+    "cues_mandates_add_result": {
+      "type": "object",
+      "required": [
+        "mandate"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "mandate": {
+          "$ref": "#/$defs/cueMandateRow"
+        }
+      }
+    },
+    "cues_mandates_update_params": {
+      "type": "object",
+      "required": [
+        "name",
+        "values"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/cueName"
+        },
+        "values": {
+          "$ref": "#/$defs/cueValues"
+        }
+      }
+    },
+    "cues_mandates_update_result": {
+      "type": "object",
+      "required": [
+        "mandate"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "mandate": {
+          "$ref": "#/$defs/cueMandateRow"
+        }
+      }
+    },
+    "cues_mandates_remove_params": {
+      "$ref": "#/$defs/cueNameParams"
+    },
+    "cues_mandates_remove_result": {
+      "type": "object",
+      "required": [
+        "name",
+        "removed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "removed": {
+          "const": true
+        }
+      }
+    },
+    "cues_mandates_enable_params": {
+      "$ref": "#/$defs/cueNameParams"
+    },
+    "cues_mandates_enable_result": {
+      "type": "object",
+      "required": [
+        "mandate"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "mandate": {
+          "$ref": "#/$defs/cueMandateRow"
+        }
+      }
+    },
+    "cues_mandates_disable_params": {
+      "$ref": "#/$defs/cueNameParams"
+    },
+    "cues_mandates_disable_result": {
+      "type": "object",
+      "required": [
+        "mandate"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "mandate": {
+          "$ref": "#/$defs/cueMandateRow"
+        }
+      }
+    },
+    "cues_mandates_approve_params": {
+      "$ref": "#/$defs/cueNameParams"
+    },
+    "cues_mandates_approve_result": {
+      "type": "object",
+      "required": [
+        "mandate"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "mandate": {
+          "$ref": "#/$defs/cueMandateRow"
+        }
+      }
+    },
+    "cues_proposals_list_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "enum": [
+            "waiting",
+            "recent"
+          ]
+        }
+      }
+    },
+    "cues_proposals_list_result": {
+      "type": "object",
+      "required": [
+        "proposals",
+        "waiting"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "proposals": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/cueProposalRecord"
+          }
+        },
+        "waiting": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "cues_proposals_get_params": {
+      "type": "object",
+      "required": [
+        "proposal_id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "proposal_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    "cues_proposals_get_result": {
+      "type": "object",
+      "required": [
+        "proposal"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "proposal": {
+          "$ref": "#/$defs/cueProposalCard"
+        }
+      }
+    },
+    "cues_proposals_decide_params": {
+      "type": "object",
+      "required": [
+        "proposal_id",
+        "decision"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "proposal_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "decision": {
+          "enum": [
+            "confirm",
+            "deny"
+          ]
+        }
+      }
+    },
+    "cues_proposals_decide_result": {
+      "type": "object",
+      "required": [
+        "proposal"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "proposal": {
+          "$ref": "#/$defs/cueProposalRecord"
+        }
       }
     },
     "logEntry": {

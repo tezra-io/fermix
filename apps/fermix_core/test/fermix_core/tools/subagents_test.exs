@@ -748,6 +748,8 @@ defmodule FermixCore.Tools.SubagentsTest do
       parent =
         context(ctx, %{
           reply_fn: fn _ -> :ok end,
+          approval_fn: fn _ -> {:ok, "TOKEN", :new} end,
+          owner_inbox_approval_fn: fn _ -> {:ok, "TOKEN", :new} end,
           channel: :telegram,
           source_channel: :telegram,
           sandbox_config: %{mode: :open},
@@ -766,10 +768,12 @@ defmodule FermixCore.Tools.SubagentsTest do
       assert is_map(worker_ctx)
       assert worker_ctx[:subagent_depth] == 1
 
-      # every stripped key is gone — channel-reply targeting, sandbox relaxation,
-      # parent trust, and all memory handles
+      # every stripped key is gone — channel-reply targeting, both owner-approval
+      # closures, sandbox relaxation, parent trust, and all memory handles
       for key <- [
             :reply_fn,
+            :approval_fn,
+            :owner_inbox_approval_fn,
             :channel,
             :source_channel,
             :source_trust,
