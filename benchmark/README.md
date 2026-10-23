@@ -50,11 +50,13 @@ judge:
 ```
 
 The `openai` backend reads `EVAL_JUDGE_API_KEY` and, optionally,
-`EVAL_JUDGE_BASE_URL`. The `make` judged targets (through `bin/tier.sh`) export
-`EVAL_JUDGE_API_KEY` from the same OpenAI key the daemon uses (macOS keychain
-service `fermix:OPENAI_API_KEY`) when it is not already exported, so there's no
-separate setup; with neither, the run refuses with a sentence. The CI eval box
-feeds it from the `OPENAI_API_KEY` repository secret (see
+`EVAL_JUDGE_BASE_URL`, and asks for an explicit `medium` reasoning effort with an
+output cap that holds the model's reasoning beside the verdict. The `make` judged
+targets (through `bin/tier.sh`) export `EVAL_JUDGE_API_KEY` from the same OpenAI
+key the daemon uses (macOS keychain service `fermix:OPENAI_API_KEY`) when it is
+not already exported, so there's no separate setup; with neither, the run refuses
+with a sentence. The CI eval box feeds it from the `OPENAI_API_KEY` repository
+secret (see
 `.github/workflows/eval-box.yml`), and its candidate is `claude-opus-5-5` on
 Anthropic at medium effort. A refusal, an API error or a missing key leaves the
 case **INCOMPLETE**, never a pass. The `anthropic` backend calls the Claude API

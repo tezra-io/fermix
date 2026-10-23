@@ -41,12 +41,22 @@ from .rubric import numbered_requirements
 NOT_RECORDED = "not recorded"
 _MAX_JUDGE_PAYLOAD_BYTES = 64 * 1024
 _MAX_JUDGE_OUTPUT_BYTES = 16 * 1024
-_MAX_JUDGE_OUTPUT_TOKENS = 2_048
+# The OpenAI judge's request policy. gpt-6-luna is a reasoning model: its hidden
+# reasoning counts toward max_completion_tokens, so the cap holds that reasoning
+# beside the verdict, the same rule as the Claude judge's cap below. The old
+# 2,048 was sized for a verdict alone, and on 2026-10-23 (eval-nightly run
+# 39910831669) gpt-6-luna spent all of it reasoning on launch_day_update and
+# returned no verdict. The effort is explicit so neither a model nor an API
+# default can move the judge's depth or its spend silently.
+_MAX_JUDGE_OUTPUT_TOKENS = 16_000
+_OPENAI_REASONING_EFFORT = "medium"
 _MAX_JUDGE_HTTP_RESPONSE_BYTES = 64 * 1024
 # Four attempts over ~13s. The judge is an external provider whose 5xx is the
 # documented transient class, so one bad minute must not void a whole run.
 _JUDGE_RETRY_DELAYS_S = (1.0, 3.0, 9.0)
-_JUDGE_HTTP_TIMEOUT_S = 30
+# The response arrives only when generation ends, so one attempt must outlast the
+# whole output cap: 16,000 tokens at a conservative 100 a second.
+_JUDGE_HTTP_TIMEOUT_S = 180
 _RETRYABLE_JUDGE_STATUS = frozenset({500, 502, 503, 504})
 _COMPLETION_REASONS = {"stop", "end_turn", "stop_sequence", "completed"}
 _TRUNCATION_REASONS = {"length", "max_tokens", "max_output_tokens", "incomplete"}
@@ -598,7 +608,7 @@ def _judge_openai(cfg, data: dict, candidates: list[dict], count: int | None) ->
         route = {
             "provider": "openai",
             "model": response_data.get("model"),
-            "reasoning_effort": "default",
+            "reasoning_effort": _OPENAI_REASONING_EFFORT,
         }
         route, route_error = _route_from(route)
         if route_error:
@@ -842,6 +852,7 @@ def _openai_request_body(cfg, data: dict, count: int | None) -> bytes:
                                                        allow_nan=False)},
         ],
         "max_completion_tokens": _MAX_JUDGE_OUTPUT_TOKENS,
+        "reasoning_effort": _OPENAI_REASONING_EFFORT,
         "response_format": {
             "type": "json_schema",
             "json_schema": {"name": "verdict", "strict": True,
