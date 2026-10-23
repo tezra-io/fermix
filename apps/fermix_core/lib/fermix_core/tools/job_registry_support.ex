@@ -1,8 +1,11 @@
 defmodule FermixCore.Tools.JobRegistrySupport do
   @moduledoc false
 
+  require Logger
+
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Cues.Watchers
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Providers.ModelCatalog
@@ -34,6 +37,43 @@ defmodule FermixCore.Tools.JobRegistrySupport do
   def check_job_access(job_id, context) when is_binary(job_id) and is_map(context) do
     with {:ok, job} <- JobsRegistry.get_job(job_id, repo: repo(context)) do
       AccessGate.check_job_tools(Map.get(job, :allowed_tools) || [], context)
+    end
+  end
+
+  @doc """
+  For `remove_job`: a job a watcher wakes is not removed (M60 §8.8), so the
+  watcher never points at nothing.
+  """
+  @spec check_unwatched(String.t(), map()) :: :ok | {:error, term()}
+  def check_unwatched(job_id, context) when is_binary(job_id) and is_map(context) do
+    case Watchers.watcher_for_job(job_id, repo: repo(context)) do
+      {:ok, nil} -> :ok
+      {:ok, _watcher} -> {:error, "Remove the watcher first, or link it to another job."}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  For `update_job`: a job a watcher wakes changes only on the owner's consent
+  turn (`AccessGate.owner_consent_turn?/1`, M60 S6), because what the task may
+  do is what outside text can start.
+  """
+  @spec check_watcher_consent(String.t(), map()) :: :ok | {:error, term()}
+  def check_watcher_consent(job_id, context) when is_binary(job_id) and is_map(context) do
+    case Watchers.watcher_for_job(job_id, repo: repo(context)) do
+      {:ok, nil} ->
+        :ok
+
+      {:ok, watcher} ->
+        if AccessGate.owner_consent_turn?(context),
+          do: :ok,
+          else:
+            {:error,
+             "Watcher #{watcher.name} wakes this job; change it from a private chat with " <>
+               "Fermix, in a turn that has read no outside text."}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -147,7 +187,7 @@ defmodule FermixCore.Tools.JobRegistrySupport do
     end
   end
 
-  def job_payload(job) do
+  def job_payload(job, repo) do
     %{
       id: job.id,
       name: job.name,
@@ -174,6 +214,39 @@ defmodule FermixCore.Tools.JobRegistrySupport do
       last_status: job.last_status,
       last_error: job.last_error
     }
+    |> put_schedule_label(job, repo)
+  end
+
+  @doc """
+  The words a job echo (`list_jobs` first) shows for a job that runs on cues,
+  in place of a schedule it does not have, or `nil` for any other job: "runs
+  on cues from watcher <name>" (M60 build decision 8), or "runs on cues" for
+  one no watcher wakes. The one hook for that label.
+  """
+  @spec schedule_label(map(), GenServer.server()) :: String.t() | nil
+  def schedule_label(job, repo) when is_map(job) do
+    if JobsRegistry.cue_job?(job), do: cue_label(job, repo), else: nil
+  end
+
+  defp cue_label(job, repo) do
+    case Watchers.name_for_job(job.id, repo: repo) do
+      {:ok, nil} ->
+        "runs on cues"
+
+      {:ok, name} ->
+        "runs on cues from watcher #{name}"
+
+      {:error, reason} ->
+        Logger.warning("job #{job.id}: its watcher could not be read: #{inspect(reason)}")
+        "runs on cues (its watcher could not be read: #{inspect(reason)})"
+    end
+  end
+
+  defp put_schedule_label(payload, job, repo) do
+    case schedule_label(job, repo) do
+      nil -> payload
+      label -> Map.put(payload, :schedule_label, label)
+    end
   end
 
   def job_run_summary(run) do

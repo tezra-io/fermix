@@ -192,13 +192,17 @@ defmodule FermixCore.Setup.AccessToken do
     |> Base.url_encode64(padding: false)
   end
 
-  # fermix_core has no runtime Plug.Crypto dependency; keep equal-length
-  # comparisons bytewise and constant-time here.
-  defp secure_equal?(left, right) when is_binary(left) and is_binary(right) do
+  @doc """
+  Whether two binaries are equal, compared bytewise in constant time for equal
+  lengths. Different lengths answer false at once, so compare fixed-length
+  digests when a length must not leak. The cue door compares its tokens here.
+  """
+  @spec secure_equal?(term(), term()) :: boolean()
+  def secure_equal?(left, right) when is_binary(left) and is_binary(right) do
     byte_size(left) == byte_size(right) and zero_diff?(:crypto.exor(left, right))
   end
 
-  defp secure_equal?(_left, _right), do: false
+  def secure_equal?(_left, _right), do: false
 
   defp zero_diff?(binary) do
     binary

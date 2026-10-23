@@ -59,8 +59,11 @@ defmodule FermixCore.Tools.ListJobs do
         end
 
       case Registry.list_jobs(opts) do
-        {:ok, jobs} -> Support.success_json(%{jobs: Enum.map(jobs, &Support.job_payload/1)})
-        {:error, reason} -> Support.error(reason)
+        {:ok, jobs} ->
+          Support.success_json(%{jobs: Enum.map(jobs, &Support.job_payload(&1, opts[:repo]))})
+
+        {:error, reason} ->
+          Support.error(reason)
       end
     end)
   end

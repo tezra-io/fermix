@@ -478,7 +478,13 @@ def test_the_shipped_numbered_rubrics_parse():
                       "rice_question_while_stocktake_runs": 3,
                       "never_mind_cancel": 2, "stop_the_stocktake": 2,
                       "thirteenth_corrected_to_twentieth": 3,
-                      "twentieth_corrected_to_thirteenth": 3}
+                      "twentieth_corrected_to_thirteenth": 3,
+                      # cues.yaml
+                      "releases_and_outages": 3, "security_fixes_only": 3,
+                      "sanity_watcher_tool_reached": 2,
+                      "ignore_conference_talks": 3, "skip_vendor_webinars": 3,
+                      "funding_story_not_useful": 3, "meetup_item_useless": 3,
+                      "alerts_to_dana_on_signal": 2, "alerts_to_sister_on_signal": 2}
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.ComputerHistory.InstalledApps
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.SidecarInstaller
+  alias FermixCore.Cues
   alias FermixCore.Harness.Vendors, as: HarnessVendors
   alias FermixCore.IMessage
   alias FermixCore.IMessage.Control, as: IMessageControl
@@ -61,6 +62,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
   alias FermixWebWeb.SetupLive.Components
+  alias FermixWebWeb.SetupLive.CuesState
   alias FermixWebWeb.SetupLive.Phone
 
   # Computer use is a core feature, not a plugin whose branding we receive, so its
@@ -245,7 +247,12 @@ defmodule FermixWebWeb.SetupLive do
   @impl true
   def handle_event("select_tab", %{"tab" => tab_id}, socket) do
     active_tab = if tab_known?(tab_id), do: tab_id, else: socket.assigns.active_tab
-    {:noreply, assign(socket, :active_tab, active_tab) |> assign(:saved_flash, nil)}
+
+    {:noreply,
+     socket
+     |> assign(:active_tab, active_tab)
+     |> assign(:saved_flash, nil)
+     |> refresh_cues_on(active_tab)}
   end
 
   def handle_event("next_step", _params, socket) do
@@ -880,6 +887,17 @@ defmodule FermixWebWeb.SetupLive do
      )}
   end
 
+  # The Cues tab (M60 §15): `CuesState` turns each `cues_*` event into a
+  # change and says what follows. A build that does not admit cues has no tab
+  # and no state, so its events are refused.
+  def handle_event("cues_" <> _action, _params, %{assigns: %{cues: nil}} = socket),
+    do: {:noreply, flash_error(socket, "Cues are not part of this build.")}
+
+  def handle_event("cues_" <> action, params, socket) do
+    result = CuesState.handle(action, params, socket.assigns.cues, cues_opts())
+    {:noreply, apply_cues(socket, result)}
+  end
+
   # The one action offered while the settings file has changed outside this
   # VM. It re-reads the file, applies it, and re-records the baseline, which
   # is what clears the refusal; an unreadable file is never offered it,
@@ -1170,6 +1188,7 @@ defmodule FermixWebWeb.SetupLive do
       skill_summary={@skill_summary}
       tabs={@tabs}
       tool_summary={@tool_summary}
+      cues={@cues}
     />
     """
   end
@@ -1208,7 +1227,7 @@ defmodule FermixWebWeb.SetupLive do
 
     socket
     |> assign(:report, report)
-    |> assign(:tabs, @tabs)
+    |> assign(:tabs, tabs())
     |> assign_config_banner()
     |> assign(:provider_form, provider_form)
     |> assign_model_sources(provider_form)
@@ -1230,7 +1249,48 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:tool_summary, tool_summary())
     |> assign(:skill_summary, skill_summary())
     |> assign(:plugin_summary, plugin_summary(snapshot))
+    |> assign(:cues, build_cues(snapshot))
   end
+
+  # --- cues (M60 §15) ---
+
+  # Built with every report, so a save in any tab leaves it current; nil in a
+  # build that does not admit cues.
+  defp build_cues(snapshot) do
+    if Cues.available?(), do: CuesState.build(snapshot, cues_opts())
+  end
+
+  # Opening the tab re-reads what the daemon reports (the door, source rows).
+  defp refresh_cues_on(socket, "cues"),
+    do: assign(socket, :cues, build_cues(socket.assigns.report.wizard.config_snapshot))
+
+  defp refresh_cues_on(socket, _tab), do: socket
+
+  defp apply_cues(socket, {:edit, cues}), do: assign(socket, :cues, cues)
+  defp apply_cues(socket, :refresh), do: refresh_cues_on(socket, "cues")
+
+  # A save re-reads the report (so the section, and any sentinel the change
+  # wrote, come from the daemon), then shows a value meant to be seen once.
+  defp apply_cues(socket, {:saved, message, opts}) do
+    restart? = Keyword.get(opts, :restart?, false)
+
+    socket
+    |> assign(:restart_pending?, socket.assigns.restart_pending? or restart?)
+    |> refresh_report(message, restart_required?: restart?)
+    |> put_cues_reveal(Keyword.get(opts, :reveal))
+  end
+
+  defp apply_cues(socket, {:error, reason, cues}),
+    do: socket |> assign(:cues, cues) |> save_refused(reason)
+
+  defp put_cues_reveal(socket, nil), do: socket
+
+  defp put_cues_reveal(%{assigns: %{cues: cues}} = socket, reveal) when is_map(cues),
+    do: assign(socket, :cues, %{cues | reveal: reveal})
+
+  # The tab's seams for a LiveView test (`:repo`, `:door`, `:now`,
+  # `:mandate_opts`); production reads the daemon's own.
+  defp cues_opts, do: Application.get_env(:fermix_web, :cues_pane_opts, [])
 
   defp assign_config_banner(socket),
     do: assign(socket, :config_banner, config_banner_state(RestartState.config_state()))
@@ -1339,6 +1399,9 @@ defmodule FermixWebWeb.SetupLive do
   # reported success, so the operator saw a stored key and the runtime had none.
   defp format_config_error({:secret_store_failed, _key, sentence}) when is_binary(sentence),
     do: sentence
+
+  # A cue setting the config refused, with its own sentence (M60 §15).
+  defp format_config_error({:invalid, sentence}) when is_binary(sentence), do: sentence
 
   defp format_config_error(reason), do: Redaction.format(reason)
 
@@ -4359,7 +4422,10 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
-  defp tab_known?(tab_id), do: Enum.any?(@tabs, &(&1.id == tab_id))
+  # The Cues tab exists only in a build that admits cues (M60 §15).
+  defp tabs, do: CuesState.visible_tabs(@tabs, Cues.available?())
+
+  defp tab_known?(tab_id), do: Enum.any?(tabs(), &(&1.id == tab_id))
 
   # Honor an explicit `?tab=` only when it names a real tab; otherwise fall
   # through to next_action_tab. Lets apply_restart return the operator to the
@@ -4371,7 +4437,7 @@ defmodule FermixWebWeb.SetupLive do
   defp requested_tab(_params), do: nil
 
   defp next_action_tab(report) do
-    Enum.find_value(@tabs, "provider", fn tab ->
+    Enum.find_value(tabs(), "provider", fn tab ->
       if tab_status(tab, report) == :partial, do: tab.id
     end)
   end
@@ -4380,10 +4446,11 @@ defmodule FermixWebWeb.SetupLive do
   defp previous_tab(tab_id), do: adjacent_tab(tab_id, -1)
 
   defp adjacent_tab(tab_id, delta) do
-    index = Enum.find_index(@tabs, &(&1.id == tab_id)) || 0
+    tabs = tabs()
+    index = Enum.find_index(tabs, &(&1.id == tab_id)) || 0
     next_index = index + delta
-    next_index = max(0, min(next_index, length(@tabs) - 1))
-    Enum.at(@tabs, next_index).id
+    next_index = max(0, min(next_index, length(tabs) - 1))
+    Enum.at(tabs, next_index).id
   end
 
   defp tab_status(%{component: nil}, _report), do: :ready

@@ -42,7 +42,10 @@ defmodule FermixCore.MixProject do
       {:compux, github: "tezra-io/compux", ref: "d043c66569d8c3480712146dcfa6ccf4b781d6d2"},
       # Native kill(2) process-group shim used by the command-sweep (ProcessGroup).
       {:fermix_nif, in_umbrella: true},
-      {:plug, "~> 1.15", only: :test},
+      # The cue door (M60 §6.7): a loopback Bandit listener with a Plug router,
+      # inside `Cues.Supervisor`, so it exists under `--no-web` too.
+      {:bandit, "~> 1.10"},
+      {:plug, "~> 1.18"},
       # Explicit because FermixCore.Application supervises the shared
       # FermixCore.Finch pool directly (req would only pull it transitively).
       {:finch, "~> 0.21"},
@@ -55,6 +58,9 @@ defmodule FermixCore.MixProject do
       # The terminal QR code `fermix pair` prints for the phone to scan.
       {:qr_code, "~> 3.2"},
       {:req, "~> 0.5"},
+      # Cue feed sources parse RSS and Atom with a SAX parser that creates no
+      # atoms and never resolves a DTD or an external entity (M60 §6.9).
+      {:saxy, "~> 1.6"},
       {:telemetry, "~> 1.0"},
       # Reads a Codex `[mcp_servers.<name>]` block an owner pastes or imports
       # (`McpServers.Interchange`). Already in the release through

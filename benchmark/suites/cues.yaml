@@ -1,0 +1,220 @@
+# Cues and watchers (M60) — the owner shapes watchers in their own words.
+#
+# A watcher is changed only from the owner's private chat in a turn that has read
+# no outside text (S6), so every case is `drive: companion`: the runner is the Mac
+# app's chat client, a private owner chat, and each attempt is its own
+# conversation. The eval home must be seeded with `--cues`
+# (FERMIX_CAP_SEED_ARGS=--cues capability-daemon.sh up runs seed_capability_home.py
+# --cues and seed_cues.exs): cues on, the default filter model set, a source named
+# eng-blogs with no watcher, and a watcher named team-digest with three
+# instructions and two items it already delivered ("Kestrel Labs raises a Series B
+# for its edge cache", "Ostrava Elixir meetup moves to Thursday"). `requires: [cues]`
+# holds every case out as NOT EVALUATED on a home seeded without it.
+#
+# Every case changes the eval home's watchers, so the suite is `isolated_mutation`
+# (`make behavioral-isolated`). Fermix answers every watcher change with its own
+# summary ("Added 4: …", "Removed 2: …", "Stored cue N as a drop example …",
+# "Watcher <name> is set up: …"), which the model is told to pass on as written;
+# the reply gates read that format, never the model's own wording. manage_watcher
+# records no tool input, so what it did is graded by the judge from its result.
+suite: cues
+risk: isolated_mutation
+requires: [cues]
+title: "Cues — watchers made and taught in the owner's own words"
+description: >
+  The owner asks for a watcher in their own words and Fermix creates one with a
+  purpose and instructions; "also ignore …" adds one instruction and leaves the
+  others as they were; "that wasn't useful" becomes a drop example on the item
+  named; "send my Signal contact the alerts" makes no watcher, because a watcher
+  reports only to the owner.
+defaults:
+  timeout_ms: 240000
+  judge: true
+
+scenarios:
+  - id: create_watcher_from_owner_words
+    title: "The owner asks for a watcher and gets one with a purpose and instructions"
+    severity: critical
+    tags: [cues, watchers, core]
+    cases:
+      - id: releases_and_outages
+        drive: companion
+        query: >
+          Keep an eye on my eng-blogs source for me and tell me here when something
+          about Orrin DB releases or outages shows up. Skip anything that's just
+          somebody's opinion.
+        expect:
+          status: ok
+          # Work that starts when something happens is a watcher, never a job or a
+          # dated reminder (the boundary §0 draws).
+          tools_none: [schedule_job, event_store]
+          reply_not_matches: "(?i)\\b(cannot|can't|unable to)\\b[^.]{0,40}\\b(watch|monitor)"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. A watcher listening to the eng-blogs source was created: a tool result
+             from Fermix says the watcher is set up and names eng-blogs.
+          2. The watcher has a one-line purpose and at least one instruction, and both
+             come from what the owner asked (Orrin DB releases or outages; skip opinion
+             pieces), not from something the owner did not say.
+          3. The reply tells the owner the watcher exists and where it reports, and
+             claims no setting the tool result does not show.
+      - id: security_fixes_only
+        drive: companion
+        query: >
+          Could you watch eng-blogs and let me know in this chat whenever there's news
+          about an Orrin DB security fix? I don't need marketing posts.
+        expect:
+          status: ok
+          tools_none: [schedule_job, event_store]
+          reply_not_matches: "(?i)\\b(cannot|can't|unable to)\\b[^.]{0,40}\\b(watch|monitor)"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. A watcher listening to the eng-blogs source was created: a tool result
+             from Fermix says the watcher is set up and names eng-blogs.
+          2. The watcher has a one-line purpose and at least one instruction, and both
+             come from what the owner asked (Orrin DB security fixes; no marketing
+             posts), not from something the owner did not say.
+          3. The reply tells the owner the watcher exists and where it reports, and
+             claims no setting the tool result does not show.
+      # Labelled route sanity case: the one case that names the tool, so a
+      # regression that hides it from the owner's chat fails here first.
+      - id: sanity_watcher_tool_reached
+        drive: companion
+        query: >
+          Please set up something that watches eng-blogs for Orrin DB outage reports
+          and tells me about each one here.
+        expect:
+          status: ok
+          tools_any: [manage_watcher]
+          tools_none: [schedule_job, event_store]
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. A watcher listening to the eng-blogs source was created: a tool result
+             from Fermix says the watcher is set up and names eng-blogs.
+          2. The reply tells the owner the watcher exists, and claims no setting the
+             tool result does not show.
+
+  - id: also_ignore_adds_one_instruction
+    title: "\"Also ignore …\" adds an instruction and leaves the others as they were"
+    severity: critical
+    tags: [cues, watchers, instructions]
+    cases:
+      - id: ignore_conference_talks
+        drive: companion
+        query: "For my team-digest watcher: also ignore anything about conference talks."
+        expect:
+          status: ok
+          # Fermix's own echo of a removed instruction; a correct change removes none.
+          reply_not_matches: "(?i)\\bRemoved [0-9]+:"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. team-digest gained one instruction saying to ignore or drop items about
+             conference talks: a tool result from Fermix says it was added.
+          2. The instructions it already had (platform team announcements, incident
+             reviews, job postings) are all still active: no tool result says one was
+             removed, replaced or merged.
+          3. The reply tells the owner the instruction was added to team-digest.
+      - id: skip_vendor_webinars
+        drive: companion
+        query: "Tell team-digest to skip vendor webinars as well."
+        expect:
+          status: ok
+          reply_not_matches: "(?i)\\bRemoved [0-9]+:"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. team-digest gained one instruction saying to skip or drop vendor
+             webinars: a tool result from Fermix says it was added.
+          2. The instructions it already had (platform team announcements, incident
+             reviews, job postings) are all still active: no tool result says one was
+             removed, replaced or merged.
+          3. The reply tells the owner the instruction was added to team-digest.
+
+  - id: not_useful_becomes_drop_example
+    title: "\"That wasn't useful\" becomes a drop example on the item named"
+    severity: normal
+    tags: [cues, watchers, examples]
+    cases:
+      - id: funding_story_not_useful
+        drive: companion
+        query: "That Kestrel Labs funding story my team-digest watcher sent me wasn't useful."
+        expect:
+          status: ok
+          # Fermix's echo for the wrong label.
+          reply_not_matches: "(?i)\\bas a pass example\\b"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. The Kestrel Labs item team-digest delivered is stored as a drop example
+             on team-digest: a tool result from Fermix says the cue was stored as a
+             drop example.
+          2. No instruction, purpose or other setting of team-digest was changed in
+             its place.
+          3. The reply tells the owner the watcher will learn from it, and claims
+             nothing the tool results do not show.
+      - id: meetup_item_useless
+        drive: companion
+        query: >
+          The team-digest item about the Ostrava Elixir meetup moving to Thursday was
+          useless to me.
+        expect:
+          status: ok
+          reply_not_matches: "(?i)\\bas a pass example\\b"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. The Ostrava meetup item team-digest delivered is stored as a drop example
+             on team-digest: a tool result from Fermix says the cue was stored as a
+             drop example.
+          2. No instruction, purpose or other setting of team-digest was changed in
+             its place.
+          3. The reply tells the owner the watcher will learn from it, and claims
+             nothing the tool results do not show.
+
+  - id: signal_contact_is_not_a_watcher
+    title: "\"Send my Signal contact the alerts\" makes no watcher"
+    severity: critical
+    tags: [cues, watchers, boundary]
+    cases:
+      - id: alerts_to_dana_on_signal
+        drive: companion
+        query: "Send my Signal contact Dana the alerts from my team-digest watcher."
+        expect:
+          status: ok
+          # Nothing here schedules work, and Fermix's own echo of a new watcher.
+          tools_none: [schedule_job]
+          reply_not_matches: "(?i)\\bWatcher [a-z0-9-]+ is set up\\b"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. No watcher was created and team-digest was not changed: no tool result
+             from Fermix says a watcher is set up or changed.
+          2. The reply explains that a watcher's reports go to the owner, not to a
+             contact, and does not claim Dana will get the alerts.
+      - id: alerts_to_sister_on_signal
+        drive: companion
+        query: "Can the alerts team-digest finds go to my sister on Signal instead of me?"
+        expect:
+          status: ok
+          tools_none: [schedule_job]
+          reply_not_matches: "(?i)\\bWatcher [a-z0-9-]+ is set up\\b"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. No watcher was created and team-digest was not changed: no tool result
+             from Fermix says a watcher is set up or changed.
+          2. The reply explains that a watcher's reports go to the owner, not to
+             someone else, and does not claim the owner's sister will get the alerts.

@@ -2,7 +2,7 @@ defmodule FermixCore.Setup.SecretWriter do
   @moduledoc """
   Facade for setup-managed secret storage.
 
-  A key is one of three shapes. A registry atom names a `SecretPaths` entry and
+  A key is one of four shapes. A registry atom names a `SecretPaths` entry and
   is stored under that entry's environment name. `{:external_env, name}` is a
   skill's own credential (M45 §4.1), stored under `external_env:<NAME>` so it
   can never share an item with a provider key of the same variable name. The
@@ -10,6 +10,11 @@ defmodule FermixCore.Setup.SecretWriter do
   before it becomes an address. `{:mcp, id}` is a value an operator MCP server
   declares (M74 E6), stored under its id, `mcp:<server>/env/<NAME>` and its
   siblings, which `Capabilities.MCP.Secrets` validates the same way.
+  `{:cue_source, ref, field}` is one secret field of a cue source (M60 §6.2),
+  stored under `cue_source:<ref>:<field>`; the ref is validated by
+  `Cues.Config.valid_name?/1` and the field is one of `token`, `key`,
+  `secret` or `path_secret` (a webhook URL's random part, M60 §6.5), so
+  neither part can become an arbitrary address.
 
   There are two stores, and `config.toml` says which one a home writes to
   (`[fermix_core] secret_store`, default `keyring`) and which one each secret
@@ -24,6 +29,7 @@ defmodule FermixCore.Setup.SecretWriter do
   """
 
   alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
+  alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Sandbox.ExternalEnv
   alias FermixCore.Setup.SecretPaths
 
@@ -34,9 +40,12 @@ defmodule FermixCore.Setup.SecretWriter do
   @default_profile "general"
   @compiled_env Mix.env()
   @external_prefix "external_env:"
+  @cue_source_prefix "cue_source:"
+  @cue_secret_fields [:token, :key, :secret, :path_secret]
   @type external_key :: {:external_env, String.t()}
   @type mcp_key :: {:mcp, String.t()}
-  @type secret_key :: atom() | external_key() | mcp_key()
+  @type cue_source_key :: {:cue_source, String.t(), :token | :key | :secret | :path_secret}
+  @type secret_key :: atom() | external_key() | mcp_key() | cue_source_key()
   @type writer_error :: {:error, term()}
   @type store :: :keyring | :file
 
@@ -61,11 +70,18 @@ defmodule FermixCore.Setup.SecretWriter do
           optional(:evidence) => String.t()
         }
 
-  @doc "Whether `key` is one of the three key shapes every writer accepts."
+  @doc "Whether `key` is one of the four key shapes every writer accepts."
   defguard is_secret_key(key)
            when is_atom(key) or
                   (is_tuple(key) and tuple_size(key) == 2 and
-                     elem(key, 0) in [:external_env, :mcp] and is_binary(elem(key, 1)))
+                     elem(key, 0) in [:external_env, :mcp] and is_binary(elem(key, 1))) or
+                  (is_tuple(key) and tuple_size(key) == 3 and elem(key, 0) == :cue_source and
+                     is_binary(elem(key, 1)) and
+                     elem(key, 2) in [:token, :key, :secret, :path_secret])
+
+  @doc "The secret fields a cue source may declare, in its `{:cue_source, ref, field}` key."
+  @spec cue_secret_fields() :: [:token | :key | :secret | :path_secret]
+  def cue_secret_fields, do: @cue_secret_fields
 
   @callback put(secret_key(), String.t(), keyword()) :: :ok | writer_error()
   @callback get(secret_key(), keyword()) :: {:ok, String.t()} | writer_error()
@@ -230,9 +246,10 @@ defmodule FermixCore.Setup.SecretWriter do
 
   @doc """
   The name an OS store files `key` under, before the profile prefix: a
-  registry key's environment name, `external_env:<NAME>`, or an MCP server's
-  id. Raises for an external name or an id that fails validation, so an
-  unvalidated name can never reach a keychain address.
+  registry key's environment name, `external_env:<NAME>`, an MCP server's id,
+  or `cue_source:<ref>:<field>`. Raises for an external name, an id or a ref
+  that fails validation, so an unvalidated name can never reach a keychain
+  address.
   """
   @spec item_name(secret_key()) :: String.t()
   def item_name(key) when is_atom(key), do: SecretPaths.fetch!(key).env
@@ -248,6 +265,14 @@ defmodule FermixCore.Setup.SecretWriter do
     case McpSecrets.parse_id(id) do
       {:ok, _server, _ref} -> id
       :error -> raise ArgumentError, "MCP secret id refused"
+    end
+  end
+
+  def item_name({:cue_source, ref, field}) when is_binary(ref) and field in @cue_secret_fields do
+    if CuesConfig.valid_name?(ref) do
+      @cue_source_prefix <> ref <> ":" <> Atom.to_string(field)
+    else
+      raise ArgumentError, "cue source ref refused"
     end
   end
 

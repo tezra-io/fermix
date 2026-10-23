@@ -28,6 +28,8 @@ defmodule FermixChannels.Channels.Discord do
   @health_timeout_ms 5_000
   @max_message_length 2_000
   @max_media_bytes 10 * 1_024 * 1_024
+  # Message flag SUPPRESS_EMBEDS (1 << 2): Discord builds no embed for a link.
+  @suppress_embeds 4
 
   @impl true
   def parse_webhook(_params), do: {:error, :unsupported_transport}
@@ -106,6 +108,7 @@ defmodule FermixChannels.Channels.Discord do
       %{content: chunk, allowed_mentions: %{parse: []}}
       |> maybe_put_message_reference(channel_id, opts)
       |> maybe_put_components(opts)
+      |> maybe_suppress_embeds(opts)
 
     Req.new(url: "#{@api_base}/channels/#{channel_id}/messages", method: :post, json: body)
     |> Req.Request.put_header("authorization", "Bot #{token}")
@@ -590,6 +593,15 @@ defmodule FermixChannels.Channels.Discord do
     case Keyword.get(opts, :components) do
       nil -> body
       components when is_list(components) -> Map.put(body, :components, components)
+    end
+  end
+
+  # `link_previews: false` (a cue run's message, M60 §9.5): no embed for any
+  # link the text names.
+  defp maybe_suppress_embeds(body, opts) do
+    case Keyword.get(opts, :link_previews) do
+      false -> Map.put(body, :flags, @suppress_embeds)
+      _default -> body
     end
   end
 

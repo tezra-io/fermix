@@ -51,6 +51,30 @@ defmodule FermixOpik.TraceFileTest do
     assert meta.job_id == "j"
   end
 
+  # M60 §9.6: a cue run's bookends name its watcher and the delivery it held.
+  test "a cue run's job rows keep its trigger, watcher and delivery" do
+    base = %{
+      "ts" => "2026-06-02T12:00:00.000Z",
+      "type" => "agent_event",
+      "job_id" => "j",
+      "session_id" => "cron_j_20261017_120000_a1b2c3",
+      "trigger" => "cue",
+      "watcher_id" => "cwt_1",
+      "delivery_id" => 17
+    }
+
+    for event <- ["job_run_start", "job_run_complete", "job_run_error"] do
+      assert {_name, _measurements, meta} =
+               TraceFile.normalize("agent_event", Map.put(base, "event", event))
+
+      assert meta.watcher_id == "cwt_1", "#{event} dropped watcher_id"
+      assert meta.delivery_id == 17, "#{event} dropped delivery_id"
+    end
+
+    assert {_name, _measurements, %{trigger: "cue"}} =
+             TraceFile.normalize("agent_event", Map.put(base, "event", "job_run_start"))
+  end
+
   test "a job_run_complete row carries its tool failure count" do
     row = %{
       "ts" => "2026-06-02T12:00:00.000Z",

@@ -55,7 +55,7 @@ defmodule FermixCore.Tools.ResumeJob do
     with {:ok, job_id} <- Support.required_string(args, "job_id"),
          :ok <- Support.check_job_access(job_id, context) do
       case Registry.resume_job(job_id, repo: Support.repo(context)) do
-        {:ok, job} -> Support.success_json(Support.job_payload(job))
+        {:ok, job} -> Support.success_json(Support.job_payload(job, Support.repo(context)))
         {:error, reason} -> Support.error(reason)
       end
     else

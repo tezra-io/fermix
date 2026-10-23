@@ -795,6 +795,39 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "not a known model for any provider"
     end
 
+    # M60: the cue filter never falls back to the main model, so an unset default
+    # is "not set", not "inherits main"; a typo'd filter model fails like the rest.
+    test "the filter default is checked and never described as inheriting" do
+      Application.put_env(:fermix_core, :routing, [])
+      result = Checks.routing_overrides()
+      assert result.detail =~ "filter: not set (each watcher with a filter names its model)"
+
+      Application.put_env(:fermix_core, :routing, filter_model: "claude-opus-4-7")
+      result = Checks.routing_overrides()
+      assert result.status == :fail
+      assert result.detail =~ "filter_model"
+
+      Application.put_env(:fermix_core, :routing,
+        filter_provider: "anthropic",
+        filter_model: "claude-haiku-4-5"
+      )
+
+      result = Checks.routing_overrides()
+      assert result.status == :ok
+      assert result.detail =~ "filter: provider=anthropic, model=claude-haiku-4-5"
+    end
+
+    # The filter keys mean something only where the build admits cues, so a
+    # build without them neither names nor checks the filter.
+    test "a build without cues names no filter line" do
+      Application.put_env(:fermix_core, :routing, filter_model: "claude-opus-4-7")
+
+      result = Checks.routing_overrides(cues_available?: false)
+
+      assert result.status == :ok
+      refute result.detail =~ "filter"
+    end
+
     test "summarizes a valid meeting override (M21 Phase 3)" do
       Application.put_env(:fermix_core, :routing,
         meeting_provider: "anthropic",

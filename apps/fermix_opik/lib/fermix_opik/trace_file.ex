@@ -205,7 +205,9 @@ defmodule FermixOpik.TraceFile do
        :schedule_kind,
        :schedule_expr,
        :trigger,
-       :input
+       :input,
+       :watcher_id,
+       :delivery_id
      ])}
   end
 
@@ -216,12 +218,22 @@ defmodule FermixOpik.TraceFile do
        iterations: int(row["iterations"]),
        total_tokens: int(row["total_tokens"]),
        tool_failures: int(row["tool_failures"])
-     }, meta(row, [:agent, :job_id, :run_id, :session_id, :status, :output])}
+     },
+     meta(row, [
+       :agent,
+       :job_id,
+       :run_id,
+       :session_id,
+       :status,
+       :output,
+       :watcher_id,
+       :delivery_id
+     ])}
   end
 
   defp normalize_agent_event("job_run_error", row) do
     {[:fermix, :job, :run_error], %{count: 1, duration_ms: int(row["duration_ms"])},
-     meta(row, [:agent, :job_id, :run_id, :session_id, :status, :error])}
+     meta(row, [:agent, :job_id, :run_id, :session_id, :status, :error, :watcher_id, :delivery_id])}
   end
 
   defp normalize_agent_event("realtime_call_start", row) do

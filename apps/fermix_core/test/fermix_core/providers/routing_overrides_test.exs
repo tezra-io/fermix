@@ -92,6 +92,41 @@ defmodule FermixCore.Providers.RoutingOverridesTest do
                    end
     end
 
+    # M60 §8.2: the cue filter's daemon-wide default model.
+    test "the filter prefix reads the same three keys, independent of the others" do
+      routing = [
+        filter_provider: "anthropic",
+        filter_model: "claude-haiku-4-5",
+        filter_reasoning_effort: "low",
+        meeting_model: "gpt-5.4-mini"
+      ]
+
+      assert RoutingOverrides.parse(routing, :filter) == %{
+               provider: :anthropic,
+               model: "claude-haiku-4-5",
+               reasoning_effort: :low
+             }
+
+      assert RoutingOverrides.parse([meeting_model: "gpt-5.4-mini"], :filter) == @empty
+
+      assert_raise ArgumentError, ~r/\[fermix_core.routing\] filter_provider = "nope"/, fn ->
+        RoutingOverrides.parse([filter_provider: "nope"], :filter)
+      end
+    end
+
+    test "filter/0 reads the filter keys from the app env" do
+      Application.put_env(:fermix_core, :routing,
+        filter_provider: "openai",
+        filter_model: "gpt-5.4-mini"
+      )
+
+      assert RoutingOverrides.filter() == %{
+               provider: :openai,
+               model: "gpt-5.4-mini",
+               reasoning_effort: nil
+             }
+    end
+
     test "an invalid effort raises naming the key and value" do
       assert_raise ArgumentError,
                    ~r/\[fermix_core.routing\] cron_reasoning_effort = "turbo"/,

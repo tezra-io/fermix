@@ -9,9 +9,10 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
   It composes three existing seams and adds no delivery path of its own:
 
     1. `FermixCore.Delivery.OwnerInbox.resolve/1`, the one answer to "where is
-       the owner's inbox". Only a Telegram, Signal, WhatsApp or iMessage inbox
-       qualifies: on those the DM's chat id is the owner's user id, so the
-       owner's `/confirm` there passes the pending record's origin check.
+       the owner's inbox". Only an inbox `OwnerInbox.dm_origin/1` answers for
+       qualifies (Telegram, Signal, WhatsApp, iMessage): on those the DM's chat
+       id is the owner's user id, so the owner's `/confirm` there passes the
+       pending record's origin check. That rule lives in core alone.
     2. `Commands.Sandbox.store_pending_grant/2`, binding the token to that DM.
        A repeat while the token lives answers `:existing` and sends nothing.
     3. `Gateway.Delivery`, the single channel-delivery path, so Telegram renders
@@ -30,8 +31,6 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Delivery.OwnerInbox
 
-  @dm_platforms ["telegram", "signal", "whatsapp", "imessage"]
-
   @type request :: %{access_sensitive: String.t(), prompt: String.t()}
 
   @doc """
@@ -43,20 +42,52 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
           {:ok, String.t(), :new | :existing} | {:error, term()}
   def request(%{access_sensitive: intent_id, prompt: prompt}, opts \\ [])
       when is_binary(intent_id) and is_binary(prompt) and is_list(opts) do
-    with {:ok, inbox} <- owner_dm(opts),
+    with {:ok, inbox, dm_origin} <- owner_dm(opts),
          {:ok, adapter} <- adapter(inbox.platform, opts) do
-      case Sandbox.store_pending_grant(%{access_sensitive: intent_id}, origin(inbox)) do
+      case Sandbox.store_pending_grant(%{access_sensitive: intent_id}, origin(dm_origin)) do
         {:ok, token, :existing} -> {:ok, token, :existing}
         {:ok, token, :new} -> deliver(adapter, inbox, prompt, token)
       end
     end
   end
 
+  @doc """
+  Sends a mandate proposal (M60 §10.9) to the owner DM `inbox` that core
+  resolved and recorded on the proposal, through `Gateway.Delivery` as an
+  approval prompt: Telegram shows its one-tap buttons, whose taps send the
+  same `/confirm <token>` and `/deny <token>` the text carries for every other
+  channel. Nothing is stored here: the proposal and its token's digest are
+  durable in core, which checks the answer's origin. Core reaches this through
+  `config :fermix_core, :cue_proposal_sender`, registered by
+  `FermixChannels.Application`. Seam: `:adapter`.
+  """
+  @spec send_cue_proposal(
+          %{required(:platform) => String.t(), required(:destination) => String.t()},
+          String.t(),
+          String.t(),
+          keyword()
+        ) :: :ok | {:error, term()}
+  def send_cue_proposal(%{platform: platform} = inbox, text, token, opts \\ [])
+      when is_binary(platform) and is_binary(text) and is_binary(token) and is_list(opts) do
+    with {:ok, _origin} <- dm_inbox(inbox),
+         {:ok, adapter} <- adapter(platform, opts) do
+      adapter
+      |> ReplyContext.new(inbox_message(inbox))
+      |> Delivery.deliver({:approval_prompt, text, token})
+    end
+  end
+
   defp owner_dm(opts) do
     case OwnerInbox.resolve(Keyword.take(opts, [:jobs_config, :configured_owners])) do
-      {:ok, %{platform: platform} = inbox} when platform in @dm_platforms -> {:ok, inbox}
-      {:ok, _other_inbox} -> {:error, :no_owner_inbox}
+      {:ok, inbox} -> with {:ok, origin} <- dm_inbox(inbox), do: {:ok, inbox, origin}
       :no_delivery_target -> {:error, :no_owner_inbox}
+    end
+  end
+
+  defp dm_inbox(inbox) do
+    case OwnerInbox.dm_origin(inbox) do
+      {:ok, origin} -> {:ok, origin}
+      :error -> {:error, :no_owner_inbox}
     end
   end
 
@@ -67,8 +98,8 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
     end
   end
 
-  defp origin(%{platform: platform, destination: owner}) do
-    %{channel: platform, chat_id: owner, thread_ts: nil, user_id: owner, resume: nil}
+  defp origin(%{platform: platform, chat_id: chat_id, user_id: user_id}) do
+    %{channel: platform, chat_id: chat_id, thread_ts: nil, user_id: user_id, resume: nil}
   end
 
   defp deliver(adapter, inbox, prompt, token) do

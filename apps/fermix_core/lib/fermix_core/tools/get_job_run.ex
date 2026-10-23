@@ -6,6 +6,7 @@ defmodule FermixCore.Tools.GetJobRun do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Jobs.CueRun
   alias FermixCore.Memory.Repo
   alias FermixCore.Tools.JobRegistrySupport, as: Support
 
@@ -62,11 +63,22 @@ defmodule FermixCore.Tools.GetJobRun do
   defp do_execute(args, context) do
     with {:ok, run_id} <- Support.required_string(args, "run_id") do
       case Repo.get_job_run(run_id, server: Support.repo(context)) do
-        {:ok, run} -> Support.success_json(Support.job_run_payload(run))
+        {:ok, run} -> present(run, context)
         {:error, reason} -> Support.error(reason)
       end
     else
       {:error, reason} -> {:ok, Tool.error(reason)}
+    end
+  end
+
+  # A cue run's reply, error and prompt are held back off an attended owner
+  # turn and framed on one (M60 §9.3).
+  defp present(run, context) do
+    pairs = [{Support.job_run_payload(run), run}]
+
+    case CueRun.present_runs(pairs, context, repo: Support.repo(context)) do
+      {:ok, [payload]} -> Support.success_json(payload)
+      {:error, reason} -> Support.error(reason)
     end
   end
 end

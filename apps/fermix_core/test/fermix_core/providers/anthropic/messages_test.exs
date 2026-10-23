@@ -541,6 +541,23 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
       end
     end
 
+    # A one-shot classifier (the cue filter) caps its output at a few hundred
+    # tokens; adaptive thinking counts against `max_tokens` and could use it all.
+    test "omits thinking when the caller turns it off, even on an adaptive model" do
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        refute Map.has_key?(Jason.decode!(body), "thinking")
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      assert {:ok, _turn} =
+               Messages.chat(
+                 [%{role: "user", content: "."}],
+                 [],
+                 chat_opts(model: "claude-haiku-5-5", thinking: :off)
+               )
+    end
+
     test "omits thinking for models without adaptive support" do
       Req.Test.stub(__MODULE__, fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)

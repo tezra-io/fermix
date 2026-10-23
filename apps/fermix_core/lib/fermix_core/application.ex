@@ -26,6 +26,8 @@ defmodule FermixCore.Application do
   alias FermixCore.ComputerHistory.Supervisor, as: ComputerHistorySupervisor
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.Supervisor, as: ComputerUseSupervisor
+  alias FermixCore.Cues
+  alias FermixCore.Cues.Supervisor, as: CuesSupervisor
   alias FermixCore.Harness.Supervisor, as: HarnessSupervisor
   alias FermixCore.HostFacts
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
@@ -273,7 +275,13 @@ defmodule FermixCore.Application do
         maybe_realtime_supervisor(),
         maybe_computer_use_supervisor(),
         maybe_computer_history_supervisor(),
-        maybe_skill_curation_scheduler()
+        maybe_skill_curation_scheduler(),
+        # Cue tree (M60 §5.3) LAST, and that order is load-bearing, as it is
+        # for the temporal rail above: under `:rest_for_one` a crash of
+        # `JobScheduler` or anything before it restarts the cue subsystem,
+        # which re-reads its rows, and a crash inside it restarts nothing
+        # outside it. Present only where `Cues.enabled?/0` admits it.
+        maybe_cues_supervisor()
       ]
       |> List.flatten()
 
@@ -483,6 +491,22 @@ defmodule FermixCore.Application do
     if compiled_env != :test and SkillCurationConfig.enabled?() and
          FermixCore.Memory.Config.enabled?() do
       [SkillCurationScheduler]
+    else
+      []
+    end
+  end
+
+  # Cue subsystem (M60 §5.3, §15): child-ABSENT when gated out, like the
+  # skill-curation clock above. `Cues.enabled?/0` already holds the
+  # compile-time gate (`:dev` and `:test` builds only), the
+  # `[fermix_core.cues] enabled` switch and memory being on; `mix test` never
+  # starts the tree on top of that, so no suite reaches the door's port or the
+  # sweeps. Public (@doc false) for the gating test; production callers use the
+  # baked default.
+  @doc false
+  def maybe_cues_supervisor(compiled_env \\ @compiled_env) do
+    if compiled_env != :test and Cues.enabled?() do
+      [CuesSupervisor]
     else
       []
     end

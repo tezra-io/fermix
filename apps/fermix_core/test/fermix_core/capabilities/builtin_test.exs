@@ -163,9 +163,12 @@ defmodule FermixCore.Capabilities.BuiltinTest do
 
       # The event family (MILESTONE_30 §12.1, §20) is owner data by definition —
       # every row is the owner's own calendar. So is the meetings family
-      # (MILESTONE_21 C2 §14.1): every row is a meeting the owner sat in.
+      # (MILESTONE_21 C2 §14.1): every row is a meeting the owner sat in. So are
+      # the owner's watchers (M60 §8), what they received (`list_cues`) and a cue
+      # run's own watcher's history (`cue_history`).
       assert flagged == [
                "content_search",
+               "cue_history",
                "event_list",
                "event_remove",
                "event_store",
@@ -176,9 +179,11 @@ defmodule FermixCore.Capabilities.BuiltinTest do
                "glob_search",
                "join_meeting",
                "leave_meeting",
+               "list_cues",
                "list_job_runs",
                "list_jobs",
                "list_meetings",
+               "manage_watcher",
                "memory_sources_list",
                # On-device computer-history recall is owner data (MILESTONE_32 §11.2).
                "recall_activity",

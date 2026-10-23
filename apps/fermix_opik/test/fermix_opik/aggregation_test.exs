@@ -726,6 +726,42 @@ defmodule FermixOpik.AggregationTest do
     assert llm.provider == "openai"
   end
 
+  test "a cue run's trace carries its trigger, watcher and delivery" do
+    {_state, closed} =
+      run([
+        {[:fermix, :job, :run_start], %{},
+         %{
+           agent: "scheduled:job-8",
+           job_id: "job-8",
+           run_id: "run-2",
+           name: "release watch",
+           session_id: "cron_job-8_20261017_120000_a1b2c3",
+           schedule_kind: "cue",
+           trigger: "cue",
+           watcher_id: "cwt_1",
+           delivery_id: 17
+         }},
+        {[:fermix, :job, :run_complete], %{duration_ms: 900, iterations: 1, total_tokens: 10},
+         %{
+           agent: "scheduled:job-8",
+           job_id: "job-8",
+           run_id: "run-2",
+           status: "ok",
+           session_id: "cron_job-8_20261017_120000_a1b2c3",
+           trigger: "cue",
+           watcher_id: "cwt_1",
+           delivery_id: 17
+         }}
+      ])
+
+    assert [%{trace: trace}] = closed
+    assert "scheduled" in trace.tags
+    assert trace.metadata.trigger == "cue"
+    assert trace.metadata.watcher_id == "cwt_1"
+    assert trace.metadata.delivery_id == 17
+    refute Map.has_key?(trace.metadata, :cue_count)
+  end
+
   test "a soul-curation draft is its own trace nesting the bounded provider call" do
     {_state, closed} =
       run([
@@ -2501,6 +2537,373 @@ defmodule FermixOpik.AggregationTest do
       assert trace.tags == ["voice_gist"]
       assert trace.metadata.status == "failed"
       assert trace.error_info.message == "timeout"
+    end
+  end
+
+  @cue_filter_start [:fermix, :cue_filter, :run_start]
+  @cue_filter_complete [:fermix, :cue_filter, :run_complete]
+  @cue_filter_error [:fermix, :cue_filter, :run_error]
+  @cue_filter_session "cue_filter_cwt_9f2e_20261017_120000_a1b2c3"
+
+  # The emitter's own metadata shape (FermixCore.Cues.Filter.Telemetry),
+  # mirrored by hand like `voice_gist_meta/1`.
+  defp cue_filter_meta(extra) do
+    Map.merge(
+      %{
+        agent: "cue_filter",
+        session_id: @cue_filter_session,
+        filter_call_id: "cfc_1",
+        watcher_id: "cwt_9f2e",
+        delivery_id: 17,
+        cue_id: 9,
+        source_ref: "eng-feeds",
+        attempt: 0
+      },
+      extra
+    )
+  end
+
+  # M60 §14: one filter call for one cue is a run kind of its own, a root with
+  # its provider call nested by the shared session id.
+  describe "a cue filter call" do
+    test "the reporter subscribes to every cue_filter event" do
+      for event <- [@cue_filter_start, @cue_filter_complete, @cue_filter_error] do
+        assert event in FermixOpik.Reporter.events(),
+               "#{inspect(event)} is not subscribed, so the run is invisible to Opik"
+      end
+    end
+
+    test "a filter call is one root trace nesting its model call, closed with the decision" do
+      {_state, closed} =
+        run([
+          {@cue_filter_start, %{count: 1}, cue_filter_meta(%{})},
+          {[:fermix, :provider, :call], %{duration_ms: 900},
+           %{
+             provider: :openai,
+             model: "gpt-5.4-mini",
+             status: :ok,
+             agent: "cue_filter",
+             session_id: @cue_filter_session,
+             tokens: %{prompt: 400, completion: 20}
+           }},
+          {@cue_filter_complete, %{count: 1, duration_ms: 950},
+           cue_filter_meta(%{status: "ok", decision: "pass"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.tags == ["cue_filter"]
+      assert trace.name == @cue_filter_session
+      assert trace.metadata.decision == "pass"
+      assert trace.metadata.watcher_id == "cwt_9f2e"
+      assert trace.metadata.delivery_id == 17
+      assert [llm] = spans_of_type(spans, "llm")
+      assert llm.trace_id == trace.id
+      refute Map.has_key?(span_named(spans, @cue_filter_session), :parent_span_id)
+    end
+
+    # Without the prefix clause a closer arriving with no opener would mint a
+    # root `infer_kind/1` reads as `:subagent`.
+    test "a failed call with no opener still closes as a cue_filter root with its status" do
+      {_state, closed} =
+        run([
+          {@cue_filter_error, %{count: 1, duration_ms: 60_000},
+           cue_filter_meta(%{status: "provider_failure", error_kind: "timeout"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.tags == ["cue_filter"]
+      assert trace.metadata.status == "provider_failure"
+      assert trace.error_info.message == "timeout"
+    end
+
+    # `Cues.Filter.Llm` puts the call's session id in the chain's failover
+    # telemetry, as the adapter's own call event carries it.
+    test "a failover on the filter call's chain nests under the call's root" do
+      {_state, closed} =
+        run([
+          {@cue_filter_start, %{count: 1}, cue_filter_meta(%{})},
+          {[:fermix, :provider, :failover], %{count: 1},
+           %{
+             from_provider: :openai,
+             from_model: "gpt-5.4-mini",
+             to_provider: :openai,
+             to_model: "gpt-5.4",
+             reason_kind: :timeout,
+             agent: "cue_filter",
+             surface: :cue_filter,
+             session_id: @cue_filter_session
+           }},
+          {@cue_filter_complete, %{count: 1, duration_ms: 950},
+           cue_filter_meta(%{status: "ok", decision: "pass"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == @cue_filter_session
+      root = span_named(spans, @cue_filter_session)
+      failover = span_named(spans, "failover:openai->openai")
+      assert failover.trace_id == trace.id
+      assert failover.parent_span_id == root.id
+    end
+  end
+
+  # Cue lifecycle ([:fermix, :cue, :lifecycle], M60 §14). `@cue_phases` mirrors
+  # `FermixCore.Cues.Telemetry.phases/0` by hand, as `@reminder_phases` does:
+  # `fermix_opik` declares no dependency on `fermix_core`, and
+  # `apps/fermix_core/test/fermix_core/cues/telemetry_test.exs` pins `phases/0`
+  # against the same literal list.
+  @cue_event [:fermix, :cue, :lifecycle]
+  @cue_phases ~w(accepted duplicate conflict stale rejected rate_limited over_budget
+                 routed gap expired ingest_error sweep_error passed dropped filter_retry
+                 filter_held filter_failed claimed settled retry exhausted proposed
+                 confirmed denied proposal_expired proposal_refused)a
+  @cue_run_session "cron_job-8_20261017_120000_a1b2c3"
+
+  # The emitter's own metadata shape (FermixCore.Cues.Telemetry): ids, labels
+  # and counts, the phase and the component.
+  defp cue_meta(phase, extra) do
+    Map.merge(%{phase: phase, component: "cues", source_ref: "eng-feeds"}, extra)
+  end
+
+  defp cue_run_meta(phase, extra) do
+    cue_meta(
+      phase,
+      Map.merge(
+        %{
+          session_id: @cue_run_session,
+          job_id: "job-8",
+          run_id: "run-2",
+          delivery_id: 17,
+          watcher_id: "cwt_9f2e"
+        },
+        extra
+      )
+    )
+  end
+
+  defp cue_job_meta(extra) do
+    Map.merge(
+      %{
+        agent: "scheduled:job-8",
+        job_id: "job-8",
+        run_id: "run-2",
+        name: "release watch",
+        session_id: @cue_run_session,
+        schedule_kind: "cue",
+        schedule_expr: "cue",
+        trigger: "cue",
+        watcher_id: "cwt_9f2e",
+        delivery_id: 17
+      },
+      extra
+    )
+  end
+
+  describe "cue lifecycle" do
+    test "the reporter subscribes to the event" do
+      assert @cue_event in FermixOpik.Reporter.events()
+    end
+
+    # Registry completeness: with no session to nest under, every phase must
+    # ship as its own trace, never fall to the catch-all.
+    test "every phase without a session is its own self-closing trace" do
+      for phase <- @cue_phases do
+        {state, closed} = run([{@cue_event, %{count: 1}, cue_meta(phase, %{cue_id: 9})}])
+
+        assert [%{trace: trace, spans: []}] = closed,
+               "phase #{inspect(phase)} produced no trace — it fell to the catch-all"
+
+        assert trace.name == "cue:#{phase}"
+        assert trace.tags == ["cue"]
+        assert state.traces == %{}
+      end
+    end
+
+    test "a sessionless trace carries the emitter's ids, labels and measurements only" do
+      {_state, closed} =
+        run([
+          {@cue_event, %{count: 1, accept_ms: 14},
+           cue_meta(:accepted, %{cue_id: 9, result: :ok, unknown_key: "dropped"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.metadata.phase == "accepted"
+      assert trace.metadata.component == "cues"
+      assert trace.metadata.source_ref == "eng-feeds"
+      assert trace.metadata.cue_id == 9
+      assert trace.metadata.result == "ok"
+      assert trace.metadata.accept_ms == 14
+      refute Map.has_key?(trace.metadata, :unknown_key)
+    end
+
+    test "a sessionless phase never nests under a run that is open" do
+      {state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 10},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-1"}},
+          {@cue_event, %{count: 1}, cue_meta(:routed, %{cue_id: 9, delivery_id: 17})},
+          {[:fermix, :agent, :message], %{iterations: 1},
+           %{channel: :cli, chat_id: "c1", session_id: "main-1", agent: "main"}}
+        ])
+
+      turn = Enum.find(closed, &(&1.trace.name == "agent:main"))
+      refute span_named(turn.spans, "cue:routed")
+      assert Enum.any?(closed, &(&1.trace.name == "cue:routed"))
+      assert state.traces == %{}
+    end
+
+    test "a filter-scoped phase is a child span of the filter call's trace" do
+      {_state, closed} =
+        run([
+          {@cue_filter_start, %{count: 1}, cue_filter_meta(%{})},
+          {@cue_event, %{count: 1},
+           cue_meta(:dropped, %{
+             session_id: @cue_filter_session,
+             filter_call_id: "cfc_1",
+             watcher_id: "cwt_9f2e",
+             delivery_id: 17,
+             cue_id: 9,
+             decision: :drop,
+             attempt: 0
+           })},
+          {@cue_filter_complete, %{count: 1, duration_ms: 950},
+           cue_filter_meta(%{status: "ok", decision: "drop"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == @cue_filter_session
+      wrapper = span_named(spans, @cue_filter_session)
+      assert %{parent_span_id: parent, metadata: metadata} = span_named(spans, "cue:dropped")
+      assert parent == wrapper.id
+      assert metadata.decision == "drop"
+      assert metadata.filter_call_id == "cfc_1"
+    end
+
+    # A `none` watcher's delivery passes at acceptance with no filter call (§14).
+    test "a pass with no filter session ships as its own trace" do
+      {_state, closed} =
+        run([
+          {@cue_event, %{count: 1},
+           cue_meta(:passed, %{cue_id: 9, delivery_id: 17, reason: "no filter"})}
+        ])
+
+      assert [%{trace: trace, spans: []}] = closed
+      assert trace.name == "cue:passed"
+      assert trace.metadata.reason == "no filter"
+    end
+
+    # The claim is traced in the scheduler before the runner exists, so its
+    # phase opens the run's session; the job's opener must still give the trace
+    # its name, metadata, thread and sweep floor.
+    test "a cue run's trace holds its claim and settle, with the job opener's fields" do
+      {state, closed} =
+        run([
+          {@cue_event, %{queue_ms: 2_500}, cue_run_meta(:claimed, %{state: "claimed"})},
+          {[:fermix, :job, :run_start], %{}, cue_job_meta(%{max_duration_ms: 600_000})}
+        ])
+
+      assert closed == []
+      # Past the idle TTL but inside the run's own timeout: still open.
+      {state, []} = Aggregation.sweep(state, 3 * 1_000_000 + 130_000_000)
+
+      {_state, closed} =
+        Enum.reduce(
+          [
+            {@cue_event, %{count: 1},
+             cue_run_meta(:settled, %{state: "acked", outcome: "acted", reason: "acted"})},
+            {[:fermix, :job, :run_complete], %{duration_ms: 900, iterations: 1},
+             cue_job_meta(%{status: "ok"})}
+          ],
+          {state, []},
+          fn {event, meas, meta}, {st, acc} ->
+            at = %{at: ~U[2026-06-02 12:05:00.000Z], mono: 200_000_000}
+            {st, new} = Aggregation.apply_event(st, event, meas, meta, at)
+            {st, acc ++ new}
+          end
+        )
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == "scheduled:release watch"
+      assert trace.thread_id == "job-8"
+      assert trace.metadata.trigger == "cue"
+      assert trace.metadata.schedule_kind == "cue"
+      assert trace.metadata.delivery_id == 17
+
+      wrapper = span_named(spans, "scheduled:release watch")
+      assert %{parent_span_id: claim_parent} = claimed = span_named(spans, "cue:claimed")
+      assert claim_parent == wrapper.id
+      assert claimed.metadata.queue_ms == 2_500
+      assert span_named(spans, "cue:settled").parent_span_id == wrapper.id
+    end
+
+    # A proposal is confirmed, or a crashed run reaped, after the run's trace
+    # shipped: the phase still ships, as its own trace naming the run's session,
+    # rather than being dropped at the tombstone or minting a phantom root.
+    test "a run-scoped phase after the run's trace shipped is its own trace" do
+      {state, closed} =
+        run([
+          {[:fermix, :job, :run_start], %{}, cue_job_meta(%{})},
+          {[:fermix, :job, :run_complete], %{duration_ms: 900}, cue_job_meta(%{status: "ok"})},
+          {@cue_event, %{count: 1},
+           cue_run_meta(:confirmed, %{proposal_id: "cpr_1", state: "confirmed"})}
+        ])
+
+      assert [%{trace: run_trace}, %{trace: late, spans: []}] = closed
+      assert run_trace.name == "scheduled:release watch"
+      assert late.name == "cue:confirmed"
+      assert late.metadata.session_id == @cue_run_session
+      assert late.metadata.proposal_id == "cpr_1"
+      assert state.dropped_after_close == 0
+      assert state.traces == %{}
+    end
+
+    test "a run-scoped phase for a run that was never seen opens no root" do
+      {state, closed} =
+        run([{@cue_event, %{count: 1}, cue_run_meta(:exhausted, %{reason: "reaped"})}])
+
+      assert [%{trace: trace, spans: []}] = closed
+      assert trace.name == "cue:exhausted"
+      assert trace.metadata.session_id == @cue_run_session
+      assert state.traces == %{}
+      assert state.sessions == %{}
+    end
+
+    # The owner confirms a proposal hours after its run's trace shipped and its
+    # tombstone was pruned: the call still ships as its own trace, not as a
+    # phantom `scheduled:` root holding one span.
+    test "a proposal's confirmed call long after its run is its own trace" do
+      {state, _closed} =
+        run([
+          {[:fermix, :job, :run_start], %{}, cue_job_meta(%{})},
+          {[:fermix, :job, :run_complete], %{duration_ms: 900}, cue_job_meta(%{status: "ok"})}
+        ])
+
+      {state, []} = Aggregation.sweep(state, 10_000_000_000)
+      assert state.closed_sessions == %{}
+
+      confirmed = %{
+        tool: "ops_create_issue",
+        success: true,
+        session_id: @cue_run_session,
+        access_gate: "confirmed",
+        mandate_call_id: "cmc_1"
+      }
+
+      at = %{at: ~U[2026-06-02 15:00:00.000Z], mono: 10_000_000_001}
+
+      {state, closed} =
+        Aggregation.apply_event(
+          state,
+          [:fermix, :tool, :exec],
+          %{duration_ms: 400},
+          confirmed,
+          at
+        )
+
+      assert [%{trace: trace, spans: [span]}] = closed
+      assert trace.name == "access_gate:confirmed"
+      assert trace.metadata.session_id == @cue_run_session
+      assert span.metadata.mandate_call_id == "cmc_1"
+      assert state.traces == %{}
     end
   end
 

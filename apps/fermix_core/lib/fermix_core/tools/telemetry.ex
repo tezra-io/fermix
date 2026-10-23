@@ -20,8 +20,10 @@ defmodule FermixCore.Tools.Telemetry do
   # `scheduled`, `confirmed`) and the parked intent a confirmed run answers. The
   # gate stamps them on the call's context, so the executor's own event carries
   # them without any executor knowing the gate exists; the context wins over a
-  # caller's `:metadata`.
-  @access_gate_keys [:access_gate, :access_intent]
+  # caller's `:metadata`. A mandate call the gate let through (M60 §14) adds
+  # whether a validator decided (`validator: "program" | "none"`) and its
+  # `cue_mandate_calls` row (`mandate_call_id`).
+  @access_gate_keys [:access_gate, :access_intent, :validator, :mandate_call_id]
 
   # A turn may carry `:redact_values` — secret values that must not leave the
   # machine in an exported event (MILESTONE_29_ACP_AGENT_SURFACE §8.3). This is

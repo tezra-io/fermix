@@ -216,6 +216,81 @@ defmodule FermixCore.Setup.RestartStateTest do
     end
   end
 
+  # M60: the cue filter's default model is read at every filter call
+  # (`RoutingOverrides.filter/0`), so changing it asks for no restart.
+  describe "the cue filter's default model" do
+    setup do
+      original = Application.get_env(:fermix_core, :routing)
+      on_exit(fn -> Application.put_env(:fermix_core, :routing, original || []) end)
+    end
+
+    test "a filter model change since boot is no restart reason" do
+      Application.put_env(:fermix_core, :routing, [])
+      server = start_state()
+
+      Application.put_env(:fermix_core, :routing,
+        filter_provider: "anthropic",
+        filter_model: "claude-haiku-4-5",
+        filter_reasoning_effort: "low"
+      )
+
+      assert RestartState.restart(server: server) == %{required: false, reasons: []}
+    end
+
+    # The negative control: the rule narrows routing, it does not drop it.
+    test "a cron model change is still a reason" do
+      Application.put_env(:fermix_core, :routing, [])
+      server = start_state()
+
+      Application.put_env(:fermix_core, :routing, cron_model: "claude-haiku-4-5")
+
+      assert %{required: true, reasons: [reason]} = RestartState.restart(server: server)
+      assert reason.section == "routing"
+      refute RestartState.boot_bound?([:routing, :filter_model])
+      assert RestartState.boot_bound?([:routing, :cron_model])
+    end
+  end
+
+  # M60: the cue tree starts at boot, so its switch and the door's port need a
+  # restart; sources reconcile live and mandates are read at every call.
+  describe "cue settings" do
+    setup do
+      original = Application.get_env(:fermix_core, :cues)
+
+      on_exit(fn ->
+        if original,
+          do: Application.put_env(:fermix_core, :cues, original),
+          else: Application.delete_env(:fermix_core, :cues)
+      end)
+    end
+
+    test "turning cues on or moving the door is a restart reason" do
+      Application.put_env(:fermix_core, :cues, enabled: false)
+      server = start_state()
+
+      Application.put_env(:fermix_core, :cues, enabled: true)
+
+      assert %{required: true, reasons: [reason]} = RestartState.restart(server: server)
+      assert reason.section == "cues"
+      assert RestartState.boot_bound?([:cues, :door_port])
+    end
+
+    test "a source, a mandate or the mandates switch is no restart reason" do
+      Application.put_env(:fermix_core, :cues, enabled: true)
+      server = start_state()
+
+      Application.put_env(:fermix_core, :cues,
+        enabled: true,
+        mandates_enabled: false,
+        sources: %{"eng-blogs" => [preset: "rss", url: "https://example.org/feed"]},
+        mandates: %{"release-issues" => [job: "job_1"]}
+      )
+
+      assert RestartState.restart(server: server) == %{required: false, reasons: []}
+      refute RestartState.boot_bound?([:cues, :sources])
+    end
+  end
+
   describe "a secret replaced since boot" do
     # The fourth input, and the one neither baseline can see: a rotation writes
     # the same `@keyring` sentinel over the same sentinel, so the document and

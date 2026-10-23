@@ -11,6 +11,58 @@ defmodule FermixCore.Plugins.Http.InterpreterTest do
     %{"parameters" => parameters, "request" => request}
   end
 
+  # M60 §10.2: a mandate call's arguments are normalised once, before the gate,
+  # and the request is built from exactly that map.
+  describe "normalisation" do
+    defp query_tool do
+      tool(
+        %{
+          "method" => "GET",
+          "url" => "https://api.example.com/x",
+          "query" => %{"state" => "{state}"}
+        },
+        %{
+          "type" => "object",
+          "properties" => %{"state" => %{"type" => "string", "default" => "open"}}
+        }
+      )
+    end
+
+    defp capture do
+      fn req ->
+        send(self(), {:req, req})
+        {:ok, %{status: 200, headers: [{"content-type", "application/json"}], body: "{}"}}
+      end
+    end
+
+    test "normalize/2 is the tool's own ParamSchema: defaults filled, undeclared keys dropped" do
+      assert {:ok, %{"state" => "open"}} = Interpreter.normalize(query_tool(), %{"extra" => 1})
+    end
+
+    test "normalized: true builds the request from the given map without normalising again" do
+      assert {:ok, %{success: true}} =
+               Interpreter.run(query_tool(), %{"state" => "closed"},
+                 http: capture(),
+                 normalized: true
+               )
+
+      assert_received {:req, req}
+      assert {"state", "closed"} in req.query
+
+      # Without the flag the same call is normalised as before.
+      assert {:ok, %{success: true}} = Interpreter.run(query_tool(), %{}, http: capture())
+      assert_received {:req, normalised}
+      assert {"state", "open"} in normalised.query
+
+      # With it, nothing is filled in: the map is the request's.
+      assert {:ok, %{success: true}} =
+               Interpreter.run(query_tool(), %{}, http: capture(), normalized: true)
+
+      assert_received {:req, verbatim}
+      refute {"state", "open"} in verbatim.query
+    end
+  end
+
   describe "single request" do
     test "returns the extracted, redacted body on success" do
       t =

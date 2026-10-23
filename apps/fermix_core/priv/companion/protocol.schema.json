@@ -3,8 +3,8 @@
   "$id": "https://fermix.sh/companion/protocol.schema.json",
   "title": "Fermix companion chat socket protocol",
   "description": "Newline-delimited JSON wire contract between the Fermix daemon and a native companion's chat. Source of truth: FermixCore.Companion.Protocol. See PROTOCOL.md.",
-  "x-protocol-version": 3,
-  "x-supported-version-range": { "min": 2, "max": 3 },
+  "x-protocol-version": 4,
+  "x-supported-version-range": { "min": 3, "max": 4 },
   "x-max-line-bytes": 65536,
   "x-media-budget-bytes": 536870912,
   "x-media-release-grace-s": 60,
@@ -23,7 +23,8 @@
             "history_search",
             "read_state",
             "media_fetch",
-            "media_release"
+            "media_release",
+            "proposal_answer"
           ]
         }
       },
@@ -63,6 +64,10 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "media_release" } } },
           "then": { "$ref": "#/$defs/media_release" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "proposal_answer" } } },
+          "then": { "$ref": "#/$defs/proposal_answer" }
         }
       ]
     },
@@ -89,6 +94,8 @@
             "search_results",
             "media_path",
             "media_missing",
+            "proposal",
+            "proposal_resolved",
             "error"
           ]
         }
@@ -164,6 +171,17 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "media_missing" } } },
           "then": { "$ref": "#/$defs/media_missing" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "proposal" } } },
+          "then": { "$ref": "#/$defs/proposal" }
+        },
+        {
+          "if": {
+            "required": ["type"],
+            "properties": { "type": { "const": "proposal_resolved" } }
+          },
+          "then": { "$ref": "#/$defs/proposal_resolved" }
         },
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "error" } } },
@@ -282,6 +300,19 @@
         "type": { "const": "media_release" },
         "profile_id": { "type": "string", "minLength": 1 },
         "ref": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "proposal_answer": {
+      "type": "object",
+      "description": "Version 4. The owner's answer to a proposal, by its id: confirm runs exactly the recorded call once, deny runs nothing. Answered accepted (duplicate false) once the decision is recorded, then proposal_resolved; refused with error request_failed carrying the daemon's sentence and client_msg_id. Taken only from a connection the daemon placed as the owner's.",
+      "x-since-version": 4,
+      "required": ["type", "client_msg_id", "profile_id", "proposal_id", "decision"],
+      "properties": {
+        "type": { "const": "proposal_answer" },
+        "client_msg_id": { "type": "string", "minLength": 1 },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "proposal_id": { "type": "string", "minLength": 1 },
+        "decision": { "enum": ["confirm", "deny"] }
       }
     },
     "server_hello": {
@@ -498,6 +529,32 @@
         "ref": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
     },
+    "proposal": {
+      "type": "object",
+      "description": "Version 4. A task under a mandate in approve mode wants to act and waits for the owner: its card. Sent when the proposal is stored, and again after server_hello for every proposal still waiting, oldest first; a client keys cards by proposal_id. Sent only to a connection on version 4 that the daemon placed as the owner's.",
+      "x-since-version": 4,
+      "required": ["type", "profile_id", "proposal"],
+      "properties": {
+        "type": { "const": "proposal" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "proposal": { "$ref": "#/$defs/proposalCard" }
+      }
+    },
+    "proposal_resolved": {
+      "type": "object",
+      "description": "Version 4. A proposal left waiting: denied, expired or refused, or confirmed once its call has finished (result_status set), whichever surface decided it. sentence is Fermix's; result_text is outside text, what the tool or the validator answered, at most 2,000 characters. Sent only to a connection on version 4 that the daemon placed as the owner's.",
+      "x-since-version": 4,
+      "required": ["type", "profile_id", "proposal_id", "state", "sentence"],
+      "properties": {
+        "type": { "const": "proposal_resolved" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "proposal_id": { "type": "string", "minLength": 1 },
+        "state": { "enum": ["confirmed", "denied", "expired", "refused"] },
+        "result_status": { "enum": ["ok", "error", "unknown"] },
+        "sentence": { "type": "string", "minLength": 1 },
+        "result_text": { "type": "string", "maxLength": 2000 }
+      }
+    },
     "error": {
       "type": "object",
       "description": "A refusal. reason is the code; the other fields are context. Protocol violations close the connection; request failures do not. ref is set only on the request_failed answering a media_fetch the daemon could not serve.",
@@ -514,6 +571,75 @@
         "client_version": { "type": "integer" },
         "min_version": { "type": "integer" },
         "max_version": { "type": "integer" }
+      }
+    },
+    "proposalCard": {
+      "type": "object",
+      "description": "A proposal as the owner decides it. Fermix's record (ids, the owner's own names, times, where an answer came from, status_sentence) and summary carry no outside text; outside holds everything a model or a stranger wrote, kept apart by structure. Times are RFC 3339 UTC. An optional field is absent when it does not apply, never null.",
+      "required": [
+        "proposal_id",
+        "state",
+        "mandate",
+        "tool",
+        "task",
+        "created_at",
+        "expires_at",
+        "status_sentence",
+        "summary",
+        "outside"
+      ],
+      "properties": {
+        "proposal_id": { "type": "string", "minLength": 1 },
+        "state": { "enum": ["waiting", "confirmed", "denied", "expired", "refused"] },
+        "mandate": { "type": "string", "minLength": 1 },
+        "tool": { "type": "string", "minLength": 1 },
+        "task": {
+          "type": "object",
+          "required": ["job_id"],
+          "properties": {
+            "job_id": { "type": "string", "minLength": 1 },
+            "name": { "type": "string", "minLength": 1 }
+          }
+        },
+        "watcher": { "type": "string", "minLength": 1 },
+        "source_ref": { "type": "string", "minLength": 1 },
+        "created_at": { "type": "string", "minLength": 1 },
+        "expires_at": { "type": "string", "minLength": 1 },
+        "received_at": { "type": "string", "minLength": 1 },
+        "decided_at": { "type": "string", "minLength": 1 },
+        "decided_from": {
+          "enum": [
+            "telegram",
+            "signal",
+            "whatsapp",
+            "imessage",
+            "companion",
+            "mobile",
+            "management"
+          ]
+        },
+        "result_status": { "enum": ["ok", "error", "unknown"] },
+        "status_sentence": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string", "minLength": 1 },
+        "outside": {
+          "type": "object",
+          "description": "Outside text. args_text is the recorded call's arguments as pretty JSON; cue is absent when Fermix no longer keeps the cue's snapshot.",
+          "required": ["args_text"],
+          "properties": {
+            "args_text": { "type": "string", "maxLength": 3500 },
+            "cue": { "$ref": "#/$defs/proposalCue" }
+          }
+        }
+      }
+    },
+    "proposalCue": {
+      "type": "object",
+      "description": "The cue a proposal acted on, from its snapshot, all outside text: occurred_at is the producer's claim.",
+      "properties": {
+        "type": { "type": "string" },
+        "subject": { "type": "string" },
+        "text": { "type": "string" },
+        "occurred_at": { "type": "string" }
       }
     },
     "historyMessage": {

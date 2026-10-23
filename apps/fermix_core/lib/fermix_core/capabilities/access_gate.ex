@@ -12,19 +12,27 @@ defmodule FermixCore.Capabilities.AccessGate do
 
     1. a delegated worker (`subagent_depth` or `skill_depth` above zero) is
        refused: no owner is in that loop;
-    2. an operator scheduled run dispatches only when its job row names the tool
+    2. a run a cue woke (`trigger: "cue"`) is refused: it read content an
+       outsider wrote, and no owner is in that loop (M60 S3);
+    3. an operator scheduled run dispatches only when its job row names the tool
        (`Harness.Authorization`'s job-row allowlist, the owner's consent given
        when they set the job up);
-    3. anything that is not an attended owner turn
+    4. anything that is not an attended owner turn
        (`Temporal.Access.attended_operator_turn?/1`) is refused;
-    4. a turn that read content someone else could have written
+    5. a turn that read content someone else could have written
        (`:outside_sources`, folded by the agent loop from
        `UntrustedContent.outside_source/1`, minus the target plugin's own reads),
        or any turn from a shared Buzz channel (`Acp.Identity.multi_principal?/1`:
        other people can post there, so the request is not proof the owner asked),
        parks the exact call and asks the owner once, on the surface the turn has
        (for ACP, the owner's own chat, never the channel itself);
-    5. otherwise the owner's direct request is the consent, and it runs.
+    6. otherwise the owner's direct request is the consent, and it runs.
+
+  Two related questions live here too: `owner_consent_turn?/1`, whether a turn
+  may change what a watcher reads or what a task may do (with
+  `owner_private_turn?/1`, the same less its taint condition), and
+  `check_attended/2`, the execution check of a tool offered only on an
+  attended owner turn.
 
   A parked call is confirmed only by the owner — `/confirm` (a tap or an app
   card) on their chat, the gateway's owner-inbox delivery, or a spoken yes the
@@ -58,6 +66,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Capabilities.UntrustedContent
+  alias FermixCore.Cues.MandateGate
   alias FermixCore.Harness.Authorization
   alias FermixCore.Temporal.Access
   alias FermixCore.Tools.RequestDirectoryAccess
@@ -84,7 +93,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   ]
 
   @type surface :: :voice | :this_chat | :owner_inbox
-  @type refusal :: :worker | :unattended | :not_allowlisted | :no_surface
+  @type refusal :: :worker | :cue_run | :unattended | :not_allowlisted | :no_surface
   @type decision :: :dispatch | {:confirm, surface()} | {:refuse, refusal()}
 
   @doc """
@@ -93,10 +102,27 @@ defmodule FermixCore.Capabilities.AccessGate do
   the caller returns instead, and the executor is never called. A result that
   parked the call for the owner carries `access_waiting: true`. Under
   `:access_waiting` every capability is held, flagged or not.
+
+  A run a cue woke (`trigger: "cue"`) meets `Cues.MandateGate` first (M60
+  §10.5): it decides the run's mandate calls (checked, recorded and, when
+  allowed in `auto` mode, run there on the normalised arguments, so its
+  `{:held, result}` then carries the executor's own result), refuses a call
+  outside the run's tool set, and keeps a mandated run's file tools inside the
+  job's skill folder. Everything else, and every other run, goes on to the
+  clauses below unchanged.
   """
   @spec admit(Capability.t(), map(), map()) :: {:dispatch, map()} | {:held, Tool.tool_result()}
-  def admit(%Capability{} = capability, args, %{access_waiting: true} = context)
-      when is_map(args) do
+  def admit(%Capability{} = capability, args, %{trigger: "cue"} = context) when is_map(args) do
+    case MandateGate.admit(capability, args, context) do
+      :not_mandated -> admit_standard(capability, args, context)
+      decided -> decided
+    end
+  end
+
+  def admit(%Capability{} = capability, args, context) when is_map(args) and is_map(context),
+    do: admit_standard(capability, args, context)
+
+  defp admit_standard(%Capability{} = capability, args, %{access_waiting: true} = context) do
     Logger.info("access_gate: #{capability.name} refused, a parked call is waiting")
 
     hold(
@@ -106,8 +132,11 @@ defmodule FermixCore.Capabilities.AccessGate do
     )
   end
 
-  def admit(%Capability{metadata: %{access_sensitive?: true}} = capability, args, context)
-      when is_map(args) and is_map(context) do
+  defp admit_standard(
+         %Capability{metadata: %{access_sensitive?: true}} = capability,
+         args,
+         context
+       ) do
     call = %{capability: capability, args: args, context: context}
 
     case Map.fetch(context, :access_confirmed) do
@@ -116,8 +145,7 @@ defmodule FermixCore.Capabilities.AccessGate do
     end
   end
 
-  def admit(%Capability{}, args, context) when is_map(args) and is_map(context),
-    do: {:dispatch, context}
+  defp admit_standard(%Capability{}, _args, context), do: {:dispatch, context}
 
   @doc """
   Whether a flagged call may run now in `context`, must wait for the owner on a
@@ -127,10 +155,72 @@ defmodule FermixCore.Capabilities.AccessGate do
   def decide(%Capability{} = capability, context) when is_map(context) do
     cond do
       worker?(context) -> {:refuse, :worker}
+      cue_run?(context) -> {:refuse, :cue_run}
       scheduled_operator?(context) -> scheduled_decision(capability.name, context)
       not Access.attended_operator_turn?(context) -> {:refuse, :unattended}
       tainted?(capability, context) -> confirm_on(surface(context))
       true -> :dispatch
+    end
+  end
+
+  @doc """
+  Whether the turn in `context` is the owner's consent to change what a watcher
+  reads or what a task may do (M60 S6). All must hold:
+
+    * an attended owner turn (`Temporal.Access.attended_operator_turn?/1`) and
+      no delegated worker of one;
+    * not a scheduled run of any kind (`Harness.Authorization.scheduled?/1`),
+      and never a context a cue woke (`trigger: "cue"`);
+    * a private chat: `chat_type` is a direct-message label
+      (`Tools.RequestDirectoryAccess.private_chat?/1`), so an absent label (a
+      Slack channel mention carries none) counts as shared; or the owner's own
+      paired device (the phone or the Mac app), whose channels carry no label
+      because they hold no other kind of chat;
+    * not a shared Buzz session (`Acp.Identity.multi_principal?/1`);
+    * the turn read nothing someone else could have written: `:outside_sources`
+      is an empty set. A context the loop never stamped is not consent.
+
+  Asked by `manage_watcher` for every change but a `drop` example, and by
+  `update_job` on a job a watcher wakes. It is `owner_private_turn?/1` and
+  read-nothing.
+  """
+  @spec owner_consent_turn?(map()) :: boolean()
+  def owner_consent_turn?(context) when is_map(context) do
+    owner_private_turn?(context) and read_nothing?(context)
+  end
+
+  @doc """
+  Whether `context` is the owner's own attended turn in a private chat, whatever
+  it has read: every condition of `owner_consent_turn?/1` except the last.
+  `manage_watcher` asks it for a `drop` example, which a tainted private turn
+  may add.
+  """
+  @spec owner_private_turn?(map()) :: boolean()
+  def owner_private_turn?(context) when is_map(context) do
+    Access.attended_operator_turn?(context) and
+      not worker?(context) and
+      not Authorization.scheduled?(context) and
+      not cue_run?(context) and
+      private_chat?(context) and
+      not shared_channel?(context)
+  end
+
+  @doc """
+  The execution check of a tool offered only on an attended owner turn
+  (`manage_watcher`, `list_cues`). Advertisement is never the only barrier, so
+  the tool's `execute/2` asks this too, as `recall_activity` re-checks its gate;
+  its `advertise?/1` asks `Temporal.Access.attended_operator_turn?/1`, the same
+  predicate. Any other turn (a scheduled or cue run, a worker, a guest) gets the
+  refusal sentence, naming the tool so the trace shows which call was denied.
+  """
+  @spec check_attended(String.t(), map()) :: :ok | {:error, String.t()}
+  def check_attended(tool, context) when is_binary(tool) and tool != "" and is_map(context) do
+    if Access.attended_operator_turn?(context) do
+      :ok
+    else
+      {:error,
+       "#{tool} is available only when the owner asks in their own chat, the Fermix " <>
+         "app or by voice."}
     end
   end
 
@@ -255,6 +345,18 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp worker?(context),
     do: Map.get(context, :subagent_depth, 0) != 0 or Map.get(context, :skill_depth, 0) != 0
 
+  # Every job run carries its `trigger`; only a cue run's is "cue".
+  defp cue_run?(context), do: Map.get(context, :trigger) == "cue"
+
+  # The phone and the Mac app are paired to the owner and hold one conversation
+  # each, so their channels set no `chat_type`; for consent they are private.
+  @owner_device_channels ["mobile", "companion"]
+
+  defp private_chat?(context) do
+    RequestDirectoryAccess.private_chat?(Map.get(context, :chat_type)) or
+      Map.get(context, :channel) in @owner_device_channels
+  end
+
   defp scheduled_operator?(context),
     do: Map.get(context, :source_trust) == :operator and Authorization.scheduled?(context)
 
@@ -282,6 +384,14 @@ defmodule FermixCore.Capabilities.AccessGate do
     case Map.fetch(context, :outside_sources) do
       {:ok, %MapSet{} = sources} -> outside_labels(capability, sources) != []
       _absent_or_malformed -> true
+    end
+  end
+
+  # Consent needs an empty set the loop stamped; absent or malformed is not one.
+  defp read_nothing?(context) do
+    case Map.fetch(context, :outside_sources) do
+      {:ok, %MapSet{} = sources} -> MapSet.size(sources) == 0
+      _absent_or_malformed -> false
     end
   end
 
@@ -618,6 +728,11 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp refusal_text(:worker, tool) do
     "#{tool} was not sent: it never runs from a delegated worker. Report that the owner " <>
       "must ask for it directly."
+  end
+
+  defp refusal_text(:cue_run, tool) do
+    "#{tool} was not sent: a task woken by a cue never runs an access-sensitive command. " <>
+      "Report what you found; the owner can run it from their own chat."
   end
 
   defp refusal_text(:unattended, tool) do

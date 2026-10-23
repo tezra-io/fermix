@@ -631,6 +631,87 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     assert presentation =~ "iMessage"
   end
 
+  # Cues exist only on a development daemon with the switch on, so an owner of
+  # any shipped build must be told it is not there, and an owner of a dev build
+  # must be sent to the surfaces that really configure it: settings for
+  # sources and mandates (the setup page's Cues tab, its Approve button, the two
+  # Mix tasks, and the Mac app's Cues pane) and chat for watchers, and told where
+  # a proposal can be answered (a chat, the Fermix app's card, the Linux app).
+  # Each string is a key, a command, a tool, a control or a boundary word, not a
+  # phrasing.
+  test "documents cues: the development-only gate, the boundaries and every surface" do
+    body = File.read!(self_knowledge_path())
+    paragraph = cues_paragraph()
+    # The reference is hard-wrapped in places; a phrase may span a line break.
+    reference = "cues" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    assert body =~ ~s(file: "cues")
+
+    for required <- [
+          "[fermix_core.cues] enabled = true",
+          "Development builds only",
+          "Signal",
+          "Cues pane"
+        ] do
+      assert paragraph =~ required, "the Cues paragraph does not mention #{required}"
+    end
+
+    for required <- [
+          "[fermix_core.cues] enabled = true",
+          "Development builds only",
+          "restart",
+          "At a time",
+          "On a date",
+          "Signal",
+          "local_push",
+          "/cues/v1/<ref>",
+          "Authorization: Bearer",
+          "github",
+          "application/json",
+          "Generate URL",
+          "mix fermix.cues.secret",
+          "mix fermix.cues.funnel",
+          "New token",
+          "manage_watcher",
+          "list_cues",
+          "cue_history",
+          "filter_model",
+          "daily_cap",
+          "drop",
+          "pass",
+          "task_notes",
+          "[fermix_core.cues.mandates.<name>]",
+          "approve",
+          "auto",
+          "pin_args",
+          "validator",
+          "Approve",
+          "/confirm",
+          "/deny",
+          "mandates_enabled",
+          "Cues tab",
+          "Cues pane",
+          "Copy URL",
+          "Confirm",
+          "Linux app",
+          "Only the owner can change cues"
+        ] do
+      assert reference =~ required, "cues self-knowledge does not mention #{required}"
+    end
+
+    # The self-reference carries no version numbers (AGENTS.md); an address such
+    # as 127.0.0.1 is not one.
+    refute reference =~ ~r/(?<![\d.])v?\d+\.\d+\.\d+(?![\d.])/
+  end
+
+  defp cues_paragraph do
+    self_knowledge_path()
+    |> File.read!()
+    |> String.split("\n## ")
+    |> Enum.filter(&String.starts_with?(&1, "Cues & watchers"))
+    |> Enum.join("\n")
+  end
+
   defp channels_paragraph do
     self_knowledge_path()
     |> File.read!()

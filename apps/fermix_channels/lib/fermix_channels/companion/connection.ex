@@ -39,6 +39,21 @@ defmodule FermixChannels.Companion.Connection do
   is answered `media_missing`; a failure of the daemon's own is answered
   `request_failed` naming the ref, and the connection stays open.
 
+  ## Proposals (version 4, M60 app surface §3.7)
+
+  A mandate's proposals reach only a connection on version 4 that was placed
+  as the owner's (`:independent`): `proposal` and `proposal_resolved`
+  (`Protocol.owner_server_events/0`) are written to no other, as an event a
+  later version brought is not, and the card of every proposal still waiting
+  follows the `server_hello` in the step that joined the registry, read from
+  `cue_proposals` (`Companion.Proposals.waiting/1`), so it survives a restart.
+  A `proposal_answer` is served in the step that read it (one or two Repo
+  calls; a confirmed call runs in a task of core's): `accepted` once the
+  decision is recorded, then `proposal_resolved` when core announces the end,
+  or `error: request_failed` with core's sentence. From a connection placed
+  otherwise it is refused, and nothing runs. `:proposal_opts` are core's
+  `Cues.Proposals` options (a test's repo and seams).
+
   ## Who is on the other end (SIDE-V1)
 
   When the socket is handed over, before any line is read, the connection
@@ -60,6 +75,7 @@ defmodule FermixChannels.Companion.Connection do
   alias FermixChannels.Companion.Fanout
   alias FermixChannels.Companion.MediaGrants
   alias FermixChannels.Companion.Output
+  alias FermixChannels.Companion.Proposals
   alias FermixChannels.Companion.Requests
   alias FermixChannels.Companion.Turns
   alias FermixCore.Companion.Protocol
@@ -130,6 +146,7 @@ defmodule FermixChannels.Companion.Connection do
       # The grants server, and the module that speaks to it (a test's stand-in).
       media_grants: Keyword.get(opts, :media_grants, MediaGrants),
       media_grants_module: Keyword.get(opts, :media_grants_module, MediaGrants),
+      proposal_opts: Keyword.get(opts, :proposal_opts, []),
       # Placed once at handover, before any line is read (moduledoc); the
       # daemon's process and platform are seams a test stands in for.
       daemon_os_pid: Keyword.get(opts, :daemon_os_pid, String.to_integer(System.pid())),
@@ -273,6 +290,9 @@ defmodule FermixChannels.Companion.Connection do
   defp serve(%{type: "media_fetch", payload: payload}, state), do: media_fetch(payload, state)
   defp serve(%{type: "media_release", payload: payload}, state), do: media_release(payload, state)
 
+  defp serve(%{type: "proposal_answer", payload: payload}, state),
+    do: proposal_answer(payload, state)
+
   # A repeat hello is a protocol violation: the handshake is one transition.
   defp hello(_payload, %{version: version} = state) when is_integer(version),
     do: refuse(:unexpected_client_hello, state)
@@ -289,11 +309,38 @@ defmodule FermixChannels.Companion.Connection do
 
     with {:ok, _owner} <- Registry.register(state.registry, @profile, version),
          :ok <- send_event("server_hello", %{"min_version" => min, "max_version" => max}, state),
-         :ok <- send_pending_approvals(state) do
-      {:cont, %{state | version: version}}
+         :ok <- send_pending_approvals(state),
+         state = %{state | version: version},
+         :ok <- send_waiting_proposals(state) do
+      {:cont, state}
     else
       _failed -> {:stop, state}
     end
+  end
+
+  # Every proposal still waiting follows the server_hello, oldest first, for
+  # the owner's connection on version 4 alone (moduledoc); one that arrives
+  # meanwhile may come twice, and the client keys cards by `proposal_id`.
+  defp send_waiting_proposals(state) do
+    if owner_reads?("proposal", state),
+      do: state.proposal_opts |> Proposals.waiting() |> write_all(state),
+      else: :ok
+  end
+
+  defp write_all(events, state) do
+    Enum.reduce_while(events, :ok, fn %{"t" => type} = event, :ok ->
+      case send_event(type, Map.delete(event, "t"), state) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  # A proposal event is written to a connection on its version, placed as the
+  # owner's; every other event only needs the version.
+  defp owner_reads?(type, state) do
+    Protocol.server_event_version(type) <= state.version and
+      (type not in Protocol.owner_server_events() or state.caller == :independent)
   end
 
   # An approval still waiting for the owner is written right after the
@@ -368,6 +415,31 @@ defmodule FermixChannels.Companion.Connection do
   end
 
   defp media_release(_payload, state), do: answer({:error, :unsupported_profile}, state)
+
+  # Answered in the step that read it (moduledoc): `accepted` once core
+  # recorded the decision, or core's sentence as `request_failed`.
+  defp proposal_answer(%{"profile_id" => @profile, "client_msg_id" => id} = payload, state) do
+    {type, reply} =
+      case Proposals.answer(payload, state.caller, state.proposal_opts) do
+        {:ok, _record} ->
+          {"accepted", %{"client_msg_id" => id, "duplicate" => false}}
+
+        {:error, sentence} ->
+          {"error", %{"reason" => "request_failed", "message" => sentence, "client_msg_id" => id}}
+      end
+
+    case send_event(type, reply, state) do
+      :ok -> {:cont, state}
+      {:error, _reason} -> {:stop, state}
+    end
+  end
+
+  defp proposal_answer(%{"client_msg_id" => id}, state) do
+    case send_event("error", error_payload(:unsupported_profile, id), state) do
+      :ok -> {:cont, state}
+      {:error, _reason} -> {:stop, state}
+    end
+  end
 
   defp grant_media(ref, state) do
     with {:ok, descriptor} <- media_descriptor(ref, state),
@@ -469,10 +541,11 @@ defmodule FermixChannels.Companion.Connection do
     end
   end
 
-  # An event a later version brought is not this client's to read: it is not
-  # sent, and is no error.
+  # An event a later version brought is not this client's to read, nor a
+  # proposal event a connection not placed as the owner's: it is not sent, and
+  # is no error.
   defp write_in_version(type, line, state) do
-    if Protocol.server_event_version(type) <= state.version,
+    if owner_reads?(type, state),
       do: write_line(line, state),
       else: {:noreply, state}
   end

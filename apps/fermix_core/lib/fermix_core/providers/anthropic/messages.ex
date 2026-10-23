@@ -293,7 +293,7 @@ defmodule FermixCore.Providers.Anthropic.Messages do
       |> maybe_put(:system, system_blocks(system, mode))
       |> maybe_put(:tools, tools |> wire_tools(mode) |> cache_final_tool())
       |> maybe_put(:temperature, resolve_temperature(model, opts))
-      |> maybe_put(:thinking, thinking_config(model))
+      |> maybe_put(:thinking, thinking_config(model, opts))
       |> maybe_put(:output_config, output_config(Keyword.get(opts, :reasoning_effort)))
 
     turn_state = %{
@@ -514,8 +514,11 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   # decides when and how much to deliberate; reasoning_effort calibrates it).
   # Response `thinking` blocks are replayed verbatim through provider_state's
   # assistant_content in continue/3, so tool loops keep their signatures intact.
-  defp thinking_config(model) do
-    if Enum.any?(@adaptive_thinking_substrings, &String.contains?(model, &1)) do
+  # A caller that caps its output tightly (the cue filter) passes
+  # `thinking: :off`, because thinking counts against `max_tokens`.
+  defp thinking_config(model, opts) do
+    if Keyword.get(opts, :thinking) != :off and
+         Enum.any?(@adaptive_thinking_substrings, &String.contains?(model, &1)) do
       %{type: "adaptive"}
     end
   end

@@ -29,6 +29,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.ComputerHistory.Gate, as: ComputerHistoryGate
   alias FermixCore.ComputerUse.Background
   alias FermixCore.Config, as: CoreConfig
+  alias FermixCore.Cues
   alias FermixCore.Harness.Artifacts, as: HarnessArtifacts
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Harness.Identity
@@ -3362,30 +3363,31 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   @doc """
-  Validates the `[fermix_core.routing]` `subagent_*`/`cron_*`/`meeting_*`
-  model-routing keys. A typo'd provider/effort — especially in the UI-less
-  `cron_*` and `meeting_*` keys — is caught here at the operator's desk rather
-  than at the next unattended job fire or meeting summary. (Whether a routing
-  provider is actually authed is the `auth_probe` check's job.)
+  Validates the `[fermix_core.routing]` `subagent_*`/`cron_*`/`meeting_*`/
+  `filter_*` model-routing keys. A typo'd provider/effort — especially in the
+  UI-less `cron_*`, `meeting_*` and `filter_*` keys — is caught here at the
+  operator's desk rather than at the next unattended job fire, meeting summary
+  or cue filter call. (Whether a routing provider is actually authed is the
+  `auth_probe` check's job.) The `filter_*` keys are read and named only where
+  the build admits cues (`Cues.available?/0`; `cues_available?:` for a test).
   """
-  @spec routing_overrides() :: result()
-  def routing_overrides do
+  @spec routing_overrides(keyword()) :: result()
+  def routing_overrides(opts \\ []) when is_list(opts) do
     subagent = RoutingOverrides.subagent()
     cron = RoutingOverrides.cron()
     meeting = RoutingOverrides.meeting()
+    filter = if cues_available?(opts), do: RoutingOverrides.filter()
 
-    entries = [
-      {"subagent_model", subagent},
-      {"cron_model", cron},
-      {"meeting_model", meeting}
-    ]
+    entries =
+      [{"subagent_model", subagent}, {"cron_model", cron}, {"meeting_model", meeting}] ++
+        if(filter, do: [{"filter_model", filter}], else: [])
 
     case validate_routing_models(entries) do
       :ok ->
         ok(
           "routing",
           "subagent: #{describe_override(subagent)}; cron: #{describe_override(cron)}; " <>
-            "meeting: #{describe_override(meeting)}"
+            "meeting: #{describe_override(meeting)}" <> filter_line(filter)
         )
 
       {:error, message} ->
@@ -3394,6 +3396,11 @@ defmodule Fermix.CLI.Doctor.Checks do
   rescue
     error in ArgumentError -> fail("routing", Exception.message(error))
   end
+
+  defp cues_available?(opts), do: Keyword.get_lazy(opts, :cues_available?, &Cues.available?/0)
+
+  defp filter_line(nil), do: ""
+  defp filter_line(filter), do: "; filter: #{describe_filter(filter)}"
 
   # Parsing only proves the provider/effort *atoms* are known. A model slug is
   # free-form, so a typo or a model removed from the catalog (or left pointing at
@@ -3449,6 +3456,10 @@ defmodule Fermix.CLI.Doctor.Checks do
     |> Enum.filter(& &1)
     |> Enum.join(", ")
   end
+
+  # The cue filter never falls back to the main model (M60 §8.2).
+  defp describe_filter(%{model: nil}), do: "not set (each watcher with a filter names its model)"
+  defp describe_filter(filter), do: describe_override(filter)
 
   defp ok(name, detail), do: %{name: name, status: :ok, detail: detail}
   defp warn(name, detail), do: %{name: name, status: :warn, detail: detail}

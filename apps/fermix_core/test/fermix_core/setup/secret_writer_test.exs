@@ -451,6 +451,76 @@ defmodule FermixCore.Setup.SecretWriterTest do
     end
   end
 
+  # M60 §6.2: one secret field of a cue source, under `cue_source:<ref>:<field>`.
+  describe "a cue source key" do
+    setup do
+      previous_profile = Application.get_env(:fermix_core, :profile)
+      Application.delete_env(:fermix_core, :profile)
+
+      on_exit(fn ->
+        case previous_profile do
+          nil -> Application.delete_env(:fermix_core, :profile)
+          value -> Application.put_env(:fermix_core, :profile, value)
+        end
+      end)
+
+      :ok
+    end
+
+    test "round-trips through the facade, one item per source and field" do
+      assert :ok = SecretWriter.put({:cue_source, "home-alerts", :token}, "tok-a")
+      assert :ok = SecretWriter.put({:cue_source, "other", :token}, "tok-b")
+      assert :ok = SecretWriter.put({:cue_source, "home-alerts", :key}, "key-a")
+
+      assert SecretWriter.get({:cue_source, "home-alerts", :token}) == {:ok, "tok-a"}
+      assert SecretWriter.get({:cue_source, "other", :token}) == {:ok, "tok-b"}
+      assert SecretWriter.get({:cue_source, "home-alerts", :key}) == {:ok, "key-a"}
+
+      assert :ok = SecretWriter.delete({:cue_source, "home-alerts", :token})
+      assert SecretWriter.get({:cue_source, "home-alerts", :token}) == {:error, :missing_secret}
+    end
+
+    test "is filed under cue_source:<ref>:<field> in both OS stores" do
+      key = {:cue_source, "home-alerts", :token}
+      assert SecretWriter.item_name(key) == "cue_source:home-alerts:token"
+
+      [_delete, add] = SecretWriter.MacOS.put_commands(key, "v")
+      assert service_flag(add) == "fermix:cue_source:home-alerts:token"
+
+      assert service_flag(SecretWriter.MacOS.delete_command(key, profile: "work")) ==
+               "fermix:work:cue_source:home-alerts:token"
+
+      assert SecretWriter.SecretTool.clear_command(key) ==
+               [
+                 "clear",
+                 "service",
+                 "fermix",
+                 "account",
+                 "fermix",
+                 "env",
+                 "cue_source:home-alerts:token"
+               ]
+    end
+
+    test "a ref that is not a source name never becomes an address" do
+      for ref <- ["Home", "a:b", "a/b", "", "-x", String.duplicate("a", 65)] do
+        assert_raise ArgumentError, fn ->
+          SecretWriter.MacOS.delete_command({:cue_source, ref, :token})
+        end
+      end
+    end
+
+    test "a field outside token, key and secret is refused at the facade" do
+      assert_raise FunctionClauseError, fn ->
+        SecretWriter.get({:cue_source, "home-alerts", :password})
+      end
+
+      assert_raise FunctionClauseError, fn ->
+        SecretWriter.put({:cue_source, "home-alerts", "token"}, "v")
+      end
+    end
+  end
+
   defp service_flag(args), do: flag_value(args, "-s")
   defp account_flag(args), do: flag_value(args, "-a")
 
