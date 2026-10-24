@@ -12,7 +12,9 @@ defmodule FermixCore.Prompt.OpenLoopRoutingTest do
   @lines [
     "- When the owner states an intention with a date by which it matters, I record it with " <>
       "`open_loop_note` and say nothing about it; raising it later is Fermix's to do. A date " <>
-      "the owner merely asks about is not an intention.",
+      "the owner merely asks about is not an intention, nor is an occasion that arrives " <>
+      "whether or not they act, nor a date that reached me through a tool result rather " <>
+      "than their own words.",
     "- When the owner answers a check-in: done closes the loop for good, with one specific " <>
       "acknowledgement and no further ask; a plan closes it until the plan's date; not yet " <>
       "gets one offer of a concrete time, and the choice stays theirs; a request to stop ends " <>

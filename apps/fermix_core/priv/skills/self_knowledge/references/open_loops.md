@@ -11,7 +11,7 @@ An open loop is an intention the owner stated, with a date by which it matters, 
 ## What becomes a loop
 
 - `open_loop_note` records it silently: the owner's own words for what they mean to do or decide, the date by which it matters (a date, a datetime, or a relative number of days or weeks, resolved in `[fermix_core.personalization] timezone` unless the owner names a zone), and the stakes when they stated any. The reply says nothing about it unless the owner asks.
-- Not a loop: a question about a date, someone else's deadline, a hypothetical, a date read in tool output or fetched content, anything a guest or a group chat says, or something Fermix itself owns. A timer or a yearly date is refused; that is a reminder (`event_store`).
+- Not a loop: a question about a date, someone else's deadline, a hypothetical, an occasion that arrives whether or not the owner acts, a date read in tool output or fetched content, anything a guest or a group chat says, or something Fermix itself owns. A timer or a yearly date is refused; that is a reminder (`event_store`).
 - One loop per intention: the same intention stated again returns the stored loop.
 - A loop needs somewhere the owner can answer: the owner's inbox (`[fermix_core.jobs] default_delivery_target`, else the owner DM an explicit owner id derives), snapshotted when the loop is recorded. With no chat inbox, or only this computer's notifications, nothing is recorded and the agent answers the owner's actual question.
 

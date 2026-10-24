@@ -594,7 +594,7 @@ defmodule FermixCore.OpenLoops.CheckIn do
 
     Speak only if the date is still live and the message adds something: the time left, or an offer of help. Open with what they said and when they said it, so they know where this comes from. State the fact that makes now relevant, never an obligation. Ask one open or two-sided question that makes "not yet" as easy to say as "done". Use no words that imply lateness or duty. Offer one small next step with permission, and leave the choice with them. One or two sentences, one loop, no preamble, no sign-off.
 
-    If this is a repeat, add new information or make a smaller ask; never restate the earlier question. If it is the last touch, say plainly that you won't raise it again. Report the decision with open_loop_respond; Fermix delivers the message, so never try to send it yourself.
+    If this is a repeat, bring only what has changed since or make a smaller ask; never restate the earlier question. If it is the last touch, say plainly that you won't raise it again. Report the decision with open_loop_respond; Fermix delivers the message, so never try to send it yourself.
     """
     |> String.trim()
   end
