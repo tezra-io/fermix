@@ -3242,6 +3242,7 @@
         "identity",
         "remote",
         "apns",
+        "fcm",
         "paired_devices",
         "protocol_version",
         "pairing"
@@ -3319,6 +3320,18 @@
             "credentials": { "enum": ["ready", "missing"] },
             "delivery": { "enum": ["ready", "degraded", "down"] },
             "reason": { "enum": ["connecting", "connect_failed", "connection_lost", null] }
+          }
+        },
+        "fcm": {
+          "type": "object",
+          "description": "Android push (FCM). It keeps no connection: `delivery` is `degraded` when the last batch could not get an access token from Google (`auth_failed`) or reached FCM for none of its phones (`unreachable`), and `down` when no FCM dispatcher runs. `reason` is null unless degraded.",
+          "required": ["enabled", "credentials", "delivery", "reason"],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "credentials": { "enum": ["ready", "missing"] },
+            "delivery": { "enum": ["ready", "degraded", "down"] },
+            "reason": { "enum": ["auth_failed", "unreachable", null] }
           }
         },
         "paired_devices": { "type": "integer", "minimum": 0 },

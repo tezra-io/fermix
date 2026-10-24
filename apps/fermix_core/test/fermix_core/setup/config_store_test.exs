@@ -3330,6 +3330,63 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(mobile, :push)[:environment] == "development"
   end
 
+  test "the FCM table round-trips beside APNs, its service account only in the keychain" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-mobile-fcm")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    account =
+      ~s({"type":"service_account","client_email":"push@fermix-owner-123.iam.gserviceaccount.com"})
+
+    snapshot = %{
+      fermix_core: [],
+      fermix_channels: [
+        mobile: [
+          enabled: true,
+          push: [enabled: false],
+          fcm: [enabled: true, project_id: "fermix-owner-123", service_account: account]
+        ]
+      ],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_channels.mobile.fcm]"
+    assert contents =~ ~s(project_id = "fermix-owner-123")
+    assert contents =~ ~s(service_account = "@keyring")
+    refute contents =~ "client_email"
+
+    assert {:ok, ^account} =
+             FermixTestSupport.SecretWriterStub.get(:mobile_fcm_service_account)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    mobile = Keyword.fetch!(loaded.fermix_channels, :mobile)
+
+    assert mobile |> Keyword.get(:fcm) |> Enum.sort() == [
+             enabled: true,
+             project_id: "fermix-owner-123",
+             service_account: "@keyring"
+           ]
+
+    assert Keyword.get(mobile, :push) == [enabled: false]
+
+    # Saved again from what it loaded, the file says the same.
+    assert :ok = ConfigStore.save_snapshot(loaded)
+    assert File.read!(Path.join(tmp_home, "config.toml")) == contents
+  end
+
+  test "the FCM table refuses keys it does not have and values of the wrong type" do
+    for {fcm, message} <- [
+          {[enabled: true, timeout_ms: 5_000], ~r/mobile.fcm/},
+          {[enabled: "yes"], ~r/mobile.fcm.enabled/},
+          {[project_id: 123], ~r/mobile.fcm.project_id/}
+        ] do
+      snapshot = %{fermix_core: [], fermix_channels: [mobile: [fcm: fcm]], fermix_web: []}
+      assert_raise ArgumentError, message, fn -> ConfigStore.persistable_snapshot(snapshot) end
+    end
+  end
+
   test "mobile config rejects unsafe ports, modes, media caps, and push environments" do
     invalid_configs = [
       {[port: 0], ~r/mobile.port/},

@@ -59,6 +59,23 @@ defmodule FermixChannels.Mobile.DeviceStoreTest do
     assert {:ok, ^updated} = DeviceStore.fetch(original.device_id, root: root)
   end
 
+  # FCM does not bound its registration tokens the way APNs' 64 hex digits are.
+  test "a push token up to 1 KiB is stored, and a longer or cleared one handled", %{root: root} do
+    assert {:ok, original} = DeviceStore.add(device_attrs(), root: root)
+    fcm_token = String.duplicate("f", 1_024)
+
+    assert {:ok, %{push_token: ^fcm_token}} =
+             DeviceStore.update(original.device_id, %{push_token: fcm_token}, root: root)
+
+    assert {:error, {:invalid_device, :push_token, :invalid_text}} =
+             DeviceStore.update(original.device_id, %{push_token: fcm_token <> "f"}, root: root)
+
+    assert {:ok, %{push_token: nil}} =
+             DeviceStore.update(original.device_id, %{push_token: nil}, root: root)
+
+    assert {:ok, %{push_token: nil}} = DeviceStore.fetch(original.device_id, root: root)
+  end
+
   test "a device's acknowledged relay list revision is stored, and a malformed one refused",
        %{root: root} do
     assert {:ok, device} = DeviceStore.add(device_attrs(), root: root)

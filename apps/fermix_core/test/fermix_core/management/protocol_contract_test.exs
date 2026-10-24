@@ -1452,6 +1452,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
            refused: %{busy: 0, alpn: 0, bridge_unreachable: 0}
          },
          apns: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
+         fcm: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
          paired_devices: 1,
          protocol_version: 1,
          pairing: %{session_id: @session_id, state: :awaiting_decision}

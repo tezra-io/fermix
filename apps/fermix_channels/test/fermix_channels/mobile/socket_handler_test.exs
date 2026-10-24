@@ -145,6 +145,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         device_registry: :registry,
         noise: :noise,
         max_media_bytes: 12_345,
+        push_services: ["fcm"],
         profile_name: "Orbit",
         wall_clock: fn -> ~U[2026-08-12 19:00:00Z] end,
         decrypt: fn :noise, "ciphertext" -> {:ok, "plaintext", :noise1} end,
@@ -160,6 +161,8 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
           assert payload["caps"]["max_media_bytes"] == 12_345
           # Every turn a request opens ends on this wire (mobile protocol 2).
           assert payload["caps"]["turn_done"] == true
+          # The phone offers notifications only when its platform's service is here.
+          assert payload["caps"]["push"] == ["fcm"]
           assert payload["profiles"] == [%{"id" => "main", "name" => "Orbit"}]
           {:ok, "encoded"}
         end,
@@ -648,6 +651,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         device_id: "paired-device",
         noise: :noise,
         push_environment: "production",
+        authenticated_device: %{device_id: "paired-device", platform: "ios"},
         authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, "ciphertext" -> {:ok, "plaintext", :noise1} end,
         decode_client: fn "plaintext", _opts ->
@@ -656,7 +660,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
              type: "push_register",
              version: 2,
              seq: 1,
-             payload: %{"apns_token" => "token", "environment" => "development"},
+             payload: %{"platform" => "ios", "token" => "token", "environment" => "development"},
              bytes: <<>>
            }}
         end,
@@ -687,6 +691,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         device_id: "paired-device",
         noise: :noise,
         push_environment: :production,
+        authenticated_device: %{device_id: "paired-device", platform: "ios"},
         authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, "ciphertext" -> {:ok, "plaintext", :noise1} end,
         decode_client: fn "plaintext", _opts ->
@@ -695,7 +700,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
              type: "push_register",
              version: 2,
              seq: 1,
-             payload: %{"apns_token" => "token", "environment" => "production"},
+             payload: %{"platform" => "ios", "token" => "token", "environment" => "production"},
              bytes: <<>>
            }}
         end,
@@ -709,6 +714,83 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     assert {:ok, next} = SocketHandler.handle_in({"ciphertext", opcode: :binary}, state)
     assert_received :updated
     assert next.client_seq == 1
+  end
+
+  test "an Android phone registers its FCM token, and push_unregister clears it" do
+    test_pid = self()
+
+    events = %{
+      "register" => %{
+        type: "push_register",
+        version: 2,
+        seq: 1,
+        payload: %{"platform" => "android", "token" => "fcm-token"},
+        bytes: <<>>
+      },
+      "unregister" => %{type: "push_unregister", version: 2, seq: 2, payload: %{}, bytes: <<>>}
+    }
+
+    {:ok, state} =
+      init_socket(%{
+        phase: :ready,
+        device_id: "pixel",
+        noise: :noise,
+        authenticated_device: %{device_id: "pixel", platform: "android"},
+        authorize_socket: fn _registry, "pixel", _pid -> :ok end,
+        decrypt: fn :noise, ciphertext -> {:ok, ciphertext, :noise} end,
+        decode_client: fn plaintext, _opts -> {:ok, Map.fetch!(events, plaintext)} end,
+        update_device: fn :store, "pixel", %{push_token: token} ->
+          send(test_pid, {:push_token, token})
+          {:ok, %{}}
+        end,
+        device_store: :store
+      })
+
+    assert {:ok, state} = SocketHandler.handle_in({"register", opcode: :binary}, state)
+    assert_received {:push_token, "fcm-token"}
+
+    assert {:ok, state} = SocketHandler.handle_in({"unregister", opcode: :binary}, state)
+    assert_received {:push_token, nil}
+    assert state.client_seq == 2
+  end
+
+  test "a phone registers only for its own platform's push service" do
+    test_pid = self()
+
+    for {paired, registered} <- [{"android", "ios"}, {"ios", "android"}, {nil, "android"}] do
+      payload =
+        if registered == "ios",
+          do: %{"platform" => "ios", "token" => "t", "environment" => "production"},
+          else: %{"platform" => registered, "token" => "t"}
+
+      {:ok, state} =
+        init_socket(%{
+          phase: :ready,
+          device_id: "phone",
+          noise: :noise,
+          push_environment: :production,
+          authenticated_device: %{device_id: "phone", platform: paired},
+          authorize_socket: fn _registry, "phone", _pid -> :ok end,
+          decrypt: fn :noise, "ciphertext" -> {:ok, "plaintext", :noise1} end,
+          decode_client: fn "plaintext", _opts ->
+            {:ok, %{type: "push_register", version: 2, seq: 1, payload: payload, bytes: <<>>}}
+          end,
+          update_device: fn _store, _id, _attrs ->
+            send(test_pid, :updated)
+            {:ok, %{}}
+          end,
+          encode_server: fn "error", error, 1 ->
+            assert error["code"] == "push_platform_mismatch"
+            {:ok, "error-frame"}
+          end,
+          encrypt: fn :noise1, "error-frame" -> {:ok, "encrypted-error", :noise2} end
+        })
+
+      assert {:push, {:binary, "encrypted-error"}, _next} =
+               SocketHandler.handle_in({"ciphertext", opcode: :binary}, state)
+
+      refute_received :updated
+    end
   end
 
   test "an authenticated application error still consumes its client sequence" do
@@ -2212,10 +2294,12 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         noise: :noise,
         negotiated_version: 2,
         profile_name: "Orbit",
+        push_services: ["apns", "fcm"],
         discover: fn -> {:ok, candidates} end,
         encode_server: fn "pair_approved", payload, 1 ->
           assert length(payload["candidates"]) == 16
           assert payload["push_salt"] == Base.encode64(<<9::256>>)
+          assert payload["push"] == ["apns", "fcm"]
           {:ok, "approved"}
         end,
         encrypt: fn :noise, "approved" -> {:ok, "encrypted-approved", :noise} end

@@ -76,6 +76,7 @@ defmodule FermixChannels.Mobile.DeviceStore do
     :relay_list_rev
   ]
   @platforms ~w(android ios)
+  @max_push_token_bytes 1_024
   @signer_roles %{"development" => :development, "release" => :release}
   @update_fields [:name, :model, :push_token, :last_seen, :relay_list_rev]
   @relay_list_rev_regex ~r/\A[0-9a-f]{16}\z/
@@ -504,7 +505,7 @@ defmodule FermixChannels.Mobile.DeviceStore do
          :ok <- validate_text(:name, attrs[:name]),
          :ok <- validate_text(:model, attrs[:model]),
          :ok <- validate_binary32(:noise_pk, attrs[:noise_pk]),
-         :ok <- validate_optional_text(:push_token, attrs[:push_token]),
+         :ok <- validate_push_token(:push_token, attrs[:push_token]),
          :ok <- validate_datetime(:created_at, attrs[:created_at]),
          :ok <- validate_optional_datetime(:last_seen, attrs[:last_seen]),
          :ok <- validate_binary32(:apns_key_salt, attrs[:apns_key_salt]),
@@ -539,7 +540,7 @@ defmodule FermixChannels.Mobile.DeviceStore do
          true <- unknown == [] or {:error, {:invalid_device_update_fields, unknown}},
          :ok <- validate_present(attrs, :name, &validate_text/2),
          :ok <- validate_present(attrs, :model, &validate_text/2),
-         :ok <- validate_present(attrs, :push_token, &validate_optional_text/2),
+         :ok <- validate_present(attrs, :push_token, &validate_push_token/2),
          :ok <- validate_present(attrs, :last_seen, &validate_optional_datetime/2),
          :ok <- validate_present(attrs, :relay_list_rev, &validate_relay_list_rev/2) do
       {:ok, attrs}
@@ -576,8 +577,14 @@ defmodule FermixChannels.Mobile.DeviceStore do
   defp validate_text(_field, value) when is_binary(value) and byte_size(value) in 1..255, do: :ok
   defp validate_text(field, _value), do: {:error, {:invalid_device, field, :invalid_text}}
 
-  defp validate_optional_text(_field, nil), do: :ok
-  defp validate_optional_text(field, value), do: validate_text(field, value)
+  # APNs tokens are 64 hex digits; FCM bounds its registration tokens nowhere.
+  defp validate_push_token(_field, nil), do: :ok
+
+  defp validate_push_token(_field, token)
+       when is_binary(token) and byte_size(token) in 1..@max_push_token_bytes,
+       do: :ok
+
+  defp validate_push_token(field, _token), do: {:error, {:invalid_device, field, :invalid_text}}
 
   defp validate_binary32(_field, value) when is_binary(value) and byte_size(value) == 32, do: :ok
   defp validate_binary32(field, _value), do: {:error, {:invalid_device, field, :invalid_length}}
@@ -605,7 +612,7 @@ defmodule FermixChannels.Mobile.DeviceStore do
 
     with :ok <- validate_text(:name, updated.name),
          :ok <- validate_text(:model, updated.model),
-         :ok <- validate_optional_text(:push_token, updated.push_token),
+         :ok <- validate_push_token(:push_token, updated.push_token),
          :ok <- validate_optional_datetime(:last_seen, updated.last_seen),
          :ok <- validate_relay_list_rev(:relay_list_rev, updated.relay_list_rev) do
       {:ok, updated}

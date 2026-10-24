@@ -24,6 +24,7 @@ defmodule FermixCore.Setup.RuntimeTest do
     fermix_home = System.get_env("FERMIX_HOME")
     openai_api_key = System.get_env("OPENAI_API_KEY")
     apns_key = System.get_env("FERMIX_APNS_KEY")
+    fcm_account = System.get_env("FERMIX_FCM_SERVICE_ACCOUNT")
     mobile = Application.fetch_env(:fermix_channels, :mobile)
 
     on_exit(fn ->
@@ -51,6 +52,11 @@ defmodule FermixCore.Setup.RuntimeTest do
       case apns_key do
         nil -> System.delete_env("FERMIX_APNS_KEY")
         value -> System.put_env("FERMIX_APNS_KEY", value)
+      end
+
+      case fcm_account do
+        nil -> System.delete_env("FERMIX_FCM_SERVICE_ACCOUNT")
+        value -> System.put_env("FERMIX_FCM_SERVICE_ACCOUNT", value)
       end
     end)
 
@@ -263,6 +269,34 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     assert get_in(mobile, [:push, :key]) ==
              "-----BEGIN PRIVATE KEY-----\nenv-key\n-----END PRIVATE KEY-----"
+
+    FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+  end
+
+  test "runtime config overlays only the nested FCM service account from its variable" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("fermix-runtime-mobile-fcm")
+    System.put_env("FERMIX_HOME", tmp_home)
+    System.put_env("FERMIX_FCM_SERVICE_ACCOUNT", ~s({"type":"service_account"}))
+
+    Application.put_env(:fermix_channels, :mobile,
+      enabled: true,
+      fcm: [enabled: true, project_id: "fermix-owner-123", service_account: "hydrated"]
+    )
+
+    runtime_exs = Path.expand("../../../../../config/runtime.exs", __DIR__)
+    mobile = read_runtime_config!(runtime_exs)[:fermix_channels][:mobile]
+
+    assert get_in(mobile, [:fcm, :project_id]) == "fermix-owner-123"
+    assert get_in(mobile, [:fcm, :service_account]) == ~s({"type":"service_account"})
+
+    System.put_env("FERMIX_FCM_SERVICE_ACCOUNT", "")
+    mobile = read_runtime_config!(runtime_exs)[:fermix_channels][:mobile]
+    assert get_in(mobile, [:fcm, :service_account]) == "hydrated"
+
+    # A home with no FCM table gets an empty one, which FcmConfig reads as off.
+    Application.put_env(:fermix_channels, :mobile, enabled: true)
+    mobile = read_runtime_config!(runtime_exs)[:fermix_channels][:mobile]
+    assert Keyword.get(mobile, :fcm) == []
 
     FermixTestSupport.SafeRm.rm_rf!(tmp_home)
   end

@@ -340,6 +340,39 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     bad_caps = %{"commands" => [%{"name" => "help"}], "max_media_bytes" => 1}
     hello_ack = server_event("hello_ack", Map.put(hello_ack_payload(), "caps", bad_caps))
     refute server_errors(hello_ack, schema) == []
+
+    push_caps = %{"commands" => [], "max_media_bytes" => 1, "push" => ["web"]}
+    hello_ack = server_event("hello_ack", Map.put(hello_ack_payload(), "caps", push_caps))
+    refute server_errors(hello_ack, schema) == []
+  end
+
+  test "the schema takes each platform's push_register and refuses an iPhone's with no environment",
+       %{schema: schema} do
+    register = fn fields -> Map.merge(%{"v" => 2, "t" => "push_register", "seq" => 1}, fields) end
+
+    assert WireSchema.errors(
+             register.(%{"platform" => "android", "token" => "t"}),
+             schema["$defs"]["clientEvent"],
+             schema
+           ) == []
+
+    assert WireSchema.errors(
+             register.(%{"platform" => "ios", "token" => "t", "environment" => "production"}),
+             schema["$defs"]["clientEvent"],
+             schema
+           ) == []
+
+    refute WireSchema.errors(
+             register.(%{"platform" => "ios", "token" => "t"}),
+             schema["$defs"]["clientEvent"],
+             schema
+           ) == []
+
+    refute WireSchema.errors(
+             register.(%{"apns_token" => "t", "environment" => "production"}),
+             schema["$defs"]["clientEvent"],
+             schema
+           ) == []
   end
 
   # M62 §4.3: the rail's candidate is a second candidate shape, told apart by

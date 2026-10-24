@@ -1,15 +1,22 @@
 defmodule FermixChannels.Mobile.Push do
   @moduledoc """
-  Direct APNs delivery for the owner-operated mobile companion.
+  Push for the owner-operated mobile companion: APNs straight to an iPhone,
+  FCM to an Android phone (M51 §10), each with its own config table and
+  dispatcher.
 
   Preview content is encrypted independently for every paired device. Presence
-  and durable read state are checked before device credentials or APNs are
-  touched, preventing double notification when any device already has the
-  profile open or has read the emitted timeline row.
+  and durable read state are checked before device credentials or a push
+  service are touched, preventing double notification when any device already
+  has the profile open or has read the emitted timeline row.
+
+  Each phone is pushed through its own platform's service and never another's:
+  a phone whose platform has no push configured is refused by name in the log.
+  A phone paired before pairing recorded a platform was an iPhone, the only
+  phone there was, and is pushed through APNs.
 
   An approval waiting for the owner is announced to an away phone with no
-  content at all: the encrypted preview is null, as for an oversized one, and
-  the alert is a fixed string.
+  content at all. APNs carries a null preview and a fixed alert; FCM carries
+  the approval's id and expiry, so the phone can show it and withdraw it.
   """
 
   require Logger
@@ -19,6 +26,9 @@ defmodule FermixChannels.Mobile.Push do
   alias FermixChannels.Mobile.DeviceStore.Device
   alias FermixChannels.Mobile.Identity
   alias FermixChannels.Mobile.Push.Config
+  alias FermixChannels.Mobile.Push.FcmConfig
+  alias FermixChannels.Mobile.Push.FcmDispatcher
+  alias FermixChannels.Mobile.Push.FcmMessage
   alias FermixChannels.Mobile.Push.PigeonDispatcher
   alias FermixChannels.Telemetry
   alias FermixCore.Companion.Timeline
@@ -33,8 +43,13 @@ defmodule FermixChannels.Mobile.Push do
   @zero_key <<0::256>>
 
   @type delivery_status ::
-          %{status: :disabled | :no_registered_devices | :sent, sent: non_neg_integer()}
+          %{
+            status: :disabled | :no_registered_devices | :unconfigured_platform | :sent,
+            sent: non_neg_integer()
+          }
           | %{status: :suppressed, reason: :connected | :read, sent: 0}
+
+  @type approval :: %{approval_id: String.t(), expires_at: non_neg_integer()}
 
   @doc "Maximum APNs JSON payload size accepted by the v1 contract."
   @spec max_payload_bytes() :: pos_integer()
@@ -121,45 +136,80 @@ defmodule FermixChannels.Mobile.Push do
     with :ok <- validate_profile(profile_id),
          :ok <- validate_server_seq(server_seq),
          :ok <- validate_preview(preview_text),
-         {:ok, config} <- opts |> config_input() |> Config.new() do
-      maybe_notify(config, profile_id, server_seq, preview_text, opts)
+         {:ok, configs} <- configs(opts) do
+      push = %{kind: :message, server_seq: server_seq, preview: preview_text}
+      maybe_notify(configs, profile_id, push, opts)
     end
   end
 
   @doc """
-  Tell every registered paired device, with no content, that an approval
-  waits for the owner; nothing is sent while a device has the profile open.
+  Tell every registered paired device that an approval waits for the owner,
+  with no content; nothing is sent while a device has the profile open.
   """
-  @spec notify_approval(String.t(), keyword()) :: {:ok, delivery_status()} | {:error, term()}
-  def notify_approval(profile_id, opts \\ []) when is_list(opts) do
+  @spec notify_approval(String.t(), approval(), keyword()) ::
+          {:ok, delivery_status()} | {:error, term()}
+  def notify_approval(profile_id, approval, opts \\ []) when is_list(opts) do
     with :ok <- validate_profile(profile_id),
-         {:ok, config} <- opts |> config_input() |> Config.new() do
-      maybe_notify_approval(config, profile_id, opts)
+         :ok <- validate_approval(approval),
+         {:ok, configs} <- configs(opts) do
+      maybe_notify_approval(configs, profile_id, Map.put(approval, :kind, :approval), opts)
     end
   end
 
-  defp maybe_notify_approval(%Config{enabled: false}, _profile, _opts),
-    do: {:ok, %{status: :disabled, sent: 0}}
+  # Each service's table resolves on its own: one whose settings do not
+  # resolve (a locked keychain leaves its secret a sentinel) refuses its own
+  # phones, and the other service still pushes. With no other service on to
+  # push through, the fault is the answer.
+  defp configs(opts) do
+    apns = opts |> config_input() |> Config.new()
+    fcm = opts |> fcm_config_input() |> FcmConfig.new()
 
-  defp maybe_notify_approval(config, profile_id, opts) do
-    case profile_connected(profile_id, opts) do
-      {:ok, true} -> {:ok, %{status: :suppressed, reason: :connected, sent: 0}}
-      {:ok, false} -> deliver_decision(:deliver, config, profile_id, :approval, opts)
-      {:ok, other} -> {:error, {:invalid_profile_connected_result, other}}
-      {:error, reason} -> {:error, reason}
+    case {apns, fcm} do
+      {{:ok, apns}, {:ok, fcm}} ->
+        {:ok, %{apns: apns, fcm: fcm}}
+
+      {{:error, reason}, {:ok, %FcmConfig{enabled: true} = fcm}} ->
+        {:ok, %{apns: {:unresolved, reason}, fcm: fcm}}
+
+      {{:ok, %Config{enabled: true} = apns}, {:error, reason}} ->
+        {:ok, %{apns: apns, fcm: {:unresolved, reason}}}
+
+      {{:error, reason}, _fcm} ->
+        {:error, reason}
+
+      {_apns, {:error, reason}} ->
+        {:error, reason}
     end
   end
 
-  defp maybe_notify(%Config{enabled: false}, _profile, _seq, _preview, _opts),
-    do: {:ok, %{status: :disabled, sent: 0}}
-
-  defp maybe_notify(config, profile_id, server_seq, preview_text, opts) do
-    with {:ok, connected?} <- profile_connected(profile_id, opts),
-         {:ok, presence_decision} <- connected_decision(connected?),
-         {:ok, decision} <- read_decision(presence_decision, profile_id, server_seq, opts) do
-      deliver_decision(decision, config, profile_id, preview_text, opts)
+  defp maybe_notify_approval(configs, profile_id, push, opts) do
+    if push_enabled?(configs) do
+      case profile_connected(profile_id, opts) do
+        {:ok, true} -> {:ok, %{status: :suppressed, reason: :connected, sent: 0}}
+        {:ok, false} -> deliver_decision(:deliver, configs, profile_id, push, opts)
+        {:ok, other} -> {:error, {:invalid_profile_connected_result, other}}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:ok, %{status: :disabled, sent: 0}}
     end
   end
+
+  defp maybe_notify(configs, profile_id, push, opts) do
+    if push_enabled?(configs) do
+      with {:ok, connected?} <- profile_connected(profile_id, opts),
+           {:ok, presence_decision} <- connected_decision(connected?),
+           {:ok, decision} <-
+             read_decision(presence_decision, profile_id, push.server_seq, opts) do
+        deliver_decision(decision, configs, profile_id, push, opts)
+      end
+    else
+      {:ok, %{status: :disabled, sent: 0}}
+    end
+  end
+
+  defp push_enabled?(%{apns: apns, fcm: fcm}),
+    do: match?(%Config{enabled: true}, apns) or match?(%FcmConfig{enabled: true}, fcm)
 
   defp connected_decision(true), do: {:ok, :suppress_connected}
   defp connected_decision(false), do: {:ok, :needs_read_frontier}
@@ -180,21 +230,175 @@ defmodule FermixChannels.Mobile.Push do
   defp deliver_decision(:suppress_read, _config, _profile, _preview, _opts),
     do: {:ok, %{status: :suppressed, reason: :read, sent: 0}}
 
-  defp deliver_decision(:deliver, config, profile_id, preview_text, opts) do
+  defp deliver_decision(:deliver, configs, profile_id, push, opts) do
     with {:ok, devices} <- list_registered_devices(opts),
          :ok <- validate_device_count(devices) do
-      send_registered(devices, config, profile_id, preview_text, opts)
+      send_registered(devices, configs, profile_id, push, opts)
     end
   end
 
-  defp send_registered([], _config, _profile, _preview, _opts),
+  defp send_registered([], _configs, _profile, _push, _opts),
     do: {:ok, %{status: :no_registered_devices, sent: 0}}
 
-  defp send_registered(devices, config, profile_id, preview_text, opts) do
-    with {:ok, gateway_private} <- load_gateway_private(opts),
-         {:ok, deliveries} <-
-           build_deliveries(devices, gateway_private, profile_id, preview_text, config, opts) do
-      dispatch(deliveries, config, opts)
+  defp send_registered(devices, configs, profile_id, push, opts) do
+    case routed(devices, configs) do
+      [] -> {:ok, %{status: :unconfigured_platform, sent: 0}}
+      routes -> send_routes(routes, configs, profile_id, push, opts)
+    end
+  end
+
+  defp send_routes(routes, configs, profile_id, push, opts) do
+    with {:ok, gateway_private} <- load_gateway_private(opts) do
+      routes
+      |> Enum.map(fn {route, devices} ->
+        {route, send_route(route, devices, gateway_private, configs, profile_id, push, opts)}
+      end)
+      |> combined()
+    end
+  end
+
+  # Each device goes to its own platform's service, configured; any other is
+  # refused by name, never pushed through the other service.
+  defp routed(devices, configs) do
+    devices
+    |> Enum.group_by(&route/1)
+    |> Enum.sort_by(fn {route, _devices} -> route end)
+    |> Enum.filter(fn {route, routed_devices} -> configured?(route, configs, routed_devices) end)
+  end
+
+  defp route(%Device{platform: platform}) when platform in [nil, "ios"], do: :apns
+  defp route(%Device{platform: "android"}), do: :fcm
+  defp route(%Device{}), do: :unknown
+
+  defp configured?(:apns, %{apns: %Config{enabled: true}}, _devices), do: true
+  defp configured?(:fcm, %{fcm: %FcmConfig{enabled: true}}, _devices), do: true
+
+  defp configured?(route, configs, devices) do
+    reason = refusal_reason(route, Map.get(configs, route))
+
+    Enum.each(devices, fn device ->
+      Logger.warning("mobile push refused #{device.device_id}: #{reason}; nothing was sent")
+    end)
+
+    false
+  end
+
+  defp refusal_reason(:apns, {:unresolved, reason}),
+    do: "it is an iPhone and the APNs settings did not resolve (#{inspect(reason)})"
+
+  defp refusal_reason(:fcm, {:unresolved, reason}),
+    do: "it is an Android phone and the FCM settings did not resolve (#{inspect(reason)})"
+
+  defp refusal_reason(:apns, _config), do: "it is an iPhone and APNs push is not configured"
+  defp refusal_reason(:fcm, _config), do: "it is an Android phone and FCM push is not configured"
+  defp refusal_reason(:unknown, _config), do: "its platform has no push service"
+
+  defp send_route(:apns, devices, gateway_private, configs, profile_id, push, opts) do
+    preview = if push.kind == :approval, do: :approval, else: push.preview
+
+    with {:ok, deliveries} <-
+           build_deliveries(devices, gateway_private, profile_id, preview, configs.apns, opts) do
+      dispatch(deliveries, configs.apns, opts)
+    end
+  end
+
+  defp send_route(:fcm, devices, gateway_private, configs, profile_id, push, opts) do
+    with {:ok, plaintext} <- fcm_plaintext(profile_id, push),
+         {:ok, messages} <- build_fcm_messages(devices, gateway_private, plaintext, opts) do
+      dispatch_fcm(devices, messages, configs.fcm, opts)
+    end
+  end
+
+  # One service's answer stands as it is; with two, both have to have sent.
+  defp combined([{_route, result}]), do: result
+
+  defp combined(results) do
+    if Enum.all?(results, fn {_route, result} -> match?({:ok, %{status: :sent}}, result) end) do
+      sent = results |> Enum.map(fn {_route, {:ok, %{sent: sent}}} -> sent end) |> Enum.sum()
+      {:ok, %{status: :sent, sent: sent}}
+    else
+      {:error, {:push_failed_by_service, Map.new(results)}}
+    end
+  end
+
+  defp fcm_plaintext(profile_id, %{kind: :message, server_seq: seq, preview: preview}),
+    do: FcmMessage.message(profile_id, seq, preview)
+
+  defp fcm_plaintext(profile_id, %{kind: :approval, approval_id: id, expires_at: expires_at}),
+    do: FcmMessage.approval(profile_id, id, expires_at)
+
+  defp build_fcm_messages(devices, gateway_private, plaintext, opts) do
+    Enum.reduce_while(devices, {:ok, []}, fn device, {:ok, messages} ->
+      case FcmMessage.build(device, gateway_private, plaintext, nonce_fun: nonce_fun(opts)) do
+        {:ok, message} ->
+          {:cont, {:ok, [message | messages]}}
+
+        {:error, reason} ->
+          Telemetry.emit_push(:mobile, :failed, 0, :fcm)
+          {:halt, {:error, {:notification_build_failed, device.device_id, reason}}}
+      end
+    end)
+    |> reverse_deliveries()
+  end
+
+  defp dispatch_fcm(devices, messages, config, opts) do
+    started = System.monotonic_time()
+    result = call_fcm_dispatcher(messages, config, opts)
+    duration_us = elapsed_us(started)
+    handle_fcm_result(result, devices, duration_us)
+  end
+
+  defp handle_fcm_result({:ok, results}, devices, duration_us)
+       when is_list(results) and length(results) == length(devices) do
+    failures =
+      devices
+      |> Enum.zip(results)
+      |> Enum.flat_map(fn
+        {_device, :ok} ->
+          Telemetry.emit_push(:mobile, :sent, duration_us, :fcm)
+          []
+
+        {device, {:error, class}} when is_atom(class) ->
+          Telemetry.emit_push(:mobile, :failed, duration_us, :fcm)
+          [%{device_id: device.device_id, reason: class}]
+
+        {device, _other} ->
+          Telemetry.emit_push(:mobile, :failed, duration_us, :fcm)
+          [%{device_id: device.device_id, reason: :invalid_response}]
+      end)
+
+    case failures do
+      [] -> {:ok, %{status: :sent, sent: length(devices)}}
+      _nonempty -> {:error, {:push_failed, failures}}
+    end
+  end
+
+  defp handle_fcm_result({:ok, results}, devices, duration_us) when is_list(results) do
+    reason = {:invalid_dispatch_response, :count_mismatch, length(results), length(devices)}
+    fail_all(devices, duration_us, reason, :fcm)
+  end
+
+  defp handle_fcm_result({:error, reason}, devices, duration_us),
+    do:
+      fail_all(devices, duration_us, {:push_dispatch_failed, dispatch_error_class(reason)}, :fcm)
+
+  defp handle_fcm_result(_result, devices, duration_us),
+    do: fail_all(devices, duration_us, {:invalid_dispatch_result, :unexpected_shape}, :fcm)
+
+  defp call_fcm_dispatcher(messages, config, opts) do
+    case Keyword.get(opts, :fcm_dispatcher, FcmDispatcher) do
+      dispatcher when is_function(dispatcher, 2) ->
+        call_dependency(:fcm_dispatcher, dispatcher, [messages, config])
+
+      dispatcher when is_atom(dispatcher) ->
+        call_dependency(
+          :fcm_dispatcher,
+          fn -> FcmDispatcher.dispatch(dispatcher, messages, config) end,
+          []
+        )
+
+      dispatcher ->
+        {:error, {:invalid_push_dependency, :fcm_dispatcher, dispatcher}}
     end
   end
 
@@ -212,7 +416,7 @@ defmodule FermixChannels.Mobile.Push do
           {:cont, {:ok, [{device, notification} | deliveries]}}
 
         {:error, reason} ->
-          Telemetry.emit_push(:mobile, :failed, 0)
+          Telemetry.emit_push(:mobile, :failed, 0, :apns)
           {:halt, {:error, {:notification_build_failed, device.device_id, reason}}}
       end
     end)
@@ -235,24 +439,26 @@ defmodule FermixChannels.Mobile.Push do
     with :ok <- validate_response_tokens(deliveries, responses) do
       summarize_responses(deliveries, responses, duration_us)
     else
-      {:error, reason} -> fail_all(deliveries, duration_us, reason)
+      {:error, reason} -> fail_all(deliveries, duration_us, reason, :apns)
     end
   end
 
   defp handle_dispatch_result({:ok, responses}, deliveries, duration_us)
        when is_list(responses) do
     reason = {:invalid_dispatch_response, :count_mismatch, length(responses), length(deliveries)}
-    fail_all(deliveries, duration_us, reason)
+    fail_all(deliveries, duration_us, reason, :apns)
   end
 
   defp handle_dispatch_result({:ok, _responses}, deliveries, duration_us),
-    do: fail_all(deliveries, duration_us, {:invalid_dispatch_response, :not_a_list})
+    do: fail_all(deliveries, duration_us, {:invalid_dispatch_response, :not_a_list}, :apns)
 
-  defp handle_dispatch_result({:error, reason}, deliveries, duration_us),
-    do: fail_all(deliveries, duration_us, {:push_dispatch_failed, dispatch_error_class(reason)})
+  defp handle_dispatch_result({:error, reason}, deliveries, duration_us) do
+    reason = {:push_dispatch_failed, dispatch_error_class(reason)}
+    fail_all(deliveries, duration_us, reason, :apns)
+  end
 
   defp handle_dispatch_result(_result, deliveries, duration_us),
-    do: fail_all(deliveries, duration_us, {:invalid_dispatch_result, :unexpected_shape})
+    do: fail_all(deliveries, duration_us, {:invalid_dispatch_result, :unexpected_shape}, :apns)
 
   defp dispatch_error_class(reason) when is_atom(reason), do: reason
 
@@ -281,11 +487,11 @@ defmodule FermixChannels.Mobile.Push do
       |> Enum.reduce([], fn {{device, _sent}, response}, errors ->
         case response.response do
           :success ->
-            Telemetry.emit_push(:mobile, :sent, duration_us)
+            Telemetry.emit_push(:mobile, :sent, duration_us, :apns)
             errors
 
           reason ->
-            Telemetry.emit_push(:mobile, :failed, duration_us)
+            Telemetry.emit_push(:mobile, :failed, duration_us, :apns)
             [%{device_id: device.device_id, reason: response_error_class(reason)} | errors]
         end
       end)
@@ -301,9 +507,9 @@ defmodule FermixChannels.Mobile.Push do
   defp response_error_class(reason) when is_atom(reason), do: reason
   defp response_error_class(_reason), do: :invalid_response
 
-  defp fail_all(deliveries, duration_us, reason) do
+  defp fail_all(deliveries, duration_us, reason, platform) do
     Enum.each(deliveries, fn _delivery ->
-      Telemetry.emit_push(:mobile, :failed, duration_us)
+      Telemetry.emit_push(:mobile, :failed, duration_us, platform)
     end)
 
     {:error, reason}
@@ -504,6 +710,14 @@ defmodule FermixChannels.Mobile.Push do
     end)
   end
 
+  defp fcm_config_input(opts) do
+    Keyword.get_lazy(opts, :fcm_config, fn ->
+      :fermix_channels
+      |> Application.get_env(:mobile, [])
+      |> nested_value(:fcm, enabled: false)
+    end)
+  end
+
   defp nested_value(values, key, default) when is_list(values),
     do: Keyword.get(values, key, default)
 
@@ -526,6 +740,12 @@ defmodule FermixChannels.Mobile.Push do
   end
 
   defp validate_profile(value), do: nonempty_text(:profile_id, value, 255)
+
+  defp validate_approval(%{approval_id: id, expires_at: expires_at} = approval)
+       when map_size(approval) == 2 and is_integer(expires_at) and expires_at >= 0,
+       do: nonempty_text(:approval_id, id, 255)
+
+  defp validate_approval(approval), do: {:error, {:invalid_approval_push, approval}}
   defp validate_topic(value), do: nonempty_text(:topic, value, 255)
 
   defp validate_preview(:approval), do: :ok

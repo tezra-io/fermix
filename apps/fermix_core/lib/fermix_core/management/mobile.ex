@@ -39,6 +39,7 @@ defmodule FermixCore.Management.Mobile do
   @credential_states ~w(ready missing)a
   @delivery_states ~w(ready degraded down)a
   @delivery_reasons ~w(connecting connect_failed connection_lost)a
+  @fcm_delivery_reasons ~w(auth_failed unreachable)a
   @refusal_classes ~w(memory_disabled identity attachment_manifest trust_store)a
   # The channel is off, it could not start this boot, or it was turned on
   # after boot and has not started yet. None is a defect of the call, so none
@@ -427,6 +428,7 @@ defmodule FermixCore.Management.Mobile do
       },
       "remote" => remote_view(status.remote),
       "apns" => apns_view(status.apns),
+      "fcm" => fcm_view(status.fcm),
       "paired_devices" => status.paired_devices,
       "protocol_version" => status.protocol_version,
       "pairing" => pairing_view(status.pairing)
@@ -475,6 +477,15 @@ defmodule FermixCore.Management.Mobile do
     }
   end
 
+  defp fcm_view(fcm) do
+    %{
+      "enabled" => fcm.enabled,
+      "credentials" => credentials_word(fcm.credentials),
+      "delivery" => delivery_word(fcm.delivery),
+      "reason" => fcm_delivery_reason(fcm.reason)
+    }
+  end
+
   defp listener_word(status) when status in @listener_states, do: Atom.to_string(status)
   defp delivery_word(delivery) when delivery in @delivery_states, do: Atom.to_string(delivery)
   defp refusal_word(nil), do: nil
@@ -483,6 +494,11 @@ defmodule FermixCore.Management.Mobile do
   defp listener_reason(reason) when reason in @listener_reasons, do: Atom.to_string(reason)
   defp delivery_reason(nil), do: nil
   defp delivery_reason(reason) when reason in @delivery_reasons, do: Atom.to_string(reason)
+  defp fcm_delivery_reason(nil), do: nil
+
+  defp fcm_delivery_reason(reason) when reason in @fcm_delivery_reasons,
+    do: Atom.to_string(reason)
+
   defp mdns_word(mdns) when mdns in @mdns_states, do: Atom.to_string(mdns)
 
   defp credentials_word(credentials) when credentials in @credential_states,

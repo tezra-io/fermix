@@ -392,6 +392,12 @@ Notes that the shapes alone do not carry:
   dispatcher runs: the channel is not running, push is off, or its
   credentials did not resolve. A connect is given up after ten seconds, and
   the status answers while one runs.
+- **Android push keeps no connection.** `fcm` has the same fields as `apns`.
+  `fcm.delivery` is `ready`, `degraded` when the last batch could not get an
+  access token from Google (`fcm.reason`: `auth_failed`) or reached FCM for
+  none of its phones (`unreachable`), or `down` when no FCM dispatcher runs:
+  the channel is not running, FCM is off, or its service account did not
+  resolve.
 - **Remote reach lets a paired phone reach this daemon from any network**,
   through Fermix's relays (M62). `remote.state` is `off` (its switch is off,
   or the channel is not running), `dormant` (no phone has been paired yet;

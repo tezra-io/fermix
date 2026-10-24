@@ -68,8 +68,9 @@ defmodule FermixCore.Setup.ConfigStore do
     "unsupported" => :unsupported
   }
 
-  @mobile_keys ~w(enabled iroh mode port bind advertise_mdns streaming max_media_bytes media_store_max_bytes push)
+  @mobile_keys ~w(enabled iroh mode port bind advertise_mdns streaming max_media_bytes media_store_max_bytes push fcm)
   @mobile_push_keys ~w(enabled team_id key_id key topic environment)
+  @mobile_fcm_keys ~w(enabled project_id service_account)
 
   # What a writer that re-renders the file from its own parse says when the
   # file carries a section the renderer would drop.
@@ -1416,8 +1417,9 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp render_mobile(mobile) do
     [
-      render_section(["fermix_channels", "mobile"], Keyword.delete(mobile, :push)),
-      render_section(["fermix_channels", "mobile", "push"], Keyword.get(mobile, :push, []))
+      render_section(["fermix_channels", "mobile"], Keyword.drop(mobile, [:push, :fcm])),
+      render_section(["fermix_channels", "mobile", "push"], Keyword.get(mobile, :push, [])),
+      render_section(["fermix_channels", "mobile", "fcm"], Keyword.get(mobile, :fcm, []))
     ]
   end
 
@@ -3107,6 +3109,7 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_mobile(config) when is_map(config) or is_list(config) do
     validate_mobile_keys!(config, @mobile_keys, "mobile")
     push = lookup(config, "push", :push)
+    fcm = lookup(config, "fcm", :fcm)
 
     []
     |> put_if_present(:enabled, normalize_mobile_boolean(config, :enabled))
@@ -3125,6 +3128,7 @@ defmodule FermixCore.Setup.ConfigStore do
       normalize_mobile_positive_integer(config, :media_store_max_bytes)
     )
     |> put_mobile_push(push)
+    |> put_mobile_fcm(fcm)
   end
 
   defp normalize_mobile(config) do
@@ -3153,6 +3157,29 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp put_mobile_push(_fields, push) do
     raise ArgumentError, "invalid mobile.push #{inspect(push)}; expected a table"
+  end
+
+  # Android push (M51 §10): APNs' sibling table. The service account is a
+  # secret and reaches the TOML only as its keychain sentinel.
+  defp put_mobile_fcm(fields, nil), do: fields
+
+  defp put_mobile_fcm(fields, fcm) when is_map(fcm) or is_list(fcm) do
+    validate_mobile_keys!(fcm, @mobile_fcm_keys, "mobile.fcm")
+
+    normalized =
+      []
+      |> put_if_present(:enabled, normalize_mobile_boolean(fcm, :enabled, "mobile.fcm"))
+      |> put_if_present(:project_id, normalize_mobile_string(fcm, :project_id, "mobile.fcm"))
+      |> put_if_present(
+        :service_account,
+        normalize_mobile_string(fcm, :service_account, "mobile.fcm")
+      )
+
+    Keyword.put(fields, :fcm, normalized)
+  end
+
+  defp put_mobile_fcm(_fields, _fcm) do
+    raise ArgumentError, "invalid mobile.fcm; expected a table"
   end
 
   defp validate_mobile_keys!(config, allowed, label) do

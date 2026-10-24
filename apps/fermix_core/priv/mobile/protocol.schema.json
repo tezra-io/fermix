@@ -27,7 +27,7 @@
       "properties": {
         "t": {"enum": [
           "hello", "msg", "attach_begin", "attach_chunk", "attach_end", "command", "cancel",
-          "history_pull", "media_fetch", "push_register", "ack", "read_state",
+          "history_pull", "media_fetch", "push_register", "push_unregister", "ack", "read_state",
           "request_status", "pair_request", "unpair", "ping"
         ]}
       },
@@ -42,6 +42,7 @@
         {"if": {"properties": {"t": {"const": "history_pull"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/history_pull"}},
         {"if": {"properties": {"t": {"const": "media_fetch"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/media_fetch"}},
         {"if": {"properties": {"t": {"const": "push_register"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/push_register"}},
+        {"if": {"properties": {"t": {"const": "push_unregister"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/push_unregister"}},
         {"if": {"properties": {"t": {"const": "ack"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/ack"}},
         {"if": {"properties": {"t": {"const": "read_state"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/read_state"}},
         {"if": {"properties": {"t": {"const": "request_status"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/request_status"}},
@@ -153,9 +154,15 @@
       "properties": {"t": {"const": "media_fetch"}, "ref": {"type": "string", "minLength": 1}}
     },
     "push_register": {
-      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "apns_token", "environment"],
-      "properties": {"t": {"const": "push_register"}, "apns_token": {"type": "string", "minLength": 1}, "environment": {"enum": ["development", "production"]}}
+      "allOf": [
+        {"$ref": "#/$defs/envelope"},
+        {"if": {"properties": {"platform": {"const": "ios"}}, "required": ["platform"]}, "then": {"required": ["environment"]}}
+      ],
+      "required": ["v", "t", "seq", "platform", "token"],
+      "description": "platform is the phone's own; environment comes with ios alone, and the daemon refuses it beside android.",
+      "properties": {"t": {"const": "push_register"}, "platform": {"enum": ["ios", "android"]}, "token": {"type": "string", "minLength": 1, "x-max-bytes": 1024}, "environment": {"enum": ["development", "production"]}}
     },
+    "push_unregister": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq"], "properties": {"t": {"const": "push_unregister"}}},
     "ack": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "server_seq"],
       "properties": {"t": {"const": "ack"}, "server_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}}
@@ -230,8 +237,13 @@
       "properties": {
         "commands": {"type": "array", "items": {"$ref": "#/$defs/commandDescriptor"}},
         "media": {"type": "boolean"}, "streaming": {"type": "boolean"}, "turn_done": {"type": "boolean"},
-        "max_media_bytes": {"type": "integer", "minimum": 0}
+        "max_media_bytes": {"type": "integer", "minimum": 0},
+        "push": {"$ref": "#/$defs/pushServices"}
       }
+    },
+    "pushServices": {
+      "type": "array", "maxItems": 2, "items": {"enum": ["apns", "fcm"]},
+      "description": "The push services this daemon sends through, each once; a phone offers notifications only when its platform's is listed."
     },
     "commandDescriptor": {
       "type": "object", "required": ["name", "aliases", "description"],
@@ -399,9 +411,9 @@
       "properties": {"t": {"const": "notice"}, "kind": {"type": "string", "minLength": 1}, "text": {"type": "string", "minLength": 1}}
     },
     "pair_approved": {
-      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "device_id", "candidates", "profiles", "push_salt"],
-      "description": "push_salt is the device's 32-byte push salt (apns_key_salt), standard base64 with padding.",
-      "properties": {"t": {"const": "pair_approved"}, "device_id": {"type": "string", "minLength": 1}, "candidates": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/candidate"}}, "profiles": {"type": "array", "items": {"$ref": "#/$defs/profile"}}, "push_salt": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"}}
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "device_id", "candidates", "profiles", "push_salt", "push"],
+      "description": "push_salt is the device's 32-byte push salt (apns_key_salt), standard base64 with padding; push lists the push services this daemon sends through.",
+      "properties": {"t": {"const": "pair_approved"}, "device_id": {"type": "string", "minLength": 1}, "candidates": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/candidate"}}, "profiles": {"type": "array", "items": {"$ref": "#/$defs/profile"}}, "push_salt": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"}, "push": {"$ref": "#/$defs/pushServices"}}
     },
     "pair_denied": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "reason"],

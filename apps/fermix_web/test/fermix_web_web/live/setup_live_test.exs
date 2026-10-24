@@ -3226,6 +3226,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         tailnet: %{detected: false, candidates: []},
         identity: %{present: true, fingerprint: "3f9a 1c2e"},
         apns: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
+        fcm: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
         remote: %{state: :off},
         paired_devices: 0,
         protocol_version: 1,

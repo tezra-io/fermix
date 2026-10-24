@@ -5,7 +5,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
   @client_events ~w(
     hello msg attach_begin attach_chunk attach_end command cancel history_pull media_fetch
-    push_register ack read_state request_status pair_request unpair ping
+    push_register push_unregister ack read_state request_status pair_request unpair ping
   )
   @server_events ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
@@ -441,7 +441,8 @@ defmodule FermixChannels.Mobile.ProtocolTest do
       "device_id" => "device-1",
       "candidates" => [],
       "profiles" => [%{"id" => "main", "name" => "Fermix"}],
-      "push_salt" => Base.encode64(:binary.copy(<<7>>, 32))
+      "push_salt" => Base.encode64(:binary.copy(<<7>>, 32)),
+      "push" => ["fcm"]
     }
 
     assert {:ok, _frame} = Protocol.encode_server_frame("pair_approved", approved, 1)
@@ -453,6 +454,83 @@ defmodule FermixChannels.Mobile.ProtocolTest do
       assert {:error, {:invalid_field, "push_salt"}} =
                Protocol.encode_server_frame("pair_approved", %{approved | "push_salt" => salt}, 1)
     end
+  end
+
+  test "pair_approved and hello_ack name the push services this daemon has" do
+    approved = %{
+      "device_id" => "device-1",
+      "candidates" => [],
+      "profiles" => [%{"id" => "main", "name" => "Fermix"}],
+      "push_salt" => Base.encode64(:binary.copy(<<7>>, 32)),
+      "push" => ["apns", "fcm"]
+    }
+
+    for push <- [[], ["fcm"], ["apns"], ["apns", "fcm"]] do
+      assert {:ok, _frame} =
+               Protocol.encode_server_frame("pair_approved", %{approved | "push" => push}, 1)
+    end
+
+    assert {:error, {:missing_field, "push"}} =
+             Protocol.encode_server_frame("pair_approved", Map.delete(approved, "push"), 1)
+
+    for push <- [["gcm"], ["fcm", "fcm"], "fcm"] do
+      assert {:error, {:invalid_field, "push"}} =
+               Protocol.encode_server_frame("pair_approved", %{approved | "push" => push}, 1)
+    end
+
+    ack = %{
+      "session_id" => "s",
+      "min_version" => 2,
+      "max_version" => 2,
+      "profiles" => [],
+      "candidates" => [],
+      "history_head_seq" => 0,
+      "read_up_to_seq" => 0,
+      "caps" => %{"commands" => [], "max_media_bytes" => 1, "push" => ["fcm"]}
+    }
+
+    assert {:ok, _frame} = Protocol.encode_server_frame("hello_ack", ack, 1)
+
+    assert {:error, {:invalid_field, "caps.push"}} =
+             Protocol.encode_server_frame("hello_ack", put_in(ack, ["caps", "push"], ["web"]), 1)
+  end
+
+  test "push_register names the phone's platform, with an APNs environment only for an iPhone" do
+    token = String.duplicate("f", 163)
+
+    assert {:ok, %{type: "push_register", payload: %{"platform" => "android", "token" => ^token}}} =
+             Protocol.decode_client_frame(
+               client_frame("push_register", 1, %{"platform" => "android", "token" => token})
+             )
+
+    ios = %{"platform" => "ios", "token" => "abc123", "environment" => "production"}
+
+    assert {:ok, %{payload: ^ios}} =
+             Protocol.decode_client_frame(client_frame("push_register", 1, ios))
+
+    refused = [
+      {%{"platform" => "android"}, {:missing_field, "token"}},
+      {%{"token" => token}, {:missing_field, "platform"}},
+      {%{"platform" => "windows", "token" => token}, {:invalid_field, "platform"}},
+      {%{"platform" => "android", "token" => ""}, {:invalid_field, "token"}},
+      {%{"platform" => "android", "token" => String.duplicate("f", 1_025)},
+       {:invalid_field, "token"}},
+      {%{"platform" => "android", "token" => token, "environment" => "production"},
+       {:invalid_field, "environment"}},
+      {%{"platform" => "ios", "token" => "abc123"}, {:invalid_field, "environment"}},
+      {%{"apns_token" => "abc123", "environment" => "production"}, {:missing_field, "platform"}}
+    ]
+
+    for {fields, reason} <- refused do
+      assert {:error, ^reason} =
+               Protocol.decode_client_frame(client_frame("push_register", 1, fields)),
+             inspect(fields)
+    end
+  end
+
+  test "push_unregister carries nothing" do
+    assert {:ok, %{type: "push_unregister", payload: %{}}} =
+             Protocol.decode_client_frame(client_frame("push_unregister", 1, %{}))
   end
 
   test "fails loudly on malformed, oversized, and unknown frames" do

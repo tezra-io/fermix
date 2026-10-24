@@ -15,6 +15,7 @@ defmodule FermixChannels.Telemetry do
   @pair_attestations [:verified, :refused, :unavailable, nil]
   @pair_signer_roles [:development, :release, nil]
   @push_statuses [:sent, :failed]
+  @push_platforms [:apns, :fcm]
   @transport_statuses [:degraded, :recovered]
 
   @type pair_status ::
@@ -33,6 +34,7 @@ defmodule FermixChannels.Telemetry do
           signer_role: :development | :release | nil
         }
   @type push_status :: :sent | :failed
+  @type push_platform :: :apns | :fcm
   @type transport_status :: :degraded | :recovered
 
   @spec emit_parse(atom(), term(), non_neg_integer()) :: :ok
@@ -93,14 +95,14 @@ defmodule FermixChannels.Telemetry do
     )
   end
 
-  @spec emit_push(atom(), push_status(), non_neg_integer()) :: :ok
-  def emit_push(channel, status, duration_us)
+  @spec emit_push(atom(), push_status(), non_neg_integer(), push_platform()) :: :ok
+  def emit_push(channel, status, duration_us, platform)
       when is_atom(channel) and status in @push_statuses and is_integer(duration_us) and
-             duration_us >= 0 do
+             duration_us >= 0 and platform in @push_platforms do
     :telemetry.execute(
       [:fermix, :channel, :push],
       %{count: 1, duration_us: duration_us},
-      %{channel: channel, status: status}
+      %{channel: channel, status: status, platform: platform}
     )
   end
 

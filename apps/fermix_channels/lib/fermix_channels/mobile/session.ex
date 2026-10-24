@@ -90,7 +90,7 @@ defmodule FermixChannels.Mobile.Session do
   @typed_refusals ~w(
     store_quota_exceeded media_too_large sha256_mismatch announced_hash_mismatch
     size_mismatch size_exceeded unexpected_chunk invalid_field missing_field
-    attachment_unavailable unsupported_event push_environment_mismatch
+    attachment_unavailable unsupported_event push_environment_mismatch push_platform_mismatch
   )a
 
   @type state :: map()
@@ -191,6 +191,7 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:discovery, Discovery)
     |> Map.put_new(:max_media_bytes, @default_max_media_bytes)
     |> Map.put_new(:push_environment, nil)
+    |> Map.put_new(:push_services, [])
     |> Map.put_new(:profile_id, @profile_id)
     |> Map.put_new(:device_id, nil)
     |> Map.put_new(:authenticated_device, nil)
@@ -763,7 +764,8 @@ defmodule FermixChannels.Mobile.Session do
            "media" => true,
            "streaming" => true,
            "turn_done" => true,
-           "max_media_bytes" => state.max_media_bytes
+           "max_media_bytes" => state.max_media_bytes,
+           "push" => state.push_services
          }
        }}
     end
@@ -853,7 +855,8 @@ defmodule FermixChannels.Mobile.Session do
       "device_id" => value(device, :device_id),
       "candidates" => current_candidates(state),
       "profiles" => profiles(state),
-      "push_salt" => Base.encode64(value(device, :apns_key_salt))
+      "push_salt" => Base.encode64(value(device, :apns_key_salt)),
+      "push" => state.push_services
     }
 
     # The owner's decision can come at any time in the window, so the hello
@@ -910,19 +913,16 @@ defmodule FermixChannels.Mobile.Session do
   end
 
   defp dispatch_event(%{type: "push_register", payload: payload}, state) do
-    with :ok <- validate_push_environment(payload["environment"], state.push_environment),
-         result <-
-           state.update_device.(state.device_store, state.device_id, %{
-             push_token: payload["apns_token"]
-           }) do
-      case result do
-        {:ok, _device} -> {:ok, nil, state}
-        {:error, reason} -> {:error, reason, state}
-      end
+    with :ok <- validate_push_platform(payload["platform"], paired_platform(state)),
+         :ok <- validate_registration(payload, state) do
+      store_push_token(payload["token"], state)
     else
       {:error, reason} -> {:error, reason, state}
     end
   end
+
+  # The phone's notifications cannot show, so no push may come (M51 §10).
+  defp dispatch_event(%{type: "push_unregister"}, state), do: store_push_token(nil, state)
 
   defp dispatch_event(%{type: "media_fetch", payload: payload}, state) do
     queue_media_fetch(payload["ref"], state)
@@ -1631,6 +1631,29 @@ defmodule FermixChannels.Mobile.Session do
        do: reason |> elem(0) |> Atom.to_string()
 
   defp error_code(_reason), do: "request_failed"
+
+  defp store_push_token(token, state) do
+    case state.update_device.(state.device_store, state.device_id, %{push_token: token}) do
+      {:ok, _device} -> {:ok, nil, state}
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  # A phone paired before pairing recorded a platform was an iPhone.
+  defp paired_platform(%{authenticated_device: nil}), do: "ios"
+
+  defp paired_platform(%{authenticated_device: device}),
+    do: value(device, :platform) || "ios"
+
+  defp validate_push_platform(platform, platform), do: :ok
+
+  defp validate_push_platform(received, paired),
+    do: {:error, {:push_platform_mismatch, paired, received}}
+
+  defp validate_registration(%{"platform" => "ios", "environment" => environment}, state),
+    do: validate_push_environment(environment, state.push_environment)
+
+  defp validate_registration(%{"platform" => "android"}, _state), do: :ok
 
   defp validate_push_environment(received, configured)
        when received in ["development", "production"] and
