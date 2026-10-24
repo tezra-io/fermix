@@ -21,6 +21,9 @@ on:
       - packaging/linux/**
       - scripts/release/build_linux_packages.sh
       - scripts/release/linux_packages.py
+      - apps/fermix_core/priv/iroh_helper/PIN.json
+      - apps/fermix_core/lib/fermix_core/release/iroh_helper.ex
+      - scripts/release/verify_linux_package.sh
       - mix.exs
       - .github/workflows/linux-packages.yml
 
@@ -89,3 +92,17 @@ jobs:
             packaging/linux/out/packages/*.rpm
           if-no-files-found: error
           retention-days: 7
+
+      # The deb is installed and run here as the release's deb-linux-x64 row
+      # runs it, on the same runner, so the release build steps (the pinned
+      # iroh helper among them) and the Linux verifier are proven before any
+      # tag. It follows the upload, so a package that fails can be inspected.
+      - name: Install and run the deb
+        if: matrix.target == 'linux_x86_64'
+        run: |
+          set -euo pipefail
+          version="$(awk -F '"' '/^      version:/ { print $2; exit }' mix.exs)"
+          scripts/release/verify_linux_package.sh \
+            "packaging/linux/out/packages/fermix_${version}_amd64.deb" \
+            deb \
+            "$version"

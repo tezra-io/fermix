@@ -28,6 +28,10 @@
 # Rustler
 /apps/fermix_nif/native/fermix_nif/target/
 
+# The pinned fermix-iroh helper: release builds place it, a checkout installs
+# it with `mix fermix.iroh_helper` (PIN.json beside it is tracked)
+/apps/fermix_core/priv/iroh_helper/bin/
+
 # SwiftPM macOS clients
 /clients/macos/*/.build/
 /clients/macos/*/.swiftpm/

@@ -132,6 +132,20 @@ class ReleaseWorkflowTest(unittest.TestCase):
             with self.subTest(job=job):
                 self.assertIn("needs: preflight\n", self._job(job))
 
+    # The build jobs compare the helper's digest with the pin and nothing more,
+    # so preflight, which every build needs, is where its signatures are checked.
+    def test_preflight_verifies_the_pinned_iroh_helper_against_its_signatures(self):
+        preflight = self._job("preflight")
+        installer = re.search(r"uses: sigstore/cosign-installer@[0-9a-f]{40} # v\S+\n", self._job("sign-candidate"))
+        self.assertIsNotNone(installer, "sign-candidate installs no pinned cosign")
+        self.assertIn(installer.group(0), preflight)
+        self.assertIn("- uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2\n", preflight)
+        check = "        run: uv run scripts/release/pin_iroh_helper.py --check\n"
+        self.assertIn(check, preflight)
+        self.assertLess(preflight.index(installer.group(0)), preflight.index(check))
+        self.assertLess(preflight.index("astral-sh/setup-uv@"), preflight.index(check))
+        self.assertNotIn("continue-on-error", preflight)
+
     def test_only_publishing_waits_on_the_release_environment(self):
         environments = re.findall(
             r"^  ([a-z][a-z0-9-]*):\n(?:    [^\n]*\n|\s*\n)*?    environment: (\S+)\n",
@@ -245,6 +259,42 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("scripts/release/build_linux_packages.sh", self.linux_packages)
         self.assertNotIn("cosign", self.linux_packages)
         self.assertNotIn("softprops/action-gh-release", self.linux_packages)
+
+    # The package build places the pinned iroh helper, so a pin bump, a
+    # change to the step that places it or to the verifier builds the
+    # packages, and the x86_64 deb is installed and verified before any tag.
+    def test_a_helper_pin_change_builds_and_verifies_the_packages(self):
+        paths = re.search(r"\n  pull_request:\n    paths:\n((?:      - \S+\n)+)", self.linux_packages)
+        self.assertIsNotNone(paths, "linux-packages.yml has no pull_request paths filter")
+        for path in (
+            "apps/fermix_core/priv/iroh_helper/PIN.json",
+            "apps/fermix_core/lib/fermix_core/release/iroh_helper.ex",
+            "scripts/release/verify_linux_package.sh",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(f"      - {path}\n", paths.group(1))
+
+        step = re.search(
+            r"\n      - name: Install and run the deb\n(.*?)(?=\n      - |\Z)", self.linux_packages, re.DOTALL
+        )
+        self.assertIsNotNone(step, "linux-packages.yml installs and verifies no deb")
+        body = step.group(1)
+        self.assertIn("        if: matrix.target == 'linux_x86_64'\n", body)
+        self.assertIn("""awk -F '"' '/^      version:/ { print $2; exit }' mix.exs""", body)
+        self.assertIn(
+            "          scripts/release/verify_linux_package.sh \\\n"
+            '            "packaging/linux/out/packages/fermix_${version}_amd64.deb" \\\n'
+            "            deb \\\n"
+            '            "$version"',
+            body,
+        )
+        self.assertLess(
+            self.linux_packages.index("- name: Build the package target"),
+            self.linux_packages.index("- name: Install and run the deb"),
+        )
+        # One run of the verifier; its only other mention is the paths filter.
+        self.assertEqual(body.count("scripts/release/verify_linux_package.sh"), 1)
+        self.assertEqual(self.linux_packages.count("scripts/release/verify_linux_package.sh"), 2)
 
     def test_the_advertised_installer_is_run_against_the_published_release(self):
         job = re.search(r"\n  installer:\n(.*?)\n  homebrew:\n", self.release, re.DOTALL)

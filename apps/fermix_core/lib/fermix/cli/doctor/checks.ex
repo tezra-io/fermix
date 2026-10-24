@@ -1114,8 +1114,6 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp refusal_label(status, nil), do: "HTTP #{status}"
   defp refusal_label(status, code), do: "HTTP #{status}, #{code}"
 
-  @no_helper "this build carries no fermix-iroh helper"
-
   @doc "Reports mobile identity permissions and daemon-owned listener state."
   @spec mobile(keyword()) :: result()
   def mobile(opts \\ []) when is_list(opts) do
@@ -1240,7 +1238,7 @@ defmodule Fermix.CLI.Doctor.Checks do
       mobile_listener(report, opts),
       mobile_mdns(report, config),
       mobile_tailnet(report),
-      mobile_remote(report),
+      mobile_remote(report, opts),
       mobile_apns(report, config),
       mobile_device_count(report)
     ]
@@ -1359,24 +1357,57 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp mobile_tailnet(%{"tailnet" => %{"detected" => true}}), do: {:ok, "tailnet detected"}
   defp mobile_tailnet(_report), do: {:ok, "tailnet not detected (LAN still available)"}
 
-  # Reach from anywhere (M62 §8), as the daemon's rail reports it. A missing
-  # helper is a warning while builds carry none; a failed rail is a failure in
-  # the helper's own words, which the rail has already stripped of control
-  # characters.
-  defp mobile_remote(%{"remote" => %{"state" => state} = remote}) do
+  # Reach from anywhere (M62 §8), as the daemon's rail reports it. A failed
+  # rail is a failure in the helper's own words, which the rail has already
+  # stripped of control characters.
+  defp mobile_remote(%{"remote" => %{"state" => state} = remote}, opts) do
     case state do
       "off" -> {:ok, "reach from anywhere off"}
       "dormant" -> {:ok, "reach from anywhere waits for the first pairing"}
       "starting" -> {:ok, "reach from anywhere starting"}
-      "helper_missing" -> {:warn, "reach from anywhere unavailable: " <> @no_helper}
+      "helper_missing" -> mobile_helper_missing(opts)
       "ready" -> mobile_relay(remote)
       "failed" -> {:fail, "reach from anywhere failed: #{remote["failure"]}"}
       other -> {:warn, "reach from anywhere reports a state this CLI does not know: #{other}"}
     end
   end
 
-  defp mobile_remote(_report),
+  defp mobile_remote(_report, _opts),
     do: {:warn, "reach from anywhere not reported: the running daemon predates it"}
+
+  # M62 stage 5: every release tree carries the pinned helper, so a release
+  # without one is broken and the line names that install's own way back. A
+  # source checkout has none until its owner installs it.
+  defp mobile_helper_missing(opts) do
+    case helper_way_back(opts) do
+      nil ->
+        {:warn,
+         "reach from anywhere unavailable: this checkout has no fermix-iroh helper; " <>
+           "install it with `mix fermix.iroh_helper`, then restart the daemon"}
+
+      way_back ->
+        {:fail,
+         "reach from anywhere unavailable: this release is missing its fermix-iroh helper; " <>
+           way_back}
+    end
+  end
+
+  defp helper_way_back(opts) do
+    cond do
+      app_engine?(opts) ->
+        "reinstall Fermix.app"
+
+      packaged?(opts) ->
+        "reinstall the package with `sudo apt install --reinstall fermix` (Fedora and RHEL: " <>
+          "`sudo dnf reinstall fermix`; openSUSE: `sudo zypper install --force fermix`)"
+
+      standalone?(opts) ->
+        "reinstall it, with `brew reinstall fermix` for a Homebrew install"
+
+      true ->
+        nil
+    end
+  end
 
   defp mobile_relay(%{"connected" => true, "relay" => relay}) when is_binary(relay),
     do: {:ok, "reach from anywhere ready via #{URI.parse(relay).host}"}
@@ -3471,6 +3502,10 @@ defmodule Fermix.CLI.Doctor.Checks do
     do: %{name: name, status: :not_applicable, detail: detail}
 
   defp app_engine?(opts), do: Keyword.get(opts, :build_info, BuildInfo).app_engine?()
+
+  # A Burrito binary (the formula's, or a Linux package's), as `Service` asks it.
+  defp standalone?(opts),
+    do: Keyword.get(opts, :standalone?, &Burrito.Util.running_standalone?/0).()
 
   defp packaged?(opts), do: Keyword.get(opts, :build_info, BuildInfo).linux_package?()
 end

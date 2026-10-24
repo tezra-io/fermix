@@ -359,7 +359,7 @@ defmodule FermixWebWeb.SetupLive.PhonePairing do
   is off, or a state this page does not know, says nothing beyond its switch.
   """
   @spec reach_line(map() | nil) :: {String.t(), :note | :progress | :failure} | nil
-  def reach_line(%{"state" => "helper_missing"}), do: {"Not available in this build yet.", :note}
+  def reach_line(%{"state" => "helper_missing"}), do: {"Not included in this build.", :note}
   def reach_line(%{"state" => "dormant"}), do: {"Starts when you pair your first phone.", :note}
   def reach_line(%{"state" => "starting"}), do: {"Starting…", :progress}
 

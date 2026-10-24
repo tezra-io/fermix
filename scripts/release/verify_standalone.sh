@@ -9,15 +9,18 @@ fail() {
 }
 
 usage() {
-  printf 'usage: %s <artifact> <target> <version>\n' "$0" >&2
+  printf 'usage: %s <artifact> <target> <version> [<iroh-helper-pin>]\n' "$0" >&2
   exit 2
 }
 
-[ "$#" -eq 3 ] || usage
+[ "$#" -eq 3 ] || [ "$#" -eq 4 ] || usage
 
 artifact="$1"
 target="$2"
 version="$3"
+# The helper the artifact must carry is the one this checkout pins; a test
+# passes a pin that matches its fake tree.
+iroh_pin="${4:-$(cd "$(dirname "$0")/../.." && pwd -P)/apps/fermix_core/priv/iroh_helper/PIN.json}"
 
 case "$target" in
   linux_x86_64|linux_aarch64|macos_aarch64|macos_x86_64) ;;
@@ -30,6 +33,49 @@ esac
 # is, a name with no slash is looked up on PATH rather than in the working
 # directory, so the artifact is anchored to its directory before it is run.
 artifact="$(cd "$(dirname "$artifact")" && pwd)/$(basename "$artifact")"
+
+# One reader for the helper pin: the digest pinned for this target, the exact
+# `--version` line and the macOS Team ID, one per line. A pin missing any of
+# them is refused here, before the artifact runs.
+iroh_pin_fields() {
+  uv run --no-project python -c '
+import json, re, sys
+path, target = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as stream:
+        pin = json.load(stream)
+except (OSError, ValueError) as error:
+    sys.exit(f"cannot read the iroh helper pin {path}: {error}")
+if not isinstance(pin, dict) or pin.get("schema_version") != 1:
+    sys.exit(f"the iroh helper pin {path} is not schema_version 1")
+targets = pin.get("targets")
+entry = targets.get(target) if isinstance(targets, dict) else None
+sha256 = entry.get("sha256") if isinstance(entry, dict) else None
+if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+    sys.exit(f"the iroh helper pin {path} has no sha256 for {target}")
+fields = [pin.get(key) for key in ("version", "iroh_version", "macos_team_id")]
+if not all(isinstance(value, str) and value for value in fields):
+    sys.exit(f"the iroh helper pin {path} must name version, iroh_version and macos_team_id")
+version, iroh_version, team_id = fields
+print(sha256)
+print(f"fermix-iroh {version} (iroh {iroh_version})")
+print(team_id)
+' "$1" "$2"
+}
+
+sha256_of() {
+  uv run --no-project python -c '
+import hashlib, sys
+with open(sys.argv[1], "rb") as stream:
+    print(hashlib.sha256(stream.read()).hexdigest())
+' "$1"
+}
+
+[ -f "$iroh_pin" ] || fail "iroh helper pin not found: $iroh_pin"
+iroh_fields="$(iroh_pin_fields "$iroh_pin" "$target")" || fail "the iroh helper pin cannot be used (the reason is above)"
+iroh_sha256="$(printf '%s\n' "$iroh_fields" | sed -n 1p)"
+iroh_version_line="$(printf '%s\n' "$iroh_fields" | sed -n 2p)"
+iroh_team_id="$(printf '%s\n' "$iroh_fields" | sed -n 3p)"
 
 runtime_parent="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 [ -d "$runtime_parent" ] || fail "standalone verification temporary directory does not exist"
@@ -53,6 +99,60 @@ case "$version_output" in
   *"$version"*) ;;
   *) fail "--version output does not contain $version" ;;
 esac
+
+# ── the bundled fermix-iroh helper ──────────────────────────────────────────
+# Reach from anywhere runs this helper, and a release without it reports the
+# switch as unavailable on every install. The Burrito step puts the pinned
+# helper into each target's tree before packing, so this stage reads the
+# payload the run above unpacked: exactly one helper, executable, the bytes the
+# pin names for this target, and the pinned `--version`; on macOS also a strict
+# signature by the pinned team. Where that payload lies is the wrapper's to
+# say, not a layout under $home (on Linux Burrito honours `XDG_DATA_HOME`), so
+# the wrapper is asked with the same environment the run above had. With
+# `FERMIX_INSTALL_DIR` set the wrapper prints its own notices on stdout ahead
+# of the directory, and that answer is refused below rather than parsed. The
+# digest is checked before the helper runs, so no unpinned bytes are executed.
+# It runs before the migrate-to-app stage because that stage ends the script on
+# a Linux target.
+payload="$(HOME="$home" FERMIX_HOME="$fermix_home" "$artifact" maintenance directory)" ||
+  fail "$artifact maintenance directory did not name the unpacked payload"
+[ -d "$payload" ] || fail "the unpacked payload directory does not exist: $payload"
+
+iroh_helper=""
+iroh_helper_count=0
+iroh_helper_paths=""
+for candidate in "$payload"/lib/fermix_core-*/priv/iroh_helper/bin/fermix-iroh; do
+  [ -e "$candidate" ] || continue
+  iroh_helper="$candidate"
+  iroh_helper_count=$((iroh_helper_count + 1))
+  iroh_helper_paths="$iroh_helper_paths $candidate"
+done
+
+[ "$iroh_helper_count" -eq 1 ] ||
+  fail "the unpacked release must carry exactly one fermix-iroh helper (lib/fermix_core-*/priv/iroh_helper/bin/fermix-iroh under $payload), found $iroh_helper_count:${iroh_helper_paths:- none}"
+[ -x "$iroh_helper" ] || fail "the bundled fermix-iroh helper is not executable: $iroh_helper"
+
+iroh_helper_sha256="$(sha256_of "$iroh_helper")" || fail "cannot hash the bundled fermix-iroh helper: $iroh_helper"
+[ "$iroh_helper_sha256" = "$iroh_sha256" ] ||
+  fail "the bundled fermix-iroh helper is not the pinned $target build: expected sha256 $iroh_sha256 (from $iroh_pin), found $iroh_helper_sha256"
+
+iroh_helper_version="$("$iroh_helper" --version < /dev/null)" ||
+  fail "the bundled fermix-iroh helper --version failed: $iroh_helper"
+[ "$iroh_helper_version" = "$iroh_version_line" ] ||
+  fail "the bundled fermix-iroh helper --version must print exactly '$iroh_version_line', got '$iroh_helper_version'"
+
+case "$target" in
+  macos_aarch64|macos_x86_64)
+    iroh_signature="$(codesign --verify --strict "$iroh_helper" 2>&1)" ||
+      fail "the bundled fermix-iroh helper does not pass codesign --verify --strict: $iroh_signature"
+    iroh_signature="$(codesign -dv "$iroh_helper" 2>&1)" ||
+      fail "codesign cannot display the bundled fermix-iroh helper's signature: $iroh_signature"
+    iroh_signed_team="$(printf '%s\n' "$iroh_signature" | sed -n 's/^TeamIdentifier=//p')"
+    [ "$iroh_signed_team" = "$iroh_team_id" ] ||
+      fail "the bundled fermix-iroh helper must be signed by team $iroh_team_id, found ${iroh_signed_team:-no TeamIdentifier}"
+    ;;
+esac
+printf 'fermix-iroh helper: %s (%s)\n' "$iroh_helper" "$iroh_helper_version"
 
 # ── plugins auth clear, run tree-less from this artifact ────────────────────
 # Every `fermix plugins` verb runs without the supervision tree, so no command

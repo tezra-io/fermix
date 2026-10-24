@@ -9,10 +9,12 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import signal
 import socket
 import stat
+import struct
 import sys
 import tarfile
 import tempfile
@@ -29,6 +31,9 @@ ARCHITECTURE = "arm64"
 VERSION = "0.9.0"
 SOURCE_COMMIT = "a" * 40
 MAPS_HELPER = "lib/fermix_nif-0.9.0/priv/fermix-maps"
+IROH_HELPER = "lib/fermix_core-0.9.0/priv/iroh_helper/bin/fermix-iroh"
+IROH_VERSION_LINE = "fermix-iroh 0.1.0 (iroh 1.3.0)"
+IROH_TEAM_ID = "ABCDE12345"
 
 
 class VerifyAppEngineTest(unittest.TestCase):
@@ -37,9 +42,19 @@ class VerifyAppEngineTest(unittest.TestCase):
         self.base = Path(self.tmp.name)
         self.release = self.base / "release"
         self.out = self.base / "out"
+        self.pin = self.base / "PIN.json"
+        self.codesign_bin = self.base / "codesign-bin"
+        self.codesign_log = self.base / "codesign.log"
         self.release.mkdir()
         self._write_fake_release()
         self._write_manifest()
+        self._write_pin()
+        # The macOS signature checks must not depend on the host's signing
+        # tools, and the Linux host these tests run on in CI has none.
+        self._write_codesign("team")
+        path = mock.patch.dict(os.environ, {"PATH": f"{self.codesign_bin}:{os.environ['PATH']}"})
+        path.start()
+        self.addCleanup(path.stop)
         self.archive = package.package_release(self.release, TARGET, self.out, VERSION)
         self.timeouts = verify.Timeouts(
             startup_attempts=150,
@@ -67,6 +82,7 @@ class VerifyAppEngineTest(unittest.TestCase):
                 TARGET,
                 VERSION,
                 "native",
+                iroh_pin=self.pin,
                 temp_parent=self.base,
                 timeouts=self.timeouts,
             )
@@ -85,6 +101,7 @@ class VerifyAppEngineTest(unittest.TestCase):
                 TARGET,
                 VERSION,
                 "native",
+                iroh_pin=self.pin,
                 temp_parent=self.base,
                 timeouts=self.timeouts,
             )
@@ -99,7 +116,13 @@ class VerifyAppEngineTest(unittest.TestCase):
         with self._darwin_host("arm64"), mock.patch.object(verify, "_start_engine") as start:
             with self.assertRaisesRegex(verify.VerificationError, "exactly one Apple Maps helper"):
                 verify.verify_app_engine(
-                    archive, TARGET, VERSION, "native", temp_parent=self.base, timeouts=self.timeouts
+                    archive,
+                    TARGET,
+                    VERSION,
+                    "native",
+                    iroh_pin=self.pin,
+                    temp_parent=self.base,
+                    timeouts=self.timeouts,
                 )
 
         start.assert_not_called()
@@ -114,10 +137,155 @@ class VerifyAppEngineTest(unittest.TestCase):
                 verify.VerificationError, r"self-check failed \(exit 70\): dyld: missing MapKit"
             ):
                 verify.verify_app_engine(
-                    archive, TARGET, VERSION, "native", temp_parent=self.base, timeouts=self.timeouts
+                    archive,
+                    TARGET,
+                    VERSION,
+                    "native",
+                    iroh_pin=self.pin,
+                    temp_parent=self.base,
+                    timeouts=self.timeouts,
                 )
 
         start.assert_not_called()
+
+    # ── the bundled fermix-iroh helper ────────────────────────────────────
+
+    def test_reports_the_pinned_signed_iroh_helper_it_checked(self):
+        with self._darwin_host("arm64"):
+            result = verify.verify_app_engine(
+                self.archive,
+                TARGET,
+                VERSION,
+                "native",
+                iroh_pin=self.pin,
+                temp_parent=self.base,
+                timeouts=self.timeouts,
+            )
+
+        self.assertEqual(result["iroh_helper"], IROH_HELPER)
+        calls = self.codesign_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual([call.split(" /", 1)[0] for call in calls], ["--verify --strict", "-dv"])
+
+    def test_rejects_an_engine_without_the_iroh_helper_before_launching(self):
+        (self.release / IROH_HELPER).unlink()
+        archive = self._repackage("no-iroh")
+
+        self._verify_before_launch(archive, r"exactly one fermix-iroh helper .* found 0")
+
+    def test_rejects_an_engine_with_two_iroh_helpers_before_launching(self):
+        self._write_iroh_helper(
+            IROH_VERSION_LINE, relative="lib/fermix_core-0.8.0/priv/iroh_helper/bin/fermix-iroh"
+        )
+        archive = self._repackage("two-iroh")
+
+        self._verify_before_launch(archive, r"exactly one fermix-iroh helper .* found 2")
+
+    # A helper that lost its executable bit is not inventoried by the release
+    # manifest, so the packager's own checks pass it; this check does not.
+    def test_rejects_an_iroh_helper_the_manifest_does_not_inventory(self):
+        self._write_iroh_helper(IROH_VERSION_LINE, mode=0o644)
+        archive = self._repackage("unlisted-iroh")
+
+        self._verify_before_launch(archive, f"the engine manifest does not inventory {IROH_HELPER}")
+
+    # The real build is a Mach-O, which the release manifest inventories
+    # whatever its mode, so a helper that lost its executable bit can arrive
+    # listed and pinned; it is refused by name before anything tries to run it.
+    def test_rejects_a_listed_pinned_iroh_helper_that_is_not_executable(self):
+        self._write_mach_o_iroh_helper(mode=0o644)
+        self._write_pin()
+        archive = self._repackage("not-executable-iroh")
+
+        self._verify_before_launch(archive, f"the fermix-iroh helper {IROH_HELPER} is not executable")
+        self.assertFalse(self.codesign_log.exists())
+
+    def test_rejects_an_iroh_helper_whose_digest_is_not_the_pinned_one(self):
+        self._write_pin(sha256="f" * 64)
+        actual = self._sha256(self.release / IROH_HELPER)
+
+        self._verify_before_launch(
+            self.archive,
+            f"{IROH_HELPER} is not the pinned fermix-iroh build for {TARGET}: "
+            f"expected sha256 {'f' * 64}, found {actual}",
+        )
+        self.assertFalse(self.codesign_log.exists())
+
+    def test_rejects_an_iroh_helper_whose_version_is_not_the_pinned_one(self):
+        self._write_iroh_helper("fermix-iroh 0.1.0 (iroh 1.2.0)")
+        self._write_pin()
+        archive = self._repackage("old-iroh")
+
+        self._verify_before_launch(
+            archive,
+            rf"--version must print exactly '{re.escape(IROH_VERSION_LINE)}', "
+            r"got \(exit 0\): fermix-iroh 0\.1\.0 \(iroh 1\.2\.0\)",
+        )
+
+    def test_rejects_an_iroh_helper_that_fails_strict_signature_verification(self):
+        self._write_codesign("unsigned")
+
+        self._verify_before_launch(
+            self.archive, r"does not pass codesign --verify --strict \(exit 1\): .*not signed at all"
+        )
+
+    def test_rejects_an_iroh_helper_signed_by_another_team(self):
+        self._write_codesign("other_team")
+
+        self._verify_before_launch(
+            self.archive, f"must be signed by team {IROH_TEAM_ID}, found ZYXWV98765"
+        )
+
+    def test_rejects_a_pin_without_this_target_before_extracting(self):
+        self._write_pin(targets={"macos_x86_64": {"asset": "fermix-iroh-macos-x86_64", "sha256": "e" * 64}})
+
+        with self._darwin_host("arm64"), mock.patch.object(verify, "extract_archive") as extract:
+            with self.assertRaisesRegex(verify.VerificationError, f"has no sha256 for {TARGET}"):
+                verify.verify_app_engine(
+                    self.archive,
+                    TARGET,
+                    VERSION,
+                    "native",
+                    iroh_pin=self.pin,
+                    temp_parent=self.base,
+                    timeouts=self.timeouts,
+                )
+
+        extract.assert_not_called()
+
+    def test_rejects_a_missing_pin(self):
+        with self._darwin_host("arm64"):
+            with self.assertRaisesRegex(verify.VerificationError, "cannot read the fermix-iroh pin"):
+                verify.verify_app_engine(
+                    self.archive,
+                    TARGET,
+                    VERSION,
+                    "native",
+                    iroh_pin=self.base / "absent.json",
+                    temp_parent=self.base,
+                    timeouts=self.timeouts,
+                )
+
+    # Rosetta verification runs the x86_64 helper through `arch -x86_64`, so the
+    # helper's --version goes through the same command prefix as the engine.
+    def test_runs_the_iroh_helper_version_through_the_command_prefix(self):
+        release_root = verify.extract_archive(self.archive, self.base / "prefix-extract")
+        manifest = verify._validated_manifest(release_root, TARGET, VERSION, None)
+        pinned = verify._iroh_pin(self.pin, TARGET)
+        prefix = [shutil.which("env")]
+
+        with mock.patch.object(verify.subprocess, "run", wraps=verify.subprocess.run) as run:
+            verify._verify_iroh_helper(release_root, manifest, prefix, pinned, self.timeouts)
+
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertIn([*prefix, str(release_root / IROH_HELPER), "--version"], commands)
+
+    def test_cli_defaults_the_iroh_pin_to_this_checkout(self):
+        arguments = verify._arguments(["a.tar.gz", TARGET, VERSION, SOURCE_COMMIT, "native"])
+
+        self.assertEqual(
+            Path(arguments.iroh_pin),
+            Path(__file__).resolve().parents[2] / "apps/fermix_core/priv/iroh_helper/PIN.json",
+        )
 
     def test_archive_validation_does_not_eagerly_load_every_member(self):
         with mock.patch.object(
@@ -211,6 +379,7 @@ class VerifyAppEngineTest(unittest.TestCase):
                     TARGET,
                     "0.9.1",
                     "native",
+                    iroh_pin=self.pin,
                     temp_parent=self.base,
                     timeouts=self.timeouts,
                 )
@@ -228,6 +397,7 @@ class VerifyAppEngineTest(unittest.TestCase):
                     VERSION,
                     "native",
                     expected_source_commit="b" * 40,
+                    iroh_pin=self.pin,
                     temp_parent=self.base,
                     timeouts=self.timeouts,
                 )
@@ -251,6 +421,7 @@ class VerifyAppEngineTest(unittest.TestCase):
                         TARGET,
                         VERSION,
                         "native",
+                        iroh_pin=self.pin,
                         temp_parent=self.base,
                         timeouts=self.timeouts,
                     )
@@ -280,6 +451,7 @@ class VerifyAppEngineTest(unittest.TestCase):
                     TARGET,
                     VERSION,
                     "rosetta",
+                    iroh_pin=self.pin,
                     temp_parent=self.base,
                     timeouts=self.timeouts,
                 )
@@ -294,6 +466,7 @@ class VerifyAppEngineTest(unittest.TestCase):
                     TARGET,
                     VERSION,
                     "native",
+                    iroh_pin=self.pin,
                     temp_parent=self.base,
                     timeouts=self.timeouts,
                 )
@@ -310,6 +483,7 @@ class VerifyAppEngineTest(unittest.TestCase):
                     TARGET,
                     VERSION,
                     "native",
+                    iroh_pin=self.pin,
                     temp_parent=self.base,
                     timeouts=self.timeouts,
                 )
@@ -337,6 +511,7 @@ class VerifyAppEngineTest(unittest.TestCase):
                     TARGET,
                     VERSION,
                     "native",
+                    iroh_pin=self.pin,
                     temp_parent=self.base,
                     timeouts=short,
                 )
@@ -364,6 +539,7 @@ class VerifyAppEngineTest(unittest.TestCase):
                     TARGET,
                     VERSION,
                     "native",
+                    iroh_pin=self.pin,
                     temp_parent=self.base,
                     timeouts=short,
                 )
@@ -392,6 +568,7 @@ class VerifyAppEngineTest(unittest.TestCase):
                     TARGET,
                     VERSION,
                     "native",
+                    iroh_pin=self.pin,
                     temp_parent=self.base,
                     timeouts=short,
                 )
@@ -423,6 +600,7 @@ class VerifyAppEngineTest(unittest.TestCase):
                     TARGET,
                     VERSION,
                     "native",
+                    iroh_pin=self.pin,
                     temp_parent=self.base,
                     timeouts=short,
                 )
@@ -451,6 +629,7 @@ class VerifyAppEngineTest(unittest.TestCase):
                     TARGET,
                     VERSION,
                     "native",
+                    iroh_pin=self.pin,
                     temp_parent=self.base,
                     timeouts=short,
                 )
@@ -481,6 +660,7 @@ class VerifyAppEngineTest(unittest.TestCase):
                         TARGET,
                         VERSION,
                         "native",
+                        iroh_pin=self.pin,
                         temp_parent=self.base,
                         timeouts=self.timeouts,
                     )
@@ -532,6 +712,7 @@ class VerifyAppEngineTest(unittest.TestCase):
         shutil.copyfile(fixture, script)
         script.chmod(0o755)
         self._write_helper("#!/bin/sh\necho 'fermix-maps: ok'\n")
+        self._write_iroh_helper(IROH_VERSION_LINE)
 
     # A script standing in for the Mach-O helper the native build makes.
     def _write_helper(self, contents):
@@ -540,19 +721,135 @@ class VerifyAppEngineTest(unittest.TestCase):
         helper.write_text(contents, encoding="utf-8")
         helper.chmod(0o755)
 
+    # A script standing in for the pinned, team-signed fermix-iroh build.
+    def _write_iroh_helper(self, version_line, mode=0o755, relative=IROH_HELPER):
+        helper = self.release / relative
+        helper.parent.mkdir(parents=True, exist_ok=True)
+        helper.write_text(
+            f"#!/bin/sh\n[ \"$*\" = \"--version\" ] || exit 64\necho '{version_line}'\n",
+            encoding="utf-8",
+        )
+        helper.chmod(mode)
+
+    # The real build's shape: a thin arm64 Mach-O header, which the manifest
+    # inventories as `mach_o` whatever the file's mode.
+    def _write_mach_o_iroh_helper(self, mode):
+        helper = self.release / IROH_HELPER
+        header = struct.pack("<IiiIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0)
+        helper.write_bytes(header + b"thin fermix-iroh stand-in")
+        helper.chmod(mode)
+
+    # The pin as `pin_iroh_helper.py` writes it, with this tree's helper as the
+    # target's build unless a test names another digest.
+    def _write_pin(self, sha256=None, targets=None):
+        digest = sha256 or self._sha256(self.release / IROH_HELPER)
+        pin = {
+            "schema_version": 1,
+            "repository": "tezra-io/fermix-iroh",
+            "tag": "v0.1.0",
+            "version": "0.1.0",
+            "protocol_version": 1,
+            "iroh_version": "1.3.0",
+            "certificate_identity": (
+                "https://github.com/tezra-io/fermix-iroh/.github/workflows/release.yml@refs/tags/v0.1.0"
+            ),
+            "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
+            "macos_team_id": IROH_TEAM_ID,
+            "targets": targets
+            or {
+                "macos_aarch64": {"asset": "fermix-iroh-macos-aarch64", "sha256": digest},
+                "macos_x86_64": {"asset": "fermix-iroh-macos-x86_64", "sha256": "e" * 64},
+                "linux_aarch64": {"asset": "fermix-iroh-linux-aarch64", "sha256": "c" * 64},
+                "linux_x86_64": {"asset": "fermix-iroh-linux-x86_64", "sha256": "d" * 64},
+            },
+        }
+        self.pin.write_text(json.dumps(pin, indent=2) + "\n", encoding="utf-8")
+
+    # A stand-in for the two codesign calls the check makes, on the helper and
+    # nothing else: any other argv exits 64. Every call is recorded.
+    def _write_codesign(self, behaviour):
+        verify = {
+            "team": "  exit 0\n",
+            "other_team": "  exit 0\n",
+            "unsigned": "  printf '%s: code object is not signed at all\\n' \"$3\" >&2\n  exit 1\n",
+        }[behaviour]
+        team = "ZYXWV98765" if behaviour == "other_team" else IROH_TEAM_ID
+        self.codesign_bin.mkdir(exist_ok=True)
+        script = self.codesign_bin / "codesign"
+        script.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$*\" >> '{self.codesign_log}'\n"
+            'case "$*" in\n'
+            "  *' '*/fermix_core-*/priv/iroh_helper/bin/fermix-iroh) ;;\n"
+            "  *) printf 'stand-in codesign: unexpected path: %s\\n' \"$*\" >&2 ; exit 64 ;;\n"
+            "esac\n"
+            'if [ "$#" -eq 3 ] && [ "$1" = "--verify" ] && [ "$2" = "--strict" ]; then\n'
+            f"{verify}"
+            "fi\n"
+            'if [ "$#" -eq 2 ] && [ "$1" = "-dv" ]; then\n'
+            "  printf 'Executable=%s\\nIdentifier=fermix-iroh\\n' \"$2\" >&2\n"
+            f"  printf 'TeamIdentifier={team}\\n' >&2\n"
+            "  exit 0\n"
+            "fi\n"
+            "printf 'stand-in codesign: unexpected invocation: codesign %s\\n' \"$*\" >&2\n"
+            "exit 64\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+
+    def _repackage(self, name):
+        self._write_manifest()
+        return package.package_release(self.release, TARGET, self.base / f"out-{name}", VERSION)
+
+    def _verify_before_launch(self, archive, pattern):
+        with self._darwin_host("arm64"), mock.patch.object(verify, "_start_engine") as start:
+            with self.assertRaisesRegex(verify.VerificationError, pattern):
+                verify.verify_app_engine(
+                    archive,
+                    TARGET,
+                    VERSION,
+                    "native",
+                    iroh_pin=self.pin,
+                    temp_parent=self.base,
+                    timeouts=self.timeouts,
+                )
+        start.assert_not_called()
+
+    def _script_entry(self, relative):
+        path = self.release / relative
+        return {
+            "path": relative,
+            "kind": "script",
+            "mode": f"{path.stat().st_mode & 0o777:04o}",
+            "interpreter": "/bin/sh",
+            "sha256": self._sha256(path),
+        }
+
+    def _mach_o_entry(self, relative):
+        path = self.release / relative
+        return {
+            "path": relative,
+            "kind": "mach_o",
+            "mode": f"{path.stat().st_mode & 0o777:04o}",
+            "architectures": [ARCHITECTURE],
+            "sha256": self._sha256(path),
+        }
+
     def _write_manifest(self, with_helper=True):
         script = self.release / "bin/fermix_app_engine"
         helper_entries = []
         if with_helper:
-            helper_entries.append(
-                {
-                    "path": MAPS_HELPER,
-                    "kind": "script",
-                    "mode": "0755",
-                    "interpreter": "/bin/sh",
-                    "sha256": self._sha256(self.release / MAPS_HELPER),
-                }
-            )
+            helper_entries.append(self._script_entry(MAPS_HELPER))
+        # Every executable helper under fermix_core's priv, and a Mach-O one
+        # whatever its mode, as the release manifest inventories them; a
+        # non-executable script is not inventoried.
+        for iroh in sorted(self.release.glob(verify.IROH_HELPER_GLOB)):
+            relative = iroh.relative_to(self.release).as_posix()
+            if package._is_mach_o(iroh):
+                helper_entries.append(self._mach_o_entry(relative))
+            elif iroh.stat().st_mode & 0o111:
+                helper_entries.append(self._script_entry(relative))
+        helper_entries.sort(key=lambda entry: entry["path"])
         manifest = {
             "schema_version": 1,
             "identity": {

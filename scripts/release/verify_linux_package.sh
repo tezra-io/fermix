@@ -19,15 +19,17 @@ fail() {
 }
 
 usage() {
-  printf 'usage: %s <package> <deb|rpm> <version>\n' "$0" >&2
+  printf 'usage: %s <package> <deb|rpm> <version> [<iroh-helper-pin>]\n' "$0" >&2
   exit 2
 }
 
-[ "$#" -eq 3 ] || usage
+[ "$#" -eq 3 ] || [ "$#" -eq 4 ] || usage
 
 package="$1"
 kind="$2"
 version="$3"
+# The helper the package must carry is the one this checkout pins.
+iroh_pin="${4:-$(cd "$(dirname "$0")/../.." && pwd -P)/apps/fermix_core/priv/iroh_helper/PIN.json}"
 
 [ -f "$package" ] || fail "package not found: $package"
 [ -n "$version" ] || fail "expected version must not be empty"
@@ -53,6 +55,16 @@ case "$kind" in
   *) fail "unsupported package kind: $kind" ;;
 esac
 
+# The architecture in the package's name names the helper build it must carry.
+package_arch="$(basename "$package")"
+package_arch="${package_arch#"$expected_prefix"}"
+package_arch="${package_arch%".$kind"}"
+case "$kind:$package_arch" in
+  deb:amd64|rpm:x86_64) target=linux_x86_64 ;;
+  deb:arm64|rpm:aarch64) target=linux_aarch64 ;;
+  *) fail "cannot tell the target of $(basename "$package"): architecture '$package_arch' is not a $kind architecture fermix ships" ;;
+esac
+
 # One reader for the shared envelope: a string prints as itself and everything
 # else as its JSON spelling, so `true` is `true` and a missing key is empty.
 json_field() {
@@ -68,16 +80,74 @@ print(cursor if isinstance(cursor, str) else json.dumps(cursor))
 ' "$1" "$2"
 }
 
+# The pinned fermix-iroh build for this target: its digest and the exact
+# `--version` line it prints. Read before anything is installed.
+[ -f "$iroh_pin" ] || fail "iroh helper pin not found: $iroh_pin"
+iroh_pin_json="$(cat "$iroh_pin")"
+[ "$(json_field "$iroh_pin_json" schema_version)" = 1 ] ||
+  fail "the iroh helper pin $iroh_pin is not schema_version 1"
+iroh_sha256="$(json_field "$iroh_pin_json" "targets.$target.sha256")"
+printf '%s\n' "$iroh_sha256" | grep -Eqx '[0-9a-f]{64}' ||
+  fail "the iroh helper pin $iroh_pin has no sha256 for $target"
+iroh_helper_version="$(json_field "$iroh_pin_json" version)"
+iroh_iroh_version="$(json_field "$iroh_pin_json" iroh_version)"
+[ -n "$iroh_helper_version" ] && [ -n "$iroh_iroh_version" ] ||
+  fail "the iroh helper pin $iroh_pin must name version and iroh_version"
+iroh_version_line="fermix-iroh $iroh_helper_version (iroh $iroh_iroh_version)"
+
+# The helper check both families run on the installed package: on the runner
+# for a deb, and inside the container for an rpm, where only coreutils can be
+# relied on, so it is POSIX sh with sha256sum. The Burrito wrapper names the
+# directory it unpacked its payload into, so the helper is looked for exactly
+# where the `fermix --version` before it put it. The digest is checked before
+# the helper runs, so no unpinned bytes are executed.
+# shellcheck disable=SC2016
+iroh_helper_check='
+set -eu
+fail() { printf "error: %s\n" "$1" >&2; exit 1; }
+expected_sha256="$1"
+expected_version="$2"
+payload="$(fermix maintenance directory)" ||
+  fail "fermix maintenance directory did not name the unpacked payload"
+[ -d "$payload" ] || fail "the unpacked payload directory does not exist: $payload"
+count=0
+helper=""
+for candidate in "$payload"/lib/fermix_core-*/priv/iroh_helper/bin/fermix-iroh; do
+  [ -e "$candidate" ] || continue
+  count=$((count + 1))
+  helper="$candidate"
+done
+[ "$count" -eq 1 ] ||
+  fail "the unpacked payload must carry exactly one fermix-iroh helper (lib/fermix_core-*/priv/iroh_helper/bin/fermix-iroh under $payload), found $count"
+[ -f "$helper" ] && [ -x "$helper" ] ||
+  fail "the bundled fermix-iroh helper is not an executable file: $helper"
+actual_sha256="$(sha256sum "$helper" | cut -d " " -f 1)"
+[ "$actual_sha256" = "$expected_sha256" ] ||
+  fail "the bundled fermix-iroh helper is not the pinned build: expected sha256 $expected_sha256, found $actual_sha256"
+actual_version="$("$helper" --version < /dev/null)" ||
+  fail "the bundled fermix-iroh helper --version failed: $helper"
+[ "$actual_version" = "$expected_version" ] ||
+  fail "the bundled fermix-iroh helper --version must print exactly \"$expected_version\", got \"$actual_version\""
+printf "fermix-iroh helper: %s (%s)\n" "$helper" "$actual_version"
+'
+
 if [ "$kind" = rpm ]; then
   command -v docker >/dev/null 2>&1 || fail "docker is required to verify an rpm"
 
   # A plain container has no user service manager, so `service status` must be
-  # the structured refusal. Its own words are the assertion.
+  # the structured refusal. Its own words are the assertion. The helper check
+  # and what it expects go in by environment; its report goes to stderr so the
+  # last stdout line stays the status envelope.
   status_output="$(
-    docker run --rm -v "$package":/pkg.rpm:ro fedora:41 sh -c '
+    docker run --rm -v "$package":/pkg.rpm:ro \
+      -e IROH_HELPER_CHECK="$iroh_helper_check" \
+      -e IROH_SHA256="$iroh_sha256" \
+      -e IROH_VERSION_LINE="$iroh_version_line" \
+      fedora:41 sh -c '
       set -eu
       dnf install -y /pkg.rpm >/dev/null 2>&1
       fermix --version
+      sh -c "$IROH_HELPER_CHECK" iroh-helper-check "$IROH_SHA256" "$IROH_VERSION_LINE" >&2
       # The rpm family gets its own refusal, on a host whose package database
       # really does own /usr/bin/fermix.
       fermix upgrade 2>&1 | grep -F "dnf upgrade fermix" >/dev/null ||
@@ -112,6 +182,10 @@ case "$version_output" in
   *"$version"*) ;;
   *) fail "fermix --version does not contain $version" ;;
 esac
+
+# The run above unpacked the payload; the pinned helper must be in it.
+sh -c "$iroh_helper_check" iroh-helper-check "$iroh_sha256" "$iroh_version_line" ||
+  fail "the deb does not carry the pinned fermix-iroh helper for $target (the reason is above)"
 
 # The engine reads this file and reports it beside its own compiled identity;
 # a mismatch is what `service status` calls an integrity failure.

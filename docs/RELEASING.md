@@ -17,6 +17,17 @@ reviewer approves once per release, and that approval publishes the verified dra
 `HOMEBREW_TAP_TOKEN` and is limited to `v*` tags, so the tap moves without a second
 approval and the token reaches no other ref.
 
+**The bundled `fermix-iroh` helper.** Every release tree carries the helper that
+`apps/fermix_core/priv/iroh_helper/PIN.json` pins, and `preflight` re-verifies that
+pin against its GitHub release with cosign (`pin_iroh_helper.py --check`), so a tag
+also fails when `github.com/tezra-io/fermix-iroh` cannot be reached. To move to a new
+helper release, run `uv run scripts/release/pin_iroh_helper.py --tag vX.Y.Z` (it needs
+`cosign` on `PATH`) and never edit the pin by hand; the fermix_channels test that
+holds the pin's `protocol_version` and `iroh_version` to the engine's then has to
+pass, and a dispatched `linux-packages.yml` run installs and verifies a package
+carrying the new helper. The Mac app picks it up at its next engine pin bump, after
+its own signing change for the helper has landed.
+
 ## Install paths to walk before announcing
 
 The release rail proves the *artifact*: it is signed, its checksum matches, it runs,

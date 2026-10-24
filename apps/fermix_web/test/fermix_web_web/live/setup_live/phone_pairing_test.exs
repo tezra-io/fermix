@@ -397,7 +397,7 @@ defmodule FermixWebWeb.SetupLive.PhonePairingTest do
 
       assert line.(nil) == nil
       assert line.(%{"state" => "off"}) == nil
-      assert line.(%{"state" => "helper_missing"}) == {"Not available in this build yet.", :note}
+      assert line.(%{"state" => "helper_missing"}) == {"Not included in this build.", :note}
       assert line.(%{"state" => "dormant"}) == {"Starts when you pair your first phone.", :note}
       assert line.(%{"state" => "starting"}) == {"Starting…", :progress}
 

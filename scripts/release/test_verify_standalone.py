@@ -5,6 +5,9 @@
 # ///
 """Hermetic tests for standalone release smoke verification."""
 
+import hashlib
+import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -12,6 +15,9 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).with_name("verify_standalone.sh")
 VERSION = "0.9.0"
+IROH_VERSION_LINE = "fermix-iroh 0.1.0 (iroh 1.3.0)"
+IROH_TEAM_ID = "ABCDE12345"
+TARGETS = ("linux_aarch64", "linux_x86_64", "macos_aarch64", "macos_x86_64")
 
 
 class VerifyStandaloneTest(unittest.TestCase):
@@ -19,6 +25,12 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="fermix-standalone-verify-")
         self.base = Path(self.tmp.name)
         self.artifact = self.base / "fermix_macos_aarch64"
+        self.pin = self.base / "PIN.json"
+        self.helper_source = self.base / "helper-payload" / "fermix-iroh"
+        self.empty_payload = self.base / "empty-payload"
+        self.pinned_digest = None
+        self.codesign_bin = self.base / "codesign-bin"
+        self.codesign_log = self.base / "codesign.log"
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -374,9 +386,24 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must exit 3, got 1", result.stderr)
 
-    def _run(self, target, artifact=None):
+    # Every run passes its own pin, written for the target it verifies, and puts
+    # a stand-in `codesign` first on PATH: the macOS rows must not depend on the
+    # host's signing tools, and a Linux host has none.
+    #
+    # The stub resolves its payload directory the way Burrito does, so the
+    # host's own data-directory overrides are dropped: one would move the
+    # stub's unpack out of the throwaway world and onto the host. A test that
+    # needs one passes it in `extra_env`.
+    def _run(self, target, artifact=None, cwd=None, codesign="team", pin_entry=True, extra_env=None):
+        self._write_pin(target, pin_entry)
+        self._write_codesign(codesign)
+        environment = {
+            name: value for name, value in os.environ.items() if name not in ("XDG_DATA_HOME", "FERMIX_INSTALL_DIR")
+        }
         return subprocess.run(
-            [str(SCRIPT), artifact or str(self.artifact), target, VERSION],
+            [str(SCRIPT), artifact or str(self.artifact), target, VERSION, str(self.pin)],
+            cwd=cwd,
+            env={**environment, "PATH": f"{self.codesign_bin}:{os.environ['PATH']}", **(extra_env or {})},
             text=True,
             capture_output=True,
             check=False,
@@ -387,16 +414,268 @@ class VerifyStandaloneTest(unittest.TestCase):
     def test_accepts_a_bare_artifact_name_in_the_working_directory(self):
         self._write_artifact(create_disclaim=True)
 
+        result = self._run("macos_aarch64", artifact=self.artifact.name, cwd=self.artifact.parent)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"fermix {VERSION}", result.stdout)
+
+    # ── the bundled fermix-iroh helper stage ──────────────────────────────
+
+    def test_checks_the_pinned_signed_helper_on_macos(self):
+        self._write_artifact(create_disclaim=True)
+
+        result = self._run("macos_aarch64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"({IROH_VERSION_LINE})", result.stdout)
+        calls = self.codesign_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual([call.split(" /", 1)[0] for call in calls], ["--verify --strict", "-dv"])
+
+    # The stage runs before migrate-to-app, which ends the script on Linux, and
+    # a Linux tree carries no signature to check.
+    def test_linux_artifact_checks_the_helper_without_codesign(self):
+        self.artifact = self.base / "fermix_linux_aarch64"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos")
+
+        result = self._run("linux_aarch64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"({IROH_VERSION_LINE})", result.stdout)
+        self.assertFalse(self.codesign_log.exists())
+
+    def test_rejects_a_release_without_the_helper(self):
+        self._write_artifact(create_disclaim=True, iroh_helper="missing")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must carry exactly one fermix-iroh helper", result.stderr)
+        self.assertIn("found 0: none", result.stderr)
+
+    def test_rejects_a_linux_release_without_the_helper(self):
+        self.artifact = self.base / "fermix_linux_x86_64"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos", iroh_helper="missing")
+
+        result = self._run("linux_x86_64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must carry exactly one fermix-iroh helper", result.stderr)
+
+    def test_rejects_a_release_with_two_helpers(self):
+        self._write_artifact(create_disclaim=True, iroh_helper="two")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must carry exactly one fermix-iroh helper", result.stderr)
+        self.assertIn("found 2:", result.stderr)
+        self.assertIn("fermix_core-0.8.0", result.stderr)
+
+    def test_rejects_a_helper_that_is_not_executable(self):
+        self._write_artifact(create_disclaim=True, iroh_helper="not_executable")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix-iroh helper is not executable", result.stderr)
+
+    def test_rejects_a_helper_whose_digest_is_not_the_pinned_one(self):
+        self._write_artifact(create_disclaim=True, iroh_helper="other_bytes")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("is not the pinned macos_aarch64 build", result.stderr)
+        self.assertIn(f"expected sha256 {self.pinned_digest}", result.stderr)
+        self.assertIn(f"found {self._sha256(self.helper_source)}", result.stderr)
+
+    def test_rejects_a_linux_helper_whose_digest_is_not_the_pinned_one(self):
+        self.artifact = self.base / "fermix_linux_x86_64"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos", iroh_helper="other_bytes")
+
+        result = self._run("linux_x86_64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("is not the pinned linux_x86_64 build", result.stderr)
+
+    # The pin names a digest per target; the one for another target is not this
+    # tree's, so a stage that read the wrong entry fails here.
+    def test_rejects_a_helper_pinned_for_another_target(self):
+        self._write_artifact(create_disclaim=True)
+
+        result = self._run("macos_x86_64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("is not the pinned macos_x86_64 build", result.stderr)
+
+    def test_rejects_a_helper_whose_version_is_not_the_pinned_one(self):
+        self._write_artifact(create_disclaim=True, iroh_helper="other_version")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"--version must print exactly '{IROH_VERSION_LINE}'", result.stderr)
+        self.assertIn("got 'fermix-iroh 0.1.0 (iroh 1.2.0)'", result.stderr)
+
+    def test_rejects_a_helper_whose_version_command_fails(self):
+        self._write_artifact(create_disclaim=True, iroh_helper="version_fails")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix-iroh helper --version failed", result.stderr)
+
+    def test_rejects_a_macos_helper_that_fails_strict_signature_verification(self):
+        self._write_artifact(create_disclaim=True)
+
+        result = self._run("macos_aarch64", codesign="unsigned")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not pass codesign --verify --strict", result.stderr)
+        self.assertIn("code object is not signed at all", result.stderr)
+
+    def test_rejects_a_macos_helper_signed_by_another_team(self):
+        self.artifact = self.base / "fermix_macos_x86_64"
+        self._write_artifact(create_disclaim=True)
+
+        result = self._run("macos_x86_64", codesign="other_team")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"must be signed by team {IROH_TEAM_ID}, found ZYXWV98765", result.stderr)
+
+    # The stage asks the wrapper where it unpacked its payload; a wrapper that
+    # cannot say is a refusal, not a search of whatever lies under the home.
+    def test_rejects_a_wrapper_that_cannot_name_its_payload_directory(self):
+        self._write_artifact(create_disclaim=True, maintenance="fails")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("maintenance directory did not name the unpacked payload", result.stderr)
+
+    def test_rejects_a_payload_directory_that_does_not_exist(self):
+        self._write_artifact(create_disclaim=True, maintenance="names_a_missing_directory")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"the unpacked payload directory does not exist: {self.base / 'no-such-payload'}", result.stderr)
+
+    # The run above still unpacked a helper under the isolated home, so a stage
+    # that searched the home would pass; only the directory the wrapper names
+    # counts.
+    def test_rejects_a_payload_directory_the_wrapper_names_without_the_helper(self):
+        self._write_artifact(create_disclaim=True, maintenance="names_an_empty_directory")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must carry exactly one fermix-iroh helper", result.stderr)
+        self.assertIn(f"under {self.empty_payload}), found 0: none", result.stderr)
+
+    # Burrito unpacks into $XDG_DATA_HOME/.burrito on Linux when it is set,
+    # outside the isolated home; the stage follows the wrapper there.
+    def test_finds_the_helper_where_the_wrapper_unpacked_it_outside_the_home(self):
+        self.artifact = self.base / "fermix_linux_x86_64"
+        data_home = self.base / "xdg-data"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos")
+
+        result = self._run("linux_x86_64", extra_env={"XDG_DATA_HOME": str(data_home)})
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            f"fermix-iroh helper: {data_home}/.burrito/fermix_erts-15.2.7_{VERSION}/lib/fermix_core-{VERSION}/",
+            result.stdout,
+        )
+
+    def test_rejects_a_missing_pin_before_running_the_artifact(self):
+        marker = self.base / "ran"
+        self._write_artifact(create_disclaim=True, marker=marker)
+        self._write_codesign("team")
+
         result = subprocess.run(
-            [str(SCRIPT), self.artifact.name, "macos_aarch64", VERSION],
-            cwd=self.artifact.parent,
+            [str(SCRIPT), str(self.artifact), "macos_aarch64", VERSION, str(self.base / "absent.json")],
             text=True,
             capture_output=True,
             check=False,
         )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"fermix {VERSION}", result.stdout)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("iroh helper pin not found", result.stderr)
+        self.assertFalse(marker.exists())
+
+    def test_rejects_a_pin_without_this_target_before_running_the_artifact(self):
+        marker = self.base / "ran"
+        self._write_artifact(create_disclaim=True, marker=marker)
+
+        result = self._run("macos_aarch64", pin_entry=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("has no sha256 for macos_aarch64", result.stderr)
+        self.assertFalse(marker.exists())
+
+    # The pin as `pin_iroh_helper.py` writes it: one digest per target, the
+    # target under test holding this tree's helper and every other target a
+    # different build's.
+    def _write_pin(self, target, pin_entry=True):
+        digests = {name: hashlib.sha256(f"another build for {name}".encode()).hexdigest() for name in TARGETS}
+        if self.pinned_digest is not None:
+            digests[self._artifact_target()] = self.pinned_digest
+        if not pin_entry:
+            del digests[target]
+        pin = {
+            "schema_version": 1,
+            "repository": "tezra-io/fermix-iroh",
+            "tag": "v0.1.0",
+            "version": "0.1.0",
+            "protocol_version": 1,
+            "iroh_version": "1.3.0",
+            "certificate_identity": "https://github.com/tezra-io/fermix-iroh/.github/workflows/release.yml@refs/tags/v0.1.0",
+            "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
+            "macos_team_id": IROH_TEAM_ID,
+            "targets": {name: {"asset": f"fermix-iroh-{name}", "sha256": digests[name]} for name in digests},
+        }
+        self.pin.write_text(json.dumps(pin, indent=2) + "\n", encoding="utf-8")
+
+    def _artifact_target(self):
+        return self.artifact.name.removeprefix("fermix_")
+
+    # A stand-in for the two codesign calls the stage makes, on the helper it
+    # found, and nothing else: any other argv exits 64, so a codesign call added
+    # later cannot pass this gate unanswered. Every call is recorded.
+    def _write_codesign(self, behaviour):
+        verify = {
+            "team": "    exit 0\n",
+            "other_team": "    exit 0\n",
+            "unsigned": "    printf '%s: code object is not signed at all\\n' \"$3\" >&2\n    exit 1\n",
+        }[behaviour]
+        team = "ZYXWV98765" if behaviour == "other_team" else IROH_TEAM_ID
+        self.codesign_bin.mkdir(exist_ok=True)
+        script = self.codesign_bin / "codesign"
+        script.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$*\" >> '{self.codesign_log}'\n"
+            'case "$*" in\n'
+            "  *' '*/fermix_core-*/priv/iroh_helper/bin/fermix-iroh) ;;\n"
+            "  *) printf 'stand-in codesign: unexpected path: %s\\n' \"$*\" >&2 ; exit 64 ;;\n"
+            "esac\n"
+            'if [ "$#" -eq 3 ] && [ "$1" = "--verify" ] && [ "$2" = "--strict" ]; then\n'
+            f"{verify}"
+            "fi\n"
+            'if [ "$#" -eq 2 ] && [ "$1" = "-dv" ]; then\n'
+            "  printf 'Executable=%s\\nIdentifier=fermix-iroh\\n' \"$2\" >&2\n"
+            f"  printf 'TeamIdentifier={team}\\n' >&2\n"
+            "  exit 0\n"
+            "fi\n"
+            "printf 'stand-in codesign: unexpected invocation: codesign %s\\n' \"$*\" >&2\n"
+            "exit 64\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+
+    @staticmethod
+    def _sha256(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
 
     def _write_artifact(
         self,
@@ -411,14 +690,23 @@ class VerifyStandaloneTest(unittest.TestCase):
         auth_logout="removes",
         browser_bridge="works",
         settings="refuses",
+        iroh_helper="pinned",
+        maintenance="answers",
     ):
         setup = self._disclaim_setup(create_disclaim, disclaim_executable, disclaim_exit, version)
+        helper_setup = self._iroh_helper_setup(iroh_helper, version)
         marker_line = "" if marker is None else f"touch '{marker}'\n"
+        self.empty_payload.mkdir(exist_ok=True)
         self.artifact.write_text(
             "#!/bin/sh\n"
             "set -eu\n"
             f"{marker_line}"
+            f"{self._payload_line(version)}"
+            'if [ "${1:-}" = "maintenance" ]; then\n'
+            f"{self._maintenance_behaviour(maintenance)}"
+            "fi\n"
             f"{setup}\n"
+            f"{helper_setup}"
             'if [ "${1:-}" = "migrate-to-app" ]; then\n'
             f"{self._migrate_behaviour(migrate, version)}"
             "fi\n"
@@ -683,6 +971,65 @@ printf 'disclaim: ok\\n'
 exit {exit_code}
 SHIM
 {mode}'''
+
+    # ── the Burrito wrapper's payload directory ───────────────────────────
+    # Where the wrapper unpacks its payload, resolved as Burrito 1.5's
+    # `getAppDataDir` resolves it: the macOS application-support directory, or
+    # on Linux `$XDG_DATA_HOME` when it is set and `~/.local/share` when not.
+    def _payload_line(self, version):
+        base = (
+            "${XDG_DATA_HOME:-$HOME/.local/share}/.burrito"
+            if self._artifact_target().startswith("linux_")
+            else "$HOME/Library/Application Support/.burrito"
+        )
+        return f'payload="{base}/fermix_erts-15.2.7_{version}"\n'
+
+    # The wrapper's own verb, answered before anything is unpacked, as Burrito
+    # answers it: the payload directory on stdout, exit 0. The argv is pinned so
+    # a stage that asks for anything else cannot pass against this stub.
+    def _maintenance_behaviour(self, maintenance):
+        argv = '  [ "$*" = "maintenance directory" ] || exit 64\n'
+        if maintenance == "answers":
+            return argv + "  printf '%s\\n' \"$payload\"\n  exit 0\n"
+        if maintenance == "fails":
+            return argv + "  printf 'stand-in wrapper: cannot resolve the install directory\\n' >&2\n  exit 1\n"
+        if maintenance == "names_an_empty_directory":
+            return argv + f"  printf '%s\\n' '{self.empty_payload}'\n  exit 0\n"
+        if maintenance == "names_a_missing_directory":
+            return argv + f"  printf '%s\\n' '{self.base / 'no-such-payload'}'\n  exit 0\n"
+        raise ValueError(f"unknown maintenance behaviour: {maintenance}")
+
+    # ── the fermix-iroh helper stub ───────────────────────────────────────
+    # Every run of the stub unpacks its payload where the wrapper names it, and
+    # the helper into that payload from one source file whose bytes the pin
+    # names (or, for `other_bytes`, does not). A release without the helper
+    # still unpacks its payload.
+    def _iroh_helper_setup(self, behaviour, version):
+        version_line = "fermix-iroh 0.1.0 (iroh 1.2.0)" if behaviour == "other_version" else IROH_VERSION_LINE
+        answer = "exit 70" if behaviour == "version_fails" else f"printf '%s\\n' '{version_line}'"
+        self.helper_source.parent.mkdir(exist_ok=True)
+        self.helper_source.write_text(
+            f'#!/bin/sh\n[ "$*" = "--version" ] || exit 64\n{answer}\n', encoding="utf-8"
+        )
+        self.pinned_digest = (
+            hashlib.sha256(b"another fermix-iroh build").hexdigest()
+            if behaviour == "other_bytes"
+            else self._sha256(self.helper_source)
+        )
+        lines = ['mkdir -p "$payload/lib"']
+        if behaviour == "missing":
+            return "\n".join(lines) + "\n"
+
+        app_versions = [version, "0.8.0"] if behaviour == "two" else [version]
+        mode = "-x" if behaviour == "not_executable" else "+x"
+        for app_version in app_versions:
+            lines += [
+                f'iroh="$payload/lib/fermix_core-{app_version}/priv/iroh_helper/bin"',
+                'mkdir -p "$iroh"',
+                f"cp '{self.helper_source}' \"$iroh/fermix-iroh\"",
+                f'chmod {mode} "$iroh/fermix-iroh"',
+            ]
+        return "\n".join(lines) + "\n"
 
 
 if __name__ == "__main__":
