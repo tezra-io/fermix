@@ -501,6 +501,10 @@ Use `--scope <conversation-key>` for checkpoint resources. Checkpoint rollback i
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — development workflow, quality gates, and PR process
 - [`SECURITY.md`](SECURITY.md) — supported versions and vulnerability reporting
 
+## Support Fermix
+
+Fermix is free, MIT licensed, and maintained independently. Funding goes to costs, in priority order: security first (an independent review, a review of every release, and kernel-enforced command sandboxing on Linux), then fully local models on Mac and Linux. The plans and amounts are in [`funding.json`](https://fermix.ai/funding.json); sponsor through [GitHub Sponsors](https://github.com/sponsors/tezra-io).
+
 ## License
 
 Released under the [MIT License](LICENSE).

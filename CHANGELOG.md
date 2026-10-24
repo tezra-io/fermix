@@ -21,6 +21,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   phones with Forget…, and holds Reach from anywhere and the advanced
   settings. A code still open when you close the tab is cancelled, so it does
   not wait out its two minutes.
+
+## [0.16.0] - 2026-10-21
+
+### Added
+
 - **Fermix knows which Fermix it is, and the machine it runs on.** Every
   conversation with you, voice calls included, is now told whether this is
   the Mac app, a standalone install on a Mac, the Linux package (and whether the
