@@ -776,9 +776,8 @@ defmodule FermixCore.Management.CopyTest do
           %{base | held?: true},
           %{base | held?: true, waiting: 1},
           %{base | filter: "none"}
-        ],
-        default? <- [true, false] do
-      CueWatcherRow.build(watcher, %{default_model?: default?, window_s: 86_400})
+        ] do
+      CueWatcherRow.build(watcher, %{window_s: 86_400})
     end
   end
 

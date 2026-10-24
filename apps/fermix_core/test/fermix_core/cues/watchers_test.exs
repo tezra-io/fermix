@@ -1,5 +1,5 @@
 defmodule FermixCore.Cues.WatchersTest do
-  # Sets `[fermix_core.routing]` for the filter-model default (C54), a global.
+  # Sets `[fermix_core.routing]` for the filter-model default, a global.
   use ExUnit.Case, async: false
 
   alias FermixCore.Cues.Watchers
@@ -150,8 +150,9 @@ defmodule FermixCore.Cues.WatchersTest do
     end
   end
 
-  describe "creation refusals" do
-    test "an llm watcher with no model and no default filter model is refused (C54)", ctx do
+  describe "the filter model" do
+    test "an llm watcher with no model and no default filter model is made for the main model",
+         ctx do
       params = %{
         name: "market-news",
         filter: "llm",
@@ -160,13 +161,12 @@ defmodule FermixCore.Cues.WatchersTest do
         task: "Tell me what matters."
       }
 
-      assert {:error,
-              "Pick a model for this watcher's filter, or set a default filter model in settings."} =
-               Watchers.create(params, private_context(), opts(ctx, 0))
-
-      assert {:ok, []} = JobsRegistry.list_jobs(repo: ctx.repo)
+      assert {:ok, %{watcher: watcher}} = Watchers.create(params, private_context(), opts(ctx, 0))
+      assert %{filter: "llm", filter_provider: nil, filter_model: nil} = watcher
     end
+  end
 
+  describe "creation refusals" do
     test "a watcher with no filter states its daily cap (decision 3)", ctx do
       params = %{name: "my-script", filter: "none", sources: ["local-push"], task: "Report it."}
 

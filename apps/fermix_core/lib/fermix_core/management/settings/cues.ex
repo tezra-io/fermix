@@ -13,30 +13,36 @@ defmodule FermixCore.Management.Settings.Cues do
   `Setup.RestartState`, which treats `routing.filter_*` and the mandates
   switch as live and the cue tree's switch and port as boot-bound.
 
-  The filter rows are catalog data: the providers `ModelCatalog` publishes,
-  each labelled by its descriptor, and the chosen provider's models as
-  suggestions. A provider whose list is the account's own publishes none,
-  and the client asks `providers.models.list`.
+  The filter rows come from `Cues.FilterChoices`, the setup page's own reader:
+  the empty value is the main model, labelled with it, then only the providers
+  that are set up, and the chosen provider's catalog models as suggestions. A
+  provider whose list is the account's own publishes none, and the client asks
+  `providers.models.list`. Each row keeps its explanation in `info`, with no
+  footer.
   """
-
-  require Logger
 
   alias FermixCore.Cues
   alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Cues.FilterChoices
   alias FermixCore.Cues.Settings, as: CueSettings
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Management.Settings.Source
-  alias FermixCore.Memory.Repo
-  alias FermixCore.Memory.Repo.CuesWatchersSql
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
-  alias FermixCore.Providers.Selection
 
   @section %{id: "cues", pane: "cues", title: "Cues"}
   @switch_answers [:enabled, :mandates_enabled, :door_port]
   @filter_answers [:filter_provider, :filter_model]
   @pair_sentence "Pick a provider and a model, or clear both."
   @not_set_up "Set up this provider first."
+  @enabled_info "Starts the sources, the door, the filters and the tasks watchers wake. " <>
+                  "Applies after a restart."
+  @mandates_info "Off stops the next call of every mandate at once, even in a run already " <>
+                   "going. No restart needed."
+  @filter_info "Decides which items reach a watcher's task, one item at a time. The main " <>
+                 "model works; a small, inexpensive one costs less. A watcher with a model " <>
+                 "of its own uses that one."
+  @door_info "The door listens on this Mac only. Applies after a restart."
 
   @doc "The one section this module owns, where the build admits cues."
   @spec sections(keyword()) :: [%{id: String.t(), pane: String.t(), title: String.t()}]
@@ -57,30 +63,29 @@ defmodule FermixCore.Management.Settings.Cues do
 
     [
       Row.new("cues_enabled", :toggle, "Run cues",
-        footer: "Starts the sources, the door, the filters and the tasks watchers wake.",
+        info: @enabled_info,
         value: CuesConfig.enabled?(cues),
         restart: Row.restart?([:cues, :enabled])
       ),
       Row.new("cues_mandates_enabled", :toggle, "Let mandates act",
-        footer: "Off stops the next call of every mandate, even in a run already going.",
+        info: @mandates_info,
         value: CuesConfig.mandates_enabled?(cues),
         restart: Row.restart?([:cues, :mandates_enabled])
       ),
-      Row.new("filter_provider", :choice, "Filter provider",
-        footer: "Decides which items reach a watcher's task. Fermix never uses your main model.",
+      Row.new("filter_provider", :choice, "Filter model",
+        info: @filter_info,
         value: provider,
-        options: [Row.option("", "None") | provider_options(snapshot)],
+        options: provider_options(snapshot, provider),
         restart: Row.restart?([:routing, :filter_provider])
       ),
-      Row.new("filter_model", :choice, "Filter model",
-        footer: "A watcher with a model of its own uses that one.",
+      Row.new("filter_model", :choice, "Model",
         value: Source.string(routing, :filter_model),
-        options: model_options(provider),
+        options: Enum.map(FilterChoices.models(provider), &Row.option(&1.id, &1.label)),
         suggestions: true,
         restart: Row.restart?([:routing, :filter_model])
       ),
       Row.new("cues_door_port", :number, "Door port",
-        footer: "The door listens on this Mac only.",
+        info: @door_info,
         value: CuesConfig.door_port(cues),
         min: 1_024,
         max: 65_535,
@@ -111,57 +116,6 @@ defmodule FermixCore.Management.Settings.Cues do
     end
   end
 
-  @doc """
-  What clearing the default filter model did that the owner did not type:
-  the `llm` watchers that name no model of their own now wait for one.
-  `before` and `current` are the snapshots around the write.
-  """
-  @spec side_effects(map(), map(), keyword()) :: [String.t()]
-  def side_effects(before, current, opts \\ []) when is_map(before) and is_map(current) do
-    if filter_model(before) != "" and filter_model(current) == "" do
-      waiting_sentence(waiting_watchers(opts))
-    else
-      []
-    end
-  end
-
-  defp waiting_sentence({:ok, 0}), do: []
-  defp waiting_sentence({:ok, 1}), do: ["One watcher now waits for a filter model."]
-  defp waiting_sentence({:ok, count}), do: ["#{count} watchers now wait for a filter model."]
-
-  defp waiting_sentence(:unknown),
-    do: ["Watchers with no filter model of their own now wait for one."]
-
-  # Watchers live in `memory.db`: with memory off, or no Repo running, there
-  # are none to wait. A Repo that answers an error leaves the count unknown,
-  # which is said and logged, never counted as none.
-  defp waiting_watchers(opts) do
-    repo = Keyword.get(opts, :repo, Repo)
-
-    case GenServer.whereis(repo) do
-      nil -> {:ok, 0}
-      _pid -> count_waiting(Repo.cues_call(CuesWatchersSql, {:list_watchers}, server: repo))
-    end
-  end
-
-  defp count_waiting({:ok, watchers}),
-    do: {:ok, Enum.count(watchers, &(&1.filter == "llm" and blank?(&1.filter_model)))}
-
-  defp count_waiting({:error, :disabled}), do: {:ok, 0}
-
-  defp count_waiting({:error, reason}) do
-    Logger.warning(
-      "cues section: the watchers waiting for a filter model are unknown: #{inspect(reason)}"
-    )
-
-    :unknown
-  end
-
-  defp blank?(value), do: value in [nil, ""]
-
-  defp filter_model(snapshot),
-    do: snapshot |> Source.core(:routing) |> Source.string(:filter_model)
-
   defp whole_pair([]), do: :ok
   defp whole_pair([_provider, _model]), do: :ok
   defp whole_pair([_one]), do: {:error, {:invalid_value, @pair_sentence}}
@@ -177,23 +131,22 @@ defmodule FermixCore.Management.Settings.Cues do
   defp refused({:error, {:invalid, sentence}}), do: {:error, {:invalid_value, sentence}}
   defp refused(result), do: result
 
-  # Every provider the engine publishes. One that is not set up is offered
-  # disabled with the reason: a filter on it would fail at its first call.
-  defp provider_options(snapshot) do
-    Enum.map(ModelCatalog.providers(), fn id ->
-      label = Descriptor.fetch!(id).label
-
-      if Selection.configured?(id, Source.provider(snapshot, id)),
-        do: Row.option(Atom.to_string(id), label),
-        else: Row.option(Atom.to_string(id), label, disabled: true, hint: @not_set_up)
-    end)
+  # The main model first, then only the providers that are set up. A saved
+  # provider that is no longer set up stays, disabled with its hint, so the
+  # row's value is always one of its options.
+  defp provider_options(snapshot, saved) do
+    set_up = Enum.map(FilterChoices.providers(snapshot), &Row.option(&1.id, &1.label))
+    [Row.option("", FilterChoices.main_model_label(snapshot)) | set_up] ++ stale(saved, set_up)
   end
 
-  defp model_options(provider) do
-    case Enum.find(ModelCatalog.providers(), &(Atom.to_string(&1) == provider)) do
-      nil -> []
-      id -> Enum.map(ModelCatalog.models_for(id), &Row.option(&1.id, &1.label))
-    end
+  defp stale(saved, set_up) do
+    provider = Enum.find(ModelCatalog.providers(), &(Atom.to_string(&1) == saved))
+
+    if provider && not Enum.any?(set_up, &(&1["value"] == saved)),
+      do: [
+        Row.option(saved, Descriptor.fetch!(provider).label, disabled: true, hint: @not_set_up)
+      ],
+      else: []
   end
 
   defp available?(opts), do: Keyword.get_lazy(opts, :cues_available?, &Cues.available?/0)

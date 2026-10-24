@@ -467,8 +467,8 @@ keys are read at each call. The path of one item:
    with its gap, and the wake-ups after the commit.
 3. `Cues.Filters` claims at most one delivery per `llm` watcher (four calls in
    all) and runs `Cues.Filter.Llm` under `Cues.FilterSupervisor` on the
-   watcher's filter model or `[fermix_core.routing] filter_*`, never the main
-   route; each call writes its own fenced settle.
+   watcher's filter model or `[fermix_core.routing] filter_*`, else the main
+   route at low effort; each call writes its own fenced settle.
 4. `Jobs.Scheduler` admits passed deliveries through `Jobs.CueAdmission`:
    `Repo.claim_cue_run/4` claims the job and the delivery and inserts the run in
    one transaction, at most three cue runs at once, oldest eligible delivery

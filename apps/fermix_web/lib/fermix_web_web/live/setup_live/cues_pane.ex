@@ -1,32 +1,73 @@
 defmodule FermixWebWeb.SetupLive.CuesPane do
   @moduledoc """
   The Cues tab's markup (M60 §15), drawn from `SetupLive.CuesState`: the
-  switches and the door, the default filter model, sources with their editor,
-  the watchers made in chat (counts and ids only), and mandates with their
+  switches and the door, the filter model, sources with their editor, the
+  watchers made in chat (counts and ids only), and mandates with their
   approval. Every control posts a `cues_*` event the LiveView hands to
   `CuesState.handle/4`.
+
+  Rows stay compact: a kind symbol, the name, a status pill and one quiet
+  line, actions at the trailing edge. Longer explanations sit behind an info
+  control or on the docs page; rarely used fields fold under "Advanced" or
+  "More options". A row's time is short and in the owner's zone, the full
+  time in its title.
   """
 
   use FermixWebWeb, :html
 
   alias FermixWebWeb.SetupLive.CuesState
 
-  @status_labels %{
-    "connected" => "Connected",
-    "reconnecting" => "Reconnecting",
-    "auth_failed" => "Credential refused",
-    "polling" => "Polling",
-    "over_budget" => "Over its daily budget",
-    "idle" => "Idle",
-    "stopped" => "Stopped",
-    "unavailable" => "Unavailable"
+  @card "rounded-box border border-base-300 bg-base-100/80 shadow-sm"
+
+  @status_pills %{
+    "connected" => {"Connected", "badge-success"},
+    "reconnecting" => {"Reconnecting", "badge-warning"},
+    "auth_failed" => {"Credential refused", "badge-error"},
+    "polling" => {"Polling", "badge-success"},
+    "over_budget" => {"Over budget", "badge-warning"},
+    "idle" => {"Idle", "badge-ghost"},
+    "stopped" => {"Stopped", "badge-ghost"},
+    "unavailable" => {"Unavailable", "badge-error"}
+  }
+
+  @kind_icons %{
+    "feed" => "hero-rss",
+    "stream" => "hero-signal",
+    "webhook" => "hero-globe-alt",
+    "local_push" => "hero-command-line"
   }
 
   @kind_labels %{
-    "local_push" => "Local push: a program posts events to the door",
-    "feed" => "Feed: Fermix polls a URL",
-    "stream" => "Stream: Fermix keeps a connection open",
-    "webhook" => "Webhook: a service posts to a URL"
+    "local_push" => "Local push",
+    "feed" => "Feed",
+    "stream" => "Stream",
+    "webhook" => "Webhook"
+  }
+
+  @verify_labels %{
+    "hmac" => "HMAC signature",
+    "shared_secret" => "Shared secret",
+    "standard_webhooks" => "Standard Webhooks"
+  }
+
+  @info %{
+    run:
+      "Starts the sources, the door, the filters and the tasks watchers wake. Applies after a restart.",
+    mandates:
+      "Off stops the next call of every mandate at once, even in a run already going. No restart needed.",
+    door_port: "The door listens on this machine only. Applies after a restart.",
+    filter:
+      "Decides which items reach a watcher's task, one item at a time. The main model works; a small, inexpensive one costs less. A watcher with a model of its own uses that one.",
+    sources: "While cues run, a save starts, changes or stops the source at once.",
+    watchers:
+      "Watchers are made and changed in chat with Fermix. Counts cover the last 24 hours.",
+    held: "The filter's provider failed three times in a row; Fermix retries every 10 minutes.",
+    mandates_list:
+      "A mandate lets one task call named action tools in its cue runs. It acts only after you approve it here; a change to it, its task or its validator needs approving again.",
+    kind:
+      "Local push: a program on this machine posts events to the door. Feed: Fermix polls a URL. Stream: Fermix keeps a connection open. Webhook: a service posts to a URL.",
+    mode:
+      "Approve: each call waits for you to confirm it in chat. Auto: the checks decide, so it needs a validator or pinned arguments (under More options)."
   }
 
   attr :cues, :map, required: true
@@ -34,20 +75,39 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   def pane(assigns) do
     ~H"""
     <div id="cues-pane" class="space-y-8">
-      <div class="max-w-3xl">
-        <h2 class="text-2xl font-semibold tracking-normal">Cues</h2>
-        <p class="mt-2 text-sm leading-6 text-base-content/70">
-          Outside input that wakes a task: feeds, streams, webhooks and your own scripts. A
-          watcher decides which items matter; its task acts on them. This section exists only in a
-          development build.
-        </p>
-      </div>
+      <.pane_title />
       <.reveal :if={@cues.reveal} reveal={@cues.reveal} port={@cues.switches.door_port} />
-      <.switches switches={@cues.switches} door={@cues.door} />
-      <.filter_model filter={@cues.filter} />
+      <section class="space-y-2">
+        <.switches switches={@cues.switches} door={@cues.door} />
+        <.filter_model filter={@cues.filter} />
+      </section>
       <.sources cues={@cues} />
       <.watchers watchers={@cues.watchers} />
       <.mandates cues={@cues} />
+    </div>
+    """
+  end
+
+  defp pane_title(assigns) do
+    ~H"""
+    <div class="flex flex-wrap items-start justify-between gap-3">
+      <div class="min-w-0">
+        <div class="flex flex-wrap items-center gap-2">
+          <h2 class="text-2xl font-semibold tracking-normal">Cues</h2>
+          <span class="badge badge-ghost badge-sm">Development build</span>
+        </div>
+        <p class="mt-1 text-sm text-base-content/70">
+          Feeds, webhooks and your own scripts that wake a task.
+        </p>
+      </div>
+      <a
+        href="https://fermix.ai/docs/cues/"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="btn btn-ghost btn-sm gap-1.5 text-base-content/70"
+      >
+        <.icon name="hero-book-open" class="size-4" /> Docs
+      </a>
     </div>
     """
   end
@@ -59,45 +119,79 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
 
   defp reveal(%{reveal: %{kind: :token}} = assigns) do
     ~H"""
-    <section id="cues-reveal" class="rounded-box border border-primary/40 bg-primary/5 p-4 text-sm">
-      <div class="flex items-center justify-between gap-3">
-        <h3 class="font-semibold">Token for {@reveal.ref}</h3>
-        <button type="button" class="btn btn-ghost btn-xs" phx-click="cues_dismiss_reveal">
-          Done
-        </button>
-      </div>
-      <p class="mt-1 text-base-content/70">
-        Shown only now. Put it in the program that posts; one token per machine.
-      </p>
-      <code class="mt-2 block break-all rounded bg-base-200 px-2 py-1 font-mono">
-        {@reveal.value}
-      </code>
-      <p class="mt-3 text-base-content/70">Try it from this machine:</p>
-      <pre class="mt-1 overflow-x-auto rounded bg-base-200 p-2 font-mono text-xs">{curl(@reveal, @port)}</pre>
+    <section id="cues-reveal" class="space-y-3 rounded-box border border-primary/30 bg-primary/5 p-4">
+      <.reveal_head title={"Token for #{@reveal.ref}"} note="Shown once. One token per machine." />
+      <.copy_block id="cues-reveal-value" text={@reveal.value} label="Copy token" />
+      <p class="text-xs font-medium text-base-content/60">Test from this machine</p>
+      <.copy_block id="cues-reveal-curl" text={curl(@reveal, @port)} label="Copy" pre?={true} />
     </section>
     """
   end
 
   defp reveal(%{reveal: %{kind: :url}} = assigns) do
     ~H"""
-    <section id="cues-reveal" class="rounded-box border border-primary/40 bg-primary/5 p-4 text-sm">
-      <div class="flex items-center justify-between gap-3">
-        <h3 class="font-semibold">URL for {@reveal.ref}</h3>
-        <button type="button" class="btn btn-ghost btn-xs" phx-click="cues_dismiss_reveal">
-          Done
-        </button>
-      </div>
-      <code class="mt-2 block break-all rounded bg-base-200 px-2 py-1 font-mono">
-        http://127.0.0.1:{@port}{@reveal.value}
-      </code>
-      <p class="mt-2 text-base-content/70">
-        The door listens on this machine only. Point a tunnel at port {@port} and give the service
-        your tunnel's address followed by {@reveal.value}. For Tailscale Funnel,
-        <code class="font-mono">mix fermix.cues.funnel {@reveal.ref}</code>
-        prints the command and the public address. In the service, choose application/json as
-        the content type.
+    <section id="cues-reveal" class="space-y-3 rounded-box border border-primary/30 bg-primary/5 p-4">
+      <.reveal_head title={"URL for #{@reveal.ref}"} note="The door listens on this machine only." />
+      <.copy_block
+        id="cues-reveal-value"
+        text={"http://127.0.0.1:#{@port}#{@reveal.value}"}
+        label="Copy URL"
+      />
+      <p class="text-xs leading-5 text-base-content/60">
+        Give the service your tunnel's address followed by the path, with content type
+        application/json. For Tailscale Funnel, run <code class="font-mono">mix fermix.cues.funnel {@reveal.ref}</code>.
       </p>
     </section>
+    """
+  end
+
+  attr :title, :string, required: true
+  attr :note, :string, required: true
+
+  defp reveal_head(assigns) do
+    ~H"""
+    <div class="flex items-start justify-between gap-3">
+      <div>
+        <h3 class="text-sm font-semibold">{@title}</h3>
+        <p class="text-xs text-base-content/60">{@note}</p>
+      </div>
+      <button type="button" class="btn btn-ghost btn-xs" phx-click="cues_dismiss_reveal">
+        Done
+      </button>
+    </div>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :text, :string, required: true
+  attr :label, :string, required: true
+  attr :pre?, :boolean, default: false
+
+  defp copy_block(assigns) do
+    ~H"""
+    <div class="flex items-start gap-2">
+      <pre
+        :if={@pre?}
+        id={@id}
+        class="min-w-0 flex-1 select-all overflow-x-auto rounded-field bg-base-200 p-2 font-mono text-xs"
+      >{@text}</pre>
+      <code
+        :if={!@pre?}
+        id={@id}
+        class="min-w-0 flex-1 select-all break-all rounded-field bg-base-200 px-2 py-1.5 font-mono text-sm"
+      >
+        {@text}
+      </code>
+      <button
+        id={"#{@id}-copy"}
+        type="button"
+        class="btn btn-ghost btn-xs shrink-0"
+        phx-hook="CopyText"
+        data-copy-from={@id}
+      >
+        {@label}
+      </button>
+    </div>
     """
   end
 
@@ -120,117 +214,186 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   attr :door, :any, required: true
 
   defp switches(assigns) do
+    assigns = assign(assigns, info: @info, card: @card)
+
     ~H"""
-    <section class="space-y-4">
-      <h3 class="text-sm font-semibold">Switches and door</h3>
-      <form id="cues-switches-form" phx-submit="cues_save_switches" class="space-y-4">
-        <.toggle
+    <form id="cues-switches-form" phx-submit="cues_save_switches" class={@card}>
+      <div class="divide-y divide-base-300">
+        <.switch_row
           name="cues_switches[enabled]"
           checked={@switches.enabled}
           label="Run cues"
-          hint="Starts sources, the door, filters and watchers' tasks. Applies after restart."
+          info={@info.run}
         />
-        <.toggle
+        <.switch_row
           name="cues_switches[mandates_enabled]"
           checked={@switches.mandates_enabled}
           label="Let mandates act"
-          hint="Off stops every mandate call at once, a run already going included. No restart needed."
+          info={@info.mandates}
         />
-        <label class="form-control w-full max-w-xs">
-          <span class="label pb-1 text-sm font-medium">Door port</span>
-          <input
-            type="number"
-            name="cues_switches[door_port]"
-            value={@switches.door_port}
-            min="1024"
-            max="65535"
-            class="input input-bordered w-full bg-base-100"
-          />
-          <span class="label pt-1 text-xs text-base-content/60">
-            The door listens on 127.0.0.1 only. Applies after restart.
-          </span>
-        </label>
-        <p class="text-sm text-base-content/70">
-          {door_line(@door, @switches)}
-        </p>
-        <p :if={!@switches.memory_on?} class="text-sm text-warning">
+        <div class="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
+          <span class="text-sm font-medium">Door</span>
+          <.door_status door={@door} switches={@switches} />
+        </div>
+        <p
+          :if={!@switches.memory_on?}
+          class="flex items-center gap-1.5 px-4 py-3 text-sm text-warning"
+        >
+          <.icon name="hero-exclamation-triangle" class="size-4 shrink-0" />
           Memory is off, so cues cannot run: every cue is a row in memory.
         </p>
-        <button type="submit" class="btn btn-primary btn-sm">Save switches</button>
-      </form>
-    </section>
+        <div class="flex items-start gap-3 px-4 py-3">
+          <.disclosure id="cues-switches-advanced" label="Advanced" class="min-w-0 flex-1">
+            <label class="mt-2 flex flex-wrap items-center gap-3">
+              <span class="flex items-center gap-1.5 text-sm">
+                Door port <.info text={@info.door_port} />
+              </span>
+              <input
+                type="number"
+                name="cues_switches[door_port]"
+                value={@switches.door_port}
+                min="1024"
+                max="65535"
+                class="input input-bordered input-sm w-28 bg-base-100"
+              />
+            </label>
+          </.disclosure>
+          <button type="submit" class="btn btn-primary btn-sm shrink-0">Save</button>
+        </div>
+      </div>
+    </form>
     """
   end
 
-  defp door_line({:listening, ip, port}, %{door_port: port}),
-    do: "Door: listening on #{ip}:#{port}."
+  attr :name, :string, required: true
+  attr :checked, :boolean, required: true
+  attr :label, :string, required: true
+  attr :info, :string, required: true
 
-  defp door_line({:listening, ip, port}, %{door_port: configured}),
-    do: "Door: listening on #{ip}:#{port}. Restart to move it to port #{configured}."
+  defp switch_row(assigns) do
+    ~H"""
+    <label class="flex cursor-pointer items-center justify-between gap-3 px-4 py-3">
+      <span class="flex items-center gap-1.5 text-sm font-medium">
+        {@label} <.info text={@info} />
+      </span>
+      <input type="hidden" name={@name} value="false" />
+      <input
+        type="checkbox"
+        name={@name}
+        value="true"
+        checked={@checked}
+        class="toggle toggle-sm toggle-primary"
+      />
+    </label>
+    """
+  end
 
-  defp door_line({:unavailable, failure}, %{door_port: port}),
-    do: "Door: unavailable; #{door_failure(failure, port)}"
+  attr :door, :any, required: true
+  attr :switches, :map, required: true
 
-  defp door_line(:not_running, %{enabled: true}),
-    do: "Door: not running; it starts after a restart."
+  defp door_status(%{door: {:listening, ip, port}} = assigns) do
+    assigns =
+      assign(assigns, address: "#{ip}:#{port}", moved?: port != assigns.switches.door_port)
 
-  defp door_line(:not_running, _switches), do: "Door: not running; cues are off."
+    ~H"""
+    <span class="flex flex-wrap items-center justify-end gap-2">
+      <.dot tone="bg-success" text={"Listening on #{@address}"} />
+      <.pill
+        :if={@moved?}
+        label="Restart to apply"
+        tone="badge-warning"
+        tip={"Restart to move it to port #{@switches.door_port}."}
+      />
+    </span>
+    """
+  end
 
-  defp door_failure(:address_in_use, port), do: "another program is using port #{port}."
-  defp door_failure(:permission_denied, port), do: "this user may not listen on port #{port}."
-  defp door_failure(:address_unavailable, _port), do: "the loopback address is not available."
-  defp door_failure(_listen_failed, port), do: "it could not listen on port #{port}."
+  defp door_status(%{door: {:unavailable, failure}} = assigns) do
+    assigns = assign(assigns, :failure, door_failure(failure, assigns.switches.door_port))
 
-  # --- default filter model --------------------------------------------------
+    ~H"""
+    <.dot tone="bg-error" text={"Unavailable: #{@failure}"} class="text-error" />
+    """
+  end
+
+  defp door_status(%{door: :not_running, switches: %{enabled: true}} = assigns) do
+    ~H"""
+    <.pill label="Restart to apply" tone="badge-warning" tip="The door starts after a restart." />
+    """
+  end
+
+  defp door_status(assigns) do
+    ~H"""
+    <.dot tone="bg-base-content/30" text="Not running" />
+    """
+  end
+
+  defp door_failure(:address_in_use, port), do: "another program is using port #{port}"
+  defp door_failure(:permission_denied, port), do: "this user may not listen on port #{port}"
+  defp door_failure(:address_unavailable, _port), do: "the loopback address is not available"
+  defp door_failure(_listen_failed, port), do: "it could not listen on port #{port}"
+
+  # --- filter model ----------------------------------------------------------
 
   attr :filter, :map, required: true
 
   defp filter_model(assigns) do
+    ids = Enum.map(assigns.filter.providers, & &1.id)
+    chosen? = assigns.filter.provider in ids
+    stale? = assigns.filter.provider != "" and not chosen?
+    assigns = assign(assigns, chosen?: chosen?, stale?: stale?, info: @info.filter, card: @card)
+
     ~H"""
-    <section class="space-y-4">
-      <h3 class="text-sm font-semibold">Default filter model</h3>
-      <p class="max-w-prose text-sm leading-6 text-base-content/70">
-        A watcher that names no model of its own filters with this one. The filter answers pass or
-        drop for one item at a time, so pick a small, inexpensive model. With no default here, a
-        watcher must name its own model: Fermix never falls back to your main model.
+    <form
+      id="cues-filter-form"
+      phx-change="cues_filter_changed"
+      phx-submit="cues_save_filter"
+      class={[@card, "flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3"]}
+    >
+      <span class="flex items-center gap-1.5 text-sm font-medium">
+        Filter model <.info text={@info} />
+      </span>
+      <div class="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
+        <select
+          name="cues_filter[provider]"
+          aria-label="Filter model"
+          class="select select-bordered select-sm w-full bg-base-100 sm:w-auto"
+        >
+          <option value="" selected={!@chosen?}>{@filter.main_label}</option>
+          <option
+            :for={provider <- @filter.providers}
+            value={provider.id}
+            selected={provider.id == @filter.provider}
+          >
+            {provider.label}
+          </option>
+        </select>
+        <.filter_model_input :if={@chosen?} filter={@filter} />
+        <button type="submit" class="btn btn-primary btn-sm">Save</button>
+      </div>
+      <p :if={@stale?} class="w-full text-sm text-warning">
+        The saved filter provider, {@filter.provider}, is not set up.
       </p>
-      <form
-        id="cues-filter-form"
-        phx-change="cues_filter_changed"
-        phx-submit="cues_save_filter"
-        class="space-y-4"
-      >
-        <div class="grid gap-4 lg:grid-cols-2">
-          <label class="form-control w-full">
-            <span class="label pb-1 text-sm font-medium">Provider</span>
-            <select name="cues_filter[provider]" class="select select-bordered w-full bg-base-100">
-              <option value="" selected={@filter.provider == ""}>None</option>
-              <option
-                :for={provider <- @filter.providers}
-                value={provider.id}
-                selected={provider.id == @filter.provider}
-              >
-                {provider.label}{if provider.configured?, do: "", else: " (not set up)"}
-              </option>
-            </select>
-          </label>
-          <label class="form-control w-full">
-            <span class="label pb-1 text-sm font-medium">Model</span>
-            <input
-              type="text"
-              name="cues_filter[model]"
-              value={@filter.model}
-              list="cues-filter-models"
-              class="input input-bordered w-full bg-base-100 font-mono"
-            />
-            <datalist id="cues-filter-models">
-              <option :for={model <- @filter.models} value={model.id}>{model.label}</option>
-            </datalist>
-          </label>
-        </div>
-        <button type="submit" class="btn btn-primary btn-sm">Save filter model</button>
-      </form>
-    </section>
+    </form>
+    """
+  end
+
+  attr :filter, :map, required: true
+
+  defp filter_model_input(assigns) do
+    ~H"""
+    <input
+      type="text"
+      name="cues_filter[model]"
+      value={@filter.model}
+      list="cues-filter-models"
+      placeholder="Model"
+      aria-label="Model"
+      class="input input-bordered input-sm w-full bg-base-100 font-mono sm:w-56"
+    />
+    <datalist id="cues-filter-models">
+      <option :for={model <- @filter.models} value={model.id}>{model.label}</option>
+    </datalist>
     """
   end
 
@@ -239,33 +402,32 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   attr :cues, :map, required: true
 
   defp sources(assigns) do
+    assigns = assign(assigns, info: @info.sources, card: @card)
+
     ~H"""
-    <section class="space-y-4">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <h3 class="text-sm font-semibold">Sources</h3>
-        <div class="flex gap-2">
-          <button type="button" class="btn btn-ghost btn-sm" phx-click="cues_refresh">
-            <.icon name="hero-arrow-path" class="size-4" /> Refresh status
+    <section class="space-y-3">
+      <.section_head title="Sources" count={length(@cues.sources)} info={@info}>
+        <span class="tooltip tooltip-left" data-tip="Refresh status">
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm btn-square"
+            phx-click="cues_refresh"
+            aria-label="Refresh status"
+          >
+            <.icon name="hero-arrow-path" class="size-4" />
           </button>
-          <button type="button" class="btn btn-outline btn-sm" phx-click="cues_new_source">
-            <.icon name="hero-plus" class="size-4" /> Add source
-          </button>
-        </div>
-      </div>
-      <p class="max-w-prose text-sm leading-6 text-base-content/70">
-        Where cues come from. While cues run, a save starts, changes or stops the source at once.
-      </p>
+        </span>
+        <button type="button" class="btn btn-ghost btn-sm" phx-click="cues_new_source">
+          <.icon name="hero-plus" class="size-4" /> Add source
+        </button>
+      </.section_head>
       <p :if={@cues.sources_error} class="text-sm text-warning">
         {rows_note(@cues.sources_error)}
       </p>
-      <p :if={@cues.sources == []} class="text-sm text-base-content/60">No sources yet.</p>
-      <ul :if={@cues.sources != []} class="space-y-3">
-        <li
-          :for={source <- @cues.sources}
-          id={"cue-source-#{source.ref}"}
-          class="rounded-box border border-base-300 bg-base-100 p-4 text-sm"
-        >
-          <.source_row source={source} />
+      <p :if={@cues.sources == []} class="text-sm text-base-content/50">No sources yet.</p>
+      <ul :if={@cues.sources != []} class="flex flex-col gap-2">
+        <li :for={source <- @cues.sources} id={"cue-source-#{source.ref}"} class={[@card, "p-3"]}>
+          <.source_row source={source} clock={@cues.clock} />
         </li>
       </ul>
       <.source_editor :if={@cues.source_editor} editor={@cues.source_editor} cues={@cues} />
@@ -274,113 +436,172 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   end
 
   attr :source, :map, required: true
+  attr :clock, :map, required: true
 
   defp source_row(assigns) do
+    assigns = assign(assigns, :missing, missing_secret(assigns.source))
+
     ~H"""
-    <div class="flex flex-wrap items-start justify-between gap-3">
-      <div class="min-w-0 space-y-1">
-        <div class="flex flex-wrap items-center gap-2">
-          <span class="font-mono font-semibold">{@source.ref}</span>
-          <span class="badge badge-ghost badge-sm">{@source.preset || @source.kind}</span>
-          <span class={[
-            "badge badge-sm",
-            if(@source.enabled?, do: "badge-success", else: "badge-ghost")
-          ]}>
-            {if @source.enabled?, do: "On", else: "Off"}
-          </span>
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+      <.kind_icon icon={kind_icon_name(@source.kind)} />
+      <div class="min-w-0 flex-1 basis-56">
+        <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span class="truncate font-mono text-sm font-semibold">{@source.ref}</span>
+          <span class="text-xs text-base-content/50">{source_type(@source)}</span>
+          <.source_pill source={@source} clock={@clock} />
+          <.pill :if={@missing} label={@missing} tone="badge-warning" />
         </div>
-        <p :if={@source.url} class="break-all text-base-content/70">{@source.url}</p>
-        <p :if={@source.dids != []} class="break-all text-base-content/70">
-          Following {Enum.join(@source.dids, ", ")}
+        <p class="mt-0.5 truncate text-xs text-base-content/50">
+          <span :for={part <- source_line(@source, @clock)} class={part.class} title={part.title}>
+            {part.text}
+          </span>
         </p>
-        <p class="text-base-content/70">{status_line(@source)}</p>
-        <p class="text-base-content/70">{secrets_line(@source)}</p>
       </div>
-      <div class="flex flex-wrap gap-2">
-        <button
-          :if={@source.kind == "local_push"}
-          type="button"
-          class="btn btn-ghost btn-xs"
-          phx-click="cues_new_token"
-          phx-value-ref={@source.ref}
-          data-confirm={"Replace the token of #{@source.ref}? The old one stops working within a minute."}
-        >
-          New token
-        </button>
-        <button
-          :if={@source.kind == "webhook"}
-          type="button"
-          class="btn btn-ghost btn-xs"
-          phx-click="cues_webhook_url"
-          phx-value-ref={@source.ref}
-        >
-          {if @source.has_url?, do: "Show URL", else: "Generate URL"}
-        </button>
-        <button
-          type="button"
-          class="btn btn-ghost btn-xs"
-          phx-click="cues_edit_source"
-          phx-value-ref={@source.ref}
-        >
-          Edit
-        </button>
-        <button
-          type="button"
-          class="btn btn-ghost btn-xs text-error"
-          phx-click="cues_remove_source"
-          phx-value-ref={@source.ref}
-          data-confirm={"Remove source #{@source.ref} and its stored secrets?"}
-        >
-          Remove
-        </button>
-      </div>
+      <.source_actions source={@source} />
     </div>
     """
   end
 
-  defp status_line(%{enabled?: false}), do: "Off: nothing is read from it."
-  defp status_line(%{status: nil}), do: "No activity yet."
+  attr :source, :map, required: true
 
-  defp status_line(%{status: status}) do
-    [
-      Map.get(@status_labels, status.status, status.status),
-      status.last_good_at && "last good #{time(status.last_good_at)}",
-      "#{status.items_today} today",
-      status.last_accepted_at && "last accepted #{time(status.last_accepted_at)}",
-      status.refused != [] && "refused: #{Enum.join(status.refused, ", ")}"
-    ]
-    |> Enum.filter(&is_binary/1)
-    |> Enum.join(" · ")
+  defp source_actions(assigns) do
+    ~H"""
+    <div class="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-1">
+      <button
+        :if={@source.kind == "local_push"}
+        type="button"
+        class="btn btn-ghost btn-xs"
+        phx-click="cues_new_token"
+        phx-value-ref={@source.ref}
+        data-confirm={"Replace the token of #{@source.ref}? The old one stops working within a minute."}
+      >
+        New token
+      </button>
+      <button
+        :if={@source.kind == "webhook"}
+        type="button"
+        class="btn btn-ghost btn-xs"
+        phx-click="cues_webhook_url"
+        phx-value-ref={@source.ref}
+      >
+        {if @source.has_url?, do: "Show URL", else: "Generate URL"}
+      </button>
+      <button
+        type="button"
+        class="btn btn-ghost btn-xs"
+        phx-click="cues_edit_source"
+        phx-value-ref={@source.ref}
+      >
+        Edit
+      </button>
+      <.remove_button
+        event="cues_remove_source"
+        value_name="ref"
+        value={@source.ref}
+        confirm={"Remove source #{@source.ref} and its stored secrets?"}
+      />
+    </div>
+    """
   end
 
-  defp secrets_line(%{kind: "local_push", secrets: secrets}),
-    do: "Token: #{set(secrets, :token)}"
+  attr :source, :map, required: true
+  attr :clock, :map, required: true
 
-  defp secrets_line(%{kind: "webhook", secrets: secrets, has_url?: has_url?, verify: verify}),
-    do:
-      "#{secret_label(verify)}: #{set(secrets, :secret)} · " <>
-        if(has_url?, do: "URL: made", else: "URL: not made yet")
+  defp source_pill(%{source: %{enabled?: false}} = assigns) do
+    ~H"""
+    <.pill label="Off" tone="badge-ghost" />
+    """
+  end
 
-  defp secrets_line(%{secrets: secrets}) when map_size(secrets) == 0, do: nil
+  defp source_pill(%{source: %{status: nil}} = assigns), do: ~H""
 
-  defp secrets_line(%{secrets: secrets}),
-    do: Enum.map_join(secrets, " · ", fn {field, _store} -> "#{field}: set" end)
+  defp source_pill(assigns) do
+    status = assigns.source.status
+    {label, tone} = Map.get(@status_pills, status.status, {status.status, "badge-ghost"})
+    title = status.last_good_at && "Last good #{full_time(status.last_good_at, assigns.clock)}"
+    assigns = assign(assigns, label: label, tone: tone, title: title)
 
-  defp set(secrets, field), do: if(Map.has_key?(secrets, field), do: "set", else: "not set")
+    ~H"""
+    <span class={["badge badge-sm", @tone]} title={@title}>{@label}</span>
+    """
+  end
+
+  defp source_type(%{preset: preset}) when is_binary(preset), do: preset
+  defp source_type(%{kind: kind}), do: kind_label(kind)
+
+  defp kind_label(kind), do: Map.get(@kind_labels, kind, kind)
+  defp kind_icon_name(kind), do: Map.get(@kind_icons, kind, "hero-bolt")
+
+  # The row's one quiet line: what came in today and when, any refusals, then
+  # where it reads from (last, so it is what truncates).
+  defp source_line(source, clock) do
+    [activity(source, clock), refused(source.status), following(source.dids), address(source.url)]
+    |> List.flatten()
+    |> Enum.with_index()
+    |> Enum.map(fn {part, index} -> separated(part, index) end)
+  end
+
+  defp activity(%{enabled?: false}, _clock), do: []
+  defp activity(%{status: nil}, _clock), do: [part("No activity yet")]
+
+  defp activity(%{status: status}, clock) do
+    last = status.last_accepted_at
+
+    [
+      part("#{status.items_today} today"),
+      last && part("last item #{short_time(last, clock)}", full_time(last, clock))
+    ]
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp refused(%{refused: [_ | _] = refused}),
+    do: [%{part("refused #{Enum.join(refused, ", ")}") | class: "text-warning"}]
+
+  defp refused(_status), do: []
+
+  defp following([]), do: []
+  defp following(dids), do: [part("following #{length(dids)}", Enum.join(dids, ", "))]
+
+  defp address(nil), do: []
+  defp address(url), do: [part(url, url)]
+
+  defp part(text, title \\ nil), do: %{text: text, title: title, class: nil}
+
+  defp separated(part, 0), do: part
+  defp separated(part, _index), do: %{part | text: " · " <> part.text}
+
+  defp missing_secret(%{kind: "local_push", secrets: secrets}),
+    do: if(Map.has_key?(secrets, :token), do: nil, else: "Needs a token")
+
+  defp missing_secret(%{kind: "webhook", secrets: secrets, verify: verify}),
+    do: if(Map.has_key?(secrets, :secret), do: nil, else: "Needs a #{secret_noun(verify)}")
+
+  defp missing_secret(_source), do: nil
 
   defp secret_label("shared_secret"), do: "Shared secret"
   defp secret_label(_method), do: "Signing secret"
 
+  defp secret_noun(method), do: method |> secret_label() |> String.downcase()
+
   defp rows_note(:memory_off), do: "Memory is off, so a source's live status is not shown."
   defp rows_note(reason), do: "Live status could not be read: #{inspect(reason)}"
+
+  # --- source editor ---------------------------------------------------------
 
   attr :editor, :map, required: true
   attr :cues, :map, required: true
 
   defp source_editor(assigns) do
-    form = CuesState.source_form(assigns.editor.values)
-    defaults = CuesState.preset_defaults(assigns.editor.values["preset"])
-    assigns = assign(assigns, form: form, defaults: defaults, values: assigns.editor.values)
+    values = assigns.editor.values
+    form = CuesState.source_form(values)
+
+    assigns =
+      assign(assigns,
+        form: form,
+        defaults: CuesState.preset_defaults(values["preset"]),
+        values: values,
+        more?: source_more?(values, form.fields)
+      )
 
     ~H"""
     <form
@@ -393,202 +614,251 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
         {if @editor.mode == :create, do: "New source", else: "Edit #{@editor.ref}"}
       </h4>
       <div class="grid gap-4 lg:grid-cols-2">
-        <.field
-          :if={@editor.mode == :create}
-          name="cue_source[ref]"
-          label="Name"
-          value={@values["ref"]}
-          hint="Lowercase letters, digits and hyphens, such as home-alerts."
-        />
-        <label class="form-control w-full">
-          <span class="label pb-1 text-sm font-medium">Preset</span>
-          <select name="cue_source[preset]" class="select select-bordered w-full bg-base-100">
-            <option value="" selected={@values["preset"] in [nil, ""]}>No preset</option>
-            <option :for={name <- @cues.presets} value={name} selected={name == @values["preset"]}>
-              {name}
-            </option>
-          </select>
-        </label>
-        <label
-          :if={:kind in @form.fields and @values["preset"] in [nil, ""]}
-          class="form-control w-full"
-        >
-          <span class="label pb-1 text-sm font-medium">Kind</span>
-          <select name="cue_source[kind]" class="select select-bordered w-full bg-base-100">
-            <option :for={kind <- @cues.kinds} value={kind} selected={kind == @form.kind}>
-              {kind_label(kind)}
-            </option>
-          </select>
-        </label>
+        <.source_kind_fields editor={@editor} cues={@cues} form={@form} values={@values} />
+        <.source_main_fields form={@form} values={@values} defaults={@defaults} cues={@cues} />
+        <.source_secret_fields form={@form} editor={@editor} />
       </div>
       <.toggle name="cue_source[enabled]" checked={@values["enabled"] != "false"} label="On" />
-      <div class="grid gap-4 lg:grid-cols-2">
-        <.field
-          :if={:url in @form.fields}
-          name="cue_source[url]"
-          label="URL"
-          value={@values["url"]}
-          placeholder={text(@defaults[:url])}
-        />
-        <.field
-          :if={:interval in @form.fields}
-          name="cue_source[interval]"
-          label="Poll every (seconds, at least 60)"
-          value={@values["interval"]}
-          placeholder={text(@defaults[:interval])}
-        />
-        <.field
-          :if={:dids in @form.fields}
-          name="cue_source[dids]"
-          label="Accounts to follow (DIDs, comma-separated)"
-          value={@values["dids"]}
-        />
-        <.field
-          :if={:collections in @form.fields}
-          name="cue_source[collections]"
-          label="Collections (comma-separated)"
-          value={@values["collections"]}
-          placeholder={Enum.join(@defaults[:collections] || [], ", ")}
-        />
-        <label :if={:verify in @form.fields} class="form-control w-full">
-          <span class="label pb-1 text-sm font-medium">How requests are verified</span>
-          <select name="cue_source[verify]" class="select select-bordered w-full bg-base-100">
-            <option :if={@defaults[:verify]} value="" selected={@values["verify"] in [nil, ""]}>
-              From the preset ({@defaults[:verify]})
-            </option>
-            <option
-              :for={method <- @cues.verify_methods}
-              value={method}
-              selected={method == @values["verify"]}
-            >
-              {method}
-            </option>
-          </select>
-        </label>
-        <.field
-          :if={:header in @form.fields}
-          name="cue_source[header]"
-          label="Signature header"
-          value={@values["header"]}
-          placeholder={text(@defaults[:header])}
-        />
-        <.field
-          :if={:algorithm in @form.fields}
-          name="cue_source[algorithm]"
-          label="Algorithm (sha1, sha256 or sha512)"
-          value={@values["algorithm"]}
-          placeholder={text(@defaults[:algorithm]) |> default_to("sha256")}
-        />
-        <.field
-          :if={:prefix in @form.fields}
-          name="cue_source[prefix]"
-          label="Signature prefix"
-          value={@values["prefix"]}
-          placeholder={text(@defaults[:prefix])}
-        />
-        <.field
-          :if={:id_header in @form.fields}
-          name="cue_source[id_header]"
-          label="Delivery id header"
-          value={@values["id_header"]}
-          placeholder={text(@defaults[:id_header])}
-        />
-        <.field
-          :if={:type_header in @form.fields}
-          name="cue_source[type_header]"
-          label="Event type header"
-          value={@values["type_header"]}
-          placeholder={text(@defaults[:type_header])}
-        />
-        <.field
-          :if={:daily_budget in @form.fields}
-          name="cue_source[daily_budget]"
-          label="Items a day (0 or blank for no limit)"
-          value={@values["daily_budget"]}
-        />
-      </div>
-      <.toggle
-        :if={:id in @form.fields}
-        name="cue_source[id]"
-        checked={@values["id"] == "true"}
-        label="The service sends no delivery id: treat exact repeats as duplicates"
-      />
-      <.source_secret_fields form={@form} editor={@editor} />
-      <div class="flex gap-2">
-        <button type="submit" class="btn btn-primary btn-sm">Save source</button>
-        <button type="button" class="btn btn-ghost btn-sm" phx-click="cues_close_source">
-          Cancel
-        </button>
-      </div>
+      <.disclosure id="cue-source-more" label="More options" open={@more?}>
+        <.source_more_fields form={@form} values={@values} defaults={@defaults} />
+      </.disclosure>
+      <.editor_actions save="Save source" close="cues_close_source" />
     </form>
     """
+  end
+
+  attr :editor, :map, required: true
+  attr :cues, :map, required: true
+  attr :form, :map, required: true
+  attr :values, :map, required: true
+
+  defp source_kind_fields(assigns) do
+    assigns = assign(assigns, :kind_info, @info.kind)
+
+    ~H"""
+    <.field
+      :if={@editor.mode == :create}
+      name="cue_source[ref]"
+      label="Name"
+      value={@values["ref"]}
+      placeholder="home-alerts"
+      info="Lowercase letters, digits and hyphens."
+    />
+    <.select_field name="cue_source[preset]" label="Preset">
+      <option value="" selected={@values["preset"] in [nil, ""]}>No preset</option>
+      <option :for={name <- @cues.presets} value={name} selected={name == @values["preset"]}>
+        {name}
+      </option>
+    </.select_field>
+    <.select_field
+      :if={:kind in @form.fields and @values["preset"] in [nil, ""]}
+      name="cue_source[kind]"
+      label="Kind"
+      info={@kind_info}
+    >
+      <option :for={kind <- @cues.kinds} value={kind} selected={kind == @form.kind}>
+        {kind_label(kind)}
+      </option>
+    </.select_field>
+    """
+  end
+
+  attr :form, :map, required: true
+  attr :values, :map, required: true
+  attr :defaults, :map, required: true
+  attr :cues, :map, required: true
+
+  defp source_main_fields(assigns) do
+    ~H"""
+    <.field
+      :if={:url in @form.fields}
+      name="cue_source[url]"
+      label="URL"
+      value={@values["url"]}
+      placeholder={text(@defaults[:url])}
+    />
+    <.field
+      :if={:interval in @form.fields}
+      name="cue_source[interval]"
+      label="Poll every (seconds)"
+      value={@values["interval"]}
+      placeholder={text(@defaults[:interval])}
+      info="At least 60."
+    />
+    <.field
+      :if={:dids in @form.fields}
+      name="cue_source[dids]"
+      label="Accounts (DIDs)"
+      value={@values["dids"]}
+      info="The accounts to follow, comma-separated."
+    />
+    <.field
+      :if={:collections in @form.fields}
+      name="cue_source[collections]"
+      label="Collections"
+      value={@values["collections"]}
+      placeholder={Enum.join(@defaults[:collections] || [], ", ")}
+      info="Comma-separated."
+    />
+    <.select_field
+      :if={:verify in @form.fields}
+      name="cue_source[verify]"
+      label="Verification"
+      info="How the door checks that a request comes from the service."
+    >
+      <option :if={@defaults[:verify]} value="" selected={@values["verify"] in [nil, ""]}>
+        From the preset ({verify_label(text(@defaults[:verify]))})
+      </option>
+      <option
+        :for={method <- @cues.verify_methods}
+        value={method}
+        selected={method == @values["verify"]}
+      >
+        {verify_label(method)}
+      </option>
+    </.select_field>
+    """
+  end
+
+  attr :form, :map, required: true
+  attr :values, :map, required: true
+  attr :defaults, :map, required: true
+
+  defp source_more_fields(assigns) do
+    ~H"""
+    <div class="mt-3 grid gap-4 lg:grid-cols-2">
+      <.field
+        :if={:header in @form.fields}
+        name="cue_source[header]"
+        label="Signature header"
+        value={@values["header"]}
+        placeholder={text(@defaults[:header])}
+      />
+      <.field
+        :if={:algorithm in @form.fields}
+        name="cue_source[algorithm]"
+        label="Algorithm"
+        value={@values["algorithm"]}
+        placeholder={text(@defaults[:algorithm]) |> default_to("sha256")}
+        info="sha1, sha256 or sha512."
+      />
+      <.field
+        :if={:prefix in @form.fields}
+        name="cue_source[prefix]"
+        label="Signature prefix"
+        value={@values["prefix"]}
+        placeholder={text(@defaults[:prefix])}
+      />
+      <.field
+        :if={:id_header in @form.fields}
+        name="cue_source[id_header]"
+        label="Delivery id header"
+        value={@values["id_header"]}
+        placeholder={text(@defaults[:id_header])}
+      />
+      <.field
+        :if={:type_header in @form.fields}
+        name="cue_source[type_header]"
+        label="Event type header"
+        value={@values["type_header"]}
+        placeholder={text(@defaults[:type_header])}
+      />
+      <.field
+        :if={:daily_budget in @form.fields}
+        name="cue_source[daily_budget]"
+        label="Daily budget"
+        value={@values["daily_budget"]}
+        info="Items a day; 0 or blank for no limit."
+      />
+    </div>
+    <div :if={:id in @form.fields} class="mt-4">
+      <.toggle
+        name="cue_source[id]"
+        checked={@values["id"] == "true"}
+        label="No delivery id"
+        info="The service sends no delivery id: treat exact repeats as duplicates."
+      />
+    </div>
+    """
+  end
+
+  # A field folded under More options opens it when it already holds a value.
+  @source_more_fields ~w(header algorithm prefix id_header type_header daily_budget)a
+
+  defp source_more?(values, fields) do
+    (values["id"] == "true" and :id in fields) or
+      Enum.any?(@source_more_fields, &(&1 in fields and present?(values[Atom.to_string(&1)])))
   end
 
   attr :form, :map, required: true
   attr :editor, :map, required: true
 
   defp source_secret_fields(%{form: %{kind: "webhook"}} = assigns) do
+    assigns = assign(assigns, :set?, Map.has_key?(assigns.editor.secrets, :secret))
+
     ~H"""
-    <label class="form-control w-full max-w-xl">
-      <span class="label pb-1 text-sm font-medium">{secret_label(@form.verify)}</span>
+    <label class="form-control w-full">
+      <span class="label flex items-center gap-1.5 pb-1 text-sm font-medium">
+        {secret_label(@form.verify)} <.info text={secret_info(@form.verify)} />
+      </span>
       <input
         type="password"
         name="cue_source[secret]"
         value=""
         autocomplete="off"
         placeholder={
-          if Map.has_key?(@editor.secrets, :secret),
-            do: "set; leave blank to keep it",
-            else: "paste the secret the service signs with"
+          if @set?,
+            do: "Set; leave blank to keep it",
+            else: "Paste the secret the service signs with"
         }
         class="input input-bordered w-full bg-base-100 font-mono"
       />
-      <span class="label pt-1 text-xs text-base-content/60">
-        {if @form.verify == "standard_webhooks",
-          do: "Starts with whsec_. ",
-          else: ""}Kept in Fermix's secret store, never shown here. In the service, choose application/json as the content type.
-      </span>
     </label>
     """
   end
 
-  defp source_secret_fields(%{form: %{kind: "local_push"}} = assigns) do
+  defp source_secret_fields(%{form: %{kind: "local_push"}, editor: %{mode: :create}} = assigns) do
     ~H"""
-    <p class="text-sm text-base-content/70">
-      {if @editor.mode == :create,
-        do: "A token is made when you save and shown once.",
-        else:
-          "Token: #{if Map.has_key?(@editor.secrets, :token), do: "set", else: "not set"}. New token replaces it."}
+    <p class="text-xs text-base-content/60 lg:col-span-2">
+      A token is made when you save and shown once.
     </p>
     """
   end
 
   defp source_secret_fields(assigns), do: ~H""
 
-  defp kind_label(kind), do: Map.get(@kind_labels, kind, kind)
+  defp secret_info("standard_webhooks"),
+    do: "Starts with whsec_. " <> secret_info(nil)
+
+  defp secret_info(_method),
+    do:
+      "Kept in Fermix's secret store, never shown here. In the service, choose application/json as the content type."
+
+  defp verify_label(method), do: Map.get(@verify_labels, method, method)
 
   # --- watchers --------------------------------------------------------------
 
   attr :watchers, :any, required: true
 
   defp watchers(assigns) do
+    assigns = assign(assigns, info: @info.watchers, count: watcher_count(assigns.watchers))
+
     ~H"""
-    <section class="space-y-4">
-      <h3 class="text-sm font-semibold">Watchers</h3>
-      <p class="max-w-prose text-sm leading-6 text-base-content/70">
-        Watchers are made and changed in chat with Fermix; this list only shows them. Counts cover
-        the last 24 hours.
-      </p>
+    <section class="space-y-3">
+      <.section_head title="Watchers" count={@count} info={@info} />
       <.watcher_list watchers={@watchers} />
     </section>
     """
   end
 
+  defp watcher_count({:ok, watchers}), do: length(watchers)
+  defp watcher_count({:error, _reason}), do: nil
+
   attr :watchers, :any, required: true
 
   defp watcher_list(%{watchers: {:error, :memory_off}} = assigns) do
     ~H"""
-    <p class="text-sm text-base-content/60">Memory is off, so there are no watchers to show.</p>
+    <p class="text-sm text-base-content/50">Memory is off, so there are no watchers to show.</p>
     """
   end
 
@@ -602,89 +872,93 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
 
   defp watcher_list(%{watchers: {:ok, []}} = assigns) do
     ~H"""
-    <p class="text-sm text-base-content/60">
-      No watchers yet. Ask Fermix in chat to watch a source for you.
-    </p>
+    <p class="text-sm text-base-content/50">No watchers yet. Ask Fermix in chat to watch a source.</p>
     """
   end
 
   defp watcher_list(%{watchers: {:ok, watchers}} = assigns) do
-    assigns = assign(assigns, :list, watchers)
+    assigns = assign(assigns, list: watchers, card: @card)
 
     ~H"""
-    <div class="overflow-x-auto">
-      <table class="table table-sm">
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Filter</th>
-            <th>Sources</th>
-            <th>Task</th>
-            <th>State</th>
-            <th class="text-right">Waiting</th>
-            <th class="text-right">Passed</th>
-            <th class="text-right">Dropped</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr
-            :for={watcher <- @list}
-            id={"cue-watcher-#{watcher.id}"}
-            data-watcher-waiting={watcher.waiting}
-            data-watcher-passed={watcher.passed}
-            data-watcher-dropped={watcher.dropped}
-          >
-            <td class="font-mono">{watcher.name}</td>
-            <td>{watcher.filter}</td>
-            <td class="font-mono">{Enum.join(watcher.sources, ", ")}</td>
-            <td>
-              <span :if={watcher.task_name}>{watcher.task_name}</span>
-              <span class="font-mono text-xs text-base-content/60">{watcher.task_job_id}</span>
-            </td>
-            <td>
-              {if watcher.enabled?, do: "On", else: "Paused"}
-              <span :if={watcher.held?} class="badge badge-warning badge-sm ml-1">Held</span>
-            </td>
-            <td class="text-right">{watcher.waiting}</td>
-            <td class="text-right">{watcher.passed}</td>
-            <td class="text-right">{watcher.dropped}</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-    <p :if={Enum.any?(@list, & &1.held?)} class="text-xs text-base-content/60">
-      Held: the filter's provider failed three times in a row; Fermix retries every 10 minutes.
-    </p>
+    <ul class="flex flex-col gap-2">
+      <li
+        :for={watcher <- @list}
+        id={"cue-watcher-#{watcher.id}"}
+        data-watcher-waiting={watcher.waiting}
+        data-watcher-passed={watcher.passed}
+        data-watcher-dropped={watcher.dropped}
+        class={[@card, "p-3"]}
+      >
+        <.watcher_row watcher={watcher} />
+      </li>
+    </ul>
     """
   end
+
+  attr :watcher, :map, required: true
+
+  defp watcher_row(assigns) do
+    assigns = assign(assigns, :held_info, @info.held)
+
+    ~H"""
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+      <.kind_icon icon="hero-eye" />
+      <div class="min-w-0 flex-1 basis-56">
+        <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span class="truncate font-mono text-sm font-semibold">{@watcher.name}</span>
+          <.pill :if={@watcher.enabled?} label="On" tone="badge-success" />
+          <.pill :if={!@watcher.enabled?} label="Paused" tone="badge-ghost" />
+          <.pill :if={@watcher.held?} label="Held" tone="badge-warning" tip={@held_info} />
+        </div>
+        <p class="mt-0.5 truncate text-xs text-base-content/50">
+          {filter_word(@watcher.filter)} ·
+          <span class="font-mono">{Enum.join(@watcher.sources, ", ")}</span>
+          · task
+          <span title={@watcher.task_job_id}>{@watcher.task_name || @watcher.task_job_id}</span>
+        </p>
+      </div>
+      <div
+        class="ml-auto flex shrink-0 items-center gap-3 text-xs text-base-content/50 tabular-nums"
+        title="Last 24 hours"
+      >
+        <.count n={@watcher.waiting} label="waiting" />
+        <.count n={@watcher.passed} label="passed" />
+        <.count n={@watcher.dropped} label="dropped" />
+      </div>
+    </div>
+    """
+  end
+
+  attr :n, :integer, required: true
+  attr :label, :string, required: true
+
+  defp count(assigns) do
+    ~H"""
+    <span><span class="font-semibold text-base-content/80">{@n}</span> {@label}</span>
+    """
+  end
+
+  defp filter_word("none"), do: "No filter"
+  defp filter_word(_llm), do: "Model filter"
 
   # --- mandates --------------------------------------------------------------
 
   attr :cues, :map, required: true
 
   defp mandates(assigns) do
+    assigns = assign(assigns, info: @info.mandates_list, card: @card)
+
     ~H"""
-    <section class="space-y-4">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <h3 class="text-sm font-semibold">Mandates</h3>
-        <button type="button" class="btn btn-outline btn-sm" phx-click="cues_new_mandate">
+    <section class="space-y-3">
+      <.section_head title="Mandates" count={length(@cues.mandates)} info={@info}>
+        <button type="button" class="btn btn-ghost btn-sm" phx-click="cues_new_mandate">
           <.icon name="hero-plus" class="size-4" /> Add mandate
         </button>
-      </div>
-      <p class="max-w-prose text-sm leading-6 text-base-content/70">
-        A mandate lets one task call named action tools in its cue runs. In approve mode each call
-        waits for you to confirm it in chat; in auto mode the checks decide. A mandate acts only
-        after you approve it here, and a change to it, its task or its validator needs approving
-        again.
-      </p>
-      <p :if={@cues.mandates == []} class="text-sm text-base-content/60">No mandates.</p>
-      <ul :if={@cues.mandates != []} class="space-y-3">
-        <li
-          :for={mandate <- @cues.mandates}
-          id={"cue-mandate-#{mandate.name}"}
-          class="rounded-box border border-base-300 bg-base-100 p-4 text-sm"
-        >
-          <.mandate_row mandate={mandate} />
+      </.section_head>
+      <p :if={@cues.mandates == []} class="text-sm text-base-content/50">No mandates.</p>
+      <ul :if={@cues.mandates != []} class="flex flex-col gap-2">
+        <li :for={mandate <- @cues.mandates} id={"cue-mandate-#{mandate.name}"} class={[@card, "p-3"]}>
+          <.mandate_row mandate={mandate} clock={@cues.clock} />
         </li>
       </ul>
       <.mandate_editor :if={@cues.mandate_editor} editor={@cues.mandate_editor} cues={@cues} />
@@ -693,74 +967,124 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   end
 
   attr :mandate, :map, required: true
+  attr :clock, :map, required: true
 
   defp mandate_row(assigns) do
+    {label, tone, tip} = approval_pill(assigns.mandate, assigns.clock)
+    assigns = assign(assigns, label: label, tone: tone, tip: tip)
+
     ~H"""
-    <div class="flex flex-wrap items-start justify-between gap-3">
-      <div class="min-w-0 space-y-1">
-        <div class="flex flex-wrap items-center gap-2">
-          <span class="font-mono font-semibold">{@mandate.name}</span>
-          <span class="badge badge-ghost badge-sm">{@mandate.mode}</span>
-          <span class={[
-            "badge badge-sm",
-            if(@mandate.enabled?, do: "badge-success", else: "badge-ghost")
-          ]}>
-            {if @mandate.enabled?, do: "On", else: "Off"}
-          </span>
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+      <.kind_icon icon="hero-shield-check" />
+      <div class="min-w-0 flex-1 basis-56">
+        <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span class="truncate font-mono text-sm font-semibold">{@mandate.name}</span>
+          <span class="text-xs text-base-content/50">{mode_label(@mandate.mode)}</span>
+          <.pill :if={!@mandate.enabled?} label="Off" tone="badge-ghost" />
+          <span data-mandate-approval><.pill label={@label} tone={@tone} tip={@tip} /></span>
         </div>
-        <p class="text-base-content/70">
-          Task {@mandate.job_name || @mandate.job}
-          <span class="font-mono text-xs">({@mandate.job})</span>
+        <p class="mt-0.5 flex items-center gap-1 text-xs text-base-content/50">
+          <span class="truncate" title={@mandate.job}>{mandate_line(@mandate)}</span>
+          <.info text={mandate_details(@mandate)} class="tooltip tooltip-left" />
         </p>
-        <p class="text-base-content/70">
-          Tools: {Enum.join(@mandate.tools, ", ")}{read_tools(@mandate.read_tools)} · acts on cues {freshness(
-            @mandate.max_cue_age_s
-          )}
-        </p>
-        <p :if={@mandate.validator} class="break-all text-base-content/70">
-          Validator: <span class="font-mono">{@mandate.validator}</span>
-        </p>
-        <p :if={@mandate.pin_args != %{}} class="text-base-content/70">
-          Pinned arguments: <span class="font-mono">{pins(@mandate.pin_args)}</span>
-        </p>
-        <p class={status_class(@mandate.status)}>{status_text(@mandate.status)}</p>
-        <p class="text-base-content/70" data-mandate-approval>{approval_text(@mandate.approval)}</p>
       </div>
-      <div class="flex flex-wrap gap-2">
-        <button
-          :if={@mandate.status == :active}
-          type="button"
-          class="btn btn-primary btn-xs"
-          phx-click="cues_approve_mandate"
-          phx-value-name={@mandate.name}
-          data-confirm={"Approve mandate #{@mandate.name} as it is now?"}
-        >
-          Approve
-        </button>
-        <button
-          type="button"
-          class="btn btn-ghost btn-xs"
-          phx-click="cues_edit_mandate"
-          phx-value-name={@mandate.name}
-        >
-          Edit
-        </button>
-        <button
-          type="button"
-          class="btn btn-ghost btn-xs text-error"
-          phx-click="cues_remove_mandate"
-          phx-value-name={@mandate.name}
-          data-confirm={"Remove mandate #{@mandate.name}?"}
-        >
-          Remove
-        </button>
-      </div>
+      <.mandate_actions mandate={@mandate} />
     </div>
     """
   end
 
-  defp read_tools([]), do: ""
-  defp read_tools(tools), do: "; reads with #{Enum.join(tools, ", ")}"
+  attr :mandate, :map, required: true
+
+  defp mandate_actions(assigns) do
+    ~H"""
+    <div class="ml-auto flex shrink-0 items-center gap-1">
+      <button
+        :if={approvable?(@mandate)}
+        type="button"
+        class="btn btn-primary btn-xs"
+        phx-click="cues_approve_mandate"
+        phx-value-name={@mandate.name}
+        data-confirm={"Approve mandate #{@mandate.name} as it is now?"}
+      >
+        Approve
+      </button>
+      <button
+        type="button"
+        class="btn btn-ghost btn-xs"
+        phx-click="cues_edit_mandate"
+        phx-value-name={@mandate.name}
+      >
+        Edit
+      </button>
+      <.remove_button
+        event="cues_remove_mandate"
+        value_name="name"
+        value={@mandate.name}
+        confirm={"Remove mandate #{@mandate.name}?"}
+      />
+    </div>
+    """
+  end
+
+  # Approve applies to an active mandate that is not approved as it is now.
+  defp approvable?(%{status: :active, approval: {:ok, %{state: :approved}}}), do: false
+  defp approvable?(%{status: :active}), do: true
+  defp approvable?(_inactive), do: false
+
+  defp mode_label("auto"), do: "Auto"
+  defp mode_label(_approve), do: "Approve each call"
+
+  defp mandate_line(mandate) do
+    reads =
+      if mandate.read_tools == [], do: "", else: " · reads #{Enum.join(mandate.read_tools, ", ")}"
+
+    "#{mandate.job_name || mandate.job} · #{Enum.join(mandate.tools, ", ")}#{reads}"
+  end
+
+  defp mandate_details(mandate) do
+    [
+      "Task #{mandate.job}.",
+      "Acts on cues #{freshness(mandate.max_cue_age_s)}.",
+      mandate.mode == "approve" && mandate.approve_within_s &&
+        "A proposal waits #{duration(mandate.approve_within_s)}.",
+      mandate.validator && "Validator: #{mandate.validator}.",
+      mandate.pin_args != %{} && "Pinned: #{pins(mandate.pin_args)}."
+    ]
+    |> Enum.filter(&is_binary/1)
+    |> Enum.join(" ")
+  end
+
+  defp approval_pill(%{status: {:inactive, reason}}, _clock),
+    do: {"Inactive", "badge-error", "Inactive: #{reason}"}
+
+  defp approval_pill(%{approval: approval}, clock), do: approval_view(approval, clock)
+
+  defp approval_view({:ok, %{state: :unapproved}}, _clock),
+    do:
+      {"Needs approval", "badge-warning", "Not approved yet. It acts only after you approve it."}
+
+  defp approval_view({:ok, %{state: :approved} = status}, clock),
+    do:
+      {"Approved", "badge-success",
+       "Approved #{full_time(status.approved_at, clock)}#{from(status.approved_from)}."}
+
+  defp approval_view({:ok, %{state: :changed} = status}, clock),
+    do:
+      {"Changed", "badge-warning",
+       "Changed since it was approved #{full_time(status.approved_at, clock)}#{detail(status.detail)}; " <>
+         "approve it again before it acts."}
+
+  defp approval_view({:ok, %{state: :disabled} = status}, clock),
+    do:
+      {"Disabled", "badge-error",
+       "Disabled #{full_time(status.disabled_at, clock)}: #{status.disabled_reason}. " <>
+         "Approve it again to turn it on."}
+
+  defp approval_view({:error, :memory_off}, _clock),
+    do: {"Approval unknown", "badge-ghost", "Memory is off."}
+
+  defp approval_view({:error, reason}, _clock),
+    do: {"Approval unknown", "badge-ghost", "Approval could not be read: #{inspect(reason)}"}
 
   defp freshness(0), do: "of any age"
   defp freshness(seconds), do: "at most #{duration(seconds)} old"
@@ -768,40 +1092,20 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   defp pins(pin_args),
     do: Enum.map_join(Enum.sort(pin_args), ", ", fn {k, v} -> "#{k} = #{v}" end)
 
-  defp status_class(:active), do: "text-success"
-  defp status_class(_inactive), do: "text-warning"
-
-  defp status_text(:active), do: "Active."
-  defp status_text({:inactive, reason}), do: "Inactive: #{reason}"
-
-  defp approval_text({:ok, %{state: :unapproved}}), do: "Not approved yet."
-
-  defp approval_text({:ok, %{state: :approved} = status}),
-    do: "Approved #{time(status.approved_at)}#{from(status.approved_from)}."
-
-  defp approval_text({:ok, %{state: :changed} = status}),
-    do:
-      "Changed since it was approved #{time(status.approved_at)}#{detail(status.detail)}; " <>
-        "approve it again before it acts."
-
-  defp approval_text({:ok, %{state: :disabled} = status}),
-    do:
-      "Disabled #{time(status.disabled_at)}: #{status.disabled_reason}. Approve it again to turn it on."
-
-  defp approval_text({:error, :memory_off}), do: "Approval unknown: memory is off."
-  defp approval_text({:error, reason}), do: "Approval could not be read: #{inspect(reason)}"
-
   defp from(nil), do: ""
   defp from(where), do: " from the #{where}"
 
   defp detail(nil), do: ""
   defp detail(sentence), do: " (#{sentence})"
 
+  # --- mandate editor --------------------------------------------------------
+
   attr :editor, :map, required: true
   attr :cues, :map, required: true
 
   defp mandate_editor(assigns) do
-    assigns = assign(assigns, :values, assigns.editor.values)
+    values = assigns.editor.values
+    assigns = assign(assigns, values: values, more?: mandate_more?(values), mode_info: @info.mode)
 
     ~H"""
     <form
@@ -819,108 +1123,282 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
           label="Name"
           value={@values["name"]}
         />
-        <label class="form-control w-full">
-          <span class="label pb-1 text-sm font-medium">Task (a job that runs on cues)</span>
-          <input
-            type="text"
-            name="cue_mandate[job]"
-            value={@values["job"]}
-            list="cue-jobs"
-            class="input input-bordered w-full bg-base-100 font-mono"
-          />
-          <datalist id="cue-jobs">
-            <option :for={job <- @cues.cue_jobs} value={job.id}>{job.name}</option>
-          </datalist>
-        </label>
-        <label class="form-control w-full">
-          <span class="label pb-1 text-sm font-medium">Mode</span>
-          <select name="cue_mandate[mode]" class="select select-bordered w-full bg-base-100">
-            <option value="approve" selected={@values["mode"] != "auto"}>
-              approve: each call waits for your confirmation
-            </option>
-            <option value="auto" selected={@values["mode"] == "auto"}>
-              auto: the checks decide
-            </option>
-          </select>
-        </label>
+        <.mandate_job_field values={@values} jobs={@cues.cue_jobs} />
+        <.select_field name="cue_mandate[mode]" label="Mode" info={@mode_info}>
+          <option value="approve" selected={@values["mode"] != "auto"}>
+            Approve each call
+          </option>
+          <option value="auto" selected={@values["mode"] == "auto"}>Auto</option>
+        </.select_field>
         <.field
           name="cue_mandate[approve_within]"
-          label="A proposal waits (at most 24h)"
+          label="Proposal wait"
           value={@values["approve_within"]}
           placeholder="30m"
+          info="How long a proposal waits for you; at most 24h."
         />
         <.field
           name="cue_mandate[tools]"
-          label="Action tools (comma-separated)"
+          label="Action tools"
           value={@values["tools"]}
+          info="Comma-separated."
         />
         <.field
           name="cue_mandate[read_tools]"
-          label="Read tools (comma-separated)"
+          label="Read tools"
           value={@values["read_tools"]}
-        />
-        <.field
-          name="cue_mandate[max_cue_age]"
-          label="Act on cues at most this old (0 for any age)"
-          value={@values["max_cue_age"]}
-          placeholder="15m"
-        />
-        <.field
-          name="cue_mandate[validator]"
-          label="Validator (absolute path)"
-          value={@values["validator"]}
-        />
-        <.field name="cue_mandate[interpreter]" label="Interpreter" value={@values["interpreter"]} />
-        <.field
-          name="cue_mandate[validator_env]"
-          label="Validator environment names"
-          value={@values["validator_env"]}
-        />
-        <.field
-          name="cue_mandate[idempotency_arg]"
-          label="Argument Fermix sets as the call's id"
-          value={@values["idempotency_arg"]}
-        />
-        <.field
-          name="cue_mandate[unpinned]"
-          label="Skill paths the job writes (unpinned)"
-          value={@values["unpinned"]}
+          info="Comma-separated."
         />
       </div>
-      <label class="form-control w-full max-w-xl">
-        <span class="label pb-1 text-sm font-medium">Pinned arguments</span>
-        <textarea
-          name="cue_mandate[pin_args]"
-          rows="3"
-          class="textarea textarea-bordered w-full bg-base-100 font-mono"
-        >{@values["pin_args"]}</textarea>
-        <span class="label pt-1 text-xs text-base-content/60">
-          One per line, as in config.toml: repo = "ops". Every call must carry these exact values.
-        </span>
-      </label>
       <.toggle name="cue_mandate[enabled]" checked={@values["enabled"] != "false"} label="On" />
-      <div class="flex gap-2">
-        <button type="submit" class="btn btn-primary btn-sm">Save mandate</button>
-        <button type="button" class="btn btn-ghost btn-sm" phx-click="cues_close_mandate">
-          Cancel
-        </button>
-      </div>
+      <.disclosure id="cue-mandate-more" label="More options" open={@more?}>
+        <.mandate_more_fields values={@values} />
+      </.disclosure>
+      <.editor_actions save="Save mandate" close="cues_close_mandate" />
     </form>
     """
   end
 
+  attr :values, :map, required: true
+  attr :jobs, :list, required: true
+
+  defp mandate_job_field(assigns) do
+    ~H"""
+    <label class="form-control w-full">
+      <span class="label flex items-center gap-1.5 pb-1 text-sm font-medium">
+        Task <.info text="A job that runs on cues." />
+      </span>
+      <input
+        type="text"
+        name="cue_mandate[job]"
+        value={@values["job"]}
+        list="cue-jobs"
+        class="input input-bordered w-full bg-base-100 font-mono"
+      />
+      <datalist id="cue-jobs">
+        <option :for={job <- @jobs} value={job.id}>{job.name}</option>
+      </datalist>
+    </label>
+    """
+  end
+
+  attr :values, :map, required: true
+
+  defp mandate_more_fields(assigns) do
+    ~H"""
+    <div class="mt-3 grid gap-4 lg:grid-cols-2">
+      <.field
+        name="cue_mandate[max_cue_age]"
+        label="Max cue age"
+        value={@values["max_cue_age"]}
+        placeholder="15m"
+        info="Acts on cues at most this old; 0 for any age."
+      />
+      <.field
+        name="cue_mandate[validator]"
+        label="Validator"
+        value={@values["validator"]}
+        info="Absolute path to a program that checks each call."
+      />
+      <.field
+        name="cue_mandate[interpreter]"
+        label="Interpreter"
+        value={@values["interpreter"]}
+        info="Runs the validator, such as python3. Blank runs it directly."
+      />
+      <.field
+        name="cue_mandate[validator_env]"
+        label="Validator environment"
+        value={@values["validator_env"]}
+        info="Names of the environment variables the validator gets, comma-separated."
+      />
+      <.field
+        name="cue_mandate[idempotency_arg]"
+        label="Idempotency argument"
+        value={@values["idempotency_arg"]}
+        info="The argument Fermix sets as the call's id."
+      />
+      <.field
+        name="cue_mandate[unpinned]"
+        label="Unpinned skill paths"
+        value={@values["unpinned"]}
+        info="Skill paths the job itself writes, left out of the approval. Comma-separated."
+      />
+    </div>
+    <label class="form-control mt-4 block w-full">
+      <span class="label flex items-center gap-1.5 pb-1 text-sm font-medium">
+        Pinned arguments
+        <.info text={
+          ~s(One per line, as in config.toml: repo = "ops". Every call must carry these exact values.)
+        } />
+      </span>
+      <textarea
+        name="cue_mandate[pin_args]"
+        rows="3"
+        placeholder={~s(repo = "ops")}
+        class="textarea textarea-bordered w-full bg-base-100 font-mono"
+      >{@values["pin_args"]}</textarea>
+    </label>
+    """
+  end
+
+  @mandate_more_fields ~w(max_cue_age validator interpreter validator_env idempotency_arg unpinned
+                          pin_args)
+
+  defp mandate_more?(values), do: Enum.any?(@mandate_more_fields, &present?(values[&1]))
+
   # --- small parts -----------------------------------------------------------
+
+  attr :title, :string, required: true
+  attr :count, :any, default: nil
+  attr :info, :string, required: true
+  slot :inner_block
+
+  defp section_head(assigns) do
+    ~H"""
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <div class="flex items-center gap-2">
+        <h3 class="text-sm font-semibold">{@title}</h3>
+        <span :if={@count} class="text-xs text-base-content/45 tabular-nums">{@count}</span>
+        <.info text={@info} />
+      </div>
+      <div :if={@inner_block != []} class="flex items-center gap-1">
+        {render_slot(@inner_block)}
+      </div>
+    </div>
+    """
+  end
+
+  attr :text, :string, required: true
+  attr :class, :string, default: "tooltip"
+
+  # Info "i": an explanation kept behind the control, never inline.
+  defp info(assigns) do
+    ~H"""
+    <span
+      class={[@class, "z-10 inline-flex font-normal text-base-content/45 max-sm:before:max-w-48"]}
+      data-tip={@text}
+      tabindex="0"
+    >
+      <.icon name="hero-information-circle" class="size-4" />
+      <span class="sr-only">{@text}</span>
+    </span>
+    """
+  end
+
+  attr :label, :string, required: true
+  attr :tone, :string, required: true
+  attr :tip, :string, default: nil
+
+  defp pill(%{tip: nil} = assigns) do
+    ~H"""
+    <span class={["badge badge-sm shrink-0 whitespace-nowrap", @tone]}>{@label}</span>
+    """
+  end
+
+  defp pill(assigns) do
+    ~H"""
+    <span class="tooltip z-10 inline-flex max-sm:before:max-w-48" data-tip={@tip} tabindex="0">
+      <span class={["badge badge-sm shrink-0 whitespace-nowrap", @tone]}>{@label}</span>
+      <span class="sr-only">{@tip}</span>
+    </span>
+    """
+  end
+
+  attr :tone, :string, required: true
+  attr :text, :string, required: true
+  attr :class, :string, default: "text-base-content/70"
+
+  defp dot(assigns) do
+    ~H"""
+    <span class={["inline-flex items-center gap-1.5 text-xs", @class]}>
+      <span class={["size-1.5 shrink-0 rounded-full", @tone]} />{@text}
+    </span>
+    """
+  end
+
+  attr :icon, :string, required: true
+
+  defp kind_icon(assigns) do
+    ~H"""
+    <span class="grid size-8 shrink-0 place-items-center rounded-field border border-base-300 bg-base-200/60 text-base-content/70">
+      <.icon name={@icon} class="size-4" />
+    </span>
+    """
+  end
+
+  attr :event, :string, required: true
+  attr :value_name, :string, required: true
+  attr :value, :string, required: true
+  attr :confirm, :string, required: true
+
+  defp remove_button(assigns) do
+    assigns = assign(assigns, :value_attr, %{"phx-value-#{assigns.value_name}" => assigns.value})
+
+    ~H"""
+    <span class="tooltip tooltip-left" data-tip="Remove">
+      <button
+        type="button"
+        class="btn btn-ghost btn-xs btn-square text-error/80"
+        phx-click={@event}
+        data-confirm={@confirm}
+        aria-label={"Remove #{@value}"}
+        {@value_attr}
+      >
+        <.icon name="hero-trash" class="size-4" />
+      </button>
+    </span>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :label, :string, required: true
+  attr :open, :boolean, default: false
+  attr :class, :string, default: nil
+  slot :inner_block, required: true
+
+  # The browser owns `open` once mounted, so a re-render never folds it shut.
+  defp disclosure(assigns) do
+    ~H"""
+    <details
+      id={@id}
+      open={@open}
+      phx-mounted={JS.ignore_attributes("open")}
+      class={["group", @class]}
+    >
+      <summary class="flex min-h-8 w-fit cursor-pointer list-none items-center gap-1.5 text-sm text-base-content/70 hover:text-base-content">
+        <.icon name="hero-chevron-right" class="size-3.5 transition-transform group-open:rotate-90" />
+        {@label}
+      </summary>
+      {render_slot(@inner_block)}
+    </details>
+    """
+  end
+
+  attr :save, :string, required: true
+  attr :close, :string, required: true
+
+  defp editor_actions(assigns) do
+    ~H"""
+    <div class="flex gap-2">
+      <button type="submit" class="btn btn-primary btn-sm">{@save}</button>
+      <button type="button" class="btn btn-ghost btn-sm" phx-click={@close}>Cancel</button>
+    </div>
+    """
+  end
 
   attr :name, :string, required: true
   attr :label, :string, required: true
   attr :value, :any, default: nil
   attr :placeholder, :string, default: nil
-  attr :hint, :string, default: nil
+  attr :info, :string, default: nil
 
   defp field(assigns) do
     ~H"""
     <label class="form-control w-full">
-      <span class="label pb-1 text-sm font-medium">{@label}</span>
+      <span class="label flex items-center gap-1.5 pb-1 text-sm font-medium">
+        {@label} <.info :if={@info} text={@info} />
+      </span>
       <input
         type="text"
         name={@name}
@@ -928,7 +1406,24 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
         placeholder={@placeholder}
         class="input input-bordered w-full bg-base-100"
       />
-      <span :if={@hint} class="label pt-1 text-xs text-base-content/60">{@hint}</span>
+    </label>
+    """
+  end
+
+  attr :name, :string, required: true
+  attr :label, :string, required: true
+  attr :info, :string, default: nil
+  slot :inner_block, required: true
+
+  defp select_field(assigns) do
+    ~H"""
+    <label class="form-control w-full">
+      <span class="label flex items-center gap-1.5 pb-1 text-sm font-medium">
+        {@label} <.info :if={@info} text={@info} />
+      </span>
+      <select name={@name} class="select select-bordered w-full bg-base-100">
+        {render_slot(@inner_block)}
+      </select>
     </label>
     """
   end
@@ -936,33 +1431,52 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   attr :name, :string, required: true
   attr :checked, :boolean, required: true
   attr :label, :string, required: true
-  attr :hint, :string, default: nil
+  attr :info, :string, default: nil
 
   defp toggle(assigns) do
     ~H"""
-    <div class="form-control">
-      <label class="label cursor-pointer justify-start gap-3">
-        <input type="hidden" name={@name} value="false" />
-        <input
-          type="checkbox"
-          name={@name}
-          value="true"
-          checked={@checked}
-          class="toggle toggle-sm toggle-primary"
-        />
-        <span class="label-text text-sm font-medium">{@label}</span>
-      </label>
-      <p :if={@hint} class="max-w-prose pt-1 text-xs leading-relaxed text-base-content/60">{@hint}</p>
-    </div>
+    <label class="flex w-fit cursor-pointer items-center gap-3">
+      <input type="hidden" name={@name} value="false" />
+      <input
+        type="checkbox"
+        name={@name}
+        value="true"
+        checked={@checked}
+        class="toggle toggle-sm toggle-primary"
+      />
+      <span class="flex items-center gap-1.5 text-sm font-medium">
+        {@label} <.info :if={@info} text={@info} />
+      </span>
+    </label>
     """
   end
 
-  defp time(nil), do: "never"
-  defp time(%DateTime{} = at), do: Calendar.strftime(at, "%Y-%m-%d %H:%M UTC")
+  # --- times -----------------------------------------------------------------
+
+  # A row's time in the owner's zone: the clock time today, "yesterday", else
+  # the date (with the year once it is not this year's).
+  defp short_time(%DateTime{} = at, clock) do
+    local = DateTime.shift_zone!(at, clock.zone)
+    today = clock.now |> DateTime.shift_zone!(clock.zone) |> DateTime.to_date()
+    short_date(local, Date.diff(today, DateTime.to_date(local)), today.year)
+  end
+
+  defp short_date(local, days, _year) when days <= 0, do: Calendar.strftime(local, "%H:%M")
+  defp short_date(_local, 1, _year), do: "yesterday"
+  defp short_date(%{year: year} = local, _days, year), do: Calendar.strftime(local, "%b %-d")
+  defp short_date(local, _days, _year), do: Calendar.strftime(local, "%b %-d, %Y")
+
+  defp full_time(nil, _clock), do: "never"
+
+  defp full_time(%DateTime{} = at, clock),
+    do: at |> DateTime.shift_zone!(clock.zone) |> Calendar.strftime("%Y-%m-%d %H:%M %Z")
 
   defp duration(seconds) when rem(seconds, 3_600) == 0, do: "#{div(seconds, 3_600)}h"
   defp duration(seconds) when rem(seconds, 60) == 0, do: "#{div(seconds, 60)}m"
   defp duration(seconds), do: "#{seconds}s"
+
+  defp present?(nil), do: false
+  defp present?(value) when is_binary(value), do: String.trim(value) != ""
 
   defp text(nil), do: nil
   defp text(value) when is_binary(value), do: value

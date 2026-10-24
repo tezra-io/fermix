@@ -280,7 +280,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
 
   defp name_row do
     Row.new("ref", :text, "Name",
-      footer: "Lowercase letters, digits and hyphens.",
+      info: "Lowercase letters, digits and hyphens.",
       value: "",
       restart: restart()
     )
@@ -329,7 +329,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
 
   defp field_row(%{key: "dids"}, value, advanced) do
     Row.new("dids", :list, "Accounts",
-      footer: "The accounts to follow, by their decentralized identifier.",
+      info: "The accounts to follow, by their decentralized identifier.",
       value: value,
       advanced: advanced,
       restart: restart()
@@ -338,7 +338,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
 
   defp field_row(%{key: "collections"}, value, advanced) do
     Row.new("collections", :list, "Collections",
-      footer: "The kinds of record to take, such as posts.",
+      info: "The kinds of record to take, such as posts.",
       value: value,
       advanced: advanced,
       restart: restart()
@@ -365,7 +365,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
 
   defp field_row(%{key: "content_hash"}, value, advanced) do
     Row.new("content_hash", :toggle, "Identify items by their content",
-      footer: "For a service that sends no delivery id: an exact repeat is a duplicate.",
+      info: "For a service that sends no delivery id: an exact repeat is a duplicate.",
       value: value,
       advanced: advanced,
       restart: restart()
@@ -374,7 +374,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
 
   defp field_row(%{key: "daily_budget"}, value, advanced) do
     Row.new("daily_budget", :number, "Items a day",
-      footer: "0 is no limit.",
+      info: "0 is no limit.",
       value: value,
       min: 0,
       step: 1,
@@ -401,7 +401,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
 
     [
       Row.new("secret", :secret, label,
-        footer: "Stored in your keychain and never shown again.",
+        info: "Stored in your keychain and never shown again.",
         present: present,
         restart: restart()
       )

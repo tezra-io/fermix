@@ -13,12 +13,13 @@ defmodule FermixCore.Management.CuesTest do
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Management.Cues
+  alias FermixCore.Management.Cues.WatcherRow
   alias FermixCore.Management.Router
   alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings
-  alias FermixCore.Management.Settings.Cues, as: CuesSection
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesSql
+  alias FermixCore.Providers.Descriptor
   alias FermixCore.Setup.RestartState
   alias FermixTestSupport.CueFixtures
   alias FermixTestSupport.MandateFixtures
@@ -70,21 +71,6 @@ defmodule FermixCore.Management.CuesTest do
         status_sentence: "Waiting for your decision."
       }
     end
-  end
-
-  # A Repo that answers every request with an error, for the reads whose
-  # failure must be said rather than counted as nothing.
-  defmodule FailingRepo do
-    @moduledoc false
-    use GenServer
-
-    def start_link(_opts), do: GenServer.start_link(__MODULE__, nil)
-
-    @impl true
-    def init(nil), do: {:ok, nil}
-
-    @impl true
-    def handle_call(_request, _from, state), do: {:reply, {:error, :corrupt}, state}
   end
 
   setup do
@@ -203,6 +189,15 @@ defmodule FermixCore.Management.CuesTest do
       add_feed(opts)
       {:ok, _} = Cues.sources_add("gh-hooks", nil, "github", %{}, opts)
       CueFixtures.insert_watcher(conn, %{name: "release-watch", filter: "llm", sources: ["x"]})
+      CueFixtures.insert_watcher(conn, %{name: "quiet-watch", filter: "llm", sources: ["x"]})
+
+      # Held from the third provider failure in a row; the other filters normally.
+      CueFixtures.exec!(
+        conn,
+        "UPDATE cue_watchers SET filter_failures = 3 WHERE name = 'release-watch'",
+        []
+      )
+
       Process.put(:fake_proposals, %{waiting: [FakeProposals.record("cpr_1", :waiting)]})
 
       assert {:ok, %{"counts" => counts}} =
@@ -211,7 +206,7 @@ defmodule FermixCore.Management.CuesTest do
       assert counts == %{
                "sources" => 2,
                "sources_attention" => 1,
-               "watchers" => 1,
+               "watchers" => 2,
                "watchers_held" => 1,
                "mandates" => 0,
                "mandates_attention" => 0,
@@ -708,6 +703,22 @@ defmodule FermixCore.Management.CuesTest do
              ]
     end
 
+    test "every row keeps its explanation behind info, with no footer" do
+      rows =
+        for {kind, preset} <- [{"feed", nil}, {"stream", "bluesky_jetstream"}, {nil, "github"}],
+            {:ok, form} = Cues.sources_form(kind, preset, nil, available?: true),
+            row <- form["rows"],
+            do: row
+
+      assert Enum.all?(rows, &is_nil(&1["footer"]))
+
+      assert %{"info" => "Lowercase letters, digits and hyphens."} =
+               Enum.find(rows, &(&1["key"] == "ref"))
+
+      assert %{"info" => "Stored in your keychain and never shown again."} =
+               Enum.find(rows, &(&1["key"] == "secret"))
+    end
+
     test "a choice it does not know, or a preset of another kind, is refused" do
       assert Cues.sources_form("pigeon", nil, nil, available?: true) ==
                {:error, {:invalid_params, "kind", "Fermix has no source kind by that name."}}
@@ -775,20 +786,15 @@ defmodule FermixCore.Management.CuesTest do
                {:error, {:invalid_params, "name", "There is no watcher named nowhere."}}
     end
 
-    test "an llm watcher with no model while no default is set waits for one", %{
-      opts: opts,
-      conn: conn
-    } do
+    test "an llm watcher with no model while no default is set is on: the main model filters",
+         %{opts: opts, conn: conn} do
       CueFixtures.insert_watcher(conn, %{name: "news", filter: "llm", sources: ["s"]})
 
-      assert {:ok, %{"watchers" => [%{"state" => "no_model"}]}} = Cues.watchers_list(opts)
+      assert {:ok, %{"watchers" => [%{"state" => "on", "filter_model" => nil} = row]}} =
+               Cues.watchers_list(opts)
 
-      Application.put_env(:fermix_core, :routing,
-        filter_provider: "anthropic",
-        filter_model: "claude-haiku-4-5"
-      )
-
-      assert {:ok, %{"watchers" => [%{"state" => "on"}]}} = Cues.watchers_list(opts)
+      assert row["status_sentence"] == "Filtering normally."
+      refute "no_model" in WatcherRow.states()
     end
   end
 
@@ -1050,8 +1056,48 @@ defmodule FermixCore.Management.CuesTest do
              ]
 
       provider = Enum.find(rows, &(&1["key"] == "filter_provider"))
-      assert %{"value" => "", "label" => "None"} = hd(provider["options"])
       assert Enum.find(rows, &(&1["key"] == "filter_model"))["suggestions"] == true
+      assert provider["label"] == "Filter model"
+      assert provider["info"] =~ "main model"
+      assert Enum.all?(rows, &is_nil(&1["footer"]))
+    end
+
+    test "the filter defaults to the main model and offers only providers that are set up" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true, default_model: "claude-sonnet-5-5"],
+        openai: [api_key: "sk-invented"],
+        mistral: [default_model: "mistral-large-latest"]
+      )
+
+      assert {:ok, %{"rows" => rows}} = Settings.get("cues")
+      provider = Enum.find(rows, &(&1["key"] == "filter_provider"))
+      anthropic = Descriptor.fetch!(:anthropic).label
+
+      assert [%{"value" => "", "label" => main} | set_up] = provider["options"]
+      assert main == "Main model (#{anthropic} · claude-sonnet-5-5)"
+      assert Enum.sort(Enum.map(set_up, & &1["value"])) == ["anthropic", "openai"]
+      refute Enum.any?(provider["options"], & &1["disabled"])
+    end
+
+    test "a saved filter provider that is no longer set up stays in the menu, disabled" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true]
+      )
+
+      Application.put_env(:fermix_core, :routing,
+        filter_provider: "openai",
+        filter_model: "gpt-5.4-mini"
+      )
+
+      assert {:ok, %{"rows" => rows}} = Settings.get("cues")
+      provider = Enum.find(rows, &(&1["key"] == "filter_provider"))
+
+      assert provider["value"] == "openai"
+
+      assert %{"disabled" => true, "hint" => "Set up this provider first."} =
+               Enum.find(provider["options"], &(&1["value"] == "openai"))
+
+      assert Enum.map(provider["options"], & &1["value"]) == ["", "anthropic", "openai"]
     end
 
     test "the filter pair is applied together, and either alone is refused", %{home: home} do
@@ -1074,35 +1120,6 @@ defmodule FermixCore.Management.CuesTest do
                Settings.apply("cues", %{"filter_provider" => "", "filter_model" => ""})
 
       refute config_text(home) =~ "filter_model"
-    end
-
-    test "clearing the default model says how many watchers now wait for one", %{
-      conn: conn,
-      repo: repo
-    } do
-      CueFixtures.insert_watcher(conn, %{name: "a", filter: "llm", sources: ["s"]})
-      CueFixtures.insert_watcher(conn, %{name: "b", filter: "llm", sources: ["s"]})
-      CueFixtures.insert_watcher(conn, %{name: "c", filter: "none", sources: ["s"]})
-
-      before = %{fermix_core: [routing: [filter_provider: "anthropic", filter_model: "m"]]}
-      current = %{fermix_core: [routing: []]}
-
-      assert CuesSection.side_effects(before, current, repo: repo) ==
-               ["2 watchers now wait for a filter model."]
-
-      assert CuesSection.side_effects(current, before, repo: repo) == []
-
-      # Watchers that cannot be read are not "none waiting": the sentence says
-      # so without a count, and the log says why.
-      failing = start_supervised!(FailingRepo)
-
-      log =
-        ExUnit.CaptureLog.capture_log(fn ->
-          assert CuesSection.side_effects(before, current, repo: failing) ==
-                   ["Watchers with no filter model of their own now wait for one."]
-        end)
-
-      assert log =~ "corrupt"
     end
 
     test "the switches write through the setup page's own path", %{home: home} do

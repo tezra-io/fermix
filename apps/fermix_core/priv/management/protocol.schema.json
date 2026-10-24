@@ -107,8 +107,7 @@
     "watcher_states": [
       "on",
       "paused",
-      "held",
-      "no_model"
+      "held"
     ],
     "mandate_actions": [
       "approve",

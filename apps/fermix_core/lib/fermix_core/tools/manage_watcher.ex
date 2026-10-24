@@ -115,7 +115,8 @@ defmodule FermixCore.Tools.ManageWatcher do
         filter_model: %{
           type: "string",
           description:
-            "The filter model; without it the default filter model in settings is used."
+            "The filter model; without it the default filter model in settings is used, " <>
+              "else the main model."
         },
         daily_cap: %{
           type: "string",
@@ -168,8 +169,7 @@ defmodule FermixCore.Tools.ManageWatcher do
         tag: "no_consent",
         description: "a change from a shared chat or a turn that read outside text"
       },
-      %{tag: "instruction_cap", description: "20 active instructions; merge first"},
-      %{tag: "no_filter_model", description: "no filter model given and no default in settings"}
+      %{tag: "instruction_cap", description: "20 active instructions; merge first"}
     ]
   end
 

@@ -358,25 +358,17 @@ defmodule FermixCore.Tools.ManageWatcherTest do
                "Job #{job.id} runs on a schedule; a watcher's task must be a job that runs on cues."
     end
 
-    test "with no model given, the default filter model in settings is used (C54)", ctx do
+    test "with no model given and no default in settings, the main model filters", ctx do
       routing = Application.get_env(:fermix_core, :routing)
       on_exit(fn -> Application.put_env(:fermix_core, :routing, routing || []) end)
 
       args = Map.drop(create_args(), ["filter_provider", "filter_model"])
       Application.put_env(:fermix_core, :routing, [])
 
-      assert {:ok, %{success: false, error: error}} = ManageWatcher.execute(args, turn(ctx, []))
-
-      assert error ==
-               "Pick a model for this watcher's filter, or set a default filter model in settings."
-
-      Application.put_env(:fermix_core, :routing,
-        filter_provider: "openai",
-        filter_model: "gpt-5-mini"
-      )
-
       assert {:ok, %{success: true, output: echo}} = ManageWatcher.execute(args, turn(ctx, []))
-      assert echo =~ "filters with the default filter model"
+
+      assert echo =~
+               "filters with the default filter model (the main model unless settings name another)"
 
       assert [[nil, nil]] =
                CueFixtures.rows(

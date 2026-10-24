@@ -4,9 +4,9 @@ defmodule FermixCore.Management.Cues.WatcherRow do
   read-only: watchers are made and changed in a consent turn in chat, so the
   row carries no actions.
 
-  `state` is `paused` (switched off), `no_model` (an `llm` watcher with no
-  model of its own while no default filter model is set), `held` (its filter
-  cannot reach its model) or `on`. A watcher is its ids, switches, budgets and
+  `state` is `paused` (switched off), `held` (its filter cannot reach its
+  model) or `on`. An `llm` watcher with no model of its own filters with the
+  default filter model, else the main model, so none waits for one. A watcher is its ids, switches, budgets and
   counts; `purpose` and `instructions` are the owner's own words and travel on
   `cues.watchers.get` alone, and examples are counted, never shown. Decision
   reasons and filter hints never cross: a model wrote them from outside text.
@@ -14,9 +14,9 @@ defmodule FermixCore.Management.Cues.WatcherRow do
 
   alias FermixCore.Cues.Overview
 
-  @states ~w(on paused held no_model)
+  @states ~w(on paused held)
 
-  @type facts :: %{default_model?: boolean(), window_s: pos_integer()}
+  @type facts :: %{window_s: pos_integer()}
 
   @doc "Every state a watcher row can carry."
   @spec states() :: [String.t()]
@@ -84,17 +84,10 @@ defmodule FermixCore.Management.Cues.WatcherRow do
 
   defp state(%{enabled?: false}, _facts), do: "paused"
 
-  defp state(%{filter: "llm", filter_model: model}, %{default_model?: false})
-       when model in [nil, ""],
-       do: "no_model"
-
   defp state(%{held?: true}, _facts), do: "held"
   defp state(_watcher, _facts), do: "on"
 
   defp sentence("paused", _watcher), do: "Paused."
-
-  defp sentence("no_model", _watcher),
-    do: "Waiting for a filter model: set a default filter model, or ask Fermix to give it one."
 
   defp sentence("held", %{waiting: 1}),
     do: "Held: it cannot reach its filter model. One item is waiting."

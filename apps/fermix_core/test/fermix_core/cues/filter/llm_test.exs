@@ -52,10 +52,14 @@ defmodule FermixCore.Cues.Filter.LlmTest do
       Application.put_env(:fermix_core, :agent, agent)
     end)
 
-    # A primary that resolves, so a test that sees no adapter call proves the
-    # filter never fell back to it.
+    # A primary that resolves, the main model a watcher with no model of its
+    # own and no default filter model runs on.
     Application.put_env(:fermix_core, :routing, [])
-    Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test", primary: true])
+
+    Application.put_env(:fermix_core, :providers,
+      openai: [api_key: "sk-test", primary: true, default_model: "gpt-5.5"]
+    )
+
     :ok
   end
 
@@ -113,24 +117,52 @@ defmodule FermixCore.Cues.Filter.LlmTest do
     )
   end
 
-  describe "the route (C54: never the primary)" do
-    test "no watcher model and no default filter model: no_filter_model and no call" do
+  describe "the route" do
+    test "no watcher model and no default filter model: the main model, at low effort" do
       watcher = %{filter_provider: nil, filter_model: nil}
 
-      assert Llm.route(claim(watcher).watcher) == {:error, :no_filter_model}
+      assert {:ok, [{%{provider: :openai}, route_opts}]} = Llm.route(claim(watcher).watcher)
+      assert Keyword.fetch!(route_opts, :model) == "gpt-5.5"
+      assert Keyword.fetch!(route_opts, :reasoning_effort) == :low
 
-      assert {:provider_failure, %{kind: :no_filter_model, message: message}} =
+      assert {:pass, "x", nil} =
                decide(claim(watcher), turn(~s({"decision":"pass","reason":"x"})))
 
-      assert message == Llm.no_filter_model_sentence()
-      refute_received {:chat, _messages, _capabilities, _opts}
+      assert_received {:chat, _messages, [], opts}
+      assert Keyword.fetch!(opts, :model) == "gpt-5.5"
     end
 
-    test "a provider default with no model is not a filter model" do
-      Application.put_env(:fermix_core, :routing, filter_provider: "openai")
+    test "the main model brings its failover chain" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-test", primary: true, default_model: "gpt-5.5"],
+        anthropic: [api_key: "sk-ant-test", default_model: "claude-sonnet-5-5"]
+      )
 
-      assert Llm.route(claim(%{filter_provider: nil, filter_model: nil}).watcher) ==
-               {:error, :no_filter_model}
+      assert {:ok, [{%{provider: :openai}, _lead}, {%{provider: :anthropic}, fallback}]} =
+               Llm.route(%{filter_provider: nil, filter_model: nil})
+
+      assert Keyword.fetch!(fallback, :model) == "claude-sonnet-5-5"
+    end
+
+    test "a provider default with no model names no model: the main model runs" do
+      Application.put_env(:fermix_core, :routing, filter_provider: "anthropic")
+
+      assert {:ok, [{%{provider: :openai}, route_opts}]} =
+               Llm.route(claim(%{filter_provider: nil, filter_model: nil}).watcher)
+
+      assert Keyword.fetch!(route_opts, :model) == "gpt-5.5"
+    end
+
+    test "with no primary that resolves the call is a provider failure, no call" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-test", primary: true],
+        anthropic: [api_key: "sk-ant-test", primary: true]
+      )
+
+      assert {:provider_failure, %{kind: :no_route}} =
+               decide(claim(%{filter_provider: nil, filter_model: nil}), turn("{}"))
+
+      refute_received {:chat, _messages, _capabilities, _opts}
     end
 
     test "the watcher's own model wins over the default" do

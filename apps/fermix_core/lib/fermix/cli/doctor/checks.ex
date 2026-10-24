@@ -3431,7 +3431,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp cues_available?(opts), do: Keyword.get_lazy(opts, :cues_available?, &Cues.available?/0)
 
   defp filter_line(nil), do: ""
-  defp filter_line(filter), do: "; filter: #{describe_filter(filter)}"
+  defp filter_line(filter), do: "; filter: #{describe_override(filter)}"
 
   # Parsing only proves the provider/effort *atoms* are known. A model slug is
   # free-form, so a typo or a model removed from the catalog (or left pointing at
@@ -3487,10 +3487,6 @@ defmodule Fermix.CLI.Doctor.Checks do
     |> Enum.filter(& &1)
     |> Enum.join(", ")
   end
-
-  # The cue filter never falls back to the main model (M60 §8.2).
-  defp describe_filter(%{model: nil}), do: "not set (each watcher with a filter names its model)"
-  defp describe_filter(filter), do: describe_override(filter)
 
   defp ok(name, detail), do: %{name: name, status: :ok, detail: detail}
   defp warn(name, detail), do: %{name: name, status: :warn, detail: detail}

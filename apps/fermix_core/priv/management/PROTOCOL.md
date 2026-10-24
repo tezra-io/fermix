@@ -990,13 +990,14 @@ Notes that the shapes alone do not carry:
   starts at boot, so `restart` is true), `cues_mandates_enabled` (read at every
   mandate call), `filter_provider` and `filter_model` (the default filter
   model, read at every filter call) and `cues_door_port` (`advanced`, 1024 to
-  65535, always on 127.0.0.1). `filter_provider` offers every provider the
-  engine publishes plus `""` "None", a provider that is not set up disabled
-  with its hint; `filter_model` offers that provider's catalog as
-  suggestions. The two are applied together in one `settings.apply`, both or
-  "None" for both; either alone is refused with "Pick a provider and a model,
-  or clear both." Clearing them while `llm` watchers name no model of their
-  own answers a `side_effects` sentence saying how many now wait for one.
+  65535, always on 127.0.0.1). The rows carry their explanations in `info`
+  and no `footer`. `filter_provider` offers `""`, the main model, labelled with
+  it ("Main model (Anthropic · claude-sonnet-5-5)"), then only the providers
+  that are set up; a saved provider that is no longer set up stays, disabled
+  with its hint, so the value is always an option. `filter_model` offers the
+  chosen provider's catalog as suggestions. With neither set, every filter runs on the main model. The two
+  are applied together in one `settings.apply`, both or `""` for both; either
+  alone is refused with "Pick a provider and a model, or clear both."
 - **Every cue write goes through the setup page's own path**, so the outside
   edit refusal (`external_change`), the baseline re-record, the secret
   take-back and the source workers' reconcile apply identically from either
@@ -1026,11 +1027,11 @@ Notes that the shapes alone do not carry:
   them. A webhook's address is returned by `cues.sources.url.get` alone, on
   every ask, and is never on a list.
 - **A watcher row is read-only**: watchers are made and changed in a chat with
-  Fermix. `state` is `on`, `paused`, `held` (its filter cannot reach its model)
-  or `no_model` (an `llm` watcher with no model of its own while no default is
-  set). `purpose` and `instructions` are the owner's own words and are on
-  `cues.watchers.get` alone; examples are counted, never shown; reasons and
-  hints never cross.
+  Fermix. `state` is `on`, `paused` or `held` (its filter cannot reach its
+  model); an `llm` watcher with no model of its own filters with the default
+  filter model, else the main model. `purpose` and `instructions` are the
+  owner's own words and are on `cues.watchers.get` alone; examples are
+  counted, never shown; reasons and hints never cross.
 - **A mandate row carries its load and its approval.** `load` is `active`, or
   `inactive` with the check's sentence; `approval.state` is `unapproved`,
   `approved`, `changed` or `disabled`, null where memory is off. A client

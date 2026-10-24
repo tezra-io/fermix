@@ -11,6 +11,12 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   `FermixCore.Cues.Settings` (or `Cues.Webhook.ensure_path_secret/2` for a
   webhook's URL) and tells the LiveView what to do next.
 
+  The filter model offers what `FermixCore.Cues.FilterChoices` offers: the
+  main model (the empty choice) and the providers that are set up. `clock`
+  carries `now` and the owner's zone (`[fermix_core.personalization]
+  timezone`, through `ComputerHistory.Config.timezone/1`), so the pane can
+  write a row's time short and local.
+
   The tab exists only in a build that admits cues (`visible_tabs/2`). Nothing
   here shows cue text: watchers are counts and ids, sources are Fermix's own
   status columns, and a secret is shown as set or not set. The two values a
@@ -21,15 +27,14 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   (zero-arity, a `DateTime`) and `:mandate_opts`.
   """
 
+  alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Cues.FilterChoices
   alias FermixCore.Cues.Overview
   alias FermixCore.Cues.Presets
   alias FermixCore.Cues.Settings
   alias FermixCore.Cues.Webhook
   alias FermixCore.Memory.Config, as: MemoryConfig
-  alias FermixCore.Providers.Descriptor
-  alias FermixCore.Providers.ModelCatalog
-  alias FermixCore.Providers.Selection
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretWriter
 
@@ -96,7 +101,8 @@ defmodule FermixWebWeb.SetupLive.CuesState do
       verify_methods: @verify_methods,
       source_editor: nil,
       mandate_editor: nil,
-      reveal: nil
+      reveal: nil,
+      clock: %{now: now, zone: owner_zone(core)}
     }
   end
 
@@ -132,8 +138,8 @@ defmodule FermixWebWeb.SetupLive.CuesState do
 
   defp event("save_filter", %{"cues_filter" => params}, state, _opts) do
     case Settings.save_filter_model(params["provider"], params["model"]) do
-      {:ok, %{cleared?: true}} -> {:saved, "Default filter model cleared.", []}
-      {:ok, %{cleared?: false}} -> {:saved, "Default filter model saved.", []}
+      {:ok, %{cleared?: true}} -> {:saved, "Filter model set to the main model.", []}
+      {:ok, %{cleared?: false}} -> {:saved, "Filter model saved.", []}
       {:error, reason} -> {:error, reason, put_filter(state, params)}
     end
   end
@@ -238,44 +244,24 @@ defmodule FermixWebWeb.SetupLive.CuesState do
 
   # --- default filter model ----------------------------------------------------
 
+  # The empty provider is the main model; only providers that are set up are
+  # offered, each with its catalog models as suggestions.
   defp filter_view(routing, snapshot) do
     provider = routing |> Keyword.get(:filter_provider) |> text()
 
     %{
       provider: provider,
       model: routing |> Keyword.get(:filter_model) |> text(),
-      providers: provider_options(snapshot),
-      models: models_for(provider)
+      main_label: FilterChoices.main_model_label(snapshot),
+      providers: FilterChoices.providers(snapshot),
+      models: FilterChoices.models(provider)
     }
   end
 
   defp put_filter(state, params) do
     provider = text(params["provider"])
     filter = %{state.filter | provider: provider, model: text(params["model"])}
-    %{state | filter: %{filter | models: models_for(provider)}}
-  end
-
-  # Every provider the engine publishes; the ones not set up yet say so, since
-  # a filter on one would fail at its first call.
-  defp provider_options(%{fermix_core: core}) do
-    blocks = Keyword.get(core, :providers, [])
-
-    Enum.map(ModelCatalog.providers(), fn id ->
-      %{
-        id: Atom.to_string(id),
-        label: Descriptor.fetch!(id).label,
-        configured?: Selection.configured?(id, Keyword.get(blocks, id, []))
-      }
-    end)
-  end
-
-  # The engine's own catalog as suggestions; a provider that lists its models
-  # live (or ships none) takes a typed id.
-  defp models_for(provider) do
-    case Enum.find(ModelCatalog.providers(), &(Atom.to_string(&1) == provider)) do
-      nil -> []
-      id -> Enum.map(ModelCatalog.models_for(id), &%{id: &1.id, label: &1.label})
-    end
+    %{state | filter: %{filter | models: FilterChoices.models(provider)}}
   end
 
   # --- sources -------------------------------------------------------------------
@@ -655,4 +641,9 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   defp blank(value), do: value
 
   defp now(opts), do: Keyword.get(opts, :now, &DateTime.utc_now/0).()
+
+  defp owner_zone(core) do
+    zone = core |> Keyword.get(:personalization, []) |> Keyword.get(:timezone)
+    ComputerHistoryConfig.timezone(timezone: zone)
+  end
 end

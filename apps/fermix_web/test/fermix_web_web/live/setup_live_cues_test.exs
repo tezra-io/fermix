@@ -62,6 +62,7 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
     Application.put_env(:fermix_core, :plugins_dist_opts, [])
     Application.put_env(:fermix_core, :oauth, %{})
     Application.put_env(:fermix_core, :cues, [])
+    Application.put_env(:fermix_core, :personalization, [])
     Application.delete_env(:fermix_channels, :telegram)
     Application.put_env(:fermix_channels, :imessage, enabled: false)
     Application.put_env(:fermix_web, :imessage_macos?, false)
@@ -108,10 +109,23 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       assert html =~ "Run cues"
       assert html =~ "Let mandates act"
       assert html =~ "Door port"
-      assert html =~ "Door: not running; cues are off."
-      assert html =~ "Fermix never falls back to your main model"
+      assert html =~ "Not running"
+      assert html =~ "Filter model"
+      refute html =~ "never falls back to your main model"
       assert html =~ "Watchers are made and changed in chat with Fermix"
       assert html =~ "Memory is off"
+      assert html =~ ~s(href="https://fermix.ai/docs/cues/")
+
+      # Every explanation lives behind a tooltip, so each one takes keyboard
+      # focus; a tooltip around a button rides the button's own focus.
+      tips =
+        html
+        |> LazyHTML.from_fragment()
+        |> LazyHTML.query("#cues-pane [data-tip]")
+        |> Enum.reject(&(LazyHTML.to_html(&1) =~ "<button"))
+
+      assert tips != []
+      assert Enum.all?(tips, &(LazyHTML.attribute(&1, "tabindex") == ["0"]))
     end
   end
 
@@ -178,44 +192,82 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
 
       {:ok, view, _html} = live(conn, "/setup")
 
-      assert open_cues(view) =~ "Door: listening on 127.0.0.1:#{port}"
+      assert open_cues(view) =~ "Listening on 127.0.0.1:#{port}"
     end
   end
 
   describe "default filter model" do
+    test "offers the main model first and only the providers that are set up", %{conn: conn} do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "invented-key-2207"])
+      {:ok, view, _html} = live(conn, "/setup")
+      html = open_cues(view)
+
+      assert html =~ ~r/<option value="" selected[^>]*>\s*Main model \(OpenAI/
+      assert html =~ ~s(<option value="openai")
+      refute html =~ ~s(<option value="anthropic")
+      refute html =~ "(not set up)"
+      # The model box belongs to a chosen provider; the main model has its own.
+      refute html =~ ~s(name="cues_filter[model]")
+
+      html =
+        view
+        |> form("#cues-filter-form", cues_filter: %{provider: "openai"})
+        |> render_change()
+
+      assert html =~ ~s(name="cues_filter[model]")
+    end
+
     test "saves the provider and model and clears them", %{conn: conn} do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "invented-key-2207"])
       model = hd(ModelCatalog.models_for(:openai)).id
       {:ok, view, _html} = live(conn, "/setup")
       open_cues(view)
+
+      view
+      |> form("#cues-filter-form", cues_filter: %{provider: "openai"})
+      |> render_change()
 
       html =
         view
         |> form("#cues-filter-form", cues_filter: %{provider: "openai", model: model})
         |> render_submit()
 
-      assert html =~ "Default filter model saved."
+      assert html =~ "Filter model saved."
       assert %{provider: :openai, model: ^model} = RoutingOverrides.filter()
       routing = persisted(:routing)
       assert Keyword.get(routing, :filter_provider) == "openai"
       assert Keyword.get(routing, :filter_model) == model
 
+      # Choosing the main model takes the model box away, so the save posts no model.
       html =
         view
-        |> form("#cues-filter-form", cues_filter: %{provider: "", model: ""})
+        |> form("#cues-filter-form", cues_filter: %{provider: ""})
+        |> render_change()
+
+      refute html =~ ~s(name="cues_filter[model]")
+
+      html =
+        view
+        |> form("#cues-filter-form", cues_filter: %{provider: ""})
         |> render_submit()
 
-      assert html =~ "Default filter model cleared."
+      assert html =~ "Filter model set to the main model."
       assert %{provider: nil, model: nil} = RoutingOverrides.filter()
+      routing = persisted(:routing)
+      refute Keyword.has_key?(routing, :filter_provider)
+      refute Keyword.has_key?(routing, :filter_model)
     end
 
     test "a model without a provider is refused", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
       open_cues(view)
 
+      # The page draws no model box for the main model; the save refuses the
+      # pair on its own all the same.
       html =
         view
-        |> form("#cues-filter-form", cues_filter: %{provider: "", model: "some-model"})
-        |> render_submit()
+        |> element("#cues-filter-form")
+        |> render_submit(%{cues_filter: %{provider: "", model: "some-model"}})
 
       assert html =~ "Pick a provider and a model, or clear both."
       assert persisted(:routing) == []
@@ -424,7 +476,24 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
 
       {:ok, _view, fresh} = live(conn, "/setup?tab=cues")
       refute fresh =~ signing
-      assert fresh =~ "Signing secret: set"
+      assert fresh =~ ~s(id="cue-source-repo-events")
+      refute fresh =~ "Needs a signing secret"
+    end
+
+    test "a source missing its secret says so, and only then", %{conn: conn} do
+      put_cues(
+        sources: %{
+          "repo-events" => [preset: "github"],
+          "home-alerts" => [kind: "local_push"],
+          "desk-alerts" => [kind: "local_push", token: "@keyring"]
+        }
+      )
+
+      {:ok, view, _html} = live(conn, "/setup?tab=cues")
+
+      assert view |> element("#cue-source-repo-events") |> render() =~ "Needs a signing secret"
+      assert view |> element("#cue-source-home-alerts") |> render() =~ "Needs a token"
+      refute view |> element("#cue-source-desk-alerts") |> render() =~ "Needs a token"
     end
 
     test "a webhook source's URL is made on request and shown with the door's port", %{
@@ -485,9 +554,51 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       {:ok, _view, html} = live(conn, "/setup?tab=cues")
 
       assert html =~ "Polling"
-      assert html =~ "2026-10-17 11:45 UTC"
+      # The full time rides the pill's title; the row itself stays short.
+      assert html =~ ~s(title="Last good 2026-10-17 11:45 UTC")
       assert html =~ "7 today"
       assert html =~ "rate_limited 3"
+    end
+
+    test "a source row shows its last item as a short time in the owner's zone", %{conn: conn} do
+      %{repo: repo, conn: db} = CueFixtures.start_repo("setup_source_times")
+      Application.put_env(:fermix_web, :cues_pane_opts, now: fn -> @now end, repo: repo)
+      Application.put_env(:fermix_core, :personalization, timezone: "Asia/Tokyo")
+
+      put_cues(
+        sources: %{
+          "feed-today" => [preset: "rss", url: "https://today.example.org/feed"],
+          "feed-yesterday" => [preset: "rss", url: "https://yesterday.example.org/feed"],
+          "feed-older" => [preset: "rss", url: "https://older.example.org/feed"]
+        }
+      )
+
+      # @now is 21:00 on Oct 17 in Tokyo.
+      for {ref, accepted} <- [
+            {"feed-today", "2026-10-17T11:30:00.000000Z"},
+            {"feed-yesterday", "2026-10-15T20:00:00.000000Z"},
+            {"feed-older", "2026-10-12T03:00:00.000000Z"}
+          ] do
+        CueFixtures.exec!(
+          db,
+          """
+          INSERT INTO cue_sources (source_ref, status, last_accepted_at, items_today, items_day,
+            reject_counts, updated_at)
+          VALUES (?, 'polling', ?, 1, '2026-10-17', '{}', ?)
+          """,
+          [ref, accepted, accepted]
+        )
+      end
+
+      {:ok, view, _html} = live(conn, "/setup?tab=cues")
+
+      today = view |> element("#cue-source-feed-today") |> render()
+      assert today =~ "last item 20:30"
+      assert today =~ ~s(title="2026-10-17 20:30 JST")
+      refute today =~ "2026-10-17T11:30"
+
+      assert view |> element("#cue-source-feed-yesterday") |> render() =~ "last item yesterday"
+      assert view |> element("#cue-source-feed-older") |> render() =~ "last item Oct 12"
     end
   end
 
@@ -528,6 +639,7 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       assert html =~ "eng-blogs"
       assert html =~ watcher.job_id
       assert html =~ "Held"
+      assert html =~ "Model filter"
       assert html =~ ~s(data-watcher-waiting="1")
       assert html =~ ~s(data-watcher-passed="1")
       # The dropped delivery 30 hours ago is outside the last day.
@@ -573,8 +685,7 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       )
 
       {:ok, view, html} = live(conn, "/setup?tab=cues")
-      assert html =~ "Active."
-      assert html =~ "Not approved yet."
+      assert html =~ "Needs approval"
 
       html =
         view
@@ -583,6 +694,8 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
 
       assert html =~ "Mandate release-issues approved."
       assert html =~ "Approved 2026-10-17 12:00 UTC from the setup page."
+      # Approved as it is now, so there is nothing left to approve.
+      refute html =~ ~s(phx-click="cues_approve_mandate")
 
       assert {:ok, %{state: :approved, approved_from: "setup page"}} =
                Pins.status("release-issues",

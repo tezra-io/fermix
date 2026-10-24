@@ -34,7 +34,6 @@ defmodule FermixCore.Cues.Watchers do
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesWatchersSql
   alias FermixCore.Providers.ModelCatalog
-  alias FermixCore.Providers.RoutingOverrides
 
   @name_pattern ~r/\A[a-z0-9][a-z0-9-]{0,63}\z/
   @purpose_max 200
@@ -45,7 +44,6 @@ defmodule FermixCore.Cues.Watchers do
   @task_prompt_max 8_000
 
   @cap_reached "This watcher has 20 instructions; merge some first."
-  @no_filter_model "Pick a model for this watcher's filter, or set a default filter model in settings."
   @none_needs_cap "A watcher with no filter wakes its task for every cue; say how many runs a day " <>
                     "it may cause, or say none."
   @none_takes_nothing "A watcher with no filter takes no purpose, instructions or filter model."
@@ -262,23 +260,16 @@ defmodule FermixCore.Cues.Watchers do
   defp check_purpose(_purpose),
     do: {:error, "Give the watcher a purpose: one line on what it is for."}
 
-  # The watcher's own model, else the daemon-wide default; never the primary
-  # route (design §8.2, C54).
+  # The watcher's own model, or neither: then the filter runs on the default
+  # filter model, else the main model, read at each call (`Filter.Llm`).
   defp filter_model(params) do
     provider = blank_to_nil(Map.get(params, :filter_provider))
     model = blank_to_nil(Map.get(params, :filter_model))
 
     case {provider, model} do
-      {nil, nil} -> default_filter_model()
+      {nil, nil} -> {:ok, {nil, nil}}
       {p, m} when is_binary(p) and is_binary(m) -> known_provider(p, m)
       _one_of_two -> {:error, "Give filter_provider and filter_model together, or neither."}
-    end
-  end
-
-  defp default_filter_model do
-    case RoutingOverrides.filter() do
-      %{model: model} when is_binary(model) -> {:ok, {nil, nil}}
-      _none -> {:error, @no_filter_model}
     end
   end
 
@@ -989,7 +980,9 @@ defmodule FermixCore.Cues.Watchers do
   defp change_words({:task_job_id, job_id}), do: "task job #{job_id}"
 
   defp filter_words(%{filter: "none"}), do: "passes every item without a filter"
-  defp filter_words(%{filter_model: nil}), do: "filters with the default filter model"
+
+  defp filter_words(%{filter_model: nil}),
+    do: "filters with the default filter model (the main model unless settings name another)"
 
   defp filter_words(watcher),
     do: "filters with #{watcher.filter_provider} #{watcher.filter_model}"

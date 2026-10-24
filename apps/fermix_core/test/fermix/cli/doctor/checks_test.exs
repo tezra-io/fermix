@@ -795,12 +795,12 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "not a known model for any provider"
     end
 
-    # M60: the cue filter never falls back to the main model, so an unset default
-    # is "not set", not "inherits main"; a typo'd filter model fails like the rest.
-    test "the filter default is checked and never described as inheriting" do
+    # M60: an unset filter default inherits the main model like the other
+    # routing keys; a typo'd filter model fails like the rest.
+    test "the filter default is checked, and an unset one inherits the main model" do
       Application.put_env(:fermix_core, :routing, [])
       result = Checks.routing_overrides()
-      assert result.detail =~ "filter: not set (each watcher with a filter names its model)"
+      assert result.detail =~ "filter: inherits main"
 
       Application.put_env(:fermix_core, :routing, filter_model: "claude-opus-4-7")
       result = Checks.routing_overrides()

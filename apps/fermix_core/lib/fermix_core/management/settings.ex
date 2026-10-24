@@ -277,7 +277,7 @@ defmodule FermixCore.Management.Settings do
       "side_effects" =>
         side_effects(before, current, switch) ++
           phone ++
-          reach_switch(before, current, opts) ++ CuesSection.side_effects(before, current)
+          reach_switch(before, current, opts)
     }
   end
 

@@ -167,7 +167,7 @@ defmodule FermixCore.Management.Cues do
       "sources" => length(sources),
       "sources_attention" => Enum.count(sources, &(&1["state"] in SourceRow.attention_states())),
       "watchers" => readable_length(watchers),
-      "watchers_held" => readable_count(watchers, &(&1["state"] in ["held", "no_model"])),
+      "watchers_held" => readable_count(watchers, &(&1["state"] == "held")),
       "mandates" => length(mandates),
       "mandates_attention" => Enum.count(mandates, &mandate_attention?/1),
       "proposals_waiting" => waiting_count(facts, opts)
@@ -516,7 +516,7 @@ defmodule FermixCore.Management.Cues do
   defp watcher_rows(facts, opts) do
     case Overview.watchers(facts.now, repo_opts(opts)) do
       {:ok, watchers} ->
-        watcher_facts = %{default_model?: default_model?(), window_s: Overview.window_s()}
+        watcher_facts = %{window_s: Overview.window_s()}
 
         {:ok,
          watchers
@@ -541,11 +541,6 @@ defmodule FermixCore.Management.Cues do
       {:error, :not_found} -> invalid("name", "There is no watcher named #{name}.")
       {:error, reason} -> rows_error("watcher", reason)
     end
-  end
-
-  defp default_model? do
-    routing = Application.get_env(:fermix_core, :routing, [])
-    Keyword.get(routing, :filter_model) not in [nil, ""]
   end
 
   # --- mandates --------------------------------------------------------------------

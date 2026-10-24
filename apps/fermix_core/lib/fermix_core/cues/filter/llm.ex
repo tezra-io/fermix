@@ -11,10 +11,10 @@ defmodule FermixCore.Cues.Filter.Llm do
 
   The watcher's `filter_model` (with its `filter_provider`, or the primary's
   when none is named) when set, else `[fermix_core.routing] filter_*` through
-  `RoutingOverrides.filter/0`, else `:no_filter_model`. Never
-  `Selection.ordered_routes/0` and never the primary route: that is usually the
-  main agent's model, an expensive one for a yes-or-no question. A route needs a
-  model; a provider alone names none. The effort is `filter_reasoning_effort`
+  `RoutingOverrides.filter/0`, else the main model: `Selection.ordered_routes/0`,
+  the primary with its failover chain, as every other unpinned model choice
+  inherits it. A route needs a model; a provider alone names none, so a default
+  with no model leaves the main model. The effort is `filter_reasoning_effort`
   when set, else `:low`, clamped by `RoutingOverrides.apply_effort/2`. Not
   `:none`: on OpenAI that omits the field and leaves the model at its own
   default effort. Every call also asks for no thinking (`thinking: :off`, read
@@ -56,6 +56,7 @@ defmodule FermixCore.Cues.Filter.Llm do
   alias FermixCore.Providers.OpenAI.Responses
   alias FermixCore.Providers.RouteResolver
   alias FermixCore.Providers.RoutingOverrides
+  alias FermixCore.Providers.Selection
 
   @max_output_tokens 150
   @default_effort :low
@@ -74,18 +75,12 @@ defmodule FermixCore.Cues.Filter.Llm do
   ]
   @input_refused_statuses [400, 413, 422]
 
-  @no_filter_model "Pick a model for this watcher's filter, or set a default filter model in settings."
-
   @type failure :: %{kind: atom(), message: String.t()}
   @type result ::
           {:pass, String.t(), String.t() | nil}
           | {:drop, String.t()}
           | {:provider_failure, failure()}
           | {:content_failure, failure()}
-
-  @doc "The sentence for a watcher with no filter model and no default filter model."
-  @spec no_filter_model_sentence() :: String.t()
-  def no_filter_model_sentence, do: @no_filter_model
 
   @doc """
   Decides one claim. Opts: `:session_id` (required, the call's own), and the
@@ -113,18 +108,12 @@ defmodule FermixCore.Cues.Filter.Llm do
   crash of the call.
   """
   @spec route(map()) ::
-          {:ok, [{Adapter.route_key(), keyword()}]}
-          | {:error, :no_filter_model}
-          | {:error, {:no_route, String.t()}}
+          {:ok, [{Adapter.route_key(), keyword()}]} | {:error, {:no_route, String.t()}}
   def route(watcher) when is_map(watcher) do
     default = RoutingOverrides.filter()
 
-    with {:ok, pick} <- pick(watcher, default),
-         {:ok, provider} <- route_provider(pick) do
-      resolved = RouteResolver.resolve!(provider: provider, model: pick.model)
-
-      {:ok,
-       RoutingOverrides.apply_effort([resolved], default.reasoning_effort || @default_effort)}
+    with {:ok, routes} <- base_routes(pick(watcher, default)) do
+      {:ok, RoutingOverrides.apply_effort(routes, default.reasoning_effort || @default_effort)}
     end
   rescue
     error in ArgumentError -> {:error, {:no_route, Exception.message(error)}}
@@ -145,7 +134,22 @@ defmodule FermixCore.Cues.Filter.Llm do
     {:ok, %{provider: default.provider, model: model}}
   end
 
-  defp pick(_watcher, _default), do: {:error, :no_filter_model}
+  defp pick(_watcher, _default), do: :main_model
+
+  defp base_routes(:main_model) do
+    case Selection.ordered_routes() do
+      {:ok, routes} ->
+        {:ok, routes}
+
+      {:error, reason} ->
+        {:error, {:no_route, "The main model has no route (#{inspect(reason)})."}}
+    end
+  end
+
+  defp base_routes({:ok, pick}) do
+    with {:ok, provider} <- route_provider(pick),
+         do: {:ok, [RouteResolver.resolve!(provider: provider, model: pick.model)]}
+  end
 
   defp route_provider(%{provider: provider}) when is_atom(provider) and not is_nil(provider),
     do: {:ok, provider}
@@ -214,7 +218,6 @@ defmodule FermixCore.Cues.Filter.Llm do
   defp answer({:error, :invalid_answer, detail}), do: content_failure(:invalid_answer, detail)
   defp answer(decision), do: decision
 
-  defp classify_error(:no_filter_model), do: provider_failure(:no_filter_model, @no_filter_model)
   defp classify_error({:no_route, message}), do: provider_failure(:no_route, message)
   defp classify_error(:no_routes), do: provider_failure(:no_route, "No route resolved.")
 
