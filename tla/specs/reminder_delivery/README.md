@@ -414,6 +414,11 @@ code. The comments' `application.ex` and `mobile.ex` numbers had drifted
 before M60 too (`:274` named the computer-use child, not the strategy); they
 now point at the committed file.
 
+Re-read on 2026-10-24 for Android push through FCM (on dev `a8c399b4`), which
+staled the `mobile.ex` pin: `send_approval` now hands the approval's id and
+expiry to its push. No delivery path the spec models (the reminder's send, its
+row, its push launch) changed.
+
 ## Code and doc drift
 
 - `delivery_worker.ex:173-176` says a claim past the validity boundary "cannot

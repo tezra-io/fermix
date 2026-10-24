@@ -57,11 +57,11 @@ one check):
 
 | Switch | The design | Switched off |
 |---|---|---|
-| `DecidesOnEvidence` | D20: the decision reads the read frontier and each device's acked cursor. | **Today's code:** one registered socket of the profile suppresses the push for every device (`push.ex:164`, `:407-417`). |
+| `DecidesOnEvidence` | D20: the decision reads the read frontier and each device's acked cursor. | **Today's code:** one registered socket of the profile suppresses the push for every device (`push.ex:214`, `:613-623`). |
 | `AcksAfterAnnounce` | The app acks a row once it has announced it: shown it on screen, or posted its notification. | The design's first draft: the app acks as soon as the row is persisted (PUSH-2). |
 | `LocalNotify` | The app posts the notification itself for a row that arrives while its chat is off screen. | The row is only listed. |
 | `NotifiedSet` | D22: the app announces an id once, whichever path brought it. | Every arrival alerts. |
-| `RetriesTransient` | D21: a transient dispatcher error is retried. | **Today's code:** one attempt, its failure logged (`notify_timeline_row`, `channels/mobile.ex:575-582`). |
+| `RetriesTransient` | D21: a transient dispatcher error is retried. | **Today's code:** one attempt, its failure logged (`notify_timeline_row`, `channels/mobile.ex:582-589`). |
 | `AttemptCap` | D21: at most three attempts per device. | The retry has no bound. |
 | `BootCheck` | D21: a boot step reads `push_attempted_seq` and decides once for the newest unread row above it. | **Today's code:** nothing runs at boot. |
 
@@ -176,6 +176,16 @@ again on 2026-10-23 for the commit of M60 (on dev `b0246d74`): that is the
 only change to the pinned functions, and the comments' `mobile.ex` numbers
 (13 lines low past `build_turn_result` after the move onto dev) now point at
 the committed file.
+
+Re-read on 2026-10-24 for Android push through FCM (M51 §10, on dev
+`a8c399b4`), which staled the `push.ex` and `session.ex` pins and moved the
+`mobile.ex` numbers. Each registered device is now pushed through its own
+platform's service (APNs or FCM), which is the abstract push platform the
+spec already has; an approval's push carries its id and expiry; and a phone's
+`push_unregister` clears its token, so the phone is no longer registered. The
+decision is unchanged (any socket of the profile suppresses the push, then the
+read frontier, then one attempt per row, nothing at boot), so nothing the
+spec models changed; the comments' line numbers now point at the new file.
 
 ## What the spec changed in the design
 
