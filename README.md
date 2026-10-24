@@ -204,22 +204,19 @@ The unit calls `fermix run`, which boots the OTP supervision tree, binds the Pho
 
 ### Local voice companion
 
-Realtime voice is an optional local mode: **FermixPet**, a native macOS app (macOS 13+) that lets you talk to the agent by voice. The daemon owns provider auth, prompts, tools, memory, and cost caps; the app only captures and plays audio, over a `0600` Unix socket at `~/.fermix/realtime.sock`.
+Realtime voice is an optional local mode: **Fermix**, the native Mac app (macOS 15 or later), lets you talk to the agent by voice. The daemon owns provider auth, prompts, tools, memory, and cost caps; the app only captures and plays audio, over a `0600` Unix socket at `~/.fermix/realtime.sock`.
 
 Enable it on the **setup page** under the *Realtime* tab (it needs an OpenAI API key), then restart the daemon. Check it with `fermix voice status`.
 
 Realtime uses the same capability surface as the main agent, so voice tool scope is governed by the sandbox mode and command profile rather than a voice-specific knob.
 
-FermixPet lives in its own repo, [tezra-io/fermix-macos](https://github.com/tezra-io/fermix-macos), which ships it as a Developer ID-signed, notarized DMG (universal2) with a Homebrew cask. Grab the DMG from that repo's releases, or build from its source:
+The Mac app, Fermix, ships as a Developer ID-signed, notarized DMG (universal2) with this engine inside it. Download it from [fermix.ai/download](https://fermix.ai/download/), or install the cask:
 
 ```bash
-git clone https://github.com/tezra-io/fermix-macos
-cd fermix-macos/Apps/FermixPet
-./script/build_and_run.sh install
-open "$HOME/Applications/FermixPet.app"
+brew install --cask tezra-io/tap/fermix
 ```
 
-Full setup options, the dev workflow, and troubleshooting are in the [fermix-macos repo](https://github.com/tezra-io/fermix-macos).
+Setup and troubleshooting are in the [installation guide](https://fermix.ai/docs/installation/).
 
 ### Channels
 
@@ -341,7 +338,7 @@ fermix/ (umbrella)
 └── apps/fermix_nif/        # C NIF (elixir_make): kill_pgid process-group signal shim
 ```
 
-The native macOS voice companion (FermixPet) lives in [tezra-io/fermix-macos](https://github.com/tezra-io/fermix-macos) and talks to the daemon over the local Realtime socket.
+The Mac app ([fermix.ai/download](https://fermix.ai/download/)) talks to the daemon over the local management, Realtime and companion sockets.
 
 One BEAM VM, all `:permanent` under OTP. The data flow is straight-line:
 
@@ -462,12 +459,7 @@ echo "summarize current health" | fermix ask --stdin --json    # stdin + JSON ou
 curl -s http://127.0.0.1:4030/health/ready | jq .              # Phoenix readiness
 ```
 
-For the macOS Realtime companion (from [tezra-io/fermix-macos](https://github.com/tezra-io/fermix-macos)), point it at the same `FERMIX_HOME`:
-
-```bash
-cd fermix-macos/Apps/FermixPet
-FERMIX_HOME=~/.fermix-dev ./script/build_and_run.sh
-```
+The Mac app's development loop lives in its own repository (`scripts/dev_e2e.sh up` in `tezra-io/fermix-macos`): it builds this engine from a checkout and runs it under its own home, `~/.fermix-macos`, never this one.
 
 ### Unit and integration tests
 
