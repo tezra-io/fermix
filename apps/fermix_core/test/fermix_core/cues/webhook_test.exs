@@ -114,11 +114,11 @@ defmodule FermixCore.Cues.WebhookTest do
     test "each method takes only its own fields" do
       refusals = [
         {%{"kind" => "webhook", "verify" => "hmac", "id" => "content_hash"},
-         ~r/hmac needs header/},
+         ~r/webhook source and needs header, the request header that carries the signature/},
         {%{"preset" => "github", "algorithm" => "md5"},
          ~r/algorithm "md5".*sha1, sha256, sha512/},
         {%{"kind" => "webhook", "verify" => "shared_secret", "id" => "content_hash"},
-         ~r/shared_secret needs header/},
+         ~r/webhook source and needs header/},
         {%{
            "kind" => "webhook",
            "verify" => "shared_secret",

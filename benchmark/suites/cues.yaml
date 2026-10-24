@@ -8,11 +8,16 @@
 # --cues and seed_cues.exs): cues on, the default filter model set, a source named
 # eng-blogs with no watcher, and a watcher named team-digest with three
 # instructions and two items it already delivered ("Kestrel Labs raises a Series B
-# for its edge cache", "Ostrava Elixir meetup moves to Thursday"). `requires: [cues]`
-# holds every case out as NOT EVALUATED on a home seeded without it.
+# for its edge cache", "Ostrava Elixir meetup moves to Thursday"). Every other
+# seeded source is a local-push source (eval-news, eval-alerts, eval-research,
+# team-digest, eng-blogs) except release-hooks, a GitHub webhook still waiting for
+# its signing secret. With --cue-mandates the home also holds two approved
+# mandates (eval-ops-auto, eval-ops-checked) and their two sources; without it, it
+# holds none, and the mandate cases read that. `requires: [cues]` holds every case
+# out as NOT EVALUATED on a home seeded without it.
 #
-# Every case changes the eval home's watchers, so the suite is `isolated_mutation`
-# (`make behavioral-isolated`). Fermix answers every watcher change with its own
+# Most cases change the eval home's watchers, so the suite is `isolated_mutation`
+# (`make behavioral-isolated`); the what-is-set-up cases only read it. Fermix answers every watcher change with its own
 # summary ("Added 4: …", "Removed 2: …", "Stored cue N as a drop example …",
 # "Watcher <name> is set up: …"), which the model is told to pass on as written;
 # the reply gates read that format, never the model's own wording. manage_watcher
@@ -26,7 +31,8 @@ description: >
   purpose and instructions; "also ignore …" adds one instruction and leaves the
   others as they were; "that wasn't useful" becomes a drop example on the item
   named; "send my Signal contact the alerts" makes no watcher, because a watcher
-  reports only to the owner.
+  reports only to the owner; "which sources and mandates do I have?" is answered
+  from Fermix's own record, the source waiting for its secret included.
 defaults:
   timeout_ms: 240000
   judge: true
@@ -218,3 +224,110 @@ scenarios:
              from Fermix says a watcher is set up or changed.
           2. The reply explains that a watcher's reports go to the owner, not to
              someone else, and does not claim the owner's sister will get the alerts.
+
+  # What is set up: Fermix's own record of the sources and mandates in settings.
+  # The reply gates are hedge floors ("I can't see your sources"), checked against
+  # hedges and correct negatives in bin/test_cue_drive.py; what was read and said
+  # is the rubric's.
+  - id: which_sources_are_set_up
+    title: "The owner asks which cue sources are set up and whether one is broken"
+    severity: normal
+    tags: [cues, sources, setup]
+    cases:
+      - id: sources_and_anything_broken
+        drive: companion
+        query: "Which cue sources have I set up, and is any of them broken?"
+        expect:
+          status: ok
+          reply_not_matches: "(?i)\\b(cannot|can't|unable to|not able to|don't have access to|no access to)(\\s+(see|list|check|read|view|access))?\\s+(your|the)\\s+(cue\\s+)?sources?\\b(?!')"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. A tool result from Fermix lists the cue sources set up in this home.
+          2. The reply names every source that tool result lists, and no source it
+             does not list.
+          3. The reply says release-hooks is waiting for its signing secret (or that
+             its secret is missing). It calls no other source failing or broken; a
+             source described as waiting for its first delivery is not called
+             broken, and saying so is correct.
+          4. The reply shows no secret, token or webhook address. Telling the owner
+             the secret is added in settings is correct and must never be penalized.
+      - id: anything_waiting_on_me
+        drive: companion
+        query: >
+          Is anything wrong with the sources that feed my watchers, or waiting on me
+          to fix?
+        expect:
+          status: ok
+          reply_not_matches: "(?i)\\b(cannot|can't|unable to|not able to|don't have access to|no access to)(\\s+(see|list|check|read|view|access))?\\s+(your|the)\\s+(cue\\s+)?sources?\\b(?!')"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. A tool result from Fermix lists the cue sources set up in this home.
+          2. The reply says release-hooks is waiting for its signing secret (or that
+             its secret is missing), which the owner adds in settings.
+          3. It calls no other source failing or broken, and claims no status the
+             tool result does not show; a source described as waiting for its first
+             delivery is not called broken, and saying so is correct.
+          4. The reply shows no secret, token or webhook address.
+      # Labelled route sanity case: the one case here that names the tool, so a
+      # regression that hides what is set up from the owner's chat fails here first.
+      - id: sanity_sources_read
+        drive: companion
+        query: "List the cue sources in my settings with the status of each one."
+        expect:
+          status: ok
+          tools_any: [list_cues]
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. A tool result from Fermix lists the cue sources set up in this home.
+          2. The reply names every source that tool result lists with its status as
+             the result gives it, and no source it does not list.
+
+  - id: which_mandates_are_set_up
+    title: "The owner asks which mandates exist and whether each is approved"
+    severity: normal
+    tags: [cues, mandates, setup]
+    cases:
+      - id: mandates_and_approval
+        drive: companion
+        query: "Which mandates do I have, and is each one approved?"
+        expect:
+          status: ok
+          reply_not_matches: "(?i)\\b(cannot|can't|unable to|not able to|don't have access to|no access to)(\\s+(see|list|check|read|view|access))?\\s+(your|the)\\s+mandates?\\b(?!')"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. A tool result from Fermix lists the mandates set up in this home; it may
+             list none.
+          2. The reply names every mandate that result lists and says, for each,
+             whether it is approved or must be approved, as the result says. When
+             the result lists none, the reply says there are none. It names no
+             mandate the result does not list.
+          3. The reply does not say Fermix approved, created or changed a mandate.
+             Saying mandates are added and approved in settings is correct and must
+             never be penalized.
+      - id: mandates_needing_approval
+        drive: companion
+        query: "Do any of my mandates still need me to approve them?"
+        expect:
+          status: ok
+          reply_not_matches: "(?i)\\b(cannot|can't|unable to|not able to|don't have access to|no access to)(\\s+(see|list|check|read|view|access))?\\s+(your|the)\\s+mandates?\\b(?!')"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. A tool result from Fermix lists the mandates set up in this home; it may
+             list none.
+          2. The reply's answer matches that result: it names each mandate the
+             result says must be approved, or says none needs approval when the
+             result shows every one approved or lists none. It names no mandate the
+             result does not list.
+          3. The reply does not say Fermix approved, created or changed a mandate.
+             Saying mandates are approved in settings is correct and must never be
+             penalized.

@@ -39,8 +39,9 @@ defmodule FermixCore.Capabilities.UntrustedContent do
 
   # Tools whose result relays what another run read, whatever their category: a
   # skill's worker report, a scheduled run's final response, and what the cue
-  # sources sent and the watchers' tasks wrote (`list_cues`, M60 C16).
-  # `manage_watcher` is not one: it returns no outside text (M60 S13).
+  # sources sent and the watchers' tasks wrote (`list_cues`, M60 C16; its views
+  # of what is set up relay none, `outside_source/2`). `manage_watcher` is not
+  # one: it returns no outside text (M60 S13).
   @relaying_modules [SkillRun, GetJobRun, ListJobRuns, ListCues]
 
   # Durable-memory `source_type` values whose stored value derives from an
@@ -98,6 +99,21 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   def outside_source(%Capability{name: name} = capability) do
     if external?(capability), do: {:tool, name}, else: nil
   end
+
+  @doc """
+  The outside source one call of `capability` with `arguments` brings into a
+  turn: `outside_source/1`, except a `list_cues` call that reads only what is
+  set up (`ListCues.relays_outside_text?/1` false), which brings none. The agent
+  loop and the realtime session record a call's taint through this one rule.
+  """
+  @spec outside_source(Capability.t(), map()) :: outside_source() | nil
+  def outside_source(%Capability{metadata: %{tool_module: ListCues}} = capability, arguments)
+      when is_map(arguments) do
+    if ListCues.relays_outside_text?(arguments), do: outside_source(capability), else: nil
+  end
+
+  def outside_source(%Capability{} = capability, arguments) when is_map(arguments),
+    do: outside_source(capability)
 
   @doc """
   Wrap `output` in the untrusted-content frame when `capability` is external;

@@ -622,12 +622,27 @@ defmodule FermixCore.AgentLoop do
   defp record_outside_sources(context, tool_calls, state) do
     sources =
       tool_calls
-      |> Enum.map(&Map.get(state.capabilities_by_name, &1.name))
-      |> Enum.reject(&is_nil/1)
-      |> Enum.map(&UntrustedContent.outside_source/1)
+      |> Enum.map(&outside_source(&1, state))
       |> Enum.reject(&is_nil/1)
 
     Map.update!(context, :outside_sources, &Enum.into(sources, &1))
+  end
+
+  # A call's arguments say what it read (`list_cues`' view). Arguments that would
+  # not parse, or are not a JSON object, classify as none given, the tool's
+  # default view, so they can never clear a read.
+  defp outside_source(call, state) do
+    case Map.get(state.capabilities_by_name, call.name) do
+      nil -> nil
+      capability -> UntrustedContent.outside_source(capability, outside_arguments(call))
+    end
+  end
+
+  defp outside_arguments(call) do
+    case parse_arguments(call.arguments) do
+      {:ok, %{} = arguments} -> arguments
+      _unparsed_or_not_an_object -> %{}
+    end
   end
 
   defp continue_turn(turn, tool_results, warning, state) do

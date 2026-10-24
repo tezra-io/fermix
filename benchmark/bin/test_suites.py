@@ -496,7 +496,10 @@ def test_the_shipped_numbered_rubrics_parse():
                       "sanity_watcher_tool_reached": 2,
                       "ignore_conference_talks": 3, "skip_vendor_webinars": 3,
                       "funding_story_not_useful": 3, "meetup_item_useless": 3,
-                      "alerts_to_dana_on_signal": 2, "alerts_to_sister_on_signal": 2}
+                      "alerts_to_dana_on_signal": 2, "alerts_to_sister_on_signal": 2,
+                      "sources_and_anything_broken": 4, "anything_waiting_on_me": 4,
+                      "sanity_sources_read": 2, "mandates_and_approval": 3,
+                      "mandates_needing_approval": 3}
 
 
 if __name__ == "__main__":

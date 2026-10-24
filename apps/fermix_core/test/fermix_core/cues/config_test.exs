@@ -224,13 +224,13 @@ defmodule FermixCore.Cues.ConfigTest do
       end
     end
 
-    test "a Bluesky stream without dids is refused with the preset's own sentence" do
+    test "a Bluesky stream without dids is refused by the presence rule" do
       for section <- [
             %{"preset" => "bluesky_jetstream"},
             %{"preset" => "bluesky_jetstream", "dids" => []}
           ] do
         assert_raise ArgumentError,
-                     "cues.sources.s1: a Bluesky stream needs dids, the accounts to follow",
+                     "cues.sources.s1 is a stream source and needs dids, the accounts to follow",
                      fn -> Config.normalize(source(section)) end
       end
 
@@ -342,6 +342,48 @@ defmodule FermixCore.Cues.ConfigTest do
   end
 
   describe "accessors" do
+    test "the fields a source must name itself: its kind's, its method's and its preset's, less what the preset fills" do
+      assert Config.required_fields(:feed, nil, nil) == [:url, :interval]
+      assert Config.required_fields(:feed, "rss", nil) == [:url]
+      assert Config.required_fields(:stream, nil, nil) == [:url]
+      assert Config.required_fields(:stream, "bluesky_jetstream", nil) == [:dids]
+      assert Config.required_fields(:webhook, nil, nil) == [:verify]
+      assert Config.required_fields(:webhook, nil, "hmac") == [:verify, :header]
+      assert Config.required_fields(:webhook, nil, :shared_secret) == [:verify, :header]
+      assert Config.required_fields(:webhook, nil, "standard_webhooks") == [:verify]
+      assert Config.required_fields(:webhook, "github", nil) == []
+      assert Config.required_fields(:webhook, "github", "shared_secret") == []
+      assert Config.required_fields(:local_push, nil, nil) == []
+
+      assert_raise ArgumentError, ~r/unknown preset "carrier"/, fn ->
+        Config.required_fields(:feed, "carrier", nil)
+      end
+    end
+
+    test "a signed or shared-secret webhook needs an identity, from itself or its preset" do
+      assert Config.identity_fields() == [:id_header, :id_path, :id]
+
+      assert Config.missing_identity?(:webhook, nil, "hmac", %{header: "X-Sig"})
+      assert Config.missing_identity?(:webhook, nil, :shared_secret, id: "")
+      refute Config.missing_identity?(:webhook, nil, "hmac", id_header: "X-Id")
+      refute Config.missing_identity?(:webhook, nil, :shared_secret, %{id: "content_hash"})
+      refute Config.missing_identity?(:webhook, nil, "hmac", %{id_path: "event.id"})
+      refute Config.missing_identity?(:webhook, nil, "standard_webhooks", %{})
+      refute Config.missing_identity?(:webhook, "github", nil, %{})
+      refute Config.missing_identity?(:feed, "rss", nil, %{})
+    end
+
+    test "a field the rule names, left out, is refused by the one presence check" do
+      for {section, pattern} <- [
+            {%{"kind" => "webhook", "verify" => "hmac", "id" => "content_hash"},
+             ~r/sources\.s1 is a webhook source and needs header/},
+            {%{"preset" => "bluesky_jetstream", "dids" => []},
+             ~r/sources\.s1 is a stream source and needs dids/}
+          ] do
+        assert_raise ArgumentError, pattern, fn -> Config.normalize(source(section)) end
+      end
+    end
+
     test "defaults when nothing is configured" do
       Application.put_env(:fermix_core, :cues, [])
 

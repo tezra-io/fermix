@@ -7,9 +7,11 @@ defmodule FermixCore.Cues.Presets do
   are in the normalized shape `Cues.Config.normalize/1` produces (atoms for
   enumerations, integers for seconds). A preset never carries a secret.
 
-  A preset whose fields need a rule of their own (Bluesky's `dids`) adds one
-  clause to `check_preset/2`, which runs on the filled section, so
-  `Cues.Config` refuses such a source at the config boundary.
+  A preset whose fields need a rule of their own (the shape of Bluesky's
+  `dids`) adds one clause to `check_preset/2`, which runs on the filled
+  section, so `Cues.Config` refuses such a source at the config boundary. A
+  field a preset needs present is named in `Cues.Config.required_fields/3`,
+  the one presence rule the config and the forms both read.
   """
 
   alias FermixCore.Cues.Jetstream
@@ -87,9 +89,10 @@ defmodule FermixCore.Cues.Presets do
   end
 
   # One clause per preset with a rule of its own; every other preset has none.
-  defp check_preset("bluesky_jetstream", filled),
-    do:
-      Jetstream.check_subscription(Map.get(filled, :dids, []), Map.get(filled, :collections, []))
+  # Whether dids are there at all is `Cues.Config.required_fields/3`'s rule,
+  # which both the config and the forms read; this checks the ones named.
+  defp check_preset("bluesky_jetstream", %{dids: [_ | _] = dids} = filled),
+    do: Jetstream.check_subscription(dids, Map.get(filled, :collections, []))
 
   defp check_preset(_name, _filled), do: :ok
 end

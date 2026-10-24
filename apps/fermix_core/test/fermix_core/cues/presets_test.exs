@@ -47,10 +47,11 @@ defmodule FermixCore.Cues.PresetsTest do
       assert filled.dids == ["did:plc:abc123"]
     end
 
-    test "needs dids, the accounts to follow" do
+    # Whether dids are there at all is `Cues.Config.required_fields/3`'s rule,
+    # the one both the config and the forms read; the preset checks their shape.
+    test "leaves dids' presence to the config's rule" do
       for section <- [%{preset: "bluesky_jetstream"}, %{preset: "bluesky_jetstream", dids: []}] do
-        assert Presets.fill(section) ==
-                 {:error, "a Bluesky stream needs dids, the accounts to follow"}
+        assert {:ok, %{kind: :stream}} = Presets.fill(section)
       end
     end
 

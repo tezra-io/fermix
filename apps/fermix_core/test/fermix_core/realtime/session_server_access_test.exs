@@ -9,10 +9,12 @@ defmodule FermixCore.Realtime.SessionServerAccessTest do
   import ExUnit.CaptureLog
 
   alias FermixCore.Capabilities.AccessGate.Pending
+  alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.SessionServer
+  alias FermixCore.Tools.ListCues
 
   # The test registers under this name to be told about each provider event as it
   # is sent, so a confirmed run's status item is awaited rather than polled for.
@@ -65,6 +67,7 @@ defmodule FermixCore.Realtime.SessionServerAccessTest do
     honk = honk_capability(self())
     web = web_capability()
     shell = shell_capability(self())
+    cue_reader = cue_reader_capability()
     :ok = CapabilityRegistry.register(registry, unlock)
     :ok = CapabilityRegistry.register(registry, trunk)
     :ok = CapabilityRegistry.register(registry, honk)
@@ -80,7 +83,7 @@ defmodule FermixCore.Realtime.SessionServerAccessTest do
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
         safety_identifier: "safe-id",
-        capabilities: [unlock, trunk, honk, web, shell],
+        capabilities: [unlock, trunk, honk, web, shell, cue_reader],
         capability_registry: registry,
         task_supervisor: task_supervisor,
         reconnect_backoff_ms: [10, 10, 10],
@@ -141,6 +144,11 @@ defmodule FermixCore.Realtime.SessionServerAccessTest do
     })
   end
 
+  # `list_cues` as the bridge offers it, answering without the cue records: the
+  # call's taint is read from the tool and the view it asked for, not the answer.
+  defp cue_reader_capability,
+    do: %{Builtin.from_tool_module(ListCues) | executor: {__MODULE__, :read_page, []}}
+
   # Stands in for `shell`: a command whose audio (`say yes`) the owner's mic
   # would pick up.
   defp shell_capability(test_pid) do
@@ -154,12 +162,11 @@ defmodule FermixCore.Realtime.SessionServerAccessTest do
     })
   end
 
-  defp call_tool(server, call_id, name) do
+  defp call_tool(server, call_id, name, arguments \\ ~s({"vin":"5YJ"})) do
     :ok =
       SessionServer.handle_provider_event(
         server,
-        {:function_call,
-         %{"call_id" => call_id, "name" => name, "arguments" => ~s({"vin":"5YJ"})}}
+        {:function_call, %{"call_id" => call_id, "name" => name, "arguments" => arguments}}
       )
 
     assert_receive {:realtime, %{type: "tool_event", status: status, name: ^name}}
@@ -360,6 +367,28 @@ defmodule FermixCore.Realtime.SessionServerAccessTest do
 
     assert :ok = SessionServer.handle_provider_event(server, {:assistant_transcript_done, "yes"})
     _ = :sys.get_state(server)
+    refute_received {:unlocked, _}
+  end
+
+  # What is set up (`list_cues` sources or mandates) is Fermix's own record and
+  # the owner's settings; what the sources sent is outside text.
+  test "reading the cue sources leaves the call clean; reading deliveries taints it", %{
+    server: server
+  } do
+    call_tool(server, "c1", "list_cues", ~s({"view":"sources"}))
+    call_tool(server, "c2", "tesla_unlock_doors")
+    assert_received {:unlocked, %{"vin" => "5YJ"}}
+
+    call_tool(server, "c3", "list_cues", ~s({"view":"deliveries"}))
+    call_tool(server, "c4", "tesla_unlock_doors")
+    refute_received {:unlocked, _}
+  end
+
+  test "list_cues arguments that do not parse taint the call like its default view", %{
+    server: server
+  } do
+    call_tool(server, "c1", "list_cues", ~s({"view":"sources"))
+    call_tool(server, "c2", "tesla_unlock_doors")
     refute_received {:unlocked, _}
   end
 

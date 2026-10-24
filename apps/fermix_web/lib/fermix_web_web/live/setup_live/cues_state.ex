@@ -9,7 +9,8 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   status row, the watchers' counts, each mandate's load status and approval).
   `handle/4` turns one tab event into a change through
   `FermixCore.Cues.Settings` (or `Cues.Webhook.ensure_path_secret/2` for a
-  webhook's URL) and tells the LiveView what to do next.
+  webhook's URL, on request and right after a new webhook source is saved)
+  and tells the LiveView what to do next.
 
   The filter model offers what `FermixCore.Cues.FilterChoices` offers: the
   main model (the empty choice) and the providers that are set up. `clock`
@@ -21,10 +22,12 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   here shows cue text: watchers are counts and ids, sources are Fermix's own
   status columns, and a secret is shown as set or not set. The two values a
   page shows once (a new local-push token, a webhook URL) live in `reveal`,
-  which every following event clears.
+  which every following event clears. The presets are
+  `Management.Cues.SourceForm`'s, with the labels the Mac app shows.
 
   Seams (the LiveView's `:cues_pane_opts`): `:repo`, `:door`, `:now`
-  (zero-arity, a `DateTime`) and `:mandate_opts`.
+  (zero-arity, a `DateTime`), `:mandate_opts` and `:webhook_opts` (the options
+  of `Cues.Webhook.ensure_path_secret/2`).
   """
 
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
@@ -34,17 +37,24 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   alias FermixCore.Cues.Presets
   alias FermixCore.Cues.Settings
   alias FermixCore.Cues.Webhook
+  alias FermixCore.Management.Cues.SourceForm
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretWriter
 
   @tab %{id: "cues", label: "Cues", component: nil, description: "Outside input"}
+  @url_note "Keep it private: it is half of what a request needs."
   @door FermixCore.Cues.Door
 
-  # The kinds and webhook methods the page offers; `Cues.Config` is still the
-  # one that accepts or refuses a section.
-  @kinds ~w(local_push feed stream webhook)
+  # The kinds and webhook methods the page offers, in the Mac sheet's order; a
+  # new source opens on a feed, the common case. `Cues.Config` is still the one
+  # that accepts or refuses a section.
+  @kinds ~w(feed stream webhook local_push)
+  @default_kind "feed"
   @verify_methods ~w(hmac shared_secret standard_webhooks)
+  # The method a webhook with no preset starts on: the menu's first, so the
+  # form draws the fields of the method it shows and a save stores it.
+  @default_verify "hmac"
 
   # Every source field the form knows, in the order a saved section lists them.
   # A field the form shows for the source's kind comes from the form; one it
@@ -58,6 +68,8 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   @mandate_list_fields ~w(tools read_tools validator_env unpinned)a
   @mandate_text_fields ~w(approve_within max_cue_age validator interpreter idempotency_arg)a
 
+  # `{:saved, message, opts}`: `:restart?`, `:reveal` (a value shown once) and
+  # `:tone` (`:error` when the save went through and a step after it did not).
   @type result ::
           {:edit, map()}
           | :refresh
@@ -96,7 +108,7 @@ defmodule FermixWebWeb.SetupLive.CuesState do
       mandates: Enum.map(Overview.mandates(cues, opts), &mandate_view/1),
       cue_jobs: cue_jobs(opts),
       raw: %{sources: Keyword.get(raw, :sources, %{}), mandates: Keyword.get(raw, :mandates, %{})},
-      presets: Presets.names(),
+      presets: SourceForm.presets(),
       kinds: @kinds,
       verify_methods: @verify_methods,
       source_editor: nil,
@@ -155,9 +167,9 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   defp event("source_changed", %{"cue_source" => params}, state, _opts),
     do: {:edit, update_source_editor(state, params)}
 
-  defp event("save_source", %{"cue_source" => params}, state, _opts) do
+  defp event("save_source", %{"cue_source" => params}, state, opts) do
     state = update_source_editor(state, params)
-    save_source(state.source_editor, Map.get(params, "secret"), state)
+    save_source(state.source_editor, Map.get(params, "secret"), state, opts)
   end
 
   defp event("remove_source", %{"ref" => ref}, state, _opts) do
@@ -184,18 +196,14 @@ defmodule FermixWebWeb.SetupLive.CuesState do
 
   # The URL's random part is made and its sentinel saved by `ensure_path_secret`
   # itself, so the LiveView re-reads the snapshot after it (never a stale form).
-  defp event("webhook_url", %{"ref" => ref}, state, _opts) do
-    case Webhook.ensure_path_secret(ref) do
+  defp event("webhook_url", %{"ref" => ref}, state, opts) do
+    case Webhook.ensure_path_secret(ref, webhook_opts(opts)) do
       {:ok, path} ->
-        {:saved,
-         "The URL for #{ref} is below. Keep it private: it is half of what a request needs.",
+        {:saved, "The URL for #{ref} is below. #{@url_note}",
          reveal: %{kind: :url, ref: ref, value: path}}
 
-      {:error, sentence} when is_binary(sentence) ->
-        {:error, {:invalid, sentence}, state}
-
-      {:error, refusal} ->
-        {:error, refusal, state}
+      {:error, reason} ->
+        {:error, url_refusal(reason), state}
     end
   end
 
@@ -304,12 +312,24 @@ defmodule FermixWebWeb.SetupLive.CuesState do
     }
   end
 
+  # A new source opens on its kind's first preset, as the Mac sheet does.
+  # `missing` lists the fields a refused save found empty; `refusal` is the
+  # page's sentence for the last refused save, said inside the editor.
   defp new_source_editor do
+    values = %{
+      "ref" => "",
+      "preset" => first_preset(@default_kind),
+      "kind" => @default_kind,
+      "enabled" => "true"
+    }
+
     %{
       mode: :create,
       ref: nil,
-      values: %{"ref" => "", "preset" => "", "kind" => "local_push", "enabled" => "true"},
-      secrets: %{}
+      values: default_verify(values),
+      secrets: %{},
+      missing: [],
+      refusal: nil
     }
   end
 
@@ -322,7 +342,9 @@ defmodule FermixWebWeb.SetupLive.CuesState do
       mode: :update,
       ref: ref,
       values: Map.put(values, "enabled", to_string(Keyword.get(section, :enabled, true))),
-      secrets: Map.new(Keyword.take(section, SecretWriter.cue_secret_fields()))
+      secrets: Map.new(Keyword.take(section, SecretWriter.cue_secret_fields())),
+      missing: [],
+      refusal: nil
     }
   end
 
@@ -335,9 +357,61 @@ defmodule FermixWebWeb.SetupLive.CuesState do
 
   # A typed secret is read from the submit alone and never kept in the editor.
   defp update_source_editor(%{source_editor: editor} = state, params) do
-    values = merge_values(editor.values, Map.delete(params, "secret"))
-    %{state | source_editor: %{editor | values: values}}
+    values =
+      editor.values
+      |> merge_values(Map.delete(params, "secret"))
+      |> preset_of_kind(editor.values, editor.mode)
+      |> verify_of_choice(editor.values)
+
+    missing = still_missing(editor.missing, values)
+    %{state | source_editor: %{editor | values: values, refusal: nil, missing: missing}}
   end
+
+  # A field marked missing stays marked only while the form still needs it:
+  # a required field, or the delivery id header while no identity is given.
+  defp still_missing(missing, values) do
+    form = source_form(values)
+
+    Enum.filter(missing, fn field ->
+      field in form.required or
+        (field == :id_header and identity_missing?(form, values, identity_of(values)))
+    end)
+  end
+
+  # A new kind or preset brings its own method, as the Mac sheet does: the
+  # preset's where it names one, else the menu's first.
+  defp verify_of_choice(values, before) do
+    chosen? =
+      source_kind(values) != source_kind(before) or
+        text(Map.get(values, "preset")) != text(Map.get(before, "preset"))
+
+    values = if chosen?, do: Map.put(values, "verify", ""), else: values
+    default_verify(values)
+  end
+
+  defp default_verify(values) do
+    preset_method = values |> Map.get("preset") |> preset_defaults() |> Map.get(:verify)
+    blank? = text(Map.get(values, "verify")) == ""
+
+    if source_kind(values) == "webhook" and blank? and is_nil(preset_method),
+      do: Map.put(values, "verify", @default_verify),
+      else: values
+  end
+
+  # On a new source a kind chosen brings its first preset, as the Mac sheet
+  # opens on one; No preset stays in the menu. An edit cannot change either.
+  defp preset_of_kind(values, before, :create) do
+    chosen = text(Map.get(values, "kind"))
+
+    if chosen != "" and chosen != source_kind(before),
+      do: Map.put(values, "preset", first_preset(chosen)),
+      else: values
+  end
+
+  defp preset_of_kind(values, _before, :update), do: values
+
+  defp first_preset(kind),
+    do: Enum.find_value(SourceForm.presets(), "", &(&1["kind"] == kind && &1["id"]))
 
   defp merge_values(values, params) do
     Enum.reduce(params, values, fn
@@ -347,34 +421,131 @@ defmodule FermixWebWeb.SetupLive.CuesState do
     end)
   end
 
-  defp save_source(editor, typed_secret, state) do
+  defp save_source(editor, typed_secret, state, opts) do
     ref = editor.ref || String.trim(Map.get(editor.values, "ref", ""))
     existing = Map.get(state.raw.sources, ref, [])
     section = source_section(editor.values, existing)
     secrets = typed_secrets(typed_secret, source_kind(editor.values))
 
-    case Settings.save_source(ref, section, secrets, editor.mode) do
-      {:ok, %{token: nil}} ->
-        {:saved, "Source #{ref} saved.", []}
+    with :ok <- same_choice(editor.mode, editor.values, existing),
+         :ok <- needed_fields(editor.values, section),
+         {:ok, %{token: token}} <- Settings.save_source(ref, section, secrets, editor.mode) do
+      saved_source(ref, token, source_kind(editor.values), editor.mode, opts)
+    else
+      {:error, {:missing, fields}} ->
+        editor = %{editor | missing: fields}
 
-      {:ok, %{token: token}} ->
-        {:saved, "Source #{ref} saved.", reveal: %{kind: :token, ref: ref, value: token}}
+        {:error, {:invalid, "Fill in the fields marked as needed."},
+         %{state | source_editor: editor}}
 
       {:error, reason} ->
         {:error, reason, state}
     end
   end
 
+  # A field the kind needs and no preset fills, left empty, is refused here,
+  # under its own field, before anything is written; so is a missing identity
+  # (`Cues.Config.missing_identity?/4`, read on the section the save would
+  # write), under the delivery id header.
+  defp needed_fields(values, section) do
+    form = source_form(values)
+    empty = Enum.filter(form.required, &(form_value(values, &1) == nil))
+    identity = if identity_missing?(form, values, section), do: [:id_header], else: []
+
+    case empty ++ identity do
+      [] -> :ok
+      missing -> {:error, {:missing, missing}}
+    end
+  end
+
+  defp identity_missing?(form, values, fields) do
+    form.kind
+    |> String.to_existing_atom()
+    |> CuesConfig.missing_identity?(blank(text(Map.get(values, "preset"))), form.verify, fields)
+  end
+
+  defp identity_of(values) do
+    [
+      id_header: form_value(values, :id_header),
+      id: if(checked?(values["id"]), do: "content_hash")
+    ]
+  end
+
+  # The name, kind and preset cannot change on an edit, as in the management
+  # form; the page shows them as text, and a submit that names others anyway
+  # is refused before anything is written.
+  defp same_choice(:create, _values, _existing), do: :ok
+
+  defp same_choice(:update, values, existing) do
+    saved = %{"preset" => Keyword.get(existing, :preset), "kind" => Keyword.get(existing, :kind)}
+
+    if choice(values) == choice(saved),
+      do: :ok,
+      else: {:error, {:invalid, "A source's kind cannot change. Remove it and add a new one."}}
+  end
+
+  # The preset and kind as written, and the kind they make.
+  defp choice(values) do
+    {blank(text(Map.get(values, "preset"))), blank(text(Map.get(values, "kind"))),
+     source_kind(values)}
+  end
+
+  # A new local push source's first token is shown once. A new webhook
+  # source's URL is made with its save and shown at once, as Generate URL shows
+  # it; the source is saved either way, and a URL that could not be made carries
+  # its refusal where the URL would be, for the page to say in its own words.
+  defp saved_source(ref, token, _kind, _mode, _opts) when is_binary(token),
+    do: {:saved, "Source #{ref} saved.", reveal: %{kind: :token, ref: ref, value: token}}
+
+  defp saved_source(ref, nil, "webhook", :create, opts) do
+    case Webhook.ensure_path_secret(ref, webhook_opts(opts)) do
+      {:ok, path} ->
+        {:saved, "Source #{ref} saved. Its URL is below. #{@url_note}",
+         reveal: %{kind: :url, ref: ref, value: path}}
+
+      {:error, reason} ->
+        {:saved, "Source #{ref} saved, but its URL could not be made.",
+         reveal: %{kind: :url_failed, ref: ref, reason: url_refusal(reason)}, tone: :error}
+    end
+  end
+
+  defp saved_source(ref, nil, _kind, _mode, _opts), do: {:saved, "Source #{ref} saved.", []}
+
+  # `ensure_path_secret`'s own sentence, or the write guard's refusal as is.
+  defp url_refusal(sentence) when is_binary(sentence), do: {:invalid, sentence}
+  defp url_refusal(refusal), do: refusal
+
+  defp webhook_opts(opts), do: Keyword.get(opts, :webhook_opts, [])
+
   @doc """
   What the source form shows for its values: the effective kind (the
-  preset's, else the chosen one), the webhook method, and the fields drawn.
+  preset's, else the chosen one), the webhook method, the fields drawn, and
+  the ones it must fill itself (`Cues.Config.required_fields/2`).
   """
-  @spec source_form(map()) :: %{kind: String.t(), verify: String.t() | nil, fields: [atom()]}
+  @spec source_form(map()) :: %{
+          kind: String.t(),
+          verify: String.t() | nil,
+          fields: [atom()],
+          required: [atom()]
+        }
   def source_form(values) when is_map(values) do
     kind = source_kind(values)
     verify = webhook_method(values, kind)
-    %{kind: kind, verify: verify, fields: shown_fields(kind, verify)}
+
+    %{
+      kind: kind,
+      verify: verify,
+      fields: shown_fields(kind, verify),
+      required: required_fields(kind, blank(text(Map.get(values, "preset"))), verify)
+    }
   end
+
+  # The page offers only its own kinds; another one is a forged form and fails loud.
+  defp required_fields(kind, preset, verify) when kind in @kinds,
+    do: kind |> String.to_existing_atom() |> CuesConfig.required_fields(preset, verify)
+
+  defp required_fields(kind, _preset, _verify),
+    do: raise(ArgumentError, "the source form offers no kind #{inspect(kind)}")
 
   @doc "What preset `name` fills, as the placeholders the form shows (`%{}` for none)."
   @spec preset_defaults(String.t() | nil) :: map()
@@ -390,7 +561,7 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   defp source_kind(values) do
     case {preset_defaults(Map.get(values, "preset")), text(Map.get(values, "kind"))} do
       {%{kind: kind}, _chosen} -> Atom.to_string(kind)
-      {_none, ""} -> "local_push"
+      {_none, ""} -> @default_kind
       {_none, chosen} -> chosen
     end
   end

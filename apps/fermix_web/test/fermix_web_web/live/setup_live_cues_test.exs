@@ -8,10 +8,13 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
 
   alias FermixCore.Cues.Door
   alias FermixCore.Cues.Pins
+  alias FermixCore.Cues.Webhook
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretWriter
+  alias FermixCore.Setup.Wizard
   alias FermixTestSupport.CueDeliveryFixtures
   alias FermixTestSupport.CueFixtures
   alias FermixTestSupport.SecretWriterStub
@@ -275,6 +278,225 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
   end
 
   describe "sources" do
+    test "the form opens on Feed, says where each kind's items come from, and offers that kind's presets by name",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+      html = view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
+
+      # Each kind opens on its first preset, as the Mac sheet does; No preset
+      # stays in the menu.
+      assert selected(html, "cue_source[kind]") == "feed"
+      assert selected(html, "cue_source[preset]") == "rss"
+      assert kind_line(html) =~ "Fermix checks the feed's URL for new items on a schedule."
+      assert preset_options(html) == [{"", "No preset"}, {"rss", "RSS, Atom or JSON Feed"}]
+      assert html =~ ~s(name="cue_source[url]")
+
+      html = view |> form("#cue-source-form", cue_source: %{kind: "webhook"}) |> render_change()
+
+      assert kind_line(html) =~
+               "A service sends items to Fermix. Saving makes its URL. Give the service that URL and the secret you enter here."
+
+      assert preset_options(html) == [{"", "No preset"}, {"github", "GitHub"}]
+      assert selected(html, "cue_source[preset]") == "github"
+      refute html =~ ~s(name="cue_source[url]")
+      # GitHub fills the method and its headers, so none of them is drawn open.
+      refute open_field?(html, "header")
+      refute open_field?(html, "id_header")
+
+      html =
+        view |> form("#cue-source-form", cue_source: %{kind: "local_push"}) |> render_change()
+
+      assert kind_line(html) =~
+               "Your own scripts on this machine send items to Fermix. Saving makes a token, shown once."
+
+      assert preset_options(html) == []
+
+      # A preset stays with its kind: choosing another kind brings that kind's.
+      view |> form("#cue-source-form", cue_source: %{kind: "feed"}) |> render_change()
+      view |> form("#cue-source-form", cue_source: %{preset: ""}) |> render_change()
+      html = view |> form("#cue-source-form", cue_source: %{kind: "stream"}) |> render_change()
+
+      assert preset_options(html) == [{"", "No preset"}, {"bluesky_jetstream", "Bluesky"}]
+      assert selected(html, "cue_source[preset]") == "bluesky_jetstream"
+      assert kind_line(html) =~ "Fermix keeps a connection open and takes items as they arrive."
+    end
+
+    test "the form as it opens saves with a name and a URL", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+      view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
+
+      html =
+        view
+        |> form("#cue-source-form",
+          cue_source: %{ref: "blog-notes", url: "https://notes.example.org/feed.xml"}
+        )
+        |> render_submit()
+
+      assert html =~ "Source blog-notes saved."
+      section = persisted_source("blog-notes")
+      assert Keyword.get(section, :preset) == "rss"
+      assert Keyword.get(section, :url) == "https://notes.example.org/feed.xml"
+    end
+
+    test "a field the kind needs and no preset fills is marked, and its absence is refused in the editor",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+      view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
+      html = view |> form("#cue-source-form", cue_source: %{preset: ""}) |> render_change()
+
+      assert required_field?(html, "url")
+      assert required_field?(html, "interval")
+
+      html =
+        view
+        |> form("#cue-source-form",
+          cue_source: %{ref: "blog-notes", url: "https://notes.example.org/feed.xml"}
+        )
+        |> render_submit()
+
+      assert persisted_cues() == []
+      assert alert_with(html, "Save failed: Fill in the fields marked as needed.")
+
+      # Said again beside Save, where the owner is looking, without a second
+      # announcement, and under the field that is missing.
+      editor = source_form_text(html, "#cue-source-refusal")
+      assert editor =~ "Fill in the fields marked as needed."
+      refute html |> source_form_nodes("#cue-source-refusal[role]") |> Enum.any?()
+      assert field_refusal(html, "interval") == "Needed when no preset fills it."
+      assert field_refusal(html, "url") == nil
+
+      assert html
+             |> source_form_nodes(~s(input[name="cue_source[interval]"][aria-invalid="true"]))
+             |> Enum.any?()
+
+      # The mark goes with its condition: RSS fills the interval.
+      html = view |> form("#cue-source-form", cue_source: %{preset: "rss"}) |> render_change()
+
+      assert field_refusal(html, "interval") == nil
+      refute html |> source_form_nodes(~s([aria-invalid="true"])) |> Enum.any?()
+    end
+
+    test "a method's and a preset's own needs are marked and refused under their field", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+
+      # A webhook checked by HMAC names its signature header.
+      view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
+      view |> form("#cue-source-form", cue_source: %{kind: "webhook"}) |> render_change()
+      html = view |> form("#cue-source-form", cue_source: %{preset: ""}) |> render_change()
+      assert required_field?(html, "header")
+
+      html =
+        view
+        |> form("#cue-source-form", cue_source: %{ref: "shop-orders", id_header: "X-Delivery"})
+        |> render_submit()
+
+      assert field_refusal(html, "header") == "Needed when no preset fills it."
+
+      assert source_form_text(html, "#cue-source-refusal") =~
+               "Fill in the fields marked as needed."
+
+      # It also names how items are told apart: either way out is named.
+      html =
+        view
+        |> form("#cue-source-form", cue_source: %{header: "X-Shop-Signature", id_header: ""})
+        |> render_submit()
+
+      assert field_refusal(html, "id_header") ==
+               "Give a delivery id header, or turn on No delivery id."
+
+      assert field_refusal(html, "header") == nil
+      assert persisted_cues() == []
+
+      # Turning on No delivery id answers it.
+      html = view |> form("#cue-source-form", cue_source: %{id: "true"}) |> render_change()
+      assert field_refusal(html, "id_header") == nil
+
+      # Bluesky follows the accounts it names.
+      view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
+      html = view |> form("#cue-source-form", cue_source: %{kind: "stream"}) |> render_change()
+      assert selected(html, "cue_source[preset]") == "bluesky_jetstream"
+      assert required_field?(html, "dids")
+
+      html =
+        view |> form("#cue-source-form", cue_source: %{ref: "bsky-posts"}) |> render_submit()
+
+      assert field_refusal(html, "dids") == "Needed when no preset fills it."
+      assert persisted_cues() == []
+    end
+
+    test "editing a source says where its items come from, not what a new one makes", %{
+      conn: conn
+    } do
+      put_cues(
+        sources: %{
+          "home-alerts" => [kind: "local_push", token: "@keyring"],
+          "repo-events" => [preset: "github", secret: "@keyring"]
+        }
+      )
+
+      {:ok, view, html} = live(conn, "/setup?tab=cues")
+      assert view |> element("#cue-source-repo-events") |> render() =~ "GitHub"
+      refute html =~ ">github<"
+
+      html =
+        view
+        |> element(~s(button[phx-click="cues_edit_source"][phx-value-ref="home-alerts"]))
+        |> render_click()
+
+      assert kind_line(html) =~ "Your own scripts on this machine send items to Fermix."
+      refute kind_line(html) =~ "Saving makes"
+
+      html =
+        view
+        |> element(~s(button[phx-click="cues_edit_source"][phx-value-ref="repo-events"]))
+        |> render_click()
+
+      assert fixed_choice(html) =~ "Webhook"
+      assert fixed_choice(html) =~ "GitHub"
+      assert kind_line(html) =~ "A service sends items to Fermix."
+      refute kind_line(html) =~ "Saving makes"
+    end
+
+    test "editing shows a source's kind and preset as text, and a save that changes them is refused",
+         %{conn: conn} do
+      put_cues(sources: %{"repo-events" => [preset: "github", secret: "@keyring"]})
+      {:ok, view, _html} = live(conn, "/setup?tab=cues")
+
+      html =
+        view
+        |> element(~s(button[phx-click="cues_edit_source"][phx-value-ref="repo-events"]))
+        |> render_click()
+
+      refute html =~ ~s(name="cue_source[kind]")
+      refute html =~ ~s(name="cue_source[preset]")
+      assert fixed_choice(html) =~ "Kind"
+      assert fixed_choice(html) =~ "Webhook"
+      assert fixed_choice(html) =~ "GitHub"
+
+      # A submit that names another kind or drops the preset anyway is refused,
+      # and the section stays as it was.
+      for change <- [
+            %{kind: "feed", url: "https://feed.example.org/items.xml", interval: "600"},
+            %{preset: ""}
+          ] do
+        html = view |> element("#cue-source-form") |> render_submit(%{cue_source: change})
+
+        assert LazyHTML.text(LazyHTML.from_fragment(html)) =~
+                 "Save failed: A source's kind cannot change. Remove it and add a new one."
+
+        section = persisted_source("repo-events")
+        assert Keyword.get(section, :preset) == "github"
+        refute Keyword.has_key?(section, :kind)
+        refute Keyword.has_key?(section, :url)
+      end
+    end
+
     test "a local-push source gets a token shown once, stored through the writer", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
       open_cues(view)
@@ -302,6 +524,35 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       {:ok, _view, fresh} = live(conn, "/setup?tab=cues")
       refute fresh =~ token
       assert fresh =~ "home-alerts"
+    end
+
+    test "a value shown once appears in the Sources section, where the owner saved, and takes focus",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+
+      view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
+
+      token =
+        view
+        |> form("#cue-source-form", cue_source: %{ref: "home-alerts", kind: "local_push"})
+        |> render_submit()
+
+      view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
+      view |> form("#cue-source-form", cue_source: %{kind: "webhook"}) |> render_change()
+
+      url =
+        view
+        |> form("#cue-source-form", cue_source: %{ref: "deploy-hooks", secret: "invented-4471"})
+        |> render_submit()
+
+      for html <- [token, url] do
+        page = LazyHTML.from_fragment(html)
+        assert page |> LazyHTML.query("#cues-sources #cues-reveal") |> Enum.any?()
+        # Brought into view: its heading takes focus as it appears.
+        heading = LazyHTML.query(page, ~s(#cues-reveal h3[tabindex="-1"][phx-mounted]))
+        assert Enum.any?(heading)
+      end
     end
 
     test "a new token replaces the stored one and is shown once", %{conn: conn} do
@@ -358,7 +609,6 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       view
       |> form("#cue-source-form",
         cue_source: %{
-          preset: "rss",
           enabled: "false",
           url: "https://blog.example.org/releases.atom",
           interval: "600",
@@ -402,8 +652,6 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       view
       |> form("#cue-source-form",
         cue_source: %{
-          preset: "",
-          kind: "feed",
           enabled: "true",
           url: "https://status.example.org/api/items",
           interval: "120",
@@ -444,6 +692,7 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
 
       assert html =~ "Save failed:"
       assert html =~ "must start with https://"
+      assert source_form_text(html, "#cue-source-refusal") =~ "must start with https://"
       assert persisted_cues() == []
     end
 
@@ -454,6 +703,7 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       {:ok, view, _html} = live(conn, "/setup")
       open_cues(view)
       view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
+      view |> form("#cue-source-form", cue_source: %{kind: "webhook"}) |> render_change()
 
       view
       |> form("#cue-source-form", cue_source: %{ref: "repo-events", preset: "github"})
@@ -494,6 +744,187 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       assert view |> element("#cue-source-repo-events") |> render() =~ "Needs a signing secret"
       assert view |> element("#cue-source-home-alerts") |> render() =~ "Needs a token"
       refute view |> element("#cue-source-desk-alerts") |> render() =~ "Needs a token"
+    end
+
+    test "a new webhook source shows its URL as soon as it is saved, and an edit does not", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+      view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
+      view |> form("#cue-source-form", cue_source: %{kind: "webhook"}) |> render_change()
+
+      html =
+        view
+        |> form("#cue-source-form",
+          cue_source: %{ref: "deploy-hooks", secret: "invented-signing-4417"}
+        )
+        |> render_submit()
+
+      {:ok, random} =
+        SecretWriter.get({:cue_source, "deploy-hooks", :path_secret}, store: :keyring)
+
+      assert html =~ "Source deploy-hooks saved."
+      assert html =~ "URL for deploy-hooks"
+      assert html =~ "http://127.0.0.1:4032/cues/hooks/deploy-hooks/#{random}"
+      assert Keyword.get(persisted_source("deploy-hooks"), :path_secret) == "@keyring"
+      refute view |> element(~s(button[phx-click="cues_refresh"])) |> render_click() =~ random
+
+      view
+      |> element(~s(button[phx-click="cues_edit_source"][phx-value-ref="deploy-hooks"]))
+      |> render_click()
+
+      html =
+        view
+        |> form("#cue-source-form", cue_source: %{daily_budget: "20"})
+        |> render_submit()
+
+      assert html =~ "Source deploy-hooks saved."
+      assert Keyword.get(persisted_source("deploy-hooks"), :daily_budget) == 20
+      refute html =~ "URL for deploy-hooks"
+      refute html =~ random
+    end
+
+    test "a webhook with no preset shows the fields of the method it shows, and saves that method",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+      view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
+      view |> form("#cue-source-form", cue_source: %{kind: "webhook"}) |> render_change()
+      html = view |> form("#cue-source-form", cue_source: %{preset: ""}) |> render_change()
+      assert html =~ "Paste the secret"
+      refute html =~ "Paste the secret the service signs with"
+
+      # Before Verification is touched: HMAC is chosen, and the fields it
+      # needs, which no preset fills, are drawn open, not under More options.
+      assert selected(html, "cue_source[verify]") == "hmac"
+
+      for name <- ~w(header id_header id) do
+        assert open_field?(html, name), "#{name} is drawn outside More options"
+      end
+
+      # A save that never posts Verification stores the method the page showed.
+      view
+      |> element("#cue-source-form")
+      |> render_submit(%{
+        cue_source: %{
+          ref: "shop-orders",
+          header: "X-Shop-Signature",
+          id_header: "X-Shop-Delivery"
+        }
+      })
+
+      section = persisted_source("shop-orders")
+      assert Keyword.get(section, :verify) == :hmac
+      assert Keyword.get(section, :header) == "X-Shop-Signature"
+      assert Keyword.get(section, :id_header) == "X-Shop-Delivery"
+
+      # A preset brings its own method, as the Mac sheet does, and folds what
+      # it fills.
+      view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
+      view |> form("#cue-source-form", cue_source: %{kind: "webhook"}) |> render_change()
+      view |> form("#cue-source-form", cue_source: %{preset: ""}) |> render_change()
+      html = view |> form("#cue-source-form", cue_source: %{preset: "github"}) |> render_change()
+
+      assert selected(html, "cue_source[verify]") == ""
+      refute open_field?(html, "header")
+    end
+
+    test "a new webhook whose URL cannot be made stays saved, and the page says so", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+      view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
+      view |> form("#cue-source-form", cue_source: %{kind: "webhook"}) |> render_change()
+
+      # No secret is typed, so the save writes none; the URL's random part is
+      # the first write the locked store refuses.
+      SecretWriterStub.set_verdict(%{store: :keyring, state: :locked, sentence: "locked"})
+      on_exit(fn -> SecretWriterStub.clear_verdict(:keyring) end)
+
+      html =
+        view
+        |> form("#cue-source-form",
+          cue_source: %{ref: "deploy-hooks"}
+        )
+        |> render_submit()
+
+      assert html =~ "Source deploy-hooks saved, but its URL could not be made."
+      assert html =~ "The URL for deploy-hooks could not be stored."
+      refute html =~ "Save failed"
+
+      # The page's banner says it in the error tone, not the green one.
+      banner = alert_with(html, "Source deploy-hooks saved, but its URL could not be made.")
+      assert banner, "the banner is an alert"
+      assert banner |> LazyHTML.attribute("class") |> hd() =~ "text-error"
+      refute banner |> LazyHTML.attribute("class") |> hd() =~ "text-success"
+      # The banner announces it; the block below it does not announce it again.
+      assert html |> LazyHTML.from_fragment() |> LazyHTML.query("#cues-reveal") |> Enum.any?()
+
+      refute html
+             |> LazyHTML.from_fragment()
+             |> LazyHTML.query("#cues-reveal[role]")
+             |> Enum.any?()
+
+      refute html =~ "/cues/hooks/deploy-hooks/"
+      assert html =~ ~s(id="cue-source-deploy-hooks")
+
+      section = persisted_source("deploy-hooks")
+      assert Keyword.get(section, :preset) == "github"
+      refute Keyword.has_key?(section, :path_secret)
+    end
+
+    test "a new webhook whose URL meets an outside change says how to recover, with the banner",
+         %{conn: conn, tmp_home: tmp_home} do
+      # The settings file is edited outside Fermix between the source's save and
+      # the save of its URL: the URL's save goes through the write guard as the
+      # daemon's does, and the guard refuses it.
+      config = Path.join(tmp_home, "config.toml")
+
+      persist = fn ref, sentinel ->
+        File.write!(config, File.read!(config) <> "\n[fermix_core.compaction]\nthreshold = 0.5\n")
+        snapshot = Webhook.put_path_sentinel(ConfigStore.current_snapshot(), ref, sentinel)
+
+        case Wizard.commit_snapshot(snapshot) do
+          {:ok, _report} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+      end
+
+      # The guard's state is this VM's; the next test starts from agreement.
+      on_exit(fn -> :ok = RestartState.record_persisted_baseline() end)
+
+      Application.put_env(:fermix_web, :cues_pane_opts,
+        now: fn -> @now end,
+        webhook_opts: [persist: persist]
+      )
+
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+      view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
+      view |> form("#cue-source-form", cue_source: %{kind: "webhook"}) |> render_change()
+
+      html =
+        view
+        |> form("#cue-source-form",
+          cue_source: %{ref: "deploy-hooks"}
+        )
+        |> render_submit()
+
+      assert alert_with(html, "Source deploy-hooks saved, but its URL could not be made.")
+
+      reveal =
+        html |> LazyHTML.from_fragment() |> LazyHTML.query("#cues-reveal") |> LazyHTML.text()
+
+      assert reveal =~ "The settings file changed outside Fermix."
+      assert reveal =~ "Reload settings from disk, then save again."
+      refute reveal =~ "external_change"
+      assert html =~ ~s(phx-click="reload_settings")
+
+      section = persisted_source("deploy-hooks")
+      assert Keyword.get(section, :preset) == "github"
+      refute Keyword.has_key?(section, :path_secret)
     end
 
     test "a webhook source's URL is made on request and shown with the door's port", %{
@@ -833,6 +1264,64 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
 
   defp open_cues(view) do
     view |> element(~s(button[phx-value-tab="cues"])) |> render_click()
+  end
+
+  # The preset menu as {value, label} pairs, and a select's selected value.
+  defp preset_options(html) do
+    html
+    |> source_form_nodes(~s(select[name="cue_source[preset]"] option))
+    |> Enum.map(&{option_value(&1), String.trim(LazyHTML.text(&1))})
+  end
+
+  defp selected(html, name) do
+    html
+    |> source_form_nodes(~s(select[name="#{name}"] option[selected]))
+    |> Enum.map(&option_value/1)
+    |> List.first()
+  end
+
+  defp kind_line(html) do
+    html |> source_form_nodes("#cue-source-kind-line") |> LazyHTML.text() |> String.trim()
+  end
+
+  defp source_form_nodes(html, selector) do
+    html |> LazyHTML.from_fragment() |> LazyHTML.query("#cue-source-form " <> selector)
+  end
+
+  defp option_value(node), do: node |> LazyHTML.attribute("value") |> List.first()
+
+  defp required_field?(html, name) do
+    html |> source_form_nodes(~s(input[name="cue_source[#{name}]"][required])) |> Enum.any?()
+  end
+
+  defp field_refusal(html, name) do
+    case html |> source_form_nodes("#cue-source-#{name}-refusal") |> Enum.to_list() do
+      [] -> nil
+      [node | _rest] -> node |> LazyHTML.text() |> String.trim()
+    end
+  end
+
+  defp source_form_text(html, selector) do
+    html |> source_form_nodes(selector) |> LazyHTML.text() |> String.trim()
+  end
+
+  defp fixed_choice(html) do
+    html |> source_form_nodes("#cue-source-choice") |> LazyHTML.text() |> String.trim()
+  end
+
+  # A source form field drawn in the form's main grid, not folded under More options.
+  defp open_field?(html, name) do
+    html
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query(~s(#cue-source-form > div [name="cue_source[#{name}]"]))
+    |> Enum.any?()
+  end
+
+  defp alert_with(html, text) do
+    html
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query(~s([role="alert"]))
+    |> Enum.find(&(LazyHTML.text(&1) =~ text))
   end
 
   defp put_cues(cues) do

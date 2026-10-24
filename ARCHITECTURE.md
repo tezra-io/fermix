@@ -249,8 +249,8 @@ agent loop and the realtime voice bridge), and it asks
 `Capabilities.AccessGate.admit/3` before the executor. A capability whose plugin
 manifest marks it `access_sensitive` runs there only on an attended owner turn,
 not from a shared Buzz channel (`Acp.Identity.multi_principal?/1`), that read no
-outside content (`:outside_sources`, folded by the agent loop from
-`UntrustedContent.outside_source/1`), or on a scheduled run whose job names it;
+outside content (`:outside_sources`, folded per call by the agent loop from
+`UntrustedContent.outside_source/2`), or on a scheduled run whose job names it;
 otherwise the call is parked in `AccessGate.Pending` for one owner
 confirmation, or refused. While a parked call waits, the turn (or Realtime
 call) that parked it runs nothing else: the loop stamps `:access_waiting` from

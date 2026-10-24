@@ -104,7 +104,8 @@ defmodule FermixCore.Tools.ManageWatcher do
         sources: %{
           type: "array",
           items: %{type: "string"},
-          description: "Source names from settings the watcher listens to."
+          description:
+            "Source names from settings the watcher listens to; list_cues view sources lists them."
         },
         filter: %{
           type: "string",

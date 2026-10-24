@@ -476,6 +476,52 @@ defmodule FermixCore.Management.CuesTest do
                 {:invalid_params, "ref", "Fermix holds at most 64 sources. Remove one first."}}
     end
 
+    # The refusal names the form's own row, so a client draws it under Poll
+    # every or URL rather than the config's sentence under Name.
+    test "a field the kind needs and no preset fills is refused under its own row", %{
+      opts: opts,
+      home: home
+    } do
+      url = %{"url" => "https://blog.example.org/feed.xml"}
+
+      assert Cues.sources_add("blog-notes", "feed", nil, url, opts) ==
+               {:error, {:invalid_params, "interval_minutes", "Needed when no preset fills it."}}
+
+      assert Cues.sources_add("live-posts", "stream", nil, %{}, opts) ==
+               {:error, {:invalid_params, "url", "Needed when no preset fills it."}}
+
+      # A method's and a preset's own needs are the same rule.
+      hmac = %{"verify" => "hmac", "content_hash" => true}
+
+      assert Cues.sources_add("shop-orders", "webhook", nil, hmac, opts) ==
+               {:error, {:invalid_params, "header", "Needed when no preset fills it."}}
+
+      assert Cues.sources_add("bsky-posts", nil, "bluesky_jetstream", %{}, opts) ==
+               {:error, {:invalid_params, "dids", "Needed when no preset fills it."}}
+
+      # So is its identity: a delivery id header or items identified by content.
+      signed = %{"verify" => "hmac", "header" => "X-Shop-Signature"}
+      no_identity = "Give a delivery id header, or have Fermix identify items by their content."
+
+      assert Cues.sources_add("shop-orders", "webhook", nil, signed, opts) ==
+               {:error, {:invalid_params, "id_header", no_identity}}
+
+      identified = Map.put(signed, "id_header", "X-Shop-Delivery")
+      assert {:ok, _added} = Cues.sources_add("shop-orders", "webhook", nil, identified, opts)
+
+      assert Cues.sources_update("shop-orders", %{"id_header" => ""}, opts) ==
+               {:error, {:invalid_params, "id_header", no_identity}}
+
+      add_feed(opts)
+      refute config_text(home) =~ "blog-notes"
+      refute config_text(home) =~ "live-posts"
+
+      assert Cues.sources_update("eng-blogs", %{"url" => ""}, opts) ==
+               {:error, {:invalid_params, "url", "Needed when no preset fills it."}}
+
+      assert config_text(home) =~ "https://example.org/releases.atom"
+    end
+
     test "an update changes the fields it names and keeps the rest", %{opts: opts, home: home} do
       add_feed(opts)
 
@@ -683,6 +729,16 @@ defmodule FermixCore.Management.CuesTest do
       assert Enum.map(form["rows"], & &1["key"]) == ~w(ref url interval_minutes daily_budget)
       assert form["consent_sentence"] =~ "new items"
       assert form["notes"] == []
+    end
+
+    # A webhook has no URL to type and a local push no token to paste: the
+    # kind's own line says Fermix makes them when the source is added.
+    test "a kind that Fermix makes an address or a token for says so" do
+      assert {:ok, form} = Cues.sources_form(nil, nil, nil, available?: true)
+      sentences = Map.new(form["kinds"], &{&1["id"], &1["sentence"]})
+
+      assert sentences["webhook"] =~ "address Fermix makes when you add this source"
+      assert sentences["local_push"] =~ "token made when you add this source"
     end
 
     test "a preset decides the kind and fills its fields under More options" do

@@ -15,6 +15,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
 
   use FermixWebWeb, :html
 
+  alias FermixCore.Management.Cues.SourceForm
   alias FermixWebWeb.SetupLive.CuesState
 
   @card "rounded-box border border-base-300 bg-base-100/80 shadow-sm"
@@ -44,6 +45,25 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
     "webhook" => "Webhook"
   }
 
+  # Under the kind: where its items come from and, on a new source, what saving
+  # makes. A kind's extra detail sits behind the info beside the line.
+  @kind_lines %{
+    "feed" => {"Fermix checks the feed's URL for new items on a schedule.", nil},
+    "stream" => {"Fermix keeps a connection open and takes items as they arrive.", nil},
+    "webhook" =>
+      {"A service sends items to Fermix.",
+       "Saving makes its URL. Give the service that URL and the secret you enter here."},
+    "local_push" =>
+      {"Your own scripts on this machine send items to Fermix.",
+       "Saving makes a token, shown once."}
+  }
+
+  @kind_notes %{
+    "webhook" =>
+      "The door listens on this machine only. A service outside reaches it through a tunnel you run.",
+    "local_push" => "Each item is a CloudEvent, sent with the token as a bearer token."
+  }
+
   @verify_labels %{
     "hmac" => "HMAC signature",
     "shared_secret" => "Shared secret",
@@ -64,8 +84,6 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
     held: "The filter's provider failed three times in a row; Fermix retries every 10 minutes.",
     mandates_list:
       "A mandate lets one task call named action tools in its cue runs. It acts only after you approve it here; a change to it, its task or its validator needs approving again.",
-    kind:
-      "Local push: a program on this machine posts events to the door. Feed: Fermix polls a URL. Stream: Fermix keeps a connection open. Webhook: a service posts to a URL.",
     mode:
       "Approve: each call waits for you to confirm it in chat. Auto: the checks decide, so it needs a validator or pinned arguments (under More options)."
   }
@@ -76,7 +94,6 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
     ~H"""
     <div id="cues-pane" class="space-y-8">
       <.pane_title />
-      <.reveal :if={@cues.reveal} reveal={@cues.reveal} port={@cues.switches.door_port} />
       <section class="space-y-2">
         <.switches switches={@cues.switches} door={@cues.door} />
         <.filter_model filter={@cues.filter} />
@@ -114,13 +131,22 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
 
   # --- shown once ------------------------------------------------------------
 
+  # A value shown once sits at the top of the Sources section, where the owner
+  # just saved or pressed the row's button, and its heading takes focus as it
+  # appears, which brings it into view on this long page. The heading's id
+  # names the value, so a new one is a new element and is brought in again.
+
   attr :reveal, :map, required: true
   attr :port, :integer, required: true
 
   defp reveal(%{reveal: %{kind: :token}} = assigns) do
     ~H"""
     <section id="cues-reveal" class="space-y-3 rounded-box border border-primary/30 bg-primary/5 p-4">
-      <.reveal_head title={"Token for #{@reveal.ref}"} note="Shown once. One token per machine." />
+      <.reveal_head
+        title={"Token for #{@reveal.ref}"}
+        note="Shown once. One token per machine."
+        reveal={@reveal}
+      />
       <.copy_block id="cues-reveal-value" text={@reveal.value} label="Copy token" />
       <p class="text-xs font-medium text-base-content/60">Test from this machine</p>
       <.copy_block id="cues-reveal-curl" text={curl(@reveal, @port)} label="Copy" pre?={true} />
@@ -128,10 +154,25 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
     """
   end
 
+  defp reveal(%{reveal: %{kind: :url_failed}} = assigns) do
+    ~H"""
+    <section id="cues-reveal" class="space-y-2 rounded-box border border-warning/40 bg-warning/5 p-4">
+      <.reveal_head title={"No URL for #{@reveal.ref} yet"} note={@reveal.sentence} reveal={@reveal} />
+      <p class="text-xs text-base-content/60">
+        The source is saved. Generate URL on its row tries again.
+      </p>
+    </section>
+    """
+  end
+
   defp reveal(%{reveal: %{kind: :url}} = assigns) do
     ~H"""
     <section id="cues-reveal" class="space-y-3 rounded-box border border-primary/30 bg-primary/5 p-4">
-      <.reveal_head title={"URL for #{@reveal.ref}"} note="The door listens on this machine only." />
+      <.reveal_head
+        title={"URL for #{@reveal.ref}"}
+        note="The door listens on this machine only."
+        reveal={@reveal}
+      />
       <.copy_block
         id="cues-reveal-value"
         text={"http://127.0.0.1:#{@port}#{@reveal.value}"}
@@ -147,12 +188,20 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
 
   attr :title, :string, required: true
   attr :note, :string, required: true
+  attr :reveal, :map, required: true
 
   defp reveal_head(assigns) do
     ~H"""
     <div class="flex items-start justify-between gap-3">
       <div>
-        <h3 class="text-sm font-semibold">{@title}</h3>
+        <h3
+          id={"cues-reveal-#{@reveal.kind}-#{@reveal.ref}"}
+          tabindex="-1"
+          phx-mounted={JS.focus()}
+          class="text-sm font-semibold outline-none"
+        >
+          {@title}
+        </h3>
         <p class="text-xs text-base-content/60">{@note}</p>
       </div>
       <button type="button" class="btn btn-ghost btn-xs" phx-click="cues_dismiss_reveal">
@@ -405,7 +454,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
     assigns = assign(assigns, info: @info.sources, card: @card)
 
     ~H"""
-    <section class="space-y-3">
+    <section id="cues-sources" class="space-y-3">
       <.section_head title="Sources" count={length(@cues.sources)} info={@info}>
         <span class="tooltip tooltip-left" data-tip="Refresh status">
           <button
@@ -421,6 +470,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
           <.icon name="hero-plus" class="size-4" /> Add source
         </button>
       </.section_head>
+      <.reveal :if={@cues.reveal} reveal={@cues.reveal} port={@cues.switches.door_port} />
       <p :if={@cues.sources_error} class="text-sm text-warning">
         {rows_note(@cues.sources_error)}
       </p>
@@ -526,7 +576,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
     """
   end
 
-  defp source_type(%{preset: preset}) when is_binary(preset), do: preset
+  defp source_type(%{preset: preset}) when is_binary(preset), do: SourceForm.preset_label(preset)
   defp source_type(%{kind: kind}), do: kind_label(kind)
 
   defp kind_label(kind), do: Map.get(@kind_labels, kind, kind)
@@ -594,13 +644,17 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   defp source_editor(assigns) do
     values = assigns.editor.values
     form = CuesState.source_form(values)
+    defaults = CuesState.preset_defaults(values["preset"])
+    open = open_fields(form.fields, defaults)
 
     assigns =
       assign(assigns,
         form: form,
-        defaults: CuesState.preset_defaults(values["preset"]),
+        defaults: defaults,
         values: values,
-        more?: source_more?(values, form.fields)
+        open: open,
+        folded: form.fields -- open,
+        more?: source_more?(values, form.fields -- open)
       )
 
     ~H"""
@@ -615,13 +669,30 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       </h4>
       <div class="grid gap-4 lg:grid-cols-2">
         <.source_kind_fields editor={@editor} cues={@cues} form={@form} values={@values} />
-        <.source_main_fields form={@form} values={@values} defaults={@defaults} cues={@cues} />
+        <.source_main_fields
+          form={@form}
+          values={@values}
+          defaults={@defaults}
+          cues={@cues}
+          missing={@editor.missing}
+        />
+        <.source_field
+          :for={field <- @open}
+          field={field}
+          values={@values}
+          defaults={@defaults}
+          required_fields={@form.required}
+          missing={@editor.missing}
+        />
         <.source_secret_fields form={@form} editor={@editor} />
       </div>
       <.toggle name="cue_source[enabled]" checked={@values["enabled"] != "false"} label="On" />
       <.disclosure id="cue-source-more" label="More options" open={@more?}>
-        <.source_more_fields form={@form} values={@values} defaults={@defaults} />
+        <.source_more_fields fields={@folded} values={@values} defaults={@defaults} />
       </.disclosure>
+      <p :if={@editor.refusal} id="cue-source-refusal" class="text-sm text-error">
+        {@editor.refusal}
+      </p>
       <.editor_actions save="Save source" close="cues_close_source" />
     </form>
     """
@@ -632,10 +703,39 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   attr :form, :map, required: true
   attr :values, :map, required: true
 
+  # The kind first, then that kind's presets by label, then the line that says
+  # where the kind's items come from, and the name. An edit cannot change the
+  # kind or the preset, so it shows them as text, as the Mac sheet does.
   defp source_kind_fields(assigns) do
-    assigns = assign(assigns, :kind_info, @info.kind)
+    assigns =
+      assign(assigns,
+        line: kind_line(assigns.form.kind, assigns.editor.mode),
+        note: Map.get(@kind_notes, assigns.form.kind)
+      )
 
     ~H"""
+    <.source_choice_fields :if={@editor.mode == :create} form={@form} values={@values} cues={@cues} />
+    <p
+      :if={@editor.mode == :update}
+      id="cue-source-choice"
+      class="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm lg:col-span-2"
+    >
+      <span>
+        <span class="text-base-content/60">Kind</span>
+        <span class="font-medium">{kind_label(@form.kind)}</span>
+      </span>
+      <span :if={@values["preset"] not in [nil, ""]}>
+        <span class="text-base-content/60">Preset</span>
+        <span class="font-medium">{SourceForm.preset_label(@values["preset"])}</span>
+      </span>
+    </p>
+    <p
+      :if={@line}
+      id="cue-source-kind-line"
+      class="flex items-center gap-1.5 text-xs text-base-content/60 lg:col-span-2"
+    >
+      {@line} <.info :if={@note} text={@note} />
+    </p>
     <.field
       :if={@editor.mode == :create}
       name="cue_source[ref]"
@@ -644,30 +744,56 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       placeholder="home-alerts"
       info="Lowercase letters, digits and hyphens."
     />
-    <.select_field name="cue_source[preset]" label="Preset">
-      <option value="" selected={@values["preset"] in [nil, ""]}>No preset</option>
-      <option :for={name <- @cues.presets} value={name} selected={name == @values["preset"]}>
-        {name}
-      </option>
-    </.select_field>
-    <.select_field
-      :if={:kind in @form.fields and @values["preset"] in [nil, ""]}
-      name="cue_source[kind]"
-      label="Kind"
-      info={@kind_info}
-    >
+    """
+  end
+
+  attr :form, :map, required: true
+  attr :values, :map, required: true
+  attr :cues, :map, required: true
+
+  defp source_choice_fields(assigns) do
+    assigns =
+      assign(
+        assigns,
+        :presets,
+        Enum.filter(assigns.cues.presets, &(&1["kind"] == assigns.form.kind))
+      )
+
+    ~H"""
+    <.select_field name="cue_source[kind]" label="Kind" describedby="cue-source-kind-line">
       <option :for={kind <- @cues.kinds} value={kind} selected={kind == @form.kind}>
         {kind_label(kind)}
       </option>
     </.select_field>
+    <.select_field :if={@presets != []} name="cue_source[preset]" label="Preset">
+      <option value="" selected={@values["preset"] in [nil, ""]}>No preset</option>
+      <option
+        :for={preset <- @presets}
+        value={preset["id"]}
+        selected={preset["id"] == @values["preset"]}
+      >
+        {preset["label"]}
+      </option>
+    </.select_field>
     """
+  end
+
+  defp kind_line(kind, mode) do
+    case {Map.get(@kind_lines, kind), mode} do
+      {nil, _mode} -> nil
+      {{flow, made}, :create} when is_binary(made) -> "#{flow} #{made}"
+      {{flow, _made}, _mode} -> flow
+    end
   end
 
   attr :form, :map, required: true
   attr :values, :map, required: true
   attr :defaults, :map, required: true
   attr :cues, :map, required: true
+  attr :missing, :list, required: true
 
+  # A field the source must fill itself is marked required; one a refused save
+  # found empty says so under it until it has a value.
   defp source_main_fields(assigns) do
     ~H"""
     <.field
@@ -676,6 +802,9 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       label="URL"
       value={@values["url"]}
       placeholder={text(@defaults[:url])}
+      required={:url in @form.required}
+      refusal={missing_refusal(:url, @missing, @values)}
+      refusal_id="cue-source-url-refusal"
     />
     <.field
       :if={:interval in @form.fields}
@@ -684,6 +813,9 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       value={@values["interval"]}
       placeholder={text(@defaults[:interval])}
       info="At least 60."
+      required={:interval in @form.required}
+      refusal={missing_refusal(:interval, @missing, @values)}
+      refusal_id="cue-source-interval-refusal"
     />
     <.field
       :if={:dids in @form.fields}
@@ -691,6 +823,9 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       label="Accounts (DIDs)"
       value={@values["dids"]}
       info="The accounts to follow, comma-separated."
+      required={:dids in @form.required}
+      refusal={missing_refusal(:dids, @missing, @values)}
+      refusal_id="cue-source-dids-refusal"
     />
     <.field
       :if={:collections in @form.fields}
@@ -720,58 +855,64 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
     """
   end
 
-  attr :form, :map, required: true
+  defp missing_refusal(field, missing, values) do
+    if field in missing and not present?(values[Atom.to_string(field)]),
+      do: missing_words(field)
+  end
+
+  defp missing_words(:id_header), do: "Give a delivery id header, or turn on No delivery id."
+  defp missing_words(_field), do: "Needed when no preset fills it."
+
+  # The fields a webhook's method needs that no preset fills (the signature
+  # header, the delivery identity) are drawn open; a preset's own fold.
+  defp open_fields(fields, defaults) do
+    header = if Map.has_key?(defaults, :header), do: [], else: [:header]
+
+    identity =
+      if Enum.any?(~w(id_header id id_path)a, &Map.has_key?(defaults, &1)),
+        do: [],
+        else: [:id_header, :id]
+
+    Enum.filter(header ++ identity, &(&1 in fields))
+  end
+
+  attr :field, :atom, required: true
   attr :values, :map, required: true
   attr :defaults, :map, required: true
+  attr :required_fields, :list, default: []
+  attr :missing, :list, default: []
 
-  defp source_more_fields(assigns) do
+  # A webhook method's field, drawn open or under More options.
+  defp source_field(%{field: :header} = assigns) do
     ~H"""
-    <div class="mt-3 grid gap-4 lg:grid-cols-2">
-      <.field
-        :if={:header in @form.fields}
-        name="cue_source[header]"
-        label="Signature header"
-        value={@values["header"]}
-        placeholder={text(@defaults[:header])}
-      />
-      <.field
-        :if={:algorithm in @form.fields}
-        name="cue_source[algorithm]"
-        label="Algorithm"
-        value={@values["algorithm"]}
-        placeholder={text(@defaults[:algorithm]) |> default_to("sha256")}
-        info="sha1, sha256 or sha512."
-      />
-      <.field
-        :if={:prefix in @form.fields}
-        name="cue_source[prefix]"
-        label="Signature prefix"
-        value={@values["prefix"]}
-        placeholder={text(@defaults[:prefix])}
-      />
-      <.field
-        :if={:id_header in @form.fields}
-        name="cue_source[id_header]"
-        label="Delivery id header"
-        value={@values["id_header"]}
-        placeholder={text(@defaults[:id_header])}
-      />
-      <.field
-        :if={:type_header in @form.fields}
-        name="cue_source[type_header]"
-        label="Event type header"
-        value={@values["type_header"]}
-        placeholder={text(@defaults[:type_header])}
-      />
-      <.field
-        :if={:daily_budget in @form.fields}
-        name="cue_source[daily_budget]"
-        label="Daily budget"
-        value={@values["daily_budget"]}
-        info="Items a day; 0 or blank for no limit."
-      />
-    </div>
-    <div :if={:id in @form.fields} class="mt-4">
+    <.field
+      name="cue_source[header]"
+      label="Signature header"
+      value={@values["header"]}
+      placeholder={text(@defaults[:header])}
+      required={:header in @required_fields}
+      refusal={missing_refusal(:header, @missing, @values)}
+      refusal_id="cue-source-header-refusal"
+    />
+    """
+  end
+
+  defp source_field(%{field: :id_header} = assigns) do
+    ~H"""
+    <.field
+      name="cue_source[id_header]"
+      label="Delivery id header"
+      value={@values["id_header"]}
+      placeholder={text(@defaults[:id_header])}
+      refusal={missing_refusal(:id_header, @missing, @values)}
+      refusal_id="cue-source-id_header-refusal"
+    />
+    """
+  end
+
+  defp source_field(%{field: :id} = assigns) do
+    ~H"""
+    <div class="flex items-center">
       <.toggle
         name="cue_source[id]"
         checked={@values["id"] == "true"}
@@ -782,12 +923,62 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
     """
   end
 
+  attr :fields, :list, required: true
+  attr :values, :map, required: true
+  attr :defaults, :map, required: true
+
+  defp source_more_fields(assigns) do
+    ~H"""
+    <div class="mt-3 grid gap-4 lg:grid-cols-2">
+      <.source_field :if={:header in @fields} field={:header} values={@values} defaults={@defaults} />
+      <.field
+        :if={:algorithm in @fields}
+        name="cue_source[algorithm]"
+        label="Algorithm"
+        value={@values["algorithm"]}
+        placeholder={text(@defaults[:algorithm]) |> default_to("sha256")}
+        info="sha1, sha256 or sha512."
+      />
+      <.field
+        :if={:prefix in @fields}
+        name="cue_source[prefix]"
+        label="Signature prefix"
+        value={@values["prefix"]}
+        placeholder={text(@defaults[:prefix])}
+      />
+      <.source_field
+        :if={:id_header in @fields}
+        field={:id_header}
+        values={@values}
+        defaults={@defaults}
+      />
+      <.field
+        :if={:type_header in @fields}
+        name="cue_source[type_header]"
+        label="Event type header"
+        value={@values["type_header"]}
+        placeholder={text(@defaults[:type_header])}
+      />
+      <.field
+        :if={:daily_budget in @fields}
+        name="cue_source[daily_budget]"
+        label="Daily budget"
+        value={@values["daily_budget"]}
+        info="Items a day; 0 or blank for no limit."
+      />
+    </div>
+    <div :if={:id in @fields} class="mt-4">
+      <.source_field field={:id} values={@values} defaults={@defaults} />
+    </div>
+    """
+  end
+
   # A field folded under More options opens it when it already holds a value.
   @source_more_fields ~w(header algorithm prefix id_header type_header daily_budget)a
 
-  defp source_more?(values, fields) do
-    (values["id"] == "true" and :id in fields) or
-      Enum.any?(@source_more_fields, &(&1 in fields and present?(values[Atom.to_string(&1)])))
+  defp source_more?(values, folded) do
+    (values["id"] == "true" and :id in folded) or
+      Enum.any?(@source_more_fields, &(&1 in folded and present?(values[Atom.to_string(&1)])))
   end
 
   attr :form, :map, required: true
@@ -809,19 +1000,11 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
         placeholder={
           if @set?,
             do: "Set; leave blank to keep it",
-            else: "Paste the secret the service signs with"
+            else: "Paste the secret"
         }
         class="input input-bordered w-full bg-base-100 font-mono"
       />
     </label>
-    """
-  end
-
-  defp source_secret_fields(%{form: %{kind: "local_push"}, editor: %{mode: :create}} = assigns) do
-    ~H"""
-    <p class="text-xs text-base-content/60 lg:col-span-2">
-      A token is made when you save and shown once.
-    </p>
     """
   end
 
@@ -1392,6 +1575,9 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   attr :value, :any, default: nil
   attr :placeholder, :string, default: nil
   attr :info, :string, default: nil
+  attr :required, :boolean, default: false
+  attr :refusal, :string, default: nil
+  attr :refusal_id, :string, default: nil
 
   defp field(assigns) do
     ~H"""
@@ -1404,8 +1590,12 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
         name={@name}
         value={@value}
         placeholder={@placeholder}
-        class="input input-bordered w-full bg-base-100"
+        required={@required}
+        aria-invalid={@refusal && "true"}
+        aria-describedby={@refusal && @refusal_id}
+        class={["input input-bordered w-full bg-base-100", @refusal && "input-error"]}
       />
+      <span :if={@refusal} id={@refusal_id} class="mt-1 block text-xs text-error">{@refusal}</span>
     </label>
     """
   end
@@ -1413,6 +1603,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   attr :name, :string, required: true
   attr :label, :string, required: true
   attr :info, :string, default: nil
+  attr :describedby, :string, default: nil
   slot :inner_block, required: true
 
   defp select_field(assigns) do
@@ -1421,7 +1612,11 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       <span class="label flex items-center gap-1.5 pb-1 text-sm font-medium">
         {@label} <.info :if={@info} text={@info} />
       </span>
-      <select name={@name} class="select select-bordered w-full bg-base-100">
+      <select
+        name={@name}
+        aria-describedby={@describedby}
+        class="select select-bordered w-full bg-base-100"
+      >
         {render_slot(@inner_block)}
       </select>
     </label>

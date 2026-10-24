@@ -1275,20 +1275,43 @@ defmodule FermixWebWeb.SetupLive do
   defp apply_cues(socket, :refresh), do: refresh_cues_on(socket, "cues")
 
   # A save re-reads the report (so the section, and any sentinel the change
-  # wrote, come from the daemon), then shows a value meant to be seen once.
+  # wrote, come from the daemon), then shows a value meant to be seen once. A
+  # save that went through while a step after it did not (a new webhook whose
+  # URL could not be made) says so in the error tone.
   defp apply_cues(socket, {:saved, message, opts}) do
     restart? = Keyword.get(opts, :restart?, false)
 
     socket
     |> assign(:restart_pending?, socket.assigns.restart_pending? or restart?)
     |> refresh_report(message, restart_required?: restart?)
+    |> cues_flash_tone(Keyword.get(opts, :tone, :info), message)
     |> put_cues_reveal(Keyword.get(opts, :reveal))
   end
 
+  # A refused save is said in the banner and, while the source editor is open,
+  # inside it beside Save, where the owner is looking.
   defp apply_cues(socket, {:error, reason, cues}),
-    do: socket |> assign(:cues, cues) |> save_refused(reason)
+    do: socket |> assign(:cues, editor_refusal(cues, reason)) |> save_refused(reason)
+
+  defp editor_refusal(%{source_editor: %{} = editor} = cues, reason),
+    do: %{cues | source_editor: %{editor | refusal: format_config_error(reason)}}
+
+  defp editor_refusal(cues, _reason), do: cues
+
+  defp cues_flash_tone(socket, :info, _message), do: socket
+
+  defp cues_flash_tone(socket, :error, message),
+    do: socket |> assign_config_banner() |> flash_error(message)
 
   defp put_cues_reveal(socket, nil), do: socket
+
+  # A step that failed after the save carries its refusal, said in the words
+  # every other refused save on this page uses.
+  defp put_cues_reveal(%{assigns: %{cues: cues}} = socket, %{reason: reason} = reveal)
+       when is_map(cues) do
+    reveal = reveal |> Map.delete(:reason) |> Map.put(:sentence, format_config_error(reason))
+    assign(socket, :cues, %{cues | reveal: reveal})
+  end
 
   defp put_cues_reveal(%{assigns: %{cues: cues}} = socket, reveal) when is_map(cues),
     do: assign(socket, :cues, %{cues | reveal: reveal})

@@ -153,6 +153,10 @@ VOICE_MAX_SESSION_MINUTES = 5
 CUE_SOURCES = ("eval-news", "eval-alerts", "eval-research", "team-digest", "eng-blogs")
 # With --cue-mandates: one source and watcher per mandate (a job takes one mandate).
 CUE_MANDATE_SOURCES = ("eval-ops", "eval-ops-checked")
+# A GitHub webhook with no signing secret stored: it waits for one, the source the
+# behavioral suite's "is any of them broken?" finds. Nothing posts to it, it has no
+# token, and the cue runner's manifest never names it.
+CUE_WAITING_SOURCE = "release-hooks"
 CUE_MANIFEST = os.path.join("eval-fixtures", "cues.json")
 CUE_WATCHERS_MANIFEST = os.path.join("eval-fixtures", "cue_watchers.json")
 # The stub http plugin the mandates grant. Its one tool posts to a host that
@@ -347,8 +351,8 @@ def render_config(
 def cue_lines(home: str, cues: dict) -> list[str]:
     """Cues on, for the cue suites (`cap_cues`, `cues`): the switch, the door on this
     home's own port, every source the suites post to with its token in the `@file`
-    store (the sentinel names the store; `write_cue_tokens` writes the files), and
-    the default filter model, which a watcher made without a model of its own uses.
+    store (the sentinel names the store; `write_cue_tokens` writes the files), one
+    webhook still waiting for its signing secret, and the default filter model, which a watcher made without a model of its own uses.
     With mandates, the stub plugin they grant is enabled from the home's own
     dev_local directory. The mandate sections themselves name job ids that exist
     only once seed_cues.exs has made the jobs, so it appends them."""
@@ -359,6 +363,7 @@ def cue_lines(home: str, cues: dict) -> list[str]:
     for ref in cue_sources(cues["mandates"]):
         lines += [f"[fermix_core.cues.sources.{ref}]", 'kind = "local_push"',
                   'token = "@file"', ""]
+    lines += [f"[fermix_core.cues.sources.{CUE_WAITING_SOURCE}]", 'preset = "github"', ""]
     lines += ["[fermix_core.routing]", f"filter_provider = {json.dumps(provider)}",
               f"filter_model = {json.dumps(model)}", ""]
     if cues["mandates"]:

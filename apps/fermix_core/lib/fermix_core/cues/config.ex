@@ -48,6 +48,8 @@ defmodule FermixCore.Cues.Config do
   @kinds [:stream, :feed, :webhook, :local_push]
   @verify_methods [:shared_secret, :hmac, :standard_webhooks]
   @id_choices [:content_hash]
+  # How a signed or shared-secret webhook tells one delivery from another.
+  @identity_fields [:id_header, :id_path, :id]
   @modes [:approve, :auto]
   @secret_fields SecretWriter.cue_secret_fields()
 
@@ -181,6 +183,72 @@ defmodule FermixCore.Cues.Config do
   @doc "The secret a source of `kind` cannot run without, or nil when it needs none."
   @spec required_secret(kind()) :: secret_field() | nil
   def required_secret(kind) when kind in @kinds, do: Map.get(@required_secret_by_kind, kind)
+
+  @doc """
+  The fields a source must name itself: those its kind, its webhook method
+  (`verify`, the preset's when nil) and its preset need, less what `preset`
+  (nil for none) fills. The one presence rule: a surface marks these before a
+  save, and `normalize/1` refuses a section that leaves one out. Raises on a
+  preset this daemon does not know.
+  """
+  @spec required_fields(kind(), String.t() | nil, atom() | String.t() | nil) :: [atom()]
+  def required_fields(kind, preset, verify) when kind in @kinds do
+    filled = preset_fill!(preset)
+    method = verify || Map.get(filled, :verify)
+
+    kind
+    |> needed_fields(method, preset)
+    |> Enum.reject(&Map.has_key?(filled, &1))
+  end
+
+  defp preset_fill!(nil), do: %{}
+
+  defp preset_fill!(preset) when is_binary(preset) do
+    case Presets.defaults(preset) do
+      {:ok, defaults} -> defaults
+      :error -> raise ArgumentError, "unknown preset #{inspect(preset)}"
+    end
+  end
+
+  @doc "The fields a webhook names its identity by; it names one where its method needs one."
+  @spec identity_fields() :: [atom()]
+  def identity_fields, do: @identity_fields
+
+  @doc """
+  Whether a source still lacks the identity its method needs: a signed or
+  shared-secret webhook names one of `identity_fields/0`, itself or through
+  its preset. `fields` is what the source writes itself (a map or a keyword
+  list). The one identity rule: a surface refuses before a save, and
+  `normalize/1` refuses a section without one. Raises on an unknown preset.
+  """
+  @spec missing_identity?(kind(), String.t() | nil, atom() | String.t() | nil, map() | keyword()) ::
+          boolean()
+  def missing_identity?(kind, preset, verify, fields)
+      when kind in @kinds and (is_map(fields) or is_list(fields)) do
+    filled = Map.merge(preset_fill!(preset), Map.new(fields))
+    identity_needed?(kind, verify || Map.get(filled, :verify)) and not identified?(filled)
+  end
+
+  # A signed or shared-secret webhook names the header that carries it and
+  # how one delivery is told from another; the Bluesky preset follows the
+  # accounts it names.
+  defp needed_fields(kind, method, preset) do
+    Map.fetch!(@required_by_kind, kind) ++ method_needs(kind, method) ++ preset_needs(preset)
+  end
+
+  defp method_needs(kind, method),
+    do: if(identity_needed?(kind, method), do: [:header], else: [])
+
+  defp identity_needed?(:webhook, method),
+    do: method in [:hmac, :shared_secret, "hmac", "shared_secret"]
+
+  defp identity_needed?(_kind, _method), do: false
+
+  defp identified?(filled),
+    do: Enum.any?(@identity_fields, &(Map.get(filled, &1) not in [nil, ""]))
+
+  defp preset_needs("bluesky_jetstream"), do: [:dids]
+  defp preset_needs(_preset), do: []
 
   @doc "Whether `name` is a valid source ref or mandate name."
   @spec valid_name?(term()) :: boolean()
@@ -492,6 +560,7 @@ defmodule FermixCore.Cues.Config do
 
     check_field_kinds!(ref, kind, Map.keys(filled))
     check_required!(ref, kind, filled)
+    check_identity!(ref, kind, filled)
     check_webhook!(ref, kind, filled)
     check_url_scheme!(ref, kind, Map.get(filled, :url))
     check_item_paths!(ref, filled)
@@ -541,15 +610,29 @@ defmodule FermixCore.Cues.Config do
   end
 
   defp check_required!(ref, kind, filled) do
-    case Enum.reject(Map.fetch!(@required_by_kind, kind), &Map.has_key?(filled, &1)) do
+    needed = needed_fields(kind, Map.get(filled, :verify), Map.get(filled, :preset))
+
+    case Enum.reject(needed, &(Map.get(filled, &1) not in [nil, "", []])) do
       [] ->
         :ok
 
       missing ->
         raise ArgumentError,
-              "cues.sources.#{ref} is a #{kind} source and needs #{Enum.join(missing, " and ")}"
+              "cues.sources.#{ref} is a #{kind} source and needs " <>
+                Enum.map_join(missing, " and ", &needed_words/1)
     end
   end
+
+  defp check_identity!(ref, kind, filled) do
+    if identity_needed?(kind, Map.get(filled, :verify)) and not identified?(filled) do
+      raise ArgumentError,
+            ~s(cues.sources.#{ref}: needs an identity: id_header, id_path or id = "content_hash")
+    end
+  end
+
+  defp needed_words(:header), do: "header, the request header that carries the signature"
+  defp needed_words(:dids), do: "dids, the accounts to follow"
+  defp needed_words(field), do: Atom.to_string(field)
 
   defp sentinel!(value, ref, field) do
     if SecretWriter.sentinel?(value) do

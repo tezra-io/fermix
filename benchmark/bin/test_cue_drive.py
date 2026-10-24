@@ -525,10 +525,10 @@ def test_a_default_seeded_home_holds_both_cue_suites_out_as_not_evaluated(
                   if s.name in ("cues", "memory")]
     kept, held = run_eval.hold_out_unseeded(_cfg(home), behavioral)
     assert [suite.name for suite, _scns in kept] == ["memory"]
-    assert {suite for suite, _case, _reason in held} == {"cues"} and len(held) == 9
+    assert {suite for suite, _case, _reason in held} == {"cues"} and len(held) == 14
     run_eval.print_not_evaluated(held)
     out = capsys.readouterr().out
-    assert "NOT EVALUATED — 9 case(s)" in out and "cues/releases_and_outages" in out
+    assert "NOT EVALUATED — 14 case(s)" in out and "cues/releases_and_outages" in out
 
 
 def test_a_home_seeded_with_cues_runs_them(tmp_path, monkeypatch):
@@ -576,6 +576,47 @@ def test_each_reply_gate_fails_its_broken_echo_and_passes_the_right_one(case_id)
     broken, right = ECHOES[case_id]
     assert re.search(pattern, broken), f"{case_id} gate passes its broken case"
     assert not re.search(pattern, right), f"{case_id} gate fails the right reply"
+
+
+# The what-is-set-up cases' hedge floors: each must catch a reply that claims it
+# cannot read the owner's sources or mandates, and pass every correct answer,
+# negative ones included (a home with no mandates, or no source broken).
+HEDGES = {
+    "sources": ["I can't see your cue sources.", "I'm unable to list the sources.",
+                "I cannot check your sources from here.",
+                "I'm not able to access your cue sources.",
+                "I don't have access to the sources."],
+    "mandates": ["I don't have access to your mandates.", "I can't see your mandates.",
+                 "I'm unable to list the mandates.", "I can't view the mandates."],
+}
+CLEAN = {
+    "sources": ["I can't see any sources that are broken, but release-hooks is waiting for "
+                "its signing secret.",
+                "I can't see or set secrets for sources, so add it in settings.",
+                "I can't read the source's secret, but its status says it waits for one.",
+                "I can't see the sources' secrets, only their status.",
+                "I can't add the source for you; add it in settings.",
+                "Nothing is broken: every source is waiting for its first delivery."],
+    "mandates": ["I can't see any mandates in your settings, so none needs approval.",
+                 "You have no mandates, so I can't list any.",
+                 "I can't approve the mandate for you; approve it in settings.",
+                 "Both mandates, eval-ops-auto and eval-ops-checked, are approved."],
+}
+SETUP_CASES = {"sources_and_anything_broken": "sources", "anything_waiting_on_me": "sources",
+               "mandates_and_approval": "mandates", "mandates_needing_approval": "mandates"}
+
+
+@pytest.mark.parametrize("case_id", sorted(SETUP_CASES))
+def test_each_setup_hedge_floor_catches_a_hedge_and_passes_a_correct_negative(case_id):
+    loaded = suites.load_all(os.path.join(BENCH, "suites"))
+    cues = next(s for s in loaded if s.name == "cues")
+    case = next(c for scn in cues.scenarios for c in scn.cases if c.id == case_id)
+    pattern = case.expect["reply_not_matches"]
+    topic = SETUP_CASES[case_id]
+    for hedge in HEDGES[topic]:
+        assert re.search(pattern, hedge), f"{case_id} floor passes the hedge {hedge!r}"
+    for clean in CLEAN[topic]:
+        assert not re.search(pattern, clean), f"{case_id} floor fails the answer {clean!r}"
 
 
 if __name__ == "__main__":

@@ -378,9 +378,12 @@ def test_cues_are_on_with_every_source_its_token_store_and_the_default_filter():
         "/tmp/x-eval", "openai", {"default_model": "m"}, None, cues=_cues()))
     cues = doc["fermix_core"]["cues"]
     assert cues["enabled"] is True and cues["door_port"] == 45123
-    assert sorted(cues["sources"]) == sorted(seed.CUE_SOURCES)
-    for section in cues["sources"].values():
-        assert section == {"kind": "local_push", "token": "@file"}
+    assert sorted(cues["sources"]) == sorted(seed.CUE_SOURCES + (seed.CUE_WAITING_SOURCE,))
+    for ref in seed.CUE_SOURCES:
+        assert cues["sources"][ref] == {"kind": "local_push", "token": "@file"}
+    # One webhook waits for its signing secret: the source "is any of them broken?"
+    # finds. It has no token, so the cue runner's manifest never names it.
+    assert cues["sources"][seed.CUE_WAITING_SOURCE] == {"preset": "github"}
     assert doc["fermix_core"]["routing"] == {"filter_provider": "openai",
                                              "filter_model": "gpt-cheap"}
     # Without --cue-mandates no plugin is enabled, so no turn sees a ticket tool.

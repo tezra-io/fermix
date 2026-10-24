@@ -32,8 +32,9 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
   source in settings does not remove its mount; this does.
 
   It reads the current `FERMIX_HOME`'s config without resolving any other
-  secret and starts no daemon tree. The source's URL is made by Generate URL
-  on the setup page (`Cues.Webhook.ensure_path_secret/2`).
+  secret and starts no daemon tree. The source's URL is made
+  (`Cues.Webhook.ensure_path_secret/2`) when a new webhook source is saved on
+  the setup page, by its Generate URL, or by the Mac app's Copy URL.
   """
 
   use Mix.Task

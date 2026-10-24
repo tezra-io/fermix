@@ -9,9 +9,10 @@ defmodule FermixCore.Cues.Webhook do
 
   **The URL** is `/cues/hooks/<ref>/<random>`: `<random>` is 16 random bytes,
   url-safe base64, stored as the source's `path_secret` secret field. It
-  exists only once the owner asks for it (`ensure_path_secret/2`, the setup
-  page's Generate URL). Until then every request to the source answers 404,
-  and so does a wrong random part: the path is the first secret.
+  exists only once `ensure_path_secret/2` makes it: when a new webhook source
+  is saved on the setup page, on its Generate URL, or on the Mac app's Copy
+  URL (`cues.sources.url.get`). Until then every request to the source answers
+  404, and so does a wrong random part: the path is the first secret.
 
   **Verification**, one method per source, every comparison in constant time:
 
@@ -65,7 +66,6 @@ defmodule FermixCore.Cues.Webhook do
   @max_title_chars 300
   @github_subjects ~w(pull_request issue discussion release workflow_run check_run check_suite deployment)
 
-  @identity_fields [:id_header, :id_path, :id]
   @path_fields [:id_path, :revision_path, :type_path, :subject_path, :time_path]
   @header_fields [:header, :id_header, :type_header]
   @max_path_segments 16
@@ -236,26 +236,21 @@ defmodule FermixCore.Cues.Webhook do
 
   defp whole_body(_filled), do: :ok
 
+  # Whether `header` is there at all is `Cues.Config.required_fields/3`'s rule;
+  # these check what the method takes.
   defp method_fields(:hmac, filled) do
     algorithm = Map.get(filled, :algorithm, @default_algorithm)
 
-    cond do
-      not Map.has_key?(filled, :header) ->
-        {:error, "hmac needs header, the request header that carries the signature"}
-
-      algorithm not in @algorithms ->
+    if algorithm in @algorithms,
+      do: :ok,
+      else:
         {:error, "algorithm #{inspect(algorithm)} is not one of #{Enum.join(@algorithms, ", ")}"}
-
-      true ->
-        :ok
-    end
   end
 
   defp method_fields(:shared_secret, filled) do
-    case {Map.has_key?(filled, :header), present(filled, [:prefix, :algorithm])} do
-      {false, _fields} -> {:error, "shared_secret needs header, the header that carries it"}
-      {true, []} -> :ok
-      {true, [field | _rest]} -> {:error, "shared_secret takes no #{field}"}
+    case present(filled, [:prefix, :algorithm]) do
+      [] -> :ok
+      [field | _rest] -> {:error, "shared_secret takes no #{field}"}
     end
   end
 
@@ -270,7 +265,7 @@ defmodule FermixCore.Cues.Webhook do
   end
 
   defp identity_fields(:standard_webhooks, filled) do
-    case present(filled, @identity_fields) do
+    case present(filled, Config.identity_fields()) do
       [] ->
         :ok
 
@@ -280,16 +275,15 @@ defmodule FermixCore.Cues.Webhook do
     end
   end
 
+  # Whether it names one at all is `Cues.Config.missing_identity?/4`'s rule;
+  # this checks that it names no more than one.
   defp identity_fields(_method, filled) do
-    case present(filled, @identity_fields) do
-      [_one] ->
-        :ok
-
-      [] ->
-        {:error, ~s(needs an identity: id_header, id_path or id = "content_hash")}
-
-      several ->
+    case present(filled, Config.identity_fields()) do
+      [_first, _second | _rest] = several ->
         {:error, "takes one identity, and this one names #{Enum.join(several, " and ")}"}
+
+      _none_or_one ->
+        :ok
     end
   end
 

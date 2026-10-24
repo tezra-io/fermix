@@ -35,12 +35,12 @@ defmodule FermixCore.Management.Cues.SourceForm do
     %{
       id: "webhook",
       label: "Webhook",
-      sentence: "A service sends an item to Fermix when something happens."
+      sentence: "A service sends items to an address Fermix makes when you add this source."
     },
     %{
       id: "local_push",
       label: "Local push",
-      sentence: "Your own scripts on this Mac send items to Fermix."
+      sentence: "Scripts on this Mac send items with a token made when you add this source."
     }
   ]
   @kind_ids Enum.map(@kinds, & &1.id)
@@ -69,6 +69,8 @@ defmodule FermixCore.Management.Cues.SourceForm do
   @push_note "Send each item as a CloudEvent, with the token as a bearer token."
 
   @unknown_field "This source has no setting by that name."
+  @needed "Needed when no preset fills it."
+  @no_identity "Give a delivery id header, or have Fermix identify items by their content."
   @secret_value "This is a secret. Store it with secret.set instead."
   @single_line "This setting takes a single line of text."
   @published_value "This setting takes one of its published values."
@@ -177,9 +179,11 @@ defmodule FermixCore.Management.Cues.SourceForm do
   def new_section(kind, preset, values) when is_map(values) do
     with {:ok, kind} <- resolve_kind(kind, preset),
          {:ok, method} <- method(values, preset_defaults(preset)),
-         {:ok, entries} <- entries(values, kind, method, preset_defaults(preset)) do
+         {:ok, entries} <- entries(values, kind, method, preset_defaults(preset)),
+         filled = Enum.reject(entries, &blank_entry?/1),
+         :ok <- needed(kind, preset, [{:verify, method} | filled]) do
       head = if preset, do: [preset: preset], else: [kind: kind]
-      {:ok, head ++ Enum.reject(entries, &blank_entry?/1)}
+      {:ok, head ++ filled}
     end
   end
 
@@ -197,11 +201,41 @@ defmodule FermixCore.Management.Cues.SourceForm do
     old_method = source.verify && Atom.to_string(source.verify)
 
     with {:ok, method} <- method(Map.merge(%{"verify" => old_method}, values), defaults),
-         {:ok, entries} <- entries(values, kind, method, %{}) do
-      section = Keyword.drop(section, dropped_fields(old_method, method))
-      {:ok, Enum.reduce(entries, section, &apply_entry/2)}
+         {:ok, entries} <- entries(values, kind, method, %{}),
+         section = Keyword.drop(section, dropped_fields(old_method, method)),
+         merged = Enum.reduce(entries, section, &apply_entry/2),
+         :ok <- needed(kind, source.preset, [{:verify, method} | merged]) do
+      {:ok, merged}
     end
   end
+
+  # A field the kind needs and its preset does not fill (`Cues.Config`'s own
+  # rule), left out, is refused under the form's row for it, before the
+  # config's sentence would name the source instead.
+  # Its identity too (`Cues.Config.missing_identity?/4`), under the delivery id
+  # header's row, naming both ways out.
+  defp needed(kind, preset, filled) do
+    kind = String.to_existing_atom(kind)
+    verify = Keyword.get(filled, :verify)
+
+    missing =
+      kind
+      |> CuesConfig.required_fields(preset, verify)
+      |> Enum.find(&(Keyword.get(filled, &1) in [nil, "", []]))
+
+    cond do
+      missing ->
+        {:error, {row_key(missing), @needed}}
+
+      CuesConfig.missing_identity?(kind, preset, verify, filled) ->
+        {:error, {"id_header", @no_identity}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp row_key(config), do: Enum.find(@fields, &(&1.config == config)).key
 
   defp dropped_fields(same, same), do: []
 
