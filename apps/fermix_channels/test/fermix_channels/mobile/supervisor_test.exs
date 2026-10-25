@@ -1,5 +1,7 @@
 defmodule FermixChannels.Mobile.SupervisorTest do
-  use ExUnit.Case, async: true
+  # async: false — the APNs key tests assert what the log never says, and an
+  # async module's captured log also holds other modules' lines.
+  use ExUnit.Case, async: false
 
   import ExUnit.CaptureLog
 
