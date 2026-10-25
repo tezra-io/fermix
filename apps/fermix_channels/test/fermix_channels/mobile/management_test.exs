@@ -1362,6 +1362,40 @@ defmodule FermixChannels.Mobile.ManagementTest do
       end
     end
 
+    # M51 §10: settings that do not resolve start no dispatcher, so the status
+    # names them from configuration alone and asks no dispatcher.
+    test "push settings that do not resolve read missing credentials and no delivery" do
+      push = [
+        enabled: true,
+        team_id: "ABCDE12345",
+        key_id: "KEY123",
+        key: X509.PrivateKey.new_ec(:secp256r1) |> X509.PrivateKey.to_pem(),
+        topic: "io.tezra.fermix",
+        environment: "development"
+      ]
+
+      for broken <- [
+            Keyword.delete(push, :team_id),
+            Keyword.put(push, :key, "@keyring"),
+            Keyword.put(
+              push,
+              :key,
+              "-----BEGIN PRIVATE KEY-----\nnot a key\n-----END PRIVATE KEY-----"
+            ),
+            Keyword.put(push, :environment, "staging")
+          ] do
+        opts =
+          serving_opts(
+            config: [enabled: true, push: broken],
+            push_status: fn _dispatcher -> flunk("no dispatcher runs for these settings") end,
+            list_devices: fn :store -> {:ok, []} end
+          )
+
+        assert {:ok, %{apns: apns}} = Management.status(opts)
+        assert apns == %{enabled: true, credentials: :missing, delivery: :down, reason: nil}
+      end
+    end
+
     test "the identity fingerprint is the grouped SHA-256 of the gateway key" do
       fingerprint = grouped_sha256(<<7::256>>)
       groups = String.split(fingerprint, " ")

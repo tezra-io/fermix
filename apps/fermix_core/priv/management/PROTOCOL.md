@@ -395,8 +395,10 @@ Notes that the shapes alone do not carry:
   last one failed or was lost (`apns.reason`: `connecting`, `connect_failed`
   or `connection_lost`; the next push reconnects), or `down` when no push
   dispatcher runs: the channel is not running, push is off, or its
-  credentials did not resolve. A connect is given up after ten seconds, and
-  the status answers while one runs.
+  settings did not resolve (a key the keychain could not give, one that is
+  not a P-256 key, a missing or invalid field), when `apns.credentials` reads
+  `missing` and the rest of the channel runs. A connect is given up after ten
+  seconds, and the status answers while one runs.
 - **Remote reach lets a paired phone reach this daemon from any network**,
   through Fermix's relays (M62). `remote.state` is `off` (its switch is off,
   or the channel is not running), `dormant` (no phone has been paired yet;

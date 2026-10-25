@@ -24,6 +24,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A bad phone push setting no longer stops Fermix starting.** With iPhone
+  push turned on in `[fermix_channels.mobile.push]`, a key that is not a
+  P-256 `.p8`, or a field missing or invalid, stopped the channels from
+  starting, and with them Fermix. The phone channel now starts without push:
+  chat, pairing and reach from anywhere work, the daemon log names the
+  fault, and `fermix doctor` and the phone channel's status say APNs
+  credentials are missing until it is fixed and Fermix restarts.
 - **Reach from anywhere can no longer be jammed by connections that never
   authenticate.** A remote connection held one of the 64 places for as long as
   it kept opening streams, even when every one failed its handshake, so enough

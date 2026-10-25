@@ -81,7 +81,8 @@ An Android phone gets no push: Fermix has no push service for Android, so it nev
 - The bind address or port is unavailable (the listener keeps retrying).
 - The daemon was not restarted after a mobile config change.
 - `bind` names one address the phone cannot reach: the pairing link and reconnects list only that address.
-- APNs `topic` or `environment` does not match the app build, or `FERMIX_APNS_KEY` cannot be read (a locked keychain): mobile starts without push, logs it, and `fermix doctor` reports APNs credentials missing.
+- APNs `topic` or `environment` does not match the app build.
+- The APNs settings do not resolve (`FERMIX_APNS_KEY` unreadable behind a locked keychain, a key that is not a P-256 `.p8`, a missing or invalid field): the phone channel still starts, without push, the daemon log names the fault, and `fermix doctor` reports APNs credentials missing. Fix `[fermix_channels.mobile.push]` (or unlock the keychain) and restart.
 - The phone was revoked or reinstalled: pair again.
 - Memory is off (`[fermix_core.memory] enabled = false`): the phone channel keeps its timeline there, so it is refused for that boot as `memory_disabled` (every other channel keeps running).
 - `devices.toml` is unreadable, corrupt, empty or not `0600`: the mobile surface refuses to start for that boot (every other channel keeps running). Repair or remove the file, then restart.

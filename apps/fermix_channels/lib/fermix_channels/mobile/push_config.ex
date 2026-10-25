@@ -141,8 +141,9 @@ defmodule FermixChannels.Mobile.Push.Config do
       _entries -> {:error, {:invalid_push_config, :key, :invalid_pem}}
     end
   rescue
-    error in [ArgumentError, ErlangError] ->
-      {:error, {:invalid_push_config, :key, {:invalid_pem, Exception.message(error)}}}
+    # The decoder's own words quote the bytes it could not match, and this
+    # reason is logged: the key is a secret, so it is refused by class alone.
+    _error in [ArgumentError, ErlangError] -> {:error, {:invalid_push_config, :key, :invalid_pem}}
   end
 
   defp validate_decoded_key(

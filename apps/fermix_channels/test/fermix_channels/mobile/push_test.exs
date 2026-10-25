@@ -87,6 +87,18 @@ defmodule FermixChannels.Mobile.PushTest do
     refute inspected =~ "PRIVATE KEY"
   end
 
+  # The reason a bad key is refused with reaches the log at boot and at every
+  # push, and a DER decoder's own words quote the bytes it could not match.
+  test "a key the decoder cannot read is refused by class, never quoting its bytes" do
+    der = <<4, 3, 0xFE, 0xED, 0xFA>>
+
+    pem =
+      "-----BEGIN EC PRIVATE KEY-----\n#{Base.encode64(der)}\n-----END EC PRIVATE KEY-----\n"
+
+    assert {:error, {:invalid_push_config, :key, :invalid_pem}} =
+             Config.new(Keyword.put(valid_config(), :key, pem))
+  end
+
   test "builds an encrypted mutable APNs preview with no plaintext content" do
     {gateway_public, gateway_private} = keypair(4)
     {device_public, device_private} = keypair(5)
