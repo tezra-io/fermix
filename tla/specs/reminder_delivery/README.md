@@ -419,6 +419,10 @@ staled the `mobile.ex` pin: `send_approval` now hands the approval's id and
 expiry to its push. No delivery path the spec models (the reminder's send, its
 row, its push launch) changed.
 
+Re-read on 2026-10-25 for the removal of direct FCM push (`9b9d83b6`),
+which staled the `mobile.ex` pin again: `send_approval` no longer hands its
+push an id and expiry. No delivery path the spec models changed.
+
 ## Code and doc drift
 
 - `delivery_worker.ex:173-176` says a claim past the validity boundary "cannot

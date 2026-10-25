@@ -57,11 +57,11 @@ one check):
 
 | Switch | The design | Switched off |
 |---|---|---|
-| `DecidesOnEvidence` | D20: the decision reads the read frontier and each device's acked cursor. | **Today's code:** one registered socket of the profile suppresses the push for every device (`push.ex:214`, `:613-623`). |
+| `DecidesOnEvidence` | D20: the decision reads the read frontier and each device's acked cursor. | **Today's code:** one registered socket of the profile suppresses the push for every device (`push.ex:172`, `:444-454`). |
 | `AcksAfterAnnounce` | The app acks a row once it has announced it: shown it on screen, or posted its notification. | The design's first draft: the app acks as soon as the row is persisted (PUSH-2). |
 | `LocalNotify` | The app posts the notification itself for a row that arrives while its chat is off screen. | The row is only listed. |
 | `NotifiedSet` | D22: the app announces an id once, whichever path brought it. | Every arrival alerts. |
-| `RetriesTransient` | D21: a transient dispatcher error is retried. | **Today's code:** one attempt, its failure logged (`notify_timeline_row`, `channels/mobile.ex:582-589`). |
+| `RetriesTransient` | D21: a transient dispatcher error is retried. | **Today's code:** one attempt, its failure logged (`notify_timeline_row`, `channels/mobile.ex:575-582`). |
 | `AttemptCap` | D21: at most three attempts per device. | The retry has no bound. |
 | `BootCheck` | D21: a boot step reads `push_attempted_seq` and decides once for the newest unread row above it. | **Today's code:** nothing runs at boot. |
 
@@ -186,6 +186,20 @@ spec already has; an approval's push carries its id and expiry; and a phone's
 decision is unchanged (any socket of the profile suppresses the push, then the
 read frontier, then one attempt per row, nothing at boot), so nothing the
 spec models changed; the comments' line numbers now point at the new file.
+
+Re-read on 2026-10-25 for the removal of direct FCM push (`9b9d83b6`),
+which staled the `push.ex` pin and moved the `mobile.ex` numbers. Fermix
+pushes through APNs alone: an iPhone, or a phone paired before pairing
+recorded a platform, is pushed as before, and an Android phone is refused by
+name with a typed reason in the log before any attempt, never sent through
+APNs. An approval's push carries no id or expiry again. The spec does not
+model a device's platform: its devices are the phones a push service reaches.
+Since `dbf03a86`, push settings that do not resolve start the channel
+without the dispatcher instead of refusing its boot, which is push turned off
+and also outside the spec. The decision is unchanged (any socket of the
+profile suppresses the push, then the read frontier, then one attempt per row,
+nothing at boot), so nothing the spec models changed; the comments' line
+numbers now point at the new file.
 
 ## What the spec changed in the design
 

@@ -51,7 +51,7 @@
 (* at the push platform, or one thing the app, the owner or the            *)
 (* environment does. Three steps fold calls together; each says why.       *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/push.ex @ f13613c297a1
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/push.ex @ 7909c61eeee1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex#schedule_push,launch_push,default_push_launcher,notify_timeline_row,push_notify,maybe_schedule_proactive_push,deliver_persisted_text,delivered_text,deliver_persisted_media,delivered_effects,build_turn_result,schedule_request_push,broadcast,emit,emit_after_commit @ 4063ad0f97f7
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/event_router.ex#after_settle,end_phone_turn,schedule_settled_push @ d42cb71bf67e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/device_registry.ex @ ff8b2c95d156
@@ -79,7 +79,7 @@ CONSTANTS
     DecidesOnEvidence,    \* D20: the decision reads the read frontier and each
                           \* device's acked cursor. FALSE is today's code: any
                           \* registered socket of the profile suppresses the
-                          \* push for every device (push.ex:214, :613-623)
+                          \* push for every device (push.ex:172, :444-454)
     AcksAfterAnnounce,    \* the app acks a row once it has announced it (shown
                           \* it on screen or posted its notification), never
                           \* on persisting it alone
@@ -89,7 +89,7 @@ CONSTANTS
                           \* brought it
     RetriesTransient,     \* D21: a transient dispatcher error is retried.
                           \* FALSE is today's code: one attempt, its failure
-                          \* logged (notify_timeline_row, channels/mobile.ex:582-589)
+                          \* logged (notify_timeline_row, channels/mobile.ex:575-582)
     AttemptCap,           \* D21: at most three attempts per device
     BootCheck,            \* D21: the boot step that reads push_attempted_seq.
                           \* FALSE is today's code: nothing runs at boot
@@ -194,15 +194,15 @@ AckTarget(d) ==
 (* The writer and the push task (Channels.Mobile, Mobile.Push) *)
 
 \* deliver_persisted_text / deliver_persisted_media for a row nobody asked
-\* for (channels/mobile.ex:470-495), and for a request's reply its
+\* for (channels/mobile.ex:463-488), and for a request's reply its
 \* settlement: build_turn_result when it became a turn (:201-207,
-\* :844-854), Mobile.EventRouter.after_settle -> schedule_settled_push when
+\* :837-847), Mobile.EventRouter.after_settle -> schedule_settled_push when
 \* it did not (event_router.ex:142-168), after the turn_done that ends the
 \* request's turn on the phones (end_phone_turn, :148-153; not a row). The
 \* row's Repo write, then emit_after_commit -> DeviceRegistry.broadcast
-\* (:538-543, :721-736), then schedule_push -> Task.Supervisor.start_child
-\* (:355-360, :558-573). A row nobody asked for reaches the sockets as a
-\* `row`, a reply as its turn's `text_done` (delivered_text, :475-480): either
+\* (:531-536, :714-729), then schedule_push -> Task.Supervisor.start_child
+\* (:348-353, :551-566). A row nobody asked for reaches the sockets as a
+\* `row`, a reply as its turn's `text_done` (delivered_text, :468-473): either
 \* way the phone takes the row.
 \* Three calls folded into one step: a crash between them leaves what a crash
 \* right after them leaves, a durable row with no task, because the registry
@@ -222,7 +222,7 @@ AnySocket == \E d \in Devices : reg[d] = "open"
 \* read_up_to_seq covers the row ...; else a push to every registered device
 \* whose acked cursor has not reached the row, which includes a device with
 \* no socket and one whose socket closed or froze meanwhile."
-\* Today's code, push.ex:198-238 and :730-732: presence first, then the
+\* Today's code, push.ex:161-196 and :553-555: presence first, then the
 \* frontier.
 Decision(r, d) ==
     IF DecidesOnEvidence
@@ -234,8 +234,8 @@ Decision(r, d) ==
          ELSE "pending"
 
 \* Mobile.Push.notify after the task's one wait (today: maybe_notify,
-\* push.ex:198-209). It reads the frontier (one Repo call, :625-628) and the
-\* registry (one GenServer call, :613-623). The two reads are folded into one
+\* push.ex:161-169). It reads the frontier (one Repo call, :456-459) and the
+\* registry (one GenServer call, :444-454). The two reads are folded into one
 \* step: both values only grow while a socket lives, a socket that goes takes
 \* its acked cursor with it and is then pushed, and a read that lands after
 \* the decision is the race Witness_AlertAfterRead keeps in view.
@@ -248,11 +248,11 @@ Decide(r) ==
                    noted, observers, budgets>>
 
 \* What a failed attempt numbered n leaves. M51 section 10, Retries: "at
-\* most three attempts"; today's code makes one (push.ex:429-462).
+\* most three attempts"; today's code makes one (push.ex:262-292).
 AfterFailure(n) ==
     IF RetriesTransient /\ (n < Cap \/ ~AttemptCap) THEN "pending" ELSE "failed"
 
-\* One dispatcher call for one device (today: dispatch/3, push.ex:429-435,
+\* One dispatcher call for one device (today: dispatch/3, push.ex:262-268,
 \* which sends every device's notification in one call). The platform takes
 \* the push and says so, or the call fails, or the platform takes the push
 \* and the daemon sees a timeout. The spec stops at a fourth attempt: that is
