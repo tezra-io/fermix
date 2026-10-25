@@ -132,8 +132,9 @@ class ReleaseWorkflowTest(unittest.TestCase):
             with self.subTest(job=job):
                 self.assertIn("needs: preflight\n", self._job(job))
 
-    # The build jobs compare the helper's digest with the pin and nothing more,
-    # so preflight, which every build needs, is where its signatures are checked.
+    # The build jobs compare the helper's and its notices' digests with the pin
+    # and nothing more, so preflight, which every build needs, is where their
+    # signatures are checked.
     def test_preflight_verifies_the_pinned_iroh_helper_against_its_signatures(self):
         preflight = self._job("preflight")
         installer = re.search(r"uses: sigstore/cosign-installer@[0-9a-f]{40} # v\S+\n", self._job("sign-candidate"))

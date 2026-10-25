@@ -27,8 +27,10 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.artifact = self.base / "fermix_macos_aarch64"
         self.pin = self.base / "PIN.json"
         self.helper_source = self.base / "helper-payload" / "fermix-iroh"
+        self.notices_source = self.base / "helper-payload" / "THIRD-PARTY-NOTICES.txt"
         self.empty_payload = self.base / "empty-payload"
         self.pinned_digest = None
+        self.pinned_notices_digest = None
         self.codesign_bin = self.base / "codesign-bin"
         self.codesign_log = self.base / "codesign.log"
 
@@ -394,8 +396,8 @@ class VerifyStandaloneTest(unittest.TestCase):
     # host's own data-directory overrides are dropped: one would move the
     # stub's unpack out of the throwaway world and onto the host. A test that
     # needs one passes it in `extra_env`.
-    def _run(self, target, artifact=None, cwd=None, codesign="team", pin_entry=True, extra_env=None):
-        self._write_pin(target, pin_entry)
+    def _run(self, target, artifact=None, cwd=None, codesign="team", pin_entry=True, pin_changes=None, extra_env=None):
+        self._write_pin(target, pin_entry, pin_changes)
         self._write_codesign(codesign)
         environment = {
             name: value for name, value in os.environ.items() if name not in ("XDG_DATA_HOME", "FERMIX_INSTALL_DIR")
@@ -614,17 +616,90 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertIn("has no sha256 for macos_aarch64", result.stderr)
         self.assertFalse(marker.exists())
 
+    # A pin from before the notices names none, so it cannot say which bytes
+    # the payload must carry beside the helper.
+    def test_rejects_a_pin_without_the_notices_before_running_the_artifact(self):
+        for changes, message in (
+            ({"notices": None}, "has no sha256 for the notices"),
+            ({"schema_version": 1}, "is not schema_version 2"),
+        ):
+            with self.subTest(changes=changes):
+                marker = self.base / "ran"
+                self._write_artifact(create_disclaim=True, marker=marker)
+
+                result = self._run("macos_aarch64", pin_changes=changes)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertFalse(marker.exists())
+
+    # ── the fermix-iroh third-party notices beside the helper ─────────────
+
+    def test_checks_the_pinned_notices_beside_the_helper(self):
+        for target in ("macos_aarch64", "linux_x86_64"):
+            with self.subTest(target=target):
+                self.artifact = self.base / f"fermix_{target}"
+                linux = target.startswith("linux_")
+                self._write_artifact(create_disclaim=not linux, migrate="refused:not_macos" if linux else "plan")
+
+                result = self._run(target)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertRegex(
+                    result.stdout, r"fermix-iroh notices: .+/fermix_core-0\.9\.0/priv/iroh_helper/THIRD-PARTY-NOTICES\.txt\n"
+                )
+
+    def test_rejects_a_release_without_the_notices(self):
+        for target in ("macos_aarch64", "linux_x86_64"):
+            with self.subTest(target=target):
+                self.artifact = self.base / f"fermix_{target}"
+                linux = target.startswith("linux_")
+                self._write_artifact(
+                    create_disclaim=not linux, migrate="refused:not_macos" if linux else "plan", iroh_notices="missing"
+                )
+
+                result = self._run(target)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("must carry the fermix-iroh third-party notices as a regular file", result.stderr)
+
+    def test_rejects_notices_that_are_a_symbolic_link(self):
+        self._write_artifact(create_disclaim=True, iroh_notices="symlink")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must carry the fermix-iroh third-party notices as a regular file", result.stderr)
+
+    def test_rejects_notices_whose_digest_is_not_the_pinned_one(self):
+        self._write_artifact(create_disclaim=True, iroh_notices="other_bytes")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("the fermix-iroh notices are not the pinned ones", result.stderr)
+        self.assertIn(f"expected sha256 {self.pinned_notices_digest}", result.stderr)
+        self.assertIn(f"found {self._sha256(self.notices_source)}", result.stderr)
+
+    def test_rejects_notices_that_are_not_mode_0644(self):
+        self._write_artifact(create_disclaim=True, iroh_notices="executable")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("the fermix-iroh notices must be mode 0644, found 0755", result.stderr)
+
     # The pin as `pin_iroh_helper.py` writes it: one digest per target, the
     # target under test holding this tree's helper and every other target a
     # different build's.
-    def _write_pin(self, target, pin_entry=True):
+    def _write_pin(self, target, pin_entry=True, pin_changes=None):
         digests = {name: hashlib.sha256(f"another build for {name}".encode()).hexdigest() for name in TARGETS}
         if self.pinned_digest is not None:
             digests[self._artifact_target()] = self.pinned_digest
         if not pin_entry:
             del digests[target]
         pin = {
-            "schema_version": 1,
+            "schema_version": 2,
             "repository": "tezra-io/fermix-iroh",
             "tag": "v0.1.0",
             "version": "0.1.0",
@@ -633,8 +708,15 @@ class VerifyStandaloneTest(unittest.TestCase):
             "certificate_identity": "https://github.com/tezra-io/fermix-iroh/.github/workflows/release.yml@refs/tags/v0.1.0",
             "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
             "macos_team_id": IROH_TEAM_ID,
+            "notices": {"asset": "fermix-iroh-THIRD-PARTY-NOTICES.txt", "sha256": self.pinned_notices_digest},
             "targets": {name: {"asset": f"fermix-iroh-{name}", "sha256": digests[name]} for name in digests},
         }
+        # A change to None drops the key, as a pin from before it would.
+        for key, value in (pin_changes or {}).items():
+            if value is None:
+                del pin[key]
+            else:
+                pin[key] = value
         self.pin.write_text(json.dumps(pin, indent=2) + "\n", encoding="utf-8")
 
     def _artifact_target(self):
@@ -691,10 +773,11 @@ class VerifyStandaloneTest(unittest.TestCase):
         browser_bridge="works",
         settings="refuses",
         iroh_helper="pinned",
+        iroh_notices="pinned",
         maintenance="answers",
     ):
         setup = self._disclaim_setup(create_disclaim, disclaim_executable, disclaim_exit, version)
-        helper_setup = self._iroh_helper_setup(iroh_helper, version)
+        helper_setup = self._iroh_helper_setup(iroh_helper, iroh_notices, version)
         marker_line = "" if marker is None else f"touch '{marker}'\n"
         self.empty_payload.mkdir(exist_ok=True)
         self.artifact.write_text(
@@ -1001,10 +1084,10 @@ SHIM
 
     # ── the fermix-iroh helper stub ───────────────────────────────────────
     # Every run of the stub unpacks its payload where the wrapper names it, and
-    # the helper into that payload from one source file whose bytes the pin
-    # names (or, for `other_bytes`, does not). A release without the helper
-    # still unpacks its payload.
-    def _iroh_helper_setup(self, behaviour, version):
+    # the helper and its notices into that payload from source files whose
+    # bytes the pin names (or, for `other_bytes`, does not). A release without
+    # the helper still unpacks its payload.
+    def _iroh_helper_setup(self, behaviour, notices, version):
         version_line = "fermix-iroh 0.1.0 (iroh 1.2.0)" if behaviour == "other_version" else IROH_VERSION_LINE
         answer = "exit 70" if behaviour == "version_fails" else f"printf '%s\\n' '{version_line}'"
         self.helper_source.parent.mkdir(exist_ok=True)
@@ -1015,6 +1098,12 @@ SHIM
             hashlib.sha256(b"another fermix-iroh build").hexdigest()
             if behaviour == "other_bytes"
             else self._sha256(self.helper_source)
+        )
+        self.notices_source.write_text("MIT License\n\nCopyright (c) 2026 Tezra.io\n", encoding="utf-8")
+        self.pinned_notices_digest = (
+            hashlib.sha256(b"other notices").hexdigest()
+            if notices == "other_bytes"
+            else self._sha256(self.notices_source)
         )
         lines = ['mkdir -p "$payload/lib"']
         if behaviour == "missing":
@@ -1028,8 +1117,18 @@ SHIM
                 'mkdir -p "$iroh"',
                 f"cp '{self.helper_source}' \"$iroh/fermix-iroh\"",
                 f'chmod {mode} "$iroh/fermix-iroh"',
+                *self._iroh_notices_lines(notices),
             ]
         return "\n".join(lines) + "\n"
+
+    def _iroh_notices_lines(self, notices):
+        target = '"$iroh/../THIRD-PARTY-NOTICES.txt"'
+        if notices == "missing":
+            return []
+        if notices == "symlink":
+            return [f"ln -sf '{self.notices_source}' {target}"]
+        mode = "0755" if notices == "executable" else "0644"
+        return [f"cp '{self.notices_source}' {target}", f"chmod {mode} {target}"]
 
 
 if __name__ == "__main__":

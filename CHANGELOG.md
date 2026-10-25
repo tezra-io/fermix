@@ -13,6 +13,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   packages, so the switch works with no download and no extra step. A source
   checkout installs it with `mix fermix.iroh_helper`, and `fermix doctor`
   fails a release that lacks it.
+- **The `fermix-iroh` helper's third-party notices ship with it.** The
+  licences of what is compiled into the helper ask for their notices to
+  travel with it. Every release carries them beside the helper, and the Linux
+  packages also install them as
+  `/usr/share/doc/fermix/fermix-iroh-THIRD-PARTY-NOTICES.txt` and name them
+  in their copyright file.
 - **Pair a phone from the browser setup.** The Channels tab has a Phone card,
   with the same steps as the Phone row in the Mac and Linux apps: it turns the
   phone channel on where it is off, shows a code to scan with the Fermix phone

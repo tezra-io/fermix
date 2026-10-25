@@ -35,8 +35,8 @@ esac
 artifact="$(cd "$(dirname "$artifact")" && pwd)/$(basename "$artifact")"
 
 # One reader for the helper pin: the digest pinned for this target, the exact
-# `--version` line and the macOS Team ID, one per line. A pin missing any of
-# them is refused here, before the artifact runs.
+# `--version` line, the macOS Team ID and the notices' digest, one per line. A
+# pin missing any of them is refused here, before the artifact runs.
 iroh_pin_fields() {
   uv run --no-project python -c '
 import json, re, sys
@@ -46,13 +46,18 @@ try:
         pin = json.load(stream)
 except (OSError, ValueError) as error:
     sys.exit(f"cannot read the iroh helper pin {path}: {error}")
-if not isinstance(pin, dict) or pin.get("schema_version") != 1:
-    sys.exit(f"the iroh helper pin {path} is not schema_version 1")
+if not isinstance(pin, dict) or pin.get("schema_version") != 2:
+    sys.exit(f"the iroh helper pin {path} is not schema_version 2")
+def digest(entry):
+    sha256 = entry.get("sha256") if isinstance(entry, dict) else None
+    return sha256 if isinstance(sha256, str) and re.fullmatch(r"[0-9a-f]{64}", sha256) else None
 targets = pin.get("targets")
-entry = targets.get(target) if isinstance(targets, dict) else None
-sha256 = entry.get("sha256") if isinstance(entry, dict) else None
-if not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+sha256 = digest(targets.get(target) if isinstance(targets, dict) else None)
+if sha256 is None:
     sys.exit(f"the iroh helper pin {path} has no sha256 for {target}")
+notices_sha256 = digest(pin.get("notices"))
+if notices_sha256 is None:
+    sys.exit(f"the iroh helper pin {path} has no sha256 for the notices")
 fields = [pin.get(key) for key in ("version", "iroh_version", "macos_team_id")]
 if not all(isinstance(value, str) and value for value in fields):
     sys.exit(f"the iroh helper pin {path} must name version, iroh_version and macos_team_id")
@@ -60,6 +65,7 @@ version, iroh_version, team_id = fields
 print(sha256)
 print(f"fermix-iroh {version} (iroh {iroh_version})")
 print(team_id)
+print(notices_sha256)
 ' "$1" "$2"
 }
 
@@ -71,11 +77,19 @@ with open(sys.argv[1], "rb") as stream:
 ' "$1"
 }
 
+mode_of() {
+  uv run --no-project python -c '
+import os, stat, sys
+print(f"{stat.S_IMODE(os.stat(sys.argv[1]).st_mode):04o}")
+' "$1"
+}
+
 [ -f "$iroh_pin" ] || fail "iroh helper pin not found: $iroh_pin"
 iroh_fields="$(iroh_pin_fields "$iroh_pin" "$target")" || fail "the iroh helper pin cannot be used (the reason is above)"
 iroh_sha256="$(printf '%s\n' "$iroh_fields" | sed -n 1p)"
 iroh_version_line="$(printf '%s\n' "$iroh_fields" | sed -n 2p)"
 iroh_team_id="$(printf '%s\n' "$iroh_fields" | sed -n 3p)"
+iroh_notices_sha256="$(printf '%s\n' "$iroh_fields" | sed -n 4p)"
 
 runtime_parent="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 [ -d "$runtime_parent" ] || fail "standalone verification temporary directory does not exist"
@@ -153,6 +167,20 @@ case "$target" in
     ;;
 esac
 printf 'fermix-iroh helper: %s (%s)\n' "$iroh_helper" "$iroh_helper_version"
+
+# The licences of what is compiled into the helper ask for their notices to
+# travel with it, so the payload carries them beside it: one regular file,
+# mode 0644, the bytes the pin names.
+iroh_notices="${iroh_helper%/bin/fermix-iroh}/THIRD-PARTY-NOTICES.txt"
+[ ! -L "$iroh_notices" ] && [ -f "$iroh_notices" ] ||
+  fail "the unpacked release must carry the fermix-iroh third-party notices as a regular file beside the helper: $iroh_notices"
+iroh_notices_mode="$(mode_of "$iroh_notices")" || fail "cannot read the mode of the fermix-iroh notices: $iroh_notices"
+[ "$iroh_notices_mode" = 0644 ] ||
+  fail "the fermix-iroh notices must be mode 0644, found $iroh_notices_mode: $iroh_notices"
+iroh_notices_actual="$(sha256_of "$iroh_notices")" || fail "cannot hash the fermix-iroh notices: $iroh_notices"
+[ "$iroh_notices_actual" = "$iroh_notices_sha256" ] ||
+  fail "the fermix-iroh notices are not the pinned ones: expected sha256 $iroh_notices_sha256 (from $iroh_pin), found $iroh_notices_actual"
+printf 'fermix-iroh notices: %s\n' "$iroh_notices"
 
 # ── plugins auth clear, run tree-less from this artifact ────────────────────
 # Every `fermix plugins` verb runs without the supervision tree, so no command

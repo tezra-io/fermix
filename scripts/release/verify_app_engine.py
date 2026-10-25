@@ -46,8 +46,10 @@ enabled = true
 MAPS_HELPER_GLOB = "lib/fermix_nif-*/priv/fermix-maps"
 MAPS_HELPER_CHECK = "fermix-maps: ok"
 # Reach from anywhere runs this helper (M62); the release step puts the pinned
-# build into the engine tree before the manifest inventories it.
+# build into the engine tree before the manifest inventories it, and its
+# third-party notices beside its bin/.
 IROH_HELPER_GLOB = "lib/fermix_core-*/priv/iroh_helper/bin/fermix-iroh"
+IROH_NOTICES_NAME = "THIRD-PARTY-NOTICES.txt"
 DEFAULT_IROH_PIN = Path(__file__).resolve().parents[2] / "apps/fermix_core/priv/iroh_helper/PIN.json"
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[+-][0-9A-Za-z.-]+)?$")
@@ -65,6 +67,7 @@ class IrohPin:
     sha256: str
     version_line: str
     team_id: str
+    notices_sha256: str
 
 
 @dataclass(frozen=True)
@@ -163,6 +166,7 @@ def _verify_in_directories(
     iroh_helper = _verify_iroh_helper(
         release_root, manifest, command_prefix, pinned_iroh, timeouts
     )
+    iroh_notices = _verify_iroh_notices(release_root, iroh_helper, pinned_iroh)
     fermix_home, environment = _runtime_environment(runtime_root, scratch)
     executable = release_root / "bin/fermix_app_engine"
     start_command = [*command_prefix, str(executable), "start"]
@@ -180,7 +184,12 @@ def _verify_in_directories(
             log_path,
         )
         result = _runtime_result(target, version, mode, fermix_home, manifest, runtime)
-        return {**result, "maps_helper": maps_helper, "iroh_helper": iroh_helper}
+        return {
+            **result,
+            "maps_helper": maps_helper,
+            "iroh_helper": iroh_helper,
+            "iroh_notices": iroh_notices,
+        }
     except VerificationError:
         raise
     except (OSError, subprocess.SubprocessError) as error:
@@ -272,6 +281,32 @@ def _verify_iroh_helper(release_root, manifest, command_prefix, pinned, timeouts
     return relative
 
 
+def _verify_iroh_notices(release_root, helper, pinned):
+    """The helper's third-party notices beside its bin/: one regular 0644 file, the pinned bytes.
+
+    The manifest's inventory lists executables only and never names them; its
+    tree digest, which `_validated_manifest` checks first, is what covers them.
+    """
+    relative = (PurePosixPath(helper).parent.parent / IROH_NOTICES_NAME).as_posix()
+    notices = release_root / relative
+    if notices.is_symlink() or not notices.is_file():
+        raise VerificationError(
+            f"the app engine must carry the fermix-iroh third-party notices as a regular file at {relative}"
+        )
+
+    mode = stat.S_IMODE(notices.stat().st_mode)
+    if mode != 0o644:
+        raise VerificationError(f"the fermix-iroh notices {relative} must be mode 0644, found {mode:04o}")
+
+    digest = hashlib.sha256(notices.read_bytes()).hexdigest()
+    if digest != pinned.notices_sha256:
+        raise VerificationError(
+            f"{relative} is not the pinned fermix-iroh notices: "
+            f"expected sha256 {pinned.notices_sha256}, found {digest}"
+        )
+    return relative
+
+
 def _verify_iroh_signature(helper, relative, team_id, timeouts):
     codesign = shutil.which("codesign")
     if codesign is None:
@@ -320,8 +355,8 @@ def _iroh_pin(path, target):
         pin = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise VerificationError(f"cannot read the fermix-iroh pin {path}: {error}") from error
-    if not isinstance(pin, dict) or pin.get("schema_version") != 1:
-        raise VerificationError(f"the fermix-iroh pin {path} is not schema_version 1")
+    if not isinstance(pin, dict) or pin.get("schema_version") != 2:
+        raise VerificationError(f"the fermix-iroh pin {path} is not schema_version 2")
 
     targets = pin.get("targets")
     entry = targets.get(target) if isinstance(targets, dict) else None
@@ -329,13 +364,18 @@ def _iroh_pin(path, target):
     if not isinstance(sha256, str) or not SHA256_PATTERN.fullmatch(sha256):
         raise VerificationError(f"the fermix-iroh pin {path} has no sha256 for {target}")
 
+    notices = pin.get("notices")
+    notices_sha256 = notices.get("sha256") if isinstance(notices, dict) else None
+    if not isinstance(notices_sha256, str) or not SHA256_PATTERN.fullmatch(notices_sha256):
+        raise VerificationError(f"the fermix-iroh pin {path} has no sha256 for the notices")
+
     fields = [pin.get(key) for key in ("version", "iroh_version", "macos_team_id")]
     if not all(isinstance(value, str) and value for value in fields):
         raise VerificationError(
             f"the fermix-iroh pin {path} must name version, iroh_version and macos_team_id"
         )
     version, iroh_version, team_id = fields
-    return IrohPin(sha256, f"fermix-iroh {version} (iroh {iroh_version})", team_id)
+    return IrohPin(sha256, f"fermix-iroh {version} (iroh {iroh_version})", team_id, notices_sha256)
 
 
 def _start_engine(command, release_root, environment, log_path):

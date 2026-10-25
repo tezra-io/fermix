@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "repository": "tezra-io/fermix-iroh",
   "tag": "v0.2.0",
   "version": "0.2.0",
@@ -8,6 +8,10 @@
   "certificate_identity": "https://github.com/tezra-io/fermix-iroh/.github/workflows/release.yml@refs/tags/v0.2.0",
   "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
   "macos_team_id": "54A57TH9BJ",
+  "notices": {
+    "asset": "fermix-iroh-THIRD-PARTY-NOTICES.txt",
+    "sha256": "46737bd25866489dc142ca71b543e342ccc98ea47ecad0b777c42e0640013837"
+  },
   "targets": {
     "macos_aarch64": {
       "asset": "fermix-iroh-macos-aarch64",

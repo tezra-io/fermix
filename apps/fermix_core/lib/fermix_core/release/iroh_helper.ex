@@ -3,12 +3,16 @@ defmodule FermixCore.Release.IrohHelper do
   Puts the pinned `fermix-iroh` helper into a release tree (M62 stage 5).
 
   `place/3` is the one function: it puts one target's pinned helper at
-  `<priv_dir>/iroh_helper/bin/fermix-iroh`, mode 0755, or raises a sentence
-  that names the target and what failed. A destination that already has the
-  pinned digest is kept; otherwise the asset is fetched once from the pinned
-  release, written to a temporary file beside the destination, hashed,
-  made executable, renamed into place and hashed again. There is no cache, no
-  retry and no other source: the digest in `PIN.json` is what proves the file.
+  `<priv_dir>/iroh_helper/bin/fermix-iroh`, mode 0755, and the helper's
+  pinned third-party notices at `<priv_dir>/iroh_helper/THIRD-PARTY-NOTICES.txt`,
+  mode 0644, or raises a sentence that names the target and what failed. The
+  licences of what is compiled into the helper ask for their notices to
+  travel with it, so `place/3` returns only once both are in place. Each
+  destination that already has its pinned digest is kept; otherwise its asset
+  is fetched once from the pinned release, written to a temporary file beside
+  the destination, hashed, given its mode, renamed into place and hashed again.
+  There is no cache, no retry and no other source: the digests in `PIN.json`
+  are what prove the files.
 
   `PIN.json` sits beside the protocol the helper speaks, in this app's source
   `priv`, and is written only by `scripts/release/pin_iroh_helper.py`. The
@@ -33,16 +37,26 @@ defmodule FermixCore.Release.IrohHelper do
 
   @source_priv Path.expand("../../../priv", __DIR__)
   @pin_path Path.join(@source_priv, "iroh_helper/PIN.json")
+  @helper_path "iroh_helper/bin/fermix-iroh"
+  @notices_path "iroh_helper/THIRD-PARTY-NOTICES.txt"
   @targets ~w(linux_aarch64 linux_x86_64 macos_aarch64 macos_x86_64)
   @sha256_pattern ~r/\A[0-9a-f]{64}\z/
   @connect_timeout_ms 15_000
   @receive_timeout_ms 60_000
 
+  @typedoc "What `place/3` did with one file, and where."
+  @type placement :: %{action: :kept | :placed, path: Path.t()}
+
   @typedoc """
-  What `place/3` did: kept a destination that already matched, or placed a
-  fetched helper; where; and the helper version the pin names.
+  What `place/3` did with the helper and with its notices, and the helper
+  version the pin names.
   """
-  @type outcome :: %{action: :kept | :placed, path: Path.t(), version: String.t()}
+  @type outcome :: %{
+          action: :kept | :placed,
+          path: Path.t(),
+          notices: placement(),
+          version: String.t()
+        }
 
   @typedoc "A fetch: the asset's bytes, or why there are none."
   @type fetcher :: (String.t() -> {:ok, binary()} | {:error, term()})
@@ -56,9 +70,9 @@ defmodule FermixCore.Release.IrohHelper do
   def pin_path, do: @pin_path
 
   @doc """
-  Reads and checks a pin: schema 1, the release it names, and exactly the four
-  Burrito targets, each with an asset and a sha256 digest. Raises on anything
-  else, naming the file.
+  Reads and checks a pin: schema 2, the release it names, the notices and
+  exactly the four Burrito targets, each with an asset and a sha256 digest.
+  Raises on anything else, naming the file.
   """
   @spec read_pin!(Path.t()) :: map()
   def read_pin!(path \\ @pin_path) when is_binary(path) do
@@ -72,7 +86,8 @@ defmodule FermixCore.Release.IrohHelper do
   end
 
   @doc """
-  Puts `target`'s pinned helper at `<priv_dir>/iroh_helper/bin/fermix-iroh`.
+  Puts `target`'s pinned helper at `<priv_dir>/iroh_helper/bin/fermix-iroh`
+  and the pinned notices at `<priv_dir>/iroh_helper/THIRD-PARTY-NOTICES.txt`.
 
   `target` is a Burrito target alias, as an atom or as the string the
   compiled build identity carries. Options: `:pin_path` (default the checked-in
@@ -84,21 +99,26 @@ defmodule FermixCore.Release.IrohHelper do
       when (is_binary(target) or (is_atom(target) and not is_nil(target))) and
              is_binary(priv_dir) and is_list(opts) do
     pin = opts |> Keyword.get(:pin_path, @pin_path) |> read_pin!()
-    %{"asset" => asset, "sha256" => expected} = target_entry!(pin, target)
-    destination = Path.join([priv_dir, "iroh_helper", "bin", "fermix-iroh"])
+    fetcher = Keyword.get(opts, :fetch, &fetch/1)
 
-    action =
-      if file_digest(destination) == expected do
-        keep_executable!(destination)
-        :kept
-      else
-        url = "https://github.com/#{pin["repository"]}/releases/download/#{pin["tag"]}/#{asset}"
-        bytes = fetch!(Keyword.get(opts, :fetch, &fetch/1), target, url)
-        install!(bytes, destination, target, expected)
-        :placed
-      end
+    helper_file = %{
+      name: "helper",
+      entry: target_entry!(pin, target),
+      path: Path.join(priv_dir, @helper_path),
+      mode: 0o755
+    }
 
-    %{action: action, path: destination, version: pin["version"]}
+    notices_file = %{
+      name: "notices file",
+      entry: pin["notices"],
+      path: Path.join(priv_dir, @notices_path),
+      mode: 0o644
+    }
+
+    [helper, notices] =
+      Enum.map([helper_file, notices_file], &place_file!(&1, pin, target, fetcher))
+
+    %{action: helper.action, path: helper.path, notices: notices, version: pin["version"]}
   end
 
   @doc """
@@ -181,30 +201,35 @@ defmodule FermixCore.Release.IrohHelper do
   defp check_pin!(path, pin) do
     problem =
       cond do
-        pin["schema_version"] != 1 -> "schema_version is not 1"
+        pin["schema_version"] != 2 -> "schema_version is not 2"
         not text?(pin["repository"]) -> "repository is missing"
         not text?(pin["tag"]) -> "tag is missing"
         not text?(pin["version"]) -> "version is missing"
         not is_map(pin["targets"]) -> "targets is missing"
         Enum.sort(Map.keys(pin["targets"])) != @targets -> "targets are not #{names(@targets)}"
-        true -> Enum.find_value(pin["targets"], &target_problem/1)
+        true -> pin |> entries() |> Enum.find_value(&entry_problem/1)
       end
 
     if problem, do: raise("#{path} is not a valid fermix-iroh pin: #{problem}")
     pin
   end
 
-  defp target_problem({target, %{"asset" => asset, "sha256" => sha256}}) do
+  defp entries(pin) do
+    Enum.map(pin["targets"], fn {target, entry} -> {"targets.#{target}", entry} end) ++
+      [{"notices", pin["notices"]}]
+  end
+
+  defp entry_problem({name, %{"asset" => asset, "sha256" => sha256}}) do
     cond do
-      not text?(asset) or String.contains?(asset, "/") -> "targets.#{target}.asset is invalid"
-      not (is_binary(sha256) and Regex.match?(@sha256_pattern, sha256)) -> sha256_problem(target)
+      not text?(asset) or String.contains?(asset, "/") -> "#{name}.asset is invalid"
+      not (is_binary(sha256) and Regex.match?(@sha256_pattern, sha256)) -> sha256_problem(name)
       true -> nil
     end
   end
 
-  defp target_problem({target, _entry}), do: "targets.#{target} needs an asset and a sha256"
+  defp entry_problem({name, _entry}), do: "#{name} needs an asset and a sha256"
 
-  defp sha256_problem(target), do: "targets.#{target}.sha256 is not a lowercase sha256 digest"
+  defp sha256_problem(name), do: "#{name}.sha256 is not a lowercase sha256 digest"
 
   defp text?(value), do: is_binary(value) and value != ""
 
@@ -224,13 +249,30 @@ defmodule FermixCore.Release.IrohHelper do
     Enum.join(init, ", ") <> " and " <> last
   end
 
-  defp fetch!(fetcher, target, url) when is_function(fetcher, 1) do
+  defp place_file!(file, pin, target, fetcher) do
+    %{"asset" => asset, "sha256" => expected} = file.entry
+
+    action =
+      if file_digest(file.path) == expected do
+        keep_mode!(file.path, file.mode)
+        :kept
+      else
+        url = "https://github.com/#{pin["repository"]}/releases/download/#{pin["tag"]}/#{asset}"
+        bytes = fetch!(fetcher, file.name, target, url)
+        install!(bytes, file, target, expected)
+        :placed
+      end
+
+    %{action: action, path: file.path}
+  end
+
+  defp fetch!(fetcher, name, target, url) when is_function(fetcher, 1) do
     case fetcher.(url) do
       {:ok, bytes} when is_binary(bytes) ->
         bytes
 
       {:error, reason} ->
-        raise "cannot fetch the fermix-iroh helper for #{target} from #{url}: " <>
+        raise "cannot fetch the fermix-iroh #{name} for #{target} from #{url}: " <>
                 transport_reason(reason)
     end
   end
@@ -242,26 +284,28 @@ defmodule FermixCore.Release.IrohHelper do
   # The temporary file sits beside the destination, so the rename is atomic and
   # a failure at any step leaves the old destination as it was and no temporary
   # file behind.
-  defp install!(bytes, destination, target, expected) do
-    bin_dir = Path.dirname(destination)
-    File.mkdir_p!(bin_dir)
-    temporary = Path.join(bin_dir, ".fermix-iroh.#{System.unique_integer([:positive])}.tmp")
+  defp install!(bytes, %{name: name, path: destination, mode: mode}, target, expected) do
+    dir = Path.dirname(destination)
+    File.mkdir_p!(dir)
+
+    temporary =
+      Path.join(dir, ".#{Path.basename(destination)}.#{System.unique_integer([:positive])}.tmp")
 
     try do
       File.write!(temporary, bytes)
-      verify_digest!(target, expected, file_digest(temporary))
-      File.chmod!(temporary, 0o755)
+      verify_digest!(name, target, expected, file_digest(temporary))
+      File.chmod!(temporary, mode)
       File.rename!(temporary, destination)
-      verify_digest!(target, expected, file_digest(destination))
+      verify_digest!(name, target, expected, file_digest(destination))
     after
       remove_leftover!(temporary)
     end
   end
 
-  # `File.chmod!/2` also stamps the file's times, so a kept helper that is
-  # already 0755 is not touched at all.
-  defp keep_executable!(path) do
-    if Bitwise.band(File.stat!(path).mode, 0o777) != 0o755, do: File.chmod!(path, 0o755)
+  # `File.chmod!/2` also stamps the file's times, so a kept file that already
+  # has its mode is not touched at all.
+  defp keep_mode!(path, mode) do
+    if Bitwise.band(File.stat!(path).mode, 0o777) != mode, do: File.chmod!(path, mode)
     :ok
   end
 
@@ -273,10 +317,10 @@ defmodule FermixCore.Release.IrohHelper do
     end
   end
 
-  defp verify_digest!(_target, expected, expected), do: :ok
+  defp verify_digest!(_name, _target, expected, expected), do: :ok
 
-  defp verify_digest!(target, expected, actual) do
-    raise "the fermix-iroh helper fetched for #{target} has digest #{actual || "none"}, " <>
+  defp verify_digest!(name, target, expected, actual) do
+    raise "the fermix-iroh #{name} fetched for #{target} has digest #{actual || "none"}, " <>
             "and the pin names #{expected}"
   end
 
@@ -302,7 +346,8 @@ defmodule FermixCore.Release.IrohHelper do
     end
   end
 
-  defp report(%{action: action, path: path, version: version}, target) do
+  defp report(%{action: action, path: path, notices: notices, version: version}, target) do
     IO.puts("fermix: fermix-iroh #{version} for #{target} #{action} at #{path}")
+    IO.puts("fermix: its third-party notices #{notices.action} at #{notices.path}")
   end
 end

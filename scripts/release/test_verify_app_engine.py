@@ -32,6 +32,7 @@ VERSION = "0.9.0"
 SOURCE_COMMIT = "a" * 40
 MAPS_HELPER = "lib/fermix_nif-0.9.0/priv/fermix-maps"
 IROH_HELPER = "lib/fermix_core-0.9.0/priv/iroh_helper/bin/fermix-iroh"
+IROH_NOTICES = "lib/fermix_core-0.9.0/priv/iroh_helper/THIRD-PARTY-NOTICES.txt"
 IROH_VERSION_LINE = "fermix-iroh 0.1.0 (iroh 1.3.0)"
 IROH_TEAM_ID = "ABCDE12345"
 
@@ -163,6 +164,7 @@ class VerifyAppEngineTest(unittest.TestCase):
             )
 
         self.assertEqual(result["iroh_helper"], IROH_HELPER)
+        self.assertEqual(result["iroh_notices"], IROH_NOTICES)
         calls = self.codesign_log.read_text(encoding="utf-8").splitlines()
         self.assertEqual([call.split(" /", 1)[0] for call in calls], ["--verify --strict", "-dv"])
 
@@ -234,6 +236,71 @@ class VerifyAppEngineTest(unittest.TestCase):
         self._verify_before_launch(
             self.archive, f"must be signed by team {IROH_TEAM_ID}, found ZYXWV98765"
         )
+
+    # ── the fermix-iroh third-party notices beside the helper ─────────────
+
+    def test_rejects_an_engine_without_the_iroh_notices_before_launching(self):
+        (self.release / IROH_NOTICES).unlink()
+        archive = self._repackage("no-notices")
+
+        self._verify_before_launch(
+            archive, f"must carry the fermix-iroh third-party notices as a regular file at {IROH_NOTICES}"
+        )
+
+    def test_rejects_iroh_notices_that_are_not_mode_0644(self):
+        (self.release / IROH_NOTICES).chmod(0o600)
+        archive = self._repackage("private-notices")
+
+        self._verify_before_launch(archive, f"the fermix-iroh notices {IROH_NOTICES} must be mode 0644, found 0600")
+
+    def test_rejects_iroh_notices_whose_digest_is_not_the_pinned_one(self):
+        self._write_pin(notices_sha256="f" * 64)
+        actual = self._sha256(self.release / IROH_NOTICES)
+
+        self._verify_before_launch(
+            self.archive,
+            f"{IROH_NOTICES} is not the pinned fermix-iroh notices: expected sha256 {'f' * 64}, found {actual}",
+        )
+
+    # The manifest covers the notices by its tree digest, not its inventory,
+    # which lists executables only, so notices placed after the manifest was
+    # written are refused before anything runs, even with the pinned bytes.
+    def test_rejects_iroh_notices_placed_after_the_manifest(self):
+        notices = self.release / IROH_NOTICES
+        contents = notices.read_bytes()
+        notices.unlink()
+        self._write_manifest()
+        notices.write_bytes(contents)
+        notices.chmod(0o644)
+        archive = self.base / "late-notices" / f"fermix_app_engine_{TARGET}.tar.gz"
+        archive.parent.mkdir()
+        package._write_archive(self.release, archive)
+
+        self._verify_before_launch(archive, "manifest tree_sha256 does not match the assembled release tree")
+
+    # A pin from before the notices names none, so it cannot say which bytes
+    # the engine must carry beside the helper.
+    def test_rejects_a_pin_without_the_notices_before_extracting(self):
+        for changes, message in (
+            ({"notices": None}, "has no sha256 for the notices"),
+            ({"schema_version": 1}, "is not schema_version 2"),
+        ):
+            with self.subTest(changes=changes):
+                self._write_pin(changes=changes)
+
+                with self._darwin_host("arm64"), mock.patch.object(verify, "extract_archive") as extract:
+                    with self.assertRaisesRegex(verify.VerificationError, message):
+                        verify.verify_app_engine(
+                            self.archive,
+                            TARGET,
+                            VERSION,
+                            "native",
+                            iroh_pin=self.pin,
+                            temp_parent=self.base,
+                            timeouts=self.timeouts,
+                        )
+
+                extract.assert_not_called()
 
     def test_rejects_a_pin_without_this_target_before_extracting(self):
         self._write_pin(targets={"macos_x86_64": {"asset": "fermix-iroh-macos-x86_64", "sha256": "e" * 64}})
@@ -713,6 +780,9 @@ class VerifyAppEngineTest(unittest.TestCase):
         script.chmod(0o755)
         self._write_helper("#!/bin/sh\necho 'fermix-maps: ok'\n")
         self._write_iroh_helper(IROH_VERSION_LINE)
+        notices = self.release / IROH_NOTICES
+        notices.write_text("MIT License\n\nCopyright (c) 2026 Tezra.io\n", encoding="utf-8")
+        notices.chmod(0o644)
 
     # A script standing in for the Mach-O helper the native build makes.
     def _write_helper(self, contents):
@@ -740,11 +810,12 @@ class VerifyAppEngineTest(unittest.TestCase):
         helper.chmod(mode)
 
     # The pin as `pin_iroh_helper.py` writes it, with this tree's helper as the
-    # target's build unless a test names another digest.
-    def _write_pin(self, sha256=None, targets=None):
+    # target's build and its notices as the notices unless a test names other
+    # digests. A change to None drops the key, as a pin from before it would.
+    def _write_pin(self, sha256=None, targets=None, notices_sha256=None, changes=None):
         digest = sha256 or self._sha256(self.release / IROH_HELPER)
         pin = {
-            "schema_version": 1,
+            "schema_version": 2,
             "repository": "tezra-io/fermix-iroh",
             "tag": "v0.1.0",
             "version": "0.1.0",
@@ -755,6 +826,10 @@ class VerifyAppEngineTest(unittest.TestCase):
             ),
             "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
             "macos_team_id": IROH_TEAM_ID,
+            "notices": {
+                "asset": "fermix-iroh-THIRD-PARTY-NOTICES.txt",
+                "sha256": notices_sha256 or self._sha256(self.release / IROH_NOTICES),
+            },
             "targets": targets
             or {
                 "macos_aarch64": {"asset": "fermix-iroh-macos-aarch64", "sha256": digest},
@@ -763,6 +838,11 @@ class VerifyAppEngineTest(unittest.TestCase):
                 "linux_x86_64": {"asset": "fermix-iroh-linux-x86_64", "sha256": "d" * 64},
             },
         }
+        for key, value in (changes or {}).items():
+            if value is None:
+                del pin[key]
+            else:
+                pin[key] = value
         self.pin.write_text(json.dumps(pin, indent=2) + "\n", encoding="utf-8")
 
     # A stand-in for the two codesign calls the check makes, on the helper and

@@ -9,10 +9,11 @@ defmodule Mix.Tasks.Fermix.IrohHelper do
 
   Release builds carry the helper; a checkout has none until this runs. It puts
   the host's pinned helper at `apps/fermix_core/priv/iroh_helper/bin/fermix-iroh`
-  (git ignores `bin/`) through `FermixCore.Release.IrohHelper.place/3`: a helper
-  already there with the pinned digest is kept, anything else is fetched once
-  from the pinned release and checked against the pin. Nothing else installs
-  it. Restart the daemon afterwards; it looks for the helper when it starts.
+  and its third-party notices beside `bin/` at `THIRD-PARTY-NOTICES.txt` (git
+  ignores both) through `FermixCore.Release.IrohHelper.place/3`: a file already
+  there with its pinned digest is kept, anything else is fetched once from the
+  pinned release and checked against the pin. Nothing else installs them.
+  Restart the daemon afterwards; it looks for the helper when it starts.
   """
 
   use Mix.Task
@@ -86,11 +87,21 @@ defmodule Mix.Tasks.Fermix.IrohHelper do
     end
   end
 
-  defp say(%{action: :placed, path: path, version: version}, target) do
+  defp say(%{action: :placed, path: path, version: version} = outcome, target) do
     Mix.shell().info("Placed fermix-iroh #{version} for #{target} at #{path}.")
+    say_notices(outcome.notices)
   end
 
-  defp say(%{action: :kept, path: path, version: version}, target) do
+  defp say(%{action: :kept, path: path, version: version} = outcome, target) do
     Mix.shell().info("fermix-iroh #{version} for #{target} is already at #{path}; kept it.")
+    say_notices(outcome.notices)
+  end
+
+  defp say_notices(%{action: :placed, path: path}) do
+    Mix.shell().info("Placed its third-party notices at #{path}.")
+  end
+
+  defp say_notices(%{action: :kept, path: path}) do
+    Mix.shell().info("Its third-party notices are already at #{path}; kept them.")
   end
 end

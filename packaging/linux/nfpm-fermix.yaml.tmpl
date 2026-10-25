@@ -90,6 +90,14 @@ contents:
     file_info:
       mode: 0644
 
+  # The third-party notices of the fermix-iroh helper inside /usr/bin/fermix,
+  # the bytes its pin names. A plain file like the copyright file, not a `doc`,
+  # which an rpm install with --excludedocs would leave out.
+  - src: {{STAGE}}/usr/share/doc/fermix/fermix-iroh-THIRD-PARTY-NOTICES.txt
+    dst: /usr/share/doc/fermix/fermix-iroh-THIRD-PARTY-NOTICES.txt
+    file_info:
+      mode: 0644
+
 scripts:
   postinstall: {{POSTINSTALL}}
   postremove: {{POSTREMOVE}}

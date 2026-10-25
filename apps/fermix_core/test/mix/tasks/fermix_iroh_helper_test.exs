@@ -6,8 +6,10 @@ defmodule Mix.Tasks.Fermix.IrohHelperTest do
   alias Mix.Tasks.Fermix.IrohHelper, as: IrohHelperTask
 
   @bytes "fake fermix-iroh for macos_aarch64\n"
-  @url "https://github.com/tezra-io/fermix-iroh/releases/download/v0.1.0/" <>
-         "fermix-iroh-macos-aarch64"
+  @release "https://github.com/tezra-io/fermix-iroh/releases/download/v0.1.0/"
+  @url @release <> "fermix-iroh-macos-aarch64"
+  @notices "fake third-party notices\n"
+  @notices_url @release <> "fermix-iroh-THIRD-PARTY-NOTICES.txt"
 
   setup do
     shell = Mix.shell()
@@ -26,20 +28,31 @@ defmodule Mix.Tasks.Fermix.IrohHelperTest do
     %{priv: priv, pin_path: write_pin!(root)}
   end
 
-  test "installs the host's pinned helper and says so, then keeps it", context do
-    opts = host_opts(context, fetch: fn @url -> {:ok, @bytes} end)
-    path = Path.join(context.priv, "iroh_helper/bin/fermix-iroh")
+  test "installs the host's pinned helper and its notices and says so, then keeps them",
+       context do
+    fetch = fn
+      @url -> {:ok, @bytes}
+      @notices_url -> {:ok, @notices}
+    end
 
-    assert IrohHelperTask.execute([], opts) == :ok
+    path = Path.join(context.priv, "iroh_helper/bin/fermix-iroh")
+    notices = Path.join(context.priv, "iroh_helper/THIRD-PARTY-NOTICES.txt")
+
+    assert IrohHelperTask.execute([], host_opts(context, fetch: fetch)) == :ok
     assert File.read!(path) == @bytes
+    assert File.read!(notices) == @notices
     assert_received {:mix_shell, :info, [placed]}
     assert placed == "Placed fermix-iroh 0.1.0 for macos_aarch64 at #{path}."
+    assert_received {:mix_shell, :info, [placed_notices]}
+    assert placed_notices == "Placed its third-party notices at #{notices}."
 
     kept_opts = host_opts(context, fetch: fn url -> flunk("fetched #{url} again") end)
 
     assert IrohHelperTask.execute([], kept_opts) == :ok
     assert_received {:mix_shell, :info, [kept]}
     assert kept == "fermix-iroh 0.1.0 for macos_aarch64 is already at #{path}; kept it."
+    assert_received {:mix_shell, :info, [kept_notices]}
+    assert kept_notices == "Its third-party notices are already at #{notices}; kept them."
   end
 
   test "refuses a host no helper is built for, before fetching anything", context do
@@ -111,12 +124,16 @@ defmodule Mix.Tasks.Fermix.IrohHelperTest do
     File.write!(
       path,
       Jason.encode!(%{
-        "schema_version" => 1,
+        "schema_version" => 2,
         "repository" => "tezra-io/fermix-iroh",
         "tag" => "v0.1.0",
         "version" => "0.1.0",
         "protocol_version" => 1,
         "iroh_version" => "1.3.0",
+        "notices" => %{
+          "asset" => "fermix-iroh-THIRD-PARTY-NOTICES.txt",
+          "sha256" => sha256(@notices)
+        },
         "targets" => targets
       })
     )

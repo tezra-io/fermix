@@ -30,6 +30,8 @@ IDENTITY = "https://github.com/tezra-io/fermix-iroh/.github/workflows/release.ym
 ISSUER = "https://token.actions.githubusercontent.com"
 HELLO = b'{"event":"hello","protocol_version":1,"helper_version":"0.1.0","iroh_version":"1.3.0"}\n'
 VERSION_LINE = b"fermix-iroh 0.1.0 (iroh 1.3.0)\n"
+NOTICES = "fermix-iroh-THIRD-PARTY-NOTICES.txt"
+NOTICES_TEXT = "MIT License\n\nCopyright (c) 2026 Tezra.io\n\n—— third-party notices ——\n".encode()
 LINUX_HOST = ("Linux", "x86_64")
 CHECKED_IN_PIN = Path(__file__).resolve().parents[2] / "apps/fermix_core/priv/iroh_helper/PIN.json"
 
@@ -69,17 +71,19 @@ def sha(data):
 
 class FakeRelease:
     """The release's files by URL, with each sidecar and SHA256SUMS written honestly
-    unless a test overrides one."""
+    unless a test overrides one. `notices=None` is a release without them."""
 
-    def __init__(self, binaries=None, *, sidecars=None, sums=None):
+    def __init__(self, binaries=None, *, notices=NOTICES_TEXT, sidecars=None, sums=None):
         self.binaries = binaries or good_binaries()
+        self.notices = notices
         self.sidecars = sidecars or {}
         self.sums = sums or {}
         self.fetched = []
 
     def files(self):
         files, lines = {}, []
-        for asset, data in sorted(self.binaries.items()):
+        assets = {**self.binaries, **({} if self.notices is None else {NOTICES: self.notices})}
+        for asset, data in sorted(assets.items()):
             digest = self.sidecars.get(asset, sha(data))
             files[asset] = data
             files[f"{asset}.sha256"] = f"{digest}  {asset}\n".encode()
@@ -100,11 +104,15 @@ class FakeRelease:
 
 
 class FakeRunner:
-    """cosign answers `cosign_exit`; the helper prints `hello` and exits `helper_exit`,
-    and under `--version` prints `version` and exits `version_exit`."""
+    """cosign answers `cosign_exit` (for `cosign_refuses` alone, when it names an
+    asset); the helper prints `hello` and exits `helper_exit`, and under
+    `--version` prints `version` and exits `version_exit`."""
 
-    def __init__(self, *, cosign_exit=0, hello=HELLO, helper_exit=0, version=VERSION_LINE, version_exit=0):
+    def __init__(
+        self, *, cosign_exit=0, cosign_refuses=None, hello=HELLO, helper_exit=0, version=VERSION_LINE, version_exit=0
+    ):
         self.cosign_exit = cosign_exit
+        self.cosign_refuses = cosign_refuses
         self.hello = hello
         self.helper_exit = helper_exit
         self.version = version
@@ -117,8 +125,10 @@ class FakeRunner:
         if command[0] == "/fake/bin/cosign":
             self.cosign_calls.append(command)
             self.paths_seen.append(Path(command[-1]))
-            stderr = "" if self.cosign_exit == 0 else "error: none of the expected identities matched"
-            return subprocess.CompletedProcess(command, self.cosign_exit, "", stderr)
+            refused = self.cosign_refuses in (None, Path(command[-1]).name)
+            exit_code = self.cosign_exit if refused else 0
+            stderr = "" if exit_code == 0 else "error: none of the expected identities matched"
+            return subprocess.CompletedProcess(command, exit_code, "", stderr)
         self.helper_calls.append((command, kwargs))
         self.paths_seen.append(Path(command[0]))
         if command[1:] == ["--version"]:
@@ -135,10 +145,10 @@ def without_cosign(_name):
     return None
 
 
-def expected_pin_text(binaries=None):
+def expected_pin_text(binaries=None, notices=NOTICES_TEXT):
     digests = {asset: sha(data) for asset, data in (binaries or good_binaries()).items()}
     return f"""{{
-  "schema_version": 1,
+  "schema_version": 2,
   "repository": "tezra-io/fermix-iroh",
   "tag": "v0.1.0",
   "version": "0.1.0",
@@ -147,6 +157,10 @@ def expected_pin_text(binaries=None):
   "certificate_identity": "{IDENTITY}",
   "certificate_oidc_issuer": "{ISSUER}",
   "macos_team_id": "54A57TH9BJ",
+  "notices": {{
+    "asset": "{NOTICES}",
+    "sha256": "{sha(notices)}"
+  }},
   "targets": {{
     "macos_aarch64": {{
       "asset": "fermix-iroh-macos-aarch64",
@@ -297,11 +311,12 @@ class MakePinTest(PinTestCase):
         for asset, data in good_binaries().items():
             self.assertIn(f"{sha(data)}  ", self.stdout.getvalue())
             self.assertIn(asset, self.stdout.getvalue())
+        self.assertIn(f"{sha(NOTICES_TEXT)}  notices  {NOTICES}", self.stdout.getvalue())
 
-    def test_cosign_checks_every_binary_against_the_tags_identity_and_issuer(self):
+    def test_cosign_checks_every_binary_and_the_notices_against_the_tags_identity_and_issuer(self):
         runner = FakeRunner()
         self.assertEqual(self.make(runner=runner), 0, self.stderr.getvalue())
-        self.assertEqual(len(runner.cosign_calls), 4)
+        self.assertEqual(len(runner.cosign_calls), 5)
         for command in runner.cosign_calls:
             binary = command[-1]
             self.assertEqual(
@@ -316,7 +331,7 @@ class MakePinTest(PinTestCase):
                 ],
             )
         self.assertEqual(
-            sorted(Path(command[-1]).name for command in runner.cosign_calls), sorted(good_binaries())
+            sorted(Path(command[-1]).name for command in runner.cosign_calls), sorted([*good_binaries(), NOTICES])
         )
 
     # Twice: bare for the hello, then `--version` for the line the release
@@ -343,11 +358,37 @@ class MakePinTest(PinTestCase):
 
     def test_refuses_a_sidecar_that_disagrees_with_the_binary(self):
         release = FakeRelease(sidecars={"fermix-iroh-linux-aarch64": "0" * 64})
-        self.assert_refused(self.make(release), "fermix-iroh-linux-aarch64: the binary hashes to")
+        self.assert_refused(self.make(release), "fermix-iroh-linux-aarch64: the file hashes to")
 
     def test_refuses_a_sha256sums_line_that_disagrees_with_the_binary(self):
         release = FakeRelease(sums={"fermix-iroh-macos-x86_64": "f" * 64})
         self.assert_refused(self.make(release), f"and SHA256SUMS says {'f' * 64}")
+
+    # A release without the notices cannot be pinned: every tree carries them
+    # beside the helper. It is refused from SHA256SUMS, before any binary is
+    # downloaded.
+    def test_refuses_a_release_without_the_notices_before_downloading_a_binary(self):
+        release = FakeRelease(notices=None)
+        self.assert_refused(self.make(release), f"v0.1.0 publishes no {NOTICES} (SHA256SUMS does not list it)")
+        self.assertEqual([url.rsplit("/", 1)[1] for url in release.fetched], ["SHA256SUMS"])
+
+    def test_refuses_notices_whose_sidecar_or_sums_line_disagrees(self):
+        for release in (FakeRelease(sidecars={NOTICES: "0" * 64}), FakeRelease(sums={NOTICES: "f" * 64})):
+            with self.subTest(sidecars=release.sidecars, sums=release.sums):
+                self.stderr = io.StringIO()
+                self.assert_refused(self.make(release), f"{NOTICES}: the file hashes to {sha(NOTICES_TEXT)}")
+
+    def test_refuses_notices_cosign_refuses(self):
+        self.assert_refused(
+            self.make(runner=FakeRunner(cosign_exit=1, cosign_refuses=NOTICES)),
+            f"{NOTICES}: cosign refused the signature for {IDENTITY}",
+        )
+
+    def test_refuses_notices_that_are_not_text(self):
+        for notices, message in ((b"", f"{NOTICES} is empty"), (b"\xff\xfe\x00", f"{NOTICES} is not UTF-8 text")):
+            with self.subTest(notices=notices):
+                self.stderr = io.StringIO()
+                self.assert_refused(self.make(FakeRelease(notices=notices)), message)
 
     def test_refuses_a_signature_cosign_refuses(self):
         self.assert_refused(
@@ -439,7 +480,8 @@ class CheckPinTest(PinTestCase):
         self.assertEqual(self.check(runner=runner), 0, self.stderr.getvalue())
         self.assertEqual(self.pin_path.read_text(encoding="utf-8"), expected_pin_text())
         self.assertEqual(self.pin_path.stat().st_mtime_ns, mtime)
-        self.assertEqual(len(runner.cosign_calls), 4)
+        self.assertEqual(len(runner.cosign_calls), 5)
+        self.assertIn("verified for 4 targets and the notices", self.stdout.getvalue())
         self.assertEqual(runner.helper_calls, [], "--check does not run the helper")
 
     def test_fails_on_a_changed_digest_and_names_it(self):
@@ -451,6 +493,29 @@ class CheckPinTest(PinTestCase):
             self.stderr.getvalue(),
         )
         self.assertIn("e" * 64, self.pin_path.read_text(encoding="utf-8"), "--check must change nothing")
+
+    def test_fails_on_a_changed_notices_digest_and_names_it(self):
+        self.write_pin(expected_pin_text().replace(sha(NOTICES_TEXT), "e" * 64))
+        self.assertEqual(self.check(), 1)
+        self.assertIn(
+            f"notices.sha256: the pin has '{'e' * 64}', the release gives '{sha(NOTICES_TEXT)}'",
+            self.stderr.getvalue(),
+        )
+
+    # A schema 1 pin names no notices; checked against a release that has
+    # them, it names both gaps.
+    def test_fails_on_a_pin_that_predates_the_notices(self):
+        written = json.loads(expected_pin_text())
+        del written["notices"]
+        self.write_pin(json.dumps({**written, "schema_version": 1}, indent=2) + "\n")
+        self.assertEqual(self.check(), 1)
+        self.assertIn("schema_version: the pin has 1, the release gives 2", self.stderr.getvalue())
+        self.assertIn("notices.sha256: missing from the pin", self.stderr.getvalue())
+
+    def test_fails_on_a_release_without_the_notices(self):
+        self.write_pin(expected_pin_text())
+        self.assertEqual(self.check(FakeRelease(notices=None)), 1)
+        self.assertIn(f"publishes no {NOTICES}", self.stderr.getvalue())
 
     def test_names_every_difference_not_only_the_first(self):
         text = expected_pin_text().replace('"macos_team_id": "54A57TH9BJ"', '"macos_team_id": "AAAAAAAAAA"')
@@ -513,6 +578,7 @@ class CheckedInPinTest(unittest.TestCase):
             checked_in["protocol_version"],
             checked_in["iroh_version"],
             {target: entry["sha256"] for target, entry in checked_in["targets"].items()},
+            checked_in.get("notices", {}).get("sha256"),
         )
         self.assertEqual(pin.pin_differences(rebuilt, checked_in), [])
 

@@ -7,7 +7,10 @@ defmodule FermixCore.Release.IrohHelperTest do
   alias FermixTestSupport.SafeRm
 
   @targets ~w(macos_aarch64 macos_x86_64 linux_aarch64 linux_x86_64)
-  @url "https://github.com/tezra-io/fermix-iroh/releases/download/v0.1.0/fermix-iroh-linux-x86_64"
+  @release "https://github.com/tezra-io/fermix-iroh/releases/download/v0.1.0/"
+  @url @release <> "fermix-iroh-linux-x86_64"
+  @notices_url @release <> "fermix-iroh-THIRD-PARTY-NOTICES.txt"
+  @notices "MIT License\n\nCopyright (c) 2026 Tezra.io\n\nthird-party notices for every target\n"
 
   setup do
     root = SafeRm.make_tmp_dir!("iroh-helper")
@@ -20,20 +23,26 @@ defmodule FermixCore.Release.IrohHelperTest do
   end
 
   describe "place/3" do
-    test "fetches the pinned asset once and places it executable", context do
+    test "fetches each pinned asset once and places the helper and its notices", context do
       {:ok, calls} = Agent.start_link(fn -> [] end)
 
-      assert %{action: :placed, path: path, version: "0.1.0"} =
+      assert %{action: :placed, path: path, notices: notices, version: "0.1.0"} =
                IrohHelper.place(:linux_x86_64, context.priv,
                  pin_path: context.pin_path,
-                 fetch: serve(calls, %{@url => helper_bytes("linux_x86_64")})
+                 fetch: serve(calls, linux_assets())
                )
 
       assert path == Path.join(context.priv, "iroh_helper/bin/fermix-iroh")
       assert File.read!(path) == helper_bytes("linux_x86_64")
       assert mode(path) == 0o755
-      assert Agent.get(calls, & &1) == [@url]
+      assert notices == %{action: :placed, path: notices_path(context.priv)}
+      assert File.read!(notices.path) == @notices
+      assert mode(notices.path) == 0o644
+      assert Agent.get(calls, & &1) == [@url, @notices_url]
       assert bin_entries(context.priv) == ["fermix-iroh"]
+
+      assert Enum.sort(File.ls!(Path.join(context.priv, "iroh_helper"))) ==
+               ["THIRD-PARTY-NOTICES.txt", "bin"]
     end
 
     test "takes the target as the string the compiled identity carries", context do
@@ -41,47 +50,63 @@ defmodule FermixCore.Release.IrohHelperTest do
         "https://github.com/tezra-io/fermix-iroh/releases/download/v0.1.0/" <>
           "fermix-iroh-macos-aarch64"
 
+      assets = %{url => helper_bytes("macos_aarch64"), @notices_url => @notices}
       {:ok, calls} = Agent.start_link(fn -> [] end)
 
       assert %{action: :placed, path: path} =
                IrohHelper.place("macos_aarch64", context.priv,
                  pin_path: context.pin_path,
-                 fetch: serve(calls, %{url => helper_bytes("macos_aarch64")})
+                 fetch: serve(calls, assets)
                )
 
       assert File.read!(path) == helper_bytes("macos_aarch64")
+      assert File.read!(notices_path(context.priv)) == @notices
     end
 
-    test "keeps a destination that already has the pinned digest, fetching nothing", context do
+    test "keeps destinations that already have the pinned digests, fetching nothing", context do
       path = destination(context.priv)
-      File.mkdir_p!(Path.dirname(path))
-      File.write!(path, helper_bytes("linux_x86_64"))
-      File.chmod!(path, 0o644)
+      put_file!(path, helper_bytes("linux_x86_64"), 0o644)
+      put_file!(notices_path(context.priv), @notices, 0o600)
 
-      assert %{action: :kept, path: ^path} =
+      assert %{action: :kept, path: ^path, notices: %{action: :kept}} =
                IrohHelper.place(:linux_x86_64, context.priv,
                  pin_path: context.pin_path,
-                 fetch: fn url -> flunk("fetched #{url} for a helper already in place") end
+                 fetch: fn url -> flunk("fetched #{url} for a file already in place") end
                )
 
       assert mode(path) == 0o755
+      assert mode(notices_path(context.priv)) == 0o644
     end
 
-    test "leaves a kept helper that is already executable untouched", context do
-      path = destination(context.priv)
-      File.mkdir_p!(Path.dirname(path))
-      File.write!(path, helper_bytes("linux_x86_64"))
-      File.chmod!(path, 0o755)
-      File.touch!(path, {{2026, 1, 2}, {3, 4, 5}})
-      before = File.stat!(path, time: :posix).mtime
+    test "leaves kept files that already have their modes untouched", context do
+      paths = [destination(context.priv), notices_path(context.priv)]
+      put_file!(destination(context.priv), helper_bytes("linux_x86_64"), 0o755)
+      put_file!(notices_path(context.priv), @notices, 0o644)
+      for path <- paths, do: File.touch!(path, {{2026, 1, 2}, {3, 4, 5}})
+      before = Enum.map(paths, &mtime/1)
 
-      assert %{action: :kept} =
+      assert %{action: :kept, notices: %{action: :kept}} =
                IrohHelper.place(:linux_x86_64, context.priv,
                  pin_path: context.pin_path,
-                 fetch: fn url -> flunk("fetched #{url} for a helper already in place") end
+                 fetch: fn url -> flunk("fetched #{url} for a file already in place") end
                )
 
-      assert File.stat!(path, time: :posix).mtime == before
+      assert Enum.map(paths, &mtime/1) == before
+    end
+
+    test "keeps a placed helper and fetches only the notices it lacks", context do
+      path = destination(context.priv)
+      put_file!(path, helper_bytes("linux_x86_64"), 0o755)
+      {:ok, calls} = Agent.start_link(fn -> [] end)
+
+      assert %{action: :kept, path: ^path, notices: %{action: :placed}} =
+               IrohHelper.place(:linux_x86_64, context.priv,
+                 pin_path: context.pin_path,
+                 fetch: serve(calls, %{@notices_url => @notices})
+               )
+
+      assert Agent.get(calls, & &1) == [@notices_url]
+      assert File.read!(notices_path(context.priv)) == @notices
     end
 
     test "replaces a destination whose digest is not the pin's", context do
@@ -93,7 +118,7 @@ defmodule FermixCore.Release.IrohHelperTest do
       assert %{action: :placed, path: ^path} =
                IrohHelper.place(:linux_x86_64, context.priv,
                  pin_path: context.pin_path,
-                 fetch: serve(calls, %{@url => helper_bytes("linux_x86_64")})
+                 fetch: serve(calls, linux_assets())
                )
 
       assert File.read!(path) == helper_bytes("linux_x86_64")
@@ -132,6 +157,44 @@ defmodule FermixCore.Release.IrohHelperTest do
 
       assert File.read!(path) == "a helper from another release"
       assert bin_entries(context.priv) == ["fermix-iroh"]
+    end
+
+    test "refuses fetched notices whose digest is not the pin's and leaves no notices", context do
+      error =
+        assert_raise RuntimeError, fn ->
+          IrohHelper.place(:linux_x86_64, context.priv,
+            pin_path: context.pin_path,
+            fetch: fn
+              @url -> {:ok, helper_bytes("linux_x86_64")}
+              @notices_url -> {:ok, "not the pinned notices"}
+            end
+          )
+        end
+
+      assert error.message ==
+               "the fermix-iroh notices file fetched for linux_x86_64 has digest " <>
+                 "#{digest("not the pinned notices")}, and the pin names #{digest(@notices)}"
+
+      assert File.ls!(Path.join(context.priv, "iroh_helper")) == ["bin"]
+    end
+
+    test "a notices transport failure names the target, the URL and the HTTP status", context do
+      error =
+        assert_raise RuntimeError, fn ->
+          IrohHelper.place(:linux_x86_64, context.priv,
+            pin_path: context.pin_path,
+            fetch: fn
+              @url -> {:ok, helper_bytes("linux_x86_64")}
+              @notices_url -> {:error, {:http_status, 404}}
+            end
+          )
+        end
+
+      assert error.message ==
+               "cannot fetch the fermix-iroh notices file for linux_x86_64 from " <>
+                 "#{@notices_url}: HTTP 404"
+
+      refute File.exists?(notices_path(context.priv))
     end
 
     test "a transport failure names the target, the URL and the HTTP status", context do
@@ -189,6 +252,32 @@ defmodule FermixCore.Release.IrohHelperTest do
         IrohHelper.place(:macos_aarch64, context.priv, pin_path: context.pin_path)
       end
     end
+
+    test "refuses a pin that names no notices, or notices it cannot place", context do
+      pin = context.pin_path |> File.read!() |> Jason.decode!()
+
+      assert pin_problem(context, Map.delete(pin, "notices")) ==
+               "notices needs an asset and a sha256"
+
+      assert pin_problem(context, put_in(pin, ["notices", "sha256"], "ABC")) ==
+               "notices.sha256 is not a lowercase sha256 digest"
+
+      assert pin_problem(context, put_in(pin, ["notices", "asset"], "../notices")) ==
+               "notices.asset is invalid"
+
+      refute File.exists?(Path.join(context.priv, "iroh_helper"))
+    end
+
+    # A schema 1 pin predates the notices, so placing from it would ship a
+    # helper without them.
+    test "refuses a schema 1 pin", context do
+      pin = context.pin_path |> File.read!() |> Jason.decode!()
+      File.write!(context.pin_path, Jason.encode!(%{pin | "schema_version" => 1}))
+
+      assert_raise RuntimeError, ~r/pin: schema_version is not 2/, fn ->
+        IrohHelper.place(:linux_x86_64, context.priv, pin_path: context.pin_path)
+      end
+    end
   end
 
   describe "fetch/2" do
@@ -235,13 +324,16 @@ defmodule FermixCore.Release.IrohHelperTest do
         capture_io(fn ->
           assert IrohHelper.run(burrito,
                    pin_path: context.pin_path,
-                   fetch: serve(calls, %{@url => helper_bytes("linux_x86_64")})
+                   fetch: serve(calls, linux_assets())
                  ) == burrito
         end)
 
-      path = Path.join(work_dir, "lib/fermix_core-0.15.0/priv/iroh_helper/bin/fermix-iroh")
+      priv = Path.join(work_dir, "lib/fermix_core-0.15.0/priv")
+      path = destination(priv)
       assert File.read!(path) == helper_bytes("linux_x86_64")
+      assert File.read!(notices_path(priv)) == @notices
       assert log =~ "fermix: fermix-iroh 0.1.0 for linux_x86_64 placed at #{path}"
+      assert log =~ "fermix: its third-party notices placed at #{notices_path(priv)}"
       refute File.exists?(Path.join(work_dir, "lib/fermix_nif-0.1.0/priv/iroh_helper"))
     end
 
@@ -270,6 +362,7 @@ defmodule FermixCore.Release.IrohHelperTest do
         "https://github.com/tezra-io/fermix-iroh/releases/download/v0.1.0/" <>
           "fermix-iroh-macos-aarch64"
 
+      assets = %{url => helper_bytes("macos_aarch64"), @notices_url => @notices}
       {:ok, calls} = Agent.start_link(fn -> [] end)
 
       log =
@@ -277,14 +370,18 @@ defmodule FermixCore.Release.IrohHelperTest do
           assert IrohHelper.place_in_release(release,
                    target: "macos_aarch64",
                    pin_path: context.pin_path,
-                   fetch: serve(calls, %{url => helper_bytes("macos_aarch64")})
+                   fetch: serve(calls, assets)
                  ) == release
         end)
 
-      path = Path.join(release.path, "lib/fermix_core-0.15.0/priv/iroh_helper/bin/fermix-iroh")
+      priv = Path.join(release.path, "lib/fermix_core-0.15.0/priv")
+      path = destination(priv)
       assert File.read!(path) == helper_bytes("macos_aarch64")
       assert mode(path) == 0o755
+      assert File.read!(notices_path(priv)) == @notices
+      assert mode(notices_path(priv)) == 0o644
       assert log =~ "fermix: fermix-iroh 0.1.0 for macos_aarch64 placed at #{path}"
+      assert log =~ "fermix: its third-party notices placed at #{notices_path(priv)}"
     end
 
     test "refuses a release whose fermix_core tree has no priv", context do
@@ -307,6 +404,9 @@ defmodule FermixCore.Release.IrohHelperTest do
 
       for {_target, %{"sha256" => sha256}} <- pin["targets"],
           do: assert(sha256 =~ ~r/\A[0-9a-f]{64}\z/)
+
+      assert pin["notices"]["asset"] == "fermix-iroh-THIRD-PARTY-NOTICES.txt"
+      assert pin["notices"]["sha256"] =~ ~r/\A[0-9a-f]{64}\z/
     end
 
     test "sits beside the protocol the helper speaks, in the source priv" do
@@ -329,12 +429,16 @@ defmodule FermixCore.Release.IrohHelperTest do
       end)
 
     pin = %{
-      "schema_version" => 1,
+      "schema_version" => 2,
       "repository" => "tezra-io/fermix-iroh",
       "tag" => "v0.1.0",
       "version" => "0.1.0",
       "protocol_version" => 1,
       "iroh_version" => "1.3.0",
+      "notices" => %{
+        "asset" => "fermix-iroh-THIRD-PARTY-NOTICES.txt",
+        "sha256" => digest(@notices)
+      },
       "targets" => targets
     }
 
@@ -350,7 +454,35 @@ defmodule FermixCore.Release.IrohHelperTest do
     end
   end
 
+  defp linux_assets, do: %{@url => helper_bytes("linux_x86_64"), @notices_url => @notices}
+
   defp destination(priv), do: Path.join(priv, "iroh_helper/bin/fermix-iroh")
+
+  defp notices_path(priv), do: Path.join(priv, "iroh_helper/THIRD-PARTY-NOTICES.txt")
+
+  defp put_file!(path, bytes, mode) do
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, bytes)
+    File.chmod!(path, mode)
+  end
+
+  defp mtime(path), do: File.stat!(path, time: :posix).mtime
+
+  # The problem `place/3` names for `pin`, written over the context's pin.
+  defp pin_problem(context, pin) do
+    File.write!(context.pin_path, Jason.encode!(pin))
+
+    error =
+      assert_raise RuntimeError, fn ->
+        IrohHelper.place(:linux_x86_64, context.priv,
+          pin_path: context.pin_path,
+          fetch: fn url -> flunk("fetched #{url} with an invalid pin") end
+        )
+      end
+
+    prefix = "#{context.pin_path} is not a valid fermix-iroh pin: "
+    String.replace_prefix(error.message, prefix, "")
+  end
 
   defp bin_entries(priv) do
     case File.ls(Path.join(priv, "iroh_helper/bin")) do

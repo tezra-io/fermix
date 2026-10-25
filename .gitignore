@@ -28,9 +28,11 @@
 # Rustler
 /apps/fermix_nif/native/fermix_nif/target/
 
-# The pinned fermix-iroh helper: release builds place it, a checkout installs
-# it with `mix fermix.iroh_helper` (PIN.json beside it is tracked)
+# The pinned fermix-iroh helper and its third-party notices: release builds
+# place them, a checkout installs them with `mix fermix.iroh_helper` (PIN.json
+# beside them is tracked)
 /apps/fermix_core/priv/iroh_helper/bin/
+/apps/fermix_core/priv/iroh_helper/THIRD-PARTY-NOTICES.txt
 
 # SwiftPM macOS clients
 /clients/macos/*/.build/

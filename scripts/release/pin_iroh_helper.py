@@ -9,14 +9,17 @@
 the only thing that writes it, never a hand edit. Every value in it is proven
 before it is written:
 
-1. `SHA256SUMS`, and for each bare binary the binary, `.sha256`, `.sig` and
-   `.pem`, are downloaded from the release, and the binary's own digest, its
-   sidecar and its `SHA256SUMS` line must agree;
-2. `cosign verify-blob` checks each binary against the tag's release workflow
+1. `SHA256SUMS`, and for each bare binary and the one third-party notices
+   file the asset, `.sha256`, `.sig` and `.pem`, are downloaded from the
+   release, and the asset's own digest, its sidecar and its `SHA256SUMS` line
+   must agree; a release whose `SHA256SUMS` lists no notices is refused, since
+   every tree carries them beside the helper;
+2. `cosign verify-blob` checks each asset against the tag's release workflow
    identity and the GitHub OIDC issuer (no cosign on PATH is a refusal);
 3. each binary's header must be the shape the trees depend on: Linux is a
    64-bit ELF for the target's machine with no `PT_INTERP` (static), macOS is a
-   thin 64-bit Mach-O for exactly the target's CPU;
+   thin 64-bit Mach-O for exactly the target's CPU; the notices must be
+   non-empty UTF-8 text;
 4. the host's own target binary runs with stdin closed and an empty
    environment, and its `hello` line gives `helper_version` (must equal the
    tag), `protocol_version` and `iroh_version`; run again with `--version`, it
@@ -53,7 +56,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+# 2 since the pin names the notices: a reader that knows only 1 would place a
+# helper without them, so it refuses this pin instead.
+SCHEMA_VERSION = 2
 REPOSITORY = "tezra-io/fermix-iroh"
 RELEASE_WORKFLOW = ".github/workflows/release.yml"
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
@@ -100,6 +105,10 @@ HOST_TARGETS = {
     ("Linux", "arm64"): "linux_aarch64",
     ("Linux", "x86_64"): "linux_x86_64",
 }
+
+# The third-party notices of what is compiled into the helper: one file for all
+# four targets, which every tree carries beside it.
+NOTICES_ASSET = "fermix-iroh-THIRD-PARTY-NOTICES.txt"
 
 SIDECARS = (".sha256", ".sig", ".pem")
 
@@ -169,7 +178,7 @@ def agree_digests(asset: str, actual: str, sidecar: str, sums: dict[str, str]) -
         raise PinError(f"SHA256SUMS does not list {asset}")
     if not actual == sidecar == listed:
         raise PinError(
-            f"{asset}: the binary hashes to {actual}, its .sha256 says {sidecar} "
+            f"{asset}: the file hashes to {actual}, its .sha256 says {sidecar} "
             f"and SHA256SUMS says {listed}; the three must agree"
         )
     return actual
@@ -223,6 +232,17 @@ def check_shape(target: str, data: bytes) -> None:
         check_macho(spec["asset"], data, spec["cpu"])
 
 
+def check_notices(data: bytes) -> None:
+    """The notices are text a reader can open: non-empty and UTF-8."""
+
+    if not data:
+        raise PinError(f"{NOTICES_ASSET} is empty")
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise PinError(f"{NOTICES_ASSET} is not UTF-8 text: {error}") from None
+
+
 def parse_hello(asset: str, stdout: bytes, version: str) -> dict:
     """`protocol_version`, `helper_version` and `iroh_version` from the helper's first line."""
 
@@ -243,7 +263,7 @@ def parse_hello(asset: str, stdout: bytes, version: str) -> dict:
     return {"protocol_version": protocol, "helper_version": helper, "iroh_version": iroh}
 
 
-def build_pin(tag: str, protocol_version, iroh_version, digests: dict[str, str]) -> dict:
+def build_pin(tag: str, protocol_version, iroh_version, digests: dict[str, str], notices_sha256: str) -> dict:
     """PIN.json in its one key order; `digests` is {target: sha256}."""
 
     return {
@@ -256,6 +276,7 @@ def build_pin(tag: str, protocol_version, iroh_version, digests: dict[str, str])
         "certificate_identity": certificate_identity(tag),
         "certificate_oidc_issuer": OIDC_ISSUER,
         "macos_team_id": MACOS_TEAM_ID,
+        "notices": {"asset": NOTICES_ASSET, "sha256": notices_sha256},
         "targets": {
             target: {"asset": spec["asset"], "sha256": digests[target]} for target, spec in TARGETS.items()
         },
@@ -345,29 +366,35 @@ def cosign_verify(cosign: str, tag: str, binary: Path, runner) -> None:
         )
 
 
-def verify_target(target: str, tag: str, sums: dict, workdir: Path, *, cosign: str, fetch, runner) -> tuple[Path, str]:
-    """Steps 1 to 3 for one target: (the downloaded binary, its agreed digest)."""
+def verify_asset(asset: str, tag: str, sums: dict, workdir: Path, *, cosign: str, fetch, runner) -> tuple[Path, str]:
+    """Steps 1 and 2 for one asset: (the download, its agreed digest)."""
 
-    asset = TARGETS[target]["asset"]
-    binary = download(tag, asset, workdir, fetch)
+    path = download(tag, asset, workdir, fetch)
     for suffix in SIDECARS:
         download(tag, asset + suffix, workdir, fetch)
-    data = binary.read_bytes()
     sidecar = parse_sidecar((workdir / f"{asset}.sha256").read_text(encoding="utf-8"), asset)
-    digest = agree_digests(asset, hashlib.sha256(data).hexdigest(), sidecar, sums)
-    cosign_verify(cosign, tag, binary, runner)
-    check_shape(target, data)
-    return binary, digest
+    digest = agree_digests(asset, hashlib.sha256(path.read_bytes()).hexdigest(), sidecar, sums)
+    cosign_verify(cosign, tag, path, runner)
+    return path, digest
 
 
-def verify_release(tag: str, workdir: Path, *, cosign: str, fetch, runner) -> dict[str, tuple[Path, str]]:
-    """{target: (binary, digest)} for every target, each proven by steps 1 to 3."""
+def verify_release(tag: str, workdir: Path, *, cosign: str, fetch, runner) -> tuple[dict[str, tuple[Path, str]], str]:
+    """({target: (binary, digest)} for every target, the notices' digest), each proven by steps 1 to 3."""
 
     sums = parse_sha256sums(download(tag, "SHA256SUMS", workdir, fetch).read_text(encoding="utf-8"))
-    return {
-        target: verify_target(target, tag, sums, workdir, cosign=cosign, fetch=fetch, runner=runner)
-        for target in TARGETS
-    }
+    if NOTICES_ASSET not in sums:
+        raise PinError(
+            f"{tag} publishes no {NOTICES_ASSET} (SHA256SUMS does not list it); "
+            "every tree carries the helper's third-party notices beside it"
+        )
+    verified = {}
+    for target, spec in TARGETS.items():
+        binary, digest = verify_asset(spec["asset"], tag, sums, workdir, cosign=cosign, fetch=fetch, runner=runner)
+        check_shape(target, binary.read_bytes())
+        verified[target] = (binary, digest)
+    notices, notices_sha256 = verify_asset(NOTICES_ASSET, tag, sums, workdir, cosign=cosign, fetch=fetch, runner=runner)
+    check_notices(notices.read_bytes())
+    return verified, notices_sha256
 
 
 def read_hello(binary: Path, version: str, runner) -> dict:
@@ -434,11 +461,11 @@ def make_pin(tag: str, pin_path: Path, *, fetch, runner, which, host) -> dict:
     cosign = resolve_cosign(which)
     own_target = host_target(*host)
     with tempfile.TemporaryDirectory(prefix="fermix-iroh-pin-") as tmp:
-        verified = verify_release(tag, Path(tmp), cosign=cosign, fetch=fetch, runner=runner)
+        verified, notices_sha256 = verify_release(tag, Path(tmp), cosign=cosign, fetch=fetch, runner=runner)
         hello = read_hello(verified[own_target][0], version, runner)
         read_version_line(verified[own_target][0], version, hello["iroh_version"], runner)
     digests = {target: digest for target, (_, digest) in verified.items()}
-    pin = build_pin(tag, hello["protocol_version"], hello["iroh_version"], digests)
+    pin = build_pin(tag, hello["protocol_version"], hello["iroh_version"], digests, notices_sha256)
     write_atomic(pin_path, render_pin(pin))
     return pin
 
@@ -464,12 +491,12 @@ def check_pin(pin_path: Path, *, fetch, runner, which) -> list[str]:
     version_of(tag)
     cosign = resolve_cosign(which)
     with tempfile.TemporaryDirectory(prefix="fermix-iroh-pin-check-") as tmp:
-        verified = verify_release(tag, Path(tmp), cosign=cosign, fetch=fetch, runner=runner)
+        verified, notices_sha256 = verify_release(tag, Path(tmp), cosign=cosign, fetch=fetch, runner=runner)
     digests = {target: digest for target, (_, digest) in verified.items()}
     # The hello is not re-run here, so the two values it gave are taken from
     # the pin; the engine's own test holds them to the protocol and relay
     # revision it speaks.
-    expected = build_pin(tag, pin.get("protocol_version"), pin.get("iroh_version"), digests)
+    expected = build_pin(tag, pin.get("protocol_version"), pin.get("iroh_version"), digests, notices_sha256)
     differences = pin_differences(expected, pin) + hello_field_problems(pin)
     # Compared with the pin as this script would write it, not as the file's
     # own keys order it, so a hand-reordered pin is not the written form.
@@ -495,6 +522,7 @@ def main(argv=None, *, fetch=http_get, runner=subprocess.run, which=shutil.which
         return 1
     for target, entry in pin["targets"].items():
         print(f"{entry['sha256']}  {target}  {entry['asset']}")
+    print(f"{pin['notices']['sha256']}  notices  {pin['notices']['asset']}")
     print(f"wrote {arguments.pin} for {REPOSITORY} {pin['tag']}")
     return 0
 
@@ -504,7 +532,10 @@ def report_check(pin_path: Path, differences: list[str]) -> int:
         for difference in differences:
             print(f"pin_iroh_helper.py: {pin_path.name} differs: {difference}", file=sys.stderr)
         return 1
-    print(f"{pin_path} matches its release: digests, signatures and shapes verified for {len(TARGETS)} targets")
+    print(
+        f"{pin_path} matches its release: digests, signatures and shapes verified for "
+        f"{len(TARGETS)} targets and the notices"
+    )
     return 0
 
 

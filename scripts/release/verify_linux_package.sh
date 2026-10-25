@@ -80,15 +80,19 @@ print(cursor if isinstance(cursor, str) else json.dumps(cursor))
 ' "$1" "$2"
 }
 
-# The pinned fermix-iroh build for this target: its digest and the exact
-# `--version` line it prints. Read before anything is installed.
+# The pinned fermix-iroh build for this target: its digest, the exact
+# `--version` line it prints and the digest of its notices. Read before
+# anything is installed.
 [ -f "$iroh_pin" ] || fail "iroh helper pin not found: $iroh_pin"
 iroh_pin_json="$(cat "$iroh_pin")"
-[ "$(json_field "$iroh_pin_json" schema_version)" = 1 ] ||
-  fail "the iroh helper pin $iroh_pin is not schema_version 1"
+[ "$(json_field "$iroh_pin_json" schema_version)" = 2 ] ||
+  fail "the iroh helper pin $iroh_pin is not schema_version 2"
 iroh_sha256="$(json_field "$iroh_pin_json" "targets.$target.sha256")"
 printf '%s\n' "$iroh_sha256" | grep -Eqx '[0-9a-f]{64}' ||
   fail "the iroh helper pin $iroh_pin has no sha256 for $target"
+iroh_notices_sha256="$(json_field "$iroh_pin_json" notices.sha256)"
+printf '%s\n' "$iroh_notices_sha256" | grep -Eqx '[0-9a-f]{64}' ||
+  fail "the iroh helper pin $iroh_pin has no sha256 for the notices"
 iroh_helper_version="$(json_field "$iroh_pin_json" version)"
 iroh_iroh_version="$(json_field "$iroh_pin_json" iroh_version)"
 [ -n "$iroh_helper_version" ] && [ -n "$iroh_iroh_version" ] ||
@@ -100,13 +104,27 @@ iroh_version_line="fermix-iroh $iroh_helper_version (iroh $iroh_iroh_version)"
 # relied on, so it is POSIX sh with sha256sum. The Burrito wrapper names the
 # directory it unpacked its payload into, so the helper is looked for exactly
 # where the `fermix --version` before it put it. The digest is checked before
-# the helper runs, so no unpinned bytes are executed.
+# the helper runs, so no unpinned bytes are executed. The helper's third-party
+# notices are checked twice, beside it in the payload and as the package's own
+# document, and the copyright file must name the helper, its licence, that
+# document and the one crate in it under the MPL 2.0.
 # shellcheck disable=SC2016
 iroh_helper_check='
 set -eu
 fail() { printf "error: %s\n" "$1" >&2; exit 1; }
 expected_sha256="$1"
 expected_version="$2"
+expected_notices_sha256="$3"
+doc_notices=/usr/share/doc/fermix/fermix-iroh-THIRD-PARTY-NOTICES.txt
+copyright=/usr/share/doc/fermix/copyright
+check_notices() {
+  [ -f "$1" ] && [ ! -L "$1" ] || fail "the fermix-iroh third-party notices are not a regular file at $1"
+  mode="$(stat -c %a "$1")" || fail "cannot read the mode of the fermix-iroh notices at $1"
+  [ "$mode" = 644 ] || fail "the fermix-iroh notices at $1 must be mode 0644, found $mode"
+  actual="$(sha256sum "$1" | cut -d " " -f 1)"
+  [ "$actual" = "$expected_notices_sha256" ] ||
+    fail "the fermix-iroh notices at $1 are not the pinned ones: expected sha256 $expected_notices_sha256, found $actual"
+}
 payload="$(fermix maintenance directory)" ||
   fail "fermix maintenance directory did not name the unpacked payload"
 [ -d "$payload" ] || fail "the unpacked payload directory does not exist: $payload"
@@ -129,6 +147,14 @@ actual_version="$("$helper" --version < /dev/null)" ||
 [ "$actual_version" = "$expected_version" ] ||
   fail "the bundled fermix-iroh helper --version must print exactly \"$expected_version\", got \"$actual_version\""
 printf "fermix-iroh helper: %s (%s)\n" "$helper" "$actual_version"
+check_notices "${helper%/bin/fermix-iroh}/THIRD-PARTY-NOTICES.txt"
+check_notices "$doc_notices"
+for line in "/usr/bin/fermix also contains the fermix-iroh helper" \
+  "Copyright (c) 2026 Tezra.io, MIT License." "$doc_notices" \
+  "One crate in the helper, attohttpc, is under the Mozilla Public License 2.0."; do
+  grep -Fq -- "$line" "$copyright" || fail "$copyright does not name the fermix-iroh helper and its notices: no line has \"$line\""
+done
+printf "fermix-iroh notices: %s\n" "$doc_notices"
 '
 
 if [ "$kind" = rpm ]; then
@@ -143,11 +169,12 @@ if [ "$kind" = rpm ]; then
       -e IROH_HELPER_CHECK="$iroh_helper_check" \
       -e IROH_SHA256="$iroh_sha256" \
       -e IROH_VERSION_LINE="$iroh_version_line" \
+      -e IROH_NOTICES_SHA256="$iroh_notices_sha256" \
       fedora:41 sh -c '
       set -eu
       dnf install -y /pkg.rpm >/dev/null 2>&1
       fermix --version
-      sh -c "$IROH_HELPER_CHECK" iroh-helper-check "$IROH_SHA256" "$IROH_VERSION_LINE" >&2
+      sh -c "$IROH_HELPER_CHECK" iroh-helper-check "$IROH_SHA256" "$IROH_VERSION_LINE" "$IROH_NOTICES_SHA256" >&2
       # The rpm family gets its own refusal, on a host whose package database
       # really does own /usr/bin/fermix.
       fermix upgrade 2>&1 | grep -F "dnf upgrade fermix" >/dev/null ||
@@ -183,9 +210,10 @@ case "$version_output" in
   *) fail "fermix --version does not contain $version" ;;
 esac
 
-# The run above unpacked the payload; the pinned helper must be in it.
-sh -c "$iroh_helper_check" iroh-helper-check "$iroh_sha256" "$iroh_version_line" ||
-  fail "the deb does not carry the pinned fermix-iroh helper for $target (the reason is above)"
+# The run above unpacked the payload; the pinned helper must be in it, with its
+# notices beside it and installed as the package's own document.
+sh -c "$iroh_helper_check" iroh-helper-check "$iroh_sha256" "$iroh_version_line" "$iroh_notices_sha256" ||
+  fail "the deb does not carry the pinned fermix-iroh helper and its notices for $target (the reason is above)"
 
 # The engine reads this file and reports it beside its own compiled identity;
 # a mismatch is what `service status` calls an integrity failure.

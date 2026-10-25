@@ -42,9 +42,10 @@ jobs:
           fi
           echo "Releasing v$mix_version"
 
-      # The build jobs compare the helper's digest with the pin and nothing
-      # more, so the signatures are checked here, once per tag: no tag ships a
-      # pin whose bytes the helper release's signatures do not cover.
+      # The build jobs compare the helper's and its notices' digests with the
+      # pin and nothing more, so the signatures are checked here, once per tag:
+      # no tag ships a pin whose bytes the helper release's signatures do not
+      # cover.
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
       - name: Install cosign
