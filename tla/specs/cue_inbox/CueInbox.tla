@@ -45,7 +45,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/supervisor.ex @ 6cd21aac9d1d
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/sweeper.ex @ da4e2d7db65e
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/proposals.ex @ bddf4da1dfac
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_sql.ex @ 7480646336d9
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_sql.ex @ 0efd93ce0491
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_filter_sql.ex @ 68f8085a8c5d
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_runs_sql.ex#@open_sql,@cap_room_sql,@eligible_sql,@candidates_sql,@eligible_delivery_sql,@settle_facts_sql,eligible_delivery,settle_delivery,settle_facts,settle_held,settle_move,unspent_retry,spent_retry,move_patch,untouched @ f65310ef1716
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_mandate_sql.ex#mark_tools_started,decide_propose,store_proposal,point_at_existing,decide_waiting,decided_or_why,decide_by_id,decided_by_id,end_denied,settle_proposal,expire_proposals @ 029c6975cee1
@@ -104,7 +104,7 @@ CONSTANTS
     BootReset,                  \* Filters.init resets filtering rows
                                 \* (filters.ex:102, :159; cues_filter_sql.ex:635)
     NonePassesAtAccept,         \* a none watcher's delivery is inserted passed
-                                \* (cues_sql.ex:620)
+                                \* (cues_sql.ex:631)
     ClaimNeedsIdleJob,          \* a cue claim needs the job scheduled with no active
                                 \* run (@open_sql :91-94; repo.ex fetch_claimable_job,
                                 \* ensure_no_active_job_run)
@@ -250,7 +250,7 @@ Fault == faults > 0 /\ faults' = faults - 1
 
 -----------------------------------------------------------------------------
 (* Accept and route: Cues.Ingest.accept/3 -> CuesSql {:accept, ...}, one   *)
-(* BEGIN IMMEDIATE (cues_sql.ex:320, accept_in_tx :409): insert_and_route  *)
+(* BEGIN IMMEDIATE (cues_sql.ex:330, accept_in_tx :420): insert_and_route  *)
 (* (:569) and insert_deliveries (:615): one delivery per enabled           *)
 (* listening watcher, pending for llm, passed with reason "no filter" and  *)
 (* ready_at = now for none. Ids are AUTOINCREMENT: the arrival order.      *)
@@ -546,7 +546,7 @@ Expire(d) ==
                    runRows, propVars, dispVars, schedVars, obs, faults>>
 
 \* Cues.Sweeper :expire_lifetime (sweeper.ex:33) -> CuesSql expire_lifetime
-\* (cues_sql.ex:1091, expire_each :698): pending and passed rows past valid_until become
+\* (cues_sql.ex:1115, expire_each :709): pending and passed rows past valid_until become
 \* expired (transition with no fence); filtering and claimed are never touched.
 SweepExpire(d) ==
     /\ ~valid[d] /\ dstate[d] \in {"pending", "passed"}
