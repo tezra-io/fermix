@@ -80,6 +80,9 @@ defmodule FermixCore.Cues.MandateGateTest do
              phase: "pre_execution"
            }
 
+    # Errored, so the exported span never reads as a call that succeeded.
+    assert metadata.error_code == label
+    assert metadata.error_summary == "refused by the access gate"
     {error, metadata}
   end
 

@@ -72,7 +72,13 @@ owner's confirmation, `"deny"` when it refused it, `phase: "pre_execution"`),
 and only on the held and refused branches, where the executor was never called.
 Because the executor never ran, the gate itself emits that model call's single
 `[:fermix, :tool, :exec]` event through `Tools.Telemetry.exec/5`, under the
-capability's name and with `success: false`.
+capability's name and with `success: false`. That event also carries a bounded
+`error_code` (the access-gate label) and a fixed `error_summary` ("held by the
+access gate for the owner's confirmation" or "refused by the access gate", no
+user content), both from `AccessGate.held_metadata/2`, so its Opik span carries
+`error_info` and is errored: a held or refused call never exports as a span that
+succeeded. A confirmed call (`access_gate: "confirmed"`) runs its executor,
+whose own event reports its own outcome.
 
 ### Access-gate labels
 

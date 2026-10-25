@@ -128,6 +128,54 @@ defmodule FermixOpik.TraceFileTest do
     assert meta.error_summary == "navigation timed out"
   end
 
+  test "tool_exec normalize keeps a held call's gate label and pre-execution marker" do
+    marker = %{"source" => "access_gate", "decision" => "confirm", "phase" => "pre_execution"}
+
+    row = %{
+      "ts" => "2026-06-02T12:00:00.000Z",
+      "type" => "tool_exec",
+      "tool" => "shell",
+      "agent" => "main",
+      "success" => false,
+      "duration_ms" => 0,
+      "access_gate" => "held_this_chat",
+      "access_intent" => "3d5a37f90059b2bc",
+      "policy_enforcement" => marker,
+      "error_code" => "held_this_chat",
+      "error_summary" => "held by the access gate for the owner's confirmation"
+    }
+
+    assert {[:fermix, :tool, :exec], %{duration_ms: 0}, meta} =
+             TraceFile.normalize("tool_exec", row)
+
+    assert meta.access_gate == "held_this_chat"
+    assert meta.access_intent == "3d5a37f90059b2bc"
+    assert meta.policy_enforcement == marker
+    assert meta.error_code == "held_this_chat"
+  end
+
+  test "tool_exec normalize keeps a mandate decision's record" do
+    row = %{
+      "ts" => "2026-06-02T12:00:00.000Z",
+      "type" => "tool_exec",
+      "tool" => "google_calendar_create_event",
+      "agent" => "main",
+      "success" => false,
+      "duration_ms" => 0,
+      "access_gate" => "mandate_disabled",
+      "validator" => "none",
+      "mandate_call_id" => "mc_1",
+      "mandate_reason" => "the mandate is switched off (enabled = false)"
+    }
+
+    assert {[:fermix, :tool, :exec], _measurements, meta} =
+             TraceFile.normalize("tool_exec", row)
+
+    assert meta.validator == "none"
+    assert meta.mandate_call_id == "mc_1"
+    assert meta.mandate_reason == "the mandate is switched off (enabled = false)"
+  end
+
   # ExUnit owns this directory: it clears and recreates it per test, so the
   # test needs no cleanup call of its own. FermixTestSupport.SafeRm — the
   # repo's guarded alternative to a bare File.rm_rf! in test/ — is compiled

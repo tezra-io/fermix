@@ -232,6 +232,8 @@ defmodule FermixCore.Capabilities.AccessGateTest do
       end
     end
 
+    # The span it exports is errored (a bounded code and fixed summary, no
+    # user content), so a grader counts the call as held, never as succeeded.
     test "the held call emits one exec event proving it never ran", ctx do
       held_text(execute(tainted(ctx)))
 
@@ -247,6 +249,8 @@ defmodule FermixCore.Capabilities.AccessGateTest do
                phase: "pre_execution"
              }
 
+      assert metadata.error_code == "held_this_chat"
+      assert metadata.error_summary == "held by the access gate for the owner's confirmation"
       refute_received {:tool_exec, _}
     end
 
@@ -458,6 +462,8 @@ defmodule FermixCore.Capabilities.AccessGateTest do
       assert metadata.tool == "computer_use"
       assert metadata.access_gate == "refused_waiting"
       assert metadata.policy_enforcement.decision == "deny"
+      assert metadata.error_code == "refused_waiting"
+      assert metadata.error_summary == "refused by the access gate"
       refute_received {:tool_exec, _}
     end
 

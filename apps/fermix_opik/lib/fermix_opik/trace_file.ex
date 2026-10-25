@@ -133,7 +133,16 @@ defmodule FermixOpik.TraceFile do
        # Fermix-minted task id that tell a refused or cancelled call from one
        # that ran. Never the request the model sent.
        :status,
-       :task_id
+       :task_id,
+       # A call the access gate or a cue mandate decided: the closed outcome
+       # label, the parked intent, the typed pre-execution marker and the
+       # mandate's record. Fixed strings and ids — never the call's arguments.
+       :access_gate,
+       :access_intent,
+       :policy_enforcement,
+       :validator,
+       :mandate_call_id,
+       :mandate_reason
      ])}
   end
 

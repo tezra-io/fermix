@@ -578,6 +578,41 @@ defmodule FermixOpik.MapperTest do
            }
   end
 
+  # A held or refused call never ran: its event carries a bounded code (the
+  # gate's label) and a fixed summary, so its span is errored and a grader
+  # counts it as held, with the marker that proves why, not as succeeded.
+  test "tool_span of a held access-gate call is errored and keeps its marker" do
+    metadata = %{
+      tool: "shell",
+      success: false,
+      access_gate: "held_this_chat",
+      access_intent: "9f2c1a7b3e4d5f60",
+      policy_enforcement: %{source: "access_gate", decision: "confirm", phase: "pre_execution"},
+      error_code: "held_this_chat",
+      error_summary: "held by the access gate for the owner's confirmation"
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 0},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.error_info == %{
+             exception_type: "held_this_chat",
+             message: "held by the access gate for the owner's confirmation"
+           }
+
+    assert span.metadata.access_gate == "held_this_chat"
+
+    assert span.metadata.policy_enforcement == %{
+             source: "access_gate",
+             decision: "confirm",
+             phase: "pre_execution"
+           }
+  end
+
   # A cue run's mandate call (M60 §14): whether a validator decided (a closed
   # enum), its `cue_mandate_calls` row (an opaque id) and Fermix's own sentence
   # for a refusal (never a validator's words or the call's arguments).

@@ -403,6 +403,27 @@ defmodule FermixCore.Capabilities.AccessGate do
     %{source: "access_gate", decision: Atom.to_string(decision), phase: "pre_execution"}
   end
 
+  @doc """
+  The exec-event metadata of a call held for the owner (`:confirm`) or refused
+  (`:deny`), whose executor never ran: the gate's `label`, the typed marker,
+  and a bounded `error_code` (the label) with a fixed `error_summary`, so the
+  exported span is errored, never a call that succeeded. No user content.
+  Shared with `Cues.MandateGate`.
+  """
+  @spec held_metadata(String.t(), :confirm | :deny) :: map()
+  def held_metadata(label, decision)
+      when is_binary(label) and label != "" and decision in [:confirm, :deny] do
+    %{
+      access_gate: label,
+      policy_enforcement: pre_execution_marker(decision),
+      error_code: label,
+      error_summary: held_summary(decision)
+    }
+  end
+
+  defp held_summary(:confirm), do: "held by the access gate for the owner's confirmation"
+  defp held_summary(:deny), do: "refused by the access gate"
+
   @doc "The fingerprint a confirmation is bound to: the tool and its exact arguments."
   @spec digest(String.t(), map()) :: String.t()
   def digest(tool, args) when is_binary(tool) and is_map(args) do
@@ -681,7 +702,8 @@ defmodule FermixCore.Capabilities.AccessGate do
   # emits the call's event itself, with the typed pre-execution marker.
   defp hold(call, text, label, intent_id \\ nil) do
     metadata =
-      %{access_gate: label, policy_enforcement: pre_execution_marker(marker_decision(label))}
+      label
+      |> held_metadata(marker_decision(label))
       |> maybe_put(:access_intent, intent_id)
 
     ToolTelemetry.exec(call.capability.name, call.context, false, 0,

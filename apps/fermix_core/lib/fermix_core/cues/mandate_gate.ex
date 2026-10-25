@@ -797,10 +797,7 @@ defmodule FermixCore.Cues.MandateGate do
     metadata =
       extra
       |> Map.reject(fn {_key, value} -> is_nil(value) end)
-      |> Map.merge(%{
-        access_gate: label,
-        policy_enforcement: AccessGate.pre_execution_marker(decision)
-      })
+      |> Map.merge(AccessGate.held_metadata(label, decision))
 
     ToolTelemetry.exec(capability.name, context, false, 0, metadata: metadata, input: args)
     {:held, Tool.error(text)}
