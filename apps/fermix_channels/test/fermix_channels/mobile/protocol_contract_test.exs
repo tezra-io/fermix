@@ -397,6 +397,17 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     end
   end
 
+  # Every field protocol 2 gained after it shipped is optional, so a daemon
+  # that shipped before it is still read: pair_approved requires what engine
+  # 0.16.0 sent, and push, which came later, may be absent.
+  test "pair_approved requires only what protocol 2 shipped with", %{schema: schema} do
+    assert schema["$defs"]["pair_approved"]["required"] ==
+             ~w(v t seq device_id candidates profiles push_salt)
+
+    approved = Enum.find(server_headers(), &(&1["t"] == "pair_approved"))
+    assert server_errors(Map.delete(approved, "push"), schema) == []
+  end
+
   # M62 §4.3: the rail's candidate is a second candidate shape, told apart by
   # `kind`; a host candidate has none.
   test "the schema refuses an iroh candidate that drifts from the format", %{schema: schema} do

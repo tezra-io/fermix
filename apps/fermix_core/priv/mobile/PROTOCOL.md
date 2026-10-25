@@ -242,9 +242,9 @@ A pairing session runs in this order:
    keepalive never has to stop; an idle disconnect while a decision is pending
    is not a failed pairing handshake.
 3. Approved: `pair_approved{device_id, candidates[], profiles[], push_salt,
-   push[]}`, where `push_salt` is the device's 32-byte push salt in standard
-   base64 and `push[]` the push services this daemon sends through (see *Push
-   notifications*). The phone then sends `hello` on the same session (its
+   push[]?}`, where `push_salt` is the device's 32-byte push salt in standard
+   base64 and `push[]` the push services this daemon sends through, which a
+   daemon older than the list leaves out (see *Push notifications*). The phone then sends `hello` on the same session (its
    next `seq`) within a fresh 10 s, and the session goes on as a paired one.
 4. Not approved: `pair_denied{reason}`, then close `4003` with the text
    `pairing <reason>`. `reason` is one word, the one the management protocol
@@ -427,7 +427,7 @@ accepts it.
 | `history_pull` | `profile_id`, `limit`, and exactly one of `after_seq` or `before_seq` | limit is 1–200; `after_seq` (≥ 0) pages forward and `before_seq` (≥ 1) backward, each any unsigned 64-bit value |
 | `media_fetch` | `ref` | re-download a content-addressed blob |
 | `push_register` | `apns_token`, `environment` | environment is `development` or `production` |
-| `push_unregister` | — | clears this phone's token: its notifications cannot show, so no push may come |
+| `push_unregister` | — | clears this phone's token: its notifications cannot show, so no push may come. A phone sends it only to a daemon whose `caps` carries `push[]`, which came with it: an older daemon answers it `unsupported` and closes, as it does any unknown event |
 | `ack` | `server_seq` | cumulative socket-delivery cursor |
 | `read_state` | `profile_id`, `read_up_to_seq` | monotonic read frontier |
 | `request_status` | `client_msg_ids[]` | 1 to 32 ids of requests this phone sent; see *Requests after a reconnect* |
@@ -482,7 +482,7 @@ A client must not upload chunks after `present`.
 | `history_page` | `profile_id`, `messages[]`, `next_after_seq`, `history_head_seq`; `prev_before_seq?` | exact server-sequence cursor page; see *History pages* |
 | `request_status_page` | `requests[]` | how each request `request_status` named stands |
 | `notice` | `kind`, `text` | reserved: in the catalog, never sent yet |
-| `pair_approved` | `device_id`, `candidates[]`, `profiles[]`, `push_salt`, `push[]` | completes pairing; `push_salt` is the device's push salt, 32 bytes in standard base64; `push[]` as `caps.push` |
+| `pair_approved` | `device_id`, `candidates[]`, `profiles[]`, `push_salt`; `push[]?` | completes pairing; `push_salt` is the device's push salt, 32 bytes in standard base64; `push[]` as `caps.push`, which this daemon always sends and a daemon older than the list leaves out |
 | `pair_denied` | `reason` | terminal pairing refusal |
 | `error` | `code`, `message`; `client_msg_id?`, `ref?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | a refusal; message ≤512 bytes; see *Errors* |
 | `pong` | — | keepalive response |
@@ -508,7 +508,8 @@ ends with `turn_done` or `turn_error`), `max_media_bytes`, the largest
 attachment the daemon takes, and `push[]`, the push services this daemon sends
 through, each once, empty when it pushes through none: `apns` while its APNs
 push runs, the only service there is. An iPhone offers notifications only
-when `apns` is listed; no service is listed for an Android phone. A `hello_ack` with 16 numeric candidates and the whole
+when `apns` is listed; no service is listed for an Android phone. A daemon
+older than the list sends no `push`. A `hello_ack` with 16 numeric candidates and the whole
 command catalog fits one frame; one whose candidates are long MagicDNS names
 arrives as an `event_part` run.
 

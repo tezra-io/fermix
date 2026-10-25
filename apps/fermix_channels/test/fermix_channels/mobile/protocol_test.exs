@@ -472,7 +472,9 @@ defmodule FermixChannels.Mobile.ProtocolTest do
                Protocol.encode_server_frame("pair_approved", %{approved | "push" => push}, 1)
     end
 
-    assert {:error, {:missing_field, "push"}} =
+    # Protocol 2 shipped pair_approved without the list (engine 0.16.0), so
+    # an approval that has none is still one.
+    assert {:ok, _frame} =
              Protocol.encode_server_frame("pair_approved", Map.delete(approved, "push"), 1)
 
     for push <- [["fcm"], ["apns", "fcm"], ["gcm"], ["apns", "apns"], "apns"] do

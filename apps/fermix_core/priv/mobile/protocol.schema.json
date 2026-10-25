@@ -406,8 +406,8 @@
       "properties": {"t": {"const": "notice"}, "kind": {"type": "string", "minLength": 1}, "text": {"type": "string", "minLength": 1}}
     },
     "pair_approved": {
-      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "device_id", "candidates", "profiles", "push_salt", "push"],
-      "description": "push_salt is the device's 32-byte push salt (apns_key_salt), standard base64 with padding; push lists the push services this daemon sends through.",
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "device_id", "candidates", "profiles", "push_salt"],
+      "description": "push_salt is the device's 32-byte push salt (apns_key_salt), standard base64 with padding; push lists the push services this daemon sends through, and is absent from a daemon older than the list.",
       "properties": {"t": {"const": "pair_approved"}, "device_id": {"type": "string", "minLength": 1}, "candidates": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/candidate"}}, "profiles": {"type": "array", "items": {"$ref": "#/$defs/profile"}}, "push_salt": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"}, "push": {"$ref": "#/$defs/pushServices"}}
     },
     "pair_denied": {

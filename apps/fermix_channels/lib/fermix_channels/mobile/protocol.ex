@@ -90,7 +90,7 @@ defmodule FermixChannels.Mobile.Protocol do
     "history_page" => ~w(profile_id messages next_after_seq history_head_seq),
     "request_status_page" => ~w(requests),
     "notice" => ~w(kind text),
-    "pair_approved" => ~w(device_id candidates profiles push_salt push),
+    "pair_approved" => ~w(device_id candidates profiles push_salt),
     "pair_denied" => ~w(reason),
     "error" => ~w(code message),
     "pong" => [],
@@ -670,12 +670,14 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- nonnegative_u64(payload, "history_head_seq"),
          :ok <- nonnegative_u64(payload, "read_up_to_seq"),
          :ok <- map_field(payload, "caps") do
-      optional_push_services(payload["caps"])
+      optional_push_services(payload["caps"], "caps.push")
     end
   end
 
-  defp optional_push_services(%{"push" => services}), do: push_services(services, "caps.push")
-  defp optional_push_services(_caps), do: :ok
+  # Absent from a daemon older than the list, as every field protocol 2 gained
+  # after it shipped may be.
+  defp optional_push_services(%{"push" => services}, field), do: push_services(services, field)
+  defp optional_push_services(_payload, _field), do: :ok
 
   # The push services this daemon has configured, each named once.
   defp push_services(services, field) when is_list(services) do
@@ -768,7 +770,7 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- list_field(payload, "candidates"),
          :ok <- list_field(payload, "profiles"),
          :ok <- base64_bytes(payload, "push_salt", 32) do
-      push_services(payload["push"], "push")
+      optional_push_services(payload, "push")
     end
   end
 
