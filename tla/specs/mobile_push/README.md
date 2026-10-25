@@ -46,7 +46,7 @@ shows up as a broken `ChatAccounted` instead.
 
 | Switch | When `TRUE` |
 |---|---|
-| `SocketsCanFreeze` | The OS suspends an app with no clean close. The daemon keeps its socket registered until the 150 s idle timeout (`Session.idle_timeout_ms`, `session.ex:136`), which the WebSocket (`router.ex:53-60`) and the iroh bridge connection (`bridge_connection.ex:199-206`) both apply. |
+| `SocketsCanFreeze` | The OS suspends an app with no clean close. The daemon keeps its socket registered until the 150 s idle timeout (`Session.idle_timeout_ms`, `session.ex:139`), which the WebSocket (`router.ex:53-60`) and the iroh bridge connection (`bridge_connection.ex:199-206`) both apply. |
 | `DispatchCanFail` | A dispatcher call returns a transient error. |
 | `AnswerCanBeLost` | The platform accepted a push and the daemon saw a timeout instead. |
 | `DaemonCanCrash` | The daemon dies with push tasks in flight, and boots again. |
@@ -200,6 +200,17 @@ and also outside the spec. The decision is unchanged (any socket of the
 profile suppresses the push, then the read frontier, then one attempt per row,
 nothing at boot), so nothing the spec models changed; the comments' line
 numbers now point at the new file.
+
+Re-read on 2026-10-25 for `push_register`'s return to the shape engine 0.16.0
+shipped, `{apns_token, environment}` (M82 D16), which staled the `session.ex`
+pin. `dispatch_event` stores any phone's `apns_token` once its environment
+matches the configured APNs one, as 0.16.0 did, and no longer checks the
+phone's platform; Push still refuses an Android phone by name before any
+attempt. The spec models neither registration nor a phone's platform: a
+device is registered throughout, and its `platform` is the push service. The
+`ack` clause, `terminate` and `idle_timeout_ms` are unchanged, so nothing the
+spec models changed; the comments' `session.ex` numbers, which had drifted
+since `e6042f1f`, now point at the committed file.
 
 ## What the spec changed in the design
 
