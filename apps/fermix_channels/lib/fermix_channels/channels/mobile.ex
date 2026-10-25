@@ -234,15 +234,8 @@ defmodule FermixChannels.Channels.Mobile do
   @spec send_approval(Message.t(), map()) :: :ok | {:error, term()}
   def send_approval(%Message{} = message, %{kind: kind, text: text, token: token} = spec)
       when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) do
-    card = Output.approval(spec)
-    :ok = Approvals.announce(Approvals.server(), message.chat_id, card, :mobile)
-
-    approval = %{
-      approval_id: card["approval_id"],
-      expires_at: System.os_time(:second) + card["ttl_s"]
-    }
-
-    launch_push(fn -> notify_approval(message.chat_id, approval) end, [])
+    :ok = Approvals.announce(Approvals.server(), message.chat_id, Output.approval(spec), :mobile)
+    launch_push(fn -> notify_approval(message.chat_id) end, [])
   end
 
   @impl true
@@ -615,13 +608,13 @@ defmodule FermixChannels.Channels.Mobile do
 
   # Push decides itself whether a phone is connected and whether it is
   # configured at all.
-  defp notify_approval(profile_id, approval) do
+  defp notify_approval(profile_id) do
     override = Application.get_env(:fermix_channels, :mobile_approval_push)
 
     result =
-      case injected(override, 2, :mobile_approval_push) do
-        nil -> Push.notify_approval(profile_id, approval)
-        notify -> notify.(profile_id, approval)
+      case injected(override, 1, :mobile_approval_push) do
+        nil -> Push.notify_approval(profile_id)
+        notify -> notify.(profile_id)
       end
 
     case result do

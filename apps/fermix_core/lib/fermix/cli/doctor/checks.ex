@@ -1240,7 +1240,6 @@ defmodule Fermix.CLI.Doctor.Checks do
       mobile_tailnet(report),
       mobile_remote(report, opts),
       mobile_apns(report, config),
-      mobile_fcm(report, config),
       mobile_device_count(report)
     ]
 
@@ -1432,37 +1431,6 @@ defmodule Fermix.CLI.Doctor.Checks do
       true -> {:fail, "APNs not delivering: no push dispatcher is running"}
     end
   end
-
-  # Android push (M51 §10) keeps no connection, so it is degraded only by how
-  # its last batch went.
-  defp mobile_fcm(report, config) do
-    fcm = Map.get(report, "fcm", %{})
-
-    cond do
-      config |> Keyword.get(:fcm, []) |> Keyword.get(:enabled, false) == false ->
-        {:ok, "FCM disabled"}
-
-      fcm["credentials"] != "ready" ->
-        {:fail, "FCM credentials missing"}
-
-      fcm["delivery"] == "ready" ->
-        {:ok, "FCM ready"}
-
-      fcm["delivery"] == "degraded" ->
-        fcm_degraded(fcm["reason"])
-
-      true ->
-        {:fail, "FCM not delivering: no FCM dispatcher is running"}
-    end
-  end
-
-  defp fcm_degraded("auth_failed"),
-    do: {:warn, "FCM degraded (auth_failed): Google refused the service account's token"}
-
-  defp fcm_degraded("unreachable"),
-    do: {:warn, "FCM degraded (unreachable): the last push could not reach Google"}
-
-  defp fcm_degraded(reason), do: {:warn, "FCM degraded (#{reason})"}
 
   defp apns_degraded("connecting"), do: {:warn, "APNs connecting to Apple"}
 

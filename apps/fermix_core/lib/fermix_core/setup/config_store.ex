@@ -68,9 +68,8 @@ defmodule FermixCore.Setup.ConfigStore do
     "unsupported" => :unsupported
   }
 
-  @mobile_keys ~w(enabled iroh mode port bind advertise_mdns streaming max_media_bytes media_store_max_bytes push fcm)
+  @mobile_keys ~w(enabled iroh mode port bind advertise_mdns streaming max_media_bytes media_store_max_bytes push)
   @mobile_push_keys ~w(enabled team_id key_id key topic environment)
-  @mobile_fcm_keys ~w(enabled project_id service_account)
 
   # What a writer that re-renders the file from its own parse says when the
   # file carries a section the renderer would drop.
@@ -1417,9 +1416,8 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp render_mobile(mobile) do
     [
-      render_section(["fermix_channels", "mobile"], Keyword.drop(mobile, [:push, :fcm])),
-      render_section(["fermix_channels", "mobile", "push"], Keyword.get(mobile, :push, [])),
-      render_section(["fermix_channels", "mobile", "fcm"], Keyword.get(mobile, :fcm, []))
+      render_section(["fermix_channels", "mobile"], Keyword.delete(mobile, :push)),
+      render_section(["fermix_channels", "mobile", "push"], Keyword.get(mobile, :push, []))
     ]
   end
 
@@ -3107,9 +3105,9 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_mobile(nil), do: []
 
   defp normalize_mobile(config) when is_map(config) or is_list(config) do
-    validate_mobile_keys!(config, @mobile_keys, "mobile")
+    validate_mobile_keys!(config, ["fcm" | @mobile_keys], "mobile")
+    warn_retired_mobile_fcm(lookup(config, "fcm", :fcm))
     push = lookup(config, "push", :push)
-    fcm = lookup(config, "fcm", :fcm)
 
     []
     |> put_if_present(:enabled, normalize_mobile_boolean(config, :enabled))
@@ -3128,7 +3126,6 @@ defmodule FermixCore.Setup.ConfigStore do
       normalize_mobile_positive_integer(config, :media_store_max_bytes)
     )
     |> put_mobile_push(push)
-    |> put_mobile_fcm(fcm)
   end
 
   defp normalize_mobile(config) do
@@ -3159,27 +3156,18 @@ defmodule FermixCore.Setup.ConfigStore do
     raise ArgumentError, "invalid mobile.push #{inspect(push)}; expected a table"
   end
 
-  # Android push (M51 §10): APNs' sibling table. The service account is a
-  # secret and reaches the TOML only as its keychain sentinel.
-  defp put_mobile_fcm(fields, nil), do: fields
+  # Android push straight through FCM was retired before any release shipped
+  # it. A config.toml that still carries its table is not a typo and must keep
+  # booting: the table is accepted, named once at warning, and dropped, so its
+  # keychain sentinel is never read and the next save writes the file without
+  # it (the `@retired_image_backends` precedent).
+  defp warn_retired_mobile_fcm(nil), do: :ok
 
-  defp put_mobile_fcm(fields, fcm) when is_map(fcm) or is_list(fcm) do
-    validate_mobile_keys!(fcm, @mobile_fcm_keys, "mobile.fcm")
-
-    normalized =
-      []
-      |> put_if_present(:enabled, normalize_mobile_boolean(fcm, :enabled, "mobile.fcm"))
-      |> put_if_present(:project_id, normalize_mobile_string(fcm, :project_id, "mobile.fcm"))
-      |> put_if_present(
-        :service_account,
-        normalize_mobile_string(fcm, :service_account, "mobile.fcm")
-      )
-
-    Keyword.put(fields, :fcm, normalized)
-  end
-
-  defp put_mobile_fcm(_fields, _fcm) do
-    raise ArgumentError, "invalid mobile.fcm; expected a table"
+  defp warn_retired_mobile_fcm(_fcm) do
+    Logger.warning(
+      "config.toml [fermix_channels.mobile.fcm] is retired: this build has no Android push, " <>
+        "so the table is ignored, and the next settings save writes the file without it."
+    )
   end
 
   defp validate_mobile_keys!(config, allowed, label) do

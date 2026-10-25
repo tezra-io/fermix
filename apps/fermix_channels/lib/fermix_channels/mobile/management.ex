@@ -37,8 +37,6 @@ defmodule FermixChannels.Mobile.Management do
   alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Push.Config, as: PushConfig
-  alias FermixChannels.Mobile.Push.FcmConfig
-  alias FermixChannels.Mobile.Push.FcmDispatcher
   alias FermixChannels.Mobile.Push.PigeonDispatcher
   alias FermixChannels.Mobile.Session
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
@@ -112,12 +110,6 @@ defmodule FermixChannels.Mobile.Management do
             credentials: :ready | :missing,
             delivery: :ready | :degraded | :down,
             reason: nil | :connecting | :connect_failed | :connection_lost
-          },
-          fcm: %{
-            enabled: boolean(),
-            credentials: :ready | :missing,
-            delivery: :ready | :degraded | :down,
-            reason: nil | :auth_failed | :unreachable
           },
           paired_devices: non_neg_integer(),
           protocol_version: pos_integer(),
@@ -397,7 +389,6 @@ defmodule FermixChannels.Mobile.Management do
          identity: identity_fact(opts),
          remote: remote_fact(started?, opts),
          apns: apns_status(Keyword.get(config, :push, enabled: false), started?, opts),
-         fcm: fcm_status(Keyword.get(config, :fcm, enabled: false), started?, opts),
          protocol_version: Protocol.protocol_version()
        })}
     end
@@ -995,38 +986,6 @@ defmodule FermixChannels.Mobile.Management do
     server = Keyword.get(opts, :push_dispatcher, PigeonDispatcher)
 
     case process_query(opts, :push_status, &PigeonDispatcher.status/1, [server]) do
-      :ready -> %{delivery: :ready, reason: nil}
-      {:degraded, reason} -> %{delivery: :degraded, reason: reason}
-      {:error, _reason} -> %{delivery: :down, reason: nil}
-    end
-  end
-
-  # FCM keeps no connection: delivery is how its last batch went, and down
-  # when no dispatcher runs (the channel is off, or the account did not resolve).
-  defp fcm_status(fcm, started?, opts) do
-    case FcmConfig.new(fcm) do
-      {:ok, %FcmConfig{enabled: true}} ->
-        Map.merge(%{enabled: true, credentials: :ready}, fcm_delivery(started?, opts))
-
-      {:ok, %FcmConfig{enabled: false}} ->
-        %{enabled: false, credentials: :missing, delivery: :down, reason: nil}
-
-      {:error, _reason} ->
-        %{
-          enabled: Keyword.get(fcm, :enabled, false),
-          credentials: :missing,
-          delivery: :down,
-          reason: nil
-        }
-    end
-  end
-
-  defp fcm_delivery(false, _opts), do: %{delivery: :down, reason: nil}
-
-  defp fcm_delivery(true, opts) do
-    server = Keyword.get(opts, :fcm_dispatcher, FcmDispatcher)
-
-    case process_query(opts, :fcm_status, &FcmDispatcher.status/1, [server]) do
       :ready -> %{delivery: :ready, reason: nil}
       {:degraded, reason} -> %{delivery: :degraded, reason: reason}
       {:error, _reason} -> %{delivery: :down, reason: nil}

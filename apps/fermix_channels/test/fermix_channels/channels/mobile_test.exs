@@ -168,8 +168,8 @@ defmodule FermixChannels.Channels.MobileTest do
 
     Application.put_env(:fermix_channels, :companion_approvals, approvals)
 
-    Application.put_env(:fermix_channels, :mobile_approval_push, fn profile_id, approval ->
-      send(test_pid, {:approval_push, profile_id, approval})
+    Application.put_env(:fermix_channels, :mobile_approval_push, fn profile_id ->
+      send(test_pid, {:approval_push, profile_id})
       {:ok, %{status: :sent, sent: 1}}
     end)
 
@@ -501,12 +501,7 @@ defmodule FermixChannels.Channels.MobileTest do
              Approvals.pending(approvals, "main", :mobile)
 
     assert Approvals.pending(approvals, "main", :companion) == []
-    before = System.os_time(:second)
-    assert_receive {:approval_push, "main", %{approval_id: ^id, expires_at: expires_at}}
-
-    # The push names the card and when it expires, as the card's own TTL says.
-    [%{"ttl_s" => ttl_s}] = Approvals.pending(approvals, "main", :mobile)
-    assert expires_at in (before + ttl_s - 5)..(System.os_time(:second) + ttl_s)
+    assert_receive {:approval_push, "main"}
   end
 
   # R1-2: a card raised on the Mac resolves only from the Mac, so a phone's

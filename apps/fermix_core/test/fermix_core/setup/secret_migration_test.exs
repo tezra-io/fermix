@@ -61,7 +61,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       assert value == Map.fetch!(secret_values(), secret.key)
     end)
 
-    assert_received {:puts, "Moved 35 secret(s) to the keyring store."}
+    assert_received {:puts, "Moved 34 secret(s) to the keyring store."}
   end
 
   test "run writes a sandbox.env source for migrated AI-provider secrets", %{home: home} do
@@ -320,11 +320,6 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     topic = "io.tezra.FermixApp"
     environment = "development"
 
-    [fermix_channels.mobile.fcm]
-    enabled = true
-    project_id = "fermix-owner-123"
-    service_account = "fcm-account-old"
-
     [fermix_core.plugin_secrets]
     discord = "discord-plugin-old"
     agentmail = "agentmail-plugin-old"
@@ -365,7 +360,6 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       slack_signing_secret: "slack-signing-old",
       slack_oauth_client_secret: "slack-oauth-old",
       mobile_apns_key: "apns-old",
-      mobile_fcm_service_account: "fcm-account-old",
       discord_plugin_secret: "discord-plugin-old",
       agentmail_plugin_secret: "agentmail-plugin-old",
       slack_plugin_secret: "slack-plugin-old"

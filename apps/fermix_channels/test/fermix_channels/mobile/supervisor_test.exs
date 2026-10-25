@@ -251,6 +251,18 @@ defmodule FermixChannels.Mobile.SupervisorTest do
 
     assert Enum.find_index(ids, &(&1 == instance_names.push_dispatcher)) <
              Enum.find_index(ids, &(&1 == Listener))
+
+    # The sessions on either carrier tell a phone the service this daemon has.
+    assert router_opts(children)[:push_services] == ["apns"]
+    assert iroh_session_opts(children)[:push_services] == ["apns"]
+  end
+
+  test "with push off, sessions say this daemon pushes through nothing" do
+    children =
+      init_children(config: [advertise_mdns: false, push: [enabled: false]], names: names())
+
+    assert router_opts(children)[:push_services] == []
+    assert iroh_session_opts(children)[:push_services] == []
   end
 
   test "disabled push starts no dispatcher and enabled invalid config fails loud" do
@@ -318,103 +330,6 @@ defmodule FermixChannels.Mobile.SupervisorTest do
 
     assert error.message =~ "invalid mobile push config"
     assert error.message =~ ":key"
-  end
-
-  describe "FCM (Android push)" do
-    setup do
-      rsa = X509.PrivateKey.new_rsa(2048) |> X509.PrivateKey.to_pem(wrap: true)
-
-      account =
-        Jason.encode!(%{
-          "type" => "service_account",
-          "private_key" => rsa,
-          "client_email" => "push@fermix-owner-123.iam.gserviceaccount.com"
-        })
-
-      %{account: account}
-    end
-
-    test "an enabled table owns its dispatcher before the listener, and sessions hear of it",
-         %{account: account} do
-      instance_names = names()
-
-      apns =
-        Keyword.fetch!(
-          push_config(X509.PrivateKey.new_ec(:secp256r1) |> X509.PrivateKey.to_pem()),
-          :push
-        )
-
-      for {push, services} <- [{[enabled: false], ["fcm"]}, {apns, ["apns", "fcm"]}] do
-        children =
-          init_children(
-            config: [
-              advertise_mdns: false,
-              push: push,
-              fcm: [enabled: true, project_id: "fermix-owner-123", service_account: account]
-            ],
-            names: instance_names
-          )
-
-        ids = Enum.map(children, & &1.id)
-
-        assert Enum.find_index(ids, &(&1 == instance_names.fcm_dispatcher)) <
-                 Enum.find_index(ids, &(&1 == Listener))
-
-        assert router_opts(children)[:push_services] == services
-        assert iroh_session_opts(children)[:push_services] == services
-      end
-    end
-
-    test "with neither service configured, sessions say no push" do
-      children =
-        init_children(config: [advertise_mdns: false, push: [enabled: false]], names: names())
-
-      assert router_opts(children)[:push_services] == []
-    end
-
-    test "an unread service account starts mobile without FCM and says so", %{account: _account} do
-      instance_names = names()
-
-      {children, log} =
-        with_log(fn ->
-          init_children(
-            config: [
-              advertise_mdns: false,
-              push: [enabled: false],
-              fcm: [
-                enabled: true,
-                project_id: "fermix-owner-123",
-                service_account: SecretWriter.sentinel()
-              ]
-            ],
-            names: instance_names
-          )
-        end)
-
-      ids = Enum.map(children, & &1.id)
-      refute instance_names.fcm_dispatcher in ids
-      assert Listener in ids
-      assert router_opts(children)[:push_services] == []
-      assert log =~ "FCM"
-      assert log =~ SecretWriter.sentinel()
-    end
-
-    test "a malformed FCM table refuses the boot", %{account: account} do
-      error =
-        assert_raise ArgumentError, fn ->
-          MobileSupervisor.init(
-            root: "/tmp/fermix-mobile-supervisor-bad-fcm-test",
-            boot_epoch: "bad-fcm-test-epoch",
-            config: [advertise_mdns: false, fcm: [enabled: true, service_account: account]],
-            start_listener?: false,
-            names: names()
-          )
-        end
-
-      assert error.message =~ "invalid mobile push config"
-      assert error.message =~ "{:invalid_fcm_config, :project_id, :missing}"
-      refute error.message =~ "PRIVATE KEY"
-    end
   end
 
   test "defaults a cryptographically random epoch for the request coordinator" do
@@ -742,7 +657,6 @@ defmodule FermixChannels.Mobile.SupervisorTest do
       listener: Module.concat(__MODULE__, "Listener#{suffix}"),
       mdns_advertiser: Module.concat(__MODULE__, "Mdns#{suffix}"),
       push_dispatcher: Module.concat(__MODULE__, "Push#{suffix}"),
-      fcm_dispatcher: Module.concat(__MODULE__, "Fcm#{suffix}"),
       iroh_helper: Module.concat(__MODULE__, "IrohHelper#{suffix}"),
       bridge: Module.concat(__MODULE__, "Bridge#{suffix}"),
       bridge_connections: Module.concat(__MODULE__, "BridgeConnections#{suffix}")

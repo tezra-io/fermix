@@ -56,14 +56,12 @@ defmodule FermixChannels.TelemetryTest do
     assert_receive {:mobile_channel_telemetry, @pair_event, _measurements, %{platform: nil}}
   end
 
-  test "push events expose only the bounded delivery status and the push service" do
-    for status <- [:sent, :failed], platform <- [:apns, :fcm] do
-      assert :ok = Telemetry.emit_push(:mobile, status, 23, platform)
+  test "push events expose only the bounded delivery status" do
+    for status <- [:sent, :failed] do
+      assert :ok = Telemetry.emit_push(:mobile, status, 23)
 
       assert_receive {:mobile_channel_telemetry, @push_event, %{count: 1, duration_us: 23},
-                      metadata}
-
-      assert metadata == %{channel: :mobile, status: status, platform: platform}
+                      %{channel: :mobile, status: ^status}}
     end
   end
 
@@ -84,10 +82,9 @@ defmodule FermixChannels.TelemetryTest do
       assert_raise FunctionClauseError, fn -> Telemetry.emit_pair(:mobile, :approved, 1, bad) end
     end
 
-    assert_raise FunctionClauseError, fn -> Telemetry.emit_push(:mobile, :skipped, 1, :fcm) end
-    assert_raise FunctionClauseError, fn -> Telemetry.emit_push(:mobile, :sent, 1, :gcm) end
+    assert_raise FunctionClauseError, fn -> Telemetry.emit_push(:mobile, :skipped, 1) end
     assert_raise FunctionClauseError, fn -> Telemetry.emit_pair(:mobile, :approved, -1, facts) end
-    assert_raise FunctionClauseError, fn -> Telemetry.emit_push(:mobile, :sent, -1, :apns) end
+    assert_raise FunctionClauseError, fn -> Telemetry.emit_push(:mobile, :sent, -1) end
   end
 
   test "transport events expose only the bounded lifecycle status" do

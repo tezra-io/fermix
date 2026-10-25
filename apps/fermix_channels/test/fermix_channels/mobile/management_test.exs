@@ -266,7 +266,6 @@ defmodule FermixChannels.Mobile.ManagementTest do
     assert status.tailnet.detected
     assert status.tailnet.candidates == ["100.64.1.2"]
     assert status.apns == %{enabled: false, credentials: :missing, delivery: :down, reason: nil}
-    assert status.fcm == %{enabled: false, credentials: :missing, delivery: :down, reason: nil}
     assert status.paired_devices == 1
   end
 
@@ -1031,7 +1030,6 @@ defmodule FermixChannels.Mobile.ManagementTest do
                identity: %{present: false, fingerprint: nil},
                remote: %{state: :off},
                apns: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
-               fcm: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
                paired_devices: 0,
                protocol_version: FermixChannels.Mobile.Protocol.protocol_version(),
                pairing: nil
@@ -1362,46 +1360,6 @@ defmodule FermixChannels.Mobile.ManagementTest do
         assert {:ok, %{apns: apns}} = Management.status(opts)
         assert apns == %{enabled: true, credentials: :ready, delivery: delivery, reason: reason}
       end
-    end
-
-    test "FCM delivery reads its own dispatcher, and an unread account is missing credentials" do
-      account =
-        Jason.encode!(%{
-          "type" => "service_account",
-          "private_key" => X509.PrivateKey.new_rsa(2048) |> X509.PrivateKey.to_pem(wrap: true),
-          "client_email" => "push@fermix-owner-123.iam.gserviceaccount.com"
-        })
-
-      fcm = [enabled: true, project_id: "fermix-owner-123", service_account: account]
-
-      for {reply, delivery, reason} <- [
-            {:ready, :ready, nil},
-            {{:degraded, :auth_failed}, :degraded, :auth_failed},
-            {{:degraded, :unreachable}, :degraded, :unreachable},
-            {{:error, :noproc}, :down, nil}
-          ] do
-        opts =
-          serving_opts(
-            config: [enabled: true, fcm: fcm],
-            fcm_status: fn _dispatcher ->
-              if match?({:error, _}, reply), do: exit(:noproc), else: reply
-            end,
-            list_devices: fn :store -> {:ok, []} end
-          )
-
-        assert {:ok, %{fcm: status}} = Management.status(opts)
-        assert status == %{enabled: true, credentials: :ready, delivery: delivery, reason: reason}
-      end
-
-      opts =
-        serving_opts(
-          config: [enabled: true, fcm: Keyword.put(fcm, :service_account, "@keyring")],
-          fcm_status: fn _dispatcher -> flunk("no dispatcher runs without credentials") end,
-          list_devices: fn :store -> {:ok, []} end
-        )
-
-      assert {:ok, %{fcm: %{enabled: true, credentials: :missing, delivery: :down}}} =
-               Management.status(opts)
     end
 
     test "the identity fingerprint is the grouped SHA-256 of the gateway key" do

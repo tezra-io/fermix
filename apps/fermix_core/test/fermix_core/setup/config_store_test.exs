@@ -3351,60 +3351,100 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(mobile, :push)[:environment] == "development"
   end
 
-  test "the FCM table round-trips beside APNs, its service account only in the keychain" do
-    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-mobile-fcm")
-    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
-    System.put_env("FERMIX_HOME", tmp_home)
+  # Android push straight through FCM was retired before any release shipped
+  # it, and the owner's dev home carries exactly this table today: it must keep
+  # booting. It is accepted at parse, named once at warning, its keychain
+  # sentinel never read, and dropped, so the next save writes the file without
+  # it.
+  @retired_fcm_toml """
+  [fermix_channels.mobile]
+  enabled = true
 
-    account =
-      ~s({"type":"service_account","client_email":"push@fermix-owner-123.iam.gserviceaccount.com"})
+  [fermix_channels.mobile.push]
+  enabled = false
 
-    snapshot = %{
-      fermix_core: [],
-      fermix_channels: [
-        mobile: [
-          enabled: true,
-          push: [enabled: false],
-          fcm: [enabled: true, project_id: "fermix-owner-123", service_account: account]
-        ]
-      ],
-      fermix_web: []
-    }
+  [fermix_channels.mobile.fcm]
+  enabled = true
+  project_id = "fermix-owner-123"
+  service_account = "@keyring"
+  """
 
-    assert :ok = ConfigStore.save_snapshot(snapshot)
-    contents = File.read!(Path.join(tmp_home, "config.toml"))
-    assert contents =~ "[fermix_channels.mobile.fcm]"
-    assert contents =~ ~s(project_id = "fermix-owner-123")
-    assert contents =~ ~s(service_account = "@keyring")
-    refute contents =~ "client_email"
+  describe "retired [fermix_channels.mobile.fcm] table" do
+    setup do
+      tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-retired-fcm")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+      %{config_path: Path.join(tmp_home, "config.toml")}
+    end
 
-    assert {:ok, ^account} =
-             FermixTestSupport.SecretWriterStub.get(:mobile_fcm_service_account)
+    test "load accepts it, names it at warning, reads no secret for it, and drops it",
+         %{config_path: path} do
+      File.write!(path, @retired_fcm_toml)
+      Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.CountingSecretWriter)
+      :ok = FermixTestSupport.CountingSecretWriter.watch()
+      on_exit(&FermixTestSupport.CountingSecretWriter.unwatch/0)
 
-    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
-    mobile = Keyword.fetch!(loaded.fermix_channels, :mobile)
+      {result, log} = with_log(fn -> ConfigStore.load_runtime_config() end)
 
-    assert mobile |> Keyword.get(:fcm) |> Enum.sort() == [
-             enabled: true,
-             project_id: "fermix-owner-123",
-             service_account: "@keyring"
-           ]
+      assert {:ok, loaded} = result
+      mobile = Keyword.fetch!(loaded.fermix_channels, :mobile)
+      assert Enum.sort(mobile) == [enabled: true, push: [enabled: false]]
+      assert log =~ "[warning]"
+      assert log =~ "config.toml [fermix_channels.mobile.fcm] is retired"
+      refute_received {:secret_writer_get, _key}
+    end
 
-    assert Keyword.get(mobile, :push) == [enabled: false]
+    test "a save after the load writes the file without it, and the next load is silent",
+         %{config_path: path} do
+      File.write!(path, @retired_fcm_toml)
 
-    # Saved again from what it loaded, the file says the same.
-    assert :ok = ConfigStore.save_snapshot(loaded)
-    assert File.read!(Path.join(tmp_home, "config.toml")) == contents
-  end
+      {{:ok, loaded}, _log} =
+        with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end)
 
-  test "the FCM table refuses keys it does not have and values of the wrong type" do
-    for {fcm, message} <- [
-          {[enabled: true, timeout_ms: 5_000], ~r/mobile.fcm/},
-          {[enabled: "yes"], ~r/mobile.fcm.enabled/},
-          {[project_id: 123], ~r/mobile.fcm.project_id/}
-        ] do
-      snapshot = %{fermix_core: [], fermix_channels: [mobile: [fcm: fcm]], fermix_web: []}
-      assert_raise ArgumentError, message, fn -> ConfigStore.persistable_snapshot(snapshot) end
+      assert :ok = ConfigStore.save_snapshot(loaded)
+
+      contents = File.read!(path)
+      assert contents =~ "[fermix_channels.mobile]"
+      assert contents =~ "[fermix_channels.mobile.push]"
+      refute contents =~ "[fermix_channels.mobile.fcm]"
+      refute contents =~ "project_id"
+      refute contents =~ "service_account"
+
+      {result, log} =
+        with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end)
+
+      assert {:ok, reloaded} = result
+      assert reloaded.fermix_channels[:mobile] == loaded.fermix_channels[:mobile]
+      refute log =~ "retired"
+    end
+
+    # The running app env of a daemon that hydrated the table before it was
+    # retired holds it in its normalized shape; a save from it drops it too.
+    test "a snapshot holding the normalized table saves without it" do
+      snapshot = %{
+        fermix_core: [],
+        fermix_channels: [
+          mobile: [
+            enabled: true,
+            push: [enabled: false],
+            fcm: [enabled: true, project_id: "fermix-owner-123", service_account: "@keyring"]
+          ]
+        ],
+        fermix_web: []
+      }
+
+      {result, log} = with_log(fn -> ConfigStore.save_snapshot(snapshot) end)
+
+      assert :ok = result
+      assert log =~ "config.toml [fermix_channels.mobile.fcm] is retired"
+      contents = File.read!(ConfigStore.path())
+      refute contents =~ "[fermix_channels.mobile.fcm]"
+      refute contents =~ "project_id"
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+
+      assert Enum.sort(Keyword.fetch!(loaded.fermix_channels, :mobile)) ==
+               [enabled: true, push: [enabled: false]]
     end
   end
 

@@ -415,12 +415,6 @@ defmodule FermixCore.Management.MobileTest do
                  "delivery" => "down",
                  "reason" => nil
                },
-               "fcm" => %{
-                 "enabled" => false,
-                 "credentials" => "missing",
-                 "delivery" => "down",
-                 "reason" => nil
-               },
                "remote" => %{
                  "state" => "ready",
                  "endpoint_id" => @endpoint_id,
@@ -537,26 +531,6 @@ defmodule FermixCore.Management.MobileTest do
         assert {:ok, view} = Mobile.status(fake({:ok, %{status() | apns: apns}}))
 
         assert view["apns"] == %{
-                 "enabled" => true,
-                 "credentials" => "ready",
-                 "delivery" => Atom.to_string(delivery),
-                 "reason" => reason && Atom.to_string(reason)
-               }
-      end
-    end
-
-    # M51 §10: FCM keeps no connection; its last batch says how it is doing.
-    test "FCM delivery is published as ready, degraded with its reason, or down" do
-      for {delivery, reason} <- [
-            ready: nil,
-            degraded: :auth_failed,
-            degraded: :unreachable,
-            down: nil
-          ] do
-        fcm = %{enabled: true, credentials: :ready, delivery: delivery, reason: reason}
-        assert {:ok, view} = Mobile.status(fake({:ok, %{status() | fcm: fcm}}))
-
-        assert view["fcm"] == %{
                  "enabled" => true,
                  "credentials" => "ready",
                  "delivery" => Atom.to_string(delivery),
@@ -706,7 +680,6 @@ defmodule FermixCore.Management.MobileTest do
       tailnet: %{detected: false, candidates: []},
       identity: %{present: true, fingerprint: "3f9a 1c2e"},
       apns: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
-      fcm: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
       remote: %{
         state: :ready,
         endpoint_id: @endpoint_id,

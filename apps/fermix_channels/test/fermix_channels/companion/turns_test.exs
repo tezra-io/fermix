@@ -240,7 +240,7 @@ defmodule FermixChannels.Companion.TurnsTest do
     Application.put_env(:fermix_channels, :mobile_push_launcher, fn task -> task.() end)
     Application.put_env(:fermix_channels, :link_preview_launcher, fn _task -> :ok end)
 
-    Application.put_env(:fermix_channels, :mobile_approval_push, fn profile, _approval ->
+    Application.put_env(:fermix_channels, :mobile_approval_push, fn profile ->
       send(test_pid, {:approval_push, profile})
       {:ok, %{status: :sent, sent: 1}}
     end)

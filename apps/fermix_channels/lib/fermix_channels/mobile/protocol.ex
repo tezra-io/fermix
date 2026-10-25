@@ -40,6 +40,7 @@ defmodule FermixChannels.Mobile.Protocol do
   @max_u64 18_446_744_073_709_551_615
   @default_max_media_bytes 20 * 1_024 * 1_024
   @platforms ~w(ios android)
+  # `fcm` stays in the wire's catalog, reserved: this daemon pushes no Android phone.
   @push_services ~w(apns fcm)
   @max_push_token_bytes 1_024
   @attestation_kinds ~w(android_keymint apple_app_attest)

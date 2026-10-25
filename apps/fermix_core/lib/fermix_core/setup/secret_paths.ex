@@ -233,15 +233,6 @@ defmodule FermixCore.Setup.SecretPaths do
       optional?: true,
       sandbox_env: false
     },
-    %{
-      key: :mobile_fcm_service_account,
-      env: "FERMIX_FCM_SERVICE_ACCOUNT",
-      env_overlay: true,
-      path: [:fermix_channels, :mobile, :fcm, :service_account],
-      functionality: "Mobile FCM push",
-      optional?: true,
-      sandbox_env: false
-    },
     # api_key-plugin secrets (M16): the static credential an `auth: api_key`
     # plugin authenticates with (e.g. a Discord bot token). Plugin-namespaced
     # env + a per-plugin config path so they never collide with the channel

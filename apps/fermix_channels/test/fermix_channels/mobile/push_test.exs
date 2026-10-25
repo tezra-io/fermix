@@ -8,31 +8,14 @@ defmodule FermixChannels.Mobile.PushTest do
   alias FermixChannels.Mobile.DeviceStore.Device
   alias FermixChannels.Mobile.Push
   alias FermixChannels.Mobile.Push.Config
-  alias FermixChannels.Mobile.Push.FcmConfig
   alias Pigeon.APNS.Notification
 
   @nonce <<0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11>>
-  @approval %{approval_id: "sandbox:3f2a9c1e", expires_at: 1_793_000_000}
   @push_vectors_path Application.app_dir(:fermix_core, "priv/mobile/push_vectors.json")
 
   setup_all do
     assert {:ok, _started} = Application.ensure_all_started(:telemetry)
     :ok
-  end
-
-  # A test that passes no `fcm_config` reads the app's, so this module pins FCM
-  # off for them rather than inherit whatever the umbrella's VM holds.
-  setup do
-    previous = Application.fetch_env(:fermix_channels, :mobile)
-    mobile = Application.get_env(:fermix_channels, :mobile, [])
-    Application.put_env(:fermix_channels, :mobile, Keyword.put(mobile, :fcm, enabled: false))
-
-    on_exit(fn ->
-      case previous do
-        {:ok, value} -> Application.put_env(:fermix_channels, :mobile, value)
-        :error -> Application.delete_env(:fermix_channels, :mobile)
-      end
-    end)
   end
 
   test "derives the same per-device key from either X25519 side" do
@@ -257,7 +240,7 @@ defmodule FermixChannels.Mobile.PushTest do
     end
 
     assert {:ok, %{status: :sent, sent: 1}} =
-             Push.notify_approval("main", @approval,
+             Push.notify_approval("main",
                config: valid_config(),
                profile_connected: fn "main" -> {:ok, false} end,
                read_frontier: fn _ -> flunk("an approval is no timeline row") end,
@@ -283,14 +266,14 @@ defmodule FermixChannels.Mobile.PushTest do
              )
 
     assert {:ok, %{status: :suppressed, reason: :connected, sent: 0}} =
-             Push.notify_approval("main", @approval,
+             Push.notify_approval("main",
                config: valid_config(),
                profile_connected: fn "main" -> {:ok, true} end,
                list_devices: fn -> flunk("a connected profile listed devices") end
              )
 
     assert {:ok, %{status: :disabled, sent: 0}} =
-             Push.notify_approval("main", @approval,
+             Push.notify_approval("main",
                config: [enabled: false],
                profile_connected: fn _ -> flunk("disabled push checked presence") end
              )
@@ -497,169 +480,65 @@ defmodule FermixChannels.Mobile.PushTest do
     assert log =~ "push_test.exs"
   end
 
-  describe "Android phones (FCM)" do
+  # Fermix pushes through APNs alone: an Android phone that registered a token
+  # is refused by name with a typed reason, never sent through APNs.
+  describe "Android phones" do
     setup do
       {_gateway_public, gateway_private} = keypair(40)
-      {android_public, android_private} = keypair(41)
+      {android_public, _android_private} = keypair(41)
       {iphone_public, _iphone_private} = keypair(42)
       salt = :binary.copy(<<43>>, 32)
 
-      android = %{device("pixel", android_public, salt, "fcm-token") | platform: "android"}
+      android = %{device("pixel", android_public, salt, "android-token") | platform: "android"}
       iphone = %{device("iphone", iphone_public, salt, "apns-token") | platform: "ios"}
-      {:ok, key} = Push.derive_key(android_private, device_public(gateway_private), salt)
 
-      %{gateway_private: gateway_private, android: android, iphone: iphone, key: key}
+      %{gateway_private: gateway_private, android: android, iphone: iphone}
     end
 
-    test "a reply goes to an Android phone through FCM, as one sealed bucket", ctx do
-      test_pid = self()
-
-      fcm = fn messages, %FcmConfig{project_id: "fermix-owner-123"} ->
-        send(test_pid, {:fcm, messages})
-        {:ok, Enum.map(messages, fn _ -> :ok end)}
-      end
-
-      {result, events} =
-        with_push_events(fn ->
-          notify_fcm(ctx, [ctx.android], "the build is green",
-            fcm_dispatcher: fcm,
-            dispatcher: fn _, _ -> flunk("an Android phone was sent to APNs") end
-          )
-        end)
-
-      assert {:ok, %{status: :sent, sent: 1}} = result
-      assert_receive {:fcm, [%{"message" => message}]}
-      assert message["token"] == "fcm-token"
-      refute Jason.encode!(message) =~ "the build is green"
-
-      assert %{
-               "kind" => "message",
-               "profile_id" => "main",
-               "server_seq" => 52,
-               "preview_text" => "the build is green"
-             } = open_fcm(ctx.key, message["data"])
-
-      assert events == [%{channel: :mobile, status: :sent, platform: :fcm}]
-    end
-
-    test "an approval tells an Android phone its id and expiry, and nothing else", ctx do
-      test_pid = self()
-
-      fcm = fn messages, _config ->
-        send(test_pid, {:fcm, messages})
-        {:ok, [:ok]}
-      end
-
-      assert {:ok, %{status: :sent, sent: 1}} =
-               Push.notify_approval("main", @approval,
-                 config: [enabled: false],
-                 fcm_config: fcm_config(),
-                 profile_connected: fn "main" -> {:ok, false} end,
-                 list_devices: fn -> {:ok, [ctx.android]} end,
-                 load_identity: fn -> {:ok, %{gateway_private_key: ctx.gateway_private}} end,
-                 fcm_dispatcher: fcm
-               )
-
-      assert_receive {:fcm, [%{"message" => %{"data" => data}}]}
-
-      assert open_fcm(ctx.key, data) == %{
-               "kind" => "approval",
-               "profile_id" => "main",
-               "approval_id" => "sandbox:3f2a9c1e",
-               "expires_at" => 1_793_000_000
-             }
-    end
-
-    test "each phone goes through its own platform's service", ctx do
+    test "an Android phone is refused by name and type while the iPhones are pushed", ctx do
       test_pid = self()
 
       apns = fn notifications, _config ->
         send(test_pid, {:apns, Enum.map(notifications, & &1.device_token)})
         {:ok, Enum.map(notifications, &%{&1 | response: :success})}
-      end
-
-      fcm = fn messages, _config ->
-        send(test_pid, {:fcm, Enum.map(messages, & &1["message"]["token"])})
-        {:ok, Enum.map(messages, fn _ -> :ok end)}
       end
 
       legacy = %{ctx.iphone | device_id: "old-iphone", push_token: "apns-legacy", platform: nil}
 
-      assert {:ok, %{status: :sent, sent: 3}} =
-               notify_fcm(ctx, [ctx.android, ctx.iphone, legacy], "hi",
-                 config: valid_config(),
-                 dispatcher: apns,
-                 fcm_dispatcher: fcm
-               )
-
-      assert_receive {:apns, ["apns-token", "apns-legacy"]}
-      assert_receive {:fcm, ["fcm-token"]}
-    end
-
-    test "an Android phone with no FCM configured is refused by name, never sent to APNs", ctx do
-      log =
-        capture_log(fn ->
-          assert {:ok, %{status: :unconfigured_platform, sent: 0}} =
-                   notify_fcm(ctx, [ctx.android], "hi",
-                     config: valid_config(),
-                     fcm_config: [enabled: false],
-                     load_identity: fn -> flunk("nothing to send loaded the identity") end,
-                     dispatcher: fn _, _ -> flunk("an Android phone was sent to APNs") end,
-                     fcm_dispatcher: fn _, _ -> flunk("FCM is not configured") end
-                   )
+      {result, log} =
+        with_log(fn ->
+          notify_phones(ctx, [ctx.android, ctx.iphone, legacy], dispatcher: apns)
         end)
 
+      assert {:ok, %{status: :sent, sent: 2}} = result
+      assert_receive {:apns, ["apns-token", "apns-legacy"]}
+
+      assert log =~ "[warning]"
+
       assert log =~
-               "mobile push refused pixel: it is an Android phone and FCM push is not configured"
+               "mobile push refused pixel {:no_push_service, :android}: " <>
+                 "Fermix has no push service for Android phones; nothing was sent"
+
+      refute log =~ "android-token"
     end
 
-    test "FCM alone is enough to push, and with neither service push is off", ctx do
-      assert {:ok, %{status: :sent, sent: 1}} =
-               notify_fcm(ctx, [ctx.android], "hi",
-                 config: [enabled: false],
-                 fcm_dispatcher: fn _messages, _config -> {:ok, [:ok]} end
-               )
+    test "with only Android phones registered nothing is sent, each refused", ctx do
+      second = %{ctx.android | device_id: "pixel-2", push_token: "android-token-2"}
 
-      assert {:ok, %{status: :disabled, sent: 0}} =
-               Push.notify("main", 1, "hi",
-                 config: [enabled: false],
-                 fcm_config: [enabled: false],
-                 profile_connected: fn _ -> flunk("disabled push checked presence") end
-               )
-    end
-
-    test "FCM's per-phone refusals come back by device, with failed telemetry", ctx do
-      second = %{ctx.android | device_id: "pixel-2", push_token: "fcm-token-2"}
-
-      {result, events} =
-        with_push_events(fn ->
-          notify_fcm(ctx, [ctx.android, second], "hi",
-            fcm_dispatcher: fn _messages, _config -> {:ok, [:ok, {:error, :unregistered}]} end
+      {result, log} =
+        with_log(fn ->
+          notify_phones(ctx, [ctx.android, second],
+            load_identity: fn -> flunk("nothing to send loaded the identity") end,
+            dispatcher: fn _, _ -> flunk("an Android phone was sent to APNs") end
           )
         end)
 
-      assert {:error, {:push_failed, [%{device_id: "pixel-2", reason: :unregistered}]}} = result
-
-      assert Enum.map(events, & &1.status) == [:sent, :failed]
-      assert Enum.all?(events, &(&1.platform == :fcm))
-
-      assert {:error, {:push_dispatch_failed, :fcm_token_failed}} =
-               notify_fcm(ctx, [ctx.android], "hi",
-                 fcm_dispatcher: fn _, _ -> {:error, {:fcm_token_failed, :rejected}} end
-               )
+      assert {:ok, %{status: :unconfigured_platform, sent: 0}} = result
+      assert log =~ "mobile push refused pixel {:no_push_service, :android}"
+      assert log =~ "mobile push refused pixel-2 {:no_push_service, :android}"
     end
 
-    test "a broken FCM table fails loud before anything is looked up", ctx do
-      assert {:error, {:invalid_fcm_config, :project_id, :missing}} =
-               notify_fcm(ctx, [ctx.android], "hi",
-                 fcm_config: [enabled: true],
-                 profile_connected: fn _ -> flunk("invalid config reached presence lookup") end
-               )
-    end
-
-    # A locked keychain leaves one service's secret a sentinel; the other
-    # service's phones are still pushed.
-    test "one service's unresolved settings refuse only its own phones", ctx do
+    test "an approval reaches only the iPhones", ctx do
       test_pid = self()
 
       apns = fn notifications, _config ->
@@ -667,64 +546,31 @@ defmodule FermixChannels.Mobile.PushTest do
         {:ok, Enum.map(notifications, &%{&1 | response: :success})}
       end
 
-      fcm = fn messages, _config ->
-        send(test_pid, {:fcm, Enum.map(messages, & &1["message"]["token"])})
-        {:ok, Enum.map(messages, fn _ -> :ok end)}
-      end
-
       {result, log} =
         with_log(fn ->
-          notify_fcm(ctx, [ctx.android, ctx.iphone], "hi",
+          Push.notify_approval("main",
             config: valid_config(),
-            fcm_config: [
-              enabled: true,
-              project_id: "fermix-owner-123",
-              service_account: "@keyring"
-            ],
-            dispatcher: apns,
-            fcm_dispatcher: fn _, _ -> flunk("FCM's settings did not resolve") end
+            profile_connected: fn "main" -> {:ok, false} end,
+            list_devices: fn -> {:ok, [ctx.android, ctx.iphone]} end,
+            load_identity: fn -> {:ok, %{gateway_private_key: ctx.gateway_private}} end,
+            dispatcher: apns
           )
         end)
 
       assert {:ok, %{status: :sent, sent: 1}} = result
       assert_receive {:apns, ["apns-token"]}
-
-      assert log =~
-               "mobile push refused pixel: it is an Android phone and the FCM settings did not resolve"
-
-      refute log =~ "PRIVATE KEY"
-
-      {result, log} =
-        with_log(fn ->
-          notify_fcm(ctx, [ctx.android, ctx.iphone], "hi",
-            config: Keyword.put(valid_config(), :key, "@keyring"),
-            dispatcher: fn _, _ -> flunk("APNs' settings did not resolve") end,
-            fcm_dispatcher: fcm
-          )
-        end)
-
-      assert {:ok, %{status: :sent, sent: 1}} = result
-      assert_receive {:fcm, ["fcm-token"]}
-
-      assert log =~
-               "mobile push refused iphone: it is an iPhone and the APNs settings did not resolve"
-    end
-
-    test "an approval without its id and expiry is refused" do
-      assert {:error, {:invalid_approval_push, %{approval_id: "a"}}} =
-               Push.notify_approval("main", %{approval_id: "a"}, config: [enabled: false])
+      assert log =~ "mobile push refused pixel {:no_push_service, :android}"
     end
   end
 
-  defp notify_fcm(ctx, devices, preview, opts) do
+  defp notify_phones(ctx, devices, opts) do
     Push.notify(
       "main",
       52,
-      preview,
+      "hi",
       Keyword.merge(
         [
-          config: [enabled: false],
-          fcm_config: fcm_config(),
+          config: valid_config(),
           profile_connected: fn _ -> {:ok, false} end,
           read_frontier: fn _ -> {:ok, 51} end,
           list_devices: fn -> {:ok, devices} end,
@@ -733,87 +579,6 @@ defmodule FermixChannels.Mobile.PushTest do
         opts
       )
     )
-  end
-
-  defp fcm_config do
-    {:ok, config} =
-      FcmConfig.new(
-        enabled: true,
-        project_id: "fermix-owner-123",
-        service_account: fcm_service_account()
-      )
-
-    config
-  end
-
-  defp fcm_service_account do
-    key = :persistent_term.get({__MODULE__, :rsa}, nil) || generate_rsa()
-
-    Jason.encode!(%{
-      "type" => "service_account",
-      "private_key" => key,
-      "client_email" => "push@fermix-owner-123.iam.gserviceaccount.com"
-    })
-  end
-
-  defp generate_rsa do
-    key = X509.PrivateKey.new_rsa(2048) |> X509.PrivateKey.to_pem(wrap: true)
-    :persistent_term.put({__MODULE__, :rsa}, key)
-    key
-  end
-
-  defp with_push_events(fun) do
-    handler = "push-test-#{System.unique_integer([:positive])}"
-    test_pid = self()
-
-    :ok =
-      :telemetry.attach(
-        handler,
-        [:fermix, :channel, :push],
-        fn _event, _measurements, metadata, ref ->
-          send(test_pid, {:push_event, ref, metadata})
-        end,
-        handler
-      )
-
-    try do
-      result = fun.()
-      {result, collect_push_events(handler, [])}
-    after
-      :telemetry.detach(handler)
-    end
-  end
-
-  defp collect_push_events(handler, events) do
-    receive do
-      {:push_event, ^handler, metadata} -> collect_push_events(handler, [metadata | events])
-    after
-      0 -> Enum.reverse(events)
-    end
-  end
-
-  defp open_fcm(key, %{"n" => nonce, "c" => sealed}) do
-    sealed = Base.decode64!(sealed)
-    size = byte_size(sealed) - 16
-    <<ciphertext::binary-size(size), tag::binary-size(16)>> = sealed
-
-    padded =
-      :crypto.crypto_one_time_aead(
-        :chacha20_poly1305,
-        key,
-        Base.decode64!(nonce),
-        ciphertext,
-        <<>>,
-        tag,
-        false
-      )
-
-    json_size =
-      byte_size(padded) -
-        (padded |> :binary.bin_to_list() |> Enum.reverse() |> Enum.find_index(&(&1 != 0))) - 1
-
-    <<json::binary-size(json_size), 0x80, _zeros::binary>> = padded
-    Jason.decode!(json)
   end
 
   defp notify_with_dispatcher(device, gateway_private, dispatcher) do

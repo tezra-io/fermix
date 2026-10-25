@@ -999,11 +999,9 @@ dropped `fermix pair` connection or a failed setup; `device_disconnected`: the
 phone was gone when the owner approved; the last three: the phone's key
 attestation was refused, Google's status list could not be used, or the phone
 is not Android, each ending the window before the owner was asked), and
-`emit_push(channel, status, duration_us, platform)` with `status ∈ sent |
-failed` and `platform ∈ apns | fcm`, the service the push went through —
+`emit_push(channel, status, duration_us)` with `status ∈ sent | failed` —
 emitting `[:fermix, :channel, :pair]` / `[:fermix, :channel, :push]`
-(`count: 1` + `duration_us`; `channel`/`status` metadata, plus the push's
-`platform`, atoms only). The
+(`count: 1` + `duration_us`; `channel`/`status` metadata, atoms only). The
 pair event's `facts` add `platform` (`android | ios`), `attestation`
 (`verified | refused | unavailable`) and `signer_role` (`development |
 release`, set only when verified), each `nil` when no phone got that far;

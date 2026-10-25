@@ -68,17 +68,6 @@ defmodule FermixCore.Setup.SecretPathsTest do
     refute :mobile_apns_key in Enum.map(SecretPaths.sandbox_env_eligible(), & &1.key)
   end
 
-  test "registers the FCM service account as a keychain-only mobile secret" do
-    secret = SecretPaths.fetch!(:mobile_fcm_service_account)
-
-    assert secret.env == "FERMIX_FCM_SERVICE_ACCOUNT"
-    assert secret.path == [:fermix_channels, :mobile, :fcm, :service_account]
-    assert secret.functionality == "Mobile FCM push"
-    assert secret.optional? == true
-    refute Map.get(secret, :sandbox_env, false)
-    refute :mobile_fcm_service_account in Enum.map(SecretPaths.sandbox_env_eligible(), & &1.key)
-  end
-
   # M21 Phase 3: the Zoom RTMS client secret is secure-on-save like every other
   # setup secret, and stays off [sandbox.env] — the meetbot sidecar is spawned
   # for Meet and must never inherit the Zoom credentials.

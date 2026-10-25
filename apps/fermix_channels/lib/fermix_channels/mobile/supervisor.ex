@@ -32,8 +32,6 @@ defmodule FermixChannels.Mobile.Supervisor do
   alias FermixChannels.Mobile.MediaStore
   alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.Push.Config, as: PushConfig
-  alias FermixChannels.Mobile.Push.FcmConfig
-  alias FermixChannels.Mobile.Push.FcmDispatcher
   alias FermixChannels.Mobile.Push.PigeonDispatcher
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixChannels.Mobile.Session
@@ -308,9 +306,7 @@ defmodule FermixChannels.Mobile.Supervisor do
        rail: names.iroh_helper}
     ]
 
-    with {:ok, apns_children} <- push_children(config, names),
-         {:ok, fcm_children} <- fcm_children(config, names) do
-      push_children = apns_children ++ fcm_children
+    with {:ok, push_children} <- push_children(config, names) do
       opts = Keyword.put(opts, :push_services, push_services(push_children))
 
       children =
@@ -378,7 +374,6 @@ defmodule FermixChannels.Mobile.Supervisor do
       listener: Listener,
       mdns_advertiser: MdnsAdvertiser,
       push_dispatcher: PigeonDispatcher,
-      fcm_dispatcher: FcmDispatcher,
       request_coordinator: RequestCoordinator,
       iroh_helper: Iroh.Helper,
       bridge: Iroh.Bridge,
@@ -432,48 +427,10 @@ defmodule FermixChannels.Mobile.Supervisor do
     end
   end
 
-  # FCM's table is APNs' sibling, with its own switch and the same posture: a
-  # service account the secret store could not read starts mobile without the
-  # dispatcher, loudly, and every other fault refuses the boot.
-  defp fcm_children(config, names) do
-    fcm = Keyword.get(config, :fcm, [])
-
-    case Keyword.get(fcm, :enabled, false) do
-      false -> {:ok, []}
-      true -> enabled_fcm_child(fcm, names.fcm_dispatcher)
-      value -> {:error, {:invalid_fcm_config, :enabled, value}}
-    end
-  end
-
-  defp enabled_fcm_child(fcm, name) do
-    account = Keyword.get(fcm, :service_account)
-
-    if account in @secret_sentinels do
-      Logger.error(
-        "mobile FCM push is enabled but its service account is still the #{account} sentinel — " <>
-          "its secret store could not be read this boot. Mobile started WITHOUT FCM push; " <>
-          "unlock the keychain and restart, or run `fermix doctor` to confirm."
-      )
-
-      {:ok, []}
-    else
-      case FcmConfig.new(fcm) do
-        {:ok, %FcmConfig{enabled: true} = config} ->
-          {:ok, [{FcmDispatcher, name: name, config: config}]}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
-    end
-  end
-
   # The services a phone is told this daemon pushes through: those whose
   # dispatcher starts, so a phone never registers for one that cannot send.
   defp push_services(push_children) do
-    Enum.map(push_children, fn
-      {PigeonDispatcher, _opts} -> "apns"
-      {FcmDispatcher, _opts} -> "fcm"
-    end)
+    Enum.map(push_children, fn {PigeonDispatcher, _opts} -> "apns" end)
   end
 
   defp media_opts(opts, root, name),
