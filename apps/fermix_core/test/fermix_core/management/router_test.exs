@@ -1003,7 +1003,7 @@ defmodule FermixCore.Management.RouterTest do
       assert {:ok, view} = Router.route(v2("mobile.status"), mobile({:ok, mobile_status()}))
 
       assert Enum.sort(Map.keys(view)) ==
-               ~w(apns enabled fcm identity listener mdns paired_devices pairing
+               ~w(apns enabled fcm hold identity listener mdns paired_devices pairing
                   protocol_version refusal refused remote started tailnet)
     end
 
@@ -1167,6 +1167,7 @@ defmodule FermixCore.Management.RouterTest do
       started: false,
       refused: false,
       refusal: nil,
+      hold: nil,
       listener: %{status: :down, reason: nil, port: 4031, bind: "0.0.0.0", candidates: []},
       mdns: :disabled,
       tailnet: %{detected: false, candidates: []},

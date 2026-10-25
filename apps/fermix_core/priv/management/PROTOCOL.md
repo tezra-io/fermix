@@ -224,7 +224,7 @@ daemon onto anything else.
 | `meetings.signin.start` | none | Starts the notetaker's one-time interactive sign-in. A job, because it waits for a person. Minimum version `2`. |
 | `computer_use.grant.start` | none | Raises the OS permission prompts and answers with what was granted. A job, and only ever on an explicit ask. Minimum version `2`. |
 | `computer_use.permissions.get` | none | The current, non-prompting permission state: whether the helper is installed, which grants it holds, and when they were read. Minimum version `2`. |
-| `mobile.status` | none | The phone channel as it stands: whether it is enabled, whether it started, whether it was refused this boot and the class of that refusal, the listener (`status`, `reason`, `port`, `bind`, `candidates`), the local-network announcement, detected tailnet addresses, the gateway identity's presence and fingerprint, remote reach, push credentials and delivery, the paired-phone count, the mobile protocol version this daemon serves, and the pairing session open or newest retained. Answers with the channel off. Minimum version `2`. |
+| `mobile.status` | none | The phone channel as it stands: whether it is enabled, whether it started, whether it was refused this boot and the class of that refusal, whether it is held until setup is finished, the listener (`status`, `reason`, `port`, `bind`, `candidates`), the local-network announcement, detected tailnet addresses, the gateway identity's presence and fingerprint, remote reach, push credentials and delivery, the paired-phone count, the mobile protocol version this daemon serves, and the pairing session open or newest retained. Answers with the channel off. Minimum version `2`. |
 | `mobile.pair.start` | none | Opens the pairing window and answers with the pairing session view plus, once, the pairing link as `uri`. `busy` while a window is open. Minimum version `2`. |
 | `mobile.pair.get` | `session_id` | The pairing session as it stands. The pane polls it until the session is terminal. Minimum version `2`. |
 | `mobile.pair.decide` | `session_id`, `approved` (boolean) | Approves or denies the phone waiting in the session and answers the terminal view. Minimum version `2`. |
@@ -365,7 +365,12 @@ Notes that the shapes alone do not carry:
   follow it. `enabled` is the switch and `started` whether the channel runs;
   they differ when the channel could not start (`refused`), or when setup was
   not complete at boot, until the next start. Every verb goes by `started`,
-  never by the switch.
+  never by the switch. A boot whose setup was not finished starts no channel,
+  so while setup still is not finished `hold` is `setup`, the pairing verbs
+  are refused with "The phone channel starts once setup is finished.", and a
+  restart would start nothing. Once setup is finished `hold` is null and,
+  while the switch is on, the restart reasons carry a `channels` reason,
+  because the next start runs it.
   `refused` is true when the channel could not start this boot, and
   `refusal` names the class: `memory_disabled` (the conversation lives in the
   memory store, which is off), `identity`, `attachment_manifest` or

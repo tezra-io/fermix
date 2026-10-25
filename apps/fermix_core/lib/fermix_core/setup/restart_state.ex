@@ -31,6 +31,13 @@ defmodule FermixCore.Setup.RestartState do
   sentinel over the same sentinel, so both operands are unchanged. It is read
   from `Setup.SecretWriteLog`, the one path every secret write takes.
 
+  A **transport this boot did not register** that a boot would start now is
+  the fifth input. A boot whose setup was not finished registers no channel at
+  all, and finishing setup afterwards (a provider signed in) changes no config
+  section and rotates no secret, so none of the four above sees it. The channels
+  application answers it through the provider it registers at
+  `:transport_restart_provider`; core does not compile against channels.
+
   **The boot baseline resets by restarting.** `lifecycle.commit` runs the
   daemon's shutdown path, so this process dies with the VM and `init/1`
   re-captures live env as `booted_live`; there is no separate reset call,
@@ -90,6 +97,7 @@ defmodule FermixCore.Setup.RestartState do
   @wrong_shape_sentence "The settings file could not be read: a value in it is not the shape Fermix expects."
   @external_change_section "settings_file"
   @external_change_sentence "The settings file changed outside Fermix."
+  @waiting_transports_sentence "A channel is ready to start once Fermix restarts."
 
   @type config_state ::
           :clear | {:external_change, [String.t()]} | {:config_unreadable, String.t()}
@@ -104,6 +112,10 @@ defmodule FermixCore.Setup.RestartState do
   @doc "Every boot-bound section, with the sentence published when it changed."
   @spec boot_bound_sections() :: [{atom(), String.t()}]
   def boot_bound_sections, do: @boot_bound
+
+  @doc "The sentence published when a channel this boot did not start waits for a restart."
+  @spec waiting_transports_sentence() :: String.t()
+  def waiting_transports_sentence, do: @waiting_transports_sentence
 
   @doc """
   Whether a change at `path` needs a restart: a section (`[:providers]`) or a
@@ -246,6 +258,8 @@ defmodule FermixCore.Setup.RestartState do
        booted_live: ConfigStore.current_snapshot(),
        booted_at_ms: System.monotonic_time(:millisecond),
        write_log: Keyword.get(opts, :write_log, SecretWriteLog),
+       transports_waiting:
+         Keyword.get(opts, :transports_waiting, &registered_transports_waiting/0),
        baseline_path: ConfigStore.path(),
        persisted_baseline: initial_baseline(opts),
        cache_ttl_ms: Keyword.get(opts, :cache_ttl_ms, @cache_ttl_ms),
@@ -329,7 +343,8 @@ defmodule FermixCore.Setup.RestartState do
     # as two problems.
     reasons =
       (boot_bound_reasons(state.booted_live) ++
-         rotated_secret_reasons(state) ++ external_reason(config_state))
+         rotated_secret_reasons(state) ++
+         waiting_transport_reasons(state.transports_waiting) ++ external_reason(config_state))
       |> Enum.uniq_by(& &1.section)
 
     answer = %{
@@ -435,6 +450,24 @@ defmodule FermixCore.Setup.RestartState do
       [:fermix_channels | _rest] -> :channels
       [:fermix_core, section | _rest] -> section
       _other -> nil
+    end
+  end
+
+  # The fifth input. One `channels` reason however many transports wait, and
+  # after a changed channel block's own reason, which names the same restart.
+  defp waiting_transport_reasons(transports_waiting) do
+    case transports_waiting.() do
+      [] -> []
+      [_ | _] -> [%{section: "channels", sentence: @waiting_transports_sentence}]
+    end
+  end
+
+  # The channels application registers the provider while it runs. With no
+  # channels application in this VM nothing was registered, so nothing waits.
+  defp registered_transports_waiting do
+    case Application.get_env(:fermix_core, :transport_restart_provider) do
+      nil -> []
+      provider -> provider.waiting_for_restart()
     end
   end
 

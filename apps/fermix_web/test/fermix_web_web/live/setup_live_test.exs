@@ -3221,6 +3221,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         started: true,
         refused: false,
         refusal: nil,
+        hold: nil,
         listener: %{status: :ready, reason: nil, port: 4031, bind: "0.0.0.0", candidates: []},
         mdns: :disabled,
         tailnet: %{detected: false, candidates: []},
@@ -3481,6 +3482,25 @@ defmodule FermixWebWeb.SetupLiveTest do
              )
 
       refute_received {:phone_call, :start, []}
+    end
+
+    # A boot whose setup was not finished holds the phone channel, and a
+    # restart before setup is finished holds it again: no Restart is offered,
+    # the window is asked for, and the daemon's refusal says what it waits for.
+    test "a channel held until setup is finished offers no Restart and says so", %{conn: conn} do
+      put_phone(%{
+        status: {:ok, phone_status(started: false, hold: :setup)},
+        start: {:error, :mobile_waiting_for_setup}
+      })
+
+      view = phone_card(conn)
+      assert render(view) =~ "Starts once setup is finished"
+
+      html = open_pairing(view)
+
+      assert_received {:phone_call, :start, []}
+      assert html =~ "The phone channel starts once setup is finished."
+      refute has_element?(view, ~s(#phone-dialog button[phx-click="apply_restart"]))
     end
 
     test "Cancel closes the window, and a read for the closed dialog is dropped", %{conn: conn} do

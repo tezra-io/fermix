@@ -13,6 +13,7 @@ defmodule FermixWebWeb.SetupLive.PhonePairingTest do
         "enabled" => true,
         "started" => true,
         "refused" => false,
+        "hold" => nil,
         "listener" => %{"status" => "ready"},
         "paired_devices" => 0,
         "remote" => %{"state" => "off", "connected" => false, "failure" => nil},
@@ -88,6 +89,20 @@ defmodule FermixWebWeb.SetupLive.PhonePairingTest do
 
     test "a channel that is on but not running owes a restart" do
       {step, nil} = PhonePairing.reduce(:closed, {:status, status(%{"started" => false})})
+
+      assert {:turn_on, %{action: :restart}} = step
+    end
+
+    # A restart would start nothing while setup is not finished: the window is
+    # asked for, and the daemon's refusal says what the channel waits for.
+    test "a channel held until setup is finished is owed no restart" do
+      held = status(%{"started" => false, "hold" => "setup"})
+      assert PhonePairing.reduce(:closed, {:status, held}) == {{:waiting, nil}, nil}
+    end
+
+    test "a hold this page cannot name is read as a page that predates the field reads it" do
+      later = status(%{"started" => false, "hold" => "a-later-hold"})
+      {step, nil} = PhonePairing.reduce(:closed, {:status, later})
 
       assert {:turn_on, %{action: :restart}} = step
     end
@@ -335,6 +350,9 @@ defmodule FermixWebWeb.SetupLive.PhonePairingTest do
 
       assert PhonePairing.row({:ok, status(%{"started" => false})}, nil).status ==
                "Restart to turn on"
+
+      held = status(%{"started" => false, "hold" => "setup"})
+      assert PhonePairing.row({:ok, held}, nil).status == "Starts once setup is finished"
 
       assert PhonePairing.row({:ok, status(%{"started" => false, "refused" => true})}, nil).status ==
                "Could not start"

@@ -216,6 +216,52 @@ defmodule FermixCore.Setup.RestartStateTest do
     end
   end
 
+  # The fifth input: a transport a boot would start now that this boot did not
+  # register, as the channels application reports it. A boot whose setup was not
+  # finished registers none, so finishing setup afterwards changes no config
+  # section and rotates no secret; this is the reason that asks for the restart.
+  describe "channels this boot did not start" do
+    defmodule WaitingProvider do
+      def waiting_for_restart, do: [FermixChannels.Channels.Telegram.Poller]
+    end
+
+    test "a transport waiting for a restart is a channels reason in the daemon's words" do
+      server =
+        start_state(transports_waiting: fn -> [FermixChannels.Channels.Telegram.Poller] end)
+
+      assert RestartState.restart(server: server) == %{
+               required: true,
+               reasons: [
+                 %{section: "channels", sentence: RestartState.waiting_transports_sentence()}
+               ]
+             }
+    end
+
+    test "a changed channel block and a waiting transport are one channels reason" do
+      Application.put_env(:fermix_channels, :mobile, enabled: true, port: 4_031)
+      server = start_state(transports_waiting: fn -> [FermixChannels.Mobile.Supervisor] end)
+      Application.put_env(:fermix_channels, :mobile, enabled: true, port: 4_131)
+
+      assert %{required: true, reasons: [%{section: "channels"}]} =
+               RestartState.restart(server: server)
+    end
+
+    test "by default it asks the provider the channels application registers" do
+      previous = Application.get_env(:fermix_core, :transport_restart_provider)
+      on_exit(fn -> restore(:fermix_core, :transport_restart_provider, previous) end)
+
+      Application.put_env(:fermix_core, :transport_restart_provider, WaitingProvider)
+      server = :restart_state_registered_provider
+      start_supervised!({RestartState, name: server, cache_ttl_ms: 0}, id: server)
+
+      assert %{required: true, reasons: [%{section: "channels"}]} =
+               RestartState.restart(server: server)
+
+      Application.delete_env(:fermix_core, :transport_restart_provider)
+      assert RestartState.restart(server: server) == %{required: false, reasons: []}
+    end
+  end
+
   # M60: the cue filter's default model is read at every filter call
   # (`RoutingOverrides.filter/0`), so changing it asks for no restart.
   describe "the cue filter's default model" do
@@ -492,12 +538,13 @@ defmodule FermixCore.Setup.RestartStateTest do
   # `cache_ttl_ms: 0` so a case can write the file and read the answer in the
   # same millisecond. The cache is a polled-read bound, not part of the
   # behaviour under test, and its own expiry is covered by the default.
+  # Nothing waits for a restart unless a case says so: the default reads the
+  # provider the channels application registers in this VM, which is global.
   defp start_state(opts \\ []) do
     name = :"restart_state_#{System.unique_integer([:positive, :monotonic])}"
+    defaults = [name: name, cache_ttl_ms: 0, transports_waiting: fn -> [] end]
 
-    start_supervised!({RestartState, Keyword.merge([name: name, cache_ttl_ms: 0], opts)},
-      id: name
-    )
+    start_supervised!({RestartState, Keyword.merge(defaults, opts)}, id: name)
 
     name
   end

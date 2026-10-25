@@ -3230,12 +3230,13 @@
     },
     "mobileStatus": {
       "type": "object",
-      "description": "The phone channel as it stands, answered with the channel off too, so a pane can always read it. `enabled` is the switch and `started` whether the channel runs: settings are boot-bound, so each can differ from the other until a restart. `refused` is true when the channel could not start this boot, `refusal` names the class of fault, and the daemon log says why. `pairing` is the open window, else the newest retained session, else null.",
+      "description": "The phone channel as it stands, answered with the channel off too, so a pane can always read it. `enabled` is the switch and `started` whether the channel runs: settings are boot-bound, so each can differ from the other until a restart. `refused` is true when the channel could not start this boot, `refusal` names the class of fault, and the daemon log says why. `hold` is `setup` while the channel is on but this boot held it because setup was not finished, and setup still is not: a restart starts nothing until setup is finished. `pairing` is the open window, else the newest retained session, else null.",
       "required": [
         "enabled",
         "started",
         "refused",
         "refusal",
+        "hold",
         "listener",
         "mdns",
         "tailnet",
@@ -3253,6 +3254,7 @@
         "started": { "type": "boolean" },
         "refused": { "type": "boolean" },
         "refusal": { "enum": ["memory_disabled", "identity", "attachment_manifest", "trust_store", null] },
+        "hold": { "enum": ["setup", null] },
         "listener": {
           "type": "object",
           "description": "`unavailable` is a running channel that cannot listen on its address; it retries on its own, and `reason` says why. `reason` is null in every other state.",

@@ -247,6 +247,13 @@ defmodule FermixCore.Management.CopyTest do
       for {section, sentence} <- RestartState.boot_bound_sections() do
         assert_clean(sentence, :prose, [], "restart reason #{section}")
       end
+
+      assert_clean(
+        RestartState.waiting_transports_sentence(),
+        :prose,
+        [],
+        "restart reason waiting"
+      )
     end
 
     test "every readiness action obeys the rules" do
@@ -561,6 +568,7 @@ defmodule FermixCore.Management.CopyTest do
         [entry["title"], entry["body"]]
       end) ++
       Enum.map(RestartState.boot_bound_sections(), fn {_section, sentence} -> sentence end) ++
+      [RestartState.waiting_transports_sentence()] ++
       Enum.map(Readiness.published_actions(), fn {_key, action} -> action end) ++
       Map.values(Protocol.error_messages()) ++
       PluginRow.verbs() ++

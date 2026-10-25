@@ -117,8 +117,12 @@ defmodule FermixWebWeb.SetupLive.PhonePairing do
 
   # Pairing begins on the channel as it stands: a running channel opens the
   # window, one that is off is turned on first, and one that is on but not
-  # running owes a restart.
+  # running owes a restart. One held until setup is finished is owed no
+  # restart, which would start nothing: the window is asked for, and the
+  # daemon's refusal says what the channel waits for. A hold this page cannot
+  # name is read as a page that predates the field reads it.
   defp opening(%{"started" => true}), do: {{:waiting, nil}, nil}
+  defp opening(%{"hold" => "setup"}), do: {{:waiting, nil}, nil}
   defp opening(%{"enabled" => true}), do: {turn_on(:restart), nil}
   defp opening(_status), do: {turn_on(:switch_on), nil}
 
@@ -266,6 +270,9 @@ defmodule FermixWebWeb.SetupLive.PhonePairing do
   def row({:ok, status}, devices), do: status_row(status, devices)
 
   defp status_row(%{"enabled" => false}, _devices), do: %{status: "Off", opens: :pair}
+
+  defp status_row(%{"hold" => "setup"}, _devices),
+    do: %{status: "Starts once setup is finished", opens: :pair}
 
   defp status_row(%{"started" => false, "refused" => false}, _devices),
     do: %{status: "Restart to turn on", opens: :pair}

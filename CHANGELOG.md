@@ -22,6 +22,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   settings. A code still open when you close the tab is cancelled, so it does
   not wait out its two minutes.
 
+### Fixed
+
+- **Pairing a phone no longer asks for a restart that cannot help.** Fermix
+  starts its channels only once setup is finished, so a daemon that started
+  before setup was done (a provider not signed in yet, for one) held the phone
+  channel, and every restart before setup held it again while pairing kept
+  saying to restart. Pairing now says "The phone channel starts once setup is
+  finished.", `mobile.status` names the hold, and finishing setup afterwards
+  asks for the one restart that starts the channels it held.
+
 ## [0.16.0] - 2026-10-21
 
 ### Added

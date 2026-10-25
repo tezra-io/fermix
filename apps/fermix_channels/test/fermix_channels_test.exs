@@ -121,6 +121,82 @@ defmodule FermixChannelsTest do
     end
   end
 
+  # What a boot holds is recorded once, at boot: the transports a boot whose
+  # setup was finished registers and this one did not.
+  describe "transports a boot holds for setup" do
+    setup :telegram_set_to_start
+
+    test "a boot whose setup was not finished holds what a finished one starts" do
+      assert Telegram.Poller in FermixChannels.Application.held_by(@setup_required, "held-epoch")
+      assert FermixChannels.Application.held_by(@ready, "ready-epoch") == []
+    end
+
+    test "this test tree's boot held nothing, so no case here sees a phantom restart" do
+      assert FermixChannels.Application.held_at_boot() == []
+      assert FermixChannels.Application.waiting_for_restart() == []
+    end
+  end
+
+  # Core's restart state asks this through `:transport_restart_provider`: what
+  # this boot held for setup that the next boot would start. Finishing setup
+  # after boot is how it becomes non-empty, which asks for the restart that
+  # starts the channels the boot held.
+  describe "transports waiting for a restart" do
+    setup :telegram_set_to_start
+
+    test "a held transport waits for a restart once setup is finished" do
+      assert FermixChannels.Application.waiting_for_restart(
+               held: [Telegram.Poller],
+               readiness: fn -> @ready end
+             ) == [Telegram.Poller]
+    end
+
+    test "nothing waits while setup is still not finished" do
+      assert FermixChannels.Application.waiting_for_restart(
+               held: [Telegram.Poller],
+               readiness: fn -> @setup_required end
+             ) == []
+    end
+
+    test "a held transport turned off since boot does not wait" do
+      Application.put_env(:fermix_channels, :telegram, enabled: false, owner_user_id: "111")
+
+      assert FermixChannels.Application.waiting_for_restart(
+               held: [Telegram.Poller],
+               readiness: fn -> @ready end
+             ) == []
+    end
+
+    # The phone's subtree is registered on or off, so a held phone waits for a
+    # restart only while its switch is on: off, the restart would start nothing.
+    test "a held phone waits for a restart only while its switch is on" do
+      held_phone = fn switch ->
+        FermixChannels.Application.waiting_for_restart(
+          held: [Mobile.Supervisor],
+          readiness: fn -> @ready end,
+          phone_switch: fn -> switch end
+        )
+      end
+
+      assert held_phone.(true) == [Mobile.Supervisor]
+      assert held_phone.(false) == []
+    end
+
+    test "a boot that held nothing reads no readiness" do
+      assert FermixChannels.Application.waiting_for_restart(
+               held: [],
+               readiness: fn -> flunk("nothing was held, so nothing is compared") end
+             ) == []
+    end
+  end
+
+  defp telegram_set_to_start(_context) do
+    previous = Application.get_env(:fermix_channels, :telegram, [])
+    on_exit(fn -> Application.put_env(:fermix_channels, :telegram, previous) end)
+    Application.put_env(:fermix_channels, :telegram, enabled: true, owner_user_id: "111")
+    :ok
+  end
+
   describe "missing-ingress-authorization startup logs" do
     test "logs enabled ingress channels with no owner or allowlist" do
       previous_telegram = Application.get_env(:fermix_channels, :telegram, [])

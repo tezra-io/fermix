@@ -1433,6 +1433,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
          started: true,
          refused: false,
          refusal: nil,
+         hold: nil,
          listener: %{
            status: :ready,
            reason: nil,

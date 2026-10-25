@@ -592,14 +592,16 @@ defmodule FermixChannels.Mobile.ManagementTest do
       assert {:error, :mobile_surface_refused} = Management.pair_cancel("pair-session", refused)
     end
 
-    # A settings write enables the channel at once, but the subtree starts
-    # only at the next boot: until then there is no process to call.
+    # The subtree this boot registered is not running: there is no process to
+    # call, and a restart is what starts it.
     test "an enabled channel that has not started yet is named, before any process call" do
       not_started =
         [config: [enabled: true], pair_manager: :pair, device_store: :store] ++
           Keyword.merge(unreachable_processes(),
             refusal: fn :store -> :none end,
-            whereis: fn MobileSupervisor -> nil end
+            whereis: fn MobileSupervisor -> nil end,
+            held_at_boot: fn -> [] end,
+            setup_ready: fn -> flunk("a channel this boot did not hold waits for no setup") end
           )
 
       assert {:error, :mobile_not_started} = Management.pair_start(not_started)
@@ -609,6 +611,86 @@ defmodule FermixChannels.Mobile.ManagementTest do
                Management.pair_decide("pair-session", true, not_started)
 
       assert {:error, :mobile_not_started} = Management.pair_cancel("pair-session", not_started)
+    end
+
+    # A boot whose setup was not finished registers no transport, the phone
+    # among them, so a restart starts nothing until setup is finished. Once it
+    # is, a restart does, and the channel is named as not started.
+    test "an enabled channel this boot held for setup waits for setup, then for a restart" do
+      held = fn ready? ->
+        [config: [enabled: true], pair_manager: :pair, device_store: :store] ++
+          Keyword.merge(unreachable_processes(),
+            refusal: fn :store -> :none end,
+            whereis: fn MobileSupervisor -> nil end,
+            held_at_boot: fn -> [MobileSupervisor] end,
+            setup_ready: fn -> ready? end
+          )
+      end
+
+      assert {:error, :mobile_waiting_for_setup} = Management.pair_start(held.(false))
+
+      assert {:error, :mobile_waiting_for_setup} =
+               Management.pair_get("pair-session", held.(false))
+
+      assert {:error, :mobile_waiting_for_setup} =
+               Management.pair_decide("pair-session", true, held.(false))
+
+      assert {:error, :mobile_waiting_for_setup} =
+               Management.pair_cancel("pair-session", held.(false))
+
+      assert {:error, :mobile_not_started} = Management.pair_start(held.(true))
+    end
+
+    test "status names a hold for setup only while setup is not finished" do
+      base = [
+        config: [enabled: true, push: [enabled: false]],
+        device_store: :store,
+        refusal: fn :store -> :none end,
+        whereis: fn MobileSupervisor -> nil end,
+        held_at_boot: fn -> [MobileSupervisor] end,
+        load_identity: fn [] -> {:error, :enoent} end,
+        list_devices: fn :store -> {:ok, []} end
+      ]
+
+      assert {:ok, %{started: false, hold: :setup}} =
+               Management.status(Keyword.put(base, :setup_ready, fn -> false end))
+
+      assert {:ok, %{started: false, hold: nil}} =
+               Management.status(Keyword.put(base, :setup_ready, fn -> true end))
+
+      assert {:ok, %{enabled: false, hold: nil}} =
+               Management.status(
+                 Keyword.merge(base,
+                   config: [enabled: false],
+                   setup_ready: fn -> flunk("a channel turned off is not held") end
+                 )
+               )
+    end
+
+    # The switch thrown while the boot held the subtree has nothing to start:
+    # the answer says whether setup or a restart is what it waits for.
+    test "turning the channel on while the boot held it names what it waits for" do
+      parent =
+        start_supervised!(%{
+          id: :held_phone_parent,
+          start: {Supervisor, :start_link, [[], [strategy: :one_for_one]]},
+          type: :supervisor
+        })
+
+      held = [parent: parent, held_at_boot: fn -> [MobileSupervisor] end]
+
+      assert {:error, :waiting_for_setup} =
+               Management.apply_enabled(true, [setup_ready: fn -> false end] ++ held)
+
+      assert {:error, :not_ready} =
+               Management.apply_enabled(true, [setup_ready: fn -> true end] ++ held)
+
+      assert {:error, :not_ready} =
+               Management.apply_enabled(true,
+                 parent: parent,
+                 held_at_boot: fn -> [] end,
+                 setup_ready: fn -> flunk("a boot that held nothing waits for no setup") end
+               )
     end
 
     # SEC-4: the switch reaches the app env at once but the subtree runs until
@@ -936,6 +1018,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
                started: false,
                refused: false,
                refusal: nil,
+               hold: nil,
                listener: %{
                  status: :down,
                  reason: nil,

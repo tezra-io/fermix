@@ -42,6 +42,7 @@ defmodule FermixChannels.Mobile.Management do
   alias FermixChannels.Mobile.Push.PigeonDispatcher
   alias FermixChannels.Mobile.Session
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
+  alias FermixCore.Readiness
 
   @max_wait_ms 120_000
   @max_listed_devices 64
@@ -94,6 +95,7 @@ defmodule FermixChannels.Mobile.Management do
           started: boolean(),
           refused: boolean(),
           refusal: nil | :memory_disabled | :identity | :attachment_manifest | :trust_store,
+          hold: nil | :setup,
           listener: %{
             status: :ready | :down | :unavailable,
             reason: nil | Listener.failure(),
@@ -121,7 +123,11 @@ defmodule FermixChannels.Mobile.Management do
           protocol_version: pos_integer(),
           pairing: nil | %{session_id: String.t(), state: session_state()}
         }
-  @type refusal :: :mobile_disabled | :mobile_surface_refused | :mobile_not_started
+  @type refusal ::
+          :mobile_disabled
+          | :mobile_surface_refused
+          | :mobile_waiting_for_setup
+          | :mobile_not_started
   @type start_error ::
           refusal()
           | :pairing_active
@@ -365,8 +371,10 @@ defmodule FermixChannels.Mobile.Management do
   The mobile channel's facts. With the channel off, the surface refused this
   boot, or the subtree not started yet, it always answers, from configuration,
   the recorded boot refusal and the identity files alone, with no process
-  call. While the channel runs, a read that fails is an error rather than an
-  empty fact.
+  call, bar readiness where this boot held the channel for setup. While the
+  channel runs, a read that fails is an error rather than an empty fact.
+  `hold` is `:setup` while the channel is on and this boot held it for setup
+  that still is not finished.
   """
   @spec status() :: {:ok, status()} | {:error, term()}
   def status, do: status([])
@@ -385,6 +393,7 @@ defmodule FermixChannels.Mobile.Management do
          started: started?,
          refused: refusal != :none,
          refusal: refusal_fact(refusal),
+         hold: hold_fact(enabled?(config) and not started? and refusal == :none, opts),
          identity: identity_fact(opts),
          remote: remote_fact(started?, opts),
          apns: apns_status(Keyword.get(config, :push, enabled: false), started?, opts),
@@ -397,12 +406,25 @@ defmodule FermixChannels.Mobile.Management do
   @doc """
   Turns the phone channel on or off while the daemon runs, after core has
   written the switch (`FermixCore.Management.Settings`). Answers what the
-  subtree did: see `FermixChannels.Mobile.Supervisor.switch/2`.
+  subtree did: see `FermixChannels.Mobile.Supervisor.switch/2`. A boot that
+  registered no subtree has nothing to start: `{:error, :waiting_for_setup}`
+  while setup still is not finished, and `{:error, :not_ready}` once it is,
+  when the next start runs it.
   """
   @spec apply_enabled(boolean(), keyword()) ::
-          {:ok, :started | :not_started | :stopped} | {:error, :not_ready | term()}
-  def apply_enabled(enabled?, opts \\ []) when is_boolean(enabled?) and is_list(opts),
-    do: MobileSupervisor.switch(enabled?, Keyword.take(opts, [:parent, :device_store]))
+          {:ok, :started | :not_started | :stopped}
+          | {:error, :waiting_for_setup | :not_ready | term()}
+  def apply_enabled(enabled?, opts \\ []) when is_boolean(enabled?) and is_list(opts) do
+    enabled?
+    |> MobileSupervisor.switch(Keyword.take(opts, [:parent, :device_store]))
+    |> name_what_it_waits_for(opts)
+  end
+
+  defp name_what_it_waits_for({:error, :not_ready}, opts) do
+    if held_for_setup?(opts), do: {:error, :waiting_for_setup}, else: {:error, :not_ready}
+  end
+
+  defp name_what_it_waits_for(reply, _opts), do: reply
 
   @doc """
   Turns the phone channel's reach from anywhere on or off while the daemon
@@ -444,17 +466,35 @@ defmodule FermixChannels.Mobile.Management do
 
   # The pairing verbs' gate: a running subtree serves, and the switch decides
   # whether it runs. With nothing running the refusal is named before any
-  # process call: the switch off, a surface refused, or one turned on that
-  # could not start (setup was not ready at boot). Without the gate these
-  # surfaced as raw `{:dependency_exit, _, {:noproc, _}}` tuples.
+  # process call: the switch off, a surface refused, one this boot held for
+  # setup that still is not finished, or one turned on that has not started.
+  # Without the gate these surfaced as raw `{:dependency_exit, _, {:noproc, _}}`
+  # tuples.
   defp require_serving(opts) do
     cond do
       subtree_started?(opts) -> :ok
       not enabled?(mobile_config(opts)) -> {:error, :mobile_disabled}
       surface_refusal(opts) != :none -> {:error, :mobile_surface_refused}
+      held_for_setup?(opts) -> {:error, :mobile_waiting_for_setup}
       true -> {:error, :mobile_not_started}
     end
   end
+
+  # A boot whose setup was not finished registers no transport, the phone among
+  # them, and the next boot holds it again until setup is finished: then a
+  # restart starts nothing, and setup is what the channel waits for. What this
+  # boot held is the channels application's record; readiness is read live, as
+  # the boot read it. `:held_at_boot` and `:setup_ready` replace the two reads
+  # in a test.
+  defp held_for_setup?(opts) do
+    held = Keyword.get(opts, :held_at_boot, &FermixChannels.Application.held_at_boot/0).()
+    MobileSupervisor in held and not setup_ready?(opts)
+  end
+
+  defp setup_ready?(opts), do: Keyword.get(opts, :setup_ready, &Readiness.ready?/0).()
+
+  defp hold_fact(true, opts), do: if(held_for_setup?(opts), do: :setup, else: nil)
+  defp hold_fact(false, _opts), do: nil
 
   defp surface_refusal(opts) do
     store = Keyword.get(opts, :device_store, DeviceStore)
