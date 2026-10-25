@@ -278,7 +278,7 @@ defmodule FermixCore.Cues.DeliveriesTest do
       assert unheard.listening == []
 
       assert unheard.note ==
-               "Nothing is listening: the 40 cues it sent since 2026-10-10 12:00 UTC reached no watcher."
+               "Nothing is listening: the 40 cues it sent since Saturday, October 10, 2026 at 12:00 PM UTC reached no watcher."
 
       heard = Enum.find(shown.sources, &(&1.source == "heard"))
       assert heard.listening == [watcher.name]

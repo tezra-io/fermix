@@ -5,6 +5,8 @@ defmodule FermixCore.Cues.Gaps do
   (`Jobs.CueRun`); a gap notice with "Watcher <name>: " (`Cues.Notices`).
   """
 
+  alias FermixCore.Clock
+
   # One phrase per `cue_gaps.reason` (the table's CHECK holds exactly these).
   @reasons %{
     "disconnect" => "the source was disconnected",
@@ -35,6 +37,6 @@ defmodule FermixCore.Cues.Gaps do
       when is_integer(count) and count > 0 and is_binary(ref) do
     "#{count} #{if count == 1, do: "item", else: "items"} from #{ref} " <>
       "#{if count == 1, do: "was", else: "were"} not delivered since " <>
-      "#{Calendar.strftime(first_at, "%Y-%m-%d %H:%M UTC")}: #{Map.fetch!(@reasons, reason)}."
+      "#{Clock.stated_instant(first_at)}: #{Map.fetch!(@reasons, reason)}."
   end
 end

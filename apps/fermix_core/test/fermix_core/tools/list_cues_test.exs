@@ -258,7 +258,9 @@ defmodule FermixCore.Tools.ListCuesTest do
       quiet = Enum.find(body["sources"], &(&1["source"] == "quiet-feed"))
 
       assert quiet["cues"] == 3
-      assert quiet["note"] =~ "Nothing is listening: the 3 cues it sent since 2026-10-10"
+
+      assert quiet["note"] =~
+               "Nothing is listening: the 3 cues it sent since Saturday, October 10, 2026"
     end
 
     test "a task's notes are shown framed", ctx do

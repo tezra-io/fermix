@@ -52,6 +52,7 @@ defmodule FermixCore.OpenLoops.CheckIn do
 
   alias FermixCore.AgentLoop
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Clock
   alias FermixCore.Delivery.ChannelSend
   alias FermixCore.Delivery.Error
   alias FermixCore.Memory.ConversationStore
@@ -566,7 +567,7 @@ defmodule FermixCore.OpenLoops.CheckIn do
       ]
   end
 
-  defp occasion(%{loop: loop, touch: touch}) do
+  defp occasion(%{loop: loop, touch: touch} = state) do
     facts =
       %{
         "open_loop" => Registry.view(loop),
@@ -577,6 +578,8 @@ defmodule FermixCore.OpenLoops.CheckIn do
       |> maybe_put_previous(loop.last_message)
 
     """
+    #{Clock.now_line(now(state))}
+
     The open loop this check-in is about, as the open-loop tools show it, and where this touch stands:
 
     #{Jason.encode!(facts, pretty: true)}

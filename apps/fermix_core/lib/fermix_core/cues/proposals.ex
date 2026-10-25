@@ -77,6 +77,7 @@ defmodule FermixCore.Cues.Proposals do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Capabilities.UntrustedContent
+  alias FermixCore.Clock
   alias FermixCore.Cues.Config
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Pins
@@ -523,7 +524,7 @@ defmodule FermixCore.Cues.Proposals do
     |> Enum.join("\n")
   end
 
-  defp time_text(%DateTime{} = at), do: Calendar.strftime(at, "%Y-%m-%d %H:%M UTC")
+  defp time_text(%DateTime{} = at), do: Clock.stated_instant(at)
 
   # --- confirming ----------------------------------------------------------------------
 

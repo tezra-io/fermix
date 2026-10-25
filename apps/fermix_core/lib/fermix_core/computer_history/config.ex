@@ -32,6 +32,7 @@ defmodule FermixCore.ComputerHistory.Config do
 
   require Logger
 
+  alias FermixCore.Clock
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.RoutingOverrides
@@ -159,18 +160,15 @@ defmodule FermixCore.ComputerHistory.Config do
   defp put_if(opts, key, value), do: Keyword.put(opts, key, value)
 
   @doc """
-  The operator's timezone (`[fermix_core.personalization] timezone`), `"Etc/UTC"`
-  when unset **or unusable**. Read-only — this block owns no timezone key. The
-  single resolver for the subsystem: the summarizer stamps event times with it
-  and recall renders memory windows with it, so an event and the note about it
-  never disagree, and neither surface can name a zone it did not actually use.
+  The zone every time Fermix shows is stated in (`FermixCore.Clock.shown_zone/1`):
+  the operator's `[fermix_core.personalization] timezone`, or `"Etc/UTC"` when it
+  is unset or unknown. Read-only — this block owns no timezone key. The summarizer
+  stamps event times with it and recall renders memory windows with it, so an
+  event, the note about it and the current-date note all read one clock, and no
+  surface can name a zone it did not actually use.
   """
   @spec timezone() :: String.t()
-  def timezone do
-    Application.get_env(@app, :personalization, [])
-    |> Keyword.get(:timezone)
-    |> configured_or_utc()
-  end
+  def timezone, do: Clock.shown_zone()
 
   @doc """
   The timezone for a caller's `opts`: `:timezone` when given, else the configured
@@ -205,9 +203,6 @@ defmodule FermixCore.ComputerHistory.Config do
         "Etc/UTC"
     end
   end
-
-  defp configured_or_utc(tz) when is_binary(tz) and tz != "", do: usable_timezone(tz)
-  defp configured_or_utc(_unset), do: "Etc/UTC"
 
   @doc """
   Normalize a parsed config block: present keys only, values validated

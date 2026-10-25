@@ -29,6 +29,7 @@ import time
 import tomllib
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(HERE)
@@ -616,8 +617,8 @@ def _configured_workspace(fermix_home: str) -> str:
 
 
 def configured_timezone(fermix_home: str) -> str | None:
-    """The personalization timezone the daemon labels its date note with, or None
-    when the home configures none (the note then carries no label)."""
+    """The personalization timezone the daemon states its date note in, or None
+    when the home configures none (the note then states the UTC date)."""
     home = os.path.realpath(os.path.expanduser(fermix_home))
     with open(os.path.join(home, "config.toml"), "rb") as handle:
         raw = tomllib.load(handle)
@@ -625,30 +626,64 @@ def configured_timezone(fermix_home: str) -> str | None:
     return label.strip() if isinstance(label, str) and label.strip() else None
 
 
+def _known_zone(label: str | None) -> ZoneInfo | None:
+    """The zone the daemon's clock (`FermixCore.Clock`) would state times in, or
+    None when the label is missing or the time zone database does not know it."""
+    if not label:
+        return None
+    try:
+        return ZoneInfo(label)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+
+
+def _utc_offset(local: datetime) -> str:
+    total = int(local.utcoffset().total_seconds() // 60)
+    sign = "-" if total < 0 else "+"
+    return f"UTC{sign}{abs(total) // 60:02d}:{abs(total) % 60:02d}"
+
+
+def _date_note(started: datetime, label: str | None) -> str:
+    """`FermixCore.Prompt.CurrentDate.note/1`, word for word, for one instant."""
+    zone = _known_zone(label)
+    local = started.astimezone(zone or timezone.utc)
+    day = f"{local:%A}, {local:%B} {local.day}, {local.year}"
+    if zone is not None:
+        return (f"Current date: {day}, in the owner's time zone ({label}, "
+                f"{_utc_offset(local)}). Every date and time Fermix shows you is in this "
+                "zone unless it names another.")
+    if not label:
+        return (f"Current date: {day} (UTC). No time zone is configured, so every date "
+                "and time Fermix shows you is in UTC; ask the owner for their time zone "
+                "before stating a local time.")
+    return (f"Current date: {day} (UTC). The configured time zone \"{label}\" is not "
+            "one Fermix knows, so every date and time Fermix shows you is in UTC.")
+
+
 def judge_date_facts(turn_records: list[dict], timezone_label: str | None) -> list[str]:
     """What `FermixCore.Prompt.CurrentDate` told the candidate, as judge reference facts.
 
-    The daemon puts the UTC date (and the user's timezone) in front of every turn, so
-    the candidate turns "the day after tomorrow" into "Friday, October 16" and is
-    right to. A judge that never saw the date graded exactly that as an invented
-    time. One fact per UTC day the graded turns started on, in turn order."""
+    The daemon puts the owner's local date (in the configured zone, with its UTC
+    offset; UTC when none is usable) in front of every turn, so the candidate turns
+    "the day after tomorrow" into "Friday, October 16" and is right to. A judge that
+    never saw the date graded exactly that as an invented time. One fact per note
+    the graded turns started under, in turn order: the note changes at the owner's
+    midnight, not UTC's."""
     if not turn_records:
         raise ValueError("no graded turn to date for the judge")
-    days = []
+    notes = []
     for record in turn_records:
         started = parse_ts(record.get("started_at"))
         if started is None:
             raise ValueError("a graded turn has no trace start time; the judge cannot "
                              "be told the date the candidate saw")
-        day = started.astimezone(timezone.utc).strftime("%A, %Y-%m-%d")
-        if day not in days:
-            days.append(day)
-    label = (f" The user's timezone is {timezone_label} — their local date can "
-             "differ from UTC near midnight." if timezone_label else "")
-    which = "On every turn, " if len(days) == 1 else "On the turns sent that day, "
-    return [f"{which}the assistant's system prompt carried this note: \"Current date: "
-            f"{day} (UTC).{label}\" Words like today and tomorrow in the conversation "
-            "are relative to that date." for day in days]
+        note = _date_note(started, timezone_label)
+        if note not in notes:
+            notes.append(note)
+    which = "On every turn, " if len(notes) == 1 else "On the turns sent that day, "
+    return [f"{which}the assistant's system prompt carried this note: \"{note}\" "
+            "Words like today and tomorrow in the conversation are relative to that date."
+            for note in notes]
 
 
 def workspace_revision_error(workspace: str, harness_repo: str) -> str | None:

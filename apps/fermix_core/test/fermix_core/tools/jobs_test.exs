@@ -123,6 +123,56 @@ defmodule FermixCore.Tools.JobsTest do
     assert %{"sources" => [%{"status" => "removed"}]} = Jason.decode!(final_sources.output)
   end
 
+  describe "a job's time zone and times" do
+    setup do
+      previous = Application.get_env(:fermix_core, :personalization)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:fermix_core, :personalization)
+          value -> Application.put_env(:fermix_core, :personalization, value)
+        end
+      end)
+
+      :ok
+    end
+
+    defp schedule_tide_report!(context) do
+      {:ok, created} =
+        ScheduleJob.execute(
+          %{
+            "name" => "Saltmarsh Tide Report",
+            "schedule" => "0 9 * * *",
+            "task" => "Report today's tide times at Saltmarsh Point.",
+            "allowed_tools" => []
+          },
+          context
+        )
+
+      Jason.decode!(created.output)
+    end
+
+    test "a job given no zone is read in the owner's, and its times carry the owner's offset",
+         %{context: context} do
+      Application.put_env(:fermix_core, :personalization, timezone: "America/New_York")
+
+      payload = schedule_tide_report!(context)
+
+      assert payload["timezone"] == "America/New_York"
+      assert payload["next_run_at"] =~ ~r/T09:00:00-0[45]:00\z/
+    end
+
+    test "with no zone configured a job given none is read in UTC, and says so",
+         %{context: context} do
+      Application.put_env(:fermix_core, :personalization, [])
+
+      payload = schedule_tide_report!(context)
+
+      assert payload["timezone"] == "Etc/UTC"
+      assert payload["next_run_at"] =~ ~r/T09:00:00Z\z/
+    end
+  end
+
   test "schedule_job without source_trust in context returns a clear tool error", %{
     context: context
   } do

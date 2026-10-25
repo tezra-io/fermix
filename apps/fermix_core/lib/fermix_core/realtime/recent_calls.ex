@@ -13,6 +13,7 @@ defmodule FermixCore.Realtime.RecentCalls do
   """
 
   alias FermixCore.Capabilities.UntrustedContent
+  alias FermixCore.Clock
   alias FermixCore.ComputerHistory.Taint
   alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.LiveText
@@ -57,7 +58,7 @@ defmodule FermixCore.Realtime.RecentCalls do
 
   defp line(%{started_at: started_at, gist: gist}) do
     {:ok, at, _offset} = DateTime.from_iso8601(started_at)
-    stamp = Calendar.strftime(at, "%Y-%m-%d %H:%M UTC")
+    stamp = Clock.stated_instant(at)
     "- #{stamp}: #{LiveText.sentence(gist, @gist_max_bytes)}"
   end
 

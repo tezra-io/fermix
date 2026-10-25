@@ -5,6 +5,7 @@ defmodule FermixCore.Tools.JobRegistrySupport do
 
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Clock
   alias FermixCore.Cues.Watchers
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
@@ -310,7 +311,8 @@ defmodule FermixCore.Tools.JobRegistrySupport do
   defp run_task_prompt(_run), do: nil
 
   defp timestamp(nil), do: nil
-  defp timestamp(%DateTime{} = value), do: DateTime.to_iso8601(value)
+  # A model reads these, so an instant carries the owner's offset (`FermixCore.Clock`).
+  defp timestamp(%DateTime{} = value), do: Clock.iso(value)
 
   defp maybe_put_error(metadata, {:ok, %{success: false, error: error}})
        when is_binary(error) do

@@ -61,8 +61,8 @@ defmodule FermixCore.Jobs.CueRunTest do
       for line <- [
             "Type: feed.item",
             "Subject: phoenix",
-            "Happened: 2026-10-10 11:50 UTC",
-            "Received: 2026-10-10 11:59 UTC",
+            "Happened: Saturday, October 10, 2026 at 11:50 AM UTC",
+            "Received: Saturday, October 10, 2026 at 11:59 AM UTC",
             "Filter's reason: a Phoenix release",
             "Filter's hint: check the changelog",
             ~s({"title":"Phoenix 1.8.2"})
@@ -114,11 +114,11 @@ defmodule FermixCore.Jobs.CueRunTest do
       [_inside, outside] = String.split(message, "</untrusted_tool_result>", parts: 2)
 
       assert outside =~
-               "Fermix: 12 items from eng-blogs were not delivered since 2026-10-10 09:14 UTC: " <>
+               "Fermix: 12 items from eng-blogs were not delivered since Saturday, October 10, 2026 at 9:14 AM UTC: " <>
                  "the inbox was full."
 
       assert outside =~
-               "Fermix: 1 item from eng-blogs was not delivered since 2026-10-09 08:00 UTC: " <>
+               "Fermix: 1 item from eng-blogs was not delivered since Friday, October 9, 2026 at 8:00 AM UTC: " <>
                  "they waited past their lifetime."
     end
 

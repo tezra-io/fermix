@@ -41,7 +41,9 @@ defmodule FermixCore.Prompt.SetupSeeder do
         }
 
   @placeholder_user_name "there"
-  @placeholder_timezone "UTC"
+  # Honest when setup knows no zone: "UTC" here would state a time zone the owner
+  # never gave, and contradict the current-date note, which says none is set.
+  @placeholder_timezone "not set"
   @placeholder_communication_style "neutral and direct"
 
   @spec seed(personalization(), keyword()) :: {:ok, [seeded_file()]} | {:error, term()}

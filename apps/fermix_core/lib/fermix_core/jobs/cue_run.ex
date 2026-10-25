@@ -26,6 +26,7 @@ defmodule FermixCore.Jobs.CueRun do
   require Logger
 
   alias FermixCore.Capabilities.UntrustedContent
+  alias FermixCore.Clock
   alias FermixCore.Cues.Gaps
   alias FermixCore.Cues.Mandates
   alias FermixCore.Jobs.Delivery
@@ -614,7 +615,7 @@ defmodule FermixCore.Jobs.CueRun do
 
   defp silent_marker(job), do: Map.get(job, :silent_marker) || "[SILENT]"
 
-  defp time_text(%DateTime{} = at), do: Calendar.strftime(at, "%Y-%m-%d %H:%M UTC")
+  defp time_text(%DateTime{} = at), do: Clock.stated_instant(at)
   defp time_text(nil), do: "not given"
 
   defp format_count(n) when is_integer(n) do

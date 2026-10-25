@@ -85,7 +85,7 @@ defmodule FermixCore.Jobs.Schedule do
            expr: expr,
            timezone: timezone,
            next_run_at: next_run_at,
-           summary: "once at #{DateTime.to_iso8601(next_run_at)}"
+           summary: "once at #{next_run_at |> in_zone!(timezone) |> DateTime.to_iso8601()}"
          }}
 
       {:error, _reason} ->

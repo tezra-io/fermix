@@ -102,7 +102,7 @@ defmodule FermixCore.Tools.VoiceCallContextTest do
     assert {:ok, %{success: true, output: output}} =
              VoiceCallContext.execute(%{}, context(call_registry: ctx.registry))
 
-    assert output =~ "started at 2026-10-03 14:05 UTC"
+    assert output =~ "started at Saturday, October 3, 2026 at 2:05 PM UTC"
     assert output =~ "6 min 12 s"
     assert output =~ "- dg_1 (revision 1): completed. The room is booked for 10am."
     assert output =~ "- dg_2 (revision 1): running."

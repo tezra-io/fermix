@@ -102,7 +102,7 @@ defmodule FermixCore.Tools.ManageWatcherTest do
                  turn(ctx, [])
                )
 
-      assert shown =~ ": drop, cue #{cue_id}, stored 20"
+      assert shown =~ ~r/: drop, cue #{cue_id}, stored \w+day, \w+ \d{1,2}, \d{4} at /
       refute shown =~ "Analyst upgrades TSLA"
     end
 
@@ -156,7 +156,9 @@ defmodule FermixCore.Tools.ManageWatcherTest do
                  turn(ctx, [])
                )
 
-      assert shown =~ "1. Pass earnings (added 2026-10-05 09:00 UTC from telegram:chat-1)"
+      assert shown =~
+               "1. Pass earnings (added Monday, October 5, 2026 at 9:00 AM UTC from telegram:chat-1)"
+
       assert shown =~ "2. Stop sending analyst notes (added"
     end
 

@@ -2499,7 +2499,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert line_index > date_index
 
       line = Enum.at(system_run, line_index).content
-      assert line =~ "started at 14:05 UTC"
+      assert line =~ "started at 2:05 PM UTC"
       assert line =~ "material for the call"
       assert line =~ "Reply in writing when"
       assert line =~ "exactly [SILENT]"
@@ -2515,7 +2515,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
         )
 
       line = Enum.find(messages, &(&1.content =~ "voice call")).content
-      assert line =~ "started at 14:05 UTC"
+      assert line =~ "started at 2:05 PM UTC"
       assert line =~ "briefly"
       refute line =~ "SILENT"
     end
@@ -2562,7 +2562,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert note_index == date_index + 1
 
       assert Enum.at(system_run, note_index).content =~
-               "- 2026-10-03 14:05 UTC: You booked the room"
+               "- Saturday, October 3, 2026 at 2:05 PM UTC: You booked the room"
     end
 
     # M56 D9: the phone's turns run in the chat, and are owner turns of it.
@@ -2573,7 +2573,10 @@ defmodule FermixCore.Agents.TurnRunnerTest do
           memory_repo: repo
         )
 
-      assert Enum.any?(messages, &(&1.content =~ "- 2026-10-03 14:05 UTC: You booked the room"))
+      assert Enum.any?(
+               messages,
+               &(&1.content =~ "- Saturday, October 3, 2026 at 2:05 PM UTC: You booked the room")
+             )
     end
 
     test "a hand-off is not told: it is the call", %{repo: repo} do

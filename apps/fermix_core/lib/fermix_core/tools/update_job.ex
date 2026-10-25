@@ -41,7 +41,7 @@ defmodule FermixCore.Tools.UpdateJob do
         schedule: %{
           type: "string",
           description:
-            "Replacement schedule expression: an interval like every 15 minutes, a 5-field cron like 0 8 * * * (8am daily), or an ISO8601 UTC timestamp. Cron fields support *, lists, ranges, and steps. Recomputes the next run time."
+            "Replacement schedule expression: an interval like every 15 minutes, a 5-field cron like 0 8 * * * (8am daily), or an ISO 8601 datetime with a UTC offset (the owner's offset unless they named another zone). Cron fields support *, lists, ranges, and steps. Recomputes the next run time."
         },
         description: %{
           type: "string",

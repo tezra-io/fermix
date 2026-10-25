@@ -101,7 +101,7 @@ defmodule FermixCore.Cues.ProposalsTest do
       assert message =~ "release issues"
       assert message =~ "release-watch"
       assert message =~ "Phoenix 2.0 is out."
-      assert message =~ "2026-10-10 12:30 UTC"
+      assert message =~ "Saturday, October 10, 2026 at 12:30 PM UTC"
 
       assert [] =
                rows(fixture.conn, "SELECT 1 FROM cue_proposals WHERE token_digest = ?", [token])

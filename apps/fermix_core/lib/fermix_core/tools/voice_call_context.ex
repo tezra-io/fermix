@@ -25,6 +25,7 @@ defmodule FermixCore.Tools.VoiceCallContext do
 
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.UntrustedContent
+  alias FermixCore.Clock
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.CallSpeech
   alias FermixCore.Realtime.SessionControl
@@ -123,8 +124,7 @@ defmodule FermixCore.Tools.VoiceCallContext do
 
   defp heading(call) do
     "A voice call in this chat started at " <>
-      (call.started_at |> DateTime.shift_zone!("Etc/UTC") |> Calendar.strftime("%Y-%m-%d %H:%M")) <>
-      " UTC and has run #{elapsed(call.elapsed_ms)}."
+      Clock.stated_instant(call.started_at) <> " and has run #{elapsed(call.elapsed_ms)}."
   end
 
   defp elapsed(ms) do

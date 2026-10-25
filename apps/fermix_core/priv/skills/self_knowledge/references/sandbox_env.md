@@ -4,7 +4,7 @@ How allowed environment variables reach sandboxed commands, where their values a
 
 ## What is passed
 
-A sandboxed `shell` command runs with a minimal child environment: `PATH`, `HOME`, `USER`, `LANG`, `SHELL`, `TMPDIR`, the `LC_*` keys, plus every name on `[sandbox.env] allow`. Every allowed name reaches every shell command, the way a terminal's variables reach every process started from it: an interactive turn, a scheduled job, a `skill_run` and a delegated sub-agent alike. A skill written for another host that reads `ALPACA_API_KEY` from its environment needs no change. `[sandbox.env] mode = "all"` passes the whole daemon environment minus the deny list when nothing is named.
+A sandboxed `shell` command runs with a minimal child environment: `PATH`, `HOME`, `USER`, `LANG`, `SHELL`, `TMPDIR`, the `LC_*` keys, `TZ` set to the owner's time zone (UTC when none is configured), plus every name on `[sandbox.env] allow`. Every allowed name reaches every shell command, the way a terminal's variables reach every process started from it: an interactive turn, a scheduled job, a `skill_run` and a delegated sub-agent alike. A skill written for another host that reads `ALPACA_API_KEY` from its environment needs no change. `[sandbox.env] mode = "all"` passes the whole daemon environment minus the deny list when nothing is named.
 
 The list is the child's whole environment: the command is started with it in place of everything the daemon inherited, never as `env -i NAME=value` arguments, so no value appears in any process's argument list. Allowing a name is the permission. Any turn allowed to run `shell` receives the allowed values, and nothing isolates one skill's variables from another's.
 

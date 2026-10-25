@@ -29,6 +29,7 @@ defmodule FermixCore.OpenLoops.Registry do
 
   require Logger
 
+  alias FermixCore.Clock
   alias FermixCore.Delivery.ChannelSend
   alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Memory.Repo
@@ -94,16 +95,16 @@ defmodule FermixCore.OpenLoops.Registry do
          {:ok, {status, loop}} <- Repo.create_open_loop(attrs, repo_opts(opts)),
          {:ok, live} <- Repo.count_live_open_loops(loop.owner_id, repo_opts(opts)) do
       if status == :created, do: notify(opts)
-      {:ok, note_result(status, loop, target, live)}
+      {:ok, note_result(status, loop, target, live, opts)}
     end
   end
 
-  defp note_result(status, loop, target, live) do
+  defp note_result(status, loop, target, live, opts) do
     %{
       status: status,
       loop: loop,
-      stated_as: stated_matters_by(loop),
-      first_check: stated_instant(loop.next_touch_at, loop.timezone),
+      stated_as: stated_matters_by(loop, opts),
+      first_check: Clock.stated_instant(loop.next_touch_at, opts),
       delivery: %{platform: loop.delivery_platform, source: delivery_source(status, target)},
       live_loops: live
     }
@@ -117,7 +118,7 @@ defmodule FermixCore.OpenLoops.Registry do
          {:ok, intention} <- bounded_text(params.intention, :intention, Defaults.intention_max()),
          {:ok, dedupe_key} <- dedupe_key(intention),
          {:ok, why} <- optional_text(params.why_it_matters, :why_it_matters),
-         {:ok, zone} <- resolve_timezone(params.timezone, now, opts),
+         {:ok, zone} <- resolve_timezone(params.timezone, opts),
          {:ok, date} <- resolve_date(params.matters_by, zone, now),
          :ok <- still_ahead(date.at, now) do
       {:ok,
@@ -206,7 +207,13 @@ defmodule FermixCore.OpenLoops.Registry do
       )
 
       notify(opts)
-      {:ok, %{loop: settled, previous_state: loop.state, next_check: next_check(answer, settled)}}
+
+      {:ok,
+       %{
+         loop: settled,
+         previous_state: loop.state,
+         next_check: next_check(answer, settled, opts)
+       }}
     end
   end
 
@@ -254,10 +261,10 @@ defmodule FermixCore.OpenLoops.Registry do
     end
   end
 
-  defp next_check(answer, loop) when answer in ["plan", "not_yet"],
-    do: stated_instant(loop.next_touch_at, loop.timezone)
+  defp next_check(answer, loop, opts) when answer in ["plan", "not_yet"],
+    do: Clock.stated_instant(loop.next_touch_at, opts)
 
-  defp next_check(_answer, _loop), do: nil
+  defp next_check(_answer, _loop, _opts), do: nil
 
   # --- list and view ---------------------------------------------------------
 
@@ -284,35 +291,40 @@ defmodule FermixCore.OpenLoops.Registry do
   and where the owner said it, its state and touches, the next check, and for
   a closed loop why and when it closed. Never a delivery destination, never a
   check-in's message text.
+
+  Every time is stated on `FermixCore.Clock`, in the owner's current zone, the
+  clock the current-date note reads, so the day it was said and "today" never
+  disagree. The loop's own zone stays what its dates and checks are computed in.
+  `opts` may carry `:personalization` in place of the application env.
   """
-  @spec view(Repo.open_loop_row()) :: map()
-  def view(loop) when is_map(loop) do
+  @spec view(Repo.open_loop_row(), keyword()) :: map()
+  def view(loop, opts \\ []) when is_map(loop) and is_list(opts) do
     %{
       "open_loop_id" => loop.id,
       "intention" => loop.intention,
       "why_it_matters" => loop.why_it_matters,
-      "matters_by" => stated_matters_by(loop),
-      "said_on" => stated_day(loop.said_at, loop.timezone),
+      "matters_by" => stated_matters_by(loop, opts),
+      "said_on" => Clock.stated_day(loop.said_at, opts),
       "source_channel" => loop.source_channel,
       "state" => loop.state,
       "touches" => loop.touches,
-      "next_check" => next_check_view(loop),
+      "next_check" => next_check_view(loop, opts),
       "last_answer" => loop.last_answer
     }
-    |> Map.merge(closed_view(loop))
+    |> Map.merge(closed_view(loop, opts))
   end
 
-  defp next_check_view(%{state: state} = loop) when state in @live,
-    do: stated_instant(loop.next_touch_at, loop.timezone)
+  defp next_check_view(%{state: state} = loop, opts) when state in @live,
+    do: Clock.stated_instant(loop.next_touch_at, opts)
 
-  defp next_check_view(_closed), do: nil
+  defp next_check_view(_closed, _opts), do: nil
 
-  defp closed_view(%{state: state}) when state in @live, do: %{}
+  defp closed_view(%{state: state}, _opts) when state in @live, do: %{}
 
-  defp closed_view(loop) do
+  defp closed_view(loop, opts) do
     %{
       "close_reason" => loop.close_reason,
-      "closed_on" => stated_day(loop.closed_at, loop.timezone)
+      "closed_on" => Clock.stated_day(loop.closed_at, opts)
     }
   end
 
@@ -320,16 +332,10 @@ defmodule FermixCore.OpenLoops.Registry do
 
   # Always absolute, always with the weekday and the year: the statement is read
   # off the stored row, so it can only say what was written.
-  defp stated_matters_by(%{matters_by_kind: "date"} = loop),
+  defp stated_matters_by(%{matters_by_kind: "date"} = loop, _opts),
     do: Calendar.strftime(loop.matters_by_date, "%A, %B %-d, %Y")
 
-  defp stated_matters_by(loop), do: stated_instant(loop.matters_by_at, loop.timezone)
-
-  defp stated_instant(%DateTime{} = at, zone),
-    do: at |> DateTime.shift_zone!(zone) |> Calendar.strftime("%A, %B %-d, %Y at %-I:%M %p %Z")
-
-  defp stated_day(%DateTime{} = at, zone),
-    do: at |> DateTime.shift_zone!(zone) |> Calendar.strftime("%A, %B %-d, %Y")
+  defp stated_matters_by(loop, opts), do: Clock.stated_instant(loop.matters_by_at, opts)
 
   # --- tagged date form (Temporal.Registry's vocabulary) ---------------------
 
@@ -418,31 +424,14 @@ defmodule FermixCore.OpenLoops.Registry do
 
   # --- timezone --------------------------------------------------------------
 
-  defp resolve_timezone(zone, now, _opts) when is_binary(zone) and zone != "",
-    do: validate_zone(zone, now)
+  # A zone the owner named wins; otherwise the owner's configured zone. Both go
+  # through `FermixCore.Clock`, so an unknown name fails rather than becoming UTC.
+  defp resolve_timezone(zone, _opts) when is_binary(zone) and zone != "",
+    do: Clock.validate_zone(zone)
 
-  defp resolve_timezone(nil, now, opts) do
-    opts
-    |> Keyword.get_lazy(:personalization, fn ->
-      Application.get_env(:fermix_core, :personalization, [])
-    end)
-    |> Keyword.get(:timezone)
-    |> case do
-      zone when is_binary(zone) and zone != "" -> validate_zone(zone, now)
-      _missing -> {:error, :timezone_not_configured}
-    end
-  end
+  defp resolve_timezone(nil, opts), do: Clock.zone(opts)
 
-  defp resolve_timezone(other, _now, _opts), do: {:error, {:invalid_timezone, other}}
-
-  # Real IANA validation against the shipped database: a name it does not know
-  # fails here rather than silently becoming UTC.
-  defp validate_zone(zone, now) do
-    case DateTime.shift_zone(now, zone) do
-      {:ok, _shifted} -> {:ok, zone}
-      {:error, _reason} -> {:error, {:invalid_timezone, zone}}
-    end
-  end
+  defp resolve_timezone(other, _opts), do: {:error, {:invalid_timezone, other}}
 
   # --- delivery target -------------------------------------------------------
 

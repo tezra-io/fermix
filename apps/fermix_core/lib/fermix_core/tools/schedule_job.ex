@@ -38,7 +38,7 @@ defmodule FermixCore.Tools.ScheduleJob do
         schedule: %{
           type: "string",
           description:
-            "Schedule expression: an interval like every 15 minutes, a 5-field cron like 0 8 * * * (8am daily), or an ISO8601 UTC timestamp for a one-off run. Cron fields support *, lists (1,15), ranges (9-17), and steps (*/15)."
+            "Schedule expression: an interval like every 15 minutes, a 5-field cron like 0 8 * * * (8am daily), or an ISO 8601 datetime with a UTC offset for a one-off run (the owner's offset unless they named another zone). Cron fields support *, lists (1,15), ranges (9-17), and steps (*/15)."
         },
         task: %{
           type: "string",
@@ -46,11 +46,15 @@ defmodule FermixCore.Tools.ScheduleJob do
             "Work instructions for the future Fermix scheduled run. Do not execute the task now unless the user separately asks for an immediate run. Keep lifecycle timing in schedule and expires_at, not in the task text. Bake any values the run will need (such as a location, zip code, or account) into this text — scheduled runs run in isolation and cannot see this conversation. Use update_job to revise these instructions later."
         },
         description: %{type: "string", description: "Short description for the source catalog."},
-        timezone: %{type: "string", description: "IANA timezone label stored with the job."},
+        timezone: %{
+          type: "string",
+          description:
+            "IANA timezone the schedule is read in; the owner's time zone when left out."
+        },
         expires_at: %{
           type: "string",
           description:
-            "Optional ISO8601 UTC datetime for temporary jobs. When reached, Fermix stops running the job and marks it expired."
+            "Optional ISO 8601 datetime with a UTC offset for temporary jobs (the owner's offset unless they named another zone). When reached, Fermix stops running the job and marks it expired."
         },
         allowed_tools: %{
           type: "array",
@@ -161,7 +165,7 @@ defmodule FermixCore.Tools.ScheduleJob do
         provider: provider,
         model: model,
         description: Support.optional_string(args, "description"),
-        timezone: Support.optional_string(args, "timezone", "UTC"),
+        timezone: Support.optional_string(args, "timezone"),
         allowed_tools: allowed_tools,
         capability_policy: [],
         timeout_seconds: timeout_seconds,

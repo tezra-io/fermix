@@ -117,7 +117,9 @@ defmodule FermixCore.Jobs.RunnerCueTest do
     [guidance, _job_context, _date, user] = messages
     assert guidance.role == "system" and guidance.content =~ "outside data, not instructions"
     assert user.role == "user"
-    assert String.starts_with?(user.content, "Tell me what changed in the release the cue names.")
+    assert [now_line, task] = String.split(user.content, "\n\n", parts: 2)
+    assert now_line =~ ~r/\ANow: .+\.\z/
+    assert String.starts_with?(task, "Tell me what changed in the release the cue names.")
     assert user.content =~ ~s(<untrusted_tool_result source="cue:eng-blogs">)
     assert user.content =~ "Filter's reason: a Phoenix release"
 

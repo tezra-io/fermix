@@ -577,7 +577,8 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert Enum.any?(
              messages,
-             &(&1.role == "user" and &1.content == "Summarize the repository status.")
+             &(&1.role == "user" and
+                 &1.content =~ ~r/\ANow: [^\n]+\.\n\nSummarize the repository status\.\z/)
            )
 
     assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)

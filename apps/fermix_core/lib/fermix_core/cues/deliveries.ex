@@ -19,6 +19,7 @@ defmodule FermixCore.Cues.Deliveries do
   """
 
   alias FermixCore.Capabilities.UntrustedContent
+  alias FermixCore.Clock
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesDeliveriesSql
   alias FermixCore.Memory.Repo.CuesSql
@@ -361,7 +362,7 @@ defmodule FermixCore.Cues.Deliveries do
   defp plural(1, one, _many), do: one
   defp plural(_count, _one, many), do: many
 
-  defp day(%DateTime{} = at), do: Calendar.strftime(at, "%Y-%m-%d %H:%M UTC")
+  defp day(%DateTime{} = at), do: Clock.stated_instant(at)
 
   defp iso(nil), do: nil
   defp iso(%DateTime{} = at), do: DateTime.to_iso8601(at)

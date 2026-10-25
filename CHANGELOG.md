@@ -31,6 +31,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   saying to restart. Pairing now says "The phone channel starts once setup is
   finished.", `mobile.status` names the hold, and finishing setup afterwards
   asks for the one restart that starts the channels it held.
+- **Every date and time Fermix shows its model is in your time zone.** The
+  current date in front of every conversation was the UTC date while open
+  loops, reminders and computer history were stated in your zone, so in the
+  evening hours when the two dates differ, something you said minutes earlier
+  could be called yesterday. The date (with your zone and its UTC offset), the
+  times in tool results, check-ins, reminder follow-ups, scheduled runs and
+  voice-call notes now all use the time zone set in Personality; with none set
+  they are UTC and the assistant is told so. A new scheduled job runs on your
+  time zone unless you name another, and `date` in a shell command reports it.
 
 ## [0.16.0] - 2026-10-21
 

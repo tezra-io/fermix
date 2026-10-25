@@ -12,7 +12,7 @@ defmodule FermixCore.Prompt.Defaults do
   alias FermixCore.Prompt.TemplateRenderer
 
   @placeholder_user_name "there"
-  @placeholder_timezone "UTC"
+  @placeholder_timezone "not set"
   @placeholder_communication_style "neutral and direct"
 
   @spec identity_md() :: String.t()

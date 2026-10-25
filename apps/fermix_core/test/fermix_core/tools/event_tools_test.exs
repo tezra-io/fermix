@@ -606,8 +606,9 @@ defmodule FermixCore.Tools.EventToolsTest do
 
       # Claim at the reminder's own scheduled instant — derived, never
       # hardcoded: a fixed future timestamp paired with a relative event date
-      # becomes a time bomb the day the calendar catches up.
-      {:ok, due_at, 0} =
+      # becomes a time bomb the day the calendar catches up. The view states it
+      # with the owner's offset; the parsed instant is the same either way.
+      {:ok, due_at, _offset} =
         payload(created)["planned_reminders"]
         |> List.first()
         |> Map.fetch!("scheduled_for")

@@ -141,7 +141,7 @@ defmodule FermixCore.Cues.NoticesTest do
 
       assert text ==
                "Watcher market-news: 3 items from alpaca-news were not delivered since " <>
-                 "2026-10-05 07:14 UTC: they waited past their lifetime."
+                 "Monday, October 5, 2026 at 7:14 AM UTC: they waited past their lifetime."
 
       assert [[reported]] =
                CueFixtures.rows(ctx.conn, "SELECT reported_at FROM cue_gaps WHERE id = ?", [old])

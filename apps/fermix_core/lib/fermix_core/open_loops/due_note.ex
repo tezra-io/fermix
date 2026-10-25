@@ -11,7 +11,8 @@ defmodule FermixCore.OpenLoops.DueNote do
   window (`Repo.due_open_loops_for_note/4` with
   `OpenLoops.Defaults.rung1_window_ms/0`). Otherwise it is one paragraph per due
   loop, in the §07 wording: the day the owner said it and the date it matters
-  by, both absolute with the weekday in the loop's zone, the owner's words
+  by, both absolute with the weekday on `FermixCore.Clock`, the clock the
+  current-date note reads, the owner's words
   quoted as stored, and the loop's id on its own line so `open_loop_update` can
   name it.
 

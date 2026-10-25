@@ -9,7 +9,7 @@
 | `name` | yes | — | non-empty; slugged into the id |
 | `schedule` | yes | — | see Schedule grammar |
 | `task` | yes | — | non-empty |
-| `timezone` | no | `UTC` | IANA zone; unknown is rejected |
+| `timezone` | no | the owner's zone | IANA zone; unknown is rejected; UTC only when no owner zone is configured |
 | `description` | no | none | for the source catalog |
 | `expires_at` | no | none | ISO8601 + offset, future |
 | `delivery_mode` | no | config default, else `none` | `none`/`origin`/`channel`/`local` |
@@ -34,7 +34,7 @@ Exactly one of three forms. Free-form English ("daily at 8am") is rejected.
 - Cron: `minute hour day-of-month month day-of-week`. Fields take `*`, a value, a list (`1,15`), a range (`9-17`), or a step (`*/15`, `8-18/4`). Weekday `0` and `7` are Sunday. Day-of-month and day-of-week must both match. Malformed or out-of-range fields are rejected.
 - One-off: one ISO8601 instant with an offset, `2035-09-10T16:00:00Z` or `2035-09-10T12:00:00-04:00`. No offset is rejected. A past instant fires on the next tick.
 
-`timezone` affects cron only: `0 9 * * 1` with `timezone: "America/New_York"` fires 09:00 local and tracks DST, and without `timezone` fires 09:00 UTC. Interval and one-off are absolute instants. The owner's zone is in the current-date system note; pass it whenever the owner spoke in local time.
+`timezone` affects cron only: `0 9 * * 1` fires 09:00 in the job's zone and tracks DST; without `timezone` that is the owner's zone. Interval and one-off are absolute instants; write a one-off or `expires_at` as ISO 8601 with the owner's UTC offset, which the current-date note states. Pass `timezone` only when the owner named another zone. Each run's message opens with the current time to the minute.
 
 ## Delivery
 

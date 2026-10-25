@@ -11,30 +11,35 @@ defmodule FermixCore.Prompt.CurrentDate do
 
   Date-only on purpose: the note sits ahead of conversation history in every
   request, so any change to it invalidates the provider's prompt-cache prefix.
-  A date changes once a day; a clock time would bust the cache every turn.
-  Agents that need the precise time run `date`.
+  A date changes once a day; a clock time would bust the cache every turn. A run
+  that reasons about time left carries `FermixCore.Clock.now_line/2` in its own
+  message instead.
 
-  The date is reported in UTC. The user's configured timezone (seeded from the
-  machine on the first boot, edited at setup) is attached as a label so the
-  agent can reason about their local date when it matters.
+  The date is the owner's local date, from `FermixCore.Clock`, the same clock
+  every other date and time a model is shown is stated on, so "today" and the
+  day something was said can never disagree. With no usable zone the note states
+  the UTC date and says why.
   """
 
-  @spec note() :: String.t()
-  def note do
-    stamp = Calendar.strftime(DateTime.utc_now(), "%A, %Y-%m-%d")
+  alias FermixCore.Clock
 
-    case configured_timezone() do
-      tz when is_binary(tz) and tz != "" ->
-        "Current date: #{stamp} (UTC). The user's timezone is #{tz} — " <>
-          "their local date can differ from UTC near midnight."
+  @spec note(DateTime.t()) :: String.t()
+  def note(%DateTime{} = now \\ DateTime.utc_now()) do
+    day = Clock.stated_day(now)
 
-      _ ->
-        "Current date: #{stamp} (UTC)."
+    case Clock.display_zone() do
+      {:ok, zone} ->
+        "Current date: #{day}, in the owner's time zone (#{zone}, #{Clock.utc_offset(now)}). " <>
+          "Every date and time Fermix shows you is in this zone unless it names another."
+
+      {:utc, :timezone_not_configured} ->
+        "Current date: #{day} (UTC). No time zone is configured, so every date and time " <>
+          "Fermix shows you is in UTC; ask the owner for their time zone before stating a " <>
+          "local time."
+
+      {:utc, {:invalid_timezone, zone}} ->
+        "Current date: #{day} (UTC). The configured time zone #{inspect(zone)} is not one " <>
+          "Fermix knows, so every date and time Fermix shows you is in UTC."
     end
-  end
-
-  defp configured_timezone do
-    Application.get_env(:fermix_core, :personalization, [])
-    |> Keyword.get(:timezone)
   end
 end

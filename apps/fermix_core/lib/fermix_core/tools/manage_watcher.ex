@@ -31,6 +31,7 @@ defmodule FermixCore.Tools.ManageWatcher do
 
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Clock
   alias FermixCore.Cues
   alias FermixCore.Cues.Watchers
   alias FermixCore.Memory.Repo
@@ -465,6 +466,6 @@ defmodule FermixCore.Tools.ManageWatcher do
   defp from(nil), do: ""
   defp from(origin), do: " from #{origin}"
 
-  defp clock(%DateTime{} = at), do: Calendar.strftime(at, "%Y-%m-%d %H:%M UTC")
+  defp clock(%DateTime{} = at), do: Clock.stated_instant(at)
   defp clock(nil), do: "at an unknown time"
 end

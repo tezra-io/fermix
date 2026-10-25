@@ -302,6 +302,57 @@ defmodule FermixCore.Sandbox.EnvTest do
   # locked keychain with several names costs a command the budget once, not a
   # timeout per name. The command still runs; what did not resolve in time is
   # reported with its own reason.
+  # `date` in a command must read the clock every time Fermix shows is stated on
+  # (`FermixCore.Clock`), not the server's own zone: one clock across the engine.
+  describe "the time zone" do
+    setup do
+      previous = Application.get_env(:fermix_core, :personalization)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:fermix_core, :personalization)
+          value -> Application.put_env(:fermix_core, :personalization, value)
+        end
+      end)
+
+      :ok
+    end
+
+    test "every built env sets TZ to the owner's zone" do
+      Application.put_env(:fermix_core, :personalization, timezone: "America/New_York")
+
+      assert {:ok, built} = Env.build(Config.normalize(env: [allow: []]))
+      assert {"TZ", "America/New_York"} in built.env
+
+      assert {:ok, all} = Env.build(Config.normalize(env: [mode: :all]))
+      assert {"TZ", "America/New_York"} in all.env
+
+      assert {:ok, command_env} = Env.build_command(Config.normalize(env: [allow: []]), [])
+      assert {"TZ", "America/New_York"} in command_env
+    end
+
+    test "with no zone configured TZ is UTC, the zone the date note then states" do
+      Application.put_env(:fermix_core, :personalization, [])
+
+      assert {:ok, built} = Env.build(Config.normalize(env: [allow: []]))
+      assert {"TZ", "Etc/UTC"} in built.env
+    end
+
+    test "TZ is the child's ordinary environment, never scrubbed as a credential" do
+      assert Env.values_for([{"TZ", "America/New_York"}], ["TZ"]) == []
+    end
+
+    test "a shell command's date reads the owner's zone" do
+      Application.put_env(:fermix_core, :personalization, timezone: "Asia/Kolkata")
+      root = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-env-tz")
+
+      assert {:ok, result} = Shell.execute(%{"command" => "date +%Z"}, context(root, []))
+      assert String.trim(result.output) == "IST"
+
+      FermixTestSupport.SafeRm.rm_rf!(root)
+    end
+  end
+
   describe "the allow-list lookup budget" do
     setup do
       dir = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-env-budget")

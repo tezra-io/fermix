@@ -239,24 +239,42 @@ def test_multi_turn_rubric_passes_every_observed_candidate_route(monkeypatch, tm
 def test_judge_is_told_the_date_the_candidate_was_told():
     """The daemon puts `Prompt.CurrentDate`'s note in front of every turn, so a
     reply that turns "the day after tomorrow" into "Friday, October 16" is grounded.
-    A judge that never saw the date graded exactly that as an invented time."""
+    A judge that never saw the date graded exactly that as an invented time. The
+    note states the owner's local date: 03:17 UTC on the 14th is still the 13th
+    in New York."""
     records = [{"started_at": "2026-10-14T03:17:47.261Z"},
                {"started_at": "2026-10-14T03:17:57.508Z"}]
     facts = run_eval.judge_date_facts(records, "America/New_York")
     assert facts == [
         "On every turn, the assistant's system prompt carried this note: \"Current "
-        "date: Wednesday, 2026-10-14 (UTC). The user's timezone is America/New_York "
-        "— their local date can differ from UTC near midnight.\" Words like today "
-        "and tomorrow in the conversation are relative to that date."]
+        "date: Tuesday, October 13, 2026, in the owner's time zone (America/New_York, "
+        "UTC-04:00). Every date and time Fermix shows you is in this zone unless it "
+        "names another.\" Words like today and tomorrow in the conversation are "
+        "relative to that date."]
 
 
-def test_judge_date_facts_follow_a_conversation_across_utc_midnight():
+def test_judge_date_facts_follow_the_owners_midnight_not_utcs():
+    records = [{"started_at": "2026-10-14T03:59:58Z"}, {"started_at": "2026-10-14T04:00:03Z"}]
+    facts = run_eval.judge_date_facts(records, "America/New_York")
+    assert len(facts) == 2
+    assert facts[0].startswith("On the turns sent that day, ")
+    assert "\"Current date: Tuesday, October 13, 2026, in the owner's" in facts[0]
+    assert "\"Current date: Wednesday, October 14, 2026, in the owner's" in facts[1]
+
+
+def test_judge_date_facts_with_no_zone_state_the_utc_date_and_say_why():
     records = [{"started_at": "2026-10-13T23:59:58Z"}, {"started_at": "2026-10-14T00:00:03Z"}]
     facts = run_eval.judge_date_facts(records, None)
     assert len(facts) == 2
-    assert facts[0].startswith("On the turns sent that day, ")
-    assert "\"Current date: Tuesday, 2026-10-13 (UTC).\"" in facts[0]
-    assert "\"Current date: Wednesday, 2026-10-14 (UTC).\"" in facts[1]
+    assert "\"Current date: Tuesday, October 13, 2026 (UTC). No time zone is configured" \
+        in facts[0]
+    assert "\"Current date: Wednesday, October 14, 2026 (UTC)." in facts[1]
+
+
+def test_judge_date_facts_with_an_unknown_zone_state_the_utc_date_and_name_it():
+    facts = run_eval.judge_date_facts([{"started_at": "2026-10-14T03:17:47Z"}], "Mars/Olympus_Mons")
+    assert "\"Current date: Wednesday, October 14, 2026 (UTC). The configured time zone " \
+        "\"Mars/Olympus_Mons\" is not one Fermix knows" in facts[0]
 
 
 def test_judge_date_facts_refuse_a_turn_without_a_trace_start():

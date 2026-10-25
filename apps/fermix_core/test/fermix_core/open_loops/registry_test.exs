@@ -538,7 +538,7 @@ defmodule FermixCore.OpenLoops.RegistryTest do
     end
 
     test "the model's view carries no destination and no message text", ctx do
-      view = Registry.view(ctx.live)
+      view = Registry.view(ctx.live, ctx.opts)
 
       assert view == %{
                "open_loop_id" => ctx.live.id,
@@ -560,11 +560,28 @@ defmodule FermixCore.OpenLoops.RegistryTest do
                "closed_on" => "Monday, June 2, 2031",
                "next_check" => nil
              } =
-               Registry.view(closed)
+               Registry.view(closed, ctx.opts)
 
-      for view <- [view, Registry.view(closed)] do
+      for view <- [view, Registry.view(closed, ctx.opts)] do
         refute Enum.any?(Map.values(view), &(&1 == "40001"))
       end
+    end
+
+    test "times are stated in the owner's current zone, the clock the date note reads", ctx do
+      # 02:30 UTC on Tuesday is 03:30 Tuesday in London and 22:30 Monday in New
+      # York. A loop whose dates are London's still states the day it was said
+      # on the owner's clock, so it agrees with the current-date note.
+      said = ~U[2031-06-03 02:30:00Z]
+      opts = at(ctx.opts, said)
+
+      %{loop: loop} =
+        note!(opts, %{"intention" => "Book the Larkspur ferry", "timezone" => "Europe/London"})
+
+      assert loop.timezone == "Europe/London"
+      assert %{"said_on" => "Monday, June 2, 2031"} = Registry.view(loop, opts)
+
+      assert %{"said_on" => "Tuesday, June 3, 2031"} =
+               Registry.view(loop, personalization: [timezone: "Europe/London"])
     end
   end
 

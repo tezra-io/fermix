@@ -24,10 +24,11 @@ defmodule FermixCore.Sandbox.Env do
   name. Reading the daemon's environment spawns nothing and is never cut off.
   """
 
+  alias FermixCore.Clock
   alias FermixCore.CommandRunner
   alias FermixCore.Sandbox.Config
 
-  @default_keys ~w(PATH HOME USER LANG SHELL TMPDIR)
+  @default_keys ~w(PATH HOME USER LANG SHELL TMPDIR TZ)
   @secret_max_bytes 8_192
   @lookup_budget_ms 5_000
 
@@ -404,10 +405,14 @@ defmodule FermixCore.Sandbox.Env do
     end
   end
 
+  # The daemon's ordinary environment, with TZ set to the zone every time Fermix
+  # shows is stated in (`FermixCore.Clock`), so `date` in a command reads the same
+  # clock as the model's date note rather than the server's own zone.
   defp default_env do
     System.get_env()
     |> Enum.filter(fn {name, _value} -> default_key?(name) end)
     |> Map.new()
+    |> Map.put("TZ", Clock.shown_zone())
   end
 
   defp default_key?(name), do: name in @default_keys or String.starts_with?(name, "LC_")

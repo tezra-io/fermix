@@ -12,6 +12,7 @@ defmodule FermixCore.Jobs.Registry do
   """
 
   alias FermixCore.Agents.IterationLimits
+  alias FermixCore.Clock
   alias FermixCore.Jobs.Schedule
   alias FermixCore.Jobs.Scheduler
   alias FermixCore.Memory.Repo
@@ -319,7 +320,9 @@ defmodule FermixCore.Jobs.Registry do
     name = required_string(attrs, :name)
     task_prompt = required_string(attrs, :task_prompt, fallback: :task)
     schedule_expr = required_string(attrs, :schedule)
-    timezone = optional_string(attrs, :timezone, "UTC")
+    # A job given no zone is read in the owner's (`FermixCore.Clock`), the clock
+    # every time Fermix shows is stated on, never a silent UTC.
+    timezone = optional_string(attrs, :timezone, Clock.shown_zone())
 
     with {:ok, parsed} <- Schedule.parse(schedule_expr, timezone: timezone, now: now),
          {:ok, expires_at} <- optional_future_datetime(attrs, :expires_at, now) do

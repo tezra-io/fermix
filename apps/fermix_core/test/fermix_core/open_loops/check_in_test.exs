@@ -668,7 +668,11 @@ defmodule FermixCore.OpenLoops.CheckInTest do
       assert system =~ "You are a Fermix check-in."
       refute system =~ "Fermix marker"
 
-      facts = user |> String.split("\n\n", parts: 2) |> List.last() |> Jason.decode!()
+      # The occasion opens with the current time on the owner's clock (no zone is
+      # configured here, so UTC), then the facts.
+      [now_line, _header, json] = String.split(user, "\n\n", parts: 3)
+      assert now_line == "Now: Saturday, June 7, 2031 at 5:00 PM UTC."
+      facts = Jason.decode!(json)
       assert facts["open_loop"]["open_loop_id"] == loop.id
       assert facts["touch"] == 1
       assert facts["repeat"] == false
@@ -711,7 +715,11 @@ defmodule FermixCore.OpenLoops.CheckInTest do
 
       assert_receive {:provider_chat, messages, _tools}
       user = messages |> Enum.filter(&(&1.role == "user")) |> Enum.map_join("\n", & &1.content)
-      facts = user |> String.split("\n\n", parts: 2) |> List.last() |> Jason.decode!()
+      # The occasion opens with the current time on the owner's clock (no zone is
+      # configured here, so UTC), then the facts.
+      [now_line, _header, json] = String.split(user, "\n\n", parts: 3)
+      assert now_line == "Now: Saturday, June 7, 2031 at 5:00 PM UTC."
+      facts = Jason.decode!(json)
 
       assert facts["touch"] == 2
       assert facts["repeat"] == true

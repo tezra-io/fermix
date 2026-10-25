@@ -13,6 +13,7 @@ defmodule FermixCore.Jobs.Runner do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Clock
   alias FermixCore.Cues.Notices
   alias FermixCore.Jobs.CueAdmission
   alias FermixCore.Jobs.CueRun
@@ -659,7 +660,7 @@ defmodule FermixCore.Jobs.Runner do
     messages = [
       %{role: "system", content: cron_guidance()},
       %{role: "system", content: CurrentDate.note()},
-      %{role: "user", content: state.job.task_prompt}
+      run_message(state.job.task_prompt)
     ]
 
     %{
@@ -688,10 +689,16 @@ defmodule FermixCore.Jobs.Runner do
       skill_prompt_message(skill, job),
       %{role: "system", content: job_context_prompt(job, media)},
       %{role: "system", content: CurrentDate.note()},
-      %{role: "user", content: job.task_prompt}
+      run_message(job.task_prompt)
     ]
     |> Enum.reject(&is_nil/1)
   end
+
+  # The run's own message opens with the current time to the minute: scheduled
+  # work reasons about time left, and the date note above stays date-only so
+  # the cached prefix holds between runs.
+  defp run_message(text),
+    do: %{role: "user", content: Clock.now_line(DateTime.utc_now()) <> "\n\n" <> text}
 
   # A cue run's prompt (M60 §9.3): the cue guidance, the skill's prompt when
   # the job names one, the job context, the date, then one user message with
@@ -702,7 +709,7 @@ defmodule FermixCore.Jobs.Runner do
       skill_prompt_message(skill, job),
       %{role: "system", content: CueRun.job_context(job, cue)},
       %{role: "system", content: CurrentDate.note()},
-      %{role: "user", content: CueRun.user_message(job, cue)}
+      run_message(CueRun.user_message(job, cue))
     ]
     |> Enum.reject(&is_nil/1)
   end

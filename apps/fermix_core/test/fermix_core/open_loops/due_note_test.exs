@@ -1,6 +1,7 @@
 defmodule FermixCore.OpenLoops.DueNoteTest do
-  # async: false — the note follows `[fermix_core.open_loops] enabled`, global
-  # `Application` env that each test pins and restores.
+  # async: false — the note follows `[fermix_core.open_loops] enabled` and states
+  # its dates in the personalization timezone, global `Application` env that each
+  # test pins and restores.
   use ExUnit.Case, async: false
 
   alias FermixCore.Memory.Repo
@@ -30,12 +31,19 @@ defmodule FermixCore.OpenLoops.DueNoteTest do
     start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
 
     previous = Application.get_env(:fermix_core, :open_loops)
+    previous_personalization = Application.get_env(:fermix_core, :personalization)
     Application.put_env(:fermix_core, :open_loops, enabled: true)
+    Application.put_env(:fermix_core, :personalization, timezone: @tz)
 
     on_exit(fn ->
       case previous do
         nil -> Application.delete_env(:fermix_core, :open_loops)
         value -> Application.put_env(:fermix_core, :open_loops, value)
+      end
+
+      case previous_personalization do
+        nil -> Application.delete_env(:fermix_core, :personalization)
+        value -> Application.put_env(:fermix_core, :personalization, value)
       end
 
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
