@@ -1332,10 +1332,10 @@ def run_case(cfg, client, suite, scn, case, run_id, trial, judge_on, fixture=Non
 
     for index, turn in enumerate(case.turns):
         query = _render_query(turn.query, run_id, trial, fixture_url)
+        # The loader resolved the turn's layers (the defaults, the case's expect
+        # on the final turn, the turn's own); only the run budget joins them here.
         expect = dict(budget)
         expect.update(_render_expect(turn.expect, run_id, trial))
-        if index == len(case.turns) - 1:
-            expect.update(_render_expect(case.expect, run_id, trial))
         transcript.append({"role": "user", "content": query})
         result = driver.drive_query(cfg, session, query, timeout_ms=timeout_ms,
                                     attachments=(case.images if index == 0 else None))

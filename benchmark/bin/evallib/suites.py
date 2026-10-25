@@ -258,6 +258,19 @@ def _validate_expect(expect, where: str, problems: list[str]) -> None:
 _PROHIBITION_KEYS = ("tools_none", "tools_none_succeeded")
 
 
+def _final_turn_conflicts(case_declared: dict, turn_declared: dict, cloc: str) -> list[str]:
+    """The case's expect is graded on the final turn beside that turn's own, so a
+    key both declare with different values is two gates for one trace: refused,
+    never resolved silently. Prohibition lists accumulate instead."""
+    conflicts = sorted(key for key in turn_declared
+                       if key not in _PROHIBITION_KEYS and key in case_declared
+                       and case_declared[key] != turn_declared[key])
+    if not conflicts:
+        return []
+    return [f"{cloc}: the case's expect and its final turn's expect disagree on "
+            f"{conflicts}; declare each gate once"]
+
+
 def _merge_expect(base: dict, override: dict) -> dict:
     out = dict(base or {})
     out.update(override or {})
@@ -452,7 +465,8 @@ def _validate_tool_list(cs: dict, key: str, cloc: str, problems: list[str]) -> l
     return []
 
 
-def _refuse_misplaced_fixture_state(case, cloc: str, problems: list[str]) -> None:
+def _refuse_misplaced_fixture_state(case, turn_expects: list[dict], cloc: str,
+                                    problems: list[str]) -> None:
     """Where a `fixture_state` gate may be declared, and what it needs.
 
     It is a CASE-level assertion. A turn-level one is refused because the
@@ -469,7 +483,7 @@ def _refuse_misplaced_fixture_state(case, cloc: str, problems: list[str]) -> Non
     case would grade against an empty map for the life of the suite — every
     `absent:` clause vacuously green, which is the reassuring checkmark a safety
     gate exists to prevent."""
-    if any("fixture_state" in turn.expect for turn in case.turns):
+    if any("fixture_state" in texp for texp in turn_expects):
         problems.append(f"{cloc}: `fixture_state` belongs to the case, not to a turn — "
                         "the capability runner reads the case's expect, so a "
                         "turn-level one is never scored; page state accumulates "
@@ -479,8 +493,8 @@ def _refuse_misplaced_fixture_state(case, cloc: str, problems: list[str]) -> Non
                         f"server — use {FIXTURE_URL_PLACEHOLDER} in `query`")
 
 
-def _companion_spec(cs: dict, drive: str, case_expect: dict, turns: list[Turn], cloc: str,
-                    problems: list[str]) -> dict:
+def _companion_spec(cs: dict, drive: str, case_expect: dict, turn_expects: list[dict],
+                    cloc: str, problems: list[str]) -> dict:
     """Validate a case's `companion:` map and its `expect.wire` against each other.
 
     Both belong to `drive: companion` alone: the socket is the only place the
@@ -488,7 +502,7 @@ def _companion_spec(cs: dict, drive: str, case_expect: dict, turns: list[Turn], 
     cancelled while it waits has no trace at all, so such a case asserts the
     wire and nothing the trace would have to show."""
     spec = cs.get("companion", {})
-    if any("wire" in turn.expect for turn in turns):
+    if any("wire" in texp for texp in turn_expects):
         problems.append(f"{cloc}: `wire` belongs to the case's expect, not to a turn")
     if drive != "companion":
         if "companion" in cs:
@@ -753,21 +767,31 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                 problems.append(f"{cloc}: provide exactly one of `query` or `turns`")
             case_expect_raw = cs.get("expect", {})
             _validate_expect(case_expect_raw, f"{cloc}.expect", problems)
-            case_expect = _merge_expect(
-                default_expect, case_expect_raw if isinstance(case_expect_raw, dict) else {})
+            case_declared = case_expect_raw if isinstance(case_expect_raw, dict) else {}
+            case_expect = _merge_expect(default_expect, case_declared)
 
+            # Each turn's `expect` is resolved here, once, most specific last: the
+            # suite defaults, then on the final turn the case's expect (graded on
+            # that turn's trace), then the turn's own. The runner grades exactly
+            # this. A second merge in the runner used to put the case layer,
+            # defaults included, back over the final turn, so a suite-wide
+            # `max_tool_calls: 0` beat the `max_tool_calls: 2` an author had
+            # lifted a last turn to. `turn_expects` keeps the declarations for the
+            # checks that refuse a case-only key on a turn.
             turns: list[Turn] = []
+            turn_expects: list[dict] = []
             if has_query:
                 q = cs.get("query")
                 if not isinstance(q, str) or not q.strip():
                     problems.append(f"{cloc}: `query` must be a non-empty string")
                     q = q or ""
-                turns = [Turn(query=q, expect={})]
+                turns = [Turn(query=q, expect=case_expect)]
             elif has_turns:
                 tr = cs.get("turns")
                 if not isinstance(tr, list) or not tr:
                     problems.append(f"{cloc}: `turns` must be a non-empty list")
                     tr = []
+                declared: list[tuple[str, dict]] = []
                 for ti, tt in enumerate(tr):
                     tloc = f"{cloc}.turns[{ti}]"
                     if not isinstance(tt, dict):
@@ -780,8 +804,13 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                         q = q or ""
                     texp_raw = tt.get("expect", {})
                     _validate_expect(texp_raw, f"{tloc}.expect", problems)
-                    texp = texp_raw if isinstance(texp_raw, dict) else {}
-                    turns.append(Turn(query=q, expect=_merge_expect(default_expect, texp)))
+                    declared.append((q, texp_raw if isinstance(texp_raw, dict) else {}))
+                turn_expects = [texp for _q, texp in declared]
+                for ti, (q, texp) in enumerate(declared):
+                    layer = case_expect if ti == len(declared) - 1 else default_expect
+                    turns.append(Turn(query=q, expect=_merge_expect(layer, texp)))
+                if declared:
+                    problems.extend(_final_turn_conflicts(case_declared, declared[-1][1], cloc))
 
             rubric = cs.get("rubric")
             if rubric is not None and not isinstance(rubric, str):
@@ -821,7 +850,8 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
 
             if drive in ("telegram_operator", "companion") and has_turns:
                 problems.append(f"{cloc}: `drive: {drive}` supports only single-turn `query` cases")
-            companion_spec = _companion_spec(cs, drive, case_expect, turns, cloc, problems)
+            companion_spec = _companion_spec(cs, drive, case_expect, turn_expects, cloc,
+                                             problems)
             voice_spec, spoken = _voice_spec(cs, drive, case_expect, cloc, fixtures_dir, problems)
             if spoken is not None:
                 turns = [Turn(query=spoken, expect={})]
@@ -878,7 +908,7 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                         requires_tools=requires_tools, cross_session=cross_session,
                         requires_tools_all=tuple(requires_all), companion=companion_spec,
                         watch=watch, voice=voice_spec, cue=cue_spec)
-            _refuse_misplaced_fixture_state(case, cloc, problems)
+            _refuse_misplaced_fixture_state(case, turn_expects, cloc, problems)
             cases.append(case)
 
         scenarios.append(Scenario(id=sid, title=stitle, severity=severity, tags=tags,

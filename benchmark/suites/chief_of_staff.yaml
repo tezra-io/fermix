@@ -123,6 +123,11 @@ scenarios:
         # answer and failed only the suite's no-tools cap; a read here is
         # diligence, not the behaviour under test. `tools_none` still bans
         # every write, and the suite-wide cap stays on every other case.
+        # 2026-10-25: until this date the runner put the suite's cap back over
+        # the second turn's (it merged the case layer, defaults included, over
+        # the final turn), so the allowance never reached that turn; the first
+        # claude-opus-5-5 night, which noted the reprioritization with
+        # `open_loop_note`, surfaced it. The loader now resolves the layers once.
         turns:
           - query: |
               Today: CEO brief due 16:00, candidate debrief at 11:00. The renewal

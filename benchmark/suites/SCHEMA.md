@@ -202,7 +202,11 @@ the `query` shorthand; multi-turn uses `turns`.
 
 - `query` (string) — single-turn shorthand; mutually exclusive with `turns`.
 - `turns` (list) — ordered turns sharing one session; each has its own `query`
-  and optional per-turn `expect`.
+  and optional per-turn `expect`. A turn's `expect` is merged over
+  `defaults.expect`; the final turn's is merged over the case-level `expect` too,
+  so a turn's own key always wins over a default. A key the case and its final
+  turn both declare with different values is a load error (prohibition lists
+  accumulate instead).
 - **Run placeholders** — four tokens `run_eval.py` substitutes before driving a
   turn, in `query` **and** in every string inside `expect` (at any depth):
   - `__EVAL_RUN_ID__` — this run's id, unique per invocation.
@@ -256,7 +260,8 @@ the `query` shorthand; multi-turn uses `turns`.
   prompt as its caption. Validated at load: the file must exist. Bundle under
   `suites/fixtures/` (e.g. a known-content image whose contents you assert on).
 - `expect` (map) — case-level structural gates, graded on the **final** turn's
-  trace. `defaults.expect` is merged beneath it (case wins on conflict).
+  trace. `defaults.expect` is merged beneath it (case wins on conflict), and on
+  that turn it sits beneath the turn's own `expect` (see `turns`).
 - `rubric` (string) — natural-language quality check, graded by the LLM judge.
   When the suite/case has `judge: true`, selecting that case requires `--judge`;
   `judge: false` leaves the rubric as manual review guidance and the automated
