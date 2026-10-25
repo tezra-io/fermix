@@ -156,6 +156,27 @@ def _unconfirmed_markdown(r: dict) -> list[str]:
     return lines
 
 
+def _platform_skips(r: dict) -> list[dict]:
+    return (r.get("selection") or {}).get("skipped_platform") or []
+
+
+_PLATFORM_SKIP_NOTE = ("Selected, but their scenario runs only on another platform than "
+                       "the host this run was on: not driven, not failed, and not counted "
+                       "in the totals above.")
+
+
+def _platform_skips_markdown(r: dict) -> list[str]:
+    rows = _platform_skips(r)
+    if not rows:
+        return []
+    lines = ["## Skipped on this platform", "", _PLATFORM_SKIP_NOTE, "",
+             "| Case | Reason |", "|---|---|"]
+    lines.extend(f"| `{row['suite']}/{row['scenario']}/{row['case']}` | "
+                 f"{_cell(row['reason'])} |" for row in rows)
+    lines.append("")
+    return lines
+
+
 def _markdown(r: dict) -> str:
     t = r["totals"]
     overall = {"pass": "✅ PASS", "fail": "❌ FAIL",
@@ -205,6 +226,7 @@ def _markdown(r: dict) -> str:
     lines.append("")
     lines.extend(_sticky_markdown(r))
     lines.extend(_unconfirmed_markdown(r))
+    lines.extend(_platform_skips_markdown(r))
 
     for s in r["suites"]:
         lines.append(f"## {s['title']}  `({s['name']})`")
@@ -213,17 +235,23 @@ def _markdown(r: dict) -> str:
             mark = _case_mark(_scenario_outcome(scn))
             sev = "🔴 critical" if scn["severity"] == "critical" else "normal"
             lines.append(f"### {mark} {scn['title']}  _( {sev} )_")
+            if "access_gate_markers" in scn:
+                lines.append(f"{_MARKERS_LABEL}: **{scn['access_gate_markers']}**")
             for c in scn["cases"]:
                 lines.append(f"- {_case_mark(c['outcome'])} **{c['id']}** "
                              f"(trial {c.get('trial', 1)}) — {c['outcome'].upper()}")
+                if "access_gate_markers" in c:
+                    lines.append(f"  - {_MARKERS_LABEL}: {c['access_gate_markers']}")
                 lines.extend(_attempts_markdown(c))
                 for turn in c["turns"]:
                     lines.append(f"  - turn {turn['index'] + 1}: `{_short(turn['query'], 90)}`")
                     if turn["status"] != "ok":
                         lines.append(f"    - ⚠️ drive `{turn['status']}`: {turn.get('drive_error')}")
+                        lines.extend(_gate_lines_markdown(turn))
                         continue
                     if turn.get("correlation") != "ok":
                         lines.append("    - ⚠️ no Opik trace correlated (turn ran but trace not found)")
+                        lines.extend(_gate_lines_markdown(turn))
                         continue
                     tools = ", ".join(turn["tools"]) or "—"
                     spawns = f"  ·  {turn['subagent_spawns']} subagents" if turn.get("subagent_spawns") else ""
@@ -232,9 +260,7 @@ def _markdown(r: dict) -> str:
                                  f"[trace]({turn['trace_url']})")
                     if turn.get("note"):
                         lines.append(f"    - ℹ️ {turn['note']}")
-                    for g in turn["gates"]:
-                        gm = "✓" if g["passed"] else "✗"
-                        lines.append(f"      - {gm} `{g['key']}` — {g['detail']}")
+                    lines.extend(_gate_lines_markdown(turn))
                 if c.get("rubric"):
                     rb = c["rubric"]
                     if rb["evaluated"]:
@@ -248,6 +274,25 @@ def _markdown(r: dict) -> str:
                         lines.append(f"  - judge: not evaluated ({rb.get('error')})")
             lines.append("")
     return "\n".join(lines) + "\n"
+
+
+# Shown, never graded, beside a case that bans a tool with tools_none_succeeded:
+# a green there is "held N times" or "the model never tried", and the count says
+# which (run_eval.access_gate_markers).
+_MARKERS_LABEL = "access_gate markers observed"
+
+
+def _gate_lines_markdown(turn: dict) -> list[str]:
+    """A turn's gates. A turn whose trace never settled carries only what the disk
+    showed (workspace_paths_absent), which must stay visible too."""
+    return [f"      - {'✓' if g['passed'] else '✗'} `{g['key']}` — {g['detail']}"
+            for g in turn.get("gates", [])]
+
+
+def _gate_lines_html(turn: dict) -> list[str]:
+    return [f"<div class='gate {'ok' if g['passed'] else 'no'}'>{'✓' if g['passed'] else '✗'} "
+            f"<span class='k'>{_e(g['key'])}</span> — {_e(g['detail'])}</div>"
+            for g in turn.get("gates", [])]
 
 
 def _short(text: str, n: int) -> str:
@@ -373,6 +418,19 @@ def _unconfirmed_html(r: dict) -> list[str]:
     return out
 
 
+def _platform_skips_html(r: dict) -> list[str]:
+    rows = _platform_skips(r)
+    if not rows:
+        return []
+    out = ["<h2>Skipped on this platform</h2>",
+           f"<div class='meta'>{_e(_PLATFORM_SKIP_NOTE)}</div>",
+           "<table><tr><th>Case</th><th>Reason</th></tr>"]
+    out.extend(f"<tr><td>{_e(row['suite'] + '/' + row['scenario'] + '/' + row['case'])}"
+               f"</td><td>{_e(row['reason'])}</td></tr>" for row in rows)
+    out.append("</table>")
+    return out
+
+
 def _attempts_html(case: dict) -> list[str]:
     summary = _attempt_summary(case)
     if len(summary) < 2:
@@ -426,6 +484,7 @@ def _html(r: dict) -> str:
     out.append("</table>")
     out.extend(_sticky_html(r))
     out.extend(_unconfirmed_html(r))
+    out.extend(_platform_skips_html(r))
 
     for s in r["suites"]:
         out.append(f"<h2>{_e(s['title'])} <span class='meta'>({_e(s['name'])})</span></h2>")
@@ -434,18 +493,24 @@ def _html(r: dict) -> str:
             pill = {"pass": "pass", "fail": "fail", "incomplete": "skip"}[scenario_outcome]
             sev = "<span class='pill crit'>critical</span> " if scn["severity"] == "critical" else ""
             out.append(f"<h3>{sev}<span class='pill {pill}'>{_e(scenario_outcome.upper())}</span> {_e(scn['title'])}</h3>")
+            if "access_gate_markers" in scn:
+                out.append(f"<div class='meta'>{_MARKERS_LABEL}: {_e(scn['access_gate_markers'])}</div>")
             for c in scn["cases"]:
                 cpill = {"pass": "pass", "fail": "fail", "incomplete": "skip"}[c["outcome"]]
                 out.append(f"<div class='case'><span class='pill {cpill}'>{_e(c['outcome'].upper())}</span> "
                            f"<b>{_e(c['id'])}</b> <span class='meta'>trial {_e(c.get('trial', 1))}</span>")
+                if "access_gate_markers" in c:
+                    out.append(f"<div class='tools'>{_MARKERS_LABEL}: {_e(c['access_gate_markers'])}</div>")
                 out.extend(_attempts_html(c))
                 for turn in c["turns"]:
                     out.append(f"<div class='q'>▸ {_e(turn['query'])}</div>")
                     if turn["status"] != "ok":
                         out.append(f"<div class='gate no'>drive {_e(turn['status'])}: {_e(turn.get('drive_error'))}</div>")
+                        out.extend(_gate_lines_html(turn))
                         continue
                     if turn.get("correlation") != "ok":
                         out.append("<div class='gate no'>no Opik trace correlated (turn ran but trace not found)</div>")
+                        out.extend(_gate_lines_html(turn))
                         continue
                     spawns = f" · {turn['subagent_spawns']} subagents" if turn.get("subagent_spawns") else ""
                     out.append(f"<div class='tools'>tools: {_e(', '.join(turn['tools']) or '—')}{_e(spawns)} · "
@@ -453,10 +518,7 @@ def _html(r: dict) -> str:
                                f"<a href='{_e(turn['trace_url'])}'>trace</a></div>")
                     if turn.get("note"):
                         out.append(f"<div class='gate skip'>ℹ️ {_e(turn['note'])}</div>")
-                    for g in turn["gates"]:
-                        cls = "ok" if g["passed"] else "no"
-                        sign = "✓" if g["passed"] else "✗"
-                        out.append(f"<div class='gate {cls}'>{sign} <span class='k'>{_e(g['key'])}</span> — {_e(g['detail'])}</div>")
+                    out.extend(_gate_lines_html(turn))
                     out.append(f"<details><summary>reply</summary><pre>{_e(turn['reply'])}</pre></details>")
                 if c.get("rubric"):
                     rb = c["rubric"]

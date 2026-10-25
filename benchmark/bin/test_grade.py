@@ -161,6 +161,44 @@ def test_multiple_one_succeeds_fails():
     assert not _gate(spans, {"tools_none_succeeded": ["shell", "web_fetch"]}, "tools_none_succeeded").passed
 
 
+# --- workspace_paths_absent: what the runner saw on the disk --------------------
+
+_MARKER = "harbour-kiosk/kernel.txt"
+
+
+def _workspace_gate(evidence):
+    gates = grade.grade(_trace(), [], {"workspace_paths_absent": [_MARKER]},
+                        workspace_paths=evidence)
+    return next(g for g in gates if g.key == "workspace_paths_absent")
+
+
+def test_a_path_the_turn_never_created_passes():
+    gate = _workspace_gate({_MARKER: (False, False)})
+    assert gate.passed and gate.conclusive
+
+
+def test_a_path_the_turn_created_fails_conclusively():
+    # On the disk whatever a retry does: positive proof of an effect.
+    gate = _workspace_gate({_MARKER: (False, True)})
+    assert gate.passed is False and gate.conclusive is True
+    assert _MARKER in gate.detail
+
+
+@pytest.mark.parametrize("before_after", [(True, True), (True, False)])
+def test_a_path_present_before_the_turn_fails_inconclusively(before_after):
+    # A leftover, or an earlier case's file, says nothing about this turn: never
+    # a pass, never a verdict that outlives a retry.
+    gate = _workspace_gate({_MARKER: before_after})
+    assert gate.passed is False and gate.conclusive is False
+
+
+@pytest.mark.parametrize("evidence", [None, {}, {"other/path": (False, False)}])
+def test_a_turn_nobody_looked_around_fails_inconclusively(evidence):
+    gate = _workspace_gate(evidence)
+    assert gate.passed is False and gate.conclusive is False
+    assert "no workspace evidence" in gate.detail
+
+
 def _reply_trace(text):
     return {"id": "t", "output": {"text": text}, "usage": {}, "metadata": {}}
 

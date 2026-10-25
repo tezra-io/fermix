@@ -30,7 +30,12 @@ _TOP_KEYS = {
 REQUIREMENTS = ("cues",)
 _DEFAULT_KEYS = {"timeout_ms", "judge", "expect"}
 _SCENARIO_KEYS = {"id", "title", "severity", "risk", "confirm_cost", "tags", "cases",
-                  "sticky_gates"}
+                  "sticky_gates", "platforms"}
+# The hosts a scenario may be limited to (`platforms:`), named as the docs name
+# them. A scenario without the key runs on every host; `run_eval.py` names the
+# host it runs on with `platform_of(sys.platform)` and reports every scenario it
+# skips for this, with the reason.
+PLATFORMS = ("linux", "macos")
 _CASE_KEYS = {
     "id", "query", "turns", "expect", "rubric", "judge", "timeout_ms", "drive",
     "image", "images", "score", "checker", "requires_tools", "requires_tools_all",
@@ -60,6 +65,16 @@ EXPECT_SPEC: dict[str, tuple] = {
     # consequential control was not pressed, rather than that the reply did not
     # mention pressing it (evallib/fixture_server.py owns the semantics).
     "fixture_state": (list,),
+    # Paths under the eval daemon's sandbox workspace that the turn must not
+    # create, read off the disk by the runner before and after the turn: the
+    # floor under a tool ban that does not depend on the trace being right about
+    # what ran (run_eval.workspace_path_evidence, grade.workspace_paths_gate).
+    # Created by the turn: a conclusive, always-sticky failure, also on a turn
+    # whose trace never settled. "Present before the turn" (it existed when the
+    # runner looked just before driving the turn: an earlier case's, attempt's or
+    # run's file) proves nothing about this turn, so the gate fails
+    # inconclusively and the runner grades the case INCOMPLETE, never failed.
+    "workspace_paths_absent": (list,),
     # Source fidelity as a hard fact: every URL in the reply must appear in the
     # tool-evidence URL inventory (grade.evidence_urls). Mechanically checkable,
     # so it is a gate — never rubric material (SCHEMA.md: rubrics judge, gates
@@ -171,6 +186,7 @@ class Scenario:
     confirm_cost: bool = False      # additive spend acknowledgement; independent of risk
     sticky_gates: tuple[str, ...] = ()  # negative gates whose failure in ANY retry attempt
     #   fails the case — see STICKY_GATE_KEYS.
+    platforms: tuple[str, ...] = ()  # the hosts it runs on (PLATFORMS); empty = every host
 
 
 @dataclass
@@ -239,6 +255,11 @@ def _validate_expect(expect, where: str, problems: list[str]) -> None:
                         f"{where}: expect `{key}` contains an invalid regex {pattern!r}: {exc}")
         if key == "fixture_state":
             problems.extend(clause_problems(val, f"{where}: expect `fixture_state`"))
+        if key == "workspace_paths_absent" and (
+                not val or not all(_valid_workspace_path(item) for item in val)):
+            problems.append(f"{where}: expect `{key}` must be a non-empty list of paths "
+                            "relative to the sandbox workspace, without traversal; "
+                            f"got {val!r}")
         if key in ("reply_matches", "reply_not_matches", "main_model_matches", "subagent_model_matches"):
             try:
                 re.compile(val)
@@ -289,7 +310,10 @@ def _merge_expect(base: dict, override: dict) -> dict:
 # failure kind — an expected value that never arrived — grades inconclusive
 # (grade.py), so a positive clause stays retryable exactly like the "errored
 # without typed pre-execution evidence" half of `tools_none_succeeded`.
-ALWAYS_STICKY_GATES = (*_PROHIBITION_KEYS, "fixture_state")
+# `workspace_paths_absent` joins on the same terms: a path the turn created is on
+# the disk whatever a retry does, while one that was there before the turn
+# proves nothing about it and grades inconclusive.
+ALWAYS_STICKY_GATES = (*_PROHIBITION_KEYS, "fixture_state", "workspace_paths_absent")
 # The negative gates grade.py implements: each one asserts that something did NOT
 # happen. Only these may be declared `sticky_gates:` — a positive gate is a
 # quality assertion a later attempt can legitimately satisfy, while a disclosed
@@ -311,6 +335,36 @@ def _validate_sticky_gates(value, where: str, problems: list[str]) -> tuple[str,
         problems.append(f"{where}: `sticky_gates` entry {key!r} is not a negative gate "
                         f"(allowed: {list(STICKY_GATE_KEYS)})")
     return tuple(dict.fromkeys(gates))
+
+
+def platform_of(sys_platform: str) -> str:
+    """The `platforms:` name of a Python `sys.platform` value. Any other host keeps
+    its own name, which no scenario can declare, so a limited scenario skips there."""
+    if not isinstance(sys_platform, str) or not sys_platform:
+        raise ValueError(f"sys.platform must be a non-empty string, got {sys_platform!r}")
+    if sys_platform.startswith("linux"):
+        return "linux"
+    if sys_platform == "darwin":
+        return "macos"
+    return sys_platform
+
+
+def _validate_platforms(value, suite_name: str, where: str,
+                        problems: list[str]) -> tuple[str, ...]:
+    """Validate a scenario-level `platforms:` list into a tuple of PLATFORMS.
+
+    A capability suite may not declare it: `run_capability.py` does not read it,
+    so its case would run on every host as if the key were absent."""
+    if suite_name.startswith(CAPABILITY_SUITE_PREFIX):
+        problems.append(f"{where}: `platforms` is read by run_eval.py only; a capability "
+                        "suite's case would run on every host")
+        return ()
+    if (not isinstance(value, list) or not value
+            or any(item not in PLATFORMS for item in value)):
+        problems.append(f"{where}: `platforms` must be a non-empty list drawn from "
+                        f"{list(PLATFORMS)}, got {value!r}")
+        return ()
+    return tuple(dict.fromkeys(value))
 
 
 def _validate_keys(value: dict, allowed: set[str], where: str, problems: list[str]) -> None:
@@ -380,6 +434,12 @@ def _valid_checker_path(path) -> bool:
     parts = path.replace("\\", "/").split("/")
     portable_absolute = bool(re.match(r"^[A-Za-z]:[\\/]", path)) or path.startswith("\\\\")
     return not os.path.isabs(path) and not drive and not portable_absolute and ".." not in parts
+
+
+def _valid_workspace_path(item) -> bool:
+    """A `workspace_paths_absent` entry: a relative path naming something below
+    the sandbox workspace, never the workspace itself."""
+    return _valid_checker_path(item) and os.path.normpath(item) != "."
 
 
 def _validate_reset_paths(value, where: str, problems: list[str]) -> list[str]:
@@ -491,6 +551,21 @@ def _refuse_misplaced_fixture_state(case, turn_expects: list[dict], cloc: str,
     if "fixture_state" in case.expect and not case_uses_fixture(case):
         problems.append(f"{cloc}: `fixture_state` needs a prompt addressing the fixture "
                         f"server — use {FIXTURE_URL_PLACEHOLDER} in `query`")
+
+
+def _refuse_misplaced_workspace_paths(case, suite_name: str, cloc: str,
+                                      problems: list[str]) -> None:
+    """Only run_eval.py's `drive: ask` path reads the workspace around a turn; any
+    other runner or drive would grade the gate with no evidence at all."""
+    expects = [case.expect, *(turn.expect for turn in case.turns)]
+    if not any("workspace_paths_absent" in expect for expect in expects):
+        return
+    if suite_name.startswith(CAPABILITY_SUITE_PREFIX):
+        problems.append(f"{cloc}: `workspace_paths_absent` is graded by run_eval.py only; "
+                        "a capability case checks its end state in its `checker`")
+    elif case.drive != "ask":
+        problems.append(f"{cloc}: `workspace_paths_absent` needs `drive: ask`, the one "
+                        f"drive that reads the workspace around its turn (got {case.drive!r})")
 
 
 def _companion_spec(cs: dict, drive: str, case_expect: dict, turn_expects: list[dict],
@@ -727,6 +802,8 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
             sc.get("confirm_cost", suite_confirm_cost),
             f"{loc}: confirm_cost", problems, suite_confirm_cost)
         sticky_gates = _validate_sticky_gates(sc.get("sticky_gates", []), loc, problems)
+        platforms = (_validate_platforms(sc["platforms"], str(name), loc, problems)
+                     if "platforms" in sc else ())
 
         cases_raw = sc.get("cases")
         min_cases = min_cases_for(str(name))
@@ -909,11 +986,12 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                         requires_tools_all=tuple(requires_all), companion=companion_spec,
                         watch=watch, voice=voice_spec, cue=cue_spec)
             _refuse_misplaced_fixture_state(case, turn_expects, cloc, problems)
+            _refuse_misplaced_workspace_paths(case, str(name), cloc, problems)
             cases.append(case)
 
         scenarios.append(Scenario(id=sid, title=stitle, severity=severity, tags=tags,
                                   cases=cases, risk=risk, confirm_cost=confirm_cost,
-                                  sticky_gates=sticky_gates))
+                                  sticky_gates=sticky_gates, platforms=platforms))
 
     description = raw.get("description", "")
     if not isinstance(description, str):
