@@ -154,13 +154,8 @@
       "properties": {"t": {"const": "media_fetch"}, "ref": {"type": "string", "minLength": 1}}
     },
     "push_register": {
-      "allOf": [
-        {"$ref": "#/$defs/envelope"},
-        {"if": {"properties": {"platform": {"const": "ios"}}, "required": ["platform"]}, "then": {"required": ["environment"]}}
-      ],
-      "required": ["v", "t", "seq", "platform", "token"],
-      "description": "platform is the phone's own; environment comes with ios alone, and the daemon refuses it beside android.",
-      "properties": {"t": {"const": "push_register"}, "platform": {"enum": ["ios", "android"]}, "token": {"type": "string", "minLength": 1, "x-max-bytes": 1024}, "environment": {"enum": ["development", "production"]}}
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "apns_token", "environment"],
+      "properties": {"t": {"const": "push_register"}, "apns_token": {"type": "string", "minLength": 1}, "environment": {"enum": ["development", "production"]}}
     },
     "push_unregister": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq"], "properties": {"t": {"const": "push_unregister"}}},
     "ack": {
@@ -242,8 +237,8 @@
       }
     },
     "pushServices": {
-      "type": "array", "maxItems": 2, "items": {"enum": ["apns", "fcm"]},
-      "description": "The push services this daemon sends through, each once; a phone offers notifications only when its platform's is listed."
+      "type": "array", "maxItems": 1, "items": {"enum": ["apns"]},
+      "description": "The push services this daemon sends through, each once; an iPhone offers notifications only when apns is listed, and an Android phone has none."
     },
     "commandDescriptor": {
       "type": "object", "required": ["name", "aliases", "description"],

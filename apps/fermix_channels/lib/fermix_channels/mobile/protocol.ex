@@ -40,9 +40,8 @@ defmodule FermixChannels.Mobile.Protocol do
   @max_u64 18_446_744_073_709_551_615
   @default_max_media_bytes 20 * 1_024 * 1_024
   @platforms ~w(ios android)
-  # `fcm` stays in the wire's catalog, reserved: this daemon pushes no Android phone.
-  @push_services ~w(apns fcm)
-  @max_push_token_bytes 1_024
+  # This daemon pushes through APNs alone, so it is the wire's whole catalog.
+  @push_services ~w(apns)
   @attestation_kinds ~w(android_keymint apple_app_attest)
   @max_attestation_certs 6
   @max_attestation_chain_bytes 16 * 1_024
@@ -69,7 +68,7 @@ defmodule FermixChannels.Mobile.Protocol do
     "attach_end" => ~w(attach_id sha256),
     "history_pull" => ~w(profile_id limit),
     "media_fetch" => ~w(ref),
-    "push_register" => ~w(platform token),
+    "push_register" => ~w(apns_token environment),
     "push_unregister" => [],
     "ack" => ~w(server_seq),
     "request_status" => ~w(client_msg_ids),
@@ -578,29 +577,11 @@ defmodule FermixChannels.Mobile.Protocol do
 
   defp validate_request_status(_payload), do: {:error, {:invalid_field, "client_msg_ids"}}
 
-  # An iPhone's token is for one APNs environment, which it names; an Android
-  # phone's FCM token has none.
-  defp validate_push(%{"platform" => "ios"} = payload) do
-    with :ok <- push_token(payload) do
+  defp validate_push(payload) do
+    with :ok <- nonempty(payload, "apns_token") do
       enum(payload, "environment", ~w(development production))
     end
   end
-
-  defp validate_push(%{"platform" => "android"} = payload) do
-    with :ok <- push_token(payload) do
-      if Map.has_key?(payload, "environment"),
-        do: {:error, {:invalid_field, "environment"}},
-        else: :ok
-    end
-  end
-
-  defp validate_push(_payload), do: {:error, {:invalid_field, "platform"}}
-
-  defp push_token(%{"token" => token})
-       when is_binary(token) and byte_size(token) in 1..@max_push_token_bytes,
-       do: :ok
-
-  defp push_token(_payload), do: {:error, {:invalid_field, "token"}}
 
   defp validate_pair_request(payload) do
     with :ok <- nonempty(payload, "device_name"),

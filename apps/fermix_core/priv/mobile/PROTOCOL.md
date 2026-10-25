@@ -426,7 +426,7 @@ accepts it.
 | `cancel` | `profile_id`, `client_msg_id` | stops that request's turn, running or waiting, and no other; never answered |
 | `history_pull` | `profile_id`, `limit`, and exactly one of `after_seq` or `before_seq` | limit is 1–200; `after_seq` (≥ 0) pages forward and `before_seq` (≥ 1) backward, each any unsigned 64-bit value |
 | `media_fetch` | `ref` | re-download a content-addressed blob |
-| `push_register` | `platform`, `token`; `environment?` | `platform` is the paired phone's own, `ios` or `android`; `token` is the APNs or FCM token, at most 1,024 bytes; `environment` (`development` or `production`) comes with `ios` alone; an `android` token is kept and never pushed (see *Push notifications*) |
+| `push_register` | `apns_token`, `environment` | environment is `development` or `production` |
 | `push_unregister` | — | clears this phone's token: its notifications cannot show, so no push may come |
 | `ack` | `server_seq` | cumulative socket-delivery cursor |
 | `read_state` | `profile_id`, `read_up_to_seq` | monotonic read frontier |
@@ -507,9 +507,8 @@ palette), `media`, `streaming`, `turn_done` (true: every turn a request opened
 ends with `turn_done` or `turn_error`), `max_media_bytes`, the largest
 attachment the daemon takes, and `push[]`, the push services this daemon sends
 through, each once, empty when it pushes through none: `apns` while its APNs
-push runs. `fcm` is reserved: in the catalog, never sent, because the daemon
-pushes no Android phone. A phone offers notifications only when its
-platform's service is listed. A `hello_ack` with 16 numeric candidates and the whole
+push runs, the only service there is. An iPhone offers notifications only
+when `apns` is listed; no service is listed for an Android phone. A `hello_ack` with 16 numeric candidates and the whole
 command catalog fits one frame; one whose candidates are long MagicDNS names
 arrives as an `event_part` run.
 
@@ -803,9 +802,10 @@ registered phone a notification with no content at all: the alert is
 the profile is connected, or when push is off.
 
 Only an `ios` phone is pushed, and a phone paired before pairing recorded a
-platform, which was an iPhone. An `android` phone is pushed nothing, and its
-token never goes to APNs: each push it would have had is logged as refused for
-that phone.
+platform, which was an iPhone. An `android` phone is pushed nothing: its
+`push_register` is kept and answered with nothing, as any phone's is, but its
+token never goes to APNs, and each push it would have had is logged as refused
+for that phone.
 
 `push_vectors.json` pins one complete example — both static keypairs, the salt,
 the shared secret, the derived key, the nonce, the exact inner plaintext, and
@@ -865,7 +865,6 @@ parsed.
 | `store_quota_exceeded`, `media_too_large` | an upload that would pass the media store's quota or the largest blob | — | open |
 | `unexpected_chunk`, `size_exceeded`, `size_mismatch`, `sha256_mismatch`, `announced_hash_mismatch` | an upload whose chunks, size or digest differ from its `attach_begin`, or a zero-byte one announced with another digest | — | open |
 | `push_environment_mismatch` | a token for the other APNs environment | — | open |
-| `push_platform_mismatch` | a `push_register` for a platform other than the one the phone paired as | — | open |
 
 Every other failure a frame can be refused with is closed `1002` with no
 `error`: malformed JSON or framing, a sequence gap or replay, a frame whose `v`

@@ -442,7 +442,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
       "candidates" => [],
       "profiles" => [%{"id" => "main", "name" => "Fermix"}],
       "push_salt" => Base.encode64(:binary.copy(<<7>>, 32)),
-      "push" => ["fcm"]
+      "push" => ["apns"]
     }
 
     assert {:ok, _frame} = Protocol.encode_server_frame("pair_approved", approved, 1)
@@ -456,16 +456,18 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     end
   end
 
+  # The daemon pushes through APNs alone, so `apns` is the whole catalog: the
+  # codec never sends `fcm`, or any other service, in either list.
   test "pair_approved and hello_ack name the push services this daemon has" do
     approved = %{
       "device_id" => "device-1",
       "candidates" => [],
       "profiles" => [%{"id" => "main", "name" => "Fermix"}],
       "push_salt" => Base.encode64(:binary.copy(<<7>>, 32)),
-      "push" => ["apns", "fcm"]
+      "push" => ["apns"]
     }
 
-    for push <- [[], ["fcm"], ["apns"], ["apns", "fcm"]] do
+    for push <- [[], ["apns"]] do
       assert {:ok, _frame} =
                Protocol.encode_server_frame("pair_approved", %{approved | "push" => push}, 1)
     end
@@ -473,7 +475,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     assert {:error, {:missing_field, "push"}} =
              Protocol.encode_server_frame("pair_approved", Map.delete(approved, "push"), 1)
 
-    for push <- [["gcm"], ["fcm", "fcm"], "fcm"] do
+    for push <- [["fcm"], ["apns", "fcm"], ["gcm"], ["apns", "apns"], "apns"] do
       assert {:error, {:invalid_field, "push"}} =
                Protocol.encode_server_frame("pair_approved", %{approved | "push" => push}, 1)
     end
@@ -486,39 +488,35 @@ defmodule FermixChannels.Mobile.ProtocolTest do
       "candidates" => [],
       "history_head_seq" => 0,
       "read_up_to_seq" => 0,
-      "caps" => %{"commands" => [], "max_media_bytes" => 1, "push" => ["fcm"]}
+      "caps" => %{"commands" => [], "max_media_bytes" => 1, "push" => ["apns"]}
     }
 
     assert {:ok, _frame} = Protocol.encode_server_frame("hello_ack", ack, 1)
 
-    assert {:error, {:invalid_field, "caps.push"}} =
-             Protocol.encode_server_frame("hello_ack", put_in(ack, ["caps", "push"], ["web"]), 1)
+    for push <- [["fcm"], ["apns", "fcm"], ["web"]] do
+      assert {:error, {:invalid_field, "caps.push"}} =
+               Protocol.encode_server_frame("hello_ack", put_in(ack, ["caps", "push"], push), 1)
+    end
   end
 
-  test "push_register names the phone's platform, with an APNs environment only for an iPhone" do
-    token = String.duplicate("f", 163)
+  # Protocol 2 shipped push_register as {apns_token, environment} (engine
+  # 0.16.0), and one protocol number keeps one shape of an event, so the
+  # {platform, token, environment?} shape it had on dev for a while is refused
+  # like any other malformed push_register.
+  test "push_register is the APNs token and environment protocol 2 shipped with" do
+    fields = %{"apns_token" => "0123456789abcdef", "environment" => "development"}
 
-    assert {:ok, %{type: "push_register", payload: %{"platform" => "android", "token" => ^token}}} =
-             Protocol.decode_client_frame(
-               client_frame("push_register", 1, %{"platform" => "android", "token" => token})
-             )
-
-    ios = %{"platform" => "ios", "token" => "abc123", "environment" => "production"}
-
-    assert {:ok, %{payload: ^ios}} =
-             Protocol.decode_client_frame(client_frame("push_register", 1, ios))
+    assert {:ok, %{type: "push_register", payload: ^fields}} =
+             Protocol.decode_client_frame(client_frame("push_register", 1, fields))
 
     refused = [
-      {%{"platform" => "android"}, {:missing_field, "token"}},
-      {%{"token" => token}, {:missing_field, "platform"}},
-      {%{"platform" => "windows", "token" => token}, {:invalid_field, "platform"}},
-      {%{"platform" => "android", "token" => ""}, {:invalid_field, "token"}},
-      {%{"platform" => "android", "token" => String.duplicate("f", 1_025)},
-       {:invalid_field, "token"}},
-      {%{"platform" => "android", "token" => token, "environment" => "production"},
-       {:invalid_field, "environment"}},
-      {%{"platform" => "ios", "token" => "abc123"}, {:invalid_field, "environment"}},
-      {%{"apns_token" => "abc123", "environment" => "production"}, {:missing_field, "platform"}}
+      {%{"environment" => "production"}, {:missing_field, "apns_token"}},
+      {%{"apns_token" => "abc123"}, {:missing_field, "environment"}},
+      {%{"apns_token" => "", "environment" => "production"}, {:invalid_field, "apns_token"}},
+      {%{"apns_token" => "abc123", "environment" => "staging"}, {:invalid_field, "environment"}},
+      {%{"platform" => "ios", "token" => "abc123", "environment" => "production"},
+       {:missing_field, "apns_token"}},
+      {%{"platform" => "android", "token" => "fcm-token"}, {:missing_field, "apns_token"}}
     ]
 
     for {fields, reason} <- refused do

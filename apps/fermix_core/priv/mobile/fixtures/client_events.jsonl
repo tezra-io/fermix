@@ -11,8 +11,7 @@
 {"v":2,"t":"history_pull","seq":11,"profile_id":"main","after_seq":18446744073709551615,"limit":50}
 {"v":2,"t":"history_pull","seq":11,"profile_id":"main","before_seq":19,"limit":50}
 {"v":2,"t":"media_fetch","seq":12,"ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
-{"v":2,"t":"push_register","seq":13,"platform":"android","token":"fK3x9QmT0aE:APA91bH-example-fcm-registration-token"}
-{"v":2,"t":"push_register","seq":13,"platform":"ios","token":"0123456789abcdef","environment":"development"}
+{"v":2,"t":"push_register","seq":13,"apns_token":"0123456789abcdef","environment":"development"}
 {"v":2,"t":"push_unregister","seq":14}
 {"v":2,"t":"ack","seq":14,"server_seq":12}
 {"v":2,"t":"read_state","seq":15,"profile_id":"main","read_up_to_seq":12}

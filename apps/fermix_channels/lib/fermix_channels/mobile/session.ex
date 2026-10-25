@@ -93,7 +93,7 @@ defmodule FermixChannels.Mobile.Session do
   @typed_refusals ~w(
     store_quota_exceeded media_too_large sha256_mismatch announced_hash_mismatch
     size_mismatch size_exceeded unexpected_chunk invalid_field missing_field
-    attachment_unavailable unsupported_event push_environment_mismatch push_platform_mismatch
+    attachment_unavailable unsupported_event push_environment_mismatch
   )a
 
   @type state :: map()
@@ -940,11 +940,11 @@ defmodule FermixChannels.Mobile.Session do
     end
   end
 
+  # Kept for every phone: Push sends only an iPhone's, and refuses the rest by
+  # name, so an Android phone's token is never sent through APNs.
   defp dispatch_event(%{type: "push_register", payload: payload}, state) do
-    with :ok <- validate_push_platform(payload["platform"], paired_platform(state)),
-         :ok <- validate_registration(payload, state) do
-      store_push_token(payload["token"], state)
-    else
+    case validate_push_environment(payload["environment"], state.push_environment) do
+      :ok -> store_push_token(payload["apns_token"], state)
       {:error, reason} -> {:error, reason, state}
     end
   end
@@ -1675,22 +1675,6 @@ defmodule FermixChannels.Mobile.Session do
       {:error, reason} -> {:error, reason, state}
     end
   end
-
-  # A phone paired before pairing recorded a platform was an iPhone.
-  defp paired_platform(%{authenticated_device: nil}), do: "ios"
-
-  defp paired_platform(%{authenticated_device: device}),
-    do: value(device, :platform) || "ios"
-
-  defp validate_push_platform(platform, platform), do: :ok
-
-  defp validate_push_platform(received, paired),
-    do: {:error, {:push_platform_mismatch, paired, received}}
-
-  defp validate_registration(%{"platform" => "ios", "environment" => environment}, state),
-    do: validate_push_environment(environment, state.push_environment)
-
-  defp validate_registration(%{"platform" => "android"}, _state), do: :ok
 
   defp validate_push_environment(received, configured)
        when received in ["development", "production"] and
