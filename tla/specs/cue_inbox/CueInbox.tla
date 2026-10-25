@@ -44,7 +44,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/filters.ex @ fed2523b7855
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/supervisor.ex @ 6cd21aac9d1d
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/sweeper.ex @ da4e2d7db65e
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/proposals.ex @ fd8172605e3f
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/proposals.ex @ 9830af99b55d
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_sql.ex @ 0efd93ce0491
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_filter_sql.ex @ 68f8085a8c5d
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_runs_sql.ex#@open_sql,@cap_room_sql,@eligible_sql,@candidates_sql,@eligible_delivery_sql,@settle_facts_sql,eligible_delivery,settle_delivery,settle_facts,settle_held,settle_move,unspent_retry,spent_retry,move_patch,untouched @ f65310ef1716
