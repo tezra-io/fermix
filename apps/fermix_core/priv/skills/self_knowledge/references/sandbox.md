@@ -1,6 +1,6 @@
 # Sandbox
 
-The sandbox bounds what the file, image, search, git, attachment and shell tools reach. It does not limit plugins, web search, memory or provider calls, and it sets computer use's `access` (`strict` is look-only). On a Mac the operating system holds every command to the mode as well (below); on Linux a command is still checked only for the folder it runs in and for destructive patterns, not for the files it names, so a command run from an allowed folder can write anywhere the owner can.
+The sandbox bounds what the file, image, search, git, attachment and shell tools reach. It does not limit plugins, web search, memory or provider calls, and it sets computer use's `access` (`strict` is look-only). On a Mac the operating system holds every command to the mode as well (below); on Linux a command is still checked only for the folder it runs in and for destructive patterns, not for the files it names, so a command run from an allowed folder can write anywhere the owner can. That is why on Linux a command in a turn that has read content someone else could have written asks the owner first (below).
 
 ## Modes and roots
 
@@ -28,6 +28,14 @@ On a Mac, every `shell` command, operator command (`[sandbox.commands]`, the `de
 - A refused write or read is the program's own `Operation not permitted`. The fix is a grant (`/grant path PATH`) or `open`, never a different command. Because commands cannot reach Fermix's files or sockets, `fermix sandbox`, `fermix grant`, `fermix setup`, `fermix settings`, `fermix status` or `fermix ask` run as a command fail: tell the owner what to run in their own terminal or the app. If the sandbox itself cannot start a command, the result says "could not start inside Fermix's sandbox".
 - Not held yet: the `codex` and `claude_code` presets, coding runs (`codex_run`, `claude_code_run`) and plugin or MCP server processes. `codex` and `claude` run through `shell` fail, because their own state folders are protected.
 
+## Commands after outside content
+
+When Fermix cannot sandbox a command, it waits for the owner before running it in a turn that has already read content someone else could have written, exactly as an access-sensitive plugin command does (plugins reference): one confirmation in the owner's chat or app, or a spoken yes on a call, expiring in 60 s; the asking turn runs nothing else meanwhile, and Fermix then runs exactly that command, in the folder and sandbox the turn had. The owner's prompt shows the exact command, verbatim (a command too long to show is refused, not run). Outside content is the plugins reference's list, which includes the message's own attachments (a voice note aside) and the Recent Activity note.
+- **Which commands.** On Linux every `shell` command, operator command and `git_write` call (the kernel holds none of them yet). On a Mac the `codex`/`claude_code` presets, which run outside the sandbox on every platform; a Mac's `shell`, `git_write` and confined operator commands are held by the kernel and do not wait.
+- A turn that has read nothing from outside runs commands at once, as before; `git_read` never asks. A shared Buzz channel is not outside content for commands: a Buzz turn's `shell` (its `buzz` CLI replies included) waits only once that turn has read outside content.
+- Delegated workers (`subagents`, `skill_run`, which also carry what their parent read), tasks a cue woke, `/background` and other unattended runs never run one after outside content. A scheduled job runs one then only when its `allowed_tools` names it, and a job with no `allowed_tools` (which would run every tool), or one that can start a skill (`skill_run` or a skill by name, whose worker uses the skill's own tools) or manage jobs (`schedule_job`, `update_job`, `run_job_now`, `resume_job`), cannot be set up, changed, resumed or run now from a turn that read outside content; name the tools the job needs instead, without skill or job tools. What a tainted turn writes for later (memory, a skill, a job's task) runs clean later within those rules.
+- On a voice call such a command is refused rather than asked aloud, because the owner must see the exact command: they ask for it from their own chat or the Fermix app.
+
 ## Changing it
 
 | Setting | Mac Settings > Sandbox | Browser setup, Sandbox tab | Chat | Terminal (Linux, dev) |
@@ -51,7 +59,7 @@ A change that adds a root, an allowed variable, a preset or a command asks for `
 - When a filesystem call is refused as outside the roots and the task genuinely needs that folder, the agent calls `request_directory_access`, only in an attended operator turn. Guests, scheduled jobs, sub-agents and unattended runs never get it, and it never asks for a path it would refuse (`$HOME` wholesale, the Fermix home, `~/.ssh`, OS roots).
 - The owner sees the canonical path, the reason and the config diff, and answers `/confirm TOKEN` or `/deny TOKEN` (a visible refusal that discards the grant). Tokens are single-use, bound to that conversation, owner-only and expire in 60 s; a `/confirm` from a process Fermix started is refused. On Telegram and Discord the prompt also has **Approve**/**Deny** buttons that deliver the token privately, and a group chat's text leaves the token out (button mechanics: `channel_presentation` reference).
 - On confirm the grant persists to `[sandbox] allowed_roots`. On a chat channel the original request resumes by itself; on the one-shot CLI the owner re-runs it.
-- The same prompt also acknowledges a coding agent's config change and holds an access-sensitive plugin command.
+- The same prompt also acknowledges a coding agent's config change and holds an access-sensitive plugin command or, on Linux, a command after outside content.
 
 ## Command profiles and presets
 

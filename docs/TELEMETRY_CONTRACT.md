@@ -60,7 +60,10 @@ must stay provable in a content-free export.
 
 A second source stamps the marker: `Capabilities.AccessGate`, the one gate in
 `Capability.execute/3`. It decides plugin tools whose manifest marks them
-`access_sensitive`, any call made while another call of the same turn is parked,
+`access_sensitive`; a built-in host command (`shell`, `git_write`, a declared
+command) after the turn read outside content, where Fermix cannot sandbox that
+call (no kernel enforcement, or a preset that runs unconfined); any call made
+while another call of the same turn is parked,
 and, through its first clause (`Cues.MandateGate`), **every** call a run woken
 by a cue makes, flagged or not (see "Access-gate labels"). It derives the map
 from `AccessGate.pre_execution_marker/1`
@@ -73,13 +76,17 @@ capability's name and with `success: false`.
 
 ### Access-gate labels
 
-Every call the gate decides (every access-sensitive call, and every call of a
-run a cue woke) also carries `access_gate`, a closed enum of how the gate
+Every call the gate decides (every access-sensitive call, every host command it
+decides, and every call of a run a cue woke) also carries
+`access_gate`, a closed enum of how the gate
 settled it: `direct` (the owner's clean, attended request), `scheduled` (a
 job whose `allowed_tools` names it), `confirmed`, or one of `held_this_chat`,
 `held_owner_inbox`, `held_voice`, `already_confirmed`, `refused_worker`,
 `refused_cue_run`, `refused_unattended`, `refused_not_allowlisted`,
-`refused_no_surface`, `refused_full`, `refused_confirm_mismatch`. The refused
+`refused_no_surface`, `refused_full`, `refused_confirm_mismatch`,
+`refused_voice_surface` (a host command on a voice call, which cannot show the
+owner the exact command), `refused_command_too_long` (a host command too long to
+show the owner whole). The refused
 labels are one function's output (`refused_<reason>`), so a new refusal reason
 is a new label here. `refused_cue_run` is an access-sensitive call made by a job
 run a cue woke (`trigger: "cue"` on the context) outside its mandate: it read
@@ -107,9 +114,17 @@ no), `mandate_disabled` (the mandate or `mandates_enabled` is switched off, it
 fails its load checks, or it is not approved), `mandate_stale` (the cue is older
 than `max_cue_age`, or its time is unknown) or `mandate_unpinned` (what the
 mandate pins changed since the owner approved it; the mandate is disabled until
-approved again). A call to a tool outside the run's tool set is refused as
-`refused_cue_surface`, or, when the tool is access-sensitive, falls through to
-`refused_cue_run`. In a mandated run a file tool reads only inside the job's
+approved again). A call to one of the mandate's `read_tools` is not a mandate
+call and writes no row: it runs only while its capability is still marked
+read-only and the mandate passes a mandate call's first steps, and is otherwise
+refused as `refused_reader_writes` (no longer read-only), `mandate_disabled`
+(the load checks, the switches, or an approval missing, disabled or given after
+the run began), `mandate_unpinned` (what the mandate pins changed; the mandate
+is disabled until approved again) or `mandate_refused` (the pins could not be
+verified). A refused read tool carries `validator: "none"` and
+`mandate_reason`, and no `mandate_call_id`. A call to a tool outside the run's tool set is refused
+as `refused_cue_surface`, or, when the tool is access-sensitive, falls through
+to `refused_cue_run`. In a mandated run a file tool reads only inside the job's
 skill folder; when the job names no skill, or the folder cannot be read, the
 call is refused as `refused_mandate_files`. Every mandate call also carries
 `mandate_call_id` (its row) and `validator: "program" | "none"` (whether the
@@ -718,8 +733,9 @@ run trace's metadata carries `trigger`, `watcher_id` and `delivery_id`, and
 `mix opik.replay` keeps all three. A cue run's tools are ordinary
 `[:fermix, :tool, :exec]` events under the run's session, one per model call:
 the gate labels each call it decides, a mandate call with a `mandate_*` label,
-a call outside the run's tools `refused_cue_surface`, an access-sensitive one
-outside its mandate `refused_cue_run` (see "Access-gate labels").
+a refused read tool `refused_reader_writes` or a `mandate_*` label, a call
+outside the run's tools `refused_cue_surface`, an access-sensitive one outside
+its mandate `refused_cue_run` (see "Access-gate labels").
 
 ## Meeting notetaker runs
 

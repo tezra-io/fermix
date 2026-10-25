@@ -107,7 +107,7 @@ helper                                   daemon
 ## Ops the daemon sends
 
 ```json
-{"op":"start","secret_key_path":"/Users/owner/.fermix/mobile/iroh_key","bridge_socket":"/Users/owner/.fermix/mobile/bridge.sock","alpn":"fermix/mobile/1","relays":[{"url":"https://us1.relay.fermix.ai/","quic_port":7842},{"url":"https://eu1.relay.fermix.ai/","quic_port":7842}],"limits":{"max_connections":64,"max_streams_per_connection":4,"stream_receive_window":262144,"connection_receive_window":1048576,"send_window":1048576}}
+{"op":"start","secret_key_path":"/Users/owner/.fermix/mobile/iroh_key","bridge_socket":"/Users/owner/.fermix/mobile/bridge.sock","alpn":"fermix/mobile/1","relays":[{"url":"https://us1.relay.fermix.ai/","quic_port":7842},{"url":"https://eu1.relay.fermix.ai/","quic_port":7842}],"limits":{"max_connections":1024,"max_streams_per_connection":4,"stream_receive_window":262144,"connection_receive_window":1048576,"send_window":1048576}}
 {"op":"set_relays","relays":[{"url":"https://us1.relay.fermix.ai/","quic_port":7842},{"url":"https://eu1.relay.fermix.ai/","quic_port":7842}]}
 {"op":"close","endpoint_id":"79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664"}
 {"op":"shutdown"}
@@ -191,9 +191,18 @@ mobile protocol's iroh carrier frames, which the daemon parses and bounds
   application code `2` and reports `refused` `bridge_unreachable`; it does not
   retry.
 
-The daemon bounds concurrent bridge connections itself, as its mobile listener
-bounds WebSocket connections: the helper may open up to
-`max_connections × max_streams_per_connection` of them.
+The daemon bounds concurrent bridge connections itself, at 64: the helper may
+open up to `max_connections × max_streams_per_connection` of them. Past its
+bound the daemon makes room for a new connection by closing the oldest one
+whose session is still in its handshake, after a close frame, and closes the
+new one at once when every session is past its handshake. Either is the daemon
+closing a bridge connection (**Ending.**): nothing changes for the helper.
+
+`limits.max_connections` is therefore the outer bound: a connection refused
+`busy` never reaches the bridge, where room could be made for it. The daemon
+sends the most this contract allows, 1,024, far above its bridge bound, so
+silent connections fill the bridge long before they fill the helper. The helper
+does not close a silent connection to make room for a new one.
 
 Ending a stream never closes the iroh connection: a phone renews its session on a
 new stream of the same connection, opened as the last one ends. A connection with

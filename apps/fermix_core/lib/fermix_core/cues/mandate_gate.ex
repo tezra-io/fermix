@@ -11,6 +11,14 @@ defmodule FermixCore.Cues.MandateGate do
   In a cue run:
 
     * a call to a tool in the run's mandate `tools` is a **mandate call**;
+    * a call to one of its `read_tools` runs unrecorded, without the mode,
+      freshness, loop breaker, `pin_args` or validator, only while the
+      capability is still marked read-only (else `refused_reader_writes`) and
+      the mandate passes the steps a mandate call takes first: the run's
+      load-check verdict and the switches (`Cues.Mandates.in_force/2`), with
+      the approval before the run began (`mandate_disabled`), and the pin
+      check (`mandate_unpinned`, which disables the mandate, or
+      `mandate_refused`);
     * a call to a tool outside the run's tool set (`Jobs.CueSurface.allowed?/1`
       plus the mandate's `tools` and `read_tools`) is refused here, except an
       access-sensitive command, which `AccessGate.decide/2` refuses as a cue
@@ -44,7 +52,8 @@ defmodule FermixCore.Cues.MandateGate do
   A refused or proposed call is still one model tool call: the gate emits its
   one `[:fermix, :tool, :exec]` event, with an `access_gate` label
   (`mandate_proposed`, `mandate_refused`, `mandate_disabled`, `mandate_stale`,
-  `mandate_unpinned`, `refused_cue_surface`, `refused_mandate_files`), the typed
+  `mandate_unpinned`, `refused_cue_surface`, `refused_reader_writes`,
+  `refused_mandate_files`), the typed
   `pre_execution` marker, `validator: program | none` and the call's id. An
   allowed call's own event comes from its executor, labelled
   `mandate_allowed` through the context.
@@ -59,7 +68,6 @@ defmodule FermixCore.Cues.MandateGate do
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.UntrustedContent
-  alias FermixCore.Cues.Config
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Pins
   alias FermixCore.Cues.Proposals
@@ -132,8 +140,11 @@ defmodule FermixCore.Cues.MandateGate do
       mandate_tool?(capability, mandate) ->
         mandated_call(capability, args, context, mandate, opts)
 
-      in_run_set?(capability, mandate) ->
+      CueSurface.allowed?(capability) ->
         files_or_pass(capability, args, context, mandate, opts)
+
+      read_tool?(capability, mandate) ->
+        reader_call(capability, args, context, mandate, opts)
 
       Map.get(capability.metadata, :access_sensitive?) == true ->
         :not_mandated
@@ -206,10 +217,62 @@ defmodule FermixCore.Cues.MandateGate do
   defp mandate_tool?(_capability, nil), do: false
   defp mandate_tool?(%Capability{name: name}, %Mandates{tools: tools}), do: name in tools
 
-  defp in_run_set?(capability, nil), do: CueSurface.allowed?(capability)
+  defp read_tool?(_capability, nil), do: false
+  defp read_tool?(%Capability{name: name}, %Mandates{read_tools: tools}), do: name in tools
 
-  defp in_run_set?(capability, %Mandates{read_tools: read_tools}),
-    do: CueSurface.allowed?(capability) or capability.name in read_tools
+  # A reader runs with none of a mandate call's other checks (mode, freshness,
+  # limit, pin_args, validator) and is not recorded. What gates it: the
+  # capability the call reaches is still marked read-only (the load check read
+  # the manifest once, and a plugin update or a stale registration can change
+  # what runs); the run's load-check verdict; the mandate in force, approved
+  # before the run began; and the pins, since `read_tools` and the task are
+  # pinned and a run that only reads would never reach a mandate call's pin
+  # check. All but the first are the mandate call's own steps, with their
+  # labels, and a changed pin disables the mandate and tells the owner once.
+  defp reader_call(capability, args, context, mandate, opts) do
+    if Map.get(capability.metadata, :read_only?) == true,
+      do:
+        reader_in_force(capability, args, context, with_load_checks(mandate, context, opts), opts),
+      else: reader_writes(capability, args, context, mandate)
+  end
+
+  defp reader_in_force(capability, args, context, mandate, opts) do
+    with {:ok, approval} <- switches(mandate, opts),
+         :ok <- approved_before_run(approval, context),
+         :ok <- pinned(mandate, approval, opts, now(opts)) do
+      :not_mandated
+    else
+      {:refuse, label, reason, validator} ->
+        refuse_reader(capability, args, context, label, reason, validator)
+    end
+  end
+
+  # It was offered as a reader, so the refusal says what changed, and the
+  # owner's log names where to look.
+  defp reader_writes(capability, args, context, mandate) do
+    Logger.warning(
+      "Mandate #{mandate.name}: read tool #{capability.name} of plugin " <>
+        "#{inspect(Map.get(capability.metadata, :plugin))} is not marked read-only now; " <>
+        "its call was refused"
+    )
+
+    reason =
+      "it is one of the mandate's read tools, but it is not marked read-only now, so it " <>
+        "could change something"
+
+    refuse_reader(capability, args, context, "refused_reader_writes", reason, "none")
+  end
+
+  # A reader writes no row, so its event carries no `mandate_call_id`; every
+  # reader refusal carries `validator` (always "none": no validator judges a
+  # reader) and `mandate_reason`, Fermix's own sentence.
+  defp refuse_reader(capability, args, context, label, reason, validator) do
+    text =
+      "#{capability.name} was not run: #{reason}. Report what you found with the tools you have."
+
+    metadata = %{validator: validator, mandate_reason: reason}
+    hold(capability, args, context, text, label, :deny, metadata)
+  end
 
   defp files_or_pass(
          %Capability{kind: :builtin, name: name} = capability,
@@ -459,42 +522,26 @@ defmodule FermixCore.Cues.MandateGate do
   defp problem(%{problem: nil}), do: :ok
   defp problem(%{problem: problem}), do: {:refuse, "mandate_refused", problem, "none"}
 
-  defp switches(%Mandates{enabled?: false}, _opts),
-    do: {:refuse, "mandate_disabled", "the mandate is switched off (enabled = false)", "none"}
-
-  defp switches(%Mandates{status: status} = mandate, opts) do
-    cond do
-      not (opts |> cues_config() |> Config.mandates_enabled?()) ->
-        {:refuse, "mandate_disabled", "unattended mandate calls are switched off in settings",
-         "none"}
-
-      match?({:inactive, _reason}, status) ->
-        {:refuse, "mandate_disabled", "the mandate is inactive: #{elem(status, 1)}", "none"}
-
-      true ->
-        approved(mandate, opts)
+  defp switches(mandate, opts) do
+    case Mandates.in_force(mandate, opts) do
+      {:ok, approval} -> {:ok, approval}
+      {:error, why} -> {:refuse, "mandate_disabled", not_in_force(why), "none"}
     end
   end
 
-  defp approved(mandate, opts) do
-    case Pins.approval(mandate.name, opts) do
-      {:ok, nil} ->
-        {:refuse, "mandate_disabled",
-         "the mandate is not approved yet; the owner approves it in settings", "none"}
+  # Fermix's words to the model for `Mandates.in_force/2`'s reasons.
+  defp not_in_force(:switched_off), do: "the mandate is switched off (enabled = false)"
+  defp not_in_force(:mandates_off), do: "unattended mandate calls are switched off in settings"
+  defp not_in_force({:inactive, why}), do: "the mandate is inactive: #{why}"
 
-      {:ok, %{disabled_at: %DateTime{}} = row} ->
-        {:refuse, "mandate_disabled",
-         "the mandate is disabled until the owner approves it again (#{row.disabled_reason})",
-         "none"}
+  defp not_in_force(:unapproved),
+    do: "the mandate is not approved yet; the owner approves it in settings"
 
-      {:ok, row} ->
-        {:ok, row}
+  defp not_in_force({:disabled, why}),
+    do: "the mandate is disabled until the owner approves it again (#{why})"
 
-      {:error, reason} ->
-        {:refuse, "mandate_disabled",
-         "the mandate's approval could not be read (#{inspect(reason)})", "none"}
-    end
-  end
+  defp not_in_force({:approval_unreadable, reason}),
+    do: "the mandate's approval could not be read (#{inspect(reason)})"
 
   # The run follows its task as the claim read it (`Repo.claim_cue_run/4`
   # reads the job in the claim's transaction), so an approval given after the
@@ -775,9 +822,6 @@ defmodule FermixCore.Cues.MandateGate do
     |> Map.get(:cue_mandate_opts, [])
     |> Keyword.put_new(:repo, Map.get(context, :memory_repo) || Repo)
   end
-
-  defp cues_config(opts),
-    do: Keyword.get_lazy(opts, :config, fn -> Application.get_env(:fermix_core, :cues, []) end)
 
   defp now(opts), do: Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
 

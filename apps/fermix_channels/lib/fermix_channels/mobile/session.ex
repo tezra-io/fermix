@@ -29,8 +29,10 @@ defmodule FermixChannels.Mobile.Session do
     which is the session's back-pressure;
   - closes with the `t:close/0` a `:stop` names, after sending its frames;
   - calls `terminate/2` once as it closes, also after `init/1` itself stopped,
-    passing the reason of the session's `:stop` unchanged, or `:timeout` when it
-    closed an idle carrier.
+    passing the reason of the session's `:stop` unchanged, `:timeout` when it
+    closed an idle carrier, or `:made_room` when it closed one not yet
+    `past_handshake?/1` to make room for another, with the handshake deadline's
+    close.
 
   The carrier also sets its own process's memory bound before `hello`; the
   session raises it to `:authenticated_max_heap_size` once a paired phone says
@@ -74,6 +76,7 @@ defmodule FermixChannels.Mobile.Session do
   @rekey_after_frames 1_048_576
   @session_lifetime_ms 3_600_000
   @handshake_deadline_ms 10_000
+  @handshake_deadline_close {1008, "mobile handshake deadline"}
   # The phases a peer passes through before it is a paired device or a phone
   # waiting for the owner; the handshake deadline bounds all of them.
   @deadline_phases [:prelude, :await_hello, :await_pair_request]
@@ -134,6 +137,30 @@ defmodule FermixChannels.Mobile.Session do
   """
   @spec idle_timeout_ms() :: pos_integer()
   def idle_timeout_ms, do: PairManager.max_ttl_ms() + @idle_grace_ms
+
+  @doc """
+  Whether the peer is past its handshake: its IK handshake proved a paired
+  phone's key (`authenticated_device`, which an approved pairing phone also
+  holds), or its pairing request waits for the owner. Until then the connection
+  may be a stranger's, held for as long as the handshake deadline lets it:
+  IKpsk2's first message proves no pairing secret, so a peer awaiting its
+  `pair_request` has shown only that it knows the gateway key, which every
+  pairing QR shows.
+
+  A replayed IK first message gets past too, until its deadline, but capturing
+  one takes breaking the transport's encryption (iroh's QUIC TLS, the
+  WebSocket's TLS) or an endpoint, not a stranger's stream.
+  """
+  @spec past_handshake?(state()) :: boolean()
+  def past_handshake?(%{phase: :await_pair_decision}), do: true
+  def past_handshake?(%{authenticated_device: device}), do: not is_nil(device)
+
+  @doc """
+  The close of a connection the handshake deadline ends, which a carrier short
+  of room also gives a connection not yet `past_handshake?/1`.
+  """
+  @spec handshake_deadline_close() :: close()
+  def handshake_deadline_close, do: @handshake_deadline_close
 
   @doc "The carrier process's memory bound before the phone has said `hello`."
   @spec unauthenticated_heap_cap() :: map()
@@ -1418,7 +1445,7 @@ defmodule FermixChannels.Mobile.Session do
   defp handshake_deadline(state), do: handshake_timeout(state)
 
   defp handshake_timeout(state),
-    do: {:stop, :handshake_timeout, {1008, "mobile handshake deadline"}, state}
+    do: {:stop, :handshake_timeout, @handshake_deadline_close, state}
 
   defp mark_session_start(state) do
     now = Map.get(state, :clock, fn -> System.monotonic_time(:millisecond) end).()

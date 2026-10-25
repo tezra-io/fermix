@@ -6,12 +6,16 @@ defmodule FermixCore.Cues.MandatesTest do
   """
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
   import FermixTestSupport.CueFixtures, only: [exec!: 3]
 
   alias FermixCore.Capabilities.Advertisement
   alias FermixCore.Cues.Config
   alias FermixCore.Cues.Mandates
+  alias FermixCore.Cues.Pins
   alias FermixCore.Jobs.CueRun
+  alias FermixCore.Jobs.CueSurface
+  alias FermixCore.Memory.Repo
   alias FermixTestSupport.MandateFixtures, as: F
   alias FermixTestSupport.SafeRm
 
@@ -169,6 +173,131 @@ defmodule FermixCore.Cues.MandatesTest do
              {:inactive,
               "github_search_issues asks for confirmation on every call; list it under tools " <>
                 "or leave it out."}
+  end
+
+  # A reader runs in a cue run with none of a mandate call's checks (no switch,
+  # approval, freshness, limit, pin or record), so a tool that can change
+  # something is no reader, whatever list it was put in.
+  test "a reader its plugin does not mark read-only is refused in read_tools",
+       %{fixture: fixture} do
+    delete = "google_calendar_delete_event"
+
+    writers = fn
+      ^delete ->
+        request = %{"method" => "DELETE", "url" => "https://calendar.example.test/events/{id}"}
+        {:ok, %{plugin: "google_calendar", tool: %{"name" => delete, "request" => request}}}
+
+      "github_search_issues" = name ->
+        {:ok, %{plugin: "github", tool: Map.put(F.manifest(name), "read_only", false)}}
+
+      name ->
+        F.plugin_tool().(name)
+    end
+
+    assert status(fixture, %{"read_tools" => [delete]}, plugin_tool: writers) ==
+             {:inactive,
+              "google_calendar_delete_event is not marked read-only, so it can change " <>
+                "something; list it under tools or leave it out."}
+
+    assert {:inactive, sentence} = status(fixture, %{}, plugin_tool: writers)
+    assert sentence =~ "github_search_issues is not marked read-only"
+    assert Mandates.for_job(fixture.job.id, seams(fixture, %{}, plugin_tool: writers)) == nil
+
+    assert status(fixture, %{}) == :active
+  end
+
+  test "the first entry of read_tools that is no reader is the one named", %{fixture: fixture} do
+    flagged = "tesla_unlock_doors"
+
+    lookup = fn
+      ^flagged ->
+        tool = %{"name" => flagged, "request" => %{}, "access_sensitive" => true}
+        {:ok, %{plugin: "tesla", tool: tool}}
+
+      "github_create_issue" = name ->
+        {:ok, %{plugin: "github", tool: F.manifest(name)}}
+
+      name ->
+        F.plugin_tool().(name)
+    end
+
+    read_tools = [F.reader(), "github_create_issue", flagged]
+
+    assert {:inactive, "github_create_issue is not marked read-only" <> _rest} =
+             status(fixture, %{"read_tools" => read_tools}, plugin_tool: lookup)
+
+    assert {:inactive, "tesla_unlock_doors asks for confirmation on every call" <> _rest} =
+             status(fixture, %{"read_tools" => [F.reader(), flagged]}, plugin_tool: lookup)
+  end
+
+  # A reader runs with none of a mandate call's other checks, so a cue run is
+  # offered the mandate's readers only while it is in force: switched on, with
+  # mandates on in settings, and approved with an approval not disabled.
+  test "a cue run is offered the mandate's readers only while it is in force",
+       %{fixture: fixture} do
+    offered = fn seams ->
+      mandate = Mandates.for_job(fixture.job.id, seams)
+      CueSurface.tools(fixture.job, nil, %{task_notes?: false}, mandate)
+    end
+
+    seams = seams(fixture, %{})
+    assert %Mandates{tools: [tool], read_tools: []} = Mandates.for_job(fixture.job.id, seams)
+    assert tool == F.tool()
+    assert F.tool() in offered.(seams)
+    refute F.reader() in offered.(seams)
+
+    assert {:ok, %{state: :approved}} = Pins.approve(@name, "test", F.now(), seams)
+    assert %Mandates{read_tools: [reader]} = Mandates.for_job(fixture.job.id, seams)
+    assert reader == F.reader()
+    assert F.reader() in offered.(seams)
+
+    refute F.reader() in offered.(seams(fixture, %{"enabled" => false}))
+
+    global_off = F.config(@name, fixture.job.id, %{}, %{"mandates_enabled" => false})
+    refute F.reader() in offered.(Keyword.put(seams, :config, global_off))
+
+    assert {:ok, _state} = Pins.disable(@name, "test", F.now(), seams)
+    refute F.reader() in offered.(seams)
+  end
+
+  # `read_tools` and the task are pinned: an approval of something else does
+  # not cover a reader, and a run that only reads never reaches the pin check
+  # a mandate call takes, so the offer takes it.
+  test "readers are not offered once the section or the task changed since the approval",
+       %{fixture: fixture} do
+    no_readers = seams(fixture, %{"read_tools" => []})
+    assert {:ok, %{state: :approved}} = Pins.approve(@name, "test", F.now(), no_readers)
+
+    assert %Mandates{read_tools: []} = Mandates.for_job(fixture.job.id, seams(fixture, %{}))
+
+    assert {:ok, %{state: :approved}} = Pins.approve(@name, "test", F.now(), seams(fixture, %{}))
+
+    assert %Mandates{read_tools: [_reader]} =
+             Mandates.for_job(fixture.job.id, seams(fixture, %{}))
+
+    exec!(fixture.conn, "UPDATE scheduled_jobs SET task_prompt = ? WHERE id = ?", [
+      "Open an issue and close every other one.",
+      fixture.job.id
+    ])
+
+    assert %Mandates{read_tools: []} = Mandates.for_job(fixture.job.id, seams(fixture, %{}))
+  end
+
+  # The setup page shows a mandate switched off, unapproved or changed; a read
+  # that failed is shown nowhere, so it is logged.
+  test "readers withheld because the approval could not be read are logged",
+       %{fixture: fixture} do
+    off = :"mandates_off_repo_#{System.unique_integer([:positive])}"
+    unused = Path.join(System.tmp_dir!(), "#{off}.db")
+    spec = {Repo, name: off, enabled: false, database_path: unused}
+    start_supervised!(Supervisor.child_spec(spec, id: off))
+    job = fixture.job
+    seams = seams(fixture, %{}, repo: off, get_job: fn _id -> {:ok, job} end)
+
+    {mandate, log} = with_log(fn -> Mandates.for_job(job.id, seams) end)
+    assert %Mandates{read_tools: []} = mandate
+    assert log =~ "Mandate release-issues"
+    assert log =~ "approval could not be read"
   end
 
   test "an interpreter is a Python; a validator in another language runs directly",

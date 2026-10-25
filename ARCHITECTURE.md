@@ -214,7 +214,10 @@ names, in which case pooled requests use the `FermixCore.Finch.Proxied` twin and
 HTTPS is tunnelled with `CONNECT`. A direct dial tries IPv6 first and falls back
 to IPv4 (`Net.Egress.prefer_ipv6/1`). `Net.TimeoutPolicy`
 holds the receive timeout for each request kind, `Net.Tls` the verified TLS
-options for WebSockets, and `Net.Guard` the public-URL checks.
+options for WebSockets, and `Net.Guard` the public-URL checks. `Net.PinnedUrl`
+pins a public URL to the address the guard checked and builds the request to
+it (`Host` and the TLS name keep the original host), for `web_fetch`, link
+previews and Cue feeds.
 `FermixCore.Timeouts` names the non-HTTP deadlines.
 
 Architecture Invariant: core boot aborts if `auth.json` exists with a mode other
@@ -249,14 +252,17 @@ agent loop and the realtime voice bridge), and it asks
 `Capabilities.AccessGate.admit/3` before the executor. A capability whose plugin
 manifest marks it `access_sensitive` runs there only on an attended owner turn,
 not from a shared Buzz channel (`Acp.Identity.multi_principal?/1`), that read no
-outside content (`:outside_sources`, folded per call by the agent loop from
-`UntrustedContent.outside_source/2`), or on a scheduled run whose job names it;
-otherwise the call is parked in `AccessGate.Pending` for one owner
-confirmation, or refused. While a parked call waits, the turn (or Realtime
-call) that parked it runs nothing else: the loop stamps `:access_waiting` from
-the held result itself (the rest of that step included), the Realtime session
-from `AccessGate.waiting?/1`, and the gate refuses every call under it. Every
-other capability returns on one map lookup.
+outside content (`:outside_sources`, seeded by `TurnRunner` with the message's
+attachments, a voice note aside, and a Recent Activity note that rendered, then
+folded per call by the agent loop from `UntrustedContent.outside_source/2`), or
+on a scheduled run whose job names it; otherwise the call is parked in
+`AccessGate.Pending` for one owner confirmation, or refused. A built-in marked
+`host_command?` meets the same rule where the kernel does not hold commands,
+once its turn read outside content. While a parked call waits, the turn (or
+Realtime call) that parked it runs nothing else: the loop stamps
+`:access_waiting` from the held result itself (the rest of that step included),
+the Realtime session from `AccessGate.waiting?/1`, and the gate refuses every
+call under it. Every other capability returns on its metadata.
 
 `Capabilities.Registry` is a GenServer over a protected ETS table. Trust decides
 what a caller sees: an operator gets every capability; a guest, or a caller with
@@ -459,7 +465,8 @@ keys are read at each call. The path of one item:
    on `127.0.0.1:door_port`, routes in `Cues.Door.Router`: local-push CloudEvents
    on `/cues/v1/:ref`, webhooks on `/cues/hooks/:ref/:random`, verified by
    `Cues.Webhook`), or a worker under `Cues.SourceSupervisor` (`Cues.Source.Feed`
-   polls through `Net.HttpClient` and feeds the body to a `Cues.FeedParser`
+   polls with each hop pinned to the address `Net.Guard` checked
+   (`Net.PinnedUrl`) and feeds the body to a `Cues.FeedParser`
    reader as it inflates, XML read one item at a time by `Cues.FeedXml`, so a
    feed's length bounds its work but not its memory; `Cues.Source.Stream`
    holds a WebSocket through a transport behind `Cues.Source.Stream.Transport`,
@@ -554,7 +561,10 @@ wraps every command a turn runs (the shell tool, the command tool, the git
 tools) in `sandbox-exec` with a Seatbelt profile built from the same roots, so
 the kernel holds the command to the mode and keeps Fermix's home and secrets
 out of its reach; `Sandbox.confine/3` is the one entry point. Linux has no
-kernel enforcement yet.
+kernel enforcement yet, so until it does, a built-in marked `host_command?`
+(`shell`, `git_write`, a declared command) in a turn that read outside content
+goes through `Capabilities.AccessGate` like an access-sensitive plugin command,
+keyed on `OsSandbox.enforced?/1`.
 
 `CommandRunner` is the entry point for spawning external commands. In the daemon
 each command runs in a temporary `CommandHost` under `CommandHost.Supervisor`,

@@ -8,6 +8,7 @@ defmodule FermixCore.Tools.WebFetch do
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Net.Egress
   alias FermixCore.Net.Guard
+  alias FermixCore.Net.PinnedUrl
   alias FermixCore.Tools.HtmlText
   alias FermixCore.Tools.Support
 
@@ -63,40 +64,12 @@ defmodule FermixCore.Tools.WebFetch do
 
   defp do_execute(args, context) do
     with {:ok, url} <- Support.required_string(args, "url"),
-         {:ok, pinned} <- pin(url, context) do
+         {:ok, pinned} <- PinnedUrl.pin(url, resolver: resolver(context)) do
       fetch(pinned, context, 0)
     else
       {:error, reason} -> Support.error(format_guard_error(reason))
     end
   end
-
-  defp pin(url, context) do
-    case Guard.resolve_and_validate(url, resolver: resolver(context)) do
-      :ok ->
-        # IP-literal URL (no DNS to rebind). The Guard already verified
-        # the literal is public; connect to it directly.
-        {:ok, %{url: url, pinned_ip: nil}}
-
-      {:ok, ip} ->
-        {:ok,
-         %{url: rewrite_url_with_ip(url, ip), pinned_ip: ip, original_host: original_host(url)}}
-
-      {:error, _reason} = err ->
-        err
-    end
-  end
-
-  defp rewrite_url_with_ip(url, ip) do
-    uri = URI.parse(url)
-    %{uri | host: ip_to_string(ip)} |> URI.to_string()
-  end
-
-  defp original_host(url), do: URI.parse(url).host
-
-  defp ip_to_string({_a, _b, _c, _d} = ip), do: :inet.ntoa(ip) |> to_string()
-
-  defp ip_to_string({_a, _b, _c, _d, _e, _f, _g, _h} = ip),
-    do: "[" <> (ip |> :inet.ntoa() |> to_string()) <> "]"
 
   defp fetch(_pinned, _context, redirects) when redirects > @max_redirects do
     Support.error("redirect_limit: exceeded #{@max_redirects} redirects")
@@ -183,82 +156,43 @@ defmodule FermixCore.Tools.WebFetch do
 
       location ->
         # Resolve the redirect target against the original (pre-pinning)
-        # host so relative locations land on the correct hostname before
-        # we re-pin the new target's DNS.
-        original_url = original_url(pinned)
-        target = original_url |> URI.merge(location) |> URI.to_string()
+        # host so relative locations land on the correct hostname, then pin
+        # it: its one lookup is both the check and the address dialled.
+        target = pinned.original_url |> URI.merge(location) |> URI.to_string()
 
-        with :ok <- Guard.validate_redirect(target, original_url, resolver: resolver(context)),
-             {:ok, next_pinned} <- pin(target, context) do
-          fetch(next_pinned, context, redirects + 1)
-        else
+        case PinnedUrl.pin(target, resolver: resolver(context)) do
+          {:ok, next_pinned} -> fetch(next_pinned, context, redirects + 1)
           {:error, reason} -> Support.error(format_guard_error(reason))
         end
     end
   end
-
-  defp original_url(%{original_host: nil, url: url}), do: url
-
-  defp original_url(%{original_host: host, url: url}) do
-    %{URI.parse(url) | host: host} |> URI.to_string()
-  end
-
-  defp original_url(%{url: url}), do: url
 
   # `pinned.url` carries the address the guard validated, so behind a proxy an
   # HTTPS tunnel is opened to that address and the name stays inside it (SNI and
   # `Host`). Plain HTTP has no tunnel to keep the name in, so `Net.Egress`
   # refuses that hop rather than hand the proxy a name to resolve.
   defp request(pinned, context) do
-    [method: :get, url: pinned.url]
-    |> Keyword.merge(request_options(context, pinned))
-    |> Req.new()
-    |> Egress.attach(:direct, egress(context))
-    |> Req.request()
+    options = Keyword.merge([method: :get], request_options(context))
+    PinnedUrl.request(pinned, options, egress(context))
   end
 
   defp egress(context), do: Map.get_lazy(context, :net_egress, &Egress.active/0)
 
-  defp request_options(context, pinned) do
+  defp request_options(context) do
     context
-    |> base_request_options(pinned)
+    |> base_request_options()
     |> Keyword.put(:into, &stream_body/2)
   end
 
-  defp base_request_options(context, pinned) do
-    headers =
-      [{"user-agent", user_agent()}]
-      |> maybe_put_host_header(pinned)
-
+  defp base_request_options(context) do
     [
-      redirect: false,
       retry: false,
       receive_timeout: 15_000,
-      connect_options: connect_options(pinned),
-      headers: headers
+      connect_options: [timeout: 3_000],
+      headers: [{"user-agent", user_agent()}]
     ]
     |> Keyword.merge(Map.get(context, :req_options, []))
   end
-
-  defp base_request_options(context) do
-    base_request_options(context, %{url: nil, pinned_ip: nil, original_host: nil})
-  end
-
-  defp maybe_put_host_header(headers, %{original_host: host})
-       when is_binary(host) and host != "" do
-    [{"host", host} | headers]
-  end
-
-  defp maybe_put_host_header(headers, _pinned), do: headers
-
-  defp connect_options(%{original_host: host}) when is_binary(host) and host != "" do
-    # Pin SNI to the original hostname so TLS still validates the cert
-    # against the name the user asked for, even though the socket
-    # connects to the validated IP literal.
-    [timeout: 3_000, transport_opts: [server_name_indication: String.to_charlist(host)]]
-  end
-
-  defp connect_options(_pinned), do: [timeout: 3_000]
 
   defp put_trace_metadata(context) do
     Map.put(context, :tool_trace, %{request_headers: redacted_request_headers(context)})

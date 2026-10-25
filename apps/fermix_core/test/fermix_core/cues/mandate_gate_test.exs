@@ -6,6 +6,7 @@ defmodule FermixCore.Cues.MandateGateTest do
   """
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
   import FermixTestSupport.CueFixtures, only: [exec!: 3, rows: 3]
 
   alias FermixCore.Capabilities.Capability
@@ -42,6 +43,9 @@ defmodule FermixCore.Cues.MandateGateTest do
 
   defp call(context, args \\ @args, capability \\ F.capability()),
     do: Capability.execute(capability, args, context)
+
+  # A call to the mandate's stand-in reader.
+  defp read(context), do: call(context, %{"query" => "x"}, F.capability(F.reader()))
 
   # The stand-in tool with `arg` added to its manifest's required arguments.
   defp requiring(arg) do
@@ -516,6 +520,139 @@ defmodule FermixCore.Cues.MandateGateTest do
       refused!(call(context, %{}, flagged), "refused_cue_run")
 
       assert {:ok, %{success: true}} = call(context, %{"query" => "x"}, F.capability(F.reader()))
+      assert_received {:executed, "github_search_issues", %{"query" => "x"}, _context}
+      assert F.call_rows(fixture.conn, fixture.run.id) == []
+    end
+
+    # The load check reads the manifest once per run; the capability the call
+    # reaches is what runs. One that is not marked read-only now (a plugin
+    # update, a stale registration) gets none of a reader's free pass, and it
+    # was offered, so the refusal says what changed.
+    test "a read_tools entry whose capability is not marked read-only is refused" do
+      {fixture, context} = run!("gate_reader_writes")
+      approve!(context)
+      writer = F.capability(F.reader(), read_only: false)
+
+      {result, log} = with_log(fn -> call(context, %{"query" => "x"}, writer) end)
+      {error, metadata} = refused!(result, "refused_reader_writes")
+      assert metadata.validator == "none"
+      assert metadata.mandate_reason =~ "not marked read-only now"
+
+      assert error =~
+               "github_search_issues was not run: it is one of the mandate's read tools, but " <>
+                 "it is not marked read-only now"
+
+      refute error =~ "not one of this cue run's tools"
+      assert log =~ "Mandate release-issues: read tool github_search_issues"
+      assert log =~ ~s(of plugin "github")
+      assert F.call_rows(fixture.conn, fixture.run.id) == []
+    end
+
+    # A reader runs with none of a mandate call's other checks and is not
+    # recorded, so the mandate's switches and approval are what keep the
+    # owner's data from reaching the model unasked.
+    test "a reader of a mandate switched off is refused" do
+      {fixture, context} = run!("gate_reader_off", %{"enabled" => false})
+      approve!(context)
+
+      {error, metadata} = refused!(read(context), "mandate_disabled")
+      assert error =~ "github_search_issues was not run: the mandate is switched off"
+      assert metadata.validator == "none"
+      assert metadata.mandate_reason == "the mandate is switched off (enabled = false)"
+      assert F.call_rows(fixture.conn, fixture.run.id) == []
+    end
+
+    test "a reader is refused while mandates are switched off in settings" do
+      {fixture, context} = run!("gate_reader_global", %{}, %{"mandates_enabled" => false})
+      approve!(context)
+
+      {error, _} = refused!(read(context), "mandate_disabled")
+      assert error =~ "switched off in settings"
+      assert F.call_rows(fixture.conn, fixture.run.id) == []
+    end
+
+    test "a reader of a mandate not approved, or disabled since, is refused" do
+      {fixture, context} = run!("gate_reader_unapproved")
+
+      {error, _} = refused!(read(context), "mandate_disabled")
+      assert error =~ "not approved yet"
+
+      approve!(context)
+      assert {:ok, _state} = Pins.disable(@name, "test", F.now(), seams(context))
+      {error, _} = refused!(read(context), "mandate_disabled")
+      assert error =~ "disabled until the owner approves it again"
+      assert F.call_rows(fixture.conn, fixture.run.id) == []
+    end
+
+    # As for a mandate call: the run follows its task as the claim read it, so
+    # an approval given since covers the next run, not this one.
+    test "a reader of a mandate approved after the run began is refused" do
+      {_fixture, context} = run!("gate_reader_late")
+      approved_at = DateTime.add(F.now(), 60, :second)
+      seams = Keyword.put(seams(context), :now, approved_at)
+      assert {:ok, %{state: :approved}} = Pins.approve(@name, "test", approved_at, seams)
+
+      {error, _} = refused!(read(context), "mandate_disabled")
+      assert error =~ "the mandate was approved after this run began"
+
+      next_run = %{context | cue_run_claimed_at: DateTime.add(approved_at, 1, :second)}
+      assert {:ok, %{success: true}} = read(next_run)
+    end
+
+    # `read_tools` and the task are pinned, and a run that only reads never
+    # reaches a mandate call's pin check, so a reader takes it: a change
+    # disables the mandate and tells the owner once, as a mandate call does.
+    test "a reader is refused once the task changed since the approval" do
+      {fixture, context} = run!("gate_reader_task")
+      approve!(context)
+
+      exec!(fixture.conn, "UPDATE scheduled_jobs SET task_prompt = ? WHERE id = ?", [
+        "Search every repository the cue names.",
+        fixture.job.id
+      ])
+
+      {error, _} = refused!(read(context), "mandate_unpinned")
+      assert error =~ "the task changed since the mandate was granted"
+      owner = F.owner_id()
+      assert_received {:sent, ^owner, "Mandate release-issues is disabled" <> _, _opts}
+
+      {error, _} = refused!(read(context), "mandate_disabled")
+      assert error =~ "disabled until the owner approves it again"
+      refute_received {:sent, _owner, _text, _opts}
+      assert F.call_rows(fixture.conn, fixture.run.id) == []
+    end
+
+    test "a reader added to the section since the approval is refused" do
+      {fixture, context} = run!("gate_reader_added")
+
+      approve!(
+        with_seams(context, config: F.config(@name, fixture.job.id, %{"read_tools" => []}))
+      )
+
+      {error, _} = refused!(read(context), "mandate_unpinned")
+      assert error =~ "the task changed since the mandate was granted"
+      assert {:ok, %{state: :disabled}} = Pins.status(@name, seams(context))
+    end
+
+    # Readers take the run's load-check verdict, as mandate calls do.
+    test "a reader of a mandate that fails its load checks is refused" do
+      {fixture, context} = run!("gate_reader_inactive")
+      approve!(context)
+
+      exec!(fixture.conn, "UPDATE scheduled_jobs SET schedule_kind = 'interval' WHERE id = ?", [
+        fixture.job.id
+      ])
+
+      {error, _} = refused!(read(context), "mandate_disabled")
+      assert error =~ "the mandate is inactive"
+      assert error =~ "runs on a schedule"
+    end
+
+    test "an approved, enabled mandate's reader runs, with no call row" do
+      {fixture, context} = run!("gate_reader_on")
+      approve!(context)
+
+      assert {:ok, %{success: true}} = read(context)
       assert_received {:executed, "github_search_issues", %{"query" => "x"}, _context}
       assert F.call_rows(fixture.conn, fixture.run.id) == []
     end

@@ -162,7 +162,10 @@ defmodule FermixCore.Cues.PinsTest do
       chat_type: "private",
       channel: "telegram",
       outside_sources: sources,
-      memory_repo: ctx.fixture.repo
+      memory_repo: ctx.fixture.repo,
+      # These are consent tests: a host whose kernel holds commands, so a
+      # tainted turn meets the consent refusal, not the host-command one.
+      os_sandbox: [os: {:unix, :darwin}]
     }
   end
 end

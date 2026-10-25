@@ -14,7 +14,9 @@ defmodule FermixCore.Jobs.CueSurface do
     * `cue_history` always (its own watcher's deliveries, framed);
     * `memory_store`, `memory_recall` and `memory_forget` only when the
       watcher's task notes are on (they reach only the task's own notes);
-    * the mandate's `tools` and `read_tools`, in full, never deferred.
+    * the mandate's `tools` and `read_tools`, in full, never deferred; the
+      runner's mandate (`Cues.Mandates.for_job/2`) carries no `read_tools`
+      while the mandate is not in force, since a reader has no other check.
 
   Nothing else, whatever the job names: no `web_search` or `web_fetch`, no
   `shell` or `browser`, no write, exec, desktop, channel, scheduling, harness or

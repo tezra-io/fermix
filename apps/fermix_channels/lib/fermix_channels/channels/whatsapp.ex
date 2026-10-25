@@ -353,13 +353,16 @@ defmodule FermixChannels.Channels.WhatsApp do
 
   # Each media message is declared as Meta gave it, its type as the hint and no
   # kind: the gateway attachment pipeline names the kind from the bytes (M67).
+  # The Cloud API has no `voice` message type: a voice note is `type: "audio"`
+  # with `audio.voice` true (a `voice` type came only from the On-Premises API,
+  # which Meta has retired), so that flag is what names a voice recording.
   defp attachments(message, type)
-       when type in ["audio", "voice", "image", "video", "document", "sticker"] do
+       when type in ["audio", "image", "video", "document", "sticker"] do
     media = Map.get(message, type, %{})
 
     [
       %{
-        hint: hint(type),
+        hint: media_hint(type, media, message),
         url: Map.get(media, "url"),
         mime_type: Map.get(media, "mime_type"),
         file_id: Map.get(media, "id"),
@@ -371,8 +374,20 @@ defmodule FermixChannels.Channels.WhatsApp do
 
   defp attachments(_message, _type), do: []
 
+  # The `:voice` hint marks a recording as the owner's own words. A forwarded
+  # voice note was recorded by someone else, so it is declared plain audio; Meta
+  # marks a forwarded message in its `context`.
+  defp media_hint("audio", %{"voice" => true}, message),
+    do: if(forwarded?(message), do: :audio, else: :voice)
+
+  defp media_hint(type, _media, _message), do: hint(type)
+
+  defp forwarded?(%{"context" => context}) when is_map(context),
+    do: context["forwarded"] == true or context["frequently_forwarded"] == true
+
+  defp forwarded?(_message), do: false
+
   defp hint("image"), do: :photo
-  defp hint("voice"), do: :voice
   defp hint("audio"), do: :audio
   defp hint("video"), do: :video
   defp hint("document"), do: :document

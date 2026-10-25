@@ -433,6 +433,89 @@ defmodule FermixCore.Net.EgressTest do
     end
   end
 
+  # `Net.PinnedUrl` puts the address the guard validated in the URL, so the
+  # name a `proxy_bypass` entry is written against is only in what
+  # `put_pinned_host/2` recorded.
+  describe "a request pinned to the address of a name" do
+    defp send_pinned(url, name, egress) do
+      parent = self()
+
+      adapter = fn request ->
+        send(parent, {:hop, request.url.host, request.options[:connect_options][:proxy]})
+
+        response =
+          if request.url.path == "/moved",
+            do: Req.Response.new(status: 302, headers: [{"location", "https://93.184.216.35/x"}]),
+            else: Req.Response.new(status: 200)
+
+        {request, response}
+      end
+
+      Req.new(url: url, adapter: adapter, retry: false, headers: [{"host", name}])
+      |> Egress.put_pinned_host(name)
+      |> Egress.attach(:direct, egress)
+      |> Req.request()
+    end
+
+    test "is direct when proxy_bypass names its host" do
+      assert {:ok, %{status: 200}} =
+               send_pinned("https://93.184.216.34/page", "git.corp.test", @proxied)
+
+      assert_received {:hop, "93.184.216.34", nil}
+    end
+
+    test "goes to the proxy, tunnelled to the address, when no entry names its host" do
+      assert {:ok, %{status: 200}} =
+               send_pinned("https://93.184.216.34/page", "remote.test", @proxied)
+
+      assert_received {:hop, "93.184.216.34", {:http, "proxy.test", 3128, _phases}}
+    end
+
+    # The name is the pinned address's only: a hop Req followed elsewhere is
+    # routed for its own URL.
+    test "lends its name to no hop at another address" do
+      assert {:ok, %{status: 200}} =
+               send_pinned("https://93.184.216.34/moved", "git.corp.test", @proxied)
+
+      assert_received {:hop, "93.184.216.34", nil}
+      assert_received {:hop, "93.184.216.35", {:http, "proxy.test", 3128, _phases}}
+    end
+
+    test "over plain HTTP is sent direct for a bypassed host, and refused for any other" do
+      assert {:ok, %{status: 200}} =
+               send_pinned("http://93.184.216.34/page", "git.corp.test", @proxied)
+
+      assert_received {:hop, "93.184.216.34", nil}
+
+      assert {:error, %Req.TransportError{reason: :proxy_needs_https}} =
+               send_pinned("http://93.184.216.34/page", "remote.test", @proxied)
+
+      refute_received {:hop, _address, _proxy}
+    end
+
+    # Mint writes the CONNECT target as `address:port`, so an IPv6 address goes
+    # out unbracketed (`CONNECT 2a01:…::7:443`), which a proxy cannot parse.
+    # Naming the host instead would hand the proxy the name to resolve.
+    test "to an IPv6 address is refused on a proxied tunnel, before anything is sent" do
+      assert {:error, %Req.TransportError{reason: :proxy_needs_ipv4}} =
+               send_pinned("https://[2a01:4f8:c0c:1d2e::7]/page", "remote.test", @proxied)
+
+      refute_received {:hop, _address, _proxy}
+    end
+
+    test "to an IPv6 address is sent when it is direct: no proxy, or its host bypassed" do
+      assert {:ok, %{status: 200}} =
+               send_pinned("https://[2a01:4f8:c0c:1d2e::7]/page", "remote.test", @direct)
+
+      assert_received {:hop, "2a01:4f8:c0c:1d2e::7", nil}
+
+      assert {:ok, %{status: 200}} =
+               send_pinned("https://[2a01:4f8:c0c:1d2e::7]/page", "git.corp.test", @proxied)
+
+      assert_received {:hop, "2a01:4f8:c0c:1d2e::7", nil}
+    end
+  end
+
   describe "attach/3 on a pooled request" do
     test "names the pool per hop, across a redirect and a bypass boundary" do
       parent = self()
@@ -566,7 +649,8 @@ defmodule FermixCore.Net.EgressTest do
             :proxy_unreachable,
             :proxy_auth_required,
             :proxy_refused,
-            :proxy_needs_https
+            :proxy_needs_https,
+            :proxy_needs_ipv4
           ] do
         assert Egress.proxy_failure?(reason)
         assert Exception.message(%Req.TransportError{reason: reason}) == inspect(reason)
@@ -615,14 +699,21 @@ defmodule FermixCore.Net.EgressTest do
     test "gives each failure its own sentence an operator can act on" do
       sentences =
         Enum.map(
-          [:proxy_unreachable, :proxy_auth_required, :proxy_refused, :proxy_needs_https],
+          [
+            :proxy_unreachable,
+            :proxy_auth_required,
+            :proxy_refused,
+            :proxy_needs_https,
+            :proxy_needs_ipv4
+          ],
           &Egress.describe_failure/1
         )
 
-      assert length(Enum.uniq(sentences)) == 4
+      assert length(Enum.uniq(sentences)) == 5
       assert Egress.describe_failure(:proxy_auth_required) =~ "407"
       assert Egress.describe_failure(:proxy_unreachable) =~ "could not be reached"
       assert Egress.describe_failure(:proxy_needs_https) =~ "https://"
+      assert Egress.describe_failure(:proxy_needs_ipv4) =~ "IPv6"
     end
   end
 

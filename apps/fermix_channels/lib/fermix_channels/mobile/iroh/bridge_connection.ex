@@ -20,6 +20,10 @@ defmodule FermixChannels.Mobile.Iroh.BridgeConnection do
     then a close frame, then closes the socket;
   - a stream the phone ended without a close frame ends the session with
     `:remote`, as a WebSocket the phone closed does;
+  - once its session is past its handshake (`Session.past_handshake?/1`) it
+    tells the bridge, once, and the bridge never closes it to make room; until
+    then the bridge may ask for its place, and it closes with the handshake
+    deadline's close (`Session.handshake_deadline_close/0`) and `:made_room`;
   - a shutdown (the rail switched off, the daemon stopping) sends the close
     `1000` the protocol names for it, then runs the session's `terminate/2`
     with the shutdown's reason; the process traps exits for it.
@@ -46,8 +50,10 @@ defmodule FermixChannels.Mobile.Iroh.BridgeConnection do
 
     state = %{
       socket: Keyword.fetch!(opts, :socket),
+      bridge: Keyword.fetch!(opts, :bridge),
       session_opts: Map.new(Keyword.get(opts, :session_opts, [])),
       session: nil,
+      past_handshake?: false,
       idle_ms: Keyword.get(opts, :idle_timeout_ms, Session.idle_timeout_ms()),
       preamble_ms: Keyword.get(opts, :preamble_timeout_ms, @preamble_timeout_ms),
       idle: nil
@@ -113,6 +119,19 @@ defmodule FermixChannels.Mobile.Iroh.BridgeConnection do
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
+  # The bridge is full and needs this connection's place for a newer stream
+  # (`Iroh.Bridge`). One whose session got past its handshake meanwhile stays:
+  # it told the bridge so before it read this. A session is always there: the
+  # bridge's handover reaches a connection before its request can, and a
+  # connection whose handover failed has stopped.
+  def handle_cast(:make_room, %{past_handshake?: true} = state), do: {:noreply, state}
+
+  def handle_cast(:make_room, state) do
+    close = Session.handshake_deadline_close()
+    stop_session(:made_room, close, [], state.session, state)
+  end
+
+  @impl true
   # Every other ending already ran the session's terminate and cleared it.
   def terminate(_reason, %{session: nil}), do: :ok
 
@@ -146,12 +165,16 @@ defmodule FermixChannels.Mobile.Iroh.BridgeConnection do
 
   # -- the session's results ----------------------------------------------------
 
-  defp carry({:ok, session}, state), do: read_on(%{state | session: session})
+  defp carry({:ok, session}, state), do: read_on(tell_bridge(%{state | session: session}))
 
+  # The bridge hears that the session got past its handshake before the phone
+  # reads the reply that took it there.
   defp carry({:push, frames, session}, state) do
+    state = tell_bridge(%{state | session: session})
+
     case send_frames(frames, state) do
-      :ok -> read_on(%{state | session: session})
-      {:error, reason} -> finish({:error, reason}, close_socket(%{state | session: session}))
+      :ok -> read_on(state)
+      {:error, reason} -> finish({:error, reason}, close_socket(state))
     end
   end
 
@@ -181,6 +204,17 @@ defmodule FermixChannels.Mobile.Iroh.BridgeConnection do
       end
     end)
   end
+
+  defp tell_bridge(%{past_handshake?: false, session: session} = state) do
+    if Session.past_handshake?(session) do
+      :ok = GenServer.cast(state.bridge, {:past_handshake, self()})
+      %{state | past_handshake?: true}
+    else
+      state
+    end
+  end
+
+  defp tell_bridge(state), do: state
 
   defp read_on(state) do
     case :inet.setopts(state.socket, active: :once) do

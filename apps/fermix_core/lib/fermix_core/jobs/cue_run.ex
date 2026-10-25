@@ -121,7 +121,8 @@ defmodule FermixCore.Jobs.CueRun do
   @doc """
   The mandate a cue run of `job` acts under (its `name`, `tools` and
   `read_tools`), or nil: `Cues.Mandates.for_job/1`, which answers only for a
-  mandate that passed its load checks.
+  mandate that passed its load checks, and leaves its `read_tools` empty
+  unless it is in force and as the owner approved it.
   """
   @spec mandate(map()) :: Mandates.t() | nil
   def mandate(%{id: job_id}) when is_binary(job_id), do: Mandates.for_job(job_id)

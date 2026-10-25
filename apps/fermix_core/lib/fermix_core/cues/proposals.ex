@@ -78,7 +78,6 @@ defmodule FermixCore.Cues.Proposals do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Clock
-  alias FermixCore.Cues.Config
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Pins
   alias FermixCore.Cues.ProposalView
@@ -644,8 +643,8 @@ defmodule FermixCore.Cues.Proposals do
   # is the proposal's own lifetime.
   defp recheck(proposal, opts, now) do
     with {:ok, mandate} <- live_mandate(proposal.mandate, opts),
-         :ok <- switches(mandate, opts),
-         :ok <- pinned(mandate, opts, now),
+         {:ok, approval} <- in_force(mandate, opts),
+         :ok <- pin_check(mandate, approval, opts, now),
          {:ok, args} <- decode_args(proposal.args_json),
          :ok <- in_grant(mandate, proposal.tool, args),
          :ok <- validate(mandate, proposal, args, opts),
@@ -662,29 +661,23 @@ defmodule FermixCore.Cues.Proposals do
     end
   end
 
-  defp switches(%Mandates{enabled?: false}, _opts), do: {:refuse, "the mandate is switched off"}
-
-  defp switches(%Mandates{}, opts) do
-    if opts |> cues_config() |> Config.mandates_enabled?(),
-      do: :ok,
-      else: {:refuse, "unattended mandate calls are switched off in settings"}
-  end
-
-  defp pinned(mandate, opts, now) do
-    case Pins.approval(mandate.name, opts) do
-      {:ok, nil} ->
-        {:refuse, "the mandate is not approved"}
-
-      {:ok, %{disabled_at: %DateTime{}}} ->
-        {:refuse, "the mandate is disabled until you approve it again"}
-
-      {:ok, row} ->
-        pin_check(mandate, row, opts, now)
-
-      {:error, reason} ->
-        {:refuse, "the mandate's approval could not be read: #{inspect(reason)}"}
+  # The switches and the approval are `Mandates.in_force/2`'s, in the owner's
+  # words: this answers their yes.
+  defp in_force(mandate, opts) do
+    case Mandates.in_force(mandate, opts) do
+      {:ok, approval} -> {:ok, approval}
+      {:error, why} -> {:refuse, not_in_force(why)}
     end
   end
+
+  defp not_in_force(:switched_off), do: "the mandate is switched off"
+  defp not_in_force(:mandates_off), do: "unattended mandate calls are switched off in settings"
+  defp not_in_force({:inactive, why}), do: why
+  defp not_in_force(:unapproved), do: "the mandate is not approved"
+  defp not_in_force({:disabled, _why}), do: "the mandate is disabled until you approve it again"
+
+  defp not_in_force({:approval_unreadable, reason}),
+    do: "the mandate's approval could not be read: #{inspect(reason)}"
 
   # As at the gate: only a real change disables the mandate; a job row the
   # Repo could not read refuses this confirm alone, with no disable and no notice.
@@ -1022,9 +1015,6 @@ defmodule FermixCore.Cues.Proposals do
   defp bounded(text, max) do
     if String.length(text) > max, do: String.slice(text, 0, max) <> "…", else: text
   end
-
-  defp cues_config(opts),
-    do: Keyword.get_lazy(opts, :config, fn -> Application.get_env(:fermix_core, :cues, []) end)
 
   defp now(opts), do: Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
 

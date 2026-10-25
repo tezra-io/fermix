@@ -47,6 +47,36 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   voice-call notes now all use the time zone set in Personality; with none set
   they are UTC and the assistant is told so. A new scheduled job runs on your
   time zone unless you name another, and `date` in a shell command reports it.
+- **Web fetches and link previews follow `proxy_bypass` again, and reach sites
+  whose first address is IPv6.** Each request is now pinned to the address the
+  network guard checked, which an entry naming the host no longer missed and
+  an IPv6 address no longer broke. Behind a proxy, a site reachable only over
+  IPv6 gets a clear refusal instead of the proxy's.
+
+### Security
+
+- **On Linux, a command waits for you once Fermix has read something someone
+  else wrote.** Linux has no kernel sandbox for commands yet, so after a turn
+  reads a web page, an attachment, or a plugin or MCP result, `shell`,
+  `git_write` and your declared commands ask you once in your chat, showing
+  the exact command and folder. A scheduled job runs one only if its allowed
+  tools name it, a job that could run one without naming it cannot be set up
+  from such a turn, and on a voice call these commands are refused rather than
+  asked aloud. The `codex` and `claude_code` command presets, which run outside
+  the sandbox everywhere, ask the same way on a Mac.
+- **Attachments and Computer History count as content someone else wrote.** A
+  file, picture, PDF or video sent with a request, the Recent Activity note,
+  and a finished coding run's report now make an access-sensitive command such
+  as a Tesla unlock ask first. Your own voice notes on Telegram and WhatsApp,
+  and those the phone app marks as recorded in the app, do not; forwarded ones
+  do.
+- **Web fetches, link previews and Cue feeds connect only to the address
+  Fermix checked**, so a name that resolves to a private address the second
+  time is never dialled.
+- **Strangers can no longer lock or crowd out pairing over reach from
+  anywhere.** Failed attempts count per remote endpoint only, and when every
+  remote place is taken, the oldest connection that has not proved itself
+  makes way for a new one; a phone that has proved its key keeps its place.
 
 ## [0.16.0] - 2026-10-21
 

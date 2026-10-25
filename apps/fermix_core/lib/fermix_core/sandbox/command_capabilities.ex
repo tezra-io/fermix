@@ -127,8 +127,14 @@ defmodule FermixCore.Sandbox.CommandCapabilities do
       executor: {CommandTool, :execute, [spec]},
       policy_class: :exec,
       hidden_from_agent?: false,
+      # Every declared command is a host process the model steers
+      # (`Capabilities.AccessGate`'s host-command rule). `confined?` false (the
+      # AI presets) means it runs outside the sandbox on every platform, so the
+      # gate holds it after outside content even on a Mac.
       metadata: %{
         sandbox_command?: true,
+        host_command?: true,
+        host_command_confined?: spec.confined?,
         category: :system,
         when_to_use: spec.description,
         examples: [%{args: %{"prompt" => "summarize this repo"}, note: "one-shot prompt"}],

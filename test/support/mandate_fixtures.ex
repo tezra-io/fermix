@@ -65,10 +65,11 @@ defmodule FermixTestSupport.MandateFixtures do
   @doc """
   The manifest of an `http`-rail tool: `owner`, `repo`, `title` required,
   `labels` an array with a default, `client_id` a client-chosen id. The
-  manifest carries the test pid for the stand-in executor.
+  manifest carries the test pid for the stand-in executor. The stand-in reader
+  is marked read-only, as a `read_tools` entry must be.
   """
   def manifest(name \\ @tool, test_pid \\ self()) do
-    %{
+    manifest = %{
       "name" => name,
       "request" => %{"method" => "POST", "url" => "https://api.example.test/issues"},
       "parameters" => %{
@@ -84,9 +85,15 @@ defmodule FermixTestSupport.MandateFixtures do
       },
       "test_pid" => test_pid
     }
+
+    if name == @reader, do: Map.put(manifest, "read_only", true), else: manifest
   end
 
-  @doc "The stand-in tool as the plugin registry would register it."
+  @doc """
+  The stand-in tool as the plugin registry would register it. `:read_only`
+  overrides its manifest's `read_only` in the metadata (a capability that
+  changed since the mandate loaded), `:flagged` sets `access_sensitive?`.
+  """
   def capability(name \\ @tool, opts \\ []) do
     tool = manifest(name, Keyword.get(opts, :test_pid, self()))
 
@@ -101,6 +108,7 @@ defmodule FermixTestSupport.MandateFixtures do
         plugin_owned?: true,
         plugin: @plugin,
         auth_profile: "github:default",
+        read_only?: Keyword.get(opts, :read_only, tool["read_only"] == true),
         access_sensitive?: Keyword.get(opts, :flagged, false)
       }
     })

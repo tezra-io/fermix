@@ -5,7 +5,8 @@ defmodule FermixCore.Cues.Source.Feed do
 
   Every `interval` seconds (at least 60) it makes one conditional request
   (`If-None-Match`/`If-Modified-Since` from the `ETag`/`Last-Modified` kept as
-  JSON in `cue_sources.cursor`) through `Net.HttpClient`:
+  JSON in `cue_sources.cursor`), pinned to the address `Net.Guard` checked
+  (`Net.PinnedUrl`) and routed by `Net.Egress`:
 
     * `304`: no items; the source's `last_good_at` moves.
     * `200`: the body is downloaded with a cap of 16 MiB as sent; past it the
@@ -18,8 +19,10 @@ defmodule FermixCore.Cues.Source.Feed do
       than the receipt horizon are skipped, so an archive is no gap; of the
       rest, one read keeps the 100 newest and the left-out ones are a
       `page_limit` gap with their range.
-    * Redirects: at most 3, `https` only, each hop checked by `Net.Guard` (no
-      private, loopback or link-local address) before it is requested.
+    * Redirects: at most 3, `https` only, each hop looked up, checked by
+      `Net.Guard` (no private, loopback or link-local address) and pinned on its
+      own before it is requested. A relative `Location` resolves against the
+      URL as written, never the address.
 
   The first successful read after the source is added (no `last_good_at` yet)
   stores undated items as receipts with no delivery (design §6.8).
@@ -44,9 +47,19 @@ defmodule FermixCore.Cues.Source.Feed do
   configured URL that is not `https`, or JSON API paths that do not parse, stop
   it at once with status `unavailable`.
 
-  Note: `Net.Guard` resolves and checks each hop's host before the request,
-  and the request resolves it again; the shared pool `Net.HttpClient` uses
-  cannot be pinned to the checked address.
+  **Pinning.** Each hop's host is looked up and checked once, and the request
+  connects to the address that was checked, so nothing looks the name up again
+  between the check and the connect. `Host` and the TLS name stay the feed's
+  host, so the certificate is verified against the name, and item links
+  resolve against the URL as written. Behind a proxy the tunnel is opened to
+  that address. The pinned request cannot use the shared pool `Net.HttpClient`
+  runs on (`Req` refuses `:finch` with the connect options the pin needs), so
+  that pool's one retry of a stale socket does not apply: its own pool closes
+  after 15 s idle, and a failure is an ordinary failed poll, retried after a
+  minute. A pool with no connection to give is such a failure too.
+
+  The process's printed state (a crash report, `:sys.get_status/1`) names the
+  source by ref, never its URL or secrets.
 
   Every function that reads time takes it from the injected clock; timers go
   through the injected `:schedule` and carry a token, so a stale one is
@@ -61,14 +74,16 @@ defmodule FermixCore.Cues.Source.Feed do
   alias FermixCore.Cues.Ingest
   alias FermixCore.Cues.Item
   alias FermixCore.Cues.Source.Worker
-  alias FermixCore.Net.Guard
-  alias FermixCore.Net.HttpClient
+  alias FermixCore.Net.Egress
+  alias FermixCore.Net.PinnedUrl
 
   @min_interval_s 60
   @max_download_bytes 16 * 1024 * 1024
   @max_redirects 3
   @redirect_statuses [301, 302, 303, 307, 308]
   @receive_timeout_ms 30_000
+  # The bound the shared pool's connections had (Finch's default).
+  @connect_timeout_ms 5_000
   @first_retry_ms 60_000
   @max_retry_ms 3_600_000
   @max_failures 8
@@ -78,7 +93,6 @@ defmodule FermixCore.Cues.Source.Feed do
   @max_inflate_steps 8_192
   @max_validator_bytes 1_024
   @path_keys [:items_path, :id_path, :revision_path, :type_path, :subject_path, :time_path]
-  @label "Cue feed"
   @unchanged %{truncation: :complete, skipped: 0}
   @accept "application/feed+json, application/atom+xml, application/rss+xml, " <>
             "application/json;q=0.9, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5"
@@ -117,6 +131,18 @@ defmodule FermixCore.Cues.Source.Feed do
     # Spread so that sources started together do not all poll at once.
     spread_ms = :erlang.phash2(state.source.ref, @first_poll_spread_ms)
     {:ok, Worker.schedule(state, :poll, spread_ms)}
+  end
+
+  # A crash report prints a process's state, and this one's source holds the
+  # feed's URL, which can carry a token, and its secrets: only the source's ref
+  # and kind and how its polling stands are printed.
+  @impl true
+  def format_status(status) do
+    Map.replace_lazy(status, :state, fn state ->
+      state
+      |> Map.take([:polled?, :failures, :last_good_at])
+      |> Map.put(:source, Map.take(state.source, [:ref, :kind]))
+    end)
   end
 
   @impl true
@@ -223,10 +249,12 @@ defmodule FermixCore.Cues.Source.Feed do
 
   defp fetch(_state, _url, hop) when hop > @max_redirects, do: {:error, :too_many_redirects}
 
+  # `url` is the name, never the address: a relative `Location` and the items'
+  # relative links resolve against it, and each hop is pinned on its own.
   defp fetch(state, url, hop) do
     with :ok <- https(url),
-         :ok <- Guard.validate(url, resolver: state.resolver),
-         {:ok, response} <- request(state, url) do
+         {:ok, pinned} <- PinnedUrl.pin(url, resolver: state.resolver),
+         {:ok, response} <- request(state, pinned) do
       follow(state, url, response, hop)
     end
   end
@@ -250,29 +278,30 @@ defmodule FermixCore.Cues.Source.Feed do
     if URI.parse(url).scheme == "https", do: :ok, else: {:error, :not_https}
   end
 
-  defp request(state, url) do
+  defp request(state, pinned) do
     headers =
       [{"user-agent", user_agent()}, {"accept", @accept}, {"accept-encoding", "gzip"}] ++
         conditional_headers(state.cursor)
 
-    [
-      method: :get,
-      url: url,
-      headers: headers,
-      redirect: false,
-      retry: false,
-      compressed: false,
-      decode_body: false,
-      receive_timeout: @receive_timeout_ms,
-      into: &capped/2
-    ]
-    |> Keyword.merge(state.req_options)
-    |> Req.new()
-    |> send_request(state.egress)
+    options =
+      [
+        method: :get,
+        headers: headers,
+        retry: false,
+        compressed: false,
+        decode_body: false,
+        receive_timeout: @receive_timeout_ms,
+        connect_options: [timeout: @connect_timeout_ms],
+        into: &capped/2
+      ]
+      |> Keyword.merge(state.req_options)
+
+    PinnedUrl.request(pinned, options, egress(state))
   end
 
-  defp send_request(request, nil), do: HttpClient.request(request, @label)
-  defp send_request(request, egress), do: HttpClient.request(request, @label, egress)
+  # Read at each poll, as `web_fetch` and link previews read it per request.
+  defp egress(%{egress: nil}), do: Egress.active()
+  defp egress(%{egress: %Egress{} = egress}), do: egress
 
   # Collects the raw body and halts (closing the connection) past the cap.
   defp capped({:data, data}, {request, response}) do

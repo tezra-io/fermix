@@ -14,7 +14,9 @@ defmodule FermixCore.Cues.Mandates do
       template, so its scheme and host are the manifest's); an MCP tool, a
       command or `web_fetch` is refused; a tool whose manifest asks for
       confirmation on every call (`access_sensitive`) is no reader, so it is
-      refused in `read_tools`;
+      refused in `read_tools`, and so is one whose manifest does not mark it
+      `read_only` (a reader runs with none of a mandate call's checks but its
+      switches and approval);
     * the job exists and runs on cues (B43); one job has at most one mandate;
     * `approve` mode needs somewhere to ask the owner (C55, the reach rule of
       M60 app surface §3.7): a Telegram, Signal, WhatsApp or iMessage chat with
@@ -33,7 +35,9 @@ defmodule FermixCore.Cues.Mandates do
 
   `unchecked/2` reads one section as it is now without the checks, for what a
   mandate call reads live (its switch, its pin); `Cues.MandateGate` keeps the
-  checks' verdict for the rest of the run.
+  checks' verdict for the rest of the run. `in_force/2` is the one answer to
+  whether a mandate may act now (its switches and approval), for its calls and
+  its readers alike.
 
   Seams (opts): `:config` (the `[fermix_core.cues]` keyword), `:repo`,
   `:get_job` (`fn job_id -> {:ok, job} | {:error, _}`), `:plugin_tool`
@@ -46,10 +50,13 @@ defmodule FermixCore.Cues.Mandates do
   and `:home`.
   """
 
+  require Logger
+
   alias FermixCore.BuildInfo
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Cues.Config
+  alias FermixCore.Cues.Pins
   alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
@@ -182,14 +189,105 @@ defmodule FermixCore.Cues.Mandates do
 
   @doc """
   The active mandate a cue run of `job_id` acts under, or nil. An inactive
-  mandate grants a run nothing: its tools are not offered.
+  mandate grants a run nothing: its tools are not offered. Its `read_tools`
+  are those the run is offered: none unless it is in force (`in_force/2`),
+  since a reader runs with none of a mandate call's other checks; its `tools`
+  are offered either way, and each call reads the switches itself.
   """
   @spec for_job(String.t(), keyword()) :: t() | nil
   def for_job(job_id, opts \\ []) when is_binary(job_id) and is_list(opts) do
     sections = opts |> cues_config() |> Config.mandates()
 
     if Enum.any?(sections, &(&1.job == job_id)) do
-      opts |> load() |> Enum.find(&(&1.job == job_id and active?(&1)))
+      opts
+      |> load()
+      |> Enum.find(&(&1.job == job_id and active?(&1)))
+      |> offered_readers(opts)
+    end
+  end
+
+  # A reader runs with none of a mandate call's other checks, and a run that
+  # only reads never reaches a mandate call's pin check, so the offer takes
+  # both: the mandate in force, and as the owner approved it (`read_tools` and
+  # the task are pinned).
+  defp offered_readers(nil, _opts), do: nil
+
+  defp offered_readers(mandate, opts) do
+    with {:ok, approval} <- in_force(mandate, opts),
+         :ok <- Pins.check(mandate, approval, opts) do
+      mandate
+    else
+      {:error, why} ->
+        log_withheld(mandate.name, why)
+        %{mandate | read_tools: []}
+    end
+  end
+
+  # A mandate switched off, unapproved or disabled is what the setup page
+  # shows, so it stays quiet; a changed pin is shown there too, and the next
+  # mandate call disables it; a read that failed is shown nowhere.
+  defp log_withheld(name, {:approval_unreadable, reason}) do
+    Logger.warning(
+      "Mandate #{name}: read tools not offered; its approval could not be read: " <>
+        inspect(reason)
+    )
+  end
+
+  defp log_withheld(name, {:unverified, sentence}),
+    do:
+      Logger.warning(
+        "Mandate #{name}: read tools not offered; its pins were not verified: #{sentence}"
+      )
+
+  defp log_withheld(name, :changed),
+    do: Logger.info("Mandate #{name}: read tools not offered; it changed since its approval")
+
+  defp log_withheld(name, {:unreadable, sentence}),
+    do: Logger.info("Mandate #{name}: read tools not offered; #{sentence}")
+
+  defp log_withheld(_name, _shown_in_settings), do: :ok
+
+  @typedoc """
+  Why a mandate is not in force: switched off (`enabled = false`), mandates
+  switched off in settings, inactive (with the load check's sentence), never
+  approved, its approval disabled (with the reason), or its approval not read.
+  """
+  @type not_in_force ::
+          :switched_off
+          | :mandates_off
+          | {:inactive, String.t()}
+          | :unapproved
+          | {:disabled, String.t() | nil}
+          | {:approval_unreadable, term()}
+
+  @doc """
+  Whether `mandate` is in force now, with its approval row, or why not:
+  switched on (`enabled`), mandates on in settings (`mandates_enabled`), not
+  inactive, and approved, with an approval that is not disabled. The one
+  answer for every path that acts under a mandate: a mandate call reads it at
+  every call (`Cues.MandateGate`), a reader is offered (`for_job/2`) and run
+  only while it holds, and a proposal is checked again with it at the owner's
+  confirm (`Cues.Proposals`). Each words the reason for its reader. A mandate
+  read without its load checks (`unchecked/2`) is judged on the rest.
+  """
+  @spec in_force(t(), keyword()) :: {:ok, map()} | {:error, not_in_force()}
+  def in_force(%__MODULE__{enabled?: false}, opts) when is_list(opts),
+    do: {:error, :switched_off}
+
+  def in_force(%__MODULE__{status: status} = mandate, opts) when is_list(opts) do
+    cond do
+      not (opts |> cues_config() |> Config.mandates_enabled?()) -> {:error, :mandates_off}
+      match?({:inactive, _reason}, status) -> {:error, status}
+      true -> approval(mandate.name, opts)
+    end
+  end
+
+  defp approval(name, opts) do
+    case Pins.approval(name, opts) do
+      {:ok, nil} -> {:error, :unapproved}
+      {:ok, %{disabled_at: %DateTime{}} = row} -> {:error, {:disabled, row.disabled_reason}}
+      {:ok, row} -> {:ok, row}
+      {:error, reason} -> {:error, {:approval_unreadable, reason}}
     end
   end
 
@@ -384,17 +482,34 @@ defmodule FermixCore.Cues.Mandates do
   defp tool_failure({_tool, {:error, reason}}),
     do: {:error, "The plugin catalog could not be read: #{inspect(reason)}."}
 
-  # A tool that asks for confirmation on every call changes something (the
-  # registry refuses the flag on a read-only tool), so it is never a reader:
-  # lane 0 would refuse each call in a cue run anyway.
+  # A reader runs with none of a mandate call's checks but the switches and
+  # the approval, so a tool its manifest does not mark read-only is no reader.
+  # The first such entry, in list order, is the one named.
   defp check_read_tools(mandate, opts) do
-    case Enum.find(mandate.read_tools, &access_sensitive?(&1, opts)) do
-      nil ->
-        :ok
+    case Enum.find(mandate.read_tools, &(not reader?(&1, opts))) do
+      nil -> :ok
+      tool -> {:error, not_a_reader(tool, opts)}
+    end
+  end
 
-      tool ->
-        {:error,
-         "#{tool} asks for confirmation on every call; list it under tools or leave it out."}
+  defp reader?(tool, opts), do: read_only?(tool, opts) and not access_sensitive?(tool, opts)
+
+  # The registry refuses `access_sensitive` on any tool not `read_only: false`,
+  # so a flagged tool already fails the read-only check: this branch only gives
+  # it the more specific sentence (and lane 0 would refuse each of its calls in
+  # a cue run anyway).
+  defp not_a_reader(tool, opts) do
+    if access_sensitive?(tool, opts),
+      do: "#{tool} asks for confirmation on every call; list it under tools or leave it out.",
+      else:
+        "#{tool} is not marked read-only, so it can change something; list it under tools " <>
+          "or leave it out."
+  end
+
+  defp read_only?(tool_name, opts) do
+    case http_tool(tool_name, opts) do
+      {:ok, %{tool: tool}} -> Map.get(tool, "read_only") == true
+      _not_found -> false
     end
   end
 

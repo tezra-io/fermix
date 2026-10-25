@@ -54,7 +54,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocolContractTest do
     ]
 
     limits = %{
-      max_connections: 64,
+      max_connections: 1_024,
       max_streams_per_connection: 4,
       stream_receive_window: 262_144,
       connection_receive_window: 1_048_576,

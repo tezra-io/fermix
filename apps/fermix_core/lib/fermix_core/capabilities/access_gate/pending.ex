@@ -37,6 +37,7 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
           digest: String.t(),
           plugin: String.t() | nil,
           auth_profile: String.t() | nil,
+          command_ref: term(),
           binding: binding(),
           sources: [String.t()],
           snapshot: map(),
@@ -126,6 +127,30 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
     {:reply, reply, state}
   end
 
+  # A record's snapshot carries the parking turn's session env (an ACP harness's
+  # signing keys), and its arguments and a declared command's fixed args can carry
+  # secrets, so a crash report or `:sys.get_status/1` shows only each record's
+  # non-secret fields.
+  @impl true
+  def format_status(status) do
+    Map.replace_lazy(status, :state, fn
+      %{records: records} = state ->
+        %{state | records: Map.new(records, fn {id, record} -> {id, printable(record)} end)}
+
+      state ->
+        state
+    end)
+  end
+
+  defp printable(record) when is_map(record) do
+    record
+    |> Map.merge(%{args: :redacted, snapshot: :redacted})
+    |> Map.update(:command_ref, nil, &printable_ref/1)
+  end
+
+  defp printable_ref({:command, executable, _args}), do: {:command, executable, :redacted}
+  defp printable_ref(ref), do: ref
+
   defp handle({:park, attrs}, state) do
     case find_live(state, attrs.binding, attrs.digest) do
       {:ok, %{status: :pending} = record} -> refresh(record, state)
@@ -206,6 +231,7 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
           :digest,
           :plugin,
           :auth_profile,
+          :command_ref,
           :binding,
           :sources,
           :snapshot

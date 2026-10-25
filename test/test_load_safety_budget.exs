@@ -42,7 +42,6 @@
     "apps/fermix_channels/test/fermix_channels/channels/telegram/poller_test.exs" => 1,
     "apps/fermix_channels/test/fermix_channels/gateway/draft_stream_test.exs" => 4,
     "apps/fermix_channels/test/fermix_channels/gateway/idempotency_test.exs" => 2,
-    "apps/fermix_channels/test/fermix_channels/mobile/iroh/bridge_test.exs" => 1,
     "apps/fermix_channels/test/fermix_channels/mobile/iroh/helper_test.exs" => 3,
     "apps/fermix_core/test/fermix/cli/daemon_test.exs" => 3,
     "apps/fermix_core/test/fermix_core/agents/worker_run_test.exs" => 3,

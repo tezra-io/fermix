@@ -20,3 +20,4 @@
 {"v":2,"t":"ping","seq":16}
 {"v":2,"t":"unpair","seq":17}
 {"v":2,"t":"attach_begin","seq":18,"attach_id":"attach-3","kind":"image","mime":"image/jpeg","size_bytes":4,"name":"clip-poster.jpg","poster_of":"attach-2","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+{"v":2,"t":"attach_begin","seq":19,"attach_id":"attach-4","kind":"voice","mime":"audio/ogg","size_bytes":4,"name":"recording.ogg","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}

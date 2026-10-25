@@ -401,7 +401,12 @@ defmodule FermixCore.Tools.ManageWatcherTest do
       assert {:ok, %{success: false, error: error}} =
                UpdateJob.execute(
                  args,
-                 turn(ctx, outside_sources: MapSet.new([{:tool, "list_cues"}]))
+                 # The consent refusal, not the host-command one: a host whose
+                 # kernel holds commands.
+                 turn(ctx,
+                   outside_sources: MapSet.new([{:tool, "list_cues"}]),
+                   os_sandbox: [os: {:unix, :darwin}]
+                 )
                )
 
       assert error =~ "Watcher market-news wakes this job"

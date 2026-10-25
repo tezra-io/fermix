@@ -48,8 +48,19 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
   # A helper that stayed ready this long ran, and its next failure starts the
   # backoff afresh; one that died sooner goes on with the backoff it had.
   @stable_ms 60_000
+  # `max_connections` is the rail's outer bound, and the contract's most: a
+  # connection past it is refused before its handshake, so a stranger holding
+  # every one shuts a phone out before the bridge can make room for it. The
+  # helper closes a connection with no stream for 30 s, and the bridge a silent
+  # stream at its 10 s handshake deadline, so holding one takes a stream or a
+  # handshake every 40 s: about 26 a second for all 1,024, where 64 took under
+  # two. The helper cannot yet close a silent connection to make room for a new
+  # one; until it does (a fermix-iroh change and a pin bump), this raises the
+  # cost of shutting phones out and does not end it. Each connection costs the
+  # helper its QUIC state; unread bytes wait only on streams the bridge has not
+  # taken, which its 64-place backlog bounds.
   @limits %{
-    max_connections: 64,
+    max_connections: 1_024,
     max_streams_per_connection: 4,
     stream_receive_window: 262_144,
     connection_receive_window: 1_048_576,

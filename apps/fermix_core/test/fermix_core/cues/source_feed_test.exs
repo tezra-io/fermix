@@ -9,11 +9,13 @@ defmodule FermixCore.Cues.Source.FeedTest do
   alias FermixCore.Cues.Source.Feed
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesSql
+  alias FermixCore.Net.Egress
   alias FermixTestSupport.TelemetryCapture
 
   @now ~U[2026-10-10 12:00:00Z]
   @url "https://feeds.example.test/releases.xml"
   @public_ip {93, 184, 216, 34}
+  @other_public_ip {93, 184, 216, 35}
   @interval_s 300
   @wait_ms 10_000
 
@@ -60,10 +62,38 @@ defmodule FermixCore.Cues.Source.FeedTest do
 
   defp plug(server, test) do
     fn conn ->
-      send(test, {:request, conn.host, Plug.Conn.get_req_header(conn, "if-none-match")})
+      send(test, {:request, host_seen(conn), Plug.Conn.get_req_header(conn, "if-none-match")})
       reply(conn, Agent.get(server, & &1))
     end
   end
+
+  # The host a server is asked for: the `Host` a pinned request carries (its
+  # URL holds the checked address), else the URL's own, as Mint would send it.
+  defp host_seen(conn), do: conn |> Plug.Conn.get_req_header("host") |> List.first(conn.host)
+
+  # An origin seen at the adapter, after `Net.Egress` routed the hop, so a test
+  # reads what a real dial would use: the URL's host (the address dialled), the
+  # host asked for, the TLS name, the path and the proxy, if any.
+  defp origin(test, answer) do
+    fn request ->
+      connect = request.options[:connect_options] || []
+      name = request |> Req.Request.get_header("host") |> List.first(request.url.host)
+      sni = connect[:transport_opts][:server_name_indication]
+      send(test, {:dialled, request.url.host, name, sni, request.url.path, connect[:proxy]})
+      {request, answer.(name, request.url.path)}
+    end
+  end
+
+  defp feed_response(body),
+    do:
+      Req.Response.new(
+        status: 200,
+        headers: [{"content-type", "application/rss+xml"}],
+        body: body
+      )
+
+  defp redirect_response(location),
+    do: Req.Response.new(status: 302, headers: [{"location", location}])
 
   defp reply(conn, %{conditional?: true, etag: etag} = reply) when is_binary(etag) do
     if Plug.Conn.get_req_header(conn, "if-none-match") == [etag],
@@ -104,7 +134,7 @@ defmodule FermixCore.Cues.Source.FeedTest do
     )
   end
 
-  defp start_feed(ctx, overrides \\ %{}) do
+  defp start_feed(ctx, overrides \\ %{}, worker_opts \\ []) do
     test = self()
 
     opts = [
@@ -115,11 +145,12 @@ defmodule FermixCore.Cues.Source.FeedTest do
       schedule: fn message, ms -> send(test, {:scheduled, message, ms}) end,
       req_options: [plug: plug(ctx.server, test)],
       resolver: fn _host -> {:ok, [@public_ip]} end,
+      egress: Egress.new([]),
       admit: fn ref, n, _now_ms -> send(test, {:admit, ref, n}) && n end,
       notify: fn ref, kind, data, _opts -> send(test, {:notice, ref, kind, data}) && :sent end
     ]
 
-    pid = start_supervised!({Feed, opts})
+    pid = start_supervised!({Feed, Keyword.merge(opts, worker_opts)})
     {pid, next_poll()}
   end
 
@@ -447,6 +478,199 @@ defmodule FermixCore.Cues.Source.FeedTest do
     end
   end
 
+  # --- pinning -------------------------------------------------------------------
+
+  describe "each hop is pinned to the address Net.Guard checked" do
+    # Only the first lookup answers the public address. A request by name (the
+    # old gap) dials the name; checking with one lookup and pinning from
+    # another would pin loopback, which is refused. Either fails this test.
+    test "the request goes to the checked address, where a second lookup would answer loopback",
+         ctx do
+      test = self()
+      lookups = :counters.new(1, [])
+
+      resolver = fn "feeds.example.test" ->
+        :counters.add(lookups, 1, 1)
+
+        if :counters.get(lookups, 1) == 1,
+          do: {:ok, [@public_ip]},
+          else: {:ok, [{127, 0, 0, 1}]}
+      end
+
+      answer = fn _name, _path -> feed_response(rss([{"a", "First", hours_ago(1)}])) end
+      worker_opts = [resolver: resolver, req_options: [adapter: origin(test, answer)]]
+
+      {pid, first} = start_feed(ctx, %{}, worker_opts)
+      fire(pid, first)
+
+      assert_received {:dialled, "93.184.216.34", "feeds.example.test", ~c"feeds.example.test",
+                       "/releases.xml", nil}
+
+      assert cue_ids(ctx) == ["a"]
+    end
+
+    # Finch raises, rather than returns, when its pool has no connection to give.
+    test "a pool with no connection to give is a failed poll, retried after a minute", ctx do
+      unavailable = fn _request ->
+        raise RuntimeError,
+              "Finch was unable to provide a connection within the timeout due to " <>
+                "excess queuing for connections."
+      end
+
+      {pid, first} = start_feed(ctx, %{}, req_options: [adapter: unavailable])
+      fire(pid, first)
+
+      assert Process.alive?(pid)
+
+      assert_received {:telemetry, [:fermix, :cue, :source], _m,
+                       %{phase: :disconnect, attempt: 1, error_class: "transport"}}
+
+      next_poll(60_000)
+    end
+
+    test "a redirect is looked up, checked and pinned on its own, its TLS name its own host",
+         ctx do
+      test = self()
+
+      resolver = fn host ->
+        send(test, {:lookup, host})
+
+        case host do
+          "feeds.example.test" -> {:ok, [@public_ip]}
+          "mirror.example.test" -> {:ok, [@other_public_ip]}
+        end
+      end
+
+      answer = fn
+        "feeds.example.test", _path ->
+          redirect_response("https://mirror.example.test/larkspur/releases.xml")
+
+        "mirror.example.test", _path ->
+          feed_response(rss([{"a", "First", hours_ago(1)}]))
+      end
+
+      worker_opts = [resolver: resolver, req_options: [adapter: origin(test, answer)]]
+      {pid, first} = start_feed(ctx, %{}, worker_opts)
+      fire(pid, first)
+
+      assert_received {:lookup, "feeds.example.test"}
+
+      assert_received {:dialled, "93.184.216.34", "feeds.example.test", ~c"feeds.example.test",
+                       "/releases.xml", nil}
+
+      assert_received {:lookup, "mirror.example.test"}
+
+      assert_received {:dialled, "93.184.216.35", "mirror.example.test", ~c"mirror.example.test",
+                       "/larkspur/releases.xml", nil}
+
+      assert cue_ids(ctx) == ["a"]
+    end
+
+    test "a redirect to a name that resolves to a private address is refused before it is dialled",
+         ctx do
+      test = self()
+
+      resolver = fn
+        "feeds.example.test" -> {:ok, [@public_ip]}
+        "intranet.example.test" -> {:ok, [{10, 0, 0, 7}]}
+      end
+
+      answer = fn _name, _path -> redirect_response("https://intranet.example.test/feed") end
+      worker_opts = [resolver: resolver, req_options: [adapter: origin(test, answer)]]
+
+      {pid, first} = start_feed(ctx, %{}, worker_opts)
+      fire(pid, first)
+
+      assert_received {:dialled, "93.184.216.34", "feeds.example.test", _sni, _path, _proxy}
+      refute_received {:dialled, _address, _name, _sni, _path, _proxy}
+      assert cue_ids(ctx) == []
+
+      assert_received {:telemetry, [:fermix, :cue, :source], _m,
+                       %{phase: :disconnect, error_class: "blocked"}}
+    end
+
+    test "a relative redirect and relative item links resolve against the name, and an item " <>
+           "keeps its id when the name moves to another address",
+         ctx do
+      test = self()
+      watcher = insert_watcher(ctx.conn, %{filter: "none", sources: [ctx.ref]})
+      address = start_supervised!({Agent, fn -> @public_ip end}, id: :address)
+      resolver = fn "feeds.example.test" -> {:ok, [Agent.get(address, & &1)]} end
+
+      # No guid: the item's id is the digest of its link, title and time as written.
+      body =
+        ~s(<?xml version="1.0"?><rss version="2.0"><channel><title>Larkspur</title>) <>
+          "<item><title>Patch notes</title><link>/posts/7</link>" <>
+          "<pubDate>Sat, 10 Oct 2026 11:00:00 GMT</pubDate></item></channel></rss>"
+
+      answer = fn
+        _name, "/releases.xml" -> redirect_response("/v2/releases.xml")
+        _name, "/v2/releases.xml" -> feed_response(body)
+      end
+
+      worker_opts = [resolver: resolver, req_options: [adapter: origin(test, answer)]]
+      {pid, first} = start_feed(ctx, %{}, worker_opts)
+      fire(pid, first)
+
+      assert_received {:dialled, "93.184.216.34", "feeds.example.test", ~c"feeds.example.test",
+                       "/releases.xml", nil}
+
+      assert_received {:dialled, "93.184.216.34", "feeds.example.test", ~c"feeds.example.test",
+                       "/v2/releases.xml", nil}
+
+      assert [_item] = delivered(ctx, watcher)
+      assert links(ctx) == ["https://feeds.example.test/posts/7"]
+
+      Agent.update(address, fn _old -> @other_public_ip end)
+      fire(pid, poll_every_interval())
+
+      assert_received {:dialled, "93.184.216.35", "feeds.example.test", _sni, "/v2/releases.xml",
+                       nil}
+
+      assert length(cue_ids(ctx)) == 1
+      assert links(ctx) == ["https://feeds.example.test/posts/7"]
+    end
+
+    test "behind a proxy, the feed tunnels to the checked address with the name in TLS", ctx do
+      answer = fn _name, _path -> feed_response(rss([{"a", "First", hours_ago(1)}])) end
+
+      worker_opts = [
+        egress: Egress.new(proxy: "http://proxy.test:3128"),
+        req_options: [adapter: origin(self(), answer)]
+      ]
+
+      {pid, first} = start_feed(ctx, %{}, worker_opts)
+      fire(pid, first)
+
+      assert_received {:dialled, "93.184.216.34", "feeds.example.test", ~c"feeds.example.test",
+                       "/releases.xml", {:http, "proxy.test", 3128, _phases}}
+    end
+
+    test "behind a proxy, a proxy_bypass entry naming the feed's host still sends it direct",
+         ctx do
+      answer = fn _name, _path -> feed_response(rss([{"a", "First", hours_ago(1)}])) end
+
+      worker_opts = [
+        egress: Egress.new(proxy: "http://proxy.test:3128", proxy_bypass: [".example.test"]),
+        req_options: [adapter: origin(self(), answer)]
+      ]
+
+      {pid, first} = start_feed(ctx, %{}, worker_opts)
+      fire(pid, first)
+
+      assert_received {:dialled, "93.184.216.34", "feeds.example.test", ~c"feeds.example.test",
+                       "/releases.xml", nil}
+
+      assert cue_ids(ctx) == ["a"]
+    end
+  end
+
+  defp links(ctx) do
+    ctx.conn
+    |> rows("SELECT payload FROM cues WHERE source_ref = ? ORDER BY item_id", [ctx.ref])
+    |> Enum.map(fn [payload] -> Jason.decode!(payload)["link"] end)
+  end
+
   # --- receipt-only ------------------------------------------------------------
 
   describe "undated items on the first poll" do
@@ -498,6 +722,18 @@ defmodule FermixCore.Cues.Source.FeedTest do
       assert_received {:notice, ^ref, :unreachable, %{failures: 8}}
       assert source_row(ctx).status == "stopped"
       assert_received {:telemetry, [:fermix, :cue, :source], _m, %{phase: :stopped}}
+    end
+
+    # A crash report prints the worker's state; a feed's URL can carry a token.
+    test "its printed state names the source, never its URL or secrets", ctx do
+      url = "https://feeds.example.test/releases.xml?token=feed-url-secret"
+      {pid, _first} = start_feed(ctx, %{url: url, secrets: %{"token" => "stored-secret"}})
+
+      printed = inspect(:sys.get_status(pid), limit: :infinity, printable_limit: :infinity)
+
+      assert printed =~ ctx.ref
+      refute printed =~ "feed-url-secret"
+      refute printed =~ "stored-secret"
     end
 
     test "a feed URL that is not https is refused at once and the worker stops", ctx do

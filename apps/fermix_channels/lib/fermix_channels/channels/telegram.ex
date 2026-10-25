@@ -1049,8 +1049,11 @@ defmodule FermixChannels.Channels.Telegram do
   end
 
   # Voice note = OGG/Opus; Telegram fixes the container, so the mime is constant.
-  defp parse_attachments(%{"voice" => %{"file_id" => file_id} = voice}) when is_binary(file_id),
-    do: [declare(voice, "audio/ogg", :voice)]
+  # A forwarded one was recorded by someone else, so it is declared plain audio:
+  # the `:voice` hint is what marks a recording as the owner's own words.
+  defp parse_attachments(%{"voice" => %{"file_id" => file_id} = voice} = msg)
+       when is_binary(file_id),
+       do: [declare(voice, "audio/ogg", if(forwarded?(msg), do: :audio, else: :voice))]
 
   # A GIF: Telegram converts every one to a silent MP4.
   defp parse_attachments(%{"animation" => %{"file_id" => file_id} = animation})
@@ -1080,6 +1083,12 @@ defmodule FermixChannels.Channels.Telegram do
        do: [declare(document, Map.get(document, "mime_type"), :document)]
 
   defp parse_attachments(_msg), do: []
+
+  # Bot API 7.0 marks a forwarded message with `forward_origin`; older payloads
+  # carry the `forward_*` fields it replaced.
+  @forward_keys ~w(forward_origin forward_from forward_from_chat forward_sender_name forward_date)
+
+  defp forwarded?(msg), do: Enum.any?(@forward_keys, &Map.has_key?(msg, &1))
 
   defp declare(%{"file_id" => file_id} = object, mime_type, hint) do
     %{

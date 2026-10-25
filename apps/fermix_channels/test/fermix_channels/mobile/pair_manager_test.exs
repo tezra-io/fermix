@@ -276,34 +276,52 @@ defmodule FermixChannels.Mobile.PairManagerTest do
     assert {:ok, 1} = PairManager.record_failure(ctx.manager, "pair-session", {10, 0, 0, 3})
   end
 
-  # M62 §7: an iroh peer is a key that costs nothing to replace, so failures
-  # summed over every iroh peer refuse iroh peers for the rest of the window,
-  # and nobody else.
-  test "past 64 failures from iroh peers, iroh peers get no window; addresses still do", ctx do
+  # A remote peer is counted by its iroh endpoint, as an address is.
+  test "the fifth failed handshake from one iroh endpoint refuses that endpoint only", ctx do
     assert {:ok, _window} = PairManager.open(ctx.manager)
+    noisy = iroh_peer(1)
 
-    for n <- 1..64 do
-      peer = {:iroh, n |> Integer.to_string() |> String.pad_leading(64, "0")}
-      assert {:ok, 1} = PairManager.record_failure(ctx.manager, "pair-session", peer)
+    for count <- 1..4 do
+      assert {:ok, ^count} = PairManager.record_failure(ctx.manager, "pair-session", noisy)
     end
 
-    fresh = {:iroh, String.duplicate("f", 64)}
-    assert :none = PairManager.current(ctx.manager, fresh)
+    assert {:error, :rate_limited} =
+             PairManager.record_failure(ctx.manager, "pair-session", noisy)
+
+    assert :none = PairManager.current(ctx.manager, noisy)
+    assert {:ok, %{session_id: "pair-session"}} = PairManager.current(ctx.manager, iroh_peer(2))
+  end
+
+  # An iroh endpoint is a key that costs nothing to replace, so a count summed
+  # over endpoints refused the owner's own phone within a second of a window
+  # opening: thirteen throwaway keys, five failures each.
+  test "failures from any number of iroh endpoints never refuse a fresh one", ctx do
+    assert {:ok, _window} = PairManager.open(ctx.manager)
+
+    for n <- 1..13, _attempt <- 1..5 do
+      PairManager.record_failure(ctx.manager, "pair-session", iroh_peer(n))
+    end
+
+    assert :none = PairManager.current(ctx.manager, iroh_peer(13))
+    assert {:ok, %{session_id: "pair-session"}} = PairManager.current(ctx.manager, iroh_peer(14))
     assert {:ok, %{session_id: "pair-session"}} = PairManager.current(ctx.manager, {10, 0, 0, 2})
     assert {:ok, %{status: :awaiting_scan}} = PairManager.session(ctx.manager, "pair-session")
   end
 
   # R1-5: handshake garbage needs neither the pairing secret nor the gateway
   # key, so a window-wide failure budget let anyone with a few addresses end
-  # every window before the owner's phone scanned it.
-  test "failed handshakes from any number of addresses never close the window", ctx do
+  # every window before the owner's phone scanned it. Remote endpoints are
+  # sources like any other.
+  test "failed handshakes from any number of sources never close the window", ctx do
     assert {:ok, _window} = PairManager.open(ctx.manager)
-    fail_from_many_addresses(ctx)
+    fail_from_many_sources(ctx)
 
     refute_received {:pair_telemetry, _status, _duration_us}
     assert {:ok, %{status: :awaiting_scan}} = PairManager.session(ctx.manager, "pair-session")
     assert :none = PairManager.current(ctx.manager, {192, 168, 1, 1})
+    assert :none = PairManager.current(ctx.manager, iroh_peer(1))
     assert {:ok, %{session_id: "pair-session"}} = PairManager.current(ctx.manager, {10, 0, 0, 2})
+    assert {:ok, %{session_id: "pair-session"}} = PairManager.current(ctx.manager, iroh_peer(99))
 
     assert {:ok, _request} = submit(ctx, %{})
     assert {:ok, _device} = PairManager.approve(ctx.manager, "pair-session")
@@ -346,7 +364,7 @@ defmodule FermixChannels.Mobile.PairManagerTest do
   test "no failure closes a window whose request awaits the owner's decision", ctx do
     assert {:ok, _window} = PairManager.open(ctx.manager)
     assert {:ok, _request} = submit(ctx, %{})
-    fail_from_many_addresses(ctx)
+    fail_from_many_sources(ctx)
 
     refute_receive {:pair_telemetry, :rate_limited, _duration_us}
     assert {:ok, %{status: :awaiting_decision}} = PairManager.session(ctx.manager, "pair-session")
@@ -1039,12 +1057,17 @@ defmodule FermixChannels.Mobile.PairManagerTest do
 
   defp refusal(reason, check), do: %{reason: reason, check: check, platform: "android"}
 
-  # Ten addresses, five failures each: twice what once closed a window.
-  defp fail_from_many_addresses(ctx) do
-    for host <- 1..10, _attempt <- 1..5 do
-      PairManager.record_failure(ctx.manager, "pair-session", {192, 168, 1, host})
+  # Ten addresses and thirteen iroh endpoints, five failures each: twice what
+  # once closed a window, and past what once refused every remote attempt.
+  defp fail_from_many_sources(ctx) do
+    sources = Enum.map(1..10, &{192, 168, 1, &1}) ++ Enum.map(1..13, &iroh_peer/1)
+
+    for source <- sources, _attempt <- 1..5 do
+      PairManager.record_failure(ctx.manager, "pair-session", source)
     end
   end
+
+  defp iroh_peer(n), do: {:iroh, n |> Integer.to_string() |> String.pad_leading(64, "0")}
 
   defp assert_socket_replaced(socket) do
     monitor = Process.monitor(socket)

@@ -67,7 +67,9 @@ defmodule FermixCore.Tools.JobsTest do
         memory_agent_id: "main",
         conversation_key: {"telegram", "chat-1", :root},
         session_id: "telegram:chat-1:root",
-        source_trust: :operator
+        source_trust: :operator,
+        # A turn that read nothing from outside, as the agent loop stamps one.
+        outside_sources: MapSet.new()
       }
     }
   end

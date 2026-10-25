@@ -15,7 +15,8 @@ defmodule FermixCore.Net.Egress do
       proxy like any public address, and so does any other name, `.localhost`
       names included, because nothing guarantees where a name resolves;
     * a `proxy_bypass` entry (an exact host, or a suffix written with a leading
-      dot) is direct;
+      dot) is direct; for a request pinned to an address (`Net.PinnedUrl`) the
+      entry may name its host or that address;
     * everything else goes to the proxy.
 
   There is no third outcome. A proxied request whose proxy is down fails; it is
@@ -53,8 +54,10 @@ defmodule FermixCore.Net.Egress do
   An HTTPS destination is reached with `CONNECT`; TLS runs end to end inside the
   tunnel and the caller's own TLS options verify the origin, so the proxy never
   sees plaintext and cannot stand in for the peer. A request pinned to a
-  validated address (`web_fetch`, link previews) tunnels to that address: the
-  proxy is handed the IP the guard approved, never a name to resolve again.
+  validated address (`Net.PinnedUrl`: `web_fetch`, link previews, Cue feeds)
+  tunnels to that address: the proxy is handed the IP the guard approved, never
+  a name to resolve again. The name it was pinned for (`put_pinned_host/2`)
+  still decides a `proxy_bypass` match.
 
   Plain HTTP has no tunnel: the proxy reads the whole request, `Host` header
   included. A pinned plain-HTTP request therefore cannot keep its pin through a
@@ -84,7 +87,7 @@ defmodule FermixCore.Net.Egress do
   ## When the proxy fails
 
   A failed proxy hop comes back as a `%Req.TransportError{}` whose reason is one
-  of four atoms, so every consumer that already matches transport reasons keeps
+  of five atoms, so every consumer that already matches transport reasons keeps
   working and the error's own `message/1` can still print it:
 
     * `:proxy_unreachable` — it could not be reached, did not answer in time, or
@@ -92,6 +95,9 @@ defmodule FermixCore.Net.Egress do
     * `:proxy_auth_required` — it answered 407. Fermix sends no proxy sign-in.
     * `:proxy_refused` — it refused the tunnel, or the tunnel could not be set up.
     * `:proxy_needs_https` — the pinned plain-HTTP hop this module will not send.
+    * `:proxy_needs_ipv4` — the pinned hop to an IPv6 address this module will
+      not tunnel: Mint writes its `CONNECT` target without the brackets a proxy
+      needs. Only a request built by `Net.PinnedUrl` can get it.
 
   No other provider is tried for any of them: every route shares the proxy.
   """
@@ -107,14 +113,25 @@ defmodule FermixCore.Net.Egress do
   @type route :: :direct | {:proxy, proxy()}
   @type mode :: :pooled | :direct
   @type proxy_failure ::
-          :proxy_unreachable | :proxy_auth_required | :proxy_refused | :proxy_needs_https
+          :proxy_unreachable
+          | :proxy_auth_required
+          | :proxy_refused
+          | :proxy_needs_https
+          | :proxy_needs_ipv4
 
-  @proxy_failures [:proxy_unreachable, :proxy_auth_required, :proxy_refused, :proxy_needs_https]
+  @proxy_failures [
+    :proxy_unreachable,
+    :proxy_auth_required,
+    :proxy_refused,
+    :proxy_needs_https,
+    :proxy_needs_ipv4
+  ]
 
   @config_keys ~w(proxy proxy_bypass)
   @direct_pool FermixCore.Finch
   @proxied_pool FermixCore.Finch.Proxied
   @step :fermix_egress
+  @pinned_host :fermix_egress_pinned_host
 
   # The connect timeout Finch gives a pool that sets none (its
   # `@default_connect_timeout`), so "unset" means the same bound proxied as direct.
@@ -207,7 +224,7 @@ defmodule FermixCore.Net.Egress do
   def describe(%__MODULE__{proxy: nil}), do: nil
   def describe(%__MODULE__{proxy: proxy}), do: "http://#{proxy.host}:#{proxy.port}"
 
-  @doc "Whether `reason` is one of the four reasons a failed proxy hop carries."
+  @doc "Whether `reason` is one of the five reasons a failed proxy hop carries."
   @spec proxy_failure?(term()) :: boolean()
   def proxy_failure?(reason), do: reason in @proxy_failures
 
@@ -226,6 +243,9 @@ defmodule FermixCore.Net.Egress do
 
   def describe_failure(:proxy_needs_https),
     do: "a plain http:// page cannot be fetched through the proxy; its https:// address can"
+
+  def describe_failure(:proxy_needs_ipv4),
+    do: "the site answers at an IPv6 address, which cannot be reached through the proxy"
 
   @doc "Which way a connection to `destination` leaves."
   @spec route(t(), String.t() | URI.t()) :: route()
@@ -276,11 +296,11 @@ defmodule FermixCore.Net.Egress do
   """
   @spec connect_options(t(), String.t() | URI.t(), keyword()) :: keyword()
   def connect_options(%__MODULE__{} = egress, url, base) when is_list(base) do
-    case route(egress, url) do
-      :direct -> prefer_ipv6(base)
-      {:proxy, proxy} -> proxied_options(base, proxy, scheme(url))
-    end
+    route_options(route(egress, url), url, base)
   end
+
+  defp route_options(:direct, _url, base), do: prefer_ipv6(base)
+  defp route_options({:proxy, proxy}, url, base), do: proxied_options(base, proxy, scheme(url))
 
   @doc """
   `options` (a request's `:connect_options` or a pool's `:conn_opts`) with the
@@ -332,6 +352,19 @@ defmodule FermixCore.Net.Egress do
     end
   end
 
+  @doc """
+  Records that `request`'s URL carries the address the guard validated for
+  `host` (`Net.PinnedUrl`). A hop to that address is then routed for the name
+  as well: direct when either the name or the address is, so a `proxy_bypass`
+  entry naming the host still holds once the URL carries the address. A hop to
+  any other address is routed for its own URL.
+  """
+  @spec put_pinned_host(Req.Request.t(), String.t()) :: Req.Request.t()
+  def put_pinned_host(%Req.Request{url: %URI{host: address}} = request, host)
+      when is_binary(address) and address != "" and is_binary(host) and host != "" do
+    Req.Request.put_private(request, @pinned_host, {address, host})
+  end
+
   # Runs last among the request steps, so the adapter it wraps is the final one
   # (a test's `plug:` included) and the connect options are the caller's own.
   defp route_at_adapter(request, mode, egress) do
@@ -342,15 +375,34 @@ defmodule FermixCore.Net.Egress do
   end
 
   defp run_hop(hop, inner, mode, egress, base) do
-    route = route(egress, hop.url)
+    route = hop_route(egress, hop)
 
-    if unpinnable?(hop, route) do
-      {hop, %Req.TransportError{reason: :proxy_needs_https}}
-    else
-      hop
-      |> put_route(mode, route, egress, base)
-      |> run_adapter(inner)
-      |> name_proxy_failure(route)
+    case refusal(hop, route) do
+      nil ->
+        hop
+        |> put_route(mode, route, base)
+        |> run_adapter(inner)
+        |> name_proxy_failure(route)
+
+      reason ->
+        {hop, %Req.TransportError{reason: reason}}
+    end
+  end
+
+  defp refusal(hop, route) do
+    cond do
+      unpinnable?(hop, route) -> :proxy_needs_https
+      untunnellable?(hop, route) -> :proxy_needs_ipv4
+      true -> nil
+    end
+  end
+
+  # A hop to the address `put_pinned_host/2` recorded dials it for that name:
+  # direct when either the address or the name is.
+  defp hop_route(egress, %Req.Request{url: %URI{host: address} = url} = hop) do
+    case {route(egress, url), Req.Request.get_private(hop, @pinned_host)} do
+      {{:proxy, _proxy}, {^address, host}} -> route(egress, %{url | host: host})
+      {by_address, _pin} -> by_address
     end
   end
 
@@ -367,13 +419,27 @@ defmodule FermixCore.Net.Egress do
 
   defp unpinnable?(_hop, _route), do: false
 
-  defp put_route(hop, :pooled, :direct, _egress, _base), do: put_option(hop, :finch, @direct_pool)
+  # Mint writes a tunnel's `CONNECT` target as `address:port` with no brackets,
+  # which a proxy cannot read for an IPv6 address. A pinned hop cannot name its
+  # host there instead: the proxy would resolve it, behind the guard.
+  defp untunnellable?(
+         %Req.Request{url: %URI{scheme: "https", host: address}} = hop,
+         {:proxy, _proxy}
+       )
+       when is_binary(address) do
+    match?({^address, _host}, Req.Request.get_private(hop, @pinned_host)) and
+      match?({:ok, {_a, _b, _c, _d, _e, _f, _g, _h}}, :inet.parse_address(to_charlist(address)))
+  end
 
-  defp put_route(hop, :pooled, {:proxy, _proxy}, _egress, _base),
+  defp untunnellable?(_hop, _route), do: false
+
+  defp put_route(hop, :pooled, :direct, _base), do: put_option(hop, :finch, @direct_pool)
+
+  defp put_route(hop, :pooled, {:proxy, _proxy}, _base),
     do: put_option(hop, :finch, @proxied_pool)
 
-  defp put_route(hop, :direct, _route, egress, base),
-    do: put_option(hop, :connect_options, connect_options(egress, hop.url, base || []))
+  defp put_route(hop, :direct, route, base),
+    do: put_option(hop, :connect_options, route_options(route, hop.url, base || []))
 
   defp put_option(hop, key, value), do: %{hop | options: Map.put(hop.options, key, value)}
 

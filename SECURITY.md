@@ -40,6 +40,38 @@ channels. Areas of particular interest:
 - inbound/outbound MCP and channel ingress authorization,
 - the signed `fermix upgrade` path.
 
+On macOS the kernel (Seatbelt) holds the commands a turn runs (the shell, git
+and operator-declared command tools; not coding agents or plugin processes) to
+the sandbox mode and keeps Fermix's own secrets out of their reach. Linux has no
+kernel confinement yet: a command is checked only for the folder it starts in
+and for catastrophic patterns, so it can read and send whatever the account can.
+Until that lands, a command (shell, git writes, operator-declared commands) in a
+turn that has read content someone else could have written — a web page, a
+plugin's or MCP server's result, a worker's report, an attachment, the Recent
+Activity note — waits for the owner's own confirmation, and never runs from a
+delegated worker, a cue-woken task or another unattended run; a scheduled job
+runs one only when its allowlist names it. The `codex` and `claude_code` command
+presets run outside the sandbox everywhere, so they wait the same way on macOS.
+The same gate holds access-sensitive plugin commands (a car unlock) on every
+platform.
+
+What this deliberately does not cover:
+
+- Only the turn that read the content waits. Replayed history on a later turn,
+  and memory, skills or a job's task that a tainted turn wrote, run clean later.
+  A tainted turn cannot set up, change or run now a job whose tools would
+  include such a command (one naming it, one with no allowlist, or one that can
+  start a skill), but a job it creates with narrower tools runs them freely.
+- In a shared Buzz channel, the other members' messages are not outside content
+  for commands (the owner's choice: a Buzz session replies through the shell);
+  they still hold access-sensitive plugin commands.
+- The coding-harness run tools (`codex_run`, `claude_code_run`) are not held
+  after outside content: the vendor CLI applies its own sandbox.
+- A voice note is treated as the owner's own words when the channel declares it
+  a voice recording. A forwarded Telegram or WhatsApp voice note is not, but a
+  forwarded Telegram video note still is, and a phone app that sends its
+  recordings as plain audio files gets no exemption.
+
 ### Out of scope
 
 Fermix defends the operator's account, not the machine against its own users. A

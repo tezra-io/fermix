@@ -409,7 +409,11 @@ defmodule FermixCore.Realtime.SessionServerTest do
     # The voice call is the operator at the keyboard: its default tool context
     # carries `source_trust: :operator`, so a scheduled job it creates is stamped
     # with the creator's real trust rather than a minted default.
-    context = Map.put(:sys.get_state(server).tool_context, :memory_repo, repo)
+    # Stamped as the session stamps every tool call of a call that read nothing.
+    context =
+      :sys.get_state(server).tool_context
+      |> Map.put(:memory_repo, repo)
+      |> Map.put(:outside_sources, MapSet.new())
 
     assert {:ok, result} =
              ScheduleJob.execute(

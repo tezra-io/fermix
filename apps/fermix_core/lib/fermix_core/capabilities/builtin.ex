@@ -6,12 +6,26 @@ defmodule FermixCore.Capabilities.Builtin do
   Policy class defaults are pinned per built-in so the §4.6 sub-agent gate
   has stable metadata to filter against. Built-ins not listed here default
   to `:read_only` — fail closed.
+
+  `host_command?: true` marks a built-in that starts a host process whose effect
+  the model chooses (`shell`; `git_write`, whose git runs the repository's
+  hooks). `host_command_confined?: true` says the OS sandbox wraps it where the
+  kernel enforces (both do). Both reach the capability's metadata, where
+  `Capabilities.AccessGate` reads them: a host command in a turn that read
+  outside content waits for the owner where the call is not confined or the host
+  has no kernel enforcement.
   """
 
   alias FermixCore.Capabilities.Capability
 
   @policy_defaults %{
-    "shell" => %{policy_class: :exec, hidden_from_agent?: false, owner_only?: false},
+    "shell" => %{
+      policy_class: :exec,
+      hidden_from_agent?: false,
+      owner_only?: false,
+      host_command?: true,
+      host_command_confined?: true
+    },
     "file_read" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
     # Returns the owner's own image files, exactly like `file_read` returns their
     # text — so it carries the same owner-only bound and a guest never sees it.
@@ -21,7 +35,13 @@ defmodule FermixCore.Capabilities.Builtin do
     "glob_search" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
     "content_search" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
     "git_read" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
-    "git_write" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
+    "git_write" => %{
+      policy_class: :read_write,
+      hidden_from_agent?: false,
+      owner_only?: false,
+      host_command?: true,
+      host_command_confined?: true
+    },
     "web_fetch" => %{policy_class: :network, hidden_from_agent?: false, owner_only?: false},
     "web_search" => %{policy_class: :network, hidden_from_agent?: false, owner_only?: false},
     # Provider place data, not owner data: the owner's saved default location is
@@ -242,7 +262,11 @@ defmodule FermixCore.Capabilities.Builtin do
       policy_class: defaults.policy_class,
       hidden_from_agent?: Map.get(defaults, :hidden_from_agent?, false),
       owner_only?: Map.get(defaults, :owner_only?, false),
-      metadata: metadata(tool_module)
+      metadata:
+        Map.merge(
+          metadata(tool_module),
+          Map.take(defaults, [:host_command?, :host_command_confined?])
+        )
     })
   end
 

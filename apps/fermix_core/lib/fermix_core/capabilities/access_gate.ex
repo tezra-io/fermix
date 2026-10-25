@@ -1,14 +1,32 @@
 defmodule FermixCore.Capabilities.AccessGate do
   @moduledoc """
-  The one decision about whether an access-sensitive plugin command may run now.
+  The one decision about whether a command that needs the owner's consent may
+  run now.
 
-  A plugin manifest marks a changing tool `"access_sensitive": true` (a car
-  unlock); the flag reaches the capability as `metadata.access_sensitive?` on
-  both plugin rails. `Capability.execute/3` — the single invoke boundary for the
-  agent loop and the realtime voice bridge — asks `admit/3` first,
-  and every other capability returns on that one map lookup.
+  Two kinds of capability are decided here. A plugin manifest marks a changing
+  tool `"access_sensitive": true` (a car unlock); the flag reaches the capability
+  as `metadata.access_sensitive?` on both plugin rails, and every call of it is
+  decided.
 
-  For a flagged call, in order:
+  A built-in that starts a host process the model steers
+  (`metadata.host_command?`: `shell`, `git_write`, a command the owner declared)
+  is decided only when the turn read outside content and Fermix cannot sandbox
+  the call. The taint is rule 5's `:outside_sources` half alone: a shared Buzz
+  channel does not hold one by itself, since a Buzz session answers through
+  `shell`. Fermix cannot sandbox the call when the host's kernel does not hold
+  commands (`Sandbox.OsSandbox.enforced?/1` false: Linux today, read through the
+  context's `:os_sandbox` seam), or when the command runs unconfined even where
+  it does (`metadata.host_command_confined?` false: the `codex` and
+  `claude_code` presets). Without the kernel, nothing but the starting folder
+  and the hardline patterns stands between a hostile page's instruction and the
+  owner's files. This is an interim rule until the kernel confines commands on
+  Linux (Landlock): a confined call on a host where `enforced?/1` holds is not
+  decided here, as `shell` is not on macOS.
+  `Capability.execute/3` — the single invoke boundary for the agent loop and the
+  realtime voice bridge — asks `admit/3` first, and every other capability
+  returns on its metadata.
+
+  For a call decided here, in order:
 
     1. a delegated worker (`subagent_depth` or `skill_depth` above zero) is
        refused: no owner is in that loop;
@@ -26,7 +44,9 @@ defmodule FermixCore.Capabilities.AccessGate do
        other people can post there, so the request is not proof the owner asked),
        parks the exact call and asks the owner once, on the surface the turn has
        (for ACP, the owner's own chat, never the channel itself);
-    6. otherwise the owner's direct request is the consent, and it runs.
+    6. otherwise the owner's direct request is the consent, and it runs (a
+       host command reaches these rules only after outside content, so it
+       parks at 5, and its prompt names what was read, never the channel).
 
   Two related questions live here too: `owner_consent_turn?/1`, whether a turn
   may change what a watcher reads or what a task may do (with
@@ -68,11 +88,16 @@ defmodule FermixCore.Capabilities.AccessGate do
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Cues.MandateGate
   alias FermixCore.Harness.Authorization
+  alias FermixCore.Sandbox.CommandTool
+  alias FermixCore.Sandbox.OsSandbox
   alias FermixCore.Temporal.Access
   alias FermixCore.Tools.RequestDirectoryAccess
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   @max_args_chars 300
+  # A host command's verbatim text past this is not shown; the call is refused
+  # rather than parked on a command the owner cannot read in full.
+  @max_command_chars 2_000
   @max_outcome_chars 400
   @max_source_labels 5
   @after_confirm "Once you confirm, Fermix runs exactly this command."
@@ -82,6 +107,13 @@ defmodule FermixCore.Capabilities.AccessGate do
                     ["yes please", "go ahead", "do it", "yes do it", "yes go ahead"]
                 )
 
+  # What a confirmed call runs with. The last four are what a host command reads
+  # to run where the turn's call would have: its folder (`:cwd`), the sandbox
+  # the context named (`:sandbox_config`; a chat turn names none and reads the
+  # live one), an ACP session's env and the platform seam (`:os_sandbox`). These
+  # are frozen at park time and spent on confirm within the 60 s window, so a
+  # sandbox mode or cwd changed after parking does not reach the confirmed run —
+  # acceptable for a one-shot owner confirmation that short-lived.
   @snapshot_keys [
     :session_id,
     :parent_session,
@@ -89,11 +121,16 @@ defmodule FermixCore.Capabilities.AccessGate do
     :redact_values,
     :conversation_key,
     :capability_registry,
-    :computer_use_origin
+    :computer_use_origin,
+    :cwd,
+    :sandbox_config,
+    :session_env,
+    :os_sandbox
   ]
 
   @type surface :: :voice | :this_chat | :owner_inbox
-  @type refusal :: :worker | :cue_run | :unattended | :not_allowlisted | :no_surface
+  @type refusal ::
+          :worker | :cue_run | :unattended | :not_allowlisted | :no_surface | :voice_surface
   @type decision :: :dispatch | {:confirm, surface()} | {:refuse, refusal()}
 
   @doc """
@@ -132,24 +169,23 @@ defmodule FermixCore.Capabilities.AccessGate do
     )
   end
 
-  defp admit_standard(
-         %Capability{metadata: %{access_sensitive?: true}} = capability,
-         args,
-         context
-       ) do
-    call = %{capability: capability, args: args, context: context}
+  defp admit_standard(%Capability{} = capability, args, context) do
+    if gated?(capability, context) do
+      call = %{capability: capability, args: args, context: context}
 
-    case Map.fetch(context, :access_confirmed) do
-      {:ok, digest} -> admit_confirmed(call, digest)
-      :error -> apply_decision(decide(capability, context), call)
+      case Map.fetch(context, :access_confirmed) do
+        {:ok, digest} -> admit_confirmed(call, digest)
+        :error -> apply_decision(decide(capability, context), call)
+      end
+    else
+      {:dispatch, context}
     end
   end
 
-  defp admit_standard(%Capability{}, _args, context), do: {:dispatch, context}
-
   @doc """
-  Whether a flagged call may run now in `context`, must wait for the owner on a
-  surface, or is refused. Pure apart from the job-row read a scheduled run makes.
+  Whether a call `admit/3` decides here (the moduledoc's two kinds) may run now
+  in `context`, must wait for the owner on a surface, or is refused. Pure apart
+  from the job-row read a scheduled run makes.
   """
   @spec decide(Capability.t(), map()) :: decision()
   def decide(%Capability{} = capability, context) when is_map(context) do
@@ -226,8 +262,9 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   @doc """
   Run a parked call the owner confirmed, once. Re-resolves the capability, which
-  must still be the same flagged command on the same plugin and auth profile.
-  Returns a short sentence for the owner either way.
+  must still be a command of either kind on the same plugin and auth profile (a
+  built-in host command has neither). Returns a short sentence for the owner
+  either way.
   """
   @spec confirm(String.t(), GenServer.server()) :: {:ok, String.t()} | {:error, String.t()}
   def confirm(id, pending \\ Pending) when is_binary(id) do
@@ -301,17 +338,52 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   @doc """
   For `schedule_job`, `update_job`, `resume_job` and `run_job_now`: a job naming
-  a flagged tool may be set up, changed, resumed or run now only from a turn
-  that would run that tool directly. Unknown and unflagged names pass.
+  a tool this gate decides in `context` (a flagged tool; a host command where
+  the kernel does not hold it, from a tainted turn) may be set up, changed,
+  resumed or run now only from a turn that would run that tool directly.
+
+  A job can also reach host commands its list does not name: an empty list is
+  the full operator surface (`Jobs.Runner` narrows `[]` to nil); a skill worker
+  (`skill_run`, or a skill capability by name) runs with the skill's own tools;
+  and a job that can set up or retarget a job (`schedule_job`, `update_job`,
+  `run_job_now`, `resume_job`) can create or run, from its clean run, a job that
+  names any tool. Such a job counts as naming every host command, so a tainted
+  turn where commands are not confined cannot launder one through it. A
+  `subagents` worker takes the job's own list and widens nothing. Unknown names
+  and every other tool pass.
   """
   @spec check_job_tools([String.t()], map()) :: :ok | {:error, String.t()}
   def check_job_tools(names, context) when is_list(names) and is_map(context) do
     registry = Map.get(context, :capability_registry) || CapabilityRegistry
 
     case Enum.find(names, &blocked_job_tool?(registry, &1, context)) do
-      nil -> :ok
+      nil -> check_wider_surface(registry, names, context)
       name -> {:error, job_refusal(name)}
     end
+  end
+
+  defp check_wider_surface(registry, names, context) do
+    if reaches_unnamed_tools?(registry, names) and
+         registry |> host_commands() |> Enum.any?(&held_for_job?(&1, context)),
+       do: {:error, open_job_refusal()},
+       else: :ok
+  end
+
+  # The tools through which a job's run can set up or retarget a job.
+  @job_managers ~w(schedule_job update_job run_job_now resume_job)
+
+  defp reaches_unnamed_tools?(_registry, []), do: true
+  defp reaches_unnamed_tools?(registry, names), do: Enum.any?(names, &widens?(registry, &1))
+
+  defp widens?(_registry, name) when name in @job_managers or name == "skill_run", do: true
+
+  defp widens?(registry, name),
+    do: match?({:ok, %Capability{kind: :skill}}, CapabilityRegistry.find(registry, name))
+
+  defp host_commands(registry) do
+    registry
+    |> CapabilityRegistry.list()
+    |> Enum.filter(&(gate_kind(&1) == :host_command))
   end
 
   @doc """
@@ -341,6 +413,42 @@ defmodule FermixCore.Capabilities.AccessGate do
   end
 
   # --- decision ------------------------------------------------------------
+
+  # The one predicate for whether a call meets `decide/2`: a flagged command
+  # always; a host command only where the kernel does not hold it, and only in a
+  # tainted turn. Metadata first, so every other call returns without reading
+  # the context.
+  defp gated?(capability, context) do
+    case gate_kind(capability) do
+      :access_sensitive -> true
+      :host_command -> host_command_gated?(capability, context)
+      nil -> false
+    end
+  end
+
+  # A host command is gated when the turn read outside content and Fermix cannot
+  # sandbox this call: the host has no kernel enforcement (Linux), or the call
+  # runs unconfined even where it does (the `codex`/`claude_code` presets). Its taint is
+  # only what the turn read, never the shared Buzz channel on its own (owner
+  # decision): a Buzz session answers by running the `buzz` CLI through `shell`.
+  defp host_command_gated?(capability, context) do
+    read_outside?(capability, context) and
+      (not confined_call?(capability) or not OsSandbox.enforced?(os_opts(context)))
+  end
+
+  defp confined_call?(%Capability{metadata: metadata}),
+    do: Map.get(metadata, :host_command_confined?, true)
+
+  # The platform seam `OsSandbox` reads; tests inject `os: {:unix, :linux}` or
+  # `{:unix, :darwin}` here so the host the suite runs on never decides.
+  defp os_opts(context), do: Map.get(context, :os_sandbox, [])
+
+  # Which of the two kinds a capability is, if either. The flag comes from a
+  # plugin manifest and the host-command mark from the built-in tables, so no
+  # capability carries both.
+  defp gate_kind(%Capability{metadata: %{access_sensitive?: true}}), do: :access_sensitive
+  defp gate_kind(%Capability{metadata: %{host_command?: true}}), do: :host_command
+  defp gate_kind(%Capability{}), do: nil
 
   defp worker?(context),
     do: Map.get(context, :subagent_depth, 0) != 0 or Map.get(context, :skill_depth, 0) != 0
@@ -432,7 +540,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp apply_decision(:dispatch, %{context: context}),
     do: {:dispatch, Map.put(context, :access_gate, dispatch_label(context))}
 
-  defp apply_decision({:confirm, surface}, call), do: park(call, surface)
+  defp apply_decision({:confirm, surface}, call), do: park_or_refuse(call, surface)
   defp apply_decision({:refuse, reason}, call), do: refuse(call, reason)
 
   defp dispatch_label(context),
@@ -447,17 +555,44 @@ defmodule FermixCore.Capabilities.AccessGate do
     end
   end
 
+  # A host command is parked only where the owner reads it whole. Never on a
+  # voice call, where the model that read the hostile content would phrase the
+  # question; never when it is too long to show. Both are refused instead, and a
+  # plugin command keeps the surface `decide/2` chose, a spoken yes included.
+  defp park_or_refuse(%{capability: capability} = call, surface) do
+    cond do
+      gate_kind(capability) != :host_command ->
+        park(call, surface)
+
+      surface == :voice ->
+        refuse(call, :voice_surface)
+
+      String.length(command_text(capability, call.args)) > @max_command_chars ->
+        hold(call, command_too_long_text(capability.name), "refused_command_too_long")
+
+      true ->
+        park(call, surface)
+    end
+  end
+
   defp park(call, surface) do
-    call =
-      Map.merge(call, %{
-        sources: outside_labels(call.capability, source_set(call.context)),
-        shared_channel?: shared_channel?(call.context)
-      })
+    call = with_sources(call)
 
     call
     |> pending_attrs(surface)
     |> Pending.park(pending(call.context))
     |> parked(call, surface)
+  end
+
+  # Why the owner is asked, resolved once: the sources the turn read (minus the
+  # target plugin's own) and, for a plugin command, whether the channel is
+  # shared. A host command is never held for the channel alone, so its reason
+  # never names it. Both the park and the refuse paths read it.
+  defp with_sources(%{capability: capability, context: context} = call) do
+    Map.merge(call, %{
+      sources: outside_labels(capability, source_set(context)),
+      shared_channel?: gate_kind(capability) == :access_sensitive and shared_channel?(context)
+    })
   end
 
   defp pending_attrs(%{capability: capability, args: args, context: context} = call, surface) do
@@ -467,6 +602,7 @@ defmodule FermixCore.Capabilities.AccessGate do
       digest: digest(capability.name, args),
       plugin: Map.get(capability.metadata, :plugin),
       auth_profile: Map.get(capability.metadata, :auth_profile),
+      command_ref: command_ref(capability),
       binding: binding(surface, context),
       sources: call.sources,
       snapshot: context |> Map.take(@snapshot_keys) |> Map.put(:source_trust, :operator)
@@ -535,9 +671,10 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   defp deliver(:voice, call, :existing), do: hold_parked(call, existing_text(), "held_voice")
 
-  defp refuse(call, reason) do
-    Logger.info("access_gate: #{call.capability.name} refused (#{reason})")
-    hold(call, refusal_text(reason, call.capability.name), "refused_#{reason}")
+  defp refuse(%{capability: capability} = call, reason) do
+    call = with_sources(call)
+    Logger.info("access_gate: #{capability.name} refused (#{reason})")
+    hold(call, refusal_text(gate_kind(capability), reason, call), "refused_#{reason}")
   end
 
   # One model tool call, one exec event: the executor never ran, so the gate
@@ -596,16 +733,40 @@ defmodule FermixCore.Capabilities.AccessGate do
     end
   end
 
-  defp same_command(%Capability{metadata: metadata} = capability, record) do
-    if Map.get(metadata, :access_sensitive?) == true and
-         Map.get(metadata, :plugin) == record.plugin and
-         Map.get(metadata, :auth_profile) == record.auth_profile do
+  defp same_command(%Capability{} = capability, record) do
+    if command_unchanged?(capability, record) do
       {:ok, capability}
     else
       Logger.warning("access_gate: intent #{record.id} #{record.tool} changed before confirm")
       {:error, :plugin_changed}
     end
   end
+
+  # The command the owner confirmed must be the one that runs. A plugin command
+  # is pinned by its plugin and auth profile; a host command by what it runs
+  # (the built-in module, or a declared command's executable and args), so a
+  # command re-declared between park and confirm never runs under the old yes.
+  defp command_unchanged?(%Capability{metadata: metadata} = capability, record) do
+    case gate_kind(capability) do
+      :access_sensitive ->
+        Map.get(metadata, :plugin) == record.plugin and
+          Map.get(metadata, :auth_profile) == record.auth_profile
+
+      :host_command ->
+        command_ref(capability) == record.command_ref
+
+      nil ->
+        false
+    end
+  end
+
+  # What pins a host command across the confirmation: the built-in's module, or
+  # a declared command's executable and fixed args.
+  defp command_ref(%Capability{executor: {CommandTool, :execute, [spec]}}),
+    do: {:command, Map.get(spec, :command), Map.get(spec, :args, [])}
+
+  defp command_ref(%Capability{metadata: %{tool_module: module}}), do: {:module, module}
+  defp command_ref(%Capability{}), do: nil
 
   defp dispatch_confirmed(capability, record) do
     context =
@@ -627,17 +788,35 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   defp blocked_job_tool?(registry, name, context) when is_binary(name) do
     case CapabilityRegistry.find(registry, name) do
-      {:ok, %Capability{metadata: %{access_sensitive?: true}} = capability} ->
-        decide(capability, context) != :dispatch
-
-      _unknown_or_unflagged ->
-        false
+      {:ok, %Capability{} = capability} -> held_for_job?(capability, context)
+      :error -> false
     end
   end
 
   defp blocked_job_tool?(_registry, _name, _context), do: false
 
+  # Whether this turn could not run `capability` itself, so a job naming it may
+  # not be set up from here either.
+  defp held_for_job?(capability, context),
+    do: gated?(capability, context) and decide(capability, context) != :dispatch
+
   # --- owner-facing text (Fermix-authored; never quotes the model or a sender)
+
+  # A plugin command shows its description and JSON arguments; a host command
+  # shows the exact command the owner is being asked to run, verbatim, and the
+  # folder it runs in when that is known. A session secret the command echoes is
+  # redacted, as the JSON arguments are, so it is never posted to the chat.
+  defp owner_prompt(%{capability: %{metadata: %{host_command?: true}} = capability} = call) do
+    [
+      "Confirm #{capability.name}? It runs a command on this computer, which Fermix " <>
+        "cannot sandbox here.",
+      "Command: " <> redacted(command_text(capability, call.args), call.context),
+      folder_line(command_folder(capability, call.args, call.context), call.context),
+      "Asked because #{reason_phrase(call)}."
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+  end
 
   defp owner_prompt(%{capability: capability} = call) do
     """
@@ -656,6 +835,45 @@ defmodule FermixCore.Capabilities.AccessGate do
     |> ToolTelemetry.redact(Map.get(context, :redact_values, []))
     |> bounded(@max_args_chars)
   end
+
+  # The exact command a host-command call runs, verbatim for the owner's prompt:
+  # the shell string, the git argv, or a declared command's executable and args.
+  # Unbounded here; `park_or_refuse/2` refuses past `@max_command_chars`.
+  defp command_text(%Capability{name: "shell"}, %{"command" => command}) when is_binary(command),
+    do: command
+
+  defp command_text(%Capability{name: "git_write"}, args),
+    do: join_words(["git", Map.get(args, "command") | extra_list(Map.get(args, "args"))])
+
+  defp command_text(%Capability{executor: {CommandTool, :execute, [spec]}}, args) do
+    join_words(
+      [Map.get(spec, :command) | Map.get(spec, :args, [])] ++
+        extra_list(Map.get(args, "args")) ++ [Map.get(args, "prompt")]
+    )
+  end
+
+  defp command_text(%Capability{}, args), do: Jason.encode!(args)
+
+  # Where a host command runs, when the call or the turn says: `shell`'s
+  # `working_dir`, else the turn's folder; `git_write`'s `repo`.
+  defp command_folder(%Capability{name: "shell"}, args, context),
+    do: Map.get(args, "working_dir") || Map.get(context, :cwd)
+
+  defp command_folder(%Capability{name: "git_write"}, args, _context), do: Map.get(args, "repo")
+  defp command_folder(%Capability{}, _args, _context), do: nil
+
+  defp folder_line(folder, context) when is_binary(folder),
+    do: "Folder: " <> redacted(folder, context)
+
+  defp folder_line(_none, _context), do: nil
+
+  defp redacted(text, context),
+    do: ToolTelemetry.redact(text, Map.get(context, :redact_values, []))
+
+  defp extra_list(list) when is_list(list), do: Enum.filter(list, &is_binary/1)
+  defp extra_list(_absent), do: []
+
+  defp join_words(parts), do: parts |> Enum.filter(&is_binary/1) |> Enum.join(" ")
 
   # Why the owner is asked: the shared channel, what the turn read, or both.
   defp reason_phrase(%{shared_channel?: true, sources: []}), do: shared_channel_reason()
@@ -680,14 +898,22 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   # --- model-facing text (fixed, never carries the token) -------------------
 
+  # Why the command needs the owner's consent at all, before why now.
+  defp what(%{capability: capability}) do
+    case gate_kind(capability) do
+      :access_sensitive -> "is an access-sensitive command"
+      :host_command -> "runs a command Fermix cannot sandbox here"
+    end
+  end
+
   defp chat_text(%{capability: %{name: tool}} = call) do
-    "Not sent. #{tool} is an access-sensitive command and #{reason_phrase(call)}, so the " <>
+    "Not sent. #{tool} #{what(call)} and #{reason_phrase(call)}, so the " <>
       "owner must confirm it. A confirmation is now in this chat and expires in 60 seconds. " <>
       "Tell the owner and stop. Do not call #{tool} again: it runs the moment they confirm."
   end
 
   defp inbox_text(%{capability: %{name: tool}} = call) do
-    "Not sent. #{tool} is an access-sensitive command and #{reason_phrase(call)}, so the " <>
+    "Not sent. #{tool} #{what(call)} and #{reason_phrase(call)}, so the " <>
       "confirmation went to the owner's own chat. Say it is waiting on the owner's " <>
       "confirmation there, then stop. Do not call #{tool} again: it runs the moment they confirm."
   end
@@ -699,8 +925,8 @@ defmodule FermixCore.Capabilities.AccessGate do
   end
 
   defp waiting_text do
-    "Not run: an access-sensitive command is already waiting on the owner's answer, and " <>
-      "nothing else runs until they give it. Tell the owner it is waiting, then stop."
+    "Not run: a command that needs the owner's confirmation is already waiting on their " <>
+      "answer, and nothing else runs until they give it. Tell the owner it is waiting, then stop."
   end
 
   defp existing_text do
@@ -716,13 +942,60 @@ defmodule FermixCore.Capabilities.AccessGate do
     "#{tool} was not sent: too many confirmations are waiting; try again shortly."
   end
 
+  defp command_too_long_text(tool) do
+    "#{tool} was not run: the command is too long for the owner to confirm safely. " <>
+      "Ask the owner to run a shorter command, or run it themselves."
+  end
+
   defp mismatch_text(tool) do
     "#{tool} was not sent: this call does not match the request the owner confirmed."
   end
 
   defp changed_text(tool) do
-    "#{tool} did not run: the command changed since the owner was asked (the plugin was " <>
-      "turned off, no longer marks it, or signs in under a different profile). Ask again."
+    "#{tool} did not run: the command changed since the owner was asked (it was removed, or " <>
+      "its plugin was turned off, no longer marks it, or signs in under a different " <>
+      "profile). Ask again."
+  end
+
+  defp refusal_text(:access_sensitive, reason, call),
+    do: refusal_text(reason, call.capability.name)
+
+  # The host-command refusal names the same reason the park prompt would
+  # (`reason_phrase/1`), so it never claims "came after content" when the only
+  # taint is a shared channel or an unstamped context.
+  defp refusal_text(:host_command, reason, %{capability: %{name: tool}} = call) do
+    "#{tool} was not run: Fermix cannot sandbox commands here, and #{reason_phrase(call)}. " <>
+      host_rule(reason, tool)
+  end
+
+  defp host_rule(:worker, _tool) do
+    "A delegated worker never runs one after such content. Report that the owner must ask " <>
+      "for it directly."
+  end
+
+  defp host_rule(:cue_run, _tool) do
+    "A task woken by a cue never runs one. Report what you found; the owner can run it " <>
+      "from their own chat."
+  end
+
+  defp host_rule(:unattended, _tool) do
+    "After such content it runs only when the owner asks directly in their chat, the Fermix " <>
+      "app or by voice, or from a scheduled job that names it."
+  end
+
+  defp host_rule(:not_allowlisted, tool) do
+    "This scheduled job does not name it. The owner can recreate the job from their own " <>
+      "chat and name #{tool} in its allowed tools."
+  end
+
+  defp host_rule(:no_surface, _tool) do
+    "It needs the owner's confirmation and Fermix has no private chat to ask them on. Ask " <>
+      "from the Fermix app or your own chat."
+  end
+
+  defp host_rule(:voice_surface, _tool) do
+    "A voice call cannot show the owner the exact command, so it is not asked aloud. Tell " <>
+      "the owner to ask for it from their own chat or the Fermix app."
   end
 
   defp refusal_text(:worker, tool) do
@@ -754,5 +1027,13 @@ defmodule FermixCore.Capabilities.AccessGate do
     "A scheduled job that may run #{tool} can be set up, changed or run now only when you " <>
       "ask directly, from your own chat, app or voice, in a request that has read nothing " <>
       "from outside. Ask again directly."
+  end
+
+  defp open_job_refusal do
+    "A scheduled job with no allowed_tools, or one that can start a skill or manage jobs, " <>
+      "can run commands Fermix cannot sandbox here, so it cannot be set up, changed or run " <>
+      "now from a request that read content from outside. Name the tools the job needs in " <>
+      "allowed_tools (no skill or job tools), or ask again in a request that has read " <>
+      "nothing from outside."
   end
 end

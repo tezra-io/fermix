@@ -5,6 +5,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixChannels.Mobile.Iroh.Bridge
   alias FermixChannels.Mobile.Iroh.Helper
   alias FermixChannels.Mobile.Iroh.HelperProtocol
   alias FermixChannels.Mobile.Iroh.Relays.Source
@@ -145,7 +146,11 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
 
     assert start["relays"] == [%{"url" => @us1.url, "quic_port" => 7842}]
 
-    assert start["limits"]["max_connections"] == 64
+    # The helper's cap is the rail's outer bound: far above the bridge's 64, so
+    # silent connections fill the bridge, where a phone can still get a place,
+    # long before they fill the helper, where it cannot (`Iroh.Bridge`).
+    assert start["limits"]["max_connections"] == 1_024
+    assert start["limits"]["max_connections"] > 4 * Bridge.max_connections()
 
     assert {:ok, %{"kind" => "iroh", "node_id" => @fixture_id, "relays_rev" => rev}} =
              Helper.candidate(pid)

@@ -338,6 +338,20 @@ defmodule FermixCore.Capabilities.MCP.Remote.SessionTest do
                Session.request(session, "tools/list", %{}, 5_000)
     end
 
+    # A plugin's credential is a pasted secret with nothing to renew, so a 401
+    # to a call that may already have acted is never sent a second time.
+    test "a plugin's tools/call answered 401 is refused and sent exactly once" do
+      {agent, session} = start_session([json(401, %{})])
+      params = %{"name" => "acme_create_note", "arguments" => %{"title" => "Release notes"}}
+
+      assert {:error, {:reauthorization_required, "mcp.acme.example"}} =
+               Session.request(session, "tools/call", params, 5_000)
+
+      assert [_initialize, _initialized, call] = requests(agent)
+      assert Jason.decode!(call.body)["method"] == "tools/call"
+      assert Jason.decode!(call.body)["params"] == params
+    end
+
     # MCP 2025-06-18 requires the client to start a NEW session on a 404 to a
     # request carrying a session id. Returning `:session_expired` and stopping
     # there left a long-lived session permanently poisoned.

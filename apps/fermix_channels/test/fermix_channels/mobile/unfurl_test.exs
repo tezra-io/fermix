@@ -64,6 +64,7 @@ defmodule FermixChannels.Mobile.UnfurlTest do
                     opts}
 
     assert {"host", "example.com"} in opts[:headers]
+    assert opts[:method] == :get
     assert opts[:receive_timeout] == 15_000
     assert_receive {:stored_thumbnail, "png-bytes", "image/png"}
   end

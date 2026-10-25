@@ -226,6 +226,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
       {:ok, digest} = CanonicalJson.descriptor_digest(name, %{}, nil, nil)
 
       %{
+        description: "The signed #{name} description.",
         read_only: true,
         replay_safe: true,
         required_credential_scope: "read",

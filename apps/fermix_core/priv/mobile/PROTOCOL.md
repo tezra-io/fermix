@@ -112,13 +112,30 @@ uint32be length | type | payload
   session.
 - The bounds of *Transport* hold per stream: the handshake deadline, the
   150 s idle bound (close `1002`, `no inbound frame`), the one-hour session,
-  and the two memory bounds. The daemon takes at most 64
-  remote connections at once, refusing one past that before it reaches a
-  session, and a phone can open at most four streams at once on one
-  connection.
-- A pairing over the route is counted like any other. Past 64 failed pairing
-  attempts from remote endpoints, a pairing window refuses every further
-  remote attempt; the owner's own network and Tailscale are untouched.
+  and the two memory bounds. A phone can open at most four streams at once on
+  one connection.
+- The outer bound is 1,024 remote connections at once: one past it is refused
+  before its handshake, and nothing the daemon does can make room for it.
+- The daemon serves 64 streams at once. A stream that arrives while all 64 are
+  served takes the place of the oldest one still in its handshake, which is
+  closed `1008` (`mobile handshake deadline`) as the deadline would close it. A
+  stream keeps its place once its IK handshake proved a paired phone's key, or
+  once its `pair_request` waits for the owner; IKpsk2's first message proves
+  no pairing secret, so a stream that has sent only that can still be closed.
+  A pairing phone therefore stays closable through the round trip to its
+  `pair_request`, which its attestation can stretch to seconds: a stranger who
+  opens streams faster than that can still close it, until the helper can make
+  room itself. A phone narrows that window by preparing its attestation before
+  it dials (the challenge comes from the pairing link's secret), so that
+  `pair_request` follows the daemon's reply at once. A stream that finds every
+  place so held is refused before it reaches a session. A stream that got past
+  its handshake in the moment the daemon chose it to make room keeps its place
+  too, so the daemon serves one more than 64 for each such stream, until a
+  stream ends.
+- A pairing over the route is counted like any other (see *Noise modes and
+  pairing*), with the phone's endpoint id as its source: an endpoint's fifth
+  failure refuses that endpoint, and no failures from other endpoints refuse
+  anyone else.
 
 The phone keeps the relays and the revision of the last route it was given and
 names that revision in `hello.relay_list_rev`. The daemon's endpoint uses only
@@ -237,17 +254,18 @@ A pairing session runs in this order:
    of the three refusals of *Attestation* below, sent before the owner is asked:
    `attestation`, `attestation_unavailable` or `platform_unsupported`.
 
-Failed pairing attempts are counted per source address. An address's fifth
-failure refuses that address for the rest of the window: its next handshake is
-closed with `1002` before any Noise state exists. Failures never close the
-window, so nobody but the owner can end one, and nothing is counted while a
-request waits for the owner. A window remembers at most 1,024 addresses; a
-failure from another address is not counted. A `pair_request` from the same
-phone key as the one waiting replaces it, and the older socket is closed with
-`4001`. A `pair_request` from another phone key while one waits is closed with
-`1002`, whether its attestation verified or not: it gets no `pair_denied`, and
-the waiting request goes on. A phone that was approved but never said `hello`
-can pair again.
+Failed pairing attempts are counted per source: the address of a WebSocket, or
+the endpoint id of a remote stream. A source's fifth failure refuses that
+source for the rest of the window: its next handshake is closed with `1002`
+before any Noise state exists. Failures never close the window, so nobody but
+the owner can end one, and nothing is counted while a request waits for the
+owner. A window remembers at most 1,024 sources, addresses and endpoint ids
+together; a failure from another source is not counted. A `pair_request` from
+the same phone key as the one waiting replaces it, and the older socket is
+closed with `4001`. A `pair_request` from another phone key while one waits is
+closed with `1002`, whether its attestation verified or not: it gets no
+`pair_denied`, and the waiting request goes on. A phone that was approved but
+never said `hello` can pair again.
 
 ### Attestation
 
@@ -401,7 +419,7 @@ accepts it.
 |---|---|---|
 | `hello` | `device_id`, `app_version`, `last_server_seq`, `protocol_v`; `relay_list_rev?` | first paired-session event; `relay_list_rev` is the revision of the relay list the phone holds (see *Remote reach*), 16 lowercase hex digits |
 | `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | text or at least one attachment is required |
-| `attach_begin` | `attach_id`, `kind`, `mime`, `size_bytes`, `sha256`; `name?`, `poster_of?` | SHA-256 is announced before transfer so the host can deduplicate. `kind` is one of `image`, `animation`, `video`, `audio`, `document`, `file`; the daemon names the kind from the bytes itself and reads `kind` as a hint. A still sent with `poster_of` set to a video's `attach_id` is that video's poster frame, not an attachment of its own |
+| `attach_begin` | `attach_id`, `kind`, `mime`, `size_bytes`, `sha256`; `name?`, `poster_of?` | SHA-256 is announced before transfer so the host can deduplicate. `kind` is one of `image`, `animation`, `video`, `audio`, `voice`, `document`, `file`; the daemon names the kind from the bytes itself and reads `kind` as a hint. `voice` is a recording the owner made in the app: the daemon treats it as the owner's own words, while `audio` (an audio file attached or forwarded) is treated as content someone else could have written. The row's `media_refs` and every media event name a `voice` upload `audio`. A daemon older than `voice` reads it as no hint and handles the recording as an audio file, so a phone sends `voice` without checking the daemon's version. A still sent with `poster_of` set to a video's `attach_id` is that video's poster frame, not an attachment of its own |
 | `attach_chunk` | `attach_id`, `index` + raw bytes | contiguous zero-based indexes; raw bytes ≤60 KiB |
 | `attach_end` | `attach_id`, `sha256` | host verifies announced size and digest |
 | `command` | `client_msg_id`, `profile_id`, `name`; `args?` | uses the normal command registry; `name` is lowercase letters, digits and `_` |
@@ -887,7 +905,7 @@ the device has since replaced.
 | `1000` | the one-hour session lifetime ran out (`Noise session lifetime reached`), or the daemon is shutting down | reconnect with a new handshake |
 | `1002` | a protocol error (`mobile protocol error`, `invalid mobile prelude`, `unsupported mobile protocol version`), no inbound frame for 150 s, or a malformed WebSocket frame | reconnect; after `unsupported_protocol_version`, update first |
 | `1003` | a text message | send binary messages |
-| `1008` | the handshake deadline (`mobile handshake deadline`) | reconnect |
+| `1008` | the handshake deadline (`mobile handshake deadline`); on the remote route, also a stream still in its handshake closed to make room for a newer one | reconnect |
 | `1009` | a message over 65,535 bytes (`mobile frame too large`) | never send one |
 | `1011` | the daemon's socket failed | reconnect |
 | `4001` | `connection replaced`: a newer connection of the same phone, or a pairing request from the same phone key | do not reconnect this connection; the newer one is live |

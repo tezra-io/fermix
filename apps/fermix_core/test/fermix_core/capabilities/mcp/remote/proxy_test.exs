@@ -101,6 +101,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.ProxyTest do
   defp facts(name, overrides \\ %{}) do
     Map.merge(
       %{
+        description: "Read one note.",
         read_only: true,
         replay_safe: true,
         required_credential_scope: "read",

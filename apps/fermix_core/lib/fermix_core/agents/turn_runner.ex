@@ -36,6 +36,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Attachments
   alias FermixCore.Attachments.Manifest
   alias FermixCore.Attachments.Workspace
+  alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.ComputerHistory.Gate, as: ComputerHistoryGate
   alias FermixCore.ComputerHistory.RecentActivity
   alias FermixCore.ComputerHistory.Taint
@@ -634,7 +635,14 @@ defmodule FermixCore.Agents.TurnRunner do
       reaction_spec: Map.get(msg, :reaction_spec),
       # This-turn inbound channel pictures (M14), so `generate_image` edit can
       # reference `inbound:last`. Transient like `:parts`, never persisted.
-      inbound_images: Enum.filter(parts, &match?(%{type: :image}, &1))
+      inbound_images: Enum.filter(parts, &match?(%{type: :image}, &1)),
+      # What this turn's first model call carries that someone else could have
+      # written: its attachments (a voice note aside), a coding-run continuation's
+      # vendor text, and below a Recent Activity note that rendered. A provenance
+      # for `Capabilities.AccessGate`, from this turn's message only, so a later
+      # turn replaying the text is not tainted; the loop keeps it (`put_new`) and
+      # folds in what the turn's tools read.
+      outside_sources: initial_outside_sources(msg)
     }
 
     # The composed prompt + runtime section are cached per profile, so neither
@@ -646,7 +654,7 @@ defmodule FermixCore.Agents.TurnRunner do
     messages = inject_channel_presentation(messages, msg)
     messages = inject_current_date(messages)
     messages = inject_recent_calls(messages, state, source_trust, voice_call)
-    messages = inject_recent_activity(messages, context)
+    {messages, context} = inject_recent_activity(messages, context)
     messages = inject_open_loop_due(messages, context)
     messages = inject_live_call(messages, Map.get(state, :live_call))
 
@@ -691,6 +699,18 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp tell_history_tainted(_voice_call, _msg, _state, _history, _stream_callback), do: :ok
+
+  # The turn's message-borne outside content, before any tool runs: its
+  # attachments and, when it re-enters as a finished coding run's notice (the
+  # continuation marker, whose content is the vendor CLI's text), that run's
+  # provenance.
+  defp initial_outside_sources(msg) do
+    sources = UntrustedContent.attachment_sources(Map.get(msg, :inbound_attachments))
+
+    if harness_continuation_depth(msg) > 0,
+      do: MapSet.put(sources, UntrustedContent.harness_continuation_source()),
+      else: sources
+  end
 
   defp run_profile(msg) do
     (Map.get(msg, :metadata) || %{}) |> Map.get(:run_profile)
@@ -778,9 +798,19 @@ defmodule FermixCore.Agents.TurnRunner do
 
   # Per-turn Recent Activity section (MILESTONE_32 §11.1), gated by the single
   # ComputerHistory.Gate — `note/1` returns nil (a no-op here) when the Gate
-  # denies it or there is no activity yet.
-  defp inject_recent_activity(messages, context),
-    do: append_system_note(messages, RecentActivity.note(context))
+  # denies it or there is no activity yet. A note that rendered summarises pages
+  # other people wrote, so the turn records it as an outside source.
+  defp inject_recent_activity(messages, context) do
+    case RecentActivity.note(context) do
+      nil ->
+        {messages, context}
+
+      note ->
+        source = UntrustedContent.recent_activity_source()
+        context = Map.update!(context, :outside_sources, &MapSet.put(&1, source))
+        {append_system_note(messages, note), context}
+    end
+  end
 
   # Rung 1 of a due open loop (MILESTONE_78 §04 stage 3): an owner's private turn
   # carries the note while a loop is due. It changes only when a loop comes due

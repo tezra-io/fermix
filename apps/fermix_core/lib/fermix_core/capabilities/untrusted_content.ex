@@ -17,22 +17,36 @@ defmodule FermixCore.Capabilities.UntrustedContent do
 
   `Capabilities.AccessGate` reads the same boundary through `outside_source/1`
   to decide whether a turn has read content someone else could have written.
+  What a turn's first model call carries has a provenance too:
+  `attachment_sources/1` and `recent_activity_source/0` are what
+  `Agents.TurnRunner` seeds the turn with, a provenance only: the content itself
+  is not framed, so an owner's own checklist still reads as theirs.
   """
 
+  alias FermixCore.Attachments
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Tools.GetJobRun
   alias FermixCore.Tools.ListCues
   alias FermixCore.Tools.ListJobRuns
+  alias FermixCore.Tools.RecallActivity
   alias FermixCore.Tools.SkillRun
 
   @typedoc """
-  Where outside content came from: a plugin, one named tool, or a cue source
-  (its `source_ref`). `outside_source/1` returns the first two from a tool's
-  result; a cue run's context arrives seeded with the third (M60 S2), so the run
-  is tainted from its first token. Every reader takes the label from the
-  second element, whatever the kind.
+  Where outside content came from: a plugin, one named tool, a cue source (its
+  `source_ref`), an attachment of the turn's message (by kind) or the Recent
+  Activity note. `outside_source/1` returns the first two from a tool's result;
+  a cue run's context arrives seeded with the third (M60 S2), and an owner's
+  turn with the last two when its first model call carries them, so either is
+  tainted from its first token. Every reader takes the label from the second
+  element, whatever the kind; the owner reads it in a confirmation prompt.
   """
-  @type outside_source :: {:plugin, String.t()} | {:tool, String.t()} | {:cue, String.t()}
+  @type outside_source ::
+          {:plugin, String.t()}
+          | {:tool, String.t()}
+          | {:cue, String.t()}
+          | {:attachment, String.t()}
+          | {:activity, String.t()}
+          | {:harness, String.t()}
 
   # Tool categories whose result relays what a worker or a coding run read.
   @relaying_categories [:delegation, :harness]
@@ -43,6 +57,24 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   # of what is set up relay none, `outside_source/2`). `manage_watcher` is not
   # one: it returns no outside text (M60 S13).
   @relaying_modules [SkillRun, GetJobRun, ListJobRuns, ListCues]
+
+  # Tools whose result is text captured from the owner's screen: Computer
+  # History's summaries of the pages and documents the owner had open, which
+  # other people wrote. `ComputerHistory.Recall` frames them itself, so the tool
+  # is not `external?/1`, but what it returns is outside content all the same.
+  @screen_text_modules [RecallActivity]
+
+  # The words an attachment's kind is named by in a confirmation prompt. Never
+  # the sender's file name: that prompt quotes no sender.
+  @attachment_labels %{
+    still: "attached image",
+    animation: "attached animation",
+    video: "attached video",
+    audio: "attached audio",
+    document: "attached PDF",
+    text: "attached text file",
+    unknown: "attached file"
+  }
 
   # Durable-memory `source_type` values whose stored value derives from an
   # external/attacker-controllable surface (a coding-harness run summarizes
@@ -78,8 +110,9 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   coding run's (the harness tools return the vendor CLI's text, derived from
   the repo, issue and web content the run read) and a scheduled job's
   (`get_job_run` and `list_job_runs` return each run's final response, which
-  relays whatever that run read). Every other `external?/1` tool is labelled by
-  name.
+  relays whatever that run read). `recall_activity` counts too: its summaries
+  are of what other people wrote on the owner's screen. Every other
+  `external?/1` tool is labelled by name.
   """
   @spec outside_source(Capability.t()) :: outside_source() | nil
   def outside_source(%Capability{metadata: %{plugin_owned?: true, plugin: plugin}})
@@ -91,7 +124,7 @@ defmodule FermixCore.Capabilities.UntrustedContent do
       do: {:tool, name}
 
   def outside_source(%Capability{name: name, metadata: %{tool_module: module}})
-      when module in @relaying_modules,
+      when module in @relaying_modules or module in @screen_text_modules,
       do: {:tool, name}
 
   def outside_source(%Capability{name: name, kind: :skill}), do: {:tool, name}
@@ -114,6 +147,37 @@ defmodule FermixCore.Capabilities.UntrustedContent do
 
   def outside_source(%Capability{} = capability, arguments) when is_map(arguments),
     do: outside_source(capability)
+
+  @doc """
+  The outside sources the attachments of a turn's message bring into its first
+  model call, one per kind. Every attachment counts, one Fermix could not read
+  too (its name and kind reach the manifest), except a voice note — what the
+  channel declared a voice recording (`hint: :voice | :video_note`), whose sound
+  became the turn's own text (M21): the owner's own voice. A forwarded audio file
+  is not exempt, even once transcribed, and neither is a video's soundtrack.
+  """
+  @spec attachment_sources([Attachments.t()] | nil) :: MapSet.t(outside_source())
+  def attachment_sources(nil), do: MapSet.new()
+
+  def attachment_sources(attachments) when is_list(attachments) do
+    attachments
+    |> Enum.reject(&voice_note?/1)
+    |> MapSet.new(&attachment_source/1)
+  end
+
+  @doc "The outside source a Recent Activity note brings into the turn it renders in."
+  @spec recent_activity_source() :: outside_source()
+  def recent_activity_source, do: {:activity, "Recent Activity"}
+
+  @doc """
+  The outside source a coding-run continuation turn carries: a finished run
+  re-enters the conversation as a message whose content is the vendor CLI's own
+  text, derived from the repo, issue and web content the run read. Seeded by
+  `Agents.TurnRunner` when the turn carries the continuation marker, the same
+  origin `get_coding_run`'s result counts as (`@relaying_categories [:harness]`).
+  """
+  @spec harness_continuation_source() :: outside_source()
+  def harness_continuation_source, do: {:harness, "a coding run"}
 
   @doc """
   Wrap `output` in the untrusted-content frame when `capability` is external;
@@ -150,6 +214,22 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   end
 
   def untrusted_source_type?(_source_type), do: false
+
+  # Only what the channel declared a voice recording is the owner's own voice; a
+  # forwarded audio file transcribes to `:transcribed` too but is still outside
+  # content. The phone declares an in-app recording as `kind: "voice"`, which
+  # `Companion.Requests` maps to `:voice`, so it is exempt; a phone app that
+  # still sends its recordings as `audio` taints its turn, as any audio file does.
+  # (The Mac app's chat socket carries no attachments.)
+  #
+  # Channel gap (not fixed here): a FORWARDED Telegram voice note still arrives
+  # as `hint: :voice`, so it is exempted though someone else recorded it. The
+  # fix is channel-level — the gateway dropping the voice hint when Telegram's
+  # `forward_origin` is set — and belongs with the inbound-attachment pipeline.
+  defp voice_note?(%Attachments{hint: hint}), do: hint in [:voice, :video_note]
+
+  defp attachment_source(%Attachments{kind: kind}),
+    do: {:attachment, Map.fetch!(@attachment_labels, kind)}
 
   defp framed(output, source) do
     """
