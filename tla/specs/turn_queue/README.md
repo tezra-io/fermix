@@ -164,7 +164,7 @@ watch was added to the model).
 
 - The LLM and tools (one "loop" step), streaming drafts, and typing.
 - The access gate's parked confirmation. `run_message_loop` hands AgentLoop
-  the owner-inbox closure and the Live call id (`turn_runner.ex:596`,
+  the owner-inbox closure and the Live call id (`turn_runner.ex:597`,
   `:600`). A parked call is a held tool result inside the one loop step, and
   the owner's confirm later runs it on a task outside the Queue, not as a
   new turn.
@@ -189,7 +189,7 @@ watch was added to the model).
 - What a turn does with its attachments before its loop (M67).
   `run_message_loop` composes their manifest into the user text that
   `persist_user_message` stores and, on the owner's chat turn, first saves
-  them to the workspace (`with_attachments`, `turn_runner.ex:473`). These are
+  them to the workspace (`with_attachments`, `turn_runner.ex:474`). These are
   file writes inside the turn's own steps, before its user message is
   persisted, and move no Queue state: a stop or crash during them is one at
   the turn's start, with nothing of the turn in history yet.
@@ -251,7 +251,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Check:** 10 (6 states).
 - **Counterexample:** the reply is delivered (`deliver_final`, `queue.ex:547`).
   `/stop` then arrives before `runner.commit` persists it (`:551` →
-  `turn_runner.ex:157`).
+  `turn_runner.ex:158`).
 - **Code:**
   - `stop_active_turn` kills the task and writes the stopped marker
     (`queue.ex:1095-1100`, `:1145-1158`).
@@ -276,7 +276,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Counterexample:** the reply is delivered, then `/stop` arrives before the
   task claims its result.
 - **Code:** `commit/4` runs auto-compaction synchronously (`queue.ex:551` →
-  `turn_runner.ex:189`). The claim happens only after that returns
+  `turn_runner.ex:190`). The claim happens only after that returns
   (`finish_turn`, `queue.ex:519`), so the window also covers post-delivery
   auto-compaction: seconds to tens of seconds when it runs. The kill aborts
   that compaction (safely: `replace_history` is one atomic call) and skips
