@@ -9,10 +9,12 @@ defmodule FermixCore.Cues.PinsTest do
   # environment, a VM-global this module sets and restores.
   use ExUnit.Case, async: false
 
-  import FermixTestSupport.CueFixtures, only: [exec!: 3]
+  import ExUnit.CaptureLog, only: [with_log: 1]
+  import FermixTestSupport.CueFixtures, only: [exec!: 3, rows: 3]
 
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Pins
+  alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Tools.UpdateJob
   alias FermixTestSupport.MandateFixtures, as: F
   alias FermixTestSupport.SafeRm
@@ -94,6 +96,65 @@ defmodule FermixCore.Cues.PinsTest do
     gone = %{mandate | validator: "/nonexistent/fermix/validate.py"}
     assert {:error, {:unreadable, sentence}} = Pins.check(gone, row, ctx.seams)
     assert sentence =~ "The validator /nonexistent/fermix/validate.py cannot be read"
+  end
+
+  describe "disable_changed/5" do
+    # The write is fenced on the approval the pin check compared: one the owner
+    # gave since is not undone, and nothing is sent.
+    test "an approval newer than the one compared is left on, as reapproved", ctx do
+      assert {:ok, %{state: :approved}} = Pins.approve(@name, "test", F.now(), ctx.seams)
+      assert {:ok, %{} = row} = Pins.approval(@name, ctx.seams)
+      stale = %{row | digest: String.duplicate("0", 64)}
+
+      assert {:ok, :reapproved} = Pins.disable_changed(@name, :changed, stale, F.now(), ctx.seams)
+      refute_received {:sent, _owner, _text, _opts}
+      assert {:ok, %{state: :approved}} = Pins.status(@name, ctx.seams)
+
+      assert {:ok, :disabled} = Pins.disable_changed(@name, :changed, row, F.now(), ctx.seams)
+      assert_received {:sent, _owner, "Mandate release-issues is disabled" <> _, _opts}
+
+      assert {:ok, :already_disabled} =
+               Pins.disable_changed(@name, :changed, row, F.now(), ctx.seams)
+
+      refute_received {:sent, _owner, _text, _opts}
+    end
+
+    # The fence compares the stored `approved_at` with the parsed one stamped
+    # again, so the round trip must give back the stored text exactly.
+    test "the compared approval's time stamps back to the stored text", ctx do
+      approved_at = ~U[2026-10-10 12:00:00.123456Z]
+      assert {:ok, %{state: :approved}} = Pins.approve(@name, "test", approved_at, ctx.seams)
+      assert {:ok, %{approved_at: parsed}} = Pins.approval(@name, ctx.seams)
+
+      [[stored]] =
+        rows(
+          ctx.fixture.conn,
+          "SELECT approved_at FROM cue_mandate_approvals WHERE mandate = ?",
+          [
+            @name
+          ]
+        )
+
+      assert CuesSql.stamp(parsed) == stored
+      assert parsed == approved_at
+    end
+
+    test "a write the Repo refuses is returned and logged as an error", ctx do
+      off = :"pins_off_repo_#{System.unique_integer([:positive])}"
+      unused = Path.join(System.tmp_dir!(), "#{off}.db")
+      spec = {FermixCore.Memory.Repo, name: off, enabled: false, database_path: unused}
+      start_supervised!(Supervisor.child_spec(spec, id: off))
+      row = %{digest: String.duplicate("0", 64), approved_at: F.now()}
+      seams = Keyword.put(ctx.seams, :repo, off)
+
+      {result, log} =
+        with_log(fn -> Pins.disable_changed(@name, :changed, row, F.now(), seams) end)
+
+      assert {:error, :disabled} = result
+      assert log =~ "[error]"
+      assert log =~ "Mandate release-issues was not disabled"
+      refute_received {:sent, _owner, _text, _opts}
+    end
   end
 
   test "the digest covers the task, its tools and route pin, not the mandate's switch", ctx do

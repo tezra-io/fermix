@@ -377,6 +377,40 @@ defmodule FermixCore.Cues.ProposalsTest do
       assert {:ok, %{state: :approved}} = Pins.status(@name, seams(context))
     end
 
+    # The owner approves the changed task again while the confirm checks it:
+    # the confirm was checked against the old approval, so it does not run, and
+    # the new approval stands with no "changed" notice.
+    test "a confirm whose pins are checked while the owner approves again runs nothing" do
+      {fixture, context} = proposing!("prop_reapproved")
+      {_message, token} = propose!(context)
+
+      exec!(
+        fixture.conn,
+        "UPDATE scheduled_jobs SET task_prompt = 'Close every issue.' WHERE id = ?",
+        [
+          fixture.job.id
+        ]
+      )
+
+      reads = :counters.new(1, [])
+
+      get_job = fn job_id ->
+        :counters.add(reads, 1, 1)
+
+        if :counters.get(reads, 1) == 2,
+          do: {:ok, %{state: :approved}} = Pins.approve(@name, "test", F.now(), seams(context))
+
+        FermixCore.Jobs.Registry.get_job(job_id, repo: fixture.repo)
+      end
+
+      racing = Keyword.put(seams(context), :get_job, get_job)
+      assert {:error, reply} = Proposals.confirm(token, owner_origin(), racing)
+      assert reply == "Not run: the mandate was approved again while this call was checked."
+      refute_received {:executed, _tool, _args, _context}
+      refute_received {:sent, _owner, _text, _opts}
+      assert {:ok, %{state: :approved}} = Pins.status(@name, seams(context))
+    end
+
     test "a validator's refusal at the confirm reaches the owner framed" do
       runner = fn answer ->
         fn _exe, _args, _opts -> {:ok, %{exit: 0, stdout: answer <> "\n", truncated?: false}} end

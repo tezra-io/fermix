@@ -14,6 +14,7 @@ defmodule FermixCore.Jobs.Runner do
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Clock
+  alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Notices
   alias FermixCore.Jobs.CueAdmission
   alias FermixCore.Jobs.CueRun
@@ -75,7 +76,9 @@ defmodule FermixCore.Jobs.Runner do
           readiness_host: String.t() | nil,
           readiness_port: :inet.port_number() | nil,
           readiness_opts: keyword(),
-          cue: nil | {:ok, CueRun.context()} | {:error, term()}
+          cue: nil | {:ok, CueRun.context()} | {:error, term()},
+          cue_mandate: Mandates.t() | nil,
+          cue_mandate_opts: keyword()
         }
 
   # A runner spends its whole run inside `handle_continue/2`, so it cannot answer
@@ -167,7 +170,12 @@ defmodule FermixCore.Jobs.Runner do
       egress: Keyword.get_lazy(opts, :egress, &Egress.active/0),
       # A cue run's delivery, cue and watcher (M60 §9.3), read at the start of
       # the run from the delivery its row holds; nil for every other run.
-      cue: nil
+      cue: nil,
+      # The mandate a cue run acts under, read once at its start; nil otherwise.
+      cue_mandate: nil,
+      # Test seams for that read and for the run's mandate gate, one set for
+      # both (the gate's `cue_mandate_opts`); none in production.
+      cue_mandate_opts: Keyword.get(opts, :cue_mandate_opts, [])
     }
 
     :ok = put_run_id(state.run.id)
@@ -255,9 +263,20 @@ defmodule FermixCore.Jobs.Runner do
     calls
   end
 
+  # The mandate is read once, at the run's start, on the run's Repo (as its
+  # gate reads it): that read may disable a changed mandate and tell the owner
+  # (`CueRun.mandate/2`), and the run's tool list and context both use it.
   defp load_cue(%{run: %{trigger: "cue", cue_delivery_id: delivery_id}} = state)
-       when is_integer(delivery_id),
-       do: %{state | cue: CueRun.load(delivery_id, repo: state.repo)}
+       when is_integer(delivery_id) do
+    case CueRun.load(delivery_id, repo: state.repo) do
+      {:ok, _cue} = cue ->
+        opts = Keyword.put_new(state.cue_mandate_opts, :repo, state.repo)
+        %{state | cue: cue, cue_mandate: CueRun.mandate(state.job, opts)}
+
+      error ->
+        %{state | cue: error}
+    end
+  end
 
   defp load_cue(state), do: state
 
@@ -801,7 +820,7 @@ defmodule FermixCore.Jobs.Runner do
   # A cue run's exact surface is `Jobs.CueSurface`'s (M60 §9.3, S5), whatever
   # the job names; every other run keeps its job and skill allowlists.
   defp run_allowed_tools(%{cue: {:ok, cue}} = state, skill),
-    do: CueSurface.tools(state.job, skill, cue.watcher, CueRun.mandate(state.job))
+    do: CueSurface.tools(state.job, skill, cue.watcher, state.cue_mandate)
 
   defp run_allowed_tools(state, skill), do: effective_allowed_tools(state.job, skill)
 
@@ -1044,9 +1063,11 @@ defmodule FermixCore.Jobs.Runner do
 
   # A cue run is tainted by its cue's source from its first token (S2) and
   # carries the cue's ids for the tools and gates that read them (PLAN §4.3).
-  defp put_cue_context(context, %{cue: {:ok, cue}} = state),
-    do:
-      Map.merge(context, CueRun.run_context(cue, CueRun.mandate(state.job), state.run.claimed_at))
+  defp put_cue_context(context, %{cue: {:ok, cue}} = state) do
+    context
+    |> Map.merge(CueRun.run_context(cue, state.cue_mandate, state.run.claimed_at))
+    |> Map.put(:cue_mandate_opts, state.cue_mandate_opts)
+  end
 
   defp put_cue_context(context, _state), do: context
 

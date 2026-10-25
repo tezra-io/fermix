@@ -110,9 +110,9 @@ defmodule FermixCore.Cues.Proposals do
 
   @too_long "This call is too long to show you in full; it was not proposed."
   @unreachable "Fermix could not reach you, so the proposal was not sent."
-  @unpinned "the task changed since the mandate was granted"
   @recheck_failed "Fermix could not finish checking it"
   @unverified "Fermix could not verify the mandate's pins; the mandate stays on"
+  @reapproved "the mandate was approved again while this call was checked"
 
   @typedoc "What a proposal needs from the mandate call that makes it."
   @type call :: %{
@@ -690,9 +690,19 @@ defmodule FermixCore.Cues.Proposals do
         Logger.warning("Mandate #{mandate.name} pins not verified at a confirm: #{sentence}")
         {:refuse, @unverified}
 
-      {:error, _changed_or_unreadable} ->
-        _ = Pins.disable(mandate.name, @unpinned, now, opts)
-        {:refuse, @unpinned}
+      {:error, why} ->
+        unpinned(mandate, why, row, opts, now)
+    end
+  end
+
+  # A change disables the mandate and refuses the confirm. An approval the owner
+  # gave while the pins were checked is left on (`Pins.disable_changed/5`), and
+  # the confirm, checked against the old one, runs nothing. `disable_changed/5`
+  # logs a failed write.
+  defp unpinned(mandate, why, row, opts, now) do
+    case Pins.disable_changed(mandate.name, why, row, now, opts) do
+      {:ok, :reapproved} -> {:refuse, @reapproved}
+      _disabled_or_failed -> {:refuse, Pins.changed_reason()}
     end
   end
 

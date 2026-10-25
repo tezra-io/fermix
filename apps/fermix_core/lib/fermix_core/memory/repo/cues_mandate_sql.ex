@@ -330,6 +330,25 @@ defmodule FermixCore.Memory.Repo.CuesMandateSql do
     end
   end
 
+  # The same, fenced on the approval the caller's pin check compared: its digest
+  # and its `approved_at`, which every approval rewrites. An approval written
+  # since (the owner approving again mid-check, even to the same digest) is left
+  # on as `:reapproved`, so it is never disabled with a stale "changed".
+  def handle(conn, {:disable, mandate, reason, %DateTime{} = now, {digest, %DateTime{} = at}})
+      when is_binary(mandate) and is_binary(reason) and is_binary(digest) do
+    sql = """
+    UPDATE cue_mandate_approvals SET disabled_at = ?, disabled_reason = ?
+    WHERE mandate = ? AND disabled_at IS NULL AND digest = ? AND approved_at = ?
+    """
+
+    params = [CuesSql.stamp(now), reason, mandate, digest, CuesSql.stamp(at)]
+
+    with :ok <- CuesSql.execute(conn, sql, params),
+         {:ok, changed} <- CuesSql.changes(conn) do
+      fenced_result(conn, mandate, changed)
+    end
+  end
+
   def handle(_conn, request), do: {:error, {:unknown_request, request}}
 
   # --- calls ---------------------------------------------------------------------------
@@ -820,6 +839,20 @@ defmodule FermixCore.Memory.Repo.CuesMandateSql do
     case handle(conn, {:get_approval, mandate}) do
       {:ok, nil} -> {:ok, :unapproved}
       {:ok, _row} -> {:ok, :already_disabled}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # No row matched the fence: already disabled, or approved again since. The
+  # caller compared a row, and no approval row is ever deleted, so a missing one
+  # is a broken store, not an unapproved mandate.
+  defp fenced_result(_conn, _mandate, 1), do: {:ok, :disabled}
+
+  defp fenced_result(conn, mandate, 0) do
+    case handle(conn, {:get_approval, mandate}) do
+      {:ok, nil} -> {:error, {:approval_missing, mandate}}
+      {:ok, %{disabled_at: %DateTime{}}} -> {:ok, :already_disabled}
+      {:ok, _newer} -> {:ok, :reapproved}
       {:error, reason} -> {:error, reason}
     end
   end

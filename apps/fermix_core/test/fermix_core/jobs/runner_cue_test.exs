@@ -14,14 +14,20 @@ defmodule FermixCore.Jobs.RunnerCueTest do
   alias FermixCore.Capabilities.BuiltinSeeder
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Cues.Pins
   alias FermixCore.Jobs.CueSurface
   alias FermixCore.Jobs.Registry
   alias FermixCore.Jobs.Runner
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesSql
+  alias FermixTestSupport.MandateFixtures
   alias FermixTestSupport.TelemetryCapture
 
   @runner_exit_ms 10_000
+  @mandate "calendar-events"
+  @action "google_calendar_create_event"
+  @reader "google_calendar_search_events"
   @now ~U[2026-10-10 12:00:00Z]
   @report_to %{"platform" => "telegram", "chat_id" => "4242"}
   @provider_down "Watcher release-watch: its task's model provider cannot be reached; passed " <>
@@ -171,6 +177,55 @@ defmodule FermixCore.Jobs.RunnerCueTest do
     assert context.cue.source_ref == "eng-blogs"
     assert context.cue.task_notes? == false
     refute Map.has_key?(context, :reply_fn)
+  end
+
+  # --- a mandated run ---------------------------------------------------------------------
+
+  # The run reads its mandate as production does: `[fermix_core.cues]` from the
+  # application environment and the bundled plugin catalog. Only the owner's
+  # inbox, where a notice goes, is a seam.
+  describe "a run whose job has an approved mandate" do
+    setup ctx do
+      cues = Application.get_env(:fermix_core, :cues)
+      on_exit(fn -> restore_env(:cues, cues) end)
+      claim = claim_cue(ctx, %{})
+      Application.put_env(:fermix_core, :cues, calendar_mandate(claim.job.id))
+
+      assert {:ok, %{state: :approved}} =
+               Pins.approve(@mandate, "test", @now, repo: ctx.repo)
+
+      # A mandated run's file tools read only its skill folder, and this job
+      # names none, so the probe stands in for `cue_history`.
+      :ok = CapabilityRegistry.register(ctx.registry, probe("cue_history"))
+      %{claim: claim}
+    end
+
+    test "is offered the mandate's tool and its reader, and carries the mandate's name", ctx do
+      run_mandated(ctx)
+
+      assert_receive {:probe_context, context}
+      assert context.cue_mandate == @mandate
+      assert @action in context.effective_allowed_tools
+      assert @reader in context.effective_allowed_tools
+      refute_received {:sent, _owner, _text, _opts}
+    end
+
+    test "whose task changed since the approval is disabled once, and offered no reader", ctx do
+      exec!(ctx.conn, "UPDATE scheduled_jobs SET task_prompt = ? WHERE id = ?", [
+        "Move every event the cue names.",
+        ctx.claim.job.id
+      ])
+
+      run_mandated(ctx)
+
+      assert_receive {:probe_context, context}
+      assert @action in context.effective_allowed_tools
+      refute @reader in context.effective_allowed_tools
+      owner = MandateFixtures.owner_id()
+      assert_received {:sent, ^owner, "Mandate calendar-events is disabled" <> _, _opts}
+      refute_received {:sent, _owner, _text, _opts}
+      assert {:ok, %{state: :disabled}} = Pins.status(@mandate, repo: ctx.repo)
+    end
   end
 
   # C10, graded on refusal: each call outside the surface comes back "not
@@ -418,11 +473,45 @@ defmodule FermixCore.Jobs.RunnerCueTest do
         network_readiness_enabled: false,
         delivery_adapter: RecordingDelivery,
         delivery_opts: [test_pid: parent],
-        delivery_timeout_ms: nil
+        delivery_timeout_ms: nil,
+        cue_mandate_opts: Keyword.get(opts, :cue_mandate_opts, [])
       )
 
     assert_receive {:EXIT, ^pid, :normal}, @runner_exit_ms
   end
+
+  # A mandated run: one probe call, so the test sees the loop's context. The
+  # owner's inbox is the test process, through the run's mandate seams.
+  defp run_mandated(ctx) do
+    seams = [
+      configured_owners: %{"telegram" => MandateFixtures.owner_id()},
+      jobs_config: [],
+      adapter: MandateFixtures.SinkAdapter
+    ]
+
+    run_cue(ctx, ctx.claim,
+      script: [%{tool_calls: [call("c1", "cue_history")]}, %{content: "Done."}],
+      cue_mandate_opts: seams
+    )
+  end
+
+  # An auto-mode mandate over the bundled Google Calendar plugin's tools.
+  defp calendar_mandate(job_id) do
+    CuesConfig.normalize(%{
+      "mandates" => %{
+        @mandate => %{
+          "job" => job_id,
+          "mode" => "auto",
+          "tools" => [@action],
+          "read_tools" => [@reader],
+          "pin_args" => %{"calendar_id" => "primary"}
+        }
+      }
+    })
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:fermix_core, key)
+  defp restore_env(key, value), do: Application.put_env(:fermix_core, key, value)
 
   # A cue-only job, its watcher on `eng-blogs`, one passed delivery, claimed.
   defp claim_cue(ctx, attrs) do

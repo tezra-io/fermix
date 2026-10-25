@@ -87,7 +87,6 @@ defmodule FermixCore.Cues.MandateGate do
   @key_chars 32
   @key_placeholder String.duplicate("0", @key_chars)
 
-  @unpinned "the task changed since the mandate was granted"
   @unverified "Fermix could not verify the mandate's pins; try again"
   @gone "the mandate no longer exists"
   @approved_during_run "the mandate was approved after this run began; the task's next run uses that approval"
@@ -601,10 +600,18 @@ defmodule FermixCore.Cues.MandateGate do
         {:refuse, "mandate_refused", @unverified, "none"}
 
       {:error, why} ->
-        Logger.warning("Mandate #{mandate.name} pin check failed: #{inspect(why)}")
-        disabled = Pins.disable(mandate.name, @unpinned, now, opts)
-        Logger.info("Mandate #{mandate.name} disable: #{inspect(disabled)}")
-        {:refuse, "mandate_unpinned", @unpinned, "none"}
+        unpinned(mandate, why, approval, opts, now)
+    end
+  end
+
+  # A change disables the mandate and refuses the call. An approval the owner
+  # gave while the pins were checked is left on (`Pins.disable_changed/5`); the
+  # call was checked against the old one, so it is refused as an approval given
+  # after the run began is. `disable_changed/5` logs a failed write.
+  defp unpinned(mandate, why, approval, opts, now) do
+    case Pins.disable_changed(mandate.name, why, approval, now, opts) do
+      {:ok, :reapproved} -> {:refuse, "mandate_disabled", @approved_during_run, "none"}
+      _disabled_or_failed -> {:refuse, "mandate_unpinned", Pins.changed_reason(), "none"}
     end
   end
 

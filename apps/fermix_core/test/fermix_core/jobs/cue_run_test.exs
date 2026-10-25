@@ -6,11 +6,19 @@ defmodule FermixCore.Jobs.CueRunTest do
   """
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
   import FermixTestSupport.CueFixtures
 
+  alias FermixCore.Capabilities.Capability
+  alias FermixCore.Cues.Mandates
+  alias FermixCore.Cues.Pins
   alias FermixCore.Jobs.CueRun
+  alias FermixCore.Jobs.Registry, as: JobsRegistry
+  alias FermixTestSupport.MandateFixtures, as: F
+  alias FermixTestSupport.SafeRm
 
   @now ~U[2026-10-10 12:00:00Z]
+  @mandate "release-issues"
 
   @job %{
     id: "job_rel",
@@ -18,6 +26,36 @@ defmodule FermixCore.Jobs.CueRunTest do
     task_prompt: "Tell me which releases need me.",
     silent_marker: "[SILENT]"
   }
+
+  # A claimed cue run of a job with an approved mandate, and its seams.
+  defp approved_mandate(tag) do
+    fixture = F.cue_run(tag)
+    seams = mandate_seams(fixture)
+    assert {:ok, %{state: :approved}} = Pins.approve(@mandate, "test", F.now(), seams)
+    {fixture, seams}
+  end
+
+  defp mandate_seams(fixture, extra \\ [], section \\ %{}) do
+    fixture
+    |> F.default_seams()
+    |> Keyword.put(:config, F.config(@mandate, fixture.job.id, section))
+    |> Keyword.merge(extra)
+  end
+
+  defp revert_task!(fixture) do
+    exec!(fixture.conn, "UPDATE scheduled_jobs SET task_prompt = ? WHERE id = ?", [
+      fixture.job.task_prompt,
+      fixture.job.id
+    ])
+  end
+
+  # Something the approval pins changes: the task's prompt.
+  defp change_task!(fixture) do
+    exec!(fixture.conn, "UPDATE scheduled_jobs SET task_prompt = ? WHERE id = ?", [
+      "Search every repository the cue names.",
+      fixture.job.id
+    ])
+  end
 
   defp context(overrides \\ %{}) do
     base = %{
@@ -342,6 +380,164 @@ defmodule FermixCore.Jobs.CueRunTest do
 
       refute CueRun.delivery_target_allowed?(%{})
       refute CueRun.delivery_target_allowed?(nil)
+    end
+  end
+
+  # The mandate a run starts with: `Mandates.for_job/2` withholds the readers
+  # of a mandate changed since its approval, and a run that only reads never
+  # reaches a mandate call's pin check, so the run's start answers the change
+  # as a call would.
+  describe "mandate/2 at a run's start" do
+    test "a mandate changed since its approval is disabled, and the owner told once" do
+      {fixture, seams} = approved_mandate("start_changed")
+
+      change_task!(fixture)
+
+      assert %Mandates{read_tools: []} = CueRun.mandate(fixture.job, seams)
+      owner = F.owner_id()
+      assert_received {:sent, ^owner, "Mandate release-issues is disabled" <> _, _opts}
+      assert {:ok, %{state: :disabled}} = Pins.status(@mandate, seams)
+
+      # The next run finds it disabled and says nothing more.
+      assert %Mandates{read_tools: []} = CueRun.mandate(fixture.job, seams)
+      refute_received {:sent, _owner, _text, _opts}
+    end
+
+    test "an unchanged mandate keeps its readers, and nothing is sent" do
+      {fixture, seams} = approved_mandate("start_unchanged")
+
+      assert %Mandates{read_tools: [reader]} = CueRun.mandate(fixture.job, seams)
+      assert reader == F.reader()
+      refute_received {:sent, _owner, _text, _opts}
+      assert {:ok, %{state: :approved}} = Pins.status(@mandate, seams)
+    end
+
+    test "a skill folder that can no longer be read is a change: disabled, the owner told once" do
+      skill = SafeRm.make_tmp_dir!("cue-run-skill")
+      on_exit(fn -> SafeRm.rm_rf!(skill) end)
+      File.write!(Path.join(skill, "SKILL.md"), "Open issues for releases.")
+      fixture = F.cue_run("start_unreadable")
+
+      exec!(fixture.conn, "UPDATE scheduled_jobs SET skill_name = 'releases' WHERE id = ?", [
+        fixture.job.id
+      ])
+
+      seams = mandate_seams(fixture, skill_dir: fn "releases" -> {:ok, skill} end)
+      assert {:ok, %{state: :approved}} = Pins.approve(@mandate, "test", F.now(), seams)
+
+      gone = Keyword.put(seams, :skill_dir, fn "releases" -> {:error, :enoent} end)
+      assert %Mandates{read_tools: []} = CueRun.mandate(fixture.job, gone)
+      owner = F.owner_id()
+      assert_received {:sent, ^owner, "Mandate release-issues is disabled" <> _, _opts}
+      refute_received {:sent, _owner, _text, _opts}
+      assert {:ok, %{state: :disabled}} = Pins.status(@mandate, seams)
+    end
+
+    # The run's start disabled it; the run's own reader call then finds it
+    # disabled, and the owner is not told twice.
+    test "a gate call after the run's start is refused as disabled, with no second notice" do
+      {fixture, seams} = approved_mandate("start_then_call")
+      change_task!(fixture)
+
+      assert %Mandates{read_tools: []} = CueRun.mandate(fixture.job, seams)
+      assert_received {:sent, _owner, "Mandate release-issues is disabled" <> _, _opts}
+
+      context = F.context(fixture, @mandate, config: Keyword.fetch!(seams, :config))
+      read = Capability.execute(F.capability(F.reader()), %{"query" => "x"}, context)
+
+      assert {:ok, %{success: false, error: error}} = read
+      assert error =~ "disabled until the owner approves it again"
+      refute_received {:executed, _tool, _args, _context}
+      refute_received {:sent, _owner, _text, _opts}
+    end
+
+    # Design §10.4: a mandate with no readers is disabled at its next call,
+    # which reports it; its run's start offers nothing to withhold.
+    test "a mandate with no readers is not disabled at the run's start" do
+      fixture = F.cue_run("start_no_readers")
+      seams = mandate_seams(fixture, [], %{"read_tools" => []})
+      assert {:ok, %{state: :approved}} = Pins.approve(@mandate, "test", F.now(), seams)
+      change_task!(fixture)
+
+      assert %Mandates{read_tools: [], readers_withheld: nil} =
+               CueRun.mandate(fixture.job, seams)
+
+      refute_received {:sent, _owner, _text, _opts}
+      assert {:ok, %{state: :changed}} = Pins.status(@mandate, seams)
+    end
+
+    # The disable is fenced on the approval the pin check compared: an owner's
+    # Approve that lands between the check and the write is not undone.
+    test "an approval landing mid-check is not disabled, and nothing is sent" do
+      {fixture, seams} = approved_mandate("start_reapproved")
+      change_task!(fixture)
+      reads = :counters.new(1, [])
+
+      # The pin check's read of the job is where the owner approves again.
+      get_job = fn id ->
+        :counters.add(reads, 1, 1)
+
+        if :counters.get(reads, 1) == 2,
+          do: {:ok, %{state: :approved}} = Pins.approve(@mandate, "test", F.now(), seams)
+
+        JobsRegistry.get_job(id, repo: fixture.repo)
+      end
+
+      racing = Keyword.put(seams, :get_job, get_job)
+      assert %Mandates{read_tools: []} = CueRun.mandate(fixture.job, racing)
+      refute_received {:sent, _owner, _text, _opts}
+      assert {:ok, %{state: :approved}} = Pins.status(@mandate, seams)
+    end
+
+    # The fence is the approval itself, not only its digest: the owner undoes
+    # the change and approves again mid-check, which records the same digest.
+    test "a same-digest approval landing mid-check is not disabled, and nothing is sent" do
+      {fixture, seams} = approved_mandate("start_same_digest")
+      change_task!(fixture)
+      reads = :counters.new(1, [])
+
+      # The pin check reads the changed job; then the owner reverts it and
+      # approves again, a second later.
+      get_job = fn id ->
+        :counters.add(reads, 1, 1)
+        read = JobsRegistry.get_job(id, repo: fixture.repo)
+
+        if :counters.get(reads, 1) == 2 do
+          revert_task!(fixture)
+          later = DateTime.add(F.now(), 1, :second)
+          {:ok, %{state: :approved}} = Pins.approve(@mandate, "test", later, seams)
+        end
+
+        read
+      end
+
+      racing = Keyword.put(seams, :get_job, get_job)
+      assert %Mandates{read_tools: []} = CueRun.mandate(fixture.job, racing)
+      refute_received {:sent, _owner, _text, _opts}
+      assert {:ok, %{state: :approved}} = Pins.status(@mandate, seams)
+    end
+
+    # As at a mandate call (`MandateGate.pinned/4`): a job row the Repo did not
+    # read says nothing about the pins, so nothing is disabled or sent.
+    test "a pin that could not be verified is logged, and neither disables nor tells" do
+      {fixture, seams} = approved_mandate("start_unverified")
+      job = fixture.job
+      reads = :counters.new(1, [])
+
+      # The load check's read of the job succeeds; the pin check's fails.
+      get_job = fn _id ->
+        :counters.add(reads, 1, 1)
+        if :counters.get(reads, 1) == 1, do: {:ok, job}, else: {:error, :busy}
+      end
+
+      {mandate, log} =
+        with_log(fn -> CueRun.mandate(job, Keyword.put(seams, :get_job, get_job)) end)
+
+      assert %Mandates{read_tools: []} = mandate
+      assert log =~ "Mandate release-issues"
+      assert log =~ "not verified"
+      refute_received {:sent, _owner, _text, _opts}
+      assert {:ok, %{state: :approved}} = Pins.status(@mandate, seams)
     end
   end
 

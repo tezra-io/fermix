@@ -111,10 +111,14 @@ own event carries the label through the context, with no marker),
 refused with marker `deny` as `mandate_refused` (its arguments, `pin_args`, the
 hourly limit of ten allowed or proposed calls per task, or the validator said
 no), `mandate_disabled` (the mandate or `mandates_enabled` is switched off, it
-fails its load checks, or it is not approved), `mandate_stale` (the cue is older
+fails its load checks, or it is not approved, or was approved only after the
+run began or while the call's pins were checked), `mandate_stale` (the cue is older
 than `max_cue_age`, or its time is unknown) or `mandate_unpinned` (what the
 mandate pins changed since the owner approved it; the mandate is disabled until
-approved again). A call to one of the mandate's `read_tools` is not a mandate
+approved again). A mandate with `read_tools` is also checked at the start of
+each cue run, since a reader call never reaches the pin check otherwise: a
+change found there disables it the same way, with one notice and no tool event;
+a mandate with no readers is disabled at its next call. A call to one of the mandate's `read_tools` is not a mandate
 call and writes no row: it runs only while its capability is still marked
 read-only and the mandate passes a mandate call's first steps, and is otherwise
 refused as `refused_reader_writes` (no longer read-only), `mandate_disabled`

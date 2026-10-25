@@ -29,6 +29,7 @@ defmodule FermixCore.Jobs.CueRun do
   alias FermixCore.Clock
   alias FermixCore.Cues.Gaps
   alias FermixCore.Cues.Mandates
+  alias FermixCore.Cues.Pins
   alias FermixCore.Jobs.Delivery
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesMandateSql
@@ -120,12 +121,41 @@ defmodule FermixCore.Jobs.CueRun do
 
   @doc """
   The mandate a cue run of `job` acts under (its `name`, `tools` and
-  `read_tools`), or nil: `Cues.Mandates.for_job/1`, which answers only for a
+  `read_tools`), or nil: `Cues.Mandates.for_job/2`, which answers only for a
   mandate that passed its load checks, and leaves its `read_tools` empty
   unless it is in force and as the owner approved it.
+
+  A run that only reads never reaches a mandate call's pin check, so when the
+  mandate's readers were withheld because it changed since its approval, the
+  run's start answers the change as a call would: the mandate is disabled and
+  the owner told once (`Cues.Pins.disable_changed/5`, fenced on the approval
+  compared); a later run finds it disabled and says nothing. A mandate with no
+  readers withholds nothing and is disabled at its next call (design §10.4),
+  and a pin check that could not read the job disables nothing, as at a call.
+  The runner reads it once per run, on the run's Repo. Seams: the
+  `Cues.Mandates` and `Cues.Pins` opts, `:now`.
   """
-  @spec mandate(map()) :: Mandates.t() | nil
-  def mandate(%{id: job_id}) when is_binary(job_id), do: Mandates.for_job(job_id)
+  @spec mandate(map(), keyword()) :: Mandates.t() | nil
+  def mandate(%{id: job_id}, opts \\ []) when is_binary(job_id) and is_list(opts) do
+    job_id |> Mandates.for_job(opts) |> answer_change(opts)
+  end
+
+  # An unverified check (the job's row not read) says nothing about the pins,
+  # as at a call; every other pin failure is a change, answered.
+  # `Pins.disable_changed/5` logs every outcome.
+  defp answer_change(
+         %Mandates{readers_withheld: {:pins, {:unverified, _sentence}, _row}} = mandate,
+         _opts
+       ),
+       do: mandate
+
+  defp answer_change(%Mandates{readers_withheld: {:pins, change, approval}} = mandate, opts) do
+    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+    _disabled = Pins.disable_changed(mandate.name, change, approval, now, opts)
+    mandate
+  end
+
+  defp answer_change(mandate, _opts), do: mandate
 
   # --- the prompt ----------------------------------------------------------------------
 

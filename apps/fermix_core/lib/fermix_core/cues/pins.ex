@@ -11,10 +11,12 @@ defmodule FermixCore.Cues.Pins do
   paths. It lives in `cue_mandate_approvals`, written only by the daemon: the
   setup page's Approve button and the management method call `approve/3`.
 
-  A mandate starts unapproved. A digest that differs at a call disables the
-  mandate until it is approved again, and the owner is told once (the write
-  that disabled it sends the notice). `update_job` on a job a mandate names
-  disables it the same way (`disable_for_job/3`).
+  A mandate starts unapproved. A digest that differs disables the mandate until
+  it is approved again, and the write that disabled it tells the owner once
+  (`disable_changed/5`). It is compared at a mandate call, at a proposal's
+  confirm, and at the start of a cue run whose mandate has readers to offer.
+  `update_job` on a job a mandate names disables it the same way
+  (`disable_for_job/3`).
 
   Seams (opts): `:repo`, `:now`, `:get_job` (as `Cues.Mandates`), `:skill_dir`
   (`fn skill_name -> {:ok, dir} | {:error, _}`), the `Cues.Mandates` seams for
@@ -37,6 +39,10 @@ defmodule FermixCore.Cues.Pins do
   @max_skill_files 2_000
   @max_file_bytes 8 * 1024 * 1024
   @max_depth 16
+
+  # The reason a changed mandate is disabled with, as the owner and the model
+  # read it.
+  @changed_reason "the task changed since the mandate was granted"
 
   @typedoc "Where a mandate's approval stands, for the setup page."
   @type state :: :unapproved | :approved | :changed | :disabled
@@ -118,14 +124,68 @@ defmodule FermixCore.Cues.Pins do
   def disable(name, reason, %DateTime{} = now, opts \\ [])
       when is_binary(name) and is_binary(reason) and is_list(opts) do
     case call({:disable, name, reason, now}, opts) do
+      {:ok, :disabled} -> told(name, reason, now, opts)
+      other -> other
+    end
+  end
+
+  @doc "Fermix's reason for a mandate disabled because something it pins changed."
+  @spec changed_reason() :: String.t()
+  def changed_reason, do: @changed_reason
+
+  @doc """
+  The one answer to a pin check that found a change (`check/3`'s `:changed` or
+  `{:unreadable, sentence}`) against `approval`, the row it compared: disables
+  mandate `name` until it is approved again, and that write tells the owner
+  once (a mandate already disabled sends nothing). The write is fenced on that
+  row (its digest and `approved_at`), so an approval the owner gave since, even
+  to the same digest, is left on (`:reapproved`), with no notice. A mandate
+  call, a
+  proposal's confirm and a cue run's start each take it, so the owner hears of
+  a change however it is found. An unverified check (the job's row not read)
+  says nothing about the pins and is never passed here.
+  """
+  @spec disable_changed(
+          String.t(),
+          :changed | {:unreadable, String.t()},
+          map(),
+          DateTime.t(),
+          keyword()
+        ) ::
+          {:ok, :disabled | :already_disabled | :reapproved} | {:error, term()}
+  def disable_changed(name, :changed, approval, now, opts),
+    do: disable_compared(name, "a pinned part differs", approval, now, opts)
+
+  def disable_changed(name, {:unreadable, sentence}, approval, now, opts)
+      when is_binary(sentence),
+      do: disable_compared(name, sentence, approval, now, opts)
+
+  defp disable_compared(name, detail, approval, %DateTime{} = now, opts)
+       when is_binary(name) and is_list(opts) do
+    %{digest: digest, approved_at: %DateTime{} = approved_at} = approval
+
+    case call({:disable, name, @changed_reason, now, {digest, approved_at}}, opts) do
       {:ok, :disabled} ->
-        Logger.warning("Mandate #{name} disabled: #{reason}")
-        notify_disabled(name, now, opts)
-        {:ok, :disabled}
+        told(name, "#{@changed_reason} (#{detail})", now, opts)
+
+      {:ok, :reapproved} = reapproved ->
+        Logger.info("Mandate #{name} was approved again while its pins were checked; left on")
+        reapproved
+
+      {:error, reason} = error ->
+        Logger.error("Mandate #{name} was not disabled: #{inspect(reason)}")
+        error
 
       other ->
         other
     end
+  end
+
+  # The write that disabled the mandate: logged, and the owner told once.
+  defp told(name, reason, now, opts) do
+    Logger.warning("Mandate #{name} disabled: #{reason}")
+    notify_disabled(name, now, opts)
+    {:ok, :disabled}
   end
 
   @doc """

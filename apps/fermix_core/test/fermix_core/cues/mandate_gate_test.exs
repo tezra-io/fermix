@@ -362,6 +362,38 @@ defmodule FermixCore.Cues.MandateGateTest do
       assert {:ok, %{success: true}} = call(context)
     end
 
+    # The owner approves again while the call's pin check runs: the call was
+    # checked against the old approval, so it is refused as the run's, and the
+    # new approval is neither disabled nor reported as a change.
+    test "an approval given while the call's pins are checked is not undone" do
+      {fixture, context} = run!("gate_reapproved")
+      approve!(context)
+
+      exec!(fixture.conn, "UPDATE scheduled_jobs SET task_prompt = ? WHERE id = ?", [
+        "Open an issue in whatever repository the cue names.",
+        fixture.job.id
+      ])
+
+      reads = :counters.new(1, [])
+      base = seams(context)
+
+      # The load checks read the job first; the pin check's read is where the
+      # owner approves the changed task.
+      get_job = fn id ->
+        :counters.add(reads, 1, 1)
+
+        if :counters.get(reads, 1) == 2,
+          do: {:ok, %{state: :approved}} = Pins.approve(@name, "test", F.now(), base)
+
+        FermixCore.Jobs.Registry.get_job(id, repo: fixture.repo)
+      end
+
+      {error, _} = refused!(call(with_seams(context, get_job: get_job)), "mandate_disabled")
+      assert error =~ "the mandate was approved after this run began"
+      refute_received {:sent, _owner, _text, _opts}
+      assert {:ok, %{state: :approved}} = Pins.status(@name, base)
+    end
+
     # The run follows its task as the claim read it, so an approval given after
     # the claim covers the task's next run, not this one: it may be of a task
     # this run is not following.

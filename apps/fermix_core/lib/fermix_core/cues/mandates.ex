@@ -87,7 +87,8 @@ defmodule FermixCore.Cues.Mandates do
     validator_env: [],
     unpinned: [],
     pin_args: %{},
-    status: :active
+    status: :active,
+    readers_withheld: nil
   ]
 
   @typedoc """
@@ -112,8 +113,21 @@ defmodule FermixCore.Cues.Mandates do
           idempotency_arg: String.t() | nil,
           unpinned: [String.t()],
           pin_args: map(),
-          status: status()
+          status: status(),
+          readers_withheld: readers_withheld()
         }
+
+  @typedoc """
+  Why `for_job/2` withheld a mandate's readers, or nil when it withheld none:
+  the mandate is not in force, or the pin check (`Cues.Pins.check/3`) against
+  the approval row it compared found a change (`:changed`, `{:unreadable, _}`)
+  or could not read the job (`{:unverified, _}`). Set only by `for_job/2`, so
+  its caller can act on it.
+  """
+  @type readers_withheld ::
+          nil
+          | {:not_in_force, not_in_force()}
+          | {:pins, :changed | {:unreadable, String.t()} | {:unverified, String.t()}, map()}
 
   @doc "The sentence a mandate in approve mode is refused with when Fermix can ask the owner nowhere."
   @spec approve_inbox_sentence() :: String.t()
@@ -190,9 +204,12 @@ defmodule FermixCore.Cues.Mandates do
   @doc """
   The active mandate a cue run of `job_id` acts under, or nil. An inactive
   mandate grants a run nothing: its tools are not offered. Its `read_tools`
-  are those the run is offered: none unless it is in force (`in_force/2`),
-  since a reader runs with none of a mandate call's other checks; its `tools`
-  are offered either way, and each call reads the switches itself.
+  are those the run is offered: none unless it is in force (`in_force/2`) and
+  as the owner approved it (`Cues.Pins.check/3`), since a reader runs with none
+  of a mandate call's other checks, and `readers_withheld` says why (nil for a
+  mandate with no readers, which is returned as it is); its `tools` are
+  offered either way, and each call reads the switches itself. A read: a
+  change it finds is answered by the run's start (`Jobs.CueRun.mandate/2`).
   """
   @spec for_job(String.t(), keyword()) :: t() | nil
   def for_job(job_id, opts \\ []) when is_binary(job_id) and is_list(opts) do
@@ -212,40 +229,46 @@ defmodule FermixCore.Cues.Mandates do
   # the task are pinned).
   defp offered_readers(nil, _opts), do: nil
 
+  # No readers, nothing to withhold: a change is found at the mandate's next
+  # call (design §10.4).
+  defp offered_readers(%__MODULE__{read_tools: []} = mandate, _opts), do: mandate
+
   defp offered_readers(mandate, opts) do
-    with {:ok, approval} <- in_force(mandate, opts),
-         :ok <- Pins.check(mandate, approval, opts) do
-      mandate
-    else
-      {:error, why} ->
-        log_withheld(mandate.name, why)
-        %{mandate | read_tools: []}
+    case in_force(mandate, opts) do
+      {:ok, approval} -> pinned_readers(mandate, approval, opts)
+      {:error, why} -> withhold(mandate, {:not_in_force, why})
     end
   end
 
+  defp pinned_readers(mandate, approval, opts) do
+    case Pins.check(mandate, approval, opts) do
+      :ok -> mandate
+      {:error, why} -> withhold(mandate, {:pins, why, approval})
+    end
+  end
+
+  defp withhold(mandate, withheld) do
+    log_withheld(mandate.name, withheld)
+    %{mandate | read_tools: [], readers_withheld: withheld}
+  end
+
   # A mandate switched off, unapproved or disabled is what the setup page
-  # shows, so it stays quiet; a changed pin is shown there too, and the next
-  # mandate call disables it; a read that failed is shown nowhere.
-  defp log_withheld(name, {:approval_unreadable, reason}) do
+  # shows, and a change is answered (and logged) by the run's start
+  # (`Jobs.CueRun.mandate/2`); a read that failed is shown nowhere.
+  defp log_withheld(name, {:not_in_force, {:approval_unreadable, reason}}) do
     Logger.warning(
       "Mandate #{name}: read tools not offered; its approval could not be read: " <>
         inspect(reason)
     )
   end
 
-  defp log_withheld(name, {:unverified, sentence}),
+  defp log_withheld(name, {:pins, {:unverified, sentence}, _approval}),
     do:
       Logger.warning(
         "Mandate #{name}: read tools not offered; its pins were not verified: #{sentence}"
       )
 
-  defp log_withheld(name, :changed),
-    do: Logger.info("Mandate #{name}: read tools not offered; it changed since its approval")
-
-  defp log_withheld(name, {:unreadable, sentence}),
-    do: Logger.info("Mandate #{name}: read tools not offered; #{sentence}")
-
-  defp log_withheld(_name, _shown_in_settings), do: :ok
+  defp log_withheld(_name, _shown_or_answered), do: :ok
 
   @typedoc """
   Why a mandate is not in force: switched off (`enabled = false`), mandates
