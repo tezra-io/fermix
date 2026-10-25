@@ -3,7 +3,7 @@ defmodule FermixCore.Cues.Telemetry do
   The single owner of the cue events (M60 §14). Never hand-roll them elsewhere.
 
       [:fermix, :cue, :lifecycle]   one event per delivery or item transition
-      [:fermix, :cue, :source]      connect, reconnect, auth failure, backfill, budget, gap
+      [:fermix, :cue, :source]      connect, reconnect, auth failure, budget, gap
 
   The phase is metadata, never part of the name: `Trace.TelemetryHandler` and
   `FermixOpik.Reporter` bind exact names, so a `[:fermix, :cue, <phase>]` tail
@@ -63,7 +63,6 @@ defmodule FermixCore.Cues.Telemetry do
     :reconnect,
     :disconnect,
     :auth_failure,
-    :backfill,
     :budget,
     :gap,
     :stopped
@@ -105,7 +104,6 @@ defmodule FermixCore.Cues.Telemetry do
     :reason,
     :attempt,
     :count,
-    :duration_ms,
     :skipped,
     :result,
     :content
@@ -165,10 +163,10 @@ defmodule FermixCore.Cues.Telemetry do
   @doc """
   Emit one `[:fermix, :cue, :source]` event. `metadata` needs `:source_ref`
   and may hold `:kind`, `:status`, `:reason`, `:attempt`, `:count`,
-  `:duration_ms`, `:skipped` (the items a feed's poll skipped as older than
-  the receipt horizon), `:result` and `:content` (a stream service's own error
-  message, behind the content gate). `:count`, `:duration_ms` and `:skipped`
-  become the measurements (`count: 1` when none is given).
+  `:skipped` (the items a feed's poll skipped as older than the receipt
+  horizon), `:result` and `:content` (a stream service's own error message,
+  behind the content gate). `:count` and `:skipped` become the measurements
+  (`count: 1` when none is given).
   """
   @spec source(atom(), map()) :: :ok
   def source(phase, metadata) when is_atom(phase) and is_map(metadata) do
@@ -178,13 +176,13 @@ defmodule FermixCore.Cues.Telemetry do
 
     measurements =
       metadata
-      |> Map.take([:count, :duration_ms, :skipped])
+      |> Map.take([:count, :skipped])
       |> measurements!()
 
     :telemetry.execute(
       @source_event,
       measurements,
-      build_metadata(phase, Map.drop(metadata, [:count, :duration_ms, :skipped]))
+      build_metadata(phase, Map.drop(metadata, [:count, :skipped]))
     )
   end
 

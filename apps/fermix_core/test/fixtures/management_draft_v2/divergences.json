@@ -572,9 +572,21 @@
     },
     {
       "method": "settings.get",
+      "field": "channels.discord:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "channels.signal:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.signal:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -584,9 +596,21 @@
     },
     {
       "method": "settings.get",
+      "field": "channels.slack:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "channels.telegram:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.telegram:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -596,9 +620,21 @@
     },
     {
       "method": "settings.get",
+      "field": "channels.whatsapp:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "computer_history:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "computer_history:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -608,9 +644,21 @@
     },
     {
       "method": "settings.get",
+      "field": "computer_use:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "editors:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "editors:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -620,9 +668,21 @@
     },
     {
       "method": "settings.get",
+      "field": "generate_image:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "harness:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "harness:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -632,9 +692,21 @@
     },
     {
       "method": "settings.get",
+      "field": "meetings:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "memory:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "memory:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -644,9 +716,21 @@
     },
     {
       "method": "settings.get",
+      "field": "personalization:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "providers.anthropic:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.anthropic:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -656,9 +740,21 @@
     },
     {
       "method": "settings.get",
+      "field": "providers.mistral:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "providers.ollama:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.ollama:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -668,9 +764,21 @@
     },
     {
       "method": "settings.get",
+      "field": "providers.openai:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "providers.openai_codex:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.openai_codex:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -680,9 +788,21 @@
     },
     {
       "method": "settings.get",
+      "field": "providers.openrouter:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "providers.xai:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.xai:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -692,9 +812,21 @@
     },
     {
       "method": "settings.get",
+      "field": "realtime:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "routing:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "routing:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -704,15 +836,33 @@
     },
     {
       "method": "settings.get",
+      "field": "sandbox:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "transcription:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
     },
     {
       "method": "settings.get",
+      "field": "transcription:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "web_search:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "web_search:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get:computer_use",

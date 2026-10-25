@@ -454,7 +454,7 @@ defmodule FermixCore.Cues.Source.StreamGeneralTest do
       assert source_row(ctx).status == "connected"
     end
 
-    test "a drop reconnects at the live tip: no rewind, no backfill and no gap", ctx do
+    test "a drop reconnects at the live tip, with no gap", ctx do
       seed_last_good(ctx, DateTime.add(@now, -3_600, :second))
       {pid, first} = start_stream(ctx)
       socket = connect(pid, first)
@@ -464,12 +464,9 @@ defmodule FermixCore.Cues.Source.StreamGeneralTest do
 
       assert url == "wss://stream.example.com/v2/news"
       assert gaps(ctx) == %{}
-      refute_received {:telemetry, [:fermix, :cue, :source], _m, %{phase: :backfill}}
     end
 
-    test "an outage is told after 15 minutes even with a last good time, in words that " <>
-           "say nothing was recorded",
-         ctx do
+    test "an outage is told after 15 minutes even with a last good time", ctx do
       ref = ctx.ref
       seed_last_good(ctx, DateTime.add(@now, -3_600, :second))
       {pid, first} = start_stream(ctx)
@@ -479,7 +476,8 @@ defmodule FermixCore.Cues.Source.StreamGeneralTest do
       down_check = scheduled(:down, 900_000)
       deliver(pid, down_check)
 
-      assert_received {:notice, ^ref, :down, %{catch_up: false}}
+      assert_received {:notice, ^ref, :down, data}
+      assert data == %{since: DateTime.to_iso8601(@now)}
     end
 
     test "an address the guard refuses stops it as unavailable with an :unreachable notice",
@@ -528,7 +526,7 @@ defmodule FermixCore.Cues.Source.StreamGeneralTest do
       # The notice comes even while a refused connection is open.
       _socket = connect(pid, dial)
       deliver(pid, down_check)
-      assert_received {:notice, ^ref, :down, %{catch_up: false}}
+      assert_received {:notice, ^ref, :down, %{since: _since}}
     end
 
     test "the first item ends the outage and resets the backoff", ctx do

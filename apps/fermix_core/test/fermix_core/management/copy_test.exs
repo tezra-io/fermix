@@ -410,7 +410,6 @@ defmodule FermixCore.Management.CopyTest do
               {"webhook", nil, "shared_secret"},
               {"webhook", nil, "standard_webhooks"},
               {nil, "github", nil},
-              {nil, "bluesky_jetstream", nil},
               {nil, "rss", nil}
             ] do
           {:ok, form} = CueSourceForm.form(kind, preset, verify)
@@ -435,6 +434,11 @@ defmodule FermixCore.Management.CopyTest do
           assert_clean(row["info"], :prose, [], "cue form info #{row["key"]}")
           Enum.each(row["options"], &assert_clean(&1["label"], :name, [], "cue form option"))
         end
+
+        # Two rows of one form never share a name, so a value is not typed in
+        # the row that only reads like its own.
+        labels = Enum.map(form["rows"], & &1["label"])
+        assert labels == Enum.uniq(labels), "cue form labels repeat: #{inspect(labels)}"
       end
     end
 
@@ -716,7 +720,11 @@ defmodule FermixCore.Management.CopyTest do
       CuesConfig.normalize(%{
         "sources" => %{
           "eng-blogs" => %{"preset" => "rss", "url" => "https://example.org/feed.xml"},
-          "bsky" => %{"preset" => "bluesky_jetstream", "dids" => ["did:plc:abc"]},
+          "live-open" => %{
+            "kind" => "stream",
+            "url" => "wss://stream.example.org/open",
+            "id_path" => "id"
+          },
           "gh-hooks" => %{"preset" => "github", "secret" => "@keyring"},
           "gh-new" => %{"preset" => "github", "path_secret" => "@keyring"},
           "shared" => %{

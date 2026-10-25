@@ -1884,6 +1884,7 @@
         "label",
         "footer",
         "info",
+        "example",
         "advanced",
         "value",
         "present",
@@ -1905,6 +1906,10 @@
         "footer": { "type": ["string", "null"] },
         "info": {
           "description": "A longer explanation a surface keeps behind an info control rather than showing inline; the footer stays the short inline line. Null on every row with nothing more to say.",
+          "type": ["string", "null"]
+        },
+        "example": {
+          "description": "A sample value a surface shows in an empty text or list field in place of its own empty prompt, so the field shows what goes in it. Never a default: nothing is saved from it. Null on every other kind and on every row with nothing to show.",
           "type": ["string", "null"]
         },
         "advanced": {

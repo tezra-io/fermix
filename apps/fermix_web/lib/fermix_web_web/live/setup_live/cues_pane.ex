@@ -587,7 +587,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   # The row's one quiet line: what came in today and when, any refusals, then
   # where it reads from (last, so it is what truncates).
   defp source_line(source, clock) do
-    [activity(source, clock), refused(source.status), following(source.dids), address(source.url)]
+    [activity(source, clock), refused(source.status), address(source.url)]
     |> List.flatten()
     |> Enum.with_index()
     |> Enum.map(fn {part, index} -> separated(part, index) end)
@@ -610,9 +610,6 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
     do: [%{part("refused #{Enum.join(refused, ", ")}") | class: "text-warning"}]
 
   defp refused(_status), do: []
-
-  defp following([]), do: []
-  defp following(dids), do: [part("following #{length(dids)}", Enum.join(dids, ", "))]
 
   defp address(nil), do: []
   defp address(url), do: [part(url, url)]
@@ -679,6 +676,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
           values={@values}
           defaults={@defaults}
           cues={@cues}
+          editor={@editor}
           missing={@editor.missing}
         />
         <.source_field
@@ -795,10 +793,13 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   attr :values, :map, required: true
   attr :defaults, :map, required: true
   attr :cues, :map, required: true
+  attr :editor, :map, required: true
   attr :missing, :list, required: true
 
   # A field the source must fill itself is marked required; one a refused save
-  # found empty says so under it until it has a value.
+  # found empty says so under it until it has a value. A stream with no preset
+  # asks for its API key and secret straight after its address, as the app's
+  # form does.
   defp source_main_fields(assigns) do
     ~H"""
     <.field
@@ -806,10 +807,16 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       name="cue_source[url]"
       label="URL"
       value={@values["url"]}
-      placeholder={text(@defaults[:url])}
+      placeholder={text(@defaults[:url]) || url_example(@form)}
       required={:url in @form.required}
       refusal={missing_refusal(:url, @missing, @values)}
       refusal_id="cue-source-url-refusal"
+    />
+    <.secret_input
+      :for={field <- [:key, :secret]}
+      :if={general_stream?(@form)}
+      field={field}
+      editor={@editor}
     />
     <.field
       :if={:interval in @form.fields}
@@ -822,30 +829,13 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       refusal={missing_refusal(:interval, @missing, @values)}
       refusal_id="cue-source-interval-refusal"
     />
-    <.field
-      :if={:dids in @form.fields}
-      name="cue_source[dids]"
-      label="Accounts (DIDs)"
-      value={@values["dids"]}
-      info="The accounts to follow, comma-separated."
-      required={:dids in @form.required}
-      refusal={missing_refusal(:dids, @missing, @values)}
-      refusal_id="cue-source-dids-refusal"
-    />
-    <.field
-      :if={:collections in @form.fields}
-      name="cue_source[collections]"
-      label="Collections"
-      value={@values["collections"]}
-      placeholder={Enum.join(@defaults[:collections] || [], ", ")}
-      info="Comma-separated."
-    />
     <.general_field
-      :for={{field, {label, info}} <- general_fields()}
+      :for={{field, {label, info, example}} <- general_fields()}
       :if={field in @form.fields}
       field={field}
       label={label}
       info={info}
+      example={example}
       values={@values}
       required={field in @form.required}
       missing={@missing}
@@ -873,11 +863,13 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   attr :field, :atom, required: true
   attr :label, :string, required: true
   attr :info, :string, required: true
+  attr :example, :string, required: true
   attr :values, :map, required: true
   attr :required, :boolean, default: false
   attr :missing, :list, default: []
 
-  # One field of a stream with no preset, its name the config key's.
+  # One field of a stream with no preset, its name the config key's, its
+  # example shown while it is empty.
   defp general_field(assigns) do
     assigns = assign(assigns, :key, Atom.to_string(assigns.field))
 
@@ -886,6 +878,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       name={"cue_source[#{@key}]"}
       label={@label}
       value={@values[@key]}
+      placeholder={@example}
       info={@info}
       required={@required}
       refusal={missing_refusal(@field, @missing, @values)}
@@ -896,15 +889,24 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
 
   # A stream with no preset: the management form's rows after its address, in
   # its words (`SourceForm.general_stream_rows/0`), the info text with its
-  # literals' backticks dropped.
+  # literals' backticks dropped, and each row's example.
   defp general_fields, do: general_rows(false)
   defp general_more_fields, do: general_rows(true)
 
   defp general_rows(advanced?) do
     for row <- SourceForm.general_stream_rows(),
         row.field != :url and row.advanced == advanced?,
-        do: {row.field, {row.label, String.replace(row.info, "`", "")}}
+        do: {row.field, {row.label, String.replace(row.info, "`", ""), row.example}}
   end
+
+  defp general_stream?(form), do: form.kind == "stream" and form.preset == nil
+
+  @url_example Enum.find_value(
+                 SourceForm.general_stream_rows(),
+                 &(&1.field == :url && &1.example)
+               )
+
+  defp url_example(form), do: if(general_stream?(form), do: @url_example)
 
   defp missing_refusal(field, missing, values) do
     if field in missing and not present?(values[Atom.to_string(field)]),
@@ -1011,11 +1013,12 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
         placeholder={text(@defaults[:type_header])}
       />
       <.general_field
-        :for={{field, {label, info}} <- general_more_fields()}
+        :for={{field, {label, info, example}} <- general_more_fields()}
         :if={field in @fields}
         field={field}
         label={label}
         info={info}
+        example={example}
         values={@values}
       />
       <.field
@@ -1075,13 +1078,6 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
     """
   end
 
-  # A stream with no preset signs in with a key and a secret, each typed once.
-  defp source_secret_fields(%{form: %{kind: "stream", preset: nil}} = assigns) do
-    ~H"""
-    <.secret_input :for={field <- [:key, :secret]} field={field} editor={@editor} />
-    """
-  end
-
   defp source_secret_fields(assigns), do: ~H""
 
   attr :field, :atom, required: true
@@ -1093,7 +1089,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
     ~H"""
     <label class="form-control w-full">
       <span class="label flex items-center gap-1.5 pb-1 text-sm font-medium">
-        {if @field == :key, do: "Key", else: "Secret"}
+        {if @field == :key, do: "API key", else: "API secret"}
         <.info text="Kept in Fermix's secret store, never shown here." />
       </span>
       <input
@@ -1101,7 +1097,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
         name={"cue_source[#{@field}]"}
         value=""
         autocomplete="off"
-        placeholder={if @set?, do: "Set; leave blank to keep it", else: "Paste the #{@field}"}
+        placeholder={if @set?, do: "Set; leave blank to keep it", else: "Paste the API #{@field}"}
         class="input input-bordered w-full bg-base-100 font-mono"
       />
     </label>

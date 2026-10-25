@@ -49,8 +49,6 @@ defmodule FermixCore.Cues.JsonStream do
   @item_type "stream.item"
 
   @path_fields [:items_path, :id_path, :revision_path, :type_path, :subject_path, :time_path]
-  @fields [:key_header, :secret_header, :auth_message, :subscribe_message] ++
-            @path_fields ++ [:item_types, :error_types]
 
   @header_name ~r/\A[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}\z/
   @reserved_headers ~w(host connection upgrade)
@@ -77,14 +75,6 @@ defmodule FermixCore.Cues.JsonStream do
   @doc "The largest frame this reader takes: 1 MiB."
   @spec max_frame_bytes() :: pos_integer()
   def max_frame_bytes, do: @max_frame_bytes
-
-  @doc "Whether a reconnect can replay what was missed: never, the source has no cursor."
-  @spec rewinds?() :: false
-  def rewinds?, do: false
-
-  @doc "The settings only a stream with no preset takes, as `Cues.Config` keys."
-  @spec fields() :: [atom()]
-  def fields, do: @fields
 
   @doc """
   The secrets `source`'s sign-in uses, key first: `:key` when it has a

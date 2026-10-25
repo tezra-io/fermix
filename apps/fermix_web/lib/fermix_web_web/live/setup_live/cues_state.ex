@@ -66,11 +66,10 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   @general_stream_rows SourceForm.general_stream_rows() |> Enum.reject(&(&1.field == :url))
   @general_stream_fields Enum.map(@general_stream_rows, & &1.field)
   @path_fields ~w(items_path id_path revision_path type_path subject_path time_path)a
-  @form_fields ~w(preset kind enabled url interval dids collections)a ++
+  @form_fields ~w(preset kind enabled url interval)a ++
                  @general_stream_fields ++
                  ~w(daily_budget verify header algorithm prefix id_header id type_header)a
-  @list_fields ~w(dids collections)a ++
-                 for(row <- @general_stream_rows, row.kind == :list, do: row.field)
+  @list_fields for(row <- @general_stream_rows, row.kind == :list, do: row.field)
   # The secrets the form takes, each read from the submit alone.
   @typed_secret_keys ~w(key secret)
   @integer_fields ~w(interval daily_budget)a
@@ -292,7 +291,6 @@ defmodule FermixWebWeb.SetupLive.CuesState do
       enabled?: source.enabled?,
       url: source.url,
       interval: source.interval,
-      dids: source.dids,
       daily_budget: source.daily_budget,
       verify: source.verify && Atom.to_string(source.verify),
       secrets: source.secrets,
@@ -594,11 +592,9 @@ defmodule FermixWebWeb.SetupLive.CuesState do
     base ++ kind_fields(kind, preset, verify)
   end
 
-  # A stream shows Bluesky's fields with its preset and the general WebSocket
-  # source's without one.
+  # A stream shows the general WebSocket source's fields.
   defp kind_fields("feed", _preset, _verify), do: [:url, :interval]
   defp kind_fields("stream", nil, _verify), do: [:url | @general_stream_fields]
-  defp kind_fields("stream", _preset, _verify), do: [:url, :dids, :collections]
 
   defp kind_fields("webhook", _preset, verify),
     do: [:verify | method_fields(verify)] ++ [:type_header]

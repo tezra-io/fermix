@@ -609,6 +609,21 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert settings_row["properties"] |> Map.keys() |> Enum.sort() == fields
   end
 
+  # An example stands in an empty text or list field. A row with no such field
+  # to show it in refuses one (a secret's above all), and so does an empty one,
+  # which would show nothing where the client's own prompt stood.
+  test "a row carries an example only where an empty field can show it" do
+    assert Row.new("k", :text, "Label", restart: false, example: "id")["example"] == "id"
+    assert Row.new("k", :list, "Label", restart: false, example: "news")["example"] == "news"
+    assert Row.new("k", :secret, "Label", restart: false)["example"] == nil
+
+    for {kind, example} <- [secret: "PK7Q2ZTW9M", toggle: "on", number: "5", text: ""] do
+      assert_raise ArgumentError, ~r/unshowable example/, fn ->
+        Row.new("k", kind, "Label", restart: false, example: example)
+      end
+    end
+  end
+
   # Every job kind, status word and failure code a client may meet is pinned to
   # the module that mints them, so a kind added in Elixir fails here rather than
   # reaching a client whose decoder has never heard of it.

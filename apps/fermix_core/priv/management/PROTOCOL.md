@@ -250,7 +250,7 @@ daemon onto anything else.
 | `cues.status` | none | The cue subsystem as it stands: `available` (whether this build admits cues), the switches (`enabled`, `mandates_enabled`), whether the cue tree is `running`, `memory_enabled`, a `state` (`unavailable`, `off`, `needs_memory`, `needs_restart`, `running`) with its `status_sentence`, the `door` (`state` `listening`, `unavailable` or `not_running`, `port`, `reason`, `sentence`), and `counts` (`sources`, `sources_attention`, `watchers`, `watchers_held`, `mandates`, `mandates_attention`, `proposals_waiting`). Answers on every build. Minimum version `2`. |
 | `cues.sources.list` | none | Every source as a row, at most 64, plus `can_add` and `limits` (`max_sources`). Minimum version `2`. |
 | `cues.sources.get` | `ref` | One source's row, its editable fields as settings rows (`values`), its open gaps (at most 20, each with the daemon's sentence) and its refused requests by reason (`rejected`). Minimum version `2`. |
-| `cues.sources.form` | `kind`, `preset`, `verify` (each optional) | The add form for that choice, and writes nothing: `kinds`, `presets`, `rows` (the name first, then the fields of that kind, preset and verification method, a secret field as a `secret` row with `present: false`), `consent_sentence` and `notes`. A stream with no preset is the general WebSocket source: each of its field rows but the name and the daily budget carries an `info` (no row of the form carries a `footer`), and the rows end with two `secret` rows, `key` and `secret`; Bluesky's rows (`dids`, `collections`) come only with its preset. Minimum version `2`. |
+| `cues.sources.form` | `kind`, `preset`, `verify` (each optional) | The add form for that choice, and writes nothing: `kinds`, `presets`, `rows` (the name first, then the fields of that kind, preset and verification method, a secret field as a `secret` row with `present: false`), `consent_sentence` and `notes`. A stream has no preset; it is the general WebSocket source: each of its field rows but the name and the daily budget carries an `info` and an `example` (no row of the form carries a `footer`), and two `secret` rows, `key` (API key) and `secret` (API secret), follow its address. Minimum version `2`. |
 | `cues.sources.add` | `ref`, `kind` or `preset`, `values` | Saves a new source and answers `{source, token}`: its row, and for a new local push source its first token, returned once; null otherwise. Minimum version `2`. |
 | `cues.sources.update` | `ref`, `values` | Changes the fields `values` names and answers `{source}`. The name, kind and preset cannot change. Minimum version `2`. |
 | `cues.sources.remove` | `ref` | Removes a source and its stored secrets, and answers `{ref, removed: true, left, watchers}`: any secret that could not be deleted, as sentences, and the watchers that listened to it. Minimum version `2`. |
@@ -617,6 +617,12 @@ Notes that the shapes alone do not carry:
   row, where the choice trades a keyring password for a file that is not
   encrypted; and the phone channel's reach-from-anywhere switch, which says
   what turning it off keeps the phone to.
+- **`example` is a sample value for an empty field.** A client shows it in an
+  empty text or list field, in place of its own empty prompt ("Not set", "New
+  entry"), so the field shows what goes in it. It is never a default: nothing
+  is saved from it, and a client never sends it. It is `null` on every row of
+  another kind and on every row with nothing to show; today the fields of a
+  stream source carry one.
 - **`advanced` marks a row most people never need to change.** A client draws
   a section's advanced rows after its other rows, under one disclosure that
   starts closed; a section with none draws no disclosure. It says nothing about

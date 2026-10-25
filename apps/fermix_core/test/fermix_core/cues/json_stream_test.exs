@@ -118,7 +118,6 @@ defmodule FermixCore.Cues.JsonStreamTest do
       assert JsonStream.read({:text, big}, @source) == {:error, :frame_too_large}
       assert JsonStream.read({:binary, big}, @source) == {:error, :frame_too_large}
       assert JsonStream.max_frame_bytes() == 1024 * 1024
-      refute JsonStream.rewinds?()
     end
   end
 

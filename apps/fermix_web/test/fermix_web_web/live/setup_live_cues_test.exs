@@ -316,29 +316,25 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       # A preset stays with its kind: choosing another kind brings that kind's.
       view |> form("#cue-source-form", cue_source: %{kind: "feed"}) |> render_change()
       view |> form("#cue-source-form", cue_source: %{preset: ""}) |> render_change()
-      html = view |> form("#cue-source-form", cue_source: %{kind: "stream"}) |> render_change()
+      html = view |> form("#cue-source-form", cue_source: %{kind: "webhook"}) |> render_change()
+      assert selected(html, "cue_source[preset]") == "github"
 
-      assert preset_options(html) == [{"", "No preset"}, {"bluesky_jetstream", "Bluesky"}]
-      assert selected(html, "cue_source[preset]") == "bluesky_jetstream"
+      # A stream has no preset to offer.
+      html = view |> form("#cue-source-form", cue_source: %{kind: "stream"}) |> render_change()
+      assert preset_options(html) == []
 
       assert kind_line(html) =~
                "Fermix keeps a connection open to a WebSocket (wss://) address and takes items " <>
                  "as they arrive."
     end
 
-    # A stream with no preset is the general WebSocket source: its own fields
-    # and two typed secrets; Bluesky's fields come only with its preset.
-    test "a stream with no preset draws the general source's fields, never Bluesky's", %{
-      conn: conn
-    } do
+    # A stream is the general WebSocket source: its own fields and two typed
+    # secrets.
+    test "a stream draws the general source's fields", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
       open_cues(view)
       view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
       html = view |> form("#cue-source-form", cue_source: %{kind: "stream"}) |> render_change()
-      assert open_field?(html, "dids")
-      refute open_field?(html, "key_header")
-
-      html = view |> form("#cue-source-form", cue_source: %{preset: ""}) |> render_change()
 
       for name <- ~w(url key_header secret_header auth_message subscribe_message id_path type_path
                      item_types error_types key secret),
@@ -350,8 +346,39 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
 
       # The management form's words, its literals' backticks dropped.
       info = Enum.find(SourceForm.general_stream_rows(), &(&1.field == :key_header)).info
-      assert html =~ String.replace(info, "`", "")
+
+      assert html =~
+               info
+               |> String.replace("`", "")
+               |> Phoenix.HTML.html_escape()
+               |> Phoenix.HTML.safe_to_string()
+
       assert source_form_nodes(html, ~s(input[name="cue_source[items_path]"])) |> Enum.any?()
+
+      # Each empty field shows the management form's example, and the API key
+      # and secret come straight after the address, by the names the app gives
+      # them, ahead of the fields that name their headers.
+      for row <- SourceForm.general_stream_rows() do
+        placeholder =
+          html
+          |> source_form_nodes(~s(input[name="cue_source[#{row.field}]"]))
+          |> LazyHTML.attribute("placeholder")
+
+        assert placeholder == [row.example], "#{row.field}"
+      end
+
+      names =
+        html
+        |> source_form_nodes("input[name^=cue_source]")
+        |> LazyHTML.attribute("name")
+        |> Enum.filter(&(&1 in ~w(cue_source[url] cue_source[key] cue_source[secret]
+                                    cue_source[key_header])))
+
+      assert names ==
+               ~w(cue_source[url] cue_source[key] cue_source[secret] cue_source[key_header])
+
+      assert html =~ "API key"
+      assert html =~ "Paste the API secret"
     end
 
     test "a stream with no preset saves its fields and its typed key and secret", %{conn: conn} do
@@ -361,7 +388,6 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       open_cues(view)
       view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
       view |> form("#cue-source-form", cue_source: %{kind: "stream"}) |> render_change()
-      view |> form("#cue-source-form", cue_source: %{preset: ""}) |> render_change()
 
       html =
         view
@@ -483,7 +509,7 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       refute html |> source_form_nodes(~s([aria-invalid="true"])) |> Enum.any?()
     end
 
-    test "a method's and a preset's own needs are marked and refused under their field", %{
+    test "a method's and a stream's own needs are marked and refused under their field", %{
       conn: conn
     } do
       {:ok, view, _html} = live(conn, "/setup")
@@ -521,16 +547,19 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       html = view |> form("#cue-source-form", cue_source: %{id: "true"}) |> render_change()
       assert field_refusal(html, "id_header") == nil
 
-      # Bluesky follows the accounts it names.
+      # A stream names where each message keeps its id.
       view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
       html = view |> form("#cue-source-form", cue_source: %{kind: "stream"}) |> render_change()
-      assert selected(html, "cue_source[preset]") == "bluesky_jetstream"
-      assert required_field?(html, "dids")
+      assert required_field?(html, "id_path")
 
       html =
-        view |> form("#cue-source-form", cue_source: %{ref: "bsky-posts"}) |> render_submit()
+        view
+        |> form("#cue-source-form",
+          cue_source: %{ref: "live-news", url: "wss://stream.example.com/v2/news"}
+        )
+        |> render_submit()
 
-      assert field_refusal(html, "dids") == "Needed when no preset fills it."
+      assert field_refusal(html, "id_path") == "Needed when no preset fills it."
       assert persisted_cues() == []
     end
 

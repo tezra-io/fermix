@@ -27,10 +27,8 @@ defmodule FermixCore.Cues.Config do
   than refusing the whole section (M60 app surface §3.8 item 3), and neither
   the door nor a worker serves it until it is stored.
 
-  A stream is `wss://` only. With the `bluesky_jetstream` preset it takes
-  `dids` and `collections`; with no preset it is the general WebSocket source
-  and takes the fields `Cues.JsonStream.fields/0` names, whose shape rules are
-  `Cues.JsonStream.check_config/1`'s. Neither takes the other's fields.
+  A stream is `wss://` only. It is the general WebSocket source, and the shape
+  rules of its own fields are `Cues.JsonStream.check_config/1`'s.
   """
 
   alias FermixCore.Cues.JsonStream
@@ -65,11 +63,9 @@ defmodule FermixCore.Cues.Config do
   @sign_in_fields [:key_header, :secret_header, :auth_message, :subscribe_message]
   @string_source_fields [:preset, :url, :id_header, :type_header, :header, :algorithm, :prefix] ++
                           @path_fields ++ @sign_in_fields
-  @list_source_fields [:dids, :collections, :item_types, :error_types]
-  # The Bluesky preset's own fields.
-  @bluesky_fields [:dids, :collections]
+  @list_source_fields [:item_types, :error_types]
 
-  @source_keys [:kind, :preset, :enabled, :url, :interval, :dids, :collections] ++
+  @source_keys [:kind, :preset, :enabled, :url, :interval] ++
                  @path_fields ++
                  [:item_types, :error_types] ++
                  @sign_in_fields ++
@@ -99,8 +95,6 @@ defmodule FermixCore.Cues.Config do
                  %{
                    url: [:stream, :feed],
                    interval: [:feed],
-                   dids: [:stream],
-                   collections: [:stream],
                    item_types: [:stream],
                    error_types: [:stream],
                    key_header: [:stream],
@@ -202,13 +196,11 @@ defmodule FermixCore.Cues.Config do
   @doc """
   The secrets `source` (a resolved source, or any map with its `kind`,
   `preset` and fields) cannot run without, in the order a surface lists them:
-  a webhook's `secret`, a local push's `token`, and for a stream with no preset
-  the `key` and `secret` its sign-in names (`Cues.JsonStream.secret_fields/1`).
+  a webhook's `secret`, a local push's `token`, and for a stream the `key` and
+  `secret` its sign-in names (`Cues.JsonStream.secret_fields/1`).
   """
   @spec needed_secrets(map()) :: [secret_field()]
-  def needed_secrets(%{kind: :stream} = source) do
-    if Map.get(source, :preset) == nil, do: JsonStream.secret_fields(source), else: []
-  end
+  def needed_secrets(%{kind: :stream} = source), do: JsonStream.secret_fields(source)
 
   def needed_secrets(%{kind: kind}) when kind in @kinds,
     do: @required_secret_by_kind |> Map.get(kind) |> List.wrap()
@@ -259,9 +251,8 @@ defmodule FermixCore.Cues.Config do
   end
 
   # A signed or shared-secret webhook names the header that carries it and
-  # how one delivery is told from another; the Bluesky preset follows the
-  # accounts it names; a stream with no preset names where each message keeps
-  # its id.
+  # how one delivery is told from another; a stream with no preset names where
+  # each message keeps its id.
   defp needed_fields(kind, method, preset) do
     Map.fetch!(@required_by_kind, kind) ++
       method_needs(kind, method) ++ preset_needs(kind, preset)
@@ -278,7 +269,6 @@ defmodule FermixCore.Cues.Config do
   defp identified?(filled),
     do: Enum.any?(@identity_fields, &(Map.get(filled, &1) not in [nil, ""]))
 
-  defp preset_needs(_kind, "bluesky_jetstream"), do: [:dids]
   defp preset_needs(:stream, nil), do: [:id_path]
   defp preset_needs(_kind, _preset), do: []
 
@@ -413,8 +403,6 @@ defmodule FermixCore.Cues.Config do
       preset: Map.get(filled, :preset),
       enabled?: Map.get(filled, :enabled, true),
       daily_budget: Map.get(filled, :daily_budget, 0),
-      dids: Map.get(filled, :dids, []),
-      collections: Map.get(filled, :collections, []),
       item_types: Map.get(filled, :item_types, []),
       error_types: Map.get(filled, :error_types, []),
       interval: Map.get(filled, :interval),
@@ -588,7 +576,6 @@ defmodule FermixCore.Cues.Config do
               "cues.sources.#{ref} needs a kind (stream, feed, webhook or local_push) or a preset"
 
     check_field_kinds!(ref, kind, Map.keys(filled))
-    check_stream_fields!(ref, kind, filled)
     check_required!(ref, kind, filled)
     check_identity!(ref, kind, filled)
     check_webhook!(ref, kind, filled)
@@ -612,25 +599,8 @@ defmodule FermixCore.Cues.Config do
     end
   end
 
-  # A stream takes its preset's fields or the general source's, never both.
-  defp check_stream_fields!(ref, :stream, filled) do
-    {foreign, owner} =
-      if Map.get(filled, :preset) == nil,
-        do: {@bluesky_fields, "the Bluesky preset"},
-        else: {JsonStream.fields(), "a stream with no preset"}
-
-    case Enum.find(foreign, &Map.has_key?(filled, &1)) do
-      nil -> :ok
-      field -> raise ArgumentError, "cues.sources.#{ref}.#{field} applies only to #{owner}"
-    end
-  end
-
-  defp check_stream_fields!(_ref, _kind, _filled), do: :ok
-
   # The general WebSocket source's headers, messages and paths are
   # `Cues.JsonStream`'s rules.
-  defp check_general_stream!(_ref, :stream, %{preset: _preset}), do: :ok
-
   defp check_general_stream!(ref, :stream, filled) do
     case JsonStream.check_config(filled) do
       :ok -> :ok
@@ -690,7 +660,6 @@ defmodule FermixCore.Cues.Config do
   end
 
   defp needed_words(:header), do: "header, the request header that carries the signature"
-  defp needed_words(:dids), do: "dids, the accounts to follow"
   defp needed_words(field), do: Atom.to_string(field)
 
   defp sentinel!(value, ref, field) do

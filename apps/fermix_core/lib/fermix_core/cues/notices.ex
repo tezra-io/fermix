@@ -118,8 +118,7 @@ defmodule FermixCore.Cues.Notices do
 
   @doc """
   Sends source notice `kind` once per episode to the owner inbox. `data` may
-  hold `:budget`, and for `:down`, `catch_up: false` when the source cannot
-  replay what it missed.
+  hold `:budget`.
   """
   @spec source(String.t(), atom(), map(), keyword()) :: result()
   def source(source_ref, kind, data, opts \\ [])
@@ -301,15 +300,10 @@ defmodule FermixCore.Cues.Notices do
         "services allow one connection per account, so another program using the same keys " <>
         "causes this. Check its settings, then save it again or restart Fermix to try again."
 
-  defp source_text(:down, ref, %{catch_up: false}),
+  defp source_text(:down, ref, _data),
     do:
       "Cue source #{ref} has been down for more than 15 minutes. It cannot catch up, so " <>
         "what the service sent meanwhile is missed and not recorded."
-
-  defp source_text(:down, ref, _data),
-    do:
-      "Cue source #{ref} has been down for more than 15 minutes and could not catch up; " <>
-        "what it missed is recorded as a gap."
 
   defp source_text(:unreachable, ref, _data),
     do:

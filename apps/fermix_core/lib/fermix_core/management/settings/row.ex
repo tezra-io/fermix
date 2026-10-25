@@ -19,6 +19,12 @@ defmodule FermixCore.Management.Settings.Row do
   other row carries `null`, because a control the operator has to open for one
   more sentence costs more than the sentence saves.
 
+  `example` is a sample value a surface shows in an empty text or list field,
+  in place of its own "Not set", so the empty field shows what goes in it. It
+  is never a default: nothing is saved from it. Only a text or list row
+  carries one; every other row, and every row with nothing to show, carries
+  `null`.
+
   `advanced` marks a row most people never need to change, which a surface draws
   after the section's other rows under one disclosure that starts closed. It
   says nothing about how the row applies; that is `restart`'s job.
@@ -66,6 +72,7 @@ defmodule FermixCore.Management.Settings.Row do
       "label" => label,
       "footer" => Keyword.get(opts, :footer),
       "info" => validate_info!(key, Keyword.get(opts, :info)),
+      "example" => validate_example!(key, kind, Keyword.get(opts, :example)),
       "advanced" => advanced,
       "value" => value(Keyword.get(opts, :value)),
       "present" => Keyword.get(opts, :present),
@@ -161,5 +168,17 @@ defmodule FermixCore.Management.Settings.Row do
 
   defp validate_info!(key, info) do
     raise ArgumentError, "row #{key} declared an unrenderable info: #{inspect(info)}"
+  end
+
+  # A sample stands in an empty field, so only a text or list row has one to
+  # show; an empty string would show nothing where "Not set" stood.
+  defp validate_example!(_key, _kind, nil), do: nil
+
+  defp validate_example!(_key, kind, example)
+       when kind in [:text, :list] and is_binary(example) and example != "",
+       do: example
+
+  defp validate_example!(key, kind, example) do
+    raise ArgumentError, "#{kind} row #{key} declared an unshowable example: #{inspect(example)}"
   end
 end

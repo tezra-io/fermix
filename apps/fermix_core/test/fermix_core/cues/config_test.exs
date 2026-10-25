@@ -169,8 +169,8 @@ defmodule FermixCore.Cues.ConfigTest do
          ~r/sources\.s1\.daily_budget/},
         {source(%{"kind" => "webhook", "verify" => "trust_me"}), ~r/sources\.s1\.verify/},
         {source(%{"kind" => "webhook", "verify" => "hmac", "id" => "uuid"}), ~r/sources\.s1\.id/},
-        {source(%{"kind" => "stream", "url" => "wss://e.test", "dids" => "did:plc:x"}),
-         ~r/sources\.s1\.dids/},
+        {source(%{"kind" => "stream", "url" => "wss://e.test", "item_types" => "n"}),
+         ~r/sources\.s1\.item_types/},
         {source(%{"kind" => "stream", "url" => ""}), ~r/sources\.s1\.url/},
         {source(%{"enabled" => "true", "kind" => "local_push", "token" => "@keyring"}),
          ~r/sources\.s1\.enabled/},
@@ -247,20 +247,37 @@ defmodule FermixCore.Cues.ConfigTest do
       end
     end
 
-    test "a Bluesky stream without dids is refused by the presence rule" do
-      for section <- [
-            %{"preset" => "bluesky_jetstream"},
-            %{"preset" => "bluesky_jetstream", "dids" => []}
+    # The engine ships no Bluesky preset: a section written for it does not
+    # load, and the refusal names what is wrong, with no migration.
+    test "a section written for the removed Bluesky preset is refused, naming the problem" do
+      assert_raise ArgumentError,
+                   ~s(cues.sources.s1: unknown preset "bluesky_jetstream"; known presets: ) <>
+                     "github, rss",
+                   fn -> Config.normalize(source(%{"preset" => "bluesky_jetstream"})) end
+
+      for {section, unknown} <- [
+            {%{"preset" => "bluesky_jetstream", "dids" => ["did:plc:abc123"]}, "dids"},
+            {%{
+               "preset" => "bluesky_jetstream",
+               "dids" => ["did:plc:abc123"],
+               "collections" => ["app.bsky.feed.post"]
+             }, "collections, dids"},
+            {%{
+               "kind" => "stream",
+               "url" => "wss://stream.example.com/v2/news",
+               "id_path" => "id",
+               "collections" => ["app.bsky.feed.post"]
+             }, "collections"},
+            {%{
+               "kind" => "stream",
+               "url" => "wss://stream.example.com/v2/news",
+               "id_path" => "id",
+               "symbols" => ["KTRL"]
+             }, "symbols"}
           ] do
-        assert_raise ArgumentError,
-                     "cues.sources.s1 is a stream source and needs dids, the accounts to follow",
-                     fn -> Config.normalize(source(section)) end
+        error = assert_raise ArgumentError, fn -> Config.normalize(source(section)) end
+        assert error.message =~ "[fermix_core.cues.sources.s1] has unknown key(s): #{unknown}."
       end
-
-      config =
-        Config.normalize(source(%{"preset" => "bluesky_jetstream", "dids" => ["did:plc:abc123"]}))
-
-      assert config[:sources]["s1"] == [preset: "bluesky_jetstream", dids: ["did:plc:abc123"]]
     end
 
     test "a field that does not apply to the source's kind is refused" do
@@ -319,7 +336,6 @@ defmodule FermixCore.Cues.ConfigTest do
       assert Config.needed_secrets(%{kind: :local_push}) == [:token]
       assert Config.needed_secrets(%{kind: :webhook, preset: "github"}) == [:secret]
       assert Config.needed_secrets(%{kind: :feed, preset: "rss"}) == []
-      assert Config.needed_secrets(%{kind: :stream, preset: "bluesky_jetstream"}) == []
       assert Config.needed_secrets(%{kind: :stream, preset: nil}) == []
 
       assert Config.needed_secrets(%{kind: :stream, preset: nil, key_header: "X-Feed-Key"}) ==
@@ -363,17 +379,15 @@ defmodule FermixCore.Cues.ConfigTest do
         Config.normalize(source(%{"preset" => "rss", "url" => "http://example.org/feed"}))
       end
 
-      for url <- ["ws://jetstream.example", "https://stream.example.com/v2/news"] do
+      for url <- ["ws://stream.example.com/v2/news", "https://stream.example.com/v2/news"] do
         assert_raise ArgumentError, ~r/sources\.s1\.url must start with wss:\/\/$/, fn ->
-          Config.normalize(
-            source(%{"preset" => "bluesky_jetstream", "url" => url, "dids" => ["did:plc:abc123"]})
-          )
+          Config.normalize(source(%{"kind" => "stream", "url" => url, "id_path" => "id"}))
         end
       end
     end
 
     # The general WebSocket source (a stream with no preset): its own fields,
-    # each refused under its own key, and never Bluesky's.
+    # each refused under its own key.
     test "a general stream's fields load, and each of its rules names the field it refuses" do
       section = %{
         "kind" => "stream",
@@ -400,29 +414,10 @@ defmodule FermixCore.Cues.ConfigTest do
             {%{"subscribe_message" => "[subscribe"}, ~r/sources\.s1\.subscribe_message must/},
             {%{"type_path" => nil}, ~r/sources\.s1\.item_types needs type_path/},
             {%{"url" => "wss:///news"}, ~r/sources\.s1\.url must name a host/},
-            {%{"dids" => ["did:plc:abc123"]},
-             ~r/sources\.s1\.dids applies only to the Bluesky preset/},
-            {%{"collections" => ["app.bsky.feed.post"]}, ~r/sources\.s1\.collections applies/},
             {%{"item_types" => "n"}, ~r/sources\.s1\.item_types/}
           ] do
         changed = section |> Map.merge(change) |> Enum.reject(&is_nil(elem(&1, 1))) |> Map.new()
         assert_raise ArgumentError, pattern, fn -> Config.normalize(source(changed)) end
-      end
-    end
-
-    test "the Bluesky preset refuses the general source's fields, and symbols is gone" do
-      bluesky = %{"preset" => "bluesky_jetstream", "dids" => ["did:plc:abc123"]}
-
-      for field <- ~w(key_header auth_message id_path type_path item_types) do
-        value = if field == "item_types", do: ["n"], else: "X-Feed-Key"
-
-        assert_raise ArgumentError,
-                     ~r/sources\.s1\.#{field} applies only to a stream with no preset/,
-                     fn -> Config.normalize(source(Map.put(bluesky, field, value))) end
-      end
-
-      assert_raise ArgumentError, ~r/unknown key\(s\): symbols/, fn ->
-        Config.normalize(source(Map.put(bluesky, "symbols", ["KTRL"])))
       end
     end
 
@@ -453,7 +448,6 @@ defmodule FermixCore.Cues.ConfigTest do
       assert Config.required_fields(:feed, nil, nil) == [:url, :interval]
       assert Config.required_fields(:feed, "rss", nil) == [:url]
       assert Config.required_fields(:stream, nil, nil) == [:url, :id_path]
-      assert Config.required_fields(:stream, "bluesky_jetstream", nil) == [:dids]
       assert Config.required_fields(:webhook, nil, nil) == [:verify]
       assert Config.required_fields(:webhook, nil, "hmac") == [:verify, :header]
       assert Config.required_fields(:webhook, nil, :shared_secret) == [:verify, :header]
@@ -464,6 +458,10 @@ defmodule FermixCore.Cues.ConfigTest do
 
       assert_raise ArgumentError, ~r/unknown preset "carrier"/, fn ->
         Config.required_fields(:feed, "carrier", nil)
+      end
+
+      assert_raise ArgumentError, ~r/unknown preset "bluesky_jetstream"/, fn ->
+        Config.required_fields(:stream, "bluesky_jetstream", nil)
       end
     end
 
@@ -484,8 +482,8 @@ defmodule FermixCore.Cues.ConfigTest do
       for {section, pattern} <- [
             {%{"kind" => "webhook", "verify" => "hmac", "id" => "content_hash"},
              ~r/sources\.s1 is a webhook source and needs header/},
-            {%{"preset" => "bluesky_jetstream", "dids" => []},
-             ~r/sources\.s1 is a stream source and needs dids/}
+            {%{"kind" => "stream", "url" => "wss://stream.example.com/v2/news"},
+             ~r/sources\.s1 is a stream source and needs id_path/}
           ] do
         assert_raise ArgumentError, pattern, fn -> Config.normalize(source(section)) end
       end
@@ -518,7 +516,7 @@ defmodule FermixCore.Cues.ConfigTest do
       assert feed.interval == 300
       assert feed.url == "https://example.org/releases.atom"
       assert feed.daily_budget == 0
-      assert feed.dids == []
+      refute Map.has_key?(feed, :dids)
       assert feed.secrets == %{}
 
       assert {:ok, push} = Config.source("home-alerts")

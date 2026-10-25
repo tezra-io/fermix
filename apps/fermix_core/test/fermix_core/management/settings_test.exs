@@ -55,8 +55,8 @@ defmodule FermixCore.Management.SettingsTest do
   @channel_keys [:telegram, :whatsapp, :discord, :slack, :signal, :acp, :mobile, :imessage]
 
   @row_fields ~w(
-    key kind label footer info advanced value present options min max step restart read_only
-    suggestions unit format
+    key kind label footer info example advanced value present options min max step restart
+    read_only suggestions unit format
   )
 
   setup do

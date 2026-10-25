@@ -7,28 +7,16 @@ defmodule FermixCore.Cues.Presets do
   are in the normalized shape `Cues.Config.normalize/1` produces (atoms for
   enumerations, integers for seconds). A preset never carries a secret.
 
-  A preset whose fields need a rule of their own (the shape of Bluesky's
-  `dids`) adds one clause to `check_preset/2`, which runs on the filled
-  section, so `Cues.Config` refuses such a source at the config boundary. A
-  field a preset needs present is named in `Cues.Config.required_fields/3`,
+  A field a preset needs present is named in `Cues.Config.required_fields/3`,
   the one presence rule the config and the forms both read.
   """
 
-  alias FermixCore.Cues.Jetstream
-
   # rss: a feed poll every 15 minutes; the owner gives the URL.
-  # bluesky_jetstream: Bluesky's public Jetstream v2 (no account); the owner
-  # gives the dids to follow, collections default to posts (`Cues.Jetstream`).
   # github: a repository or organisation webhook (§6.10): GitHub's HMAC over
   # the raw body, its delivery id as identity and its event name as type; the
   # owner gives the signing secret (`Cues.Webhook` projects a body over 64 KiB).
   @presets %{
     "rss" => %{kind: :feed, interval: 900},
-    "bluesky_jetstream" => %{
-      kind: :stream,
-      url: Jetstream.default_base_url(),
-      collections: Jetstream.default_collections()
-    },
     "github" => %{
       kind: :webhook,
       verify: :hmac,
@@ -54,9 +42,9 @@ defmodule FermixCore.Cues.Presets do
   @doc """
   Fills `section` (a map with atom keys, normalized values) from its `:preset`.
 
-  A section with no preset comes back unchanged. An unknown preset, a `:kind`
-  that contradicts the preset's, or a filled section the preset's own rule
-  refuses, is refused with a sentence for the owner.
+  A section with no preset comes back unchanged. An unknown preset, or a
+  `:kind` that contradicts the preset's, is refused with a sentence for the
+  owner.
   """
   @spec fill(map()) :: {:ok, map()} | {:error, String.t()}
   def fill(section) when is_map(section) do
@@ -82,17 +70,7 @@ defmodule FermixCore.Cues.Presets do
         {:error, "preset #{name} makes a #{kind} source; remove kind or set it to #{kind}"}
 
       _same_or_absent ->
-        filled = Map.merge(preset, section)
-
-        with :ok <- check_preset(name, filled), do: {:ok, filled}
+        {:ok, Map.merge(preset, section)}
     end
   end
-
-  # One clause per preset with a rule of its own; every other preset has none.
-  # Whether dids are there at all is `Cues.Config.required_fields/3`'s rule,
-  # which both the config and the forms read; this checks the ones named.
-  defp check_preset("bluesky_jetstream", %{dids: [_ | _] = dids} = filled),
-    do: Jetstream.check_subscription(dids, Map.get(filled, :collections, []))
-
-  defp check_preset(_name, _filled), do: :ok
 end

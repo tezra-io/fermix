@@ -200,15 +200,12 @@ defmodule FermixCore.Cues.NoticesTest do
       assert :already_sent = Notices.source("harbour-hours", :too_large, %{}, opts(ctx, 1))
     end
 
-    test "an outage of a source that cannot catch up says nothing was recorded", ctx do
-      assert :sent = Notices.source("live-news", :down, %{catch_up: false}, opts(ctx, 0))
+    test "an outage of a source says it cannot catch up and nothing was recorded", ctx do
+      since = "2026-10-12T13:45:00Z"
+      assert :sent = Notices.source("live-news", :down, %{since: since}, opts(ctx, 0))
       assert_receive {:sent, "owner-1", text, _opts}
       assert text =~ "It cannot catch up, so what the service sent meanwhile is missed"
       refute text =~ "gap"
-
-      assert :sent = Notices.source("eng-blogs", :down, %{catch_up: true}, opts(ctx, 0))
-      assert_receive {:sent, "owner-1", text, _opts}
-      assert text =~ "what it missed is recorded as a gap"
     end
 
     test "a reached source budget is told once per UTC day", ctx do

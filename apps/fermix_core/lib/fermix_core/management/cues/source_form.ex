@@ -14,13 +14,14 @@ defmodule FermixCore.Management.Cues.SourceForm do
   is not a field of the form.
 
   A secret is never a value: a secret row is published with its presence,
-  and its value crosses in `secret.set` alone. A webhook has one secret row;
-  a stream with no preset (the general WebSocket source) has two, `key` and
-  `secret`, each with its own presence. That stream's rows are its own: the
-  address, how it signs in, where each message keeps its id and type, and,
-  under More options, the rest of its paths, each with an `info` saying what it
-  is for, behind an info control like every cue row's explanation (no
-  footers). Bluesky's rows show only with its preset.
+  and its value crosses in `secret.set` alone. A webhook has one secret row,
+  last; a stream with no preset (the general WebSocket source) has two, `key`
+  and `secret` (API key and API secret, the names the source's page gives
+  them), each with its own presence, straight after the address. That
+  stream's rows are its own: the address, how it signs in, where each message
+  keeps its id and type, and, under More options, the rest of its paths, each
+  with an `info` saying what it is for, behind an info control like every cue
+  row's explanation (no footers), and an `example` the empty field shows.
   """
 
   alias FermixCore.Cues.Config, as: CuesConfig
@@ -54,7 +55,6 @@ defmodule FermixCore.Management.Cues.SourceForm do
   @kind_ids Enum.map(@kinds, & &1.id)
   @preset_labels %{
     "rss" => "RSS, Atom or JSON Feed",
-    "bluesky_jetstream" => "Bluesky",
     "github" => "GitHub"
   }
   @verify_options [
@@ -75,8 +75,8 @@ defmodule FermixCore.Management.Cues.SourceForm do
                   "tunnel you run."
   @github_note "In GitHub's webhook form, choose `application/json` as the content type."
   @push_note "Send each item as a CloudEvent, with the token as a bearer token."
-  @general_stream_note "Any WebSocket service. Fermix signs in, sends the message after " <>
-                         "connecting, and takes each message of an item type."
+  @general_stream_note "Any WebSocket service. Fermix signs in with your API key and secret, " <>
+                         "sends the subscribe message, and keeps each message of a type you list."
   @secret_info "Stored in your keychain and never shown again."
 
   @unknown_field "This source has no setting by that name."
@@ -92,8 +92,6 @@ defmodule FermixCore.Management.Cues.SourceForm do
   @fields [
     %{key: "url", config: :url, kind: :text, kinds: [:feed, :stream]},
     %{key: "interval_minutes", config: :interval, kind: :number, kinds: [:feed]},
-    %{key: "dids", config: :dids, kind: :list, kinds: [:stream]},
-    %{key: "collections", config: :collections, kind: :list, kinds: [:stream]},
     %{key: "key_header", config: :key_header, kind: :text, kinds: [:stream]},
     %{key: "secret_header", config: :secret_header, kind: :text, kinds: [:stream]},
     %{key: "auth_message", config: :auth_message, kind: :text, kinds: [:stream]},
@@ -123,39 +121,52 @@ defmodule FermixCore.Management.Cues.SourceForm do
   @field_by_key Map.new(@fields, &{&1.key, &1})
 
   # A stream with no preset: its rows in form order, the ones most sources need
-  # first, each with its label and its info, which a surface keeps behind an
-  # info control. A literal the owner types is backticked, the copy rules' mark
-  # for one. The examples are invented. `general_stream_rows/0` publishes them,
-  # so the browser setup page draws the same rows in the same words.
+  # first, each with its label, its info (kept behind an info control) and its
+  # example (shown in the empty field). No two labels read alike, and a field
+  # that names where a value goes says so ("Header name for…", "… field"), so
+  # it is not taken for the value. A literal the owner types is backticked in
+  # an info, the copy rules' mark for one. The examples are invented and short
+  # enough for the field. `general_stream_rows/0` publishes them, so the
+  # browser setup page draws the same rows in the same words.
   @general_rows [
-    {"url", "Address",
-     "The service's WebSocket address, such as `wss://news.example.com/stream`."},
-    {"key_header", "Key header",
-     "Sends your key in this header when connecting, such as `X-Api-Key`."},
-    {"secret_header", "Secret header",
-     "Sends your secret in this header when connecting, such as `X-Api-Secret`."},
+    {"url", "Address", "The service's WebSocket address. It starts with `wss://`.",
+     "wss://news.example.com/stream"},
+    {"key_header", "Header name for the API key",
+     "If the service reads your API key from a header when connecting, that header's name. " <>
+       "The key itself goes in API key. Leave it empty if the service does not use one.",
+     "X-Api-Key"},
+    {"secret_header", "Header name for the API secret",
+     "If the service reads your API secret from a header when connecting, that header's " <>
+       "name. The secret itself goes in API secret. Leave it empty if the service does not " <>
+       "use one.", "X-Api-Secret"},
     {"auth_message", "Sign-in message",
-     "JSON on one line, sent first. Put `{{key}}` and `{{secret}}` where your key and " <>
-       ~s(secret go, such as `{"action":"auth","key":"{{key}}"}`.)},
-    {"subscribe_message", "Message after connecting",
-     ~s(JSON on one line, sent after the sign-in message, such as `{"action":"subscribe","topics":["news"]}`.)},
-    {"id_path", "Item id", "Where each message keeps its id, such as `id`."},
-    {"type_path", "Message type", "Where each message keeps its type, such as `type`."},
-    {"item_types", "Item types",
-     "Messages of these types become items. Leave it empty to take every message."},
+     "For a service that signs in by a message instead of headers: JSON on one line, sent " <>
+       "first. Fermix puts your API key where it says `{{key}}` and your API secret where " <>
+       "it says `{{secret}}`.", ~s({"auth":"{{key}}"})},
+    {"subscribe_message", "Subscribe message",
+     "JSON on one line, sent after signing in, that tells the service what to send.",
+     ~s({"subscribe":"news"})},
+    {"id_path", "Id field",
+     "Where each message keeps its unique id, so a message sent twice becomes one item. A " <>
+       "dotted path reaches inside a message, such as `data.id`.", "id"},
+    {"type_path", "Type field", "Where each message says what kind of message it is.", "type"},
+    {"item_types", "Types to keep",
+     "Messages of these types become items. Leave it empty to keep every message.", "news"},
     {"error_types", "Error types",
-     "A message of one of these types is the service's error: Fermix closes the connection " <>
-       "and tries again."},
-    {"items_path", "Messages in a frame",
-     "Where a frame keeps its messages, such as `data`. A list there is read one message at " <>
-       "a time."},
-    {"revision_path", "Revision",
-     "Where an updated message keeps its revision, such as `updated_at`."},
-    {"time_path", "Time", "Where each message keeps its time, such as `created_at`."},
-    {"subject_path", "Subject", "Where each message keeps what it is about, such as `tickers.0`."}
+     "A message of one of these types is the service refusing: Fermix closes the connection " <>
+       "and tries again.", "error"},
+    {"items_path", "List field",
+     "Where a frame keeps a list of messages, read one message at a time.", "data"},
+    {"revision_path", "Revision field",
+     "Where an updated message keeps its revision, so an edit becomes a new version of the " <>
+       "same item.", "updated_at"},
+    {"time_path", "Time field", "Where each message keeps its time.", "created_at"},
+    {"subject_path", "Subject field", "Where each message keeps what it is about.", "tickers.0"}
   ]
   @general_stream_keys Enum.map(@general_rows, &elem(&1, 0)) ++ ["daily_budget"]
-  @general_row_words Map.new(@general_rows, fn {key, label, info} -> {key, {label, info}} end)
+  @general_row_words Map.new(@general_rows, fn {key, label, info, example} ->
+                       {key, {label, info, example}}
+                     end)
   @more_options [:daily_budget, :items_path, :revision_path, :time_path, :subject_path]
 
   @type kind :: String.t()
@@ -184,9 +195,9 @@ defmodule FermixCore.Management.Cues.SourceForm do
 
   @doc """
   The rows of a stream with no preset before its daily budget, in form order:
-  each field's config key, row kind (`:text` or `:list`), label, info and
-  whether it sits under More options. The browser setup page draws its form
-  from these, so both surfaces say the same thing.
+  each field's config key, row kind (`:text` or `:list`), label, info, example
+  and whether it sits under More options. The browser setup page draws its
+  form from these, so both surfaces say the same thing.
   """
   @spec general_stream_rows() :: [
           %{
@@ -194,11 +205,12 @@ defmodule FermixCore.Management.Cues.SourceForm do
             kind: :text | :list,
             label: String.t(),
             info: String.t(),
+            example: String.t(),
             advanced: boolean()
           }
         ]
   def general_stream_rows do
-    for {key, label, info} <- @general_rows do
+    for {key, label, info, example} <- @general_rows do
       %{config: config, kind: kind} = Map.fetch!(@field_by_key, key)
 
       %{
@@ -206,6 +218,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
         kind: kind,
         label: label,
         info: info,
+        example: example,
         advanced: config in @more_options
       }
     end
@@ -228,13 +241,14 @@ defmodule FermixCore.Management.Cues.SourceForm do
       defaults = preset_defaults(preset)
       method = verify || defaults |> Map.get(:verify) |> text()
       chosen = if verify, do: [verify: verify], else: []
-      rows = [name_row() | field_rows(kind, preset, method, defaults, chosen)]
+      fields = [name_row() | field_rows(kind, preset, method, defaults, chosen)]
+      rows = with_secrets(fields, secret_rows(kind, preset, method, %{}), kind, preset)
 
       {:ok,
        %{
          "kinds" => kinds(),
          "presets" => presets(),
-         "rows" => rows ++ secret_rows(kind, preset, method, %{}),
+         "rows" => rows,
          "consent_sentence" => Map.fetch!(@consent, kind),
          "notes" => notes(kind, preset)
        }}
@@ -253,8 +267,9 @@ defmodule FermixCore.Management.Cues.SourceForm do
     defaults = preset_defaults(source.preset)
     method = source.verify && Atom.to_string(source.verify)
 
-    field_rows(kind, source.preset, method, defaults, section) ++
-      secret_rows(kind, source.preset, method, source.secrets)
+    kind
+    |> field_rows(source.preset, method, defaults, section)
+    |> with_secrets(secret_rows(kind, source.preset, method, source.secrets), kind, source.preset)
   end
 
   @doc """
@@ -454,24 +469,6 @@ defmodule FermixCore.Management.Cues.SourceForm do
     )
   end
 
-  defp field_row(%{key: "dids"}, value, advanced) do
-    Row.new("dids", :list, "Accounts",
-      info: "The accounts to follow, by their decentralized identifier.",
-      value: value,
-      advanced: advanced,
-      restart: restart()
-    )
-  end
-
-  defp field_row(%{key: "collections"}, value, advanced) do
-    Row.new("collections", :list, "Collections",
-      info: "The kinds of record to take, such as posts.",
-      value: value,
-      advanced: advanced,
-      restart: restart()
-    )
-  end
-
   defp field_row(%{key: "verify"}, value, advanced) do
     Row.new("verify", :choice, "Checked by",
       value: value,
@@ -520,10 +517,11 @@ defmodule FermixCore.Management.Cues.SourceForm do
     do: field_row(field, value, advanced)
 
   defp general_row(%{key: key, kind: kind}, value, advanced) do
-    {label, info} = Map.fetch!(@general_row_words, key)
+    {label, info, example} = Map.fetch!(@general_row_words, key)
 
     Row.new(key, kind, label,
       info: info,
+      example: example,
       value: value,
       advanced: advanced,
       restart: restart()
@@ -538,17 +536,28 @@ defmodule FermixCore.Management.Cues.SourceForm do
   # The secrets a form takes, each row with its own field's presence in
   # `secrets` (a source's sentinels by field): a webhook's signing or shared
   # secret, and the key and secret a stream with no preset signs in with. A
-  # local push's token is Fermix's to make, and a feed or a Bluesky stream
-  # needs none.
+  # local push's token is Fermix's to make, and a feed needs none.
   defp secret_rows("webhook", _preset, method, secrets) do
     label = if method == "shared_secret", do: "Shared secret", else: "Signing secret"
     [secret_row(:secret, label, secrets)]
   end
 
   defp secret_rows("stream", nil, _method, secrets),
-    do: [secret_row(:key, "Key", secrets), secret_row(:secret, "Secret", secrets)]
+    do: [secret_row(:key, "API key", secrets), secret_row(:secret, "API secret", secrets)]
 
   defp secret_rows(_kind, _preset, _method, _secrets), do: []
+
+  # A stream with no preset asks for its API key and secret straight after its
+  # address, ahead of the fields that say how they are sent, so a value is not
+  # typed where a header's name goes. Every other form ends with its secret.
+  defp with_secrets(rows, secrets, kind, preset) do
+    if general_stream?(kind, preset) do
+      {head, rest} = Enum.split(rows, Enum.find_index(rows, &(&1["key"] == "url")) + 1)
+      head ++ secrets ++ rest
+    else
+      rows ++ secrets
+    end
+  end
 
   defp secret_row(field, label, secrets) do
     Row.new(Atom.to_string(field), :secret, label,
@@ -560,10 +569,6 @@ defmodule FermixCore.Management.Cues.SourceForm do
 
   defp shown("feed", _preset, _method), do: fields(~w(url interval_minutes daily_budget))
   defp shown("stream", nil, _method), do: fields(@general_stream_keys)
-
-  defp shown("stream", "bluesky_jetstream", _method),
-    do: fields(~w(url dids collections daily_budget))
-
   defp shown("local_push", _preset, _method), do: fields(~w(daily_budget))
 
   defp shown("webhook", _preset, method),

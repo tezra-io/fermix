@@ -436,6 +436,10 @@ defmodule FermixCore.Management.CuesTest do
       assert [%{"key" => "key", "present" => true}, %{"key" => "secret", "present" => false}] =
                Enum.filter(rows, &(&1["kind"] == "secret"))
 
+      # The edit form names each secret as the source's page does.
+      assert for(%{"kind" => "secret", "label" => label} <- rows, do: label) ==
+               Enum.map(row["secrets"], & &1["label"])
+
       assert {:ok, _} = Secrets.set("cue_source:live-news:secret", ~S(s3"cr\et))
 
       assert {:ok, %{"source" => %{"missing_secret" => nil}}} =
@@ -463,17 +467,14 @@ defmodule FermixCore.Management.CuesTest do
       end
 
       assert add.(Map.put(base, "dids", ["did:plc:abc123"])) ==
-               {:error,
-                {:invalid_params, "dids", "This setting does not apply to this kind of source."}}
+               {:error, {:invalid_params, "dids", "This source has no setting by that name."}}
 
       assert add.(Map.put(base, "key", "PK7Q2ZTW9M")) ==
                {:error,
                 {:invalid_params, "key", "This is a secret. Store it with secret.set instead."}}
 
       assert Cues.sources_add("bsky", nil, "bluesky_jetstream", %{"id_path" => "id"}, opts) ==
-               {:error,
-                {:invalid_params, "id_path",
-                 "This setting does not apply to this kind of source."}}
+               {:error, {:invalid_params, "preset", "Fermix has no preset by that name."}}
     end
 
     # The settings file is checked and the change planned before the stored
@@ -575,14 +576,11 @@ defmodule FermixCore.Management.CuesTest do
       assert Cues.sources_add("live-posts", "stream", nil, %{}, opts) ==
                {:error, {:invalid_params, "url", "Needed when no preset fills it."}}
 
-      # A method's and a preset's own needs are the same rule.
+      # A method's own needs are the same rule.
       hmac = %{"verify" => "hmac", "content_hash" => true}
 
       assert Cues.sources_add("shop-orders", "webhook", nil, hmac, opts) ==
                {:error, {:invalid_params, "header", "Needed when no preset fills it."}}
-
-      assert Cues.sources_add("bsky-posts", nil, "bluesky_jetstream", %{}, opts) ==
-               {:error, {:invalid_params, "dids", "Needed when no preset fills it."}}
 
       # So is its identity: a delivery id header or items identified by content.
       signed = %{"verify" => "hmac", "header" => "X-Shop-Signature"}
@@ -810,7 +808,7 @@ defmodule FermixCore.Management.CuesTest do
       assert {:ok, form} = Cues.sources_form(nil, nil, nil, available?: true)
 
       assert Enum.map(form["kinds"], & &1["id"]) == ~w(feed stream webhook local_push)
-      assert Enum.map(form["presets"], & &1["id"]) == ~w(bluesky_jetstream github rss)
+      assert Enum.map(form["presets"], & &1["id"]) == ~w(github rss)
       assert Enum.map(form["rows"], & &1["key"]) == ~w(ref url interval_minutes daily_budget)
       assert form["consent_sentence"] =~ "new items"
       assert form["notes"] == []
@@ -846,7 +844,7 @@ defmodule FermixCore.Management.CuesTest do
 
     test "every row keeps its explanation behind info, with no footer" do
       rows =
-        for {kind, preset} <- [{"feed", nil}, {"stream", "bluesky_jetstream"}, {nil, "github"}],
+        for {kind, preset} <- [{"feed", nil}, {"stream", nil}, {nil, "github"}],
             {:ok, form} = Cues.sources_form(kind, preset, nil, available?: true),
             row <- form["rows"],
             do: row
@@ -861,47 +859,59 @@ defmodule FermixCore.Management.CuesTest do
     end
 
     # A stream with no preset is the general WebSocket source: its own rows,
-    # each explained behind an info control and none with a footer, two secret
-    # rows, and a note saying what it does.
+    # each explained behind an info control and none with a footer, each field
+    # with an example for its empty state, its API key and secret straight after
+    # its address, and a note saying what it does.
     test "a stream with no preset is the general WebSocket source's form" do
       assert {:ok, form} = Cues.sources_form("stream", nil, nil, available?: true)
 
       assert Enum.map(form["rows"], & &1["key"]) ==
-               ~w(ref url key_header secret_header auth_message subscribe_message id_path
-                  type_path item_types error_types items_path revision_path time_path
-                  subject_path daily_budget key secret)
+               ~w(ref url key secret key_header secret_header auth_message subscribe_message
+                  id_path type_path item_types error_types items_path revision_path time_path
+                  subject_path daily_budget)
 
       rows = Map.new(form["rows"], &{&1["key"], &1})
       assert %{"label" => "Address", "kind" => "text", "advanced" => false} = rows["url"]
       assert %{"label" => "Sign-in message", "info" => info} = rows["auth_message"]
       assert info =~ "JSON on one line"
       assert info =~ "`{{key}}`"
-      assert %{"kind" => "list", "value" => []} = rows["item_types"]
+      assert %{"kind" => "list", "value" => [], "example" => "news"} = rows["item_types"]
+
+      assert %{"label" => "Header name for the API key", "example" => "X-Api-Key"} =
+               rows["key_header"]
 
       for key <- ~w(items_path revision_path time_path subject_path daily_budget),
           do: assert(rows[key]["advanced"], key)
 
-      for key <- ~w(url key_header secret_header auth_message subscribe_message id_path type_path
-                    item_types error_types items_path revision_path time_path subject_path),
-          do: assert(is_binary(rows[key]["info"]) and is_nil(rows[key]["footer"]), key)
+      fields =
+        ~w(url key_header secret_header auth_message subscribe_message id_path type_path
+           item_types error_types items_path revision_path time_path subject_path)
 
-      assert %{"kind" => "secret", "label" => "Key", "present" => false} = rows["key"]
-      assert %{"kind" => "secret", "label" => "Secret", "present" => false} = rows["secret"]
+      for key <- fields do
+        assert is_binary(rows[key]["info"]) and is_nil(rows[key]["footer"]), key
+        assert is_binary(rows[key]["example"]), key
+      end
+
+      assert %{"kind" => "secret", "label" => "API key", "present" => false, "example" => nil} =
+               rows["key"]
+
+      assert %{"kind" => "secret", "label" => "API secret", "present" => false} = rows["secret"]
+      assert %{"example" => nil} = rows["daily_budget"]
 
       sentence = Enum.find(form["kinds"], &(&1["id"] == "stream"))["sentence"]
       assert sentence =~ "WebSocket (wss://) address"
 
       assert form["notes"] == [
-               "Any WebSocket service. Fermix signs in, sends the message after connecting, " <>
-                 "and takes each message of an item type."
+               "Any WebSocket service. Fermix signs in with your API key and secret, sends the " <>
+                 "subscribe message, and keeps each message of a type you list."
              ]
     end
 
-    test "Bluesky's rows show only with its preset, and the general rows never with it" do
-      assert {:ok, form} = Cues.sources_form(nil, "bluesky_jetstream", nil, available?: true)
-      assert Enum.map(form["rows"], & &1["key"]) == ~w(ref url dids collections daily_budget)
-      assert %{"label" => "URL", "advanced" => true} = Enum.at(form["rows"], 1)
-      assert form["notes"] == []
+    test "the engine ships no Bluesky preset: its form is refused" do
+      for kind <- [nil, "stream"] do
+        assert Cues.sources_form(kind, "bluesky_jetstream", nil, available?: true) ==
+                 {:error, {:invalid_params, "preset", "Fermix has no preset by that name."}}
+      end
     end
 
     test "a choice it does not know, or a preset of another kind, is refused" do
