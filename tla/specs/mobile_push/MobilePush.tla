@@ -55,7 +55,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex#schedule_push,launch_push,default_push_launcher,notify_timeline_row,push_notify,maybe_schedule_proactive_push,deliver_persisted_text,delivered_text,deliver_persisted_media,delivered_effects,build_turn_result,schedule_request_push,broadcast,emit,emit_after_commit @ 4063ad0f97f7
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/event_router.ex#after_settle,end_phone_turn,schedule_settled_push @ d42cb71bf67e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/device_registry.ex @ ff8b2c95d156
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/session.ex#dispatch_event,terminate,idle_timeout_ms,@idle_grace_ms @ 9a553430fd8f
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/session.ex#dispatch_event,terminate,idle_timeout_ms,@idle_grace_ms @ ee576f4a2f2a
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/router.ex#socket_options @ c961dba4f2d3
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/iroh/bridge_connection.ex#handle_info,arm_idle,stop_session,finish,terminate @ a04ac00c19ea
 EXTENDS Naturals, FiniteSets
@@ -359,7 +359,7 @@ IdleTimeout(d) ==
     /\ UNCHANGED <<durable, daemon, pushTask, platform, app, have, unannounced,
                    noted, observers, budgets>>
 
-\* dispatch_event "ack" (session.ex:931-932) and, in the design, the
+\* dispatch_event "ack" (session.ex:932-933) and, in the design, the
 \* registry entry's acked_seq (M51 section 11.4). The app's send and the
 \* daemon's handling are one step: an ack lost on the way is an ack sent
 \* late, and the app may ack at any moment here.

@@ -1,29 +1,29 @@
 {
   "schema_version": 1,
   "repository": "tezra-io/fermix-iroh",
-  "tag": "v0.1.0",
-  "version": "0.1.0",
-  "protocol_version": 1,
+  "tag": "v0.2.0",
+  "version": "0.2.0",
+  "protocol_version": 2,
   "iroh_version": "1.3.0",
-  "certificate_identity": "https://github.com/tezra-io/fermix-iroh/.github/workflows/release.yml@refs/tags/v0.1.0",
+  "certificate_identity": "https://github.com/tezra-io/fermix-iroh/.github/workflows/release.yml@refs/tags/v0.2.0",
   "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
   "macos_team_id": "54A57TH9BJ",
   "targets": {
     "macos_aarch64": {
       "asset": "fermix-iroh-macos-aarch64",
-      "sha256": "34dd7464ff32fcea49ada2c16b901ad3549aafc18c02a90918bb26a669611757"
+      "sha256": "a945acc40d8f909039c33aece3f5faa173636dc14d0e017becbfa038bbeae550"
     },
     "macos_x86_64": {
       "asset": "fermix-iroh-macos-x86_64",
-      "sha256": "c8c5ae3857cdcbc2806da8525975fae1d56bedbc1a1f5a297b5390ba9126a0dc"
+      "sha256": "72b0aec11365b0a18315a40b94560fd8932f3ca7a7e99ec566404ee099d1f906"
     },
     "linux_aarch64": {
       "asset": "fermix-iroh-linux-aarch64",
-      "sha256": "dcf09bfca7daebf36c88351bad4914947afdcdf314c1deed4af276b1356c9854"
+      "sha256": "061dcb88030d9bfbcf3b4c9980c2fa7ed5b382711b8571b70d1500df0d768b73"
     },
     "linux_x86_64": {
       "asset": "fermix-iroh-linux-x86_64",
-      "sha256": "511bdad32e690537a71edbab7c89b36f51ca9c975f0c80123c60ef7f0bafee89"
+      "sha256": "b7c5e399879e4dc5318e32f414fcaf7a9cd5627926b77474151d48f3f9e04882"
     }
   }
 }

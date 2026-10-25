@@ -102,6 +102,14 @@ uint32be length | type | payload
   session's stream on it, as the last one ends. A connection with no stream for
   30 s is closed (code `0`, reason `idle`); the phone dials again when it next
   needs one.
+- A session that ends before `hello` or the pair request, for any reason (the
+  prelude, the Noise handshake, the handshake deadline, or the phone ending
+  the stream itself), ends its connection too. The daemon resets every stream
+  the phone opens on that connection afterwards (code `0`) and closes it
+  (code `0`, reason `refused`) once the connection's other streams have ended
+  and the daemon's close frame has reached the phone. A phone whose renewal
+  fails before `hello` on a kept connection dials a new one for its next
+  session.
 - The bounds of *Transport* hold per stream: the handshake deadline, the
   150 s idle bound (close `1002`, `no inbound frame`), the one-hour session,
   and the two memory bounds. The daemon takes at most 64

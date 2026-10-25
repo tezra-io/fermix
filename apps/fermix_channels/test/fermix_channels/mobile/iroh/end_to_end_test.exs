@@ -65,7 +65,7 @@ defmodule FermixChannels.Mobile.Iroh.EndToEndTest do
     }
   end
 
-  test "a paired phone's session over iroh: hello, renewal, revocation", ctx do
+  test "a paired phone's session over iroh: hello, renewal, revocation, close", ctx do
     names = names()
     registry = start_registry(names, ctx.revoked)
     {endpoint_id, port} = start_rail(ctx, names, registry)
@@ -95,6 +95,14 @@ defmodule FermixChannels.Mobile.Iroh.EndToEndTest do
     write_frame(third, Carrier.message(first_wire))
     assert {:close, 1002, "mobile protocol error"} = read_frame(third)
     assert_peer_exits(third)
+
+    # That refusal sent the helper protocol 2's close for the third peer; the
+    # helper took it and still carries the next peer's session to its own.
+    fourth = open_peer(ctx, endpoint_id, port)
+    write_frame(fourth, Carrier.message("not a prelude"))
+    assert {:close, 1002, _reason} = read_frame(fourth)
+    assert_peer_exits(fourth)
+    assert %{state: :ready} = Helper.status(names.iroh_helper)
   end
 
   # -- the rail ----------------------------------------------------------------

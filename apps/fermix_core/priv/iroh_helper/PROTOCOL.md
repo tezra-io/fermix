@@ -53,13 +53,15 @@ error, and the side that sees it ends the helper. Frames the helper sends carry
 
 ## Versioning
 
-A single integer, `protocol_version`, currently **1**. The helper declares it in
+A single integer, `protocol_version`, currently **2**. The helper declares it in
 `hello`; the daemon refuses any other value and ends the helper. There is no
 negotiation: the helper is bundled with, and pinned by, the engine release that
 speaks its version, and both halves move together. The daemon also compares
 `iroh_version` with the iroh version its built-in relay source names and ends a
 helper that differs, so a release that moved one without the other fails loudly
 (M62 §8).
+
+Version 2 adds the `close` op.
 
 ## Sequence
 
@@ -73,6 +75,7 @@ helper                                   daemon
   closed ───────────────────────────────▶   (a connection ends)
   refused ──────────────────────────────▶   (a connection or stream is refused)
         ◀──────────────────────────────── set_relays   (any time after ready)
+        ◀──────────────────────────────── close        (a session ended before hello or a pair request)
   log   ────────────────────────────────▶   (any time after hello)
         ◀──────────────────────────────── shutdown
 ```
@@ -80,7 +83,7 @@ helper                                   daemon
 ## Events the helper sends
 
 ```json
-{"event":"hello","protocol_version":1,"helper_version":"0.1.0","iroh_version":"1.3.0"}
+{"event":"hello","protocol_version":2,"helper_version":"0.2.0","iroh_version":"1.3.0"}
 {"event":"ready","endpoint_id":"79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664"}
 {"event":"relay","home_relay":"https://us1.relay.fermix.ai/","connected":true}
 {"event":"path","endpoint_id":"79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664","kind":"relay","relay":"https://us1.relay.fermix.ai/"}
@@ -106,6 +109,7 @@ helper                                   daemon
 ```json
 {"op":"start","secret_key_path":"/Users/owner/.fermix/mobile/iroh_key","bridge_socket":"/Users/owner/.fermix/mobile/bridge.sock","alpn":"fermix/mobile/1","relays":[{"url":"https://us1.relay.fermix.ai/","quic_port":7842},{"url":"https://eu1.relay.fermix.ai/","quic_port":7842}],"limits":{"max_connections":64,"max_streams_per_connection":4,"stream_receive_window":262144,"connection_receive_window":1048576,"send_window":1048576}}
 {"op":"set_relays","relays":[{"url":"https://us1.relay.fermix.ai/","quic_port":7842},{"url":"https://eu1.relay.fermix.ai/","quic_port":7842}]}
+{"op":"close","endpoint_id":"79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664"}
 {"op":"shutdown"}
 ```
 
@@ -113,6 +117,7 @@ helper                                   daemon
 |---|---|---|
 | `start` | `secret_key_path`, `bridge_socket`, `alpn`, `relays`, `limits` | Exactly once, after `hello`. The helper reads the key, binds the endpoint and answers `ready`, or `error`. |
 | `set_relays` | `relays` | Replaces the endpoint's relay map at run time: relays not named are removed, new ones added. Valid only after `ready`. |
+| `close` | `endpoint_id` (lowercase hex) | A session on a stream from this peer ended, for any reason, before it was a paired phone's session or a pairing request: in the prelude, in the Noise handshake, or before `hello` or the pair request (`../mobile/PROTOCOL.md`), the phone's own ending of the stream included. The helper bridges no further stream from the peer's connections, resetting each new one with application code `0`, and closes each connection with code `0`, reason `refused`, once every stream it bridges on it has ended and the peer has acknowledged what the daemon wrote on it, so the daemon's close frame reaches the phone first. It waits at most **5 s** for that acknowledgement after a stream ends. Valid only after `ready`; a peer with no connection is not an error. |
 | `shutdown` | — | Stop accepting; close every connection with application code `0`, reason `shutdown` (iroh's `Endpoint::close` alone sends an empty reason; a connection still in its handshake cannot carry a reason and is closed without one); close every bridge connection; wait for iroh's drain, bounded by its own timeout; exit `0` within **5 s**. The daemon kills the process group after that. This is also how the daemon turns remote reach off: after the exit nothing contacts a relay. |
 
 - **`secret_key_path`:** an absolute path to a file of exactly 32 bytes, the raw
@@ -132,9 +137,12 @@ helper                                   daemon
   handshake (iroh's `Incoming::refuse`), so it costs no key exchange, and
   reported as `refused` `busy`. No connection holds a place for nothing: a
   handshake not finished within **10 s** is dropped, a connection that has had
-  no stream for **30 s** is closed with code `0`, reason `idle`, and once half
-  the places are taken a new peer whose address QUIC has not validated is sent
-  a Retry first, so forged packets never take one.
+  no stream for **30 s** is closed with code `0`, reason `idle`, the
+  connections of a peer whose session ended before `hello` or a pair request
+  are closed on the daemon's `close`, so opening stream after stream that fails
+  its handshake keeps no place, and once half the places are taken a new peer
+  whose address QUIC has not validated is sent a Retry first, so forged
+  packets never take one.
 - **`limits.max_streams_per_connection`:** concurrent bidirectional streams on one
   connection, 1 to 16, applied as the connection's QUIC bidirectional stream
   credit: a peer past it waits for a stream to close; the helper neither sees
@@ -190,7 +198,8 @@ bounds WebSocket connections: the helper may open up to
 Ending a stream never closes the iroh connection: a phone renews its session on a
 new stream of the same connection, opened as the last one ends. A connection with
 no stream for 30 s is closed (`idle`, above); iroh's keep-alive would otherwise
-hold it for as long as the peer answers.
+hold it for as long as the peer answers. The one exception is `close`, which the
+daemon sends for a peer whose session ended before `hello` or a pair request.
 
 ## Fixtures
 
@@ -199,7 +208,7 @@ hold it for as long as the peer answers.
 | File | Contents |
 |---|---|
 | `hello.json`, `ready.json`, `relay.json`, `path.json`, `closed.json`, `refused.json`, `log.json`, `error.json` | events, one line each with its trailing `\n` |
-| `start.json`, `set_relays.json`, `shutdown.json` | ops, one line each with its trailing `\n` |
+| `start.json`, `set_relays.json`, `close.json`, `shutdown.json` | ops, one line each with its trailing `\n` |
 | `bridge_preamble.bin` | the 37-byte preamble for a phone whose endpoint id is the one in `ready.json` |
 
 The fixtures' key is the Ed25519 secret key whose 32 bytes are `01 02 … 20`; its

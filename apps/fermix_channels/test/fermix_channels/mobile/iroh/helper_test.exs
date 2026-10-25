@@ -6,6 +6,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
   import ExUnit.CaptureLog
 
   alias FermixChannels.Mobile.Iroh.Helper
+  alias FermixChannels.Mobile.Iroh.HelperProtocol
   alias FermixChannels.Mobile.Iroh.Relays.Source
 
   @moduletag :tmp_dir
@@ -31,7 +32,8 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     hello =
       Jason.encode!(%{
         "event" => "hello",
-        "protocol_version" => Keyword.get(opts, :protocol_version, 1),
+        "protocol_version" =>
+          Keyword.get(opts, :protocol_version, HelperProtocol.protocol_version()),
         "helper_version" => "0.1.0",
         "iroh_version" => Keyword.get(opts, :iroh_version, "1.3.0")
       })
@@ -153,7 +155,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
 
   test "a helper that disagrees with this build fails without retrying", ctx do
     for {opts, words} <- [
-          {[protocol_version: 2], "protocol 2"},
+          {[protocol_version: 1], "protocol 1"},
           {[iroh_version: "1.2.0"], "iroh 1.2.0"},
           {[after_start: [~s({"event":"ready","endpoint_id":"#{String.duplicate("a", 64)}"})]],
            "reported endpoint"}
@@ -360,6 +362,31 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     assert Enum.map(relays, & &1["url"]) == [@us1.url, @eu1.url, @ap1.url]
   end
 
+  test "a peer whose session failed is closed at a ready helper", ctx do
+    pid = start(ctx, binary_path: fake(ctx), test_pid: self())
+    await_state(pid, :ready)
+
+    assert :ok = Helper.close(pid, @fixture_id)
+    :ok = GenServer.stop(pid)
+
+    assert [
+             %{"op" => "start"},
+             %{"op" => "close", "endpoint_id" => @fixture_id},
+             %{"op" => "shutdown"}
+           ] = ops(ctx)
+  end
+
+  # No helper holds a connection before it is ready, so there is nothing to close.
+  test "a close before the helper is ready is not sent", ctx do
+    pid = start(ctx, binary_path: fake(ctx, after_start: []), test_pid: self())
+
+    assert :ok = Helper.close(pid, @fixture_id)
+    assert %{state: :starting} = Helper.status(pid)
+    :ok = GenServer.stop(pid)
+
+    refute Enum.any?(ops(ctx), &(&1["op"] == "close"))
+  end
+
   test "stopping the rail shuts the helper down", ctx do
     pid = start(ctx, binary_path: fake(ctx), test_pid: self())
     await_state(pid, :ready)
@@ -373,6 +400,8 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     assert Helper.candidate(:no_rail_here) == :none
     assert :ok = Helper.activate(:no_rail_here)
     assert :ok = Helper.relays_acknowledged(:no_rail_here)
+    assert :ok = Helper.close(:no_rail_here, @fixture_id)
+    assert_raise ArgumentError, fn -> Helper.close(:no_rail_here, "79B5") end
   end
 
   test "macOS spawns through the disclaim shim and refuses without one" do

@@ -18,7 +18,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocolContractTest do
   end
 
   test "every event fixture is one line, newline-terminated, and decodes" do
-    assert {:ok, %{event: :hello, protocol_version: 1, iroh_version: "1.3.0"}} =
+    assert {:ok, %{event: :hello, protocol_version: 2, iroh_version: "1.3.0"}} =
              HelperProtocol.decode_event(line("hello.json"))
 
     assert {:ok, %{event: :ready, endpoint_id: @endpoint_id}} =
@@ -71,7 +71,14 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocolContractTest do
 
     assert decoded(start) == Jason.decode!(fixture("start.json"))
     assert decoded(HelperProtocol.set_relays(relays)) == Jason.decode!(fixture("set_relays.json"))
+    assert decoded(HelperProtocol.close(@endpoint_id)) == Jason.decode!(fixture("close.json"))
     assert decoded(HelperProtocol.shutdown()) == Jason.decode!(fixture("shutdown.json"))
+  end
+
+  test "a close names one peer by its lowercase hex endpoint id, or fails loud" do
+    for id <- [String.upcase(@endpoint_id), "79b5", @endpoint_id <> "00"] do
+      assert_raise ArgumentError, fn -> HelperProtocol.close(id) end
+    end
   end
 
   test "the bridge preamble fixture is a phone with the fixture key's endpoint id" do
