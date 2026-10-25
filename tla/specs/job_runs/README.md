@@ -155,7 +155,7 @@ checks listed under it):
 - `RetriesOnlyUnsent`: a send is retried only when it never reached the
   platform (`channel_send.ex:140-143`, `:194-202`). This is the mechanism for
   platforms that do not dedupe. The runner tags its send with the proactive
-  key `job:<run id>` (`runner.ex:1598`). The mobile channel keeps one row per
+  key `job:<run id>` (`runner.ex:1605`). The mobile channel keeps one row per
   key (`mobile_sql.ex:41-43`), so a retry there would not show twice. Check 04.
 - `ReconcilesRuns`: at init and every 60 s the Scheduler reaps unsettled runs
   with no live runner and adopts live ones (`scheduler.ex:210`, `:245-415`).
@@ -167,7 +167,7 @@ checks listed under it):
   `delivery_timeout_ms` (`channel_send.ex:219-241`). Check 05.
 - `AtomicSettle`: a run's final row and its job's release are one
   transaction, `Repo.settle_job_run` (`repo.ex:2453-2456`, `:6596-6612`, `:6672-6719`), used by
-  the runner (`runner.ex:311`, `:457`) and the reaper (`scheduler.ex:907-923`).
+  the runner (`runner.ex:312`, `:458`) and the reaper (`scheduler.ex:907-923`).
   The release is a column-targeted `UPDATE` that turns `running` back into
   `scheduled` and keeps any other state. Switched off, the spec runs the code
   before the fix: the run row alone, then a read and a whole-row upsert of the
@@ -181,12 +181,12 @@ checks listed under it):
   (`scheduler.ex:593-597`, `:1080-1086`). Switched off, the refusal counts as a
   clean drain and a past-due job re-arms at 0 ms. Check 19.
 - `OwnerWritesColumns`: pause, resume and `update_job` write only the columns
-  they own, in place (`registry.ex:178-201`;
+  they own, in place (`registry.ex:179-202`;
   `Repo.update_scheduled_job_fields`, `repo.ex:2396-2399`, `:6867-6874`, the owner
   field list `:7782-7820`). Switched off, pause and `update_job` upsert the
   whole row they read. Check 27.
 - `LoopDiesWithRunner`: a runner's AgentLoop is spawned linked to it and
-  reports its own crash as a value (`runner.ex:1236-1240`, `:1252-1269`), so a
+  reports its own crash as a value (`runner.ex:1243-1247`, `:1259-1276`), so a
   restart that kills the runner kills its loop. Switched off, the code before
   the fix: the loop was only monitored, and a daemon crash (which stands for
   a restart of the job subtree) leaves a runner's loop running as a stray
@@ -797,7 +797,7 @@ shortest and can change between runs.
   `last_*`, and raises in the caller on anything else. Pause writes `enabled`
   and `state`; resume writes `enabled`, `state` and `next_run_at`;
   `update_job` writes only the edited columns, never `state`, `enabled` or
-  `last_*` (`registry.ex:93-116`).
+  `last_*` (`registry.ex:94-117`).
 - **Tests:** `registry_test.exs` ("owner writes racing a run's release":
   `update_job` and resume each keep a release that lands between their read
   and their write; pause, which reads nothing, writes only `enabled` and
@@ -875,7 +875,7 @@ shortest and can change between runs.
   left there (a process the loop links to itself killing the loop, and through
   the link the runner) leaves the rows the `Loop` step and then a crash at
   `complete` or `fail` leave.
-  - The `{:ok, _} = write_run_artifact` writes (`runner.ex:294`, `:443`) are
+  - The `{:ok, _} = write_run_artifact` writes (`runner.ex:295`, `:444`) are
     folded into the final write, so they share the `complete` and `fail`
     crash points.
   - After a loop error, the memory-source calls between the settle and the

@@ -36,7 +36,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/defaults.ex @ 59a91aaa03d9
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/open_loops_sql.ex @ a1393b1c6eb2
 \* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/scheduler.ex @ ca94a8aacbbf
-\* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/check_in.ex @ 530504ef65c3
+\* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/check_in.ex @ 787d2a0ead1d
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
@@ -64,7 +64,7 @@ CONSTANTS
                          \* (id, state = 'due', claimed_at) (finalize/5, :487-498)
     ChecksBeforeSend,    \* the run re-reads the row at its outcome step and reports
                          \* closed_meanwhile when its claim no longer stands
-                         \* (CheckIn.still_claimed/1, check_in.ex:426-435), and
+                         \* (CheckIn.still_claimed/1, check_in.ex:427-436), and
                          \* the budget spend is a compare-and-set on the same claim
                          \* (spend_budget/5, open_loops_sql.ex:513-552); redundant
                          \* layers, one switch for both
@@ -78,7 +78,7 @@ CONSTANTS
                          \* Scheduler.budget_for/2 (scheduler.ex:301-316) into
                          \* Lifecycle.rung2_eligible?/4 (lifecycle.ex:162-171)
     SpendBeforeSend,     \* the run spends the owner's day before its one send:
-                         \* CheckIn.spend_then_deliver/3 (check_in.ex:400-424) ->
+                         \* CheckIn.spend_then_deliver/3 (check_in.ex:401-425) ->
                          \* Repo.spend_open_loop_budget/5 (spend_budget/5,
                          \* open_loops_sql.ex:513-552) stamps last_rung2_at, the
                          \* column the budget reads, which no touch writes; off,
@@ -283,7 +283,7 @@ Decide(r) ==
     /\ \E d \in {"speak", "silent", "close"} : run' = [run EXCEPT ![r] = d]
     /\ UNCHANGED <<rowVars, holder, clockVars, lost, sched, faults, obsVars>>
 
-\* CheckIn.speak/3 -> still_claimed/1 (check_in.ex:378-384, :426-435): one Repo
+\* CheckIn.speak/3 -> still_claimed/1 (check_in.ex:379-385, :427-436): one Repo
 \* read of the row. A row no longer due, or claimed by another, is
 \* closed_meanwhile: a traced skip, nothing sent.
 Check(r) ==
@@ -293,7 +293,7 @@ Check(r) ==
                  THEN "checked" ELSE "none"]
     /\ UNCHANGED <<rowVars, holder, clockVars, lost, sched, faults, obsVars>>
 
-\* CheckIn.spend_then_deliver/3 -> spend_budget/1 (check_in.ex:400-424) ->
+\* CheckIn.spend_then_deliver/3 -> spend_budget/1 (check_in.ex:401-425) ->
 \* Repo.spend_open_loop_budget/5 (spend_budget/5, open_loops_sql.ex:513-552):
 \* the owner's day is spent before the send, a compare-and-set on the claim the
 \* run holds that stamps last_rung2_at, refused (budget_spent) in the same
@@ -322,7 +322,7 @@ Shown(r) ==
     /\ shownWhileClosed' = (shownWhileClosed \/ state \in Terminal)
     /\ UNCHANGED wasTerminal
 
-\* CheckIn.deliver/3 -> send_once/2 (check_in.ex:426-444): Delivery.ChannelSend,
+\* CheckIn.deliver/3 -> send_once/2 (check_in.ex:427-445): Delivery.ChannelSend,
 \* one attempt under send_timeout_ms, proactive key open_loop:<id>:<touch>, to
 \* the snapshotted target: confirmed, refused, or shown with the answer lost (a
 \* timeout after the platform accepted). The send and its answer are one step.
@@ -333,7 +333,7 @@ Send(r) ==
        \/ AnswerCanBeLost /\ run' = [run EXCEPT ![r] = "failed"] /\ Shown(r)
     /\ UNCHANGED <<rowVars, holder, clockVars, lost, sched, faults>>
 
-\* CheckIn.record_spoken/3 (check_in.ex:446-470): ConversationStore.add_message/4,
+\* CheckIn.record_spoken/3 (check_in.ex:447-471): ConversationStore.add_message/4,
 \* the assistant chat_message marked open_loop_checkin, written before the ledger,
 \* so a crash between them leaves a history row and no touch.
 History(r) ==
@@ -344,7 +344,7 @@ History(r) ==
 \* The run's write lands only while its claim stands.
 Holds(r) == (state = "due" /\ r \in holder) \/ ~FinalizeIsCAS
 
-\* The rest of record_spoken/3, then CheckIn.finalize/2 (check_in.ex:486-503):
+\* The rest of record_spoken/3, then CheckIn.finalize/2 (check_in.ex:487-504):
 \* Repo.finalize_open_loop_checkin/5 with Lifecycle.after_touch/4 at rung 2. On
 \* :closed_meanwhile the message is already out and the touch is not counted;
 \* the day was spent before the send.
@@ -389,7 +389,7 @@ AfterOutcome(o) ==
                              rung2Today, wasTerminal>>
 
 \* The finalising write of a run that sent nothing (CheckIn.quiet/3, close/2,
-\* failed/4, delivery_failed/3; check_in.ex:358-372, :472-482): the same
+\* failed/4, delivery_failed/3; check_in.ex:359-373, :473-483): the same
 \* compare-and-set.
 Outcome(r) ==
     /\ run[r] \in {"silent", "close", "failed"}

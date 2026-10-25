@@ -93,7 +93,7 @@
 (* RunnerSupervisor itself: under :rest_for_one each restarts the          *)
 (* RunnerSupervisor with its runners and the Scheduler                     *)
 (* (application.ex:297). A runner's send helper (REMIND-2,                 *)
-(* channel_send.ex:219-224) and its AgentLoop (JOB-8, runner.ex:1236-1240) *)
+(* channel_send.ex:219-224) and its AgentLoop (JOB-8, runner.ex:1243-1247) *)
 (* are linked to it, so the restart kills them too. With                   *)
 (* LoopDiesWithRunner off (the code before JOB-8's fix, an unlinked        *)
 (* spawn_monitor) the loop outlives it (strayLoops). Process-local values  *)
@@ -135,10 +135,10 @@
 (* after init, "scan" in the 60 s tick, "idle" after a DOWN.               *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/scheduler.ex @ dc199b476a15
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex @ 9d20a8bcde39
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex @ 40148485d665
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner_supervisor.ex @ 6a21dfe6cfad
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/delivery.ex @ 4eb42c517b57
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/registry.ex @ 56f16fd28fd7
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/registry.ex @ c75bc539b7c1
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 9b06289e25ae
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,call_or_timeout_error,request_name,periodic_opts,claim_due_job,claim_job_now,claim_due_job_tx,claim_in_tx,claim_job_now_tx,transact_claim,fetch_claimable_due_job,finish_job_claim,rollback_job_claim,upsert_scheduled_job_row,upsert_job_run_row,ensure_no_active_job_run,fetch_claimable_job,settle_job_run,settle_job_run_tx,settle_job_run_in_tx,ensure_job_run_active,release_settled_job,finish_job_settle,rollback_job_settle,unsettled_job_runs,fetch_unsettled_job_runs,@unsettled_job_runs_sql,update_scheduled_job_fields,update_scheduled_job_fields_row,scheduled_job_field_assignments!,scheduled_job_field_assignment!,@owner_text_fields,due_scheduled_jobs,fetch_due_scheduled_jobs,next_scheduled_job,fetch_next_scheduled_job,upsert_job_run,upsert_scheduled_job,get_job_run,get_scheduled_job,upsert_memory @ 4babf473a267
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,jobs_scheduler_opts @ 2af672d8803d
@@ -195,9 +195,9 @@ CONSTANTS
     RefusalBacksOff,          \* a due claim refused as :already_running is backpressure: the re-arm
                               \* floors at the 5 s backoff (scheduler.ex:593-597, :1080-1086)
     OwnerWritesColumns,       \* pause, resume and update_job write only the columns they own
-                              \* (registry.ex:178-201; repo.ex:2396-2399, :6867-6874, :7782-7820)
+                              \* (registry.ex:179-202; repo.ex:2396-2399, :6867-6874, :7782-7820)
     LoopDiesWithRunner,       \* a runner's AgentLoop is linked to it, so a restart that kills
-                              \* the runner kills its loop too (runner.ex:1236-1240)
+                              \* the runner kills its loop too (runner.ex:1243-1247)
     TicksAdmit,               \* the due and reconcile ticks run cue admission after their due
                               \* scan (handle_info(:due_tick | :reconcile_tick), scheduler.ex
                               \* :238-256), so a cue whose wake found nothing to claim is still
@@ -431,10 +431,10 @@ OwnerQuiet == <<rowVars, runnerVars, helperVars, envVars, sPc, reapReturn, monit
                 downs, dueTimer, refused, sRun, activeSnap, reapQ, sSnap, cuePending, admit,
                 runsKnown>>
 
-\* Registry.pause_job (registry.ex:88-90 -> update_job_fields :181-189):
+\* Registry.pause_job (registry.ex:89-91 -> update_job_fields :182-190):
 \* Repo.update_scheduled_job_fields writes enabled = false and state =
 \* "paused" in place (repo.ex:2396-2399, :6867-6874), then the :job_changed cast
-\* (registry.ex:510-515). The owner is told "paused". Nothing is read first.
+\* (registry.ex:513-518). The owner is told "paused". Nothing is read first.
 Pause ==
     /\ OwnerWritesColumns
     /\ oPc = "idle" /\ movesLeft > 0
