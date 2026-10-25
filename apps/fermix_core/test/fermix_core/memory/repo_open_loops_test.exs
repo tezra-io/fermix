@@ -129,7 +129,8 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
 
       with_raw_conn(db_path, fn conn ->
         :ok = Sqlite3.execute(conn, "DROP TABLE open_loops")
-        :ok = Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version = 43")
+        :ok = Sqlite3.execute(conn, "ALTER TABLE cue_sources DROP COLUMN stop_reason")
+        :ok = Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version > 42")
         assert [[42]] = query!(conn, "SELECT MAX(version) FROM schema_migrations")
       end)
 

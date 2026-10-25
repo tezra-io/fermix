@@ -8,18 +8,28 @@ defmodule FermixCore.Cues.Source.Feed do
   JSON in `cue_sources.cursor`) through `Net.HttpClient`:
 
     * `304`: no items; the source's `last_good_at` moves.
-    * `200`: the body is read with a cap of 4 MiB after decompression (gzip is
-      asked for and inflated in bounded steps); past the cap the connection is
-      closed and a `read_limit` gap recorded. The body goes through
-      `Cues.FeedParser`, whose items become `Cues.Item`s (an item it refuses is
+    * `200`: the body is downloaded with a cap of 16 MiB as sent; past it the
+      connection is closed. It is then fed to a `Cues.FeedParser` reader as it
+      is inflated (gzip is asked for and inflated in bounded steps), so an XML
+      feed is never held unpacked; the reader's own limits are 32 MiB of XML,
+      4 MiB in one item, and 4 MiB of JSON. Its items become `Cues.Item`s (an item it refuses is
       counted as a reject) and go to `Cues.Ingest.accept/3` in one transaction
-      with the new cursor, `last_good_at` and `status: "polling"`. A page with
-      more than 100 items records the rest as a `page_limit` gap with its range.
+      with the new cursor, `last_good_at` and `status: "polling"`. Items older
+      than the receipt horizon are skipped, so an archive is no gap; of the
+      rest, one read keeps the 100 newest and the left-out ones are a
+      `page_limit` gap with their range.
     * Redirects: at most 3, `https` only, each hop checked by `Net.Guard` (no
       private, loopback or link-local address) before it is requested.
 
   The first successful read after the source is added (no `last_good_at` yet)
   stores undated items as receipts with no delivery (design §6.8).
+
+  **Too large.** A body past the download cap or the reader's limits loses
+  every item of the poll, and the next poll of the same feed would too. It is
+  recorded as a `read_limit` gap and stops the worker normally with status
+  `unavailable`, its reason `too_large` (which the app's row reads), and a
+  source notice (`:too_large`). It starts again when its settings change or
+  Fermix restarts.
 
   **Budget.** When `Cues.Ingest` reports `:over_budget`, polling stops until
   the next UTC day and the owner is told once that day
@@ -55,7 +65,7 @@ defmodule FermixCore.Cues.Source.Feed do
   alias FermixCore.Net.HttpClient
 
   @min_interval_s 60
-  @max_body_bytes 4 * 1024 * 1024
+  @max_download_bytes 16 * 1024 * 1024
   @max_redirects 3
   @redirect_statuses [301, 302, 303, 307, 308]
   @receive_timeout_ms 30_000
@@ -63,10 +73,13 @@ defmodule FermixCore.Cues.Source.Feed do
   @max_retry_ms 3_600_000
   @max_failures 8
   @first_poll_spread_ms 30_000
-  @max_inflate_steps 4_096
+  # A guard against an inflate that stops producing: a step yields up to
+  # 16 KiB, so the reader's limits (32 MiB of XML) stop a large body first.
+  @max_inflate_steps 8_192
   @max_validator_bytes 1_024
   @path_keys [:items_path, :id_path, :revision_path, :type_path, :subject_path, :time_path]
   @label "Cue feed"
+  @unchanged %{truncation: :complete, skipped: 0}
   @accept "application/feed+json, application/atom+xml, application/rss+xml, " <>
             "application/json;q=0.9, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5"
 
@@ -136,27 +149,30 @@ defmodule FermixCore.Cues.Source.Feed do
 
   defp fetch_and_accept(state, now) do
     case fetch(state, state.source.url, 0) do
-      {:ok, %Req.Response{status: 304}, _url} -> accepted(state, {[], nil, :complete}, now)
+      {:ok, %Req.Response{status: 304}, _url} -> accepted(state, {[], nil, @unchanged}, now)
       {:ok, response, url} -> read(state, response, url, now)
       {:error, reason} -> failed(state, reason, now)
     end
   end
 
   defp read(state, response, url, now) do
-    with {:ok, body} <- body(response),
-         {:ok, fields, truncation} <- parse(state.source, body, content_type(response), url) do
+    opts = reader_opts(state.source, url, now)
+
+    with {:ok, reader} <- FeedParser.reader(content_type(response), opts),
+         {:ok, reader} <- read_body(response, reader),
+         {:ok, fields, outcome} <- FeedParser.finish(reader) do
       first? = state.last_good_at == nil
       entries = Enum.map(fields, &entry(&1, first?, now))
-      accepted(state, {entries, cursor_json(response), truncation}, now)
+      accepted(state, {entries, cursor_json(response), outcome}, now)
     else
-      {:error, :read_limit} -> read_limit(state, now)
+      {:error, :read_limit} -> too_large(state, now)
       {:error, reason} -> failed(state, reason, now)
     end
   end
 
   # One transaction for the items, the new cursor and the last good time; the
   # page_limit gap is recorded only once the page it belongs to is in.
-  defp accepted(state, {entries, cursor, truncation}, now) do
+  defp accepted(state, {entries, cursor, outcome}, now) do
     source_state = %{cursor: cursor, last_good_at: now, status: "polling"}
 
     opts = [
@@ -168,7 +184,9 @@ defmodule FermixCore.Cues.Source.Feed do
 
     case Ingest.accept(Worker.ingest_source(state), entries, opts) do
       {:ok, results} ->
-        state = state |> polled(cursor, now) |> page_limit(truncation, now)
+        state =
+          state |> polled(cursor, outcome.skipped, now) |> page_limit(outcome.truncation, now)
+
         {:noreply, state |> over_budget(results, now) |> next_poll(now)}
 
       {:error, reason} ->
@@ -176,11 +194,10 @@ defmodule FermixCore.Cues.Source.Feed do
     end
   end
 
-  defp polled(state, cursor, now) do
+  defp polled(state, cursor, skipped, now) do
     phase = if state.polled?, do: :reconnect, else: :connect
-
-    if state.failures > 0 or not state.polled?,
-      do: Worker.trace(state, phase, %{status: "polling", attempt: state.failures})
+    trace = %{status: "polling", attempt: state.failures, skipped: skipped}
+    if state.failures > 0 or not state.polled?, do: Worker.trace(state, phase, trace)
 
     %{
       state
@@ -261,7 +278,7 @@ defmodule FermixCore.Cues.Source.Feed do
   defp capped({:data, data}, {request, response}) do
     body = if is_binary(response.body), do: response.body, else: ""
 
-    if byte_size(body) + byte_size(data) > @max_body_bytes,
+    if byte_size(body) + byte_size(data) > @max_download_bytes,
       do: {:halt, {request, Req.Response.put_private(response, :cue_read_limit, true)}},
       else: {:cont, {request, %{response | body: body <> data}}}
   end
@@ -294,30 +311,34 @@ defmodule FermixCore.Cues.Source.Feed do
 
   # --- body ------------------------------------------------------------------------
 
-  defp body(%Req.Response{private: %{cue_read_limit: true}}), do: {:error, :read_limit}
+  defp read_body(%Req.Response{private: %{cue_read_limit: true}}, _reader),
+    do: {:error, :read_limit}
 
-  defp body(response) do
+  defp read_body(response, reader) do
     raw = if is_binary(response.body), do: response.body, else: ""
 
     response
     |> Req.Response.get_header("content-encoding")
     |> Enum.map(&(&1 |> String.trim() |> String.downcase()))
-    |> decode_body(raw)
+    |> decode_body(raw, reader)
   end
 
-  defp decode_body([], raw), do: {:ok, raw}
-  defp decode_body(["identity"], raw), do: {:ok, raw}
-  defp decode_body([gzip], raw) when gzip in ["gzip", "x-gzip"], do: gunzip(raw)
-  defp decode_body(codings, _raw), do: {:error, {:unsupported_encoding, Enum.join(codings, ",")}}
+  defp decode_body([], raw, reader), do: FeedParser.read(reader, raw)
+  defp decode_body(["identity"], raw, reader), do: FeedParser.read(reader, raw)
+  defp decode_body([gzip], raw, reader) when gzip in ["gzip", "x-gzip"], do: gunzip(raw, reader)
 
-  # Inflates in bounded steps and stops past the cap, so a small body that
-  # inflates to gigabytes is never held in memory.
-  defp gunzip(data) do
+  defp decode_body(codings, _raw, _reader),
+    do: {:error, {:unsupported_encoding, Enum.join(codings, ",")}}
+
+  # Inflates in bounded steps, each step's output going to the reader as it
+  # comes, so the inflated body is never held and the reader's limits stop a
+  # small body that inflates to gigabytes.
+  defp gunzip(data, reader) do
     zstream = :zlib.open()
 
     try do
       :ok = :zlib.inflateInit(zstream, 31)
-      inflate(zstream, :zlib.safeInflate(zstream, data), [], 0, 1)
+      inflate(zstream, :zlib.safeInflate(zstream, data), reader, 1)
     rescue
       error in ErlangError ->
         if error.original == :data_error,
@@ -328,26 +349,27 @@ defmodule FermixCore.Cues.Source.Feed do
     end
   end
 
-  defp inflate(zstream, {status, output}, acc, size, steps) do
-    size = size + IO.iodata_length(output)
-    acc = [output | acc]
-
-    cond do
-      size > @max_body_bytes -> {:error, :read_limit}
-      status == :finished -> {:ok, acc |> Enum.reverse() |> IO.iodata_to_binary()}
-      steps >= @max_inflate_steps -> {:error, {:invalid_gzip, :too_many_steps}}
-      true -> inflate(zstream, :zlib.safeInflate(zstream, []), acc, size, steps + 1)
+  defp inflate(zstream, {status, output}, reader, steps) do
+    with {:ok, reader} <- FeedParser.read(reader, IO.iodata_to_binary(output)) do
+      cond do
+        status == :finished -> {:ok, reader}
+        steps >= @max_inflate_steps -> {:error, {:invalid_gzip, :too_many_steps}}
+        true -> inflate(zstream, :zlib.safeInflate(zstream, []), reader, steps + 1)
+      end
     end
   end
 
   defp content_type(response),
     do: response |> Req.Response.get_header("content-type") |> List.first()
 
-  defp parse(%{items_path: path} = source, body, _content_type, _url) when is_binary(path),
-    do: FeedParser.parse_json_api(body, json_paths(source))
+  # An item older than the receipt horizon would be refused as stale
+  # (`Cues.Item`); the reader skips it, so a feed's past is no gap.
+  defp reader_opts(%{items_path: path} = source, _url, now) when is_binary(path),
+    do: [paths: json_paths(source), stale_before: stale_before(now)]
 
-  defp parse(_source, body, content_type, url),
-    do: FeedParser.parse(body, content_type, base_url: url)
+  defp reader_opts(_source, url, now), do: [base_url: url, stale_before: stale_before(now)]
+
+  defp stale_before(now), do: DateTime.add(now, -Item.horizon_days(), :day)
 
   defp json_paths(source) do
     for key <- @path_keys, value = Map.get(source, key), into: %{}, do: {key, value}
@@ -355,9 +377,19 @@ defmodule FermixCore.Cues.Source.Feed do
 
   # --- gaps --------------------------------------------------------------------------
 
-  defp read_limit(state, now) do
+  defp too_large(state, now) do
     Worker.gap(state, "read_limit", 1, nil, now)
-    {:noreply, Worker.schedule(state, :poll, interval_ms(state.source))}
+    Worker.touch(state, %{status: "unavailable", stop_reason: "too_large"}, now)
+
+    Worker.trace(state, :stopped, %{
+      status: "unavailable",
+      reason: :read_limit,
+      result: {:error, :read_limit}
+    })
+
+    Logger.error("Cue feed #{state.source.ref} is larger than Fermix reads; stopped")
+    Worker.notify(state, :too_large, %{}, now)
+    {:stop, :normal, state}
   end
 
   defp page_limit(state, :complete, _now), do: state

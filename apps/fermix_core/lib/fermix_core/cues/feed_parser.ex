@@ -2,37 +2,54 @@ defmodule FermixCore.Cues.FeedParser do
   @moduledoc """
   Turns a feed response into cue item fields (M60 §6.4, §6.8, §6.9).
 
-  Pure: no I/O, no clock, no process. The feed worker fetches the body and
-  hands each result to `Cues.Item.new/2`.
+  Pure: no I/O, no clock, no process. The feed worker fetches the body, feeds
+  it to a reader (`reader/2`, `read/2` for each piece, `finish/1`) and hands
+  each result to `Cues.Item.new/2`. `parse/3` and `parse_json_api/3` are the
+  same reader given a whole body.
 
-  Formats: RSS 2.0, Atom 1.0 and JSON Feed 1.0/1.1 through `parse/3`, and a JSON
-  API with configured dot paths through `parse_json_api/3`.
+  Formats: RSS 2.0, Atom 1.0 and JSON Feed 1.0/1.1, and a JSON API with
+  configured dot paths (the reader's `:paths`).
 
-  XML goes through Saxy, which creates no atoms and skips a DTD without reading
-  it. Entity references other than XML's five predefined ones stay literal
-  (`expand_entity: :keep`), so an internal entity (billion laughs) is never
-  expanded and an external one is never read or fetched. JSON is decoded with
-  string keys, so it creates no atoms either.
+  XML is read as it arrives, one item at a time (`Cues.FeedXml`), and each
+  item is turned into its fields as it closes, so what a read holds is one
+  item and the fields of the items kept, not the feed: at most 32 MiB of XML
+  is read, an item may hold at most 4 MiB. Saxy creates no atoms and skips a
+  DTD without reading it. Entity references other than XML's five predefined
+  ones stay literal (`expand_entity: :keep`), so an internal entity (billion
+  laughs) is never expanded and an external one is never read or fetched.
+  JSON is held, at most 4 MiB, and decoded whole with string keys, so it
+  creates no atoms either. Past any of these limits the reader returns
+  `:read_limit`.
 
   Identity: an item's `guid` (RSS), `id` (Atom) or `id` (JSON Feed). An item
   without one takes `"sha256:"` plus the digest of its link, title and time as
   written, never the link alone, so whoever submits a link first does not own
   it. An id longer than 512 bytes is replaced by its digest.
 
-  One parse keeps at most 100 items, the first ones in the feed's order
-  (feeds list newest first); the rest comes back as `{:truncated, …}` with its
-  count and time range, for the worker's `page_limit` gap. Ordering for insert
-  (oldest first) is `Cues.Ingest`'s job, not this module's.
+  An item older than the reader's `:stale_before` (the receipt horizon) is
+  skipped: `Cues.Item` would refuse it as stale, and a feed that lists its
+  past is not delivering late, so it is neither a cue nor a gap; the read
+  counts it as `skipped`. Of the rest, one read keeps at most 100, the newest
+  by their time, whatever order the feed lists them in; an undated item ranks
+  below every dated one, and ties go to the feed's order. Kept items come back
+  in the feed's order; ordering for insert (oldest first) is `Cues.Ingest`'s
+  job. The ones left out come back as `{:truncated, …}` with their count and
+  time range, for the worker's `page_limit` gap.
 
   Text fields are plain text with bounded length: HTML is stripped from
   summaries and HTML-typed titles through `Tools.SnippetSanitizer`.
   """
 
+  alias FermixCore.Cues.FeedXml
   alias FermixCore.Cues.JsonPath
   alias FermixCore.Plugins.CanonicalJson
   alias FermixCore.Tools.SnippetSanitizer
 
-  @max_body_bytes 4 * 1024 * 1024
+  @max_xml_bytes 32 * 1024 * 1024
+  @max_json_bytes 4 * 1024 * 1024
+  # The blank bytes a body may start with before its first one decides.
+  @max_sniff_bytes 65_536
+  @bom <<0xEF, 0xBB, 0xBF>>
   @max_items 100
   @max_id_bytes 512
   @max_link_bytes 2_048
@@ -106,6 +123,9 @@ defmodule FermixCore.Cues.FeedParser do
           | {:truncated,
              %{count: pos_integer(), range_from: DateTime.t() | nil, range_to: DateTime.t() | nil}}
 
+  @typedoc "What a read left out: past the 100 kept, and past the horizon."
+  @type outcome :: %{truncation: truncation(), skipped: non_neg_integer()}
+
   @type paths :: %{
           required(:items_path) => String.t(),
           required(:id_path) => String.t(),
@@ -116,7 +136,7 @@ defmodule FermixCore.Cues.FeedParser do
         }
 
   @type error ::
-          :body_too_large
+          :read_limit
           | :not_a_feed
           | :content_type_mismatch
           | :invalid_feed
@@ -126,57 +146,119 @@ defmodule FermixCore.Cues.FeedParser do
           | {:unsupported_feed, String.t()}
           | {:invalid_path, atom()}
 
-  @doc """
-  Parses an RSS, Atom or JSON Feed body.
+  @enforce_keys [:mode, :declared, :options]
+  defstruct @enforce_keys ++ [head: <<>>, json: [], xml: nil, size: 0]
 
-  `content_type` is the response's `Content-Type` (or nil). A JSON or XML media
-  type must agree with the body; any other type (`text/html`, `text/plain`,
-  none) lets the body's first character decide.
-
-  Options: `:base_url`, the feed's absolute URL, against which relative item
-  links are resolved; without it a relative link stays as written.
+  @typedoc """
+  A feed being read: `:sniff` until its first byte that is not blank decides
+  the syntax, then `:xml` or `:json`; `:json_api` from the start.
   """
-  @spec parse(binary(), String.t() | nil, keyword()) ::
-          {:ok, [fields()], truncation()} | {:error, error()}
-  def parse(body, content_type, opts \\ [])
-      when is_binary(body) and (is_binary(content_type) or is_nil(content_type)) and is_list(opts) do
-    base_url =
-      opts |> Keyword.validate!(base_url: nil) |> Keyword.fetch!(:base_url) |> base_url!()
+  @opaque t :: %__MODULE__{
+            mode: :sniff | :xml | :json | :json_api,
+            declared: :xml | :json | :unknown,
+            options: map(),
+            head: binary(),
+            json: iodata(),
+            xml: FeedXml.t() | nil,
+            size: non_neg_integer()
+          }
 
-    with :ok <- check_size(body),
-         body = strip_bom(body),
-         {:ok, syntax} <- syntax(content_type, body),
-         {:ok, format, entries, context} <- decode_feed(syntax, body) do
-      context = Map.put(context, :base_url, base_url)
-      {kept, rest} = Enum.split(entries, @max_items)
-      times = Enum.map(rest, &(&1 |> raw_time(format, context) |> parse_time()))
-      {:ok, Enum.map(kept, &feed_fields(&1, format, context)), truncation(times)}
+  @doc """
+  A reader for a feed whose response has `content_type` (or nil). A JSON or
+  XML media type must agree with the body; any other type (`text/html`,
+  `text/plain`, none) lets the body's first character decide.
+
+  Options:
+
+    * `:base_url`, the feed's absolute URL, against which relative item links
+      are resolved; without it a relative link stays as written.
+    * `:stale_before`, a `DateTime`: an item older than it is skipped.
+      Without it no item is.
+    * `:paths`, for a JSON API whose items sit at `paths.items_path`. Each
+      path is a dot path of object keys (a numeric segment indexes a list);
+      `"."` is the document itself. Nothing in a path is evaluated. `id_path`
+      is required; an item with no scalar at it comes back with `item_id:
+      nil`, which `Cues.Item.new/2` refuses as invalid. Missing optional
+      values: revision `"1"`, type `"feed.item"`, subject and time nil. The
+      body is JSON whatever `content_type` says.
+  """
+  @spec reader(String.t() | nil, keyword()) :: {:ok, t()} | {:error, error()}
+  def reader(content_type, opts \\ [])
+      when (is_binary(content_type) or is_nil(content_type)) and is_list(opts) do
+    opts = Keyword.validate!(opts, base_url: nil, stale_before: nil, paths: nil)
+    stale_before = Keyword.fetch!(opts, :stale_before)
+    true = is_nil(stale_before) or is_struct(stale_before, DateTime)
+
+    options = %{
+      base_url: opts |> Keyword.fetch!(:base_url) |> base_url!(),
+      stale_before: stale_before,
+      paths: Keyword.fetch!(opts, :paths)
+    }
+
+    case options.paths do
+      nil -> {:ok, new_reader(:sniff, content_type, options)}
+      paths -> with :ok <- validate_paths(paths), do: {:ok, new_reader(:json_api, nil, options)}
     end
   end
 
-  @doc """
-  Parses a JSON API body whose items sit at `paths.items_path`.
+  @doc "Reads the next piece of the body, any size."
+  @spec read(t(), binary()) :: {:ok, t()} | {:error, error()}
+  def read(%__MODULE__{} = reader, chunk) when is_binary(chunk),
+    do: consume(%{reader | size: reader.size + byte_size(chunk)}, chunk)
 
-  Each path is a dot path of object keys (a numeric segment indexes a list);
-  `"."` is the document itself. Nothing in a path is evaluated. `id_path` is
-  required; an item with no scalar at it comes back with `item_id: nil`, which
-  `Cues.Item.new/2` refuses as invalid. Missing optional values: revision
-  `"1"`, type `"feed.item"`, subject and time nil.
-  """
+  @doc "Ends the body: the kept items' fields and what was left out."
+  @spec finish(t()) :: {:ok, [fields()], outcome()} | {:error, error()}
+  def finish(%__MODULE__{mode: :sniff}), do: {:error, :not_a_feed}
+
+  def finish(%__MODULE__{mode: :xml} = reader) do
+    case FeedXml.finish(reader.xml) do
+      {:ok, document} -> xml_items(document)
+      {:error, reason} -> {:error, xml_error(reason)}
+    end
+  end
+
+  def finish(%__MODULE__{mode: :json} = reader) do
+    with {:ok, document} <- decode_json(IO.iodata_to_binary(reader.json)),
+         {:ok, format, entries, context} <- json_feed(document) do
+      context = Map.put(context, :base_url, reader.options.base_url)
+
+      entries
+      |> Enum.reduce(keeper(reader.options), &keep_feed_item(&1, format, context, &2))
+      |> kept()
+    end
+  end
+
+  def finish(%__MODULE__{mode: :json_api} = reader) do
+    paths = reader.options.paths
+
+    with {:ok, document} <- decode_json(strip_bom(IO.iodata_to_binary(reader.json))),
+         {:ok, entries} <- items_at(document, paths.items_path) do
+      entries |> Enum.reduce(keeper(reader.options), &keep_api_item(&1, paths, &2)) |> kept()
+    end
+  end
+
+  @doc "Reads a whole RSS, Atom or JSON Feed body (`reader/2`'s options but `:paths`)."
+  @spec parse(binary(), String.t() | nil, keyword()) ::
+          {:ok, [fields()], outcome()} | {:error, error()}
+  def parse(body, content_type, opts \\ [])
+      when is_binary(body) and (is_binary(content_type) or is_nil(content_type)) and is_list(opts) do
+    true = not Keyword.has_key?(opts, :paths)
+    read_whole(body, content_type, opts)
+  end
+
+  @doc "Reads a whole JSON API body whose items sit at `paths.items_path` (see `reader/2`)."
   @spec parse_json_api(binary(), paths(), keyword()) ::
-          {:ok, [fields()], truncation()} | {:error, error()}
+          {:ok, [fields()], outcome()} | {:error, error()}
   def parse_json_api(body, paths, opts \\ [])
       when is_binary(body) and is_map(paths) and is_list(opts) do
-    Keyword.validate!(opts, [])
+    opts = Keyword.validate!(opts, [:stale_before])
+    read_whole(body, nil, [{:paths, paths} | opts])
+  end
 
-    with :ok <- check_size(body),
-         :ok <- validate_paths(paths),
-         {:ok, document} <- decode_json(strip_bom(body)),
-         {:ok, entries} <- items_at(document, paths.items_path) do
-      {kept, rest} = Enum.split(entries, @max_items)
-      times = Enum.map(rest, &JsonPath.time(&1, paths[:time_path]))
-      {:ok, Enum.map(kept, &JsonPath.fields(&1, paths, @item_type)), truncation(times)}
-    end
+  defp read_whole(body, content_type, opts) do
+    with {:ok, reader} <- reader(content_type, opts),
+         {:ok, reader} <- read(reader, body),
+         do: finish(reader)
   end
 
   @doc """
@@ -197,17 +279,98 @@ defmodule FermixCore.Cues.FeedParser do
     end
   end
 
+  # --- reading ----------------------------------------------------------------
+
+  defp new_reader(mode, content_type, options),
+    do: %__MODULE__{mode: mode, declared: declared_syntax(content_type), options: options}
+
+  # The first chunk is the head as it is, so a whole body is not copied.
+  defp consume(%{mode: :sniff, head: <<>>} = reader, chunk), do: sniff(%{reader | head: chunk})
+  defp consume(%{mode: :sniff} = reader, chunk), do: sniff(%{reader | head: reader.head <> chunk})
+
+  defp consume(%{mode: :xml} = reader, chunk) do
+    with :ok <- within(reader, @max_xml_bytes) do
+      case FeedXml.read(reader.xml, chunk) do
+        {:ok, xml} -> {:ok, %{reader | xml: xml}}
+        {:error, reason} -> {:error, xml_error(reason)}
+      end
+    end
+  end
+
+  defp consume(%{mode: mode} = reader, chunk) when mode in [:json, :json_api] do
+    with :ok <- within(reader, @max_json_bytes), do: {:ok, %{reader | json: [reader.json, chunk]}}
+  end
+
+  defp within(%{size: size}, max) when size > max, do: {:error, :read_limit}
+  defp within(_reader, _max), do: :ok
+
+  # The body's start is held until its first byte that is not blank, past a
+  # byte-order mark, decides the syntax; then all of it goes on.
+  defp sniff(%{head: head} = reader) do
+    case sniffed_syntax(head) do
+      :more ->
+        {:ok, reader}
+
+      sniffed ->
+        with {:ok, syntax} <- decide_syntax(reader.declared, sniffed), do: start(syntax, reader)
+    end
+  end
+
+  defp start(:xml, reader) do
+    base_url = reader.options.base_url
+    on_item = fn item, format, keeper -> keep_item(item, format, base_url, keeper) end
+    xml = FeedXml.new(on_item, keeper(reader.options))
+    consume(%{reader | mode: :xml, xml: xml, head: <<>>}, strip_bom(reader.head))
+  end
+
+  defp start(:json, reader),
+    do: consume(%{reader | mode: :json, head: <<>>}, strip_bom(reader.head))
+
+  defp keep_feed_item(entry, format, context, keeper) do
+    time = entry |> raw_time(format, context) |> parse_time()
+    keep(keeper, time, fn -> feed_fields(entry, format, context) end)
+  end
+
+  defp keep_api_item(entry, paths, keeper) do
+    time = JsonPath.time(entry, paths[:time_path])
+    keep(keeper, time, fn -> JsonPath.fields(entry, paths, @item_type) end)
+  end
+
+  # An item's fields are made as it closes, before Atom's feed-level author
+  # may have been read; `xml_items/1` fills that in at the end.
+  defp keep_item(item, format, base_url, keeper) do
+    {format, context} = xml_format(format)
+    context = Map.merge(context, %{author: nil, base_url: base_url})
+    time = item |> raw_time(format, context) |> parse_time()
+    keep(keeper, time, fn -> feed_fields(item, format, context) end)
+  end
+
+  defp xml_items(%{format: format, root: {_name, _attrs, children}, acc: keeper}) do
+    {:ok, items, outcome} = kept(keeper)
+    {:ok, Enum.map(items, &with_feed_author(&1, format, children)), outcome}
+  end
+
+  defp xml_format(:rss), do: {:rss, %{}}
+  defp xml_format({:atom, prefix}), do: {:atom, %{prefix: prefix}}
+
+  defp with_feed_author(%{data: %{"author" => nil}} = fields, {:atom, prefix}, children) do
+    author = children |> atom_author(prefix) |> plain_text(@max_author_chars)
+    %{fields | data: %{fields.data | "author" => author}}
+  end
+
+  defp with_feed_author(fields, _format, _children), do: fields
+
+  defp xml_error({:invalid_xml, %Saxy.ParseError{} = error}),
+    do: {:invalid_xml, bounded_name(Exception.message(error))}
+
+  defp xml_error({:unsupported_feed, name}), do: {:unsupported_feed, bounded_name(name)}
+  defp xml_error(reason) when reason in [:invalid_feed, :read_limit], do: reason
+
   # --- detection ------------------------------------------------------------
 
-  defp check_size(body) when byte_size(body) > @max_body_bytes, do: {:error, :body_too_large}
-  defp check_size(_body), do: :ok
-
   # A UTF-8 byte-order mark; Saxy refuses a document that starts with one.
-  defp strip_bom(<<0xEF, 0xBB, 0xBF, body::binary>>), do: body
+  defp strip_bom(@bom <> body), do: body
   defp strip_bom(body), do: body
-
-  defp syntax(content_type, body),
-    do: decide_syntax(declared_syntax(content_type), sniffed_syntax(body))
 
   defp decide_syntax(_declared, :unknown), do: {:error, :not_a_feed}
   defp decide_syntax(:unknown, sniffed), do: {:ok, sniffed}
@@ -229,61 +392,36 @@ defmodule FermixCore.Cues.FeedParser do
     end
   end
 
-  defp sniffed_syntax(body) do
-    case String.trim_leading(body) do
-      "<" <> _rest -> :xml
-      "{" <> _rest -> :json
-      _other -> :unknown
+  # `:more` while the start is blank, or could still be a byte-order mark.
+  defp sniffed_syntax(head) when byte_size(head) < byte_size(@bom) do
+    if head == binary_part(@bom, 0, byte_size(head)), do: :more, else: sniffed_text(head)
+  end
+
+  defp sniffed_syntax(head), do: head |> strip_bom() |> sniffed_text()
+
+  # A blank start past 64 KiB is no feed, however the body was split.
+  defp sniffed_text(text) do
+    rest = String.trim_leading(text)
+
+    cond do
+      byte_size(text) - byte_size(rest) > @max_sniff_bytes -> :unknown
+      rest == "" or incomplete_character?(rest) -> :more
+      String.starts_with?(rest, "<") -> :xml
+      String.starts_with?(rest, "{") -> :json
+      true -> :unknown
     end
   end
 
-  defp decode_feed(:xml, body) do
-    case Saxy.SimpleForm.parse_string(body, expand_entity: :keep) do
-      {:ok, root} ->
-        xml_feed(root)
+  # A chunk can end inside a character, blank or not; the next one completes it.
+  defp incomplete_character?(text) when byte_size(text) < 4,
+    do: match?({:incomplete, "", _rest}, :unicode.characters_to_binary(text))
 
-      {:error, %Saxy.ParseError{} = error} ->
-        {:error, {:invalid_xml, bounded_name(Exception.message(error))}}
-    end
-  end
-
-  defp decode_feed(:json, body) do
-    with {:ok, document} <- decode_json(body), do: json_feed(document)
-  end
+  defp incomplete_character?(_text), do: false
 
   defp decode_json(body) do
     case Jason.decode(body) do
       {:ok, document} -> {:ok, document}
       {:error, %Jason.DecodeError{}} -> {:error, :invalid_json}
-    end
-  end
-
-  defp xml_feed({"rss", _attrs, children}) do
-    case element(children, "channel") do
-      {_name, _attrs, channel} -> {:ok, :rss, elements(channel, "item"), %{}}
-      nil -> {:error, :invalid_feed}
-    end
-  end
-
-  defp xml_feed({name, _attrs, children}) do
-    case atom_prefix(name) do
-      {:ok, prefix} ->
-        context = %{prefix: prefix, author: atom_author(children, prefix)}
-        {:ok, :atom, elements(children, prefix <> "entry"), context}
-
-      :error ->
-        {:error, {:unsupported_feed, bounded_name(name)}}
-    end
-  end
-
-  # An Atom document may bind its namespace to a prefix (`<a:feed>`); every
-  # Atom element then carries that prefix.
-  defp atom_prefix("feed"), do: {:ok, ""}
-
-  defp atom_prefix(name) do
-    case String.split(name, ":", parts: 2) do
-      [prefix, "feed"] -> {:ok, prefix <> ":"}
-      _other -> :error
     end
   end
 
@@ -490,18 +628,87 @@ defmodule FermixCore.Cues.FeedParser do
     end
   end
 
-  defp truncation([]), do: :complete
+  # --- the newest 100 ----------------------------------------------------------
 
-  defp truncation(times) do
-    known = Enum.reject(times, &is_nil/1)
-    {:truncated, %{count: length(times), range_from: min_time(known), range_to: max_time(known)}}
+  defp keeper(options) do
+    %{
+      kept: :gb_trees.empty(),
+      next: 0,
+      stale_before: options.stale_before,
+      skipped: 0,
+      dropped: %{count: 0, from: nil, to: nil}
+    }
   end
 
-  defp min_time([]), do: nil
-  defp min_time(times), do: Enum.min(times, DateTime)
+  # An entry older than `stale_before` is skipped and only counted: Ingest
+  # would refuse it as stale, and a feed listing its past is no late arrival
+  # and no gap. `to_fields` runs only for an entry that goes in.
+  defp keep(keeper, time, to_fields) do
+    if past?(keeper, time),
+      do: %{keeper | skipped: keeper.skipped + 1},
+      else: rank_in(keeper, time, to_fields)
+  end
 
-  defp max_time([]), do: nil
-  defp max_time(times), do: Enum.max(times, DateTime)
+  defp past?(%{stale_before: %DateTime{} = cutoff}, %DateTime{} = time),
+    do: DateTime.compare(time, cutoff) == :lt
+
+  defp past?(_keeper, _time), do: false
+
+  # Ranked by time, newest highest; an undated entry ranks below every dated
+  # one, and of two equal ranks the earlier in the feed is higher.
+  defp rank_in(keeper, time, to_fields) do
+    index = keeper.next
+    rank = if time, do: {1, DateTime.to_unix(time, :microsecond), -index}, else: {0, 0, -index}
+    keeper = %{keeper | next: index + 1}
+
+    cond do
+      :gb_trees.size(keeper.kept) < @max_items ->
+        %{keeper | kept: :gb_trees.insert(rank, {index, to_fields.(), time}, keeper.kept)}
+
+      rank > elem(:gb_trees.smallest(keeper.kept), 0) ->
+        {_rank, {_index, _fields, out_time}, kept} = :gb_trees.take_smallest(keeper.kept)
+        kept = :gb_trees.insert(rank, {index, to_fields.(), time}, kept)
+        dropped(%{keeper | kept: kept}, out_time)
+
+      true ->
+        dropped(keeper, time)
+    end
+  end
+
+  defp dropped(%{dropped: dropped} = keeper, time) do
+    %{
+      keeper
+      | dropped: %{
+          count: dropped.count + 1,
+          from: earliest(dropped.from, time),
+          to: latest(dropped.to, time)
+        }
+    }
+  end
+
+  defp earliest(nil, time), do: time
+  defp earliest(from, nil), do: from
+  defp earliest(from, time), do: Enum.min([from, time], DateTime)
+
+  defp latest(nil, time), do: time
+  defp latest(to, nil), do: to
+  defp latest(to, time), do: Enum.max([to, time], DateTime)
+
+  # The kept fields in the feed's order, and what was left out.
+  defp kept(keeper) do
+    items =
+      keeper.kept
+      |> :gb_trees.values()
+      |> Enum.sort_by(fn {index, _fields, _time} -> index end)
+      |> Enum.map(fn {_index, fields, _time} -> fields end)
+
+    {:ok, items, %{truncation: truncation(keeper.dropped), skipped: keeper.skipped}}
+  end
+
+  defp truncation(%{count: 0}), do: :complete
+
+  defp truncation(%{count: count, from: from, to: to}),
+    do: {:truncated, %{count: count, range_from: from, range_to: to}}
 
   # --- XML helpers ------------------------------------------------------------
 

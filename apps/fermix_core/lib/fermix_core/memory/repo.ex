@@ -66,6 +66,8 @@ defmodule FermixCore.Memory.Repo do
   @reply_blocks_migration_version 41
   @cues_migration_version 42
   @open_loops_migration_version 43
+  # 44 is reserved.
+  @cue_stop_reason_migration_version 45
   @sqlite_open_intent :readwritecreate
 
   # The cue SQL modules (M60), one per lane, all served by `cues_call/3`.
@@ -4688,7 +4690,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_phone_joins_chat_migration(conn, versions),
          :ok <- apply_reply_blocks_migration(conn, versions),
          :ok <- apply_cues_migration(conn, versions),
-         :ok <- apply_open_loops_migration(conn, versions) do
+         :ok <- apply_open_loops_migration(conn, versions),
+         :ok <- apply_cue_stop_reason_migration(conn, versions) do
       :ok
     end
   end
@@ -4723,6 +4726,25 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{OpenLoopsSql.schema_sql()}
         INSERT INTO schema_migrations(version) VALUES (#{@open_loops_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # Why a cue source stopped (`cue_sources.stop_reason`), a column beside its
+  # status, with its version in one transaction. It runs after 42, which made
+  # the table; a row written before has none.
+  defp apply_cue_stop_reason_migration(conn, versions) do
+    if Enum.member?(versions, @cue_stop_reason_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{CuesSql.stop_reason_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@cue_stop_reason_migration_version});
         COMMIT;
         """
       )

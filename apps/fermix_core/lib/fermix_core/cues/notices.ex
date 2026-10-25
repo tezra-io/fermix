@@ -13,7 +13,7 @@ defmodule FermixCore.Cues.Notices do
   | `:filter_failed` | watcher per UTC day |
   | `:cap_reached`, `:filter_budget_reached`, `:task_provider_down` | 24 hours, the rolling window: by then every run or call counted when it was sent has left the window |
   | `:gap` | open gap, which the notice marks reported |
-  | source `:auth_failed`, `:refused`, `:down`, `:unreachable` | episode, ended by the source's next good moment (`last_good_at` after the notice) |
+  | source `:auth_failed`, `:refused`, `:down`, `:unreachable`, `:too_large` | episode, ended by the source's next good moment (`last_good_at` after the notice) |
   | source `:budget_reached` | source per UTC day |
   | mandate `:unpinned` | call: its caller sends it from the change that disabled the mandate, once per approval |
 
@@ -64,6 +64,7 @@ defmodule FermixCore.Cues.Notices do
     refused: :since_last_good,
     down: :since_last_good,
     unreachable: :since_last_good,
+    too_large: :since_last_good,
     budget_reached: :utc_day
   }
   @source_kinds Map.keys(@source_rules)
@@ -313,6 +314,11 @@ defmodule FermixCore.Cues.Notices do
   defp source_text(:unreachable, ref, _data),
     do:
       "Cue source #{ref} stopped after failing to reach its address again and again. Check it in settings."
+
+  defp source_text(:too_large, ref, _data),
+    do:
+      "Cue source #{ref} stopped: its feed is larger than Fermix reads. It tries again " <>
+        "when its settings change or Fermix restarts."
 
   defp source_text(:budget_reached, ref, data),
     do:

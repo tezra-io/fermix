@@ -13,7 +13,9 @@ defmodule FermixCore.Management.Cues.SourceRow do
   disabled source keeps its last `cue_sources.status`), `needs_secret`
   (waiting for a secret it needs: its kind's, or one a stream's sign-in
   names), `not_running` (cues off, or on and not yet restarted), then the
-  `cue_sources` status the source last wrote, `idle` before it wrote one.
+  `cue_sources` status the source last wrote, `idle` before it wrote one. An
+  `unavailable` row's sentence follows the `stop_reason` written with that
+  status.
 
   Never on the wire: a payload, an item's text or snapshot, a cursor, a
   secret's value, a webhook's address. A secret's presence is its sentinel in
@@ -111,6 +113,10 @@ defmodule FermixCore.Management.Cues.SourceRow do
 
   defp sentence("stopped", _source, _facts),
     do: "Stopped after repeated failures. Save it again or restart Fermix to try again."
+
+  # Why it stopped, where the worker that stopped it said (`stop_reason`).
+  defp sentence("unavailable", _source, %{row: %{stop_reason: "too_large"}}),
+    do: "Its feed is larger than Fermix reads."
 
   defp sentence("unavailable", _source, _facts), do: "Fermix could not reach it."
   defp sentence(_unknown, _source, _facts), do: "Running."

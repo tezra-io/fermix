@@ -106,10 +106,11 @@ defmodule FermixCore.Cues.Telemetry do
     :attempt,
     :count,
     :duration_ms,
+    :skipped,
     :result,
     :content
   ]
-  @measurement_keys [:count, :accept_ms, :queue_ms, :duration_ms]
+  @measurement_keys [:count, :accept_ms, :queue_ms, :duration_ms, :skipped]
 
   @trace_event_definitions [
     %{
@@ -164,9 +165,10 @@ defmodule FermixCore.Cues.Telemetry do
   @doc """
   Emit one `[:fermix, :cue, :source]` event. `metadata` needs `:source_ref`
   and may hold `:kind`, `:status`, `:reason`, `:attempt`, `:count`,
-  `:duration_ms`, `:result` and `:content` (a stream service's own error
-  message, behind the content gate). `:count` and `:duration_ms` become the
-  measurements (`count: 1` when absent).
+  `:duration_ms`, `:skipped` (the items a feed's poll skipped as older than
+  the receipt horizon), `:result` and `:content` (a stream service's own error
+  message, behind the content gate). `:count`, `:duration_ms` and `:skipped`
+  become the measurements (`count: 1` when none is given).
   """
   @spec source(atom(), map()) :: :ok
   def source(phase, metadata) when is_atom(phase) and is_map(metadata) do
@@ -176,13 +178,13 @@ defmodule FermixCore.Cues.Telemetry do
 
     measurements =
       metadata
-      |> Map.take([:count, :duration_ms])
+      |> Map.take([:count, :duration_ms, :skipped])
       |> measurements!()
 
     :telemetry.execute(
       @source_event,
       measurements,
-      build_metadata(phase, Map.drop(metadata, [:count, :duration_ms]))
+      build_metadata(phase, Map.drop(metadata, [:count, :duration_ms, :skipped]))
     )
   end
 

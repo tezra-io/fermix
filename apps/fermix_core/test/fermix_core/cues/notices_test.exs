@@ -189,6 +189,17 @@ defmodule FermixCore.Cues.NoticesTest do
       assert :already_sent = Notices.source("live-news", :refused, %{}, opts(ctx, 1))
     end
 
+    test "a feed larger than Fermix reads is told once per episode", ctx do
+      assert :sent = Notices.source("harbour-hours", :too_large, %{}, opts(ctx, 0))
+      assert_receive {:sent, "owner-1", text, _opts}
+
+      assert text ==
+               "Cue source harbour-hours stopped: its feed is larger than Fermix reads. It " <>
+                 "tries again when its settings change or Fermix restarts."
+
+      assert :already_sent = Notices.source("harbour-hours", :too_large, %{}, opts(ctx, 1))
+    end
+
     test "an outage of a source that cannot catch up says nothing was recorded", ctx do
       assert :sent = Notices.source("live-news", :down, %{catch_up: false}, opts(ctx, 0))
       assert_receive {:sent, "owner-1", text, _opts}

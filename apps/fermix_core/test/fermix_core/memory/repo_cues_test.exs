@@ -53,6 +53,32 @@ defmodule FermixCore.Memory.RepoCuesTest do
     end
   end
 
+  describe "migration 45" do
+    test "adds cue_sources.stop_reason to a database that has the cue tables, keeping their rows",
+         ctx do
+      %{repo: repo, db_path: db_path, conn: conn} = ctx
+      ref = "before-45-#{System.unique_integer([:positive])}"
+      {:ok, _row} = Repo.cues_call(CuesSql, {:source_touch, ref, %{}, @now}, server: repo)
+      assert "stop_reason" in source_columns(conn)
+
+      # The database as it stood before 45.
+      exec!(conn, "ALTER TABLE cue_sources DROP COLUMN stop_reason")
+      exec!(conn, "DELETE FROM schema_migrations WHERE version = 45")
+      :ok = stop_supervised(Repo)
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+      assert {:ok, versions} = Repo.migration_versions(server: repo)
+      assert Enum.count(versions, &(&1 == 45)) == 1
+      assert "stop_reason" in source_columns(conn)
+
+      assert {:ok, %{source_ref: ^ref, stop_reason: nil}} =
+               Repo.cues_call(CuesSql, {:get_source, ref}, server: repo)
+    end
+  end
+
+  defp source_columns(conn),
+    do: conn |> rows("SELECT name FROM pragma_table_info('cue_sources')") |> List.flatten()
+
   describe "dispatch" do
     test "routes a request to its SQL module", %{repo: repo} do
       assert {:ok, []} = Repo.cues_call(CuesSql, {:list_sources}, server: repo)
@@ -199,6 +225,25 @@ defmodule FermixCore.Memory.RepoCuesTest do
                Repo.cues_call(CuesSql, {:source_touch, ref, %{status: "asleep"}, @now},
                  server: repo
                )
+    end
+
+    test "a stop reason is written with its status and cleared by the next status", %{
+      repo: repo,
+      ref: ref
+    } do
+      touch = &Repo.cues_call(CuesSql, {:source_touch, ref, &1, @now}, server: repo)
+
+      assert {:ok, %{status: "unavailable", stop_reason: "too_large"}} =
+               touch.(%{status: "unavailable", stop_reason: "too_large"})
+
+      # A write without a status leaves both as they are.
+      assert {:ok, %{status: "unavailable", stop_reason: "too_large"}} = touch.(%{cursor: "c2"})
+      assert {:ok, %{status: "polling", stop_reason: nil}} = touch.(%{status: "polling"})
+
+      assert {:error, {:invalid, :stop_reason}} = touch.(%{stop_reason: "too_large"})
+
+      assert {:error, {:invalid, :stop_reason}} =
+               touch.(%{status: "unavailable", stop_reason: "tired"})
     end
 
     test "rejects are coalesced per reason", %{repo: repo, ref: ref} do

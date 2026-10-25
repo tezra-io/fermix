@@ -60,6 +60,8 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   @item_rejects ~w(invalid stale rate_limited over_budget)
   @reject_gaps %{"stale" => "stale", "rate_limited" => "rate_limited", "over_budget" => "budget"}
   @source_times [:last_good_at, :last_accepted_at, :last_rejected_at]
+  # Why a source stopped, beside the status that says it did.
+  @stop_reasons ~w(too_large)
   @reason_pattern ~r/^[a-z][a-z_]{0,31}$/
 
   @schema_sql """
@@ -296,6 +298,14 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   @spec schema_sql() :: String.t()
   def schema_sql, do: @schema_sql
 
+  @doc """
+  The DDL of migration 45: `cue_sources.stop_reason`, why a source stopped
+  (`too_large`), or null. Every write of a status sets it: to the reason
+  given with that status, else null, so it never outlives its status.
+  """
+  @spec stop_reason_schema_sql() :: String.t()
+  def stop_reason_schema_sql, do: "ALTER TABLE cue_sources ADD COLUMN stop_reason TEXT;"
+
   @doc "Delivery states that hold a delivery open (never touched by retention)."
   @spec live_states() :: [String.t()]
   def live_states, do: @live_states
@@ -331,7 +341,8 @@ defmodule FermixCore.Memory.Repo.CuesSql do
 
   def handle(conn, {:source_touch, ref, attrs, %DateTime{} = now})
       when is_binary(ref) and is_map(attrs) do
-    with {:ok, normalized} <- source_attrs(attrs) do
+    with {:ok, normalized} <- source_attrs(attrs),
+         :ok <- stop_reason_with_status(normalized) do
       with_immediate_transaction(conn, fn -> touch_and_fetch(conn, ref, normalized, now) end)
     end
   end
@@ -764,6 +775,7 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   defp source_attr(:status, status) when status in @source_statuses, do: {:ok, status}
   defp source_attr(:status, _status), do: {:error, {:invalid, :status}}
   defp source_attr(:cursor, cursor) when is_binary(cursor), do: {:ok, cursor}
+  defp source_attr(:stop_reason, reason) when reason in @stop_reasons, do: {:ok, reason}
 
   defp source_attr(key, %DateTime{} = at) when key in @source_times, do: {:ok, stamp(at)}
 
@@ -777,7 +789,17 @@ defmodule FermixCore.Memory.Repo.CuesSql do
     )
   end
 
+  defp stop_reason_with_status(%{stop_reason: _reason} = attrs)
+       when not is_map_key(attrs, :status),
+       do: {:error, {:invalid, :stop_reason}}
+
+  defp stop_reason_with_status(_attrs), do: :ok
+
+  # A status written without a reason clears the one before it.
   defp touch_source(conn, ref, attrs, stamp) do
+    attrs =
+      if Map.has_key?(attrs, :status), do: Map.put_new(attrs, :stop_reason, nil), else: attrs
+
     columns = attrs |> Map.keys() |> Enum.sort()
     set_sql = Enum.map_join(columns, "", &", #{&1} = ?")
     params = Enum.map(columns, &Map.fetch!(attrs, &1))
@@ -846,7 +868,7 @@ defmodule FermixCore.Memory.Repo.CuesSql do
 
   defp source_select do
     "SELECT source_ref, status, last_good_at, cursor, items_today, items_day, last_accepted_at, " <>
-      "last_rejected_at, reject_counts, notices, updated_at FROM cue_sources"
+      "last_rejected_at, reject_counts, notices, updated_at, stop_reason FROM cue_sources"
   end
 
   defp fetch_source(conn, ref) do
@@ -884,7 +906,8 @@ defmodule FermixCore.Memory.Repo.CuesSql do
          rejected,
          counts,
          notices,
-         at
+         at,
+         stop_reason
        ]) do
     with {:ok, reject_counts} <- decode_object(counts, :reject_counts),
          {:ok, notice_stamps} <- decode_object(notices, :notices),
@@ -904,7 +927,8 @@ defmodule FermixCore.Memory.Repo.CuesSql do
          last_rejected_at: last_rejected_at,
          reject_counts: reject_counts,
          notices: notice_stamps,
-         updated_at: updated_at
+         updated_at: updated_at,
+         stop_reason: stop_reason
        }}
     end
   end

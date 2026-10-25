@@ -627,16 +627,18 @@ Who emits what:
 (`feed | stream`), `status`, `reason`, `attempt`, `result` (tag plus derived
 `error_class`) and `content` (a stream service's own error message, at most 512
 bytes with control characters removed, kept only when content capture is on);
-`count` and `duration_ms` become its measurements. Phases:
+`count`, `duration_ms` and `skipped` become its measurements. Phases:
 `connect` and `reconnect` (a feed's first good poll, and its first after a
-failure; a stream's handshake), `disconnect` (`attempt`, `reason`, `result`;
+failure, with `skipped`, the items it skipped as older than the receipt
+horizon; a stream's handshake), `disconnect` (`attempt`, `reason`, `result`;
 `reason: :service_error` when a stream with no preset closed on its service's
 error, with that error as `content`), `auth_failure` (a stream's refused
 handshake), `backfill` (`duration_ms` is how far back a stream's rewind
 reaches), `budget` (the daily budget is spent), `gap` (`reason` is the gap's,
 `count`) and `stopped` (a worker that gave up: `reason: :refused` after a
 stream's eighth connection in a row ended on its service's error, with the last
-as `content`; or `reason: "crashed"` from `Cues.SourceManager` after a worker's
+as `content`; `reason: :read_limit` for a feed larger than Fermix reads; or
+`reason: "crashed"` from `Cues.SourceManager` after a worker's
 fifth crash in an hour). Emitted by the feed and stream workers (`Cues.Source.Feed`,
 `Cues.Source.Stream`, through `Cues.Source.Worker.trace/3`) and by
 `Cues.SourceManager`.

@@ -239,30 +239,24 @@ defmodule FermixCore.Cues.Source.FeedTest do
   # --- C40 ---------------------------------------------------------------------
 
   describe "C40: limits on what a feed reads" do
-    test "a response over 4 MiB is closed with a read_limit gap and no cue", ctx do
-      body = String.duplicate("x", 4 * 1024 * 1024 + 1)
-      serve(ctx, %{status: 200, body: body, etag: "big", headers: [], conditional?: true})
+    test "a gzipped archive that unpacks past 4 MiB is read; its old items are no gap", ctx do
+      notes = String.duplicate("Guests talk about tides, maps and long walks. ", 44)
 
-      {pid, first} = start_feed(ctx)
-      fire(pid, first)
+      items =
+        Enum.map_join(1..2_770, "", fn n ->
+          published = Calendar.strftime(DateTime.add(@now, -n, :day), "%a, %d %b %Y %H:%M:%S")
 
-      assert cue_ids(ctx) == []
-      assert %{"read_limit" => %{count: 1}} = gaps(ctx)
+          "<item><title>Episode #{n}</title><guid>episode-#{n}</guid>" <>
+            "<pubDate>#{published} GMT</pubDate><description>#{notes}</description></item>"
+        end)
 
-      assert_received {:telemetry, [:fermix, :cue, :source], _m,
-                       %{phase: :gap, reason: "read_limit"}}
-
-      # Not a failure: the next poll comes at the interval.
-      poll_every_interval()
-    end
-
-    test "a gzip body that inflates past 4 MiB is a read_limit gap too", ctx do
-      body = :zlib.gzip(String.duplicate(" ", 5 * 1024 * 1024))
+      xml = ~s(<rss version="2.0"><channel><title>Harbour Hours</title>#{items}</channel></rss>)
+      assert byte_size(xml) > 4 * 1024 * 1024
 
       serve(ctx, %{
         status: 200,
-        body: body,
-        etag: "bomb",
+        body: :zlib.gzip(xml),
+        etag: "archive",
         headers: [{"content-encoding", "gzip"}],
         conditional?: true
       })
@@ -270,8 +264,127 @@ defmodule FermixCore.Cues.Source.FeedTest do
       {pid, first} = start_feed(ctx)
       fire(pid, first)
 
+      # The seven inside the receipt horizon become cues; the rest is skipped,
+      # neither a stale reject nor a gap.
+      assert cue_ids(ctx) == Enum.sort(Enum.map(1..7, &"episode-#{&1}"))
+      assert gaps(ctx) == %{}
+      row = source_row(ctx)
+      assert row.status == "polling"
+      assert row.reject_counts == %{}
+      assert Jason.decode!(row.cursor) == %{"etag" => "archive"}
+
+      assert_received {:telemetry, [:fermix, :cue, :source], %{skipped: 2_763},
+                       %{phase: :connect}}
+    end
+
+    test "120 fresh and 50 stale items make 100 cues and a page_limit gap of 20, nothing stale",
+         ctx do
+      fresh = for n <- 1..120, do: {"fresh-#{n}", "Fresh #{n}", DateTime.add(@now, -n, :minute)}
+      stale = for n <- 1..50, do: {"stale-#{n}", "Stale #{n}", DateTime.add(@now, -8 - n, :day)}
+      serve(ctx, feed(stale ++ fresh, "mixed"))
+
+      {pid, first} = start_feed(ctx)
+      fire(pid, first)
+
+      assert cue_ids(ctx) == Enum.sort(Enum.map(1..100, &"fresh-#{&1}"))
+      assert %{"page_limit" => gap} = gaps(ctx)
+      assert map_size(gaps(ctx)) == 1
+      assert gap.count == 20
+      assert gap.range_from == CuesSql.stamp(DateTime.add(@now, -120, :minute))
+      assert gap.range_to == CuesSql.stamp(DateTime.add(@now, -101, :minute))
+      assert source_row(ctx).reject_counts == %{}
+    end
+
+    test "a first read of stale and undated items keeps the undated as receipts, nothing stale",
+         ctx do
+      watcher = insert_watcher(ctx.conn, %{filter: "none", sources: [ctx.ref]})
+      items = [{"old", "Old", DateTime.add(@now, -30, :day)}, {"undated", "No date", nil}]
+      serve(ctx, feed(items, "v1"))
+
+      {pid, first} = start_feed(ctx)
+      fire(pid, first)
+
+      assert cue_ids(ctx) == ["undated"]
+      assert delivered(ctx, watcher) == []
+      assert gaps(ctx) == %{}
+      assert source_row(ctx).reject_counts == %{}
+    end
+
+    test "a download over 16 MiB stops the source as unavailable with a notice and a gap", ctx do
+      ref = ctx.ref
+      body = String.duplicate("x", 16 * 1024 * 1024 + 1)
+      serve(ctx, %{status: 200, body: body, etag: "big", headers: [], conditional?: true})
+
+      {pid, first} = start_feed(ctx)
+      monitor = Process.monitor(pid)
+      send(pid, first)
+
+      assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, @wait_ms
       assert cue_ids(ctx) == []
       assert %{"read_limit" => %{count: 1}} = gaps(ctx)
+      assert %{status: "unavailable", stop_reason: "too_large"} = source_row(ctx)
+      assert_received {:notice, ^ref, :too_large, %{}}
+
+      assert_received {:telemetry, [:fermix, :cue, :source], _m,
+                       %{phase: :gap, reason: "read_limit"}}
+
+      assert_received {:telemetry, [:fermix, :cue, :source], _m,
+                       %{phase: :stopped, status: "unavailable", reason: :read_limit}}
+    end
+
+    test "a gzip body that unpacks past the reader's limit stops it the same way", ctx do
+      ref = ctx.ref
+      body = :zlib.gzip("{" <> String.duplicate(" ", 5 * 1024 * 1024))
+
+      serve(ctx, %{
+        status: 200,
+        body: body,
+        etag: "bomb",
+        headers: [{"content-encoding", "gzip"}, {"content-type", "application/feed+json"}],
+        conditional?: true
+      })
+
+      {pid, first} = start_feed(ctx)
+      monitor = Process.monitor(pid)
+      send(pid, first)
+
+      assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, @wait_ms
+      assert %{"read_limit" => %{count: 1}} = gaps(ctx)
+      assert %{status: "unavailable", stop_reason: "too_large"} = source_row(ctx)
+      assert_received {:notice, ^ref, :too_large, %{}}
+    end
+
+    test "gzipped XML that unpacks past 32 MiB is past the read limit, not a gzip failure", ctx do
+      ref = ctx.ref
+      old = Calendar.strftime(DateTime.add(@now, -30, :day), "%a, %d %b %Y %H:%M:%S GMT")
+      notes = String.duplicate("tide ", 20_000)
+
+      # A few hundred long items past the horizon: Saxy reads past 32 MiB while
+      # the keeper only counts them.
+      item =
+        "<item><guid>old</guid><pubDate>#{old}</pubDate><description>#{notes}</description></item>"
+
+      count = div(33 * 1024 * 1024, byte_size(item))
+
+      xml =
+        ~s(<rss version="2.0"><channel><title>Old tides</title>) <>
+          String.duplicate(item, count) <> "</channel></rss>"
+
+      serve(ctx, %{
+        status: 200,
+        body: :zlib.gzip(xml),
+        etag: "deep",
+        headers: [{"content-encoding", "gzip"}],
+        conditional?: true
+      })
+
+      {pid, first} = start_feed(ctx)
+      monitor = Process.monitor(pid)
+      send(pid, first)
+
+      assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, @wait_ms
+      assert %{status: "unavailable", stop_reason: "too_large"} = source_row(ctx)
+      assert_received {:notice, ^ref, :too_large, %{}}
     end
 
     test "a 1,000-item page accepts 100 and records the rest as a page_limit gap with its range",

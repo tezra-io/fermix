@@ -745,20 +745,29 @@ defmodule FermixCore.Management.CopyTest do
 
     statuses = ~w(idle polling connected reconnecting auth_failed over_budget stopped unavailable)
 
-    facts = [
-      %{row: nil, running?: false, cues_on?: false, memory?: false},
-      %{row: nil, running?: false, cues_on?: false, memory?: true},
-      %{row: nil, running?: false, cues_on?: true, memory?: true},
-      %{row: nil, running?: true, cues_on?: true, memory?: true}
-      | Enum.map(statuses, fn status ->
+    facts =
+      [
+        %{row: nil, running?: false, cues_on?: false, memory?: false},
+        %{row: nil, running?: false, cues_on?: false, memory?: true},
+        %{row: nil, running?: false, cues_on?: true, memory?: true},
+        %{row: nil, running?: true, cues_on?: true, memory?: true}
+        | Enum.map(statuses, fn status ->
+            %{
+              row: %{status: status, last_accepted_at: ~U[2026-10-17 10:00:00Z]},
+              running?: true,
+              cues_on?: true,
+              memory?: true
+            }
+          end)
+      ] ++
+        [
           %{
-            row: %{status: status, last_accepted_at: ~U[2026-10-17 10:00:00Z]},
+            row: %{status: "unavailable", stop_reason: "too_large"},
             running?: true,
             cues_on?: true,
             memory?: true
           }
-        end)
-    ]
+        ]
 
     for source <- CuesConfig.sources(cues),
         variant <- [source, %{source | enabled?: false}],
