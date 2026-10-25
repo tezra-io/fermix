@@ -4,6 +4,7 @@ defmodule FermixWebWeb.SetupLiveTest do
   import Phoenix.LiveViewTest
 
   alias Fermix.CLI.Upgrade.Manifest
+  alias FermixCore.Auth.AnthropicLogin
   alias FermixCore.Auth.ChatGPT.Registration, as: ChatGPTRegistration
   alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.Store
@@ -57,7 +58,31 @@ defmodule FermixWebWeb.SetupLiveTest do
       {:ok, @entry}
     end
 
-    def claude_code_available?(_opts \\ []), do: true
+    def claude_code_present?(_opts \\ []), do: true
+  end
+
+  # The Claude Code import as the page meets it. Every call is reported to the
+  # test registered under this module's name; an import reports the process it
+  # runs in and answers only when that test sends `{:import_answer, answer}`
+  # (`:crash` raises), the way a read waiting on the keychain's prompt does. It
+  # has no reader beyond these, so a page that read the login to decide whether
+  # to offer it fails here.
+  defmodule ObservedAnthropicLogin do
+    def import_claude_code(_opts \\ []) do
+      report({:import_claude_code, self()})
+
+      receive do
+        {:import_answer, :crash} -> raise "the import stopped"
+        {:import_answer, answer} -> answer
+      end
+    end
+
+    def claude_code_present?(_opts \\ []) do
+      report(:claude_code_present?)
+      true
+    end
+
+    defp report(call), do: send(Process.whereis(__MODULE__), {:anthropic_login, call})
   end
 
   # The transport module double `Remote.Session` exposes: canned responses in
@@ -4142,6 +4167,98 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
   end
 
+  describe "Import Claude Code login" do
+    setup do
+      Application.put_env(:fermix_web, :anthropic_login_impl, ObservedAnthropicLogin)
+      Process.register(self(), ObservedAnthropicLogin)
+
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant", primary: true, default_model: "claude-opus-4-8"]
+      )
+
+      :ok = ConfigStore.save_snapshot(ConfigStore.current_snapshot())
+      :ok
+    end
+
+    # The read can wait on the login keychain's prompt for as long as the page's
+    # own push waits for a reply, and the browser reloads the page when that
+    # wait runs out, so the click must answer before the import does.
+    test "the click answers at once, and a prompt nobody answered shows its sentence", %{
+      conn: conn
+    } do
+      view = open_anthropic_oauth(conn)
+
+      html = render_click(view, "anthropic_import", %{})
+
+      assert html =~ "Importing Claude Code login"
+      assert_received {:anthropic_login, {:import_claude_code, importer}}
+
+      timeout = {:claude_code_import, :keychain_read_timeout}
+      send(importer, {:import_answer, {:error, timeout}})
+      html = render_async(view)
+
+      assert html =~ escaped(AnthropicLogin.failure_sentence(timeout))
+      refute html =~ "Importing Claude Code login"
+      refute_received {:anthropic_login, {:import_claude_code, _importer}}
+    end
+
+    test "a login the import read connects Anthropic when it answers", %{conn: conn} do
+      view = open_anthropic_oauth(conn)
+
+      render_click(view, "anthropic_import", %{})
+      assert_received {:anthropic_login, {:import_claude_code, importer}}
+
+      entry = %{
+        auth_mode: "claude_code_import",
+        provider: "anthropic",
+        tokens: %{access_token: "kc-imported", refresh_token: nil},
+        expires_at: nil,
+        last_refresh: nil,
+        status: "ready"
+      }
+
+      :ok = Store.write("anthropic_oauth", entry)
+      send(importer, {:import_answer, {:ok, entry}})
+
+      assert render_async(view) =~ "Anthropic OAuth connected"
+      assert provider_auth_mode(:anthropic) == :oauth
+    end
+
+    test "an import that stopped says so instead of leaving the page waiting", %{conn: conn} do
+      view = open_anthropic_oauth(conn)
+
+      render_click(view, "anthropic_import", %{})
+      assert_received {:anthropic_login, {:import_claude_code, importer}}
+      send(importer, {:import_answer, :crash})
+      html = render_async(view)
+
+      assert html =~ "The Claude Code import stopped before it answered"
+      refute html =~ "Importing Claude Code login"
+    end
+
+    test "no Claude Code login to import says so", %{conn: conn} do
+      view = open_anthropic_oauth(conn)
+
+      render_click(view, "anthropic_import", %{})
+      assert_received {:anthropic_login, {:import_claude_code, importer}}
+      absent = {:claude_code_import, :no_claude_code_credentials}
+      send(importer, {:import_answer, {:error, absent}})
+
+      assert render_async(view) =~ escaped(AnthropicLogin.failure_sentence(absent))
+    end
+
+    # A report runs on mount and after every save, in the page's own process,
+    # so it asks only whether a login exists, which reads no secret.
+    test "with Anthropic primary, the page asks whether a login exists and never reads it", %{
+      conn: conn
+    } do
+      {:ok, _view, _html} = live(conn, "/setup?tab=provider")
+
+      assert_received {:anthropic_login, :claude_code_present?}
+      refute_received {:anthropic_login, {:import_claude_code, _importer}}
+    end
+  end
+
   describe "primary provider cards" do
     setup do
       Application.put_env(:fermix_core, :providers,
@@ -6885,6 +7002,21 @@ defmodule FermixWebWeb.SetupLiveTest do
 
   # Installer copy is asserted verbatim, so the `<target>`/`<model>` placeholders
   # in it have to be compared in the form the template renders them.
+  # The provider pane with Anthropic's subscription sign-in open, where the
+  # Claude Code import button is.
+  defp open_anthropic_oauth(conn) do
+    {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+    view
+    |> form("form[phx-submit=\"save_provider\"]",
+      provider_form: %{provider: "anthropic", auth_mode: "oauth"}
+    )
+    |> render_change()
+
+    assert render(view) =~ "Import Claude Code login"
+    view
+  end
+
   defp escaped(message),
     do: message |> Phoenix.HTML.html_escape() |> Phoenix.HTML.safe_to_string()
 

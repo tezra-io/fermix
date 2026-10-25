@@ -11,6 +11,7 @@ defmodule FermixCore.Management.CopyTest do
 
   use ExUnit.Case, async: true
 
+  alias FermixCore.Auth.AnthropicLogin
   alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.Redaction
@@ -357,6 +358,22 @@ defmodule FermixCore.Management.CopyTest do
         assert_clean(ClientRejection.sentence(detail), :prose, names, "refusal #{where}")
         assert_clean(ClientRejection.grant_sentence(detail.provider), :prose, names, where)
         assert internal_terms(ClientRejection.sentence(detail)) == []
+      end
+    end
+  end
+
+  # A Claude Code import that failed answers the Mac app's `auth_import` job
+  # with one of these as its `failure.sentence`, verbatim. They are written in
+  # `Auth.AnthropicLogin`, outside the management tree the sweep below reads.
+  describe "the Claude Code import's failure sentences" do
+    test "every one obeys the rules" do
+      failures = AnthropicLogin.worded_failures()
+      assert failures != []
+
+      for failure <- failures do
+        sentence = AnthropicLogin.failure_sentence(failure)
+        assert_clean(sentence, :prose, [], "import failure #{inspect(failure)}")
+        assert internal_terms(sentence) == []
       end
     end
   end

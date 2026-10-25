@@ -228,12 +228,13 @@ defmodule FermixCore.Setup.SecretWriter do
   @spec attemptable?(verdict()) :: boolean()
   def attemptable?(%{state: state} = verdict), do: usable?(verdict) or state == :locked
 
-  # A write gives the operator time to answer the desktop's unlock prompt; a
-  # read never waits for one, because the reads that happen with nobody
-  # present (boot) are refused by the probe before they are tried.
+  # A write, and the read `fermix setup --migrate-secrets` makes of a secret it
+  # moves, give the operator time to answer the desktop's unlock prompt. A read
+  # with nobody present (boot) never waits for one: the probe refuses it before
+  # it is tried.
   @unlock_prompt_timeout_ms 120_000
 
-  @doc "How long a write waits for the operator to answer an unlock prompt."
+  @doc "How long a write, or a migration's read, waits for the operator to answer an unlock prompt."
   @spec unlock_prompt_timeout_ms() :: pos_integer()
   def unlock_prompt_timeout_ms, do: @unlock_prompt_timeout_ms
 

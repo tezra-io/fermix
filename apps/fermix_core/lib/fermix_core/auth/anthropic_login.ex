@@ -24,22 +24,71 @@ defmodule FermixCore.Auth.AnthropicLogin do
 
   alias FermixCore.Auth.Store
   alias FermixCore.CommandRunner
+  alias FermixCore.Management.Jobs
+  alias FermixCore.Setup.SecretWriter.MacOS
 
   require Logger
 
   @auth_profile Store.profile(:anthropic)
   @keychain_service "Claude Code-credentials"
+  # `-g` prints the item's attributes and one `password: ` line that says which
+  # form it printed, and `SecretWriter.MacOS.get_result/1` reads it byte for
+  # byte. `-w` prints a value holding any byte outside space to tilde as bare
+  # hex, which no reader can tell from a value made of hex digits.
+  @keychain_read ["find-generic-password", "-s", @keychain_service, "-g"]
+  # errSecItemNotFound: the keychain holds no Claude Code login.
+  @item_not_found_exit 44
+  # errSecAuthFailed (-25293) and errSecUserCanceled (-128), cut to their low
+  # byte: the allow prompt was denied, or cancelled.
+  @denied_exits [51, 128]
+  # errSecInteractionNotAllowed (-25308): there is no screen to show the
+  # prompt on, as over SSH.
+  @prompt_unavailable_exit 36
+  @login_failures [
+    :no_claude_code_credentials,
+    :claude_code_credentials_invalid,
+    :claude_code_credentials_expired
+  ]
+  @keychain_failures [
+    :keychain_read_denied,
+    :keychain_read_timeout,
+    :keychain_prompt_unavailable,
+    :unreadable_keychain_password,
+    :helper_output_too_large,
+    :missing_secret
+  ]
   # The presence probe's own bound. It is a metadata lookup, not a network call
   # and not a value read, so a second of wall clock is already generous.
   @presence_timeout_ms 2_000
   # Tokens this close to expiry are treated as expired (Hermes parity).
   @expiry_buffer_ms 60_000
 
+  @type keychain_answer :: {:ok, String.t()} | :error | {:error, term()}
+  @typedoc """
+  A failed import `failure_sentence/1` words, inside the import's own tag: the
+  keychain read's reasons are spelled like SecretWriter's, and only the tag
+  says one is Claude Code's. None holds a helper's output.
+  """
+  @type import_failure :: {:claude_code_import, import_reason()}
+  @type import_reason ::
+          :no_claude_code_credentials
+          | :claude_code_credentials_invalid
+          | :claude_code_credentials_expired
+          | :keychain_read_denied
+          | :keychain_read_timeout
+          | :keychain_prompt_unavailable
+          | :unreadable_keychain_password
+          | :helper_output_too_large
+          | :missing_secret
+          | {:keychain_read_failed, integer()}
   @type opts :: [
           credentials_path: Path.t(),
-          keychain_reader: (-> {:ok, String.t()} | :error),
+          keychain_reader: (-> keychain_answer()),
           keychain_present?: (-> boolean()),
           security_path: Path.t() | nil,
+          command_runner: (String.t(), [String.t()], keyword() ->
+                             {:ok, CommandRunner.result()} | {:error, term()}),
+          supervised: boolean(),
           fermix_path: Path.t()
         ]
 
@@ -66,30 +115,62 @@ defmodule FermixCore.Auth.AnthropicLogin do
     persist(entry, Keyword.get(opts, :fermix_path, Store.path()))
   end
 
-  @spec import_claude_code(opts()) :: {:ok, Store.entry()} | {:error, term()}
+  @doc """
+  Imports Claude Code's login. A failure to read or use it is
+  `{:claude_code_import, reason}`; one in persisting it (`:profile_busy`,
+  `{:persist_failed, reason}`) is the store's, untagged.
+  """
+  @spec import_claude_code(opts()) ::
+          {:ok, Store.entry()} | {:error, {:claude_code_import, term()} | term()}
   def import_claude_code(opts \\ []) when is_list(opts) do
     with {:ok, credentials} <- read_credentials(opts),
          {:ok, entry} <- to_entry(credentials) do
       persist(entry, Keyword.get(opts, :fermix_path, Store.path()))
+    else
+      {:error, reason} -> {:error, {:claude_code_import, reason}}
     end
   end
 
-  @spec claude_code_available?(opts()) :: boolean()
-  def claude_code_available?(opts \\ []) when is_list(opts) do
-    match?({:ok, _credentials}, read_credentials(opts))
+  @doc "Whether `reason` is an import failure `failure_sentence/1` words."
+  defguard is_import_failure(reason)
+           when is_tuple(reason) and tuple_size(reason) == 2 and
+                  elem(reason, 0) == :claude_code_import and
+                  (elem(reason, 1) in @login_failures or elem(reason, 1) in @keychain_failures or
+                     (is_tuple(elem(reason, 1)) and tuple_size(elem(reason, 1)) == 2 and
+                        elem(elem(reason, 1), 0) == :keychain_read_failed and
+                        is_integer(elem(elem(reason, 1), 1))))
+
+  @doc "Every failure `failure_sentence/1` words, one exit status standing for all."
+  @spec worded_failures() :: [import_failure()]
+  def worded_failures do
+    Enum.map(
+      @login_failures ++ @keychain_failures ++ [{:keychain_read_failed, 1}],
+      &{:claude_code_import, &1}
+    )
   end
+
+  @doc """
+  The sentence a person reads when an import failed, the same on every surface
+  that imports (the Mac app, the browser setup, `fermix auth login`). It names
+  the reason and never quotes the keychain tool, whose output can hold the
+  secret. A failure it does not word (a busy profile, a failed write, a runner
+  that could not start) is the caller's to word and log.
+  """
+  @spec failure_sentence(import_failure()) :: String.t()
+  def failure_sentence({:claude_code_import, reason} = failure) when is_import_failure(failure),
+    do: sentence(reason)
 
   @doc """
   Whether a Claude Code login exists on this machine, without reading it.
 
-  `claude_code_available?/1` answers the same question by reading the
-  credential, which on macOS means `security ... -w`: that returns the token
-  itself and raises the keychain allow dialog, so a daemon asking it blocks
-  until a human answers a modal about another app's secret. A detection row
-  needs presence, not the value, so this asks the keychain whether the item
-  exists (no `-w`, exit code only) under an explicit timeout, and otherwise
-  whether the credentials file is there — the same two stores, in the same
-  order, that `read_credentials/1` consults.
+  Reading the credential means `security ... -g` on macOS: that returns the
+  token itself and raises the keychain allow dialog, so a daemon asking it
+  blocks until a human answers a modal about another app's secret. A detection
+  row or a page deciding whether to offer the import needs presence, not the
+  value, so this asks the keychain whether the item exists (no `-g`, exit code
+  only) under an explicit timeout, and otherwise whether the credentials file
+  is there — the same two stores, in the same order, that `read_credentials/1`
+  consults.
   """
   @spec claude_code_present?(opts()) :: boolean()
   def claude_code_present?(opts \\ []) when is_list(opts) do
@@ -121,12 +202,15 @@ defmodule FermixCore.Auth.AnthropicLogin do
   end
 
   # Keychain first, then the credentials file — the Claude Code lookup order.
+  # The file answers only when the keychain holds no login; a keychain read
+  # that failed is reported, never answered from the other store.
   defp read_credentials(opts) do
-    keychain_reader = Keyword.get(opts, :keychain_reader, &default_keychain_read/0)
+    keychain_reader = Keyword.get(opts, :keychain_reader, fn -> read_keychain(opts) end)
 
     case keychain_reader.() do
       {:ok, json} -> parse_credentials(json)
       :error -> read_credentials_file(opts)
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -227,15 +311,101 @@ defmodule FermixCore.Auth.AnthropicLogin do
     end
   end
 
-  defp default_keychain_read do
-    with {:darwin, true} <- {:darwin, match?({:unix, :darwin}, :os.type())},
-         {output, 0} <-
-           System.cmd("security", ["find-generic-password", "-s", @keychain_service, "-w"],
-             stderr_to_stdout: true
-           ) do
-      {:ok, String.trim(output)}
-    else
-      _miss -> :error
+  # The item the presence probe asks about, read through the parser Fermix
+  # reads its own keychain items with, and on the same terms as that probe: no
+  # platform branch, the absolute `security`. Only an import reads it, which a
+  # person starts, and reading another app's item can raise the allow prompt,
+  # so the read waits for their answer: half the Mac app's import job budget
+  # (`Management.Jobs`), which leaves the job the other half to verify the
+  # login. The caller says whether a command host exists to run it (the
+  # tree-less CLI does not).
+  defp read_keychain(opts) do
+    case security_path(opts) do
+      nil ->
+        :error
+
+      security ->
+        run_opts =
+          [timeout_ms: div(Jobs.budget_ms(:auth_import), 2)] ++
+            Keyword.take(opts, [:supervised])
+
+        keychain_answer(command_runner(opts).(security, @keychain_read, run_opts))
+    end
+  end
+
+  defp keychain_answer({:ok, %{exit: 0, stdout: output, truncated?: false}}),
+    do: MacOS.get_result({:ok, output})
+
+  # What was read is the start of the answer, which can be the secret.
+  defp keychain_answer({:ok, %{truncated?: true}}), do: {:error, :helper_output_too_large}
+
+  defp keychain_answer({:ok, %{exit: @item_not_found_exit}}), do: :error
+
+  defp keychain_answer({:ok, %{exit: code}}) when code in @denied_exits,
+    do: {:error, :keychain_read_denied}
+
+  defp keychain_answer({:ok, %{exit: @prompt_unavailable_exit}}),
+    do: {:error, :keychain_prompt_unavailable}
+
+  # The status alone: what the tool printed beside it can hold the secret.
+  defp keychain_answer({:ok, %{exit: code}}), do: {:error, {:keychain_read_failed, code}}
+
+  defp keychain_answer({:error, {:timeout, _timeout_ms}}), do: {:error, :keychain_read_timeout}
+
+  defp keychain_answer({:error, reason}), do: {:error, {:keychain_runner_failed, reason}}
+
+  defp sentence(:no_claude_code_credentials),
+    do: "No Claude Code sign-in was found on this computer. Sign in to Claude Code, then import."
+
+  defp sentence(:claude_code_credentials_invalid),
+    do: "Claude Code's sign-in on this computer could not be read, so there was nothing to adopt."
+
+  defp sentence(:claude_code_credentials_expired) do
+    "Claude Code's sign-in on this computer has expired, so there was nothing to adopt. " <>
+      "Sign in to Claude Code again, then import."
+  end
+
+  defp sentence(:keychain_read_denied) do
+    "macOS did not let Fermix read Claude Code's sign-in from the login keychain. " <>
+      "Import again and allow access when macOS asks."
+  end
+
+  defp sentence(:keychain_read_timeout) do
+    "No one answered the login keychain prompt in time, so Claude Code's sign-in was " <>
+      "not read. Import again and answer the prompt."
+  end
+
+  defp sentence(:keychain_prompt_unavailable) do
+    "macOS can't show the login keychain prompt here (no screen session), so Claude " <>
+      "Code's sign-in was not read. Run the import from the Mac's own desktop."
+  end
+
+  defp sentence(:unreadable_keychain_password) do
+    "The login keychain answered in a form Fermix does not read, so Claude Code's sign-in " <>
+      "was not used."
+  end
+
+  defp sentence(:helper_output_too_large) do
+    "The login keychain answered with more than Fermix reads, so none of Claude Code's " <>
+      "sign-in was used."
+  end
+
+  defp sentence(:missing_secret),
+    do: "Claude Code's login keychain item is empty, so there was nothing to adopt."
+
+  defp sentence({:keychain_read_failed, code}) do
+    "The login keychain did not hand over Claude Code's sign-in (the keychain tool " <>
+      "exited #{code})."
+  end
+
+  defp command_runner(opts) do
+    case Keyword.get(opts, :command_runner, &CommandRunner.run/3) do
+      runner when is_function(runner, 3) ->
+        runner
+
+      other ->
+        raise ArgumentError,
+              ":command_runner must be a function of arity 3, got: #{inspect(other)}"
     end
   end
 end

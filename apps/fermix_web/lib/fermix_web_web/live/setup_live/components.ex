@@ -1141,8 +1141,15 @@ defmodule FermixWebWeb.SetupLive.Components do
       </label>
 
       <div :if={@anthropic_import_available?} class="mt-2">
-        <button type="button" class="btn btn-ghost btn-sm" phx-click="anthropic_import">
-          Import Claude Code login
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm"
+          phx-click="anthropic_import"
+          disabled={@anthropic_auth[:importing?]}
+        >
+          {if @anthropic_auth[:importing?],
+            do: "Importing Claude Code login…",
+            else: "Import Claude Code login"}
         </button>
       </div>
 

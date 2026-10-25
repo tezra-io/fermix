@@ -84,6 +84,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lookup commands use would still hand them that hex, so such a value is
   refused when you store it, with a sentence saying why. The rule holds on
   every platform, so Linux refuses these values too.
+- **Importing a Claude Code login on a Mac reads it exactly.** Fermix read
+  Claude Code's keychain item in a form that turns a line break or any
+  character outside plain ASCII into hex, so such a login was refused as
+  unreadable. The item is now read byte for byte, the way Fermix reads its own
+  secrets, and a keychain read that fails, such as one you deny, is reported
+  instead of being answered from `~/.claude/.credentials.json`: the Mac app,
+  browser setup and `fermix auth login` each say why, in the same words.
+  Browser setup also stopped reading the login, and raising the keychain's
+  prompt, every time it loaded while Anthropic was your provider; it now only
+  checks that one exists, and reads it when you choose to import it, without
+  reloading the page while the prompt waits for you.
 
 ### Security
 

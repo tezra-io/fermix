@@ -67,6 +67,9 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixWebWeb.SetupLive.CuesState
   alias FermixWebWeb.SetupLive.Phone
 
+  require AnthropicLogin
+  require Logger
+
   # Computer use is a core feature, not a plugin whose branding we receive, so its
   # card name + logo are owned here. The SVG is inlined as a data URI at compile
   # time (the same shape plugin logos render as); @external_resource recompiles
@@ -223,6 +226,7 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:chatgpt_auth_url, nil)
       |> assign(:chatgpt_notice?, false)
       |> assign(:chatgpt_signing_out?, false)
+      |> assign(:anthropic_importing?, false)
       |> assign(:plugin_auth_tasks, %{})
       |> assign(:plugin_auth_url, nil)
       |> assign(:plugin_install_tasks, %{})
@@ -366,11 +370,12 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
+  # One read: the import itself says when there is no login to import.
   def handle_event("anthropic_import", _params, socket) do
-    if anthropic_login_impl().claude_code_available?() do
-      {:noreply, connect_anthropic(socket, fn -> anthropic_login_impl().import_claude_code() end)}
+    if socket.assigns.anthropic_importing? do
+      {:noreply, socket}
     else
-      {:noreply, flash_error(socket, "No Claude Code login found to import.")}
+      {:noreply, start_anthropic_import(socket)}
     end
   end
 
@@ -1138,6 +1143,24 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, finish_chatgpt_logout(socket, {:error, reason})}
   end
 
+  def handle_async(:anthropic_import, {:ok, result}, socket) do
+    {:noreply, socket |> assign(:anthropic_importing?, false) |> connect_anthropic(result)}
+  end
+
+  # Only the exception's name reaches the log: a crash reason's stack can hold
+  # the arguments of the call it stopped in, and those can be the login.
+  def handle_async(:anthropic_import, {:exit, reason}, socket) do
+    Logger.error("setup: the Claude Code import stopped: #{exit_kind(reason)}")
+
+    {:noreply,
+     socket
+     |> assign(:anthropic_importing?, false)
+     |> flash_error(
+       "The Claude Code import stopped before it answered, so nothing was imported. " <>
+         "See the daemon log."
+     )}
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -1163,7 +1186,7 @@ defmodule FermixWebWeb.SetupLive do
           @chatgpt_signing_out?
         )
       }
-      anthropic_auth={@anthropic_auth}
+      anthropic_auth={Map.put(@anthropic_auth, :importing?, @anthropic_importing?)}
       anthropic_import_available?={@anthropic_import_available?}
       doctor_probe_running?={@doctor_probe_running?}
       provider_form={@provider_form}
@@ -3564,6 +3587,10 @@ defmodule FermixWebWeb.SetupLive do
   # nothing was spent: the flash says to retry rather than naming the reason.
   defp sign_in_failure(_label, :profile_busy), do: Store.busy_sentence()
 
+  # A Claude Code import's own failure, in the words every surface uses.
+  defp sign_in_failure("Anthropic", reason) when AnthropicLogin.is_import_failure(reason),
+    do: AnthropicLogin.failure_sentence(reason)
+
   defp sign_in_failure(label, reason),
     do: "#{label} sign-in failed: #{Redaction.format(reason)}"
 
@@ -4108,10 +4135,21 @@ defmodule FermixWebWeb.SetupLive do
   defp chatgpt_logout_outcome(socket, {:error, reason}),
     do: flash_error(socket, ChatGPT.failure_sentence(reason))
 
-  # --- Anthropic setup-token / Claude Code import (synchronous, no loopback) -
+  # --- Claude Code import (off the page's process, no loopback) --------------
 
-  defp connect_anthropic(socket, login_fun) do
-    with {:ok, _entry} <- login_fun.(),
+  # The read can wait on the login keychain's prompt for as long as a pushed
+  # event waits for its reply, and the browser reloads the page when that wait
+  # runs out, so the import answers the page through `handle_async/3`.
+  defp start_anthropic_import(socket) do
+    impl = anthropic_login_impl()
+
+    socket
+    |> assign(:anthropic_importing?, true)
+    |> start_async(:anthropic_import, fn -> impl.import_claude_code() end)
+  end
+
+  defp connect_anthropic(socket, login_result) do
+    with {:ok, _entry} <- login_result,
          {:ok, _report} <- Wizard.set_provider_auth_mode(:anthropic, :oauth) do
       socket
       |> assign(:restart_pending?, true)
@@ -4127,14 +4165,19 @@ defmodule FermixWebWeb.SetupLive do
 
   defp anthropic_auth_summary, do: oauth_profile_summary(Store.profile(:anthropic))
 
+  defp exit_kind({%{__exception__: true, __struct__: module}, _stacktrace}), do: inspect(module)
+  defp exit_kind(reason) when is_atom(reason), do: inspect(reason)
+  defp exit_kind(_reason), do: "an exit"
+
   defp anthropic_login_impl do
     Application.get_env(:fermix_web, :anthropic_login_impl, AnthropicLogin)
   end
 
-  # Probe only when Anthropic is the active provider — claude_code_available?
-  # can shell out (keychain), so it should not run on every render.
+  # Asked on every report (mount and each save) in this process, so it asks
+  # only whether a Claude Code login exists, which reads no secret and raises
+  # no keychain prompt, and only while Anthropic is the active provider.
   defp anthropic_import_available?(snapshot) do
-    current_provider(snapshot) == :anthropic and anthropic_login_impl().claude_code_available?()
+    current_provider(snapshot) == :anthropic and anthropic_login_impl().claude_code_present?()
   end
 
   # Shared connected/error read for the oauth profiles: a missing auth file or
