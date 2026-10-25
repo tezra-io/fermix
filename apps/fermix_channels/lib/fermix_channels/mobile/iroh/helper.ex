@@ -50,15 +50,21 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
   @stable_ms 60_000
   # `max_connections` is the rail's outer bound, and the contract's most: a
   # connection past it is refused before its handshake, so a stranger holding
-  # every one shuts a phone out before the bridge can make room for it. The
-  # helper closes a connection with no stream for 30 s, and the bridge a silent
-  # stream at its 10 s handshake deadline, so holding one takes a stream or a
-  # handshake every 40 s: about 26 a second for all 1,024, where 64 took under
-  # two. The helper cannot yet close a silent connection to make room for a new
-  # one; until it does (a fermix-iroh change and a pin bump), this raises the
-  # cost of shutting phones out and does not end it. Each connection costs the
-  # helper its QUIC state; unread bytes wait only on streams the bridge has not
-  # taken, which its 64-place backlog bounds.
+  # every one shuts a phone out before the bridge can make room for it. A
+  # stranger's connection that takes what the bridge writes holds a place for at
+  # most about 65 s (the contract's `limits.max_connections`): a 10 s handshake,
+  # 30 s before its first stream, that stream's 10 s handshake deadline at the
+  # bridge, 10 s for a stream opened as the `close` that deadline sends lands,
+  # and 5 s for the acknowledgement; 40 s if it opens no stream. Holding all
+  # 1,024 so takes about 16 new connections a second (26 without streams), where
+  # 64 took about one. One that gives its stream no flow-control credit holds
+  # its place for as long as it keeps the connection alive, so 1,024 such
+  # connections, opened once, hold every place. The helper cannot yet close a
+  # silent connection to make room for a new one; until it does (a fermix-iroh
+  # change and a pin bump), this raises the cost of shutting phones out and does
+  # not end it. Each connection costs the helper its QUIC state; unread bytes
+  # wait only on streams the bridge has not taken, which its 64-place backlog
+  # bounds.
   @limits %{
     max_connections: 1_024,
     max_streams_per_connection: 4,

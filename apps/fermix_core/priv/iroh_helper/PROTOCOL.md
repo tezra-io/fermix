@@ -135,14 +135,24 @@ helper                                   daemon
 - **`limits.max_connections`:** concurrent iroh connections, 1 to 1,024,
   handshaking ones included. A connection over the bound is refused before its
   handshake (iroh's `Incoming::refuse`), so it costs no key exchange, and
-  reported as `refused` `busy`. No connection holds a place for nothing: a
-  handshake not finished within **10 s** is dropped, a connection that has had
-  no stream for **30 s** is closed with code `0`, reason `idle`, the
-  connections of a peer whose session ended before `hello` or a pair request
-  are closed on the daemon's `close`, so opening stream after stream that fails
-  its handshake keeps no place, and once half the places are taken a new peer
-  whose address QUIC has not validated is sent a Retry first, so forged
-  packets never take one.
+  reported as `refused` `busy`. A connection holds its place for a bounded
+  time: a handshake not finished within **10 s** is dropped, a connection that
+  has had no stream for **30 s** is closed with code `0`, reason `idle`, and
+  the connections of a peer whose session ended before `hello` or a pair
+  request are closed on the daemon's `close`, so opening stream after stream
+  that fails its handshake keeps no place. Once half the places are taken, a
+  new peer whose address QUIC has not validated is sent a Retry first, so
+  forged packets never take one. Within those bounds an unauthenticated peer
+  that takes what the daemon writes holds a place for at most about 65 s: 10 s
+  of handshake, 30 s before its first stream, that stream's 10 s handshake
+  deadline at the daemon, 10 s more for a stream opened just before the
+  daemon's `close` lands, and 5 s waiting for the peer's acknowledgement (see
+  the `close` op); 40 s if it opens no stream. Holding every place so takes new
+  connections at a sustained rate, about 16 a second for 1,024 places, or 26 a
+  second without streams. Nothing yet bounds a peer that gives a stream no
+  flow-control credit: the daemon's last bytes on it are never sent, so the
+  stream never ends, and neither `idle` nor `close` closes its connection while
+  the peer keeps it alive.
 - **`limits.max_streams_per_connection`:** concurrent bidirectional streams on one
   connection, 1 to 16, applied as the connection's QUIC bidirectional stream
   credit: a peer past it waits for a stream to close; the helper neither sees
@@ -183,8 +193,11 @@ mobile protocol's iroh carrier frames, which the daemon parses and bounds
 
 - When the peer finishes its side of the stream, the helper shuts down the write
   half of the bridge connection; the daemon reads end of file.
-- When the daemon closes the bridge connection, the helper finishes its side of
-  the stream and stops reading it.
+- When the daemon closes the bridge connection, the helper sends the peer what
+  the daemon wrote, finishes its side of the stream and stops reading it, and
+  counts the stream as open until the peer acknowledges its last bytes, for at
+  most **5 s** once they are sent. Sending them waits on the peer's flow-control
+  credit, with no bound.
 - When the peer resets the stream, or the iroh connection is lost, the helper
   closes the bridge connection.
 - When the bridge socket cannot be reached, the helper resets the stream with

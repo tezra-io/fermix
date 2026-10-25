@@ -127,11 +127,15 @@ uint32be length | type | payload
   opens streams faster than that can still close it, until the helper can make
   room itself. A phone narrows that window by preparing its attestation before
   it dials (the challenge comes from the pairing link's secret), so that
-  `pair_request` follows the daemon's reply at once. A stream that finds every
-  place so held is refused before it reaches a session. A stream that got past
-  its handshake in the moment the daemon chose it to make room keeps its place
-  too, so the daemon serves one more than 64 for each such stream, until a
-  stream ends.
+  `pair_request` follows the daemon's reply at once. Only phones hold places
+  so, and a pairing window takes one `pair_request`, so strangers cannot fill
+  them, and a stranger's stream that gets a place ends its connection with its
+  session (above). A stream that finds every place so held is refused before it
+  reaches a session, so its connection is not ended with it: it stays open until
+  it has had no stream for 30 s, and a further stream refused the same way
+  starts that wait again. A stream that got past its handshake in the moment the
+  daemon chose it to make room keeps its place too, so the daemon serves one
+  more than 64 for each such stream, until a stream ends.
 - A pairing over the route is counted like any other (see *Noise modes and
   pairing*), with the phone's endpoint id as its source: an endpoint's fifth
   failure refuses that endpoint, and no failures from other endpoints refuse
@@ -507,8 +511,9 @@ palette), `media`, `streaming`, `turn_done` (true: every turn a request opened
 ends with `turn_done` or `turn_error`), `max_media_bytes`, the largest
 attachment the daemon takes, and `push[]`, the push services this daemon sends
 through, each once, empty when it pushes through none: `apns` while its APNs
-push runs, the only service there is. An iPhone offers notifications only
-when `apns` is listed; no service is listed for an Android phone. A daemon
+push runs, the only service there is. Every phone gets the same list, and a
+phone offers notifications only when its own platform's service is in it: an
+iPhone does when `apns` is listed, an Android phone never does. A daemon
 older than the list sends no `push`. A `hello_ack` with 16 numeric candidates and the whole
 command catalog fits one frame; one whose candidates are long MagicDNS names
 arrives as an `event_part` run.

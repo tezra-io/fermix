@@ -21,6 +21,16 @@ defmodule FermixChannels.Mobile.Iroh.Bridge do
   after its session got past its handshake stays, and the bridge serves one
   past its bound until a connection ends.
 
+  Only a phone gets past its handshake: one whose IK handshake proved a paired
+  phone's key, or the one pairing phone a window takes, whose request proved
+  the window's secret and its attestation and waits for the owner. A stranger
+  holds no place the bridge keeps, so it cannot fill the bridge, and each of
+  its streams the bridge admits runs a session that ends with a `close` for
+  its peer (`Session.terminate/2`), a stream closed to make room included. A
+  stream is turned away only while phones hold every place, and is closed
+  before its preamble is read: no session runs and no `close` is sent, so its
+  iroh connection lasts until the helper's own bounds end it.
+
   The rail's outer bound is the helper's own: it takes 1,024 iroh connections
   (`Iroh.Helper.limits/0`) and refuses one past them before its handshake,
   where nothing here can make room. Making that cap far larger than this
@@ -234,6 +244,8 @@ defmodule FermixChannels.Mobile.Iroh.Bridge do
     %{state | connections: connections, made_room: count}
   end
 
+  # Every place holds a phone's session. The stream gets no session, so its
+  # peer gets no `close`: the helper's own bounds end its connection.
   defp refuse(socket, state) do
     count = state.refused + 1
     :ok = warn_full(count, "refused", "with every session past its handshake")
