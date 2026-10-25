@@ -13,7 +13,7 @@ description: >
 
   IMPORTANT — how to run this honestly:
    * Run it SEPARATELY, never as part of `make capability`:
-       EVAL_JUDGE_BACKEND=openai EVAL_JUDGE_API_KEY=sk-... \
+       ANTHROPIC_API_KEY=sk-ant-... \
          uv run bin/run_capability.py --suite cap_response_quality --judge --trials 3
    * Use an INDEPENDENT judge (a model NOT under test) — a model judging its own family
      self-prefers. Never let the daemon's own model grade this.

@@ -105,7 +105,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.changed == 'true'
     uses: ./.github/workflows/eval-box.yml
-    # The regression tier's judge is OpenAI's, on the OPENAI_API_KEY secret, and it
+    # The regression tier's judge is Claude's, on the ANTHROPIC_API_KEY secret, and it
     # delegates nothing to Claude Code, so it needs no Workload Identity Federation
     # sign-in and this job grants no id-token: write; eval-box inherits its
     # caller's token.

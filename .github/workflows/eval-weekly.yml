@@ -25,7 +25,8 @@ jobs:
     uses: ./.github/workflows/eval-box.yml
     # The capability tier signs Claude Code (its delegated coding tasks) in through
     # Workload Identity Federation, so this job grants id-token: write; eval-box
-    # inherits its caller's token. Its judge is OpenAI's, on an API key.
+    # inherits its caller's token. Its judge is Claude's, on the ANTHROPIC_API_KEY
+    # secret.
     permissions:
       contents: read
       id-token: write

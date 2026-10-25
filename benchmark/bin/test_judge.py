@@ -839,6 +839,18 @@ def test_the_preflight_refuses_another_credential_source(preflight, sdk):
     assert "ANTHROPIC_API_KEY" in r.output and PROFILE_SOURCE in r.output
 
 
+def test_the_preflight_proves_the_api_key_source_the_eval_box_expects(preflight, sdk):
+    # The eval box holds ANTHROPIC_API_KEY on its judged steps and requires the judge
+    # to answer through it, not through a profile the capability tier wrote for
+    # Claude Code.
+    sdk.credentials, sdk.api_key = None, "invented-key"
+    r = preflight(_message(model="claude-haiku-5-5"), expect="ANTHROPIC_API_KEY",
+                  model="claude-haiku-5-5")
+    assert r.status == 0, r.output
+    assert "judge anthropic/claude-haiku-5-5 answered through ANTHROPIC_API_KEY" in r.output
+    assert "invented-key" not in r.output
+
+
 def test_the_preflight_refuses_another_served_model(preflight):
     r = preflight(_message(model="claude-opus-5"))
     assert r.status == 1

@@ -24,11 +24,9 @@ on:
         type: string
         default: claude-opus-5-5
     secrets:
-      # The candidate daemon's provider key (Anthropic).
+      # The candidate daemon's provider key (Anthropic); the judged tiers' Claude
+      # judge reads the same key through its SDK.
       ANTHROPIC_API_KEY:
-        required: true
-      # The judge's key: the judged tiers' OpenAI judge reads it as EVAL_JUDGE_API_KEY.
-      OPENAI_API_KEY:
         required: true
       FERMIX_OPIK_API_KEY:
         required: true
@@ -65,7 +63,7 @@ on:
 # No `permissions` here or on the job: the box inherits its caller's token, so only
 # the job that runs the capability tier (eval-weekly's) grants id-token: write, for
 # the Workload Identity Federation sign-in its Claude Code needs. The judge needs
-# none (it is OpenAI's, on an API key), so the regression and dangerous tiers never
+# none (it is Claude's, on an API key), so the regression and dangerous tiers never
 # hold the right to mint GitHub OIDC tokens. A direct dispatch gets the
 # repository's default token, which must stay read-only (Settings > Actions >
 # General > Workflow permissions; read-only as of 2026-10-13), and the sign-in step
@@ -151,16 +149,18 @@ jobs:
       - name: Fetch deps
         run: mix deps.get
 
-      # Every JUDGED tier (regression, capability) grades replies with the OpenAI
-      # judge on gpt-6-luna (`judge:` in behavioral_config.yaml and config.yaml;
-      # benchmark/bin/evallib/judge.py). It reads its key from EVAL_JUDGE_API_KEY,
-      # which this step and the judged tier steps feed from the OPENAI_API_KEY
-      # repository secret; the daemon under test never holds it.
+      # Every JUDGED tier (regression, capability) grades replies with the Claude
+      # judge on claude-haiku-5-5 (`judge:` in behavioral_config.yaml and
+      # config.yaml; benchmark/bin/evallib/judge.py). Its SDK reads ANTHROPIC_API_KEY,
+      # which this step and the judged tier steps hold from the ANTHROPIC_API_KEY
+      # repository secret: the candidate daemon runs on the same key, so one
+      # provider-side spend cap bounds both.
       #
       # The preflight is one real verdict on a canned case through the judge's own
       # code (bin/judge_preflight.py) with the judge settings the tier's runner
-      # loads, before anything else is spent: the configured model must answer, and
-      # a judge on the candidate's model is refused before any call. It costs a
+      # loads, before anything else is spent: the configured model must answer
+      # through the secret (--expect-source; never a profile on the box), and a
+      # judge on the candidate's model is refused before any call. It costs a
       # fraction of a cent per run.
       - name: Prove the judge answers (judged tiers)
         id: judge_preflight
@@ -170,15 +170,16 @@ jobs:
           # run_eval.py (regression) loads behavioral_config.yaml; run_capability.py
           # (capability) loads config.yaml.
           JUDGE_CONFIG: ${{ inputs.tier == 'regression' && 'behavioral_config.yaml' || 'config.yaml' }}
-          EVAL_JUDGE_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           set -euo pipefail
           fail() { echo "::error::$*"; exit 1; }
-          if [ -z "${EVAL_JUDGE_API_KEY:-}" ]; then
-            fail "The repository secret OPENAI_API_KEY is empty: the $TIER tier's judge (the openai backend in benchmark/$JUDGE_CONFIG) reads it as EVAL_JUDGE_API_KEY. Set it under Settings > Secrets and variables > Actions > Secrets."
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            fail "The repository secret ANTHROPIC_API_KEY is empty: the $TIER tier's judge (the anthropic backend in benchmark/$JUDGE_CONFIG) reads it, as does the daemon under test. Set it under Settings > Secrets and variables > Actions > Secrets."
           fi
           if ! preflight="$(uv run bin/judge_preflight.py --config "$JUDGE_CONFIG" \
-                              --candidate-model "$CANDIDATE_MODEL" 2>&1)"; then
+                              --candidate-model "$CANDIDATE_MODEL" \
+                              --expect-source ANTHROPIC_API_KEY 2>&1)"; then
             fail "The judge preflight failed: $(printf '%s' "$preflight" | tail -n 3 | tr '\n' ' ')"
           fi
           printf '%s\n' "$preflight"
@@ -427,8 +428,8 @@ jobs:
       - name: Seed the disposable home and boot the daemon
         env:
           # The candidate's provider key: the daemon reads it at boot
-          # (config/runtime.exs) and nothing writes it to disk. The judge's
-          # OPENAI_API_KEY is not here, so nothing the daemon runs can spend it.
+          # (config/runtime.exs) and nothing writes it to disk. The judge's steps
+          # hold the same key; no other provider's key is here.
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           FERMIX_CAP_HOME: ${{ env.EVAL_HOME }}
           FERMIX_CAP_PROJECT: ${{ env.OPIK_PROJECT }}
@@ -477,7 +478,7 @@ jobs:
           FERMIX_EVAL_HOME: ${{ env.EVAL_HOME }}
           OPIK_API_KEY: ${{ secrets.FERMIX_OPIK_API_KEY }}
           OPIK_WORKSPACE: ${{ secrets.FERMIX_OPIK_WORKSPACE }}
-          EVAL_JUDGE_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           set -euo pipefail
           uv run bin/run_eval.py --check --judge
@@ -530,7 +531,7 @@ jobs:
           FERMIX_EVAL_HOME: ${{ env.EVAL_HOME }}
           OPIK_API_KEY: ${{ secrets.FERMIX_OPIK_API_KEY }}
           OPIK_WORKSPACE: ${{ secrets.FERMIX_OPIK_WORKSPACE }}
-          EVAL_JUDGE_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           set -euo pipefail
           # tier.sh, not make: the judged axis publishes its runner's code too.

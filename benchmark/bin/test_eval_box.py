@@ -7,11 +7,12 @@
 `.github/workflows/eval-box.yml`.
 
 The daemon under test runs on Anthropic's provider (the `model` input, at the
-job's CANDIDATE_REASONING_EFFORT) with the ANTHROPIC_API_KEY secret, which only
-the boot step holds. Every JUDGED tier (regression, capability) grades replies with
-the OpenAI judge, whose EVAL_JUDGE_API_KEY comes from the OPENAI_API_KEY secret on
-the judged steps only; one step proves it with a real verdict before anything else
-is spent. The capability tier's coding-harness tasks (suites/capability/harness.yaml)
+job's CANDIDATE_REASONING_EFFORT) with the ANTHROPIC_API_KEY secret, which the boot
+step and the judged steps hold. Every JUDGED tier (regression, capability) grades
+replies with the Claude judge, whose SDK reads that same key on the judged steps
+only (the preflight, the regression tier, the capability tier's judged axis); one
+step proves it with a real verdict before anything else is spent. The capability
+tier's coding-harness tasks (suites/capability/harness.yaml)
 delegate to Claude Code, which signs in through Workload Identity Federation: one
 step writes an `oidc_federation` profile fed by this job's GitHub OIDC token and
 starts a background loop that keeps the token fresh, and a second installs a
@@ -55,10 +56,9 @@ JUDGED_IF = "inputs.tier == 'regression' || inputs.tier == 'capability'"
 CAPABILITY_IF = "inputs.tier == 'capability'"
 CANDIDATE = "claude-opus-5-5"
 ANTHROPIC_SECRET = "${{ secrets.ANTHROPIC_API_KEY }}"
-OPENAI_SECRET = "${{ secrets.OPENAI_API_KEY }}"
-# Invented keys: they may reach a step's environment, never its output.
+JUDGE = "claude-haiku-5-5"
+# An invented key: it may reach a step's environment, never its output.
 INVENTED_ANTHROPIC_KEY = "invented-anthropic-key-8d2f"
-INVENTED_OPENAI_KEY = "invented-openai-key-3b7c"
 # The judge settings each judged tier's runner loads.
 JUDGE_CONFIGS = {"regression": "behavioral_config.yaml", "capability": "config.yaml"}
 REQUIRED_VARS = ("ANTHROPIC_EVAL_ORGANIZATION_ID", "ANTHROPIC_EVAL_SERVICE_ACCOUNT_ID",
@@ -194,9 +194,10 @@ def test_the_preflight_loads_the_judge_settings_of_the_tiers_runner(judge_step):
     assert judge_step["working-directory"] == "benchmark"
     run = judge_step["run"]
     assert 'uv run bin/judge_preflight.py --config "$JUDGE_CONFIG"' in run
-    # The preflight refuses a judge on the candidate's model before any call.
+    # The preflight refuses a judge on the candidate's model before any call, and
+    # the judge must answer through the secret, never through a profile on the box.
     assert '--candidate-model "$CANDIDATE_MODEL"' in run
-    assert "--expect-source" not in run
+    assert "--expect-source ANTHROPIC_API_KEY" in run
 
 
 def test_the_candidate_is_anthropic_opus_at_medium_effort(workflow, seed_step):
@@ -223,11 +224,13 @@ def test_the_federation_ids_come_from_repository_variables(steps, wif_step, clau
     assert others == []
 
 
-def test_the_declared_secrets_are_the_candidates_the_judges_and_opiks(workflow):
+def test_the_declared_secrets_are_the_shared_anthropic_key_and_opiks(workflow):
+    # One Anthropic key serves the candidate daemon and the judge; the retired
+    # OpenAI judge secret is declared nowhere.
     # PyYAML reads the bare key `on` as the boolean True.
     declared = workflow[True]["workflow_call"]["secrets"]
-    assert set(declared) == {"ANTHROPIC_API_KEY", "OPENAI_API_KEY",
-                             "FERMIX_OPIK_API_KEY", "FERMIX_OPIK_WORKSPACE"}
+    assert set(declared) == {"ANTHROPIC_API_KEY", "FERMIX_OPIK_API_KEY",
+                             "FERMIX_OPIK_WORKSPACE"}
     assert all(spec["required"] is True for spec in declared.values())
 
 
@@ -235,21 +238,25 @@ def _steps_naming(steps, needle):
     return [s for s in steps if needle in yaml.safe_dump(s)]
 
 
-def test_the_candidate_key_reaches_the_daemon_boot_only(steps, seed_step):
-    assert _steps_naming(steps, "secrets.ANTHROPIC_API_KEY") == [seed_step]
-    assert seed_step["env"]["ANTHROPIC_API_KEY"] == ANTHROPIC_SECRET
-    # The daemon never holds the judge's key, so it can neither spend it nor fail
-    # a turn over to OpenAI.
-    assert not any("OPENAI" in name or "JUDGE" in name for name in seed_step["env"])
+def test_the_anthropic_key_reaches_the_boot_and_the_judged_steps_only(steps, seed_step):
+    holders = _steps_naming(steps, "secrets.ANTHROPIC_API_KEY")
+    judged = [_step_by_id(steps, step_id)
+              for step_id in ("judge_preflight", "regression", "capability_judged")]
+    assert holders == sorted([*judged, seed_step], key=steps.index)
+    for step in holders:
+        assert step["env"]["ANTHROPIC_API_KEY"] == ANTHROPIC_SECRET, step.get("id")
+    # The daemon holds no other provider's key (Opik's is the exporter's, not a
+    # model's), so it can neither spend one nor fail a turn over to another provider.
+    provider_keys = [n for n in seed_step["env"] if n.endswith("_API_KEY") and "OPIK" not in n]
+    assert provider_keys == ["ANTHROPIC_API_KEY"]
 
 
-def test_the_judge_key_is_the_openai_secret_on_the_judged_steps_only(steps):
-    judged = [s for s in steps if "EVAL_JUDGE_API_KEY" in s.get("env", {})]
-    assert [s["id"] for s in judged] == ["judge_preflight", "regression",
-                                         "capability_judged"]
-    for step in judged:
-        assert step["env"]["EVAL_JUDGE_API_KEY"] == OPENAI_SECRET, step["id"]
-    assert _steps_naming(steps, "secrets.OPENAI_API_KEY") == judged
+def test_no_step_reads_the_retired_openai_judge_key(steps):
+    for step in steps:
+        names = list(step.get("env", {}))
+        assert "EVAL_JUDGE_API_KEY" not in names, step.get("id")
+        assert not any("OPENAI" in name for name in names), step.get("id")
+    assert _steps_naming(steps, "secrets.OPENAI_API_KEY") == []
 
 
 def test_no_other_api_key_path_remains():
@@ -258,7 +265,8 @@ def test_no_other_api_key_path_remains():
         code = "\n".join(ln for ln in path.read_text(encoding="utf-8").splitlines()
                          if not ln.lstrip().startswith("#"))
         for name in ("EVAL_CODEX_API_KEY", "EVAL_ANTHROPIC_API_KEY",
-                     "secrets.EVAL_JUDGE_API_KEY", "apiKeyHelper"):
+                     "secrets.EVAL_JUDGE_API_KEY", "secrets.OPENAI_API_KEY",
+                     "EVAL_JUDGE_API_KEY", "apiKeyHelper"):
             assert name not in code, (path.name, name)
 
 
@@ -432,17 +440,17 @@ UV_STUB = """#!/bin/sh
 . "$(dirname "$0")/stub.env"
 printf '%s\\n' "$*" >> "$STUB_UV_LOG"
 case "$*" in
-  "run bin/judge_preflight.py --config "*" --candidate-model "*) ;;
+  "run bin/judge_preflight.py --config "*" --candidate-model "*" --expect-source ANTHROPIC_API_KEY") ;;
   *) echo "unexpected uv call: $*" >&2; exit 64 ;;
 esac
-if [ -n "${EVAL_JUDGE_API_KEY:-}" ]; then echo "key=set" >> "$STUB_UV_LOG"
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then echo "key=set" >> "$STUB_UV_LOG"
 else echo "key=unset" >> "$STUB_UV_LOG"; fi
 if [ -e "$STUB_JUDGE_FAIL" ]; then
   echo "Installed 18 packages in 40ms"
-  echo "the judge did not answer: openai judge error: HTTP Error 404: Not Found"
+  echo "the judge did not answer: anthropic judge API error (HTTP 401, authentication_error): invalid x-api-key [request req_invented]"
   exit 1
 fi
-echo "judge openai/gpt-6-luna answered through EVAL_JUDGE_API_KEY: pass (310 input / 41 output tokens)"
+echo "judge anthropic/claude-haiku-5-5 answered through ANTHROPIC_API_KEY: pass (310 input / 41 output tokens)"
 """
 
 # Stands in for benchmark/bin/capability-daemon.sh: records how the boot step called
@@ -482,8 +490,7 @@ def _claude_binary(path: Path, spent: Path, *, auth=AUTH_FROM_PROFILE, call=None
 def _run_steps(workflow, run_steps, root: Path, *, tier="capability", binary=None,
                sha=None, arch="x86_64", vars_=None, oidc=True, oidc_fails=False,
                oidc_slow="", judge_fails=False, refresh_seconds="30", refresh_max="200",
-               rotation_wait=None, judge_key=INVENTED_OPENAI_KEY,
-               anthropic_key=INVENTED_ANTHROPIC_KEY):
+               rotation_wait=None, anthropic_key=INVENTED_ANTHROPIC_KEY):
     """Executes the given steps' shell in order, the way the runner would, sharing
     one HOME, RUNNER_TEMP and GITHUB_PATH; stops at the first step that fails."""
     root.mkdir()
@@ -529,7 +536,7 @@ def _run_steps(workflow, run_steps, root: Path, *, tier="capability", binary=Non
     overrides = {**(VAR_VALUES if vars_ is None else vars_),
                  "CLAUDE_CODE_SHA256": sha or binary_sha,
                  "WIF_REFRESH_SECONDS": refresh_seconds, "WIF_REFRESH_MAX": refresh_max,
-                 "EVAL_JUDGE_API_KEY": judge_key, "ANTHROPIC_API_KEY": anthropic_key}
+                 "ANTHROPIC_API_KEY": anthropic_key}
     output, status = "", 0
     for step in run_steps:
         env = {**base, **{k: str(v) for k, v in step.get("env", {}).items()}}
@@ -843,17 +850,19 @@ def test_the_judge_preflight_proves_the_judge_before_anything_is_spent(run_box, 
     r = run_box(steps=[judge_step], tier=tier)
     assert r.status == 0, r.output
     assert r.uv_calls == [f"run bin/judge_preflight.py --config {JUDGE_CONFIGS[tier]} "
-                          f"--candidate-model {CANDIDATE}", "key=set"]
-    assert "judge openai/gpt-6-luna answered through EVAL_JUDGE_API_KEY" in r.output
-    assert INVENTED_OPENAI_KEY not in r.output
+                          f"--candidate-model {CANDIDATE} --expect-source ANTHROPIC_API_KEY",
+                          "key=set"]
+    assert f"judge anthropic/{JUDGE} answered through ANTHROPIC_API_KEY" in r.output
+    assert INVENTED_ANTHROPIC_KEY not in r.output
     assert r.urls == [] and r.daemon == []
 
 
-def test_an_empty_openai_secret_stops_a_judged_tier_with_a_sentence(run_box, judge_step):
-    r = run_box(steps=[judge_step], tier="regression", judge_key="")
+def test_an_empty_anthropic_secret_stops_a_judged_tier_before_the_preflight(run_box,
+                                                                            judge_step):
+    r = run_box(steps=[judge_step], tier="regression", anthropic_key="")
     assert r.status != 0
     errors = _error_lines(r.output)
-    assert any("OPENAI_API_KEY is empty" in ln and "EVAL_JUDGE_API_KEY" in ln
+    assert any("ANTHROPIC_API_KEY is empty" in ln and "anthropic backend" in ln
                and "behavioral_config.yaml" in ln for ln in errors), r.output
     assert r.uv_calls == []
 
@@ -862,7 +871,7 @@ def test_a_judge_whose_preflight_fails_stops_the_tier(run_box, judge_step):
     r = run_box(steps=[judge_step], tier="regression", judge_fails=True)
     assert r.status != 0
     errors = _error_lines(r.output)
-    assert any("judge preflight failed" in ln and "HTTP Error 404" in ln
+    assert any("judge preflight failed" in ln and "HTTP 401" in ln
                for ln in errors), r.output
 
 
@@ -874,7 +883,8 @@ def test_the_daemon_boots_on_the_anthropic_candidate_at_medium_effort(run_box, s
     assert r.daemon[:2] == ["argv=up",
                             f"seed_args=--provider anthropic --model {CANDIDATE} "
                             f"--reasoning-effort medium --allow-root {r.home.parent}/workspace"]
-    # The candidate's key, and nothing the judge or the OIDC exchange holds.
+    # The candidate's key, which the judge's own steps share; nothing of the OIDC
+    # exchange and no other provider's key.
     assert r.daemon[2:] == ["ANTHROPIC_API_KEY=set", "OPENAI_API_KEY=unset",
                             "EVAL_JUDGE_API_KEY=unset",
                             "ACTIONS_ID_TOKEN_REQUEST_TOKEN=unset"]

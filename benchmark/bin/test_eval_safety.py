@@ -653,7 +653,8 @@ def test_anthropic_judge_requires_a_model(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("name", ["config.yaml", "behavioral_config.yaml"])
-def test_both_runner_configs_judge_with_openai_away_from_the_candidate(monkeypatch, name):
+def test_both_runner_configs_judge_with_claude_haiku_away_from_the_candidate(monkeypatch,
+                                                                             name):
     # run_eval.py loads behavioral_config.yaml and run_capability.py config.yaml;
     # both tiers use the same judge, and it must never be the candidate the eval
     # box runs (eval-box.yml's `model` input default).
@@ -661,7 +662,7 @@ def test_both_runner_configs_judge_with_openai_away_from_the_candidate(monkeypat
     monkeypatch.delenv("EVAL_JUDGE_MODEL", raising=False)
     skill_dir = os.path.dirname(HERE)
     cfg = config.load(skill_dir, os.path.join(skill_dir, name))
-    assert (cfg.judge.backend, cfg.judge.model) == ("openai", "gpt-6-luna")
+    assert (cfg.judge.backend, cfg.judge.model) == ("anthropic", "claude-haiku-5-5")
     workflow = pathlib.Path(skill_dir).parent / ".github" / "workflows" / "eval-box.yml"
     # The scheduled tiers (workflow_call) and a direct dispatch run one candidate.
     # PyYAML reads the bare key `on` as the boolean True.
@@ -739,8 +740,8 @@ def test_behavioral_config_defaults_to_the_dev_daemon(monkeypatch):
     cfg = config.load(os.path.dirname(HERE), config_path)
     assert cfg.daemon.fermix_home == os.path.expanduser("~/.fermix-dev")
     assert cfg.opik.project == "fermix-dev"
-    assert cfg.judge.backend == "openai"
-    assert cfg.judge.model == "gpt-6-luna"
+    assert cfg.judge.backend == "anthropic"
+    assert cfg.judge.model == "claude-haiku-5-5"
 
 
 def test_daemon_sandbox_requires_strict_eval_scoped_workspace(tmp_path):

@@ -265,11 +265,11 @@ the `query` shorthand; multi-turn uses `turns`.
   and, as a reference fact, the current-date note the daemon put in front of
   each turn, so a weekday or date the model derived from it is not graded as
   invented.
-  The judge is the **external OpenAI API**, called directly by the harness — there
-  is no in-daemon judge. `judge.backend` in this benchmark's config takes exactly
-  two values, `openai` and `none`; the model is `judge.model`, and actual candidate
-  and judge model equality is refused. Ordinary agent turns are never used as
-  judges.
+  The judge is an **external API**, called directly by the harness — there is no
+  in-daemon judge. `judge.backend` in this benchmark's config takes exactly three
+  values, `anthropic` (the configured one: the Claude API through the official
+  SDK), `openai` and `none`; the model is `judge.model`, and actual candidate and
+  judge model equality is refused. Ordinary agent turns are never used as judges.
   A rubric is **numbered** when it lists its requirements on lines starting
   `1. `, `2. `, … (use a `|` block so the lines survive YAML folding). The judge
   then decides each requirement (`met` and a one-sentence `why`) and the harness

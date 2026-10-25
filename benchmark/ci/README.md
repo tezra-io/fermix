@@ -6,7 +6,7 @@ box anatomy; thin callers own cadence:
 
 | Tier | What runs | Where | When |
 |---|---|---|---|
-| T1 regression | `run_eval.py --check --judge` → `make dry` → `bin/tier.sh regression` (host-safe-core; the candidate is Claude Opus 5.5 at medium effort, judged by OpenAI's gpt-6-luna) | `eval-nightly.yml` → eval-box | nightly 07:17 UTC |
+| T1 regression | `run_eval.py --check --judge` → `make dry` → `bin/tier.sh regression` (host-safe-core; the candidate is Claude Opus 5.5 at medium effort, judged by Claude Haiku 5.5 on the same Anthropic key) | `eval-nightly.yml` → eval-box | nightly 07:17 UTC |
 | T3 macOS smoke | `macos_smoke.sh` — ungraded daemon boot/converse/trace/refuse on a clean Mac, on the box's candidate | `eval-nightly.yml` (macos-15 job) | nightly |
 | T2a capability | `make check` / `make estimate` then `bin/tier.sh capability` and `bin/tier.sh capability-judged` (deterministic composite, 27 tasks / 140 turns at k=5 including the `cap_untrusted_content` safety pack, with a pinned Claude Code CLI on Claude Haiku 5.5, signed in through Workload Identity Federation, for the delegated coding tasks + the judged response-quality axis, which has no release verdict), each publishing its runner's exit code | `eval-weekly.yml` → eval-box | weekly Sat 06:23 UTC |
 | T2b dangerous | `sandbox_verify` named scenario, destructive profile | `eval-weekly.yml` → eval-box, after T2a | weekly; red files a critical issue |
@@ -91,17 +91,19 @@ and recorded"* about a sweep that never happened.
    adapter sends as `output_config.effort`; no keychain, no auth.json in the
    eval home — the daemon reads `ANTHROPIC_API_KEY` from its environment at
    boot, and the boot step fails with a sentence when that secret is empty. The
-   daemon never holds the judge's `OPENAI_API_KEY`.
+   judge runs on the same key from its own steps; the daemon holds no other
+   provider's key.
 3. Judged tiers only (regression, capability), before anything else is spent:
-   the judge preflight. The judge is OpenAI's `gpt-6-luna` (`judge:` in
-   `config.yaml` and `behavioral_config.yaml`), on `EVAL_JUDGE_API_KEY`, which
-   this step and the judged tier steps feed from the `OPENAI_API_KEY` secret.
-   `bin/judge_preflight.py` (a fraction of a cent) refuses a judge on the
-   candidate's model before any call, then sends one real verdict through the
-   judge's own code with the judge settings the tier's runner loads and
-   requires the configured model to answer. An empty secret or a failed
-   preflight fails the tier: an unusable judge would leave every judged case
-   INCOMPLETE.
+   the judge preflight. The judge is Claude Haiku 5.5 (`judge:` in
+   `config.yaml` and `behavioral_config.yaml`) through the official SDK, which
+   reads `ANTHROPIC_API_KEY`; this step and the judged tier steps hold the
+   `ANTHROPIC_API_KEY` secret. `bin/judge_preflight.py` (a fraction of a cent)
+   refuses a judge on the candidate's model before any call, then sends one
+   real verdict through the judge's own code with the judge settings the
+   tier's runner loads and requires the configured model to answer through the
+   secret (`--expect-source ANTHROPIC_API_KEY`), never through a profile on the
+   box. An empty secret or a failed preflight fails the tier: an unusable judge
+   would leave every judged case INCOMPLETE.
 
    Capability tier only: the Anthropic sign-in for Claude Code, which signs in
    through Workload Identity Federation and no API key. An `oidc_federation`
@@ -147,12 +149,12 @@ strict preflight requires the workspace HEAD to match the harness checkout.
 
 ## Secrets (repo Actions secrets — no .env files anywhere)
 
-- `ANTHROPIC_API_KEY` — the candidate's key: fills the Anthropic provider
-  block at daemon boot and pays for candidate turns (eval-box's boot step and
-  the macOS smoke only). Give it a provider-side spend cap.
-- `OPENAI_API_KEY` — the judge's key: the judged steps (the judge preflight,
-  the regression tier, the capability tier's judged axis) pass it to the judge
-  as `EVAL_JUDGE_API_KEY`; the daemon never receives it.
+- `ANTHROPIC_API_KEY` — the candidate's key and the judge's: fills the
+  Anthropic provider block at daemon boot and pays for candidate turns
+  (eval-box's boot step and the macOS smoke), and the judged steps (the judge
+  preflight, the regression tier, the capability tier's judged axis) hold it
+  for the Claude judge's SDK. Give it a provider-side spend cap; it bounds
+  both.
 - `FERMIX_OPIK_API_KEY` + `FERMIX_OPIK_WORKSPACE` — Comet-hosted Opik auth
   for both the daemon exporter and the harness read side. Project names are
   workflow config, not secrets (`fermix-eval-ci-<tier>`); a
@@ -181,7 +183,7 @@ request credential.
 **Model rule:** the candidate model (eval-box input `model`, default
 `claude-opus-5-5` on Anthropic at medium effort) must differ from `judge.model`
 in `benchmark/config.yaml` and `benchmark/behavioral_config.yaml`
-(`gpt-6-luna`) — the judge preflight refuses a judge on the candidate's model
+(`claude-haiku-5-5`) — the judge preflight refuses a judge on the candidate's model
 before any call, and the harness refuses any verdict whose judge matches a
 model the candidate actually ran on, vendor prefixes and release dates aside.
 

@@ -3,9 +3,10 @@
 Backends (config `judge.backend`, one code path each):
   anthropic — the Claude API through the official SDK. The client is built with no
               credential argument, so the SDK resolves the credential itself:
-              ANTHROPIC_API_KEY, else ANTHROPIC_AUTH_TOKEN, else the selected or
-              active profile under ~/.config/anthropic (an `ant auth login` profile
-              locally, the eval box's Workload Identity Federation profile in CI).
+              ANTHROPIC_API_KEY (bin/tier.sh exports it from the keychain locally;
+              the eval box's judged steps hold the repository secret), else
+              ANTHROPIC_AUTH_TOKEN, else the selected or active profile under
+              ~/.config/anthropic (an `ant auth login` profile).
   openai    — an explicit OpenAI-compatible /chat/completions endpoint using
               EVAL_JUDGE_API_KEY, EVAL_JUDGE_BASE_URL, and judge.model.
   none      — skip judging.
@@ -61,10 +62,12 @@ _RETRYABLE_JUDGE_STATUS = frozenset({500, 502, 503, 504})
 _COMPLETION_REASONS = {"stop", "end_turn", "stop_sequence", "completed"}
 _TRUNCATION_REASONS = {"length", "max_tokens", "max_output_tokens", "incomplete"}
 
-# The Claude judge's request policy. Claude Opus 5.5 always thinks (a request that
-# disables thinking is a 400) and defaults to medium effort; the effort is set
-# here so neither a model nor an SDK default can move the judge silently. Thinking
-# counts toward max_tokens, so the cap leaves room for it beside the verdict.
+# The Claude judge's request policy. The current Claude models (claude-haiku-5-5,
+# the configured judge, like Claude Opus 5.5) think by default and default to
+# medium effort; the effort is set here so neither a model nor an SDK default can
+# move the judge silently, and no request tries to turn thinking off (a 400 on
+# Opus 5.5). Thinking counts toward max_tokens, so the cap leaves room for it
+# beside the verdict.
 _ANTHROPIC_EFFORT = "medium"
 _MAX_ANTHROPIC_OUTPUT_TOKENS = 16_000
 _ANTHROPIC_TIMEOUT_S = 180
@@ -74,8 +77,8 @@ _MAX_ERROR_DETAIL_CHARS = 300
 _NO_ANTHROPIC_CREDENTIAL = (
     "anthropic judge found no credential: export ANTHROPIC_API_KEY (bin/tier.sh "
     "exports it from the macOS keychain item fermix:ANTHROPIC_API_KEY) or sign in "
-    "with `ant auth login`; on the eval box the federation sign-in step writes the "
-    "profile")
+    "with `ant auth login`; on the eval box the judged steps hold the "
+    "ANTHROPIC_API_KEY secret")
 # A release date at the end of a model id: claude-haiku-4-5-20251001, gpt-4o-2024-08-06.
 _MODEL_DATE_SUFFIX = re.compile(r"-\d{4}-?\d{2}-?\d{2}$")
 
@@ -712,8 +715,9 @@ def _anthropic_error(exc: anthropic.AnthropicError) -> str:
 
 
 def _anthropic_request(cfg, data: dict, count: int | None) -> dict:
-    # No `thinking` (always on for Claude Opus 5.5; disabling it is a 400) and no
-    # `temperature` (sampling parameters are rejected); effort is the only control.
+    # No `thinking` (on by default for the current Claude models; disabling it is a
+    # 400 on Claude Opus 5.5) and no `temperature` (sampling parameters are
+    # rejected); effort is the only control.
     return {
         "model": cfg.judge.model,
         "max_tokens": _MAX_ANTHROPIC_OUTPUT_TOKENS,

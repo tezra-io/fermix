@@ -183,7 +183,8 @@ scenarios:
               of its own first briefing (a "moved up" for an item whose place held)
               in about 2 of 12 trials even after 90608c1a, and missed it in 4 of 6
               nightly attempts on 2026-10-14/15. The candidate is now
-              claude-opus-5-5 at medium effort, graded by gpt-6-luna, and
+              claude-opus-5-5 at medium effort, graded by claude-haiku-5-5
+              (gpt-6-luna until 2026-10-24), and
               unmeasured here: this watch is due. Revisit when the candidate model
               changes.
 

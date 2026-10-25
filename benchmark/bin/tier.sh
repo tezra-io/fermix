@@ -19,7 +19,7 @@
 #   bin/tier.sh --print <tier>    print the argv it would exec, one per line,
 #                                 and exit 0 — the test seam (bin/test_tier.py),
 #                                 never a second execution path. Judged tiers
-#                                 first print where the judge's EVAL_JUDGE_API_KEY
+#                                 first print where the judge's ANTHROPIC_API_KEY
 #                                 comes from, never its value.
 set -euo pipefail
 
@@ -31,13 +31,15 @@ usage() {
   printf 'usage: %s [--print] <%s>\n' "$(basename "${BASH_SOURCE[0]}")" "$TIERS" >&2
 }
 
-# The OpenAI judge's credential (judge.backend in config.yaml and
-# behavioral_config.yaml): EVAL_JUDGE_API_KEY if exported (the CI eval box feeds it
-# from the OPENAI_API_KEY repository secret), else the daemon's configured OpenAI
-# key from the macOS keychain (the entry `@keyring` resolves to), so judged
-# targets need no separate setup. When neither answers nothing is exported, and
-# the runner's judge precondition refuses the run with a sentence.
-JUDGE_KEYCHAIN_ITEM="fermix:OPENAI_API_KEY"
+# The Claude judge's credential (judge.backend in config.yaml and
+# behavioral_config.yaml): ANTHROPIC_API_KEY if exported (the CI eval box feeds it
+# from the ANTHROPIC_API_KEY repository secret, the candidate daemon's own key),
+# else the daemon's configured Anthropic key from the macOS keychain (the entry
+# `@keyring` resolves to), so judged targets need no separate setup. When neither
+# answers nothing is exported and the SDK resolves a profile on its own (an `ant
+# auth login` profile); the runner's judge precondition refuses the run with a
+# sentence when nothing resolves.
+JUDGE_KEYCHAIN_ITEM="fermix:ANTHROPIC_API_KEY"
 judge_keychain_key() {
   security find-generic-password -s "$JUDGE_KEYCHAIN_ITEM" -a fermix -w 2>/dev/null || true
 }
@@ -98,13 +100,13 @@ esac
 
 judge_source=""
 if [ "$judged" -eq 1 ]; then
-  if [ -n "${EVAL_JUDGE_API_KEY:-}" ]; then
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     judge_source="<environment>"
   else
     keychain_key="$(judge_keychain_key)"
     if [ -n "$keychain_key" ]; then
-      EVAL_JUDGE_API_KEY="$keychain_key"
-      export EVAL_JUDGE_API_KEY
+      ANTHROPIC_API_KEY="$keychain_key"
+      export ANTHROPIC_API_KEY
       judge_source="<keychain $JUDGE_KEYCHAIN_ITEM>"
     else
       judge_source="<unset>"
@@ -115,7 +117,7 @@ fi
 
 if [ "$print_only" -eq 1 ]; then
   if [ -n "$judge_source" ]; then
-    printf 'EVAL_JUDGE_API_KEY=%s\n' "$judge_source"
+    printf 'ANTHROPIC_API_KEY=%s\n' "$judge_source"
   fi
   printf '%s\n' "${cmd[@]}"
   exit 0
@@ -124,10 +126,10 @@ fi
 case "$judge_source" in
   "") ;;
   "<unset>")
-    printf 'tier.sh: no EVAL_JUDGE_API_KEY in the environment or the keychain item %s; the runner refuses the judged run\n' \
+    printf 'tier.sh: no ANTHROPIC_API_KEY in the environment or the keychain item %s; the judge signs in with an `ant auth login` profile, or the runner refuses the judged run\n' \
       "$JUDGE_KEYCHAIN_ITEM" >&2 ;;
   *)
-    printf 'tier.sh: the judge uses EVAL_JUDGE_API_KEY from %s\n' "$judge_source" >&2 ;;
+    printf 'tier.sh: the judge signs in with ANTHROPIC_API_KEY from %s\n' "$judge_source" >&2 ;;
 esac
 
 exec "${cmd[@]}"
