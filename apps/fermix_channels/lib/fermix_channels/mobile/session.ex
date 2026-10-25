@@ -330,7 +330,7 @@ defmodule FermixChannels.Mobile.Session do
     cancel_uploads(state)
     close_media_transfer(state)
     record_abandoned_pair(reason, state)
-    :ok
+    close_unauthenticated_iroh_peer(state)
   end
 
   defp put_default_dependencies(state) do
@@ -363,6 +363,7 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:discover, fn -> Discovery.candidates(discovery) end)
     |> Map.put_new(:iroh_candidate, fn -> Helper.candidate(iroh_helper) end)
     |> Map.put_new(:relay_list_acknowledged, fn -> Helper.relays_acknowledged(iroh_helper) end)
+    |> Map.put_new(:close_iroh_peer, &Helper.close(iroh_helper, &1))
     |> Map.put_new(:pending_approvals, &Approvals.pending(Approvals.server(), &1, :mobile))
     |> Map.put_new(:media_descriptor, &Timeline.media_descriptor/2)
     |> Map.put_new(:event_router, &EventRouter.route/3)
@@ -1537,6 +1538,15 @@ defmodule FermixChannels.Mobile.Session do
     do: record_pair_failure(state)
 
   defp record_abandoned_pair(_reason, _state), do: :ok
+
+  # A peer whose session failed before hello or a pair request keeps no iroh
+  # connection: otherwise stream after failing stream holds one of the
+  # helper's connection places for as long as the peer likes.
+  defp close_unauthenticated_iroh_peer(%{peer: {:iroh, endpoint_id}, phase: phase} = state)
+       when phase in @deadline_phases,
+       do: :ok = state.close_iroh_peer.(endpoint_id)
+
+  defp close_unauthenticated_iroh_peer(_state), do: :ok
 
   defp record_pair_failure(%{pair_failure_recorded?: true} = state), do: state
 

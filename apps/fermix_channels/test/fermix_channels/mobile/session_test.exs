@@ -8,6 +8,35 @@ defmodule FermixChannels.Mobile.SessionTest do
 
   @peer {10, 0, 0, 7}
 
+  test "a session that ends before hello or a pair request closes its iroh peer, and only then" do
+    test_pid = self()
+
+    close = fn id ->
+      send(test_pid, {:close_iroh_peer, id})
+      :ok
+    end
+
+    id = String.duplicate("ab", 32)
+    iroh = {:iroh, id}
+
+    ended = fn peer, phase ->
+      {:ok, state} = Session.init(device_registry: :registry, peer: peer, close_iroh_peer: close)
+      :ok = Session.terminate(:handshake_timeout, %{state | phase: phase})
+    end
+
+    for phase <- [:prelude, :await_hello, :await_pair_request] do
+      ended.(iroh, phase)
+      assert_received {:close_iroh_peer, ^id}
+    end
+
+    # A phone the owner is deciding on, or a paired phone's session, ends with
+    # its own close; a WebSocket peer has no iroh connection.
+    ended.(iroh, :await_pair_decision)
+    ended.(iroh, :ready)
+    ended.(@peer, :prelude)
+    refute_received {:close_iroh_peer, _id}
+  end
+
   test "a session needs its carrier's peer, and fails loud without one" do
     assert_raise ArgumentError, ~r/:peer/, fn -> Session.init(device_registry: :registry) end
     assert {:ok, %{peer: @peer}} = Session.init(device_registry: :registry, peer: @peer)

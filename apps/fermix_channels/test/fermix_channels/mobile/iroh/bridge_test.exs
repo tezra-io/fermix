@@ -223,6 +223,30 @@ defmodule FermixChannels.Mobile.Iroh.BridgeTest do
     assert {:error, :closed} = :gen_tcp.recv(socket, 0, 1_000)
   end
 
+  # A peer refused before it is a paired phone's session keeps no iroh
+  # connection, so opening stream after failing stream holds none of the
+  # helper's connection places.
+  test "a session refused in its handshake asks the helper to close its iroh peer", ctx do
+    test_pid = self()
+
+    refused =
+      paired_session(test_pid)
+      |> Keyword.put(:find_device, fn :store, <<7::256>> -> {:error, :not_found} end)
+      |> Keyword.put(:close_iroh_peer, fn id ->
+        send(test_pid, {:close_iroh_peer, id})
+        :ok
+      end)
+
+    start_bridge(ctx, session_opts: refused)
+    socket = connect(ctx)
+    send_frame(socket, @preamble)
+    socket = framed(socket)
+
+    send_frame(socket, Carrier.message(<<"FXM1", 1, "handshake">>))
+    assert {:close, 1002, "mobile protocol error"} = recv_frame(socket)
+    assert_receive {:close_iroh_peer, @fixture_id}
+  end
+
   test "a frame over 65,536 bytes is refused before it is read", ctx do
     start_bridge(ctx, [])
     socket = connect(ctx)

@@ -108,6 +108,17 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
   @spec status(GenServer.server()) :: status() | %{state: :off}
   def status(server), do: safe_call(server, :status, %{state: :off})
 
+  @doc """
+  A session from this iroh peer failed before `hello` or a pair request: the
+  helper closes the peer's connections. A rail that is not ready, switched off
+  or absent holds no connection, so there is nothing to close.
+  """
+  @spec close(GenServer.server(), String.t()) :: :ok
+  def close(server, endpoint_id) when is_binary(endpoint_id) do
+    if alive?(server), do: GenServer.cast(server, {:close, endpoint_id})
+    :ok
+  end
+
   @doc "A phone acknowledged a relay list, or one was revoked: recompute the relays."
   @spec relays_acknowledged(GenServer.server()) :: :ok
   def relays_acknowledged(server) do
@@ -197,6 +208,13 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
 
   def handle_cast(:recompute, %{rail: :ready} = state), do: {:noreply, push_relays(state)}
   def handle_cast(:recompute, state), do: {:noreply, state}
+
+  def handle_cast({:close, endpoint_id}, %{rail: :ready} = state) do
+    :ok = command(state, HelperProtocol.close(endpoint_id))
+    {:noreply, state}
+  end
+
+  def handle_cast({:close, _endpoint_id}, state), do: {:noreply, state}
 
   @impl true
   def handle_call(:candidate, _from, %{rail: :ready} = state),
