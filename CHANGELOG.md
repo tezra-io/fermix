@@ -28,7 +28,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   authenticate.** A remote connection held one of the 64 places for as long as
   it kept opening streams, even when every one failed its handshake, so enough
   of them turned paired phones away as busy. When a session over reach from
-  anywhere fails before `hello` or a pair request, the daemon now has
+  anywhere ends before `hello` or a pair request, the daemon now has
   `fermix-iroh` close that connection once the refusal has reached it. This
   needs `fermix-iroh` 0.2.0 (helper protocol 2).
 - **Pairing a phone no longer asks for a restart that cannot help.** Fermix

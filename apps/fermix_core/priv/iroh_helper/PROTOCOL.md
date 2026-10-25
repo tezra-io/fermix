@@ -75,7 +75,7 @@ helper                                   daemon
   closed ───────────────────────────────▶   (a connection ends)
   refused ──────────────────────────────▶   (a connection or stream is refused)
         ◀──────────────────────────────── set_relays   (any time after ready)
-        ◀──────────────────────────────── close        (a session failed before hello or a pair request)
+        ◀──────────────────────────────── close        (a session ended before hello or a pair request)
   log   ────────────────────────────────▶   (any time after hello)
         ◀──────────────────────────────── shutdown
 ```
@@ -83,7 +83,7 @@ helper                                   daemon
 ## Events the helper sends
 
 ```json
-{"event":"hello","protocol_version":2,"helper_version":"0.1.0","iroh_version":"1.3.0"}
+{"event":"hello","protocol_version":2,"helper_version":"0.2.0","iroh_version":"1.3.0"}
 {"event":"ready","endpoint_id":"79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664"}
 {"event":"relay","home_relay":"https://us1.relay.fermix.ai/","connected":true}
 {"event":"path","endpoint_id":"79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664","kind":"relay","relay":"https://us1.relay.fermix.ai/"}
@@ -117,7 +117,7 @@ helper                                   daemon
 |---|---|---|
 | `start` | `secret_key_path`, `bridge_socket`, `alpn`, `relays`, `limits` | Exactly once, after `hello`. The helper reads the key, binds the endpoint and answers `ready`, or `error`. |
 | `set_relays` | `relays` | Replaces the endpoint's relay map at run time: relays not named are removed, new ones added. Valid only after `ready`. |
-| `close` | `endpoint_id` (lowercase hex) | A session on a stream from this peer ended before it was a paired phone's session or a pairing request: in the prelude, in the Noise handshake, or before `hello` or the pair request (`../mobile/PROTOCOL.md`). The helper bridges no further stream from the peer's connections and closes each with application code `0`, reason `refused`, once every stream it bridges on it has ended and the peer has acknowledged what the daemon wrote on it, so the daemon's close frame reaches the phone first. It waits at most **5 s** for that acknowledgement after a stream ends. Valid only after `ready`; a peer with no connection is not an error. |
+| `close` | `endpoint_id` (lowercase hex) | A session on a stream from this peer ended, for any reason, before it was a paired phone's session or a pairing request: in the prelude, in the Noise handshake, or before `hello` or the pair request (`../mobile/PROTOCOL.md`), the phone's own ending of the stream included. The helper bridges no further stream from the peer's connections, resetting each new one with application code `0`, and closes each connection with code `0`, reason `refused`, once every stream it bridges on it has ended and the peer has acknowledged what the daemon wrote on it, so the daemon's close frame reaches the phone first. It waits at most **5 s** for that acknowledgement after a stream ends. Valid only after `ready`; a peer with no connection is not an error. |
 | `shutdown` | — | Stop accepting; close every connection with application code `0`, reason `shutdown` (iroh's `Endpoint::close` alone sends an empty reason; a connection still in its handshake cannot carry a reason and is closed without one); close every bridge connection; wait for iroh's drain, bounded by its own timeout; exit `0` within **5 s**. The daemon kills the process group after that. This is also how the daemon turns remote reach off: after the exit nothing contacts a relay. |
 
 - **`secret_key_path`:** an absolute path to a file of exactly 32 bytes, the raw
@@ -137,12 +137,12 @@ helper                                   daemon
   handshake (iroh's `Incoming::refuse`), so it costs no key exchange, and
   reported as `refused` `busy`. No connection holds a place for nothing: a
   handshake not finished within **10 s** is dropped, a connection that has had
-  no stream for **30 s** is closed with code `0`, reason `idle`, a connection
-  whose session failed before `hello` or a pair request is closed on the
-  daemon's `close`, so opening stream after stream that fails its handshake
-  keeps no place, and once half the places are taken a new peer whose address
-  QUIC has not validated is sent a Retry first, so forged packets never take
-  one.
+  no stream for **30 s** is closed with code `0`, reason `idle`, the
+  connections of a peer whose session ended before `hello` or a pair request
+  are closed on the daemon's `close`, so opening stream after stream that fails
+  its handshake keeps no place, and once half the places are taken a new peer
+  whose address QUIC has not validated is sent a Retry first, so forged
+  packets never take one.
 - **`limits.max_streams_per_connection`:** concurrent bidirectional streams on one
   connection, 1 to 16, applied as the connection's QUIC bidirectional stream
   credit: a peer past it waits for a stream to close; the helper neither sees
@@ -199,7 +199,7 @@ Ending a stream never closes the iroh connection: a phone renews its session on 
 new stream of the same connection, opened as the last one ends. A connection with
 no stream for 30 s is closed (`idle`, above); iroh's keep-alive would otherwise
 hold it for as long as the peer answers. The one exception is `close`, which the
-daemon sends for a peer whose session failed before `hello` or a pair request.
+daemon sends for a peer whose session ended before `hello` or a pair request.
 
 ## Fixtures
 

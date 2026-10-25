@@ -401,6 +401,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     assert :ok = Helper.activate(:no_rail_here)
     assert :ok = Helper.relays_acknowledged(:no_rail_here)
     assert :ok = Helper.close(:no_rail_here, @fixture_id)
+    assert_raise ArgumentError, fn -> Helper.close(:no_rail_here, "79B5") end
   end
 
   test "macOS spawns through the disclaim shim and refuses without one" do
