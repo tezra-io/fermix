@@ -264,7 +264,9 @@ defmodule FermixWebWeb.SetupLiveTest do
     Application.delete_env(:fermix_web, :xai_login_runner)
     Application.delete_env(:fermix_web, :chatgpt_login_runner)
     Application.delete_env(:fermix_web, :chatgpt_logout_runner)
-    Application.delete_env(:fermix_web, :anthropic_login_impl)
+    # Every case gets the hermetic Claude Code stub, so none can read the real
+    # login; config/test.exs's default raises for a module that chose none.
+    Application.put_env(:fermix_web, :anthropic_login_impl, AnthropicLoginStub)
     Application.delete_env(:fermix_web, :doctor_probe_opts)
     Application.delete_env(:fermix_web, :computer_use_grant_impl)
     # iMessage ships off, and a card case names the platform it means; every
@@ -4882,8 +4884,6 @@ defmodule FermixWebWeb.SetupLiveTest do
     test "Anthropic OAuth: pasting a token and Save provider stores it and sets auth_mode", %{
       conn: conn
     } do
-      Application.put_env(:fermix_web, :anthropic_login_impl, AnthropicLoginStub)
-
       {:ok, view, _html} = live(conn, "/setup")
 
       view
@@ -4915,8 +4915,6 @@ defmodule FermixWebWeb.SetupLiveTest do
     test "Anthropic OAuth: Save provider with a blank token keeps existing and sets auth_mode", %{
       conn: conn
     } do
-      Application.put_env(:fermix_web, :anthropic_login_impl, AnthropicLoginStub)
-
       {:ok, view, _html} = live(conn, "/setup")
 
       view
