@@ -787,7 +787,8 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
   # A command source's whole stdout is its value, so it reads with `-w`. Settings
   # files record these exact arguments, and `Sandbox.ExternalEnv` knows a stored
   # name by them, so they stay as they are. `-w` prints any byte outside space
-  # to tilde as hex, so only a printable ASCII value arrives intact this way.
+  # to tilde as hex, so only a printable ASCII value arrives intact this way,
+  # and `ExternalEnv.validate_value/1` refuses any other when it is stored.
   @impl true
   @spec command_source(SecretWriter.secret_key(), keyword()) :: map()
   def command_source(key, opts \\ []) when is_secret_key(key) do

@@ -721,7 +721,8 @@ Notes that the shapes alone do not carry:
   `NAME` is any name matching `^[A-Za-z_][A-Za-z0-9_]{0,127}$` exactly, except
   `PATH`, `HOME`, `USER`, `LANG`, `SHELL`, `TMPDIR`, `FERMIX_HOME` and any name
   starting `LC_`, which Fermix sets itself. The value is one line of 1 to 8,192
-  bytes with no NUL, CR or LF, and at most 64 names are stored. `secret.set`
+  bytes of printable ASCII, space to `~` (so no NUL, CR, LF, tab or non-ASCII
+  character), and at most 64 names are stored. `secret.set`
   stores the value in the OS secret store in a namespace of its own (a skill's
   `OPENAI_API_KEY` never touches the OpenAI provider's key), reads it back to
   verify it, and then allows the name, removes it from the deny list and points

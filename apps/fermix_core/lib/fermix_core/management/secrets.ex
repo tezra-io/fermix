@@ -114,6 +114,7 @@ defmodule FermixCore.Management.Secrets do
                        "does not start with a digit, and is at most 128 characters."
   @env_reserved_sentence "Fermix sets this variable itself, so it cannot be stored."
   @env_line_sentence "A stored variable is one line with no null characters."
+  @env_printable_sentence "A stored variable is printable ASCII, with no tabs or accented letters."
   @env_elsewhere_sentence "This variable is read from a helper command or another variable. " <>
                             "Change that in the settings file first."
   # The open family of values an operator MCP server declares.
@@ -702,6 +703,7 @@ defmodule FermixCore.Management.Secrets do
     do: "A secret is at most #{ExternalEnv.max_value_bytes()} bytes."
 
   defp env_value_sentence(:value_not_single_line), do: @env_line_sentence
+  defp env_value_sentence(:value_not_printable), do: @env_printable_sentence
 
   # The closed reason set collapses what went wrong, so the kind is logged for
   # whoever reads the daemon log. Never the value, never a helper's output.

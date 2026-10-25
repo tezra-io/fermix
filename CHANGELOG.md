@@ -74,6 +74,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with that reason rather than used. A secret too large to read whole, from
   the keychain or a Linux keyring, is refused too, and no part of it reaches
   the log.
+- **A value stored for sandboxed commands that holds a character outside
+  printable ASCII is refused with the reason.** On a Mac, storing a value in
+  Settings > Sandbox (or with `fermix settings secret set env:NAME`) that held
+  a tab, an accented letter or any other such character failed as if the
+  secret store were unavailable, because the keychain read it back as hex,
+  and a new value for a name already stored was kept behind that error, so
+  commands got the hex. Now that secrets read back exactly, the keychain
+  lookup commands use would still hand them that hex, so such a value is
+  refused when you store it, with a sentence saying why. The rule holds on
+  every platform, so Linux refuses these values too.
 
 ### Security
 
