@@ -28,6 +28,7 @@ defmodule FermixCore.Cues.FeedParser do
   summaries and HTML-typed titles through `Tools.SnippetSanitizer`.
   """
 
+  alias FermixCore.Cues.JsonPath
   alias FermixCore.Plugins.CanonicalJson
   alias FermixCore.Tools.SnippetSanitizer
 
@@ -42,7 +43,6 @@ defmodule FermixCore.Cues.FeedParser do
   @max_category_chars 100
   @max_scan_chars 65_536
   @max_text_depth 32
-  @max_path_segments 16
   @max_name_chars 64
 
   @item_type "feed.item"
@@ -55,7 +55,6 @@ defmodule FermixCore.Cues.FeedParser do
   @script_or_style ~r/<(script|style)\b[^>]*>.*?<\/\1\s*>/is
   @whitespace ~r/\s+/u
   @space_before_punctuation ~r/\s+([.,;:!?])/u
-  @segment ~r/^[^.\s]{1,128}$/u
 
   @months %{
     "jan" => 1,
@@ -175,21 +174,21 @@ defmodule FermixCore.Cues.FeedParser do
          {:ok, document} <- decode_json(strip_bom(body)),
          {:ok, entries} <- items_at(document, paths.items_path) do
       {kept, rest} = Enum.split(entries, @max_items)
-      times = Enum.map(rest, &api_time(&1, paths))
-      {:ok, Enum.map(kept, &api_fields(&1, paths)), truncation(times)}
+      times = Enum.map(rest, &JsonPath.time(&1, paths[:time_path]))
+      {:ok, Enum.map(kept, &JsonPath.fields(&1, paths, @item_type)), truncation(times)}
     end
   end
 
   @doc """
   Checks a JSON API path map: `items_path` and `id_path` present, only the six
-  known keys, each a `"."` or a dot path of at most 16 non-empty segments.
+  known keys, each a path `Cues.JsonPath.valid?/1` accepts.
   """
   @spec validate_paths(map()) :: :ok | {:error, {:invalid_path, atom()}}
   def validate_paths(paths) when is_map(paths) do
     missing = Enum.find(@required_path_keys, &(not Map.has_key?(paths, &1)))
 
     invalid =
-      Enum.find(paths, fn {key, path} -> key not in @path_keys or not valid_path?(path) end)
+      Enum.find(paths, fn {key, path} -> key not in @path_keys or not JsonPath.valid?(path) end)
 
     cond do
       missing -> {:error, {:invalid_path, missing}}
@@ -442,73 +441,11 @@ defmodule FermixCore.Cues.FeedParser do
   # --- JSON API -------------------------------------------------------------
 
   defp items_at(document, path) do
-    case lookup(document, path) do
+    case JsonPath.lookup(document, path) do
       {:ok, items} when is_list(items) -> {:ok, items}
       _other -> {:error, :no_items_list}
     end
   end
-
-  defp api_fields(item, paths) do
-    %{
-      item_id: item |> scalar_at(paths.id_path) |> bounded_id(),
-      revision: scalar_at(item, paths[:revision_path]) || "1",
-      type: scalar_at(item, paths[:type_path]) || @item_type,
-      subject: scalar_at(item, paths[:subject_path]),
-      occurred_at: api_time(item, paths),
-      datacontenttype: @data_content_type,
-      data: item,
-      title: nil
-    }
-  end
-
-  defp api_time(item, paths) do
-    case scalar_at(item, paths[:time_path]) do
-      nil -> nil
-      text -> parse_time({:rfc3339, text})
-    end
-  end
-
-  defp scalar_at(_item, nil), do: nil
-
-  defp scalar_at(item, path) do
-    case lookup(item, path) do
-      {:ok, value} when is_binary(value) -> blank_to_nil(String.trim(value))
-      {:ok, value} when is_integer(value) -> Integer.to_string(value)
-      _other -> nil
-    end
-  end
-
-  defp valid_path?("."), do: true
-
-  defp valid_path?(path) when is_binary(path) do
-    segments = String.split(path, ".")
-    length(segments) <= @max_path_segments and Enum.all?(segments, &Regex.match?(@segment, &1))
-  end
-
-  defp valid_path?(_path), do: false
-
-  # Segments are bounded by `validate_paths/1`, so the walk is too.
-  defp lookup(document, "."), do: {:ok, document}
-
-  defp lookup(document, path) do
-    path |> String.split(".") |> Enum.reduce_while({:ok, document}, &step/2)
-  end
-
-  defp step(key, {:ok, %{} = object}) do
-    case Map.fetch(object, key) do
-      {:ok, value} -> {:cont, {:ok, value}}
-      :error -> {:halt, :error}
-    end
-  end
-
-  defp step(key, {:ok, list}) when is_list(list) do
-    case Integer.parse(key) do
-      {index, ""} when index >= 0 and index < length(list) -> {:cont, {:ok, Enum.at(list, index)}}
-      _other -> {:halt, :error}
-    end
-  end
-
-  defp step(_key, _acc), do: {:halt, :error}
 
   # --- identity, links, truncation -------------------------------------------
 

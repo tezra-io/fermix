@@ -55,6 +55,10 @@ defmodule FermixCore.MixProject do
       # of which a pooled request/response client can express. Finch would only
       # pull it transitively.
       {:mint, "~> 1.7"},
+      # The cue stream's WebSocket (`Cues.Source.Stream.Socket`, M60 §3.6) runs
+      # on Mint: it bounds a frame while it arrives and reads with
+      # `active: :once`, neither of which WebSockex can express.
+      {:mint_web_socket, "~> 1.0"},
       # The terminal QR code `fermix pair` prints for the phone to scan.
       {:qr_code, "~> 3.2"},
       {:req, "~> 0.5"},

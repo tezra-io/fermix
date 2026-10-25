@@ -724,7 +724,22 @@ defmodule FermixCore.Management.CopyTest do
             "id" => "content_hash"
           },
           "home-alerts" => %{"kind" => "local_push", "token" => "@keyring"},
-          "new-alerts" => %{"kind" => "local_push"}
+          "new-alerts" => %{"kind" => "local_push"},
+          "live-news" => %{
+            "kind" => "stream",
+            "url" => "wss://stream.example.org/news",
+            "id_path" => "id",
+            "key_header" => "X-Feed-Key",
+            "auth_message" => ~s({"secret":"{{secret}}"})
+          },
+          "live-keyed" => %{
+            "kind" => "stream",
+            "url" => "wss://stream.example.org/news",
+            "id_path" => "id",
+            "key_header" => "X-Feed-Key",
+            "secret_header" => "X-Feed-Secret",
+            "key" => "@keyring"
+          }
         }
       })
 

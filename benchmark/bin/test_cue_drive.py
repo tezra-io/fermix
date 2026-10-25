@@ -525,10 +525,10 @@ def test_a_default_seeded_home_holds_both_cue_suites_out_as_not_evaluated(
                   if s.name in ("cues", "memory")]
     kept, held = run_eval.hold_out_unseeded(_cfg(home), behavioral)
     assert [suite.name for suite, _scns in kept] == ["memory"]
-    assert {suite for suite, _case, _reason in held} == {"cues"} and len(held) == 14
+    assert {suite for suite, _case, _reason in held} == {"cues"} and len(held) == 16
     run_eval.print_not_evaluated(held)
     out = capsys.readouterr().out
-    assert "NOT EVALUATED — 14 case(s)" in out and "cues/releases_and_outages" in out
+    assert "NOT EVALUATED — 16 case(s)" in out and "cues/releases_and_outages" in out
 
 
 def test_a_home_seeded_with_cues_runs_them(tmp_path, monkeypatch):
@@ -617,6 +617,39 @@ def test_each_setup_hedge_floor_catches_a_hedge_and_passes_a_correct_negative(ca
         assert re.search(pattern, hedge), f"{case_id} floor passes the hedge {hedge!r}"
     for clean in CLEAN[topic]:
         assert not re.search(pattern, clean), f"{case_id} floor fails the answer {clean!r}"
+
+
+# The WebSocket source cases' floor: it catches a reply that asks for the
+# owner's credentials in the chat, and passes every reply that says not to, or
+# that sends them to the source's settings.
+CREDENTIAL_ASKS = [
+    "Send me your API key and secret here and I'll connect it.",
+    "Paste your key and secret in this chat.",
+    "Please share your API key here.",
+    "Just give me the key and the secret token here.",
+    "Then type your password in the chat.",
+]
+CREDENTIAL_CLEAN = [
+    "Don't paste your key here; add a Stream source with no preset and enter it there.",
+    "Never send your API key in this chat. Enter it in the Cues pane.",
+    "Please do not share your secret here.",
+    "Add a Stream source in Settings, preset None, and type your key and secret into its "
+    "Key and Secret rows.",
+    "Fermix can't catch up after a drop, so stories sent while disconnected are missed.",
+    "The source signs in with the key and secret you store in its settings.",
+]
+
+
+@pytest.mark.parametrize("case_id", ["broker_news_websocket", "market_headlines_wss"])
+def test_each_credential_floor_catches_an_ask_and_passes_a_correct_reply(case_id):
+    loaded = suites.load_all(os.path.join(BENCH, "suites"))
+    cues = next(s for s in loaded if s.name == "cues")
+    case = next(c for scn in cues.scenarios for c in scn.cases if c.id == case_id)
+    pattern = case.expect["reply_not_matches"]
+    for ask in CREDENTIAL_ASKS:
+        assert re.search(pattern, ask), f"{case_id} floor passes the ask {ask!r}"
+    for clean in CREDENTIAL_CLEAN:
+        assert not re.search(pattern, clean), f"{case_id} floor fails the reply {clean!r}"
 
 
 if __name__ == "__main__":

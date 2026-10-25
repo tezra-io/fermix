@@ -1,7 +1,8 @@
 defmodule FermixCore.Cues.Source.StreamTest do
   # One worker per test on its own temp Repo, with a stand-in transport the test
-  # drives by hand (the worker's messages from a socket are crafted here), a
-  # hand-driven clock and captured timers: no network, no real time.
+  # drives by hand (FakeCueTransport; the worker's messages from a socket are
+  # crafted here), a hand-driven clock and captured timers: no network, no real
+  # time. The general source, a stream with no preset, has its own file.
   use ExUnit.Case, async: true
 
   import FermixTestSupport.CueFixtures
@@ -9,6 +10,7 @@ defmodule FermixCore.Cues.Source.StreamTest do
   alias FermixCore.Cues.Source.Stream
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesSql
+  alias FermixTestSupport.FakeCueTransport
   alias FermixTestSupport.TelemetryCapture
 
   @now ~U[2026-10-12 14:00:00Z]
@@ -16,44 +18,6 @@ defmodule FermixCore.Cues.Source.StreamTest do
   @friend "did:plc:p2nrd7wq4fxk6jzv3mbt5hce"
   @stranger "did:plc:zz7xq4m2rbw6n3kd5tyhvjpa"
   @wait_ms 10_000
-
-  defmodule FakeTransport do
-    @moduledoc false
-    @behaviour FermixCore.Cues.Source.Stream
-
-    # A stand-in socket: it reports pings to the test, stops when closed, dies
-    # with the reason it is told, and ends with the test.
-    @impl true
-    def start(url, owner, opts) when is_pid(owner) do
-      test = Keyword.fetch!(opts, :test)
-      socket = spawn(fn -> loop(test, Process.monitor(test)) end)
-      send(test, {:dialed, url, socket, opts})
-      {:ok, socket}
-    end
-
-    @impl true
-    def ping(socket), do: send(socket, :ping) && :ok
-
-    @impl true
-    def close(socket), do: send(socket, :close) && :ok
-
-    defp loop(test, monitor) do
-      receive do
-        :ping ->
-          send(test, {:pinged, self()})
-          loop(test, monitor)
-
-        :close ->
-          send(test, {:closed, self()})
-
-        {:die, reason} ->
-          exit(reason)
-
-        {:DOWN, ^monitor, :process, _pid, _reason} ->
-          :ok
-      end
-    end
-  end
 
   setup do
     ctx = start_repo("stream")
@@ -95,7 +59,7 @@ defmodule FermixCore.Cues.Source.StreamTest do
       clock: fn -> Agent.get(ctx.clock, & &1) end,
       monotonic_ms: fn -> 0 end,
       schedule: fn message, ms -> send(test, {:scheduled, message, ms}) end,
-      transport: FakeTransport,
+      transport: FakeCueTransport,
       transport_opts: [test: test],
       admit: fn ref, n, _now_ms -> send(test, {:admit, ref, n}) && n end,
       notify: fn ref, kind, data, _opts -> send(test, {:notice, ref, kind, data}) && :sent end
@@ -211,10 +175,11 @@ defmodule FermixCore.Cues.Source.StreamTest do
       # A new source starts at the live tip.
       {url, socket} = connect(pid, first)
       assert cursor(url) == nil
-      assert source_row(ctx).status == "connected"
       assert_received {:telemetry, [:fermix, :cue, :source], _m, %{phase: :connect}}
 
+      # The first item proves the connection healthy: the row says connected.
       frame(pid, socket, post(@author, "3m4qa", DateTime.add(@now, -1, :second)))
+      assert source_row(ctx).status == "connected"
       flush(pid)
       assert cue_ids(ctx) == [uri(@author, "3m4qa")]
       assert_received {:admit, ^ref, 1}
@@ -224,7 +189,7 @@ defmodule FermixCore.Cues.Source.StreamTest do
 
       # The connection drops 30 s later, and comes back two minutes after that.
       advance(ctx, 30)
-      send(socket, {:die, {:remote, :closed}})
+      send(socket, {:die, {:remote_closed, 1000}})
       reconnect = scheduled(:connect, 1_000)
       assert source_row(ctx).status == "reconnecting"
 
@@ -279,7 +244,7 @@ defmodule FermixCore.Cues.Source.StreamTest do
       assert_same_time(source_row(ctx).last_good_at, replayed)
 
       advance(ctx, 5)
-      send(socket, {:die, {:remote, :closed}})
+      send(socket, {:die, {:remote_closed, 1000}})
       reconnect = scheduled(:connect, 1_000)
       {url, _socket} = dial(pid, reconnect)
       assert cursor(url) == Integer.to_string(us(DateTime.add(replayed, -300, :second)))
@@ -373,6 +338,25 @@ defmodule FermixCore.Cues.Source.StreamTest do
       {url, _socket} = dial(pid, reconnect)
       assert cursor(url) == Integer.to_string(us(@now))
     end
+
+    test "the transport is given the 128 KiB cap, and a connection it ends at a larger frame " <>
+           "takes the same path",
+         ctx do
+      {pid, first} = start_stream(ctx)
+      deliver(pid, first)
+      assert_receive {:dialed, _url, socket, opts}
+      assert opts[:max_frame_bytes] == 128 * 1024
+      assert opts[:headers] == []
+      deliver(pid, {:cue_stream, socket, :connected})
+
+      send(socket, {:die, :frame_too_large})
+
+      reconnect = scheduled(:connect, 1_000)
+      assert %{"read_limit" => %{count: 1}} = gaps(ctx)
+      advance(ctx, 1)
+      {url, _socket} = dial(pid, reconnect)
+      assert cursor(url) == Integer.to_string(us(@now))
+    end
   end
 
   # --- liveness --------------------------------------------------------------------
@@ -415,7 +399,7 @@ defmodule FermixCore.Cues.Source.StreamTest do
       monitor = Process.monitor(pid)
       {_url, socket} = dial(pid, first)
 
-      send(socket, {:die, {:error, %WebSockex.RequestError{code: 401, message: "Unauthorized"}}})
+      send(socket, {:die, {:upgrade_refused, 401}})
 
       assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, @wait_ms
       assert_received {:notice, ^ref, :auth_failed, _data}
@@ -431,7 +415,7 @@ defmodule FermixCore.Cues.Source.StreamTest do
 
       # It never connects, so it has no last good time to resume from.
       {_url, socket} = dial(pid, first)
-      send(socket, {:die, {:error, %WebSockex.ConnError{original: :econnrefused}}})
+      send(socket, {:die, {:connect_failed, :econnrefused}})
       down_check = scheduled(:down, 900_000)
       reconnect = scheduled(:connect, 1_000)
 
@@ -441,7 +425,7 @@ defmodule FermixCore.Cues.Source.StreamTest do
 
       # Once per outage: a failed redial does not tell the owner again.
       {_url, socket} = dial(pid, reconnect)
-      send(socket, {:die, {:remote, :closed}})
+      send(socket, {:die, {:remote_closed, 1000}})
       scheduled(:connect, 2_000)
       refute_received {:scheduled, {:timer, :down, _token}, _ms}
       refute_received {:notice, ^ref, :down, _data}
@@ -453,7 +437,7 @@ defmodule FermixCore.Cues.Source.StreamTest do
       {pid, first} = start_stream(ctx)
       {_url, socket} = connect(pid, first)
 
-      send(socket, {:die, {:remote, :closed}})
+      send(socket, {:die, {:remote_closed, 1000}})
 
       # The resume point is an hour and five minutes back; 24 hours after it,
       # the rest is lost: 22 h 55 min from now.
@@ -479,18 +463,6 @@ defmodule FermixCore.Cues.Source.StreamTest do
       assert_received {:telemetry, [:fermix, :cue, :source], _m, %{phase: :budget}}
       assert source_row(ctx).status == "over_budget"
       scheduled(:connect, 6 * 3_600_000 + 1_000)
-    end
-  end
-
-  describe "sources the worker cannot stream" do
-    test "a stream source without the bluesky_jetstream preset is unavailable", ctx do
-      {pid, first} = start_stream(ctx, %{preset: nil})
-      monitor = Process.monitor(pid)
-      send(pid, first)
-
-      assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, @wait_ms
-      refute_received {:dialed, _url, _socket, _opts}
-      assert source_row(ctx).status == "unavailable"
     end
   end
 end

@@ -9,6 +9,7 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
   alias FermixCore.Cues.Door
   alias FermixCore.Cues.Pins
   alias FermixCore.Cues.Webhook
+  alias FermixCore.Management.Cues.SourceForm
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Setup.ConfigStore
@@ -319,7 +320,110 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
 
       assert preset_options(html) == [{"", "No preset"}, {"bluesky_jetstream", "Bluesky"}]
       assert selected(html, "cue_source[preset]") == "bluesky_jetstream"
-      assert kind_line(html) =~ "Fermix keeps a connection open and takes items as they arrive."
+
+      assert kind_line(html) =~
+               "Fermix keeps a connection open to a WebSocket (wss://) address and takes items " <>
+                 "as they arrive."
+    end
+
+    # A stream with no preset is the general WebSocket source: its own fields
+    # and two typed secrets; Bluesky's fields come only with its preset.
+    test "a stream with no preset draws the general source's fields, never Bluesky's", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+      view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
+      html = view |> form("#cue-source-form", cue_source: %{kind: "stream"}) |> render_change()
+      assert open_field?(html, "dids")
+      refute open_field?(html, "key_header")
+
+      html = view |> form("#cue-source-form", cue_source: %{preset: ""}) |> render_change()
+
+      for name <- ~w(url key_header secret_header auth_message subscribe_message id_path type_path
+                     item_types error_types key secret),
+          do: assert(open_field?(html, name), name)
+
+      refute open_field?(html, "dids")
+      refute open_field?(html, "collections")
+      assert required_field?(html, "id_path")
+
+      # The management form's words, its literals' backticks dropped.
+      footer = Enum.find(SourceForm.general_stream_rows(), &(&1.field == :key_header)).footer
+      assert html =~ String.replace(footer, "`", "")
+      assert source_form_nodes(html, ~s(input[name="cue_source[items_path]"])) |> Enum.any?()
+    end
+
+    test "a stream with no preset saves its fields and its typed key and secret", %{conn: conn} do
+      key = "PK3W9QZ7RT"
+      secret = "invented-secret-8840"
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+      view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
+      view |> form("#cue-source-form", cue_source: %{kind: "stream"}) |> render_change()
+      view |> form("#cue-source-form", cue_source: %{preset: ""}) |> render_change()
+
+      html =
+        view
+        |> form("#cue-source-form",
+          cue_source: %{
+            ref: "live-news",
+            url: "wss://stream.example.com/v2/news",
+            key_header: "X-Feed-Key",
+            auth_message: ~s({"action":"auth","secret":"{{secret}}"}),
+            id_path: "id",
+            type_path: "T",
+            item_types: "n, update",
+            error_types: "error",
+            key: key,
+            secret: secret
+          }
+        )
+        |> render_submit()
+
+      assert html =~ "Source live-news saved."
+      refute html =~ key
+      refute html =~ secret
+
+      source = persisted_source("live-news")
+      assert source[:kind] == :stream
+      assert source[:key_header] == "X-Feed-Key"
+      assert source[:item_types] == ["n", "update"]
+      assert source[:key] == "@keyring"
+      assert source[:secret] == "@keyring"
+      refute Keyword.has_key?(source, :dids)
+      assert {:ok, ^key} = SecretWriter.get({:cue_source, "live-news", :key}, store: :keyring)
+    end
+
+    # The JSON paths are a general stream's fields on this page; a feed's own,
+    # written by hand, stay as they were when the feed is edited here.
+    test "editing a JSON API feed keeps the paths it was written with", %{conn: conn} do
+      put_cues(
+        sources: %{
+          "api-feed" => [
+            kind: "feed",
+            url: "https://api.example.com/items",
+            interval: 300,
+            items_path: "data",
+            id_path: "id"
+          ]
+        }
+      )
+
+      {:ok, view, _html} = live(conn, "/setup?tab=cues")
+
+      view
+      |> element(~s(button[phx-click="cues_edit_source"][phx-value-ref="api-feed"]))
+      |> render_click()
+
+      view
+      |> form("#cue-source-form", cue_source: %{interval: "600"})
+      |> render_submit()
+
+      source = persisted_source("api-feed")
+      assert source[:interval] == 600
+      assert source[:items_path] == "data"
+      assert source[:id_path] == "id"
     end
 
     test "the form as it opens saves with a name and a URL", %{conn: conn} do

@@ -176,6 +176,30 @@ defmodule FermixCore.Cues.NoticesTest do
       assert :sent = Notices.source("eng-blogs", :auth_failed, %{}, opts(ctx, 2))
     end
 
+    test "a stream the service kept refusing is told once per episode, in Fermix's words", ctx do
+      assert :sent = Notices.source("live-news", :refused, %{}, opts(ctx, 0))
+      assert_receive {:sent, "owner-1", text, _opts}
+
+      assert text ==
+               "Cue source live-news stopped: the service sent an error each time Fermix " <>
+                 "connected. Some services allow one connection per account, so another " <>
+                 "program using the same keys causes this. Check its settings, then save it " <>
+                 "again or restart Fermix to try again."
+
+      assert :already_sent = Notices.source("live-news", :refused, %{}, opts(ctx, 1))
+    end
+
+    test "an outage of a source that cannot catch up says nothing was recorded", ctx do
+      assert :sent = Notices.source("live-news", :down, %{catch_up: false}, opts(ctx, 0))
+      assert_receive {:sent, "owner-1", text, _opts}
+      assert text =~ "It cannot catch up, so what the service sent meanwhile is missed"
+      refute text =~ "gap"
+
+      assert :sent = Notices.source("eng-blogs", :down, %{catch_up: true}, opts(ctx, 0))
+      assert_receive {:sent, "owner-1", text, _opts}
+      assert text =~ "what it missed is recorded as a gap"
+    end
+
     test "a reached source budget is told once per UTC day", ctx do
       assert :sent = Notices.source("eng-blogs", :budget_reached, %{budget: 5_000}, opts(ctx, 0))
       assert_receive {:sent, "owner-1", text, _opts}

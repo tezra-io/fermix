@@ -58,11 +58,21 @@ defmodule FermixWebWeb.SetupLive.CuesState do
 
   # Every source field the form knows, in the order a saved section lists them.
   # A field the form shows for the source's kind comes from the form; one it
-  # knows but does not show for that kind is dropped; any other field (JSON
-  # paths, symbols) stays as the section had it.
-  @form_fields ~w(preset kind enabled url interval dids collections daily_budget verify header
-                  algorithm prefix id_header id type_header)a
-  @list_fields ~w(dids collections)a
+  # knows but does not show for that kind is dropped, except the JSON paths,
+  # which only a stream with no preset shows and a feed or webhook keeps as
+  # the section had them; any other field stays as the section had it.
+  # A stream with no preset shows the management form's own rows after its
+  # address (`SourceForm.general_stream_rows/0`).
+  @general_stream_rows SourceForm.general_stream_rows() |> Enum.reject(&(&1.field == :url))
+  @general_stream_fields Enum.map(@general_stream_rows, & &1.field)
+  @path_fields ~w(items_path id_path revision_path type_path subject_path time_path)a
+  @form_fields ~w(preset kind enabled url interval dids collections)a ++
+                 @general_stream_fields ++
+                 ~w(daily_budget verify header algorithm prefix id_header id type_header)a
+  @list_fields ~w(dids collections)a ++
+                 for(row <- @general_stream_rows, row.kind == :list, do: row.field)
+  # The secrets the form takes, each read from the submit alone.
+  @typed_secret_keys ~w(key secret)
   @integer_fields ~w(interval daily_budget)a
 
   @mandate_list_fields ~w(tools read_tools validator_env unpinned)a
@@ -169,7 +179,7 @@ defmodule FermixWebWeb.SetupLive.CuesState do
 
   defp event("save_source", %{"cue_source" => params}, state, opts) do
     state = update_source_editor(state, params)
-    save_source(state.source_editor, Map.get(params, "secret"), state, opts)
+    save_source(state.source_editor, Map.take(params, @typed_secret_keys), state, opts)
   end
 
   defp event("remove_source", %{"ref" => ref}, state, _opts) do
@@ -286,6 +296,7 @@ defmodule FermixWebWeb.SetupLive.CuesState do
       daily_budget: source.daily_budget,
       verify: source.verify && Atom.to_string(source.verify),
       secrets: source.secrets,
+      missing_secret: source.missing_secret,
       has_url?: Map.has_key?(source.secrets, :path_secret),
       status: status_view(row(rows, source.ref), now)
     }
@@ -359,7 +370,7 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   defp update_source_editor(%{source_editor: editor} = state, params) do
     values =
       editor.values
-      |> merge_values(Map.delete(params, "secret"))
+      |> merge_values(Map.drop(params, @typed_secret_keys))
       |> preset_of_kind(editor.values, editor.mode)
       |> verify_of_choice(editor.values)
 
@@ -421,11 +432,11 @@ defmodule FermixWebWeb.SetupLive.CuesState do
     end)
   end
 
-  defp save_source(editor, typed_secret, state, opts) do
+  defp save_source(editor, typed, state, opts) do
     ref = editor.ref || String.trim(Map.get(editor.values, "ref", ""))
     existing = Map.get(state.raw.sources, ref, [])
     section = source_section(editor.values, existing)
-    secrets = typed_secrets(typed_secret, source_kind(editor.values))
+    secrets = typed_secrets(typed, source_form(editor.values))
 
     with :ok <- same_choice(editor.mode, editor.values, existing),
          :ok <- needed_fields(editor.values, section),
@@ -524,19 +535,22 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   """
   @spec source_form(map()) :: %{
           kind: String.t(),
+          preset: String.t() | nil,
           verify: String.t() | nil,
           fields: [atom()],
           required: [atom()]
         }
   def source_form(values) when is_map(values) do
     kind = source_kind(values)
+    preset = blank(text(Map.get(values, "preset")))
     verify = webhook_method(values, kind)
 
     %{
       kind: kind,
+      preset: preset,
       verify: verify,
-      fields: shown_fields(kind, verify),
-      required: required_fields(kind, blank(text(Map.get(values, "preset"))), verify)
+      fields: shown_fields(kind, preset, verify),
+      required: required_fields(kind, preset, verify)
     }
   end
 
@@ -575,15 +589,21 @@ defmodule FermixWebWeb.SetupLive.CuesState do
 
   defp webhook_method(_values, _kind), do: nil
 
-  defp shown_fields(kind, verify) do
+  defp shown_fields(kind, preset, verify) do
     base = [:preset, :kind, :enabled, :daily_budget]
-    base ++ kind_fields(kind, verify)
+    base ++ kind_fields(kind, preset, verify)
   end
 
-  defp kind_fields("feed", _verify), do: [:url, :interval]
-  defp kind_fields("stream", _verify), do: [:url, :dids, :collections]
-  defp kind_fields("webhook", verify), do: [:verify | method_fields(verify)] ++ [:type_header]
-  defp kind_fields(_local_push, _verify), do: []
+  # A stream shows Bluesky's fields with its preset and the general WebSocket
+  # source's without one.
+  defp kind_fields("feed", _preset, _verify), do: [:url, :interval]
+  defp kind_fields("stream", nil, _verify), do: [:url | @general_stream_fields]
+  defp kind_fields("stream", _preset, _verify), do: [:url, :dids, :collections]
+
+  defp kind_fields("webhook", _preset, verify),
+    do: [:verify | method_fields(verify)] ++ [:type_header]
+
+  defp kind_fields(_local_push, _preset, _verify), do: []
 
   defp method_fields("hmac"), do: [:header, :algorithm, :prefix, :id_header, :id]
   defp method_fields("shared_secret"), do: [:header, :id_header, :id]
@@ -598,7 +618,8 @@ defmodule FermixWebWeb.SetupLive.CuesState do
       |> Enum.filter(&(&1 in fields))
       |> Enum.flat_map(&source_entry(&1, values, existing, preset, kind))
 
-    kept = Keyword.drop(existing, @form_fields ++ SecretWriter.cue_secret_fields())
+    known = (@form_fields -- @path_fields) ++ Enum.filter(@path_fields, &(&1 in fields))
+    kept = Keyword.drop(existing, known ++ SecretWriter.cue_secret_fields())
     shown ++ kept
   end
 
@@ -624,14 +645,21 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   defp source_entry(field, values, _existing, _preset, _kind),
     do: entry(field, form_value(values, field))
 
-  defp typed_secrets(typed, "webhook") do
-    case blank(text(typed)) do
-      nil -> %{}
-      secret -> %{secret: secret}
-    end
-  end
+  # A webhook's one secret, or the key and secret a stream with no preset signs
+  # in with; a field left blank keeps what is stored.
+  defp typed_secrets(typed, %{kind: "webhook"}), do: typed_values(typed, [:secret])
 
-  defp typed_secrets(_typed, _kind), do: %{}
+  defp typed_secrets(typed, %{kind: "stream", preset: nil}),
+    do: typed_values(typed, [:key, :secret])
+
+  defp typed_secrets(_typed, _form), do: %{}
+
+  defp typed_values(typed, fields) do
+    for field <- fields,
+        value = blank(text(Map.get(typed, Atom.to_string(field)))),
+        into: %{},
+        do: {field, value}
+  end
 
   # --- mandates ------------------------------------------------------------------
 

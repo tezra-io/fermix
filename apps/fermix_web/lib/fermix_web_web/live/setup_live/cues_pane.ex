@@ -49,7 +49,9 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   # makes. A kind's extra detail sits behind the info beside the line.
   @kind_lines %{
     "feed" => {"Fermix checks the feed's URL for new items on a schedule.", nil},
-    "stream" => {"Fermix keeps a connection open and takes items as they arrive.", nil},
+    "stream" =>
+      {"Fermix keeps a connection open to a WebSocket (wss://) address and takes items as they arrive.",
+       nil},
     "webhook" =>
       {"A service sends items to Fermix.",
        "Saving makes its URL. Give the service that URL and the secret you enter here."},
@@ -626,6 +628,9 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   defp missing_secret(%{kind: "webhook", secrets: secrets, verify: verify}),
     do: if(Map.has_key?(secrets, :secret), do: nil, else: "Needs a #{secret_noun(verify)}")
 
+  defp missing_secret(%{kind: "stream", missing_secret: field}) when not is_nil(field),
+    do: "Needs a #{field}"
+
   defp missing_secret(_source), do: nil
 
   defp secret_label("shared_secret"), do: "Shared secret"
@@ -835,6 +840,16 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       placeholder={Enum.join(@defaults[:collections] || [], ", ")}
       info="Comma-separated."
     />
+    <.general_field
+      :for={{field, {label, info}} <- general_fields()}
+      :if={field in @form.fields}
+      field={field}
+      label={label}
+      info={info}
+      values={@values}
+      required={field in @form.required}
+      missing={@missing}
+    />
     <.select_field
       :if={:verify in @form.fields}
       name="cue_source[verify]"
@@ -853,6 +868,42 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       </option>
     </.select_field>
     """
+  end
+
+  attr :field, :atom, required: true
+  attr :label, :string, required: true
+  attr :info, :string, required: true
+  attr :values, :map, required: true
+  attr :required, :boolean, default: false
+  attr :missing, :list, default: []
+
+  # One field of a stream with no preset, its name the config key's.
+  defp general_field(assigns) do
+    assigns = assign(assigns, :key, Atom.to_string(assigns.field))
+
+    ~H"""
+    <.field
+      name={"cue_source[#{@key}]"}
+      label={@label}
+      value={@values[@key]}
+      info={@info}
+      required={@required}
+      refusal={missing_refusal(@field, @missing, @values)}
+      refusal_id={"cue-source-#{@key}-refusal"}
+    />
+    """
+  end
+
+  # A stream with no preset: the management form's rows after its address, in
+  # its words (`SourceForm.general_stream_rows/0`), the footer as the info
+  # text with its literals' backticks dropped.
+  defp general_fields, do: general_rows(false)
+  defp general_more_fields, do: general_rows(true)
+
+  defp general_rows(advanced?) do
+    for row <- SourceForm.general_stream_rows(),
+        row.field != :url and row.advanced == advanced?,
+        do: {row.field, {row.label, String.replace(row.footer, "`", "")}}
   end
 
   defp missing_refusal(field, missing, values) do
@@ -959,6 +1010,14 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
         value={@values["type_header"]}
         placeholder={text(@defaults[:type_header])}
       />
+      <.general_field
+        :for={{field, {label, info}} <- general_more_fields()}
+        :if={field in @fields}
+        field={field}
+        label={label}
+        info={info}
+        values={@values}
+      />
       <.field
         :if={:daily_budget in @fields}
         name="cue_source[daily_budget]"
@@ -973,8 +1032,16 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
     """
   end
 
-  # A field folded under More options opens it when it already holds a value.
-  @source_more_fields ~w(header algorithm prefix id_header type_header daily_budget)a
+  # A field folded under More options opens it when it already holds a value:
+  # a webhook's, and the general stream's as `SourceForm` folds them.
+  @source_more_fields Enum.uniq(
+                        ~w(header algorithm prefix id_header type_header daily_budget)a ++
+                          for(
+                            row <- SourceForm.general_stream_rows(),
+                            row.advanced,
+                            do: row.field
+                          )
+                      )
 
   defp source_more?(values, folded) do
     (values["id"] == "true" and :id in folded) or
@@ -1008,7 +1075,38 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
     """
   end
 
+  # A stream with no preset signs in with a key and a secret, each typed once.
+  defp source_secret_fields(%{form: %{kind: "stream", preset: nil}} = assigns) do
+    ~H"""
+    <.secret_input :for={field <- [:key, :secret]} field={field} editor={@editor} />
+    """
+  end
+
   defp source_secret_fields(assigns), do: ~H""
+
+  attr :field, :atom, required: true
+  attr :editor, :map, required: true
+
+  defp secret_input(assigns) do
+    assigns = assign(assigns, :set?, Map.has_key?(assigns.editor.secrets, assigns.field))
+
+    ~H"""
+    <label class="form-control w-full">
+      <span class="label flex items-center gap-1.5 pb-1 text-sm font-medium">
+        {if @field == :key, do: "Key", else: "Secret"}
+        <.info text="Kept in Fermix's secret store, never shown here." />
+      </span>
+      <input
+        type="password"
+        name={"cue_source[#{@field}]"}
+        value=""
+        autocomplete="off"
+        placeholder={if @set?, do: "Set; leave blank to keep it", else: "Paste the #{@field}"}
+        class="input input-bordered w-full bg-base-100 font-mono"
+      />
+    </label>
+    """
+  end
 
   defp secret_info("standard_webhooks"),
     do: "Starts with whsec_. " <> secret_info(nil)

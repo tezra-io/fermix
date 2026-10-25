@@ -66,6 +66,29 @@ defmodule FermixCore.Cues.ConfigTest do
     }
   end
 
+  # A general WebSocket source with every field it takes.
+  defp general_stream do
+    %{
+      "kind" => "stream",
+      "url" => "wss://stream.example.com/v2/news",
+      "key" => "@keyring",
+      "secret" => "@file",
+      "key_header" => "X-Feed-Key",
+      "secret_header" => "X-Feed-Secret",
+      "auth_message" => ~s({"action":"auth","key":"{{key}}","secret":"{{secret}}"}),
+      "subscribe_message" => ~s({"action":"subscribe","news":["*"]}),
+      "items_path" => ".",
+      "id_path" => "id",
+      "revision_path" => "updated_at",
+      "type_path" => "T",
+      "subject_path" => "symbols.0",
+      "time_path" => "created_at",
+      "item_types" => ["n"],
+      "error_types" => ["error"],
+      "daily_budget" => 2_000
+    }
+  end
+
   describe "normalize/1" do
     test "nil and an empty section normalize to nothing" do
       assert Config.normalize(nil) == []
@@ -95,7 +118,7 @@ defmodule FermixCore.Cues.ConfigTest do
     end
 
     test "normalize is idempotent over its own output and over to_keyword's" do
-      once = Config.normalize(toml_section())
+      once = Config.normalize(put_in(toml_section(), ["sources", "live-news"], general_stream()))
 
       assert Config.normalize(once) == once
       assert once |> Config.to_keyword() |> Config.normalize() == once
@@ -287,36 +310,120 @@ defmodule FermixCore.Cues.ConfigTest do
       assert {:ok, %{missing_secret: nil}} = Config.source("s1", cues)
     end
 
-    test "each kind declares its secret fields, and which one it needs" do
+    test "each kind declares its secret fields, and a source the ones it needs" do
       assert Config.secret_fields(:local_push) == [:token]
       assert Config.secret_fields(:webhook) == [:key, :secret, :path_secret]
       assert Config.secret_fields(:feed) == [:key, :secret]
       assert Config.secret_fields(:stream) == [:key, :secret]
 
-      assert Config.required_secret(:local_push) == :token
-      assert Config.required_secret(:webhook) == :secret
-      assert Config.required_secret(:feed) == nil
-      assert Config.required_secret(:stream) == nil
+      assert Config.needed_secrets(%{kind: :local_push}) == [:token]
+      assert Config.needed_secrets(%{kind: :webhook, preset: "github"}) == [:secret]
+      assert Config.needed_secrets(%{kind: :feed, preset: "rss"}) == []
+      assert Config.needed_secrets(%{kind: :stream, preset: "bluesky_jetstream"}) == []
+      assert Config.needed_secrets(%{kind: :stream, preset: nil}) == []
+
+      assert Config.needed_secrets(%{kind: :stream, preset: nil, key_header: "X-Feed-Key"}) ==
+               [:key]
+
+      general = %{kind: :stream, preset: nil, auth_message: ~s({"k":"{{key}}","s":"{{secret}}"})}
+      assert Config.needed_secrets(general) == [:key, :secret]
+    end
+
+    # A stream with no preset signs in with what its fields name; until each is
+    # stored it waits, naming the first one missing, key before secret.
+    test "a general stream waits for the first secret its sign-in names" do
+      base = %{
+        "kind" => "stream",
+        "url" => "wss://stream.example.com/v2/news",
+        "id_path" => "id",
+        "key_header" => "X-Feed-Key",
+        "auth_message" => ~s({"action":"auth","secret":"{{secret}}"})
+      }
+
+      for {stored, missing} <- [
+            {%{}, :key},
+            {%{"secret" => "@keyring"}, :key},
+            {%{"key" => "@keyring"}, :secret},
+            {%{"key" => "@keyring", "secret" => "@file"}, nil}
+          ] do
+        cues = Config.normalize(source(Map.merge(base, stored)))
+        assert {:ok, %{missing_secret: ^missing}} = Config.source("s1", cues)
+      end
+
+      no_sign_in = Map.drop(base, ["key_header", "auth_message"])
+
+      assert {:ok, %{missing_secret: nil}} =
+               Config.source("s1", Config.normalize(source(no_sign_in)))
     end
 
     # The feed worker refuses a plain-text URL at poll time; the config refuses it
     # first, so a typo never becomes a source that only fails once it runs.
-    test "a feed or stream URL must be encrypted" do
+    test "a feed URL must be https and a stream URL wss" do
       assert_raise ArgumentError, ~r/sources\.s1\.url must start with https:\/\//, fn ->
         Config.normalize(source(%{"preset" => "rss", "url" => "http://example.org/feed"}))
       end
 
-      assert_raise ArgumentError,
-                   ~r/sources\.s1\.url must start with wss:\/\/ or https:\/\//,
-                   fn ->
-                     Config.normalize(
-                       source(%{
-                         "preset" => "bluesky_jetstream",
-                         "url" => "ws://jetstream.example",
-                         "dids" => ["did:plc:abc123"]
-                       })
-                     )
-                   end
+      for url <- ["ws://jetstream.example", "https://stream.example.com/v2/news"] do
+        assert_raise ArgumentError, ~r/sources\.s1\.url must start with wss:\/\/$/, fn ->
+          Config.normalize(
+            source(%{"preset" => "bluesky_jetstream", "url" => url, "dids" => ["did:plc:abc123"]})
+          )
+        end
+      end
+    end
+
+    # The general WebSocket source (a stream with no preset): its own fields,
+    # each refused under its own key, and never Bluesky's.
+    test "a general stream's fields load, and each of its rules names the field it refuses" do
+      section = %{
+        "kind" => "stream",
+        "url" => "wss://stream.example.com/v2/news",
+        "key" => "@keyring",
+        "key_header" => "X-Feed-Key",
+        "subscribe_message" => ~s({"action":"subscribe","news":["*"]}),
+        "type_path" => "T",
+        "item_types" => ["n"],
+        "error_types" => ["error"],
+        "id_path" => "id"
+      }
+
+      assert {:ok, stream} = Config.source("s1", Config.normalize(source(section)))
+      assert stream.key_header == "X-Feed-Key"
+      assert stream.item_types == ["n"]
+      assert stream.error_types == ["error"]
+      assert stream.missing_secret == nil
+
+      for {change, pattern} <- [
+            {%{"id_path" => nil}, ~r/sources\.s1 is a stream source and needs id_path/},
+            {%{"key_header" => "Sec-WebSocket-Key"}, ~r/sources\.s1\.key_header is a header/},
+            {%{"auth_message" => ~s({"key":{{key}}})}, ~r/sources\.s1\.auth_message must be/},
+            {%{"subscribe_message" => "[subscribe"}, ~r/sources\.s1\.subscribe_message must/},
+            {%{"type_path" => nil}, ~r/sources\.s1\.item_types needs type_path/},
+            {%{"url" => "wss:///news"}, ~r/sources\.s1\.url must name a host/},
+            {%{"dids" => ["did:plc:abc123"]},
+             ~r/sources\.s1\.dids applies only to the Bluesky preset/},
+            {%{"collections" => ["app.bsky.feed.post"]}, ~r/sources\.s1\.collections applies/},
+            {%{"item_types" => "n"}, ~r/sources\.s1\.item_types/}
+          ] do
+        changed = section |> Map.merge(change) |> Enum.reject(&is_nil(elem(&1, 1))) |> Map.new()
+        assert_raise ArgumentError, pattern, fn -> Config.normalize(source(changed)) end
+      end
+    end
+
+    test "the Bluesky preset refuses the general source's fields, and symbols is gone" do
+      bluesky = %{"preset" => "bluesky_jetstream", "dids" => ["did:plc:abc123"]}
+
+      for field <- ~w(key_header auth_message id_path type_path item_types) do
+        value = if field == "item_types", do: ["n"], else: "X-Feed-Key"
+
+        assert_raise ArgumentError,
+                     ~r/sources\.s1\.#{field} applies only to a stream with no preset/,
+                     fn -> Config.normalize(source(Map.put(bluesky, field, value))) end
+      end
+
+      assert_raise ArgumentError, ~r/unknown key\(s\): symbols/, fn ->
+        Config.normalize(source(Map.put(bluesky, "symbols", ["KTRL"])))
+      end
     end
 
     test "items_path needs id_path, or no item would have an identity" do
@@ -345,7 +452,7 @@ defmodule FermixCore.Cues.ConfigTest do
     test "the fields a source must name itself: its kind's, its method's and its preset's, less what the preset fills" do
       assert Config.required_fields(:feed, nil, nil) == [:url, :interval]
       assert Config.required_fields(:feed, "rss", nil) == [:url]
-      assert Config.required_fields(:stream, nil, nil) == [:url]
+      assert Config.required_fields(:stream, nil, nil) == [:url, :id_path]
       assert Config.required_fields(:stream, "bluesky_jetstream", nil) == [:dids]
       assert Config.required_fields(:webhook, nil, nil) == [:verify]
       assert Config.required_fields(:webhook, nil, "hmac") == [:verify, :header]

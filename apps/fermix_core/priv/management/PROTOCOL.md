@@ -250,7 +250,7 @@ daemon onto anything else.
 | `cues.status` | none | The cue subsystem as it stands: `available` (whether this build admits cues), the switches (`enabled`, `mandates_enabled`), whether the cue tree is `running`, `memory_enabled`, a `state` (`unavailable`, `off`, `needs_memory`, `needs_restart`, `running`) with its `status_sentence`, the `door` (`state` `listening`, `unavailable` or `not_running`, `port`, `reason`, `sentence`), and `counts` (`sources`, `sources_attention`, `watchers`, `watchers_held`, `mandates`, `mandates_attention`, `proposals_waiting`). Answers on every build. Minimum version `2`. |
 | `cues.sources.list` | none | Every source as a row, at most 64, plus `can_add` and `limits` (`max_sources`). Minimum version `2`. |
 | `cues.sources.get` | `ref` | One source's row, its editable fields as settings rows (`values`), its open gaps (at most 20, each with the daemon's sentence) and its refused requests by reason (`rejected`). Minimum version `2`. |
-| `cues.sources.form` | `kind`, `preset`, `verify` (each optional) | The add form for that choice, and writes nothing: `kinds`, `presets`, `rows` (the name first, then the fields of that kind, preset and verification method, a secret field as a `secret` row with `present: false`), `consent_sentence` and `notes`. Minimum version `2`. |
+| `cues.sources.form` | `kind`, `preset`, `verify` (each optional) | The add form for that choice, and writes nothing: `kinds`, `presets`, `rows` (the name first, then the fields of that kind, preset and verification method, a secret field as a `secret` row with `present: false`), `consent_sentence` and `notes`. A stream with no preset is the general WebSocket source: each of its field rows but the name and the daily budget carries a `footer`, and the rows end with two `secret` rows, `key` and `secret`; Bluesky's rows (`dids`, `collections`) come only with its preset. Minimum version `2`. |
 | `cues.sources.add` | `ref`, `kind` or `preset`, `values` | Saves a new source and answers `{source, token}`: its row, and for a new local push source its first token, returned once; null otherwise. Minimum version `2`. |
 | `cues.sources.update` | `ref`, `values` | Changes the fields `values` names and answers `{source}`. The name, kind and preset cannot change. Minimum version `2`. |
 | `cues.sources.remove` | `ref` | Removes a source and its stored secrets, and answers `{ref, removed: true, left, watchers}`: any secret that could not be deleted, as sentences, and the watchers that listened to it. Minimum version `2`. |
@@ -756,8 +756,8 @@ Notes that the shapes alone do not carry:
   or a stream's key and secret). The value is one line of 1 to 8,192 bytes.
   Storing writes the value and the reference that names it in one settings
   write, so storing the last secret a source waits for starts it; clearing
-  deletes the value first, then the reference, and a source whose kind needs
-  that secret waits for it again. `present` is "the settings file points this
+  deletes the value first, then the reference, and a source that needs that
+  secret waits for it again. `present` is "the settings file points this
   field at a stored value". `cue_source:<ref>:token` and
   `cue_source:<ref>:path_secret` are Fermix's to make and are refused with
   `invalid_params` and a sentence: a new token comes from
@@ -1026,12 +1026,16 @@ Notes that the shapes alone do not carry:
   are always available and are the client's controls. `secrets` reports each
   field's presence and nothing else. Never on the wire: a payload, an item's
   text or snapshot, a cursor, a secret's value, or a webhook's address.
-- **A source can wait for its secret.** A source whose kind needs a secret (a
-  webhook's signing secret, a local push's token) and has none stored loads
-  as `needs_secret` with `missing_secret` naming the field, for a hand-edited
-  file as much as for a socket write: the door refuses its requests and no
-  worker runs until the secret is stored. So `cues.sources.add` saves a
-  webhook first and the client stores its secret with `secret.set` after.
+- **A source can wait for its secret.** A source that needs a secret (a
+  webhook's signing secret, a local push's token, or the `key` and `secret` a
+  stream with no preset signs in with, by a header or a placeholder in its
+  sign-in message) and has one not stored loads as `needs_secret` with
+  `missing_secret` naming the first such field (key before secret), for a
+  hand-edited file as much as for a socket write: the door refuses its
+  requests and no worker runs until each is stored. So `cues.sources.add`
+  saves a webhook or a stream first and the client stores its secrets with
+  `secret.set` after, one per secret row; `secrets` lists each field the
+  source needs with its own presence.
 - **Two values are handed out.** A new local push source's first token
   (`cues.sources.add`) and a fresh one (`cues.sources.token.new`) are returned
   once: never logged, never traced, never retained, and no later read repeats

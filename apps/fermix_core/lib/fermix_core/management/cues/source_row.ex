@@ -11,9 +11,9 @@ defmodule FermixCore.Management.Cues.SourceRow do
 
   `state` is read from the configuration first: `off` (switched off, since a
   disabled source keeps its last `cue_sources.status`), `needs_secret`
-  (waiting for the secret its kind needs), `not_running` (cues off, or on and
-  not yet restarted), then the `cue_sources` status the source last wrote,
-  `idle` before it wrote one.
+  (waiting for a secret it needs: its kind's, or one a stream's sign-in
+  names), `not_running` (cues off, or on and not yet restarted), then the
+  `cue_sources` status the source last wrote, `idle` before it wrote one.
 
   Never on the wire: a payload, an item's text or snapshot, a cursor, a
   secret's value, a webhook's address. A secret's presence is its sentinel in
@@ -88,6 +88,7 @@ defmodule FermixCore.Management.Cues.SourceRow do
 
   defp sentence("off", _source, _facts), do: "Off."
   defp sentence("needs_secret", %{missing_secret: :token}, _facts), do: "Waiting for its token."
+  defp sentence("needs_secret", %{missing_secret: :key}, _facts), do: "Waiting for its key."
   defp sentence("needs_secret", source, _facts), do: "Waiting for its #{secret_label(source)}."
 
   defp sentence("not_running", _source, %{memory?: false}),
@@ -160,14 +161,15 @@ defmodule FermixCore.Management.Cues.SourceRow do
   defp source_url(%{kind: kind, url: url}) when kind in [:feed, :stream], do: url
   defp source_url(_source), do: nil
 
-  # The secret its kind needs, a webhook's address, and any other field whose
-  # sentinel the section holds.
+  # Every secret it needs (its kind's, or those a stream's sign-in names), a
+  # webhook's address, and any other field whose sentinel the section holds,
+  # each with its own presence.
   defp secrets(source) do
-    required = CuesConfig.required_secret(source.kind)
+    needed = CuesConfig.needed_secrets(source)
 
     source.kind
     |> CuesConfig.secret_fields()
-    |> Enum.filter(&(&1 == required or &1 == :path_secret or Map.has_key?(source.secrets, &1)))
+    |> Enum.filter(&(&1 in needed or &1 == :path_secret or Map.has_key?(source.secrets, &1)))
     |> Enum.map(fn field ->
       %{
         "field" => Atom.to_string(field),

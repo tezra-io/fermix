@@ -459,8 +459,13 @@ keys are read at each call. The path of one item:
    on `127.0.0.1:door_port`, routes in `Cues.Door.Router`: local-push CloudEvents
    on `/cues/v1/:ref`, webhooks on `/cues/hooks/:ref/:random`, verified by
    `Cues.Webhook`), or a worker under `Cues.SourceSupervisor` (`Cues.Source.Feed`
-   polls through `Net.HttpClient`, `Cues.Source.Stream` holds a Jetstream
-   WebSocket), which `Cues.SourceManager` starts and stops to match the config.
+   polls through `Net.HttpClient`; `Cues.Source.Stream` holds a WebSocket
+   through a transport behind `Cues.Source.Stream.Transport`, reading it with
+   the reader its preset chooses: `Cues.Jetstream` for Bluesky, which rewinds
+   with a cursor, or `Cues.JsonStream`, the general source that signs in with
+   the owner's key and secret and cannot rewind), which `Cues.SourceManager`
+   starts and stops to match the config. A JSON API feed, a webhook and the
+   general stream read messages by the same dot paths (`Cues.JsonPath`).
 2. Accept and route are one Repo transaction: the identity check, the cue row,
    one `cue_deliveries` row per enabled watcher listening to the source
    (`pending` for an `llm` watcher, `passed` for a `none` one), inbox eviction
@@ -501,6 +506,12 @@ a process holds only timers and work in flight, and the boot sweeps put a
 runs a stop interrupted. No GenServer callback makes a provider call or a
 channel send: filter calls run as supervised tasks and sends go through the
 delivery layer with their timeouts.
+
+Architecture Invariant: no text from outside reaches a notice, a source's
+status or a source row. A stream service's error message goes to the log and,
+behind the content gate, the trace; the source's status and notices are
+Fermix's own sentences, so `list_cues` reads sources without tainting a turn.
+A stream's secrets are read at each connection and kept in no process state.
 
 Architecture Invariant: a cue is data, never an owner message. It never enters a
 conversation, and its text reaches a model only framed as outside text

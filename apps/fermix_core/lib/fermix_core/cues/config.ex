@@ -20,13 +20,20 @@ defmodule FermixCore.Cues.Config do
   which `Cues.Webhook.ensure_path_secret/2` writes) holds only a sentinel,
   `@keyring` or `@file`, naming the store the value is in under
   `cue_source:<ref>:<field>`; `secret/2` resolves it on demand, so the value is
-  never in application environment. A source whose kind needs a secret (a
-  webhook's `secret`, a local push's `token`) and whose section has no
-  sentinel for it loads with `missing_secret` naming the field: it waits for
-  the secret rather than refusing the whole section (M60 app surface §3.8
-  item 3), and neither the door nor a worker serves it until it is stored.
+  never in application environment. A source that needs a secret (a webhook's
+  `secret`, a local push's `token`, the `key` or `secret` a stream with no
+  preset signs in with) and whose section has no sentinel for it loads with
+  `missing_secret` naming the first such field: it waits for the secret rather
+  than refusing the whole section (M60 app surface §3.8 item 3), and neither
+  the door nor a worker serves it until it is stored.
+
+  A stream is `wss://` only. With the `bluesky_jetstream` preset it takes
+  `dids` and `collections`; with no preset it is the general WebSocket source
+  and takes the fields `Cues.JsonStream.fields/0` names, whose shape rules are
+  `Cues.JsonStream.check_config/1`'s. Neither takes the other's fields.
   """
 
+  alias FermixCore.Cues.JsonStream
   alias FermixCore.Cues.Presets
   alias FermixCore.Cues.Webhook
   alias FermixCore.Setup.SecretWriter
@@ -54,12 +61,18 @@ defmodule FermixCore.Cues.Config do
   @secret_fields SecretWriter.cue_secret_fields()
 
   @path_fields [:items_path, :id_path, :revision_path, :type_path, :subject_path, :time_path]
+  # How a stream with no preset signs in (`Cues.JsonStream`).
+  @sign_in_fields [:key_header, :secret_header, :auth_message, :subscribe_message]
   @string_source_fields [:preset, :url, :id_header, :type_header, :header, :algorithm, :prefix] ++
-                          @path_fields
-  @list_source_fields [:dids, :collections, :symbols]
+                          @path_fields ++ @sign_in_fields
+  @list_source_fields [:dids, :collections, :item_types, :error_types]
+  # The Bluesky preset's own fields.
+  @bluesky_fields [:dids, :collections]
 
-  @source_keys [:kind, :preset, :enabled, :url, :interval, :dids, :collections, :symbols] ++
+  @source_keys [:kind, :preset, :enabled, :url, :interval, :dids, :collections] ++
                  @path_fields ++
+                 [:item_types, :error_types] ++
+                 @sign_in_fields ++
                  [:id_header, :type_header, :id, :verify, :header, :algorithm, :prefix] ++
                  [:daily_budget | @secret_fields]
 
@@ -88,7 +101,12 @@ defmodule FermixCore.Cues.Config do
                    interval: [:feed],
                    dids: [:stream],
                    collections: [:stream],
-                   symbols: [:stream],
+                   item_types: [:stream],
+                   error_types: [:stream],
+                   key_header: [:stream],
+                   secret_header: [:stream],
+                   auth_message: [:stream],
+                   subscribe_message: [:stream],
                    id_header: [:webhook],
                    type_header: [:webhook],
                    id: [:webhook],
@@ -109,8 +127,9 @@ defmodule FermixCore.Cues.Config do
     local_push: []
   }
 
-  # The secret a kind cannot run without. A source whose section has no
-  # sentinel for it still loads, waiting for it (`missing_secret`): the source
+  # The secret a kind cannot run without; a stream with no preset needs the
+  # ones its sign-in names (`needed_secrets/1`). A source whose section has no
+  # sentinel for one still loads, waiting for it (`missing_secret`): the source
   # is added first and its secret stored after (M60 app surface §3.5), and the
   # door and the workers leave it alone until then.
   @required_secret_by_kind %{webhook: :secret, local_push: :token}
@@ -180,9 +199,19 @@ defmodule FermixCore.Cues.Config do
   @spec secret_fields(kind()) :: [secret_field()]
   def secret_fields(kind) when kind in @kinds, do: Map.fetch!(@secret_fields_by_kind, kind)
 
-  @doc "The secret a source of `kind` cannot run without, or nil when it needs none."
-  @spec required_secret(kind()) :: secret_field() | nil
-  def required_secret(kind) when kind in @kinds, do: Map.get(@required_secret_by_kind, kind)
+  @doc """
+  The secrets `source` (a resolved source, or any map with its `kind`,
+  `preset` and fields) cannot run without, in the order a surface lists them:
+  a webhook's `secret`, a local push's `token`, and for a stream with no preset
+  the `key` and `secret` its sign-in names (`Cues.JsonStream.secret_fields/1`).
+  """
+  @spec needed_secrets(map()) :: [secret_field()]
+  def needed_secrets(%{kind: :stream} = source) do
+    if Map.get(source, :preset) == nil, do: JsonStream.secret_fields(source), else: []
+  end
+
+  def needed_secrets(%{kind: kind}) when kind in @kinds,
+    do: @required_secret_by_kind |> Map.get(kind) |> List.wrap()
 
   @doc """
   The fields a source must name itself: those its kind, its webhook method
@@ -231,9 +260,11 @@ defmodule FermixCore.Cues.Config do
 
   # A signed or shared-secret webhook names the header that carries it and
   # how one delivery is told from another; the Bluesky preset follows the
-  # accounts it names.
+  # accounts it names; a stream with no preset names where each message keeps
+  # its id.
   defp needed_fields(kind, method, preset) do
-    Map.fetch!(@required_by_kind, kind) ++ method_needs(kind, method) ++ preset_needs(preset)
+    Map.fetch!(@required_by_kind, kind) ++
+      method_needs(kind, method) ++ preset_needs(kind, preset)
   end
 
   defp method_needs(kind, method),
@@ -247,8 +278,9 @@ defmodule FermixCore.Cues.Config do
   defp identified?(filled),
     do: Enum.any?(@identity_fields, &(Map.get(filled, &1) not in [nil, ""]))
 
-  defp preset_needs("bluesky_jetstream"), do: [:dids]
-  defp preset_needs(_preset), do: []
+  defp preset_needs(_kind, "bluesky_jetstream"), do: [:dids]
+  defp preset_needs(:stream, nil), do: [:id_path]
+  defp preset_needs(_kind, _preset), do: []
 
   @doc "Whether `name` is a valid source ref or mandate name."
   @spec valid_name?(term()) :: boolean()
@@ -375,27 +407,28 @@ defmodule FermixCore.Cues.Config do
           into: %{},
           do: {field, store!(filled[field])}
 
-    kind = Map.fetch!(filled, :kind)
-
     base = %{
       ref: ref,
-      kind: kind,
+      kind: Map.fetch!(filled, :kind),
       preset: Map.get(filled, :preset),
       enabled?: Map.get(filled, :enabled, true),
       daily_budget: Map.get(filled, :daily_budget, 0),
       dids: Map.get(filled, :dids, []),
       collections: Map.get(filled, :collections, []),
-      symbols: Map.get(filled, :symbols, []),
+      item_types: Map.get(filled, :item_types, []),
+      error_types: Map.get(filled, :error_types, []),
       interval: Map.get(filled, :interval),
       id: Map.get(filled, :id),
       verify: Map.get(filled, :verify),
-      secrets: secrets,
-      missing_secret: missing_secret(kind, secrets)
+      secrets: secrets
     }
 
-    Enum.reduce(@string_source_fields -- [:preset], base, fn field, acc ->
-      Map.put(acc, field, Map.get(filled, field))
-    end)
+    source =
+      Enum.reduce(@string_source_fields -- [:preset], base, fn field, acc ->
+        Map.put(acc, field, Map.get(filled, field))
+      end)
+
+    Map.put(source, :missing_secret, missing_secret(source))
   end
 
   defp store!(sentinel) do
@@ -403,12 +436,8 @@ defmodule FermixCore.Cues.Config do
     store
   end
 
-  defp missing_secret(kind, secrets) do
-    case required_secret(kind) do
-      nil -> nil
-      field -> if Map.has_key?(secrets, field), do: nil, else: field
-    end
-  end
+  defp missing_secret(source),
+    do: source |> needed_secrets() |> Enum.find(&(not Map.has_key?(source.secrets, &1)))
 
   defp resolve_mandate(name, section) do
     %{
@@ -559,16 +588,18 @@ defmodule FermixCore.Cues.Config do
               "cues.sources.#{ref} needs a kind (stream, feed, webhook or local_push) or a preset"
 
     check_field_kinds!(ref, kind, Map.keys(filled))
+    check_stream_fields!(ref, kind, filled)
     check_required!(ref, kind, filled)
     check_identity!(ref, kind, filled)
     check_webhook!(ref, kind, filled)
     check_url_scheme!(ref, kind, Map.get(filled, :url))
     check_item_paths!(ref, filled)
+    check_general_stream!(ref, kind, filled)
   end
 
   # Fermix reads sources only over an encrypted connection: a feed over https,
-  # a stream over wss (a WebSocket) or https (an HTTP stream).
-  @url_schemes %{feed: ["https://"], stream: ["wss://", "https://"]}
+  # a stream over wss (a WebSocket).
+  @url_schemes %{feed: ["https://"], stream: ["wss://"]}
 
   defp check_url_scheme!(_ref, _kind, nil), do: :ok
 
@@ -580,6 +611,34 @@ defmodule FermixCore.Cues.Config do
             "cues.sources.#{ref}.url must start with #{Enum.join(schemes, " or ")}"
     end
   end
+
+  # A stream takes its preset's fields or the general source's, never both.
+  defp check_stream_fields!(ref, :stream, filled) do
+    {foreign, owner} =
+      if Map.get(filled, :preset) == nil,
+        do: {@bluesky_fields, "the Bluesky preset"},
+        else: {JsonStream.fields(), "a stream with no preset"}
+
+    case Enum.find(foreign, &Map.has_key?(filled, &1)) do
+      nil -> :ok
+      field -> raise ArgumentError, "cues.sources.#{ref}.#{field} applies only to #{owner}"
+    end
+  end
+
+  defp check_stream_fields!(_ref, _kind, _filled), do: :ok
+
+  # The general WebSocket source's headers, messages and paths are
+  # `Cues.JsonStream`'s rules.
+  defp check_general_stream!(_ref, :stream, %{preset: _preset}), do: :ok
+
+  defp check_general_stream!(ref, :stream, filled) do
+    case JsonStream.check_config(filled) do
+      :ok -> :ok
+      {:error, field, words} -> raise ArgumentError, "cues.sources.#{ref}.#{field} #{words}"
+    end
+  end
+
+  defp check_general_stream!(_ref, _kind, _filled), do: :ok
 
   # A webhook's method, identity and paths are `Cues.Webhook`'s rules.
   defp check_webhook!(ref, :webhook, filled) do

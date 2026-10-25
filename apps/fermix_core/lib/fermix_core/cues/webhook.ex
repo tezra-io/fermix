@@ -44,6 +44,7 @@ defmodule FermixCore.Cues.Webhook do
 
   alias FermixCore.Cues.Config
   alias FermixCore.Cues.Item
+  alias FermixCore.Cues.JsonPath
   alias FermixCore.Plugins.CanonicalJson
   alias FermixCore.Setup.AccessToken
   alias FermixCore.Setup.ConfigStore
@@ -68,8 +69,6 @@ defmodule FermixCore.Cues.Webhook do
 
   @path_fields [:id_path, :revision_path, :type_path, :subject_path, :time_path]
   @header_fields [:header, :id_header, :type_header]
-  @max_path_segments 16
-  @segment ~r/^[^.\s]{1,128}$/u
   @header_name ~r/\A[A-Za-z0-9-]{1,64}\z/
 
   @type headers :: [{String.t(), String.t()}]
@@ -293,7 +292,7 @@ defmodule FermixCore.Cues.Webhook do
   defp one_type(_filled), do: :ok
 
   defp check_paths(filled) do
-    case Enum.find(present(filled, @path_fields), &(not valid_path?(Map.fetch!(filled, &1)))) do
+    case Enum.find(present(filled, @path_fields), &(not JsonPath.valid?(Map.fetch!(filled, &1)))) do
       nil ->
         :ok
 
@@ -310,13 +309,6 @@ defmodule FermixCore.Cues.Webhook do
   end
 
   defp present(filled, fields), do: Enum.filter(fields, &Map.has_key?(filled, &1))
-
-  defp valid_path?("."), do: true
-
-  defp valid_path?(path) when is_binary(path) do
-    segments = String.split(path, ".")
-    length(segments) <= @max_path_segments and Enum.all?(segments, &Regex.match?(@segment, &1))
-  end
 
   defp header_name?(name), do: is_binary(name) and Regex.match?(@header_name, name)
 
@@ -463,9 +455,9 @@ defmodule FermixCore.Cues.Webhook do
     github? = source.preset == "github"
 
     %{
-      revision: scalar_at(data, source.revision_path) || "1",
+      revision: JsonPath.scalar(data, source.revision_path) || "1",
       type: type,
-      subject: scalar_at(data, source.subject_path),
+      subject: JsonPath.scalar(data, source.subject_path),
       occurred_at: time_at(data, source.time_path),
       datacontenttype: @content_type,
       data: if(github?, do: github_data(data, type), else: data),
@@ -481,14 +473,16 @@ defmodule FermixCore.Cues.Webhook do
   defp identity(%{id_header: name}, headers, _data) when is_binary(name),
     do: header_value(headers, name)
 
-  defp identity(%{id_path: path}, _headers, data) when is_binary(path), do: scalar_at(data, path)
+  defp identity(%{id_path: path}, _headers, data) when is_binary(path),
+    do: JsonPath.scalar(data, path)
+
   defp identity(%{id: :content_hash}, _headers, _data), do: :content_hash
 
   defp item_type(%{type_header: name}, headers, _data) when is_binary(name),
     do: header_value(headers, name)
 
   defp item_type(%{type_path: path}, _headers, data) when is_binary(path),
-    do: scalar_at(data, path)
+    do: JsonPath.scalar(data, path)
 
   defp item_type(_source, _headers, _data), do: nil
 
@@ -598,46 +592,14 @@ defmodule FermixCore.Cues.Webhook do
   defp get_path(%{} = object, [key | rest]), do: object |> Map.get(key) |> get_path(rest)
   defp get_path(_value, _keys), do: nil
 
-  defp scalar_at(_data, nil), do: nil
-
-  defp scalar_at(data, path) do
-    case lookup(data, path) do
-      {:ok, value} when is_binary(value) -> value |> String.trim() |> blank_to_nil()
-      {:ok, value} when is_integer(value) -> Integer.to_string(value)
-      _other -> nil
-    end
-  end
-
   defp time_at(data, path) do
-    with text when is_binary(text) <- scalar_at(data, path),
+    with text when is_binary(text) <- JsonPath.scalar(data, path),
          {:ok, at, _offset} <- DateTime.from_iso8601(text) do
       at
     else
       _absent_or_unparsed -> nil
     end
   end
-
-  # Segments are bounded by `check_config/1`, so the walk is too.
-  defp lookup(data, "."), do: {:ok, data}
-
-  defp lookup(data, path),
-    do: path |> String.split(".") |> Enum.reduce_while({:ok, data}, &step/2)
-
-  defp step(key, {:ok, %{} = object}) do
-    case Map.fetch(object, key) do
-      {:ok, value} -> {:cont, {:ok, value}}
-      :error -> {:halt, :error}
-    end
-  end
-
-  defp step(key, {:ok, list}) when is_list(list) do
-    case Integer.parse(key) do
-      {index, ""} when index >= 0 and index < length(list) -> {:cont, {:ok, Enum.at(list, index)}}
-      _other -> {:halt, :error}
-    end
-  end
-
-  defp step(_key, _acc), do: {:halt, :error}
 
   defp blank_to_nil(""), do: nil
   defp blank_to_nil(text), do: text

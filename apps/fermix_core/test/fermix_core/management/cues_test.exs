@@ -391,6 +391,91 @@ defmodule FermixCore.Management.CuesTest do
       assert {:ok, %{missing_secret: :secret}} = CuesConfig.source("gh-hooks")
     end
 
+    # The general WebSocket source signs in with a key and a secret, each its
+    # own row and its own presence; it waits for the first one its sign-in
+    # names, key before secret.
+    test "a stream with no preset waits for each secret its sign-in names, one field at a time",
+         %{opts: opts, home: home} do
+      values = %{
+        "url" => "wss://stream.example.com/v2/news",
+        "key_header" => "X-Feed-Key",
+        "auth_message" => ~s({"action":"auth","secret":"{{secret}}"}),
+        "subscribe_message" => ~s({"action":"subscribe","news":["*"]}),
+        "id_path" => "id",
+        "type_path" => "T",
+        "item_types" => ["n", " "],
+        "error_types" => ["error"]
+      }
+
+      assert {:ok, %{"source" => row}} =
+               Cues.sources_add("live-news", "stream", nil, values, opts)
+
+      assert %{
+               "label" => "Stream",
+               "state" => "needs_secret",
+               "status_sentence" => "Waiting for its key.",
+               "missing_secret" => "key",
+               "primary_action" => "set_secret",
+               "actions" => ["disable", "set_secret"],
+               "location" => "stream.example.com",
+               "secrets" => [
+                 %{"field" => "key", "label" => "API key", "present" => false},
+                 %{"field" => "secret", "label" => "API secret", "present" => false}
+               ]
+             } = row
+
+      text = config_text(home)
+      assert text =~ ~s(kind = "stream")
+      assert text =~ ~s(item_types = ["n"])
+      assert text =~ "key_header = "
+
+      assert {:ok, _} = Secrets.set("cue_source:live-news:key", "PK7Q2ZTW9M")
+      assert {:ok, %{"source" => waiting, "values" => rows}} = Cues.sources_get("live-news", opts)
+      assert %{"state" => "needs_secret", "missing_secret" => "secret"} = waiting
+
+      assert [%{"key" => "key", "present" => true}, %{"key" => "secret", "present" => false}] =
+               Enum.filter(rows, &(&1["kind"] == "secret"))
+
+      assert {:ok, _} = Secrets.set("cue_source:live-news:secret", ~S(s3"cr\et))
+
+      assert {:ok, %{"source" => %{"missing_secret" => nil}}} =
+               Cues.sources_get("live-news", opts)
+
+      refute config_text(home) =~ "PK7Q2ZTW9M"
+    end
+
+    test "a stream's refusals land under the row they are about", %{opts: opts} do
+      base = %{"url" => "wss://stream.example.com/v2/news", "id_path" => "id"}
+      add = fn values -> Cues.sources_add("live-news", "stream", nil, values, opts) end
+
+      assert add.(Map.delete(base, "id_path")) ==
+               {:error, {:invalid_params, "id_path", "Needed when no preset fills it."}}
+
+      for {field, value, words} <- [
+            {"key_header", "Sec-WebSocket-Key", "sets itself"},
+            {"auth_message", ~s({"key":{{key}}}), "inside a JSON string"},
+            {"subscribe_message", ~s({"key":"{{key}}"}), "no placeholder"},
+            {"item_types", ["n"], "needs type_path"},
+            {"url", "https://stream.example.com/v2/news", "wss://"}
+          ] do
+        assert {:error, {:invalid_params, ^field, sentence}} = add.(Map.put(base, field, value))
+        assert sentence =~ words
+      end
+
+      assert add.(Map.put(base, "dids", ["did:plc:abc123"])) ==
+               {:error,
+                {:invalid_params, "dids", "This setting does not apply to this kind of source."}}
+
+      assert add.(Map.put(base, "key", "PK7Q2ZTW9M")) ==
+               {:error,
+                {:invalid_params, "key", "This is a secret. Store it with secret.set instead."}}
+
+      assert Cues.sources_add("bsky", nil, "bluesky_jetstream", %{"id_path" => "id"}, opts) ==
+               {:error,
+                {:invalid_params, "id_path",
+                 "This setting does not apply to this kind of source."}}
+    end
+
     # The settings file is checked and the change planned before the stored
     # item goes, so an outside edit never leaves a sentinel naming nothing.
     test "forgetting a secret under an outside edit keeps the stored item", %{
@@ -773,6 +858,49 @@ defmodule FermixCore.Management.CuesTest do
 
       assert %{"info" => "Stored in your keychain and never shown again."} =
                Enum.find(rows, &(&1["key"] == "secret"))
+    end
+
+    # A stream with no preset is the general WebSocket source: its own rows,
+    # each with a footer, two secret rows, and a note saying what it does.
+    test "a stream with no preset is the general WebSocket source's form" do
+      assert {:ok, form} = Cues.sources_form("stream", nil, nil, available?: true)
+
+      assert Enum.map(form["rows"], & &1["key"]) ==
+               ~w(ref url key_header secret_header auth_message subscribe_message id_path
+                  type_path item_types error_types items_path revision_path time_path
+                  subject_path daily_budget key secret)
+
+      rows = Map.new(form["rows"], &{&1["key"], &1})
+      assert %{"label" => "Address", "kind" => "text", "advanced" => false} = rows["url"]
+      assert %{"label" => "Sign-in message", "footer" => footer} = rows["auth_message"]
+      assert footer =~ "JSON on one line"
+      assert footer =~ "`{{key}}`"
+      assert %{"kind" => "list", "value" => []} = rows["item_types"]
+
+      for key <- ~w(items_path revision_path time_path subject_path daily_budget),
+          do: assert(rows[key]["advanced"], key)
+
+      for key <- ~w(url key_header secret_header auth_message subscribe_message id_path type_path
+                    item_types error_types items_path revision_path time_path subject_path),
+          do: assert(is_binary(rows[key]["footer"]), key)
+
+      assert %{"kind" => "secret", "label" => "Key", "present" => false} = rows["key"]
+      assert %{"kind" => "secret", "label" => "Secret", "present" => false} = rows["secret"]
+
+      sentence = Enum.find(form["kinds"], &(&1["id"] == "stream"))["sentence"]
+      assert sentence =~ "WebSocket (wss://) address"
+
+      assert form["notes"] == [
+               "Any WebSocket service. Fermix signs in, sends the message after connecting, " <>
+                 "and takes each message of an item type."
+             ]
+    end
+
+    test "Bluesky's rows show only with its preset, and the general rows never with it" do
+      assert {:ok, form} = Cues.sources_form(nil, "bluesky_jetstream", nil, available?: true)
+      assert Enum.map(form["rows"], & &1["key"]) == ~w(ref url dids collections daily_budget)
+      assert %{"label" => "URL", "advanced" => true} = Enum.at(form["rows"], 1)
+      assert form["notes"] == []
     end
 
     test "a choice it does not know, or a preset of another kind, is refused" do
@@ -1331,6 +1459,16 @@ defmodule FermixCore.Management.CuesTest do
         assert {:ok, result} = route(method, params, opts), golden
         assert shape(result) == shape(named_result(golden)), golden
       end
+    end
+
+    # The two forms are the daemon's words, so their goldens are held to the
+    # very rows and sentences the form answers, not only their shape.
+    test "the golden forms are the ones the daemon answers" do
+      assert Cues.sources_form(nil, "github", nil, available?: true) ==
+               {:ok, named_result("cues_sources_form")}
+
+      assert Cues.sources_form("stream", nil, nil, available?: true) ==
+               {:ok, named_result("cues_sources_form_stream")}
     end
 
     test "the cue refusals are the golden ones", %{opts: opts} do

@@ -98,7 +98,17 @@ defmodule FermixCore.Cues.Telemetry do
   ]
   @count_keys [:attempt, :count]
   @lifecycle_keys @id_keys ++ @label_keys ++ @count_keys ++ [:result, :content]
-  @source_keys [:source_ref, :kind, :status, :reason, :attempt, :count, :duration_ms, :result]
+  @source_keys [
+    :source_ref,
+    :kind,
+    :status,
+    :reason,
+    :attempt,
+    :count,
+    :duration_ms,
+    :result,
+    :content
+  ]
   @measurement_keys [:count, :accept_ms, :queue_ms, :duration_ms]
 
   @trace_event_definitions [
@@ -154,7 +164,8 @@ defmodule FermixCore.Cues.Telemetry do
   @doc """
   Emit one `[:fermix, :cue, :source]` event. `metadata` needs `:source_ref`
   and may hold `:kind`, `:status`, `:reason`, `:attempt`, `:count`,
-  `:duration_ms` and `:result`. `:count` and `:duration_ms` become the
+  `:duration_ms`, `:result` and `:content` (a stream service's own error
+  message, behind the content gate). `:count` and `:duration_ms` become the
   measurements (`count: 1` when absent).
   """
   @spec source(atom(), map()) :: :ok

@@ -2781,6 +2781,27 @@ defmodule FermixCore.Setup.ConfigStoreTest do
             enabled: false,
             url: "https://example.org/a?b=c&d=\"e\"",
             interval: 300
+          ],
+          # The general WebSocket source with every field it takes, its JSON
+          # messages carrying quotes, braces and a backslash.
+          "live-news" => [
+            kind: :stream,
+            url: "wss://stream.example.com/v2/news",
+            items_path: "data",
+            id_path: "id",
+            revision_path: "updated_at",
+            type_path: "T",
+            subject_path: "symbols.0",
+            time_path: "created_at",
+            item_types: ["n"],
+            error_types: ["error", "warning"],
+            key_header: "X-Feed-Key",
+            secret_header: "X-Feed-Secret",
+            auth_message: ~S({"action":"auth","key":"{{key}}","note":"a\\b \"c\""}),
+            subscribe_message: ~s({"action":"subscribe","news":["*"]}),
+            daily_budget: 2_000,
+            key: "@keyring",
+            secret: "@file"
           ]
         },
         mandates: %{

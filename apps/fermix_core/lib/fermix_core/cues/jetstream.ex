@@ -84,6 +84,14 @@ defmodule FermixCore.Cues.Jetstream do
           | {:error,
              :frame_too_large | :invalid_json | :invalid_frame | {:stream_error, String.t()}}
 
+  @doc "The largest frame this reader takes: 128 KiB, Jetstream's events being small."
+  @spec max_frame_bytes() :: pos_integer()
+  def max_frame_bytes, do: @max_frame_bytes
+
+  @doc "Whether a reconnect can replay what was missed: yes, from a time cursor."
+  @spec rewinds?() :: true
+  def rewinds?, do: true
+
   @doc "The public v2 host the preset uses."
   @spec default_base_url() :: String.t()
   def default_base_url, do: @default_base_url

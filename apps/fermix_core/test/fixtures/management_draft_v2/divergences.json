@@ -2036,6 +2036,12 @@
     },
     {
       "method": "cues.sources.form",
+      "field": "params:kind",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.sources.form",
       "field": "params:preset",
       "kind": "engine_only",
       "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."

@@ -13,7 +13,7 @@ defmodule FermixCore.Cues.Notices do
   | `:filter_failed` | watcher per UTC day |
   | `:cap_reached`, `:filter_budget_reached`, `:task_provider_down` | 24 hours, the rolling window: by then every run or call counted when it was sent has left the window |
   | `:gap` | open gap, which the notice marks reported |
-  | source `:auth_failed`, `:down`, `:unreachable` | episode, ended by the source's next good moment (`last_good_at` after the notice) |
+  | source `:auth_failed`, `:refused`, `:down`, `:unreachable` | episode, ended by the source's next good moment (`last_good_at` after the notice) |
   | source `:budget_reached` | source per UTC day |
   | mandate `:unpinned` | call: its caller sends it from the change that disabled the mandate, once per approval |
 
@@ -61,6 +61,7 @@ defmodule FermixCore.Cues.Notices do
 
   @source_rules %{
     auth_failed: :since_last_good,
+    refused: :since_last_good,
     down: :since_last_good,
     unreachable: :since_last_good,
     budget_reached: :utc_day
@@ -114,7 +115,11 @@ defmodule FermixCore.Cues.Notices do
     end
   end
 
-  @doc "Sends source notice `kind` once per episode to the owner inbox. `data` may hold `:budget`."
+  @doc """
+  Sends source notice `kind` once per episode to the owner inbox. `data` may
+  hold `:budget`, and for `:down`, `catch_up: false` when the source cannot
+  replay what it missed.
+  """
   @spec source(String.t(), atom(), map(), keyword()) :: result()
   def source(source_ref, kind, data, opts \\ [])
       when is_binary(source_ref) and kind in @source_kinds and is_map(data) and is_list(opts) do
@@ -288,6 +293,17 @@ defmodule FermixCore.Cues.Notices do
 
   defp source_text(:auth_failed, ref, _data),
     do: "Cue source #{ref} stopped: its credential was refused. Update it in settings."
+
+  defp source_text(:refused, ref, _data),
+    do:
+      "Cue source #{ref} stopped: the service sent an error each time Fermix connected. Some " <>
+        "services allow one connection per account, so another program using the same keys " <>
+        "causes this. Check its settings, then save it again or restart Fermix to try again."
+
+  defp source_text(:down, ref, %{catch_up: false}),
+    do:
+      "Cue source #{ref} has been down for more than 15 minutes. It cannot catch up, so " <>
+        "what the service sent meanwhile is missed and not recorded."
 
   defp source_text(:down, ref, _data),
     do:
