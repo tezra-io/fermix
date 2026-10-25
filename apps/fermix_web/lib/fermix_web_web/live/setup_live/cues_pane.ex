@@ -895,15 +895,15 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   end
 
   # A stream with no preset: the management form's rows after its address, in
-  # its words (`SourceForm.general_stream_rows/0`), the footer as the info
-  # text with its literals' backticks dropped.
+  # its words (`SourceForm.general_stream_rows/0`), the info text with its
+  # literals' backticks dropped.
   defp general_fields, do: general_rows(false)
   defp general_more_fields, do: general_rows(true)
 
   defp general_rows(advanced?) do
     for row <- SourceForm.general_stream_rows(),
         row.field != :url and row.advanced == advanced?,
-        do: {row.field, {row.label, String.replace(row.footer, "`", "")}}
+        do: {row.field, {row.label, String.replace(row.info, "`", "")}}
   end
 
   defp missing_refusal(field, missing, values) do

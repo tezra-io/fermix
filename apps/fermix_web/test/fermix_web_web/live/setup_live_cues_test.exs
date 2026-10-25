@@ -349,8 +349,8 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       assert required_field?(html, "id_path")
 
       # The management form's words, its literals' backticks dropped.
-      footer = Enum.find(SourceForm.general_stream_rows(), &(&1.field == :key_header)).footer
-      assert html =~ String.replace(footer, "`", "")
+      info = Enum.find(SourceForm.general_stream_rows(), &(&1.field == :key_header)).info
+      assert html =~ String.replace(info, "`", "")
       assert source_form_nodes(html, ~s(input[name="cue_source[items_path]"])) |> Enum.any?()
     end
 

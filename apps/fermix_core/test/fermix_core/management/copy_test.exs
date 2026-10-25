@@ -430,7 +430,9 @@ defmodule FermixCore.Management.CopyTest do
 
         for row <- form["rows"] do
           assert_clean(row["label"], :name, [], "cue form row #{row["key"]}")
-          assert_clean(row["footer"], :prose, [], "cue form footer #{row["key"]}")
+          # A cue row explains itself behind an info control, never in a footer.
+          assert row["footer"] == nil, "cue form footer #{row["key"]}"
+          assert_clean(row["info"], :prose, [], "cue form info #{row["key"]}")
           Enum.each(row["options"], &assert_clean(&1["label"], :name, [], "cue form option"))
         end
       end

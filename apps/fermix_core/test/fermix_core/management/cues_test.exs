@@ -861,7 +861,8 @@ defmodule FermixCore.Management.CuesTest do
     end
 
     # A stream with no preset is the general WebSocket source: its own rows,
-    # each with a footer, two secret rows, and a note saying what it does.
+    # each explained behind an info control and none with a footer, two secret
+    # rows, and a note saying what it does.
     test "a stream with no preset is the general WebSocket source's form" do
       assert {:ok, form} = Cues.sources_form("stream", nil, nil, available?: true)
 
@@ -872,9 +873,9 @@ defmodule FermixCore.Management.CuesTest do
 
       rows = Map.new(form["rows"], &{&1["key"], &1})
       assert %{"label" => "Address", "kind" => "text", "advanced" => false} = rows["url"]
-      assert %{"label" => "Sign-in message", "footer" => footer} = rows["auth_message"]
-      assert footer =~ "JSON on one line"
-      assert footer =~ "`{{key}}`"
+      assert %{"label" => "Sign-in message", "info" => info} = rows["auth_message"]
+      assert info =~ "JSON on one line"
+      assert info =~ "`{{key}}`"
       assert %{"kind" => "list", "value" => []} = rows["item_types"]
 
       for key <- ~w(items_path revision_path time_path subject_path daily_budget),
@@ -882,7 +883,7 @@ defmodule FermixCore.Management.CuesTest do
 
       for key <- ~w(url key_header secret_header auth_message subscribe_message id_path type_path
                     item_types error_types items_path revision_path time_path subject_path),
-          do: assert(is_binary(rows[key]["footer"]), key)
+          do: assert(is_binary(rows[key]["info"]) and is_nil(rows[key]["footer"]), key)
 
       assert %{"kind" => "secret", "label" => "Key", "present" => false} = rows["key"]
       assert %{"kind" => "secret", "label" => "Secret", "present" => false} = rows["secret"]

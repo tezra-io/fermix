@@ -18,8 +18,9 @@ defmodule FermixCore.Management.Cues.SourceForm do
   a stream with no preset (the general WebSocket source) has two, `key` and
   `secret`, each with its own presence. That stream's rows are its own: the
   address, how it signs in, where each message keeps its id and type, and,
-  under More options, the rest of its paths, each with a footer saying what it
-  is for. Bluesky's rows show only with its preset.
+  under More options, the rest of its paths, each with an `info` saying what it
+  is for, behind an info control like every cue row's explanation (no
+  footers). Bluesky's rows show only with its preset.
   """
 
   alias FermixCore.Cues.Config, as: CuesConfig
@@ -122,9 +123,10 @@ defmodule FermixCore.Management.Cues.SourceForm do
   @field_by_key Map.new(@fields, &{&1.key, &1})
 
   # A stream with no preset: its rows in form order, the ones most sources need
-  # first, each with its label and footer. The footers' examples are invented.
-  # `general_stream_rows/0` publishes them, so the browser setup page draws the
-  # same rows in the same words.
+  # first, each with its label and its info, which a surface keeps behind an
+  # info control. A literal the owner types is backticked, the copy rules' mark
+  # for one. The examples are invented. `general_stream_rows/0` publishes them,
+  # so the browser setup page draws the same rows in the same words.
   @general_rows [
     {"url", "Address",
      "The service's WebSocket address, such as `wss://news.example.com/stream`."},
@@ -153,7 +155,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
     {"subject_path", "Subject", "Where each message keeps what it is about, such as `tickers.0`."}
   ]
   @general_stream_keys Enum.map(@general_rows, &elem(&1, 0)) ++ ["daily_budget"]
-  @general_row_words Map.new(@general_rows, fn {key, label, footer} -> {key, {label, footer}} end)
+  @general_row_words Map.new(@general_rows, fn {key, label, info} -> {key, {label, info}} end)
   @more_options [:daily_budget, :items_path, :revision_path, :time_path, :subject_path]
 
   @type kind :: String.t()
@@ -182,7 +184,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
 
   @doc """
   The rows of a stream with no preset before its daily budget, in form order:
-  each field's config key, row kind (`:text` or `:list`), label, footer and
+  each field's config key, row kind (`:text` or `:list`), label, info and
   whether it sits under More options. The browser setup page draws its form
   from these, so both surfaces say the same thing.
   """
@@ -191,19 +193,19 @@ defmodule FermixCore.Management.Cues.SourceForm do
             field: atom(),
             kind: :text | :list,
             label: String.t(),
-            footer: String.t(),
+            info: String.t(),
             advanced: boolean()
           }
         ]
   def general_stream_rows do
-    for {key, label, footer} <- @general_rows do
+    for {key, label, info} <- @general_rows do
       %{config: config, kind: kind} = Map.fetch!(@field_by_key, key)
 
       %{
         field: config,
         kind: kind,
         label: label,
-        footer: footer,
+        info: info,
         advanced: config in @more_options
       }
     end
@@ -512,16 +514,16 @@ defmodule FermixCore.Management.Cues.SourceForm do
   defp field_row(%{key: key}, value, advanced),
     do: Row.new(key, :text, text_label(key), value: value, advanced: advanced, restart: restart())
 
-  # A stream with no preset: every row but the budget with its label and a
-  # footer saying what it is for.
+  # A stream with no preset: every row but the budget with its label and an
+  # info saying what it is for.
   defp general_row(%{key: "daily_budget"} = field, value, advanced),
     do: field_row(field, value, advanced)
 
   defp general_row(%{key: key, kind: kind}, value, advanced) do
-    {label, footer} = Map.fetch!(@general_row_words, key)
+    {label, info} = Map.fetch!(@general_row_words, key)
 
     Row.new(key, kind, label,
-      footer: footer,
+      info: info,
       value: value,
       advanced: advanced,
       restart: restart()
