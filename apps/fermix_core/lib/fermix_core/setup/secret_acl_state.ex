@@ -3,7 +3,7 @@ defmodule FermixCore.Setup.SecretAclState do
   The last measurement of which stored keys the keychain will not hand over
   without a prompt (M34 native setup §7.3, §15.2).
 
-  The measurement itself costs one `security find-generic-password -w`
+  The measurement itself costs one `security find-generic-password -g`
   subprocess per stored sentinel, and on the exact population it exists to name
   — items written before the `-A` flag arrived — each read raises the macOS
   allow dialog. That is affordable in Doctor, which the operator started and

@@ -65,6 +65,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   network guard checked, which an entry naming the host no longer missed and
   an IPv6 address no longer broke. Behind a proxy, a site reachable only over
   IPv6 gets a clear refusal instead of the proxy's.
+- **A multi-line secret stored in the macOS keychain is read back exactly.** A
+  secret holding a newline, a tab or any character outside plain ASCII (a
+  pretty-printed JSON key, a PEM private key) came back from the login
+  Keychain as a string of hex digits, and Fermix used that string as the
+  secret, so a key it has to parse could stop it starting. Every secret is now
+  read back byte for byte, and a keychain answer Fermix cannot read is refused
+  with that reason rather than used. A secret too large to read whole, from
+  the keychain or a Linux keyring, is refused too, and no part of it reaches
+  the log.
 
 ### Security
 
