@@ -11,7 +11,8 @@
   (`push_attempted_seq`);
 - the `DeviceRegistry` and each device's socket, which carries the phone's
   `ack`;
-- the push platform (FCM or APNs), which holds what it accepted;
+- the push platform, the service a phone is pushed through, which holds what
+  it accepted;
 - each phone's app: it takes rows off its socket, announces them, and handles
   a push;
 - the owner, who opens, leaves and navigates the app, and may read the reply
@@ -107,16 +108,15 @@ timeout and a running app's own work (its reconnect loop, taking and
 announcing rows, its `ack` and its `read_state`). Nothing is assumed of the
 writer, the owner, the OS, the push platform or the faults.
 
-"Held by the push platform" is where the daemon's duty ends. Whether FCM
-delivers a push it accepted is outside Fermix (M51 §15.1 item 8 measures it).
+"Held by the push platform" is where the daemon's duty ends. Whether the push
+service delivers a push it accepted is outside Fermix.
 
 **Witnesses:**
 - 16: a phone alerts for a reply the owner has already read. The decision ran
   before the read, and the phone had no socket to learn of it. The optional
   clearing push of M51 §11.7 is the design's answer.
 - 17: a push is on its way to a phone that has already told its owner of that
-  reply. The notified set hides it, but it still spends FCM priority
-  (onboarding gotcha 10).
+  reply. The notified set hides it, but the push is still sent.
 - 18: the decision marks a device for a push while its socket is registered,
   because the socket's `ack` has not reached the row. This is the case D20
   exists for.
@@ -187,7 +187,7 @@ decision is unchanged (any socket of the profile suppresses the push, then the
 read frontier, then one attempt per row, nothing at boot), so nothing the
 spec models changed; the comments' line numbers now point at the new file.
 
-Re-read on 2026-10-25 for the removal of direct FCM push (`9b9d83b6`),
+Re-read on 2026-10-25 for the removal of direct FCM push (`dc3025a0`),
 which staled the `push.ex` pin and moved the `mobile.ex` numbers. Fermix
 pushes through APNs alone: an iPhone, or a phone paired before pairing
 recorded a platform, is pushed as before, and an Android phone is refused by
