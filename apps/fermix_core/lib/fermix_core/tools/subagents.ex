@@ -5,7 +5,8 @@ defmodule FermixCore.Tools.Subagents do
   The model supplies only the work (task goals) and orchestration knobs
   (concurrency, timeout, result shape) — never `policy`, `allowed_tools`, or
   `trust`. Fermix computes the worker surface from the parent turn's
-  `:source_trust`: a worker runs at the parent's trust with the parent's policy
+  `:source_trust`: a worker runs at the parent's trust (lowered to the trust the
+  parent's loop ran at, when that is lower) with the parent's policy
   classes **minus `:read_write` and `:gui_control`**, so it can read, browse the
   web, use MCP/plugin tools, run skills, and run sandbox-bounded `shell`, but cannot
   directly mutate local/Fermix state and can never drive the desktop/GUI (computer
@@ -230,14 +231,13 @@ defmodule FermixCore.Tools.Subagents do
 
   defp do_execute(args, context) do
     with {:ok, depth} <- check_recursion(context),
-         {:ok, source_trust} <- fetch_source_trust(context),
+         {:ok, _source_trust} <- fetch_source_trust(context),
          {:ok, tasks} <- validate_tasks(args, context),
          {:ok, max_concurrency} <- validate_concurrency(args, context),
          {:ok, timeout_seconds} <- validate_timeout(args),
          {:ok, override} <- resolve_override(args) do
       run_fanout(
         tasks,
-        source_trust,
         max_concurrency,
         timeout_seconds,
         depth,
@@ -269,7 +269,6 @@ defmodule FermixCore.Tools.Subagents do
 
   defp run_fanout(
          tasks,
-         source_trust,
          max_concurrency,
          timeout_seconds,
          depth,
@@ -277,7 +276,11 @@ defmodule FermixCore.Tools.Subagents do
          context,
          override
        ) do
-    policy = worker_policy(source_trust, context)
+    # The parent's run trust: its `source_trust`, lowered to the trust its loop
+    # ran at when that is lower (a plugin skill's worker), so it hands workers
+    # no more.
+    trust = CapabilityRegistry.run_trust(context)
+    policy = worker_policy(trust, context)
     allowed_tools = worker_allowed_tools(policy, context)
     worker_context = sanitize_context(context, depth)
     spawn_opts = base_spawn_opts(context)
@@ -292,7 +295,7 @@ defmodule FermixCore.Tools.Subagents do
         tasks,
         fn task ->
           run_one(task, %{
-            source_trust: source_trust,
+            source_trust: trust,
             policy: policy,
             allowed_tools: allowed_tools,
             timeout_seconds: timeout_seconds,
@@ -386,9 +389,9 @@ defmodule FermixCore.Tools.Subagents do
   # still answer from the model alone. An interactive main-agent parent's
   # effective surface is its full trust default, so the intersection is the
   # identity — today's worker surface, unchanged.
-  defp worker_policy(source_trust, context) do
+  defp worker_policy(trust, context) do
     baseline =
-      CapabilityRegistry.default_policy_classes(source_trust) -- [:read_write, :gui_control]
+      CapabilityRegistry.default_policy_classes(trust) -- [:read_write, :gui_control]
 
     intersect_policy(baseline, Map.get(context, :effective_policy))
   end

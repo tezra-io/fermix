@@ -398,4 +398,21 @@ defmodule FermixCore.Capabilities.RegistryTest do
       assert :ok = Registry.refresh(reg, :all)
     end
   end
+
+  describe "run_trust/1" do
+    test "is the lower of the person's trust and the loop's, each read alone when the other is missing" do
+      for {context, trust} <- [
+            {%{source_trust: :operator}, :operator},
+            {%{source_trust: :guest}, :guest},
+            {%{source_trust: :operator, effective_trust: :operator}, :operator},
+            {%{source_trust: :operator, effective_trust: :guest}, :guest},
+            {%{source_trust: :guest, effective_trust: :operator}, :guest},
+            {%{source_trust: :operator, effective_trust: nil}, :guest},
+            {%{effective_trust: :operator}, :operator},
+            {%{}, nil}
+          ] do
+        assert {context, Registry.run_trust(context)} == {context, trust}
+      end
+    end
+  end
 end

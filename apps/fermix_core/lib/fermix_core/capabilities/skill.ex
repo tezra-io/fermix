@@ -14,6 +14,7 @@ defmodule FermixCore.Capabilities.Skill do
   alias FermixCore.Agents.WorkerRun
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.SkillCuration.Usage
 
   require Logger
@@ -77,7 +78,7 @@ defmodule FermixCore.Capabilities.Skill do
       |> Map.delete(:agent_name)
       |> Map.put(:skill_depth, current_depth + 1)
 
-    case WorkerRun.run(definition, forced_task, worker_context,
+    case WorkerRun.run(within_parent(definition, context), forced_task, worker_context,
            parent: self(),
            parent_name: Map.get(context, :agent_name, "main"),
            parent_session: Map.get(context, :session_id),
@@ -107,6 +108,68 @@ defmodule FermixCore.Capabilities.Skill do
         {:ok, Tool.error("Failed to spawn skill: #{format_reason(reason)}")}
     end
   end
+
+  @doc """
+  The policy classes `skill` runs with inside a parent that grants `granted`:
+  the classes the skill declares at its own trust (what `skill_run` of it
+  resolves) kept to those the parent grants. The one meet for a skill's worker
+  (`invoke/3`, against the parent run's `effective_policy`) and a job bound to
+  the skill (`Jobs.Runner`, against the job's own grant at the job's trust), so
+  a skill offers the same classes in both. An empty meet means the parent
+  grants none of what the skill asks for.
+  """
+  @spec classes_within(AgentDefinition.t(), [Capability.policy_class()]) ::
+          [Capability.policy_class()]
+  def classes_within(%AgentDefinition{} = skill, granted) when is_list(granted) do
+    skill |> declared_classes() |> Enum.filter(&(&1 in granted))
+  end
+
+  @doc "The classes `skill` declares at its own trust: what `skill_run` of it resolves."
+  @spec declared_classes(AgentDefinition.t()) :: [Capability.policy_class()]
+  def declared_classes(%AgentDefinition{trust: trust, policy: policy}),
+    do: CapabilityRegistry.resolved_policy_classes(trust, policy)
+
+  # A skill's worker gets at most what its parent run is authorized for (§11.2,
+  # as a `subagents` worker does): the skill's trust meets the parent's run
+  # trust (`CapabilityRegistry.run_trust/1`), its allowlist the parent's
+  # `effective_allowed_tools`, and its policy classes the parent's
+  # `effective_policy` (`classes_within/2`). A missing stamp narrows nothing from
+  # that side, so an un-narrowed parent starts the skill exactly as declared;
+  # what the parent's surface leaves out only to fit its channel does not carry.
+  # An empty class meet rides the allowlist as deny-all, because the registry
+  # reads `policy: []` as the trust default.
+  defp within_parent(%AgentDefinition{} = definition, context) do
+    allowed =
+      meet_allowlist(definition.allowed_tools, Map.get(context, :effective_allowed_tools))
+
+    definition
+    |> within_parent_classes(Map.get(context, :effective_policy), allowed)
+    |> Map.put(:trust, meet_trust(definition.trust, context))
+  end
+
+  defp within_parent_classes(definition, nil, allowed), do: %{definition | allowed_tools: allowed}
+
+  defp within_parent_classes(definition, parent_classes, allowed) do
+    declared = declared_classes(definition)
+
+    case classes_within(definition, parent_classes) do
+      [] -> %{definition | allowed_tools: []}
+      ^declared -> %{definition | allowed_tools: allowed}
+      classes -> %{definition | policy: classes, allowed_tools: allowed}
+    end
+  end
+
+  defp meet_trust(trust, context) do
+    case CapabilityRegistry.run_trust(context) do
+      nil -> trust
+      run_trust -> CapabilityRegistry.lower_trust(trust, run_trust)
+    end
+  end
+
+  # `Jobs.Runner.intersect_allowlist/2`'s rule.
+  defp meet_allowlist(nil, parent), do: parent
+  defp meet_allowlist(skill, nil), do: skill
+  defp meet_allowlist(skill, parent), do: Enum.filter(skill, &(&1 in parent))
 
   defp finalize_invocation(
          definition,

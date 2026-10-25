@@ -343,14 +343,16 @@ defmodule FermixCore.Capabilities.AccessGate do
   resumed or run now only from a turn that would run that tool directly.
 
   A job can also reach host commands its list does not name: an empty list is
-  the full operator surface (`Jobs.Runner` narrows `[]` to nil); a skill worker
-  (`skill_run`, or a skill capability by name) runs with the skill's own tools;
-  and a job that can set up or retarget a job (`schedule_job`, `update_job`,
-  `run_job_now`, `resume_job`) can create or run, from its clean run, a job that
-  names any tool. Such a job counts as naming every host command, so a tainted
-  turn where commands are not confined cannot launder one through it. A
-  `subagents` worker takes the job's own list and widens nothing. Unknown names
-  and every other tool pass.
+  the full operator surface (`Jobs.Runner` narrows `[]` to nil), and a job that
+  can run now or resume a job (`run_job_now`, `resume_job`) can start, from its
+  clean run, an existing job that names any tool. A job that can start a skill
+  (`skill_run`, or a skill capability by name) or set up or change a job
+  (`schedule_job`, `update_job`) hands on at most its own tools (the skill's
+  worker meets the run's surface, and so does a job the run sets up or
+  changes), and is counted the same way. Such a job counts as naming every host
+  command, so a tainted turn where commands are not confined cannot launder one
+  through it. A `subagents` worker takes the job's own list and widens nothing.
+  Unknown names and every other tool pass.
   """
   @spec check_job_tools([String.t()], map()) :: :ok | {:error, String.t()}
   def check_job_tools(names, context) when is_list(names) and is_map(context) do

@@ -3,11 +3,14 @@ defmodule FermixCore.Tools.JobRegistrySupport do
 
   require Logger
 
+  alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Clock
   alias FermixCore.Cues.Watchers
   alias FermixCore.Jobs.Registry, as: JobsRegistry
+  alias FermixCore.Jobs.Runner
   alias FermixCore.Memory.Repo
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
@@ -32,12 +35,13 @@ defmodule FermixCore.Tools.JobRegistrySupport do
   An existing job row's access check for `update_job`, `resume_job` and
   `run_job_now`: a job whose allowlist names an access-sensitive tool may be
   changed, resumed or run now only from a turn that would run that tool
-  directly (`Capabilities.AccessGate`).
+  directly (`Capabilities.AccessGate`). Returns the row it read.
   """
-  @spec check_job_access(String.t(), map()) :: :ok | {:error, term()}
+  @spec check_job_access(String.t(), map()) :: {:ok, map()} | {:error, term()}
   def check_job_access(job_id, context) when is_binary(job_id) and is_map(context) do
-    with {:ok, job} <- JobsRegistry.get_job(job_id, repo: repo(context)) do
-      AccessGate.check_job_tools(Map.get(job, :allowed_tools) || [], context)
+    with {:ok, job} <- JobsRegistry.get_job(job_id, repo: repo(context)),
+         :ok <- AccessGate.check_job_tools(Map.get(job, :allowed_tools) || [], context) do
+      {:ok, job}
     end
   end
 
@@ -75,6 +79,241 @@ defmodule FermixCore.Tools.JobRegistrySupport do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  # The most refused tool names one sentence lists before it counts the rest.
+  @named_max 8
+  @give_refusal "This run can't give a job tools it doesn't have itself: "
+  @change_refusal "This run can't change a job with tools it doesn't have itself: "
+
+  @doc """
+  The tools a run may hand on to a job it creates or changes, or `nil` when
+  nothing narrowed the run.
+
+  Narrowing is authorization only, read from the stamps `AgentLoop` puts on
+  every run it drives (the owner's turn, a job's run, a skill's or a sub-agent's
+  worker): the run was given an explicit `effective_allowed_tools`; its
+  `effective_policy` lacks a class its own trust grants by default; or its loop
+  ran at an `effective_trust` below its person's operator `source_trust` (a
+  plugin skill's worker under the owner's turn). What a surface leaves out to
+  fit its channel (voice's channel, media and delegation tools, an ACP
+  session's harness tools) or what registered after a cached profile was built
+  narrows nothing, so the owner's own turns never count as narrowed.
+
+  A narrowed run's tools are the names `Capabilities.Registry.list_for/2` gives
+  for its `effective_trust`, `effective_policy` and `effective_allowed_tools`.
+  A context with no stamp (a voice call's `Realtime.ToolBridge`, a direct
+  executor such as `Cues.Proposals`) is not narrowed. One with no
+  `source_trust` (a sub-agent worker strips it) is judged on its stamps alone,
+  and cannot create a job anyway (`schedule_job` refuses it).
+
+  No eval covers this rule: the behavioral harness drives only the owner's text
+  turns, which are never narrowed, so ExUnit is its whole proof (`jobs_test`,
+  `capabilities/skill_test`, `tools/subagents_test`,
+  `realtime/session_server_test`).
+  """
+  @spec run_tools(map()) :: [String.t()] | nil
+  def run_tools(context) when is_map(context) do
+    run_trust = CapabilityRegistry.run_trust(context)
+
+    if narrowed?(context, run_trust) do
+      tool_names(context,
+        trust: run_trust,
+        policy_classes: Map.get(context, :effective_policy),
+        allowed_tools: Map.get(context, :effective_allowed_tools)
+      )
+    else
+      nil
+    end
+  end
+
+  defp narrowed?(context, run_trust) do
+    is_list(Map.get(context, :effective_allowed_tools)) or
+      short_of_trust?(Map.get(context, :effective_policy), run_trust) or
+      (Map.get(context, :source_trust) == :operator and run_trust != :operator)
+  end
+
+  defp short_of_trust?(nil, _trust), do: false
+
+  defp short_of_trust?(classes, trust) when is_list(classes),
+    do: Enum.any?(CapabilityRegistry.default_policy_classes(trust), &(&1 not in classes))
+
+  @doc """
+  The names the run's own grant (`effective_allowed_tools`) lists that no
+  capability carries right now, such as a disabled plugin's: the run cannot
+  hand them on today, but would have them back with the plugin.
+  """
+  @spec unregistered_grants(map()) :: [String.t()]
+  def unregistered_grants(context) when is_map(context) do
+    registry = registry(context)
+
+    context
+    |> Map.get(:effective_allowed_tools)
+    |> List.wrap()
+    |> Enum.reject(&match?({:ok, _}, CapabilityRegistry.find(registry, &1)))
+  end
+
+  @doc """
+  The names of the registered capabilities `filters` admits
+  (`Capabilities.Registry.list_for/2`); a `nil` filter is left out, so it
+  narrows nothing.
+  """
+  @spec tool_names(map(), keyword()) :: [String.t()]
+  def tool_names(context, filters) when is_map(context) and is_list(filters) do
+    opts = Enum.reject(filters, fn {_key, value} -> is_nil(value) end)
+
+    context
+    |> registry()
+    |> CapabilityRegistry.list_for(opts)
+    |> Enum.map(& &1.name)
+  end
+
+  defp registry(context), do: Map.get(context, :capability_registry) || CapabilityRegistry
+
+  @doc """
+  For `schedule_job`, after the trust scoping: a job gets at most the tools of
+  the run that creates it (`run_tools/1`). From a narrowed run, a list naming
+  any other tool is refused, naming it, rather than trimmed, so the job never
+  quietly does less than asked; no list (`[]`, which a job reads as every tool)
+  becomes the run's own, stored explicitly so the job can never widen later.
+  """
+  @spec within_run_tools([String.t()], map()) :: {:ok, [String.t()]} | {:error, String.t()}
+  def within_run_tools(requested, context) when is_list(requested) and is_map(context) do
+    case run_tools(context) do
+      nil -> {:ok, requested}
+      run_tools -> scope_to_run_tools(requested, run_tools)
+    end
+  end
+
+  # An empty list on a job is every tool, so a run with none has none to give.
+  defp scope_to_run_tools([], []),
+    do: {:error, "This run has no tools, so it can't give a job any."}
+
+  defp scope_to_run_tools([], run_tools), do: {:ok, run_tools}
+
+  defp scope_to_run_tools(requested, run_tools) do
+    with :ok <- inside_run_tools(requested, run_tools, @give_refusal), do: {:ok, requested}
+  end
+
+  @doc """
+  For `update_job`, on the row `check_job_access/2` returned: a run below
+  operator trust (`CapabilityRegistry.run_trust/1`: a plugin skill's worker
+  under the owner's turn, or a job bound to a plugin skill) cannot change an
+  operator job, whatever tools both hold: the job would keep running at
+  operator on instructions a guest run wrote.
+  """
+  @spec check_change_trust(map(), map()) :: :ok | {:error, String.t()}
+  def check_change_trust(job, context) when is_map(job) and is_map(context) do
+    if CapabilityRegistry.run_trust(context) != :operator and
+         Map.get(job, :created_by_trust) == "operator" do
+      {:error,
+       "This run is at guest trust, below the operator trust this job was set up at, so " <>
+         "it can't change the job."}
+    else
+      :ok
+    end
+  end
+
+  @doc """
+  For `update_job`: a watcher's task job (one that runs on cues) is bound only
+  to a skill that keeps `cue_history` on its runs' surface, the task's one way to
+  read its watcher's deliveries (`Jobs.Runner.cue_history_on_surface?/3`, the
+  predicate a cue run itself fails on). A plugin skill (guest) loses it, and so
+  does one asking only for classes other than `:read_only`.
+  """
+  @spec check_cue_skill(map(), map() | nil, map()) :: :ok | {:error, String.t()}
+  def check_cue_skill(job, skill, context)
+      when is_map(job) and (is_map(skill) or is_nil(skill)) and is_map(context) do
+    cond do
+      is_nil(skill) or not JobsRegistry.cue_job?(job) -> :ok
+      Runner.cue_history_on_surface?(job, skill, registry(context)) -> :ok
+      true -> {:error, Runner.cue_skill_sentence(skill)}
+    end
+  end
+
+  @doc """
+  For `update_job`, on the row `check_job_access/2` returned: a narrowed run
+  (`run_tools/1`) changes only a job whose tools, after the change, are all its
+  own, since whatever the change sets the job to do runs with the job's tools.
+  Those are the job's list narrowed by its skill's, as `Jobs.Runner` narrows a
+  run: `skill` is the definition the change binds, or nil to keep the job's
+  own. A name no capability carries now passes when the run's grant lists it
+  (`unregistered_grants/1`): the change keeps or narrows the job's list, never
+  adds to it. With no list on the job or its skill, nothing bounds the job and
+  the change is refused.
+  """
+  @spec check_within_run_tools(map(), map() | nil, map()) :: :ok | {:error, String.t()}
+  def check_within_run_tools(job, skill, context)
+      when is_map(job) and (is_map(skill) or is_nil(skill)) and is_map(context) do
+    case run_tools(context) do
+      nil -> :ok
+      run_tools -> job_within_run(job, skill, run_tools ++ unregistered_grants(context), context)
+    end
+  end
+
+  defp job_within_run(job, nil, run_tools, context) do
+    with {:ok, skill} <- bound_skill(job, context), do: bounded_within_run(job, skill, run_tools)
+  end
+
+  defp job_within_run(job, skill, run_tools, _context),
+    do: bounded_within_run(job, skill, run_tools)
+
+  defp bounded_within_run(job, skill, run_tools) do
+    case job_allowlist(job, skill) do
+      nil -> {:error, "This run can't change a job no tool list bounds: " <> unbounded(skill)}
+      job_tools -> inside_run_tools(job_tools, run_tools, @change_refusal)
+    end
+  end
+
+  defp unbounded(nil), do: "the job names no tools."
+  defp unbounded({:gone, name}), do: "the job names no tools, and its skill #{name} is gone."
+  defp unbounded(skill), do: "neither the job nor its skill #{Map.get(skill, :name)} names tools."
+
+  # `Jobs.Runner.effective_allowed_tools/2`: the job's list (`[]` narrows
+  # nothing) meets its skill's; nil when neither names tools.
+  defp job_allowlist(job, skill) do
+    case {nonempty(Map.get(job, :allowed_tools)), skill_allowlist(skill)} do
+      {nil, skill_list} -> skill_list
+      {job_list, nil} -> job_list
+      {job_list, skill_list} -> Enum.filter(job_list, &(&1 in skill_list))
+    end
+  end
+
+  defp nonempty([]), do: nil
+  defp nonempty(list), do: list
+
+  defp skill_allowlist(nil), do: nil
+  defp skill_allowlist({:gone, _name}), do: nil
+  defp skill_allowlist(skill), do: Map.get(skill, :allowed_tools)
+
+  # The skill the job is bound to. One the registry no longer has narrows
+  # nothing (the job's run fails on it), which can only leave the job more tools
+  # to check, never fewer.
+  defp bound_skill(%{skill_name: name}, context) when is_binary(name) and name != "" do
+    case SkillRegistry.load(Map.get(context, :skill_registry, SkillRegistry), name) do
+      {:ok, skill} -> {:ok, skill}
+      {:error, {:unknown_skill, _name}} -> {:ok, {:gone, name}}
+    end
+  catch
+    :exit, reason -> {:error, "skill_registry_unavailable: #{inspect(reason)}"}
+  end
+
+  defp bound_skill(_job, _context), do: {:ok, nil}
+
+  # The one check behind both refusals: `:ok`, or `sentence` naming the tools
+  # outside the run's (the first eight, then how many more).
+  defp inside_run_tools(names, run_tools, sentence) do
+    case Enum.reject(names, &(&1 in run_tools)) do
+      [] -> :ok
+      outside -> {:error, sentence <> name_list(outside)}
+    end
+  end
+
+  defp name_list(names) do
+    case Enum.split(names, @named_max) do
+      {shown, []} -> Enum.join(shown, ", ")
+      {shown, rest} -> Enum.join(shown, ", ") <> " and #{length(rest)} more"
     end
   end
 

@@ -289,8 +289,8 @@ defmodule FermixCore.Capabilities.AccessGateHostCommandTest do
       assert :ok = AccessGate.check_job_tools([], tainted(ctx, @darwin))
     end
 
-    # A skill worker runs with the skill's own tools, not the job's list, so a
-    # job that can start one reaches host commands its list does not name.
+    # A job that can start a skill counts as naming every host command, though
+    # the skill's worker now gets at most the job's own tools.
     test "a tainted turn may not set up a job that can start a skill", ctx do
       skill =
         Capability.new(%{
@@ -317,8 +317,8 @@ defmodule FermixCore.Capabilities.AccessGateHostCommandTest do
       assert :ok = AccessGate.check_job_tools(["subagents"], tainted(ctx, @linux))
     end
 
-    # A job that can set up or retarget a job reaches every host command: its
-    # clean run could create a child job naming `shell`, or run one that does.
+    # A job that can set up or retarget a job counts as naming every host
+    # command: its clean run could run now or resume a job naming `shell`.
     test "a tainted turn may not set up a job that can manage jobs", ctx do
       for names <- [["schedule_job"], ["update_job", "run_job_now"], ["resume_job"]] do
         assert {:error, text} = AccessGate.check_job_tools(names, tainted(ctx, @linux)),

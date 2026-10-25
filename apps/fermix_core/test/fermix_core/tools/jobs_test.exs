@@ -1,6 +1,10 @@
 defmodule FermixCore.Tools.JobsTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.AgentLoop
+  alias FermixCore.Agents.AgentDefinition
+  alias FermixCore.Agents.RuntimeContext
+  alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Jobs.Registry, as: JobsRegistry
@@ -14,19 +18,26 @@ defmodule FermixCore.Tools.JobsTest do
   alias FermixCore.Tools.ResumeJob
   alias FermixCore.Tools.RunJobNow
   alias FermixCore.Tools.ScheduleJob
+  alias FermixCore.Tools.Shell
   alias FermixCore.Tools.UpdateJob
 
   defmodule SkillRegistryStub do
     @moduledoc false
-    # Minimal stand-in for FermixCore.Agents.SkillRegistry. schedule_job's
-    # create-time validation only ever calls `SkillRegistry.load(registry,
-    # name)`, so a map-backed GenServer keeps the binding tests hermetic — no
-    # fixture skill files, no default-skill seeding.
+    # Minimal stand-in for FermixCore.Agents.SkillRegistry. The job tools only
+    # ever call `SkillRegistry.load(registry, name)`, so a map-backed GenServer
+    # keeps the binding tests hermetic — no fixture skill files, no
+    # default-skill seeding. A bare name loads a skill with no allowlist;
+    # `{name, allowed_tools}` loads one with that list, and `{name, %{...}}`
+    # one with those fields.
     use GenServer
 
     def start_link(skills) when is_list(skills) do
-      GenServer.start_link(__MODULE__, MapSet.new(skills))
+      GenServer.start_link(__MODULE__, Map.new(skills, &definition/1))
     end
+
+    defp definition(name) when is_binary(name), do: {name, %{name: name}}
+    defp definition({name, %{} = fields}), do: {name, Map.put(fields, :name, name)}
+    defp definition({name, tools}), do: {name, %{name: name, allowed_tools: tools}}
 
     @impl true
     def init(skills), do: {:ok, skills}
@@ -34,13 +45,48 @@ defmodule FermixCore.Tools.JobsTest do
     @impl true
     def handle_call({:load, name}, _from, skills) do
       reply =
-        if MapSet.member?(skills, name) do
-          {:ok, %{name: name}}
-        else
-          {:error, {:unknown_skill, name}}
+        case Map.fetch(skills, name) do
+          {:ok, definition} -> {:ok, definition}
+          :error -> {:error, {:unknown_skill, name}}
         end
 
       {:reply, reply, skills}
+    end
+  end
+
+  defmodule ScriptedModel do
+    @moduledoc false
+    # A model that answers from a script in the process running the agent loop
+    # (the loop calls its adapter there) and keeps the tool results it is
+    # handed, so a test reads what a tool told the model.
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, _opts), do: next_turn()
+
+    @impl true
+    def continue(_provider_state, tool_results, _opts) do
+      Process.put(:tool_results, Process.get(:tool_results, []) ++ tool_results)
+      next_turn()
+    end
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    # The loop reads `tool_calls` off the turn `chat/3` returns; it never calls this.
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+
+    defp next_turn do
+      [next | rest] = Process.get(:script)
+      Process.put(:script, rest)
+      {:ok, next}
     end
   end
 
@@ -1358,6 +1404,49 @@ defmodule FermixCore.Tools.JobsTest do
       %{cue_job_id: job.id}
     end
 
+    # A cue run always reads its watcher's deliveries through `cue_history`
+    # (owner-only, `:read_only`), so a skill whose trust (a plugin skill's
+    # guest) or classes (an operator skill asking only for `:exec`) leave it
+    # off the run's surface is not bound to a watcher's task.
+    test "update_job refuses a skill that leaves its runs without cue_history", %{
+      context: context,
+      cue_job_id: job_id
+    } do
+      registry = :"cue_skill_caps_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry})
+
+      :ok =
+        CapabilityRegistry.register(
+          registry,
+          BuiltinCapability.from_tool_module(FermixCore.Tools.CueHistory)
+        )
+
+      {:ok, skills} =
+        SkillRegistryStub.start_link([
+          {"plugin_helper", skill_definition("plugin_helper", %{}, :guest)},
+          {"exec_helper", skill_definition("exec_helper", %{"policy" => ["exec"]}, :operator)},
+          {"weather", skill_definition("weather", %{}, :operator)}
+        ])
+
+      context = Map.merge(context, %{skill_registry: skills, capability_registry: registry})
+
+      for skill_name <- ["plugin_helper", "exec_helper"] do
+        assert {:ok, refused} =
+                 UpdateJob.execute(%{"job_id" => job_id, "skill_name" => skill_name}, context)
+
+        assert refused.success == false
+
+        assert refused.error =~
+                 "Skill #{skill_name} leaves a watcher's task without cue_history"
+
+        assert {:ok, %{skill_name: nil}} =
+                 Repo.get_scheduled_job(job_id, server: context.memory_repo)
+      end
+
+      assert {:ok, %{success: true}} =
+               UpdateJob.execute(%{"job_id" => job_id, "skill_name" => "weather"}, context)
+    end
+
     test "run_job_now refuses it before the scheduler is asked", %{
       context: context,
       cue_job_id: job_id
@@ -1410,7 +1499,481 @@ defmodule FermixCore.Tools.JobsTest do
     end
   end
 
+  # A job gets at most the tools of the run that creates or changes it, when
+  # the run is narrowed in what it is authorized for: an allowlist, policy
+  # classes short of its trust, or a loop trust below its person's. Every
+  # narrowed context here is the one a tool saw inside a real loop
+  # (`loop_context/3`), so the stamps are the loop's own.
+  describe "a run narrowed to some tools" do
+    setup %{context: context} do
+      registry = :"job_ceiling_caps_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry})
+      register_stand_in(registry, "web_search", :network, {__MODULE__, :report_context, [self()]})
+      register_stand_in(registry, "update_job", :read_write)
+
+      # The real shell and schedule_job shapes (shell a host command), so the
+      # access gate judges them as it would live; shell never runs.
+      shell = BuiltinCapability.from_tool_module(Shell)
+      :ok = CapabilityRegistry.register(registry, %{shell | executor: stand_in_executor()})
+
+      :ok =
+        CapabilityRegistry.register(registry, BuiltinCapability.from_tool_module(ScheduleJob))
+
+      {:ok, skill_registry} =
+        SkillRegistryStub.start_link([{"searcher", ["web_search"]}, {"cleaner", ["shell"]}])
+
+      open = Map.merge(context, %{capability_registry: registry, skill_registry: skill_registry})
+      run_tools = ["web_search", "schedule_job", "update_job"]
+      narrowed = loop_context(open, registry, allowed_tools: run_tools)
+      %{open: open, narrowed: narrowed, registry: registry, run_tools: run_tools}
+    end
+
+    test "schedule_job refuses a tool the run does not have, naming it, and creates no job", %{
+      narrowed: narrowed
+    } do
+      args = %{
+        "name" => "Cleanup",
+        "schedule" => "every 15 minutes",
+        "task" => "Clear the cache folder.",
+        "allowed_tools" => ["web_search", "shell"]
+      }
+
+      assert {:ok, refused} = ScheduleJob.execute(args, narrowed)
+      assert refused.success == false
+      assert refused.error =~ "can't give a job tools it doesn't have itself: shell"
+      refute refused.error =~ "web_search"
+      assert {:ok, []} = Repo.list_scheduled_jobs(%{}, server: narrowed.memory_repo)
+    end
+
+    test "schedule_job with no allowed_tools stores the run's own list and says so", %{
+      narrowed: narrowed,
+      run_tools: run_tools
+    } do
+      for allowed <- [:absent, []] do
+        args =
+          %{"name" => "Digest #{inspect(allowed)}", "schedule" => "every 15 minutes"}
+          |> Map.put("task", "Summarize the news.")
+          |> put_allowed(allowed)
+
+        assert {:ok, created} = ScheduleJob.execute(args, narrowed)
+        assert created.success == true
+        payload = Jason.decode!(created.output)
+        assert payload["allowed_tools"] == Enum.sort(run_tools)
+        assert payload["note"] =~ "allowed_tools was empty or left out"
+        assert payload["note"] =~ "this run's own tools (schedule_job, update_job, web_search)"
+        refute payload["note"] =~ "unavailable now"
+
+        assert {:ok, job} = Repo.get_scheduled_job(payload["id"], server: narrowed.memory_repo)
+        assert job.allowed_tools == Enum.sort(run_tools)
+      end
+    end
+
+    # Classes that still admit the job tools (`:read_write`) but not `:exec`:
+    # a skill whose SKILL.md sets such a `policy:` and no `allowed_tools`.
+    test "a run narrowed by policy classes alone gives a job only the tools they admit", %{
+      open: open,
+      registry: registry
+    } do
+      by_policy = loop_context(open, registry, policy: [:read_only, :read_write, :network])
+
+      job = %{"name" => "Policy", "schedule" => "every 15 minutes", "task" => "Report."}
+
+      assert {:ok, refused} =
+               ScheduleJob.execute(Map.put(job, "allowed_tools", ["shell"]), by_policy)
+
+      assert refused.success == false
+      assert refused.error =~ "can't give a job tools it doesn't have itself: shell"
+      assert {:ok, []} = Repo.list_scheduled_jobs(%{}, server: open.memory_repo)
+
+      assert {:ok, created} = ScheduleJob.execute(job, by_policy)
+      assert created.success == true
+
+      assert Jason.decode!(created.output)["allowed_tools"] ==
+               ["schedule_job", "update_job", "web_search"]
+    end
+
+    # An empty list on a job means every tool, so a run with none of its own
+    # has nothing it may give.
+    test "schedule_job from a run with no tools at all is refused", %{narrowed: narrowed} do
+      no_tools = Map.put(narrowed, :effective_allowed_tools, [])
+
+      assert {:ok, refused} =
+               ScheduleJob.execute(
+                 %{"name" => "Empty", "schedule" => "every 15 minutes", "task" => "Report."},
+                 no_tools
+               )
+
+      assert refused.success == false
+      assert refused.error =~ "has no tools"
+      assert {:ok, []} = Repo.list_scheduled_jobs(%{}, server: narrowed.memory_repo)
+    end
+
+    test "schedule_job keeps a subset of the run's tools exactly as asked", %{narrowed: narrowed} do
+      assert {:ok, created} =
+               ScheduleJob.execute(
+                 %{
+                   "name" => "Search",
+                   "schedule" => "every 15 minutes",
+                   "task" => "Search for news.",
+                   "allowed_tools" => ["web_search"]
+                 },
+                 narrowed
+               )
+
+      assert created.success == true
+      payload = Jason.decode!(created.output)
+      assert payload["allowed_tools"] == ["web_search"]
+      refute Map.has_key?(payload, "note")
+    end
+
+    # The owner's turn runs on a cached profile, as `TurnRunner` hands it to
+    # the loop. A tool registered after the profile was built (a sandbox
+    # profile change, an MCP server connecting) is missing from it, and an ACP
+    # session with no posting identity drops the harness tools: neither is an
+    # authorization limit, so neither narrows the turn. An operator job with no
+    # list runs on the registry's own surface.
+    test "the owner's turn and an un-narrowed run schedule and change jobs as before", %{
+      open: open,
+      registry: registry
+    } do
+      register_stand_in(registry, "codex_run", :exec, stand_in_executor(), :harness)
+      profile = RuntimeContext.build_profile(:operator, [], registry)
+
+      harness_free =
+        RuntimeContext.build_profile(:operator, [], registry, excluded_categories: [:harness])
+
+      register_stand_in(registry, "late_tool", :read_only)
+
+      owner_turns =
+        for built <- [profile, harness_free] do
+          loop_context(open, registry,
+            capabilities: built.capabilities,
+            dispatchable_capabilities: built.dispatchable
+          )
+        end
+
+      every_tool_job = seed_job_with_tools(open, "Every Tool Job", [])
+
+      for context <- owner_turns ++ [loop_context(open, registry, []), open],
+          {allowed, stored} <- [{["shell"], ["shell"]}, {:absent, []}] do
+        args =
+          %{"name" => "Open #{System.unique_integer([:positive])}", "task" => "Report."}
+          |> Map.put("schedule", "every 15 minutes")
+          |> put_allowed(allowed)
+
+        assert {:ok, created} = ScheduleJob.execute(args, context)
+        assert created.success == true
+        payload = Jason.decode!(created.output)
+        assert payload["allowed_tools"] == stored
+        refute Map.has_key?(payload, "note")
+
+        assert {:ok, %{success: true}} =
+                 UpdateJob.execute(%{"job_id" => every_tool_job, "task" => "Report."}, context)
+      end
+    end
+
+    test "update_job refuses a job with tools the run does not have and leaves it unchanged", %{
+      open: open,
+      narrowed: narrowed
+    } do
+      shell_job = seed_job_with_tools(open, "Shell Job", ["shell"])
+      every_tool_job = seed_job_with_tools(open, "Every Tool Job", [])
+
+      assert {:ok, refused} =
+               UpdateJob.execute(%{"job_id" => shell_job, "task" => "Delete it all."}, narrowed)
+
+      assert refused.success == false
+      assert refused.error =~ "can't change a job with tools it doesn't have itself: shell"
+
+      assert {:ok, refused} =
+               UpdateJob.execute(
+                 %{"job_id" => every_tool_job, "task" => "Delete it all."},
+                 narrowed
+               )
+
+      assert refused.success == false
+      assert refused.error =~ "no tool list bounds: the job names no tools."
+
+      for job_id <- [shell_job, every_tool_job] do
+        assert {:ok, job} = Repo.get_scheduled_job(job_id, server: open.memory_repo)
+        assert job.task_prompt == "Report."
+      end
+    end
+
+    # A job with no list of its own runs inside its skill's (`Jobs.Runner`), and
+    # after a rebind inside the new skill's.
+    test "update_job reads a job's tools through its skill, the rebound one included", %{
+      open: open,
+      narrowed: narrowed
+    } do
+      searcher_job = seed_job_with_tools(open, "Searcher Job", [], "searcher")
+      cleaner_job = seed_job_with_tools(open, "Cleaner Job", [], "cleaner")
+
+      assert {:ok, %{success: true}} =
+               UpdateJob.execute(%{"job_id" => searcher_job, "task" => "Search."}, narrowed)
+
+      for args <- [
+            %{"job_id" => cleaner_job, "task" => "Delete it all."},
+            %{"job_id" => searcher_job, "skill_name" => "cleaner"}
+          ] do
+        assert {:ok, refused} = UpdateJob.execute(args, narrowed)
+        assert refused.success == false
+        assert refused.error =~ "can't change a job with tools it doesn't have itself: shell"
+      end
+
+      assert {:ok, job} = Repo.get_scheduled_job(searcher_job, server: open.memory_repo)
+      assert job.skill_name == "searcher"
+    end
+
+    # The gate runs after the scoping, on the list the job will hold: a run
+    # with `schedule_job` hands a job a way to every host command, so a tainted
+    # Linux turn is held, while a run with only `web_search` is not, though the
+    # gate refuses the `[]` it was asked for.
+    test "the access gate still judges the inherited list", %{open: open, registry: registry} do
+      tainted_linux = %{
+        os_sandbox: [os: {:unix, :linux}],
+        outside_sources: MapSet.new([{:tool, "web_fetch"}])
+      }
+
+      job = %{"name" => "Inherited", "schedule" => "every 15 minutes", "task" => "Report."}
+
+      held =
+        open
+        |> loop_context(registry, allowed_tools: ["web_search", "schedule_job"])
+        |> Map.merge(tainted_linux)
+
+      assert {:ok, refused} = ScheduleJob.execute(job, held)
+      assert refused.success == false
+      assert refused.error =~ "Name the tools the job needs"
+      assert {:ok, []} = Repo.list_scheduled_jobs(%{}, server: open.memory_repo)
+
+      searcher =
+        open
+        |> loop_context(registry, allowed_tools: ["web_search"])
+        |> Map.merge(tainted_linux)
+
+      assert {:ok, created} = ScheduleJob.execute(job, searcher)
+      assert created.success == true
+      assert Jason.decode!(created.output)["allowed_tools"] == ["web_search"]
+    end
+
+    test "update_job changes a job within the run's tools, and an un-narrowed run any job", %{
+      open: open,
+      narrowed: narrowed,
+      registry: registry
+    } do
+      search_job = seed_job_with_tools(open, "Search Job", ["web_search"])
+      shell_job = seed_job_with_tools(open, "Shell Job", ["shell"])
+
+      assert {:ok, %{success: true}} =
+               UpdateJob.execute(%{"job_id" => search_job, "task" => "Search more."}, narrowed)
+
+      for context <- [open, loop_context(open, registry, [])] do
+        assert {:ok, %{success: true}} =
+                 UpdateJob.execute(%{"job_id" => shell_job, "task" => "Tidy up."}, context)
+      end
+    end
+
+    # A name no capability carries right now (a disabled plugin's) is one the
+    # run lacks too, so it cannot be inherited; but a run granted it may still
+    # change a job holding it, since the change keeps or narrows that list.
+    test "a granted name that is not registered now is kept on update, and named when dropped",
+         %{open: open, registry: registry} do
+      {:ok, job} =
+        JobsRegistry.create_job(
+          %{
+            name: "Plugin Job",
+            schedule: "every 15 minutes",
+            task_prompt: "Report.",
+            allowed_tools: ["web_search", "gone_tool"],
+            created_by_trust: "operator"
+          },
+          repo: open.memory_repo
+        )
+
+      granted =
+        loop_context(open, registry,
+          allowed_tools: ["web_search", "schedule_job", "update_job", "gone_tool"]
+        )
+
+      assert {:ok, %{success: true}} =
+               UpdateJob.execute(%{"job_id" => job.id, "task" => "Report again."}, granted)
+
+      not_granted = loop_context(open, registry, allowed_tools: ["web_search", "update_job"])
+
+      assert {:ok, refused} =
+               UpdateJob.execute(%{"job_id" => job.id, "task" => "Report later."}, not_granted)
+
+      assert refused.success == false
+      assert refused.error =~ "doesn't have itself: gone_tool"
+
+      assert {:ok, created} =
+               ScheduleJob.execute(
+                 %{"name" => "Heir", "schedule" => "every 15 minutes", "task" => "Report."},
+                 granted
+               )
+
+      payload = Jason.decode!(created.output)
+      assert payload["allowed_tools"] == ["schedule_job", "update_job", "web_search"]
+      assert payload["note"] =~ "Granted to this run but unavailable now, so left out: gone_tool"
+    end
+
+    test "update_job on a job whose skill is gone says the skill is gone", %{
+      open: open,
+      narrowed: narrowed
+    } do
+      job_id = seed_job_with_tools(open, "Orphan Job", [], "searcher")
+      {:ok, empty_skills} = SkillRegistryStub.start_link([])
+
+      assert {:ok, refused} =
+               UpdateJob.execute(
+                 %{"job_id" => job_id, "task" => "Search."},
+                 Map.put(narrowed, :skill_registry, empty_skills)
+               )
+
+      assert refused.success == false
+      assert refused.error =~ "the job names no tools, and its skill searcher is gone"
+    end
+
+    # The real path: the loop stamps its own allowlist on the context every
+    # tool sees, so a job's run, a skill's worker and a sub-agent's worker are
+    # each held to the tools their own loop was given.
+    test "the agent loop holds schedule_job to the loop's own allowlist", %{
+      open: open,
+      registry: registry
+    } do
+      Process.put(:script, [
+        scripted_turn([
+          scheduled_call("call_1", %{"allowed_tools" => ["shell"]}),
+          scheduled_call("call_2", %{})
+        ]),
+        scripted_turn([])
+      ])
+
+      assert {:ok, _result} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "Set up the cleanup job."}],
+                 adapter: ScriptedModel,
+                 adapter_opts: [model: "mock"],
+                 capability_registry: registry,
+                 trust: :operator,
+                 allowed_tools: ["web_search", "schedule_job"],
+                 context: open
+               )
+
+      results = Map.new(Process.get(:tool_results), &{&1.call_id, &1.output})
+      assert results["call_1"] =~ "can't give a job tools it doesn't have itself: shell"
+      assert results["call_2"] =~ "this run's own tools"
+
+      assert {:ok, [job]} = Repo.list_scheduled_jobs(%{}, server: open.memory_repo)
+      assert job.allowed_tools == ["schedule_job", "web_search"]
+    end
+  end
+
   def never_run(_args, _context), do: raise("the access-sensitive stub must never run")
+
+  def stand_in_never_runs(_args, _context), do: raise("a stand-in tool must never run")
+
+  defp stand_in_executor, do: {__MODULE__, :stand_in_never_runs, []}
+
+  # The web_search stand-in reports the context the loop handed it.
+  def report_context(_args, context, test_pid) do
+    send(test_pid, {:tool_context, context})
+    {:ok, %{success: true, output: "no results", error: nil}}
+  end
+
+  defp register_stand_in(
+         registry,
+         name,
+         policy_class,
+         executor \\ stand_in_executor(),
+         category \\ nil
+       ) do
+    capability =
+      Capability.new(%{
+        name: name,
+        description: "Stands in for #{name}.",
+        parameters: %{"type" => "object"},
+        kind: :builtin,
+        executor: executor,
+        policy_class: policy_class,
+        metadata: if(category, do: %{category: category}, else: %{})
+      })
+
+    :ok = CapabilityRegistry.register(registry, capability)
+  end
+
+  # The context a tool sees inside an operator agent loop run with `loop_opts`:
+  # the scripted model calls web_search once, whose stand-in reports it.
+  defp loop_context(base, registry, loop_opts) do
+    call = %{id: "fc_probe", call_id: "probe", name: "web_search", arguments: "{}"}
+    Process.put(:script, [scripted_turn([call]), scripted_turn([])])
+
+    assert {:ok, _result} =
+             [
+               messages: [%{role: "user", content: "Look something up."}],
+               adapter: ScriptedModel,
+               adapter_opts: [model: "mock"],
+               capability_registry: registry,
+               trust: :operator,
+               context: base
+             ]
+             |> Keyword.merge(loop_opts)
+             |> AgentLoop.run()
+
+    assert_receive {:tool_context, context}
+    Process.delete(:tool_results)
+    context
+  end
+
+  defp skill_definition(name, attrs, trust) do
+    {:ok, definition} =
+      %{"name" => name, "description" => "Use #{name}.", "system_prompt" => "Be #{name}."}
+      |> Map.merge(attrs)
+      |> AgentDefinition.new()
+
+    AgentDefinition.with_trust(definition, trust)
+  end
+
+  defp put_allowed(args, :absent), do: args
+  defp put_allowed(args, allowed), do: Map.put(args, "allowed_tools", allowed)
+
+  defp seed_job_with_tools(context, name, allowed_tools, skill_name \\ nil) do
+    args =
+      %{"name" => name, "schedule" => "every 15 minutes", "task" => "Report."}
+      |> Map.put("allowed_tools", allowed_tools)
+      |> then(&if(skill_name, do: Map.put(&1, "skill_name", skill_name), else: &1))
+
+    assert {:ok, created} = ScheduleJob.execute(args, context)
+
+    assert created.success == true
+    Jason.decode!(created.output)["id"]
+  end
+
+  defp scripted_turn(tool_calls) do
+    %{
+      content: if(tool_calls == [], do: "Done.", else: ""),
+      tool_calls: tool_calls,
+      provider_state: %{},
+      usage: %{prompt_tokens: 10, completion_tokens: 0, total_tokens: 10},
+      model: "mock"
+    }
+  end
+
+  defp scheduled_call(call_id, extra) do
+    arguments =
+      Map.merge(
+        %{"name" => "Cleanup #{call_id}", "schedule" => "every 15 minutes", "task" => "Tidy."},
+        extra
+      )
+
+    %{
+      id: "fc_#{call_id}",
+      call_id: call_id,
+      name: "schedule_job",
+      arguments: Jason.encode!(arguments)
+    }
+  end
 
   defp seed_job(context, name) do
     assert {:ok, created} =

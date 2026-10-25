@@ -260,11 +260,14 @@ defmodule FermixCore.AgentLoop do
   # can never spawn workers that regain the tools it lost. Correct for every run
   # type, including workers themselves: a worker's own loop re-stamps its
   # (already-intersected) values. `effective_allowed_tools` is `nil` when the
-  # run is unrestricted.
+  # run is unrestricted. `effective_trust` is the trust the loop resolved its
+  # surface at, which a skill's worker can hold below its person's
+  # `source_trust` (a plugin skill runs at guest under the owner's turn).
   defp stamp_effective_surface(context, trust, policy, allowed_tools) do
     context
     |> Map.put(:effective_policy, CapabilityRegistry.resolved_policy_classes(trust, policy))
     |> Map.put(:effective_allowed_tools, allowed_tools)
+    |> Map.put(:effective_trust, trust)
   end
 
   defp index_by_name(capabilities) do

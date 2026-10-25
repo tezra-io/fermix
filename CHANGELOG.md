@@ -109,6 +109,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   anywhere.** Failed attempts count per remote endpoint only, and when every
   remote place is taken, the oldest connection that has not proved itself
   makes way for a new one; a phone that has proved its key keeps its place.
+- **A limited run can no longer hand out more than it has.** A scheduled job
+  or skill run narrowed to some tools, some capability classes or a lower
+  trust can only create jobs, change jobs and start skill or sub-agent
+  workers within that; a job it creates with no tool list keeps the run's
+  own. Your own chat, voice and editor turns are not limited this way.
+- **A job bound to a plugin skill runs at guest trust,** as running that
+  skill directly always did, with the same capability classes; it no longer
+  sees owner-only tools such as file reads. A watcher's task can't be bound
+  to a skill that would leave it without its cue history.
 
 ## [0.16.0] - 2026-10-21
 

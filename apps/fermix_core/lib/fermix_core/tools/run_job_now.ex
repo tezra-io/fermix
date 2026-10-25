@@ -69,7 +69,7 @@ defmodule FermixCore.Tools.RunJobNow do
   defp do_execute(args, context) do
     with {:ok, job_id} <- Support.required_string(args, "job_id"),
          :ok <- Registry.check_run_now(job_id, repo: Support.repo(context)),
-         :ok <- Support.check_job_access(job_id, context) do
+         {:ok, _job} <- Support.check_job_access(job_id, context) do
       scheduler = Map.get(context, :scheduler, Scheduler)
 
       case Scheduler.run_now(scheduler, job_id) do

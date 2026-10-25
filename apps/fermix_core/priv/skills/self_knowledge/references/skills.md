@@ -3,7 +3,7 @@
 ## Skills
 
 - A skill is a `SKILL.md` instruction package, not a provider-visible tool. `skill_view` loads a body (and a named reference file); `skill_run` delegates it to a sub-agent (recursion cap 4); `skill_list` enumerates.
-- Sources: bundled skills and `~/.fermix/skills` load at operator trust; plugin skills load at guest trust (capability-restricted) whoever calls them. A skill's `allowed_tools` narrows its trust default (`[]` = none; absent = the default).
+- Sources: bundled skills and `~/.fermix/skills` load at operator trust; plugin skills load at guest trust (capability-restricted) whoever calls them, a scheduled job bound to one included. A skill's `allowed_tools` narrows its trust default (`[]` = none; absent = the default). A skill's worker gets at most the tools the run that starts it is authorized for: its trust, `allowed_tools` and `policy` meet that run's own; what that run's surface leaves out only to fit its channel does not carry.
 - `skill_create` writes to `~/.fermix/skills`. `skill_reload` re-scans the skill directories and refreshes the running agent in place (no restart) after a `SKILL.md` is created or edited on disk, reporting added, removed and changed names and load errors.
 - CLI: `fermix skills list | view NAME | reload`.
 

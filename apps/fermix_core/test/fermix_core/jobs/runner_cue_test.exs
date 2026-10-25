@@ -11,6 +11,8 @@ defmodule FermixCore.Jobs.RunnerCueTest do
 
   import FermixTestSupport.CueFixtures
 
+  alias FermixCore.Agents.AgentDefinition
+  alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.BuiltinSeeder
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
@@ -21,6 +23,7 @@ defmodule FermixCore.Jobs.RunnerCueTest do
   alias FermixCore.Jobs.Runner
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesSql
+  alias FermixCore.Tools.CueHistory
   alias FermixTestSupport.MandateFixtures
   alias FermixTestSupport.TelemetryCapture
 
@@ -83,6 +86,28 @@ defmodule FermixCore.Jobs.RunnerCueTest do
     defp next_turn([]), do: {:error, "No mock responses left"}
   end
 
+  defmodule SkillRegistryStub do
+    @moduledoc false
+    # The runner only calls `GenServer.call(registry, {:load, name})`.
+    use GenServer
+
+    def start_link(skills) when is_map(skills), do: GenServer.start_link(__MODULE__, skills)
+
+    @impl true
+    def init(skills), do: {:ok, skills}
+
+    @impl true
+    def handle_call({:load, name}, _from, skills) do
+      reply =
+        case Map.fetch(skills, name) do
+          {:ok, definition} -> {:ok, definition}
+          :error -> {:error, {:unknown_skill, name}}
+        end
+
+      {:reply, reply, skills}
+    end
+  end
+
   defmodule RecordingDelivery do
     @moduledoc false
     def send_message(target, text, opts) do
@@ -95,6 +120,9 @@ defmodule FermixCore.Jobs.RunnerCueTest do
     %{repo: repo, conn: conn} = start_repo("runner_cue")
     registry = :"runner_cue_registry_#{System.unique_integer([:positive])}"
     start_supervised!({CapabilityRegistry, name: registry})
+    # Every cue run reads its watcher's deliveries through `cue_history`, which
+    # the daemon always registers; a run without it on its surface fails.
+    :ok = CapabilityRegistry.register(registry, Builtin.from_tool_module(CueHistory))
 
     output_base_dir =
       Path.join(System.tmp_dir!(), "fermix-runner-cue-#{System.unique_integer([:positive])}")
@@ -195,7 +223,9 @@ defmodule FermixCore.Jobs.RunnerCueTest do
                Pins.approve(@mandate, "test", @now, repo: ctx.repo)
 
       # A mandated run's file tools read only its skill folder, and this job
-      # names none, so the probe stands in for `cue_history`.
+      # names none, so the probe stands in for `cue_history`, replacing the
+      # real one the setup registers.
+      :ok = CapabilityRegistry.unregister(ctx.registry, "cue_history")
       :ok = CapabilityRegistry.register(ctx.registry, probe("cue_history"))
       %{claim: claim}
     end
@@ -439,6 +469,34 @@ defmodule FermixCore.Jobs.RunnerCueTest do
     assert [[0, "passed"]] == attempts_and_state(ctx.conn, claim.delivery.id)
   end
 
+  # A row bound to a plugin skill before binding one was refused: the skill
+  # runs at guest, which never sees the owner-only `cue_history`, so the run
+  # fails with the sentence `update_job` refuses with, never runs half-blind.
+  test "a task bound to a plugin skill fails before the model is asked", ctx do
+    seed_every_builtin(ctx.registry)
+
+    {:ok, plugin} =
+      AgentDefinition.new(%{
+        "name" => "plugin_helper",
+        "description" => "Use plugin_helper.",
+        "system_prompt" => "Help."
+      })
+
+    {:ok, skills} =
+      SkillRegistryStub.start_link(%{
+        "plugin_helper" => AgentDefinition.with_trust(plugin, :guest)
+      })
+
+    claim = claim_cue(ctx, %{skill_name: "plugin_helper"})
+
+    run_cue(ctx, claim, script: [%{content: "unreachable"}], skill_registry: skills)
+
+    refute_received {:adapter_chat, _messages, _offered}
+    {:ok, run} = Repo.get_job_run(claim.run.id, server: ctx.repo)
+    assert run.status == "error"
+    assert run.error =~ "Skill plugin_helper leaves a watcher's task without cue_history"
+  end
+
   test "a report never goes to a channel a cue run may not reach", ctx do
     claim = claim_cue(ctx, %{target: %{"platform" => "imessage", "chat_id" => "+15550100"}})
 
@@ -464,6 +522,7 @@ defmodule FermixCore.Jobs.RunnerCueTest do
         run: claim.run,
         notify: parent,
         capability_registry: ctx.registry,
+        skill_registry: Keyword.get(opts, :skill_registry),
         adapter: ScriptAdapter,
         adapter_opts: [test_pid: parent, script: Keyword.fetch!(opts, :script)],
         output_base_dir: ctx.output_base_dir,
@@ -528,6 +587,7 @@ defmodule FermixCore.Jobs.RunnerCueTest do
         scheduler: nil
       )
 
+    job = bind_skill(ctx, job, Map.get(attrs, :skill_name))
     watcher_id = "cwt_#{System.unique_integer([:positive])}"
 
     exec!(
@@ -572,6 +632,13 @@ defmodule FermixCore.Jobs.RunnerCueTest do
       )
 
     Map.put(claim, :watcher_id, watcher_id)
+  end
+
+  defp bind_skill(_ctx, job, nil), do: job
+
+  defp bind_skill(ctx, job, skill_name) do
+    {:ok, bound} = Registry.update_job(job.id, %{skill_name: skill_name}, repo: ctx.repo)
+    bound
   end
 
   defp insert_passed_delivery(conn, watcher_id, attempts) do
