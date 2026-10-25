@@ -461,13 +461,15 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
     end
   end
 
+  # `secret-tool lookup` writes the secret's bytes, and a newline after them
+  # only when its stdout is a terminal (libsecret tool/secret-tool.c,
+  # write_password_stdout: `if (isatty (1))`). The runner's stdout is a pipe,
+  # so the output is the stored value, its own trailing newlines included.
   @impl true
   def get(key, opts \\ []) when is_secret_key(key) do
     with {:ok, binary} <- fetch_secret_tool_binary(opts),
          {:ok, output} <- run(binary, lookup_args(key, opts), opts) do
-      output
-      |> String.trim_trailing("\n")
-      |> case do
+      case output do
         "" -> {:error, :missing_secret}
         value -> {:ok, value}
       end

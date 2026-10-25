@@ -95,6 +95,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prompt, every time it loaded while Anthropic was your provider; it now only
   checks that one exists, and reads it when you choose to import it, without
   reloading the page while the prompt waits for you.
+- **A secret in a Linux keyring that ends with a line break is read back with
+  it.** Fermix dropped every line break at the end of what the keyring handed
+  back, so a value ending in one lost it, and a value of line breaks alone
+  read as missing. The keyring adds nothing after a secret when Fermix reads
+  it, so the value now comes back exactly as it was stored: one stored with a
+  trailing line break now reaches the provider with it, and one stored by hand
+  with `echo … | secret-tool store` keeps the line break `echo` added. To fix
+  such a key, store it again through Fermix: with `fermix setup`, or in the
+  app's Settings.
 
 ### Security
 

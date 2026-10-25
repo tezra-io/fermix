@@ -480,6 +480,37 @@ defmodule FermixCore.Setup.SecretWriterTest do
     end
   end
 
+  # libsecret's `secret-tool lookup` writes the secret's bytes, and a newline
+  # after them only when its stdout is a terminal (tool/secret-tool.c,
+  # write_password_stdout: `if (isatty (1))`, the same from 0.18 to 0.21.8).
+  # The runner's stdout is a pipe, so what it captured is the stored value.
+  describe "secret-tool get/2 reads back exactly the stored bytes" do
+    for {label, value} <- [
+          {"plain", "sk-invented"},
+          {"ended by a newline", "pem-body\n"},
+          {"ended by two newlines", "pem-body\n\n"},
+          {"only a newline", "\n"}
+        ] do
+      test "a value that is #{label}" do
+        runner = fn _binary, ["lookup" | _attributes], _opts ->
+          {:ok, %{exit: 0, stdout: unquote(value), truncated?: false}}
+        end
+
+        assert SecretWriter.SecretTool.get(:openai_api_key, host_opts("secret-tool", runner)) ==
+                 {:ok, unquote(value)}
+      end
+    end
+
+    test "an empty stored value is no secret" do
+      runner = fn _binary, ["lookup" | _attributes], _opts ->
+        {:ok, %{exit: 0, stdout: "", truncated?: false}}
+      end
+
+      assert SecretWriter.SecretTool.get(:openai_api_key, host_opts("secret-tool", runner)) ==
+               {:error, :missing_secret}
+    end
+  end
+
   # CommandRunner stops reading at 1 MiB and reports the run as exit 124,
   # truncated. What it read is the start of the answer, which for `security -g`
   # is the password line and for `secret-tool lookup` the secret itself, so a
