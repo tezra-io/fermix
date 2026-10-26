@@ -967,9 +967,13 @@ defmodule FermixOpik.MapperTest do
           phase: :session_started
         )
 
-      refute String.contains?(inspect(span), "4111")
-      refute String.contains?(inspect(span), "book the flight")
-      refute String.contains?(inspect(span), "live voice companion")
+      # The id is a random UUIDv7, whose hex spells "4111" about once in ten
+      # thousand spans, so the check reads every field but the id.
+      exported = span |> Map.delete(:id) |> inspect()
+
+      refute String.contains?(exported, "4111")
+      refute String.contains?(exported, "book the flight")
+      refute String.contains?(exported, "live voice companion")
     end
   end
 
