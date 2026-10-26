@@ -40,13 +40,13 @@
 (* is unknown), the review fixes after them, and the owner's devices       *)
 (* answering a proposal. Line numbers below are those of that commit.      *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/ingest.ex @ 05d7fd9c9e51
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/filters.ex @ fed2523b7855
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/supervisor.ex @ 6cd21aac9d1d
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/sweeper.ex @ da4e2d7db65e
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/ingest.ex @ e49c9f5c2100
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/filters.ex @ 297db329d3f6
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/supervisor.ex @ e1b36533a8b3
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/sweeper.ex @ 7472388b5bc0
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/proposals.ex @ 9830af99b55d
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_sql.ex @ 0efd93ce0491
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_filter_sql.ex @ 68f8085a8c5d
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_sql.ex @ eacc5f5de565
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_filter_sql.ex @ 7581db5069b1
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_runs_sql.ex#@open_sql,@cap_room_sql,@eligible_sql,@candidates_sql,@eligible_delivery_sql,@settle_facts_sql,eligible_delivery,settle_delivery,settle_facts,settle_held,settle_move,unspent_retry,spent_retry,move_patch,untouched @ f65310ef1716
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_mandate_sql.ex#mark_tools_started,decide_propose,store_proposal,point_at_existing,decide_waiting,decided_or_why,decide_by_id,decided_by_id,end_denied,settle_proposal,expire_proposals @ 029c6975cee1
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/cue_admission.ex @ 94f9aac007e9
