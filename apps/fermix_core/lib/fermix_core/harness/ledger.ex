@@ -83,6 +83,15 @@ defmodule FermixCore.Harness.Ledger do
     Repo.get_harness_run(id, opts)
   end
 
+  @doc """
+  The runs that continued `parent_id`: launched by its follow-up turn, which the
+  admit records beside each child's row (`continued_from_run_id`).
+  """
+  @spec children(String.t(), keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  def children(parent_id, opts \\ []) when is_binary(parent_id) and is_list(opts) do
+    Repo.harness_run_children(parent_id, opts)
+  end
+
   @spec list(map(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def list(filters \\ %{}, opts \\ []) when is_map(filters) and is_list(opts) do
     Repo.list_harness_runs(filters, opts)

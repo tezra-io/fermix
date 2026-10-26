@@ -68,6 +68,7 @@ defmodule FermixCore.Memory.Repo do
   @open_loops_migration_version 43
   # 44 is reserved.
   @cue_stop_reason_migration_version 45
+  @harness_continued_from_migration_version 46
   @sqlite_open_intent :readwritecreate
 
   # The cue SQL modules (M60), one per lane, all served by `cues_call/3`.
@@ -624,6 +625,24 @@ defmodule FermixCore.Memory.Repo do
   ALTER TABLE harness_runs ADD COLUMN vendor_config_json TEXT;
   ALTER TABLE harness_runs ADD COLUMN vendor_config_changes_json TEXT;
   ALTER TABLE harness_runs ADD COLUMN vendor_config_cleared_at TEXT;
+  """
+
+  # The finished run whose follow-up turn started a run (a coding-run chain,
+  # `Capabilities.AccessGate`): the gate continues each finished run as one run
+  # at most, which only a durable link from the child can say across resumes
+  # and restarts. A table beside `harness_runs`, as migration 41 put a reply's
+  # blocks beside the timeline: `harness_runs` rows are read positionally
+  # (`SELECT *`), so a new column there would break every row for an engine
+  # rolled back to before this one. One row per child; the parent is indexed,
+  # since the gate asks for a run's children. Not unique: a cloud or blocked row
+  # may name the same parent.
+  @harness_continued_from_schema_sql """
+  CREATE TABLE IF NOT EXISTS harness_run_continuations (
+    run_id TEXT PRIMARY KEY,
+    continued_from_run_id TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_harness_run_continuations_parent
+    ON harness_run_continuations(continued_from_run_id);
   """
 
   # Durable counts-only skill-usage counters (MILESTONE_26_SKILL_CURATION §6.9):
@@ -2649,6 +2668,15 @@ defmodule FermixCore.Memory.Repo do
     call({:get_harness_run, id}, opts)
   end
 
+  @doc """
+  The runs that name `parent_id` as the finished run they continued (a coding
+  run's follow-up turn launched them), from `harness_run_continuations`.
+  """
+  @spec harness_run_children(String.t(), keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  def harness_run_children(parent_id, opts \\ []) when is_binary(parent_id) do
+    call({:harness_run_children, parent_id}, opts)
+  end
+
   @spec list_harness_runs(map(), keyword()) :: {:ok, [harness_run_row()]} | {:error, term()}
   def list_harness_runs(selector \\ %{}, opts \\ []) when is_map(selector) do
     call({:list_harness_runs, selector, Keyword.get(opts, :limit, 50)}, opts)
@@ -4470,6 +4498,11 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:harness_run_children, parent_id}, _from, state) do
+    reply = with_connection(state, &fetch_harness_run_children(&1, parent_id))
+    {:reply, reply, state}
+  end
+
   def handle_call(:active_harness_runs, _from, state) do
     reply = with_connection(state, &fetch_active_harness_runs/1)
     {:reply, reply, state}
@@ -4691,7 +4724,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_reply_blocks_migration(conn, versions),
          :ok <- apply_cues_migration(conn, versions),
          :ok <- apply_open_loops_migration(conn, versions),
-         :ok <- apply_cue_stop_reason_migration(conn, versions) do
+         :ok <- apply_cue_stop_reason_migration(conn, versions),
+         :ok <- apply_harness_continued_from_migration(conn, versions) do
       :ok
     end
   end
@@ -4921,6 +4955,22 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{ComputerHistorySql.purges_schema_sql(migrated_at)}
         INSERT INTO schema_migrations(version) VALUES (#{@computer_history_purges_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_harness_continued_from_migration(conn, versions) do
+    if Enum.member?(versions, @harness_continued_from_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@harness_continued_from_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@harness_continued_from_migration_version});
         COMMIT;
         """
       )
@@ -5741,6 +5791,11 @@ defmodule FermixCore.Memory.Repo do
                AND COALESCE(
                      CASE WHEN json_valid(metadata_json)
                           THEN json_extract(metadata_json, '$.spoken') END,
+                     0
+                   ) != 1
+               AND COALESCE(
+                     CASE WHEN json_valid(metadata_json)
+                          THEN json_extract(metadata_json, '$.harness_continuation') END,
                      0
                    ) != 1
              ORDER BY id ASC
@@ -7363,8 +7418,51 @@ defmodule FermixCore.Memory.Repo do
 
   defp admit_harness_run_in_tx(conn, run, max_active) do
     with :ok <- ensure_harness_capacity(conn, max_active),
-         :ok <- ensure_harness_lock_free(conn, run.lock_roots) do
-      insert_harness_run_row(conn, run)
+         :ok <- ensure_harness_lock_free(conn, run.lock_roots),
+         :ok <- ensure_sole_continuation(conn, run),
+         {:ok, row} <- insert_harness_run_row(conn, run),
+         :ok <- insert_harness_run_continuation(conn, run) do
+      {:ok, row}
+    end
+  end
+
+  # A run the access gate dispatched as the chain's next is admitted only as
+  # its finished run's first child, checked in the admit's own transaction so
+  # two chained launches cannot both pass it.
+  defp ensure_sole_continuation(conn, %{sole_continuation: true, continued_from_run_id: parent})
+       when is_binary(parent) do
+    case fetch_harness_run_children(conn, parent) do
+      {:ok, []} -> :ok
+      {:ok, [_child | _rest]} -> {:error, {:already_continued, parent}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp ensure_sole_continuation(_conn, _run), do: :ok
+
+  defp insert_harness_run_continuation(conn, %{continued_from_run_id: parent, id: id})
+       when is_binary(parent) do
+    execute(
+      conn,
+      "INSERT INTO harness_run_continuations (run_id, continued_from_run_id) VALUES (?, ?)",
+      [id, parent]
+    )
+  end
+
+  defp insert_harness_run_continuation(_conn, _run), do: :ok
+
+  defp fetch_harness_run_children(conn, parent) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT run_id FROM harness_run_continuations
+             WHERE continued_from_run_id = ?
+             ORDER BY run_id ASC
+             """,
+             [parent]
+           ) do
+      {:ok, Enum.map(rows, fn [run_id] -> run_id end)}
     end
   end
 
@@ -7930,6 +8028,11 @@ defmodule FermixCore.Memory.Repo do
       origin_kind: fetch_string!(attrs, :origin_kind),
       origin_session_id: fetch_string!(attrs, :origin_session_id),
       continuation_depth: non_negative_integer_with_default!(attrs, :continuation_depth, 0),
+      # Not columns: the chain's parent link is written beside the row
+      # (`harness_run_continuations`), and `sole_continuation` asks the admit to
+      # refuse a second child of that parent.
+      continued_from_run_id: optional_string!(attrs, :continued_from_run_id),
+      sole_continuation: bool_with_default!(attrs, :sole_continuation, false),
       client_origin: Map.get(attrs, :client_origin),
       vendor_config: Map.get(attrs, :vendor_config),
       parent_job_id: optional_string!(attrs, :parent_job_id),

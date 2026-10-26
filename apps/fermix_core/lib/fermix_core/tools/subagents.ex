@@ -30,6 +30,7 @@ defmodule FermixCore.Tools.Subagents do
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Providers.RoutingOverrides
+  alias FermixCore.Temporal.Access
   alias FermixCore.Tools.Support
 
   # Regular-mode caps (fallback defaults; the live values come from the
@@ -161,18 +162,19 @@ defmodule FermixCore.Tools.Subagents do
   end
 
   @doc """
-  Advertise `subagents` only where a call could execute (§12): a top-level turn
-  (`subagent_depth == 0`) whose context carries a delegating trust. This mirrors
-  the two execution guards (`check_recursion`, `fetch_source_trust`) so the tool
-  — schema and model-slug hint and all — is dropped from every AgentLoop-driven
-  context where a call is guaranteed to fail (workers, any trust-less context),
-  instead of burning a model iteration on a doomed call. The guards stay; this
-  is advertisement, not enforcement. Discovered via `function_exported?` at
-  `AgentLoop.build_state`.
+  Advertise `subagents` only on a top-level turn (not a delegated worker,
+  `Temporal.Access.worker?/1`) whose context carries a delegating trust. This
+  mirrors the two execution guards (`check_recursion`, `fetch_source_trust`) so
+  the tool — schema and model-slug hint and all — is dropped from every
+  AgentLoop-driven context where a call would fail (workers, any trust-less
+  context), instead of burning a model iteration on a doomed call; a skill
+  worker is neither offered it nor runs it. The guards stay; this is
+  advertisement, not enforcement.
+  Discovered via `function_exported?` at `AgentLoop.build_state`.
   """
   @spec advertise?(map()) :: boolean()
   def advertise?(context) when is_map(context) do
-    Map.get(context, :subagent_depth, 0) == 0 and
+    not Access.worker?(context) and
       Map.get(context, :source_trust) in [:operator, :guest]
   end
 
@@ -550,11 +552,15 @@ defmodule FermixCore.Tools.Subagents do
     }
   end
 
+  # The one delegated-worker rule (`Temporal.Access.worker?/1`): a `subagents`
+  # worker or a skill's, which keeps its parent turn's trust and is not
+  # offered this tool either.
   defp check_recursion(context) do
-    case Map.get(context, :subagent_depth, 0) do
-      0 -> {:ok, 0}
-      depth -> {:error, "subagents cannot be called from within a subagent (depth #{depth})."}
-    end
+    if Access.worker?(context),
+      do:
+        {:error,
+         "subagents cannot be called from within a subagent or any other delegated worker."},
+      else: {:ok, 0}
   end
 
   defp fetch_source_trust(context) do

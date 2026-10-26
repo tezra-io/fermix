@@ -33,19 +33,30 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
           resume: grant_resume() | nil
         }
 
-  @typedoc "Enough of the original inbound message to faithfully re-ingest it after the grant is confirmed."
-  @type grant_resume :: %{content: String.t(), reply_target: String.t(), sender: String.t()}
+  @typedoc """
+  Enough of the original inbound message to faithfully re-ingest it after the
+  grant is confirmed, with what its parked turn had read (`provenance`,
+  `FermixCore.Capabilities.UntrustedContent.resume_provenance/1`) so the re-run
+  is the same request.
+  """
+  @type grant_resume :: %{
+          required(:content) => String.t(),
+          required(:reply_target) => String.t(),
+          required(:sender) => String.t(),
+          required(:provenance) => map()
+        }
 
   @typedoc """
   What core passes to the injected approval closure: a directory grant from the
   `request_directory_access` tool, a coding run's vendor-config change for the
   owner to acknowledge before the next harness launch (GAP3-1), or an
   access-sensitive plugin command parked by `Capabilities.AccessGate` (its
-  intent id; the call itself stays in core).
+  intent id; the call itself stays in core). The two that re-run a request
+  hand what their turn had read (`provenance`).
   """
   @type grant_request ::
-          %{path: String.t(), reason: String.t(), diff: String.t()}
-          | %{acknowledge_vendor_config: String.t()}
+          %{path: String.t(), reason: String.t(), diff: String.t(), provenance: map()}
+          | %{acknowledge_vendor_config: String.t(), provenance: map()}
           | %{access_sensitive: String.t()}
 
   @impl true
@@ -405,7 +416,9 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
           [
             channel: adapter,
             agent: Map.fetch!(context, :agent),
-            agent_server: Map.fetch!(context, :agent_server)
+            agent_server: Map.fetch!(context, :agent_server),
+            # The re-run carries its parked turn's chain position.
+            keep_chain_metadata: true
           ]
           |> maybe_put(:ingress_context, Map.get(record, :ingress_context))
 
@@ -515,7 +528,12 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp settle_command(finish, {:ok, _outcome}), do: finish.(:completed)
   defp settle_command(finish, {:error, reason}), do: finish.({:failed, reason})
 
+  # The re-run is the request that parked: it carries what that turn had read
+  # (`resumed_sources`, which the turn seeds) and, on a coding run's follow-up,
+  # its chain depth and finished run in the metadata the turn reads them from.
   defp synthesize_resume_message(record, resume, token) do
+    provenance = Map.fetch!(resume, :provenance)
+
     Message.new!(%{
       id: "grant-resume-#{System.unique_integer([:positive])}",
       content: resume.content,
@@ -524,7 +542,11 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
       chat_id: record.chat_id,
       reply_target: resume.reply_target,
       thread_ts: record.thread_ts,
-      metadata: %{user_id: record.user_id, resumed_from_grant: token}
+      metadata:
+        provenance
+        |> Map.take([:harness_continuation_depth, :harness_run_id])
+        |> Map.merge(%{user_id: record.user_id, resumed_from_grant: token}),
+      resumed_sources: Map.get(provenance, :outside_sources)
     })
   end
 

@@ -327,6 +327,88 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
     refute_received {:unlocked, _}
   end
 
+  # The gate reads the finished run from the ledger by the id the notice
+  # carries, to chain the next run only in its folder, with its coding agent.
+  test "a coding-run continuation turn carries the finished run's id", ctx do
+    msg =
+      owner_msg(chat_id(), %{
+        content: "the coding run finished; here is its summary",
+        metadata: %{
+          chat_type: "private",
+          harness_continuation_depth: 1,
+          harness_run_id: "hr_000000000001"
+        }
+      })
+
+    {_messages, context} = run_turn(ctx, msg)
+    assert context.harness_run_id == "hr_000000000001"
+
+    {_messages, owner_context} = run_turn(ctx, owner_msg(chat_id(), %{content: "hi"}))
+    assert owner_context.harness_run_id == nil
+  end
+
+  # Only the gateway sets chain metadata, under atom keys; a string-keyed copy
+  # (a payload's, a stored row's) is never read as a continuation.
+  test "chain metadata under string keys is not a continuation", ctx do
+    msg =
+      owner_msg(chat_id(), %{
+        metadata: %{
+          "chat_type" => "private",
+          "harness_continuation_depth" => 1,
+          "harness_run_id" => "hr_000000000001"
+        }
+      })
+
+    {_messages, context} = run_turn(ctx, msg)
+    assert context.harness_continuation_depth == 0
+    assert context.harness_run_id == nil
+    assert context.outside_sources == MapSet.new()
+  end
+
+  # A finished run's notice is the vendor CLI's text: TurnRunner stores it as
+  # the run's whenever the turn is a follow-up, a resumed one (whose metadata
+  # carries only the chain's depth and run) included, so the memory review never
+  # reads it as the owner's words.
+  test "a follow-up turn's notice is stored as the run's, resumed or not", ctx do
+    for metadata <- [
+          %{chat_type: "private", harness_continuation_depth: 2, harness_run_id: "hr_1"},
+          %{
+            chat_type: "private",
+            harness_continuation_depth: 2,
+            harness_run_id: "hr_1",
+            resumed_from_grant: "TOKEN"
+          }
+        ] do
+      id = chat_id()
+      msg = owner_msg(id, %{content: "[coding run hr_1 finished]", metadata: metadata})
+      {_messages, _context} = run_turn(ctx, msg)
+
+      [stored | _rest] = ConversationStore.get_history({"telegram", id, :root}, server: ctx.store)
+      assert stored.role == "user"
+      assert stored.harness_continuation == true
+    end
+
+    id = chat_id()
+    {_messages, _context} = run_turn(ctx, owner_msg(id, %{content: "hi"}))
+    [owner | _rest] = ConversationStore.get_history({"telegram", id, :root}, server: ctx.store)
+    refute Map.has_key?(owner, :harness_continuation)
+  end
+
+  # A request re-ingested after the owner's `/confirm` is the request that
+  # parked: it arrives with what that turn had read, and starts from there.
+  test "a resumed request keeps what its parked turn had read", ctx do
+    msg =
+      owner_msg(chat_id(), %{
+        content: "finish the refactor",
+        metadata: %{chat_type: "private", resumed_from_grant: "TOKEN"},
+        resumed_sources: MapSet.new([{:tool, "web_fetch"}])
+      })
+
+    {_messages, context} = run_turn(ctx, msg)
+    assert context.outside_sources == MapSet.new([{:tool, "web_fetch"}])
+    refute AccessGate.owner_consent_turn?(context)
+  end
+
   describe "the Recent Activity note" do
     setup ctx do
       db = Path.join(ctx.base, "memory.db")

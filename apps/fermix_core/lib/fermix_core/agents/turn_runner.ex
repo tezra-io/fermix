@@ -629,6 +629,11 @@ defmodule FermixCore.Agents.TurnRunner do
       # depth+1 on its ledger row, which is what bounds the chain — so the depth
       # must reach the run tools through the turn context. Zero on an ordinary turn.
       harness_continuation_depth: harness_continuation_depth(msg),
+      # The finished run's id on that synthesized message (nil on every other
+      # turn): `Capabilities.AccessGate` reads that run's ledger row to let the
+      # follow-up turn start the next run of the chain without asking, only in
+      # its folder and with its coding agent.
+      harness_run_id: harness_run_id(msg),
       # Reaction capability resolved by the gateway (nil on no-reaction channels).
       # Plain data, never the channel module — the `react` tool reads it to gate
       # its own advertisement and build the emoji enum (EMOJI_REACTION_ACKS §5.4).
@@ -701,15 +706,27 @@ defmodule FermixCore.Agents.TurnRunner do
   defp tell_history_tainted(_voice_call, _msg, _state, _history, _stream_callback), do: :ok
 
   # The turn's message-borne outside content, before any tool runs: its
-  # attachments and, when it re-enters as a finished coding run's notice (the
-  # continuation marker, whose content is the vendor CLI's text), that run's
-  # provenance.
+  # attachments, when it re-enters as a finished coding run's notice (the
+  # continuation marker, whose content is the vendor CLI's text) that run's
+  # provenance, and when it is a request re-run after the owner's `/confirm`
+  # what its parked turn had read (`:resumed_sources`, set only by that
+  # re-ingest).
   defp initial_outside_sources(msg) do
     sources = UntrustedContent.attachment_sources(Map.get(msg, :inbound_attachments))
 
-    if harness_continuation_depth(msg) > 0,
-      do: MapSet.put(sources, UntrustedContent.harness_continuation_source()),
-      else: sources
+    sources =
+      if harness_continuation_depth(msg) > 0,
+        do: MapSet.put(sources, UntrustedContent.harness_continuation_source()),
+        else: sources
+
+    MapSet.union(sources, resumed_sources(msg))
+  end
+
+  defp resumed_sources(msg) do
+    case Map.get(msg, :resumed_sources) do
+      %MapSet{} = sources -> sources
+      nil -> MapSet.new()
+    end
   end
 
   defp run_profile(msg) do
@@ -721,14 +738,26 @@ defmodule FermixCore.Agents.TurnRunner do
     Map.get(metadata, :chat_type) || Map.get(metadata, "chat_type")
   end
 
+  # A coding-run chain's metadata is read under atom keys only: the gateway
+  # sets them, and keeps them only on what the continuation dispatcher or a
+  # grant resume hands it, so a string-keyed copy (a payload's, a stored row's)
+  # is never read as a continuation.
   defp harness_continuation_depth(msg) do
     metadata = Map.get(msg, :metadata) || %{}
 
-    case Map.get(metadata, :harness_continuation_depth) ||
-           Map.get(metadata, "harness_continuation_depth") do
+    case Map.get(metadata, :harness_continuation_depth) do
       depth when is_integer(depth) and depth > 0 -> depth
       _absent_or_invalid -> 0
     end
+  end
+
+  defp harness_run_id(msg) do
+    metadata = Map.get(msg, :metadata) || %{}
+    run_id = Map.get(metadata, :harness_run_id)
+
+    if harness_continuation_depth(msg) > 0 and is_binary(run_id) and run_id != "",
+      do: run_id,
+      else: nil
   end
 
   # The Live backend addendum (M41 §6.3), spliced right after the runtime
@@ -1155,8 +1184,19 @@ defmodule FermixCore.Agents.TurnRunner do
       sender: msg.sender,
       agent_id: state.memory_agent_id,
       owner_id: state.memory_owner_id,
-      metadata: user_message_metadata(msg, voice_call)
+      metadata: msg |> user_message_metadata(voice_call) |> mark_continuation(msg)
     )
+  end
+
+  # A follow-up turn's message is a finished coding run's notice, the vendor
+  # CLI's text: stored as the run's (`harness_continuation`) on every such turn,
+  # one re-run after the owner's `/confirm` included (its metadata carries only
+  # the chain's depth and run), so the memory review never reads it as the
+  # owner's words.
+  defp mark_continuation(metadata, msg) do
+    if harness_continuation_depth(msg) > 0,
+      do: Map.put(metadata || %{}, :harness_continuation, true),
+      else: metadata
   end
 
   # A Live hand-off's request is stored as what it is (M56 §4.1, D10): asked

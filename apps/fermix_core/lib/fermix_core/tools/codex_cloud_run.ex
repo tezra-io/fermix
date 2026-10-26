@@ -177,7 +177,8 @@ defmodule FermixCore.Tools.CodexCloudRun do
       ctx: plan_ctx(context),
       # Chain depth of the launching turn, so this run's completion knows whether
       # it may continue the conversation (design §23.2).
-      continuation_depth: Support.continuation_depth(context)
+      continuation_depth: Support.continuation_depth(context),
+      continued_from_run_id: Support.continued_from_run_id(context)
     }
 
     Manager.start_cloud_run(request, manager(context))

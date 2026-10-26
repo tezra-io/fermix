@@ -61,8 +61,11 @@ must stay provable in a content-free export.
 A second source stamps the marker: `Capabilities.AccessGate`, the one gate in
 `Capability.execute/3`. It decides plugin tools whose manifest marks them
 `access_sensitive`; a built-in host command (`shell`, `git_write`, a declared
-command) after the turn read outside content, where Fermix cannot sandbox that
-call (no kernel enforcement, or a preset that runs unconfined); any call made
+command, the local coding runs `codex_run` and `claude_code_run`) after the turn
+read outside content, where Fermix cannot sandbox that call (no kernel
+enforcement, or a preset or coding run that runs unconfined; the next run a
+finished coding run's follow-up turn starts in that run's folder dispatches as
+`chained`); any call made
 while another call of the same turn is parked,
 and, through its first clause (`Cues.MandateGate`), **every** call a run woken
 by a cue makes, flagged or not (see "Access-gate labels"). It derives the map
@@ -86,13 +89,19 @@ Every call the gate decides (every access-sensitive call, every host command it
 decides, and every call of a run a cue woke) also carries
 `access_gate`, a closed enum of how the gate
 settled it: `direct` (the owner's clean, attended request), `scheduled` (a
-job whose `allowed_tools` names it), `confirmed`, or one of `held_this_chat`,
+job whose `allowed_tools` names it), `confirmed`, `chained` (the next run of a
+coding-run chain: a finished run's follow-up turn starting the same coding
+agent in that run's own starting folder, both read from its ledger row, once
+per finished run (no run yet names it as the run it continued), having read
+nothing but the run's report, with only its task,
+folder, model, effort and limits), or one of `held_this_chat`,
 `held_owner_inbox`, `held_voice`, `already_confirmed`, `refused_worker`,
 `refused_cue_run`, `refused_unattended`, `refused_not_allowlisted`,
 `refused_no_surface`, `refused_full`, `refused_confirm_mismatch`,
 `refused_voice_surface` (a host command on a voice call, which cannot show the
 owner the exact command), `refused_command_too_long` (a host command too long to
-show the owner whole). The refused
+show the owner whole), `refused_unshown_file` (a coding run naming
+`append_system_prompt_file`, whose contents the owner could not review). The refused
 labels are one function's output (`refused_<reason>`), so a new refusal reason
 is a new label here. `refused_cue_run` is an access-sensitive call made by a job
 run a cue woke (`trigger: "cue"` on the context) outside its mandate: it read

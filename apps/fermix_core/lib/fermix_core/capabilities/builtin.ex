@@ -9,11 +9,15 @@ defmodule FermixCore.Capabilities.Builtin do
 
   `host_command?: true` marks a built-in that starts a host process whose effect
   the model chooses (`shell`; `git_write`, whose git runs the repository's
-  hooks). `host_command_confined?: true` says the OS sandbox wraps it where the
-  kernel enforces (both do). Both reach the capability's metadata, where
-  `Capabilities.AccessGate` reads them: a host command in a turn that read
-  outside content waits for the owner where the call is not confined or the host
-  has no kernel enforcement.
+  hooks; `codex_run` and `claude_code_run`, which start a coding agent on a
+  model-written task). `host_command_confined?` says whether the OS sandbox
+  wraps it where the kernel enforces: true for `shell` and `git_write`, false
+  for the coding agents, which run outside it. `coding_run?: true` marks those
+  two, whose confirmation shows every argument handed to the vendor CLI and
+  whose chain a run's follow-up turn may continue in the same folder. All three
+  reach the capability's metadata, where `Capabilities.AccessGate` reads them: a
+  host command in a turn that read outside content waits for the owner where
+  the call is not confined or the host has no kernel enforcement.
   """
 
   alias FermixCore.Capabilities.Capability
@@ -137,9 +141,26 @@ defmodule FermixCore.Capabilities.Builtin do
     # an operator's `:exec` ceiling — but the execute-time `Harness.Authorization`
     # gate (attended operator or allowlisted cron) is the real barrier, not the
     # policy class. Only seeded when the harness is enabled AND the vendor CLI is
-    # present (BuiltinSeeder), so a disabled daemon never advertises them.
-    "codex_run" => %{policy_class: :exec, hidden_from_agent?: false, owner_only?: false},
-    "claude_code_run" => %{policy_class: :exec, hidden_from_agent?: false, owner_only?: false},
+    # present (BuiltinSeeder), so a disabled daemon never advertises them. The two
+    # local run tools start a vendor CLI on a model-written task with the owner's
+    # account authority, outside Fermix's sandbox on every platform: unconfined
+    # host commands. `codex_cloud_run` runs remotely and is not one.
+    "codex_run" => %{
+      policy_class: :exec,
+      hidden_from_agent?: false,
+      owner_only?: false,
+      host_command?: true,
+      host_command_confined?: false,
+      coding_run?: true
+    },
+    "claude_code_run" => %{
+      policy_class: :exec,
+      hidden_from_agent?: false,
+      owner_only?: false,
+      host_command?: true,
+      host_command_confined?: false,
+      coding_run?: true
+    },
     "codex_cloud_run" => %{policy_class: :exec, hidden_from_agent?: false, owner_only?: false},
     "list_coding_runs" => %{
       policy_class: :read_only,
@@ -265,7 +286,7 @@ defmodule FermixCore.Capabilities.Builtin do
       metadata:
         Map.merge(
           metadata(tool_module),
-          Map.take(defaults, [:host_command?, :host_command_confined?])
+          Map.take(defaults, [:host_command?, :host_command_confined?, :coding_run?])
         )
     })
   end

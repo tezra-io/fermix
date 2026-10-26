@@ -563,7 +563,22 @@ out of its reach; `Sandbox.confine/3` is the one entry point. Linux has no
 kernel enforcement yet, so until it does, a built-in marked `host_command?`
 (`shell`, `git_write`, a declared command) in a turn that read outside content
 goes through `Capabilities.AccessGate` like an access-sensitive plugin command,
-keyed on `OsSandbox.enforced?/1`.
+keyed on `OsSandbox.enforced?/1`. One that runs unconfined everywhere
+(`host_command_confined?` false: the `codex`/`claude_code` presets and the
+coding runs `codex_run`/`claude_code_run`) goes through it on every platform;
+the next run a finished coding run's follow-up turn starts with the same coding
+agent in that run's own starting folder (both read from its ledger row), once
+per finished run (the admit links the child to it in
+`harness_run_continuations`, beside `harness_runs`, and refuses a second
+chained child in the same transaction) and with
+only its task, folder, model, effort and limits, dispatches
+there labelled `chained`. A request re-run after the owner's `/confirm` (a
+directory grant, a vendor-config acknowledgment) carries what its parked turn
+had read through the gateway's resume intent, and the resumed turn starts from
+it. A chain's metadata (`harness_continuation`, its depth, the finished run) is
+kept only on what the continuation dispatcher or the grant resume ingests
+(`keep_chain_metadata`); the gateway drops it from every other message, as it
+names the conversation.
 
 `CommandRunner` is the entry point for spawning external commands. In the daemon
 each command runs in a temporary `CommandHost` under `CommandHost.Supervisor`,

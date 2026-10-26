@@ -489,6 +489,19 @@ defmodule FermixCore.Tools.SubagentsTest do
       assert error =~ "within a subagent"
     end
 
+    # A skill worker keeps its parent turn's trust, so only its depth tells it
+    # apart: it is a delegated worker, and may not fan out, as it is not offered.
+    test "recursion: a skill worker", ctx do
+      tasks = [%{"id" => "t1", "task" => "a"}]
+
+      for depth <- [%{skill_depth: 1}, %{skill_depth: nil}] do
+        assert {:ok, %{success: false, error: error}} =
+                 Subagents.execute(%{"tasks" => tasks}, context(ctx, depth))
+
+        assert error =~ "delegated worker"
+      end
+    end
+
     test "max_concurrency out of range", ctx do
       tasks = [%{"id" => "t1", "task" => "a"}]
 
@@ -812,6 +825,17 @@ defmodule FermixCore.Tools.SubagentsTest do
       # scope, so a worker's browser shares the parent conversation's one Chrome
       # instead of spawning its own per-worker instance.
       assert worker_ctx[:conversation_key] == "conv-1"
+    end
+  end
+
+  # Advertisement follows the one delegated-worker rule
+  # (`Temporal.Access.worker?/1`): a skill worker keeps its parent turn's trust,
+  # so only its depth tells it apart.
+  describe "advertise?/1" do
+    test "offered on a top-level turn, not inside a subagents or skill worker" do
+      assert Subagents.advertise?(%{source_trust: :operator})
+      refute Subagents.advertise?(%{source_trust: :operator, subagent_depth: 1})
+      refute Subagents.advertise?(%{source_trust: :operator, skill_depth: 1})
     end
   end
 end

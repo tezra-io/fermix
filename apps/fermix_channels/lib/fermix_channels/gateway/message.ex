@@ -37,6 +37,12 @@ defmodule FermixChannels.Gateway.Message do
     # and over anything the message carried. `ConversationKey.from/1` answers
     # it; `nil` keys the message on its own channel, chat and thread.
     :conversation_key,
+    # What a request re-run after the owner's `/confirm` had read before it
+    # parked (`FermixCore.Capabilities.UntrustedContent.resume_provenance/1`),
+    # set ONLY by that re-ingest (`Commands.Sandbox`), never from channel input;
+    # the turn seeds it as its starting outside sources. Turn-local: the
+    # message's metadata, not this, is stored.
+    :resumed_sources,
     thread_scope: :root,
     metadata: %{},
     # What the channel declared (`FermixCore.Attachments.declared/0`).
@@ -61,6 +67,7 @@ defmodule FermixChannels.Gateway.Message do
           request_cwd: String.t() | nil,
           session_env: %{String.t() => String.t()} | nil,
           conversation_key: FermixCore.Agents.ConversationKey.t() | nil,
+          resumed_sources: MapSet.t() | nil,
           thread_scope: thread_scope(),
           metadata: map(),
           attachments: [FermixCore.Attachments.declared()],

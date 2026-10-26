@@ -12,6 +12,7 @@ defmodule FermixCore.Tools.HarnessRun do
   # one refusal the owner can clear from chat, an unresolved vendor-config change
   # (GAP3-1), becomes a `/confirm` prompt instead of an error.
 
+  alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Harness.Authorization
   alias FermixCore.Harness.Config
   alias FermixCore.Harness.Consent
@@ -77,7 +78,12 @@ defmodule FermixCore.Tools.HarnessRun do
   end
 
   defp ask_owner(change, context) do
-    case context.approval_fn.(%{acknowledge_vendor_config: change.run_id}) do
+    request = %{
+      acknowledge_vendor_config: change.run_id,
+      provenance: UntrustedContent.resume_provenance(context)
+    }
+
+    case context.approval_fn.(request) do
       {:ok, _token, :existing} ->
         Support.success_json(awaiting_map())
 
@@ -193,7 +199,11 @@ defmodule FermixCore.Tools.HarnessRun do
       progress: opts.progress,
       # A run launched from a continuation turn inherits depth+1 on its row, so
       # the chain stays bounded (design §23.2). The turn's depth rides the context.
-      continuation_depth: Support.continuation_depth(context)
+      continuation_depth: Support.continuation_depth(context),
+      continued_from_run_id: Support.continued_from_run_id(context),
+      # The access gate dispatched this as the chain's next run: the Manager
+      # admits it only as its finished run's first child.
+      sole_continuation: Map.get(context, :access_gate) == "chained"
     }
 
     Manager.start_run(request, manager(context))

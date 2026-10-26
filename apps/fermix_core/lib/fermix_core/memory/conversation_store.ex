@@ -291,6 +291,7 @@ defmodule FermixCore.Memory.ConversationStore do
     }
     |> maybe_mark_tainted(Keyword.get(opts, :metadata))
     |> maybe_mark_guest(Keyword.get(opts, :metadata))
+    |> maybe_mark_continuation(Keyword.get(opts, :metadata))
     |> maybe_mark_spoken(Keyword.get(opts, :metadata))
   end
 
@@ -309,6 +310,14 @@ defmodule FermixCore.Memory.ConversationStore do
   # by the memory review (`Repo.get_user_messages_after/4`).
   defp maybe_mark_guest(message, %{guest: true}), do: Map.put(message, :guest, true)
   defp maybe_mark_guest(message, _metadata), do: message
+
+  # A finished coding run's notice is the vendor CLI's text, stored as a user
+  # message: it keeps its marker for the same reason, so the memory review
+  # never reads it as the owner's words.
+  defp maybe_mark_continuation(message, %{harness_continuation: true}),
+    do: Map.put(message, :harness_continuation, true)
+
+  defp maybe_mark_continuation(message, _metadata), do: message
 
   # A request asked aloud on a Live call keeps its marker and the call it came
   # from, for the same reason (M56 D10): a retained spoken request that lost
@@ -336,6 +345,7 @@ defmodule FermixCore.Memory.ConversationStore do
     }
     |> carry_taint(message)
     |> carry_guest(message)
+    |> carry_continuation(message)
     |> carry_spoken(message)
   end
 
@@ -354,6 +364,16 @@ defmodule FermixCore.Memory.ConversationStore do
   defp carry_guest(normalized, message) do
     if Map.get(message, :guest, Map.get(message, "guest")) == true do
       Map.put(normalized, :guest, true)
+    else
+      normalized
+    end
+  end
+
+  defp carry_continuation(normalized, message) do
+    marked = Map.get(message, :harness_continuation, Map.get(message, "harness_continuation"))
+
+    if marked == true do
+      Map.put(normalized, :harness_continuation, true)
     else
       normalized
     end
@@ -496,11 +516,14 @@ defmodule FermixCore.Memory.ConversationStore do
   end
 
   # Per-message metadata on the durable replace: a retained message persists
-  # the markers it carries — Computer History taint, guest authorship, a
-  # spoken request and its call — and the backfill side re-derives them from
-  # the row's metadata; an unmarked message keeps the caller's opts.
+  # the markers it carries — Computer History taint, guest authorship, a coding
+  # run's notice, a spoken request and its call — and the backfill side
+  # re-derives them from the row's metadata; an unmarked message keeps the
+  # caller's opts.
   defp replace_message_opts(opts, message) do
-    case Map.take(message, [:history_tainted, :guest, :spoken, :call_uuid]) do
+    markers = [:history_tainted, :guest, :harness_continuation, :spoken, :call_uuid]
+
+    case Map.take(message, markers) do
       markers when map_size(markers) == 0 -> opts
       markers -> Keyword.put(opts, :metadata, markers)
     end
@@ -822,6 +845,7 @@ defmodule FermixCore.Memory.ConversationStore do
     }
     |> maybe_mark_tainted_from_row(row)
     |> maybe_mark_guest_from_row(row)
+    |> maybe_mark_continuation_from_row(row)
     |> maybe_mark_spoken_from_row(row)
   end
 
@@ -837,6 +861,11 @@ defmodule FermixCore.Memory.ConversationStore do
     do: Map.put(message, :guest, true)
 
   defp maybe_mark_guest_from_row(message, _row), do: message
+
+  defp maybe_mark_continuation_from_row(message, %{metadata: %{"harness_continuation" => true}}),
+    do: Map.put(message, :harness_continuation, true)
+
+  defp maybe_mark_continuation_from_row(message, _row), do: message
 
   defp maybe_mark_spoken_from_row(
          message,

@@ -118,6 +118,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   skill directly always did, with the same capability classes; it no longer
   sees owner-only tools such as file reads. A watcher's task can't be bound
   to a skill that would leave it without its cue history.
+- **Starting a coding agent waits for you once Fermix has read something
+  someone else wrote, on every platform.** `codex_run` and `claude_code_run`
+  launch a coding agent with your account's access, outside Fermix's
+  sandbox, so after a web page, attachment, plugin or MCP result they ask you
+  once, showing the task, every other argument and the folder; a voice call,
+  a delegated worker or an unattended run is refused, and a scheduled job
+  runs one only if it names it. A finished run's follow-up may still start
+  the next run of its chain on its own, with the same coding agent in the
+  same folder, once. A request re-run after your `/confirm` keeps what it
+  had read, and a skill's worker is no longer treated as your own turn.
 
 ## [0.16.0] - 2026-10-21
 

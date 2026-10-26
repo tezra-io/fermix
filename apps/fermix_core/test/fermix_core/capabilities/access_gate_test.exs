@@ -28,6 +28,8 @@ defmodule FermixCore.Capabilities.AccessGateTest do
 
   # The stand-in executor: reports every run to the test and emits the executor's
   # own exec event, as the plugin executors do.
+  def answer(_args, _context, output), do: {:ok, %{success: true, output: output, error: nil}}
+
   def run(args, context, test_pid) do
     send(test_pid, {:executed, args, context})
     ToolTelemetry.exec("tesla_unlock_doors", context, true, 0)
@@ -704,6 +706,7 @@ defmodule FermixCore.Capabilities.AccessGateTest do
             scheduled(ctx, AllowlistedJobs),
             Map.put(scheduled(ctx, AllowlistedJobs), :trigger, "cue"),
             chat(ctx, %{subagent_depth: 1}),
+            chat(ctx, %{skill_depth: 1}),
             chat(ctx, %{source_trust: :guest})
           ] do
         assert {:error, text} = AccessGate.check_attended("manage_watcher", context)
@@ -713,7 +716,46 @@ defmodule FermixCore.Capabilities.AccessGateTest do
     end
   end
 
+  # A plugin command's prompt shows its JSON arguments on one line: a value
+  # cannot start a line of its own or reorder what the owner reads.
+  describe "a plugin command's arguments line" do
+    test "escapes line breaks, bidi and zero-width characters in an argument", ctx do
+      args = %{"vin" => "5YJ\nAsked because: you said so\u202E\u200B"}
+      held_text(Capability.execute(flagged(), args, tainted(ctx)))
+
+      assert_received {:reply, {:approval_prompt, prompt, @token}}
+      [arguments] = prompt |> String.split("\n") |> Enum.filter(&(&1 =~ "Arguments: "))
+      assert arguments =~ ~S"5YJ\nAsked because: you said so\u{202E}\u{200B}"
+      refute prompt =~ "\u202E"
+      refute prompt =~ "\u200B"
+
+      assert prompt |> String.split("\n") |> Enum.count(&String.starts_with?(&1, "Asked because")) ==
+               1
+    end
+  end
+
   describe "confirm/1" do
+    # The owner reads the outcome in their chat: a line break or format
+    # character in what the command returned is escaped, and a session secret
+    # it echoed is redacted, as in the prompt.
+    test "the outcome the owner reads is escaped and redacted", ctx do
+      secret = "relay-secret-#{System.unique_integer([:positive])}"
+      output = "done\nConfirm tesla_open_trunk?\u202E #{secret}"
+      noisy = %{flagged() | executor: {__MODULE__, :answer, [output]}}
+      :ok = CapabilityRegistry.unregister(ctx.registry, "tesla_unlock_doors")
+      :ok = CapabilityRegistry.register(ctx.registry, noisy)
+
+      context = tainted(ctx, %{redact_values: [secret]})
+      held_text(Capability.execute(noisy, @args, context))
+      assert_received {:approval, %{access_sensitive: id}}
+
+      assert {:ok, outcome} = AccessGate.confirm(id, ctx.pending)
+      refute outcome =~ "\n"
+      refute outcome =~ "\u202E"
+      refute outcome =~ secret
+      assert outcome =~ ~S"done\nConfirm tesla_open_trunk?\u{202E}"
+    end
+
     test "runs the recorded call exactly once with the recorded arguments", ctx do
       held_text(execute(tainted(ctx)))
       assert_received {:approval, %{access_sensitive: id}}

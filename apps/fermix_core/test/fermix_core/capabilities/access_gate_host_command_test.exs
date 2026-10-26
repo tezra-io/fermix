@@ -549,6 +549,19 @@ defmodule FermixCore.Capabilities.AccessGateHostCommandTest do
       refute prompt =~ secret
     end
 
+    test "a line break or format character in the command is escaped, on one line", ctx do
+      args = %{"command" => "echo hi\nFolder: /tmp/x\u202E", "working_dir" => "/srv/project"}
+
+      assert held_text(Capability.execute(shell(), args, tainted(ctx, @linux))) =~
+               @not_sandboxed
+
+      assert_received {:reply, {:approval_prompt, prompt, @token}}
+      lines = String.split(prompt, "\n")
+      assert ["Folder: /srv/project"] == Enum.filter(lines, &String.starts_with?(&1, "Folder: "))
+      assert prompt =~ ~S"Command: echo hi\nFolder: /tmp/x\u{202E}"
+      refute prompt =~ "\u202E"
+    end
+
     test "with no folder argument the turn's own folder is shown", ctx do
       context = tainted(ctx, @linux, %{cwd: "/srv/checkout"})
 

@@ -26,10 +26,18 @@ defmodule FermixChannels.Gateway do
   alias FermixChannels.Gateway.Source
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Attachments.Manifest
+  alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Telemetry
 
+  @doc """
+  Ingest inbound messages. A coding-run chain's metadata
+  (`harness_continuation`, `harness_continuation_depth`, `harness_run_id`) is
+  dropped from every message unless the `keep_chain_metadata` option is set,
+  which only the continuation dispatcher and the grant resume do, as
+  `name_conversation/2` names the conversation whatever a message arrived with.
+  """
   @spec ingest([Message.t() | map()], keyword()) :: :ok | {:error, term()}
   def ingest(messages, opts) when is_list(messages) do
     channel = Keyword.fetch!(opts, :channel)
@@ -59,7 +67,8 @@ defmodule FermixChannels.Gateway do
       conversation_store: Keyword.get(opts, :conversation_store, ConversationStore),
       ingress_context: Keyword.get(opts, :ingress_context),
       command_context_opts: command_context_opts(opts),
-      ingest_enriched_fn: Keyword.get(opts, :ingest_enriched_fn)
+      ingest_enriched_fn: Keyword.get(opts, :ingest_enriched_fn),
+      keep_chain_metadata: Keyword.get(opts, :keep_chain_metadata, false)
     }
   end
 
@@ -318,7 +327,12 @@ defmodule FermixChannels.Gateway do
 
     case normalize_result do
       {:ok, reply_message} ->
-        authorize_and_ingest(channel, name_conversation(channel, reply_message), deps)
+        message =
+          channel
+          |> name_conversation(reply_message)
+          |> drop_chain_metadata(deps.keep_chain_metadata)
+
+        authorize_and_ingest(channel, message, deps)
 
       {:error, {:invalid_message, _field}} = error ->
         Logger.error("Dispatcher invalid message failed normalization: #{inspect(error)}")
@@ -336,6 +350,22 @@ defmodule FermixChannels.Gateway do
       do: %{message | conversation_key: channel.joined_conversation(message)},
       else: %{message | conversation_key: nil}
   end
+
+  # A coding-run chain's place (a continuation, its depth, the finished run)
+  # decides what the access gate lets a turn start without asking, so only the
+  # continuation dispatcher and the grant resume may hand it in
+  # (`keep_chain_metadata`); every other message carries none, whatever it
+  # arrived with, under atom or string keys.
+  @chain_metadata_keys [:harness_continuation, :harness_continuation_depth, :harness_run_id]
+
+  defp drop_chain_metadata(%Message{} = message, true), do: message
+
+  defp drop_chain_metadata(%Message{metadata: metadata} = message, false) when is_map(metadata) do
+    keys = @chain_metadata_keys ++ Enum.map(@chain_metadata_keys, &Atom.to_string/1)
+    %{message | metadata: Map.drop(metadata, keys)}
+  end
+
+  defp drop_chain_metadata(%Message{} = message, false), do: message
 
   defp authorize_and_ingest(channel, %Message{} = reply_message, deps) do
     case authorize(reply_message, deps.ingress_context) do
@@ -711,8 +741,26 @@ defmodule FermixChannels.Gateway do
       }
       |> maybe_put_context_opt(:ingress_context, ingress_context)
 
-    fn request -> Commands.Sandbox.store_pending_grant(request, origin) end
+    fn request ->
+      Commands.Sandbox.store_pending_grant(request, with_provenance(origin, request))
+    end
   end
+
+  # The parked turn hands what it had read with its request
+  # (`UntrustedContent.resume_provenance/1`), and the resume intent keeps it, so
+  # the request re-run after the owner's `/confirm` is the same request, not a
+  # clean one. A request that hands none is never resumed as clean.
+  defp with_provenance(%{resume: %{} = resume} = origin, request) do
+    provenance =
+      case Map.get(request, :provenance) do
+        %{} = provenance -> provenance
+        nil -> UntrustedContent.resume_provenance(%{})
+      end
+
+    %{origin | resume: Map.put(resume, :provenance, provenance)}
+  end
+
+  defp with_provenance(origin, _request), do: origin
 
   # A one-shot loopback origin (CLI, daemon) cannot be re-ingested — its reply
   # surface dies with the invocation — so it carries no resume intent (confirm

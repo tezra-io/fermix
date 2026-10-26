@@ -25,6 +25,7 @@ defmodule FermixCore.Capabilities.UntrustedContent do
 
   alias FermixCore.Attachments
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Tools.GetCodingRun
   alias FermixCore.Tools.GetJobRun
   alias FermixCore.Tools.ListCues
   alias FermixCore.Tools.ListJobRuns
@@ -48,15 +49,17 @@ defmodule FermixCore.Capabilities.UntrustedContent do
           | {:activity, String.t()}
           | {:harness, String.t()}
 
-  # Tool categories whose result relays what a worker or a coding run read.
-  @relaying_categories [:delegation, :harness]
+  # Tool categories whose result relays what a worker read.
+  @relaying_categories [:delegation]
 
   # Tools whose result relays what another run read, whatever their category: a
-  # skill's worker report, a scheduled run's final response, and what the cue
+  # skill's worker report, a coding run's result (`get_coding_run`'s result tail,
+  # the vendor CLI's own text; listing, starting or cancelling runs returns
+  # Fermix's own fields), a scheduled run's final response, and what the cue
   # sources sent and the watchers' tasks wrote (`list_cues`, M60 C16; its views
   # of what is set up relay none, `outside_source/2`). `manage_watcher` is not
   # one: it returns no outside text (M60 S13).
-  @relaying_modules [SkillRun, GetJobRun, ListJobRuns, ListCues]
+  @relaying_modules [SkillRun, GetCodingRun, GetJobRun, ListJobRuns, ListCues]
 
   # Tools whose result is text captured from the owner's screen: Computer
   # History's summaries of the pages and documents the owner had open, which
@@ -107,7 +110,7 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   relays what someone else read counts even though it is not wrapped: a
   delegated worker's (`subagents`), a skill's (`skill_run` or a skill
   capability, both a sub-agent worker whose report comes back verbatim), a
-  coding run's (the harness tools return the vendor CLI's text, derived from
+  coding run's (`get_coding_run` returns the vendor CLI's text, derived from
   the repo, issue and web content the run read) and a scheduled job's
   (`get_job_run` and `list_job_runs` return each run's final response, which
   relays whatever that run read). `recall_activity` counts too: its summaries
@@ -174,10 +177,43 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   re-enters the conversation as a message whose content is the vendor CLI's own
   text, derived from the repo, issue and web content the run read. Seeded by
   `Agents.TurnRunner` when the turn carries the continuation marker, the same
-  origin `get_coding_run`'s result counts as (`@relaying_categories [:harness]`).
+  origin `get_coding_run`'s result counts as. While it is all such a turn has
+  read, `Capabilities.AccessGate` lets the turn start the next run of the chain
+  in the finished run's folder.
   """
   @spec harness_continuation_source() :: outside_source()
   def harness_continuation_source, do: {:harness, "a coding run"}
+
+  @doc """
+  What a turn hands a request it parks for the owner and re-runs after their
+  `/confirm` (a directory grant, a coding run's vendor-config acknowledgment),
+  so the re-run is the same request rather than a clean one: the outside
+  sources the turn had read and, on a finished coding run's follow-up turn, its
+  chain depth and that run's id. The gateway keeps it with the resume intent
+  and `Agents.TurnRunner` seeds it on the resumed turn. A context the loop never
+  stamped hands on a source of its own, so the re-run is never read as clean.
+  """
+  @spec resume_provenance(map()) :: map()
+  def resume_provenance(context) when is_map(context) do
+    %{outside_sources: provenance_sources(context)}
+    |> put_positive(:harness_continuation_depth, Map.get(context, :harness_continuation_depth))
+    |> put_binary(:harness_run_id, Map.get(context, :harness_run_id))
+  end
+
+  defp provenance_sources(context) do
+    case Map.get(context, :outside_sources) do
+      %MapSet{} = sources -> sources
+      _unstamped -> MapSet.new([{:tool, "an unrecorded earlier read"}])
+    end
+  end
+
+  defp put_positive(map, key, value) when is_integer(value) and value > 0,
+    do: Map.put(map, key, value)
+
+  defp put_positive(map, _key, _value), do: map
+
+  defp put_binary(map, key, value) when is_binary(value), do: Map.put(map, key, value)
+  defp put_binary(map, _key, _value), do: map
 
   @doc """
   Wrap `output` in the untrusted-content frame when `capability` is external;

@@ -9,44 +9,55 @@ defmodule FermixCore.Capabilities.AccessGate do
   decided.
 
   A built-in that starts a host process the model steers
-  (`metadata.host_command?`: `shell`, `git_write`, a command the owner declared)
-  is decided only when the turn read outside content and Fermix cannot sandbox
-  the call. The taint is rule 5's `:outside_sources` half alone: a shared Buzz
+  (`metadata.host_command?`: `shell`, `git_write`, a command the owner
+  declared, and the local coding runs `codex_run` and `claude_code_run`) is
+  decided only when the turn read outside content and Fermix cannot sandbox the
+  call. The taint is rule 5's `:outside_sources` half alone: a shared Buzz
   channel does not hold one by itself, since a Buzz session answers through
   `shell`. Fermix cannot sandbox the call when the host's kernel does not hold
-  commands (`Sandbox.OsSandbox.enforced?/1` false: Linux today, read through the
-  context's `:os_sandbox` seam), or when the command runs unconfined even where
-  it does (`metadata.host_command_confined?` false: the `codex` and
-  `claude_code` presets). Without the kernel, nothing but the starting folder
-  and the hardline patterns stands between a hostile page's instruction and the
-  owner's files. This is an interim rule until the kernel confines commands on
-  Linux (Landlock): a confined call on a host where `enforced?/1` holds is not
+  commands (`Sandbox.OsSandbox.enforced?/1` false: Linux today, read through
+  the context's `:os_sandbox` seam), or when the command runs unconfined even
+  where it does (`metadata.host_command_confined?` false: the `codex` and
+  `claude_code` presets, and the coding runs, whose vendor CLI acts with the
+  owner's account authority outside the sandbox), so those are decided on
+  every platform. Without the kernel, nothing but the starting folder and the
+  hardline patterns stands between a hostile page's instruction and the owner's
+  files. This is an interim rule until the kernel confines commands on Linux
+  (Landlock): a confined call on a host where `enforced?/1` holds is not
   decided here, as `shell` is not on macOS.
+
   `Capability.execute/3` — the single invoke boundary for the agent loop and the
   realtime voice bridge — asks `admit/3` first, and every other capability
   returns on its metadata.
 
   For a call decided here, in order:
 
-    1. a delegated worker (`subagent_depth` or `skill_depth` above zero) is
-       refused: no owner is in that loop;
+    1. a delegated worker (`Temporal.Access.worker?/1`: `subagent_depth` or
+       `skill_depth` above zero) is refused: no owner is in that loop;
     2. a run a cue woke (`trigger: "cue"`) is refused: it read content an
        outsider wrote, and no owner is in that loop (M60 S3);
     3. an operator scheduled run dispatches only when its job row names the tool
        (`Harness.Authorization`'s job-row allowlist, the owner's consent given
        when they set the job up);
-    4. anything that is not an attended owner turn
+    4. the next run of a coding-run chain dispatches, labelled `chained` (owner
+       decision, "same folder only"): a finished run's follow-up turn starting
+       the same coding agent in that run's own starting folder (both read from
+       its ledger row), once per finished run, while the run's report is all
+       the turn has read, with nothing but its task, folder, model, effort and limits
+       (`chained_run?/3`). The chain stays bounded by `Harness.Continuation`'s
+       depth cap;
+    5. anything that is not an attended owner turn
        (`Temporal.Access.attended_operator_turn?/1`) is refused;
-    5. a turn that read content someone else could have written
+    6. a turn that read content someone else could have written
        (`:outside_sources`, folded by the agent loop from
        `UntrustedContent.outside_source/2`, minus the target plugin's own reads),
        or any turn from a shared Buzz channel (`Acp.Identity.multi_principal?/1`:
        other people can post there, so the request is not proof the owner asked),
        parks the exact call and asks the owner once, on the surface the turn has
        (for ACP, the owner's own chat, never the channel itself);
-    6. otherwise the owner's direct request is the consent, and it runs (a
+    7. otherwise the owner's direct request is the consent, and it runs (a
        host command reaches these rules only after outside content, so it
-       parks at 5, and its prompt names what was read, never the channel).
+       parks at 6, and its prompt names what was read, never the channel).
 
   Two related questions live here too: `owner_consent_turn?/1`, whether a turn
   may change what a watcher reads or what a task may do (with
@@ -88,15 +99,20 @@ defmodule FermixCore.Capabilities.AccessGate do
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Cues.MandateGate
   alias FermixCore.Harness.Authorization
+  alias FermixCore.Harness.Ledger
+  alias FermixCore.Memory.Repo
   alias FermixCore.Sandbox.CommandTool
   alias FermixCore.Sandbox.OsSandbox
+  alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Temporal.Access
   alias FermixCore.Tools.RequestDirectoryAccess
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   @max_args_chars 300
-  # A host command's verbatim text past this is not shown; the call is refused
-  # rather than parked on a command the owner cannot read in full.
+  # What the owner is shown of a host command (`shown_command/1`: the command or
+  # a coding run's task, every other argument a coding run hands its vendor CLI,
+  # the folder) past this is not shown; the call is refused rather than parked on
+  # a command the owner cannot read in full.
   @max_command_chars 2_000
   @max_outcome_chars 400
   @max_source_labels 5
@@ -110,10 +126,14 @@ defmodule FermixCore.Capabilities.AccessGate do
   # What a confirmed call runs with. The last four are what a host command reads
   # to run where the turn's call would have: its folder (`:cwd`), the sandbox
   # the context named (`:sandbox_config`; a chat turn names none and reads the
-  # live one), an ACP session's env and the platform seam (`:os_sandbox`). These
-  # are frozen at park time and spent on confirm within the 60 s window, so a
-  # sandbox mode or cwd changed after parking does not reach the confirmed run —
-  # acceptable for a one-shot owner confirmation that short-lived.
+  # live one), an ACP session's env and the platform seam (`:os_sandbox`). They
+  # are frozen at park time, so a sandbox mode or cwd changed after parking does
+  # not reach the confirmed run — acceptable for a one-shot owner confirmation
+  # that must come within 60 s. `Pending` holds the snapshot while the record
+  # waits, while it runs, and in its done tombstone for another 60 s; it drops
+  # an expired record only when it next handles a call, so an idle store keeps
+  # the last snapshot in memory until then (`Pending.format_status/1` redacts
+  # it from crash reports and `:sys.get_status/1`).
   @snapshot_keys [
     :session_id,
     :parent_session,
@@ -128,10 +148,35 @@ defmodule FermixCore.Capabilities.AccessGate do
     :os_sandbox
   ]
 
+  # What a confirmed coding run (`codex_run`, `claude_code_run`) reads beyond
+  # those to start as the turn's would have (`Harness.Authorization`,
+  # `Tools.HarnessRun`, `Harness.Delivery`): the attended-turn proof and the
+  # vendor-config acknowledgment's surface (`:reply_fn`, `:approval_fn`,
+  # `:chat_type`, `:private_approval_button?`), where the outcome reports back
+  # (`:conversation_store`, `:memory_repo`), the chain depth and finished run
+  # (`:harness_continuation_depth`, `:harness_run_id`), what the turn had read
+  # (`:outside_sources`, which an acknowledgment hands on so the request it
+  # re-runs is the same request), and the manager and executable seams
+  # (`:harness_manager`, `:find_executable`). `Pending.format_status/1` redacts
+  # the whole snapshot.
+  @harness_snapshot_keys [
+    :reply_fn,
+    :approval_fn,
+    :chat_type,
+    :private_approval_button?,
+    :conversation_store,
+    :memory_repo,
+    :harness_continuation_depth,
+    :harness_run_id,
+    :outside_sources,
+    :harness_manager,
+    :find_executable
+  ]
+
   @type surface :: :voice | :this_chat | :owner_inbox
   @type refusal ::
           :worker | :cue_run | :unattended | :not_allowlisted | :no_surface | :voice_surface
-  @type decision :: :dispatch | {:confirm, surface()} | {:refuse, refusal()}
+  @type decision :: :dispatch | :chained | {:confirm, surface()} | {:refuse, refusal()}
 
   @doc """
   Called by `Capability.execute/3` before the executor. `{:dispatch, context}`
@@ -175,7 +220,7 @@ defmodule FermixCore.Capabilities.AccessGate do
 
       case Map.fetch(context, :access_confirmed) do
         {:ok, digest} -> admit_confirmed(call, digest)
-        :error -> apply_decision(decide(capability, context), call)
+        :error -> apply_decision(decide(capability, context, args), call)
       end
     else
       {:dispatch, context}
@@ -184,15 +229,19 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   @doc """
   Whether a call `admit/3` decides here (the moduledoc's two kinds) may run now
-  in `context`, must wait for the owner on a surface, or is refused. Pure apart
-  from the job-row read a scheduled run makes.
+  in `context`, must wait for the owner on a surface, or is refused. `args` are
+  the call's arguments; without them (a job's tools, checked before any call) a
+  call is never the next run of a chain. Pure apart from the job-row read a
+  scheduled run makes and the link resolution a chained run's folder takes.
   """
-  @spec decide(Capability.t(), map()) :: decision()
-  def decide(%Capability{} = capability, context) when is_map(context) do
+  @spec decide(Capability.t(), map(), map()) :: decision()
+  def decide(%Capability{} = capability, context, args \\ %{})
+      when is_map(context) and is_map(args) do
     cond do
-      worker?(context) -> {:refuse, :worker}
+      Access.worker?(context) -> {:refuse, :worker}
       cue_run?(context) -> {:refuse, :cue_run}
       scheduled_operator?(context) -> scheduled_decision(capability.name, context)
+      chained_run?(capability, args, context) -> :chained
       not Access.attended_operator_turn?(context) -> {:refuse, :unattended}
       tainted?(capability, context) -> confirm_on(surface(context))
       true -> :dispatch
@@ -234,7 +283,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   @spec owner_private_turn?(map()) :: boolean()
   def owner_private_turn?(context) when is_map(context) do
     Access.attended_operator_turn?(context) and
-      not worker?(context) and
+      not Access.worker?(context) and
       not Authorization.scheduled?(context) and
       not cue_run?(context) and
       private_chat?(context) and
@@ -437,7 +486,7 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   # --- decision ------------------------------------------------------------
 
-  # The one predicate for whether a call meets `decide/2`: a flagged command
+  # The one predicate for whether a call meets `decide/3`: a flagged command
   # always; a host command only where the kernel does not hold it, and only in a
   # tainted turn. Metadata first, so every other call returns without reading
   # the context.
@@ -451,13 +500,87 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   # A host command is gated when the turn read outside content and Fermix cannot
   # sandbox this call: the host has no kernel enforcement (Linux), or the call
-  # runs unconfined even where it does (the `codex`/`claude_code` presets). Its taint is
-  # only what the turn read, never the shared Buzz channel on its own (owner
-  # decision): a Buzz session answers by running the `buzz` CLI through `shell`.
+  # runs unconfined even where it does (the `codex`/`claude_code` presets, the
+  # coding runs). Its taint is only what the turn read, never the shared Buzz
+  # channel on its own (owner decision): a Buzz session answers by running the
+  # `buzz` CLI through `shell`.
   defp host_command_gated?(capability, context) do
     read_outside?(capability, context) and
       (not confined_call?(capability) or not OsSandbox.enforced?(os_opts(context)))
   end
+
+  # What a chained run may carry: its task and folder, and settings that widen
+  # nothing it can reach or how. Every other argument (extra directories, a
+  # sandbox or permission posture, a file of instructions, images, a schema
+  # file, a session to resume, tool lists, extra instructions) would be chosen
+  # from the finished run's report and was never shown to the owner.
+  @chain_argument_keys ~w(prompt cwd model effort max_turns timeout_minutes progress)
+
+  # The coding agent each run tool starts, as a ledger row names it.
+  @chain_vendors %{"codex_run" => "codex", "claude_code_run" => "claude"}
+
+  # Owner decision ("same folder only"): a finished coding run's follow-up turn
+  # (`harness_continuation_depth` above zero) may start the next run of the
+  # chain without asking, when that run's report is all the turn has read, its
+  # arguments are only `@chain_argument_keys`, and the finished run's ledger row
+  # (by the notice's `:harness_run_id`) allows it (`chain_parent_allows?/3`).
+  # The ledger records no posture for a run, so a posture-bearing argument is
+  # never known to match it and is never chained. Anything else meets the rules
+  # after it in `decide/3`, which refuse it: a follow-up turn is not the owner's
+  # own. The chain stays bounded by `Harness.Continuation`'s depth cap
+  # (`max_depth/0`, `continuable?/1`): a run started here carries the turn's
+  # depth on its row, and at the cap its outcome is delivered as text, with no
+  # follow-up turn. Cheap checks first, so a turn that read anything else never
+  # reads the ledger.
+  defp chained_run?(%Capability{metadata: %{coding_run?: true}} = capability, args, context) do
+    follow_up_turn?(context) and
+      Map.get(context, :outside_sources) ==
+        MapSet.new([UntrustedContent.harness_continuation_source()]) and
+      Enum.all?(Map.keys(args), &(&1 in @chain_argument_keys)) and
+      chain_parent_allows?(capability, args, context)
+  end
+
+  defp chained_run?(%Capability{}, _args, _context), do: false
+
+  # The finished run, read from its row: the new run starts the same coding
+  # agent in the same starting folder, and no run yet names it as the run it
+  # continued (`Ledger.children/2`, which the admit records from the launching
+  # turn), so one finished run continues as one run, never a tree, whichever
+  # turn asks: a resumed follow-up, or one after a restart. The Manager checks
+  # the same again inside the admit (`sole_continuation`). A lookup that fails
+  # chains nothing.
+  defp chain_parent_allows?(capability, args, context) do
+    repo = Map.get(context, :memory_repo) || Repo
+
+    with run_id when is_binary(run_id) <- Map.get(context, :harness_run_id),
+         {:ok, %{vendor: vendor, cwd: cwd}} <- Ledger.get(run_id, server: repo),
+         true <- Map.fetch!(@chain_vendors, capability.name) == vendor,
+         true <- same_folder?(Map.get(args, "cwd"), cwd),
+         {:ok, []} <- Ledger.children(run_id, server: repo) do
+      true
+    else
+      _unknown_other_or_already_continued -> false
+    end
+  end
+
+  defp follow_up_turn?(context) do
+    depth = Map.get(context, :harness_continuation_depth)
+    is_integer(depth) and depth > 0
+  end
+
+  # Both resolved through their links; a relative folder never matches, since
+  # the run would resolve it against a base this check does not know.
+  defp same_folder?(folder, run_folder) when is_binary(folder) and is_binary(run_folder) do
+    with :absolute <- Path.type(folder),
+         {{:ok, same}, {:ok, same}} <-
+           {PathPolicy.resolve_links(folder), PathPolicy.resolve_links(run_folder)} do
+      true
+    else
+      _relative_different_or_unresolvable -> false
+    end
+  end
+
+  defp same_folder?(_folder, _run_folder), do: false
 
   defp confined_call?(%Capability{metadata: metadata}),
     do: Map.get(metadata, :host_command_confined?, true)
@@ -472,9 +595,6 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp gate_kind(%Capability{metadata: %{access_sensitive?: true}}), do: :access_sensitive
   defp gate_kind(%Capability{metadata: %{host_command?: true}}), do: :host_command
   defp gate_kind(%Capability{}), do: nil
-
-  defp worker?(context),
-    do: Map.get(context, :subagent_depth, 0) != 0 or Map.get(context, :skill_depth, 0) != 0
 
   # Every job run carries its `trigger`; only a cue run's is "cue".
   defp cue_run?(context), do: Map.get(context, :trigger) == "cue"
@@ -563,6 +683,9 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp apply_decision(:dispatch, %{context: context}),
     do: {:dispatch, Map.put(context, :access_gate, dispatch_label(context))}
 
+  defp apply_decision(:chained, %{context: context}),
+    do: {:dispatch, Map.put(context, :access_gate, "chained")}
+
   defp apply_decision({:confirm, surface}, call), do: park_or_refuse(call, surface)
   defp apply_decision({:refuse, reason}, call), do: refuse(call, reason)
 
@@ -590,7 +713,10 @@ defmodule FermixCore.Capabilities.AccessGate do
       surface == :voice ->
         refuse(call, :voice_surface)
 
-      String.length(command_text(capability, call.args)) > @max_command_chars ->
+      unshown_file?(call) ->
+        hold(call, unshown_file_text(capability.name), "refused_unshown_file")
+
+      String.length(shown_command(call)) > @max_command_chars ->
         hold(call, command_too_long_text(capability.name), "refused_command_too_long")
 
       true ->
@@ -628,9 +754,15 @@ defmodule FermixCore.Capabilities.AccessGate do
       command_ref: command_ref(capability),
       binding: binding(surface, context),
       sources: call.sources,
-      snapshot: context |> Map.take(@snapshot_keys) |> Map.put(:source_trust, :operator)
+      snapshot:
+        context |> Map.take(snapshot_keys(capability)) |> Map.put(:source_trust, :operator)
     }
   end
+
+  defp snapshot_keys(%Capability{metadata: %{coding_run?: true}}),
+    do: @snapshot_keys ++ @harness_snapshot_keys
+
+  defp snapshot_keys(%Capability{}), do: @snapshot_keys
 
   defp binding(:voice, context), do: {:voice_call, Map.fetch!(context, :voice_call_id)}
   defp binding(_surface, context), do: {:conversation, Map.get(context, :conversation_key)}
@@ -798,17 +930,27 @@ defmodule FermixCore.Capabilities.AccessGate do
 
     capability
     |> Capability.execute(record.args, context)
-    |> confirmed_outcome(record.tool)
+    |> confirmed_outcome(capability, record)
   end
 
-  defp confirmed_outcome({:ok, %{success: true, output: output}}, tool),
-    do: {:ok, "#{tool} ran: #{bounded(output, @max_outcome_chars)}"}
+  # What the owner reads in their chat once a confirmed call ran, redacted and
+  # made `visible/1` as the prompt was, since a command's output or error can
+  # carry anything its target wrote.
+  defp confirmed_outcome({:ok, %{success: true, output: output}}, capability, record),
+    do: {:ok, ran_text(capability, record, output)}
 
-  defp confirmed_outcome({:ok, %{success: false, error: error}}, tool),
-    do: {:error, "#{tool} failed: #{bounded(error, @max_outcome_chars)}"}
+  defp confirmed_outcome({:ok, %{success: false, error: error}}, _capability, record),
+    do: {:error, "#{record.tool} failed: #{shown_outcome(error, record)}"}
 
-  defp confirmed_outcome({:error, reason}, tool),
-    do: {:error, "#{tool} failed: #{bounded(inspect(reason), @max_outcome_chars)}"}
+  defp confirmed_outcome({:error, reason}, _capability, record),
+    do: {:error, "#{record.tool} failed: #{shown_outcome(inspect(reason), record)}"}
+
+  defp shown_outcome(text, record) do
+    text
+    |> ToolTelemetry.redact(Map.get(record.snapshot, :redact_values, []))
+    |> visible()
+    |> bounded(@max_outcome_chars)
+  end
 
   defp blocked_job_tool?(registry, name, context) when is_binary(name) do
     case CapabilityRegistry.find(registry, name) do
@@ -820,25 +962,21 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp blocked_job_tool?(_registry, _name, _context), do: false
 
   # Whether this turn could not run `capability` itself, so a job naming it may
-  # not be set up from here either.
+  # not be set up from here either. No call's arguments: a job's run is never
+  # the next run of a coding-run chain.
   defp held_for_job?(capability, context),
     do: gated?(capability, context) and decide(capability, context) != :dispatch
 
   # --- owner-facing text (Fermix-authored; never quotes the model or a sender)
 
   # A plugin command shows its description and JSON arguments; a host command
-  # shows the exact command the owner is being asked to run, verbatim, and the
-  # folder it runs in when that is known. A session secret the command echoes is
-  # redacted, as the JSON arguments are, so it is never posted to the chat.
+  # shows everything that will run, verbatim (`shown_command/1`).
   defp owner_prompt(%{capability: %{metadata: %{host_command?: true}} = capability} = call) do
     [
-      "Confirm #{capability.name}? It runs a command on this computer, which Fermix " <>
-        "cannot sandbox here.",
-      "Command: " <> redacted(command_text(capability, call.args), call.context),
-      folder_line(command_folder(capability, call.args, call.context), call.context),
+      "Confirm #{capability.name}? " <> prompt_head(capability),
+      shown_command(call),
       "Asked because #{reason_phrase(call)}."
     ]
-    |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
   end
 
@@ -850,6 +988,15 @@ defmodule FermixCore.Capabilities.AccessGate do
     """
   end
 
+  defp prompt_head(%Capability{metadata: %{coding_run?: true}}),
+    do: "It starts a coding agent on this computer, outside Fermix's sandbox, with your access."
+
+  defp prompt_head(%Capability{}),
+    do: "It runs a command on this computer, which Fermix cannot sandbox here."
+
+  defp command_label(%Capability{metadata: %{coding_run?: true}}), do: "Task"
+  defp command_label(%Capability{}), do: "Command"
+
   defp chat_prompt(call, token),
     do: owner_prompt(call) <> "\n\n" <> approval_line(token, call.context)
 
@@ -857,12 +1004,39 @@ defmodule FermixCore.Capabilities.AccessGate do
     args
     |> Jason.encode!()
     |> ToolTelemetry.redact(Map.get(context, :redact_values, []))
+    |> visible()
     |> bounded(@max_args_chars)
   end
 
-  # The exact command a host-command call runs, verbatim for the owner's prompt:
-  # the shell string, the git argv, or a declared command's executable and args.
-  # Unbounded here; `park_or_refuse/2` refuses past `@max_command_chars`.
+  # What the owner is shown of a host command, one named line each: the
+  # command (a coding run's task), every other argument a coding run hands its
+  # vendor CLI, and the folder when that is known. Each value is redacted (a
+  # session secret the command echoes is never posted to the chat, as a plugin
+  # command's JSON arguments are not) and made `visible/1`, so no value can
+  # start a line of its own. Unbounded here; `park_or_refuse/2` refuses past
+  # `@max_command_chars`, measured on this whole text.
+  defp shown_command(%{capability: capability, args: args, context: context}) do
+    [{command_label(capability), command_text(capability, args)}]
+    |> Kernel.++(argument_lines(capability, args))
+    |> Kernel.++(folder_line(command_folder(capability, args, context)))
+    |> Enum.map_join("\n", fn {label, value} ->
+      label <> ": " <> (value |> redacted(context) |> visible())
+    end)
+  end
+
+  # Control, format and line-separator characters (a line break, a bidi
+  # override, a zero-width space) shown as escapes, so a value cannot forge a
+  # line of the prompt or reorder what the owner reads.
+  defp visible(text), do: String.replace(text, ~r/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u, &escaped/1)
+
+  defp escaped("\n"), do: "\\n"
+  defp escaped("\r"), do: "\\r"
+  defp escaped("\t"), do: "\\t"
+  defp escaped(<<code::utf8>>), do: "\\u{" <> Integer.to_string(code, 16) <> "}"
+
+  # The exact command a host-command call runs, verbatim: the shell string, the
+  # git argv, a declared command's executable and args, or the task a coding
+  # agent is given.
   defp command_text(%Capability{name: "shell"}, %{"command" => command}) when is_binary(command),
     do: command
 
@@ -876,20 +1050,84 @@ defmodule FermixCore.Capabilities.AccessGate do
     )
   end
 
+  defp command_text(%Capability{metadata: %{coding_run?: true}}, args),
+    do: argument_value(Map.get(args, "prompt"))
+
   defp command_text(%Capability{}, args), do: Jason.encode!(args)
 
   # Where a host command runs, when the call or the turn says: `shell`'s
-  # `working_dir`, else the turn's folder; `git_write`'s `repo`.
+  # `working_dir`, else the turn's folder; `git_write`'s `repo`; a coding run's
+  # `cwd`.
   defp command_folder(%Capability{name: "shell"}, args, context),
     do: Map.get(args, "working_dir") || Map.get(context, :cwd)
 
   defp command_folder(%Capability{name: "git_write"}, args, _context), do: Map.get(args, "repo")
+
+  defp command_folder(%Capability{metadata: %{coding_run?: true}}, args, _context),
+    do: Map.get(args, "cwd")
+
   defp command_folder(%Capability{}, _args, _context), do: nil
 
-  defp folder_line(folder, context) when is_binary(folder),
-    do: "Folder: " <> redacted(folder, context)
+  defp folder_line(folder) when is_binary(folder), do: [{"Folder", folder}]
+  defp folder_line(_none), do: []
 
-  defp folder_line(_none, _context), do: nil
+  # A coding run hands every argument but its task and folder to the vendor CLI
+  # (or to the run's own limits), so each is shown on a named line, in this
+  # order; one not named here follows as JSON, so nothing that will run is
+  # hidden from the owner.
+  @coding_run_argument_lines [
+    {"append_system_prompt", "Extra instructions"},
+    {"append_system_prompt_file", "Extra instructions file"},
+    {"add_dirs", "Extra directories"},
+    {"permission_mode", "Permission mode"},
+    {"sandbox", "Sandbox"},
+    {"allowed_tools", "Allowed tools"},
+    {"disallowed_tools", "Disallowed tools"},
+    {"profile", "Codex profile"},
+    {"model", "Model"},
+    {"effort", "Effort"},
+    {"images", "Images"},
+    {"output_schema", "Output schema"},
+    {"json_schema", "JSON schema"},
+    {"resume", "Resumes session"},
+    {"continue", "Continues the last session"},
+    {"max_turns", "Max turns"},
+    {"bare", "Bare mode"},
+    {"ephemeral", "Ephemeral"},
+    {"timeout_minutes", "Time limit (minutes)"},
+    {"progress", "Progress updates"}
+  ]
+  @coding_run_shown_keys ["prompt", "cwd" | Enum.map(@coding_run_argument_lines, &elem(&1, 0))]
+
+  defp argument_lines(%Capability{metadata: %{coding_run?: true}}, args) do
+    named =
+      for {key, label} <- @coding_run_argument_lines,
+          Map.has_key?(args, key),
+          do: {label, argument_value(Map.fetch!(args, key))}
+
+    named ++ other_arguments(Map.drop(args, @coding_run_shown_keys))
+  end
+
+  defp argument_lines(%Capability{}, _args), do: []
+
+  defp other_arguments(rest) when map_size(rest) == 0, do: []
+  defp other_arguments(rest), do: [{"Other arguments", Jason.encode!(rest)}]
+
+  # A file of extra instructions is passed to the vendor CLI by path, so the
+  # owner cannot review its contents in a confirmation: such a held run is
+  # refused rather than parked.
+  defp unshown_file?(%{capability: %Capability{metadata: %{coding_run?: true}}, args: args}),
+    do: Map.has_key?(args, "append_system_prompt_file")
+
+  defp unshown_file?(_call), do: false
+
+  defp argument_value(value) when is_binary(value), do: value
+
+  defp argument_value(values) when is_list(values) do
+    if Enum.all?(values, &is_binary/1), do: Enum.join(values, ", "), else: Jason.encode!(values)
+  end
+
+  defp argument_value(value), do: Jason.encode!(value)
 
   defp redacted(text, context),
     do: ToolTelemetry.redact(text, Map.get(context, :redact_values, []))
@@ -918,6 +1156,35 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   defp bounded(text, max) when is_binary(text) do
     if String.length(text) <= max, do: text, else: String.slice(text, 0, max) <> "…"
+  end
+
+  # What the owner reads once a confirmed call ran. A coding run returns its
+  # launch acknowledgment, so they read which run started, where, and where its
+  # outcome lands; every other call, its bounded output.
+  defp ran_text(%Capability{metadata: %{coding_run?: true}}, record, output) do
+    case Jason.decode(output) do
+      {:ok, %{"run_id" => run_id}} when is_binary(run_id) ->
+        coding_run_started(record, run_id)
+
+      {:ok, %{"status" => "awaiting_acknowledgment"}} ->
+        "#{record.tool} did not start: you were asked to acknowledge a change to " <>
+          "coding-agent config first."
+
+      _not_a_launch ->
+        output_text(record, output)
+    end
+  end
+
+  defp ran_text(%Capability{}, record, output), do: output_text(record, output)
+
+  defp output_text(record, output), do: "#{record.tool} ran: #{shown_outcome(output, record)}"
+
+  defp coding_run_started(record, run_id) do
+    folder = record.args |> Map.get("cwd") |> argument_value()
+
+    "#{record.tool} started coding run #{shown_outcome(run_id, record)} in " <>
+      shown_outcome(folder, record) <>
+      ". It reports back into the chat that asked for it when it finishes."
   end
 
   # --- model-facing text (fixed, never carries the token) -------------------
@@ -966,6 +1233,12 @@ defmodule FermixCore.Capabilities.AccessGate do
     "#{tool} was not sent: too many confirmations are waiting; try again shortly."
   end
 
+  defp unshown_file_text(tool) do
+    "#{tool} was not run: it names a file of extra instructions " <>
+      "(append_system_prompt_file) whose contents the owner cannot review in a " <>
+      "confirmation. Put the instructions in the task, or ask the owner to run it themselves."
+  end
+
   defp command_too_long_text(tool) do
     "#{tool} was not run: the command is too long for the owner to confirm safely. " <>
       "Ask the owner to run a shorter command, or run it themselves."
@@ -989,8 +1262,22 @@ defmodule FermixCore.Capabilities.AccessGate do
   # taint is a shared channel or an unstamped context.
   defp refusal_text(:host_command, reason, %{capability: %{name: tool}} = call) do
     "#{tool} was not run: Fermix cannot sandbox commands here, and #{reason_phrase(call)}. " <>
-      host_rule(reason, tool)
+      host_rule(reason, tool) <> chain_note(call)
   end
+
+  # A follow-up turn's coding run is refused when it left the chain's folder or
+  # read something else (`chained_run?/3`); say what would have run it.
+  defp chain_note(%{capability: %{metadata: %{coding_run?: true}}, context: context}) do
+    if follow_up_turn?(context) do
+      " A coding run's follow-up turn starts the next run without asking only in that " <>
+        "run's own starting folder, with the same coding agent, once per run, before it " <>
+        "reads anything else, and carrying only its task, folder, model, effort and limits."
+    else
+      ""
+    end
+  end
+
+  defp chain_note(_call), do: ""
 
   defp host_rule(:worker, _tool) do
     "A delegated worker never runs one after such content. Report that the owner must ask " <>

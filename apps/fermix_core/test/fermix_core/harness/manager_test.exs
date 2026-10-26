@@ -473,14 +473,41 @@ defmodule FermixCore.Harness.ManagerTest do
 
     test "a launched run inherits the launching turn's depth + 1 on its row", ctx do
       manager = start_manager(ctx, continuation_dispatcher: RecordingDispatcher)
-      request = ctx |> chat_request(completing_stub(ctx)) |> Map.put(:continuation_depth, 1)
+
+      request =
+        ctx
+        |> chat_request(completing_stub(ctx))
+        |> Map.merge(%{continuation_depth: 1, continued_from_run_id: "hr_parent00001"})
 
       {:ok, run_id} = Manager.start_run(request, manager)
       assert row = await_status(ctx.repo, run_id, "completed")
       assert row.continuation_depth == 1
+      assert {:ok, [^run_id]} = Ledger.children("hr_parent00001", server: ctx.repo)
 
       assert_receive {:continued, notice}, 5_000
       assert notice.metadata.harness_continuation_depth == 2
+    end
+
+    # The access gate checks before it dispatches; the admit checks again, in
+    # its own transaction, so a chained launch that lost the race to another
+    # child of the same finished run is refused, not admitted beside it.
+    test "a chained launch whose finished run already has a child is refused", ctx do
+      manager = start_manager(ctx, continuation_dispatcher: RecordingDispatcher)
+
+      first =
+        ctx
+        |> chat_request(completing_stub(ctx))
+        |> Map.merge(%{continuation_depth: 1, continued_from_run_id: "hr_parent00003"})
+
+      {:ok, run_id} = Manager.start_run(first, manager)
+      assert await_status(ctx.repo, run_id, "completed")
+
+      second = Map.put(first, :sole_continuation, true)
+
+      assert {:error, {:already_continued, "hr_parent00003"}} =
+               Manager.start_run(second, manager)
+
+      assert {:ok, [^run_id]} = Ledger.children("hr_parent00003", server: ctx.repo)
     end
 
     # The kill switch must not be undone: an owner cancel (`/stop`,
