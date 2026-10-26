@@ -197,7 +197,7 @@ mobile protocol's iroh carrier frames, which the daemon parses and bounds
   take and acknowledge them, whatever flow-control credit it gives; a peer that
   has not by then gets the stream reset with application code `0`. The helper
   reads the bridge connection while it waits on the peer, into its 64 KiB
-  buffer, so it reads the close at once unless more than 64 KiB of the daemon's
+  buffer, so it reads the close at once unless 64 KiB or more of the daemon's
   bytes are unsent.
 - When the peer resets the stream, or the iroh connection is lost, the helper
   closes the bridge connection.
