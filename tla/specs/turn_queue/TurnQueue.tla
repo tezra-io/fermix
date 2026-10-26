@@ -50,8 +50,8 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/peer.ex#@moduledoc,handle_info,start_prompt,hand_off,watch_queue,ingest,handle_ingest,apply_turn_result,cancel_turn,cancel_prompt_request,stop_turn,settle_queue_down,close_turn,demonitor_queue,apply_if_open @ 37fc57942bd1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/session.ex#start_turn,clear_turn,turn_open?,put_queue_ref,queue_ref,queue @ ad21422f117f
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway.ex#ingest,do_deliver_to_agent @ a988106fa5ca
-\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run_message_loop,persist_user_message,commit @ 0aaa6434785c
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/conversation_store.ex @ 133fbbc3e716
+\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run_message_loop,persist_user_message,commit @ 936ccf9654ee
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/conversation_store.ex @ a81b127db387
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
@@ -375,7 +375,7 @@ CheckoutFail(m) ==
     /\ Show(m, "error")
     /\ QueueUnchanged /\ UNCHANGED <<holding, outcomes, history>>
 
-\* TurnRunner persist_user_message (turn_runner.ex:1149), before AgentLoop.
+\* TurnRunner persist_user_message (turn_runner.ex:1179), before AgentLoop.
 PersistUser(m) ==
     /\ pc[m] = "start"
     /\ MoveTo(m, "loop")
