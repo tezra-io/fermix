@@ -231,8 +231,11 @@ defmodule FermixCore.Providers.Error do
 
   defp auth_status?(status), do: status in [401, 403]
 
+  # Anthropic names an exhausted API account only in words, on a 400
+  # `invalid_request_error`: "Your credit balance is too low ...".
   defp quota_error?(text) do
-    String.contains?(text, "insufficient_quota") or String.contains?(text, "quota")
+    String.contains?(text, "insufficient_quota") or String.contains?(text, "quota") or
+      String.contains?(text, "credit balance")
   end
 
   # A server can declare a rate limit without a 429 wrapper — Codex reports it
