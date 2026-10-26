@@ -86,7 +86,7 @@ defmodule FermixCore.OpenLoops.DefaultsTest do
       assert Defaults.slots("long") == [{:days_before, 7}, {:days_before, 1}, {:days_after, 1}]
       assert Defaults.slots("medium") == [{:days_before, 3}, {:days_before, 1}, {:days_after, 1}]
       assert Defaults.slots("short") == [{:before_hours_min, 24}, {:days_after, 1}]
-      assert Defaults.slots("imminent") == [:now]
+      assert Defaults.slots("imminent") == [{:after_hours, 3}]
     end
 
     test "no class has more slots than a loop has touches" do

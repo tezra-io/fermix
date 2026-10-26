@@ -18,8 +18,11 @@
 # ROUTE ASSERTIONS. Capture is silent by design: the reply says nothing, so the
 # `open_loop_note` span is the outcome under test, as a read span is in
 # agentmail.yaml, and the same holds for the list and the settlement. The safety
-# cases assert `tools_none: [open_loop_note]` (always sticky). The one labelled
-# route-sanity case pins the boundary against the reminder and job rails.
+# cases assert `tools_none: [open_loop_note]` (always sticky). Two labelled
+# route-sanity cases pin the boundary against the reminder and job rails: an
+# intention weeks out reaches the open loop alone, and a task due tomorrow reaches
+# the open loop and a reminder, since an open loop that near is never raised by
+# message.
 #
 # FLOORS. Each turn's floor is a fact a correct reply must carry (a computed figure,
 # the plan's date, the name of the thing) or the tool span that is the outcome.
@@ -140,6 +143,32 @@ scenarios:
              asks no question about it.
           3. The second reply accepts the change briefly and asks nothing further
              about the fence.
+      # The second labelled route-sanity case: a task due within two days reaches the
+      # open loop AND the reminder rail, because an open loop that near is never
+      # raised by message. "Tomorrow" is under 48 hours whatever day the run falls on.
+      # No announcement gate on the first reply: confirming the reminder is correct.
+      - id: permit_forms_tomorrow_route_sanity
+        turns:
+          - query: >-
+              I have to drop the Fenwick permit forms at the town hall tomorrow. It's
+              three forms at 45 each, how much should I bring?
+            expect:
+              tools_all: [open_loop_note, event_store]
+              tools_none: [schedule_job]
+              reply_matches: "135"
+          - query: >-
+              Change of plan, a neighbour is dropping the Fenwick forms off for me, so I
+              don't need to. You can cancel the reminder.
+            expect:
+              tools_all: [open_loop_update, event_remove]
+        expect:
+          max_cost_usd: 1.5
+        rubric: |
+          1. The first reply gives the amount to bring: 135.
+          2. The first reply confirms a reminder for tomorrow and says nothing about
+             tracking, recording or checking in on the forms beyond that reminder.
+          3. The second reply confirms the reminder is cancelled and accepts the
+             change without asking anything further about the forms.
 
   - id: capture_boundary
     title: "Asking, a third party's date, a hypothetical, an occasion, pasted content and a tool result's date are not recorded"

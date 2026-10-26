@@ -559,7 +559,8 @@ def test_the_shipped_numbered_rubrics_parse():
                       "twentieth_corrected_to_thirteenth": 3,
                       # open_loops.yaml
                       "grant_overhead": 3, "contractor_choice": 3,
-                      "fence_paint_route_sanity": 3, "deadline_question": 2,
+                      "fence_paint_route_sanity": 3,
+                      "permit_forms_tomorrow_route_sanity": 3, "deadline_question": 2,
                       "colleague_visa": 2, "hypothetical_race": 2,
                       "forwarded_school_notice": 2, "concert_occasion": 2,
                       "reminder_listed_back": 3, "fetched_notice": 2,

@@ -10,11 +10,12 @@ description: >
   minutes earlier was reported as said yesterday.
 
   The first turn states a task due before noon tomorrow, which open loops record
-  as an imminent loop, due at once, so every private turn for the next three hours
-  carries the due note naming the day it was said. The second turn runs in a fresh
-  session, as the original report did (the task said on one channel, the question
-  on another), so the only source for the day is that note or the open-loop tools,
-  never the conversation history. The reply must say today and never yesterday.
+  as an imminent loop. The second turn runs in a fresh session, as the original
+  report did (the task said on one channel, the question on another), so the only
+  source for the day is the open-loop listing, which names the day each loop was
+  said, never the conversation history. The due note names the same day, but an
+  imminent loop is noted only from three hours after it was said, so no turn of
+  this case sees it. The reply must say today and never yesterday.
 
   PRECONDITIONS: `[fermix_core.open_loops] enabled = true` and an owner inbox
   (both pre-granted by bin/seed_capability_home.py). The defect this case guards

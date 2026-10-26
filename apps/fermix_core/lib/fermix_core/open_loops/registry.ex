@@ -689,8 +689,8 @@ defmodule FermixCore.OpenLoops.Registry do
   end
 
   def describe_error(:imminent_without_window) do
-    "That date is too close to raise before it passes, so nothing was recorded; answer " <>
-      "the owner without recording a loop."
+    "That date is too close for Fermix to raise before it passes, so no loop was " <>
+      "recorded; as with an imminent loop, store the reminder instead."
   end
 
   def describe_error(:not_found) do

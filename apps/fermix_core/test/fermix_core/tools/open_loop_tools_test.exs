@@ -227,6 +227,12 @@ defmodule FermixCore.Tools.OpenLoopToolsTest do
     test "the descriptions are §07's text" do
       assert OpenLoopNote.description() =~ ~r/^Record an open loop: something the owner said/
       assert OpenLoopNote.description() =~ ~r/Say nothing about the loop unless asked\.$/
+
+      assert OpenLoopNote.description() =~
+               "Unless the owner asked to be reminded, the loop is the only record of the " <>
+                 "intention: store no reminder beside it, except when the result reports the " <>
+                 "loop imminent, since an imminent loop is never raised by message."
+
       assert OpenLoopUpdate.description() =~ ~r/^Settle or move an open loop/
 
       assert OpenLoopUpdate.description() =~

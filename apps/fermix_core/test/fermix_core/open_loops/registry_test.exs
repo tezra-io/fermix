@@ -176,7 +176,14 @@ defmodule FermixCore.OpenLoops.RegistryTest do
 
       assert today.loop.matters_by_at == utc(~U[2031-06-03 04:00:00Z])
       assert today.loop.horizon_class == "imminent"
-      assert today.loop.next_touch_at == utc(@now)
+      assert today.loop.next_touch_at == utc(~U[2031-06-02 17:00:00Z])
+    end
+
+    test "a loop said within three hours of its date is not recorded", %{opts: opts} do
+      soon = %{"type" => "datetime", "date" => "2031-06-02", "time" => "12:00:00"}
+
+      assert {:error, :imminent_without_window} =
+               Registry.note(%{"intention" => @intention, "matters_by" => soon}, @attended, opts)
     end
 
     test "a zone the owner named wins over the configured one", %{opts: opts} do

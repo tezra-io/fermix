@@ -71,8 +71,14 @@ defmodule FermixCore.OpenLoops.LifecycleTest do
       assert Lifecycle.slot_time(short(), 0, @hours, ~U[2031-06-04 10:00:00Z]) == :past
     end
 
-    test "imminent: now, until the date has passed" do
-      assert Lifecycle.slot_time(imminent(), 0, @hours, @now) == {:ok, @now}
+    test "imminent: three hours after it is armed, while that is still before the date" do
+      assert Lifecycle.slot_time(imminent(), 0, @hours, @now) == {:ok, ~U[2031-06-02 17:00:00Z]}
+
+      # June 3 has passed at 04:00 UTC on June 4.
+      assert Lifecycle.slot_time(imminent(), 0, @hours, ~U[2031-06-04 00:59:59Z]) ==
+               {:ok, ~U[2031-06-04 03:59:59Z]}
+
+      assert Lifecycle.slot_time(imminent(), 0, @hours, ~U[2031-06-04 01:00:00Z]) == :past
       assert Lifecycle.slot_time(imminent(), 0, @hours, ~U[2031-06-04 04:00:00Z]) == :past
       assert Lifecycle.slot_time(imminent(), 1, @hours, @now) == :none
     end
@@ -99,15 +105,22 @@ defmodule FermixCore.OpenLoops.LifecycleTest do
   end
 
   describe "first_touch_at/3" do
-    test "every class arms its first slot; imminent arms now" do
+    test "every class arms its first slot; imminent arms three hours on" do
       assert Lifecycle.first_touch_at(long(), @hours, @now) == {:ok, ~U[2031-06-13 13:00:00Z]}
       assert Lifecycle.first_touch_at(medium(), @hours, @now) == {:ok, ~U[2031-06-07 13:00:00Z]}
       assert Lifecycle.first_touch_at(short(), @hours, @now) == {:ok, ~U[2031-06-03 13:00:00Z]}
-      assert Lifecycle.first_touch_at(imminent(), @hours, @now) == {:ok, @now}
+
+      assert Lifecycle.first_touch_at(imminent(), @hours, @now) ==
+               {:ok, ~U[2031-06-02 17:00:00Z]}
     end
 
     test "an imminent loop with no time left before its date has no window" do
       assert Lifecycle.first_touch_at(imminent(), @hours, ~U[2031-06-04 05:00:00Z]) ==
+               {:error, :imminent_without_window}
+    end
+
+    test "an imminent loop said within three hours of its date has no window" do
+      assert Lifecycle.first_touch_at(imminent(), @hours, ~U[2031-06-04 02:00:00Z]) ==
                {:error, :imminent_without_window}
     end
   end
@@ -191,7 +204,7 @@ defmodule FermixCore.OpenLoops.LifecycleTest do
       assert Lifecycle.due_decision(skipped_then_handed_back, ~U[2031-06-12 16:00:00Z]) == :expire
     end
 
-    test "under 48 hours: due at once, and expired once the date passes" do
+    test "under 48 hours: due once its touch arrives, and expired once the date passes" do
       assert Lifecycle.due_decision(imminent(), @now) == :due
 
       due = imminent(%{state: "due"})

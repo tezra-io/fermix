@@ -2272,6 +2272,17 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert note =~ "\nopen_loop_id: #{loop.id}"
     end
 
+    test "a loop said a minute ago is not carried into the next turn", %{repo: repo} do
+      said_at = DateTime.add(DateTime.utc_now(), -60, :second)
+      note_loop!(repo, "Return the Ellery library books", said_at)
+      {:ok, %{due: []}} = Repo.scan_due_open_loops(DateTime.utc_now(), 50, server: repo)
+
+      messages = capture_prompt(%{channel: "telegram", chat_id: "40031"}, memory_repo: repo)
+
+      assert Enum.any?(messages, &(&1.content =~ "Post the Quillfeather newsletter draft"))
+      refute Enum.any?(messages, &(&1.content =~ "Return the Ellery library books"))
+    end
+
     test "a guest's turn does not carry it", %{repo: repo} do
       messages =
         capture_prompt(%{channel: "telegram", chat_id: "guest-7", source_trust: :guest},
@@ -2285,12 +2296,20 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   # An imminent loop is due from the moment it is noted until its date passes,
   # so a turn, which reads the real clock, finds it inside its window. The
   # names and ids are invented.
+  # An imminent loop is noted from three hours after it was said, so this one was
+  # said just over three hours ago.
   defp note_imminent_loop!(repo) do
-    now = DateTime.utc_now()
-    matters_by = DateTime.add(now, 10 * 3_600, :second)
+    said_at = DateTime.add(DateTime.utc_now(), -(3 * 3_600 + 60), :second)
+    loop = note_loop!(repo, "Post the Quillfeather newsletter draft", said_at)
+    {:ok, %{due: [_due]}} = Repo.scan_due_open_loops(DateTime.utc_now(), 50, server: repo)
+    loop
+  end
+
+  defp note_loop!(repo, intention, said_at) do
+    matters_by = DateTime.add(DateTime.utc_now(), 10 * 3_600, :second)
 
     params = %{
-      "intention" => "Post the Quillfeather newsletter draft",
+      "intention" => intention,
       "timezone" => "Etc/UTC",
       "matters_by" => %{
         "type" => "datetime",
@@ -2309,14 +2328,13 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
     opts = [
       repo: repo,
-      now: now,
+      now: said_at,
       jobs_config: [delivery_channels: %{"telegram" => OpenLoopInbox}],
       configured_owners: %{"telegram" => "40031"},
       scheduler: nil
     ]
 
     {:ok, %{loop: loop}} = OpenLoopsRegistry.note(params, attended, opts)
-    {:ok, %{due: [_due]}} = Repo.scan_due_open_loops(DateTime.utc_now(), 50, server: repo)
     loop
   end
 

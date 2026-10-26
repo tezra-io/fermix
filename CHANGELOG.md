@@ -60,6 +60,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   voice-call notes now all use the time zone set in Personality; with none set
   they are UTC and the assistant is told so. A new scheduled job runs on your
   time zone unless you name another, and `date` in a shell command reports it.
+- **An open loop due within two days is no longer raised in the conversation
+  it came from.** Such a loop was ready to raise the moment it was recorded, so
+  a task you mentioned minutes earlier could come straight back as a question
+  in your next message. The assistant now sees it only from three hours after
+  you said it until its date passes, and a date less than three hours away
+  records no loop: the assistant stores a reminder instead.
+- **Something you have to do by a date is recorded once, as an open loop.**
+  With open loops on, a task you stated as your own, without asking to be
+  reminded, could become both an open loop and a reminder you never asked for,
+  so one task could bring up to three reminders and three check-ins. It is now
+  an open loop only. A task due within two days still gets a reminder as well,
+  because an open loop that near never sends a message of its own, and saying
+  the task is done or no longer needed settles both.
 - **Web fetches and link previews follow `proxy_bypass` again, and reach sites
   whose first address is IPv6.** Each request is now pinned to the address the
   network guard checked, which an entry naming the host no longer missed and

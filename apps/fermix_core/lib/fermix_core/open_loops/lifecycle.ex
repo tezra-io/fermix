@@ -40,8 +40,8 @@ defmodule FermixCore.OpenLoops.Lifecycle do
 
   @doc """
   The time of slot `index` of the loop's class, `:past` when that time is not
-  after `now` (or, for an imminent loop, once its date has passed), `:none`
-  when the class has no such slot.
+  after `now` (or, for an imminent loop, when it would not come before its
+  date), `:none` when the class has no such slot.
   """
   @spec slot_time(loop(), non_neg_integer(), hours(), DateTime.t()) ::
           {:ok, DateTime.t()} | :past | :none
@@ -53,8 +53,9 @@ defmodule FermixCore.OpenLoops.Lifecycle do
     end
   end
 
-  defp slot_at(:now, loop, _hours, now) do
-    if before_date?(now, loop), do: {:ok, now}, else: :past
+  defp slot_at({:after_hours, hours_after}, loop, _hours, now) do
+    at = DateTime.add(now, hours_after * 3_600, :second)
+    if before_date?(at, loop), do: {:ok, at}, else: :past
   end
 
   defp slot_at({:before_hours_min, hours_before}, loop, hours, now) do
@@ -80,8 +81,9 @@ defmodule FermixCore.OpenLoops.Lifecycle do
   defp future(at, now), do: if(DateTime.compare(at, now) == :gt, do: {:ok, at}, else: :past)
 
   @doc """
-  The first `next_touch_at` of a new loop: its class's first slot (now for an
-  imminent one). An imminent loop whose date has already passed has no window.
+  The first `next_touch_at` of a new loop: its class's first slot (three hours
+  on for an imminent one). An imminent loop whose date passes before then has
+  no window.
   """
   @spec first_touch_at(loop(), hours(), DateTime.t()) ::
           {:ok, DateTime.t()} | {:error, :imminent_without_window}

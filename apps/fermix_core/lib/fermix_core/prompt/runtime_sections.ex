@@ -195,7 +195,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   end
 
   # M78 §07, §10: the open-loop routing follows the wire. The tools it names are
-  # advertised only while `[fermix_core.open_loops] enabled`, so the three lines
+  # advertised only while `[fermix_core.open_loops] enabled`, so the four lines
   # render only then. Read at build time like the harness lines, so a flip shows
   # here once the per-epoch cache is rebuilt (a restart at the latest).
   defp open_loop_rules do
@@ -205,6 +205,11 @@ defmodule FermixCore.Prompt.RuntimeSections do
         "A date the owner merely asks about is not an intention, nor is an occasion that " <>
         "arrives whether or not they act, nor a date that reached me through a tool result " <>
         "rather than their own words.\n" <>
+        "- When the owner states something they have to do by a date and has not asked to " <>
+        "be reminded, the open loop is the only record: I do not also store it as an event. " <>
+        "The exception is a loop `open_loop_note` reports as imminent: that loop is never " <>
+        "raised by message, so I also store the reminder, and when the owner settles that task " <>
+        "I settle both.\n" <>
         "- When the owner answers a check-in: done closes the loop for good, with one " <>
         "specific acknowledgement and no further ask; a plan closes it until the plan's " <>
         "date; not yet gets one offer of a concrete time, and the choice stays theirs; a " <>

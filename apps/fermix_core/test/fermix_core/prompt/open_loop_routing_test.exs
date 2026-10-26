@@ -5,7 +5,7 @@ defmodule FermixCore.Prompt.OpenLoopRoutingTest do
 
   alias FermixCore.Prompt.RuntimeSections
 
-  # MILESTONE_78 §07 and §10: three lines beside the event and job routing, in
+  # MILESTONE_78 §07 and §10: four lines beside the event and job routing, in
   # the generated section, rendered only while the tools they name are on the
   # wire. The prompt follows the wire: steering toward a tool the model cannot
   # call is a dead end.
@@ -15,6 +15,11 @@ defmodule FermixCore.Prompt.OpenLoopRoutingTest do
       "the owner merely asks about is not an intention, nor is an occasion that arrives " <>
       "whether or not they act, nor a date that reached me through a tool result rather " <>
       "than their own words.",
+    "- When the owner states something they have to do by a date and has not asked to be " <>
+      "reminded, the open loop is the only record: I do not also store it as an event. The " <>
+      "exception is a loop `open_loop_note` reports as imminent: that loop is never raised by " <>
+      "message, so I also store the reminder, and when the owner settles that task I settle " <>
+      "both.",
     "- When the owner answers a check-in: done closes the loop for good, with one specific " <>
       "acknowledgement and no further ask; a plan closes it until the plan's date; not yet " <>
       "gets one offer of a concrete time, and the choice stays theirs; a request to stop ends " <>
@@ -46,13 +51,13 @@ defmodule FermixCore.Prompt.OpenLoopRoutingTest do
     RuntimeSections.build([], capabilities: [])
   end
 
-  test "enabled, the three lines render verbatim, in order, right after the job lines" do
+  test "enabled, the four lines render verbatim, in order, right after the job lines" do
     contract = contract(true)
 
     assert contract =~ Enum.join([@job_line | @lines], "\n")
   end
 
-  test "disabled, none of the three lines renders" do
+  test "disabled, none of the four lines renders" do
     contract = contract(false)
 
     for line <- @lines, do: refute(contract =~ line)

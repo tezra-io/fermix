@@ -14,7 +14,9 @@ defmodule FermixCore.OpenLoops.Defaults do
     * `{:days_after, n}` — the local date `n` days after it, likewise;
     * `{:before_hours_min, h}` — the next active-hours start that is still at
       least `h` hours before the instant the date has passed;
-    * `:now` — the moment of capture (an imminent loop, rung 1 only).
+    * `{:after_hours, h}` — `h` hours after the loop is armed, while that is
+      still before the date has passed (an imminent loop, rung 1 only), so the
+      loop is never raised in the conversation it came from.
 
   The last slot of a class is its hand-back.
   """
@@ -52,7 +54,7 @@ defmodule FermixCore.OpenLoops.Defaults do
           {:days_before, pos_integer()}
           | {:days_after, pos_integer()}
           | {:before_hours_min, pos_integer()}
-          | :now
+          | {:after_hours, pos_integer()}
 
   @doc "Touches per loop, ever; the hand-back is the last (§06 caps)."
   @spec max_touches() :: pos_integer()
@@ -158,5 +160,5 @@ defmodule FermixCore.OpenLoops.Defaults do
   def slots("long"), do: [{:days_before, 7}, {:days_before, 1}, {:days_after, 1}]
   def slots("medium"), do: [{:days_before, 3}, {:days_before, 1}, {:days_after, 1}]
   def slots("short"), do: [{:before_hours_min, 24}, {:days_after, 1}]
-  def slots("imminent"), do: [:now]
+  def slots("imminent"), do: [{:after_hours, 3}]
 end
