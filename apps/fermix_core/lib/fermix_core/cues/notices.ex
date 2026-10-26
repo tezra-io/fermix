@@ -11,6 +11,7 @@ defmodule FermixCore.Cues.Notices do
   | `:filter_held` | hold, until `:filter_recovered` (`cue_watchers.held_notified_at`) |
   | `:filter_recovered` | hold that was notified |
   | `:filter_failed` | watcher per UTC day |
+  | `:needs_update` | watcher: once, whatever rule it breaks (`Cues.Watchers.needs_update_notices/1`) |
   | `:cap_reached`, `:filter_budget_reached`, `:task_provider_down` | 24 hours, the rolling window: by then every run or call counted when it was sent has left the window |
   | `:gap` | open gap, which the notice marks reported |
   | source `:auth_failed`, `:refused`, `:down`, `:unreachable`, `:too_large` | episode, ended by the source's next good moment (`last_good_at` after the notice) |
@@ -53,6 +54,7 @@ defmodule FermixCore.Cues.Notices do
     filter_held: :held,
     filter_recovered: :recovered,
     filter_failed: :utc_day,
+    needs_update: :once,
     filter_budget_reached: {:window, @day_s},
     cap_reached: {:window, @day_s},
     task_provider_down: {:window, @day_s}
@@ -78,8 +80,9 @@ defmodule FermixCore.Cues.Notices do
   @doc """
   Sends watcher notice `kind` once per episode to the watcher's task's
   delivery target. `data` may hold `:waiting` (items waiting), `:cap`,
-  `:budget`; a `:gap` notice needs `:gap_id`, `:source_ref`, `:count`,
-  `:reason` and `:first_at`.
+  `:budget`; a `:needs_update` notice needs `:needed` (`:words` or `:filter`,
+  `Cues.Watchers.update_needed/2`); a `:gap` notice needs `:gap_id`,
+  `:source_ref`, `:count`, `:reason` and `:first_at`.
   """
   @spec watcher(String.t(), atom(), map(), keyword()) :: result()
   def watcher(watcher_id, kind, data, opts \\ [])
@@ -205,7 +208,9 @@ defmodule FermixCore.Cues.Notices do
   # --- sending -----------------------------------------------------------------------
 
   defp send_to_task(job_id, text, opts) do
-    with {:ok, job} <- JobsRegistry.get_job(job_id, repo: Keyword.get(opts, :repo, Repo)) do
+    lookup = [repo: Keyword.get(opts, :repo, Repo)] ++ Keyword.take(opts, [:timeout, :on_timeout])
+
+    with {:ok, job} <- JobsRegistry.get_job(job_id, lookup) do
       delivery_opts =
         opts
         |> Keyword.take([:adapter, :channels])
@@ -283,6 +288,16 @@ defmodule FermixCore.Cues.Notices do
     do:
       "Watcher #{name}: it reached its daily cap#{of(data, :cap, "runs")}; #{waiting(data)} " <>
         "They wait for room."
+
+  defp watcher_text(:needs_update, name, %{needed: :words}),
+    do:
+      "Watcher #{name}: it has no words to listen for, so no item reaches it. Ask Fermix in " <>
+        "chat to give it some."
+
+  defp watcher_text(:needs_update, name, %{needed: :filter}),
+    do:
+      "Watcher #{name}: it passes every item, so it cannot listen to a stream and gets nothing " <>
+        "from one. Ask Fermix in chat to give it a filter."
 
   defp watcher_text(:task_provider_down, name, _data),
     do:

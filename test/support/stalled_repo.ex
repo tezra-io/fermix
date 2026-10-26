@@ -4,26 +4,34 @@ defmodule FermixTestSupport.StalledRepo do
   # A Memory.Repo that takes a request and never answers: the Repo stuck
   # behind a long operation, which its callers only see as their call timing
   # out. Alone it stalls every request. With `forward_to:` (a real Repo) and
-  # `stall:` (request names such as `:get_job_run`) it stalls only those and
-  # forwards the rest, so a caller reaches the path that makes the stalled
-  # request. Start it with `start_supervised!/1` and pass its pid as `repo:`.
+  # `stall:` (request names such as `:get_job_run`; a cue request is named by
+  # its own tuple, such as `:counts_put`) it stalls only those and forwards the
+  # rest, so a caller reaches the path that makes the stalled request. With
+  # `notify:` (a pid) it sends that process `{:stalled, name}` for each request
+  # it stalls. Start it with `start_supervised!/1` and pass its pid as `repo:`.
 
   use GenServer
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts) do
-    {config, server_opts} = Keyword.split(opts, [:forward_to, :stall])
+    {config, server_opts} = Keyword.split(opts, [:forward_to, :stall, :notify])
     GenServer.start_link(__MODULE__, config, server_opts)
   end
 
   @impl true
   def init(config) do
-    {:ok, %{forward_to: Keyword.get(config, :forward_to), stall: Keyword.get(config, :stall, [])}}
+    {:ok,
+     %{
+       forward_to: Keyword.get(config, :forward_to),
+       stall: Keyword.get(config, :stall, []),
+       notify: Keyword.get(config, :notify)
+     }}
   end
 
   @impl true
   def handle_call(request, _from, state) do
     if stalls?(request, state) do
+      if state.notify, do: send(state.notify, {:stalled, request_name(request)})
       {:noreply, state}
     else
       {:reply, GenServer.call(state.forward_to, request), state}
@@ -33,6 +41,7 @@ defmodule FermixTestSupport.StalledRepo do
   defp stalls?(_request, %{forward_to: nil}), do: true
   defp stalls?(request, %{stall: names}), do: request_name(request) in names
 
+  defp request_name({:cues, _module, request}) when is_tuple(request), do: elem(request, 0)
   defp request_name(request) when is_tuple(request), do: elem(request, 0)
   defp request_name(request) when is_atom(request), do: request
 end

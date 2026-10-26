@@ -550,9 +550,12 @@ bind it beside the five above.
 ## Cues: lifecycle, sources, filter calls and cue runs
 
 A cue is an item an outside source sent (a feed entry, a stream event, a local
-push). Every watcher listening to the source gets a delivery of it; a filter
-call may pass or drop the delivery, and a cue run (a job run with
-`trigger: "cue"`) settles it. Items and deliveries move through two stable
+push). A watcher with no filter that listens to the source gets a delivery of
+it, and a filtering watcher one only when its words to listen for match; a
+filter call may pass or drop the delivery, and a cue run (a job run with
+`trigger: "cue"`) settles it. A stream's item is judged before it is stored,
+and only a pass becomes a cue (M60_CUE_INTAKE_AT_SCALE.md): what it does not
+store, it counts. Items and deliveries move through two stable
 event names, both emitted only through `FermixCore.Cues.Telemetry` — never
 hand-rolled, and never a `[:fermix, :cue, <phase>]` tail of their own
 (exact-name binding would drop it, the reminder lifecycle's rule):
@@ -579,25 +582,28 @@ only a filter decision's reason, on `passed` and `dropped`). The emitter adds
 `count`, `accept_ms` (receipt to commit, on `accepted`), `queue_ms` (receipt to
 the task's claim, on `claimed`) and `duration_ms`; none given means
 `%{count: 1}`. An event names one delivery (`delivery_id`); there is no
-`cue_count`.
+`cue_count`. The counted phases are the exception: one event names a source or
+a watcher and carries how many items its `count` stands for.
 
 **A phase's class is its session**, and the emitter enforces it:
 
 | Class | Phases | `session_id` |
 |---|---|---|
-| sessionless | `accepted`, `duplicate`, `conflict`, `stale`, `rejected`, `rate_limited`, `over_budget`, `routed`, `gap`, `expired`, `ingest_error`, `sweep_error` | refused (raises) |
+| sessionless | `accepted`, `duplicate`, `conflict`, `stale`, `rejected`, `rate_limited`, `over_budget`, `routed`, `gap`, `expired`, `unmatched`, `overflow`, `write_failed`, `ingest_error`, `sweep_error` | refused (raises) |
 | filter-scoped | `passed`, `dropped`, `filter_retry`, `filter_held`, `filter_failed` | the filter call's; optional |
 | run-scoped | `claimed`, `settled`, `retry`, `exhausted` | the cue run's; required |
 | proposal-scoped | `proposed`, `confirmed`, `denied`, `proposal_expired`, `proposal_refused` | the proposing run's; required |
 
 Who emits what:
 
-- **Accept and route** (`Cues.Ingest`, one event per item after the
-  transaction commits): `accepted` (`cue_id`, `accept_ms`), or what happened
+- **Accept and route** (`Cues.Ingest`, for feeds, webhooks and local push;
+  one event per item after the transaction commits): `accepted` (`cue_id`,
+  `accept_ms`), or what happened
   instead: `duplicate` (seen before), `conflict` (same identity, different content),
   `stale` (older than the 7-day horizon), `rejected` (it failed validation),
   `rate_limited`, `over_budget`. Then `routed` per delivery created
-  (`delivery_id`, `watcher_id`, `state` `pending` or `passed`), and for a
+  (`delivery_id`, `watcher_id`, `state` `pending` or `passed`; a filtering
+  watcher gets one only when its words matched), and for a
   watcher with no filter `passed` at once, with no session and
   `reason: "no filter"` (no filter call exists for it). A delivery evicted from
   a full inbox is `expired` with `reason: "inbox_full"`. A refusal at the HTTP
@@ -606,15 +612,30 @@ Who emits what:
   waited for its filter in the switch's transaction, and `Cues.Watchers` then
   emits the same sessionless `passed` (`reason: "no filter"`, `cue_id`,
   `source_ref`) for each.
+- **Counted phases** (a stream's items, which are not stored): what is not
+  stored is counted in memory (`Cues.Counts`) and written to `cue_counts`
+  every 10 s as the hour's totals, and each such flush emits one event per
+  phase that grew, with no session and no item id, its measurement `count`
+  the items since the last flush. Per source, from `Cues.Source.Stream`
+  (`source_ref`): `unmatched` (no watcher's words matched), `rate_limited`,
+  `over_budget` (the daily budget), `rejected` (it failed validation) and
+  `stale`. Per watcher, from `Cues.LiveFilters` (`watcher_id`): `overflow` (its
+  live queue was full), `over_budget` (its filter budget was spent),
+  `dropped`, `filter_failed` (three content failures) and `write_failed` (a
+  pass whose write kept failing). The `received`, `offered` and `passed` counts
+  are rows only; a pass keeps its own events (below).
 - **Gaps and expiry**: `gap` (`gap_id`, `reason`, measurement `count`) when
   ingest, the sweeper or a watcher's removal opens or extends a gap; `expired`
   with `reason: "lifetime"` from `Cues.Sweeper` and `"watcher_removed"` from
   `Cues.Watchers`.
-- **Errors**: `ingest_error` (an ingest transaction, or a source worker's
-  Repo call, failed; `result`) and `sweep_error`, whose `reason` names the step
-  that failed: a retention step of `Cues.Sweeper` (`expire_lifetime`,
-  `drop_payloads`, …), the filter dispatcher's `filter_reset`, `filter_claim`
-  or `filter_reclaim` (its sweep's reclaim of `filtering` rows no task holds),
+- **Errors**: `ingest_error` (an ingest transaction, a source worker's Repo
+  call, or `Cues.SourceManager`'s write of a crashed-out source's `stopped`
+  status, failed or did not answer in time; `result`) and `sweep_error`, whose
+  `reason` names the step that failed: a retention step of `Cues.Sweeper`
+  (`expire_lifetime`, `drop_payloads`, …, `prune_counts`), the filter
+  dispatcher's `filter_reset`, `filter_claim` or `filter_reclaim` (its sweep's
+  reclaim of `filtering` rows no task holds), the live dispatcher's
+  `live_counts` (its count flush),
   or cue admission's `cue_claim` (the candidate scan, or one
   job's claim with its `job_id`) or `cue_settle` (a cue run's settle, with its
   `job_id` and `run_id`). Every
@@ -631,7 +652,16 @@ Who emits what:
   third provider failure in a row, and each after it); `filter_failed` (the
   third content failure: the delivery is exhausted). A failure adds `reason`
   (`provider_failure | content_failure | aborted`), `kind` (the failure's typed
-  kind) and `result: {:error, kind}`.
+  kind) and `result: {:error, kind}`. A live call (`Cues.LiveFilters`, a
+  stream's item) emits only a pass per item: `passed` once its cue and
+  delivery are written, with the call's `session_id`, `filter_call_id`,
+  `watcher_id`, `delivery_id` (absent when the watcher already had this
+  item), `cue_id`, `source_ref`, `decision` and the reason in `content`, then
+  `expired` and `gap` for a delivery its write evicted from a full inbox. A
+  pass onto a stored item of other content writes no delivery and emits, as
+  accept does, `conflict` (`cue_id`, `source_ref`, `watcher_id`, no session)
+  and its `identity_conflict` `gap` instead. Its drops and failures are
+  counted (above).
 - **Cue runs** (`Jobs.CueAdmission`, each with the run's `session_id`,
   `job_id`, `run_id`, `delivery_id`, `watcher_id`, `source_ref`, `state`,
   `attempt`): `claimed` when the scheduler's claim commits (`queue_ms`), then
@@ -707,7 +737,8 @@ reminder precedent): `mix opik.replay` skips cue rows.
 ### Filter calls (a run kind with one model call)
 
 A filter call is one bounded model call deciding one delivery for one watcher,
-in the shape of a Live call's gist. `Cues.Filters` mints its session id,
+in the shape of a Live call's gist. `Cues.Filters` mints its session id (and
+`Cues.LiveFilters` a live call's, for a stream's item),
 `cue_filter_<watcher_id>_<YYYYMMDD_HHMMSS>_<6 hex>` (UTC claim time; the
 watcher id keeps its `cwt_` prefix), with **no** `parent_session`: no turn asked
 for it, so it is always a root. Its bookends go through
@@ -717,7 +748,9 @@ one closer after the result is written, `[:fermix, :cue_filter, :run_complete]`
 or `[:fermix, :cue_filter, :run_error]` (`%{count: 1, duration_ms}`). Shared
 metadata: `agent: "cue_filter"`, `session_id`, `filter_call_id`, `watcher_id`,
 `delivery_id`, `cue_id`, `source_ref`, `attempt`, and `provider`/`model` only
-when the watcher pins them. `run_complete` adds `status: "ok"` and
+when the Cues filter model is set (the main model otherwise). A live call's
+bookends add `live: true` and carry no `delivery_id` or `cue_id` until a pass
+wrote them: only the closer after a pass has them. `run_complete` adds `status: "ok"` and
 `decision: "pass" | "drop"`; `run_error` adds `status` (`provider_failure`,
 `content_failure`, `aborted`, `stale` when the delivery had moved on before the
 write, `settle_failed` when the write itself failed) and `error_kind`, the

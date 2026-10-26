@@ -22,8 +22,11 @@ defmodule FermixCore.Cues.SourceManager do
       restarts; it has already told the owner why;
     * a worker that crashes is restarted alone after a delay, from one second
       doubling to a minute. After five crashes within an hour it stays down,
-      traced as `stopped` with reason `crashed`, and the owner is told through
-      `Cues.Notices.source/4` (`:unreachable`).
+      its row reads `stopped` (M60_CUE_INTAKE_AT_SCALE.md §3.6), it is traced
+      as `stopped` with reason `crashed`, and the owner is told through
+      `Cues.Notices.source/4` (`:unreachable`). That status is the one write
+      the manager makes: bounded, and a write that fails or does not answer
+      in time is traced (`ingest_error`) and logged, never a crash.
 
   Every worker links itself to this process from its `init` (option
   `:manager`), and this process traps exits, so it sees each exit with its
@@ -44,6 +47,9 @@ defmodule FermixCore.Cues.SourceManager do
   alias FermixCore.Cues.Source.Stream
   alias FermixCore.Cues.SourceSupervisor
   alias FermixCore.Cues.Telemetry
+  alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.CuesSql
+  alias FermixCore.Timeouts
 
   @worker_kinds [:feed, :stream]
   @max_crashes 5
@@ -57,6 +63,8 @@ defmodule FermixCore.Cues.SourceManager do
 
   @doc """
   Starts the manager. Options: `:name` (default `#{inspect(__MODULE__)}`),
+  `:repo` (default `Memory.Repo`), `:repo_timeout_ms` (default
+  `Timeouts.repo_call/0`), `:clock` (zero-arity, the UTC now),
   `:supervisor` (default `Cues.SourceSupervisor`), `:sources` (zero-arity,
   default `Cues.Config.sources/0`), `:workers` (kind to module, default
   `%{feed: Cues.Source.Feed, stream: Cues.Source.Stream}`), `:worker_opts`
@@ -90,6 +98,9 @@ defmodule FermixCore.Cues.SourceManager do
     Process.flag(:trap_exit, true)
 
     state = %{
+      repo: Keyword.get(opts, :repo, Repo),
+      repo_timeout_ms: Keyword.get(opts, :repo_timeout_ms, Timeouts.repo_call()),
+      clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
       supervisor: Keyword.get(opts, :supervisor, SourceSupervisor),
       sources: Keyword.get(opts, :sources, &Config.sources/0),
       modules: Keyword.get(opts, :workers, %{feed: Feed, stream: Stream}),
@@ -284,12 +295,34 @@ defmodule FermixCore.Cues.SourceManager do
       "Cue source #{ref} crashed #{length(crashes)} times within an hour; left stopped"
     )
 
+    write_stopped(state, ref)
     notify(state, ref, %{reason: "crashed", crashes: length(crashes)})
     %{state | stopped: Map.put(state.stopped, ref, settings)}
   end
 
+  # The row says the source stopped, so it never reads as connected for as long
+  # as the daemon runs.
+  defp write_stopped(state, ref) do
+    request = {:source_touch, ref, %{status: "stopped"}, state.clock.()}
+    opts = Repo.periodic_opts(state.repo, state.repo_timeout_ms)
+
+    case Repo.cues_call(CuesSql, request, opts) do
+      {:ok, _row} ->
+        :ok
+
+      {:error, reason} ->
+        Telemetry.lifecycle(:ingest_error, %{}, %{source_ref: ref, result: {:error, reason}})
+
+        Logger.error(
+          "Cue source #{ref}: its stopped status could not be written: #{inspect(reason)}"
+        )
+    end
+  end
+
   defp notify(state, ref, data) do
-    case state.notify.(ref, :unreachable, data, []) do
+    opts = [repo: state.repo, on_timeout: :error, timeout: state.repo_timeout_ms]
+
+    case state.notify.(ref, :unreachable, data, opts) do
       {:error, reason} ->
         Logger.error("Cue source #{ref}: the owner could not be told: #{inspect(reason)}")
 

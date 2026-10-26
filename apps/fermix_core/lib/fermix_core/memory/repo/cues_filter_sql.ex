@@ -1,7 +1,7 @@
 defmodule FermixCore.Memory.Repo.CuesFilterSql do
   @moduledoc """
   SQL for the filter dispatcher's claims, settles and boot reset (PLAN §4.2,
-  design §7.3 and §8.3). Lane B owns it.
+  design §7.3 and §8.3).
 
   Pure SQL over the caller's `conn`, reached only through
   `FermixCore.Memory.Repo.cues_call/3`. One `handle/2` head per request tuple,
@@ -42,6 +42,22 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
   - `{:held_watchers}`: `llm` watchers held by provider failures, with the
     count of deliveries waiting.
 
+  ## Live calls (M60_CUE_INTAKE_AT_SCALE.md §3.2)
+
+  A stream item is judged before it is stored (`Cues.LiveFilters`), so its
+  call has no delivery. Its ledger row is written once, when the call ends,
+  with `delivery_id` null, so the filter budget, the hold and the cost record
+  count it as they count a stored call.
+
+  - `{:live_context, watcher_ids, now}`: what a live call needs beyond the
+    watcher's row, per watcher: its active `instructions`, its 20 most recent
+    `examples`, and `used`, the calls started in the last 24 hours (stored and
+    live) that its `filter_budget` counts.
+  - `{:settle_live, watcher_id, call, result, now}`: a live drop or failure,
+    written by `record_live/5`. A pass is written with its cue and delivery by
+    `CuesSql`'s `{:pass_live, …}`, which calls `record_live/5` in its own
+    transaction.
+
   ## Backoffs (design §8.3)
 
   A provider failure is the watcher's: the delivery goes back to `pending`
@@ -69,7 +85,10 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
   @max_claims 16
   @max_error_chars 500
   @failure_results [:provider_failure, :content_failure, :aborted]
+  @live_failures [:provider_failure, :content_failure]
   @orphan_error "aborted: no task held this call past its deadline"
+  # The most watchers one source's live context is read for at once.
+  @max_live_watchers 200
 
   @within_budget """
   (w.filter_budget = 0 OR (SELECT count(*) FROM cue_filter_calls c
@@ -84,6 +103,11 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
           | {:provider_failure, failure()}
           | {:content_failure, failure()}
           | {:aborted, failure()}
+  @type live_result ::
+          {:pass, String.t(), String.t() | nil}
+          | {:drop, String.t()}
+          | {:provider_failure, failure()}
+          | {:content_failure, failure()}
 
   @doc """
   The keys of a settle's `{:ok, outcome}`: `result` (`:passed | :dropped |
@@ -140,6 +164,24 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
 
   def handle(conn, {:held_watchers}), do: held_watchers(conn)
 
+  def handle(conn, {:live_context, watcher_ids, %DateTime{} = now})
+      when is_list(watcher_ids) and length(watcher_ids) <= @max_live_watchers do
+    if Enum.all?(watcher_ids, &is_binary/1),
+      do: live_context(conn, watcher_ids, now),
+      else: {:error, {:invalid, :watcher_ids}}
+  end
+
+  def handle(conn, {:settle_live, watcher_id, call, result, %DateTime{} = now})
+      when is_binary(watcher_id) and is_map(call) do
+    if live_result?(result) and live_call?(call) do
+      CuesSql.with_immediate_transaction(conn, fn ->
+        record_live(conn, watcher_id, call, result, now)
+      end)
+    else
+      {:error, {:invalid, :live_result}}
+    end
+  end
+
   def handle(_conn, request), do: {:error, {:unknown_request, request}}
 
   defp valid_result?({:pass, reason, hint}) when is_binary(reason) and reason != "",
@@ -152,6 +194,24 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
        do: true
 
   defp valid_result?(_result), do: false
+
+  # A pass is not settled here: it is written with its cue (`{:pass_live, …}`).
+  defp live_result?({kind, _detail} = result) when kind in [:drop | @live_failures],
+    do: valid_result?(result)
+
+  defp live_result?(_result), do: false
+
+  @doc "Whether `call` is a live call as `record_live/5` writes it."
+  @spec live_call?(term()) :: boolean()
+  def live_call?(%{id: id, session_id: session, started_at: %DateTime{}} = call)
+      when is_binary(id) and is_binary(session),
+      do:
+        Enum.all?(
+          [:provider, :model],
+          &(is_binary(Map.get(call, &1)) or is_nil(Map.get(call, &1)))
+        )
+
+  def live_call?(_call), do: false
 
   # --- claim ------------------------------------------------------------------------
 
@@ -235,20 +295,17 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
 
   defp fetch_watcher(conn, watcher_id) do
     sql = """
-    SELECT id, name, purpose, filter_provider, filter_model, task_job_id, filter_failures,
-      filter_budget
+    SELECT id, name, purpose, task_job_id, filter_failures, filter_budget
     FROM cue_watchers WHERE id = ?
     """
 
     case CuesSql.query_all(conn, sql, [watcher_id]) do
-      {:ok, [[id, name, purpose, provider, model, job_id, failures, budget]]} ->
+      {:ok, [[id, name, purpose, job_id, failures, budget]]} ->
         {:ok,
          %{
            id: id,
            name: name,
            purpose: purpose,
-           filter_provider: provider,
-           filter_model: model,
            task_job_id: job_id,
            filter_failures: failures,
            filter_budget: budget
@@ -331,23 +388,16 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
     end
   end
 
+  # The call's provider and model stay null here: every call uses the one Cues
+  # filter model, which the task resolves when it runs.
   defp insert_call(conn, call_id, watcher, delivery_id, session_id, now) do
     CuesSql.execute(
       conn,
       """
-      INSERT INTO cue_filter_calls (id, watcher_id, delivery_id, provider, model, session_id,
-        started_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO cue_filter_calls (id, watcher_id, delivery_id, session_id, started_at)
+      VALUES (?, ?, ?, ?, ?)
       """,
-      [
-        call_id,
-        watcher.id,
-        delivery_id,
-        watcher.filter_provider,
-        watcher.filter_model,
-        session_id,
-        CuesSql.stamp(now)
-      ]
+      [call_id, watcher.id, delivery_id, session_id, CuesSql.stamp(now)]
     )
   end
 
@@ -482,36 +532,22 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
   defp apply_result(conn, call_id, target, {:pass, reason, hint}, now) do
     patch = %{decision_reason: reason, hint: hint, ready_at: now}
 
-    with :ok <- move(conn, target, call_id, "passed", patch),
-         :ok <- clear_failures(conn, target.watcher_id) do
-      {:ok, succeeded(target, :passed, %{passed?: true})}
+    with :ok <- move(conn, target, call_id, "passed", patch) do
+      watcher_succeeded(conn, target, :passed, %{passed?: true})
     end
   end
 
   defp apply_result(conn, call_id, target, {:drop, reason}, now) do
     patch = %{decision_reason: reason, settled_at: now}
 
-    with :ok <- move(conn, target, call_id, "dropped", patch),
-         :ok <- clear_failures(conn, target.watcher_id) do
-      {:ok, succeeded(target, :dropped, %{})}
+    with :ok <- move(conn, target, call_id, "dropped", patch) do
+      watcher_succeeded(conn, target, :dropped, %{})
     end
   end
 
   defp apply_result(conn, call_id, target, {:provider_failure, _failure}, now) do
-    failures = target.failures + 1
-    retry_at = DateTime.add(now, Map.get(@provider_backoff_s, failures, @held_backoff_s), :second)
-
-    with :ok <- move(conn, target, call_id, "pending", %{filter_call_id: nil}),
-         :ok <- add_failure(conn, target.watcher_id, retry_at) do
-      held? = failures >= @held_after
-
-      {:ok,
-       outcome(target, if(held?, do: :held, else: :retry), %{
-         held?: held?,
-         held_now?: failures == @held_after,
-         filter_failures: failures,
-         retry_at: retry_at
-       })}
+    with :ok <- move(conn, target, call_id, "pending", %{filter_call_id: nil}) do
+      watcher_failed(conn, target, now)
     end
   end
 
@@ -549,6 +585,31 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
       to,
       patch
     )
+  end
+
+  # The watcher's side of a decision, the same for a stored call and a live
+  # one: a pass or a drop clears its failures; a provider failure is its next
+  # failure in a row, backed off, and from the third it is held.
+  defp watcher_succeeded(conn, target, result, extra) do
+    with :ok <- clear_failures(conn, target.watcher_id),
+         do: {:ok, succeeded(target, result, extra)}
+  end
+
+  defp watcher_failed(conn, target, now) do
+    failures = target.failures + 1
+    retry_at = DateTime.add(now, Map.get(@provider_backoff_s, failures, @held_backoff_s), :second)
+
+    with :ok <- add_failure(conn, target.watcher_id, retry_at) do
+      held? = failures >= @held_after
+
+      {:ok,
+       outcome(target, if(held?, do: :held, else: :retry), %{
+         held?: held?,
+         held_now?: failures == @held_after,
+         filter_failures: failures,
+         retry_at: retry_at
+       })}
+    end
   end
 
   defp succeeded(target, result, extra) do
@@ -627,6 +688,128 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
     case CuesSql.query_all(conn, sql, [watcher_id]) do
       {:ok, [[count]]} -> {:ok, count}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # --- live calls (M60_CUE_INTAKE_AT_SCALE.md §3.2) --------------------------------------
+
+  @doc """
+  Writes one live call's end inside the caller's transaction: its ledger row
+  (`delivery_id` null), then the watcher's side as the stored settle does (a
+  pass or a drop clears its failures, a provider failure backs it off and
+  holds it from the third). A content failure is the item's: nothing is
+  written on the watcher. Both are written once: when the call's row is
+  already there (a write sent again after a timeout that still ran), nothing
+  is written and the answer reads the watcher as that first write left it.
+  Returns the settle's outcome keys (`settle_outcome/0`) without `waiting`,
+  with `result` `:passed`, `:dropped`, `:retry`, `:held` or `:failed`. A
+  watcher removed since is no error: its fields default and no watcher row
+  changes.
+  """
+  @spec record_live(conn(), String.t(), map(), live_result(), DateTime.t()) ::
+          {:ok, map()} | {:error, term()}
+  def record_live(conn, watcher_id, call, result, %DateTime{} = now)
+      when is_binary(watcher_id) and is_map(call) do
+    with {:ok, target} <- live_target(conn, watcher_id, call),
+         :ok <- insert_live_call(conn, watcher_id, call, result, now),
+         {:ok, inserted} <- CuesSql.changes(conn) do
+      if inserted == 1,
+        do: live_outcome(conn, target, result, now),
+        else: {:ok, recorded_outcome(target, result)}
+    end
+  end
+
+  defp live_outcome(conn, target, {:pass, _reason, _hint}, _now),
+    do: watcher_succeeded(conn, target, :passed, %{passed?: true})
+
+  defp live_outcome(conn, target, {:drop, _reason}, _now),
+    do: watcher_succeeded(conn, target, :dropped, %{})
+
+  defp live_outcome(conn, target, {:provider_failure, _failure}, now),
+    do: watcher_failed(conn, target, now)
+
+  defp live_outcome(_conn, target, {:content_failure, _failure}, _now),
+    do: {:ok, outcome(target, :failed, %{})}
+
+  # The call's row was there already, so its first write wrote the watcher's
+  # side too. A watcher at its third failure still reads `held_now?`, so the
+  # hold's notice (sent once per hold) is not lost with the first answer.
+  defp recorded_outcome(target, {:provider_failure, _failure}) do
+    held? = target.failures >= @held_after
+
+    outcome(target, if(held?, do: :held, else: :retry), %{
+      held_now?: target.failures == @held_after,
+      retry_at: target.retry_at
+    })
+  end
+
+  defp recorded_outcome(target, {:pass, _reason, _hint}),
+    do: outcome(target, :passed, %{passed?: true})
+
+  defp recorded_outcome(target, {:drop, _reason}), do: outcome(target, :dropped, %{})
+  defp recorded_outcome(target, {:content_failure, _failure}), do: outcome(target, :failed, %{})
+
+  defp live_target(conn, watcher_id, call) do
+    sql =
+      "SELECT name, task_job_id, filter_failures, filter_retry_at FROM cue_watchers WHERE id = ?"
+
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, [watcher_id]),
+         [name, job_id, failures, stored_retry] = List.first(rows, [nil, nil, 0, nil]),
+         {:ok, retry_at} <- CuesSql.read_stamp(stored_retry, "cue_watchers", :filter_retry_at) do
+      {:ok,
+       %{
+         watcher_id: watcher_id,
+         watcher_name: name,
+         task_job_id: job_id,
+         failures: failures,
+         retry_at: retry_at,
+         delivery_id: nil,
+         cue_id: nil,
+         source_ref: Map.get(call, :source_ref),
+         attempts: Map.get(call, :attempt, 0)
+       }}
+    end
+  end
+
+  defp insert_live_call(conn, watcher_id, call, result, now) do
+    CuesSql.execute(
+      conn,
+      """
+      INSERT INTO cue_filter_calls (id, watcher_id, delivery_id, provider, model, session_id,
+        started_at, finished_at, result, error)
+      VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (id) DO NOTHING
+      """,
+      [
+        call.id,
+        watcher_id,
+        Map.get(call, :provider),
+        Map.get(call, :model),
+        call.session_id,
+        CuesSql.stamp(call.started_at),
+        CuesSql.stamp(now),
+        result_text(result),
+        error_text(result)
+      ]
+    )
+  end
+
+  defp live_context(conn, watcher_ids, now) do
+    Enum.reduce_while(watcher_ids, {:ok, %{}}, fn id, {:ok, acc} ->
+      case watcher_context(conn, id, now) do
+        {:ok, context} -> {:cont, {:ok, Map.put(acc, id, context)}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp watcher_context(conn, watcher_id, now) do
+    sql = "SELECT count(*) FROM cue_filter_calls WHERE watcher_id = ? AND started_at > ?"
+
+    with {:ok, instructions} <- instructions(conn, watcher_id),
+         {:ok, examples} <- examples(conn, watcher_id),
+         {:ok, [[used]]} <- CuesSql.query_all(conn, sql, [watcher_id, budget_window(now)]) do
+      {:ok, %{instructions: instructions, examples: examples, used: used}}
     end
   end
 

@@ -259,7 +259,7 @@ daemon onto anything else.
 | `cues.sources.token.new` | `ref` | A fresh token for a local push source, returned once, as `{ref, token}`. The old one stops working within a minute. Minimum version `2`. |
 | `cues.sources.url.get` | `ref` | A webhook source's address, `{ref, url, path}`: made on the first call and the same on every later one. Minimum version `2`. |
 | `cues.watchers.list` | none | Every watcher as a row, oldest first, at most 200, with `window_s` (86400) and `truncated`. Minimum version `2`. |
-| `cues.watchers.get` | `name` | One watcher's row plus its `purpose`, its `instructions` and how many of its examples are marked each way. Minimum version `2`. |
+| `cues.watchers.get` | `name` | One watcher's row plus its `purpose`, its words to listen for (`listen_for`), its `instructions` and how many of its examples are marked each way. Minimum version `2`. |
 | `cues.mandates.list` | none | Every mandate as a row, at most 64, plus `can_add` and `limits` (`max_mandates`). Minimum version `2`. |
 | `cues.mandates.choices` | none | What a mandate form offers: the jobs that run on cues, each with the watcher that wakes it and the mandate that names it, and the installed, enabled `http` plugin tools. Minimum version `2`. |
 | `cues.mandates.add` | `name`, `values` | Saves a new mandate and answers `{mandate}`. Durations travel as whole seconds (`approve_within_s`, `max_cue_age_s`). Minimum version `2`. |
@@ -1002,16 +1002,19 @@ Notes that the shapes alone do not carry:
   home-alerts.").
 - **`cues` is the cue section**, under pane `cues`: `cues_enabled` (the cue tree
   starts at boot, so `restart` is true), `cues_mandates_enabled` (read at every
-  mandate call), `filter_provider` and `filter_model` (the default filter
-  model, read at every filter call) and `cues_door_port` (`advanced`, 1024 to
-  65535, always on 127.0.0.1). The rows carry their explanations in `info`
-  and no `footer`. `filter_provider` offers `""`, the main model, labelled with
-  it ("Main model (Anthropic · claude-sonnet-5-5)"), then only the providers
-  that are set up; a saved provider that is no longer set up stays, disabled
-  with its hint, so the value is always an option. `filter_model` offers the
-  chosen provider's catalog as suggestions. With neither set, every filter runs on the main model. The two
-  are applied together in one `settings.apply`, both or `""` for both; either
-  alone is refused with "Pick a provider and a model, or clear both."
+  mandate call), `filter_provider` and `filter_model` (the Cues filter model,
+  the one every watcher's filter uses, read at every filter call) and
+  `cues_door_port` (`advanced`, 1024 to 65535, always on 127.0.0.1). The rows
+  carry their explanations in `info` and no `footer`; the filter model's says
+  a smaller, faster model works well. `filter_provider` offers `""`, the
+  default, labelled with the main model it resolves to ("Default: your main
+  model (Anthropic · claude-sonnet-5-5)"), then only the providers that are set
+  up; a saved provider that is no longer set up stays, disabled with its hint,
+  so the value is always an option. `filter_model` offers the chosen provider's
+  catalog as suggestions. With neither set, every filter runs on the main
+  model. The two are applied together in one `settings.apply`, both or `""`
+  for both; either alone is refused with "Pick a provider and a model, or
+  clear both."
 - **Every cue write goes through the setup page's own path**, so the outside
   edit refusal (`external_change`), the baseline re-record, the secret
   take-back and the source workers' reconcile apply identically from either
@@ -1045,11 +1048,19 @@ Notes that the shapes alone do not carry:
   them. A webhook's address is returned by `cues.sources.url.get` alone, on
   every ask, and is never on a list.
 - **A watcher row is read-only**: watchers are made and changed in a chat with
-  Fermix. `state` is `on`, `paused` or `held` (its filter cannot reach its
-  model); an `llm` watcher with no model of its own filters with the default
-  filter model, else the main model. `purpose` and `instructions` are the
-  owner's own words and are on `cues.watchers.get` alone; examples are
-  counted, never shown; reasons and hints never cross.
+  Fermix, and every `llm` watcher filters with the one Cues filter model.
+  `state` is `on`, `paused`, `needs_update` or `held` (its filter cannot reach
+  its model). `needs_update` is a watcher saved before a rule every save now
+  keeps, which gets nothing until a change in chat: one that filters needs
+  words to listen for ("Needs words to listen for: update it in chat."), and
+  one with no filter cannot listen to a stream ("Passes everything, so it
+  can't listen to a stream: give it a filter in chat."). `counts` cover
+  `window_s`: `offered` is every item the watcher's words let through, kept or
+  not; a stream keeps only what passes, so its watchers' `offered`, `dropped`
+  and `failed` are counted by the hour rather than stored. `purpose`,
+  `listen_for` and `instructions` are the owner's own words and are on
+  `cues.watchers.get` alone; examples are counted, never shown; reasons and
+  hints never cross.
 - **A mandate row carries its load and its approval.** `load` is `active`, or
   `inactive` with the check's sentence; `approval.state` is `unapproved`,
   `approved`, `changed` or `disabled`, null where memory is off. A client

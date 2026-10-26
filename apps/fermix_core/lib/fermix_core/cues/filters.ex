@@ -1,6 +1,9 @@
 defmodule FermixCore.Cues.Filters do
   @moduledoc """
-  The one filter dispatcher for every `llm` watcher (M60 §8.3, PLAN §4.2).
+  The filter dispatcher for the stored deliveries of every `llm` watcher (M60
+  §8.3, PLAN §4.2): a feed's, a webhook's and a local push's. A stream's items
+  are judged before they are stored, by `Cues.LiveFilters`, with four calls of
+  its own, so neither pool starves the other.
 
   Woken by `wake/0` after deliveries commit, by a timer when a backoff or a
   cue's retry falls due, and by a 60 s sweep that finds whatever a lost
@@ -287,10 +290,9 @@ defmodule FermixCore.Cues.Filters do
       delivery_id: claim.delivery.id,
       cue_id: claim.cue.id,
       source_ref: claim.cue.source_ref,
-      attempt: claim.delivery.filter_attempts,
-      provider: claim.watcher.filter_provider,
-      model: claim.watcher.filter_model
+      attempt: claim.delivery.filter_attempts
     }
+    |> Map.merge(Llm.configured())
   end
 
   defp task_context(state) do

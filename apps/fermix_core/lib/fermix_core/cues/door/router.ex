@@ -44,7 +44,9 @@ defmodule FermixCore.Cues.Door.Router do
        result.
 
   A refusal writes nothing except a coalesced count in `Cues.Buckets`, and only
-  for a configured source. Options (copied to `conn.assigns.door`): `:ingest`,
+  for a configured source. Every `503` (the door busy, a secret that cannot be
+  read, a store that failed or did not answer in time) carries `Retry-After`
+  (M60_CUE_INTAKE_AT_SCALE.md §3.5). Options (copied to `conn.assigns.door`): `:ingest`,
   `:clock` (monotonic milliseconds), `:now` (the receipt `DateTime`), both
   zero-arity functions, and `:load_secret` (`(ref, field) -> {:ok, secret}`).
   """
@@ -70,6 +72,8 @@ defmodule FermixCore.Cues.Door.Router do
   # ever returns nothing.
   @max_body_reads div(@max_body_bytes, @read_chunk_bytes) + 2
   @funnel_header "tailscale-funnel-request"
+  # Seconds a client waits before it tries a 503 again.
+  @retry_after_s "5"
 
   @unauthorized "This request is not authorized for that source."
   @busy "The door is busy; try again shortly."
@@ -102,7 +106,7 @@ defmodule FermixCore.Cues.Door.Router do
 
       {:refuse, status, reason, message} ->
         count_refusal(known, ref, reason)
-        send_json(conn, status, %{"error" => message})
+        send_refusal(conn, status, message)
     end
   end
 
@@ -381,7 +385,7 @@ defmodule FermixCore.Cues.Door.Router do
 
       {:refuse, status, reason, message} ->
         count_refusal(known, ref, reason)
-        send_json(conn, status, %{"error" => message})
+        send_refusal(conn, status, message)
     end
   end
 
@@ -535,6 +539,14 @@ defmodule FermixCore.Cues.Door.Router do
 
   defp clock(opts),
     do: Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end)
+
+  defp send_refusal(conn, 503, message) do
+    conn
+    |> put_resp_header("retry-after", @retry_after_s)
+    |> send_json(503, %{"error" => message})
+  end
+
+  defp send_refusal(conn, status, message), do: send_json(conn, status, %{"error" => message})
 
   defp send_json(conn, status, body) do
     conn

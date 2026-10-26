@@ -52,8 +52,8 @@ defmodule FermixCore.Cues.Filter.LlmTest do
       Application.put_env(:fermix_core, :agent, agent)
     end)
 
-    # A primary that resolves, the main model a watcher with no model of its
-    # own and no default filter model runs on.
+    # A primary that resolves: the main model every call runs on while settings
+    # name no filter model.
     Application.put_env(:fermix_core, :routing, [])
 
     Application.put_env(:fermix_core, :providers,
@@ -74,7 +74,7 @@ defmodule FermixCore.Cues.Filter.LlmTest do
      }}
   end
 
-  defp claim(watcher_overrides \\ %{}) do
+  defp claim do
     %{
       call_id: "cfc_llmtest",
       session_id: "cue_filter_cwt_llm_20261010_120000_a1b2c3",
@@ -91,18 +91,7 @@ defmodule FermixCore.Cues.Filter.LlmTest do
         payload: Jason.encode!("A new release"),
         snapshot: nil
       },
-      watcher:
-        Map.merge(
-          %{
-            id: "cwt_llm",
-            name: "eng-news",
-            purpose: "Releases.",
-            filter_provider: "openai",
-            filter_model: "gpt-5.4-mini",
-            task_job_id: "job_llm"
-          },
-          watcher_overrides
-        ),
+      watcher: %{id: "cwt_llm", name: "eng-news", purpose: "Releases.", task_job_id: "job_llm"},
       instructions: [],
       examples: []
     }
@@ -118,16 +107,13 @@ defmodule FermixCore.Cues.Filter.LlmTest do
   end
 
   describe "the route" do
-    test "no watcher model and no default filter model: the main model, at low effort" do
-      watcher = %{filter_provider: nil, filter_model: nil}
-
-      assert {:ok, [{%{provider: :openai}, route_opts}]} = Llm.route(claim(watcher).watcher)
+    test "with no filter model in settings: the main model, at low effort" do
+      assert {:ok, [{%{provider: :openai}, route_opts}]} = Llm.route()
       assert Keyword.fetch!(route_opts, :model) == "gpt-5.5"
       assert Keyword.fetch!(route_opts, :reasoning_effort) == :low
+      assert Llm.configured() == %{provider: nil, model: nil}
 
-      assert {:pass, "x", nil} =
-               decide(claim(watcher), turn(~s({"decision":"pass","reason":"x"})))
-
+      assert {:pass, "x", nil} = decide(claim(), turn(~s({"decision":"pass","reason":"x"})))
       assert_received {:chat, _messages, [], opts}
       assert Keyword.fetch!(opts, :model) == "gpt-5.5"
     end
@@ -139,17 +125,15 @@ defmodule FermixCore.Cues.Filter.LlmTest do
       )
 
       assert {:ok, [{%{provider: :openai}, _lead}, {%{provider: :anthropic}, fallback}]} =
-               Llm.route(%{filter_provider: nil, filter_model: nil})
+               Llm.route()
 
       assert Keyword.fetch!(fallback, :model) == "claude-sonnet-5-5"
     end
 
-    test "a provider default with no model names no model: the main model runs" do
+    test "a provider in settings with no model names no model: the main model runs" do
       Application.put_env(:fermix_core, :routing, filter_provider: "anthropic")
 
-      assert {:ok, [{%{provider: :openai}, route_opts}]} =
-               Llm.route(claim(%{filter_provider: nil, filter_model: nil}).watcher)
-
+      assert {:ok, [{%{provider: :openai}, route_opts}]} = Llm.route()
       assert Keyword.fetch!(route_opts, :model) == "gpt-5.5"
     end
 
@@ -159,41 +143,27 @@ defmodule FermixCore.Cues.Filter.LlmTest do
         anthropic: [api_key: "sk-ant-test", primary: true]
       )
 
-      assert {:provider_failure, %{kind: :no_route}} =
-               decide(claim(%{filter_provider: nil, filter_model: nil}), turn("{}"))
-
+      assert {:provider_failure, %{kind: :no_route}} = decide(claim(), turn("{}"))
       refute_received {:chat, _messages, _capabilities, _opts}
     end
 
-    test "the watcher's own model wins over the default" do
+    # M60_CUE_INTAKE_AT_SCALE.md §3.7: one filter model, the Cues setting.
+    test "the filter model in settings is the one every call uses" do
       Application.put_env(:fermix_core, :routing,
         filter_provider: "anthropic",
         filter_model: "claude-haiku-4-5"
       )
 
-      assert {:pass, "Release.", nil} =
-               decide(claim(), turn(~s({"decision":"pass","reason":"Release."})))
-
-      assert_received {:chat, _messages, [], opts}
-      assert Keyword.fetch!(opts, :model) == "gpt-5.4-mini"
-    end
-
-    test "with no watcher model the default filter model is used" do
-      Application.put_env(:fermix_core, :routing,
-        filter_provider: "anthropic",
-        filter_model: "claude-haiku-4-5"
-      )
-
-      watcher = %{filter_provider: nil, filter_model: nil}
-      assert {:drop, "No."} = decide(claim(watcher), turn(~s({"decision":"drop","reason":"No."})))
+      assert Llm.configured() == %{provider: "anthropic", model: "claude-haiku-4-5"}
+      assert {:drop, "No."} = decide(claim(), turn(~s({"decision":"drop","reason":"No."})))
       assert_received {:chat, _messages, [], opts}
       assert Keyword.fetch!(opts, :model) == "claude-haiku-4-5"
     end
 
-    test "an unknown provider on the watcher is a provider failure, no call" do
-      assert {:provider_failure, %{kind: :no_route}} =
-               decide(claim(%{filter_provider: "nope"}), turn("{}"))
+    test "an unknown provider in settings is a provider failure, no call" do
+      Application.put_env(:fermix_core, :routing, filter_provider: "nope", filter_model: "x")
 
+      assert {:provider_failure, %{kind: :no_route}} = decide(claim(), turn("{}"))
       refute_received {:chat, _messages, _capabilities, _opts}
     end
   end
@@ -219,8 +189,12 @@ defmodule FermixCore.Cues.Filter.LlmTest do
     end
 
     test "an Anthropic route gets no format, low effort and no thinking" do
-      watcher = %{filter_provider: "anthropic", filter_model: "claude-haiku-4-5"}
-      decide(claim(watcher), turn(~s({"decision":"pass","reason":"x"})))
+      Application.put_env(:fermix_core, :routing,
+        filter_provider: "anthropic",
+        filter_model: "claude-haiku-4-5"
+      )
+
+      decide(claim(), turn(~s({"decision":"pass","reason":"x"})))
       assert_received {:chat, _messages, [], opts}
       refute Keyword.has_key?(opts, :text_format)
       refute Keyword.has_key?(opts, :response_format)
@@ -240,8 +214,20 @@ defmodule FermixCore.Cues.Filter.LlmTest do
     test "a failover event carries the call's session id" do
       TelemetryCapture.attach([[:fermix, :provider, :failover]], :emitter)
       claim = claim()
-      {:ok, [first]} = Llm.route(claim.watcher)
-      {:ok, [second]} = Llm.route(%{claim.watcher | filter_model: "gpt-5.4"})
+
+      Application.put_env(:fermix_core, :routing,
+        filter_provider: "openai",
+        filter_model: "gpt-5.4-mini"
+      )
+
+      {:ok, [first]} = Llm.route()
+
+      Application.put_env(:fermix_core, :routing,
+        filter_provider: "openai",
+        filter_model: "gpt-5.4"
+      )
+
+      {:ok, [second]} = Llm.route()
 
       assert {:pass, "x", _hint} =
                Llm.decide(claim,

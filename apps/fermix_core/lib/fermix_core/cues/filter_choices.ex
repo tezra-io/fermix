@@ -1,9 +1,10 @@
 defmodule FermixCore.Cues.FilterChoices do
   @moduledoc """
-  What a surface offers for the default filter model (M60 §8.2): the main
-  model, which every filter runs on while no default is set, and the providers
-  that are set up, with their catalog models as suggestions. A provider that is
-  not set up is not offered: a filter on it would fail at its first call.
+  What a surface offers for the Cues filter model (M60 §8.2): the default, the
+  main model, which every filter runs on while none is set, named by what it
+  resolves to (M60_CUE_INTAKE_AT_SCALE.md §3.7), and the providers that are set
+  up, with their catalog models as suggestions. A provider that is not set up
+  is not offered: a filter on it would fail at its first call.
 
   The one reader behind the setup page's Cues tab and the management `cues`
   section, so both offer the same choices under the same labels. Reads the
@@ -19,8 +20,9 @@ defmodule FermixCore.Cues.FilterChoices do
   @type choice :: %{id: String.t(), label: String.t()}
 
   @doc """
-  The label of the empty choice, the main model: "Main model (Anthropic ·
-  claude-sonnet-5-5)", or the provider alone while it has no model chosen.
+  The label of the empty choice, the main model, read from the owner's own
+  settings: "Default: your main model (Anthropic · claude-sonnet-5-5)", or the
+  provider alone while it has no model chosen.
   """
   @spec main_model_label(Source.snapshot()) :: String.t()
   def main_model_label(snapshot) when is_map(snapshot) do
@@ -28,10 +30,10 @@ defmodule FermixCore.Cues.FilterChoices do
 
     case PrimaryConfig.primary_in(providers, Source.core(snapshot, :agent)) do
       {:ok, provider} ->
-        "Main model (#{route_label(provider, Source.provider(snapshot, provider))})"
+        "Default: your main model (#{route_label(provider, Source.provider(snapshot, provider))})"
 
       {:error, :multiple_primary} ->
-        "Main model"
+        "Default: your main model"
     end
   end
 

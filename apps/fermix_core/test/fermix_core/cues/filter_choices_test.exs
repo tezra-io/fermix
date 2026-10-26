@@ -26,6 +26,8 @@ defmodule FermixCore.Cues.FilterChoicesTest do
   defp snapshot(providers, agent \\ []),
     do: %{fermix_core: [providers: providers, agent: agent]}
 
+  # The default option names what it resolves to, from the owner's own
+  # settings (M60_CUE_INTAKE_AT_SCALE.md §3.7): no per-provider list to keep.
   test "the main model is labelled with the primary and the model it runs" do
     snapshot =
       snapshot(
@@ -34,14 +36,14 @@ defmodule FermixCore.Cues.FilterChoicesTest do
       )
 
     assert FilterChoices.main_model_label(snapshot) ==
-             "Main model (#{Descriptor.fetch!(:anthropic).label} · claude-sonnet-5-5)"
+             "Default: your main model (#{Descriptor.fetch!(:anthropic).label} · claude-sonnet-5-5)"
   end
 
   test "a primary with no model chosen yet is named alone" do
     snapshot = snapshot(openai_codex: [primary: true])
 
     assert FilterChoices.main_model_label(snapshot) ==
-             "Main model (#{Descriptor.fetch!(:openai_codex).label})"
+             "Default: your main model (#{Descriptor.fetch!(:openai_codex).label})"
   end
 
   test "two primaries name no model rather than guess one" do
@@ -51,7 +53,7 @@ defmodule FermixCore.Cues.FilterChoicesTest do
         openai: [api_key: "sk-invented", primary: true]
       )
 
-    assert FilterChoices.main_model_label(snapshot) == "Main model"
+    assert FilterChoices.main_model_label(snapshot) == "Default: your main model"
   end
 
   test "only the providers that are set up are offered, in catalog order" do

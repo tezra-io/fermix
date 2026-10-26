@@ -810,9 +810,9 @@ defmodule FermixCore.Management.CopyTest do
       name: "release-watch",
       enabled?: true,
       filter: "llm",
-      filter_provider: nil,
-      filter_model: nil,
       held?: false,
+      needs_update: nil,
+      offered: 56,
       waiting: 12,
       passed: 3,
       dropped: 41,
@@ -834,6 +834,8 @@ defmodule FermixCore.Management.CopyTest do
           %{base | enabled?: false},
           %{base | held?: true},
           %{base | held?: true, waiting: 1},
+          %{base | needs_update: :words},
+          %{base | filter: "none", needs_update: :filter},
           %{base | filter: "none"}
         ] do
       CueWatcherRow.build(watcher, %{window_s: 86_400})

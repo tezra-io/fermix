@@ -1,12 +1,18 @@
 defmodule FermixCore.Cues.SourceManagerTest do
   # Each test runs its own manager and DynamicSupervisor under unique names,
-  # with stand-in workers that report to the test: no poller, no socket.
+  # with stand-in workers that report to the test: no poller, no socket. The
+  # tests that crash a source out, the one case the manager writes a row, have
+  # their own temp Repo.
   use ExUnit.Case, async: true
 
   import ExUnit.CaptureLog
+  import FermixTestSupport.CueFixtures, only: [start_repo: 1]
 
   alias FermixCore.Cues.SourceManager
   alias FermixCore.Cues.SourceSupervisor
+  alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.CuesSql
+  alias FermixTestSupport.TelemetryCapture
 
   @wait_ms 10_000
 
@@ -52,19 +58,22 @@ defmodule FermixCore.Cues.SourceManagerTest do
 
   defp set_sources(ctx, sources), do: Agent.update(ctx.sources, fn _old -> sources end)
 
-  defp start_manager(ctx) do
+  defp start_manager(ctx, opts \\ []) do
     test = self()
 
-    start_supervised!(
-      {SourceManager,
-       name: ctx.name,
-       supervisor: ctx.supervisor,
-       sources: fn -> Agent.get(ctx.sources, & &1) end,
-       workers: %{feed: FakeWorker, stream: FakeWorker},
-       worker_opts: [test: test],
-       schedule: fn message, ms -> send(test, {:scheduled, message, ms}) end,
-       notify: fn ref, kind, data, _opts -> send(test, {:notice, ref, kind, data}) && :sent end}
-    )
+    defaults = [
+      name: ctx.name,
+      clock: fn -> ~U[2026-10-12 22:51:00Z] end,
+      supervisor: ctx.supervisor,
+      sources: fn -> Agent.get(ctx.sources, & &1) end,
+      workers: %{feed: FakeWorker, stream: FakeWorker},
+      worker_opts: [test: test],
+      schedule: fn message, ms -> send(test, {:scheduled, message, ms}) end,
+      notify: fn ref, kind, data, _opts -> send(test, {:notice, ref, kind, data}) && :sent end
+    ]
+
+    repo = if ctx[:repo], do: [repo: ctx.repo], else: []
+    start_supervised!({SourceManager, defaults |> Keyword.merge(repo) |> Keyword.merge(opts)})
   end
 
   defp reconcile(ctx) do
@@ -152,30 +161,60 @@ defmodule FermixCore.Cues.SourceManagerTest do
     assert_received {:worker_started, "blog", ^restarted, %{interval: 600}}
   end
 
-  test "a crashed worker is restarted after a delay; after five crashes in an hour it stays " <>
-         "down and the owner is told",
-       ctx do
-    set_sources(ctx, [source("blog", :feed)])
-    start_manager(ctx)
-    assert_receive {:worker_started, "blog", worker, _source}
+  describe "a source that keeps crashing" do
+    setup do
+      %{repo: repo} = start_repo("source_manager")
+      %{repo: repo}
+    end
 
-    capture_log(fn ->
-      last =
-        Enum.reduce([1_000, 2_000, 4_000, 8_000], worker, fn delay, current ->
-          crash(current)
-          assert_receive {:scheduled, {:restart, "blog", _token} = restart, ^delay}
-          assert SourceManager.workers(ctx.name) == %{"blog" => :restarting}
-          send(GenServer.whereis(ctx.name), restart)
-          assert_receive {:worker_started, "blog", next, _source}, @wait_ms
-          next
-        end)
+    test "a crashed worker is restarted after a delay; after five crashes in an hour it stays " <>
+           "down, its row reads stopped and the owner is told",
+         ctx do
+      set_sources(ctx, [source("blog", :feed)])
+      start_manager(ctx)
+      assert_receive {:worker_started, "blog", worker, _source}
 
-      crash(last)
-      assert_receive {:notice, "blog", :unreachable, %{reason: "crashed"}}, @wait_ms
-    end)
+      capture_log(fn -> crash_five_times(ctx, worker) end)
 
-    refute_received {:scheduled, {:restart, "blog", _token}, _delay}
-    assert SourceManager.workers(ctx.name) == %{"blog" => :stopped}
+      refute_received {:scheduled, {:restart, "blog", _token}, _delay}
+      assert SourceManager.workers(ctx.name) == %{"blog" => :stopped}
+
+      assert {:ok, %{status: "stopped"}} =
+               Repo.cues_call(CuesSql, {:get_source, "blog"}, server: ctx.repo)
+    end
+
+    test "a stopped row that cannot be written is traced, and the manager runs on", ctx do
+      TelemetryCapture.attach([[:fermix, :cue, :lifecycle]], source_ref: "blog")
+      stalled = start_supervised!(FermixTestSupport.StalledRepo)
+      set_sources(ctx, [source("blog", :feed)])
+      start_manager(ctx, repo: stalled, repo_timeout_ms: 50)
+      assert_receive {:worker_started, "blog", worker, _source}
+
+      log = capture_log(fn -> crash_five_times(ctx, worker) end)
+
+      assert log =~ "its stopped status could not be written: :repo_timeout"
+      assert SourceManager.workers(ctx.name) == %{"blog" => :stopped}
+
+      assert_received {:telemetry, [:fermix, :cue, :lifecycle], _m,
+                       %{phase: :ingest_error, error_class: "repo_timeout"}}
+    end
+  end
+
+  # Four crashes each restarted after its delay, then the fifth, which leaves
+  # the source stopped once the owner is told.
+  defp crash_five_times(ctx, worker) do
+    last =
+      Enum.reduce([1_000, 2_000, 4_000, 8_000], worker, fn delay, current ->
+        crash(current)
+        assert_receive {:scheduled, {:restart, "blog", _token} = restart, ^delay}
+        assert SourceManager.workers(ctx.name) == %{"blog" => :restarting}
+        send(GenServer.whereis(ctx.name), restart)
+        assert_receive {:worker_started, "blog", next, _source}, @wait_ms
+        next
+      end)
+
+    crash(last)
+    assert_receive {:notice, "blog", :unreachable, %{reason: "crashed"}}, @wait_ms
   end
 
   test "workers left under the supervisor by an earlier manager are ended at start", ctx do

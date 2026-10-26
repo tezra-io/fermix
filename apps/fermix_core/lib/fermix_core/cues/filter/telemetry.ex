@@ -13,6 +13,12 @@ defmodule FermixCore.Cues.Filter.Telemetry do
   carry it too; and one closer ends it, after the decision is written:
   `run_complete` with the decision, or `run_error` with what went wrong.
 
+  A stream item is judged before it is stored (`Cues.LiveFilters`,
+  M60_CUE_INTAKE_AT_SCALE.md §3.2): its run is live (`live?: true`, traced as
+  `live: true`) and names no delivery or cue until a pass writes them, so only
+  the closer after a pass carries them. The phases of a live call are counted,
+  not emitted per item (`Cues.Telemetry`), except a pass's.
+
   Ids, labels and sizes only: the cue's text, the decision's reason and the
   hint never reach a field here (the provider call's own input and output follow
   the content switch, as every provider call's do).
@@ -50,14 +56,19 @@ defmodule FermixCore.Cues.Filter.Telemetry do
     }
   ]
 
-  @typedoc "What every bookend names: the call, its session and the delivery it decides."
+  @typedoc """
+  What every bookend names: the call, its session and what it decides. A
+  stored call's run needs its `delivery_id` and `cue_id`; a live run
+  (`live?: true`) has them only once a pass wrote them.
+  """
   @type run :: %{
           required(:session_id) => String.t(),
           required(:call_id) => String.t(),
           required(:watcher_id) => String.t(),
-          required(:delivery_id) => pos_integer(),
-          required(:cue_id) => pos_integer(),
           required(:source_ref) => String.t(),
+          optional(:delivery_id) => pos_integer() | nil,
+          optional(:cue_id) => pos_integer() | nil,
+          optional(:live?) => boolean(),
           optional(:attempt) => non_neg_integer(),
           optional(:provider) => String.t() | nil,
           optional(:model) => String.t() | nil
@@ -118,13 +129,20 @@ defmodule FermixCore.Cues.Filter.Telemetry do
       session_id: session_id,
       filter_call_id: call_id,
       watcher_id: watcher_id,
-      delivery_id: Map.fetch!(run, :delivery_id),
-      cue_id: Map.fetch!(run, :cue_id),
       source_ref: Map.fetch!(run, :source_ref),
       attempt: Map.get(run, :attempt),
       provider: Map.get(run, :provider),
       model: Map.get(run, :model)
     }
+    |> Map.merge(decided(run))
     |> Map.reject(fn {_key, value} -> is_nil(value) end)
   end
+
+  # What the call decides: a stored delivery, or a live item that has a
+  # delivery and a cue only once a pass wrote them.
+  defp decided(%{live?: true} = run),
+    do: %{live: true, delivery_id: Map.get(run, :delivery_id), cue_id: Map.get(run, :cue_id)}
+
+  defp decided(run),
+    do: %{delivery_id: Map.fetch!(run, :delivery_id), cue_id: Map.fetch!(run, :cue_id)}
 end

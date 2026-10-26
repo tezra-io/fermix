@@ -9,9 +9,9 @@ defmodule FermixCore.Cues.Filter.Llm do
 
   ## The model
 
-  The watcher's `filter_model` (with its `filter_provider`, or the primary's
-  when none is named) when set, else `[fermix_core.routing] filter_*` through
-  `RoutingOverrides.filter/0`, else the main model: `Selection.ordered_routes/0`,
+  One filter model for every watcher (M60_CUE_INTAKE_AT_SCALE.md §3.7):
+  `[fermix_core.routing] filter_*` through `RoutingOverrides.filter/0`, else
+  the main model: `Selection.ordered_routes/0`,
   the primary with its failover chain, as every other unpinned model choice
   inherits it. A route needs a model; a provider alone names none, so a default
   with no model leaves the main model. The effort is `filter_reasoning_effort`
@@ -87,14 +87,14 @@ defmodule FermixCore.Cues.Filter.Llm do
   seams `:adapter` (a module used in place of `Adapter.for_route/1` for the
   resolved route), `:adapter_opts` (merged into the call opts),
   `:retry_delay_fn` (the same-provider retry's sleep) and `:routes` (a route
-  chain run in place of `route/1`'s one route, for a test of the failover
+  chain run in place of `route/0`'s one route, for a test of the failover
   path).
   """
   @spec decide(map(), keyword()) :: result()
   def decide(%{watcher: watcher} = claim, opts) when is_map(watcher) and is_list(opts) do
     session_id = Keyword.fetch!(opts, :session_id)
 
-    with {:ok, routes} <- routes(watcher, opts),
+    with {:ok, routes} <- routes(opts),
          {:ok, turn} <- call(routes, Prompt.messages(claim), session_id, opts) do
       classify_turn(turn)
     else
@@ -103,38 +103,49 @@ defmodule FermixCore.Cues.Filter.Llm do
   end
 
   @doc """
-  The route chain one call of `watcher` runs on, effort applied, or why there
-  is none. A bad override in config is a route that cannot resolve, never a
-  crash of the call.
+  The route chain every filter call runs on, effort applied, or why there is
+  none. A bad override in config is a route that cannot resolve, never a crash
+  of the call.
   """
-  @spec route(map()) ::
+  @spec route() ::
           {:ok, [{Adapter.route_key(), keyword()}]} | {:error, {:no_route, String.t()}}
-  def route(watcher) when is_map(watcher) do
+  def route do
     default = RoutingOverrides.filter()
 
-    with {:ok, routes} <- base_routes(pick(watcher, default)) do
+    with {:ok, routes} <- base_routes(pick(default)) do
       {:ok, RoutingOverrides.apply_effort(routes, default.reasoning_effort || @default_effort)}
     end
   rescue
     error in ArgumentError -> {:error, {:no_route, Exception.message(error)}}
   end
 
-  defp routes(watcher, opts) do
-    case Keyword.fetch(opts, :routes) do
-      {:ok, [_ | _] = routes} -> {:ok, routes}
-      :error -> route(watcher)
+  @doc """
+  The filter model the owner configured, as a run records it: its provider and
+  model, both nil when the filter uses the main model.
+  """
+  @spec configured() :: %{provider: String.t() | nil, model: String.t() | nil}
+  def configured do
+    case RoutingOverrides.filter() do
+      %{model: model} = default when is_binary(model) ->
+        %{provider: default.provider && to_string(default.provider), model: model}
+
+      _default ->
+        %{provider: nil, model: nil}
     end
   end
 
-  defp pick(%{filter_model: model} = watcher, _default) when is_binary(model) and model != "" do
-    {:ok, %{provider: Map.get(watcher, :filter_provider), model: model}}
+  defp routes(opts) do
+    case Keyword.fetch(opts, :routes) do
+      {:ok, [_ | _] = routes} -> {:ok, routes}
+      :error -> route()
+    end
   end
 
-  defp pick(_watcher, %{model: model} = default) when is_binary(model) do
+  defp pick(%{model: model} = default) when is_binary(model) do
     {:ok, %{provider: default.provider, model: model}}
   end
 
-  defp pick(_watcher, _default), do: :main_model
+  defp pick(_default), do: :main_model
 
   defp base_routes(:main_model) do
     case Selection.ordered_routes() do

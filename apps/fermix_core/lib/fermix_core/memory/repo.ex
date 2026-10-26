@@ -69,6 +69,7 @@ defmodule FermixCore.Memory.Repo do
   # 44 is reserved.
   @cue_stop_reason_migration_version 45
   @harness_continued_from_migration_version 46
+  @cue_live_intake_migration_version 47
   @sqlite_open_intent :readwritecreate
 
   # The cue SQL modules (M60), one per lane, all served by `cues_call/3`.
@@ -4725,7 +4726,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_cues_migration(conn, versions),
          :ok <- apply_open_loops_migration(conn, versions),
          :ok <- apply_cue_stop_reason_migration(conn, versions),
-         :ok <- apply_harness_continued_from_migration(conn, versions) do
+         :ok <- apply_harness_continued_from_migration(conn, versions),
+         :ok <- apply_cue_live_intake_migration(conn, versions) do
       :ok
     end
   end
@@ -4779,6 +4781,26 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{CuesSql.stop_reason_schema_sql()}
         INSERT INTO schema_migrations(version) VALUES (#{@cue_stop_reason_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # Cue intake at scale (M60_CUE_INTAKE_AT_SCALE.md): a watcher's words to
+  # listen for, one filter model (the per-watcher columns go), a filter call
+  # with no delivery (a stream item judged before it is stored), and the
+  # counts of what was not stored, with its version in one transaction.
+  defp apply_cue_live_intake_migration(conn, versions) do
+    if Enum.member?(versions, @cue_live_intake_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{CuesSql.live_intake_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@cue_live_intake_migration_version});
         COMMIT;
         """
       )

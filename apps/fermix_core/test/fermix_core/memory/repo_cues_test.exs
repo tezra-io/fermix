@@ -5,6 +5,7 @@ defmodule FermixCore.Memory.RepoCuesTest do
   import FermixTestSupport.CueFixtures
 
   alias FermixCore.Cues.Ingest
+  alias FermixCore.Cues.Item
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesDeliveriesSql
   alias FermixCore.Memory.Repo.CuesFilterSql
@@ -76,6 +77,270 @@ defmodule FermixCore.Memory.RepoCuesTest do
     end
   end
 
+  describe "migration 47" do
+    test "gives watchers words, drops their own model, lets a call have no delivery, adds counts",
+         ctx do
+      %{repo: repo, db_path: db_path, conn: conn} = ctx
+      id = insert_watcher(conn, %{name: "w47", filter: "llm", sources: ["s47"]})
+
+      exec!(
+        conn,
+        "INSERT INTO cue_filter_calls (id, watcher_id, delivery_id, session_id, started_at, " <>
+          "result) VALUES ('cfc_47', ?, 7, 's', '2026-10-10T12:00:00Z', 'drop')",
+        [id]
+      )
+
+      # The database as it stood before 47.
+      exec!(conn, "DROP TABLE cue_counts")
+      exec!(conn, "ALTER TABLE cue_watchers DROP COLUMN listen_for")
+      exec!(conn, "ALTER TABLE cue_watchers ADD COLUMN filter_provider TEXT")
+      exec!(conn, "ALTER TABLE cue_watchers ADD COLUMN filter_model TEXT")
+
+      exec!(
+        conn,
+        "UPDATE cue_watchers SET filter_provider = 'openai', filter_model = 'gpt-5-mini'"
+      )
+
+      exec!(conn, "DELETE FROM schema_migrations WHERE version = 47")
+      :ok = stop_supervised(Repo)
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+      assert {:ok, versions} = Repo.migration_versions(server: repo)
+      assert Enum.count(versions, &(&1 == 47)) == 1
+
+      columns =
+        conn |> rows("SELECT name FROM pragma_table_info('cue_watchers')") |> List.flatten()
+
+      assert "listen_for" in columns
+      refute "filter_provider" in columns
+      refute "filter_model" in columns
+
+      assert {:ok, %{listen_for: []}} =
+               Repo.cues_call(CuesWatchersSql, {:get_watcher, {:id, id}}, server: repo)
+
+      assert [["cfc_47", 7, "drop"]] =
+               rows(conn, "SELECT id, delivery_id, result FROM cue_filter_calls")
+
+      # A stream item's call is judged before the item is stored: no delivery.
+      exec!(
+        conn,
+        "INSERT INTO cue_filter_calls (id, watcher_id, session_id, started_at) " <>
+          "VALUES ('cfc_live', ?, 's', '2026-10-10T12:00:00Z')",
+        [id]
+      )
+
+      assert "cue_counts" in table_names(conn)
+    end
+  end
+
+  describe "counts" do
+    test "a flush replaces its incarnation's totals, incarnations sum, old hours fall out",
+         %{repo: repo} do
+      call = &Repo.cues_call(CuesSql, &1, server: repo)
+      hour = ~U[2026-10-10 12:00:00Z]
+
+      row = fn incarnation, counts ->
+        %{scope: "source", ref: "s", hour: hour, incarnation: incarnation, counts: counts}
+      end
+
+      assert {:ok, 1} = call.({:counts_put, [row.("a", %{"received" => 5})], @now})
+      # The same flush sent again after a timeout replaces, never adds.
+      assert {:ok, 1} = call.({:counts_put, [row.("a", %{"received" => 9})], @now})
+
+      assert {:ok, 1} =
+               call.({:counts_put, [row.("b", %{"received" => 2, "unmatched" => 1})], @now})
+
+      old = %{row.("a", %{"received" => 100}) | hour: ~U[2026-10-09 10:00:00Z]}
+      assert {:ok, 1} = call.({:counts_put, [old], @now})
+
+      assert {:ok, %{"s" => %{"received" => 11, "unmatched" => 1}}} =
+               call.({:counts_window, "source", ~U[2026-10-09 12:30:00Z]})
+
+      assert {:ok, %{}} = call.({:counts_window, "watcher", ~U[2026-10-09 12:30:00Z]})
+
+      assert {:error, {:invalid, :counts}} =
+               call.({:counts_put, [row.("a", %{"received" => -1})], @now})
+
+      assert {:ok, 1} = call.({:prune_counts, ~U[2026-10-11 11:00:00Z], 100})
+    end
+  end
+
+  describe "store_item" do
+    test "keeps an item as a receipt with its snapshot, once; its identity answers after", ctx do
+      %{repo: repo, conn: conn} = ctx
+      {:ok, item} = Item.new(%{item_id: "s-1", data: %{"text" => "x"}}, @now)
+      call = &Repo.cues_call(CuesSql, &1, server: repo)
+
+      assert {:ok, id} = call.({:store_item, "stream-a", item, @now})
+      assert {:ok, ^id} = call.({:store_item, "stream-a", item, @now})
+
+      assert [[nil, 0, snapshot]] =
+               rows(conn, "SELECT payload, routed_count, snapshot FROM cues WHERE id = ?", [id])
+
+      assert is_binary(snapshot)
+    end
+  end
+
+  describe "pass_live (M60_CUE_INTAKE_AT_SCALE.md §3.2)" do
+    setup %{conn: conn} do
+      ref = "live-#{System.unique_integer([:positive])}"
+      words = ["orbit"]
+      one = insert_watcher(conn, %{filter: "llm", sources: [ref], listen_for: words})
+      two = insert_watcher(conn, %{filter: "llm", sources: [ref], listen_for: words})
+      item = item!(%{item_id: "p-1", subject: "launch", data: %{"text" => "Orbit reached"}}, @now)
+      %{ref: ref, one: one, two: two, item: item}
+    end
+
+    defp live_call(id),
+      do: %{id: id, session_id: "s-#{id}", started_at: @now, provider: "openai", model: "m-1"}
+
+    defp pass_live(ctx, watcher, call_id) do
+      call = live_call(call_id)
+      request = {:pass_live, ctx.ref, ctx.item, watcher, "On topic.", "launch", call, @now}
+      Repo.cues_call(CuesSql, request, server: ctx.repo)
+    end
+
+    # `n` passed deliveries of the watcher from the source, written in one
+    # transaction on the test's own connection.
+    defp seed_passed(ctx, watcher, n) do
+      at = CuesSql.stamp(@now)
+      exec!(ctx.conn, "BEGIN", [])
+
+      for i <- 1..n do
+        [[cue_id]] =
+          rows(
+            ctx.conn,
+            "INSERT INTO cues (source_ref, item_id, received_at, content_hash, payload, " <>
+              "routed_count, last_seen_at) VALUES (?, ?, ?, ?, '{}', 1, ?) RETURNING id",
+            [ctx.ref, "cap-#{i}", at, "hash-#{i}", at]
+          )
+
+        exec!(
+          ctx.conn,
+          "INSERT INTO cue_deliveries (cue_id, watcher_id, source_ref, received_at, state, " <>
+            "ready_at, valid_until) VALUES (?, ?, ?, ?, 'passed', ?, ?)",
+          [cue_id, watcher, ctx.ref, at, at, "2026-10-17T12:00:00.000000Z"]
+        )
+      end
+
+      exec!(ctx.conn, "COMMIT", [])
+    end
+
+    defp live_rows(ctx) do
+      %{
+        cues:
+          rows(ctx.conn, "SELECT id, payload IS NOT NULL, routed_count, terminal_at FROM cues"),
+        deliveries:
+          rows(
+            ctx.conn,
+            "SELECT cue_id, watcher_id, state, decision_reason, hint, filter_call_id " <>
+              "FROM cue_deliveries ORDER BY id"
+          ),
+        calls:
+          rows(
+            ctx.conn,
+            "SELECT id, watcher_id, delivery_id, provider, model, result, finished_at " <>
+              "FROM cue_filter_calls ORDER BY id"
+          )
+      }
+    end
+
+    test "stores the new cue with its payload, the watcher's passed delivery and the call's " <>
+           "ledger row in one write",
+         ctx do
+      assert {:ok, %{cue_id: cue_id, delivery_id: delivery_id, result: :passed}} =
+               pass_live(ctx, ctx.one, "cfc_a")
+
+      assert is_integer(delivery_id)
+      one = ctx.one
+
+      assert %{
+               cues: [[^cue_id, 1, 1, nil]],
+               deliveries: [[^cue_id, ^one, "passed", "On topic.", "launch", "cfc_a"]],
+               calls: [["cfc_a", ^one, nil, "openai", "m-1", "pass", finished]]
+             } = live_rows(ctx)
+
+      assert finished == CuesSql.stamp(@now)
+    end
+
+    test "two watchers passing one item each get a delivery on one cue, and a retried write " <>
+           "changes nothing",
+         ctx do
+      {:ok, %{cue_id: cue_id, delivery_id: first}} = pass_live(ctx, ctx.one, "cfc_a")
+      {:ok, %{cue_id: ^cue_id, delivery_id: second}} = pass_live(ctx, ctx.two, "cfc_b")
+      assert first != second
+
+      # The first write timed out, still ran, and is sent again: it answers the
+      # delivery it stored. A repeat of the item, judged again, stores none.
+      assert {:ok, %{cue_id: ^cue_id, delivery_id: ^first}} = pass_live(ctx, ctx.one, "cfc_a")
+      assert {:ok, %{cue_id: ^cue_id, delivery_id: nil}} = pass_live(ctx, ctx.one, "cfc_c")
+
+      %{cues: cues, deliveries: deliveries, calls: calls} = live_rows(ctx)
+      assert [[^cue_id, 1, 2, nil]] = cues
+      assert Enum.map(deliveries, &Enum.at(&1, 1)) == [ctx.one, ctx.two]
+      assert Enum.map(calls, &hd/1) == ["cfc_a", "cfc_b", "cfc_c"]
+    end
+
+    test "a pass on a stored receipt keeps that cue, gives it back the item's payload, counts " <>
+           "the delivery and opens it",
+         ctx do
+      {:ok, cue_id} =
+        Repo.cues_call(CuesSql, {:store_item, ctx.ref, ctx.item, @now}, server: ctx.repo)
+
+      exec!(ctx.conn, "UPDATE cues SET payload_bytes = 0 WHERE id = ?", [cue_id])
+
+      assert {:ok, %{cue_id: ^cue_id, delivery_id: id}} = pass_live(ctx, ctx.one, "cfc_a")
+      assert is_integer(id)
+      assert [[^cue_id, 1, 1, nil]] = live_rows(ctx).cues
+
+      assert [[payload, bytes]] =
+               rows(ctx.conn, "SELECT payload, payload_bytes FROM cues WHERE id = ?", [cue_id])
+
+      assert {payload, bytes} == {ctx.item.payload, ctx.item.payload_bytes}
+    end
+
+    test "a pass on a stored item of other content is an identity conflict: a gap, no " <>
+           "delivery, and the call's ledger row",
+         ctx do
+      other = item!(%{item_id: "p-1", subject: "launch", data: %{"text" => "Other text"}}, @now)
+
+      {:ok, cue_id} =
+        Repo.cues_call(CuesSql, {:store_item, ctx.ref, other, @now}, server: ctx.repo)
+
+      assert {:ok, %{cue_id: ^cue_id, delivery_id: nil, conflict?: true, gaps: [gap]}} =
+               pass_live(ctx, ctx.one, "cfc_a")
+
+      assert %{reason: "identity_conflict", watcher_id: nil, count: 1} = gap
+      one = ctx.one
+
+      assert %{cues: [[^cue_id, 0, 0, _terminal]], deliveries: [], calls: [["cfc_a", ^one | _]]} =
+               live_rows(ctx)
+
+      assert {:ok, [%{reason: "identity_conflict", count: 1}]} =
+               Repo.cues_call(CuesSql, {:list_gaps, %{source_ref: ctx.ref}}, server: ctx.repo)
+    end
+
+    test "the inbox cap holds for passes: past 250 waiting, the oldest is evicted", ctx do
+      seed_passed(ctx, ctx.one, 250)
+
+      assert {:ok, %{evicted: [%{delivery_id: evicted}], gaps: [%{reason: "inbox_full"}]}} =
+               pass_live(ctx, ctx.one, "cfc_last")
+
+      assert [["expired", "inbox_full", "cap-1"]] =
+               rows(
+                 ctx.conn,
+                 "SELECT d.state, d.outcome, c.item_id FROM cue_deliveries d " <>
+                   "JOIN cues c ON c.id = d.cue_id WHERE d.id = ?",
+                 [evicted]
+               )
+    end
+
+    test "a call that is not a live call is refused", ctx do
+      request = {:pass_live, ctx.ref, ctx.item, ctx.one, "On topic.", nil, %{id: "x"}, @now}
+      assert {:error, {:invalid, :call}} = Repo.cues_call(CuesSql, request, server: ctx.repo)
+    end
+  end
+
   defp source_columns(conn),
     do: conn |> rows("SELECT name FROM pragma_table_info('cue_sources')") |> List.flatten()
 
@@ -108,8 +373,8 @@ defmodule FermixCore.Memory.RepoCuesTest do
   describe "transition/6" do
     setup %{conn: conn, repo: repo} do
       ref = "cas-#{System.unique_integer([:positive])}"
-      watcher = insert_watcher(conn, %{filter: "llm", sources: [ref]})
-      item = item!(%{item_id: "cas-1", type: "t", data: "x"}, @now)
+      watcher = insert_watcher(conn, %{filter: "llm", sources: [ref], listen_for: ["release"]})
+      item = item!(%{item_id: "cas-1", type: "t", data: "Release notes"}, @now)
 
       {:ok, [:accepted]} =
         Ingest.accept(%{ref: ref, daily_budget: 0}, [item], now: @now, repo: repo)
@@ -225,6 +490,16 @@ defmodule FermixCore.Memory.RepoCuesTest do
                Repo.cues_call(CuesSql, {:source_touch, ref, %{status: "asleep"}, @now},
                  server: repo
                )
+    end
+
+    test "a stream writes its day's count of matched items", %{repo: repo, ref: ref} do
+      touch = &Repo.cues_call(CuesSql, {:source_touch, ref, &1, @now}, server: repo)
+
+      assert {:ok, %{items_today: 12, items_day: "2026-10-10"}} =
+               touch.(%{items_today: 12, items_day: "2026-10-10"})
+
+      assert {:error, {:invalid, :items_day}} = touch.(%{items_day: "yesterday"})
+      assert {:error, {:invalid, :items_today}} = touch.(%{items_today: -1})
     end
 
     test "a stop reason is written with its status and cleared by the next status", %{

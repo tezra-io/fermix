@@ -8,7 +8,9 @@ defmodule FermixCore.Cues.Sweeper do
   tick resumes from the first step. `filtering` and `claimed` deliveries are
   never touched here.
 
-  The first sweep comes after a delay, never from `init`. `timer?: false`
+  The first sweep comes after a delay, never from `init`, and it alone also
+  tells the owner about stored watchers that break a rule
+  (`Cues.Watchers.needs_update_notices/1`, once per watcher). `timer?: false`
   disables the timer; tests then drive `sweep/2` by hand with their own `now`.
   """
 
@@ -17,6 +19,7 @@ defmodule FermixCore.Cues.Sweeper do
   require Logger
 
   alias FermixCore.Cues.Telemetry
+  alias FermixCore.Cues.Watchers
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Timeouts
@@ -38,6 +41,9 @@ defmodule FermixCore.Cues.Sweeper do
     {:delete_receipts, &__MODULE__.delete_receipts/3},
     {:prune_gaps, &__MODULE__.prune_gaps/3},
     {:prune_filter_calls, &__MODULE__.prune_filter_calls/3},
+    # What a stream counted instead of storing, 48 hours after its hour
+    # (M60_CUE_INTAKE_AT_SCALE.md §3.4).
+    {:prune_counts, &__MODULE__.prune_counts/3},
     {:gap_notices, &FermixCore.Cues.Notices.sweep_gaps/3},
     # A waiting proposal past its expiry becomes `expired`; a confirmed one
     # that never reported its result (a crash or restart mid-call) is reported
@@ -56,7 +62,9 @@ defmodule FermixCore.Cues.Sweeper do
   Starts the sweeper. Opts: `:name` (default `__MODULE__`), `:repo` (default
   `Memory.Repo`), `:timer?` (default true), `:clock` (default
   `DateTime.utc_now/0`), `:chunk`, `:budget_ms`, `:monotonic_ms` (a zero-arity
-  function returning monotonic milliseconds, for the budget).
+  function returning monotonic milliseconds, for the budget),
+  `:repo_timeout_ms` (each Repo call's bound, default `Timeouts.repo_call/0`),
+  `:needs_update_notices` (default `Cues.Watchers.needs_update_notices/1`).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts) do
@@ -84,12 +92,16 @@ defmodule FermixCore.Cues.Sweeper do
   def init(opts) do
     state = %{
       repo: Keyword.get(opts, :repo, Repo),
+      repo_timeout_ms: Keyword.get(opts, :repo_timeout_ms, Timeouts.repo_call()),
       clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
       chunk: Keyword.get(opts, :chunk, @chunk),
       budget_ms: Keyword.get(opts, :budget_ms, @budget_ms),
       monotonic_ms:
         Keyword.get(opts, :monotonic_ms, fn -> System.monotonic_time(:millisecond) end),
-      timer?: Keyword.get(opts, :timer?, true)
+      timer?: Keyword.get(opts, :timer?, true),
+      needs_update_notices:
+        Keyword.get(opts, :needs_update_notices, &Watchers.needs_update_notices/1),
+      told_needs_update?: false
     }
 
     if state.timer?, do: Process.send_after(self(), :sweep, @first_sweep_ms)
@@ -99,18 +111,45 @@ defmodule FermixCore.Cues.Sweeper do
   @impl true
   def handle_call({:sweep, now}, _from, state), do: {:reply, {:ok, run_pass(state, now)}, state}
 
+  # The first tick also tells the owner, once per watcher, about each stored
+  # watcher that breaks a rule of M60_CUE_INTAKE_AT_SCALE.md §3.1
+  # (`Cues.Watchers.needs_update_notices/1`), its Repo calls bounded as every
+  # sweep step's are.
   @impl true
   def handle_info(:sweep, state) do
-    run_pass(state, state.clock.())
+    now = state.clock.()
+    state = tell_needs_update(state, now)
+    run_pass(state, now)
     Process.send_after(self(), :sweep, @interval_ms)
     {:noreply, state}
+  end
+
+  defp tell_needs_update(%{told_needs_update?: true} = state, _now), do: state
+
+  defp tell_needs_update(state, now) do
+    opts = repo_opts(state) ++ [repo: state.repo, now: now]
+
+    case state.needs_update_notices.(opts) do
+      {:ok, _sent} ->
+        :ok
+
+      {:error, reason} ->
+        Telemetry.lifecycle(:sweep_error, %{}, %{
+          reason: :needs_update_notices,
+          result: {:error, reason}
+        })
+
+        Logger.error("Cue needs-update notices failed: #{inspect(reason)}")
+    end
+
+    %{state | told_needs_update?: true}
   end
 
   # --- one pass ------------------------------------------------------------------
 
   defp run_pass(state, now) do
     started = state.monotonic_ms.()
-    repo_opts = Repo.periodic_opts(state.repo, Timeouts.repo_call())
+    repo_opts = repo_opts(state)
 
     Enum.reduce_while(@steps, %{}, fn {name, step}, results ->
       outcome = run_step(state, step, repo_opts, now, started)
@@ -146,6 +185,8 @@ defmodule FermixCore.Cues.Sweeper do
     Logger.error("Cue retention step #{name} failed: #{inspect(reason)}")
     {:error, reason}
   end
+
+  defp repo_opts(state), do: Repo.periodic_opts(state.repo, state.repo_timeout_ms)
 
   # --- the steps -------------------------------------------------------------------
 
@@ -198,6 +239,11 @@ defmodule FermixCore.Cues.Sweeper do
           {:ok, non_neg_integer()} | {:error, term()}
   def prune_filter_calls(repo_opts, now, limit),
     do: sql_step(:prune_filter_calls, repo_opts, now, limit)
+
+  @doc false
+  @spec prune_counts(keyword(), DateTime.t(), pos_integer()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def prune_counts(repo_opts, now, limit), do: sql_step(:prune_counts, repo_opts, now, limit)
 
   defp sql_step(name, repo_opts, now, limit) do
     Repo.cues_call(CuesSql, {name, now, limit}, repo_opts)

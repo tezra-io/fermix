@@ -4,23 +4,36 @@ defmodule FermixCore.Management.Cues.WatcherRow do
   read-only: watchers are made and changed in a consent turn in chat, so the
   row carries no actions.
 
-  `state` is `paused` (switched off), `held` (its filter cannot reach its
-  model) or `on`. An `llm` watcher with no model of its own filters with the
-  default filter model, else the main model, so none waits for one. A watcher is its ids, switches, budgets and
-  counts; `purpose` and `instructions` are the owner's own words and travel on
-  `cues.watchers.get` alone, and examples are counted, never shown. Decision
-  reasons and filter hints never cross: a model wrote them from outside text.
+  `state` is `paused` (switched off), `needs_update` (it breaks a rule a save
+  now enforces, M60_CUE_INTAKE_AT_SCALE.md §3.1, so it gets nothing until a
+  change in chat), `held` (its filter cannot reach its model) or `on`. Every
+  `llm` watcher filters with the one Cues filter model. A watcher is its ids,
+  switches, budgets and counts; `purpose`, `listen_for` and `instructions` are
+  the owner's own words and travel on `cues.watchers.get` alone, and examples
+  are counted, never shown. Decision reasons and filter hints never cross: a
+  model wrote them from outside text.
   """
 
+  alias FermixCore.Cues.Filter.Llm
   alias FermixCore.Cues.Overview
 
-  @states ~w(on paused held)
+  @states ~w(on paused needs_update held)
 
   @type facts :: %{window_s: pos_integer()}
 
   @doc "Every state a watcher row can carry."
   @spec states() :: [String.t()]
   def states, do: @states
+
+  @doc """
+  What a watcher that needs an update (`Cues.Watchers.update_needed/2`) needs,
+  in the owner's words: the row's sentence, and the setup page's.
+  """
+  @spec needs_update_sentence(:words | :filter) :: String.t()
+  def needs_update_sentence(:words), do: "Needs words to listen for: update it in chat."
+
+  def needs_update_sentence(:filter),
+    do: "Passes everything, so it can't listen to a stream: give it a filter in chat."
 
   @doc "The row of one `Cues.Overview` watcher."
   @spec build(Overview.watcher(), facts()) :: map()
@@ -45,6 +58,7 @@ defmodule FermixCore.Management.Cues.WatcherRow do
       "daily_cap" => watcher.daily_cap,
       "filter_budget" => watcher.filter_budget,
       "counts" => %{
+        "offered" => watcher.offered,
         "waiting" => watcher.waiting,
         "passed" => watcher.passed,
         "dropped" => watcher.dropped,
@@ -58,8 +72,9 @@ defmodule FermixCore.Management.Cues.WatcherRow do
 
   @doc """
   The row plus what `cues.watchers.get` adds from the stored watcher
-  (`detail`, `CuesWatchersSql`'s `get_watcher`): its purpose, its active
-  instructions, and how many of its recent examples are marked each way.
+  (`detail`, `CuesWatchersSql`'s `get_watcher`): its purpose, its words to
+  listen for, its active instructions, and how many of its recent examples are
+  marked each way.
   """
   @spec detail(map(), map()) :: map()
   def detail(row, stored) when is_map(row) and is_map(stored) do
@@ -67,6 +82,7 @@ defmodule FermixCore.Management.Cues.WatcherRow do
 
     Map.merge(row, %{
       "purpose" => Map.get(stored, :purpose),
+      "listen_for" => Map.get(stored, :listen_for, []),
       "instructions" =>
         Enum.map(Map.get(stored, :instructions, []), fn instruction ->
           %{
@@ -83,11 +99,13 @@ defmodule FermixCore.Management.Cues.WatcherRow do
   end
 
   defp state(%{enabled?: false}, _facts), do: "paused"
-
+  defp state(%{needs_update: needed}, _facts) when not is_nil(needed), do: "needs_update"
   defp state(%{held?: true}, _facts), do: "held"
   defp state(_watcher, _facts), do: "on"
 
   defp sentence("paused", _watcher), do: "Paused."
+
+  defp sentence("needs_update", watcher), do: needs_update_sentence(watcher.needs_update)
 
   defp sentence("held", %{waiting: 1}),
     do: "Held: it cannot reach its filter model. One item is waiting."
@@ -98,8 +116,14 @@ defmodule FermixCore.Management.Cues.WatcherRow do
   defp sentence("on", %{filter: "none"}), do: "Passes every item to its task."
   defp sentence("on", _watcher), do: "Filtering normally."
 
-  defp filter_model(%{filter_model: model} = watcher) when is_binary(model) and model != "",
-    do: %{"provider" => watcher.filter_provider, "model" => model}
+  # The one Cues filter model every `llm` watcher uses; null when that is the
+  # main model, and for a watcher with no filter.
+  defp filter_model(%{filter: "llm"}) do
+    case Llm.configured() do
+      %{model: nil} -> nil
+      %{provider: provider, model: model} -> %{"provider" => provider, "model" => model}
+    end
+  end
 
   defp filter_model(_watcher), do: nil
 

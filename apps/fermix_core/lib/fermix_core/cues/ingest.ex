@@ -15,10 +15,17 @@ defmodule FermixCore.Cues.Ingest do
      0 = none: a new item past what the source may still send today is
      `:over_budget`, and only items accepted are counted in `cue_sources`),
      receipt or routing, inbox eviction, the coalesced reject counts and their
-     gaps, and `:source_state`;
+     gaps, and `:source_state`. Routing is by words
+     (M60_CUE_INTAKE_AT_SCALE.md §3.1): a `none` watcher gets every item, an
+     `llm` watcher only one its words to listen for match, and an item no
+     watcher took is a receipt;
   5. lifecycle telemetry per result, then the wake-ups: `Cues.Filters` when an
      `llm` watcher got a delivery, `Jobs.Scheduler` when a `none` watcher did.
 
+  Feeds, webhooks and local push come here; a stream's items do not
+  (`Cues.LiveFilters`). The transaction is bounded: a Repo that does not answer
+  in time is `{:error, :repo_timeout}`, never an exit, and the request still
+  runs when the Repo reaches it, so a retried item meets its stored identity.
   Every error is traced (`ingest_error`) before it is returned.
   """
 
@@ -29,6 +36,7 @@ defmodule FermixCore.Cues.Ingest do
   alias FermixCore.Cues.Telemetry
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesSql
+  alias FermixCore.Timeouts
 
   @type source :: %{ref: String.t(), daily_budget: non_neg_integer()}
   @type entry :: Item.t() | {:error, {:invalid, String.t()}} | {:error, :stale}
@@ -53,6 +61,8 @@ defmodule FermixCore.Cues.Ingest do
 
   - `:now` (required) — the receipt time, a `DateTime`;
   - `:repo` — the `Memory.Repo` server (default `Memory.Repo`);
+  - `:repo_timeout_ms` — how long the transaction may wait for the Repo
+    (default `Timeouts.repo_call/0`);
   - `:admit` — `(pos_integer() -> non_neg_integer())`: given how many valid
     items arrived, how many the rate buckets admit (default: all);
   - `:source_state` — `cursor`, `last_good_at`, `status` written to
@@ -167,7 +177,9 @@ defmodule FermixCore.Cues.Ingest do
   end
 
   defp repo_call(request, opts) do
-    Repo.cues_call(CuesSql, request, server: Keyword.get(opts, :repo, Repo))
+    repo = Keyword.get(opts, :repo, Repo)
+    timeout_ms = Keyword.get(opts, :repo_timeout_ms, Timeouts.repo_call())
+    Repo.cues_call(CuesSql, request, Repo.periodic_opts(repo, timeout_ms))
   end
 
   defp source_state!(nil), do: nil

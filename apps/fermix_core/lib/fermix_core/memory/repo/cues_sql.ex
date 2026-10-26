@@ -1,7 +1,8 @@
 defmodule FermixCore.Memory.Repo.CuesSql do
   @moduledoc """
-  SQL for the cue inbox (M60 §7): the schema of migration 42, accept and route,
-  source state, gaps and retention. Lane A owns it.
+  SQL for the cue inbox (M60 §7): the schema of migration 42, accept and route
+  (by words, M60_CUE_INTAKE_AT_SCALE.md §3.1), a stream's live pass (§3.2),
+  source state, gaps, the counts of what was not stored (§3.4) and retention.
 
   Like every `Memory.Repo` SQL module it is pure SQL over the caller's `conn`,
   reached only through `Memory.Repo.cues_call/3`, so the single writer stays the
@@ -28,6 +29,8 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   alias Exqlite.Sqlite3
   alias FermixCore.Cues
   alias FermixCore.Cues.Item
+  alias FermixCore.Cues.ListenFor
+  alias FermixCore.Memory.Repo.CuesFilterSql
   alias FermixCore.Memory.Repo.TemporalSql
 
   @inbox_cap 250
@@ -35,6 +38,14 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   @horizon_days 7
   @payload_grace_hours 24
   @prune_days 30
+  @count_scopes ~w(source watcher)
+  @count_keep_s 48 * 3_600
+  @count_upsert """
+  INSERT INTO cue_counts (scope, ref, hour, incarnation, counts, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?)
+  ON CONFLICT (scope, ref, hour, incarnation)
+  DO UPDATE SET counts = excluded.counts, updated_at = excluded.updated_at
+  """
   @list_default 100
   @list_max 500
 
@@ -294,6 +305,45 @@ defmodule FermixCore.Memory.Repo.CuesSql do
           count: pos_integer()
         }
 
+  @live_intake_schema_sql """
+  ALTER TABLE cue_watchers ADD COLUMN listen_for TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE cue_watchers DROP COLUMN filter_provider;
+  ALTER TABLE cue_watchers DROP COLUMN filter_model;
+
+  CREATE TABLE cue_filter_calls_46 (
+    id TEXT PRIMARY KEY,
+    watcher_id TEXT NOT NULL,
+    delivery_id INTEGER,
+    provider TEXT,
+    model TEXT,
+    session_id TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    result TEXT CHECK (result IS NULL OR result IN
+      ('pass','drop','provider_failure','content_failure','aborted')),
+    error TEXT
+  );
+  INSERT INTO cue_filter_calls_46
+    SELECT id, watcher_id, delivery_id, provider, model, session_id, started_at, finished_at,
+           result, error
+    FROM cue_filter_calls;
+  DROP TABLE cue_filter_calls;
+  ALTER TABLE cue_filter_calls_46 RENAME TO cue_filter_calls;
+  CREATE INDEX cue_filter_calls_watcher ON cue_filter_calls (watcher_id, started_at);
+  CREATE INDEX cue_filter_calls_started ON cue_filter_calls (started_at);
+
+  CREATE TABLE cue_counts (
+    scope TEXT NOT NULL CHECK (scope IN ('source','watcher')),
+    ref TEXT NOT NULL,
+    hour TEXT NOT NULL,
+    incarnation TEXT NOT NULL,
+    counts TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (scope, ref, hour, incarnation)
+  );
+  CREATE INDEX cue_counts_hour ON cue_counts (hour);
+  """
+
   @doc "The DDL of migration 42: every cue table and the two `job_runs` columns."
   @spec schema_sql() :: String.t()
   def schema_sql, do: @schema_sql
@@ -305,6 +355,22 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   """
   @spec stop_reason_schema_sql() :: String.t()
   def stop_reason_schema_sql, do: "ALTER TABLE cue_sources ADD COLUMN stop_reason TEXT;"
+
+  @doc """
+  The DDL of migration 47 (M60_CUE_INTAKE_AT_SCALE.md):
+
+    * `cue_watchers.listen_for`, the watcher's words to listen for as a JSON
+      list (`[]` for a watcher saved before them);
+    * the per-watcher `filter_provider` and `filter_model` go: every filter
+      call uses the one Cues filter model;
+    * `cue_filter_calls` is rebuilt with a nullable `delivery_id`: a stream
+      item is judged before it is stored, so its call has no delivery;
+    * `cue_counts`: per source or watcher, per UTC hour and per process
+      incarnation, the absolute totals of what was counted rather than stored,
+      replaced on every flush so a resent flush cannot count twice.
+  """
+  @spec live_intake_schema_sql() :: String.t()
+  def live_intake_schema_sql, do: @live_intake_schema_sql
 
   @doc "Delivery states that hold a delivery open (never touched by retention)."
   @spec live_states() :: [String.t()]
@@ -392,6 +458,7 @@ defmodule FermixCore.Memory.Repo.CuesSql do
              :prune_deliveries,
              :prune_gaps,
              :prune_filter_calls,
+             :prune_counts,
              :drop_snapshots
            ] and is_integer(limit) and limit > 0 do
     {sql, params} = retention_sql(step, now)
@@ -401,7 +468,216 @@ defmodule FermixCore.Memory.Repo.CuesSql do
     end
   end
 
+  def handle(conn, {:counts_put, rows, %DateTime{} = now}) when is_list(rows) do
+    if Enum.all?(rows, &count_row?/1),
+      do: with_immediate_transaction(conn, fn -> put_counts(conn, rows, now) end),
+      else: {:error, {:invalid, :counts}}
+  end
+
+  def handle(conn, {:counts_window, scope, %DateTime{} = since}) when scope in @count_scopes,
+    do: counts_window(conn, scope, since)
+
+  # One item kept on its own, for an example the owner labels from a stream
+  # watcher's recent drops (M60_CUE_INTAKE_AT_SCALE.md §3.2): the stored cue
+  # of its identity, or a receipt (snapshot, no payload, no delivery).
+  def handle(conn, {:store_item, ref, %Item{} = item, %DateTime{} = now}) when is_binary(ref) do
+    with_immediate_transaction(conn, fn -> store_item(conn, ref, item, now) end)
+  end
+
+  # A stream item a watcher's filter passed (M60_CUE_INTAKE_AT_SCALE.md §3.2).
+  def handle(
+        conn,
+        {:pass_live, ref, %Item{} = item, watcher_id, reason, hint, call, %DateTime{} = now}
+      )
+      when is_binary(ref) and is_binary(watcher_id) and is_binary(reason) and reason != "" and
+             (is_binary(hint) or is_nil(hint)) do
+    if CuesFilterSql.live_call?(call) do
+      with_immediate_transaction(conn, fn ->
+        pass_live(conn, ref, item, watcher_id, {reason, hint}, call, now)
+      end)
+    else
+      {:error, {:invalid, :call}}
+    end
+  end
+
   def handle(_conn, request), do: {:error, {:unknown_request, request}}
+
+  # --- a live pass (M60_CUE_INTAKE_AT_SCALE.md §3.2) ------------------------------
+
+  # One transaction: the cue if its identity is new (with its payload), else
+  # the stored one; this watcher's `passed` delivery if it has none; the inbox
+  # cap; and the call's ledger row. "Inserted" and "already there" both
+  # succeed, so two watchers passing one item each get their delivery and a
+  # write retried after a timeout that still ran changes nothing. A stored
+  # item of other content is an identity conflict, as at accept: a gap and no
+  # delivery, and still the ledger row. The answer's `delivery_id` is this
+  # call's delivery, nil for a repeat of an item the watcher already had or a
+  # conflict (`conflict?`).
+  defp pass_live(conn, ref, item, watcher_id, {reason, hint}, call, now) do
+    decision = {reason, hint, call}
+
+    with {:ok, cue} <- live_cue(conn, ref, item, now),
+         {:ok, written} <- live_write(conn, cue, ref, item, watcher_id, decision, now),
+         {:ok, outcome} <-
+           CuesFilterSql.record_live(conn, watcher_id, call, {:pass, reason, hint}, now) do
+      {:ok, outcome |> Map.merge(written) |> Map.put(:cue_id, elem(cue, 1))}
+    end
+  end
+
+  defp live_cue(conn, ref, item, now) do
+    case find_identity(conn, ref, item) do
+      {:ok, {id, hash}} when hash == item.content_hash -> {:ok, {:stored, id}}
+      {:ok, {id, _other_hash}} -> {:ok, {:conflict, id}}
+      {:ok, nil} -> with {:ok, id} <- insert_cue(conn, ref, item, 1, now), do: {:ok, {:new, id}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp live_write(conn, {:conflict, cue_id}, ref, _item, _watcher_id, _decision, now) do
+    with {:ok, _result, gaps} <- record_conflict(conn, ref, cue_id, now),
+         do: {:ok, %{delivery_id: nil, conflict?: true, evicted: [], gaps: gaps}}
+  end
+
+  defp live_write(conn, cue, ref, item, watcher_id, decision, now) do
+    with {:ok, delivery, inserted} <-
+           live_delivery(conn, cue, ref, item, watcher_id, decision, now),
+         {:ok, evicted, gaps} <- evict_overflow(conn, ref, inserted, now) do
+      {:ok,
+       %{
+         delivery_id: delivery && delivery.delivery_id,
+         conflict?: false,
+         evicted: evicted,
+         gaps: gaps
+       }}
+    end
+  end
+
+  # `{:ok, delivery | nil, inserted}`. A delivery added to a stored cue counts
+  # in its `routed_count`, makes it live again (`terminal_at` null) so its
+  # payload is not swept from under it, and gives a receipt (no payload) the
+  # item's payload, so the task reads the item.
+  defp live_delivery(conn, {kind, cue_id}, ref, item, watcher_id, decision, now) do
+    case insert_live_delivery(conn, cue_id, ref, item, watcher_id, decision, now) do
+      {:ok, nil} ->
+        calls_delivery(conn, cue_id, watcher_id, decision)
+
+      {:ok, delivery} when kind == :new ->
+        {:ok, delivery, [delivery]}
+
+      {:ok, delivery} ->
+        with :ok <- reopen_cue(conn, cue_id, item), do: {:ok, delivery, [delivery]}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # The watcher has this item's delivery already: this call's own, written by
+  # an attempt that timed out and still ran, or an earlier pass's.
+  defp calls_delivery(conn, cue_id, watcher_id, {_reason, _hint, call}) do
+    sql =
+      "SELECT id FROM cue_deliveries WHERE cue_id = ? AND watcher_id = ? AND filter_call_id = ?"
+
+    case query_all(conn, sql, [cue_id, watcher_id, call.id]) do
+      {:ok, [[id]]} -> {:ok, %{delivery_id: id, watcher_id: watcher_id, state: "passed"}, []}
+      {:ok, []} -> {:ok, nil, []}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp insert_live_delivery(conn, cue_id, ref, item, watcher_id, {reason, hint, call}, now) do
+    received = stamp(now)
+    valid_until = now |> DateTime.add(@lifetime_days, :day) |> stamp()
+
+    sql = """
+    INSERT INTO cue_deliveries (cue_id, watcher_id, source_ref, subject, received_at, state,
+      decision_reason, hint, filter_attempts, ready_at, valid_until, filter_call_id)
+    VALUES (?, ?, ?, ?, ?, 'passed', ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (cue_id, watcher_id) DO NOTHING
+    RETURNING id
+    """
+
+    params = [cue_id, watcher_id, ref, item.subject, received, reason, hint]
+    params = params ++ [Map.get(call, :attempt, 0), received, valid_until, call.id]
+
+    case query_all(conn, sql, params) do
+      {:ok, [[id]]} -> {:ok, %{delivery_id: id, watcher_id: watcher_id, state: "passed"}}
+      {:ok, []} -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp reopen_cue(conn, cue_id, item) do
+    execute(
+      conn,
+      """
+      UPDATE cues SET routed_count = routed_count + 1, terminal_at = NULL,
+        payload_bytes = CASE WHEN payload IS NULL THEN ? ELSE payload_bytes END,
+        payload = coalesce(payload, ?)
+      WHERE id = ?
+      """,
+      [item.payload_bytes, item.payload, cue_id]
+    )
+  end
+
+  defp store_item(conn, ref, item, now) do
+    sql = "SELECT id FROM cues WHERE source_ref = ? AND item_id = ? AND revision = ?"
+
+    case query_all(conn, sql, [ref, item.item_id, item.revision]) do
+      {:ok, [[id]]} -> {:ok, id}
+      {:ok, []} -> insert_cue(conn, ref, item, 0, now)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # --- counts of what was not stored (M60_CUE_INTAKE_AT_SCALE.md §3.4) ----------
+
+  # One row per scope, ref, UTC hour and process incarnation, holding that
+  # incarnation's absolute totals for the hour. A flush replaces the row, so a
+  # flush sent again after a timeout (which still ran) cannot count twice.
+  defp count_row?(%{scope: scope, ref: ref, hour: %DateTime{}, incarnation: inc, counts: counts})
+       when scope in @count_scopes and is_binary(ref) and is_binary(inc) and is_map(counts),
+       do: Enum.all?(counts, fn {phase, n} -> is_binary(phase) and is_integer(n) and n >= 0 end)
+
+  defp count_row?(_row), do: false
+
+  defp put_counts(conn, rows, now) do
+    Enum.reduce_while(rows, {:ok, 0}, fn row, {:ok, written} ->
+      case execute(conn, @count_upsert, [
+             row.scope,
+             row.ref,
+             stamp(row.hour),
+             row.incarnation,
+             Jason.encode!(row.counts),
+             stamp(now)
+           ]) do
+        :ok -> {:cont, {:ok, written + 1}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  # Each ref's totals by phase over the hours from `since`'s hour on, summed
+  # across incarnations: the rolling window `Cues.Overview` reads.
+  defp counts_window(conn, scope, since) do
+    sql = "SELECT ref, counts FROM cue_counts WHERE scope = ? AND hour >= ?"
+
+    with {:ok, rows} <- query_all(conn, sql, [scope, stamp(hour_of(since))]) do
+      {:ok,
+       Enum.reduce(rows, %{}, fn [ref, counts], acc ->
+         Map.update(
+           acc,
+           ref,
+           Jason.decode!(counts),
+           &Map.merge(&1, Jason.decode!(counts), fn _phase, a, b -> a + b end)
+         )
+       end)}
+    end
+  end
+
+  @doc "The start of `at`'s UTC hour, the key a count row is filed under."
+  @spec hour_of(DateTime.t()) :: DateTime.t()
+  def hour_of(%DateTime{} = at), do: %{DateTime.truncate(at, :second) | minute: 0, second: 0}
 
   # --- accept and route (design §7.1) ------------------------------------------
 
@@ -466,19 +742,44 @@ defmodule FermixCore.Memory.Repo.CuesSql do
     with {:ok, _today} <- count_items(conn, ref, accepted, now), do: :ok
   end
 
+  # Each enabled watcher of the source with what it listens for: a `none`
+  # watcher everything, an `llm` watcher its words, compiled once per accept.
   defp listening_watchers(conn, ref) do
     with {:ok, rows} <-
            query_all(
              conn,
              """
-             SELECT w.id, w.filter FROM cue_watcher_sources s
+             SELECT w.id, w.filter, w.listen_for FROM cue_watcher_sources s
              JOIN cue_watchers w ON w.id = s.watcher_id
              WHERE s.source_ref = ? AND w.enabled = 1
              ORDER BY w.id
              """,
              [ref]
            ) do
-      {:ok, Enum.map(rows, fn [id, filter] -> {id, filter} end)}
+      listeners(rows)
+    end
+  end
+
+  defp listeners(rows) do
+    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
+      case listener(row) do
+        {:ok, watcher} -> {:cont, {:ok, acc ++ [watcher]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp listener([id, "none", _words]), do: {:ok, {id, "none", nil}}
+
+  defp listener([id, "llm", words]) do
+    case Jason.decode(words) do
+      {:ok, list} when is_list(list) ->
+        if Enum.all?(list, &is_binary/1),
+          do: {:ok, {id, "llm", ListenFor.compile(list)}},
+          else: {:error, {:corrupt, "cue_watchers", {:json_list, :listen_for}}}
+
+      _not_a_list ->
+        {:error, {:corrupt, "cue_watchers", {:json_list, :listen_for}}}
     end
   end
 
@@ -578,7 +879,7 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   end
 
   defp insert_and_route(conn, ref, item, watchers, now) do
-    targets = if item.self_caused? or item.receipt_only?, do: [], else: watchers
+    targets = targets(item, watchers)
 
     with {:ok, cue_id} <- insert_cue(conn, ref, item, length(targets), now),
          {:ok, deliveries} <- insert_deliveries(conn, cue_id, ref, item, targets, now),
@@ -586,6 +887,20 @@ defmodule FermixCore.Memory.Repo.CuesSql do
       {:ok, %{result: :accepted, cue_id: cue_id, deliveries: deliveries, evicted: evicted}, gaps}
     end
   end
+
+  # Routing by words (M60_CUE_INTAKE_AT_SCALE.md §3.1): a `none` watcher gets
+  # every item, an `llm` watcher only one its words match, so one with no
+  # words gets nothing. The item's text is prepared once, for every watcher.
+  defp targets(%Item{self_caused?: true}, _watchers), do: []
+  defp targets(%Item{receipt_only?: true}, _watchers), do: []
+
+  defp targets(item, watchers) do
+    prepared = if Enum.any?(watchers, &match?({_id, "llm", _m}, &1)), do: ListenFor.prepare(item)
+    for {id, filter, matcher} <- watchers, listens?(filter, matcher, prepared), do: {id, filter}
+  end
+
+  defp listens?("none", _matcher, _prepared), do: true
+  defp listens?("llm", matcher, prepared), do: ListenFor.match?(matcher, prepared)
 
   # A cue no watcher gets is a receipt: no payload, and terminal from the start,
   # so retention's clocks run from its arrival.
@@ -776,6 +1091,17 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   defp source_attr(:status, _status), do: {:error, {:invalid, :status}}
   defp source_attr(:cursor, cursor) when is_binary(cursor), do: {:ok, cursor}
   defp source_attr(:stop_reason, reason) when reason in @stop_reasons, do: {:ok, reason}
+
+  # A stream counts its own day (M60_CUE_INTAKE_AT_SCALE.md §3.2): it writes the
+  # absolute count of matched items and the UTC day it is for.
+  defp source_attr(:items_today, n) when is_integer(n) and n >= 0, do: {:ok, n}
+
+  defp source_attr(:items_day, day) when is_binary(day) do
+    case Date.from_iso8601(day) do
+      {:ok, _date} -> {:ok, day}
+      {:error, _reason} -> {:error, {:invalid, :items_day}}
+    end
+  end
 
   defp source_attr(key, %DateTime{} = at) when key in @source_times, do: {:ok, stamp(at)}
 
@@ -1201,6 +1527,12 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   defp retention_sql(:prune_filter_calls, now) do
     {"DELETE FROM cue_filter_calls WHERE id IN (SELECT id FROM cue_filter_calls " <>
        "WHERE started_at <= ? ORDER BY started_at LIMIT ?)", [ago(now, @prune_days * 86_400)]}
+  end
+
+  # Counts outlive the rolling day they are read for by one more day.
+  defp retention_sql(:prune_counts, now) do
+    {"DELETE FROM cue_counts WHERE rowid IN (SELECT rowid FROM cue_counts " <>
+       "WHERE hour < ? ORDER BY hour LIMIT ?)", [ago(now, @count_keep_s)]}
   end
 
   defp retention_sql(:drop_snapshots, now) do

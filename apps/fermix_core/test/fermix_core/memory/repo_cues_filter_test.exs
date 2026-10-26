@@ -9,6 +9,8 @@ defmodule FermixCore.Memory.RepoCuesFilterTest do
   alias FermixCore.Memory.Repo.CuesSql
 
   @now ~U[2026-10-10 12:00:00.000000Z]
+  # Every item below is of type `feed.item`, so this word offers it to a watcher.
+  @words ["feed"]
 
   setup do
     ctx = start_repo("filter_sql")
@@ -18,12 +20,12 @@ defmodule FermixCore.Memory.RepoCuesFilterTest do
   defp call(ctx, request), do: Repo.cues_call(CuesFilterSql, request, server: ctx.repo)
 
   defp watcher(ctx, attrs \\ %{}) do
-    id = insert_watcher(ctx.conn, Map.merge(%{filter: "llm", sources: [ctx.ref]}, attrs))
+    defaults = %{filter: "llm", sources: [ctx.ref], listen_for: @words}
+    id = insert_watcher(ctx.conn, Map.merge(defaults, attrs))
 
     exec!(
       ctx.conn,
-      "UPDATE cue_watchers SET filter_provider = 'openai', filter_model = 'gpt-5.4-mini', " <>
-        "purpose = 'Releases.', filter_budget = ? WHERE id = ?",
+      "UPDATE cue_watchers SET purpose = 'Releases.', filter_budget = ? WHERE id = ?",
       [Map.get(attrs, :budget, 0), id]
     )
 
@@ -100,7 +102,6 @@ defmodule FermixCore.Memory.RepoCuesFilterTest do
       assert %{claims: [claim]} = claim(ctx)
       assert claim.watcher.id == w
       assert claim.cue.item_id == "a"
-      assert claim.watcher.filter_model == "gpt-5.4-mini"
       assert claim.watcher.purpose == "Releases."
       assert claim.session_id =~ ~r/^cue_filter_#{w}_20261010_120000_[0-9a-f]{6}$/
       assert claim.call_id =~ ~r/^cfc_[0-9a-f]{24}$/
@@ -111,7 +112,8 @@ defmodule FermixCore.Memory.RepoCuesFilterTest do
       row = call_row(ctx, claim.call_id)
       assert row.session_id == claim.session_id
       assert row.delivery_id == claim.delivery.id
-      assert {row.provider, row.model} == {"openai", "gpt-5.4-mini"}
+      # Every call uses the one Cues filter model, which the task resolves.
+      assert {row.provider, row.model} == {nil, nil}
       assert row.finished_at == nil
 
       # The watcher is busy: no second claim while its call is open.
@@ -405,6 +407,137 @@ defmodule FermixCore.Memory.RepoCuesFilterTest do
 
       assert {:ok, [%{watcher_id: ^w, filter_failures: 3, waiting: 2}]} =
                call(ctx, {:held_watchers})
+    end
+  end
+
+  describe "live calls (M60_CUE_INTAKE_AT_SCALE.md §3.2)" do
+    defp live_call(id, at),
+      do: %{id: id, session_id: "s-#{id}", started_at: at, provider: "openai", model: "m-1"}
+
+    defp settle_live(ctx, w, id, result, at \\ @now),
+      do: call(ctx, {:settle_live, w, live_call(id, at), result, at})
+
+    test "a drop writes the call's ledger row with no delivery, once", ctx do
+      w = watcher(ctx)
+
+      assert {:ok, %{result: :dropped, recovered?: false}} =
+               settle_live(ctx, w, "cfc_d", {:drop, "Off topic."})
+
+      # The same write sent again after a timeout that still ran.
+      assert {:ok, %{result: :dropped}} = settle_live(ctx, w, "cfc_d", {:drop, "Off topic."})
+
+      assert %{watcher_id: ^w, delivery_id: nil, provider: "openai", model: "m-1"} =
+               call_row(ctx, "cfc_d")
+
+      assert %{result: "drop", error: nil} = call_row(ctx, "cfc_d")
+      assert [[1]] = rows(ctx.conn, "SELECT count(*) FROM cue_filter_calls")
+    end
+
+    test "provider failures back the watcher off and hold it from the third, as a stored " <>
+           "call's do; a drop after the hold recovers it",
+         ctx do
+      w = watcher(ctx)
+
+      for {n, retry_at} <- [
+            {1, ~U[2026-10-10 12:00:30.000000Z]},
+            {2, ~U[2026-10-10 12:02:00.000000Z]},
+            {3, ~U[2026-10-10 12:10:00.000000Z]}
+          ] do
+        assert {:ok, outcome} = settle_live(ctx, w, "cfc_p#{n}", provider_down())
+        assert outcome.held_now? == (n == 3)
+        assert outcome.result == if(n == 3, do: :held, else: :retry)
+        assert watcher_row(ctx, w) == %{failures: n, retry_at: CuesSql.stamp(retry_at)}
+
+        assert %{result: "provider_failure", error: "network: connection refused"} =
+                 call_row(ctx, "cfc_p#{n}")
+      end
+
+      # The hold is the watcher's: its stored deliveries wait too.
+      push(ctx, ["a"])
+      assert %{claims: []} = claim(ctx, ~U[2026-10-10 12:09:59.000000Z])
+
+      assert {:ok, %{result: :dropped, recovered?: true}} =
+               settle_live(ctx, w, "cfc_ok", {:drop, "Off topic."})
+
+      assert watcher_row(ctx, w) == %{failures: 0, retry_at: nil}
+    end
+
+    test "a provider failure sent again after a timeout that still ran counts once, and " <>
+           "answers the backoff the first write left",
+         ctx do
+      w = watcher(ctx)
+      retry_at = ~U[2026-10-10 12:00:30.000000Z]
+
+      assert {:ok, %{result: :retry, filter_failures: 1, retry_at: ^retry_at}} =
+               settle_live(ctx, w, "cfc_p", provider_down())
+
+      # The same call's write, sent again a second later.
+      later = DateTime.add(@now, 1, :second)
+      resent = {:settle_live, w, live_call("cfc_p", @now), provider_down(), later}
+
+      assert {:ok, %{result: :retry, filter_failures: 1, retry_at: ^retry_at, held_now?: false}} =
+               call(ctx, resent)
+
+      assert watcher_row(ctx, w) == %{failures: 1, retry_at: CuesSql.stamp(retry_at)}
+      assert [[1]] = rows(ctx.conn, "SELECT count(*) FROM cue_filter_calls")
+    end
+
+    test "a content failure is the item's: the ledger row only", ctx do
+      w = watcher(ctx)
+
+      assert {:ok, %{result: :failed, held_now?: false}} =
+               settle_live(ctx, w, "cfc_c", invalid())
+
+      assert watcher_row(ctx, w) == %{failures: 0, retry_at: nil}
+      assert %{result: "content_failure"} = call_row(ctx, "cfc_c")
+    end
+
+    test "a pass or an unknown result is refused here", ctx do
+      w = watcher(ctx)
+
+      assert {:error, {:invalid, :live_result}} =
+               settle_live(ctx, w, "cfc_x", {:pass, "Ok.", nil})
+
+      assert {:error, {:invalid, :live_result}} =
+               settle_live(ctx, w, "cfc_x", {:aborted, %{kind: :shutdown, message: "x"}})
+    end
+
+    test "the live context: instructions, recent examples and the calls the budget counts, " <>
+           "live ones included",
+         ctx do
+      w = watcher(ctx, %{budget: 3})
+      other = watcher(ctx)
+
+      exec!(
+        ctx.conn,
+        "INSERT INTO cue_watcher_instructions (id, watcher_id, number, text, added_at) " <>
+          "VALUES ('cwi_1', ?, 1, 'Only launches.', ?)",
+        [w, CuesSql.stamp(@now)]
+      )
+
+      {:ok, _row} = settle_live(ctx, w, "cfc_old", {:drop, "No."}, DateTime.add(@now, -2, :day))
+      {:ok, _row} = settle_live(ctx, w, "cfc_new", {:drop, "No."})
+      push(ctx, ["a"])
+
+      for stored <- claim(ctx).claims,
+          do: {:ok, _outcome} = call(ctx, {:settle, stored.call_id, {:drop, "No."}, @now})
+
+      assert {:ok, %{^w => context, ^other => %{used: 1, instructions: []}}} =
+               call(ctx, {:live_context, [w, other], @now})
+
+      assert context == %{
+               instructions: [%{number: 1, text: "Only launches."}],
+               examples: [],
+               used: 2
+             }
+
+      # The stored claim's budget counts the live rows as well: two live calls
+      # and one stored call in the window spend this watcher's three.
+      {:ok, _row} = settle_live(ctx, w, "cfc_third", {:drop, "No."})
+      push(ctx, ["b"])
+
+      assert %{claims: [%{watcher: %{id: ^other}}], over_budget: [%{watcher_id: ^w}]} =
+               claim(ctx)
     end
   end
 end

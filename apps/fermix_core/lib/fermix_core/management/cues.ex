@@ -514,7 +514,7 @@ defmodule FermixCore.Management.Cues do
   defp watcher_rows(%{memory?: false}, _opts), do: {:error, :memory_off}
 
   defp watcher_rows(facts, opts) do
-    case Overview.watchers(facts.now, repo_opts(opts)) do
+    case Overview.watchers(facts.now, watcher_opts(opts)) do
       {:ok, watchers} ->
         watcher_facts = %{window_s: Overview.window_s()}
 
@@ -661,7 +661,7 @@ defmodule FermixCore.Management.Cues do
 
   defp choice_jobs(opts) do
     with {:ok, jobs} <- Overview.cue_jobs(repo_opts(opts)),
-         {:ok, watchers} <- Overview.watchers(now(opts), repo_opts(opts)) do
+         {:ok, watchers} <- Overview.watchers(now(opts), watcher_opts(opts)) do
       wakes = Map.new(watchers, &{&1.task_job_id, &1.name})
       named = Map.new(CuesConfig.mandates(cue_config(opts)), &{&1.job, &1.name})
 
@@ -901,6 +901,9 @@ defmodule FermixCore.Management.Cues do
 
   defp repo_opts(opts), do: [repo: repo(opts)]
   defp repo(opts), do: Keyword.get(opts, :repo, Repo)
+
+  # A watcher's state reads the stream sources in the cue settings a read uses.
+  defp watcher_opts(opts), do: [repo: repo(opts), cues_config: cue_config(opts)]
 
   defp mandate_seams(opts),
     do: [repo: repo(opts), mandate_opts: Keyword.get(opts, :mandate_opts, [])]

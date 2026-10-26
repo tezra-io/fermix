@@ -11,6 +11,8 @@ defmodule FermixCore.Cues.FiltersTest do
   alias FermixTestSupport.TelemetryCapture
 
   @t0 ~U[2026-10-10 12:00:00.000000Z]
+  # Every item below is of type `feed.item`, so this word offers it to a watcher.
+  @words ["feed"]
   @lifecycle [:fermix, :cue, :lifecycle]
   @bookends [
     [:fermix, :cue_filter, :run_start],
@@ -108,7 +110,17 @@ defmodule FermixCore.Cues.FiltersTest do
       llm: [
         adapter: BlockingAdapter,
         adapter_opts: [test_pid: test],
-        retry_delay_fn: fn _ms -> :ok end
+        retry_delay_fn: fn _ms -> :ok end,
+        # The one route every call runs on, named here so the test reads no
+        # shared `[fermix_core.routing]`.
+        routes: [
+          {%{
+             provider: :openai,
+             model: "gpt-5.4-mini",
+             auth_mode: :api_key,
+             base_url: "https://api.openai.com/v1"
+           }, []}
+        ]
       ]
     ]
 
@@ -118,15 +130,7 @@ defmodule FermixCore.Cues.FiltersTest do
   defp start_filters(ctx), do: start_supervised!({Filters, ctx.opts})
 
   defp watcher(ctx, ref \\ nil) do
-    id = insert_watcher(ctx.conn, %{filter: "llm", sources: [ref || ctx.ref]})
-
-    exec!(
-      ctx.conn,
-      "UPDATE cue_watchers SET filter_provider = 'openai', filter_model = 'gpt-5.4-mini' " <>
-        "WHERE id = ?",
-      [id]
-    )
-
+    id = insert_watcher(ctx.conn, %{filter: "llm", sources: [ref || ctx.ref], listen_for: @words})
     TelemetryCapture.attach([@lifecycle | @bookends], watcher_id: id)
     id
   end

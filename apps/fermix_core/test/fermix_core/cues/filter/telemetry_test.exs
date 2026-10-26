@@ -57,6 +57,25 @@ defmodule FermixCore.Cues.Filter.TelemetryTest do
                     %{status: "provider_failure", error_kind: "rate_limit"}}
   end
 
+  test "a live run names no delivery or cue until a pass wrote them; a stored run must" do
+    watcher = "cwt_#{System.unique_integer([:positive])}"
+    TelemetryCapture.attach(@events, watcher_id: watcher)
+    live = run(watcher) |> Map.drop([:delivery_id, :cue_id]) |> Map.put(:live?, true)
+
+    FilterTelemetry.run_start(live)
+    FilterTelemetry.run_complete(Map.merge(live, %{delivery_id: 31, cue_id: 12}), :pass, 90)
+
+    assert_receive {:telemetry, [:fermix, :cue_filter, :run_start], _m, start}
+    assert start.live == true
+    refute Map.has_key?(start, :delivery_id) or Map.has_key?(start, :cue_id)
+
+    assert_receive {:telemetry, [:fermix, :cue_filter, :run_complete], _m,
+                    %{live: true, delivery_id: 31, cue_id: 12, decision: "pass"}}
+
+    stored = Map.delete(run(watcher), :delivery_id)
+    assert_raise KeyError, fn -> FilterTelemetry.run_start(stored) end
+  end
+
   test "an unknown status or decision is refused" do
     run = run("cwt_x")
     assert_raise FunctionClauseError, fn -> FilterTelemetry.run_complete(run, :maybe, 1) end

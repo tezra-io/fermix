@@ -263,6 +263,44 @@ defmodule FermixCore.Tools.ListCuesTest do
                "Nothing is listening: the 3 cues it sent since Saturday, October 10, 2026"
     end
 
+    # M60_CUE_INTAKE_AT_SCALE.md §3.4: a stream keeps only what passes, so what
+    # it received and what its watchers judged are counts, which the summary
+    # reports beside the receipts.
+    test "the summary reports what a stream received, matched no watcher and offered", ctx do
+      hour = CuesSql.hour_of(@now)
+
+      rows = [
+        %{
+          scope: "source",
+          ref: "gh-releases",
+          hour: hour,
+          incarnation: "inc-a",
+          counts: %{"received" => 500, "unmatched" => 480}
+        },
+        %{
+          scope: "watcher",
+          ref: ctx.watcher.id,
+          hour: hour,
+          incarnation: "inc-a",
+          counts: %{"offered" => 20, "overflow" => 3, "dropped" => 15}
+        }
+      ]
+
+      {:ok, 2} = Repo.cues_call(CuesSql, {:counts_put, rows, @now}, server: ctx.repo)
+      Rows.cue(ctx.conn, %{source_ref: "quiet-feed", received_at: @now, routed: 0})
+
+      body = decoded(ListCues.execute(%{"view" => "summary"}, owner_turn(ctx)))
+
+      assert body["stream_counts_since"] == "2026-10-16T12:00:00Z"
+      stream = Enum.find(body["sources"], &(&1["source"] == "gh-releases"))
+      assert stream["stream_counts"] == %{"received" => 500, "unmatched" => 480}
+      quiet = Enum.find(body["sources"], &(&1["source"] == "quiet-feed"))
+      refute Map.has_key?(quiet, "stream_counts")
+
+      assert [%{"stream_counts" => counted}] = body["watchers"]
+      assert counted == %{"offered" => 20, "overflow" => 3, "dropped" => 15}
+    end
+
     test "a task's notes are shown framed", ctx do
       scope =
         TaskNotes.job_scope(%{

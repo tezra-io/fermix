@@ -113,7 +113,7 @@ defmodule FermixWebWeb.SetupLive.CuesState do
       filter: filter_view(Keyword.get(core, :routing, []), snapshot),
       sources: Enum.map(CuesConfig.sources(cues), &source_view(&1, rows, now)),
       sources_error: rows_error(rows),
-      watchers: Overview.watchers(now, opts),
+      watchers: Overview.watchers(now, Keyword.put(opts, :cues_config, cues)),
       mandates: Enum.map(Overview.mandates(cues, opts), &mandate_view/1),
       cue_jobs: cue_jobs(opts),
       raw: %{sources: Keyword.get(raw, :sources, %{}), mandates: Keyword.get(raw, :mandates, %{})},

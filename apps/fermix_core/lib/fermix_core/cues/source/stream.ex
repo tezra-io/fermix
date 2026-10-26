@@ -8,7 +8,7 @@ defmodule FermixCore.Cues.Source.Stream do
   The worker owns a transport process (`Cues.Source.Stream.Socket` in
   production; the contract is `Cues.Source.Stream.Transport`), monitors it,
   and keeps everything that must survive a reconnect itself: the last good
-  time, the backoff, the batch, the refusal count. It acknowledges each frame
+  time, the backoff, the counts, the refusal count. It acknowledges each frame
   once it has handled it, and gives the transport the reader's frame cap.
 
   **Signing in.** The secrets the sign-in names are read from their store
@@ -25,16 +25,33 @@ defmodule FermixCore.Cues.Source.Stream do
   and the refusal count reset, and the source's row `connected`. Until then a
   source that keeps being refused shows `reconnecting` and backs off.
 
-  **No cursor.** `cue_sources.last_good_at` is the local time the connection
-  was last known good, written in the same transaction as the cues it covers
-  (a frame or a pong is the evidence; a heartbeat writes it when no item
-  came). Every connection starts at the live tip: what the service sends while
-  it is disconnected is missed, and no gap is recorded for it, since its size
-  is unknown. Repeats are duplicates by identity.
+  **Items are judged before they are stored** (M60_CUE_INTAKE_AT_SCALE.md
+  §3.2). Each item of a frame goes through the words of the source's `llm`
+  watchers (`Cues.ListenFor`): one no watcher's words matched is counted
+  `unmatched`; the rate buckets (`Cues.Buckets.admit/3`) and the daily budget
+  apply to the matched ones; the rest go to `Cues.LiveFilters` with the
+  watchers whose words matched, where each is judged and only a pass is
+  stored. A stream routes nothing to a `none` watcher, and never goes through
+  `Cues.Ingest.accept/3`. Repeats are refused at a pass, by identity.
 
-  **Batches.** Items are accepted every 250 ms, or at once when 50 are waiting,
-  through `Cues.Ingest.accept/3` with the rate buckets (`Cues.Buckets.admit/3`)
-  and `status: "connected"`.
+  **Watchers.** At connect and on every flush of a live connection the worker
+  reads its source's enabled watchers (`{:source_watchers, ref}`) and what a
+  live call needs (`{:live_context, ...}`), compiles each watcher's words
+  (again only when they changed) and hands its `llm` watchers to
+  `Cues.LiveFilters`. A read that fails at connect is a disconnect; one that
+  fails on a flush keeps the watchers it had.
+
+  **The flush.** Every 10 seconds, and once at a clean stop, the worker writes
+  its counts (`Cues.Counts`: received, unmatched, rate_limited, over_budget,
+  invalid, stale) as absolute totals for the hour, and, on a live connection,
+  the source's row: `status`, the last good time and the day's count of
+  matched items. A counts write that fails is sent again by the next flush.
+
+  **No cursor.** `cue_sources.last_good_at` is the local time the connection
+  was last known good (a frame or a pong is the evidence), written by the
+  flush and once more when the connection drops. Every connection starts at
+  the live tip: what the service sends while it is disconnected is missed,
+  and no gap is recorded for it, since its size is unknown.
 
   **Limits.** A frame over 1 MiB closes the connection with a `read_limit`
   gap, whether the reader refuses it or the transport ends the connection
@@ -45,8 +62,10 @@ defmodule FermixCore.Cues.Source.Stream do
   dialled again.
 
   **Failures.** Reconnects back off from one second doubling to a minute, and
-  never stop. The owner is told of an outage once (`:down`) when it is longer
-  than 15 minutes. A refused credential (HTTP 401 or 403 at the upgrade) stops
+  never stop. A write of the source's row that fails, a Repo that does not
+  answer in time included, closes the connection, which is dialled again; no
+  Repo timeout stops the worker. The owner is told of an outage once (`:down`)
+  when it is longer than 15 minutes. A refused credential (HTTP 401 or 403 at the upgrade) stops
   the worker with status `auth_failed` and a notice (`:auth_failed`); a route
   through the proxy, which a WebSocket cannot take, or a host that resolves to
   an address `Net.Guard` refuses, stops it with status `unavailable` and a
@@ -55,28 +74,35 @@ defmodule FermixCore.Cues.Source.Stream do
   no item is a refusal, a healthy connection resets the count, and the eighth
   refusal in a row stops the worker with status `stopped` and a notice
   (`:refused`). The service's words go to the log and the trace (behind the
-  content gate) only. Past the daily budget the stream is closed until the
-  next UTC day and the owner is told once that day (`:budget_reached`).
+  content gate) only. Past the daily budget (matched items, counted here,
+  read back from the row at start) the stream is closed until the next UTC
+  day, the row reads `over_budget`, and the owner is told once that day
+  (`:budget_reached`).
 
   Status in `cue_sources`: `connected`, `reconnecting`, `auth_failed`,
-  `unavailable`, `stopped`. Source telemetry: `connect`, `reconnect`,
-  `disconnect` (`reason: :service_error` for a service's error), `auth_failure`,
-  `budget`, `gap`, `stopped` (`reason: :refused` after the eighth refusal).
+  `unavailable`, `stopped`, `over_budget`. Source telemetry: `connect`,
+  `reconnect`, `disconnect` (`reason: :service_error` for a service's error),
+  `auth_failure`, `budget`, `gap`, `stopped` (`reason: :refused` after the
+  eighth refusal). The items it does not store are counted lifecycle phases
+  (`Cues.Counts`), one event per phase per flush.
   """
 
   use GenServer, restart: :temporary
 
   require Logger
 
-  alias FermixCore.Cues.Ingest
+  alias FermixCore.Cues.Counts
   alias FermixCore.Cues.Item
   alias FermixCore.Cues.JsonStream
+  alias FermixCore.Cues.ListenFor
+  alias FermixCore.Cues.LiveFilters
   alias FermixCore.Cues.Source.Stream.Socket
   alias FermixCore.Cues.Source.Worker
+  alias FermixCore.Memory.Repo.CuesFilterSql
+  alias FermixCore.Memory.Repo.CuesWatchersSql
   alias FermixCore.Setup.SecretWriter
 
-  @batch_ms 250
-  @batch_items 50
+  @flush_ms 10_000
   @heartbeat_ms 30_000
   @stall_ms 90_000
   @first_retry_ms 1_000
@@ -87,15 +113,19 @@ defmodule FermixCore.Cues.Source.Stream do
   # The general source stops at the eighth connection in a row that ended on
   # the service's error before any item, as a feed stops at its eighth failure.
   @max_refusals 8
+  # The clean stop's count flush is bounded well under the supervisor's
+  # shutdown (5 s by default), which would kill the worker mid-call.
+  @stop_flush_ms 2_000
 
   @doc """
   Starts the worker for `opts[:source]` (a `Cues.Config.sources/0` map of kind
-  `:stream`). Other options, each with a production default: `:repo`, `:clock`
-  (zero-arity, a `DateTime`), `:monotonic_ms`, `:schedule` (`(message, ms) ->
-  term`), `:transport` (a module with this module's callbacks),
-  `:transport_opts` (added to the transport's options), `:admit` (`(ref, n,
-  now_ms) -> admitted`, default `Cues.Buckets.admit/3`), `:notify` (default
-  `Cues.Notices.source/4`), `:manager` (a pid linked from `init`;
+  `:stream`). Other options, each with a production default: `:repo`,
+  `:repo_timeout_ms`, `:clock` (zero-arity, a `DateTime`), `:monotonic_ms`,
+  `:schedule` (`(message, ms) -> term`), `:transport` (a module with this
+  module's callbacks), `:transport_opts` (added to the transport's options),
+  `:admit` (`(ref, n, now_ms) -> admitted`, default `Cues.Buckets.admit/3`),
+  `:live` (the `Cues.LiveFilters` server, default its name), `:notify`
+  (default `Cues.Notices.source/4`), `:manager` (a pid linked from `init`;
   `Cues.SourceManager` passes itself). A transport implements
   `Cues.Source.Stream.Transport`.
   """
@@ -106,14 +136,18 @@ defmodule FermixCore.Cues.Source.Stream do
     GenServer.start_link(__MODULE__, opts)
   end
 
+  # Exits are trapped so a stop from the supervisor runs `terminate/2`, which
+  # writes the counts; the manager's link still ends the worker with it.
   @impl true
   def init(opts) do
+    Process.flag(:trap_exit, true)
     base = Worker.base_state(opts)
 
     state =
       Map.merge(base, %{
         transport: Keyword.get(opts, :transport, Socket),
         transport_opts: Keyword.get(opts, :transport_opts, []),
+        live: Keyword.get(opts, :live, LiveFilters),
         socket: nil,
         socket_ref: nil,
         closing: nil,
@@ -121,8 +155,10 @@ defmodule FermixCore.Cues.Source.Stream do
         ever_connected?: false,
         failures: 0,
         alive_at: nil,
-        buffer: [],
-        buffered: 0,
+        watchers: [],
+        counts: Counts.new("source"),
+        spent: {nil, 0},
+        spent_written: nil,
         down_since: nil,
         down_notified?: false,
         refusals: 0,
@@ -130,7 +166,7 @@ defmodule FermixCore.Cues.Source.Stream do
         healthy?: false
       })
 
-    {:ok, Worker.schedule(state, :connect, 0)}
+    {:ok, state |> Worker.schedule(:connect, 0) |> Worker.schedule(:flush, @flush_ms)}
   end
 
   @impl true
@@ -141,9 +177,9 @@ defmodule FermixCore.Cues.Source.Stream do
     end
   end
 
-  # After a batch failed to commit, the connection is closing and nothing more
-  # from it is taken (see `accept/3`). Every frame is acknowledged once handled,
-  # so the transport reads on.
+  # After the source's row failed to be written, the connection is closing and
+  # nothing more from it is taken (see `put_state/3`). Every frame is
+  # acknowledged once handled, so the transport reads on.
   def handle_info({:cue_stream, socket, event}, %{socket: socket} = state) when is_pid(socket) do
     reply =
       if state.closing == :ingest_failed, do: {:noreply, state}, else: on_socket(event, state)
@@ -159,15 +195,20 @@ defmodule FermixCore.Cues.Source.Stream do
 
   def handle_info({:DOWN, _ref, :process, _pid, _reason}, state), do: {:noreply, state}
 
+  def handle_info({:EXIT, _pid, reason}, state), do: {:stop, reason, state}
+
+  # A clean stop writes what was counted since the last flush, bounded by
+  # `@stop_flush_ms`.
+  @impl true
+  def terminate(_reason, state) do
+    write_counts(%{state | repo_timeout_ms: @stop_flush_ms}, state.clock.())
+    :ok
+  end
+
   # --- timers ----------------------------------------------------------------------
 
   defp on_timer(:connect, state), do: connect(state, state.clock.())
-  # A batch is taken only on a live connection; what waits after a drop is
-  # accepted by the next connection's first flush.
-  defp on_timer(:flush, %{phase: :connected, closing: nil} = state),
-    do: {:noreply, flush(state, live_status(state))}
-
-  defp on_timer(:flush, state), do: {:noreply, state}
+  defp on_timer(:flush, state), do: {:noreply, flush(state, state.clock.())}
   # A closing connection has no heartbeat: its close is bounded by the transport.
   defp on_timer(:heartbeat, %{phase: :connected, closing: nil} = state),
     do: heartbeat(state, state.clock.())
@@ -178,14 +219,13 @@ defmodule FermixCore.Cues.Source.Stream do
   # --- connecting --------------------------------------------------------------------
 
   defp connect(state, now) do
-    case load(state, now) do
-      {:ok, state} ->
-        if Worker.paused?(state, now),
-          do: {:noreply, Worker.schedule(state, :connect, Worker.ms_to_next_day(now))},
-          else: dial(state, now)
-
-      {:error, reason} ->
-        disconnected(state, {:load, reason}, now)
+    with {:ok, state} <- load(state, now),
+         {:ok, state} <- read_watchers(state, now) do
+      if Worker.paused?(state, now),
+        do: {:noreply, Worker.schedule(state, :connect, Worker.ms_to_next_day(now))},
+        else: dial(state, now)
+    else
+      {:error, reason} -> disconnected(state, {:load, reason}, now)
     end
   end
 
@@ -306,25 +346,32 @@ defmodule FermixCore.Cues.Source.Stream do
   # --- frames --------------------------------------------------------------------------
 
   # A frame's messages, in order. More than 100 is a `page_limit` gap for the
-  # rest; an item proves the connection healthy.
+  # rest; an item proves the connection healthy. Its items are routed at once.
   defp json_read(state, %{entries: entries, over_limit: over}, now) do
     if over > 0, do: Worker.gap(state, "page_limit", over, {now, now}, now)
-    Enum.reduce(entries, state, &json_entry(&1, &2, now))
+    {state, items} = Enum.reduce(entries, {state, []}, &json_entry(&1, &2, now))
+    route(state, Enum.reverse(items), now)
   end
 
-  defp json_entry({:item, fields}, state, now) do
-    state = %{healthy(state, now) | delivered?: true}
-    buffer(state, fields |> Item.new(now) |> Worker.unwrap())
+  defp json_entry({:item, fields}, {state, items}, now) do
+    state = %{healthy(state, now) | delivered?: true} |> counted("received", 1, now)
+
+    case Item.new(fields, now) do
+      {:ok, item} -> {state, [item | items]}
+      {:error, :stale} -> {counted(state, "stale", 1, now), items}
+      {:error, {:invalid, _sentence}} -> {counted(state, "invalid", 1, now), items}
+    end
   end
 
-  defp json_entry({:reject, sentence}, state, _now),
-    do: buffer(state, {:error, {:invalid, sentence}})
+  defp json_entry({:reject, _sentence}, {state, items}, now),
+    do: {state |> counted("received", 1, now) |> counted("invalid", 1, now), items}
 
-  defp json_entry({:service_error, words}, state, _now), do: service_error(state, words)
+  defp json_entry({:service_error, words}, {state, items}, _now),
+    do: {service_error(state, words), items}
 
-  defp json_entry(:skip, state, _now) do
+  defp json_entry(:skip, {state, _items} = acc, _now) do
     Logger.debug("Cue stream #{state.source.ref}: skipped a message that is not an item")
-    state
+    acc
   end
 
   # The service's error closes the connection. The first one a connection
@@ -340,62 +387,125 @@ defmodule FermixCore.Cues.Source.Stream do
     state
   end
 
-  # `Cues.Ingest.accept/3` takes an item, or the refusal `Item.new/2` returned.
-  defp buffer(state, entry) do
-    state = %{state | buffer: [entry | state.buffer], buffered: state.buffered + 1}
+  # --- routing (M60_CUE_INTAKE_AT_SCALE.md §3.2) --------------------------------------
 
-    if state.buffered >= @batch_items,
-      do: flush(state, live_status(state)),
-      else: arm_flush(state)
+  # Each item through the words of the source's `llm` watchers; the matched
+  # ones through the rate buckets and the daily budget, then to
+  # `Cues.LiveFilters` with the watchers whose words matched. Nothing about an
+  # item is written here.
+  defp route(state, [], _now), do: state
+
+  defp route(state, items, now) do
+    matched = for item <- items, ids = listeners(state.watchers, item), ids != [], do: {item, ids}
+    state = counted(state, "unmatched", length(items) - length(matched), now)
+    {admitted, state} = admit(state, matched, now)
+    {offers, state} = within_budget(state, admitted, now)
+    if offers != [], do: LiveFilters.offer(state.live, state.source.ref, offers)
+    state
   end
 
-  defp arm_flush(state) do
-    if Map.has_key?(state.timers, :flush),
-      do: state,
-      else: Worker.schedule(state, :flush, @batch_ms)
+  # The item's text is prepared once for every watcher of the source.
+  defp listeners([], _item), do: []
+
+  defp listeners(watchers, item) do
+    prepared = ListenFor.prepare(item)
+    for %{id: id, matcher: matcher} <- watchers, ListenFor.match?(matcher, prepared), do: id
   end
 
-  # --- accepting -----------------------------------------------------------------------
+  defp admit(state, [], _now), do: {[], state}
 
-  # Accepts everything waiting, with the last good time it covers, in one
-  # transaction. On a failed transaction the connection is dropped, and what
-  # the batch held is lost: the source has no cursor to replay it from. Until
-  # that drop lands, the connection writes nothing more (no heartbeat, no flush
-  # at the drop), so `last_good_at` never moves past items that were not stored.
-  defp flush(%{closing: :ingest_failed} = state, _status), do: state
-
-  defp flush(state, status) do
-    now = state.clock.()
-    state = Worker.drop_timer(state, :flush)
-
-    if state.buffer == [] and not advanced?(state),
-      do: state,
-      else: accept(state, status, now)
+  defp admit(state, matched, now) do
+    wanted = length(matched)
+    granted = state.admit.(state.source.ref, wanted, state.monotonic_ms.())
+    true = is_integer(granted) and granted in 0..wanted
+    {taken, refused} = Enum.split(matched, granted)
+    {taken, counted(state, "rate_limited", length(refused), now)}
   end
 
-  defp accept(state, status, now) do
+  # The daily budget (0 = none) counts the matched items the source took today
+  # (UTC); past it the rest are `over_budget` and the stream pauses.
+  defp within_budget(%{source: %{daily_budget: 0}} = state, offers, now),
+    do: {offers, spend(state, length(offers), now)}
+
+  defp within_budget(state, offers, now) do
+    room = max(state.source.daily_budget - spent_today(state, now), 0)
+    {taken, over} = Enum.split(offers, room)
+    state = spend(state, length(taken), now)
+
+    if over == [],
+      do: {taken, state},
+      else: {taken, state |> counted("over_budget", length(over), now) |> budget_reached(now)}
+  end
+
+  defp spent_today(%{spent: {day, n}}, now), do: if(day == utc_day(now), do: n, else: 0)
+
+  defp spend(state, n, now), do: %{state | spent: {utc_day(now), spent_today(state, now) + n}}
+
+  defp utc_day(now), do: now |> Worker.utc_date() |> Date.to_iso8601()
+
+  defp counted(state, name, n, now),
+    do: %{state | counts: Counts.add(state.counts, state.source.ref, name, n, now)}
+
+  # --- the flush -----------------------------------------------------------------------
+
+  # Every 10 s: the counts, and on a live connection the source's row and the
+  # watchers.
+  defp flush(state, now) do
+    state = write_counts(state, now)
+
+    state =
+      if live?(state),
+        do: state |> write_state(live_status(state), now) |> refresh_watchers(now),
+        else: state
+
+    Worker.schedule(state, :flush, @flush_ms)
+  end
+
+  defp live?(state), do: state.phase == :connected and state.closing == nil
+
+  # Absolute totals for the hour: one that failed is sent again by the next.
+  defp write_counts(state, now) do
+    state = %{state | counts: Counts.report(state.counts)}
+
+    case Counts.rows(state.counts) do
+      [] -> state
+      rows -> wrote_counts(state, rows, Worker.repo_call(state, {:counts_put, rows, now}), now)
+    end
+  end
+
+  defp wrote_counts(state, rows, {:ok, _written}, now),
+    do: %{state | counts: Counts.written(state.counts, rows, now)}
+
+  defp wrote_counts(state, _rows, {:error, _traced}, _now), do: state
+
+  # The source's row: the last good time it covers, the status (nil leaves it)
+  # and the day's count of matched items, written when either moved. A write
+  # that fails closes the connection, the failed-write path; until that close
+  # lands nothing more is written, so `last_good_at` never moves past it.
+  defp write_state(%{closing: :ingest_failed} = state, _status, _now), do: state
+
+  defp write_state(state, status, now) do
+    if advanced?(state) or state.spent != state.spent_written,
+      do: put_state(state, status, now),
+      else: state
+  end
+
+  defp put_state(state, status, now) do
     covered = state.alive_at
-    source_state = %{last_good_at: covered, status: status}
+    attrs = Map.merge(%{last_good_at: covered, status: status}, spent_attrs(state))
 
-    opts = [
-      now: now,
-      repo: state.repo,
-      admit: Worker.admit_fun(state),
-      source_state: source_state
-    ]
-
-    entries = Enum.reverse(state.buffer)
-    state = %{state | buffer: [], buffered: 0}
-
-    case Ingest.accept(Worker.ingest_source(state), entries, opts) do
-      {:ok, results} ->
-        state = %{state | last_good_at: later(state.last_good_at, covered)}
-        if :over_budget in results, do: budget_reached(state, now), else: state
+    case Worker.repo_call(state, {:source_touch, state.source.ref, attrs, now}) do
+      {:ok, _row} ->
+        last_good_at = later(state.last_good_at, covered)
+        %{state | last_good_at: last_good_at, spent_written: state.spent}
 
       {:error, _traced} ->
         close_socket(state, :ingest_failed)
     end
   end
+
+  defp spent_attrs(%{spent: {nil, _n}}), do: %{}
+  defp spent_attrs(%{spent: {day, n}}), do: %{items_today: n, items_day: day}
 
   # Whether the last frame or pong, how far the received stream is known
   # complete, is past the last good time written.
@@ -408,6 +518,45 @@ defmodule FermixCore.Cues.Source.Stream do
   defp later(at, nil), do: at
   defp later(at, other), do: if(DateTime.compare(at, other) == :lt, do: other, else: at)
 
+  # --- watchers --------------------------------------------------------------------------
+
+  # The source's enabled watchers, read at connect and on every flush: a
+  # stream routes nothing to a `none` watcher, and each `llm` watcher's words
+  # compile again only when they changed. Its `llm` watchers, with what a
+  # live call needs, go to `Cues.LiveFilters`.
+  defp read_watchers(state, now) do
+    ref = state.source.ref
+
+    with {:ok, rows} <- Worker.repo_call(state, CuesWatchersSql, {:source_watchers, ref}),
+         llm = Enum.filter(rows, &(&1.filter == "llm")),
+         {:ok, context} <-
+           Worker.repo_call(state, CuesFilterSql, {:live_context, Enum.map(llm, & &1.id), now}) do
+      LiveFilters.watchers(state.live, ref, Enum.map(llm, &spec(&1, context)))
+      {:ok, %{state | watchers: Enum.map(llm, &compiled(&1, state.watchers))}}
+    end
+  end
+
+  # On a flush a read that fails keeps the watchers the worker had.
+  defp refresh_watchers(state, now) do
+    case read_watchers(state, now) do
+      {:ok, state} -> state
+      {:error, _traced} -> state
+    end
+  end
+
+  defp spec(watcher, context) do
+    watcher
+    |> Map.take([:id, :name, :purpose, :filter_budget, :filter_failures, :filter_retry_at])
+    |> Map.merge(Map.fetch!(context, watcher.id))
+  end
+
+  defp compiled(%{id: id, listen_for: words}, previous) do
+    case Enum.find(previous, &(&1.id == id and &1.words == words)) do
+      nil -> %{id: id, words: words, matcher: ListenFor.compile(words)}
+      same -> same
+    end
+  end
+
   # --- liveness and limits -------------------------------------------------------------
 
   defp heartbeat(state, now) do
@@ -416,8 +565,7 @@ defmodule FermixCore.Cues.Source.Stream do
       {:noreply, close_socket(state, :stalled)}
     else
       state.transport.ping(state.socket)
-      state = healthy(state, now)
-      {:noreply, state |> flush(live_status(state)) |> Worker.schedule(:heartbeat, @heartbeat_ms)}
+      {:noreply, state |> healthy(now) |> Worker.schedule(:heartbeat, @heartbeat_ms)}
     end
   end
 
@@ -425,17 +573,8 @@ defmodule FermixCore.Cues.Source.Stream do
   # to now. The same holds when the transport ended the connection at such a
   # frame (`read_limit_down/3`).
   defp too_large(state, now) do
-    from = state.alive_at || now
-    state = flush(state, live_status(state))
-
-    # A flush that failed has closed the connection already, and its drop
-    # reports that failure instead.
-    if state.closing == :ingest_failed do
-      state
-    else
-      Worker.gap(state, "read_limit", 1, {from, now}, now)
-      close_socket(state, :read_limit)
-    end
+    Worker.gap(state, "read_limit", 1, {state.alive_at || now, now}, now)
+    close_socket(state, :read_limit)
   end
 
   defp close_socket(%{socket: nil} = state, _reason), do: state
@@ -448,14 +587,14 @@ defmodule FermixCore.Cues.Source.Stream do
 
   # --- disconnects -----------------------------------------------------------------------
 
-  # What was received before the drop is accepted first. A flush that spent the
-  # daily budget has paused the stream already: that drop is no outage. A
-  # failed flush (now or before) is what the drop reports.
+  # The source's row is written first, with what the connection covered. A
+  # budget that ran out has paused the stream already: that drop is no
+  # outage. A failed write (now or before) is what the drop reports.
   defp on_down(reason, state) do
     now = state.clock.()
     closing = state.closing
     from = state.alive_at || now
-    state = flush(state, "reconnecting")
+    state = write_state(state, "reconnecting", now)
     ingest_failed? = state.closing == :ingest_failed
     state = forget_socket(state)
 
@@ -477,8 +616,8 @@ defmodule FermixCore.Cues.Source.Stream do
   defp ended(reason, closing, _ctx, state, now), do: disconnected(state, closing || reason, now)
 
   # The transport ended the connection at a frame over the cap, before it was
-  # whole: a `read_limit` gap, unless a batch failed to commit, which the drop
-  # reports instead.
+  # whole: a `read_limit` gap, unless the source's row failed to be written,
+  # which the drop reports instead.
   defp read_limit_down(state, %{ingest_failed?: true}, now),
     do: disconnected(state, :ingest_failed, now)
 
@@ -487,12 +626,10 @@ defmodule FermixCore.Cues.Source.Stream do
     disconnected(state, :read_limit, now)
   end
 
-  # A batch timer of the dropped connection goes with it: what still waits is
-  # taken by the next connection's first flush.
+  # The heartbeat goes with the dropped connection; the flush does not.
   defp forget_socket(state) do
     %{state | socket: nil, socket_ref: nil, closing: nil, healthy?: false}
     |> Worker.drop_timer(:heartbeat)
-    |> Worker.drop_timer(:flush)
   end
 
   defp disconnected(state, reason, now) do
@@ -617,8 +754,11 @@ defmodule FermixCore.Cues.Source.Stream do
 
   # --- budget ----------------------------------------------------------------------------
 
+  # The row says so at once, with the day's count, so a restart today stays
+  # paused (`Worker.load/2`).
   defp budget_reached(state, now) do
     state = Worker.budget_reached(state, now)
+    Worker.touch(state, Map.put(spent_attrs(state), :status, "over_budget"), now)
 
     # Forget the socket before closing it: its exit is no outage.
     if state.socket_ref, do: Process.demonitor(state.socket_ref, [:flush])
@@ -631,7 +771,15 @@ defmodule FermixCore.Cues.Source.Stream do
 
   # --- the source's row ------------------------------------------------------------------
 
+  # The day's count of matched items comes back from the row once, at start.
   defp load(state, now) do
-    with {:ok, state, _row} <- Worker.load(state, now), do: {:ok, state}
+    case Worker.load(state, now) do
+      {:ok, state, nil} -> {:ok, state}
+      {:ok, state, row} -> {:ok, %{state | spent: spent_of(row), spent_written: spent_of(row)}}
+      {:error, reason} -> {:error, reason}
+    end
   end
+
+  defp spent_of(%{items_day: day, items_today: n}) when is_binary(day), do: {day, n}
+  defp spent_of(_row), do: {nil, 0}
 end

@@ -5,6 +5,7 @@ defmodule FermixCore.Cues.NoticesTest do
   import ExUnit.CaptureLog
 
   alias FermixCore.Cues.Notices
+  alias FermixCore.Cues.Watchers
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesWatchersSql
@@ -131,6 +132,48 @@ defmodule FermixCore.Cues.NoticesTest do
     end
   end
 
+  # A watcher saved before the rules (M60_CUE_INTAKE_AT_SCALE.md §3.1) gets
+  # nothing until a change in chat; the sweeper's first pass tells the owner.
+  describe "needs-update notices" do
+    test "each watcher that breaks a rule is told once, with what it needs", ctx do
+      cues = [
+        cues_config: [
+          sources: %{"bsky" => %{kind: :stream, url: "wss://jetstream.example.org/subscribe"}}
+        ]
+      ]
+
+      watcher!(ctx.repo, "chip-news", filter: "llm", listen_for: ["TSMC"])
+      watcher!(ctx.repo, "all-posts", filter: "none", sources: ["bsky"])
+
+      assert {:ok, 2} = Watchers.needs_update_notices(opts(ctx, 0) ++ cues)
+
+      assert_receive {:sent, "chat-9",
+                      "Watcher market-news: it has no words to listen for, so no item reaches " <>
+                        "it. Ask Fermix in chat to give it some.", _opts}
+
+      assert_receive {:sent, "chat-9",
+                      "Watcher all-posts: it passes every item, so it cannot listen to a stream " <>
+                        "and gets nothing from one. Ask Fermix in chat to give it a filter.",
+                      _opts}
+
+      refute_received {:sent, _destination, _text, _opts}
+
+      assert {:ok, 0} = Watchers.needs_update_notices(opts(ctx, 1) ++ cues)
+      refute_received {:sent, _destination, _text, _opts}
+    end
+
+    test "a send that fails is told at the next call", ctx do
+      down = Keyword.put(opts(ctx, 0), :adapter, DownAdapter)
+
+      log =
+        capture_log(fn -> assert {:ok, 0} = Watchers.needs_update_notices(down) end)
+
+      assert log =~ "notice was not sent"
+      assert {:ok, 1} = Watchers.needs_update_notices(opts(ctx, 1))
+      assert_receive {:sent, "chat-9", "Watcher market-news: it has no words" <> _, _opts}
+    end
+  end
+
   describe "gap notices" do
     test "an open gap no run reported within an hour is told once and marked reported", ctx do
       fresh = gap!(ctx, "eng-blogs", "inbox_full", 12, ~U[2026-10-05 08:30:00.000000Z])
@@ -240,7 +283,7 @@ defmodule FermixCore.Cues.NoticesTest do
   defp opts(ctx, day), do: opts_at(ctx, DateTime.add(@t0, day, :day))
   defp opts_at(ctx, now), do: [repo: ctx.repo, now: now] ++ seams()
 
-  defp watcher!(repo, name) do
+  defp watcher!(repo, name, attrs \\ []) do
     {:ok, job} =
       JobsRegistry.create_cue_job(
         %{
@@ -254,19 +297,23 @@ defmodule FermixCore.Cues.NoticesTest do
         scheduler: nil
       )
 
-    attrs = %{
-      id: "cwt_#{name}",
-      name: name,
-      purpose: "Market moves",
-      filter: "llm",
-      task_job_id: job.id,
-      created_from: "telegram:chat-1"
-    }
+    {sources, attrs} = Keyword.pop(attrs, :sources, ["alpaca-news"])
+
+    attrs =
+      Map.merge(
+        %{
+          id: "cwt_#{name}",
+          name: name,
+          purpose: "Market moves",
+          filter: "llm",
+          task_job_id: job.id,
+          created_from: "telegram:chat-1"
+        },
+        Map.new(attrs)
+      )
 
     {:ok, watcher} =
-      Repo.cues_call(CuesWatchersSql, {:insert_watcher, attrs, ["alpaca-news"], [], @t0},
-        server: repo
-      )
+      Repo.cues_call(CuesWatchersSql, {:insert_watcher, attrs, sources, [], @t0}, server: repo)
 
     watcher
   end

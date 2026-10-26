@@ -3,12 +3,14 @@ defmodule FermixCore.Cues.Source.Worker do
   The plumbing `Cues.Source.Feed` and `Cues.Source.Stream` share (M60 §6):
   plain functions over a worker's state map, which holds at least the fields
   `base_state/1` builds from the start options: `source` (a
-  `Cues.Config.sources/0` map), `repo`, `clock`, `monotonic_ms`, `schedule`,
-  `admit`, `notify`, `timers`, `next_token`, `loaded?`, `last_good_at`,
-  `paused_day` and `budget_notified`.
+  `Cues.Config.sources/0` map), `repo`, `repo_timeout_ms`, `clock`,
+  `monotonic_ms`, `schedule`, `admit`, `notify`, `timers`, `next_token`,
+  `loaded?`, `last_good_at`, `paused_day` and `budget_notified`.
 
-  Row reads and writes go through `repo_call/2`, which traces a failure
-  (`ingest_error`) and logs it before returning it; source events go through
+  Row reads and writes go through `repo_call/2,3`, which traces a failure
+  (`ingest_error`) and logs it before returning it. A Repo that does not
+  answer within `repo_timeout_ms` is such a failure (`{:error, :repo_timeout}`,
+  M60_CUE_INTAKE_AT_SCALE.md §3.5), never an exit; source events go through
   `trace/3` (`Cues.Telemetry.source/2`, with the source's kind); timers carry a
   token (`schedule/3`), so a stale one is ignored.
   """
@@ -21,6 +23,7 @@ defmodule FermixCore.Cues.Source.Worker do
   alias FermixCore.Cues.Telemetry
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesSql
+  alias FermixCore.Timeouts
 
   # A retry delay doubles at most this many times before its cap.
   @max_retry_shift 6
@@ -32,8 +35,9 @@ defmodule FermixCore.Cues.Source.Worker do
 
   @doc """
   The shared fields of a worker's state, from its start options (`:source`
-  required; `:repo`, `:clock`, `:monotonic_ms`, `:schedule`, `:admit`,
-  `:notify`, each with its production default), and the link to `:manager`
+  required; `:repo`, `:repo_timeout_ms`, `:clock`, `:monotonic_ms`,
+  `:schedule`, `:admit`, `:notify`, each with its production default), and the
+  link to `:manager`
   (`Cues.SourceManager` passes itself), made here so the manager sees the
   worker's exit with its reason however soon it comes.
   """
@@ -46,6 +50,7 @@ defmodule FermixCore.Cues.Source.Worker do
     %{
       source: source,
       repo: Keyword.get(opts, :repo, Repo),
+      repo_timeout_ms: Keyword.get(opts, :repo_timeout_ms, Timeouts.repo_call()),
       clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
       monotonic_ms:
         Keyword.get(opts, :monotonic_ms, fn -> System.monotonic_time(:millisecond) end),
@@ -144,10 +149,17 @@ defmodule FermixCore.Cues.Source.Worker do
     end
   end
 
-  @doc "One `CuesSql` request; a failure is traced and logged here, then returned."
+  @doc "One `CuesSql` request (`repo_call/3`)."
   @spec repo_call(state(), tuple()) :: term()
-  def repo_call(state, request) do
-    case Repo.cues_call(CuesSql, request, server: state.repo) do
+  def repo_call(state, request), do: repo_call(state, CuesSql, request)
+
+  @doc """
+  One request to cue SQL `module`, bounded by `repo_timeout_ms`; a failure is
+  traced and logged here, then returned.
+  """
+  @spec repo_call(state(), module(), tuple()) :: term()
+  def repo_call(state, module, request) when is_atom(module) and is_tuple(request) do
+    case Repo.cues_call(module, request, repo_opts(state)) do
       {:error, reason} ->
         Telemetry.lifecycle(:ingest_error, %{}, %{
           source_ref: state.source.ref,
@@ -214,10 +226,15 @@ defmodule FermixCore.Cues.Source.Worker do
 
   # --- notices and traces ------------------------------------------------------------------
 
-  @doc "Sends source notice `kind`; a failed send is logged (`Cues.Notices` keeps it once)."
+  @doc """
+  Sends source notice `kind`, its Repo calls bounded like the worker's own; a
+  failed send is logged (`Cues.Notices` keeps it once).
+  """
   @spec notify(state(), atom(), map(), DateTime.t()) :: :ok
   def notify(state, kind, data, now) do
-    case state.notify.(state.source.ref, kind, data, repo: state.repo, now: now) do
+    opts = [repo: state.repo, now: now, on_timeout: :error, timeout: state.repo_timeout_ms]
+
+    case state.notify.(state.source.ref, kind, data, opts) do
       {:error, reason} ->
         Logger.error("#{label(state)}: the #{kind} notice failed: #{inspect(reason)}")
 
@@ -240,6 +257,9 @@ defmodule FermixCore.Cues.Source.Worker do
   # --- private -----------------------------------------------------------------------------
 
   defp send_after(message, ms), do: Process.send_after(self(), message, ms)
+
+  # Every call the worker makes is bounded, and a timeout is an error.
+  defp repo_opts(state), do: Repo.periodic_opts(state.repo, state.repo_timeout_ms)
 
   defp link_manager(nil), do: :ok
   defp link_manager(manager) when is_pid(manager), do: Process.link(manager)

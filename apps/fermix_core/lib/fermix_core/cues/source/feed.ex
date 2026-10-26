@@ -40,7 +40,8 @@ defmodule FermixCore.Cues.Source.Feed do
   budget is spent waits too.
 
   **Failures** (a transport error, an HTTP status other than 200 or 304, a
-  refused hop, an unreadable body, a failed transaction) are traced and retried
+  refused hop, an unreadable body, a failed transaction, a Repo that does not
+  answer in time) are traced and retried
   inside the worker, after one minute doubling to an hour. The eighth failure
   in a row stops the worker normally with a source notice (`:unreachable`), so
   a failing source never spends the supervisor's restart budget (§5.3). A
@@ -99,13 +100,13 @@ defmodule FermixCore.Cues.Source.Feed do
 
   @doc """
   Starts the worker for `opts[:source]` (a `Cues.Config.sources/0` map of kind
-  `:feed`). Other options, each with a production default: `:repo`, `:clock`
-  (zero-arity, a `DateTime`), `:monotonic_ms`, `:schedule` (`(message, ms) ->
-  term`), `:req_options` (merged into the request; a test's `plug:`),
-  `:resolver` (for `Net.Guard`), `:egress`, `:admit` (`(ref, n, now_ms) ->
-  admitted`, default `Cues.Buckets.admit/3`), `:notify` (default
-  `Cues.Notices.source/4`), `:manager` (a pid linked from `init`;
-  `Cues.SourceManager` passes itself).
+  `:feed`). Other options, each with a production default: `:repo`,
+  `:repo_timeout_ms`, `:clock` (zero-arity, a `DateTime`), `:monotonic_ms`,
+  `:schedule` (`(message, ms) -> term`), `:req_options` (merged into the
+  request; a test's `plug:`), `:resolver` (for `Net.Guard`), `:egress`,
+  `:admit` (`(ref, n, now_ms) -> admitted`, default `Cues.Buckets.admit/3`),
+  `:notify` (default `Cues.Notices.source/4`), `:manager` (a pid linked from
+  `init`; `Cues.SourceManager` passes itself).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
@@ -204,6 +205,7 @@ defmodule FermixCore.Cues.Source.Feed do
     opts = [
       now: now,
       repo: state.repo,
+      repo_timeout_ms: state.repo_timeout_ms,
       admit: Worker.admit_fun(state),
       source_state: source_state
     ]

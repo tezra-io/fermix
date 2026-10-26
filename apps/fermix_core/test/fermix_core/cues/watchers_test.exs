@@ -2,6 +2,8 @@ defmodule FermixCore.Cues.WatchersTest do
   # Sets `[fermix_core.routing]` for the filter-model default, a global.
   use ExUnit.Case, async: false
 
+  alias FermixCore.Cues.Item
+  alias FermixCore.Cues.RecentDrops
   alias FermixCore.Cues.Watchers
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
@@ -13,6 +15,19 @@ defmodule FermixCore.Cues.WatchersTest do
 
   @t0 ~U[2026-10-05 09:00:00.000000Z]
   @cap_sentence "This watcher has 20 instructions; merge some first."
+  @needs_words "A watcher that filters needs words to listen for: list the names, products, " <>
+                 "abbreviations and phrases an item it should see would contain, as listen_for."
+  @no_filter_on_stream "A watcher with no filter cannot listen to a stream (bsky), where it " <>
+                         "would pass every item: give it a model filter and words to listen " <>
+                         "for, or pick sources that are not streams."
+  @streams [
+    cues_config: [
+      sources: %{
+        "bsky" => %{kind: :stream, url: "wss://jetstream.example.org/subscribe"},
+        "my-script" => %{kind: :local_push}
+      }
+    ]
+  ]
 
   setup do
     routing = Application.get_env(:fermix_core, :routing)
@@ -157,12 +172,155 @@ defmodule FermixCore.Cues.WatchersTest do
         name: "market-news",
         filter: "llm",
         purpose: "Market moves that need me",
+        listen_for: ["earnings"],
         sources: ["alpaca-news"],
         task: "Tell me what matters."
       }
 
       assert {:ok, %{watcher: watcher}} = Watchers.create(params, private_context(), opts(ctx, 0))
-      assert %{filter: "llm", filter_provider: nil, filter_model: nil} = watcher
+      assert %{filter: "llm"} = watcher
+      refute Map.has_key?(watcher, :filter_model)
+    end
+  end
+
+  describe "words to listen for (M60_CUE_INTAKE_AT_SCALE.md §3.1)" do
+    test "a watcher that filters is made with its words, and the echo lists them", ctx do
+      params = %{
+        name: "chip-news",
+        filter: "llm",
+        purpose: "AI chip news",
+        listen_for: [" TSMC ", "AI chip", "tsmc", "半導体"],
+        sources: ["alpaca-news"],
+        task: "Tell me what matters."
+      }
+
+      assert {:ok, %{watcher: watcher, echo: echo}} =
+               Watchers.create(params, private_context(), opts(ctx, 0))
+
+      assert watcher.listen_for == ["TSMC", "AI chip", "半導体"]
+      assert echo =~ "\nListens for: TSMC, AI chip, 半導体\n"
+    end
+
+    test "one that filters with no words, or with words the rules refuse, is not made", ctx do
+      base = %{
+        name: "chip-news",
+        filter: "llm",
+        purpose: "AI chip news",
+        sources: ["alpaca-news"],
+        task: "Tell me what matters."
+      }
+
+      assert {:error, @needs_words} = Watchers.create(base, private_context(), opts(ctx, 0))
+
+      assert {:error, "A watcher listens for at least one word."} =
+               Watchers.create(Map.put(base, :listen_for, []), private_context(), opts(ctx, 0))
+
+      long = String.duplicate("a", 65)
+
+      assert {:error, "Each word to listen for is at most 64 characters: " <> ^long} =
+               Watchers.create(
+                 Map.put(base, :listen_for, [long]),
+                 private_context(),
+                 opts(ctx, 0)
+               )
+
+      assert {:ok, []} = Watchers.list(opts(ctx, 0))
+      assert {:ok, []} = JobsRegistry.list_jobs(repo: ctx.repo)
+    end
+
+    test "one with no filter takes no words and cannot listen to a stream", ctx do
+      params = %{
+        name: "all-posts",
+        filter: "none",
+        daily_cap: 10,
+        sources: ["my-script", "bsky"],
+        task: "Report it."
+      }
+
+      assert {:error, @no_filter_on_stream} =
+               Watchers.create(params, private_context(), opts(ctx, 0) ++ @streams)
+
+      with_words = %{params | sources: ["my-script"]} |> Map.put(:listen_for, ["post"])
+
+      assert {:error,
+              "A watcher with no filter takes no purpose, instructions or words to listen for."} =
+               Watchers.create(with_words, private_context(), opts(ctx, 0) ++ @streams)
+
+      assert {:ok, %{watcher: %{filter: "none", listen_for: []}}} =
+               Watchers.create(
+                 %{params | sources: ["my-script"]},
+                 private_context(),
+                 opts(ctx, 0) ++ @streams
+               )
+    end
+
+    test "an update replaces the words, and every echo lists what is stored", ctx do
+      watcher = watcher!(ctx, "chip-news", [])
+
+      assert {:ok, %{watcher: updated, echo: echo}} =
+               Watchers.update(watcher.name, %{listen_for: ["TSMC", "Nvidia"]}, opts(ctx, 1))
+
+      assert updated.listen_for == ["TSMC", "Nvidia"]
+
+      assert echo ==
+               "Watcher chip-news changed: new words to listen for.\nListens for: TSMC, Nvidia"
+
+      assert {:ok, %{echo: echo}} = Watchers.update(watcher.name, %{daily_cap: 5}, opts(ctx, 2))
+      assert echo == "Watcher chip-news changed: daily cap 5 runs.\nListens for: TSMC, Nvidia"
+
+      assert {:error, "A watcher listens for at least one word."} =
+               Watchers.update(watcher.name, %{listen_for: []}, opts(ctx, 3))
+    end
+
+    test "a change that leaves a rule broken is refused, naming the fix", ctx do
+      watcher = watcher!(ctx, "old-news", [], ["alpaca-news"], [])
+
+      assert {:error, @needs_words} =
+               Watchers.update(watcher.name, %{daily_cap: 5}, opts(ctx, 1) ++ @streams)
+
+      assert {:ok, _given} =
+               Watchers.update(watcher.name, %{listen_for: ["outage"]}, opts(ctx, 2) ++ @streams)
+
+      assert {:error, @no_filter_on_stream} =
+               Watchers.update(
+                 watcher.name,
+                 %{filter: "none", daily_cap: 3, sources: ["bsky"]},
+                 opts(ctx, 3) ++ @streams
+               )
+
+      assert {:ok, %{watcher: none}} =
+               Watchers.update(
+                 watcher.name,
+                 %{filter: "none", daily_cap: 3},
+                 opts(ctx, 4) ++ @streams ++ [wake_scheduler: fn -> :ok end]
+               )
+
+      # The words stay for a switch back, as the instructions do.
+      assert none.listen_for == ["outage"]
+
+      assert {:error, @no_filter_on_stream} =
+               Watchers.update(watcher.name, %{sources: ["bsky"]}, opts(ctx, 5) ++ @streams)
+
+      assert {:error,
+              "A watcher with no filter takes no purpose, instructions or words to listen for."} =
+               Watchers.update(watcher.name, %{listen_for: ["x"]}, opts(ctx, 6) ++ @streams)
+    end
+
+    test "update_needed names the rule a stored watcher breaks, or nil" do
+      words = %{filter: "llm", listen_for: ["outage"], sources: ["bsky"]}
+      no_filter = %{filter: "none", listen_for: [], sources: ["my-script"]}
+
+      assert Watchers.update_needed(words, ["bsky"]) == nil
+      assert Watchers.update_needed(%{words | listen_for: []}, []) == :words
+      assert Watchers.update_needed(no_filter, ["bsky"]) == nil
+
+      assert Watchers.update_needed(%{no_filter | sources: ["my-script", "bsky"]}, ["bsky"]) ==
+               :filter
+    end
+
+    test "the stream sources are read from the cue settings" do
+      assert Watchers.stream_refs(@streams) == ["bsky"]
+      assert Watchers.stream_refs(cues_config: []) == []
     end
   end
 
@@ -177,7 +335,8 @@ defmodule FermixCore.Cues.WatchersTest do
 
       with_list = Map.merge(params, %{daily_cap: "none", instructions: ["Pass it all"]})
 
-      assert {:error, "A watcher with no filter takes no purpose, instructions or filter model."} =
+      assert {:error,
+              "A watcher with no filter takes no purpose, instructions or words to listen for."} =
                Watchers.create(with_list, private_context(), opts(ctx, 0))
     end
 
@@ -286,6 +445,58 @@ defmodule FermixCore.Cues.WatchersTest do
       assert {:ok, %{echo: echo}} = Watchers.remove_example(watcher.name, id, opts(ctx, 3))
       assert echo =~ "Removed the pass example"
     end
+
+    # A stream keeps only what passes, so "that one should have passed" names a
+    # drop from the watcher's recent drops (M60_CUE_INTAKE_AT_SCALE.md §3.2):
+    # the item is kept then, as a receipt, and the example with it.
+    test "a recent drop of a stream watcher becomes an example, its item kept with it", ctx do
+      watcher = watcher!(ctx, "chip-news", ["Pass AI chip news"], ["bsky"])
+      RecentDrops.new_table()
+
+      {:ok, item} =
+        Item.new(
+          %{item_id: "at://post/1", type: "post", data: %{"text" => "TSMC opens a fab"}},
+          at(0)
+        )
+
+      drop = RecentDrops.put(watcher.id, item, "bsky", "Not about AI.", at(0))
+
+      assert {:ok, %{example: example, echo: echo}} =
+               Watchers.add_drop_example(
+                 watcher.name,
+                 drop.key,
+                 "pass",
+                 "chip news",
+                 opts(ctx, 1)
+               )
+
+      assert echo ==
+               "Stored cue #{example.cue_id} as a pass example for watcher chip-news " <>
+                 "(#{example.id}); the filter sees it from its next call."
+
+      assert example.snapshot == item.snapshot
+
+      assert [["bsky", nil, 0]] =
+               CueFixtures.rows(
+                 ctx.conn,
+                 "SELECT source_ref, payload, routed_count FROM cues WHERE id = ?",
+                 [example.cue_id]
+               )
+
+      assert [[0]] =
+               CueFixtures.rows(ctx.conn, "SELECT count(*) FROM cue_deliveries", [])
+
+      # Labelled again, it is the same kept item.
+      assert {:ok, %{example: again}} =
+               Watchers.add_drop_example(watcher.name, drop.key, "pass", nil, opts(ctx, 2))
+
+      assert again.cue_id == example.cue_id
+
+      assert {:error,
+              "That drop is no longer kept: Fermix keeps a stream watcher's last 50 drops " <>
+                "until it restarts."} =
+               Watchers.add_drop_example(watcher.name, drop.key + 1, "pass", nil, opts(ctx, 3))
+    end
   end
 
   describe "update" do
@@ -321,7 +532,7 @@ defmodule FermixCore.Cues.WatchersTest do
       assert {:ok, %{watcher: updated}} =
                Watchers.update(watcher.name, %{filter: "none", daily_cap: 30}, opts(ctx, 2))
 
-      assert %{filter: "none", purpose: nil, filter_model: nil, daily_cap: 30} = updated
+      assert %{filter: "none", purpose: nil, daily_cap: 30} = updated
       assert [%{number: 1}] = updated.instructions
     end
 
@@ -471,12 +682,7 @@ defmodule FermixCore.Cues.WatchersTest do
       assert {:ok, %{echo: echo}} =
                Watchers.update(
                  watcher.name,
-                 %{
-                   filter: "llm",
-                   purpose: "Market moves",
-                   filter_provider: "openai",
-                   filter_model: "gpt-5-mini"
-                 },
+                 %{filter: "llm", purpose: "Market moves"},
                  opts.(2)
                )
 
@@ -508,7 +714,7 @@ defmodule FermixCore.Cues.WatchersTest do
 
   # A watcher written straight through the SQL module, with a cue-only task, so
   # these tests need nothing from the task surface.
-  defp watcher!(ctx, name, instructions, sources \\ ["alpaca-news"]) do
+  defp watcher!(ctx, name, instructions, sources \\ ["alpaca-news"], words \\ ["earnings"]) do
     {:ok, job} =
       JobsRegistry.create_cue_job(
         %{
@@ -527,8 +733,7 @@ defmodule FermixCore.Cues.WatchersTest do
       name: name,
       purpose: "What #{name} is for",
       filter: "llm",
-      filter_provider: "openai",
-      filter_model: "gpt-5-mini",
+      listen_for: words,
       task_job_id: job.id,
       created_from: "telegram:chat-1"
     }

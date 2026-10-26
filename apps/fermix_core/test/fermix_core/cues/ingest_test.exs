@@ -9,6 +9,11 @@ defmodule FermixCore.Cues.IngestTest do
   alias FermixCore.Memory.Repo.CuesSql
 
   @now ~U[2026-10-10 12:00:00Z]
+  # Words every item below carries in its text (`item/2`).
+  @words ["disk"]
+  # A 250-item transaction on a runner busy with the rest of the suite's
+  # SQLite work: the test is about what it writes, not how fast.
+  @busy_repo_ms 30_000
 
   setup do
     ctx = start_repo("ingest")
@@ -17,6 +22,7 @@ defmodule FermixCore.Cues.IngestTest do
     opts = [
       now: @now,
       repo: ctx.repo,
+      repo_timeout_ms: @busy_repo_ms,
       wake_filters: fn -> send(test, :woke_filters) end,
       wake_scheduler: fn -> send(test, :woke_scheduler) end
     ]
@@ -27,10 +33,13 @@ defmodule FermixCore.Cues.IngestTest do
   defp source(ref, budget \\ 0), do: %{ref: ref, daily_budget: budget}
 
   defp item(id, overrides \\ %{}) do
-    item!(
-      Map.merge(%{item_id: id, type: "com.example.alert", data: %{"id" => id}}, overrides),
-      @now
-    )
+    data = %{"id" => id, "text" => "Disk alert on host #{id}"}
+    item!(Map.merge(%{item_id: id, type: "com.example.alert", data: data}, overrides), @now)
+  end
+
+  defp llm_watcher(ctx, attrs \\ %{}) do
+    defaults = %{filter: "llm", sources: [ctx.ref], listen_for: @words}
+    insert_watcher(ctx.conn, Map.merge(defaults, attrs))
   end
 
   defp deliveries(conn, watcher) do
@@ -70,7 +79,7 @@ defmodule FermixCore.Cues.IngestTest do
 
   describe "C01: stored and routed with no provider" do
     test "an llm watcher's delivery waits pending and the filters are woken", ctx do
-      watcher = insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref]})
+      watcher = llm_watcher(ctx)
 
       assert {:ok, [:accepted]} = Ingest.accept(source(ctx.ref), [item("a")], ctx.opts)
 
@@ -94,9 +103,43 @@ defmodule FermixCore.Cues.IngestTest do
     end
   end
 
+  describe "routing by words (M60_CUE_INTAKE_AT_SCALE.md §3.1)" do
+    test "an llm watcher gets an item only when one of its words matches; a none watcher " <>
+           "gets every item",
+         ctx do
+      disks = llm_watcher(ctx)
+      fans = llm_watcher(ctx, %{listen_for: ["cooling fan", "風扇"]})
+      everything = insert_watcher(ctx.conn, %{filter: "none", sources: [ctx.ref]})
+
+      fan = item("f", %{data: %{"id" => "f", "text" => "The cooling fan on rack 4 stopped"}})
+      cjk = item("z", %{data: %{"id" => "z", "text" => "機房風扇停了"}})
+
+      assert {:ok, [:accepted, :accepted, :accepted]} =
+               Ingest.accept(source(ctx.ref), [item("a"), fan, cjk], ctx.opts)
+
+      assert ctx.conn |> deliveries(disks) |> Enum.map(&List.last/1) == ["a"]
+      assert ctx.conn |> deliveries(fans) |> Enum.map(&List.last/1) == ["f", "z"]
+      assert ctx.conn |> deliveries(everything) |> Enum.map(&List.last/1) == ["a", "f", "z"]
+    end
+
+    test "an llm watcher with no words gets nothing, and an item no watcher took is a receipt",
+         ctx do
+      silent = llm_watcher(ctx, %{listen_for: []})
+      fans = llm_watcher(ctx, %{listen_for: ["cooling fan"]})
+
+      assert {:ok, [:accepted]} = Ingest.accept(source(ctx.ref), [item("a")], ctx.opts)
+
+      assert deliveries(ctx.conn, silent) == []
+      assert deliveries(ctx.conn, fans) == []
+      assert [["a", "1", nil, 0, terminal_at, _seen]] = cue_rows(ctx.conn, ctx.ref)
+      assert terminal_at == "2026-10-10T12:00:00.000000Z"
+      refute_received :woke_filters
+    end
+  end
+
   describe "C02: identity" do
     test "the same item twice is a duplicate that refreshes last_seen_at", ctx do
-      insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref]})
+      llm_watcher(ctx)
       later = DateTime.add(@now, 3600, :second)
 
       {:ok, [:accepted]} = Ingest.accept(source(ctx.ref), [item("a")], ctx.opts)
@@ -109,7 +152,7 @@ defmodule FermixCore.Cues.IngestTest do
     end
 
     test "same id with new content is a conflict and a gap; a new revision is a new cue", ctx do
-      insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref]})
+      llm_watcher(ctx)
       {:ok, [:accepted]} = Ingest.accept(source(ctx.ref), [item("a")], ctx.opts)
 
       changed = item("a", %{data: %{"id" => "a", "edited" => true}})
@@ -141,7 +184,7 @@ defmodule FermixCore.Cues.IngestTest do
     test "the oldest pending from the flooding source expires; other sources are unaffected",
          ctx do
       other = "#{ctx.ref}-b"
-      watcher = insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref, other]})
+      watcher = llm_watcher(ctx, %{sources: [ctx.ref, other]})
       flood = for n <- 1..250, do: item("f#{n}", %{occurred_at: DateTime.add(@now, -n, :second)})
 
       {:ok, results} = Ingest.accept(source(ctx.ref), flood, ctx.opts)
@@ -216,9 +259,9 @@ defmodule FermixCore.Cues.IngestTest do
   end
 
   test "C24: two watchers on one source get independent deliveries", ctx do
-    one = insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref]})
+    one = llm_watcher(ctx)
     two = insert_watcher(ctx.conn, %{filter: "none", sources: [ctx.ref]})
-    _off = insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref], enabled: false})
+    _off = llm_watcher(ctx, %{enabled: false})
 
     {:ok, [:accepted]} = Ingest.accept(source(ctx.ref), [item("a")], ctx.opts)
 
@@ -244,7 +287,7 @@ defmodule FermixCore.Cues.IngestTest do
   end
 
   test "C38: a body replayed under a new delivery id is a duplicate", ctx do
-    insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref]})
+    llm_watcher(ctx)
     first = item("delivery-1", %{body_hash: "b0dy"})
     replay = item("delivery-2", %{body_hash: "b0dy"})
 
@@ -263,7 +306,7 @@ defmodule FermixCore.Cues.IngestTest do
     end
 
     test "a self-caused item is stored and not routed", ctx do
-      watcher = insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref]})
+      watcher = llm_watcher(ctx)
 
       assert {:ok, [:accepted]} =
                Ingest.accept(source(ctx.ref), [item("mine", %{self_caused?: true})], ctx.opts)
@@ -285,7 +328,7 @@ defmodule FermixCore.Cues.IngestTest do
 
   test "items are inserted oldest first, undated last in input order; results keep input order",
        ctx do
-    watcher = insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref]})
+    watcher = llm_watcher(ctx)
 
     batch = [
       item("u1", %{occurred_at: nil}),
@@ -304,7 +347,7 @@ defmodule FermixCore.Cues.IngestTest do
 
   describe "budget and rate" do
     test "past the daily budget items are over_budget, a gap, and the source over_budget", ctx do
-      insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref]})
+      llm_watcher(ctx)
       batch = [item("a"), item("b"), item("c")]
 
       assert {:ok, [:accepted, :accepted, :over_budget]} =

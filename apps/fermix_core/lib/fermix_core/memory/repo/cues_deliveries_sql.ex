@@ -41,8 +41,8 @@ defmodule FermixCore.Memory.Repo.CuesDeliveriesSql do
   `until` (on `received_at`), `before_id`, `exclude_id`.
   `{:cue_summary, filters}` → `{:ok, %{sources: [...], watchers: [...]}}`:
   per source, the cues received since `since` (receipts included) and the
-  watchers listening to it; per watcher, its deliveries since then by state
-  and outcome. Filters: `since` (required), `watcher_id`, `source_ref`.
+  watchers listening to it; per watcher, its deliveries since then by state,
+  outcome and source. Filters: `since` (required), `watcher_id`, `source_ref`.
   `{:list_proposals, filters}` → `{:ok, [proposal]}`, newest first. Filters:
   `limit` (required), `watcher_id`, `source_ref`, `state`, `since`.
   `{:watcher_ref, name}` → `{:ok, ref} | {:error, :not_found}`: a watcher's
@@ -98,7 +98,7 @@ defmodule FermixCore.Memory.Repo.CuesDeliveriesSql do
   @recorded_text_chars 1_000
   # Mandate calls and proposals listed per delivery; the rest are counted.
   @delivery_children_max 10
-  # Rows a summary reads: sources, and watcher × state × outcome groups.
+  # Rows a summary reads: sources, and watcher × state × outcome × source groups.
   @summary_sources_max 100
   @summary_groups_max 500
   # Mandate × decision groups a mandate summary reads: three decisions for each
@@ -184,7 +184,7 @@ defmodule FermixCore.Memory.Repo.CuesDeliveriesSql do
 
   # Its `?` is `since`; a source filter adds itself to the join condition.
   @summary_groups_sql """
-  SELECT w.id, w.name, w.enabled, d.state, d.outcome, COUNT(d.id)
+  SELECT w.id, w.name, w.enabled, d.state, d.outcome, d.source_ref, COUNT(d.id)
   FROM cue_watchers w
   LEFT JOIN cue_deliveries d ON d.watcher_id = w.id AND d.received_at >= ?
   """
@@ -519,7 +519,9 @@ defmodule FermixCore.Memory.Repo.CuesDeliveriesSql do
 
     sql =
       @summary_groups_sql <>
-        on <> where <> " GROUP BY w.id, d.state, d.outcome ORDER BY w.name, w.id LIMIT ?"
+        on <>
+        where <>
+        " GROUP BY w.id, d.state, d.outcome, d.source_ref ORDER BY w.name, w.id LIMIT ?"
 
     CuesSql.query_all(conn, sql, [since | on_params] ++ params ++ [@summary_groups_max])
   end
@@ -565,7 +567,8 @@ defmodule FermixCore.Memory.Repo.CuesDeliveriesSql do
       enabled?: enabled == 1,
       deliveries: counted |> Enum.map(&List.last/1) |> Enum.sum(),
       by_state: tally(counted, 3),
-      by_outcome: counted |> Enum.reject(&is_nil(Enum.at(&1, 4))) |> tally(4)
+      by_outcome: counted |> Enum.reject(&is_nil(Enum.at(&1, 4))) |> tally(4),
+      by_source: tally(counted, 5)
     }
   end
 

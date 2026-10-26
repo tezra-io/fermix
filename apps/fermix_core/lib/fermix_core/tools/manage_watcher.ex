@@ -17,14 +17,14 @@ defmodule FermixCore.Tools.ManageWatcher do
   ## What it returns
 
   Fermix's own sentences: the echo of every change, and for `show` the
-  purpose and the active instructions, numbered and dated, and its examples
-  by id, label and cue. It returns no outside text: no snapshot, example
-  note, decision reason or hint (`list_cues` is where an item's text is read,
-  framed). So it is not one of `UntrustedContent`'s relaying modules and
-  leaves the turn untainted, and reading the list with `show` and then
-  changing it in the same turn is consent (design §8.4: "before adding, the
-  agent sees the active list"). Should `show` ever return outside text, it
-  must frame it and join the relaying modules.
+  purpose, the words to listen for, the active instructions, numbered and
+  dated, and its examples by id, label and cue. It returns no outside text: no
+  snapshot, example note, decision reason or hint (`list_cues` is where an
+  item's text is read, framed). So it is not one of `UntrustedContent`'s
+  relaying modules and leaves the turn untainted, and reading the list with
+  `show` and then changing it in the same turn is consent (design §8.4: "before
+  adding, the agent sees the active list"). Should `show` ever return outside
+  text, it must frame it and join the relaying modules.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
@@ -44,8 +44,8 @@ defmodule FermixCore.Tools.ManageWatcher do
                      remove_example update)
   @actions @read_actions ++ @change_actions
 
-  @update_keys ~w(sources filter filter_provider filter_model purpose task_job_id task_notes
-                  daily_cap filter_budget)
+  @update_keys ~w(sources filter listen_for purpose task_job_id task_notes daily_cap
+                  filter_budget)
 
   @shared_chat_create "Create the watcher from a private chat with Fermix."
   @shared_chat_change "Change the watcher from a private chat with Fermix."
@@ -62,13 +62,19 @@ defmodule FermixCore.Tools.ManageWatcher do
     "Manage the owner's watchers. A watcher reads the cue sources set up in settings (feeds, " <>
       "streams, webhooks), judges each item against its one-line purpose and numbered " <>
       "instructions with a filter model (or passes every item when its filter is none), and " <>
-      "wakes its task, a job that runs on cues, for each item that passes. Instructions are " <>
-      "a list of single criteria that Fermix never rewrites: read the list with show before " <>
-      "adding, and remove one that a new instruction contradicts in the same change. A " <>
-      "watcher holds at most 20 active instructions of at most 300 characters; past that, " <>
-      "merge several into one. An example must be an item the watcher received (find it with " <>
-      "list_cues). Changes need the owner's own request in a private chat; Fermix answers " <>
-      "every change with its own summary, which you pass on to the owner as written."
+      "wakes its task, a job that runs on cues, for each item that passes. A watcher that " <>
+      "filters listens for words (listen_for): only an item containing one of them reaches " <>
+      "its filter, and the words never decide a pass. Draft them yourself, broadly, from the " <>
+      "owner's purpose and instructions: names, products, common abbreviations, and the " <>
+      "languages the source likely carries, since an item no word matches is never judged; " <>
+      "never ask the owner for a pattern. A watcher with no filter cannot listen to a stream " <>
+      "source. Instructions are a list of single criteria that Fermix never rewrites: read " <>
+      "the list with show before adding, and remove one that a new instruction contradicts in " <>
+      "the same change. A watcher holds at most 20 active instructions of at most 300 " <>
+      "characters; past that, merge several into one. An example must be an item the watcher " <>
+      "received, or one of a stream watcher's recent drops (find either with list_cues). " <>
+      "Changes need the owner's own request in a private chat; Fermix answers every change " <>
+      "with its own summary, which you pass on to the owner as written."
   end
 
   @impl true
@@ -84,6 +90,14 @@ defmodule FermixCore.Tools.ManageWatcher do
           description: "The watcher's name: lowercase letters, digits and dashes."
         },
         purpose: %{type: "string", description: "One line, at most 200 characters."},
+        listen_for: %{
+          type: "array",
+          items: %{type: "string"},
+          description:
+            "Words and short phrases an item this watcher should see would contain (create, " <>
+              "update, where it replaces the list): 1 to 200, each at most 64 characters, " <>
+              "matched as whole words ignoring case and accents. Needed for filter llm."
+        },
         instructions: %{
           type: "array",
           items: %{type: "string"},
@@ -111,14 +125,9 @@ defmodule FermixCore.Tools.ManageWatcher do
         filter: %{
           type: "string",
           enum: ["llm", "none"],
-          description: "llm judges each item with a model; none passes every item."
-        },
-        filter_provider: %{type: "string", description: "The filter model's provider."},
-        filter_model: %{
-          type: "string",
           description:
-            "The filter model; without it the default filter model in settings is used, " <>
-              "else the main model."
+            "llm judges each item with the Cues filter model set in settings; none passes " <>
+              "every item."
         },
         daily_cap: %{
           type: "string",
@@ -145,6 +154,11 @@ defmodule FermixCore.Tools.ManageWatcher do
         },
         delivery_mode: %{type: "string", enum: ["origin", "channel", "none"]},
         cue_id: %{type: "integer", description: "The cue an example names, from list_cues."},
+        drop_key: %{
+          type: "integer",
+          description:
+            "In place of cue_id: a stream watcher's recent drop an example names, from list_cues."
+        },
         label: %{
           type: "string",
           enum: ["pass", "drop"],
@@ -171,7 +185,9 @@ defmodule FermixCore.Tools.ManageWatcher do
         tag: "no_consent",
         description: "a change from a shared chat or a turn that read outside text"
       },
-      %{tag: "instruction_cap", description: "20 active instructions; merge first"}
+      %{tag: "instruction_cap", description: "20 active instructions; merge first"},
+      %{tag: "needs_words", description: "a model filter with no words to listen for"},
+      %{tag: "no_filter_on_stream", description: "a watcher with no filter on a stream source"}
     ]
   end
 
@@ -233,7 +249,8 @@ defmodule FermixCore.Tools.ManageWatcher do
   # --- actions -------------------------------------------------------------------------
 
   defp dispatch("list", _args, context) do
-    with {:ok, watchers} <- Watchers.list(opts(context)), do: {:ok, render_list(watchers)}
+    with {:ok, watchers} <- Watchers.list(opts(context)),
+         do: {:ok, render_list(watchers, context)}
   end
 
   defp dispatch("show", args, context) do
@@ -301,13 +318,19 @@ defmodule FermixCore.Tools.ManageWatcher do
     do: Watchers.set_purpose(name, Map.get(args, "purpose"), opts(context))
 
   defp change("add_example", name, args, context) do
-    Watchers.add_example(
-      name,
-      Map.get(args, "cue_id"),
-      Map.get(args, "label"),
-      Map.get(args, "note"),
-      opts(context)
-    )
+    label = Map.get(args, "label")
+    note = Map.get(args, "note")
+
+    case {Map.get(args, "cue_id"), Map.get(args, "drop_key")} do
+      {nil, key} when not is_nil(key) ->
+        Watchers.add_drop_example(name, key, label, note, opts(context))
+
+      {cue_id, nil} ->
+        Watchers.add_example(name, cue_id, label, note, opts(context))
+
+      {_cue_id, _key} ->
+        {:error, "Name the item by cue_id or by drop_key, not both."}
+    end
   end
 
   defp change("remove_example", name, args, context),
@@ -328,8 +351,8 @@ defmodule FermixCore.Tools.ManageWatcher do
   defp create_params(args) do
     with {:ok, daily_cap} <- count_arg(args, "daily_cap"),
          {:ok, budget} <- count_arg(args, "filter_budget") do
-      keys = ~w(name purpose instructions sources filter filter_provider filter_model task_notes
-                task_job_id task task_name task_timeout_minutes delivery_target delivery_mode)
+      keys = ~w(name purpose listen_for instructions sources filter task_notes task_job_id task
+                task_name task_timeout_minutes delivery_target delivery_mode)
 
       {:ok,
        args
@@ -392,24 +415,31 @@ defmodule FermixCore.Tools.ManageWatcher do
 
   # --- rendering (Fermix's words; outside text framed) ----------------------------------
 
-  defp render_list([]), do: "There are no watchers yet."
+  defp render_list([], _context), do: "There are no watchers yet."
 
-  defp render_list(watchers) do
+  defp render_list(watchers, context) do
+    streams = Watchers.stream_refs(opts(context))
+
     Enum.map_join(watchers, "\n", fn watcher ->
-      "#{watcher.name}: #{state_word(watcher)}; #{filter_word(watcher)}; " <>
+      "#{watcher.name}: #{state_word(watcher, streams)}; #{filter_word(watcher)}; " <>
         "#{watcher.active_instructions} active instructions; sources " <>
         "#{Enum.join(watcher.sources, ", ")}; task job #{watcher.task_job_id}"
     end)
   end
 
   defp render_show(watcher, context) do
+    streams = Watchers.stream_refs(opts(context))
+
     [
-      "Watcher #{watcher.name} (#{watcher.id}): #{state_word(watcher)}; #{filter_word(watcher)}; " <>
-        "task job #{watcher.task_job_id}; task notes #{if watcher.task_notes?, do: "on", else: "off"}.",
+      "Watcher #{watcher.name} (#{watcher.id}): #{state_word(watcher, streams)}; " <>
+        "#{filter_word(watcher)}; task job #{watcher.task_job_id}; task notes " <>
+        "#{if watcher.task_notes?, do: "on", else: "off"}.",
+      needs_line(Watchers.update_needed(watcher, streams)),
       "Sources: #{Enum.join(watcher.sources, ", ")}." <> missing(watcher, context),
       "Daily cap: #{count_word(watcher.daily_cap, "runs")}. Filter budget: " <>
         "#{count_word(watcher.filter_budget, "calls")}.",
       if(watcher.purpose, do: "Purpose: #{watcher.purpose}"),
+      Watchers.words_line(watcher),
       instructions_block(watcher.instructions),
       removed_block(watcher.removed_instructions),
       examples_block(watcher.examples)
@@ -425,12 +455,28 @@ defmodule FermixCore.Tools.ManageWatcher do
     end
   end
 
-  defp state_word(%{enabled?: true}), do: "listening"
-  defp state_word(_watcher), do: "paused"
+  defp state_word(%{enabled?: false}, _streams), do: "paused"
+
+  defp state_word(watcher, streams) do
+    case Watchers.update_needed(watcher, streams) do
+      nil -> "listening"
+      :words -> "needs words to listen for"
+      :filter -> "needs a filter to listen to a stream"
+    end
+  end
+
+  defp needs_line(nil), do: nil
+
+  defp needs_line(:words),
+    do: "It needs words to listen for, and no item reaches it until an update gives it some."
+
+  defp needs_line(:filter),
+    do:
+      "It passes every item and listens to a stream, so nothing reaches it until an update " <>
+        "gives it a model filter or other sources."
 
   defp filter_word(%{filter: "none"}), do: "no filter (every item passes)"
-  defp filter_word(%{filter_model: nil}), do: "filter: the default filter model"
-  defp filter_word(watcher), do: "filter: #{watcher.filter_provider} #{watcher.filter_model}"
+  defp filter_word(_watcher), do: "filter: the Cues filter model"
 
   defp count_word(0, _unit), do: "none"
   defp count_word(n, unit), do: "#{n} #{unit} in 24 hours"

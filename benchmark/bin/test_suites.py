@@ -572,6 +572,7 @@ def test_the_shipped_numbered_rubrics_parse():
                       # cues.yaml
                       "releases_and_outages": 3, "security_fixes_only": 3,
                       "sanity_watcher_tool_reached": 2,
+                      "firehose_failover_news": 4, "flooded_source_replication_lag": 4,
                       "ignore_conference_talks": 3, "skip_vendor_webinars": 3,
                       "funding_story_not_useful": 3, "meetup_item_useless": 3,
                       "alerts_to_dana_on_signal": 2, "alerts_to_sister_on_signal": 2,

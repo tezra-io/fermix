@@ -7,16 +7,23 @@ defmodule FermixCore.Cues.SweeperTest do
   alias FermixCore.Cues.Sweeper
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesSql
+  alias FermixTestSupport.TelemetryCapture
 
   @t0 ~U[2026-09-01 12:00:00Z]
+  @wait_ms 10_000
+  # A word every item below carries (`item/2`), so an llm watcher is offered it.
+  @words ["release"]
 
   setup do
     ctx = start_repo("sweeper")
     Map.put(ctx, :ref, "src-#{System.unique_integer([:positive])}")
   end
 
+  defp item(id, now),
+    do: item!(%{item_id: id, type: "t", data: %{"text" => "Release #{id}"}}, now)
+
   defp accept(ctx, ids, now, ref \\ nil) do
-    items = Enum.map(ids, &item!(%{item_id: &1, type: "t", data: %{"id" => &1}}, now))
+    items = Enum.map(ids, &item(&1, now))
 
     {:ok, results} =
       Ingest.accept(%{ref: ref || ctx.ref, daily_budget: 0}, items,
@@ -69,7 +76,7 @@ defmodule FermixCore.Cues.SweeperTest do
 
   test "expire: undecided and passed deliveries past their lifetime expire with a gap", ctx do
     FermixTestSupport.TelemetryCapture.attach([[:fermix, :cue, :lifecycle]], source_ref: ctx.ref)
-    llm = insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref]})
+    llm = insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref], listen_for: @words})
     none = insert_watcher(ctx.conn, %{filter: "none", sources: [ctx.ref]})
     :ok = accept(ctx, ["a"], @t0)
     :ok = accept(ctx, ["busy"], @t0)
@@ -111,7 +118,7 @@ defmodule FermixCore.Cues.SweeperTest do
   end
 
   test "terminal_at: set from the last settle once every delivery is terminal", ctx do
-    insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref]})
+    insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref], listen_for: @words})
     :ok = accept(ctx, ["done", "open"], @t0)
     settled = later(@t0, 0, 600)
     settle(ctx.conn, "done", "acked", settled)
@@ -123,7 +130,7 @@ defmodule FermixCore.Cues.SweeperTest do
   end
 
   test "payloads: dropped 24 hours after the cue became terminal", ctx do
-    insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref]})
+    insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref], listen_for: @words})
     :ok = accept(ctx, ["a"], @t0)
     settle(ctx.conn, "a", "dropped", @t0)
     {:ok, 1} = step(ctx, :mark_terminal, @t0)
@@ -141,12 +148,12 @@ defmodule FermixCore.Cues.SweeperTest do
     {:ok, [:duplicate]} =
       Ingest.accept(
         %{ref: ctx.ref, daily_budget: 0},
-        [item!(%{item_id: "seen", type: "t", data: %{"id" => "seen"}}, later(@t0, 5))],
+        [item("seen", later(@t0, 5))],
         now: later(@t0, 5),
         repo: ctx.repo
       )
 
-    insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref]})
+    insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref], listen_for: @words})
     :ok = accept(ctx, ["routed"], @t0)
     settle(ctx.conn, "routed", "dropped", @t0)
     {:ok, _count} = step(ctx, :mark_terminal, @t0)
@@ -164,7 +171,7 @@ defmodule FermixCore.Cues.SweeperTest do
   end
 
   test "deliveries: terminal ones pruned after 30 days, live ones never", ctx do
-    insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref]})
+    insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref], listen_for: @words})
     :ok = accept(ctx, ["old", "live"], @t0)
     settle(ctx.conn, "old", "dropped", @t0)
 
@@ -179,7 +186,7 @@ defmodule FermixCore.Cues.SweeperTest do
   end
 
   test "gaps, filter calls and snapshots age out after 30 days", ctx do
-    insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref]})
+    insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref], listen_for: @words})
     :ok = accept(ctx, ["a"], @t0)
 
     {:ok, _gap} =
@@ -207,15 +214,136 @@ defmodule FermixCore.Cues.SweeperTest do
     assert cue(ctx.conn, "a").snapshot == nil
   end
 
+  test "counts age out 48 hours after their hour, through the Sweeper's step", ctx do
+    row = fn hour ->
+      %{scope: "source", ref: ctx.ref, hour: hour, incarnation: "i1", counts: %{"received" => 1}}
+    end
+
+    rows = [row.(~U[2026-09-01 10:00:00Z]), row.(~U[2026-09-01 12:00:00Z])]
+    {:ok, 2} = Repo.cues_call(CuesSql, {:counts_put, rows, @t0}, server: ctx.repo)
+
+    assert {:ok, 0} = Sweeper.prune_counts([server: ctx.repo], later(@t0, 1, 22 * 3_600), 1_000)
+    assert {:ok, 1} = Sweeper.prune_counts([server: ctx.repo], later(@t0, 2), 1_000)
+    assert [["2026-09-01T12:00:00.000000Z"]] = rows(ctx.conn, "SELECT hour FROM cue_counts")
+    assert :prune_counts in Sweeper.step_names()
+  end
+
   describe "the Sweeper process" do
     defp start_sweeper(ctx, opts) do
       name = :"cue_sweeper_#{System.unique_integer([:positive])}"
-      start_supervised!({Sweeper, [name: name, repo: ctx.repo, timer?: false] ++ opts})
+
+      start_supervised!(
+        {Sweeper, Keyword.merge([name: name, repo: ctx.repo, timer?: false], opts)}
+      )
+
       name
     end
 
-    test "runs every step in chunks when driven by hand", ctx do
+    # M60_CUE_INTAKE_AT_SCALE.md §3.1: the first tick alone tells the owner
+    # about stored watchers that break a rule; a failure is traced, not lost.
+    test "the first tick tells about watchers that need an update, once", ctx do
+      test = self()
+
+      notices = fn opts ->
+        send(test, {:needs_update_notices, Keyword.fetch!(opts, :repo)})
+        {:error, :repo_timeout}
+      end
+
+      TelemetryCapture.attach([[:fermix, :cue, :lifecycle]], reason: :needs_update_notices)
+      server = start_sweeper(ctx, needs_update_notices: notices)
+      repo = ctx.repo
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          send(server, :sweep)
+          assert_receive {:needs_update_notices, ^repo}
+          send(server, :sweep)
+          _ = :sys.get_state(server)
+        end)
+
+      refute_received {:needs_update_notices, _repo}
+      assert log =~ "Cue needs-update notices failed: :repo_timeout"
+
+      assert_received {:telemetry, [:fermix, :cue, :lifecycle], _measurements,
+                       %{phase: :sweep_error}}
+    end
+
+    # The real notices against a store that never answers: each of their Repo
+    # calls is bounded like a sweep step's, so the sweeper runs on.
+    test "a store that never answers the first tick's notices costs a traced error, once", ctx do
+      stalled = start_supervised!({FermixTestSupport.StalledRepo, notify: self()})
+      TelemetryCapture.attach([[:fermix, :cue, :lifecycle]], reason: :needs_update_notices)
+      server = start_sweeper(ctx, repo: stalled, repo_timeout_ms: 50)
+      pid = GenServer.whereis(server)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          send(server, :sweep)
+
+          assert_receive {:telemetry, [:fermix, :cue, :lifecycle], _m,
+                          %{phase: :sweep_error, error_class: "repo_timeout"}},
+                         @wait_ms
+
+          send(server, :sweep)
+          _ = :sys.get_state(server, @wait_ms)
+        end)
+
+      assert GenServer.whereis(server) == pid
+      assert_received {:stalled, :list_watchers}
+      refute_received {:stalled, :list_watchers}
+      assert log =~ "Cue needs-update notices failed: :repo_timeout"
+    end
+
+    test "a notice claim the store never answers is bounded too, and the sweeper runs on", ctx do
       insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref]})
+
+      stalled =
+        start_supervised!(
+          {FermixTestSupport.StalledRepo,
+           forward_to: ctx.repo, stall: [:claim_watcher_notice], notify: self()}
+        )
+
+      # Forwarded requests share this budget, so it leaves room for a slow but
+      # answering Repo; only the stalled claim spends all of it.
+      server = start_sweeper(ctx, repo: stalled, repo_timeout_ms: 1_000)
+      pid = GenServer.whereis(server)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          send(server, :sweep)
+          assert_receive {:stalled, :claim_watcher_notice}, @wait_ms
+          _ = :sys.get_state(server, @wait_ms)
+        end)
+
+      assert GenServer.whereis(server) == pid
+      assert log =~ "needs_update notice was not sent: :repo_timeout"
+    end
+
+    test "the task lookup after a claim is bounded too, and the sweeper runs on", ctx do
+      insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref]})
+
+      stalled =
+        start_supervised!(
+          {FermixTestSupport.StalledRepo,
+           forward_to: ctx.repo, stall: [:get_scheduled_job], notify: self()}
+        )
+
+      server = start_sweeper(ctx, repo: stalled, repo_timeout_ms: 1_000)
+      pid = GenServer.whereis(server)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          send(server, :sweep)
+          assert_receive {:stalled, :get_scheduled_job}, @wait_ms
+          _ = :sys.get_state(server, @wait_ms)
+        end)
+
+      assert GenServer.whereis(server) == pid
+      assert log =~ "notice was not sent: :repo_timeout"
+    end
+
+    test "runs every step in chunks when driven by hand", ctx do
+      insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref], listen_for: @words})
       :ok = accept(ctx, Enum.map(1..5, &"e#{&1}"), @t0)
       # A clock that never moves: on the real one a busy runner spends the
       # 250 ms budget before the last steps run (the next test covers it).
@@ -228,7 +356,7 @@ defmodule FermixCore.Cues.SweeperTest do
     end
 
     test "stops a pass when its time budget is spent", ctx do
-      insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref]})
+      insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref], listen_for: @words})
       :ok = accept(ctx, Enum.map(1..5, &"e#{&1}"), @t0)
       ticks = :counters.new(1, [])
 

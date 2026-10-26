@@ -15,12 +15,28 @@ defmodule FermixCore.Cues.TelemetryTest do
   # The phase surface is pinned, not inferred: adding a phase is a deliberate
   # edit that also updates `@cue_phases` in
   # apps/fermix_opik/test/fermix_opik/aggregation_test.exs.
-  test "every phase of design §14 is allowed, plus the two error phases" do
+  test "every phase of design §14 is allowed, plus the counted ones and the two error phases" do
     assert Enum.sort(Telemetry.phases()) ==
              Enum.sort(~w(accepted duplicate conflict stale rejected rate_limited over_budget
-                          routed gap expired passed dropped filter_retry filter_held filter_failed
-                          claimed settled retry exhausted proposed confirmed denied
-                          proposal_expired proposal_refused ingest_error sweep_error)a)
+                          routed gap expired unmatched overflow write_failed passed dropped
+                          filter_retry filter_held filter_failed claimed settled retry exhausted
+                          proposed confirmed denied proposal_expired proposal_refused
+                          ingest_error sweep_error)a)
+  end
+
+  test "a counted phase carries its count and the source or watcher, and no session" do
+    Telemetry.lifecycle(:unmatched, %{count: 41}, %{source_ref: "bsky-news"})
+    Telemetry.lifecycle(:dropped, %{count: 3}, %{watcher_id: "cwt_a"})
+
+    assert_receive {:telemetry, [:fermix, :cue, :lifecycle], %{count: 41},
+                    %{phase: :unmatched, source_ref: "bsky-news"}}
+
+    assert_receive {:telemetry, [:fermix, :cue, :lifecycle], %{count: 3},
+                    %{phase: :dropped, watcher_id: "cwt_a"}}
+
+    assert_raise ArgumentError, ~r/sessionless/, fn ->
+      Telemetry.lifecycle(:overflow, %{count: 1}, %{watcher_id: "cwt_a", session_id: "s"})
+    end
   end
 
   test "a lifecycle event carries ids, counts, the phase and the component" do

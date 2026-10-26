@@ -10,6 +10,8 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
   alias FermixCore.Cues.Pins
   alias FermixCore.Cues.Webhook
   alias FermixCore.Management.Cues.SourceForm
+  alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Setup.ConfigStore
@@ -206,7 +208,12 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       {:ok, view, _html} = live(conn, "/setup")
       html = open_cues(view)
 
-      assert html =~ ~r/<option value="" selected[^>]*>\s*Main model \(OpenAI/
+      assert html =~ ~r/<option value="" selected[^>]*>\s*Default: your main model \(OpenAI/
+
+      assert html =~
+               "Judges each item on its own, so a smaller, faster model works well and costs " <>
+                 "much less than your main model."
+
       assert html =~ ~s(<option value="openai")
       refute html =~ ~s(<option value="anthropic")
       refute html =~ "(not set up)"
@@ -1174,9 +1181,11 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       watcher =
         CueDeliveryFixtures.watcher(db, %{name: "release-notes", sources: ["eng-blogs"]})
 
-      CueFixtures.exec!(db, "UPDATE cue_watchers SET filter_failures = 3 WHERE id = ?", [
-        watcher.id
-      ])
+      CueFixtures.exec!(
+        db,
+        "UPDATE cue_watchers SET filter_failures = 3, listen_for = '[\"release\"]' WHERE id = ?",
+        [watcher.id]
+      )
 
       for {state, hours} <- [{"pending", 1}, {"passed", 2}, {"dropped", 3}, {"dropped", 30}] do
         received = DateTime.add(@now, -hours * 3_600, :second)
@@ -1210,6 +1219,30 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       assert html =~ ~s(data-watcher-dropped="1")
       refute html =~ @cue_text
       refute html =~ @drop_reason
+    end
+
+    # M60_CUE_INTAKE_AT_SCALE.md §3.1 and §3.4: a watcher stored before the
+    # rules says what it needs, and a stream's offers are counted, not stored.
+    test "one stored before the rules says what it needs; offers are counted", %{conn: conn} do
+      %{repo: repo, conn: db} = CueFixtures.start_repo("setup_watchers_rules")
+      Application.put_env(:fermix_web, :cues_pane_opts, now: fn -> @now end, repo: repo)
+      watcher = CueDeliveryFixtures.watcher(db, %{name: "old-news", sources: ["eng-blogs"]})
+
+      row = %{
+        scope: "watcher",
+        ref: watcher.id,
+        hour: CuesSql.hour_of(@now),
+        incarnation: "inc-a",
+        counts: %{"offered" => 7}
+      }
+
+      {:ok, 1} = Repo.cues_call(CuesSql, {:counts_put, [row], @now}, server: repo)
+
+      {:ok, _view, html} = live(conn, "/setup?tab=cues")
+
+      assert html =~ "Needs update"
+      assert html =~ "Needs words to listen for: update it in chat."
+      assert html =~ ~s(data-watcher-offered="7")
     end
   end
 

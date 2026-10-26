@@ -14,11 +14,11 @@ defmodule FermixCore.Management.Settings.Cues do
   switch as live and the cue tree's switch and port as boot-bound.
 
   The filter rows come from `Cues.FilterChoices`, the setup page's own reader:
-  the empty value is the main model, labelled with it, then only the providers
-  that are set up, and the chosen provider's catalog models as suggestions. A
-  provider whose list is the account's own publishes none, and the client asks
-  `providers.models.list`. Each row keeps its explanation in `info`, with no
-  footer.
+  the empty value is the default, labelled with the main model it resolves to,
+  then only the providers that are set up, and the chosen provider's catalog
+  models as suggestions. A provider whose list is the account's own publishes
+  none, and the client asks `providers.models.list`. Each row keeps its
+  explanation in `info`, with no footer.
   """
 
   alias FermixCore.Cues
@@ -39,9 +39,8 @@ defmodule FermixCore.Management.Settings.Cues do
                   "Applies after a restart."
   @mandates_info "Off stops the next call of every mandate at once, even in a run already " <>
                    "going. No restart needed."
-  @filter_info "Decides which items reach a watcher's task, one item at a time. The main " <>
-                 "model works; a small, inexpensive one costs less. A watcher with a model " <>
-                 "of its own uses that one."
+  @filter_info "Judges each item on its own, so a smaller, faster model works well and costs " <>
+                 "much less than your main model."
   @door_info "The door listens on this Mac only. Applies after a restart."
 
   @doc "The one section this module owns, where the build admits cues."

@@ -1305,6 +1305,11 @@ defmodule FermixCore.Management.ProtocolContractTest do
       [watcher]
     )
 
+    CueFixtures.exec!(conn, "UPDATE cue_watchers SET listen_for = ? WHERE id = ?", [
+      Jason.encode!(["release", "outage"]),
+      watcher
+    ])
+
     for request <- [
           {:source_reject, "gh-hooks", %{"unauthorized" => 3}, now},
           {:extend_gap, "gh-hooks", nil, "rate_limited", 4, nil, now}

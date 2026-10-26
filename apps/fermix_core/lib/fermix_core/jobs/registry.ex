@@ -692,5 +692,11 @@ defmodule FermixCore.Jobs.Registry do
     end
   end
 
-  defp repo_opts(opts), do: [server: Keyword.get(opts, :repo, Keyword.get(opts, :server, Repo))]
+  # A caller's `:timeout` and `:on_timeout` bound its Repo call (the cue
+  # sweeper's notices must not exit on a stalled store); without them a call
+  # keeps the Repo's defaults.
+  defp repo_opts(opts) do
+    [server: Keyword.get(opts, :repo, Keyword.get(opts, :server, Repo))] ++
+      Keyword.take(opts, [:timeout, :on_timeout])
+  end
 end

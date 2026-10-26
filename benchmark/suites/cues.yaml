@@ -19,7 +19,7 @@
 # Most cases change the eval home's watchers, so the suite is `isolated_mutation`
 # (`make behavioral-isolated`); the what-is-set-up cases only read it. Fermix answers every watcher change with its own
 # summary ("Added 4: …", "Removed 2: …", "Stored cue N as a drop example …",
-# "Watcher <name> is set up: …"), which the model is told to pass on as written;
+# "Watcher <name> is set up: …" with its "Listens for: …" words), which the model is told to pass on as written;
 # the reply gates read that format, never the model's own wording. manage_watcher
 # records no tool input, so what it did is graded by the judge from its result.
 suite: cues
@@ -28,7 +28,9 @@ requires: [cues]
 title: "Cues — watchers made and taught in the owner's own words"
 description: >
   The owner asks for a watcher in their own words and Fermix creates one with a
-  purpose and instructions; "also ignore …" adds one instruction and leaves the
+  purpose and instructions; watching a busy source for a topic sets up words to
+  listen for, drafted from the owner's request and listed in Fermix's summary,
+  never a pattern asked of the owner; "also ignore …" adds one instruction and leaves the
   others as they were; "that wasn't useful" becomes a drop example on the item
   named; "send my Signal contact the alerts" makes no watcher, because a watcher
   reports only to the owner; "which sources and mandates do I have?" is answered
@@ -107,6 +109,70 @@ scenarios:
              from Fermix says the watcher is set up and names eng-blogs.
           2. The reply tells the owner the watcher exists, and claims no setting the
              tool result does not show.
+
+  # M60_CUE_INTAKE_AT_SCALE.md §3.1: a watcher that filters listens for words the
+  # consent turn drafts from the owner's purpose, and Fermix's echo lists them. The
+  # gate is a floor on asking the owner for a regular expression (checked against
+  # asks and correct "no regex needed" replies in bin/test_cue_drive.py); what was
+  # saved and said is the rubric's.
+  - id: busy_source_words_to_listen_for
+    title: "Watching a busy source for a topic sets up words to listen for, never a pattern"
+    severity: critical
+    risk: isolated_mutation
+    tags: [cues, watchers, listen_for]
+    cases:
+      - id: firehose_failover_news
+        drive: companion
+        query: >
+          My eng-blogs source is a firehose these days, hundreds of posts an hour and
+          almost all noise. Keep watch on it for anything about Orrin DB replication
+          breaking or failovers going wrong, and tell me here.
+        expect:
+          status: ok
+          tools_none: [schedule_job, event_store]
+          reply_not_matches: "(?i)(?<!\\bno )(?<!\\bnot a )(?<!without a )(?<!n't need a )(?<!need for a )(?<!rather than a )(?<!instead of a )\\b(?:regex(?:es|ps?)?|regular expressions?)\\b"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. A watcher listening to the eng-blogs source was created: a tool result
+             from Fermix says the watcher is set up, names eng-blogs, and lists the
+             words it listens for ("Listens for: …").
+          2. Those words come from what the owner asked (Orrin DB replication or
+             failover problems), with more than one word or phrase, and none about
+             anything the owner did not ask for.
+          3. The reply tells the owner the watcher exists and gives the words it
+             listens for as the tool result lists them; it claims no word the result
+             does not list.
+          4. The watcher was set up in this turn without first asking the owner for
+             words, keywords, a pattern or a regular expression. Offering to change
+             the words afterwards is correct and must never be penalized.
+      - id: flooded_source_replication_lag
+        drive: companion
+        query: >
+          eng-blogs gets flooded all day long. The only posts I care about are ones on
+          Orrin DB failover or replication lag. Can you watch it for those and let me
+          know in this chat?
+        expect:
+          status: ok
+          tools_none: [schedule_job, event_store]
+          reply_not_matches: "(?i)(?<!\\bno )(?<!\\bnot a )(?<!without a )(?<!n't need a )(?<!need for a )(?<!rather than a )(?<!instead of a )\\b(?:regex(?:es|ps?)?|regular expressions?)\\b"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. A watcher listening to the eng-blogs source was created: a tool result
+             from Fermix says the watcher is set up, names eng-blogs, and lists the
+             words it listens for ("Listens for: …").
+          2. Those words come from what the owner asked (Orrin DB failover or
+             replication lag), with more than one word or phrase, and none about
+             anything the owner did not ask for.
+          3. The reply tells the owner the watcher exists and gives the words it
+             listens for as the tool result lists them; it claims no word the result
+             does not list.
+          4. The watcher was set up in this turn without first asking the owner for
+             words, keywords, a pattern or a regular expression. Offering to change
+             the words afterwards is correct and must never be penalized.
 
   - id: also_ignore_adds_one_instruction
     title: "\"Also ignore …\" adds an instruction and leaves the others as they were"

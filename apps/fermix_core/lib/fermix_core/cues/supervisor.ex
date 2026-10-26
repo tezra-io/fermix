@@ -3,9 +3,15 @@ defmodule FermixCore.Cues.Supervisor do
   The cue subsystem's tree (M60 §5.3), last in the core `rest_for_one` tree and
   present only when `FermixCore.Cues.enabled?/0` at boot.
 
-  `one_for_one` over three children, because every child's durable state is
-  rows and the only shared memory is `Cues.Buckets`' tables:
+  `one_for_one` over four children, because every child's durable state is
+  rows and the shared memory is `Cues.Buckets`' tables and the recent drops:
 
+    * the live group, `rest_for_one`, first, so it is up before any stream
+      hands it watchers: `Cues.LiveFilters`' task supervisor, then
+      `Cues.LiveFilters` (M60_CUE_INTAKE_AT_SCALE.md §3.2). Its tasks come
+      before its dispatcher, the reverse of the filtering group, because a
+      live task writes its own result, so it may outlive a dispatcher crash.
+      A stream hands its watchers again within 10 s;
     * the intake group, `rest_for_one`: `Cues.Buckets` first, since the
       sources and the door read its tables, then `Cues.SourceSupervisor`,
       `Cues.SourceManager` and `Cues.Door`. A source or door crash restarts
@@ -34,6 +40,11 @@ defmodule FermixCore.Cues.Supervisor do
 
   @impl true
   def init(opts) do
+    live = [
+      {Task.Supervisor, name: FermixCore.Cues.LiveFilterSupervisor},
+      FermixCore.Cues.LiveFilters
+    ]
+
     intake = [
       Buckets,
       FermixCore.Cues.SourceSupervisor,
@@ -47,6 +58,7 @@ defmodule FermixCore.Cues.Supervisor do
     ]
 
     children = [
+      group(:live, live, FermixCore.Cues.LiveSupervisor),
       group(:intake, intake, FermixCore.Cues.IntakeSupervisor),
       group(:filtering, filtering, FermixCore.Cues.FilteringSupervisor),
       {Sweeper, Keyword.get(opts, :sweeper, [])}

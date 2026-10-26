@@ -13,6 +13,13 @@ defmodule FermixCore.Cues.Watchers do
   `removed_from`) as `channel:chat` taken from the tool context by Fermix,
   never from the model.
 
+  Two rules hold for every watcher saved (M60_CUE_INTAKE_AT_SCALE.md §3.1): one
+  that filters has words to listen for (`listen_for`, validated by
+  `Cues.ListenFor`), and one with no filter listens to no stream. A save that
+  breaks either is refused with the fix; a watcher stored before the rules that
+  breaks one reads `needs_update` (`update_needed/2`) and is told once
+  (`needs_update_notices/1`).
+
   ## Options
 
   `:repo` (the `Memory.Repo` server), `:now`, `:cues_config` (the
@@ -26,14 +33,17 @@ defmodule FermixCore.Cues.Watchers do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Cues
   alias FermixCore.Cues.Config
+  alias FermixCore.Cues.ListenFor
+  alias FermixCore.Cues.Notices
+  alias FermixCore.Cues.RecentDrops
   alias FermixCore.Cues.Telemetry
   alias FermixCore.Jobs.CueRun
   alias FermixCore.Jobs.CueSurface
   alias FermixCore.Jobs.DeliveryDefaults
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Memory.Repo.CuesWatchersSql
-  alias FermixCore.Providers.ModelCatalog
 
   @name_pattern ~r/\A[a-z0-9][a-z0-9-]{0,63}\z/
   @purpose_max 200
@@ -46,7 +56,12 @@ defmodule FermixCore.Cues.Watchers do
   @cap_reached "This watcher has 20 instructions; merge some first."
   @none_needs_cap "A watcher with no filter wakes its task for every cue; say how many runs a day " <>
                     "it may cause, or say none."
-  @none_takes_nothing "A watcher with no filter takes no purpose, instructions or filter model."
+  @none_takes_nothing "A watcher with no filter takes no purpose, instructions or words to " <>
+                        "listen for."
+  @needs_words "A watcher that filters needs words to listen for: list the names, products, " <>
+                 "abbreviations and phrases an item it should see would contain, as listen_for."
+  @drop_gone "That drop is no longer kept: Fermix keeps a stream watcher's last 50 drops until " <>
+               "it restarts."
   @none_has_no_list "A watcher with no filter has no purpose, instructions or examples; switch it " <>
                       "to a model filter first."
   @must_report "A watcher's task must reach you: pick where it reports."
@@ -83,6 +98,8 @@ defmodule FermixCore.Cues.Watchers do
 
   @type opts :: keyword()
   @type watcher :: map()
+  @typedoc "The update a stored watcher needs to keep a rule: words, or a filter."
+  @type update_needed :: :words | :filter | nil
   @type result ::
           {:ok, %{required(:echo) => String.t(), optional(atom()) => term()}}
           | {:error, String.t()}
@@ -109,6 +126,7 @@ defmodule FermixCore.Cues.Watchers do
     with {:ok, name} <- check_name(Map.get(params, :name)),
          {:ok, settings} <- filter_settings(params),
          {:ok, sources} <- check_sources(Map.get(params, :sources)),
+         :ok <- keeps_rules(Map.put(settings, :sources, sources), opts),
          {:ok, instructions} <- check_instructions(Map.get(params, :instructions) || []),
          :ok <- name_free(name, opts),
          {:ok, job, created?} <- task_for(name, params, context, opts) do
@@ -181,8 +199,7 @@ defmodule FermixCore.Cues.Watchers do
        %{
          filter: "none",
          purpose: nil,
-         filter_provider: nil,
-         filter_model: nil,
+         listen_for: [],
          daily_cap: daily_cap,
          filter_budget: 0
        }}
@@ -191,15 +208,14 @@ defmodule FermixCore.Cues.Watchers do
 
   defp filter_settings(%{filter: "llm"} = params) do
     with {:ok, purpose} <- check_purpose(Map.get(params, :purpose)),
-         {:ok, {provider, model}} <- filter_model(params),
+         {:ok, words} <- check_words(Map.get(params, :listen_for)),
          {:ok, daily_cap} <- count_setting(Map.get(params, :daily_cap), :daily_cap),
          {:ok, budget} <- count_setting(Map.get(params, :filter_budget), :filter_budget) do
       {:ok,
        %{
          filter: "llm",
          purpose: purpose,
-         filter_provider: provider,
-         filter_model: model,
+         listen_for: words,
          daily_cap: daily_cap,
          filter_budget: budget
        }}
@@ -207,12 +223,12 @@ defmodule FermixCore.Cues.Watchers do
   end
 
   defp filter_settings(_params),
-    do: {:error, ~s(Pick the watcher's filter: "llm" with a model, or "none".)}
+    do: {:error, ~s(Pick the watcher's filter: "llm", where a model judges each item, or "none".)}
 
   defp refuse_for_none(params) do
     given =
       Enum.filter(
-        [:purpose, :instructions, :filter_provider, :filter_model],
+        [:purpose, :instructions, :listen_for],
         &present?(params, &1)
       )
 
@@ -260,31 +276,75 @@ defmodule FermixCore.Cues.Watchers do
   defp check_purpose(_purpose),
     do: {:error, "Give the watcher a purpose: one line on what it is for."}
 
-  # The watcher's own model, or neither: then the filter runs on the default
-  # filter model, else the main model, read at each call (`Filter.Llm`).
-  defp filter_model(params) do
-    provider = blank_to_nil(Map.get(params, :filter_provider))
-    model = blank_to_nil(Map.get(params, :filter_model))
+  defp check_words(nil), do: {:error, @needs_words}
+  defp check_words(words), do: ListenFor.validate(words)
 
-    case {provider, model} do
-      {nil, nil} -> {:ok, {nil, nil}}
-      {p, m} when is_binary(p) and is_binary(m) -> known_provider(p, m)
-      _one_of_two -> {:error, "Give filter_provider and filter_model together, or neither."}
+  # --- the rules (M60_CUE_INTAKE_AT_SCALE.md §3.1) ---------------------------------------
+
+  @doc """
+  The update a stored watcher needs to keep the rules, or nil: `:words` for one
+  that filters with no words to listen for, `:filter` for one with no filter
+  that listens to a stream (`stream_refs`, the stream sources in settings).
+  """
+  @spec update_needed(map(), [String.t()]) :: update_needed()
+  def update_needed(%{filter: "llm", listen_for: []}, stream_refs) when is_list(stream_refs),
+    do: :words
+
+  def update_needed(%{filter: "none", sources: sources}, stream_refs)
+      when is_list(sources) and is_list(stream_refs),
+      do: if(Enum.any?(sources, &(&1 in stream_refs)), do: :filter)
+
+  def update_needed(watcher, stream_refs) when is_map(watcher) and is_list(stream_refs), do: nil
+
+  @doc "The refs of the stream sources in the cue settings (`:cues_config`)."
+  @spec stream_refs(opts()) :: [String.t()]
+  def stream_refs(opts \\ []) when is_list(opts),
+    do: for(%{kind: :stream, ref: ref} <- Config.sources(cues_config(opts)), do: ref)
+
+  # A save that leaves a rule broken is refused, naming the fix.
+  defp keeps_rules(watcher, opts) do
+    streams = stream_refs(opts)
+
+    case update_needed(watcher, streams) do
+      nil -> :ok
+      :words -> {:error, @needs_words}
+      :filter -> {:error, no_filter_on_stream(Enum.filter(watcher.sources, &(&1 in streams)))}
     end
   end
 
-  defp known_provider(provider, model) do
-    cond do
-      not Enum.any?(ModelCatalog.providers(), &(Atom.to_string(&1) == provider)) ->
-        {:error, "#{provider} is not a provider Fermix knows."}
+  defp no_filter_on_stream(refs) do
+    "A watcher with no filter cannot listen to a stream (#{Enum.join(refs, ", ")}), where it " <>
+      "would pass every item: give it a model filter and words to listen for, or pick sources " <>
+      "that are not streams."
+  end
 
-      String.match?(model, ~r/[[:cntrl:]]/) ->
-        {:error, "That filter model name has control characters."}
+  @doc """
+  Tells the owner, once per watcher, about each stored watcher that breaks a
+  rule (`Notices.watcher/4` `:needs_update`): it gets no items until a change
+  in chat fixes it. Called once per start of the cue sweeper, at its first
+  pass, so the boot that first finds such a watcher tells about it. `:timeout`
+  and `:on_timeout` bound every Repo call it makes, the notices' claims
+  included. Returns how many notices this call sent; a send that fails is
+  logged by `Cues.Notices` and tried again at the sweeper's next start.
+  """
+  @spec needs_update_notices(opts()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def needs_update_notices(opts \\ []) when is_list(opts) do
+    streams = stream_refs(opts)
 
-      true ->
-        {:ok, {provider, model}}
+    with {:ok, watchers} <- call({:list_watchers}, opts) do
+      sent =
+        watchers
+        |> Enum.map(&{&1, update_needed(&1, streams)})
+        |> Enum.reject(fn {_watcher, needed} -> is_nil(needed) end)
+        |> Enum.map(fn {watcher, needed} -> notify_needed(watcher, needed, opts) end)
+        |> Enum.count(&(&1 == :sent))
+
+      {:ok, sent}
     end
   end
+
+  defp notify_needed(watcher, needed, opts),
+    do: Notices.watcher(watcher.id, :needs_update, %{needed: needed}, opts)
 
   # --- sources, instructions -------------------------------------------------------------
 
@@ -695,6 +755,52 @@ defmodule FermixCore.Cues.Watchers do
     end
   end
 
+  @doc """
+  Stores one of a stream watcher's recent drops (`Cues.RecentDrops`, by its
+  key from `list_cues`) as a `pass` or `drop` example: the item is kept first
+  (`CuesSql` `{:store_item, …}`, the stored cue of its identity or a receipt),
+  then the example copies its snapshot.
+  """
+  @spec add_drop_example(String.t(), pos_integer(), String.t(), String.t() | nil, opts()) ::
+          result()
+  def add_drop_example(name, key, label, note, opts \\ []) when is_binary(name) do
+    with :ok <- drop_args(key, label),
+         {:ok, note} <- check_note(note),
+         {:ok, watcher} <- fetch(name, opts),
+         :ok <- has_list(watcher),
+         {:ok, drop} <- recent_drop(watcher.id, key),
+         {:ok, cue_id} <- keep_item(drop, opts) do
+      case call({:add_drop_example, watcher.id, cue_id, label, note, now(opts)}, opts) do
+        {:ok, example} -> {:ok, %{example: example, echo: example_echo(name, example)}}
+        {:error, reason} -> refusal(reason, name)
+      end
+    end
+  end
+
+  defp drop_args(key, label) do
+    cond do
+      not (is_integer(key) and key > 0) -> {:error, "Name the drop by its key from list_cues."}
+      label not in ["pass", "drop"] -> {:error, ~s(An example is labelled "pass" or "drop".)}
+      true -> :ok
+    end
+  end
+
+  defp recent_drop(watcher_id, key) do
+    case RecentDrops.fetch(watcher_id, key) do
+      {:ok, drop} -> {:ok, drop}
+      :error -> {:error, @drop_gone}
+    end
+  end
+
+  defp keep_item(drop, opts) do
+    request = {:store_item, drop.source_ref, drop.item, now(opts)}
+
+    case Repo.cues_call(CuesSql, request, server: Keyword.get(opts, :repo, Repo)) do
+      {:ok, cue_id} -> {:ok, cue_id}
+      {:error, reason} -> refusal(reason, drop.source_ref)
+    end
+  end
+
   @doc "Removes one example by id."
   @spec remove_example(String.t(), String.t(), opts()) :: result()
   def remove_example(name, example_id, opts \\ []) when is_binary(name) do
@@ -762,14 +868,15 @@ defmodule FermixCore.Cues.Watchers do
   # --- update -------------------------------------------------------------------------------
 
   @doc """
-  Changes the watcher's sources, filter (with its model, or to `none`),
-  task, task notes, daily cap or filter budget, in one fenced write. Switching
-  to `llm` needs a model (given or the default) and a purpose; switching to
-  `none` needs a daily cap and clears the purpose and model, keeping the
-  instructions for a switch back; the items that waited for the filter pass in
-  the same write and the scheduler is woken for them (opt `:wake_scheduler`,
-  default `Cues.wake_scheduler/0`). Switching back to `llm` leaves passed
-  items as they are. Changes are atom-keyed.
+  Changes the watcher's sources, filter (to `llm` or `none`), words to listen
+  for (`listen_for`, replacing the list), task, task notes, daily cap or filter
+  budget, in one fenced write. Switching to `llm` needs a purpose; switching to
+  `none` needs a daily cap and clears the purpose, keeping the instructions and
+  words for a switch back; the items that waited for the filter pass in the
+  same write and the scheduler is woken for them (opt `:wake_scheduler`,
+  default `Cues.wake_scheduler/0`). Switching back to `llm` leaves passed items
+  as they are. The watcher the change leaves must keep the rules. Changes are
+  atom-keyed.
   """
   @spec update(String.t(), map(), opts()) :: result()
   def update(name, changes, opts \\ []) when is_binary(name) and is_map(changes) do
@@ -777,6 +884,7 @@ defmodule FermixCore.Cues.Watchers do
          {:ok, patch} <- update_patch(watcher, changes),
          {:ok, sources} <- update_sources(changes),
          :ok <- something_changed(patch, sources),
+         :ok <- keeps_rules(changed(watcher, patch, sources), opts),
          {:ok, job} <- relinked_job(patch, opts),
          {:ok, %{watcher: updated, passed: passed}} <- write(watcher, patch, sources, opts) do
       Enum.each(passed, &emit_passed(updated.id, &1))
@@ -809,54 +917,62 @@ defmodule FermixCore.Cues.Watchers do
 
   defp update_patch(watcher, changes) do
     with {:ok, filter_patch} <- filter_patch(watcher, changes),
+         {:ok, words} <- words_patch(changes),
          {:ok, counts} <- counts_patch(changes),
          {:ok, rest} <- simple_patch(changes) do
-      {:ok, filter_patch |> Map.merge(counts) |> Map.merge(rest)}
+      {:ok, filter_patch |> Map.merge(words) |> Map.merge(counts) |> Map.merge(rest)}
     end
   end
 
   defp filter_patch(watcher, changes) do
-    model_given? = present?(changes, :filter_provider) or present?(changes, :filter_model)
-
     case Map.get(changes, :filter, watcher.filter) do
-      "none" -> none_patch(watcher, changes, model_given? or present?(changes, :purpose))
-      "llm" -> llm_patch(watcher, changes, model_given?)
-      _other -> {:error, ~s(A watcher's filter is "llm" or "none".)}
+      "none" ->
+        none_patch(watcher, changes, Enum.any?([:purpose, :listen_for], &present?(changes, &1)))
+
+      "llm" ->
+        llm_patch(watcher, changes)
+
+      _other ->
+        {:error, ~s(A watcher's filter is "llm" or "none".)}
     end
   end
+
+  defp words_patch(changes) do
+    case Map.fetch(changes, :listen_for) do
+      :error ->
+        {:ok, %{}}
+
+      {:ok, words} ->
+        with {:ok, words} <- ListenFor.validate(words), do: {:ok, %{listen_for: words}}
+    end
+  end
+
+  # The watcher as the change would leave it, for the rules.
+  defp changed(watcher, patch, sources),
+    do: watcher |> Map.merge(patch) |> Map.put(:sources, sources || watcher.sources)
 
   defp none_patch(_watcher, _changes, true), do: {:error, @none_takes_nothing}
   defp none_patch(watcher, changes, false), do: to_none(watcher, changes)
 
-  defp llm_patch(%{filter: "none"}, changes, _model_given?), do: to_llm(changes)
+  defp llm_patch(%{filter: "none"}, changes), do: to_llm(changes)
 
-  defp llm_patch(_watcher, changes, model_given?) do
-    cond do
-      present?(changes, :purpose) -> {:error, "Change the purpose with set_purpose."}
-      model_given? -> model_patch(changes)
-      true -> {:ok, %{}}
-    end
+  defp llm_patch(_watcher, changes) do
+    if present?(changes, :purpose),
+      do: {:error, "Change the purpose with set_purpose."},
+      else: {:ok, %{}}
   end
 
   defp to_none(%{filter: "none"}, _changes), do: {:ok, %{}}
 
   defp to_none(_watcher, changes) do
     with {:ok, cap} <- none_daily_cap(Map.get(changes, :daily_cap)) do
-      {:ok,
-       %{filter: "none", purpose: nil, filter_provider: nil, filter_model: nil, daily_cap: cap}}
+      {:ok, %{filter: "none", purpose: nil, daily_cap: cap}}
     end
   end
 
   defp to_llm(changes) do
-    with {:ok, purpose} <- check_purpose(Map.get(changes, :purpose)),
-         {:ok, {provider, model}} <- filter_model(changes) do
-      {:ok, %{filter: "llm", purpose: purpose, filter_provider: provider, filter_model: model}}
-    end
-  end
-
-  defp model_patch(changes) do
-    with {:ok, {provider, model}} <- filter_model(changes) do
-      {:ok, %{filter_provider: provider, filter_model: model}}
+    with {:ok, purpose} <- check_purpose(Map.get(changes, :purpose)) do
+      {:ok, %{filter: "llm", purpose: purpose}}
     end
   end
 
@@ -936,6 +1052,7 @@ defmodule FermixCore.Cues.Watchers do
         "#{filter_words(watcher)}, and wakes job #{job.id} (#{job.name}), which reports to " <>
         "#{report_words(job)}.",
       purpose_line(watcher),
+      words_line(watcher),
       instructions_lines(watcher.instructions),
       cap_line(watcher),
       missing_line(missing_sources(watcher.sources, opts)),
@@ -948,6 +1065,7 @@ defmodule FermixCore.Cues.Watchers do
   defp updated_echo(watcher, patch, sources, job, opts) do
     [
       "Watcher #{watcher.name} changed: #{changed_words(patch, sources)}.",
+      words_line(watcher),
       if(sources, do: missing_line(missing_sources(sources, opts))),
       if(job, do: lacking_line(job, watcher, opts))
     ]
@@ -966,9 +1084,7 @@ defmodule FermixCore.Cues.Watchers do
 
   defp change_words({:filter, "none"}), do: "it passes every item without a filter"
   defp change_words({:filter, "llm"}), do: "it filters with a model"
-  defp change_words({:filter_model, nil}), do: nil
-  defp change_words({:filter_model, model}), do: "filter model #{model}"
-  defp change_words({:filter_provider, _provider}), do: nil
+  defp change_words({:listen_for, _words}), do: "new words to listen for"
   defp change_words({:purpose, nil}), do: "purpose cleared"
   defp change_words({:purpose, purpose}), do: "purpose #{purpose}"
   defp change_words({:daily_cap, 0}), do: "no daily cap"
@@ -981,11 +1097,8 @@ defmodule FermixCore.Cues.Watchers do
 
   defp filter_words(%{filter: "none"}), do: "passes every item without a filter"
 
-  defp filter_words(%{filter_model: nil}),
-    do: "filters with the default filter model (the main model unless settings name another)"
-
-  defp filter_words(watcher),
-    do: "filters with #{watcher.filter_provider} #{watcher.filter_model}"
+  defp filter_words(_watcher),
+    do: "filters with the Cues filter model (the main model unless settings name another)"
 
   defp report_words(job) do
     target = job.delivery_target || %{}
@@ -996,6 +1109,17 @@ defmodule FermixCore.Cues.Watchers do
 
   defp purpose_line(%{purpose: nil}), do: nil
   defp purpose_line(%{purpose: purpose}), do: "Purpose: #{purpose}"
+
+  @doc """
+  The line listing a filtering watcher's words to listen for, or nil for one
+  with none. Every echo and view of a watcher shows it, so the owner always
+  sees what was stored.
+  """
+  @spec words_line(map()) :: String.t() | nil
+  def words_line(%{filter: "llm", listen_for: [_word | _more] = words}),
+    do: "Listens for: " <> Enum.join(words, ", ")
+
+  def words_line(watcher) when is_map(watcher), do: nil
 
   defp instructions_lines([]), do: nil
 
@@ -1131,8 +1255,12 @@ defmodule FermixCore.Cues.Watchers do
 
   # --- plumbing ----------------------------------------------------------------------------
 
-  defp call(request, opts),
-    do: Repo.cues_call(CuesWatchersSql, request, server: Keyword.get(opts, :repo, Repo))
+  defp call(request, opts) do
+    repo_opts =
+      [server: Keyword.get(opts, :repo, Repo)] ++ Keyword.take(opts, [:timeout, :on_timeout])
+
+    Repo.cues_call(CuesWatchersSql, request, repo_opts)
+  end
 
   defp registry_opts(opts),
     do: [repo: Keyword.get(opts, :repo, Repo)] ++ Keyword.take(opts, [:scheduler])

@@ -11,8 +11,9 @@
 #   * eval-news      llm filter on the default filter model, for the filter cases
 #   * eval-alerts    no filter, 100 runs a day, for the task cases
 #   * eval-research  no filter, a task whose prompt names web_search
-#   * team-digest    llm filter with three instructions and two delivered items, for
-#                    the behavioral suite's "also ignore …" and "that wasn't useful"
+#   * team-digest    llm filter with three instructions and two delivered items (its
+#                    words match both), for the behavioral suite's "also ignore …" and
+#                    "that wasn't useful"
 #   * with the manifest's `mandates`: eval-ops and eval-ops-checked, no filter, and
 #     the two auto mandates on the stub plugin's tool: eval-ops-auto (pinned
 #     project OPS) and eval-ops-checked (validator /usr/bin/false, which refuses
@@ -73,13 +74,13 @@ defmodule SeedCues do
     home = eval_home!()
     same_database!(home)
     manifest = home |> Path.join(@manifest) |> File.read!() |> Jason.decode!()
-    {cues, routing} = read_config!()
+    cues = read_config!()
     {:ok, _apps} = Application.ensure_all_started(:exqlite)
     {:ok, _repo} = Repo.start_link([])
     now = DateTime.utc_now()
 
     watchers =
-      watcher_specs(routing, manifest["mandates"] == true)
+      watcher_specs(manifest["mandates"] == true)
       |> Map.new(fn spec -> {spec.name, create!(spec, cues, now)} end)
 
     digest = deliver_digest_items!(home, now)
@@ -122,26 +123,33 @@ defmodule SeedCues do
   defp read_config! do
     {:ok, snapshot} = ConfigStore.load_runtime_config(resolve_secrets: false, supervised: false)
     cues = Keyword.get(snapshot.fermix_core, :cues, [])
-    routing = Keyword.get(snapshot.fermix_core, :routing, [])
 
     unless Keyword.get(cues, :enabled) == true do
       raise "config.toml does not turn cues on; run seed_capability_home.py first"
     end
 
-    {cues, routing}
+    cues
   end
 
   # --- watchers ------------------------------------------------------------------
 
-  defp watcher_specs(routing, mandates?) do
-    filter = %{
-      filter_provider: to_string(Keyword.fetch!(routing, :filter_provider)),
-      filter_model: Keyword.fetch!(routing, :filter_model)
-    }
-
+  # Every llm watcher filters with the home's one Cues filter model.
+  defp watcher_specs(mandates?) do
     base = [
-      llm("eval-news", filter, @news_task,
+      llm("eval-news", @news_task,
         purpose: "Engineering news that affects our Orrin DB fleet",
+        listen_for: [
+          "Orrin DB",
+          "Orrin",
+          "release",
+          "security advisory",
+          "CVE",
+          "outage",
+          "incident",
+          "replication",
+          "database",
+          "server"
+        ],
         instructions: [
           "Pass Orrin DB releases, security advisories and outages.",
           "Drop anything that is not about Orrin DB or the servers we run it on.",
@@ -150,8 +158,22 @@ defmodule SeedCues do
       ),
       none("eval-alerts", @alerts_task),
       none("eval-research", @research_task),
-      llm("team-digest", filter, @digest_task,
+      llm("team-digest", @digest_task,
         purpose: "Team and engineering news worth my attention",
+        listen_for: [
+          "platform team",
+          "incident review",
+          "postmortem",
+          "engineering",
+          "release",
+          "Elixir",
+          "meetup",
+          "edge cache",
+          "funding",
+          "Series B",
+          "job posting",
+          "hiring"
+        ],
         instructions: [
           "Pass announcements from the platform team.",
           "Pass incident reviews.",
@@ -165,19 +187,20 @@ defmodule SeedCues do
       else: base
   end
 
-  defp llm(name, filter, task, opts) do
-    Map.merge(filter, %{
+  defp llm(name, task, opts) do
+    %{
       name: name,
       sources: [name],
       filter: "llm",
       purpose: Keyword.fetch!(opts, :purpose),
+      listen_for: Keyword.fetch!(opts, :listen_for),
       instructions: Keyword.fetch!(opts, :instructions),
       task: task,
       task_name: "eval task #{name}",
       task_timeout_minutes: 5,
       delivery_mode: "channel",
       delivery_target: @target
-    })
+    }
   end
 
   defp none(name, task) do
@@ -277,7 +300,7 @@ defmodule SeedCues do
 
     File.write!(Path.join(home, "config.toml"), Enum.map_join(sections, &section/1), [:append])
 
-    {cues, _routing} = read_config!()
+    cues = read_config!()
     Application.put_env(:fermix_core, :cues, cues)
 
     Map.new(sections, fn {name, job_id, _pins, _extra} ->

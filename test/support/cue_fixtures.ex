@@ -63,7 +63,9 @@ defmodule FermixTestSupport.CueFixtures do
   @doc """
   Inserts an enabled watcher listening to `sources`, with the memory source and
   cue-only job it needs. `attrs`: `:name`, `:filter` (`"llm"` or `"none"`),
-  `:sources` (list of refs), `:enabled` (default true). Returns its id.
+  `:sources` (list of refs), `:listen_for` (its words, default none: an `llm`
+  watcher with no words is offered nothing), `:enabled` (default true).
+  Returns its id.
   """
   @spec insert_watcher(term(), map()) :: String.t()
   def insert_watcher(conn, attrs) when is_map(attrs) do
@@ -92,13 +94,15 @@ defmodule FermixTestSupport.CueFixtures do
     exec!(
       conn,
       """
-      INSERT INTO cue_watchers (id, name, filter, task_job_id, enabled, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO cue_watchers (id, name, filter, listen_for, task_job_id, enabled, created_at,
+        updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       """,
       [
         id,
         Map.get(attrs, :name, "watcher-#{unique}"),
         Map.fetch!(attrs, :filter),
+        Jason.encode!(Map.get(attrs, :listen_for, [])),
         job_id,
         if(Map.get(attrs, :enabled, true), do: 1, else: 0),
         stamp,

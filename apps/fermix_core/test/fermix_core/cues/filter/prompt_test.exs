@@ -33,8 +33,6 @@ defmodule FermixCore.Cues.Filter.PromptTest do
           id: "cwt_x",
           name: "eng-news",
           purpose: "Releases and advisories for the stack I run.",
-          filter_provider: "openai",
-          filter_model: "gpt-5.4-mini",
           task_job_id: "job_x"
         },
         instructions: [

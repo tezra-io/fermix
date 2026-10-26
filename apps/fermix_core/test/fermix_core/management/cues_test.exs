@@ -21,6 +21,7 @@ defmodule FermixCore.Management.CuesTest do
   alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Setup.RestartState
+  alias FermixTestSupport.CueDeliveryFixtures, as: Rows
   alias FermixTestSupport.CueFixtures
   alias FermixTestSupport.MandateFixtures
   alias FermixTestSupport.SafeRm
@@ -122,6 +123,34 @@ defmodule FermixCore.Management.CuesTest do
 
   defp config_text(home), do: File.read!(Path.join(home, "config.toml"))
 
+  defp stream_config do
+    CuesConfig.normalize(%{
+      "enabled" => true,
+      "sources" => %{
+        "bsky" => %{
+          "kind" => "stream",
+          "url" => "wss://jetstream.example.org/subscribe",
+          "id_path" => "id"
+        }
+      }
+    })
+  end
+
+  defp listen_for!(conn, id, words),
+    do:
+      CueFixtures.exec!(conn, "UPDATE cue_watchers SET listen_for = ? WHERE id = ?", [
+        Jason.encode!(words),
+        id
+      ])
+
+  defp counts!(repo, rows) do
+    rows =
+      for {scope, ref, hour, incarnation, counts} <- rows,
+          do: %{scope: scope, ref: ref, hour: hour, incarnation: incarnation, counts: counts}
+
+    {:ok, _written} = Repo.cues_call(CuesSql, {:counts_put, rows, @now}, server: repo)
+  end
+
   defp route(method, params, cue_opts) do
     request = %{request_id: "req-1", protocol_version: 2, method: method, params: params}
     Router.route(request, operation_opts: [cues: cue_opts])
@@ -188,8 +217,11 @@ defmodule FermixCore.Management.CuesTest do
     } do
       add_feed(opts)
       {:ok, _} = Cues.sources_add("gh-hooks", nil, "github", %{}, opts)
-      CueFixtures.insert_watcher(conn, %{name: "release-watch", filter: "llm", sources: ["x"]})
-      CueFixtures.insert_watcher(conn, %{name: "quiet-watch", filter: "llm", sources: ["x"]})
+
+      for name <- ["release-watch", "quiet-watch"] do
+        id = CueFixtures.insert_watcher(conn, %{name: name, filter: "llm", sources: ["x"]})
+        listen_for!(conn, id, ["release"])
+      end
 
       # Held from the third provider failure in a row; the other filters normally.
       CueFixtures.exec!(
@@ -983,13 +1015,132 @@ defmodule FermixCore.Management.CuesTest do
 
     test "an llm watcher with no model while no default is set is on: the main model filters",
          %{opts: opts, conn: conn} do
-      CueFixtures.insert_watcher(conn, %{name: "news", filter: "llm", sources: ["s"]})
+      id = CueFixtures.insert_watcher(conn, %{name: "news", filter: "llm", sources: ["s"]})
+      listen_for!(conn, id, ["Orrin DB", "outage"])
 
       assert {:ok, %{"watchers" => [%{"state" => "on", "filter_model" => nil} = row]}} =
                Cues.watchers_list(opts)
 
       assert row["status_sentence"] == "Filtering normally."
       refute "no_model" in WatcherRow.states()
+
+      assert {:ok, %{"watcher" => %{"listen_for" => ["Orrin DB", "outage"]}}} =
+               Cues.watchers_get("news", opts)
+    end
+
+    # M60_CUE_INTAKE_AT_SCALE.md §3.1: a watcher saved before the rules gets
+    # nothing until a change in chat, and its row says what it needs.
+    test "one stored before the rules reads needs_update with what it needs", %{
+      opts: opts,
+      conn: conn
+    } do
+      CueFixtures.insert_watcher(conn, %{name: "old-news", filter: "llm", sources: ["eng-blogs"]})
+      CueFixtures.insert_watcher(conn, %{name: "all-posts", filter: "none", sources: ["bsky"]})
+
+      CueFixtures.insert_watcher(conn, %{
+        name: "paused-news",
+        filter: "llm",
+        sources: ["eng-blogs"],
+        enabled: false
+      })
+
+      held = CueFixtures.insert_watcher(conn, %{name: "held-news", filter: "llm", sources: ["s"]})
+      listen_for!(conn, held, ["outage"])
+      CueFixtures.exec!(conn, "UPDATE cue_watchers SET filter_failures = 3 WHERE id = ?", [held])
+
+      assert {:ok, %{"watchers" => rows}} =
+               Cues.watchers_list(Keyword.put(opts, :config, stream_config()))
+
+      states = Map.new(rows, &{&1["name"], {&1["state"], &1["status_sentence"]}})
+
+      assert states["old-news"] ==
+               {"needs_update", "Needs words to listen for: update it in chat."}
+
+      assert states["all-posts"] ==
+               {"needs_update",
+                "Passes everything, so it can't listen to a stream: give it a filter in chat."}
+
+      assert {"paused", _sentence} = states["paused-news"]
+      assert {"held", _sentence} = states["held-news"]
+      assert "needs_update" in WatcherRow.states()
+    end
+
+    # M60_CUE_INTAKE_AT_SCALE.md §3.4: a stream keeps only what passes, so
+    # what its watcher was offered, dropped or failed is counted, not stored.
+    # A stream's pass is a stored delivery and a counted offer, so `offered`
+    # adds the counts to the deliveries from every other source, and the
+    # counts' whole hours never meet the deliveries' exact 24 hours.
+    test "a stream watcher's counts add what it judged and did not keep", %{
+      opts: opts,
+      conn: conn,
+      repo: repo
+    } do
+      id =
+        CueFixtures.insert_watcher(conn, %{
+          name: "chip-news",
+          filter: "llm",
+          sources: ["bsky", "eng-blogs"]
+        })
+
+      listen_for!(conn, id, ["TSMC"])
+      now = ~U[2026-10-17 12:30:00.000000Z]
+      two_hours_ago = DateTime.add(now, -2 * 3_600, :second)
+      # In the counted hours (from 12:00 a day ago), past the exact 24 hours.
+      day_ago = ~U[2026-10-16 12:10:00.000000Z]
+
+      for {ref, at, state} <- [
+            {"bsky", two_hours_ago, "passed"},
+            {"bsky", two_hours_ago, "passed"},
+            {"bsky", day_ago, "passed"},
+            {"eng-blogs", two_hours_ago, "dropped"}
+          ] do
+        cue = Rows.cue(conn, %{source_ref: ref, received_at: at})
+
+        Rows.delivery(conn, cue, %{watcher_id: id, source_ref: ref, received_at: at, state: state})
+      end
+
+      hour = CuesSql.hour_of(now)
+
+      counts!(repo, [
+        {"watcher", id, hour, "inc-a",
+         %{"offered" => 40, "passed" => 2, "dropped" => 30, "filter_failed" => 1, "overflow" => 5}},
+        {"watcher", id, DateTime.add(hour, -3_600, :second), "inc-b",
+         %{"offered" => 10, "dropped" => 8, "write_failed" => 1}},
+        {"watcher", id, CuesSql.hour_of(day_ago), "inc-c", %{"offered" => 1, "passed" => 1}},
+        {"watcher", id, DateTime.add(hour, -30 * 3_600, :second), "inc-d",
+         %{"offered" => 900, "dropped" => 900}}
+      ])
+
+      opts = Keyword.merge(opts, config: stream_config(), now: fn -> now end)
+      assert {:ok, %{"watchers" => [row]}} = Cues.watchers_list(opts)
+
+      assert row["counts"] == %{
+               "offered" => 52,
+               "waiting" => 0,
+               "passed" => 2,
+               "dropped" => 39,
+               "acted" => 0,
+               "failed" => 2
+             }
+    end
+
+    test "a stream source's row counts what it received, not only what it kept", %{
+      opts: opts,
+      conn: conn,
+      repo: repo
+    } do
+      for _pass <- 1..2,
+          do: Rows.cue(conn, %{source_ref: "bsky", received_at: DateTime.add(@now, -60, :second)})
+
+      counts!(repo, [
+        {"source", "bsky", CuesSql.hour_of(@now), "inc-a",
+         %{"received" => 1_000, "unmatched" => 900, "rate_limited" => 50}}
+      ])
+
+      assert {:ok, %{"sources" => [row]}} =
+               Cues.sources_list(Keyword.put(opts, :config, stream_config()))
+
+      assert %{"received" => 1_000, "routed" => 50, "not_routed" => 950} = row["counts"]
     end
   end
 
@@ -1253,7 +1404,11 @@ defmodule FermixCore.Management.CuesTest do
       provider = Enum.find(rows, &(&1["key"] == "filter_provider"))
       assert Enum.find(rows, &(&1["key"] == "filter_model"))["suggestions"] == true
       assert provider["label"] == "Filter model"
-      assert provider["info"] =~ "main model"
+
+      assert provider["info"] ==
+               "Judges each item on its own, so a smaller, faster model works well and costs " <>
+                 "much less than your main model."
+
       assert Enum.all?(rows, &is_nil(&1["footer"]))
     end
 
@@ -1269,7 +1424,7 @@ defmodule FermixCore.Management.CuesTest do
       anthropic = Descriptor.fetch!(:anthropic).label
 
       assert [%{"value" => "", "label" => main} | set_up] = provider["options"]
-      assert main == "Main model (#{anthropic} · claude-sonnet-5-5)"
+      assert main == "Default: your main model (#{anthropic} · claude-sonnet-5-5)"
       assert Enum.sort(Enum.map(set_up, & &1["value"])) == ["anthropic", "openai"]
       refute Enum.any?(provider["options"], & &1["disabled"])
     end

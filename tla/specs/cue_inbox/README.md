@@ -128,6 +128,25 @@ if it was sent, is already in the Repo's mailbox ahead of the reset.
   is the same `UPDATE` and adds no step. The announcements to the app
   (`{:offered, card}`, `{:resolved, …}`) and the owner-only placement of the
   socket's peer change no proposal state and are ExUnit's.
+- **Cue intake at scale (M60_CUE_INTAKE_AT_SCALE.md; 2026-10-25).** Three
+  changes reach the pinned code and none moves a modelled step:
+  - *Words to listen for* decide which deliveries the accept transaction
+    writes for feeds, webhooks and local push. An `llm` watcher gets an item
+    only if one of its words matched. That changes which deliveries exist, and
+    the `Topology` constant already fixes those.
+  - *A stream item is judged before it is stored.* `Cues.LiveFilters` holds it
+    in memory, judges it, and on a pass writes the cue and the watcher's
+    delivery in state `passed` in one transaction (`CuesSql {:pass_live, …}`),
+    the entry a `none` watcher's acceptance already has. The live queue, its
+    head re-queue after a provider failure, and the live ledger rows are
+    outside the inbox's states, and nothing the properties read starts before
+    that `passed` row exists, so they are ExUnit's.
+  - *The filter's stored-path settle* moved its watcher side into
+    `watcher_succeeded`/`watcher_failed`, which the live path shares, with the
+    same writes. The new `:live` supervisor group starts before the filtering
+    group and is not in the model. The sweeper's `:prune_counts` step is
+    another retention step on rows no property reads, and its first-tick
+    needs-update notice changes no delivery.
 
 ## Switches
 

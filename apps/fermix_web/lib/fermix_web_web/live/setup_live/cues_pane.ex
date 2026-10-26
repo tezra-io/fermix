@@ -16,6 +16,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   use FermixWebWeb, :html
 
   alias FermixCore.Management.Cues.SourceForm
+  alias FermixCore.Management.Cues.WatcherRow
   alias FermixWebWeb.SetupLive.CuesState
 
   @card "rounded-box border border-base-300 bg-base-100/80 shadow-sm"
@@ -79,7 +80,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       "Off stops the next call of every mandate at once, even in a run already going. No restart needed.",
     door_port: "The door listens on this machine only. Applies after a restart.",
     filter:
-      "Decides which items reach a watcher's task, one item at a time. The main model works; a small, inexpensive one costs less. A watcher with a model of its own uses that one.",
+      "Judges each item on its own, so a smaller, faster model works well and costs much less than your main model.",
     sources: "While cues run, a save starts, changes or stops the source at once.",
     watchers:
       "Watchers are made and changed in chat with Fermix. Counts cover the last 24 hours.",
@@ -1161,6 +1162,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       <li
         :for={watcher <- @list}
         id={"cue-watcher-#{watcher.id}"}
+        data-watcher-offered={watcher.offered}
         data-watcher-waiting={watcher.waiting}
         data-watcher-passed={watcher.passed}
         data-watcher-dropped={watcher.dropped}
@@ -1175,7 +1177,11 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   attr :watcher, :map, required: true
 
   defp watcher_row(assigns) do
-    assigns = assign(assigns, :held_info, @info.held)
+    assigns =
+      assign(assigns,
+        held_info: @info.held,
+        needs: assigns.watcher.enabled? && assigns.watcher.needs_update
+      )
 
     ~H"""
     <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -1183,8 +1189,14 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       <div class="min-w-0 flex-1 basis-56">
         <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span class="truncate font-mono text-sm font-semibold">{@watcher.name}</span>
-          <.pill :if={@watcher.enabled?} label="On" tone="badge-success" />
+          <.pill :if={@watcher.enabled? && !@needs} label="On" tone="badge-success" />
           <.pill :if={!@watcher.enabled?} label="Paused" tone="badge-ghost" />
+          <.pill
+            :if={@needs}
+            label="Needs update"
+            tone="badge-warning"
+            tip={WatcherRow.needs_update_sentence(@needs)}
+          />
           <.pill :if={@watcher.held?} label="Held" tone="badge-warning" tip={@held_info} />
         </div>
         <p class="mt-0.5 truncate text-xs text-base-content/50">
@@ -1198,6 +1210,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
         class="ml-auto flex shrink-0 items-center gap-3 text-xs text-base-content/50 tabular-nums"
         title="Last 24 hours"
       >
+        <.count n={@watcher.offered} label="offered" />
         <.count n={@watcher.waiting} label="waiting" />
         <.count n={@watcher.passed} label="passed" />
         <.count n={@watcher.dropped} label="dropped" />

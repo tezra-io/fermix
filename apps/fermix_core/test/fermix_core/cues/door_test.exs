@@ -403,11 +403,12 @@ defmodule FermixCore.Cues.DoorTest do
       refute_received :loaded
     end
 
-    test "an ingest failure is 503, an unknown outcome" do
-      ingest = fn _source, _entries, _opts -> {:error, :repo_down} end
+    test "an ingest failure is 503 with Retry-After, an unknown outcome" do
+      ingest = fn _source, _entries, _opts -> {:error, :repo_timeout} end
       conn = push(Jason.encode!(event()), router_opts: router_opts(ingest: ingest))
 
       assert conn.status == 503
+      assert get_resp_header(conn, "retry-after") == ["5"]
       assert json(conn)["error"] =~ "retry with the same ids"
     end
   end
@@ -462,14 +463,22 @@ defmodule FermixCore.Cues.DoorTest do
            sweeper: [timer?: false]}
         )
 
-      # `which_children/1` lists the newest first. One for one over three
-      # children: the intake group (Buckets, the sources, the door, rest for
-      # one: all read Buckets' tables), the filtering group (the dispatcher
-      # before its task supervisor, rest for one: a dispatcher crash ends its
-      # calls) and the sweeper. A door or source crash never reaches a filter
-      # call.
+      # `which_children/1` lists the newest first. One for one over four
+      # children: the live group (the live dispatcher's task supervisor before
+      # it, rest for one, up before any stream hands it watchers), the intake
+      # group (Buckets, the sources, the door, rest for one: all read Buckets'
+      # tables), the filtering group (the dispatcher before its task
+      # supervisor, rest for one: a dispatcher crash ends its calls) and the
+      # sweeper. A door or source crash never reaches a filter call.
       children = Supervisor.which_children(supervisor)
-      assert Enum.map(children, &elem(&1, 0)) == [Sweeper, :filtering, :intake]
+      assert Enum.map(children, &elem(&1, 0)) == [Sweeper, :filtering, :intake, :live]
+      {:live, live, :supervisor, _modules} = List.keyfind(children, :live, 0)
+
+      assert Enum.map(Supervisor.which_children(live), &elem(&1, 0)) == [
+               FermixCore.Cues.LiveFilters,
+               FermixCore.Cues.LiveFilterSupervisor
+             ]
+
       {:intake, intake, :supervisor, _modules} = List.keyfind(children, :intake, 0)
       {:filtering, filtering, :supervisor, _modules} = List.keyfind(children, :filtering, 0)
       intake_children = Supervisor.which_children(intake)

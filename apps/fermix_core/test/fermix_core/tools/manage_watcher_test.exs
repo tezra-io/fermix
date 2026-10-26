@@ -5,6 +5,8 @@ defmodule FermixCore.Tools.ManageWatcherTest do
 
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.UntrustedContent
+  alias FermixCore.Cues.Item
+  alias FermixCore.Cues.RecentDrops
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesWatchersSql
@@ -19,6 +21,8 @@ defmodule FermixCore.Tools.ManageWatcherTest do
   @tainted "This turn has read outside text, so it cannot change a watcher; ask for the change " <>
              "again in a new message."
   @shared "Create the watcher from a private chat with Fermix."
+  @needs_words "A watcher that filters needs words to listen for: list the names, products, " <>
+                 "abbreviations and phrases an item it should see would contain, as listen_for."
 
   setup do
     %{repo: repo, conn: conn} = CueFixtures.start_repo("manage_watcher")
@@ -270,9 +274,10 @@ defmodule FermixCore.Tools.ManageWatcherTest do
                ManageWatcher.execute(create_args(), turn(ctx, []))
 
       assert echo =~
-               ~r/^Watcher market-news is set up: it listens to alpaca-news, filters with openai gpt-5-mini, and wakes job \S+ \(watcher market-news\), which reports to Telegram chat-1\./
+               ~r/^Watcher market-news is set up: it listens to alpaca-news, filters with the Cues filter model \(the main model unless settings name another\), and wakes job \S+ \(watcher market-news\), which reports to Telegram chat-1\./
 
       assert echo =~ "Purpose: Market moves that need me"
+      assert echo =~ "Listens for: earnings, guidance cut"
       assert echo =~ "Instructions:\n1. Pass earnings surprises"
       assert echo =~ "Missing: alpaca-news is not set up yet; add it in settings."
 
@@ -360,24 +365,107 @@ defmodule FermixCore.Tools.ManageWatcherTest do
                "Job #{job.id} runs on a schedule; a watcher's task must be a job that runs on cues."
     end
 
-    test "with no model given and no default in settings, the main model filters", ctx do
-      routing = Application.get_env(:fermix_core, :routing)
-      on_exit(fn -> Application.put_env(:fermix_core, :routing, routing || []) end)
-
-      args = Map.drop(create_args(), ["filter_provider", "filter_model"])
-      Application.put_env(:fermix_core, :routing, [])
+    test "every watcher filters with the one Cues filter model; a model per watcher is not taken",
+         ctx do
+      args =
+        Map.merge(create_args(), %{"filter_provider" => "openai", "filter_model" => "gpt-5-mini"})
 
       assert {:ok, %{success: true, output: echo}} = ManageWatcher.execute(args, turn(ctx, []))
 
       assert echo =~
-               "filters with the default filter model (the main model unless settings name another)"
+               "filters with the Cues filter model (the main model unless settings name another)"
 
-      assert [[nil, nil]] =
-               CueFixtures.rows(
-                 ctx.conn,
-                 "SELECT filter_provider, filter_model FROM cue_watchers",
-                 []
+      refute echo =~ "gpt-5-mini"
+      refute Map.has_key?(ManageWatcher.parameters().properties, :filter_model)
+    end
+  end
+
+  describe "words to listen for (M60_CUE_INTAKE_AT_SCALE.md §3.1)" do
+    test "a watcher that filters needs words; the rules' refusals come back as written", ctx do
+      no_words = Map.delete(create_args(), "listen_for")
+
+      assert {:ok, %{success: false, error: @needs_words}} =
+               ManageWatcher.execute(no_words, turn(ctx, []))
+
+      assert {:ok, %{success: false, error: "Give the words to listen for as a list."}} =
+               ManageWatcher.execute(Map.put(no_words, "listen_for", "TSMC"), turn(ctx, []))
+
+      assert {:ok, []} = JobsRegistry.list_jobs(repo: ctx.repo)
+      assert ManageWatcher.description() =~ "never ask the owner for a pattern"
+    end
+
+    test "a watcher with no filter cannot listen to a stream", ctx do
+      cues = Application.get_env(:fermix_core, :cues)
+      on_exit(fn -> Application.put_env(:fermix_core, :cues, cues || []) end)
+
+      Application.put_env(:fermix_core, :cues,
+        sources: %{"bsky" => %{kind: :stream, url: "wss://jetstream.example.org/subscribe"}}
+      )
+
+      args =
+        create_args()
+        |> Map.drop(["purpose", "instructions", "listen_for"])
+        |> Map.merge(%{"filter" => "none", "daily_cap" => "20", "sources" => ["bsky"]})
+
+      assert {:ok, %{success: false, error: error}} = ManageWatcher.execute(args, turn(ctx, []))
+      assert error =~ "A watcher with no filter cannot listen to a stream (bsky)"
+    end
+
+    test "an update replaces the words; show lists them and what a watcher needs", ctx do
+      watcher!(ctx, "market-news", [], [])
+
+      assert {:ok, %{success: true, output: shown}} =
+               ManageWatcher.execute(
+                 %{"action" => "show", "name" => "market-news"},
+                 turn(ctx, [])
                )
+
+      assert shown =~
+               "It needs words to listen for, and no item reaches it until an update gives it some."
+
+      assert {:ok, %{success: true, output: "market-news: needs words to listen for" <> _}} =
+               ManageWatcher.execute(%{"action" => "list"}, turn(ctx, []))
+
+      update = %{"action" => "update", "name" => "market-news", "listen_for" => ["NVDA", "AMD"]}
+
+      assert {:ok, %{success: true, output: echo}} = ManageWatcher.execute(update, turn(ctx, []))
+
+      assert echo ==
+               "Watcher market-news changed: new words to listen for.\nListens for: NVDA, AMD"
+
+      assert {:ok, %{success: true, output: shown}} =
+               ManageWatcher.execute(
+                 %{"action" => "show", "name" => "market-news"},
+                 turn(ctx, [])
+               )
+
+      assert "Listens for: NVDA, AMD" in String.split(shown, "\n")
+      refute shown =~ "It needs words"
+    end
+
+    test "a stream watcher's recent drop is labelled by its key", ctx do
+      watcher = watcher!(ctx, "market-news", [])
+      RecentDrops.new_table()
+
+      {:ok, item} =
+        Item.new(%{item_id: "n-1", type: "news", data: %{"text" => "NVDA guidance raised"}}, @t0)
+
+      drop = RecentDrops.put(watcher.id, item, "alpaca-news", "Not a market move.", @t0)
+
+      args = %{
+        "action" => "add_example",
+        "name" => "market-news",
+        "drop_key" => drop.key,
+        "label" => "pass"
+      }
+
+      assert {:ok, %{success: true, output: echo}} = ManageWatcher.execute(args, turn(ctx, []))
+      assert echo =~ ~r/^Stored cue \d+ as a pass example for watcher market-news/
+
+      both = Map.put(args, "cue_id", 41)
+
+      assert {:ok, %{success: false, error: "Name the item by cue_id or by drop_key, not both."}} =
+               ManageWatcher.execute(both, turn(ctx, []))
     end
   end
 
@@ -481,9 +569,8 @@ defmodule FermixCore.Tools.ManageWatcherTest do
       "action" => "create",
       "name" => "market-news",
       "filter" => "llm",
-      "filter_provider" => "openai",
-      "filter_model" => "gpt-5-mini",
       "purpose" => "Market moves that need me",
+      "listen_for" => ["earnings", "guidance cut"],
       "instructions" => ["Pass earnings surprises"],
       "sources" => ["alpaca-news"],
       "task" => "Tell me what it means for my positions."
@@ -507,7 +594,7 @@ defmodule FermixCore.Tools.ManageWatcherTest do
     )
   end
 
-  defp watcher!(ctx, name, instructions) do
+  defp watcher!(ctx, name, instructions, words \\ ["earnings"]) do
     {:ok, job} = cue_job(ctx, name)
 
     attrs = %{
@@ -515,8 +602,7 @@ defmodule FermixCore.Tools.ManageWatcherTest do
       name: name,
       purpose: "What #{name} is for",
       filter: "llm",
-      filter_provider: "openai",
-      filter_model: "gpt-5-mini",
+      listen_for: words,
       task_job_id: job.id,
       created_from: "telegram:chat-1"
     }

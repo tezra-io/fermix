@@ -35,8 +35,10 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
     returning what was added and removed for Fermix's echo. A number is never
     reused: the next is one past the highest the watcher ever had.
   - `{:add_example, id, cue_id, label, note, now}` (the cue must have been
-    delivered to this watcher; its snapshot is copied) and
-    `{:remove_example, id, example_id, now}`.
+    delivered to this watcher; its snapshot is copied),
+    `{:add_drop_example, id, cue_id, label, note, now}` (a stream watcher's
+    recent drop, kept by `CuesSql`'s `{:store_item, …}` with no delivery; the
+    cue's snapshot is copied) and `{:remove_example, id, example_id, now}`.
   - `{:watcher_for_job, job_id}`.
   - Notice claims: `{:claim_watcher_notice, id, kind, rule, now}`,
     `{:release_watcher_notice, id, kind, rule, previous}`,
@@ -53,7 +55,7 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
   @gap_notice_after_s 3_600
 
   @watcher_select """
-  SELECT id, name, purpose, filter, filter_provider, filter_model, task_job_id, task_notes,
+  SELECT id, name, purpose, filter, listen_for, task_job_id, task_notes,
     daily_cap, filter_budget, filter_failures, filter_retry_at, held_notified_at, notices,
     enabled, created_from, created_at, updated_at
   FROM cue_watchers
@@ -62,8 +64,7 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
   @patch_fields [
     :purpose,
     :filter,
-    :filter_provider,
-    :filter_model,
+    :listen_for,
     :task_job_id,
     :task_notes,
     :daily_cap,
@@ -89,6 +90,8 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
     do: get_watcher(conn, "id", id)
 
   def handle(conn, {:list_watchers}), do: list_watchers(conn)
+
+  def handle(conn, {:source_watchers, ref}) when is_binary(ref), do: source_watchers(conn, ref)
 
   def handle(
         conn,
@@ -129,6 +132,13 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
       when is_binary(id) and is_integer(cue_id) and label in ["pass", "drop"] do
     CuesSql.with_immediate_transaction(conn, fn ->
       add_example(conn, id, cue_id, label, note, now)
+    end)
+  end
+
+  def handle(conn, {:add_drop_example, id, cue_id, label, note, %DateTime{} = now})
+      when is_binary(id) and is_integer(cue_id) and label in ["pass", "drop"] do
+    CuesSql.with_immediate_transaction(conn, fn ->
+      add_drop_example(conn, id, cue_id, label, note, now)
     end)
   end
 
@@ -256,18 +266,16 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
     CuesSql.execute(
       conn,
       """
-      INSERT INTO cue_watchers (id, name, purpose, filter, filter_provider, filter_model,
-        task_job_id, task_notes, daily_cap, filter_budget, enabled, created_from, created_at,
-        updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+      INSERT INTO cue_watchers (id, name, purpose, filter, listen_for, task_job_id, task_notes,
+        daily_cap, filter_budget, enabled, created_from, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
       """,
       [
         attrs.id,
         attrs.name,
         Map.get(attrs, :purpose),
         attrs.filter,
-        Map.get(attrs, :filter_provider),
-        Map.get(attrs, :filter_model),
+        Jason.encode!(Map.get(attrs, :listen_for, [])),
         attrs.task_job_id,
         flag(Map.get(attrs, :task_notes, false)),
         Map.get(attrs, :daily_cap, 0),
@@ -277,6 +285,20 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
         stamp
       ]
     )
+  end
+
+  # The watchers of one source, with their words, for a stream that judges its
+  # items before they are stored (`Cues.LiveFilters`): an enabled watcher only,
+  # oldest first.
+  defp source_watchers(conn, ref) do
+    sql =
+      @watcher_select <>
+        " WHERE enabled = 1 AND id IN" <>
+        " (SELECT watcher_id FROM cue_watcher_sources WHERE source_ref = ?) ORDER BY created_at, id"
+
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, [ref]) do
+      {:ok, Enum.map(rows, &watcher_row/1)}
+    end
   end
 
   defp insert_sources(conn, id, sources) do
@@ -404,8 +426,7 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
          name,
          purpose,
          filter,
-         filter_provider,
-         filter_model,
+         listen_for,
          task_job_id,
          task_notes,
          daily_cap,
@@ -424,8 +445,7 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
       name: name,
       purpose: purpose,
       filter: filter,
-      filter_provider: filter_provider,
-      filter_model: filter_model,
+      listen_for: Jason.decode!(listen_for),
       task_job_id: task_job_id,
       task_notes?: task_notes == 1,
       daily_cap: daily_cap,
@@ -751,17 +771,39 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
   defp add_example(conn, id, cue_id, label, note, now) do
     with :ok <- touch(conn, id, now),
          {:ok, snapshot} <- delivered_snapshot(conn, id, cue_id) do
-      example_id = Cues.id("cwe")
+      insert_example(conn, id, {cue_id, snapshot}, label, note, now)
+    end
+  end
 
-      with :ok <-
-             CuesSql.execute(
-               conn,
-               "INSERT INTO cue_watcher_examples (id, watcher_id, cue_id, label, note, snapshot, " <>
-                 "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-               [example_id, id, cue_id, label, note, snapshot, CuesSql.stamp(now)]
-             ) do
-        {:ok, %{id: example_id, cue_id: cue_id, label: label, note: note, snapshot: snapshot}}
-      end
+  # A stream watcher's drop has no delivery: the drop's ring entry is what
+  # showed the watcher had it, so the kept cue's own snapshot is copied.
+  defp add_drop_example(conn, id, cue_id, label, note, now) do
+    with :ok <- touch(conn, id, now),
+         {:ok, snapshot} <- kept_snapshot(conn, cue_id) do
+      insert_example(conn, id, {cue_id, snapshot}, label, note, now)
+    end
+  end
+
+  defp insert_example(conn, id, {cue_id, snapshot}, label, note, now) do
+    example_id = Cues.id("cwe")
+
+    with :ok <-
+           CuesSql.execute(
+             conn,
+             "INSERT INTO cue_watcher_examples (id, watcher_id, cue_id, label, note, snapshot, " <>
+               "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+             [example_id, id, cue_id, label, note, snapshot, CuesSql.stamp(now)]
+           ) do
+      {:ok, %{id: example_id, cue_id: cue_id, label: label, note: note, snapshot: snapshot}}
+    end
+  end
+
+  defp kept_snapshot(conn, cue_id) do
+    case CuesSql.query_all(conn, "SELECT snapshot FROM cues WHERE id = ?", [cue_id]) do
+      {:ok, [[snapshot]]} when is_binary(snapshot) -> {:ok, snapshot}
+      {:ok, [[nil]]} -> {:error, :snapshot_gone}
+      {:ok, []} -> {:error, :cue_not_found}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -943,6 +985,8 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
 
   defp due?(_rule, nil, _now), do: true
 
+  defp due?(:once, _previous, _now), do: false
+
   defp due?(:utc_day, previous, now),
     do: String.slice(previous, 0, 10) != Date.to_iso8601(DateTime.to_date(now))
 
@@ -1004,5 +1048,6 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
   defp flag(false), do: 0
 
   defp column_value(value) when is_boolean(value), do: flag(value)
+  defp column_value(value) when is_list(value), do: Jason.encode!(value)
   defp column_value(value), do: value
 end

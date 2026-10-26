@@ -3032,9 +3032,9 @@ defmodule FermixOpik.AggregationTest do
   # against the same literal list.
   @cue_event [:fermix, :cue, :lifecycle]
   @cue_phases ~w(accepted duplicate conflict stale rejected rate_limited over_budget
-                 routed gap expired ingest_error sweep_error passed dropped filter_retry
-                 filter_held filter_failed claimed settled retry exhausted proposed
-                 confirmed denied proposal_expired proposal_refused)a
+                 routed gap expired unmatched overflow write_failed ingest_error sweep_error
+                 passed dropped filter_retry filter_held filter_failed claimed settled retry
+                 exhausted proposed confirmed denied proposal_expired proposal_refused)a
   @cue_run_session "cron_job-8_20261017_120000_a1b2c3"
 
   # The emitter's own metadata shape (FermixCore.Cues.Telemetry): ids, labels

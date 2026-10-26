@@ -107,6 +107,7 @@
     "watcher_states": [
       "on",
       "paused",
+      "needs_update",
       "held"
     ],
     "mandate_actions": [
@@ -3706,7 +3707,7 @@
       }
     },
     "cueWatcherRow": {
-      "description": "One watcher, read-only: watchers are made and changed in chat. Counts cover the list's `window_s`; never an item's text, a reason or a hint.",
+      "description": "One watcher, read-only: watchers are made and changed in chat. Counts cover the list's `window_s` (a stream's by the hour, since it keeps only what passes); never an item's text, a reason or a hint.",
       "type": "object",
       "required": [
         "id",
@@ -3821,6 +3822,7 @@
         "counts": {
           "type": "object",
           "required": [
+            "offered",
             "waiting",
             "passed",
             "dropped",
@@ -3829,6 +3831,11 @@
           ],
           "additionalProperties": false,
           "properties": {
+            "offered": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Every item its words to listen for let through, kept or not; for a watcher with no filter, every item of its sources."
+            },
             "waiting": {
               "type": "integer",
               "minimum": 0
@@ -3865,7 +3872,7 @@
       }
     },
     "cueWatcherDetail": {
-      "description": "A watcher row plus its purpose, its instructions and how many examples are marked each way.",
+      "description": "A watcher row plus its purpose, its words to listen for, its instructions and how many examples are marked each way.",
       "type": "object",
       "required": [
         "id",
@@ -3884,6 +3891,7 @@
         "instruction_count",
         "created_at",
         "purpose",
+        "listen_for",
         "instructions",
         "examples"
       ],
@@ -3940,6 +3948,14 @@
             "null"
           ],
           "description": "The owner's own words, from the consent turn that made the watcher."
+        },
+        "listen_for": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "string"
+          },
+          "description": "The words and short phrases (each at most 64 characters) an item must contain to reach the watcher's filter: the owner's own, from the consent turn that made or changed it. A watcher with no filter does not use them."
         },
         "instructions": {
           "type": "array",

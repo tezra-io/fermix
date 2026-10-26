@@ -20,8 +20,9 @@ defmodule FermixCore.Cues.Telemetry do
 
   ## Sessions
 
-  The sessionless phases (`accepted` … `expired`, and the two error phases) render
-  as self-closing traces and refuse a `session_id`. The run-scoped phases
+  The sessionless phases (`accepted` … `expired`, `unmatched`, `overflow`,
+  `write_failed`, and the two error phases) render as self-closing traces and
+  refuse a `session_id`. The run-scoped phases
   (`claimed`, `settled`, `retry`, `exhausted`) and the proposal phases need the
   run's `session_id`, so they nest under it. The filter-scoped phases take the
   filter call's `session_id`; `passed` may have none, because a `none` watcher's
@@ -30,6 +31,18 @@ defmodule FermixCore.Cues.Telemetry do
   `ingest_error` and `sweep_error` are beyond design §14: every `{:error, reason}`
   from ingest or a retention sweep is traced before it is returned (the
   reminders' `scheduler_error` precedent).
+
+  ## Counted phases
+
+  A stream's items are judged before they are stored, and only a pass is
+  written (M60_CUE_INTAKE_AT_SCALE.md §3.4). What is not stored is counted
+  (`Cues.Counts`), and each count flush emits one event per phase with its
+  `count` since the last flush and no item id: per source (`source_ref`)
+  `unmatched` (no watcher's words matched), `rate_limited`, `over_budget`,
+  `rejected` and `stale`; per watcher (`watcher_id`) `overflow` (its live queue
+  was full), `over_budget` (its filter budget was spent), `dropped`,
+  `filter_failed` and `write_failed` (a pass whose write kept failing). A pass
+  keeps its per-item events.
   """
 
   alias FermixCore.Telemetry
@@ -49,6 +62,9 @@ defmodule FermixCore.Cues.Telemetry do
     :routed,
     :gap,
     :expired,
+    :unmatched,
+    :overflow,
+    :write_failed,
     :ingest_error,
     :sweep_error
   ]

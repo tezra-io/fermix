@@ -16,10 +16,15 @@ defmodule FermixCore.Cues.Deliveries do
   The summary answers from receipts: a cue no watcher took is kept, without
   its payload, about eight days, so "this source sent 40 cues this week and
   nothing is listening" reads straight from the rows.
+
+  A stream keeps only what passes (M60_CUE_INTAKE_AT_SCALE.md §3.2), so a
+  stream watcher's drops are not rows: `present_drop/1` shows one of its recent
+  drops (`Cues.RecentDrops`), marked as not kept, framed like a delivery.
   """
 
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Clock
+  alias FermixCore.Cues.RecentDrops
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesDeliveriesSql
   alias FermixCore.Memory.Repo.CuesSql
@@ -172,6 +177,30 @@ defmodule FermixCore.Cues.Deliveries do
     |> put_count(:more_proposals, delivery.more_proposals)
   end
 
+  @doc """
+  A stream watcher's recent drop as `list_cues` shows it: Fermix's record, with
+  `kept: false` (the item is in memory only, until Fermix restarts) and the
+  `drop_key` `manage_watcher` labels it by, and its outside text framed.
+  """
+  @spec present_drop(RecentDrops.drop()) :: map()
+  def present_drop(%{item: item} = drop) do
+    lines = [
+      {"Type", item.type},
+      {"Subject", item.subject},
+      {"Snapshot", snapshot_text(item.snapshot)},
+      {"Filter's reason", drop.reason}
+    ]
+
+    %{
+      drop_key: drop.key,
+      source: drop.source_ref,
+      dropped_at: iso(drop.at),
+      occurred_at: iso(item.occurred_at),
+      kept: false,
+      outside_text: frame(drop.source_ref, lines)
+    }
+  end
+
   @doc "A proposal as `list_cues` shows it, its arguments and results framed."
   @spec present_proposal(map()) :: map()
   def present_proposal(proposal) when is_map(proposal) do
@@ -271,6 +300,9 @@ defmodule FermixCore.Cues.Deliveries do
       finished_at: iso(proposal.finished_at)
     }
   end
+
+  # The snapshot `Cues.Item` wrote: JSON `{type, subject, text}`.
+  defp snapshot_text(snapshot), do: snapshot |> Jason.decode!() |> Map.fetch!("text")
 
   defp delivery_lines(delivery) do
     [

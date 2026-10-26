@@ -11,6 +11,12 @@ defmodule FermixCore.Tools.ListCues do
   watcher, per source, or across all; filtered by state and time; one bounded
   page.
 
+  A stream keeps only what passes (M60_CUE_INTAKE_AT_SCALE.md §3.2, §3.4). So
+  `summary` adds each stream source's and watcher's `stream_counts` over the
+  last day (`Cues.Overview.counted/3`), and `deliveries` for one watcher adds
+  its recent drops (`Cues.RecentDrops`) beside the first page, marked as not
+  kept and framed like every other item text.
+
   `sources` and `mandates` read what is set up from the rows the management
   socket publishes (`Management.Cues.sources_list/1`, `mandates_list/1`, each
   bounded by `Cues.Config`'s 64), keeping only the owner's settings and Fermix's
@@ -54,9 +60,12 @@ defmodule FermixCore.Tools.ListCues do
   alias FermixCore.Cues
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.Deliveries
+  alias FermixCore.Cues.Overview
+  alias FermixCore.Cues.RecentDrops
   alias FermixCore.Cues.TaskNotes
   alias FermixCore.Management.Cues, as: ManagementCues
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Temporal.Access
   alias FermixCore.Tools.Support
 
@@ -85,9 +94,14 @@ defmodule FermixCore.Tools.ListCues do
     "Read what the owner's watchers received and what came of it, and what is set up. Each " <>
       "item a cue source sent reaches every watcher listening to that source as a delivery: " <>
       "its filter passes or drops it with a reason, and a passed one wakes the watcher's " <>
-      "task, whose outcome, mandate calls and proposals are recorded. Views: deliveries (the " <>
-      "default), summary (per source, how many items arrived and which watchers listen; per " <>
-      "watcher, its deliveries by state and outcome), proposals, gaps (items Fermix lost, " <>
+      "task, whose outcome, mandate calls and proposals are recorded. A stream source keeps " <>
+      "only what passes. Views: deliveries (the default; for one watcher of a stream, also " <>
+      "its recent drops, which are not kept: the last 50 until Fermix restarts, each with " <>
+      "the drop_key an example names), summary (per source, how many items arrived and " <>
+      "which watchers listen; per watcher, its deliveries by state and outcome; for a " <>
+      "stream, stream_counts over the last day: what arrived, what no watcher's words " <>
+      "matched, what each watcher was offered, dropped or turned away with a full queue " <>
+      "(overflow)), proposals, gaps (items Fermix lost, " <>
       "and why), notes (what a watcher's task keeps for itself), sources (every cue source " <>
       "in settings: kind, on or off, its status, a missing secret, when its last item " <>
       "arrived, which watchers listen) and mandates (each mandate's task, tools and mode, " <>
@@ -238,7 +252,7 @@ defmodule FermixCore.Tools.ListCues do
          filters =
            Map.merge(scope, %{state: state, since: since, until: until, before_id: before}),
          {:ok, page} <- Deliveries.list(Map.put(filters, :limit, limit(args)), opts(context)) do
-      {:ok, deliveries_body(page)}
+      {:ok, page |> deliveries_body() |> put_recent_drops(filters, limit(args))}
     end
   end
 
@@ -293,16 +307,53 @@ defmodule FermixCore.Tools.ListCues do
   end
 
   defp summary(scope, since, context) do
-    with {:ok, summary} <- Deliveries.summary(Map.put(scope, :since, since), opts(context)) do
-      {:ok, Deliveries.present_summary(summary, since)}
+    now = now(context)
+
+    with {:ok, summary} <- Deliveries.summary(Map.put(scope, :since, since), opts(context)),
+         {:ok, sources} <- Overview.counted("source", now, opts(context)),
+         {:ok, watchers} <- Overview.counted("watcher", now, opts(context)) do
+      by_name = Map.new(summary.watchers, &{&1.name, Map.get(watchers, &1.watcher_id)})
+      presented = Deliveries.present_summary(summary, since)
+
+      {:ok,
+       Map.merge(presented, %{
+         sources: Enum.map(presented.sources, &put_counted(&1, Map.get(sources, &1.source))),
+         watchers: Enum.map(presented.watchers, &put_counted(&1, Map.get(by_name, &1.watcher))),
+         stream_counts_since: iso(counted_since(now))
+       })}
     end
   end
+
+  defp put_counted(row, nil), do: row
+  defp put_counted(row, counted), do: Map.put(row, :stream_counts, counted)
+
+  # `Overview.counted/3` sums whole hours from the hour a day before `now`.
+  defp counted_since(now),
+    do: now |> DateTime.add(-Overview.window_s(), :second) |> CuesSql.hour_of()
 
   defp deliveries_body(%{deliveries: []}), do: %{deliveries: [], note: "No delivery matches."}
 
   defp deliveries_body(%{deliveries: deliveries, more?: more?}) do
     body = %{deliveries: Enum.map(deliveries, &Deliveries.present/1)}
     if more?, do: Map.put(body, :next_before, List.last(deliveries).id), else: body
+  end
+
+  # One watcher's recent drops, beside the first page of its deliveries when
+  # dropped items are asked for, within the page's source, times and limit.
+  defp put_recent_drops(body, %{watcher_id: id, state: state, before_id: nil} = filters, limit)
+       when is_binary(id) and state in [nil, "dropped"] do
+    case id |> RecentDrops.list() |> Enum.filter(&within?(&1, filters)) |> Enum.take(limit) do
+      [] -> body
+      drops -> Map.put(body, :recent_drops, Enum.map(drops, &Deliveries.present_drop/1))
+    end
+  end
+
+  defp put_recent_drops(body, _filters, _limit), do: body
+
+  defp within?(drop, filters) do
+    filters.source_ref in [nil, drop.source_ref] and
+      (is_nil(filters.since) or DateTime.compare(drop.at, filters.since) != :lt) and
+      (is_nil(filters.until) or DateTime.compare(drop.at, filters.until) == :lt)
   end
 
   # A filter a view does not take is refused, never silently ignored.
@@ -438,10 +489,12 @@ defmodule FermixCore.Tools.ListCues do
     end
   end
 
-  defp week_ago(context) do
-    now = Map.get(context, :clock, &DateTime.utc_now/0).()
-    DateTime.add(now, -Deliveries.summary_days() * 86_400, :second)
-  end
+  defp week_ago(context),
+    do: DateTime.add(now(context), -Deliveries.summary_days() * 86_400, :second)
+
+  defp now(context), do: Map.get(context, :clock, &DateTime.utc_now/0).()
+
+  defp iso(%DateTime{} = at), do: DateTime.to_iso8601(at)
 
   defp opts(context), do: [repo: Map.get(context, :memory_repo, Repo)]
 

@@ -525,10 +525,10 @@ def test_a_default_seeded_home_holds_both_cue_suites_out_as_not_evaluated(
                   if s.name in ("cues", "memory")]
     kept, held = run_eval.hold_out_unseeded(_cfg(home), behavioral)
     assert [suite.name for suite, _scns in kept] == ["memory"]
-    assert {suite for suite, _case, _reason in held} == {"cues"} and len(held) == 16
+    assert {suite for suite, _case, _reason in held} == {"cues"} and len(held) == 18
     run_eval.print_not_evaluated(held)
     out = capsys.readouterr().out
-    assert "NOT EVALUATED — 16 case(s)" in out and "cues/releases_and_outages" in out
+    assert "NOT EVALUATED — 18 case(s)" in out and "cues/releases_and_outages" in out
 
 
 def test_a_home_seeded_with_cues_runs_them(tmp_path, monkeypatch):
@@ -649,6 +649,41 @@ def test_each_credential_floor_catches_an_ask_and_passes_a_correct_reply(case_id
     for ask in CREDENTIAL_ASKS:
         assert re.search(pattern, ask), f"{case_id} floor passes the ask {ask!r}"
     for clean in CREDENTIAL_CLEAN:
+        assert not re.search(pattern, clean), f"{case_id} floor fails the reply {clean!r}"
+
+
+# The words-to-listen-for cases' floor: it catches a reply that asks the owner
+# for a regular expression (or offers one), and passes every reply that sets the
+# watcher up from plain words, saying so or not.
+PATTERN_ASKS = [
+    "What regex should I use to match those posts?",
+    "Can you give me a regular expression for the topics you care about?",
+    "Send me the regex you want and I'll set the watcher up.",
+    "Do you have a regex pattern in mind?",
+    "I'll need a regex for the filter first.",
+    "Want me to write a regular expression for that?",
+]
+PATTERN_CLEAN = [
+    "Watcher orrin-failover is set up: it listens to eng-blogs. Listens for: Orrin DB, "
+    "replication, failover, replication lag",
+    "No regex needed: it listens for plain words.",
+    "It matches plain words, not a regex.",
+    "You don't need a regex; I drafted the words from what you asked.",
+    "It works without a regex or any other pattern.",
+    "It listens for words rather than a regular expression.",
+    "Tell me if you want other words added.",
+]
+
+
+@pytest.mark.parametrize("case_id", ["firehose_failover_news", "flooded_source_replication_lag"])
+def test_each_pattern_floor_catches_an_ask_and_passes_a_plain_words_reply(case_id):
+    loaded = suites.load_all(os.path.join(BENCH, "suites"))
+    cues = next(s for s in loaded if s.name == "cues")
+    case = next(c for scn in cues.scenarios for c in scn.cases if c.id == case_id)
+    pattern = case.expect["reply_not_matches"]
+    for ask in PATTERN_ASKS:
+        assert re.search(pattern, ask), f"{case_id} floor passes the ask {ask!r}"
+    for clean in PATTERN_CLEAN:
         assert not re.search(pattern, clean), f"{case_id} floor fails the reply {clean!r}"
 
 

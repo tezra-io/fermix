@@ -10,15 +10,23 @@ defmodule FermixCore.Cues.Overview do
   a source is Fermix's own status columns. Watchers are made in chat (design
   §8.1), so the page lists them and changes nothing.
 
+  A stream keeps only what passes (M60_CUE_INTAKE_AT_SCALE.md §3.4), so what it
+  received and what its watchers were offered or judged without keeping are
+  hourly counts (`cue_counts`, `counted/3`); the delivery rows still count
+  every pass and everything a feed, webhook or local push sent.
+
   Every read takes `:repo` (default `Memory.Repo`) or a door server, so a test
-  names its own; `:mandate_opts` carries the `Cues.Mandates` and `Cues.Pins`
-  seams. Memory switched off answers `{:error, :memory_off}`.
+  names its own; `:cues_config` (the `[fermix_core.cues]` keyword, default the
+  application's) names the stream sources a watcher's state reads;
+  `:mandate_opts` carries the `Cues.Mandates` and `Cues.Pins` seams. Memory
+  switched off answers `{:error, :memory_off}`.
   """
 
   alias FermixCore.Cues.Deliveries
   alias FermixCore.Cues.Door
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Pins
+  alias FermixCore.Cues.Watchers
   alias FermixCore.Jobs.Registry, as: JobRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesDeliveriesSql
@@ -32,6 +40,10 @@ defmodule FermixCore.Cues.Overview do
   @passed_states ~w(passed claimed acked)
   # Delivery outcomes counted as a task that acted, and as a failure.
   @failed_outcomes ~w(filter_failed task_failed failed_after_action)
+  # What a stream source counted that reached no watcher, and what a stream
+  # watcher counted as dropped and as failed, without a row.
+  @unrouted_phases ~w(unmatched rate_limited over_budget invalid stale)
+  @failed_phases ~w(filter_failed write_failed)
   @mandate_decisions %{"allow" => :allowed, "propose" => :proposed, "refuse" => :refused}
 
   @type door ::
@@ -48,13 +60,13 @@ defmodule FermixCore.Cues.Overview do
           task_name: String.t() | nil,
           enabled?: boolean(),
           held?: boolean(),
+          needs_update: Watchers.update_needed(),
+          offered: non_neg_integer(),
           waiting: non_neg_integer(),
           passed: non_neg_integer(),
           dropped: non_neg_integer(),
           acted: non_neg_integer(),
           failed: non_neg_integer(),
-          filter_provider: String.t() | nil,
-          filter_model: String.t() | nil,
           daily_cap: non_neg_integer(),
           filter_budget: non_neg_integer(),
           task_notes?: boolean(),
@@ -101,7 +113,10 @@ defmodule FermixCore.Cues.Overview do
   @doc """
   Every source's counts over the day before `now`, by source ref, from
   `Cues.Deliveries.summary/2`: `cues` received, `routed` to a watcher,
-  `not_routed`, `open_gaps`, and the enabled and paused watchers listening.
+  `not_routed`, `open_gaps`, and the enabled and paused watchers listening. A
+  stream keeps only what passes, so its `cues`, `routed` and `not_routed` are
+  its counts (`counted/3`, scope `source`, which only a stream writes):
+  `received`, less what reached no watcher.
   """
   @spec source_summary(DateTime.t(), keyword()) ::
           {:ok, %{String.t() => map()}} | {:error, :memory_off | term()}
@@ -110,11 +125,41 @@ defmodule FermixCore.Cues.Overview do
 
     result =
       with :ok <- running(opts),
-           {:ok, summary} <- Deliveries.summary(%{since: since}, repo: repo(opts)) do
-        {:ok, Map.new(summary.sources, &{&1.source_ref, &1})}
+           {:ok, summary} <- Deliveries.summary(%{since: since}, repo: repo(opts)),
+           {:ok, counted} <- counted("source", now, opts) do
+        {:ok, Map.new(summary.sources, &{&1.source_ref, stream_arrivals(&1, counted)})}
       end
 
     memory_off(result)
+  end
+
+  @doc """
+  What streams counted rather than stored (M60_CUE_INTAKE_AT_SCALE.md §3.4), by
+  ref, over the hours of the day before `now`, summed across process
+  incarnations: per `"source"`, `received`, `unmatched`, `rate_limited`,
+  `over_budget`, `invalid` and `stale`; per `"watcher"` (by id), `offered`,
+  `overflow`, `over_budget`, `dropped`, `filter_failed`, `write_failed` and
+  `passed`. A phase never counted is absent.
+  """
+  @spec counted(String.t(), DateTime.t(), keyword()) ::
+          {:ok, %{String.t() => %{String.t() => non_neg_integer()}}}
+          | {:error, :memory_off | term()}
+  def counted(scope, %DateTime{} = now, opts)
+      when scope in ["source", "watcher"] and is_list(opts) do
+    since = DateTime.add(now, -@window_s, :second)
+    call(CuesSql, {:counts_window, scope, since}, opts)
+  end
+
+  defp stream_arrivals(source, counted) do
+    case Map.fetch(counted, source.source_ref) do
+      :error ->
+        source
+
+      {:ok, counts} ->
+        received = Map.get(counts, "received", 0)
+        unrouted = count(counts, @unrouted_phases)
+        %{source | cues: received, routed: max(received - unrouted, 0), not_routed: unrouted}
+    end
   end
 
   @doc """
@@ -139,10 +184,13 @@ defmodule FermixCore.Cues.Overview do
 
   @doc """
   Every watcher, by name, with its task's name and whether the task is paused,
-  whether its filter is held by provider failures, its filter model, budgets
-  and instruction count, and its deliveries received in the day before `now`:
-  `waiting` (pending or being filtered), `passed`, `dropped`, and the ones
-  whose task `acted` or that `failed`.
+  whether its filter is held by provider failures, the update it needs to keep
+  the rules (`Cues.Watchers.update_needed/2`), its budgets and instruction
+  count, and what it received in the day before `now`: `offered` (every item
+  its words let through, kept or not), `waiting` (pending or being filtered),
+  `passed`, `dropped`, and the ones whose task `acted` or that `failed`. A
+  stream watcher's offers, drops and failures are counted, not stored
+  (`counted/3`).
   """
   @spec watchers(DateTime.t(), keyword()) :: {:ok, [watcher()]} | {:error, :memory_off | term()}
   def watchers(%DateTime{} = now, opts) when is_list(opts) do
@@ -152,12 +200,17 @@ defmodule FermixCore.Cues.Overview do
       with {:ok, watchers} <- call(CuesWatchersSql, {:list_watchers}, opts),
            {:ok, held} <- call(CuesFilterSql, {:held_watchers}, opts),
            {:ok, summary} <- Deliveries.summary(%{since: since}, repo: repo(opts)),
+           {:ok, counted} <- counted("watcher", now, opts),
            {:ok, jobs} <- cue_jobs(opts, & &1) do
-        held_ids = MapSet.new(held, & &1.watcher_id)
-        counts = Map.new(summary.watchers, &{&1.watcher_id, &1})
-        jobs = Map.new(jobs, &{&1.id, &1})
+        facts = %{
+          held_ids: MapSet.new(held, & &1.watcher_id),
+          stored: Map.new(summary.watchers, &{&1.watcher_id, &1}),
+          counted: counted,
+          jobs: Map.new(jobs, &{&1.id, &1}),
+          streams: Watchers.stream_refs(opts)
+        }
 
-        {:ok, Enum.map(watchers, &watcher_view(&1, held_ids, counts, jobs))}
+        {:ok, Enum.map(watchers, &watcher_view(&1, facts))}
       end
 
     memory_off(result)
@@ -209,11 +262,16 @@ defmodule FermixCore.Cues.Overview do
     memory_off(result)
   end
 
-  defp watcher_view(watcher, held_ids, counts, jobs) do
-    summary = Map.get(counts, watcher.id, %{})
-    by_state = Map.get(summary, :by_state, %{})
-    by_outcome = Map.get(summary, :by_outcome, %{})
-    job = Map.get(jobs, watcher.task_job_id, %{})
+  # A stream's pass is both a stored delivery and a counted offer, so
+  # `offered` takes the stored deliveries from every other source plus what
+  # the streams counted as offered.
+  defp watcher_view(watcher, facts) do
+    stored = Map.get(facts.stored, watcher.id, %{})
+    by_state = Map.get(stored, :by_state, %{})
+    by_outcome = Map.get(stored, :by_outcome, %{})
+    live = Map.get(facts.counted, watcher.id, %{})
+    job = Map.get(facts.jobs, watcher.task_job_id, %{})
+    not_streamed = stored |> Map.get(:by_source, %{}) |> Map.drop(facts.streams)
 
     %{
       id: watcher.id,
@@ -223,14 +281,14 @@ defmodule FermixCore.Cues.Overview do
       task_job_id: watcher.task_job_id,
       task_name: Map.get(job, :name),
       enabled?: watcher.enabled?,
-      held?: MapSet.member?(held_ids, watcher.id),
+      held?: MapSet.member?(facts.held_ids, watcher.id),
+      needs_update: Watchers.update_needed(watcher, facts.streams),
+      offered: Enum.sum(Map.values(not_streamed)) + count(live, ["offered"]),
       waiting: count(by_state, @waiting_states),
       passed: count(by_state, @passed_states),
-      dropped: count(by_state, ["dropped"]),
+      dropped: count(by_state, ["dropped"]) + count(live, ["dropped"]),
       acted: count(by_outcome, ["acted"]),
-      failed: count(by_outcome, @failed_outcomes),
-      filter_provider: watcher.filter_provider,
-      filter_model: watcher.filter_model,
+      failed: count(by_outcome, @failed_outcomes) + count(live, @failed_phases),
       daily_cap: watcher.daily_cap,
       filter_budget: watcher.filter_budget,
       task_notes?: watcher.task_notes?,
@@ -240,7 +298,7 @@ defmodule FermixCore.Cues.Overview do
     }
   end
 
-  defp count(by_state, states), do: states |> Enum.map(&Map.get(by_state, &1, 0)) |> Enum.sum()
+  defp count(counts, keys), do: keys |> Enum.map(&Map.get(counts, &1, 0)) |> Enum.sum()
 
   defp call(module, request, opts) do
     result =

@@ -462,28 +462,31 @@ changes nothing until a restart. `enabled` and `door_port` are boot-bound
 (`Cues.SourceManager.reconcile/0`), and mandates and the routing `filter_*`
 keys are read at each call. The path of one item:
 
-1. A source hands items to `Cues.Ingest.accept/3`: the door (`Cues.Door`, Bandit
-   on `127.0.0.1:door_port`, routes in `Cues.Door.Router`: local-push CloudEvents
-   on `/cues/v1/:ref`, webhooks on `/cues/hooks/:ref/:random`, verified by
-   `Cues.Webhook`), or a worker under `Cues.SourceSupervisor` (`Cues.Source.Feed`
-   polls with each hop pinned to the address `Net.Guard` checked
-   (`Net.PinnedUrl`) and feeds the body to a `Cues.FeedParser`
-   reader as it inflates, XML read one item at a time by `Cues.FeedXml`, so a
-   feed's length bounds its work but not its memory; `Cues.Source.Stream`
-   holds a WebSocket through a transport behind `Cues.Source.Stream.Transport`,
-   reading it with `Cues.JsonStream`, the general source that signs in with the
-   owner's key and secret and cannot rewind),
-   which `Cues.SourceManager` starts and stops to match the config. A JSON API
-   feed, a webhook and the general stream read messages by the same dot paths
+1. A feed, a webhook or a local push hands items to `Cues.Ingest.accept/3`: the
+   door (`Cues.Door`, Bandit on `127.0.0.1:door_port`, routes in
+   `Cues.Door.Router`: local-push CloudEvents on `/cues/v1/:ref`, webhooks on
+   `/cues/hooks/:ref/:random`, verified by `Cues.Webhook`), or
+   `Cues.Source.Feed`, a worker under `Cues.SourceSupervisor` that polls with
+   each hop pinned to the address `Net.Guard` checked (`Net.PinnedUrl`) and
+   feeds the body to a `Cues.FeedParser` reader as it inflates, XML read one
+   item at a time by `Cues.FeedXml`, so a feed's length bounds its work but not
+   its memory. A stream takes the path below instead. `Cues.SourceManager`
+   starts and stops the workers to match the config. A JSON API feed, a webhook
+   and the general stream read messages by the same dot paths
    (`Cues.JsonPath`).
 2. Accept and route are one Repo transaction: the identity check, the cue row,
-   one `cue_deliveries` row per enabled watcher listening to the source
-   (`pending` for an `llm` watcher, `passed` for a `none` one), inbox eviction
-   with its gap, and the wake-ups after the commit.
+   one `cue_deliveries` row per enabled watcher the item is routed to, inbox
+   eviction with its gap, and the wake-ups after the commit. Routing is by
+   words (`Cues.ListenFor`): a `none` watcher gets every item (`passed`), an
+   `llm` watcher only one its words to listen for match (`pending`), and an
+   item no watcher took is a receipt (identity and hashes, no payload). The
+   transaction is bounded: a Repo that does not answer in time is an error, a
+   failed poll for a feed and a `503` with `Retry-After` at the door, never an
+   exit.
 3. `Cues.Filters` claims at most one delivery per `llm` watcher (four calls in
-   all) and runs `Cues.Filter.Llm` under `Cues.FilterSupervisor` on the
-   watcher's filter model or `[fermix_core.routing] filter_*`, else the main
-   route at low effort; each call writes its own fenced settle.
+   all) and runs `Cues.Filter.Llm` under `Cues.FilterSupervisor` on the one
+   Cues filter model (`[fermix_core.routing] filter_*`), else the main route at
+   low effort; each call writes its own fenced settle.
 4. `Jobs.Scheduler` admits passed deliveries through `Jobs.CueAdmission`:
    `Repo.claim_cue_run/4` claims the job and the delivery and inserts the run in
    one transaction, at most three cue runs at once, oldest eligible delivery
@@ -497,21 +500,49 @@ keys are read at each call. The path of one item:
    validator (`Cues.Validator`, whose answer is the last line of its standard
    output). Approve mode goes through `Cues.Proposals` and the gateway's
    `/confirm`.
-6. `Cues.Sweeper` expires, prunes and reports (retention, proposal expiry,
-   unknown proposal outcomes, gap notices); `Cues.Notices` tells the owner once
-   per episode.
+6. `Cues.Sweeper` expires, prunes and reports (retention, the 48-hour counts,
+   proposal expiry, unknown proposal outcomes, gap notices); `Cues.Notices`
+   tells the owner once per episode.
+
+A stream's item is judged before it is stored (M60_CUE_INTAKE_AT_SCALE.md).
+`Cues.Source.Stream` holds a WebSocket through a transport behind
+`Cues.Source.Stream.Transport`, reading it with `Cues.JsonStream`, the general
+source that signs in with the owner's key and secret and cannot rewind. It
+never calls `Cues.Ingest`: each item goes through the words of the source's
+`llm` watchers (an item none matched is counted `unmatched`; a stream routes
+nothing to a `none` watcher), then through the rate buckets and the daily
+budget, and is offered to `Cues.LiveFilters` with the watchers it matched. The
+worker reads its watchers and what a live call needs at connect and on its 10 s
+flush, which also writes its counts (`Cues.Counts`, into `cue_counts` as the
+hour's absolute totals per incarnation) and the source's row; a row write that
+fails closes the connection, which is dialled again. `Cues.LiveFilters` keeps a
+live queue of at most 250 items per watcher in memory and runs at most four
+calls (never two for one watcher's subject) under
+`Cues.LiveFilterSupervisor`. It makes no synchronous Repo call: each call's
+task writes its own result, a pass as one transaction (`CuesSql`'s
+`{:pass_live, …}`: the cue if its identity is new, this watcher's `passed`
+delivery, the call's ledger row) that wakes the scheduler, a drop or a failure
+as the call's ledger row (`delivery_id` null) and the watcher's backoff, so the
+filter budget and the hold count live calls as they count stored ones. Drops,
+overflow and failures become counts; the last 50 drops per watcher stay in
+`Cues.RecentDrops` (ETS) for labelling. From the `passed` delivery on, a
+stream's item takes steps 4 to 6 like any other.
 
 `Cues.Supervisor` is the last child of the core tree, so a crash of the job
 scheduler or anything before it restarts the cue tree, which re-reads its rows,
-and a crash inside it restarts nothing outside. It is `one_for_one` over three
-children: the intake group (`rest_for_one`: `Cues.Buckets`, the ETS owner for
+and a crash inside it restarts nothing outside. It is `one_for_one` over four
+children: the live group (`rest_for_one`: the live task supervisor, then
+`Cues.LiveFilters`, first so a stream's watchers always reach it), the intake
+group (`rest_for_one`: `Cues.Buckets`, the ETS owner for
 token buckets, door slots and secret fingerprints, then the source supervisor,
 the source manager and the door), the filtering group (`rest_for_one`:
 `Cues.Filters`, then the filter task supervisor, so a dispatcher crash ends its
 calls) and `Cues.Sweeper`. The door is in core, not in `fermix_web`, so it exists
 under `--no-web` and in eval homes; a port in use leaves it `unavailable`, never
 a crashed tree. Rows are the truth: every durable fact is a row in `memory.db`,
-a process holds only timers and work in flight, and the boot sweeps put a
+a process holds only timers and work in flight (a stream's live queues, recent
+drops and the counts since the last flush are such work, lost with their
+process by design), and the boot sweeps put a
 `filtering` delivery back to `pending` without spending an attempt and reap the
 runs a stop interrupted. No GenServer callback makes a provider call or a
 channel send: filter calls run as supervised tasks and sends go through the

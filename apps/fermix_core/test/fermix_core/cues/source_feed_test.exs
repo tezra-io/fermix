@@ -19,6 +19,26 @@ defmodule FermixCore.Cues.Source.FeedTest do
   @interval_s 300
   @wait_ms 10_000
 
+  # A Repo in front of the test's own that takes the accept transaction and
+  # never answers it, and forwards every other request: the store held up
+  # behind a long write, as the poll sees it.
+  defmodule AcceptStallingRepo do
+    @moduledoc false
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, Map.new(opts))
+
+    @impl true
+    def init(config), do: {:ok, config}
+
+    @impl true
+    def handle_call({:cues, CuesSql, {:accept, _source, _items, _now, _state}}, _from, state),
+      do: {:noreply, state}
+
+    def handle_call(request, _from, state),
+      do: {:reply, GenServer.call(state.forward_to, request), state}
+  end
+
   setup do
     ctx = start_repo("feed")
     ref = "feed-#{System.unique_integer([:positive])}"
@@ -691,6 +711,29 @@ defmodule FermixCore.Cues.Source.FeedTest do
     end
   end
 
+  describe "routing by words (M60_CUE_INTAKE_AT_SCALE.md §3.1)" do
+    test "an llm watcher is offered only the items its words match; the rest are receipts",
+         ctx do
+      watcher =
+        insert_watcher(ctx.conn, %{filter: "llm", sources: [ctx.ref], listen_for: ["larkspur"]})
+
+      items = [
+        {"released", "Larkspur 4.2 released", hours_ago(1)},
+        {"closed", "The office is closed on Friday", hours_ago(2)}
+      ]
+
+      serve(ctx, feed(items, "v1"))
+      {pid, first} = start_feed(ctx)
+      fire(pid, first)
+
+      assert cue_ids(ctx) == ["closed", "released"]
+      assert delivered(ctx, watcher) == ["released"]
+
+      assert [[nil, 0]] =
+               rows(ctx.conn, "SELECT payload, routed_count FROM cues WHERE item_id = 'closed'")
+    end
+  end
+
   defp delivered(ctx, watcher) do
     ctx.conn
     |> rows(
@@ -722,6 +765,20 @@ defmodule FermixCore.Cues.Source.FeedTest do
       assert_received {:notice, ^ref, :unreachable, %{failures: 8}}
       assert source_row(ctx).status == "stopped"
       assert_received {:telemetry, [:fermix, :cue, :source], _m, %{phase: :stopped}}
+    end
+
+    test "a store that does not answer is a failed poll, backed off, and the worker runs on",
+         ctx do
+      stalling = start_supervised!({AcceptStallingRepo, forward_to: ctx.repo})
+      {pid, first} = start_feed(ctx, %{}, repo: stalling, repo_timeout_ms: 50)
+
+      ExUnit.CaptureLog.capture_log(fn -> fire(pid, first) end)
+
+      next_poll(60_000)
+      assert Process.alive?(pid)
+
+      assert_received {:telemetry, [:fermix, :cue, :source], _m,
+                       %{phase: :disconnect, reason: :repo, attempt: 1}}
     end
 
     # A crash report prints the worker's state; a feed's URL can carry a token.

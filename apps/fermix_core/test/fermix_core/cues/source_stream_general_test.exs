@@ -1,8 +1,9 @@
 defmodule FermixCore.Cues.Source.StreamGeneralTest do
   # The general WebSocket source: a stream with no preset. One worker per test
   # on its own temp Repo, built from a config section as the daemon resolves
-  # it, with FakeCueTransport driven by hand, a hand-driven clock and captured
-  # timers: no network, no real time. Its secrets live in the stub writer under
+  # it, with FakeCueTransport driven by hand, FakeLiveFilters telling the test
+  # what was offered, a hand-driven clock and captured timers: no network, no
+  # real time. Its secrets live in the stub writer under
   # this test's own ref. async: false because some cases assert that a secret
   # is in no log line, and another flips the content gate.
   use ExUnit.Case, async: false
@@ -16,6 +17,7 @@ defmodule FermixCore.Cues.Source.StreamGeneralTest do
   alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Setup.SecretWriter
   alias FermixTestSupport.FakeCueTransport
+  alias FermixTestSupport.FakeLiveFilters
   alias FermixTestSupport.TelemetryCapture
 
   @now ~U[2026-10-12 14:00:00Z]
@@ -43,7 +45,12 @@ defmodule FermixCore.Cues.Source.StreamGeneralTest do
       source_ref: ref
     )
 
-    Map.merge(ctx, %{ref: ref, clock: clock})
+    live = start_supervised!({FakeLiveFilters, test: self()})
+
+    _watcher =
+      insert_watcher(ctx.conn, %{filter: "llm", sources: [ref], listen_for: ["harrowgate"]})
+
+    Map.merge(ctx, %{ref: ref, clock: clock, live: live})
   end
 
   # --- helpers ---------------------------------------------------------------
@@ -87,6 +94,7 @@ defmodule FermixCore.Cues.Source.StreamGeneralTest do
       schedule: fn message, ms -> send(test, {:scheduled, message, ms}) end,
       transport: FakeCueTransport,
       transport_opts: [test: test],
+      live: ctx.live,
       admit: fn _ref, n, _now_ms -> n end,
       notify: fn ref, kind, data, _opts -> send(test, {:notice, ref, kind, data}) && :sent end
     ]
@@ -167,16 +175,18 @@ defmodule FermixCore.Cues.Source.StreamGeneralTest do
 
   defp advance(ctx, seconds), do: Agent.update(ctx.clock, &DateTime.add(&1, seconds, :second))
 
-  defp flush(pid), do: deliver(pid, scheduled(:flush, 250))
+  defp flush(pid), do: deliver(pid, scheduled(:flush, 10_000))
 
-  defp cues(ctx) do
-    rows(
-      ctx.conn,
-      "SELECT item_id, revision, subject FROM cues WHERE source_ref = ? ORDER BY id",
-      [
-        ctx.ref
-      ]
-    )
+  # What the stream offered the live dispatcher in one frame.
+  defp offered(ctx) do
+    ref = ctx.ref
+    assert_receive {:live_offer, ^ref, offers}, @wait_ms
+    Enum.map(offers, fn {item, _watchers} -> [item.item_id, item.revision, item.subject] end)
+  end
+
+  defp counts(ctx) do
+    {:ok, counts} = Repo.cues_call(CuesSql, {:counts_window, "source", @now}, server: ctx.repo)
+    Map.get(counts, ctx.ref, %{})
   end
 
   defp source_row(ctx) do
@@ -257,7 +267,7 @@ defmodule FermixCore.Cues.Source.StreamGeneralTest do
   # --- reading -----------------------------------------------------------------
 
   describe "reading" do
-    test "each story becomes a cue, an update a new revision, control messages are " <>
+    test "each story is offered, an update as a new revision, control messages are " <>
            "skipped, and every frame is acknowledged once handled",
          ctx do
       {pid, first} = start_stream(ctx)
@@ -267,20 +277,19 @@ defmodule FermixCore.Cues.Source.StreamGeneralTest do
       frame(pid, socket, [%{"T" => "subscription", "news" => ["*"]}])
       frame(pid, socket, [story(24_918_784), story(24_918_785)])
       frame(pid, socket, [story(24_918_784, updated_at: "2026-10-12T13:59:40Z")])
-      flush(pid)
 
       for _frame <- 1..4, do: assert_receive({:acked, ^socket})
 
-      assert cues(ctx) == [
+      assert offered(ctx) == [
                ["24918784", "2026-10-12T13:59:00Z", "HGFT"],
-               ["24918785", "2026-10-12T13:59:00Z", "HGFT"],
-               ["24918784", "2026-10-12T13:59:40Z", "HGFT"]
+               ["24918785", "2026-10-12T13:59:00Z", "HGFT"]
              ]
 
+      assert offered(ctx) == [["24918784", "2026-10-12T13:59:40Z", "HGFT"]]
       assert source_row(ctx).status == "connected"
     end
 
-    test "a message with no id and a frame that is not JSON are rejects", ctx do
+    test "a message with no id and a frame that is not JSON are counted invalid", ctx do
       {pid, first} = start_stream(ctx)
       socket = connect(pid, first)
 
@@ -288,8 +297,8 @@ defmodule FermixCore.Cues.Source.StreamGeneralTest do
       deliver(pid, {:cue_stream, socket, {:frame, {:text, "not json"}}})
       flush(pid)
 
-      assert cues(ctx) == []
-      assert source_row(ctx).reject_counts == %{"invalid" => 2}
+      refute_received {:live_offer, _ref, _offers}
+      assert counts(ctx) == %{"received" => 2, "invalid" => 2}
     end
 
     test "a frame of more than 100 messages keeps 100 and records the rest as a page_limit gap",
@@ -298,9 +307,8 @@ defmodule FermixCore.Cues.Source.StreamGeneralTest do
       socket = connect(pid, first)
 
       frame(pid, socket, Enum.map(1..103, &story/1))
-      flush(pid)
 
-      assert length(cues(ctx)) == 100
+      assert length(offered(ctx)) == 100
       assert %{"page_limit" => %{count: 3}} = gaps(ctx)
     end
 
@@ -362,7 +370,7 @@ defmodule FermixCore.Cues.Source.StreamGeneralTest do
       dial = refusals(pid, next_dial(1), 7, 1)
       refute_received {:DOWN, ^monitor, :process, ^pid, _reason}
       assert Process.alive?(pid)
-      assert [["77001", _revision, _subject]] = cues(ctx)
+      assert [["77001", _revision, _subject]] = offered(ctx)
 
       refused_once(pid, dial)
       assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, @wait_ms
@@ -413,44 +421,43 @@ defmodule FermixCore.Cues.Source.StreamGeneralTest do
                        %{phase: :disconnect, reason: :secret_unavailable}}
     end
 
-    # A batch that fails to commit closes the connection; its batch timer goes
-    # with it, so nothing writes the row as connected after the drop, and what
-    # was still waiting is taken by the next connection's first flush.
-    test "a failed batch: nothing writes connected after the drop, and the next connection " <>
-           "takes what waited",
+    # A write of the source's row that fails closes the connection, so nothing
+    # writes the row as connected after the drop: the flush writes the row only
+    # on a live connection, and the next connection proves itself again.
+    test "a failed row write: nothing writes connected after the drop, and the next " <>
+           "connection proves itself again",
          ctx do
       {pid, first} = start_stream(ctx)
       socket = connect(pid, first)
+      frame(pid, socket, [story(61_101)])
+      assert source_row(ctx).status == "connected"
 
       exec!(
         ctx.conn,
-        "CREATE TRIGGER cue_insert_fails BEFORE INSERT ON cues " <>
+        "CREATE TRIGGER cue_good_fails BEFORE UPDATE OF last_good_at ON cue_sources " <>
           "BEGIN SELECT RAISE(ABORT, 'disk full'); END",
         []
       )
 
       {dial, _log} =
         with_log(fn ->
-          frame(pid, socket, Enum.map(1..60, &story/1))
+          flush(pid)
           assert_receive {:closed, ^socket}
           next_dial(1)
         end)
 
-      exec!(ctx.conn, "DROP TRIGGER cue_insert_fails", [])
+      exec!(ctx.conn, "DROP TRIGGER cue_good_fails", [])
       assert source_row(ctx).status == "reconnecting"
 
-      # The batch timers armed on the dropped connection: stale, and the worker
-      # is not connected, so neither writes.
-      for _armed <- 1..2, do: deliver(pid, scheduled(:flush, 250))
+      # Not connected: the next flush writes no row.
+      flush(pid)
       assert source_row(ctx).status == "reconnecting"
-      assert cues(ctx) == []
 
       drain(:heartbeat)
       socket = connect(pid, dial)
       advance(ctx, 30)
       deliver(pid, scheduled(:heartbeat, 30_000))
       assert_receive {:pinged, ^socket}
-      assert length(cues(ctx)) == 10
       assert source_row(ctx).status == "connected"
     end
 

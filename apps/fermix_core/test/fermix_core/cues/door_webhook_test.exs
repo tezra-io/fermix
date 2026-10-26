@@ -178,6 +178,24 @@ defmodule FermixCore.Cues.DoorWebhookTest do
 
   defp json(conn), do: Jason.decode!(conn.resp_body)
 
+  defp hook_watcher(ctx, words) do
+    CueFixtures.insert_watcher(ctx.conn, %{
+      filter: "llm",
+      sources: ["gh-hooks"],
+      listen_for: words
+    })
+  end
+
+  defp offered(ctx, watcher) do
+    ctx.conn
+    |> CueFixtures.rows(
+      "SELECT c.item_id FROM cue_deliveries d JOIN cues c ON c.id = d.cue_id " <>
+        "WHERE d.watcher_id = ? ORDER BY d.id",
+      [watcher]
+    )
+    |> List.flatten()
+  end
+
   describe "a GitHub webhook" do
     test "a signed delivery is accepted, with its delivery id, event type and body hash" do
       body = issue_body()
@@ -582,10 +600,57 @@ defmodule FermixCore.Cues.DoorWebhookTest do
       assert [[2]] = CueFixtures.rows(ctx.conn, "SELECT count(*) FROM cues")
     end
 
+    test "routing by words: an llm watcher is offered the event only when its words match" do
+      ctx = CueFixtures.start_repo("hook_words")
+      builds = hook_watcher(ctx, ["build fails", "flaky test"])
+      deploys = hook_watcher(ctx, ["deploy"])
+      body = issue_body()
+
+      conn =
+        post_hook(
+          hook_path("gh-hooks"),
+          body,
+          github_headers(body),
+          router_opts(ingest: real_ingest(ctx))
+        )
+
+      assert [%{"status" => "accepted"}] = json(conn)["results"]
+      assert offered(ctx, builds) == ["d-1"]
+      assert offered(ctx, deploys) == []
+    end
+
+    test "a store that does not answer in time is 503 with Retry-After, an unknown outcome" do
+      stalled = start_supervised!(FermixTestSupport.StalledRepo)
+      body = issue_body()
+
+      ingest = fn source, entries, opts ->
+        Ingest.accept(source, entries, Keyword.merge(opts, repo: stalled, repo_timeout_ms: 50))
+      end
+
+      {conn, _log} =
+        ExUnit.CaptureLog.with_log(fn ->
+          post_hook(
+            hook_path("gh-hooks"),
+            body,
+            github_headers(body),
+            router_opts(ingest: ingest)
+          )
+        end)
+
+      assert conn.status == 503
+      assert Plug.Conn.get_resp_header(conn, "retry-after") == ["5"]
+      assert json(conn)["error"] =~ "retry with the same ids"
+    end
+
     test "a GitHub event over 64 KiB is stored as its projection" do
       ctx = CueFixtures.start_repo("hook_projection")
       # A listening watcher, so the cue keeps its payload rather than a receipt.
-      _watcher = CueFixtures.insert_watcher(ctx.conn, %{filter: "llm", sources: ["gh-hooks"]})
+      _watcher =
+        CueFixtures.insert_watcher(ctx.conn, %{
+          filter: "llm",
+          sources: ["gh-hooks"],
+          listen_for: ["build fails"]
+        })
 
       body =
         issue_body(%{
