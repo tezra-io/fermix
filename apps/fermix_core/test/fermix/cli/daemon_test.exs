@@ -11,6 +11,12 @@ defmodule Fermix.CLI.DaemonTest do
   alias FermixCore.SocketPath
   alias FermixTestSupport.ParentProcess
 
+  # How long a client waits for the daemon's reply. An answer that arrives
+  # returns at once, so the bound costs a passing test nothing; on a loaded
+  # runner the daemon can take over a second, Linux's caller check alone
+  # reading every process's /proc entry through the one file server.
+  @reply_ms 10_000
+
   defmodule TestPluginsRuntime do
     def apply_persisted do
       test_pid = Application.fetch_env!(:fermix_core, :daemon_test_pid)
@@ -201,7 +207,7 @@ defmodule Fermix.CLI.DaemonTest do
   # to one answer, which is exactly what deleting v0 exists to prevent.
   test "the v0 status and overview methods are deleted", %{socket_path: socket_path} do
     for method <- ["status", "overview"] do
-      assert {:ok, reply} = Client.request(method, socket_path: socket_path, timeout: 1_000)
+      assert {:ok, reply} = Client.request(method, socket_path: socket_path, timeout: @reply_ms)
       assert reply == %{"status" => "error", "reason" => "unknown method", "method" => method}
     end
   end
@@ -211,7 +217,7 @@ defmodule Fermix.CLI.DaemonTest do
              Client.request_v1("hello", %{},
                request_id: "req-hello",
                socket_path: socket_path,
-               timeout: 1_000
+               timeout: @reply_ms
              )
 
     assert result["protocol"] == %{
@@ -235,7 +241,7 @@ defmodule Fermix.CLI.DaemonTest do
              Client.request_v1("overview.get", %{},
                request_id: "req-overview",
                socket_path: socket_path,
-               timeout: 1_000
+               timeout: @reply_ms
              )
 
     assert result["readiness"] == %{"status" => "ready", "failure_count" => 0}
@@ -260,7 +266,7 @@ defmodule Fermix.CLI.DaemonTest do
              Client.request_v1("setup.session.create", %{},
                request_id: "req-setup",
                socket_path: socket_path,
-               timeout: 1_000
+               timeout: @reply_ms
              )
 
     assert result == %{
@@ -277,7 +283,7 @@ defmodule Fermix.CLI.DaemonTest do
                request_id: "req-old",
                protocol_version: 0,
                socket_path: socket_path,
-               timeout: 1_000
+               timeout: @reply_ms
              )
 
     assert details == %{"minimum_version" => 1, "maximum_version" => 2}
@@ -287,7 +293,7 @@ defmodule Fermix.CLI.DaemonTest do
                request_id: "req-new",
                protocol_version: 3,
                socket_path: socket_path,
-               timeout: 1_000
+               timeout: @reply_ms
              )
   end
 
@@ -302,7 +308,7 @@ defmodule Fermix.CLI.DaemonTest do
                request_id: "req-v1-setup-state",
                protocol_version: 1,
                socket_path: socket_path,
-               timeout: 1_000
+               timeout: @reply_ms
              )
 
     assert details == %{"method" => "setup.state.get", "requires" => 2}
@@ -312,7 +318,7 @@ defmodule Fermix.CLI.DaemonTest do
                request_id: "req-v1-hello",
                protocol_version: 1,
                socket_path: socket_path,
-               timeout: 1_000
+               timeout: @reply_ms
              )
   end
 
@@ -332,7 +338,7 @@ defmodule Fermix.CLI.DaemonTest do
              Client.request_v1("missing.method", %{},
                request_id: "req-missing",
                socket_path: socket_path,
-               timeout: 1_000
+               timeout: @reply_ms
              )
 
     assert details == %{"method" => "missing.method"}
@@ -369,7 +375,7 @@ defmodule Fermix.CLI.DaemonTest do
                  Client.request_v1("overview.get", %{},
                    request_id: "req-provider-fault",
                    socket_path: socket_path,
-                   timeout: 1_000
+                   timeout: @reply_ms
                  )
       end)
 
@@ -422,7 +428,7 @@ defmodule Fermix.CLI.DaemonTest do
     Process.sleep(50)
 
     assert {:ok, reply} =
-             Client.request("does-not-exist", socket_path: socket_path, timeout: 1_000)
+             Client.request("does-not-exist", socket_path: socket_path, timeout: @reply_ms)
 
     assert reply["status"] == "error"
     assert reply["reason"] == "unknown method"
@@ -454,7 +460,7 @@ defmodule Fermix.CLI.DaemonTest do
           :paired
         end,
         socket_path: socket_path,
-        timeout: 1_000
+        timeout: @reply_ms
       )
 
     assert result == :paired
@@ -493,7 +499,7 @@ defmodule Fermix.CLI.DaemonTest do
             request.("mobile_pair_wait", %{"session_id" => "pair-session-1"}, 125_000)
           end,
           socket_path: socket_path,
-          timeout: 1_000
+          timeout: @reply_ms
         )
       end)
 
@@ -514,7 +520,7 @@ defmodule Fermix.CLI.DaemonTest do
           request.("mobile_pair_cancel", %{"session_id" => "pair-session-1"}, 1_000)
         end,
         socket_path: socket_path,
-        timeout: 1_000
+        timeout: @reply_ms
       )
 
     assert {:ok, cancel_reply} = result
@@ -531,7 +537,7 @@ defmodule Fermix.CLI.DaemonTest do
           {"mobile_status", :status, "listener"}
         ] do
       assert {:ok, reply} =
-               Client.request(method, socket_path: socket_path, timeout: 1_000)
+               Client.request(method, socket_path: socket_path, timeout: @reply_ms)
 
       assert reply["status"] == "ok"
       assert Map.has_key?(reply["result"], result_key)
@@ -543,7 +549,7 @@ defmodule Fermix.CLI.DaemonTest do
     assert {:ok, reply} =
              Client.request("mobile_device_revoke",
                socket_path: socket_path,
-               timeout: 1_000,
+               timeout: @reply_ms,
                params: %{"device_id" => device_id}
              )
 
@@ -555,7 +561,7 @@ defmodule Fermix.CLI.DaemonTest do
     assert {:ok, wait_reply} =
              Client.request("mobile_pair_wait",
                socket_path: socket_path,
-               timeout: 1_000,
+               timeout: @reply_ms,
                params: %{"session_id" => "../../bad"}
              )
 
@@ -565,7 +571,7 @@ defmodule Fermix.CLI.DaemonTest do
     assert {:ok, revoke_reply} =
              Client.request("mobile_device_revoke",
                socket_path: socket_path,
-               timeout: 1_000,
+               timeout: @reply_ms,
                params: %{"device_id" => "not-a-uuid"}
              )
 
@@ -587,7 +593,7 @@ defmodule Fermix.CLI.DaemonTest do
     )
 
     assert {:ok, reply} =
-             Client.request("mobile_pair_begin", socket_path: socket_path, timeout: 1_000)
+             Client.request("mobile_pair_begin", socket_path: socket_path, timeout: @reply_ms)
 
     assert reply == %{"status" => "error", "reason" => "pairing_already_active"}
 
@@ -720,27 +726,27 @@ defmodule Fermix.CLI.DaemonTest do
              Client.request_v1("lifecycle.prepare", %{},
                request_id: "req-prepare",
                socket_path: socket_path,
-               timeout: 1_000
+               timeout: @reply_ms
              )
 
     assert {:error, {:management_error, "busy", _message, %{"operation" => "lifecycle"}}} =
              Client.request_v1("lifecycle.prepare", %{},
                request_id: "req-prepare-2",
                socket_path: socket_path,
-               timeout: 1_000
+               timeout: @reply_ms
              )
 
     assert {:ok, %{"status" => "committed"}} =
              Client.request_v1("lifecycle.commit", %{"lease_id" => lease_id},
                request_id: "req-commit",
                socket_path: socket_path,
-               timeout: 1_000
+               timeout: @reply_ms
              )
 
     assert_receive {:stopped, :lifecycle}
 
     assert {:ok, %{"status" => "shutting_down"}} =
-             Client.request("shutdown", socket_path: socket_path, timeout: 1_000)
+             Client.request("shutdown", socket_path: socket_path, timeout: @reply_ms)
 
     assert_receive {:stopped, :v0}
     # Both seams default to the same function, so production has one stop path
@@ -880,7 +886,7 @@ defmodule Fermix.CLI.DaemonTest do
       assert {:error, {:management_error, "unknown_pairing_session", _message, _details}} =
                Client.request_v1("mobile.pair.get", %{"session_id" => "pair-1"},
                  socket_path: socket_path,
-                 timeout: 1_000
+                 timeout: @reply_ms
                )
 
       assert_received {:mobile_provider_call, :pair_get, ["pair-1"]}
@@ -1100,7 +1106,7 @@ defmodule Fermix.CLI.DaemonTest do
     assert {:ok, reply} =
              Client.agent_message(%{"content" => "   "},
                socket_path: socket_path,
-               timeout: 1_000
+               timeout: @reply_ms
              )
 
     assert reply["status"] == "error"
@@ -1117,7 +1123,7 @@ defmodule Fermix.CLI.DaemonTest do
              Client.agent_message(
                %{"content" => "hello", "session_id" => "daemon-test"},
                socket_path: socket_path,
-               timeout: 1_000
+               timeout: @reply_ms
              )
 
     assert reply["status"] == "error"
@@ -1146,7 +1152,7 @@ defmodule Fermix.CLI.DaemonTest do
     end)
 
     assert {:ok, reply} =
-             Client.request("plugins_apply", socket_path: socket_path, timeout: 1_000)
+             Client.request("plugins_apply", socket_path: socket_path, timeout: @reply_ms)
 
     assert reply["status"] == "ok"
     assert is_map(reply["reload"])
@@ -1173,7 +1179,7 @@ defmodule Fermix.CLI.DaemonTest do
     end)
 
     assert {:ok, reply} =
-             Client.request("plugins_apply", socket_path: socket_path, timeout: 1_000)
+             Client.request("plugins_apply", socket_path: socket_path, timeout: @reply_ms)
 
     assert reply["status"] == "ok"
     assert reply["reload"]["main_agent"]["version"] == 2
@@ -1213,7 +1219,7 @@ defmodule Fermix.CLI.DaemonTest do
                Client.request("auth_forget",
                  params: %{"profile" => "github:primary"},
                  socket_path: ctx.forget_socket,
-                 timeout: 1_000
+                 timeout: @reply_ms
                )
 
       assert_receive {:forget_signed_out, "github:primary"}
@@ -1226,7 +1232,7 @@ defmodule Fermix.CLI.DaemonTest do
                Client.request("auth_forget",
                  params: %{"profile" => "chatgpt"},
                  socket_path: ctx.forget_socket,
-                 timeout: 1_000
+                 timeout: @reply_ms
                )
 
       assert_receive {:forget_signed_out, "chatgpt"}
@@ -1240,7 +1246,7 @@ defmodule Fermix.CLI.DaemonTest do
                  Client.request("auth_forget",
                    params: params,
                    socket_path: ctx.forget_socket,
-                   timeout: 1_000
+                   timeout: @reply_ms
                  )
       end
 
@@ -1253,7 +1259,7 @@ defmodule Fermix.CLI.DaemonTest do
           Client.request("auth_forget",
             params: %{"profile" => "wedged:primary"},
             socket_path: ctx.forget_socket,
-            timeout: 1_000
+            timeout: @reply_ms
           )
         end)
 
@@ -1367,7 +1373,10 @@ defmodule Fermix.CLI.DaemonTest do
     end)
 
     assert {:ok, reply} =
-             Client.request("plugins_runtime_status", socket_path: socket_path, timeout: 1_000)
+             Client.request("plugins_runtime_status",
+               socket_path: socket_path,
+               timeout: @reply_ms
+             )
 
     assert reply["status"] == "ok"
     assert [row] = reply["runtime_status"]
@@ -1404,14 +1413,18 @@ defmodule Fermix.CLI.DaemonTest do
     end)
 
     assert {:ok, reply} =
-             Client.request("plugins_runtime_status", socket_path: socket_path, timeout: 1_000)
+             Client.request("plugins_runtime_status",
+               socket_path: socket_path,
+               timeout: @reply_ms
+             )
 
     assert reply["status"] == "error"
     assert reply["reason"] =~ "noproc"
   end
 
   test "skills_list returns JSON-safe skill summaries", %{socket_path: socket_path} do
-    assert {:ok, reply} = Client.request("skills_list", socket_path: socket_path, timeout: 1_000)
+    assert {:ok, reply} =
+             Client.request("skills_list", socket_path: socket_path, timeout: @reply_ms)
 
     assert reply["status"] == "ok"
     assert is_integer(reply["skills"]["count"])
@@ -1422,7 +1435,7 @@ defmodule Fermix.CLI.DaemonTest do
     assert {:ok, reply} =
              Client.request("skills_view",
                socket_path: socket_path,
-               timeout: 1_000,
+               timeout: @reply_ms,
                params: %{"name" => "self-knowledge"}
              )
 
@@ -1625,7 +1638,7 @@ defmodule Fermix.CLI.DaemonTest do
       Client.request_v1("hello", %{},
         request_id: "req-client",
         socket_path: socket_path,
-        timeout: 1_000
+        timeout: @reply_ms
       )
     after
       Task.await(task, 1_000)
@@ -1663,7 +1676,7 @@ defmodule Fermix.CLI.DaemonTest do
   end
 
   defp hello(socket_path) do
-    Client.request_v1("hello", %{}, socket_path: socket_path, timeout: 1_000)
+    Client.request_v1("hello", %{}, socket_path: socket_path, timeout: @reply_ms)
   end
 
   defp unique_name(prefix) do
