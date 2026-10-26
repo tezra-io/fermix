@@ -68,7 +68,7 @@ check):
 | `SpendBeforeSend` | The run spends the owner's day before its one send (`CheckIn.spend_then_deliver/3`, `check_in.ex:401-425`; `Repo.spend_open_loop_budget/5`, `open_loops_sql.ex:513-552`), stamping `last_rung2_at`, the one column the budget reads and no touch writes. The same transaction refuses the stamp (`budget_spent`) when any row of the owner's already carries one since the local day began; with one loop modelled that branch is never taken. | The budget is the loop's last recorded touch, as before the fix. |
 | `TouchCap` | The slot table ends at the hand-back, whose touch arms the answer day (`Lifecycle.after_touch/4`, `following_touch/4`, `Defaults.slots/1`); the spent phase is checked first (`Lifecycle.phase/1`); `asked` is refused once touches are spent; the `CHECK touches BETWEEN 0 AND 3`. One switch for all. | The hand-back re-arms itself. |
 | `BootSweep` | `Scheduler.boot_sweep/1` (`scheduler.ex:187-202`). | Nothing runs at boot. |
-| `ScanExpires` | The due scan's expiries (`Lifecycle.due_decision/2`, `lifecycle.ex:112-151`). | The scan never expires a loop. |
+| `ScanExpires` | The due scan's expiries (`Lifecycle.due_decision/2`, `lifecycle.ex:114-153`). | The scan never expires a loop. |
 
 ## What holds
 

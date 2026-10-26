@@ -32,8 +32,8 @@
 (* code: the scheduler and check-in pins name files lane E is writing, and *)
 (* every line number below is re-read at the first re-pin.                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/lifecycle.ex @ 08ba76819bb7
-\* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/defaults.ex @ 59a91aaa03d9
+\* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/lifecycle.ex @ a0092c2cef0b
+\* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/defaults.ex @ dce4830c823c
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/open_loops_sql.ex @ a1393b1c6eb2
 \* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/scheduler.ex @ ca94a8aacbbf
 \* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/check_in.ex @ 787d2a0ead1d
@@ -76,7 +76,7 @@ CONSTANTS
     BudgetRead,          \* a claim needs the owner's day unspent:
                          \* budget_spent_since/3 (:834-846) read by
                          \* Scheduler.budget_for/2 (scheduler.ex:301-316) into
-                         \* Lifecycle.rung2_eligible?/4 (lifecycle.ex:162-171)
+                         \* Lifecycle.rung2_eligible?/4 (lifecycle.ex:164-173)
     SpendBeforeSend,     \* the run spends the owner's day before its one send:
                          \* CheckIn.spend_then_deliver/3 (check_in.ex:401-425) ->
                          \* Repo.spend_open_loop_budget/5 (spend_budget/5,
@@ -143,7 +143,7 @@ PreCheck == {"claimed", "speak"}
 
 datePassed == daysLeft = 0
 \* The pending touch is a before-the-date one: slot 0 or 1, or a plan (never later
-\* than the date, Lifecycle.plan/3, lifecycle.ex:250-261).
+\* than the date, Lifecycle.plan/3, lifecycle.ex:252-263).
 BeforeDate == slot <= 1 \/ planned
 \* The day's budget as the claim reads it. With the spend, last_rung2_at is
 \* since the local day began (budget_spent_since/3 reads MAX(last_rung2_at) >=
@@ -153,7 +153,7 @@ BeforeDate == slot <= 1 \/ planned
 BudgetSpent ==
     /\ BudgetRead
     /\ IF SpendBeforeSend THEN rung2Today ELSE lastRung = 2 /\ touchedToday
-\* Lifecycle.phase/1 (lifecycle.ex:430-437) :spent: the class's touches are used,
+\* Lifecycle.phase/1 (lifecycle.ex:432-439) :spent: the class's touches are used,
 \* or the hand-back was touched (its answer day is pending). Checked before the
 \* pending slot's phase, so a plan never revives a spent loop.
 Spent == (TouchCap /\ touches >= 3) \/ slot = 3
@@ -168,7 +168,7 @@ LoseClaim(newHolder) ==
 -----------------------------------------------------------------------------
 (* Row rules shared by several steps *)
 
-\* Lifecycle.after_touch/4 (lifecycle.ex:184-201): a recorded raise or a
+\* Lifecycle.after_touch/4 (lifecycle.ex:186-203): a recorded raise or a
 \* confirmed rung 2 send. One more touch, asked, the following slot armed on a
 \* later day; a touch at the hand-back arms the answer day. The guard
 \* touches < 4 is the spec's bound on a run without TouchCap, not code.
@@ -194,7 +194,7 @@ EndAs(s) ==
     /\ UNCHANGED <<touches, slot, planned, arrived, hold, dueDays, hbRetried, lastRung,
                    touchedToday, rung2Today>>
 
-\* Lifecycle.due_decision/2 (lifecycle.ex:112-136): {:skip_to_handback, at}.
+\* Lifecycle.due_decision/2 (lifecycle.ex:114-138): {:skip_to_handback, at}.
 SkipToHandBack ==
     /\ slot' = 2
     /\ planned' = FALSE
@@ -222,7 +222,7 @@ BecomeDue ==
 \* The due timer or the 60 s reconcile tick -> Scheduler.run_due/2
 \* (scheduler.ex:211-221) -> Repo.scan_due_open_loops (open_loops_sql.ex:587-684):
 \* one transaction per row, each decided by Lifecycle.due_decision/2. A claimed
-\* row is left to its check-in (lifecycle.ex:114).
+\* row is left to its check-in (lifecycle.ex:116).
 ScanArrived ==
     \/ Spent /\ ScanExpire
     \/ ~Spent /\ BeforeDate /\ datePassed /\ touches > 0 /\ SkipToHandBack
@@ -249,7 +249,7 @@ Scan ==
 
 \* The same pass, Scheduler.weigh_due/3 (scheduler.ex:230-281): skip an owner
 \* with a run in flight, read the hours and the budget, Lifecycle.rung2_eligible?/4
-\* (window closed, active hours, budget; lifecycle.ex:162-171), then
+\* (window closed, active hours, budget; lifecycle.ex:164-173), then
 \* Repo.claim_open_loop_checkin/3 (open_loops_sql.ex:571-583) and a
 \* CheckInSupervisor child. CHOOSE takes one free child slot, always the same one
 \* for the same state: slots are interchangeable.
@@ -360,7 +360,7 @@ Finalize(r) ==
     /\ UNCHANGED <<clockVars, lost, sched, faults, sentToday, unclaimedSend,
                    shownWhileClosed>>
 
-\* Lifecycle.after_outcome/4 (lifecycle.ex:295-345). close: settled elsewhere.
+\* Lifecycle.after_outcome/4 (lifecycle.ex:297-347). close: settled elsewhere.
 \* silent: the following slot, or the end of a loop with no slot left (a
 \* never-asked loop's last before-the-date slot, or the hand-back). A failed
 \* send: retry at the next active-hours start, a later day; the hand-back
@@ -409,7 +409,7 @@ RunStep(r) ==
 (* The owner and the main agent *)
 
 \* open_loop_update -> Registry.update -> Repo.settle_open_loop/3 with
-\* Lifecycle.after_answer/5 (lifecycle.ex:226-271). done, stop and drop close;
+\* Lifecycle.after_answer/5 (lifecycle.ex:228-273). done, stop and drop close;
 \* a plan re-arms at its time, never past the date; not yet keeps the loop open
 \* for one more touch nearer the date (from a due row, the passed slot is not
 \* re-armed). Accepted on any live state, a claimed row included.
@@ -442,7 +442,7 @@ Answer ==
 
 \* Rung 1: the due note on an owner-private turn inside the window; the main agent
 \* raises the loop and records open_loop_update(asked) -> after_answer "asked"
-\* -> after_touch/4 at rung 1 (lifecycle.ex:273-279). Refused once touches are
+\* -> after_touch/4 at rung 1 (lifecycle.ex:275-281). Refused once touches are
 \* spent.
 Raise ==
     /\ RaiseInConversation /\ sched = "up" /\ Writable
@@ -465,7 +465,7 @@ Done ==
     /\ \A r \in Runs : run[r] = "none"
 
 \* The rung 1 window closes (rung1_window_ms after next_touch_at): a scheduler
-\* timer (Lifecycle.next_wake/2, lifecycle.ex:394-405).
+\* timer (Lifecycle.next_wake/2, lifecycle.ex:396-407).
 WindowCloses ==
     /\ state = "due" /\ windowOpen
     /\ windowOpen' = FALSE
