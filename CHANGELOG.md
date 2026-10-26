@@ -8,6 +8,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **GPT-6.1 Terra is in the model lists.** OpenAI's new balanced model sits
+  between GPT-6.1 Sol and GPT-6 Luna for an OpenAI API key and on OpenRouter;
+  no provider's default changes. A ChatGPT sign-in offers it whenever the
+  account does, and Fermix now knows its context window there, so a
+  conversation on it compacts where the rest of the GPT-6 generation does.
+
 - **Reach from anywhere works out of the box.** The `fermix-iroh` helper it
   needs ships inside the Homebrew binaries, the Mac app's engine and the Linux
   packages, so the switch works with no download and no extra step. A source

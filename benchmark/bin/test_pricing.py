@@ -413,8 +413,8 @@ def test_malformed_spans_raise_rather_than_being_skipped():
 # checked against first-party vendor pricing; the card carries the reason beside
 # the entry, and the assertion here is what makes the reason enforceable.
 
-_OPENAI_CACHE_WRITE_MODELS = ("gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna",
-                              "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+_OPENAI_CACHE_WRITE_MODELS = ("gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol",
+                              "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
 
 
 @pytest.mark.parametrize("model", _OPENAI_CACHE_WRITE_MODELS)
@@ -601,6 +601,19 @@ def test_gpt_6_1_sol_reads_its_cache_at_half_gpt_6_sol():
         assert pricing.CARD[(route, "gpt-6.1-sol")] == pricing.Rate(2.00, 10.00, 0.10, 2.50)
     assert (pricing.CARD[("openai", "gpt-6.1-sol")].cached_input_per_mtok * 2
             == pricing.CARD[("openai", "gpt-6-sol")].cached_input_per_mtok)
+
+
+def test_gpt_6_1_terra_costs_half_gpt_6_1_sol_on_every_leg():
+    # Read first-party 2026-10-26, its release day, standard tier: 1.00 input,
+    # 5.00 output, 0.05 cached read, 1.25 write; OpenRouter lists the same
+    # 1.00/5.00 that day.
+    for route, model in (("openai", "gpt-6.1-terra"), ("openai_codex", "gpt-6.1-terra"),
+                         ("openrouter", "openai/gpt-6.1-terra")):
+        assert pricing.CARD[(route, model)] == pricing.Rate(1.00, 5.00, 0.05, 1.25), route
+    terra, sol = pricing.CARD[("openai", "gpt-6.1-terra")], pricing.CARD[("openai", "gpt-6.1-sol")]
+    for leg in ("input_per_mtok", "output_per_mtok", "cached_input_per_mtok",
+                "cache_write_per_mtok"):
+        assert getattr(terra, leg) * 2 == pytest.approx(getattr(sol, leg)), leg
 
 
 def test_fable_5_1_caches_at_a_tenth_of_its_siblings_read_rate():

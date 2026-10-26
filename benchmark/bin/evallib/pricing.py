@@ -66,16 +66,17 @@ All figures are published list prices in US dollars per MILLION tokens, standard
 2026-09-05 and re-checked against first-party vendor pricing the same day;
 Venice's was read 2026-09-19 and carries its own line below. The four models
 released 2026-09-22 (gpt-6-sol, gpt-6-luna, claude-opus-5-5, grok-4.7) were
-read from the same first-party pages that day, and gpt-6.1-sol on its release
-day, 2026-09-29. The OpenRouter and Venice entries added with the catalog's
+read from the same first-party pages that day, gpt-6.1-sol on its release
+day, 2026-09-29, and gpt-6.1-terra (with its OpenRouter twin) on its release
+day, 2026-10-26. The OpenRouter and Venice entries added with the catalog's
 2026-10-03 refresh were read from each one's public listing that day, and
 claude-haiku-5-5 from the first-party model page on 2026-10-10:
 
   OpenAI      https://developers.openai.com/api/docs/pricing (first-party;
               input / cached input / output for every slug). Cache WRITES are
               billed at 1.25x uncached input from GPT-5.6 onward — gpt-6-astra,
-              gpt-6.1-sol, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra,
-              gpt-5.6-luna.
+              gpt-6.1-sol, gpt-6.1-terra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol,
+              gpt-5.6-terra, gpt-5.6-luna.
               Every older slug carded here predates that line and bills a
               written token as ordinary input; that is a read fact
               (`BILLS_AT_INPUT_RATE`), not a gap.
@@ -153,7 +154,7 @@ from typing import Protocol
 # onto a stored row. It is not an ordered sequence and the values in between
 # need not exist: `.1` never did, and renaming `.2` now would make a token that
 # is already on disk mean two different tables.
-CARD_VERSION = "2026-10-10.2"
+CARD_VERSION = "2026-10-26.1"
 
 
 class LlmSpanUsage(Protocol):
@@ -266,6 +267,8 @@ _OPENAI_RATES: dict[str, Rate] = {
     # 0.10 is 0.05x input, and it is what the pricing table lists. Do not
     # "fix" it to 0.20.
     "gpt-6.1-sol": Rate(2.00, 10.00, 0.10, 2.50),
+    # Exactly half GPT-6.1 Sol on every leg, 0.05 cached read included.
+    "gpt-6.1-terra": Rate(1.00, 5.00, 0.05, 1.25),
     "gpt-6-luna": Rate(0.10, 0.50, 0.01, 0.125),
     # 4.00 input is promotional through at least 2026-11-21; the write leg is
     # 1.25x whatever input is, so it becomes 6.25 if input reverts to 5.00.
@@ -404,6 +407,7 @@ _OPENROUTER_RATES: dict[str, Rate] = {
     "anthropic/claude-opus-4.8": Rate(5.00, 25.00, 0.50, 6.25),
     "openai/gpt-6-astra": Rate(10.00, 50.00, 1.00, 12.50),
     "openai/gpt-6.1-sol": Rate(2.00, 10.00, 0.10, 2.50),
+    "openai/gpt-6.1-terra": Rate(1.00, 5.00, 0.05, 1.25),
     "openai/gpt-6-luna": Rate(0.10, 0.50, 0.01, 0.125),
     "openai/gpt-5.5": Rate(5.00, 30.00, 0.50, BILLS_AT_INPUT_RATE),
     "x-ai/grok-4.7": Rate(2.00, 6.00, 0.50),
