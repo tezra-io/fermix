@@ -100,7 +100,7 @@ helper                                   daemon
 | `relay` | `home_relay` (a URL, or `null` before one is chosen), `connected`; `error?` | The endpoint's home relay and whether it is connected, sent after `ready` and whenever either changes. iroh reports home relays as a list; `home_relay` is the connected entry, else the first. `error` is the first line of iroh's error text, at most 512 bytes, with any `user:password@` removed from URLs: relay-influenced text the daemon logs and never matches on. |
 | `path` | `endpoint_id`, `kind` (`relay` or `direct`), `relay` (a URL, or `null` for a direct path) | A connection's selected path, sent when the connection opens and whenever its selected path changes. `endpoint_id` is the peer's: per phone process, since a phone makes a new iroh key on each launch. For the Phone sheet's route line and the speed measurement (M62 §3.2, D5). |
 | `closed` | `endpoint_id` | A connection that had a `path` ended, however it ended. Sent once per connection, after its last `path`; the daemon forgets that peer's path. |
-| `refused` | `reason`, `endpoint_id` (hex, or `null` where it is not known) | A connection or stream the helper refused: `busy` (over `limits.max_connections`, refused before its handshake, so `endpoint_id` is `null`), `alpn` (no matching application protocol), `bridge_unreachable` (the bridge socket could not be reached for a stream). The daemon counts these toward its admission bound and per-peer accounting; it never parses `log` text. |
+| `refused` | `reason`, `endpoint_id` (hex, or `null` where it is not known) | A connection or stream the helper refused: `busy` (over `limits.max_connections` with no connection that can make way, refused before its handshake, so `endpoint_id` is `null`), `alpn` (no matching application protocol), `bridge_unreachable` (the bridge socket could not be reached for a stream). The daemon counts these toward its admission bound and per-peer accounting; it never parses `log` text. |
 | `log` | `level` (`info` or `warn`), `message` | A diagnostic for the daemon's log, at most 512 bytes. The daemon logs it and never matches on it. Never key material, never stream contents. |
 | `error` | `code`, `message` | Fatal: the helper exits `1` after sending it. `code` is one of `bad_request` (a malformed or out-of-order `op`, one with an unknown or missing field, or a `start` whose values the helper refuses), `key_unreadable`, `key_invalid`, `bind_failed`, `internal`. `message` is at most 512 bytes. The daemon restarts a helper that failed, except after `bad_request` or `key_invalid`, which the same `start` would get again. |
 
@@ -133,23 +133,34 @@ helper                                   daemon
   endpoint uses no address lookup service, so it never publishes to or resolves
   through a third party.
 - **`limits.max_connections`:** concurrent iroh connections, 1 to 1,024,
-  handshaking ones included. A connection over the bound is refused before its
-  handshake (iroh's `Incoming::refuse`), so it costs no key exchange, and
-  reported as `refused` `busy`. A connection holds its place for a bounded
-  time: a handshake not finished within **10 s** is dropped, a connection that
-  has had no stream for **30 s** is closed with code `0`, reason `idle`, and
-  the connections of a peer whose session ended before `hello` or a pair
-  request are closed on the daemon's `close`, so opening stream after stream
-  that fails its handshake keeps no place. Once half the places are taken, a
-  new peer whose address QUIC has not validated is sent a Retry first, so
-  forged packets never take one. Within those bounds an unauthenticated peer
-  holds a place for at most about 65 s: 10 s of handshake, 30 s before its
-  first stream, that stream's 10 s handshake deadline at the daemon, 10 s more
-  for a stream opened just before the daemon's `close` lands, and 5 s for the
-  peer to take and acknowledge the daemon's last bytes, whatever flow-control
-  credit it gives (see **Ending.**); 40 s if it opens no stream. Holding every
-  place so takes new connections at a sustained rate, about 16 a second for
-  1,024 places, or 26 a second without streams.
+  handshaking ones included. When every place is taken, a new connection
+  takes the place of the connection that has gone longest with no stream open
+  (since it was accepted, or since its last stream ended), one still in its
+  handshake included: that connection is closed with code `0`, reason `room`,
+  or its handshake dropped. A connection keeps its place while the helper
+  waits for the daemon to read an event about it, so a daemon that stops
+  reading gets refusals, not unbounded work. Only when no connection can make
+  way is the new one refused before its handshake (iroh's `Incoming::refuse`),
+  so it costs no key exchange, and reported as `refused` `busy`. A connection
+  holds its place for a bounded time: a handshake not finished within
+  **10 s** is dropped, a connection that has had no stream for **30 s** is closed with
+  code `0`, reason `idle`, and the connections of a peer whose session ended
+  before `hello` or a pair request are closed on the daemon's `close`, so
+  opening stream after stream that fails its handshake keeps no place. Once
+  half the places are taken, a new peer whose address QUIC has not validated
+  is sent a Retry first, so forged packets never take one. Within those bounds
+  an unauthenticated peer holds a place for at most about 65 s: 10 s of
+  handshake, 30 s before its first stream, that stream's 10 s handshake
+  deadline at the daemon, 10 s more for a stream opened just before the
+  daemon's `close` lands, and 5 s for the peer to take and acknowledge the
+  daemon's last bytes, whatever flow-control credit it gives (see
+  **Ending.**); 40 s if it opens no stream. Only the time with a stream open
+  keeps a newer connection out. The daemon serves 64 streams at once, and a
+  stream whose bridge connection the daemon has closed stays open for at most
+  the 5 s its peer has to acknowledge the daemon's last bytes, so keeping a
+  phone out takes about 200 new connections a second, each with a finished
+  handshake and a stream. One with no stream holds its place only until the
+  next connection arrives.
 - **`limits.max_streams_per_connection`:** concurrent bidirectional streams on one
   connection, 1 to 16, applied as the connection's QUIC bidirectional stream
   credit: a peer past it waits for a stream to close; the helper neither sees
@@ -212,17 +223,20 @@ whose session is still in its handshake, after a close frame, and closes the
 new one at once when every session is past its handshake. Either is the daemon
 closing a bridge connection (**Ending.**): nothing changes for the helper.
 
-`limits.max_connections` is therefore the outer bound: a connection refused
-`busy` never reaches the bridge, where room could be made for it. The daemon
-sends the most this contract allows, 1,024, far above its bridge bound, so
-silent connections fill the bridge long before they fill the helper. The helper
-does not close a silent connection to make room for a new one.
+`limits.max_connections` is the outer bound, and the helper makes room within
+it as the daemon does within its own: a connection with no stream open makes
+way for a new one (`room`, above), so a connection is refused `busy`, before it
+can reach the bridge, only while every connection has a stream open (what that
+costs a stranger is under `limits.max_connections`). The daemon sends the most
+this contract allows, 1,024, far above its bridge bound.
 
 Ending a stream never closes the iroh connection: a phone renews its session on a
 new stream of the same connection, opened as the last one ends. A connection with
 no stream for 30 s is closed (`idle`, above); iroh's keep-alive would otherwise
 hold it for as long as the peer answers. The one exception is `close`, which the
-daemon sends for a peer whose session ended before `hello` or a pair request.
+daemon sends for a peer whose session ended before `hello` or a pair request. A
+connection with no stream also makes way for a new one when every place is
+taken (`room`, above).
 
 ## Fixtures
 
