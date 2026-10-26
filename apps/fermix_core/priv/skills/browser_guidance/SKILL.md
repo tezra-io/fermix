@@ -76,4 +76,4 @@ Use `browser` for JavaScript-capable pages. Choose the right web tool once, read
 
 ## Stop Conditions
 
-Stop and report for CAPTCHA, 2FA, payment confirmation, missing credentials, URL-policy blocks, unsafe dialogs, repeated launch/profile errors, or the same action failing twice with no new information.
+Stop and report for 2FA, payment confirmation, missing credentials, URL-policy blocks, unsafe dialogs, repeated launch/profile errors, or the same action failing twice with no new information.
