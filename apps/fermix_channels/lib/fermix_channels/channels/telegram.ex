@@ -1028,6 +1028,7 @@ defmodule FermixChannels.Channels.Telegram do
           |> maybe_put_media_group(msg["media_group_id"]),
         attachments: parse_attachments(msg)
       })
+      |> Message.mark_forwarded(forwarded?(msg))
 
     {:ok, [message]}
   end
@@ -1049,11 +1050,8 @@ defmodule FermixChannels.Channels.Telegram do
   end
 
   # Voice note = OGG/Opus; Telegram fixes the container, so the mime is constant.
-  # A forwarded one was recorded by someone else, so it is declared plain audio:
-  # the `:voice` hint is what marks a recording as the owner's own words.
-  defp parse_attachments(%{"voice" => %{"file_id" => file_id} = voice} = msg)
-       when is_binary(file_id),
-       do: [declare(voice, "audio/ogg", if(forwarded?(msg), do: :audio, else: :voice))]
+  defp parse_attachments(%{"voice" => %{"file_id" => file_id} = voice}) when is_binary(file_id),
+    do: [declare(voice, "audio/ogg", :voice)]
 
   # A GIF: Telegram converts every one to a silent MP4.
   defp parse_attachments(%{"animation" => %{"file_id" => file_id} = animation})
@@ -1084,6 +1082,10 @@ defmodule FermixChannels.Channels.Telegram do
 
   defp parse_attachments(_msg), do: []
 
+  # A forwarded message and its attachments are someone else's, which the hint
+  # (the media) does not say: `Message.mark_forwarded/2` records it from this
+  # one reading, so a forwarded voice or video note is processed as the owner's
+  # would be but does not count as the owner's words.
   # Bot API 7.0 marks a forwarded message with `forward_origin`; older payloads
   # carry the `forward_*` fields it replaced.
   @forward_keys ~w(forward_origin forward_from forward_from_chat forward_sender_name forward_date)

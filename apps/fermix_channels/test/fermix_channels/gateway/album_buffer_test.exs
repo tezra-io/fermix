@@ -117,6 +117,22 @@ defmodule FermixChannels.Gateway.AlbumBufferTest do
       refute_received {:dispatched, _}
     end
 
+    # The channel marks a forwarded part and each of its attachments; the album
+    # it joins is forwarded, and every attachment keeps its own part's mark.
+    test "an album with a forwarded part is forwarded, each attachment keeping its own mark" do
+      pid = start_buffer(debounce_ms: 20)
+
+      forwarded = Message.mark_forwarded(image_message("2", "wa-1", "and this"), true)
+
+      AlbumBuffer.ingest(image_message("1", "wa-1", "look at this"), pid)
+      AlbumBuffer.ingest(forwarded, pid)
+
+      assert_receive {:dispatched, [merged]}
+      assert merged.metadata.forwarded
+      assert merged.content == "look at this\n[forwarded message]\nand this"
+      assert [false, true] = Enum.map(merged.attachments, &Map.get(&1, :forwarded?, false))
+    end
+
     test "ignores stale queued flushes after a debounce reset" do
       pid = start_buffer(debounce_ms: 10_000)
 

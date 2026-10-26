@@ -529,8 +529,9 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp settle_command(finish, {:error, reason}), do: finish.({:failed, reason})
 
   # The re-run is the request that parked: it carries what that turn had read
-  # (`resumed_sources`, which the turn seeds) and, on a coding run's follow-up,
-  # its chain depth and finished run in the metadata the turn reads them from.
+  # (`resumed_sources`, which the turn seeds) and, in the metadata the turn and
+  # the store read them from, a forwarded message's mark and, on a coding run's
+  # follow-up, its chain depth and finished run.
   defp synthesize_resume_message(record, resume, token) do
     provenance = Map.fetch!(resume, :provenance)
 
@@ -545,6 +546,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
       metadata:
         provenance
         |> Map.take([:harness_continuation_depth, :harness_run_id])
+        |> Map.merge(Map.take(resume, [:forwarded]))
         |> Map.merge(%{user_id: record.user_id, resumed_from_grant: token}),
       resumed_sources: Map.get(provenance, :outside_sources)
     })

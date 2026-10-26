@@ -164,6 +164,28 @@ defmodule FermixChannels.Gateway.ResumeProvenanceTest do
       assert Enum.all?(stored, &(Map.get(&1, :harness_continuation) == true))
     end
 
+    # A forwarded message keeps its mark on the re-run: stored as someone
+    # else's, read as such, and the resumed turn counts it as outside content.
+    test "a forwarded message keeps its mark and taints its resumed turn", ctx do
+      {:ok, [msg]} =
+        Telegram.parse_update(%{
+          "message" => %{
+            "message_id" => System.unique_integer([:positive]),
+            "chat" => %{"id" => 123, "type" => "private"},
+            "from" => %{"id" => String.to_integer(@owner), "username" => "owner"},
+            "forward_sender_name" => "Brook",
+            "text" => "open the folder and finish the refactor"
+          }
+        })
+
+      resumed = park_and_resume(ctx, msg, [[grant_call(ctx)]])
+
+      assert resumed.metadata.forwarded == true
+      assert resumed.content == "[forwarded message]\nopen the folder and finish the refactor"
+      context = resumed_context(ctx, resumed)
+      assert MapSet.member?(context.outside_sources, {:message, "a forwarded message"})
+    end
+
     test "the owner's clean request resumes clean", ctx do
       msg = owner_text("finish the refactor in that folder")
       resumed = park_and_resume(ctx, msg, [[grant_call(ctx)]])

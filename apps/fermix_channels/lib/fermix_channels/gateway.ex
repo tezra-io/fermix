@@ -771,8 +771,14 @@ defmodule FermixChannels.Gateway do
       nil
     else
       %{content: message.content, reply_target: message.reply_target, sender: message.sender}
+      |> maybe_put_forwarded(message.metadata)
     end
   end
+
+  # A forwarded message re-runs as one: stored, read and counted as someone
+  # else's (`Message.mark_forwarded/2`).
+  defp maybe_put_forwarded(intent, %{forwarded: true}), do: Map.put(intent, :forwarded, true)
+  defp maybe_put_forwarded(intent, _metadata), do: intent
 
   defp approval_user_id(metadata) when is_map(metadata),
     do: Map.get(metadata, :user_id) || Map.get(metadata, "user_id")

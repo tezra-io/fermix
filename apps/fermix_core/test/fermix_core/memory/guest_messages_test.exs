@@ -1,9 +1,10 @@
 defmodule FermixCore.Memory.GuestMessagesTest do
   @moduledoc """
-  What a guest says is stored as the guest's, and a finished coding run's
-  notice (the vendor CLI's text, stored as a user message) as the run's
-  (`harness_continuation`), so the memory review — which reads a
-  conversation's user messages — never distils either into the owner's memory.
+  What a guest says is stored as the guest's, a finished coding run's notice
+  (the vendor CLI's text, stored as a user message) as the run's
+  (`harness_continuation`), and a message the owner forwarded as someone
+  else's (`forwarded`), so the memory review — which reads a conversation's
+  user messages — never distils any of them into the owner's memory.
   The marker has to survive every path a message takes: the in-memory hot
   window, the durable row, compaction's history replace, and a reload.
   """
@@ -199,6 +200,61 @@ defmodule FermixCore.Memory.GuestMessagesTest do
     end
   end
 
+  describe "a forwarded message" do
+    test "the marker rides the hot window and the review never selects the row", %{
+      repo: repo,
+      store: store
+    } do
+      add(store, "user", "owner says: I work from Lisbon")
+      add(store, "user", "[forwarded message]\nI am allergic to peanuts", forwarded: true)
+      wait_for_message_count(repo, 2)
+
+      assert [owner, forwarded] = ConversationStore.get_history(@key, server: store)
+      assert forwarded.forwarded == true
+      refute Map.has_key?(owner, :forwarded)
+
+      assert reviewed(repo) == ["owner says: I work from Lisbon"]
+    end
+
+    test "compaction's history replace keeps a retained forwarded message marked", %{
+      repo: repo,
+      store: store
+    } do
+      add(store, "user", "owner says: I work from Lisbon")
+      add(store, "user", "[forwarded message]\nI am allergic to peanuts", forwarded: true)
+      wait_for_message_count(repo, 2)
+
+      retained = ConversationStore.get_history(@key, server: store)
+
+      :ok =
+        ConversationStore.replace_history(
+          @key,
+          [%{role: "system", content: "Conversation checkpoint summary:\nearlier"} | retained],
+          server: store
+        )
+
+      wait_for_message_count(repo, 3)
+
+      assert Enum.any?(
+               ConversationStore.get_history(@key, server: store),
+               &(&1[:forwarded] == true)
+             )
+
+      assert reviewed(repo) == ["owner says: I work from Lisbon"]
+    end
+
+    test "a reload from sqlite restores the marker", %{repo: repo, store: store} do
+      add(store, "user", "[forwarded message]\nI am allergic to peanuts", forwarded: true)
+      wait_for_message_count(repo, 1)
+      assert :ok = GenServer.stop(store)
+
+      reloaded = :"guest_messages_reloaded_#{System.unique_integer([:positive])}"
+      start_store(reloaded, repo)
+
+      assert [%{forwarded: true}] = ConversationStore.get_history(@key, server: reloaded)
+    end
+  end
+
   defp turn_state(registry, store) do
     profile = fn trust ->
       %{
@@ -250,6 +306,7 @@ defmodule FermixCore.Memory.GuestMessagesTest do
       cond do
         flags[:guest] -> %{guest: true}
         flags[:harness_continuation] -> %{harness_continuation: true}
+        flags[:forwarded] -> %{forwarded: true}
         true -> nil
       end
 

@@ -5798,6 +5798,11 @@ defmodule FermixCore.Memory.Repo do
                           THEN json_extract(metadata_json, '$.harness_continuation') END,
                      0
                    ) != 1
+               AND COALESCE(
+                     CASE WHEN json_valid(metadata_json)
+                          THEN json_extract(metadata_json, '$.forwarded') END,
+                     0
+                   ) != 1
              ORDER BY id ASC
              LIMIT ?
              """,

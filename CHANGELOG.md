@@ -128,6 +128,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the next run of its chain on its own, with the same coding agent in the
   same folder, once. A request re-run after your `/confirm` keeps what it
   had read, and a skill's worker is no longer treated as your own turn.
+- **A forwarded message counts as someone else's words.** Text, voice notes
+  and video notes forwarded on Telegram or WhatsApp are marked forwarded, so
+  an access-sensitive command or, on Linux, a command asked for with one
+  waits for you; the model reads them as forwarded, they never run as a
+  slash command, and the memory review does not learn from them.
 
 ## [0.16.0] - 2026-10-21
 

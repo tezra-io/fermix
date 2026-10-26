@@ -340,6 +340,7 @@ defmodule FermixChannels.Channels.WhatsApp do
       },
       attachments: attachments(message, type)
     })
+    |> Message.mark_forwarded(forwarded?(message))
   end
 
   defp content(%{"text" => %{"body" => text}}, "text") when is_binary(text), do: text
@@ -355,14 +356,17 @@ defmodule FermixChannels.Channels.WhatsApp do
   # kind: the gateway attachment pipeline names the kind from the bytes (M67).
   # The Cloud API has no `voice` message type: a voice note is `type: "audio"`
   # with `audio.voice` true (a `voice` type came only from the On-Premises API,
-  # which Meta has retired), so that flag is what names a voice recording.
+  # which Meta has retired), so that flag is what names a voice recording. A
+  # forwarded message's attachment is marked `forwarded?`
+  # (`Message.mark_forwarded/2`) and keeps its hint, so it is processed as the
+  # owner's would be but does not count as their words.
   defp attachments(message, type)
        when type in ["audio", "image", "video", "document", "sticker"] do
     media = Map.get(message, type, %{})
 
     [
       %{
-        hint: media_hint(type, media, message),
+        hint: media_hint(type, media),
         url: Map.get(media, "url"),
         mime_type: Map.get(media, "mime_type"),
         file_id: Map.get(media, "id"),
@@ -374,14 +378,11 @@ defmodule FermixChannels.Channels.WhatsApp do
 
   defp attachments(_message, _type), do: []
 
-  # The `:voice` hint marks a recording as the owner's own words. A forwarded
-  # voice note was recorded by someone else, so it is declared plain audio; Meta
-  # marks a forwarded message in its `context`.
-  defp media_hint("audio", %{"voice" => true}, message),
-    do: if(forwarded?(message), do: :audio, else: :voice)
+  defp media_hint("audio", %{"voice" => true}), do: :voice
+  defp media_hint(type, _media), do: hint(type)
 
-  defp media_hint(type, _media, _message), do: hint(type)
-
+  # Meta marks a forwarded message in its `context`. A reply's `context` names
+  # the message it answers and is not a forward.
   defp forwarded?(%{"context" => context}) when is_map(context),
     do: context["forwarded"] == true or context["frequently_forwarded"] == true
 

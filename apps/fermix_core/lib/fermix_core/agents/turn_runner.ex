@@ -642,8 +642,9 @@ defmodule FermixCore.Agents.TurnRunner do
       # reference `inbound:last`. Transient like `:parts`, never persisted.
       inbound_images: Enum.filter(parts, &match?(%{type: :image}, &1)),
       # What this turn's first model call carries that someone else could have
-      # written: its attachments (a voice note aside), a coding-run continuation's
-      # vendor text, and below a Recent Activity note that rendered. A provenance
+      # written: a forwarded message, its attachments (a voice note aside), a
+      # coding-run continuation's vendor text, and below a Recent Activity note
+      # that rendered. A provenance
       # for `Capabilities.AccessGate`, from this turn's message only, so a later
       # turn replaying the text is not tainted; the loop keeps it (`put_new`) and
       # folds in what the turn's tools read.
@@ -705,14 +706,14 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp tell_history_tainted(_voice_call, _msg, _state, _history, _stream_callback), do: :ok
 
-  # The turn's message-borne outside content, before any tool runs: its
-  # attachments, when it re-enters as a finished coding run's notice (the
-  # continuation marker, whose content is the vendor CLI's text) that run's
-  # provenance, and when it is a request re-run after the owner's `/confirm`
-  # what its parked turn had read (`:resumed_sources`, set only by that
-  # re-ingest).
+  # The turn's message-borne outside content, before any tool runs: a
+  # forwarded message and its attachments, when it re-enters as a finished
+  # coding run's notice (the continuation marker, whose content is the vendor
+  # CLI's text) that run's provenance, and when it is a request re-run after
+  # the owner's `/confirm` what its parked turn had read (`:resumed_sources`,
+  # set only by that re-ingest).
   defp initial_outside_sources(msg) do
-    sources = UntrustedContent.attachment_sources(Map.get(msg, :inbound_attachments))
+    sources = UntrustedContent.message_sources(msg)
 
     sources =
       if harness_continuation_depth(msg) > 0,

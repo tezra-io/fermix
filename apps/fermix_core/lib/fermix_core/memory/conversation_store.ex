@@ -292,6 +292,7 @@ defmodule FermixCore.Memory.ConversationStore do
     |> maybe_mark_tainted(Keyword.get(opts, :metadata))
     |> maybe_mark_guest(Keyword.get(opts, :metadata))
     |> maybe_mark_continuation(Keyword.get(opts, :metadata))
+    |> maybe_mark_forwarded(Keyword.get(opts, :metadata))
     |> maybe_mark_spoken(Keyword.get(opts, :metadata))
   end
 
@@ -318,6 +319,12 @@ defmodule FermixCore.Memory.ConversationStore do
     do: Map.put(message, :harness_continuation, true)
 
   defp maybe_mark_continuation(message, _metadata), do: message
+
+  # A message the owner forwarded keeps its marker for the same reason: someone
+  # else wrote it, and a retained one that lost the marker would be read by the
+  # memory review as the owner's own words.
+  defp maybe_mark_forwarded(message, %{forwarded: true}), do: Map.put(message, :forwarded, true)
+  defp maybe_mark_forwarded(message, _metadata), do: message
 
   # A request asked aloud on a Live call keeps its marker and the call it came
   # from, for the same reason (M56 D10): a retained spoken request that lost
@@ -346,6 +353,7 @@ defmodule FermixCore.Memory.ConversationStore do
     |> carry_taint(message)
     |> carry_guest(message)
     |> carry_continuation(message)
+    |> carry_forwarded(message)
     |> carry_spoken(message)
   end
 
@@ -374,6 +382,14 @@ defmodule FermixCore.Memory.ConversationStore do
 
     if marked == true do
       Map.put(normalized, :harness_continuation, true)
+    else
+      normalized
+    end
+  end
+
+  defp carry_forwarded(normalized, message) do
+    if Map.get(message, :forwarded, Map.get(message, "forwarded")) == true do
+      Map.put(normalized, :forwarded, true)
     else
       normalized
     end
@@ -517,11 +533,11 @@ defmodule FermixCore.Memory.ConversationStore do
 
   # Per-message metadata on the durable replace: a retained message persists
   # the markers it carries — Computer History taint, guest authorship, a coding
-  # run's notice, a spoken request and its call — and the backfill side
-  # re-derives them from the row's metadata; an unmarked message keeps the
-  # caller's opts.
+  # run's notice, a forwarded message, a spoken request and its call — and the
+  # backfill side re-derives them from the row's metadata; an unmarked message
+  # keeps the caller's opts.
   defp replace_message_opts(opts, message) do
-    markers = [:history_tainted, :guest, :harness_continuation, :spoken, :call_uuid]
+    markers = [:history_tainted, :guest, :harness_continuation, :forwarded, :spoken, :call_uuid]
 
     case Map.take(message, markers) do
       markers when map_size(markers) == 0 -> opts
@@ -846,6 +862,7 @@ defmodule FermixCore.Memory.ConversationStore do
     |> maybe_mark_tainted_from_row(row)
     |> maybe_mark_guest_from_row(row)
     |> maybe_mark_continuation_from_row(row)
+    |> maybe_mark_forwarded_from_row(row)
     |> maybe_mark_spoken_from_row(row)
   end
 
@@ -866,6 +883,11 @@ defmodule FermixCore.Memory.ConversationStore do
     do: Map.put(message, :harness_continuation, true)
 
   defp maybe_mark_continuation_from_row(message, _row), do: message
+
+  defp maybe_mark_forwarded_from_row(message, %{metadata: %{"forwarded" => true}}),
+    do: Map.put(message, :forwarded, true)
+
+  defp maybe_mark_forwarded_from_row(message, _row), do: message
 
   defp maybe_mark_spoken_from_row(
          message,

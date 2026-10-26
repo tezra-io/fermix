@@ -83,7 +83,8 @@ defmodule FermixChannels.Gateway.TranscriptionTest do
                file_id: "audio-media-id",
                mime_type: "audio/ogg",
                size_bytes: nil,
-               url: nil
+               url: nil,
+               forwarded?: false
              }
            }
 
@@ -123,6 +124,27 @@ defmodule FermixChannels.Gateway.TranscriptionTest do
     assert updated.content == "transcribed voice note"
     assert updated.metadata.message_type == "audio"
     assert updated.metadata.transcription == %{attachment: transcript.attachment, backend: :fake}
+  end
+
+  # Someone else recorded a forwarded one, so the model reads its words under a
+  # label that says so, caption or not; the owner's own stay as they were.
+  test "a forwarded recording's transcript is labelled forwarded, with or without a caption",
+       %{path: path} do
+    forwarded = Map.put(attachment(), :forwarded?, true)
+
+    {:ok, transcript} =
+      Transcription.transcribe(message(""), forwarded, path,
+        backend: FakeBackend,
+        test_pid: self()
+      )
+
+    assert transcript.attachment.forwarded? == true
+
+    assert Transcription.put_transcript(message(""), transcript).content ==
+             "[forwarded voice note transcript]\ntranscribed voice note"
+
+    assert Transcription.put_transcript(message("what does she want?"), transcript).content ==
+             "what does she want?\n\n[forwarded voice note transcript]\ntranscribed voice note"
   end
 
   test "a caption stays first and the transcript follows under its label (D15)", %{path: path} do

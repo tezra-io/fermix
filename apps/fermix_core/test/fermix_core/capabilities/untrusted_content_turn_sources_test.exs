@@ -64,6 +64,18 @@ defmodule FermixCore.Capabilities.UntrustedContentTurnSourcesTest do
                MapSet.new([{:attachment, "attached audio"}])
     end
 
+    # Someone else recorded a forwarded voice note or video note: it keeps its
+    # hint (so it is processed the same) and counts as outside content.
+    test "a forwarded voice note or video note counts" do
+      voice = attachment(:audio, %{hint: :voice, status: :transcribed, forwarded?: true})
+
+      video_note =
+        attachment(:video, %{hint: :video_note, status: :transcribed, forwarded?: true})
+
+      assert UntrustedContent.attachment_sources([voice, video_note]) ==
+               MapSet.new([{:attachment, "attached audio"}, {:attachment, "attached video"}])
+    end
+
     test "a message without attachments brings none" do
       assert UntrustedContent.attachment_sources([]) == MapSet.new()
       assert UntrustedContent.attachment_sources(nil) == MapSet.new()
@@ -85,5 +97,31 @@ defmodule FermixCore.Capabilities.UntrustedContentTurnSourcesTest do
              {:tool, "recall_activity"}
 
     refute UntrustedContent.external?(capability)
+  end
+
+  # A message the channel marked forwarded was written by someone else, as its
+  # attachments were; one owner-facing source names it, beside theirs.
+  describe "message_sources/1" do
+    test "a forwarded message counts, alone or beside its attachments" do
+      assert UntrustedContent.message_sources(%{metadata: %{forwarded: true}}) ==
+               MapSet.new([{:message, "a forwarded message"}])
+
+      voice = attachment(:audio, %{hint: :voice, status: :transcribed, forwarded?: true})
+
+      assert UntrustedContent.message_sources(%{
+               metadata: %{forwarded: true},
+               inbound_attachments: [voice]
+             }) ==
+               MapSet.new([{:message, "a forwarded message"}, {:attachment, "attached audio"}])
+    end
+
+    test "the owner's own message counts only its attachments" do
+      voice = attachment(:audio, %{hint: :voice, status: :transcribed})
+
+      assert UntrustedContent.message_sources(%{metadata: %{chat_type: "private"}}) ==
+               MapSet.new()
+
+      assert UntrustedContent.message_sources(%{inbound_attachments: [voice]}) == MapSet.new()
+    end
   end
 end

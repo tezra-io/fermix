@@ -21,10 +21,14 @@ defmodule FermixCore.Attachments do
     * `{:unusable, reason}` — nothing of it reached the model, and the manifest
       or the gateway's reply names it with the one sentence its reason has.
 
-  Two more facts ride beside `status`: `sound`, what became of a video's sound
-  (D5: a transcript, no speech, or a named failure), and `saved`, where an
-  operator turn kept it in the workspace (D1, `FermixCore.Attachments.Workspace`),
-  or why it could not.
+  Three more facts ride beside `status`: `sound`, what became of a video's sound
+  (D5: a transcript, no speech, or a named failure); `saved`, where an operator
+  turn kept it in the workspace (D1, `FermixCore.Attachments.Workspace`), or why
+  it could not; and `forwarded?`, whether the channel said the message was
+  forwarded. The hint describes the media and decides how it is processed;
+  `forwarded?` describes its origin and decides nothing about processing: it is
+  what keeps a forwarded voice recording from counting as the owner's own words
+  (`Capabilities.UntrustedContent.attachment_sources/1`).
 
   Bytes are turn-local and never reach a log or a trace: `inspect/1` shows only
   the fields that describe the attachment.
@@ -58,7 +62,8 @@ defmodule FermixCore.Attachments do
           optional(:file_name) => String.t() | nil,
           optional(:hint) => hint() | nil,
           optional(:poster) => map() | nil,
-          optional(:duration_s) => non_neg_integer() | nil
+          optional(:duration_s) => non_neg_integer() | nil,
+          optional(:forwarded?) => boolean()
         }
 
   @typedoc "Why nothing of an attachment reached the model; each has one sentence."
@@ -105,7 +110,8 @@ defmodule FermixCore.Attachments do
           frames: [still()],
           status: status(),
           sound: sound() | nil,
-          saved: saved() | nil
+          saved: saved() | nil,
+          forwarded?: boolean()
         }
 
   @derive {Inspect, only: [:kind, :mime_type, :name, :size_bytes, :status, :saved]}
@@ -122,7 +128,8 @@ defmodule FermixCore.Attachments do
     frames: [],
     status: :ready,
     sound: nil,
-    saved: nil
+    saved: nil,
+    forwarded?: false
   ]
 
   # The text one message inlines under its manifest, all its text files

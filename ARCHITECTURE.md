@@ -252,7 +252,8 @@ agent loop and the realtime voice bridge), and it asks
 `Capabilities.AccessGate.admit/3` before the executor. A capability whose plugin
 manifest marks it `access_sensitive` runs there only on an attended owner turn,
 not from a shared Buzz channel (`Acp.Identity.multi_principal?/1`), that read no
-outside content (`:outside_sources`, seeded by `TurnRunner` with the message's
+outside content (`:outside_sources`, seeded by `TurnRunner` from
+`UntrustedContent.message_sources/1` with a forwarded message and the message's
 attachments, a voice note aside, and a Recent Activity note that rendered, then
 folded per call by the agent loop from `UntrustedContent.outside_source/2`), or
 on a scheduled run whose job names it; otherwise the call is parked in

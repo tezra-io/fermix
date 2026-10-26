@@ -18,9 +18,10 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   `Capabilities.AccessGate` reads the same boundary through `outside_source/1`
   to decide whether a turn has read content someone else could have written.
   What a turn's first model call carries has a provenance too:
-  `attachment_sources/1` and `recent_activity_source/0` are what
-  `Agents.TurnRunner` seeds the turn with, a provenance only: the content itself
-  is not framed, so an owner's own checklist still reads as theirs.
+  `message_sources/1` (a forwarded message and its attachments) and
+  `recent_activity_source/0` are what `Agents.TurnRunner` seeds the turn with, a
+  provenance only: the content itself is not framed, so an owner's own
+  checklist still reads as theirs.
   """
 
   alias FermixCore.Attachments
@@ -34,11 +35,12 @@ defmodule FermixCore.Capabilities.UntrustedContent do
 
   @typedoc """
   Where outside content came from: a plugin, one named tool, a cue source (its
-  `source_ref`), an attachment of the turn's message (by kind) or the Recent
-  Activity note. `outside_source/1` returns the first two from a tool's result;
-  a cue run's context arrives seeded with the third (M60 S2), and an owner's
-  turn with the last two when its first model call carries them, so either is
-  tainted from its first token. Every reader takes the label from the second
+  `source_ref`), an attachment of the turn's message (by kind), the Recent
+  Activity note, a coding run's report, or the turn's message itself when the
+  channel marked it forwarded. `outside_source/1` returns the first two from a
+  tool's result; a cue run's context arrives seeded with the third (M60 S2), and
+  an owner's turn with what its first model call carries, so either is tainted
+  from its first token. Every reader takes the label from the second
   element, whatever the kind; the owner reads it in a confirmation prompt.
   """
   @type outside_source ::
@@ -48,6 +50,7 @@ defmodule FermixCore.Capabilities.UntrustedContent do
           | {:attachment, String.t()}
           | {:activity, String.t()}
           | {:harness, String.t()}
+          | {:message, String.t()}
 
   # Tool categories whose result relays what a worker read.
   @relaying_categories [:delegation]
@@ -155,9 +158,10 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   The outside sources the attachments of a turn's message bring into its first
   model call, one per kind. Every attachment counts, one Fermix could not read
   too (its name and kind reach the manifest), except a voice note — what the
-  channel declared a voice recording (`hint: :voice | :video_note`), whose sound
-  became the turn's own text (M21): the owner's own voice. A forwarded audio file
-  is not exempt, even once transcribed, and neither is a video's soundtrack.
+  channel declared a voice recording (`hint: :voice | :video_note`) and did not
+  mark forwarded, whose sound became the turn's own text (M21): the owner's own
+  voice. A forwarded recording is someone else's and counts; so does an audio
+  file, even once transcribed, and a video's soundtrack.
   """
   @spec attachment_sources([Attachments.t()] | nil) :: MapSet.t(outside_source())
   def attachment_sources(nil), do: MapSet.new()
@@ -167,6 +171,28 @@ defmodule FermixCore.Capabilities.UntrustedContent do
     |> Enum.reject(&voice_note?/1)
     |> MapSet.new(&attachment_source/1)
   end
+
+  @doc """
+  The outside sources a turn's message itself brings into its first model call:
+  its attachments (`attachment_sources/1`) and, when the channel marked the
+  message forwarded (`metadata.forwarded`, set with each attachment's
+  `forwarded?` from the platform's own markers by the channel's one helper), the
+  message: someone else wrote it. A message the owner typed brings only its
+  attachments' sources.
+  """
+  @spec message_sources(map()) :: MapSet.t(outside_source())
+  def message_sources(message) when is_map(message) do
+    sources = attachment_sources(Map.get(message, :inbound_attachments))
+
+    if forwarded_message?(Map.get(message, :metadata)),
+      do: MapSet.put(sources, {:message, "a forwarded message"}),
+      else: sources
+  end
+
+  defp forwarded_message?(%{} = metadata),
+    do: Map.get(metadata, :forwarded) == true or Map.get(metadata, "forwarded") == true
+
+  defp forwarded_message?(_absent), do: false
 
   @doc "The outside source a Recent Activity note brings into the turn it renders in."
   @spec recent_activity_source() :: outside_source()
@@ -251,18 +277,17 @@ defmodule FermixCore.Capabilities.UntrustedContent do
 
   def untrusted_source_type?(_source_type), do: false
 
-  # Only what the channel declared a voice recording is the owner's own voice; a
-  # forwarded audio file transcribes to `:transcribed` too but is still outside
+  # A recording is the owner's own voice when the channel declared it one
+  # (`:voice`, or a Telegram `:video_note`) and did not mark the message
+  # forwarded. An audio file transcribes to `:transcribed` too but is outside
   # content. The phone declares an in-app recording as `kind: "voice"`, which
   # `Companion.Requests` maps to `:voice`, so it is exempt; a phone app that
   # still sends its recordings as `audio` taints its turn, as any audio file does.
-  # (The Mac app's chat socket carries no attachments.)
-  #
-  # Channel gap (not fixed here): a FORWARDED Telegram voice note still arrives
-  # as `hint: :voice`, so it is exempted though someone else recorded it. The
-  # fix is channel-level — the gateway dropping the voice hint when Telegram's
-  # `forward_origin` is set — and belongs with the inbound-attachment pipeline.
-  defp voice_note?(%Attachments{hint: hint}), do: hint in [:voice, :video_note]
+  # (The Mac app's chat socket carries no attachments.) Telegram and WhatsApp
+  # mark a forwarded message's attachments `forwarded?`, whose hint is unchanged
+  # so it is processed the same.
+  defp voice_note?(%Attachments{hint: hint, forwarded?: forwarded?}),
+    do: hint in [:voice, :video_note] and not forwarded?
 
   defp attachment_source(%Attachments{kind: kind}),
     do: {:attachment, Map.fetch!(@attachment_labels, kind)}

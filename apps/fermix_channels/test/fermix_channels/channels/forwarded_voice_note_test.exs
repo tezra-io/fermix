@@ -1,8 +1,10 @@
 defmodule FermixChannels.Channels.ForwardedVoiceNoteTest do
-  # A voice note is the owner's own words only when the owner recorded it. A
-  # forwarded one was recorded by someone else, so the channel declares it as
-  # plain audio (`:audio`, never `:voice`): it is still transcribed, and it counts
-  # as content someone else could have written (`UntrustedContent`).
+  # A voice recording is the owner's own words only when the owner made it. The
+  # channel declares the media as it is (`hint`: `:voice`, `:video_note`,
+  # `:audio`), and separately whether the message was forwarded (`forwarded?`).
+  # A forwarded recording keeps its hint, so it is processed exactly as the
+  # owner's would be, but it counts as content someone else could have written
+  # (`UntrustedContent`).
   # async: false — WhatsApp reads whether its ingress is on from app env.
   use ExUnit.Case, async: false
 
@@ -11,47 +13,68 @@ defmodule FermixChannels.Channels.ForwardedVoiceNoteTest do
   alias FermixCore.Attachments
   alias FermixCore.Capabilities.UntrustedContent
 
-  # What the gateway builds from a declared audio attachment once transcribed:
-  # the hint is copied as declared, and decides whether it counts.
-  defp sources(%{hint: hint}) do
+  @outside MapSet.new([{:attachment, "attached audio"}])
+
+  # What the gateway builds from a declared recording once transcribed: hint and
+  # forwarded flag copied as declared, which decide whether it counts.
+  defp sources(declared) do
     UntrustedContent.attachment_sources([
-      %Attachments{kind: :audio, mime_type: "audio/ogg", hint: hint, status: :transcribed}
+      %Attachments{
+        kind: :audio,
+        mime_type: "audio/ogg",
+        hint: declared.hint,
+        forwarded?: Map.get(declared, :forwarded?, false),
+        status: :transcribed
+      }
     ])
   end
 
   describe "Telegram" do
-    defp voice_update(extra) do
+    defp update(media, extra) do
       %{
         "message" =>
           Map.merge(
             %{
               "message_id" => 40,
-              "voice" => %{"file_id" => "voice-40", "duration" => 3, "file_size" => 900},
               "chat" => %{"id" => 123},
               "from" => %{"id" => 111, "username" => "alice"}
             },
-            extra
+            Map.merge(media, extra)
           )
       }
     end
 
-    test "the owner's own voice note is declared a voice recording" do
-      assert {:ok, [msg]} = Telegram.parse_update(voice_update(%{}))
-      assert [%{hint: :voice, mime_type: "audio/ogg"}] = msg.attachments
+    @voice %{"voice" => %{"file_id" => "voice-40", "duration" => 3, "file_size" => 900}}
+    @video_note %{"video_note" => %{"file_id" => "note-40", "duration" => 5, "length" => 240}}
+    @audio %{"audio" => %{"file_id" => "song-40", "mime_type" => "audio/mpeg"}}
+    @markers [
+      %{"forward_origin" => %{"type" => "user", "date" => 1_760_000_000}},
+      %{"forward_from" => %{"id" => 222, "first_name" => "Brook"}},
+      %{"forward_sender_name" => "Brook"},
+      %{"forward_date" => 1_760_000_000}
+    ]
+
+    test "the owner's own voice note and video note are not forwarded and do not count" do
+      for {media, hint} <- [{@voice, :voice}, {@video_note, :video_note}] do
+        assert {:ok, [msg]} = Telegram.parse_update(update(media, %{}))
+        assert [%{hint: ^hint} = declared] = msg.attachments
+        refute Map.get(declared, :forwarded?, false)
+        assert sources(declared) == MapSet.new()
+      end
     end
 
-    test "a forwarded voice note is declared plain audio" do
-      forwarded = [
-        %{"forward_origin" => %{"type" => "user", "date" => 1_760_000_000}},
-        %{"forward_from" => %{"id" => 222, "first_name" => "Brook"}},
-        %{"forward_sender_name" => "Brook"},
-        %{"forward_date" => 1_760_000_000}
-      ]
-
-      for marker <- forwarded do
-        assert {:ok, [msg]} = Telegram.parse_update(voice_update(marker))
-        assert [%{hint: :audio, mime_type: "audio/ogg"}] = msg.attachments, inspect(marker)
+    test "a forwarded voice note or video note keeps its hint, is marked, and counts" do
+      for {media, hint} <- [{@voice, :voice}, {@video_note, :video_note}], marker <- @markers do
+        assert {:ok, [msg]} = Telegram.parse_update(update(media, marker))
+        assert [%{hint: ^hint, forwarded?: true} = declared] = msg.attachments, inspect(marker)
+        assert sources(declared) == @outside
       end
+    end
+
+    test "an audio file counts, forwarded or not" do
+      assert {:ok, [msg]} = Telegram.parse_update(update(@audio, %{}))
+      assert [%{hint: :audio} = declared] = msg.attachments
+      assert sources(declared) == @outside
     end
   end
 
@@ -108,22 +131,23 @@ defmodule FermixChannels.Channels.ForwardedVoiceNoteTest do
     test "the owner's own voice note is a voice recording and does not count" do
       assert {:ok, [msg]} = WhatsApp.parse_webhook(audio_webhook(%{"voice" => true}, %{}))
       assert [%{hint: :voice} = declared] = msg.attachments
+      refute Map.get(declared, :forwarded?, false)
       assert sources(declared) == MapSet.new()
     end
 
-    test "a forwarded voice note is plain audio and counts" do
+    test "a forwarded voice note keeps its hint, is marked, and counts" do
       for context <- [%{"forwarded" => true}, %{"frequently_forwarded" => true}] do
         webhook = audio_webhook(%{"voice" => true}, %{"context" => context})
         assert {:ok, [msg]} = WhatsApp.parse_webhook(webhook)
-        assert [%{hint: :audio} = declared] = msg.attachments, inspect(context)
-        assert sources(declared) == MapSet.new([{:attachment, "attached audio"}])
+        assert [%{hint: :voice, forwarded?: true} = declared] = msg.attachments, inspect(context)
+        assert sources(declared) == @outside
       end
     end
 
     test "an attached audio file is plain audio and counts" do
       assert {:ok, [msg]} = WhatsApp.parse_webhook(audio_webhook(%{}, %{}))
       assert [%{hint: :audio} = declared] = msg.attachments
-      assert sources(declared) == MapSet.new([{:attachment, "attached audio"}])
+      assert sources(declared) == @outside
     end
   end
 end
