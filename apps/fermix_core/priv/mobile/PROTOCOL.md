@@ -114,8 +114,12 @@ uint32be length | type | payload
   150 s idle bound (close `1002`, `no inbound frame`), the one-hour session,
   and the two memory bounds. A phone can open at most four streams at once on
   one connection.
-- The outer bound is 1,024 remote connections at once: one past it is refused
-  before its handshake, and nothing the daemon does can make room for it.
+- The outer bound is 1,024 remote connections at once. When all are taken, a
+  new connection takes the place of the one that has gone longest with no
+  stream open, which is closed (code `0`, reason `room`), or dropped if still
+  in its handshake; the phone dials again when it next needs a connection, as
+  after `idle`. A connection is refused before its handshake only while every
+  one has a stream open.
 - The daemon serves 64 streams at once. A stream that arrives while all 64 are
   served takes the place of the oldest one still in its handshake, which is
   closed `1008` (`mobile handshake deadline`) as the deadline would close it. A
@@ -124,13 +128,13 @@ uint32be length | type | payload
   no pairing secret, so a stream that has sent only that can still be closed.
   A pairing phone therefore stays closable through the round trip to its
   `pair_request`, which its attestation can stretch to seconds: a stranger who
-  opens streams faster than that can still close it, until the helper can make
-  room itself. A phone narrows that window by preparing its attestation before
-  it dials (the challenge comes from the pairing link's secret), so that
-  `pair_request` follows the daemon's reply at once. Only phones hold places
-  so, and a pairing window takes one `pair_request`, so strangers cannot fill
-  them, and a stranger's stream that gets a place ends its connection with its
-  session (above). A stream that finds every place so held is refused before it
+  opens streams faster than that can still close it. A phone narrows that
+  window by preparing its attestation before it dials (the challenge comes
+  from the pairing link's secret), so that `pair_request` follows the daemon's
+  reply at once. Only phones hold places so, and a pairing window takes one
+  `pair_request`, so strangers cannot fill them, and a stranger's stream that
+  gets a place ends its connection with its session (above). A stream that
+  finds every place so held is refused before it
   reaches a session, so its connection is not ended with it: it stays open until
   it has had no stream for 30 s, and a further stream refused the same way
   starts that wait again. A stream that got past its handshake in the moment the

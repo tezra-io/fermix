@@ -32,15 +32,16 @@ defmodule FermixChannels.Mobile.Iroh.Bridge do
   iroh connection lasts until the helper's own bounds end it.
 
   The rail's outer bound is the helper's own: it takes 1,024 iroh connections
-  (`Iroh.Helper.limits/0`) and refuses one past them before its handshake,
-  where nothing here can make room. Making that cap far larger than this
-  bound only raises what holding every connection costs a stranger; a full fix
-  needs the helper to close a silent connection to make room for a new one
-  (a fermix-iroh change and a pin bump). Until then a stranger who opens
-  streams fast enough can still close a pairing phone's stream, which stays in
-  its handshake through the round trip to its `pair_request` and the
-  attestation that may take seconds; a phone that prepares its attestation
-  before it dials keeps that window short.
+  (`Iroh.Helper.limits/0`), and when they are all taken it gives a new one the
+  place of the connection that has gone longest with no stream open, so
+  connections that never open a stream cannot keep a phone from reaching this
+  bridge. It refuses one before its handshake only while every connection has
+  a stream open, which takes a stranger about 200 new connections a second.
+  That does not protect a pairing phone's stream here: a stranger who opens
+  streams fast enough can still close it, since it stays in its handshake
+  through the round trip to its `pair_request` and the attestation that may
+  take seconds; a phone that prepares its attestation before it dials keeps
+  that window short.
 
   The places are counted from the connections this process admitted and
   monitors. A bridge restarted while its old connections live starts with none

@@ -129,6 +129,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   anywhere.** Failed attempts count per remote endpoint only, and when every
   remote place is taken, the oldest connection that has not proved itself
   makes way for a new one; a phone that has proved its key keeps its place.
+- **Connections that never talk can no longer keep your phone off reach from
+  anywhere.** The bundled `fermix-iroh` helper gives a peer 5 seconds to take
+  Fermix's last words once a session ends, however little it reads, so a
+  stranger can no longer hold a connection open by never reading. When every
+  remote connection is taken, the one that has gone longest without a session
+  makes way for a new one, so a phone that reconnects is no longer turned
+  away by connections that hold a place and say nothing.
 - **A limited run can no longer hand out more than it has.** A scheduled job
   or skill run narrowed to some tools, some capability classes or a lower
   trust can only create jobs, change jobs and start skill or sub-agent
