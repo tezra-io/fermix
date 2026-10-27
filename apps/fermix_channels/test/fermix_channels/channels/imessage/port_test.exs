@@ -230,7 +230,10 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
       assert_receive {:transport, ^port, :degraded, %{consecutive_failures: 1},
                       %{error_class: :helper_exit}}
 
-      assert_eventually(fn -> spawns(ctx.home) >= 3 end)
+      # The third failure the Port recorded, not the third spawn: a helper counts
+      # its spawn before it reads `exit_code`, so removing the file on the count
+      # can let the third one start.
+      assert_eventually(fn -> HelperPort.status(port).failures >= 3 end)
       SafeRm.rm!(exit_code)
 
       assert_receive {:imessage_helper, :up, %{"protocol_version" => 1}}
@@ -268,16 +271,25 @@ defmodule FermixChannels.Channels.IMessage.PortTest do
     refute Process.alive?(port)
   end
 
-  defp assert_eventually(fun, attempts \\ 200)
+  # A condition that already holds returns at once, so the bound costs a
+  # passing test nothing; a loaded runner can take seconds to spawn a helper.
+  @arrival_ms 10_000
 
-  defp assert_eventually(fun, 0), do: assert(fun.())
+  defp assert_eventually(fun) do
+    assert_eventually(fun, System.monotonic_time(:millisecond) + @arrival_ms)
+  end
 
-  defp assert_eventually(fun, attempts) do
-    if fun.() do
-      :ok
-    else
-      Process.sleep(5)
-      assert_eventually(fun, attempts - 1)
+  defp assert_eventually(fun, deadline) do
+    cond do
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        assert fun.()
+
+      true ->
+        Process.sleep(5)
+        assert_eventually(fun, deadline)
     end
   end
 end
