@@ -156,20 +156,26 @@ defmodule FermixCore.Memory.Repo.CuesDeliveriesSql do
   """
 
   # Every source that sent a cue since `since`, has a state row or is listened
-  # to. The four `?` are `since`. A receipt (a cue no watcher took) is kept about
-  # eight days, so a window longer than that undercounts what nobody took.
+  # to. Its `?` is `since`. A receipt (a cue no watcher took) is kept about
+  # eight days, so a window longer than that undercounts what nobody took. The
+  # window is counted in one pass through `cues_received_at`: a source keeps its
+  # rows for weeks, and counting by source would walk all of them for the
+  # day's few, on every Cues read.
   @summary_sources_sql """
-  WITH refs AS (
-    SELECT source_ref FROM cues WHERE received_at >= ?
+  WITH recent AS MATERIALIZED (
+    SELECT source_ref, COUNT(*) AS received, SUM(routed_count > 0) AS routed,
+      SUM(self_caused = 1) AS self_caused
+    FROM cues INDEXED BY cues_received_at
+    WHERE received_at >= ?
+    GROUP BY source_ref
+  ),
+  refs AS (
+    SELECT source_ref FROM recent
     UNION SELECT source_ref FROM cue_sources
     UNION SELECT source_ref FROM cue_watcher_sources
   )
-  SELECT r.source_ref,
-    (SELECT COUNT(*) FROM cues c WHERE c.source_ref = r.source_ref AND c.received_at >= ?),
-    (SELECT COUNT(*) FROM cues c
-     WHERE c.source_ref = r.source_ref AND c.received_at >= ? AND c.routed_count > 0),
-    (SELECT COUNT(*) FROM cues c
-     WHERE c.source_ref = r.source_ref AND c.received_at >= ? AND c.self_caused = 1),
+  SELECT r.source_ref, coalesce(c.received, 0), coalesce(c.routed, 0),
+    coalesce(c.self_caused, 0),
     (SELECT group_concat(w.name, char(10)) FROM cue_watcher_sources s
      JOIN cue_watchers w ON w.id = s.watcher_id
      WHERE s.source_ref = r.source_ref AND w.enabled = 1),
@@ -179,8 +185,14 @@ defmodule FermixCore.Memory.Repo.CuesDeliveriesSql do
     (SELECT COUNT(*) FROM cue_gaps g WHERE g.source_ref = r.source_ref AND g.closed_at IS NULL),
     s.status, s.last_good_at, s.last_accepted_at
   FROM refs r
+  LEFT JOIN recent c ON c.source_ref = r.source_ref
   LEFT JOIN cue_sources s ON s.source_ref = r.source_ref
   """
+
+  @doc false
+  # The source summary's SQL, for the test that holds its query plan.
+  @spec summary_sources_sql() :: String.t()
+  def summary_sources_sql, do: @summary_sources_sql <> " ORDER BY r.source_ref"
 
   # Its `?` is `since`; a source filter adds itself to the join condition.
   @summary_groups_sql """
@@ -501,7 +513,7 @@ defmodule FermixCore.Memory.Repo.CuesDeliveriesSql do
       ])
 
     sql = @summary_sources_sql <> where <> " ORDER BY r.source_ref LIMIT ?"
-    CuesSql.query_all(conn, sql, List.duplicate(since, 4) ++ params ++ [@summary_sources_max])
+    CuesSql.query_all(conn, sql, [since | params] ++ [@summary_sources_max])
   end
 
   defp summary_groups(conn, since, filters) do

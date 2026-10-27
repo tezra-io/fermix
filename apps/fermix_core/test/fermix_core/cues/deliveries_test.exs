@@ -287,6 +287,28 @@ defmodule FermixCore.Cues.DeliveriesTest do
       assert [%{watcher: name, deliveries: 1, by_state: %{"acked" => 1}}] = shown.watchers
       assert name == watcher.name
     end
+
+    # Every Cues pane read and every cues.status asks for this summary, and a
+    # source keeps its rows for weeks: counting by source would walk every row
+    # it ever sent to find the day's few. The window is read through its own
+    # index, once, whatever a source has kept.
+    test "reads the day through the received_at index, never a source's whole history", ctx do
+      {:ok, statement} =
+        Exqlite.Sqlite3.prepare(
+          ctx.conn,
+          "EXPLAIN QUERY PLAN " <> CuesDeliveriesSql.summary_sources_sql() <> " LIMIT ?"
+        )
+
+      # A plan needs no values: every `?` is NULL here.
+      {:ok, rows} = Exqlite.Sqlite3.fetch_all(ctx.conn, statement)
+      :ok = Exqlite.Sqlite3.release(ctx.conn, statement)
+      plan = Enum.map(rows, &List.last/1)
+
+      assert Enum.any?(plan, &(&1 =~ "cues USING INDEX cues_received_at")), inspect(plan)
+      # `sqlite_autoindex_cues_1` is the (source_ref, item_id) key: reading cues
+      # through it takes every row a source kept.
+      refute Enum.any?(plan, &(&1 =~ "sqlite_autoindex_cues_1")), inspect(plan)
+    end
   end
 
   test "an unknown or mistyped filter is an error from the Repo, never a crash of it", ctx do
