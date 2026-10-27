@@ -273,10 +273,13 @@ defmodule FermixChannels.Companion.ConnectionTest do
   # FEAT-2: a client that was not connected when an approval went out gets it
   # right after its server_hello, with the time it has left.
   test "an approval still waiting follows the server_hello", ctx do
+    {:ok, clock} = Agent.start_link(fn -> 1_000_000 end)
+
     approvals =
       start_supervised!(
         {Approvals,
          name: nil,
+         clock: fn -> Agent.get(clock, & &1) end,
          schedule: fn _message, _delay -> make_ref() end,
          announce: fn _profile, _card, _transport -> :ok end},
         id: :waiting_approvals
@@ -285,6 +288,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
     card = Output.approval(%{kind: :soul, text: "Apply?", token: "SOUL-T"})
 
     assert :ok = Approvals.announce(approvals, "main", card, :companion)
+    Agent.update(clock, &(&1 + 120_000))
     restart_endpoint(ctx, approvals: approvals)
 
     client = connect(ctx.socket_path)
@@ -293,7 +297,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
     assert %{"type" => "approval", "approval_id" => id, "ttl_s" => ttl} = recv(client)
     assert id == card["approval_id"]
-    assert ttl in 299..300
+    assert ttl == 180
   end
 
   # R1-2: a card raised on the phone resolves only from the phone (M19 §9.5),
