@@ -247,6 +247,39 @@ defmodule FermixCore.Cues.DeliveriesTest do
     end
   end
 
+  # Taking a source off a watcher stores the outcome a removed watcher's items
+  # get (the column's CHECK fixes the set); list_cues shows what happened.
+  describe "an item whose source was taken off its watcher" do
+    test "reads source_removed while its watcher exists; a removed watcher's reads " <>
+           "watcher_removed",
+         ctx do
+      watcher = Rows.watcher(ctx.conn, %{sources: ["gh-releases"]})
+
+      for {watcher_id, seconds_ago} <- [{watcher.id, 600}, {"cwt_removed", 300}] do
+        cue = Rows.cue(ctx.conn, %{source_ref: "gh-old", received_at: at(ctx.now, seconds_ago)})
+
+        Rows.delivery(ctx.conn, cue, %{
+          watcher_id: watcher_id,
+          source_ref: "gh-old",
+          received_at: at(ctx.now, seconds_ago),
+          state: "expired",
+          outcome: "watcher_removed"
+        })
+      end
+
+      {:ok, %{deliveries: deliveries}} = Deliveries.list(%{limit: 10}, repo: ctx.repo)
+
+      assert deliveries |> Enum.map(&Deliveries.present/1) |> Enum.map(&{&1.watcher, &1.outcome}) ==
+               [{"cwt_removed", "watcher_removed"}, {watcher.name, "source_removed"}]
+
+      since = at(ctx.now, 7 * @day)
+      assert {:ok, summary} = Deliveries.summary(%{since: since}, repo: ctx.repo)
+
+      assert [%{by_outcome: %{"source_removed" => 1}}] =
+               Deliveries.present_summary(summary, since).watchers
+    end
+  end
+
   describe "summary/2" do
     test "says from receipts that a source sent cues and nothing is listening", ctx do
       watcher = Rows.watcher(ctx.conn, %{sources: ["heard"]})

@@ -20,7 +20,9 @@ defmodule FermixCore.Cues.Filters do
   result itself through the Repo (fenced on its `filter_call_id`), emits the
   filter-scoped lifecycle phase, sends any notice and closes the run. When it
   reports back, this process frees the slot, wakes the scheduler on a pass and
-  claims again.
+  claims again. A pass whose watcher was paused while the call ran is withheld
+  by the settle (its delivery waits `pending` for the resume): no phase, no
+  wake.
 
   A task that exits abnormally is a content failure for its cue; one shut down
   with its supervisor is `aborted` (the delivery goes back unchanged, as the
@@ -394,6 +396,10 @@ defmodule FermixCore.Cues.Filters do
     do: FilterTelemetry.run_error(run, status, kind, duration_ms)
 
   # --- lifecycle and notices ----------------------------------------------------------
+
+  # A pass withheld because its watcher was paused while the call ran passed
+  # nothing, so it has no phase; the call's run still closes as the pass it was.
+  defp emit_phase(_run, _result, %{result: :withheld}), do: :ok
 
   defp emit_phase(run, result, outcome) do
     {phase, extra} = phase(result, outcome)

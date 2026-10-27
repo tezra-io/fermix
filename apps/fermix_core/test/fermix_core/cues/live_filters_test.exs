@@ -10,7 +10,9 @@ defmodule FermixCore.Cues.LiveFiltersTest do
   alias FermixCore.Cues.LiveFilters
   alias FermixCore.Cues.RecentDrops
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.CuesRunsSql
   alias FermixCore.Memory.Repo.CuesSql
+  alias FermixCore.Memory.Repo.CuesWatchersSql
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixTestSupport.TelemetryCapture
 
@@ -242,6 +244,27 @@ defmodule FermixCore.Cues.LiveFiltersTest do
     )
   end
 
+  # A change the owner makes in chat, written as `Cues.Watchers` writes it: the
+  # real `{:update_watcher, …}`, fenced on the `updated_at` read just before it.
+  defp change_watcher(ctx, watcher, patch, sources \\ nil) do
+    id = watcher.id
+    [[updated_at]] = rows(ctx.conn, "SELECT updated_at FROM cue_watchers WHERE id = ?", [id])
+    expected = CuesSql.parse_stamp(updated_at)
+    request = {:update_watcher, id, expected, patch, sources, Agent.get(ctx.clock, & &1)}
+    {:ok, _changed} = Repo.cues_call(CuesWatchersSql, request, server: ctx.repo)
+    :ok
+  end
+
+  defp delivery_id(ctx, watcher) do
+    [[id]] = rows(ctx.conn, "SELECT id FROM cue_deliveries WHERE watcher_id = ?", [watcher.id])
+    id
+  end
+
+  defp cue_count(ctx) do
+    [[n]] = rows(ctx.conn, "SELECT count(*) FROM cues WHERE source_ref = ?", [ctx.ref])
+    n
+  end
+
   # The counts a clean stop flushes for a watcher: the stop writes them before
   # the dispatcher is gone.
   defp flushed(ctx, watcher) do
@@ -362,6 +385,125 @@ defmodule FermixCore.Cues.LiveFiltersTest do
 
       LiveFilters.watchers(live, ctx.ref, [w])
       assert {_pid, "w-1"} = next_call()
+    end
+  end
+
+  # The stream hands its watchers over again only at its next flush, so a call
+  # started before a pause or a source change still runs on the old list.
+  describe "a change while a call runs (design §8.8)" do
+    test "a pass whose watcher was paused while its call ran stores nothing and wakes no " <>
+           "task; the call is still recorded",
+         ctx do
+      w = watcher(ctx)
+      live = start_live(ctx)
+      LiveFilters.watchers(live, ctx.ref, [w])
+      offer(live, ctx, [item("z-1")], [w])
+      call = next_call()
+
+      change_watcher(ctx, w, %{enabled: false})
+      finish(live, call, pass())
+
+      assert deliveries(ctx, w) == []
+      assert cue_count(ctx) == 0
+      assert [[nil, "pass"]] = calls(ctx, w)
+      refute_received :woke_scheduler
+      refute_received {:telemetry, @lifecycle, _m, %{phase: :passed}}
+      assert flushed(ctx, w) == %{"offered" => 1}
+    end
+
+    test "a pass whose watcher stopped listening to the source while its call ran stores " <>
+           "nothing and wakes no task; the call is still recorded",
+         ctx do
+      w = watcher(ctx)
+      live = start_live(ctx)
+      LiveFilters.watchers(live, ctx.ref, [w])
+      offer(live, ctx, [item("z-1")], [w])
+      call = next_call()
+
+      change_watcher(ctx, w, %{}, [ctx.ref <> "-other"])
+      finish(live, call, pass())
+
+      assert deliveries(ctx, w) == []
+      assert cue_count(ctx) == 0
+      assert [[nil, "pass"]] = calls(ctx, w)
+      refute_received :woke_scheduler
+      refute_received {:telemetry, @lifecycle, _m, %{phase: :passed}}
+      assert flushed(ctx, w) == %{"offered" => 1}
+    end
+
+    test "an item passed before the pause stays passed and its task may still claim it", ctx do
+      w = watcher(ctx)
+      live = start_live(ctx)
+      LiveFilters.watchers(live, ctx.ref, [w])
+      offer(live, ctx, [item("z-1")], [w])
+      finish(live, next_call(), pass())
+      assert_received :woke_scheduler
+
+      change_watcher(ctx, w, %{enabled: false})
+
+      assert deliveries(ctx, w) == [["z-1", "passed"]]
+      delivery_id = delivery_id(ctx, w)
+      request = {:admission_candidates, @t0, 4}
+
+      assert {:ok, %{candidates: [%{delivery_id: ^delivery_id}]}} =
+               Repo.cues_call(CuesRunsSql, request, server: ctx.repo)
+    end
+
+    test "a pause and a resume while the call runs leave its pass as it was", ctx do
+      w = watcher(ctx)
+      live = start_live(ctx)
+      LiveFilters.watchers(live, ctx.ref, [w])
+      offer(live, ctx, [item("z-1")], [w])
+      call = next_call()
+
+      change_watcher(ctx, w, %{enabled: false})
+      change_watcher(ctx, w, %{enabled: true})
+      finish(live, call, pass())
+
+      assert deliveries(ctx, w) == [["z-1", "passed"]]
+      assert_received :woke_scheduler
+      assert_received {:telemetry, @lifecycle, _m, %{phase: :passed}}
+      assert flushed(ctx, w) == %{"offered" => 1, "passed" => 1}
+    end
+
+    test "a write sent again after a pause reports the delivery its first attempt stored " <>
+           "before it",
+         ctx do
+      late = start_supervised!({LatePassRepo, forward_to: ctx.repo, late: 1})
+      test = self()
+
+      # The write's retry waits for the test, which pauses the watcher first.
+      sleep = fn _ms ->
+        send(test, {:retry_waits, self()})
+
+        receive do
+          :retry -> :ok
+        after
+          30_000 -> :ok
+        end
+      end
+
+      w = watcher(ctx)
+      live = start_live(ctx, repo: late, sleep: sleep)
+      LiveFilters.watchers(live, ctx.ref, [w])
+      offer(live, ctx, [item("z-1")], [w])
+      {pid, "z-1"} = next_call()
+      ref = Process.monitor(pid)
+
+      send(pid, {:answer, pass()})
+      assert_receive {:retry_waits, ^pid}, @wait_ms
+      assert deliveries(ctx, w) == [["z-1", "passed"]]
+      change_watcher(ctx, w, %{enabled: false})
+      send(pid, :retry)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, @wait_ms
+      :sys.get_state(live)
+
+      delivery_id = delivery_id(ctx, w)
+      assert deliveries(ctx, w) == [["z-1", "passed"]]
+      assert [[nil, "pass"]] = calls(ctx, w)
+      assert_received :woke_scheduler
+      assert_received {:telemetry, @lifecycle, _m, %{phase: :passed, delivery_id: ^delivery_id}}
+      assert flushed(ctx, w) == %{"offered" => 1, "passed" => 1}
     end
   end
 

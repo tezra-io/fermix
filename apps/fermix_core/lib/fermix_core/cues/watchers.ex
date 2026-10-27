@@ -875,8 +875,9 @@ defmodule FermixCore.Cues.Watchers do
   words for a switch back; the items that waited for the filter pass in the
   same write and the scheduler is woken for them (opt `:wake_scheduler`,
   default `Cues.wake_scheduler/0`). Switching back to `llm` leaves passed items
-  as they are. The watcher the change leaves must keep the rules. Changes are
-  atom-keyed.
+  as they are. New sources expire what was waiting for the filter from a
+  source the watcher no longer has, with no gap, and leave what it passed. The
+  watcher the change leaves must keep the rules. Changes are atom-keyed.
   """
   @spec update(String.t(), map(), opts()) :: result()
   def update(name, changes, opts \\ []) when is_binary(name) and is_map(changes) do
@@ -886,12 +887,30 @@ defmodule FermixCore.Cues.Watchers do
          :ok <- something_changed(patch, sources),
          :ok <- keeps_rules(changed(watcher, patch, sources), opts),
          {:ok, job} <- relinked_job(patch, opts),
-         {:ok, %{watcher: updated, passed: passed}} <- write(watcher, patch, sources, opts) do
+         {:ok, %{watcher: updated, passed: passed, expired: expired}} <-
+           write(watcher, patch, sources, opts) do
+      Enum.each(expired, &emit_source_removed(updated.id, &1))
       Enum.each(passed, &emit_passed(updated.id, &1))
       wake_for_passed(passed, opts)
-      echo = updated_echo(updated, patch, sources, job, opts) <> passed_line(length(passed))
+
+      echo =
+        updated_echo(updated, patch, sources, job, opts) <>
+          expired_line(length(expired)) <> passed_line(length(passed))
+
       {:ok, %{watcher: updated, echo: echo}}
     end
+  end
+
+  # An item that waited from a source taken off the watcher, traced as a
+  # removal traces its expiries.
+  defp emit_source_removed(watcher_id, expired) do
+    Telemetry.lifecycle(:expired, %{}, %{
+      source_ref: expired.source_ref,
+      cue_id: expired.cue_id,
+      delivery_id: expired.delivery_id,
+      watcher_id: watcher_id,
+      reason: "source_removed"
+    })
   end
 
   # An item a switch to `none` passes has no filter call, as at acceptance
@@ -910,6 +929,14 @@ defmodule FermixCore.Cues.Watchers do
 
   defp wake_for_passed(_passed, opts),
     do: Keyword.get(opts, :wake_scheduler, &Cues.wake_scheduler/0).()
+
+  defp expired_line(0), do: ""
+
+  defp expired_line(1),
+    do: "\n1 item waiting from a source it no longer listens to was discarded."
+
+  defp expired_line(n),
+    do: "\n#{n} items waiting from sources it no longer listens to were discarded."
 
   defp passed_line(0), do: ""
   defp passed_line(1), do: "\n1 item that waited for the filter now goes to its task."

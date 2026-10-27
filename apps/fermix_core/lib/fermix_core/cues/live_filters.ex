@@ -31,7 +31,9 @@ defmodule FermixCore.Cues.LiveFilters do
     * a pass: `CuesSql`'s `{:pass_live, …}` (the cue if its identity is new,
       this watcher's `passed` delivery, the call's ledger row; a stored item of
       other content is an identity conflict, its gap and no delivery), then
-      the scheduler is woken, as for a `none` delivery;
+      the scheduler is woken, as for a `none` delivery. A watcher paused, or no
+      longer listening to the source, when the pass is written gets only the
+      ledger row (`withheld`), and nothing is woken;
     * a drop: the call's ledger row (`CuesFilterSql`'s `{:settle_live, …}`);
       here the item goes to the watcher's recent drops (`Cues.RecentDrops`);
     * a provider failure: the ledger row and the watcher's backoff, written as
@@ -536,8 +538,11 @@ defmodule FermixCore.Cues.LiveFilters do
     do: FilterTelemetry.run_error(run, status, kind, duration_ms)
 
   # A pass keeps its per-item events; every other outcome of a live call is
-  # counted and traced at the flush (`Cues.Counts`). A pass that met a stored
-  # item of other content is traced as accept traces it: `conflict`, its gap.
+  # counted and traced at the flush (`Cues.Counts`). A withheld pass stored
+  # nothing, so it has none. A pass that met a stored item of other content is
+  # traced as accept traces it: `conflict`, its gap.
+  defp emit_pass(_run, _result, %{result: :withheld}), do: :ok
+
   defp emit_pass(run, {:pass, _reason, _hint}, %{conflict?: true} = outcome) do
     Telemetry.lifecycle(:conflict, %{}, %{
       source_ref: run.source_ref,
@@ -721,7 +726,13 @@ defmodule FermixCore.Cues.LiveFilters do
 
   # What a reported call means for its item, its watcher and the counts.
   # `passed` counts the passes whose delivery was stored: the watcher already
-  # had this item's (a repeat) when the write stored none.
+  # had this item's (a repeat) when the write stored none. A withheld pass (the
+  # watcher paused, or no longer listening to the source, when it was written)
+  # stored nothing: no task to wake and nothing passed, though the model did
+  # answer.
+  defp settle(state, flight, {:pass, _reason, _hint}, {:ok, %{result: :withheld}}),
+    do: succeeded(state, flight.watcher_id)
+
   defp settle(state, flight, {:pass, _reason, _hint}, {:ok, outcome}) do
     state.wake_scheduler.()
     state = succeeded(state, flight.watcher_id)

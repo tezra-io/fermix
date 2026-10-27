@@ -623,11 +623,16 @@ Who emits what:
   live queue was full), `over_budget` (its filter budget was spent),
   `dropped`, `filter_failed` (three content failures) and `write_failed` (a
   pass whose write kept failing). The `received`, `offered` and `passed` counts
-  are rows only; a pass keeps its own events (below).
+  are rows only; a pass keeps its own events (below). A withheld live pass
+  (below) is counted as `offered` and nothing else, so a watcher's `offered`
+  can exceed the sum of its other counts.
 - **Gaps and expiry**: `gap` (`gap_id`, `reason`, measurement `count`) when
   ingest, the sweeper or a watcher's removal opens or extends a gap; `expired`
-  with `reason: "lifetime"` from `Cues.Sweeper` and `"watcher_removed"` from
-  `Cues.Watchers`.
+  with `reason: "lifetime"` from `Cues.Sweeper`, `"watcher_removed"` from
+  `Cues.Watchers` when a watcher is removed, and `"source_removed"` from
+  `Cues.Watchers` when a change takes a source off a watcher: one per `pending`
+  or `filtering` delivery from that source (`cue_id`, `source_ref`), with no
+  `gap`, since the owner chose it.
 - **Errors**: `ingest_error` (an ingest transaction, a source worker's Repo
   call, or `Cues.SourceManager`'s write of a crashed-out source's `stopped`
   status, failed or did not answer in time; `result`) and `sweep_error`, whose
@@ -652,16 +657,23 @@ Who emits what:
   third provider failure in a row, and each after it); `filter_failed` (the
   third content failure: the delivery is exhausted). A failure adds `reason`
   (`provider_failure | content_failure | aborted`), `kind` (the failure's typed
-  kind) and `result: {:error, kind}`. A live call (`Cues.LiveFilters`, a
-  stream's item) emits only a pass per item: `passed` once its cue and
-  delivery are written, with the call's `session_id`, `filter_call_id`,
-  `watcher_id`, `delivery_id` (absent when the watcher already had this
-  item), `cue_id`, `source_ref`, `decision` and the reason in `content`, then
-  `expired` and `gap` for a delivery its write evicted from a full inbox. A
-  pass onto a stored item of other content writes no delivery and emits, as
-  accept does, `conflict` (`cue_id`, `source_ref`, `watcher_id`, no session)
-  and its `identity_conflict` `gap` instead. Its drops and failures are
-  counted (above).
+  kind) and `result: {:error, kind}`. A pass whose watcher was paused while
+  the call ran is withheld: the delivery goes back to `pending` and no phase
+  is emitted, though the closer still reads the pass. A call whose delivery a
+  source change expired (`source_removed`, above) is refused at its settle as
+  stale: no phase, and its closer is `run_error` with `status: "stale"`. A
+  live call (`Cues.LiveFilters`, a stream's item) emits only a pass per item:
+  `passed` once its cue and delivery are written, with the call's
+  `session_id`, `filter_call_id`, `watcher_id`, `delivery_id` (absent when the
+  watcher already had this item), `cue_id`, `source_ref`, `decision` and the
+  reason in `content`, then `expired` and `gap` for a delivery its write
+  evicted from a full inbox. A pass onto a stored item of other content writes
+  no delivery and emits, as accept does, `conflict` (`cue_id`, `source_ref`,
+  `watcher_id`, no session) and its `identity_conflict` `gap` instead. A live
+  pass whose watcher was paused, or no longer listens to the item's source,
+  when its write runs is withheld: no cue, no delivery, only the call's ledger
+  row, and no phase (the closer still reads the pass). Its drops and failures
+  are counted (above).
 - **Cue runs** (`Jobs.CueAdmission`, each with the run's `session_id`,
   `job_id`, `run_id`, `delivery_id`, `watcher_id`, `source_ref`, `state`,
   `attempt`): `claimed` when the scheduler's claim commits (`queue_ms`), then

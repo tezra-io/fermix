@@ -19,12 +19,16 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
     active and removed instructions and its 20 most recent examples.
   - `{:list_watchers}`.
   - `{:update_watcher, id, expected_updated_at, patch, sources | nil, now}` →
-    `{:ok, %{watcher: watcher, passed: [passed]}}`: fenced on `updated_at`, so
-    two changes read from the same state cannot both land; a relinked task is
-    checked in the same transaction. A patch that switches the filter to
-    `none` also passes the watcher's `pending` deliveries in that transaction,
-    so nothing waits for a filter that no longer runs; `passed` lists each
-    one's `delivery_id`, `cue_id` and `source_ref`, in id order.
+    `{:ok, %{watcher: watcher, passed: [passed], expired: [expired]}}`: fenced
+    on `updated_at`, so two changes read from the same state cannot both land;
+    a relinked task is checked in the same transaction. New `sources` expire
+    the watcher's `pending` and `filtering` deliveries from every source it no
+    longer has (`watcher_removed`, no gap; a call on a `filtering` one then
+    settles stale); `expired` lists them. A patch that switches the filter to
+    `none` then passes the watcher's remaining `pending` and `filtering`
+    deliveries in that transaction, so nothing waits for a filter that no
+    longer runs; `passed` lists them. Each entry is a `delivery_id`, `cue_id`
+    and `source_ref`, in id order.
   - `{:remove_watcher, id, now}`: refused (`:busy`) while a delivery of it is
     `filtering` or `claimed`; otherwise its `pending` and `passed` deliveries
     expire (`watcher_removed`), one gap per source they came from, and the
@@ -490,10 +494,10 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
     with :ok <- check_patch(patch),
          :ok <- check_relink(conn, id, patch),
          :ok <- write_patch(conn, id, expected, patch, now),
-         :ok <- replace_sources(conn, id, sources),
+         {:ok, expired} <- replace_sources(conn, id, sources, now),
          {:ok, passed} <- pass_pending(conn, id, patch, now),
          {:ok, watcher} <- get_watcher(conn, "id", id) do
-      {:ok, %{watcher: watcher, passed: passed}}
+      {:ok, %{watcher: watcher, passed: passed, expired: expired}}
     end
   end
 
@@ -569,12 +573,50 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
     end
   end
 
-  defp replace_sources(_conn, _id, nil), do: :ok
+  defp replace_sources(_conn, _id, nil, _now), do: {:ok, []}
 
-  defp replace_sources(conn, id, sources) do
+  defp replace_sources(conn, id, sources, now) do
     with :ok <-
-           CuesSql.execute(conn, "DELETE FROM cue_watcher_sources WHERE watcher_id = ?", [id]) do
-      insert_sources(conn, id, sources)
+           CuesSql.execute(conn, "DELETE FROM cue_watcher_sources WHERE watcher_id = ?", [id]),
+         :ok <- insert_sources(conn, id, sources) do
+      expire_unlistened(conn, id, now)
+    end
+  end
+
+  # M60 §8.8 does not cover taking a source off a watcher, so it is treated as
+  # removing the watcher for that source: what waits from a source it no
+  # longer has expires here, in the change's transaction, ahead of a switch to
+  # no filter in the same change, so it is never claimed again, never holds a
+  # later item of its subject at the run claim, and is never passed. A row
+  # under a filter call expires too: that call's settle then finds its fence
+  # gone and is refused as stale, its call closed `aborted`, as for a switch
+  # to no filter. No gap, because the owner chose it, as with a pause;
+  # `passed` deliveries stay and still go to the task, as after a pause.
+  # Adding the source back brings none of them back.
+  defp expire_unlistened(conn, id, now) do
+    sql = """
+    SELECT d.id, d.cue_id, d.source_ref, d.state FROM cue_deliveries d
+    WHERE d.watcher_id = ? AND d.state IN ('pending', 'filtering')
+      AND NOT EXISTS (SELECT 1 FROM cue_watcher_sources s
+                      WHERE s.watcher_id = d.watcher_id AND s.source_ref = d.source_ref)
+    ORDER BY d.id
+    """
+
+    patch = %{outcome: "watcher_removed", settled_at: now}
+
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, [id]) do
+      Enum.reduce_while(rows, {:ok, []}, &expire_one(conn, &1, patch, &2))
+    end
+  end
+
+  defp expire_one(conn, [delivery_id, cue_id, source_ref, from], patch, {:ok, expired}) do
+    case CuesSql.transition(conn, delivery_id, from, :none, "expired", patch) do
+      :ok ->
+        {:cont,
+         {:ok, expired ++ [%{delivery_id: delivery_id, cue_id: cue_id, source_ref: source_ref}]}}
+
+      {:error, reason} ->
+        {:halt, {:error, reason}}
     end
   end
 

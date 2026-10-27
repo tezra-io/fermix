@@ -520,6 +520,74 @@ defmodule FermixCore.Memory.Repo.CuesSql do
 
   # --- a live pass (M60_CUE_INTAKE_AT_SCALE.md §3.2) ------------------------------
 
+  # A live pass is the item's routing: it gives the watcher its delivery. So it
+  # is fenced as accept routes (`listening_watchers/2`): the watcher enabled
+  # and still listening to the source, read in this transaction on the single
+  # writer, so no pause or source change lands between the check and the
+  # write. The stream refreshes its watchers only every 10 s, so a call started
+  # before a pause can end after it, and a paused watcher gets no new items
+  # (design §8.8). The fence reads the watcher as it is, not whether it
+  # changed: an instruction or example edited while the call ran withholds
+  # nothing, since a stream item is never judged again. A pass the fence turns
+  # away is withheld; one written before the pause stays passed and still
+  # wakes the task.
+  defp pass_live(conn, ref, item, watcher_id, decision, call, now) do
+    case live_fence(conn, ref, item, watcher_id, call) do
+      {:ok, :open} -> route_live(conn, ref, item, watcher_id, decision, call, now)
+      {:ok, :closed} -> withhold_live(conn, watcher_id, decision, call, now)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # This call's own delivery, stored by an attempt that timed out and still
+  # ran before the change, is past the fence: the write sent again reports it
+  # as it was, so its task is woken and its pass counted.
+  defp live_fence(conn, ref, item, watcher_id, call) do
+    case own_live_delivery(conn, ref, item, watcher_id, call) do
+      {:ok, nil} -> listening(conn, ref, watcher_id)
+      {:ok, _delivery} -> {:ok, :open}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp own_live_delivery(conn, ref, item, watcher_id, call) do
+    case find_identity(conn, ref, item) do
+      {:ok, {cue_id, _hash}} ->
+        with {:ok, delivery, _inserted} <- calls_delivery(conn, cue_id, watcher_id, call),
+             do: {:ok, delivery}
+
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp listening(conn, ref, watcher_id) do
+    sql = """
+    SELECT 1 FROM cue_watchers w
+    JOIN cue_watcher_sources s ON s.watcher_id = w.id AND s.source_ref = ?
+    WHERE w.id = ? AND w.enabled = 1
+    """
+
+    case query_all(conn, sql, [ref, watcher_id]) do
+      {:ok, [_row]} -> {:ok, :open}
+      {:ok, []} -> {:ok, :closed}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # No cue and no delivery, but the call's ledger row all the same: the call
+  # ran, so it counts against the filter budget and keeps its cost. The answer
+  # reads `result: :withheld` with no conflict, eviction or gap, so the
+  # dispatcher wakes no task and traces no pass.
+  defp withhold_live(conn, watcher_id, {reason, hint}, call, now) do
+    with {:ok, outcome} <-
+           CuesFilterSql.record_withheld(conn, watcher_id, call, {:pass, reason, hint}, now),
+         do: {:ok, Map.merge(outcome, %{conflict?: false, evicted: [], gaps: []})}
+  end
+
   # One transaction: the cue if its identity is new (with its payload), else
   # the stored one; this watcher's `passed` delivery if it has none; the inbox
   # cap; and the call's ledger row. "Inserted" and "already there" both
@@ -529,7 +597,7 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   # delivery, and still the ledger row. The answer's `delivery_id` is this
   # call's delivery, nil for a repeat of an item the watcher already had or a
   # conflict (`conflict?`).
-  defp pass_live(conn, ref, item, watcher_id, {reason, hint}, call, now) do
+  defp route_live(conn, ref, item, watcher_id, {reason, hint}, call, now) do
     decision = {reason, hint, call}
 
     with {:ok, cue} <- live_cue(conn, ref, item, now),
@@ -575,7 +643,8 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   defp live_delivery(conn, {kind, cue_id}, ref, item, watcher_id, decision, now) do
     case insert_live_delivery(conn, cue_id, ref, item, watcher_id, decision, now) do
       {:ok, nil} ->
-        calls_delivery(conn, cue_id, watcher_id, decision)
+        {_reason, _hint, call} = decision
+        calls_delivery(conn, cue_id, watcher_id, call)
 
       {:ok, delivery} when kind == :new ->
         {:ok, delivery, [delivery]}
@@ -590,7 +659,7 @@ defmodule FermixCore.Memory.Repo.CuesSql do
 
   # The watcher has this item's delivery already: this call's own, written by
   # an attempt that timed out and still ran, or an earlier pass's.
-  defp calls_delivery(conn, cue_id, watcher_id, {_reason, _hint, call}) do
+  defp calls_delivery(conn, cue_id, watcher_id, call) do
     sql =
       "SELECT id FROM cue_deliveries WHERE cue_id = ? AND watcher_id = ? AND filter_call_id = ?"
 

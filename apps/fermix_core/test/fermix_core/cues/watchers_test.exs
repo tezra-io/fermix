@@ -564,6 +564,81 @@ defmodule FermixCore.Cues.WatchersTest do
     end
   end
 
+  # Design §8.8 does not cover taking a source off a watcher; it is treated as
+  # removing the watcher for that source.
+  describe "taking a source off" do
+    test "discards what waited from it with no gap, says how many, and traces each", ctx do
+      watcher = watcher!(ctx, "market-news", ["Pass earnings"], ["alpaca-news", "sec-filings"])
+      TelemetryCapture.attach([[:fermix, :cue, :lifecycle]], watcher_id: watcher.id)
+      waiting = for _n <- 1..2, do: delivery!(ctx, watcher.id, "alpaca-news", "pending")
+      passed = delivery!(ctx, watcher.id, "alpaca-news", "passed")
+      kept = delivery!(ctx, watcher.id, "sec-filings", "pending")
+
+      assert {:ok, %{echo: echo}} =
+               Watchers.update(watcher.name, %{sources: ["sec-filings"]}, opts(ctx, 1))
+
+      assert echo =~ "2 items waiting from sources it no longer listens to were discarded."
+
+      for id <- waiting do
+        assert_received {:telemetry, [:fermix, :cue, :lifecycle], _m,
+                         %{phase: :expired, delivery_id: ^id, reason: "source_removed"}}
+      end
+
+      states =
+        CueFixtures.rows(
+          ctx.conn,
+          "SELECT id, state, outcome FROM cue_deliveries WHERE watcher_id = ? ORDER BY id",
+          [watcher.id]
+        )
+
+      assert states ==
+               Enum.map(waiting, &[&1, "expired", "watcher_removed"]) ++
+                 [[passed, "passed", nil], [kept, "pending", nil]]
+
+      assert [[0]] = CueFixtures.rows(ctx.conn, "SELECT count(*) FROM cue_gaps", [])
+    end
+
+    # One change that switches to no filter and takes a source off: that
+    # source's item under a call expires before the switch passes what is left.
+    test "with a switch to none, the taken source's item under a call expires, nothing " <>
+           "wakes, and the call's answer is refused as stale",
+         ctx do
+      watcher = watcher!(ctx, "market-news", ["Pass earnings"], ["alpaca-news", "sec-filings"])
+
+      filtering =
+        delivery!(ctx, watcher.id, "alpaca-news", "filtering", filter_call_id: "cfc_live")
+
+      CueFixtures.exec!(
+        ctx.conn,
+        "INSERT INTO cue_filter_calls (id, watcher_id, delivery_id, session_id, started_at) " <>
+          "VALUES ('cfc_live', ?, ?, 'cue_filter_live', ?)",
+        [watcher.id, filtering, CuesSql.stamp(at(0))]
+      )
+
+      test_pid = self()
+      opts = opts(ctx, 1) ++ [wake_scheduler: fn -> send(test_pid, :scheduler_woken) end]
+      changes = %{filter: "none", daily_cap: 30, sources: ["sec-filings"]}
+
+      assert {:ok, %{echo: echo}} = Watchers.update(watcher.name, changes, opts)
+      assert echo =~ "1 item waiting from a source it no longer listens to was discarded."
+      refute echo =~ "now go"
+      refute_received :scheduler_woken
+
+      assert {:error, :stale} =
+               Repo.cues_call(CuesFilterSql, {:settle, "cfc_live", {:pass, "Late.", nil}, at(1)},
+                 server: ctx.repo
+               )
+
+      assert [["expired", "watcher_removed", "aborted"]] =
+               CueFixtures.rows(
+                 ctx.conn,
+                 "SELECT d.state, d.outcome, c.result FROM cue_deliveries d " <>
+                   "JOIN cue_filter_calls c ON c.id = 'cfc_live' WHERE d.id = ?",
+                 [filtering]
+               )
+    end
+  end
+
   describe "switching the filter (design §8.1)" do
     test "to none passes what waited for the filter, wakes the task and says how many", ctx do
       watcher = watcher!(ctx, "market-news", ["Pass earnings"])

@@ -17,6 +17,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Fermix ships for them, the same list their own settings offer, and typing in
   their Model field narrows it.
 
+### Security
+
+- **Pausing a watcher, or taking a source off it, no longer lets an item
+  through.** A stream item whose filter call was still running when you paused
+  a watcher, or took the stream off its sources, could still pass and wake the
+  watcher's task, where a mandate in auto mode could act on it. It is no
+  longer delivered, though the call still counts toward the watcher's filter
+  budget. When you take a feed, webhook or local-push source off a watcher,
+  what was waiting for its filter from that source, an item it was judging at
+  that moment included, is now discarded even if the same change turns the
+  filter off, and Fermix tells you how many; adding the source back does not
+  bring it back. A paused watcher's waiting items still wait for the resume,
+  and items a watcher passed before either change still go to its task.
+
 ## [0.17.0] - 2026-10-26
 
 ### Added

@@ -7,6 +7,9 @@ defmodule FermixCore.Cues.FiltersTest do
   alias FermixCore.Cues.Ingest
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesFilterSql
+  alias FermixCore.Memory.Repo.CuesRunsSql
+  alias FermixCore.Memory.Repo.CuesSql
+  alias FermixCore.Memory.Repo.CuesWatchersSql
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixTestSupport.TelemetryCapture
 
@@ -135,11 +138,14 @@ defmodule FermixCore.Cues.FiltersTest do
     id
   end
 
-  defp push(ctx, titles, ref \\ nil) do
+  defp push(ctx, titles, ref \\ nil, subject \\ nil) do
     now = Agent.get(ctx.clock, & &1)
 
     items =
-      Enum.map(titles, &item!(%{item_id: &1, type: "feed.item", data: %{"title" => &1}}, now))
+      Enum.map(
+        titles,
+        &item!(%{item_id: &1, subject: subject, type: "feed.item", data: %{"title" => &1}}, now)
+      )
 
     {:ok, _results} =
       Ingest.accept(%{ref: ref || ctx.ref, daily_budget: 0}, items,
@@ -192,6 +198,24 @@ defmodule FermixCore.Cues.FiltersTest do
     answer(call, reply)
     assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
     sync(filters)
+  end
+
+  # A change the owner makes in chat, written as `Cues.Watchers` writes it: the
+  # real `{:update_watcher, …}`, fenced on the `updated_at` read just before it.
+  defp change_watcher(ctx, watcher, patch, sources \\ nil) do
+    id = watcher
+    [[updated_at]] = rows(ctx.conn, "SELECT updated_at FROM cue_watchers WHERE id = ?", [id])
+    expected = CuesSql.parse_stamp(updated_at)
+    request = {:update_watcher, id, expected, patch, sources, Agent.get(ctx.clock, & &1)}
+    {:ok, _changed} = Repo.cues_call(CuesWatchersSql, request, server: ctx.repo)
+    :ok
+  end
+
+  # The deliveries the run claim would take now, one per task.
+  defp run_candidates(ctx) do
+    request = {:admission_candidates, Agent.get(ctx.clock, & &1), 4}
+    {:ok, %{candidates: candidates}} = Repo.cues_call(CuesRunsSql, request, server: ctx.repo)
+    candidates
   end
 
   defp deliveries(ctx, watcher) do
@@ -496,6 +520,190 @@ defmodule FermixCore.Cues.FiltersTest do
       assert [["a", "pending", 0 | _]] = deliveries(ctx, w)
       assert [[1]] = rows(ctx.conn, "SELECT filter_failures FROM cue_watchers WHERE id = ?", [w])
       assert in_flight_watchers(filters) == []
+    end
+  end
+
+  describe "a pause while a call runs (design §8.8)" do
+    test "a pass whose watcher was paused while its call ran waits as pending, wakes no task, " <>
+           "and is filtered again on resume",
+         ctx do
+      w = watcher(ctx)
+      push(ctx, ["a"])
+      filters = start_filters(ctx)
+      Filters.wake(filters)
+      call = next_call()
+
+      change_watcher(ctx, w, %{enabled: false})
+      finish(filters, call, pass())
+
+      assert [["a", "pending", 0, _ready, nil, nil]] = deliveries(ctx, w)
+      assert [[nil]] = rows(ctx.conn, "SELECT filter_call_id FROM cue_deliveries", [])
+
+      assert [["pass", finished]] =
+               rows(ctx.conn, "SELECT result, finished_at FROM cue_filter_calls", [])
+
+      assert finished == CuesSql.stamp(@t0)
+      refute_received :woke_scheduler
+      refute_received {:telemetry, @lifecycle, _m, %{phase: :passed}}
+
+      # Paused, it waits: a wake claims nothing.
+      Filters.wake(filters)
+      sync(filters)
+      assert in_flight_watchers(filters) == []
+
+      change_watcher(ctx, w, %{enabled: true})
+      Filters.wake(filters)
+      assert {_pid, "a", _m, _o} = again = next_call()
+      finish(filters, again, pass())
+
+      assert [["a", "passed" | _]] = deliveries(ctx, w)
+      assert_received :woke_scheduler
+    end
+
+    test "a pause and a resume while the call runs leave its pass as it was", ctx do
+      w = watcher(ctx)
+      push(ctx, ["a"])
+      filters = start_filters(ctx)
+      Filters.wake(filters)
+      call = next_call()
+
+      change_watcher(ctx, w, %{enabled: false})
+      change_watcher(ctx, w, %{enabled: true})
+      finish(filters, call, pass())
+
+      assert [["a", "passed" | _]] = deliveries(ctx, w)
+      assert_received :woke_scheduler
+      assert_received {:telemetry, @lifecycle, _m, %{phase: :passed}}
+    end
+  end
+
+  # Design §8.8 does not cover taking a source off a watcher; it is treated as
+  # removing the watcher for that source.
+  describe "a source taken off the watcher" do
+    test "its waiting deliveries expire with no gap; one already passed still goes to the " <>
+           "task",
+         ctx do
+      w = watcher(ctx)
+      push(ctx, ["a"])
+      filters = start_filters(ctx)
+      Filters.wake(filters)
+      finish(filters, next_call(), pass())
+      push(ctx, ["b"])
+
+      change_watcher(ctx, w, %{}, [ctx.ref <> "-other"])
+
+      assert [["a", "passed" | _], ["b", "expired", 0, _ready, nil, "watcher_removed"]] =
+               deliveries(ctx, w)
+
+      assert {:ok, []} =
+               Repo.cues_call(CuesSql, {:list_gaps, %{source_ref: ctx.ref}}, server: ctx.repo)
+
+      assert [%{watcher_id: ^w}] = run_candidates(ctx)
+    end
+
+    test "added back, it brings nothing back", ctx do
+      w = watcher(ctx)
+      push(ctx, ["a"])
+      filters = start_filters(ctx)
+
+      change_watcher(ctx, w, %{}, [ctx.ref <> "-other"])
+      change_watcher(ctx, w, %{}, [ctx.ref])
+      Filters.wake(filters)
+      sync(filters)
+
+      assert in_flight_watchers(filters) == []
+      assert [["a", "expired" | _]] = deliveries(ctx, w)
+      assert [[0]] = rows(ctx.conn, "SELECT count(*) FROM cue_filter_calls", [])
+    end
+
+    # The change expires the row under the call, so the call's answer finds
+    # its fence gone: refused as stale, and its row closed `aborted`.
+    test "the item under a call expires with the change; the call's answer is refused as " <>
+           "stale, nothing passes, and the call row stays",
+         ctx do
+      w = watcher(ctx)
+      push(ctx, ["a"])
+      filters = start_filters(ctx)
+      Filters.wake(filters)
+      call = next_call()
+
+      change_watcher(ctx, w, %{}, [ctx.ref <> "-other"])
+      assert [["a", "expired", 0, _ready, nil, "watcher_removed"]] = deliveries(ctx, w)
+      finish(filters, call, pass())
+
+      assert [["a", "expired", 0, _ready, nil, "watcher_removed"]] = deliveries(ctx, w)
+
+      assert [["aborted", "stale: " <> _why, finished]] =
+               rows(ctx.conn, "SELECT result, error, finished_at FROM cue_filter_calls", [])
+
+      assert finished == CuesSql.stamp(@t0)
+      assert in_flight_watchers(filters) == []
+      refute_received {:telemetry, @lifecycle, _m, %{phase: :passed}}
+
+      assert_received {:telemetry, [:fermix, :cue_filter, :run_error], _m,
+                       %{status: "stale", session_id: _session}}
+    end
+
+    test "a boot reset brings back no row the change took from under a call", ctx do
+      w = watcher(ctx)
+      push(ctx, ["a"])
+      # A call cut off by a stop: its row is filtering and no task holds it.
+      {:ok, %{claims: [claim]}} =
+        Repo.cues_call(CuesFilterSql, {:claim, @t0, 1, []}, server: ctx.repo)
+
+      change_watcher(ctx, w, %{}, [ctx.ref <> "-other"])
+      filters = start_filters(ctx)
+      Filters.wake(filters)
+      sync(filters)
+
+      assert [["a", "expired" | _]] = deliveries(ctx, w)
+      assert in_flight_watchers(filters) == []
+
+      assert [["aborted"]] =
+               rows(ctx.conn, "SELECT result FROM cue_filter_calls WHERE id = ?", [claim.call_id])
+    end
+
+    test "a sweep's reclaim brings back no row the change took from under a call", ctx do
+      w = watcher(ctx)
+      push(ctx, ["a"])
+
+      {:ok, %{claims: [_claim]}} =
+        Repo.cues_call(CuesFilterSql, {:claim, @t0, 1, []}, server: ctx.repo)
+
+      change_watcher(ctx, w, %{}, [ctx.ref <> "-other"])
+      later = DateTime.add(@t0, 3_600, :second)
+
+      assert {:ok, %{reclaimed: []}} =
+               Repo.cues_call(CuesFilterSql, {:reclaim_orphans, [], later, later},
+                 server: ctx.repo
+               )
+
+      assert [["a", "expired" | _]] = deliveries(ctx, w)
+    end
+
+    test "another source's later delivery of the same subject is not held back", ctx do
+      other_ref = ctx.ref <> "-b"
+
+      w =
+        insert_watcher(ctx.conn, %{
+          filter: "llm",
+          sources: [ctx.ref, other_ref],
+          listen_for: @words
+        })
+
+      TelemetryCapture.attach([@lifecycle | @bookends], watcher_id: w)
+      push(ctx, ["a"], ctx.ref, "launch")
+      push(ctx, ["b"], other_ref, "launch")
+      filters = start_filters(ctx)
+
+      change_watcher(ctx, w, %{}, [other_ref])
+      Filters.wake(filters)
+      assert {_pid, "b", _m, _o} = call = next_call()
+      finish(filters, call, pass())
+
+      [[b_id]] = rows(ctx.conn, "SELECT id FROM cue_deliveries WHERE source_ref = ?", [other_ref])
+      assert [%{delivery_id: ^b_id}] = run_candidates(ctx)
+      assert [["a", "expired" | _], ["b", "passed" | _]] = deliveries(ctx, w)
     end
   end
 
