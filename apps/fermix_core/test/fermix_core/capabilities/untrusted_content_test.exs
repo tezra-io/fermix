@@ -4,11 +4,17 @@ defmodule FermixCore.Capabilities.UntrustedContentTest do
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.UntrustedContent
+  alias FermixCore.Tools.ContentSearch
+  alias FermixCore.Tools.FileRead
   alias FermixCore.Tools.GetCodingRun
   alias FermixCore.Tools.GetJobRun
+  alias FermixCore.Tools.GitRead
+  alias FermixCore.Tools.GlobSearch
   alias FermixCore.Tools.ListJobRuns
+  alias FermixCore.Tools.Shell
   alias FermixCore.Tools.SkillRun
   alias FermixCore.Tools.SkillView
+  alias FermixCore.Tools.ViewImage
 
   defp cap(attrs) do
     Capability.new(
@@ -141,6 +147,15 @@ defmodule FermixCore.Capabilities.UntrustedContentTest do
     # skill is a local file read, not a worker's report.
     test "reading a skill's instructions is not an outside source" do
       assert UntrustedContent.outside_source(Builtin.from_tool_module(SkillView)) == nil
+    end
+
+    # The rule SECURITY.md states: what the owner's own files say is the
+    # owner's, as a command's own output is, whoever wrote the file.
+    test "the workspace readers and a command's output are not an outside source" do
+      for module <- [FileRead, ViewImage, GitRead, ContentSearch, GlobSearch, Shell] do
+        assert UntrustedContent.outside_source(Builtin.from_tool_module(module)) == nil,
+               "#{inspect(module)} brought an outside source"
+      end
     end
 
     test "an internal tool is not an outside source" do

@@ -13,7 +13,10 @@ defmodule FermixCore.Capabilities.UntrustedContent do
 
   The gate is content ORIGIN, not effect: a bare `:external_api` tool without
   plugin ownership (e.g. `subagents`) returns fermix-internal reports and stays
-  unwrapped; fermix-authored error strings are also unwrapped.
+  unwrapped; fermix-authored error strings are also unwrapped. What the owner's
+  own files say is the owner's: the workspace readers (`file_read`,
+  `view_image`, `content_search`, `glob_search`, `git_read`) bring no outside
+  source, as a command's own output brings none, a limit `SECURITY.md` states.
 
   `Capabilities.AccessGate` reads the same boundary through `outside_source/1`
   to decide whether a turn has read content someone else could have written.

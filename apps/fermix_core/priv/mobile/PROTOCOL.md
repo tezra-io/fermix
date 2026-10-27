@@ -127,8 +127,11 @@ uint32be length | type | payload
   once its `pair_request` waits for the owner; IKpsk2's first message proves
   no pairing secret, so a stream that has sent only that can still be closed.
   A pairing phone therefore stays closable through the round trip to its
-  `pair_request`, which its attestation can stretch to seconds: a stranger who
-  opens streams faster than that can still close it. A phone narrows that
+  `pair_request`; a phone that makes its attestation only after the daemon's
+  reply stretches that to seconds, and a stranger who opens streams faster
+  than that can still close it. Once the `pair_request` arrives, the daemon
+  checks it before it reads any request to make room, so its own check adds
+  nothing to that window. A phone narrows that
   window by preparing its attestation before it dials (the challenge comes
   from the pairing link's secret), so that `pair_request` follows the daemon's
   reply at once. Only phones hold places so, and a pairing window takes one
