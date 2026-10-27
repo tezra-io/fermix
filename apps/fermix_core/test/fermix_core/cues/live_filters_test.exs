@@ -564,10 +564,13 @@ defmodule FermixCore.Cues.LiveFiltersTest do
   end
 
   describe "a slow store" do
+    # LatePassRepo answers the first write :repo_timeout itself, so the bound
+    # has only the real writes to time, which a loaded runner can hold past
+    # a short one.
     test "a pass whose write timed out is written again without a second judgement", ctx do
       late = start_supervised!({LatePassRepo, forward_to: ctx.repo, late: 1})
       w = watcher(ctx)
-      live = start_live(ctx, repo: late, repo_timeout_ms: 50)
+      live = start_live(ctx, repo: late, repo_timeout_ms: @wait_ms)
       LiveFilters.watchers(live, ctx.ref, [w])
       offer(live, ctx, [item("p-1")], [w])
 
