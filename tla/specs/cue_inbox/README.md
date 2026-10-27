@@ -147,6 +147,11 @@ if it was sent, is already in the Repo's mailbox ahead of the reset.
     group and is not in the model. The sweeper's `:prune_counts` step is
     another retention step on rows no property reads, and its first-tick
     needs-update notice changes no delivery.
+- **Retention indexes (migration 48; 2026-10-26).** `drop_payloads`,
+  `drop_snapshots` and `delete_receipts` each search a partial index of the
+  rows they change. `delete_receipts` now searches receipts no watcher was
+  offered from 8 days and routed ones from 30, and deletes the same rows. All
+  three touch terminal rows only, which the model leaves out, so no step moved.
 
 ## Switches
 
