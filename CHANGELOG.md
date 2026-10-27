@@ -6,6 +6,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Mac app lists Anthropic's models when you pick it for the Cues
+  filter.** Choosing Anthropic, OpenAI, SpaceXAI or Mistral as the filter
+  model's provider in Settings → Cues opened an empty list that said "The
+  requested management capability is unavailable": the app asks for a
+  provider's current models, and Fermix answered that only for the providers
+  that publish a list of their own. Those four now answer with the models
+  Fermix ships for them, the same list their own settings offer, and typing in
+  their Model field narrows it.
+
+## [0.17.0] - 2026-10-26
+
 ### Added
 
 - **GPT-6.1 Terra is in the model lists.** OpenAI's new balanced model sits
@@ -176,14 +189,6 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mandate held, exported to Opik as a successful span. It is now an errored
   span with a fixed code and summary that say it was held or refused, never
   the call's arguments, and a replayed trace file shows it the same way.
-- **The Mac app lists Anthropic's models when you pick it for the Cues
-  filter.** Choosing Anthropic, OpenAI, SpaceXAI or Mistral as the filter
-  model's provider in Settings → Cues opened an empty list that said "The
-  requested management capability is unavailable": the app asks for a
-  provider's current models, and Fermix answered that only for the providers
-  that publish a list of their own. Those four now answer with the models
-  Fermix ships for them, the same list their own settings offer, and typing in
-  their Model field narrows it.
 
 ### Security
 
