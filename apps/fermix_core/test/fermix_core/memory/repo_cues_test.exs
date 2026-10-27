@@ -18,6 +18,8 @@ defmodule FermixCore.Memory.RepoCuesTest do
   @tables ~w(cues cue_sources cue_watchers cue_watcher_sources cue_watcher_instructions
              cue_watcher_examples cue_deliveries cue_gaps cue_filter_calls cue_mandate_calls
              cue_proposals cue_mandate_approvals)
+  @retention_indexes ~w(cues_payload_terminal_at cues_snapshot_received_at
+                        cues_unrouted_terminal_at)
 
   setup do
     start_repo("repo")
@@ -27,6 +29,20 @@ defmodule FermixCore.Memory.RepoCuesTest do
     conn
     |> rows("SELECT name FROM sqlite_master WHERE type = 'table'")
     |> List.flatten()
+  end
+
+  defp index_names(conn) do
+    conn
+    |> rows("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'cues'")
+    |> List.flatten()
+  end
+
+  defp retention_plan(conn, step) do
+    {sql, params} = CuesSql.retention_sql(step, @now)
+
+    conn
+    |> rows("EXPLAIN QUERY PLAN " <> sql, params ++ [1_000])
+    |> Enum.map(&List.last/1)
   end
 
   describe "migration 42" do
@@ -130,6 +146,58 @@ defmodule FermixCore.Memory.RepoCuesTest do
       )
 
       assert "cue_counts" in table_names(conn)
+    end
+  end
+
+  describe "migration 48" do
+    test "adds the retention indexes to a database that has the cue tables", ctx do
+      %{repo: repo, db_path: db_path, conn: conn} = ctx
+      assert @retention_indexes -- index_names(conn) == []
+
+      # The database as it stood before 48.
+      Enum.each(@retention_indexes, &exec!(conn, "DROP INDEX #{&1}"))
+      exec!(conn, "DELETE FROM schema_migrations WHERE version = 48")
+      :ok = stop_supervised(Repo)
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+      assert {:ok, versions} = Repo.migration_versions(server: repo)
+      assert Enum.count(versions, &(&1 == 48)) == 1
+      assert @retention_indexes -- index_names(conn) == []
+    end
+  end
+
+  # A receipt stays in cues until retention deletes it, up to 30 days after its
+  # deliveries settle, so a step that walked the table read every stored row
+  # once a minute to find the few it changes.
+  describe "retention reads" do
+    test "drop_payloads searches only the cues that still hold a payload", %{conn: conn} do
+      details = retention_plan(conn, :drop_payloads)
+
+      assert Enum.any?(details, &(&1 =~ ~r/^SEARCH \w+ USING INDEX cues_payload_terminal_at\b/)),
+             inspect(details)
+
+      refute Enum.any?(details, &(&1 =~ ~r/^SCAN /)), inspect(details)
+    end
+
+    test "drop_snapshots searches only the cues that still hold a snapshot", %{conn: conn} do
+      details = retention_plan(conn, :drop_snapshots)
+
+      assert Enum.any?(details, &(&1 =~ ~r/^SEARCH \w+ USING INDEX cues_snapshot_received_at\b/)),
+             inspect(details)
+
+      refute Enum.any?(details, &(&1 =~ ~r/^SCAN /)), inspect(details)
+    end
+
+    test "delete_receipts searches unrouted receipts by their own index", %{conn: conn} do
+      details = retention_plan(conn, :delete_receipts)
+
+      assert Enum.any?(details, &(&1 =~ ~r/^SEARCH \w+ USING INDEX cues_unrouted_terminal_at\b/)),
+             inspect(details)
+
+      assert Enum.any?(details, &(&1 =~ ~r/^SEARCH \w+ USING INDEX cues_terminal_at\b/)),
+             inspect(details)
+
+      refute Enum.any?(details, &(&1 =~ ~r/^SCAN /)), inspect(details)
     end
   end
 

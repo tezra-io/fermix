@@ -168,6 +168,12 @@ defmodule FermixCore.Cues.SweeperTest do
     assert {:ok, 1} = step(ctx, :delete_receipts, later(@t0, 12, 1))
     assert cue(ctx.conn, "seen") == nil
     refute cue(ctx.conn, "routed") == nil
+
+    # A routed receipt goes once its last delivery has been pruned.
+    assert {:ok, 0} = step(ctx, :delete_receipts, later(@t0, 30, 1))
+    assert {:ok, 1} = step(ctx, :prune_deliveries, later(@t0, 30, 1))
+    assert {:ok, 1} = step(ctx, :delete_receipts, later(@t0, 30, 1))
+    assert cue(ctx.conn, "routed") == nil
   end
 
   test "deliveries: terminal ones pruned after 30 days, live ones never", ctx do

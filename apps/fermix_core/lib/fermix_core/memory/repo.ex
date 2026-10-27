@@ -70,6 +70,7 @@ defmodule FermixCore.Memory.Repo do
   @cue_stop_reason_migration_version 45
   @harness_continued_from_migration_version 46
   @cue_live_intake_migration_version 47
+  @cue_retention_index_migration_version 48
   @sqlite_open_intent :readwritecreate
 
   # The cue SQL modules (M60), one per lane, all served by `cues_call/3`.
@@ -4727,7 +4728,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_open_loops_migration(conn, versions),
          :ok <- apply_cue_stop_reason_migration(conn, versions),
          :ok <- apply_harness_continued_from_migration(conn, versions),
-         :ok <- apply_cue_live_intake_migration(conn, versions) do
+         :ok <- apply_cue_live_intake_migration(conn, versions),
+         :ok <- apply_cue_retention_index_migration(conn, versions) do
       :ok
     end
   end
@@ -4801,6 +4803,24 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{CuesSql.live_intake_schema_sql()}
         INSERT INTO schema_migrations(version) VALUES (#{@cue_live_intake_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # The cue retention indexes: a sweep step searches only the rows it changes,
+  # never every receipt, with its version in one transaction.
+  defp apply_cue_retention_index_migration(conn, versions) do
+    if Enum.member?(versions, @cue_retention_index_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{CuesSql.retention_index_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@cue_retention_index_migration_version});
         COMMIT;
         """
       )

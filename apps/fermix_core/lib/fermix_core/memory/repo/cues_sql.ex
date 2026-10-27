@@ -372,6 +372,22 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   @spec live_intake_schema_sql() :: String.t()
   def live_intake_schema_sql, do: @live_intake_schema_sql
 
+  @doc """
+  The DDL of migration 48: one partial index per retention step that looks for
+  the few rows it changes among every receipt `cues` still holds, so a sweep
+  reads those rows alone: the cues that still hold a payload (`drop_payloads`)
+  or a snapshot (`drop_snapshots`), and the receipts no watcher was offered
+  (`delete_receipts`).
+  """
+  @spec retention_index_schema_sql() :: String.t()
+  def retention_index_schema_sql do
+    """
+    CREATE INDEX cues_payload_terminal_at ON cues (terminal_at) WHERE payload IS NOT NULL;
+    CREATE INDEX cues_snapshot_received_at ON cues (received_at) WHERE snapshot IS NOT NULL;
+    CREATE INDEX cues_unrouted_terminal_at ON cues (terminal_at) WHERE routed_count = 0;
+    """
+  end
+
   @doc "Delivery states that hold a delivery open (never touched by retention)."
   @spec live_states() :: [String.t()]
   def live_states, do: @live_states
@@ -1470,7 +1486,11 @@ defmodule FermixCore.Memory.Repo.CuesSql do
     end)
   end
 
-  defp retention_sql(:mark_terminal, now) do
+  @doc false
+  # A retention step's statement and its parameters before the trailing limit;
+  # public so a test can read its query plan.
+  @spec retention_sql(atom(), DateTime.t()) :: {String.t(), [String.t()]}
+  def retention_sql(:mark_terminal, now) do
     {"""
      UPDATE cues SET terminal_at = coalesce(
        (SELECT max(d.settled_at) FROM cue_deliveries d WHERE d.cue_id = cues.id), ?)
@@ -1483,32 +1503,44 @@ defmodule FermixCore.Memory.Repo.CuesSql do
      """, [stamp(now)]}
   end
 
-  defp retention_sql(:drop_payloads, now) do
+  def retention_sql(:drop_payloads, now) do
     {"""
      UPDATE cues SET payload = NULL WHERE id IN (
-       SELECT id FROM cues WHERE payload IS NOT NULL AND terminal_at IS NOT NULL
+       SELECT id FROM cues INDEXED BY cues_payload_terminal_at
+       WHERE payload IS NOT NULL AND terminal_at IS NOT NULL
          AND terminal_at <= ? ORDER BY terminal_at LIMIT ?)
      """, [ago(now, @payload_grace_hours * 3600)]}
   end
 
   # 7 days after the payload drop (terminal + 24 h) and 7 days after the last
-  # sighting, and only once no delivery row refers to the cue.
-  defp retention_sql(:delete_receipts, now) do
+  # sighting, and only once no delivery row refers to the cue. A cue some
+  # watcher was offered (`routed_count` above 0) keeps a delivery until
+  # `prune_deliveries` takes the last one, 30 days after it settled, and its
+  # `terminal_at` is that settle, so only a receipt terminal for 30 days can
+  # have none: the search starts there instead of reading every younger one.
+  def retention_sql(:delete_receipts, now) do
     {"""
      DELETE FROM cues WHERE id IN (
-       SELECT c.id FROM cues c
-       WHERE c.payload IS NULL AND c.terminal_at IS NOT NULL AND c.terminal_at <= ?
+       SELECT c.id FROM cues c INDEXED BY cues_unrouted_terminal_at
+       WHERE c.routed_count = 0 AND c.payload IS NULL AND c.terminal_at <= ?
          AND c.last_seen_at <= ?
          AND NOT EXISTS (SELECT 1 FROM cue_deliveries d WHERE d.cue_id = c.id)
-       ORDER BY c.terminal_at LIMIT ?)
+       UNION ALL
+       SELECT c.id FROM cues c INDEXED BY cues_terminal_at
+       WHERE c.routed_count > 0 AND c.payload IS NULL AND c.terminal_at <= ?
+         AND c.last_seen_at <= ?
+         AND NOT EXISTS (SELECT 1 FROM cue_deliveries d WHERE d.cue_id = c.id)
+       LIMIT ?)
      """,
      [
        ago(now, @payload_grace_hours * 3600 + @horizon_days * 86_400),
+       ago(now, @horizon_days * 86_400),
+       ago(now, @prune_days * 86_400),
        ago(now, @horizon_days * 86_400)
      ]}
   end
 
-  defp retention_sql(:prune_deliveries, now) do
+  def retention_sql(:prune_deliveries, now) do
     {"""
      DELETE FROM cue_deliveries WHERE id IN (
        SELECT id FROM cue_deliveries WHERE settled_at IS NOT NULL AND settled_at <= ?
@@ -1517,26 +1549,27 @@ defmodule FermixCore.Memory.Repo.CuesSql do
      """, [ago(now, @prune_days * 86_400)]}
   end
 
-  defp retention_sql(:prune_gaps, now) do
+  def retention_sql(:prune_gaps, now) do
     {"DELETE FROM cue_gaps WHERE id IN (SELECT id FROM cue_gaps WHERE last_at <= ? " <>
        "ORDER BY last_at LIMIT ?)", [ago(now, @prune_days * 86_400)]}
   end
 
   # A call is pruned 30 days after it started, finished or not: one left open
   # (a settle that never came) holds nothing a sweep could still need.
-  defp retention_sql(:prune_filter_calls, now) do
+  def retention_sql(:prune_filter_calls, now) do
     {"DELETE FROM cue_filter_calls WHERE id IN (SELECT id FROM cue_filter_calls " <>
        "WHERE started_at <= ? ORDER BY started_at LIMIT ?)", [ago(now, @prune_days * 86_400)]}
   end
 
   # Counts outlive the rolling day they are read for by one more day.
-  defp retention_sql(:prune_counts, now) do
+  def retention_sql(:prune_counts, now) do
     {"DELETE FROM cue_counts WHERE rowid IN (SELECT rowid FROM cue_counts " <>
        "WHERE hour < ? ORDER BY hour LIMIT ?)", [ago(now, @count_keep_s)]}
   end
 
-  defp retention_sql(:drop_snapshots, now) do
+  def retention_sql(:drop_snapshots, now) do
     {"UPDATE cues SET snapshot = NULL WHERE id IN (SELECT id FROM cues " <>
+       "INDEXED BY cues_snapshot_received_at " <>
        "WHERE snapshot IS NOT NULL AND received_at <= ? ORDER BY received_at LIMIT ?)",
      [ago(now, @prune_days * 86_400)]}
   end
