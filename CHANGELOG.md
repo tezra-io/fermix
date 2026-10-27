@@ -14,6 +14,21 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   account does, and Fermix now knows its context window there, so a
   conversation on it compacts where the rest of the GPT-6 generation does.
 
+- **Cues and watchers: something that happens elsewhere can wake a task.** A
+  source hands Fermix items: an RSS, Atom or JSON feed it polls, a WebSocket
+  stream it keeps open, a webhook from a service such as GitHub, or a program
+  on this machine posting to Fermix's local door. A watcher you make in chat
+  judges each item against what you asked it to watch for, and an item that
+  passes wakes the watcher's task, which reads it and reports to you. A task
+  acts on the outside world only through a mandate you grant in settings, and
+  in approve mode each action waits for your yes. Sources and mandates are
+  set on browser setup's Cues tab or in the Mac app's Settings → Cues; the
+  Linux app has no Cues pane. Cues are off until you turn on **Run cues** and
+  restart, and they need memory on. A webhook from the internet needs a
+  tunnel to the door: for Tailscale Funnel, the Cues tab shows the command for
+  that one source. A feed connects only to the address Fermix checked. A
+  watcher's task can't be bound to a skill that would leave it without its
+  cue history.
 - **Fermix can check in on something you said you would do by a date.** With
   open loops on, when you tell the assistant you mean to do or decide
   something by a date, it keeps that as an open loop without saying so. A
