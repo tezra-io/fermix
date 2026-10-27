@@ -164,7 +164,7 @@ watch was added to the model).
 
 - The LLM and tools (one "loop" step), streaming drafts, and typing.
 - The access gate's parked confirmation. `run_message_loop` hands AgentLoop
-  the owner-inbox closure and the Live call id (`turn_runner.ex:597`,
+  the owner-inbox closure and the Live call id (`turn_runner.ex:598`,
   `:600`). A parked call is a held tool result inside the one loop step, and
   the owner's confirm later runs it on a task outside the Queue, not as a
   new turn.

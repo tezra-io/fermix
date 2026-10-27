@@ -12,7 +12,7 @@
 (*  - the LLM and tools (one "loop" step), streaming drafts, typing;       *)
 (*  - the access gate's parked confirmation: run_message_loop hands        *)
 (*    AgentLoop the owner-inbox closure and the Live call id               *)
-(*    (turn_runner.ex:597, :601); a parked call is a held tool result      *)
+(*    (turn_runner.ex:598, :602); a parked call is a held tool result      *)
 (*    inside the one loop step, and the owner's confirm later runs it on   *)
 (*    a task outside the Queue, not as a new turn;                         *)
 (*  - what a turn tells its channel's stream (a hand-off's word, before   *)
@@ -50,7 +50,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/peer.ex#@moduledoc,handle_info,start_prompt,hand_off,watch_queue,ingest,handle_ingest,apply_turn_result,cancel_turn,cancel_prompt_request,stop_turn,settle_queue_down,close_turn,demonitor_queue,apply_if_open @ 37fc57942bd1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/session.ex#start_turn,clear_turn,turn_open?,put_queue_ref,queue_ref,queue @ ad21422f117f
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway.ex#ingest,do_deliver_to_agent @ a988106fa5ca
-\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run_message_loop,persist_user_message,commit @ 936ccf9654ee
+\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run_message_loop,persist_user_message,commit @ 8093dd12e039
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/conversation_store.ex @ a81b127db387
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -375,7 +375,7 @@ CheckoutFail(m) ==
     /\ Show(m, "error")
     /\ QueueUnchanged /\ UNCHANGED <<holding, outcomes, history>>
 
-\* TurnRunner persist_user_message (turn_runner.ex:1179), before AgentLoop.
+\* TurnRunner persist_user_message (turn_runner.ex:1208), before AgentLoop.
 PersistUser(m) ==
     /\ pc[m] = "start"
     /\ MoveTo(m, "loop")

@@ -421,6 +421,9 @@ of an entity its rules are about. All still hold:
   in the timeline, and no rule reads them. `read_state` is a frontier the
   daemon caps at the newest row and announces to every watcher, the phones
   included.
+- A voice call's hand-off turn reporting what it read (`{:outside_sources,
+  set}` on its stream before its reply, 2026-10-27): only a turn with a voice
+  call id sends it, to the voice channel, and no companion client reads it.
 - `history_search` and scroll-back through `history_pull{before_seq}`: reads
   below the cursor that never move it. `search_results` is written in the
   reading step like a page (453c24fc).

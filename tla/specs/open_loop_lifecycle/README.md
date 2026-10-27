@@ -59,13 +59,13 @@ check):
 
 | Switch | The code | Off |
 |---|---|---|
-| `SingleClaimant` | The claim's `WHERE state = 'due' AND claimed_at IS NULL` (`open_loops_sql.ex:571-583`) and the scheduler's skip of an owner with a run in flight (`scheduler.ex:253-259`). Redundant layers; one switch turns off both. | Two runs hold the loop. |
-| `FinalizeIsCAS` | The finalising write's `WHERE id = ? AND state = 'due' AND claimed_at = ?` (`open_loops_sql.ex:487-498`). | The run writes whatever the row became. |
-| `ChecksBeforeSend` | `CheckIn.still_claimed/1` (`check_in.ex:427-436`) before the send, and the budget spend's `WHERE id = ? AND state = 'due' AND claimed_at = ?` (`open_loops_sql.ex:513-552`). Redundant layers; one switch turns off both. | The run sends without re-reading, and the spend writes whatever the row became. |
-| `WhereLiveGuard` | Every settle's `WHERE state IN ('open','due','asked')` (`open_loops_sql.ex:464-472`). | A settle reaches a closed or expired row. |
+| `SingleClaimant` | The claim's `WHERE state = 'due' AND claimed_at IS NULL` (`open_loops_sql.ex:596-608`) and the scheduler's skip of an owner with a run in flight (`scheduler.ex:253-259`). Redundant layers; one switch turns off both. | Two runs hold the loop. |
+| `FinalizeIsCAS` | The finalising write's `WHERE id = ? AND state = 'due' AND claimed_at = ?` (`open_loops_sql.ex:512-523`). | The run writes whatever the row became. |
+| `ChecksBeforeSend` | `CheckIn.still_claimed/1` (`check_in.ex:432-441`) before the send, and the budget spend's `WHERE id = ? AND state = 'due' AND claimed_at = ?` (`open_loops_sql.ex:538-577`). Redundant layers; one switch turns off both. | The run sends without re-reading, and the spend writes whatever the row became. |
+| `WhereLiveGuard` | Every settle's `WHERE state IN ('open','due','asked')` (`open_loops_sql.ex:489-497`). | A settle reaches a closed or expired row. |
 | `SettleClearsClaim` | `claimed_at = NULL` in every settle and finalize (`write_settle/5`, `:554-567`), backed by the `CHECK (claimed_at IS NULL OR state = 'due')`. | A settle leaves the claim. |
 | `BudgetRead` | The claim reads `budget_spent_since/3` (`:834-846`) through `Scheduler.budget_for/2` (`scheduler.ex:301-316`). | No budget. |
-| `SpendBeforeSend` | The run spends the owner's day before its one send (`CheckIn.spend_then_deliver/3`, `check_in.ex:401-425`; `Repo.spend_open_loop_budget/5`, `open_loops_sql.ex:513-552`), stamping `last_rung2_at`, the one column the budget reads and no touch writes. The same transaction refuses the stamp (`budget_spent`) when any row of the owner's already carries one since the local day began; with one loop modelled that branch is never taken. | The budget is the loop's last recorded touch, as before the fix. |
+| `SpendBeforeSend` | The run spends the owner's day before its one send (`CheckIn.spend_then_deliver/3`, `check_in.ex:406-430`; `Repo.spend_open_loop_budget/5`, `open_loops_sql.ex:538-577`), stamping `last_rung2_at`, the one column the budget reads and no touch writes. The same transaction refuses the stamp (`budget_spent`) when any row of the owner's already carries one since the local day began; with one loop modelled that branch is never taken. | The budget is the loop's last recorded touch, as before the fix. |
 | `TouchCap` | The slot table ends at the hand-back, whose touch arms the answer day (`Lifecycle.after_touch/4`, `following_touch/4`, `Defaults.slots/1`); the spent phase is checked first (`Lifecycle.phase/1`); `asked` is refused once touches are spent; the `CHECK touches BETWEEN 0 AND 3`. One switch for all. | The hand-back re-arms itself. |
 | `BootSweep` | `Scheduler.boot_sweep/1` (`scheduler.ex:187-202`). | Nothing runs at boot. |
 | `ScanExpires` | The due scan's expiries (`Lifecycle.due_decision/2`, `lifecycle.ex:114-153`). | The scan never expires a loop. |
@@ -255,6 +255,11 @@ checks 19 to 22.
 - **The 20-loop cap, message bounds and wording**, single-call rules in ExUnit
   and the capability eval.
 - **A history or telemetry write that errors.** `record_spoken/3` matches `:ok`.
+- **Where a loop may be read or changed, and its words' provenance
+  (2026-10-27).** The private-turn check, the `noted_after_outside_content`
+  column (migration 49) and the framing of a stamped loop's words in the due
+  note and the check-in decide no transition: no step reads the column, and
+  the check-in prompt's wording is outside the model.
 
 ## Assumptions
 

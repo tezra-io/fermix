@@ -34,9 +34,9 @@
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/lifecycle.ex @ a0092c2cef0b
 \* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/defaults.ex @ dce4830c823c
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/open_loops_sql.ex @ a1393b1c6eb2
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/open_loops_sql.ex @ c2a45ffb8a8e
 \* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/scheduler.ex @ ca94a8aacbbf
-\* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/check_in.ex @ 787d2a0ead1d
+\* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/check_in.ex @ 5c51dae8e631
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
@@ -56,7 +56,7 @@ CONSTANTS
     \* each is switched off by at least one check.
     SingleClaimant,      \* one run per loop: the claim takes only a due, unclaimed
                          \* row (claim/3's WHERE state = 'due' AND claimed_at IS
-                         \* NULL, open_loops_sql.ex:571-583), and the scheduler
+                         \* NULL, open_loops_sql.ex:596-608), and the scheduler
                          \* claims no loop whose owner has a run in flight
                          \* (Scheduler.weigh/2, scheduler.ex:253-259); redundant
                          \* layers, one switch for both
@@ -64,9 +64,9 @@ CONSTANTS
                          \* (id, state = 'due', claimed_at) (finalize/5, :487-498)
     ChecksBeforeSend,    \* the run re-reads the row at its outcome step and reports
                          \* closed_meanwhile when its claim no longer stands
-                         \* (CheckIn.still_claimed/1, check_in.ex:427-436), and
+                         \* (CheckIn.still_claimed/1, check_in.ex:432-441), and
                          \* the budget spend is a compare-and-set on the same claim
-                         \* (spend_budget/5, open_loops_sql.ex:513-552); redundant
+                         \* (spend_budget/5, open_loops_sql.ex:538-577); redundant
                          \* layers, one switch for both
     WhereLiveGuard,      \* every settle carries WHERE state IN ('open','due','asked')
                          \* (settle/4, :464-472), so a terminal row is unreachable
@@ -78,9 +78,9 @@ CONSTANTS
                          \* Scheduler.budget_for/2 (scheduler.ex:301-316) into
                          \* Lifecycle.rung2_eligible?/4 (lifecycle.ex:164-173)
     SpendBeforeSend,     \* the run spends the owner's day before its one send:
-                         \* CheckIn.spend_then_deliver/3 (check_in.ex:401-425) ->
+                         \* CheckIn.spend_then_deliver/3 (check_in.ex:406-430) ->
                          \* Repo.spend_open_loop_budget/5 (spend_budget/5,
-                         \* open_loops_sql.ex:513-552) stamps last_rung2_at, the
+                         \* open_loops_sql.ex:538-577) stamps last_rung2_at, the
                          \* column the budget reads, which no touch writes; off,
                          \* the budget is the loop's last recorded touch, as it
                          \* was before the fix (OL-1, OL-2)
@@ -91,7 +91,7 @@ CONSTANTS
                          \* CHECK touches BETWEEN 0 AND 3; one switch for all
     BootSweep,           \* the scheduler's boot clears every claimed_at
                          \* (Scheduler.boot_sweep/1, scheduler.ex:187-202;
-                         \* sweep_claims/1, open_loops_sql.ex:556-573)
+                         \* sweep_claims/1, open_loops_sql.ex:581-598)
     ScanExpires          \* the due scan expires a loop never asked once its date
                          \* passes, a hand-back a day after its slot, and an asked
                          \* row when its answer day ends (due_decision/2 :112-136)
@@ -220,7 +220,7 @@ BecomeDue ==
 (* The scheduler (OpenLoops.Scheduler, one GenServer) *)
 
 \* The due timer or the 60 s reconcile tick -> Scheduler.run_due/2
-\* (scheduler.ex:211-221) -> Repo.scan_due_open_loops (open_loops_sql.ex:587-684):
+\* (scheduler.ex:211-221) -> Repo.scan_due_open_loops (open_loops_sql.ex:612-709):
 \* one transaction per row, each decided by Lifecycle.due_decision/2. A claimed
 \* row is left to its check-in (lifecycle.ex:116).
 ScanArrived ==
@@ -250,7 +250,7 @@ Scan ==
 \* The same pass, Scheduler.weigh_due/3 (scheduler.ex:230-281): skip an owner
 \* with a run in flight, read the hours and the budget, Lifecycle.rung2_eligible?/4
 \* (window closed, active hours, budget; lifecycle.ex:164-173), then
-\* Repo.claim_open_loop_checkin/3 (open_loops_sql.ex:571-583) and a
+\* Repo.claim_open_loop_checkin/3 (open_loops_sql.ex:596-608) and a
 \* CheckInSupervisor child. CHOOSE takes one free child slot, always the same one
 \* for the same state: slots are interchangeable.
 Claim ==
@@ -266,7 +266,7 @@ Claim ==
 
 \* The restarted daemon's scheduler init: Scheduler.boot_sweep/1
 \* (scheduler.ex:187-202) -> Repo.sweep_open_loop_claims/1
-\* (open_loops_sql.ex:556-573), since no run outlives the daemon.
+\* (open_loops_sql.ex:581-598), since no run outlives the daemon.
 Boot ==
     /\ sched = "down"
     /\ sched' = "up"
@@ -283,7 +283,7 @@ Decide(r) ==
     /\ \E d \in {"speak", "silent", "close"} : run' = [run EXCEPT ![r] = d]
     /\ UNCHANGED <<rowVars, holder, clockVars, lost, sched, faults, obsVars>>
 
-\* CheckIn.speak/3 -> still_claimed/1 (check_in.ex:379-385, :427-436): one Repo
+\* CheckIn.speak/3 -> still_claimed/1 (check_in.ex:384-390, :432-441): one Repo
 \* read of the row. A row no longer due, or claimed by another, is
 \* closed_meanwhile: a traced skip, nothing sent.
 Check(r) ==
@@ -293,8 +293,8 @@ Check(r) ==
                  THEN "checked" ELSE "none"]
     /\ UNCHANGED <<rowVars, holder, clockVars, lost, sched, faults, obsVars>>
 
-\* CheckIn.spend_then_deliver/3 -> spend_budget/1 (check_in.ex:401-425) ->
-\* Repo.spend_open_loop_budget/5 (spend_budget/5, open_loops_sql.ex:513-552):
+\* CheckIn.spend_then_deliver/3 -> spend_budget/1 (check_in.ex:406-430) ->
+\* Repo.spend_open_loop_budget/5 (spend_budget/5, open_loops_sql.ex:538-577):
 \* the owner's day is spent before the send, a compare-and-set on the claim the
 \* run holds that stamps last_rung2_at, refused (budget_spent) in the same
 \* transaction when any row of the owner's already carries today's stamp; with
@@ -322,7 +322,7 @@ Shown(r) ==
     /\ shownWhileClosed' = (shownWhileClosed \/ state \in Terminal)
     /\ UNCHANGED wasTerminal
 
-\* CheckIn.deliver/3 -> send_once/2 (check_in.ex:427-445): Delivery.ChannelSend,
+\* CheckIn.deliver/3 -> send_once/2 (check_in.ex:432-450): Delivery.ChannelSend,
 \* one attempt under send_timeout_ms, proactive key open_loop:<id>:<touch>, to
 \* the snapshotted target: confirmed, refused, or shown with the answer lost (a
 \* timeout after the platform accepted). The send and its answer are one step.
@@ -333,7 +333,7 @@ Send(r) ==
        \/ AnswerCanBeLost /\ run' = [run EXCEPT ![r] = "failed"] /\ Shown(r)
     /\ UNCHANGED <<rowVars, holder, clockVars, lost, sched, faults>>
 
-\* CheckIn.record_spoken/3 (check_in.ex:447-471): ConversationStore.add_message/4,
+\* CheckIn.record_spoken/3 (check_in.ex:452-476): ConversationStore.add_message/4,
 \* the assistant chat_message marked open_loop_checkin, written before the ledger,
 \* so a crash between them leaves a history row and no touch.
 History(r) ==
@@ -344,7 +344,7 @@ History(r) ==
 \* The run's write lands only while its claim stands.
 Holds(r) == (state = "due" /\ r \in holder) \/ ~FinalizeIsCAS
 
-\* The rest of record_spoken/3, then CheckIn.finalize/2 (check_in.ex:487-504):
+\* The rest of record_spoken/3, then CheckIn.finalize/2 (check_in.ex:492-509):
 \* Repo.finalize_open_loop_checkin/5 with Lifecycle.after_touch/4 at rung 2. On
 \* :closed_meanwhile the message is already out and the touch is not counted;
 \* the day was spent before the send.
@@ -389,7 +389,7 @@ AfterOutcome(o) ==
                              rung2Today, wasTerminal>>
 
 \* The finalising write of a run that sent nothing (CheckIn.quiet/3, close/2,
-\* failed/4, delivery_failed/3; check_in.ex:359-373, :473-483): the same
+\* failed/4, delivery_failed/3; check_in.ex:364-378, :478-488): the same
 \* compare-and-set.
 Outcome(r) ==
     /\ run[r] \in {"silent", "close", "failed"}
