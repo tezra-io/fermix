@@ -30,6 +30,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   filter off, and Fermix tells you how many; adding the source back does not
   bring it back. A paused watcher's waiting items still wait for the resume,
   and items a watcher passed before either change still go to its task.
+- **A command Fermix started can no longer change cues through the general
+  settings and secret writes.** Storing or clearing a cue source's key or
+  secret, or changing the Cues settings (such as turning mandates back on
+  after you stopped them), is refused unless it comes from you through the
+  Fermix app or your own terminal, as every other cue change already was.
+  Every other secret and setting is unchanged.
 
 ## [0.17.0] - 2026-10-26
 

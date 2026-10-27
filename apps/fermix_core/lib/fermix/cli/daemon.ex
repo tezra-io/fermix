@@ -46,6 +46,8 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Management.Mobile, as: ManagementMobile
   alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Management.Router, as: ManagementRouter
+  alias FermixCore.Management.Secrets, as: ManagementSecrets
+  alias FermixCore.Management.Settings.Cues, as: SettingsCues
   alias FermixCore.Management.Text
   alias FermixCore.Observability
   alias FermixCore.Plugins.Runtime, as: PluginsRuntime
@@ -74,18 +76,23 @@ defmodule Fermix.CLI.Daemon do
   @max_profile_bytes 256
   # The owner's decisions on the phone channel, in both protocol versions:
   # opening a pairing window (its link carries the pairing secret), deciding
-  # on the phone that asked, closing the window, and forgetting a phone. And
-  # the cue writes that widen what reaches a task or what a task may do, the
-  # two values handed out (a source's token and a webhook's address), and the
-  # answer to a proposal (M60 app surface §3.6). Reads stay open.
-  @owner_decisions_v1 ~w(mobile.pair.start mobile.pair.decide mobile.pair.cancel
-                         mobile.devices.revoke cues.sources.add cues.sources.update
-                         cues.sources.remove cues.sources.enable cues.sources.disable
-                         cues.sources.token.new cues.sources.url.get cues.mandates.add
-                         cues.mandates.update cues.mandates.remove cues.mandates.enable
-                         cues.mandates.disable cues.mandates.approve cues.proposals.decide)
+  # on the phone that asked, closing the window, and forgetting a phone.
+  @mobile_decisions_v1 ~w(mobile.pair.start mobile.pair.decide mobile.pair.cancel
+                          mobile.devices.revoke)
   @owner_decisions_v0 ~w(mobile_pair_begin mobile_pair_decide mobile_pair_cancel
                          mobile_device_revoke)
+  # The cue writes that widen what reaches a task or what a task may do, the
+  # two values handed out (a source's token and a webhook's address), and the
+  # answer to a proposal (M60 app surface §3.6). Reads stay open.
+  @cue_decisions_v1 ~w(cues.sources.add cues.sources.update cues.sources.remove
+                       cues.sources.enable cues.sources.disable cues.sources.token.new
+                       cues.sources.url.get cues.mandates.add cues.mandates.update
+                       cues.mandates.remove cues.mandates.enable cues.mandates.disable
+                       cues.mandates.approve cues.proposals.decide)
+  # A cue source's secret rides the generic secret writes, so its id, spelled
+  # by the module that stores it, is what makes one of them a cue write.
+  @secret_writes ~w(secret.set secret.clear)
+  @cue_secret_prefix ManagementSecrets.cue_prefix()
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -329,33 +336,54 @@ defmodule Fermix.CLI.Daemon do
   end
 
   defp handle_v1_request(conn, request, state) do
+    family = owner_family(request.method, request.params)
+
     result =
-      case owner_caller(request.method, @owner_decisions_v1, conn, state) do
+      case owner_caller(family, request.method, conn, state) do
         :ok -> route_management_request(request, state)
-        {:error, _verdict} -> owner_decision_refusal(request.method)
+        {:error, _verdict} -> owner_decision_refusal(family)
       end
 
     response = management_response(request.request_id, result)
     send_response(conn, response)
   end
 
+  # Whose decision a v1 request is, or nil when it is nobody's. The generic
+  # writes are judged by what they write, not by their method: a cue source's
+  # secret and the `cues` section are cue writes, since switching
+  # `cues_mandates_enabled` back on undoes the owner's stop of every mandate.
+  # Every other secret and section stays open, as it was.
+  defp owner_family(method, _params) when method in @mobile_decisions_v1, do: :mobile
+  defp owner_family(method, _params) when method in @cue_decisions_v1, do: :cues
+
+  defp owner_family(method, %{"id" => @cue_secret_prefix <> _ref}) when method in @secret_writes,
+    do: :cues
+
+  defp owner_family("settings.apply", %{"section" => section}) when is_binary(section),
+    do: if(SettingsCues.owns?(section), do: :cues)
+
+  defp owner_family(_method, _params), do: nil
+
+  # v0 carries the phone's decisions alone.
+  defp owner_family_v0(method) when method in @owner_decisions_v0, do: :mobile
+  defp owner_family_v0(_method), do: nil
+
   # M19 §6.2: pairing is the owner's interactive decision, never the agent's.
   # The socket's trust boundary is its 0600 file, which every process of the
   # owner's account can open, so the kernel's peer is placed (SIDE-V1): a
   # process the daemon started is the agent or a harness, and nobody watches a
   # detached one. Either is refused, as is a peer that cannot be placed.
-  defp owner_caller(method, decisions, conn, state) do
-    if method in decisions,
-      do: placed_owner(method, SocketPeer.classify(conn, state.daemon_os_pid, state.os)),
-      else: :ok
-  end
+  defp owner_caller(nil, _method, _conn, _state), do: :ok
+
+  defp owner_caller(_family, method, conn, state),
+    do: placed_owner(method, SocketPeer.classify(conn, state.daemon_os_pid, state.os))
 
   # The same code as a channel that cannot answer, with its own sentence: the
   # channel is fine and doctor says so, so "not running" would send the
   # operator after the wrong fault. The capability and the sentence are the
-  # method's family's: the phone's own pair for `mobile.*`, the cues' for
-  # `cues.*`.
-  defp owner_decision_refusal("cues." <> _rest) do
+  # request's family's: the phone's own pair for its pairing methods, the
+  # cues' for theirs and for a cue write that rides a generic method.
+  defp owner_decision_refusal(:cues) do
     {:error, :unavailable,
      %{
        "capability" => ManagementCues.capability(),
@@ -363,7 +391,7 @@ defmodule Fermix.CLI.Daemon do
      }}
   end
 
-  defp owner_decision_refusal(_mobile_method) do
+  defp owner_decision_refusal(:mobile) do
     {:error, :unavailable,
      %{"capability" => "mobile", "sentence" => ManagementMobile.owner_only_sentence()}}
   end
@@ -452,7 +480,7 @@ defmodule Fermix.CLI.Daemon do
   end
 
   defp dispatch_initial_request(%{"method" => method} = request, conn, state) do
-    case owner_caller(method, @owner_decisions_v0, conn, state) do
+    case owner_caller(owner_family_v0(method), method, conn, state) do
       :ok -> dispatch_request(request, state)
       {:error, _verdict} -> error_reply(:owner_decision_refused)
     end

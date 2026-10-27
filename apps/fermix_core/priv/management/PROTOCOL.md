@@ -432,11 +432,14 @@ Notes that the shapes alone do not carry:
   `.update`, `.remove`, `.enable`, `.disable`, `.approve` and
   `cues.proposals.decide` answer `unavailable` {`capability`: `cues`,
   `sentence`: "Only the owner can change cues: use the Fermix app or your own
-  terminal."} to the same callers. The capability and the sentence are the
-  method's family's. This raises the bar and authenticates nobody: it stops a
-  model's own command from approving a mandate or answering a proposal. Every
-  cue read stays open, and `settings.apply` on the `cues` section is not an
-  owner decision: its switches narrow or stop.
+  terminal."} to the same callers. So do the two cue writes that ride a
+  generic method: `secret.set` and `secret.clear` on a `cue_source:` id, and
+  `settings.apply` on the `cues` section, whatever its values, since turning
+  `cues_mandates_enabled` back on undoes the owner's stop of every mandate. The
+  capability and the sentence are the request's family's. This raises the bar
+  and authenticates nobody: it stops a model's own command from approving a
+  mandate, answering a proposal or switching mandates back on. Every cue read
+  stays open, and so does every other secret and settings section.
 - **`channels.mobile` is the phone channel's settings section**: the enable
   switch and the remote-reach switch `mobile_iroh` (on by default), each
   applied the moment it is written (their rows' `restart` is false), and the
@@ -767,7 +770,12 @@ Notes that the shapes alone do not carry:
   `cue_source:<ref>:path_secret` are Fermix's to make and are refused with
   `invalid_params` and a sentence: a new token comes from
   `cues.sources.token.new`, an address from `cues.sources.url.get`. On a build
-  without cues the family answers `unavailable` {`capability`: `cues`}.
+  without cues the family answers `unavailable` {`capability`: `cues`}. Both
+  methods on this family are the owner's decisions, as every cue write is: a
+  caller the daemon does not place as the owner (a process it started, a
+  detached one, or one it cannot place) is answered `unavailable`
+  {`capability`: `cues`, `sentence`: "Only the owner can change cues: use the
+  Fermix app or your own terminal."}, and nothing is stored or cleared.
 - **A plugin row is one shape for two halves.** An installed plugin and a
   catalog entry that has never been fetched publish the same fields, so a client
   decodes one record rather than two. `installed` is what separates them.
@@ -1184,9 +1192,12 @@ one, is `details.sentence`. Three codes carry one:
   id.", and every settings validation refusal. A refusal with nothing to
   add carries `field` alone.
 - `config_unreadable` — `details.sentence` is the parser's own message.
-- `unavailable` — only when the phone channel refuses a pairing or forgetting
-  decision from a caller that is not the owner: "Only the owner can pair or
-  forget a phone; run this from your own terminal."
+- `unavailable` — when a caller that is not the owner asks for an owner's
+  decision: the phone's, "Only the owner can pair or forget a phone; run this
+  from your own terminal.", and the cues', "Only the owner can change cues:
+  use the Fermix app or your own terminal." And when the cues cannot reach
+  their records, with the cues' sentence for why: memory is off, or the
+  records could not be read.
 
 **A client that renders `message` alone renders "Request parameters are
 invalid." for that whole family**, which is the one sentence in the catalog that

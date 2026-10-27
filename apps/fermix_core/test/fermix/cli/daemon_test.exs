@@ -999,6 +999,97 @@ defmodule Fermix.CLI.DaemonTest do
                )
     end
 
+    # A cue source's secret and the `cues` section's switches are cue writes
+    # too, though they ride the generic `secret.set`, `secret.clear` and
+    # `settings.apply`: switching `cues_mandates_enabled` back on undoes the
+    # owner's stop of every mandate. So the target decides, not the method, and
+    # every other secret and section stays as open as it was.
+    @cue_writes [
+      {"secret.set", %{"id" => "cue_source:x:secret", "value" => "Tern-Quarry-41"}, :secret_set},
+      {"secret.clear", %{"id" => "cue_source:x:secret"}, :secret_clear},
+      {"settings.apply", %{"section" => "cues", "values" => %{"cues_mandates_enabled" => true}},
+       :settings_apply}
+    ]
+    @other_writes [
+      {"secret.set", %{"id" => "openai_api_key", "value" => "sk-Larch-0412"}, :secret_set},
+      {"secret.set", %{"id" => "env:HERON_TOKEN", "value" => "Heron-9081"}, :secret_set},
+      {"settings.apply", %{"section" => "assistant", "values" => %{"agent_name" => "Wren"}},
+       :settings_apply}
+    ]
+
+    test "a cue source's secret and the cues section are refused to a process the daemon " <>
+           "started, and to one it cannot place" do
+      golden = golden_error_details("unavailable_cues_owner_decision")
+
+      for peer <- [[daemon_os_pid: ParentProcess.os_pid()], [os: {:win32, :nt}]] do
+        socket_path = start_peer_daemon([management_opts: recording_writers()] ++ peer)
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            for {method, params, _write} <- @cue_writes do
+              assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                       Client.request_v1(method, params,
+                         socket_path: socket_path,
+                         timeout: @reply_ms
+                       ),
+                     method
+            end
+          end)
+
+        assert log =~ "only the owner may"
+        refute_received {:written, _write, _target}
+      end
+    end
+
+    test "a cue source's secret and the cues section reach their writers from a process " <>
+           "the daemon did not start" do
+      socket_path = start_peer_daemon(management_opts: recording_writers())
+      assert_writes_reached(socket_path, @cue_writes)
+    end
+
+    test "every other secret and section stays open to a process the daemon started" do
+      socket_path =
+        start_peer_daemon(
+          management_opts: recording_writers(),
+          daemon_os_pid: ParentProcess.os_pid()
+        )
+
+      assert_writes_reached(socket_path, @other_writes)
+    end
+
+    defp assert_writes_reached(socket_path, writes) do
+      for {method, params, write} <- writes do
+        assert {:ok, _result} =
+                 Client.request_v1(method, params, socket_path: socket_path, timeout: @reply_ms),
+               method
+
+        target = params["id"] || params["section"]
+        assert_received {:written, ^write, ^target}
+      end
+    end
+
+    # The router's own seams for the three generic writes, so a call that got
+    # past the check is seen arriving and stores nothing.
+    defp recording_writers do
+      test_pid = self()
+
+      management_opts() ++
+        [
+          secret_writer: fn id, _value ->
+            send(test_pid, {:written, :secret_set, id})
+            {:ok, %{"id" => id}}
+          end,
+          secret_clearer: fn id ->
+            send(test_pid, {:written, :secret_clear, id})
+            {:ok, %{"id" => id}}
+          end,
+          settings_writer: fn section, _values, _opts ->
+            send(test_pid, {:written, :settings_apply, section})
+            {:ok, %{"section" => section}}
+          end
+        ]
+    end
+
     defp cue_management_opts,
       do: management_opts() ++ [operation_opts: [cues: [memory?: false, running?: false]]]
 
