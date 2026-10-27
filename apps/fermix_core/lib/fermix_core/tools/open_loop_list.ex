@@ -3,11 +3,12 @@ defmodule FermixCore.Tools.OpenLoopList do
   List the owner's open loops (MILESTONE_78 §07, §08, §18): what Fermix is
   keeping an eye on, with each loop's date stated absolutely, where and when
   the owner said it, its state, how many times it has been raised and its next
-  check. Never a delivery destination, never a check-in's message text.
+  check. Never a delivery destination, never a check-in's message text. A loop
+  noted after outside content has its words framed (`Registry.result_view/1`).
 
   Read-only. Offered and run only while `[fermix_core.open_loops] enabled`, on
-  an attended owner turn or inside a check-in run (`OpenLoops.Access.read?/1`);
-  both halves of the gate ask the same question.
+  the owner's attended turn in a private chat or inside a check-in run
+  (`OpenLoops.Access.read?/1`); both halves of the gate ask the same question.
 
   Context seam: `:memory_repo` (the Repo).
   """
@@ -69,7 +70,9 @@ defmodule FermixCore.Tools.OpenLoopList do
       %{tag: "invalid_param", description: "state is not live, closed or any"},
       %{
         tag: "not_attended",
-        description: "the turn is neither an attended top-level owner turn nor a check-in run"
+        description:
+          "the turn is neither the owner's attended top-level turn in a private chat nor a " <>
+            "check-in run"
       },
       %{tag: "disabled", description: "open loops are turned off on this install"}
     ]
@@ -124,5 +127,9 @@ defmodule FermixCore.Tools.OpenLoopList do
     end
   end
 
-  defp view(loops), do: Enum.map(loops, &Registry.view/1)
+  # A stamped loop's words are framed, as its due note frames them. Listing one
+  # does not also count as the turn reading outside content: the agent loop and
+  # the realtime session take a call's taint from its capability and arguments,
+  # before any result exists, and a result has no way to add to it.
+  defp view(loops), do: Enum.map(loops, &Registry.result_view/1)
 end

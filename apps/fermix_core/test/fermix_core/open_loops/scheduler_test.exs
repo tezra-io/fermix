@@ -221,6 +221,7 @@ defmodule FermixCore.OpenLoops.SchedulerTest do
           owner_id: "owner_#{ctx.unique}",
           dedupe_key: "send the harbourview grant report #{id}",
           intention: "Send the Harbourview grant report",
+          noted_after_outside_content: false,
           why_it_matters: nil,
           matters_by_kind: "date",
           matters_by_date: ~D[2031-06-10],

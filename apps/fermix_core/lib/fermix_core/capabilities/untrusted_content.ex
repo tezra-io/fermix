@@ -21,10 +21,11 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   `Capabilities.AccessGate` reads the same boundary through `outside_source/1`
   to decide whether a turn has read content someone else could have written.
   What a turn's first model call carries has a provenance too:
-  `message_sources/1` (a forwarded message and its attachments) and
-  `recent_activity_source/0` are what `Agents.TurnRunner` seeds the turn with, a
-  provenance only: the content itself is not framed, so an owner's own
-  checklist still reads as theirs.
+  `message_sources/1` (a forwarded message and its attachments),
+  `recent_activity_source/0` and `open_loop_source/0` are what
+  `Agents.TurnRunner` seeds the turn with, a provenance only: the content itself
+  is not framed here (a due open loop's words are framed by `OpenLoops.DueNote`),
+  so an owner's own checklist still reads as theirs.
   """
 
   alias FermixCore.Attachments
@@ -39,8 +40,9 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   @typedoc """
   Where outside content came from: a plugin, one named tool, a cue source (its
   `source_ref`), an attachment of the turn's message (by kind), the Recent
-  Activity note, a coding run's report, or the turn's message itself when the
-  channel marked it forwarded. `outside_source/1` returns the first two from a
+  Activity note, a coding run's report, the turn's message itself when the
+  channel marked it forwarded, or a due open loop noted on a turn that had read
+  outside content. `outside_source/1` returns the first two from a
   tool's result; a cue run's context arrives seeded with the third (M60 S2), and
   an owner's turn with what its first model call carries, so either is tainted
   from its first token. Every reader takes the label from the second
@@ -54,6 +56,7 @@ defmodule FermixCore.Capabilities.UntrustedContent do
           | {:activity, String.t()}
           | {:harness, String.t()}
           | {:message, String.t()}
+          | {:open_loop, String.t()}
 
   # Tool categories whose result relays what a worker read.
   @relaying_categories [:delegation]
@@ -192,6 +195,25 @@ defmodule FermixCore.Capabilities.UntrustedContent do
       else: sources
   end
 
+  @doc """
+  The words the owner typed in a turn's `message`: its content as it arrived,
+  or nothing when the channel marked it forwarded, since someone else wrote
+  that, and nothing for a voice call's hand-off (`metadata.voice_call`), whose
+  text is the exchange the call's session put together, the voice model's
+  words among the owner's. Read before the attachment manifest is composed
+  into the content, so a file's name or text is never among them. An
+  open-loop answer given after outside content must quote these
+  (`OpenLoops.Registry.update/4`).
+  """
+  @spec owner_text(map()) :: String.t()
+  def owner_text(%{content: content} = message) when is_binary(content) do
+    metadata = Map.get(message, :metadata)
+    if forwarded_message?(metadata) or hand_off?(metadata), do: "", else: content
+  end
+
+  defp hand_off?(%{voice_call: _call}), do: true
+  defp hand_off?(_metadata), do: false
+
   defp forwarded_message?(%{} = metadata),
     do: Map.get(metadata, :forwarded) == true or Map.get(metadata, "forwarded") == true
 
@@ -200,6 +222,14 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   @doc "The outside source a Recent Activity note brings into the turn it renders in."
   @spec recent_activity_source() :: outside_source()
   def recent_activity_source, do: {:activity, "Recent Activity"}
+
+  @doc """
+  The outside source an open loop's due note brings into the turn it renders
+  in when the loop was noted on a turn that had read outside content: its
+  words may be someone else's (`OpenLoops.DueNote`).
+  """
+  @spec open_loop_source() :: outside_source()
+  def open_loop_source, do: {:open_loop, "an open loop noted after outside content"}
 
   @doc """
   The outside source a coding-run continuation turn carries: a finished run

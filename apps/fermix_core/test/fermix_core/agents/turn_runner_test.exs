@@ -2258,7 +2258,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
 
     test "an owner's chat turn carries it after the date note", %{repo: repo, loop: loop} do
-      messages = capture_prompt(%{channel: "telegram", chat_id: "40031"}, memory_repo: repo)
+      messages = capture_prompt(private_chat("40031"), memory_repo: repo)
 
       system_run = Enum.take_while(messages, &(&1.role == "system"))
       note_index = Enum.find_index(system_run, &(&1.content =~ "Open loop due."))
@@ -2268,8 +2268,23 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert note_index > date_index
 
       note = Enum.at(system_run, note_index).content
-      assert note =~ ~s(the owner said: "Post the Quillfeather newsletter draft")
+      assert note =~ ~s(the owner said)
+      assert note =~ ~s("Post the Quillfeather newsletter draft")
       assert note =~ "\nopen_loop_id: #{loop.id}"
+    end
+
+    # MILESTONE_78 §08: a group chat never receives a loop; the owner's loop
+    # waits for their next private turn.
+    test "a shared chat's turn does not carry it", %{repo: repo} do
+      for chat_type <- ["group", nil] do
+        messages =
+          capture_prompt(
+            %{channel: "telegram", chat_id: "-40031", metadata: %{chat_type: chat_type}},
+            memory_repo: repo
+          )
+
+        refute Enum.any?(messages, &(&1.content =~ "Open loop due.")), inspect(chat_type)
+      end
     end
 
     test "a loop said a minute ago is not carried into the next turn", %{repo: repo} do
@@ -2277,7 +2292,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       note_loop!(repo, "Return the Ellery library books", said_at)
       {:ok, %{due: []}} = Repo.scan_due_open_loops(DateTime.utc_now(), 50, server: repo)
 
-      messages = capture_prompt(%{channel: "telegram", chat_id: "40031"}, memory_repo: repo)
+      messages = capture_prompt(private_chat("40031"), memory_repo: repo)
 
       assert Enum.any?(messages, &(&1.content =~ "Post the Quillfeather newsletter draft"))
       refute Enum.any?(messages, &(&1.content =~ "Return the Ellery library books"))
@@ -2285,13 +2300,16 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
     test "a guest's turn does not carry it", %{repo: repo} do
       messages =
-        capture_prompt(%{channel: "telegram", chat_id: "guest-7", source_trust: :guest},
+        capture_prompt(Map.put(private_chat("guest-7"), :source_trust, :guest),
           memory_repo: repo
         )
 
       refute Enum.any?(messages, &(&1.content =~ "Open loop due."))
     end
   end
+
+  defp private_chat(chat_id),
+    do: %{channel: "telegram", chat_id: chat_id, metadata: %{chat_type: "private"}}
 
   # An imminent loop is due from the moment it is noted until its date passes,
   # so a turn, which reads the real clock, finds it inside its window. The
@@ -2322,6 +2340,8 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       source_trust: :operator,
       computer_use_origin: :interactive,
       conversation_key: {"telegram", "40031", :root},
+      chat_type: "private",
+      outside_sources: MapSet.new(),
       memory_owner_id: "default",
       memory_agent_id: "main"
     }

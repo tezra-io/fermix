@@ -144,14 +144,17 @@ defmodule FermixCore.AgentLoop do
   A finished loop. `tool_failures` counts the tool calls that came back as an
   error result (a tool that refused, exploded, was unknown, or received
   arguments it could not parse); the loop went on and the model answered, so
-  the run's status alone would never show it.
+  the run's status alone would never show it. `outside_sources` is what the
+  run read that someone else could have written, as it ended
+  (`record_outside_sources/3`).
   """
   @type loop_result :: %{
           response: String.t(),
           iterations: pos_integer(),
           total_tokens: non_neg_integer(),
           context_tokens: non_neg_integer(),
-          tool_failures: non_neg_integer()
+          tool_failures: non_neg_integer(),
+          outside_sources: MapSet.t()
         }
 
   @spec run(loop_opts()) :: {:ok, loop_result()} | {:error, term()}
@@ -662,7 +665,8 @@ defmodule FermixCore.AgentLoop do
       iterations: state.iteration,
       total_tokens: state.total_tokens,
       context_tokens: state.context_tokens,
-      tool_failures: state.tool_failures
+      tool_failures: state.tool_failures,
+      outside_sources: state.context.outside_sources
     }
   end
 

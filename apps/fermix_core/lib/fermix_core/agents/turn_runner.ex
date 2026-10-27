@@ -482,6 +482,7 @@ defmodule FermixCore.Agents.TurnRunner do
     # a one-sided read rather than a branch in the shared turn path (M41 §7).
     voice_call = VoiceCall.from_message(msg)
     session_id = session_id(voice_call)
+    owner_text = UntrustedContent.owner_text(msg)
     {msg, parts} = with_attachments(msg, state, session_id, voice_call)
     conversation_key = ConversationKey.from(msg)
     %RuntimeContext{} = ctx = state.runtime_context
@@ -648,7 +649,11 @@ defmodule FermixCore.Agents.TurnRunner do
       # for `Capabilities.AccessGate`, from this turn's message only, so a later
       # turn replaying the text is not tainted; the loop keeps it (`put_new`) and
       # folds in what the turn's tools read.
-      outside_sources: initial_outside_sources(msg)
+      outside_sources: initial_outside_sources(msg),
+      # What the owner typed, before the attachment manifest was composed into
+      # the content, and nothing for a forwarded message. An open-loop answer
+      # given after outside content must quote it (`OpenLoops.Registry`).
+      owner_text: owner_text
     }
 
     # The composed prompt + runtime section are cached per profile, so neither
@@ -661,7 +666,7 @@ defmodule FermixCore.Agents.TurnRunner do
     messages = inject_current_date(messages)
     messages = inject_recent_calls(messages, state, source_trust, voice_call)
     {messages, context} = inject_recent_activity(messages, context)
-    messages = inject_open_loop_due(messages, context)
+    {messages, context} = inject_open_loop_due(messages, context)
     messages = inject_live_call(messages, Map.get(state, :live_call))
 
     # `/ultra` is now a run-mode of the normal turn (not a separate
@@ -845,9 +850,19 @@ defmodule FermixCore.Agents.TurnRunner do
   # Rung 1 of a due open loop (MILESTONE_78 §04 stage 3): an owner's private turn
   # carries the note while a loop is due. It changes only when a loop comes due
   # or settles, so it sits in the leading system run beside the recent-activity
-  # note and ahead of the live-call line; `note/1` is nil on every other turn.
-  defp inject_open_loop_due(messages, context),
-    do: append_system_note(messages, DueNote.note(context))
+  # note and ahead of the live-call line; `note/1` is nil on every other turn. A
+  # loop noted after outside content may carry someone else's words, so a note
+  # that frames one records that source, as a Recent Activity note does.
+  defp inject_open_loop_due(messages, context) do
+    case DueNote.note(context) do
+      nil ->
+        {messages, context}
+
+      {note, sources} ->
+        context = Map.update!(context, :outside_sources, &MapSet.union(&1, sources))
+        {append_system_note(messages, note), context}
+    end
+  end
 
   # A typed chat turn during a Live call in the chat (M56 §4.4): the line exists
   # only while the call the snapshot froze does, and goes last in the leading
@@ -921,6 +936,7 @@ defmodule FermixCore.Agents.TurnRunner do
         )
 
         if silent?, do: tell_silent(Keyword.get(loop_opts, :stream_callback))
+        tell_outside_sources(context, Keyword.get(loop_opts, :stream_callback), result)
         {:ok, result.response, Map.get(result, :context_tokens, 0)}
 
       {:error, reason} ->
@@ -935,6 +951,19 @@ defmodule FermixCore.Agents.TurnRunner do
         {:error, reason}
     end
   end
+
+  # A Live or Grok call's voice model hears every hand-off's reply, so what one
+  # hand-off read can steer the words of the next. The hand-off tells its call
+  # what it read, from this process, before its reply, as it tells a reply drawn
+  # from Computer History; the call starts its later hand-offs with it. A turn
+  # that is no hand-off, or read nothing, tells nothing.
+  defp tell_outside_sources(%{voice_call_id: call_id}, stream_callback, %{outside_sources: read})
+       when is_binary(call_id) and is_function(stream_callback, 1) do
+    if MapSet.size(read) > 0, do: stream_callback.({:outside_sources, read})
+    :ok
+  end
+
+  defp tell_outside_sources(_context, _stream_callback, _result), do: :ok
 
   # M56 §4.4: the turn ends with no reply, and its channel, the one surface
   # that streams it, is told before the reply reaches it, from this same

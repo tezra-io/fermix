@@ -33,6 +33,9 @@ defmodule FermixChannels.Channels.VoiceTest do
       progress: fn text -> send(test_pid, {:progress, text}) && :ok end,
       activity: fn event -> send(test_pid, {:activity, event}) && :ok end,
       history_tainted: fn -> send(test_pid, {owner, :history_tainted}) && :ok end,
+      outside_sources: fn sources ->
+        send(test_pid, {owner, {:outside_sources, sources}}) && :ok
+      end,
       result: fn outcome -> send(test_pid, {owner, {:result, outcome}}) && :ok end
     }
 
@@ -107,6 +110,18 @@ defmodule FermixChannels.Channels.VoiceTest do
       assert stale.(:history_tainted) == {:error, :superseded_revision}
       refute_receive {:session, :history_tainted}, 100
     end
+  end
+
+  # What the turn read, told by the runner before the reply, goes to the call
+  # so its later hand-offs start with it.
+  test "the raw stream callback tells the session what the turn read" do
+    id = call_id()
+    :ok = register(id, "d-1", 1)
+    callback = Voice.build_raw_stream_callback(message(id, "d-1", 1))
+    read = MapSet.new([{:tool, "web_fetch"}])
+
+    assert callback.({:outside_sources, read}) == :ok
+    assert_receive {:session, {:outside_sources, ^read}}
   end
 
   # The chat's timeline, as the companion channel writes it: reports each row

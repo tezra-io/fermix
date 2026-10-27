@@ -677,6 +677,16 @@ defmodule FermixCore.Capabilities.AccessGateTest do
       refute AccessGate.owner_consent_turn?(tainted(ctx))
     end
 
+    # A realtime call's tool context names no channel and no chat type. It is
+    # not a private chat for these rules, so a watcher, a watcher's job and a
+    # cue mandate are not changed from a call, whatever open loops allow there.
+    test "the owner's realtime voice call is not a private chat", ctx do
+      call = voice(ctx, %{realtime?: true, conversation_key: {"realtime", ctx.sid, :root}})
+
+      refute AccessGate.owner_private_turn?(call)
+      refute AccessGate.owner_consent_turn?(call)
+    end
+
     test "a shared chat, a scheduled or cue run and a worker are never private", ctx do
       for context <- [
             chat(ctx, %{chat_type: "group"}),

@@ -11,11 +11,11 @@ defmodule FermixCore.Tools.OpenLoopToolsTrustInvariantTest do
 
   # MILESTONE_78 §08, §10 and §18, written as the whole-feature invariant the
   # Known Pitfalls section mandates: no open-loop tool is advertised or executed
-  # on a turn that is not an attended owner turn, the check-in run reaches only
-  # its own two, the main turn never reaches the check-in's outcome tool, and a
-  # disabled install advertises none of them anywhere. The tool list is read
-  # from the SEEDER, never spelled out here, so a member added later either
-  # joins this invariant or fails it.
+  # on a turn that is not an attended owner turn in a private chat, the check-in
+  # run reaches only its own two, the main turn never reaches the check-in's
+  # outcome tool, and a disabled install advertises none of them anywhere. The
+  # tool list is read from the SEEDER, never spelled out here, so a member added
+  # later either joins this invariant or fails it.
   @family_prefix "open_loop_"
 
   # The check-in run's context is built by the module that runs it, never
@@ -43,7 +43,35 @@ defmodule FermixCore.Tools.OpenLoopToolsTrustInvariantTest do
     {"missing source_trust", %{computer_use_origin: :interactive}}
   ]
 
-  @attended %{source_trust: :operator, computer_use_origin: :interactive}
+  @attended %{source_trust: :operator, computer_use_origin: :interactive, chat_type: "private"}
+
+  # MILESTONE_78 §08: group chats never produce, see or receive a loop. A chat is
+  # private by `Capabilities.AccessGate`'s one notion: a direct-message label, the
+  # owner's own paired phone or Mac app, or the owner's voice call. Anything else
+  # is shared, an absent label included: a Slack channel mention carries none.
+  @mention_key {"slack", "C0HALVERING", "1714000000.000100"}
+
+  @shared [
+    {"group chat", %{chat_type: "group"}},
+    {"Slack channel mention", %{chat_type: "channel", conversation_key: @mention_key}},
+    {"Slack mention with no chat type", %{chat_type: nil, conversation_key: @mention_key}}
+  ]
+
+  # The voice call is the realtime session's own tool context, which names no
+  # channel and no chat type: the session marks it a voice call and nothing else.
+  @private [
+    {"Telegram private chat", %{chat_type: "private"}},
+    {"Slack direct message", %{chat_type: "im", conversation_key: {"slack", "D0ORRIN", :root}}},
+    {"paired phone", %{channel: "mobile", conversation_key: {"mobile", "phone-1", :root}}},
+    {"Mac app", %{channel: "companion", conversation_key: {"companion", "mac-1", :root}}},
+    {"voice call",
+     %{
+       computer_use_origin: :voice,
+       realtime?: true,
+       voice_call_id: "root",
+       conversation_key: {"realtime", "dev-1", :root}
+     }}
+  ]
 
   setup do
     previous = Application.get_env(:fermix_core, :open_loops)
@@ -109,6 +137,42 @@ defmodule FermixCore.Tools.OpenLoopToolsTrustInvariantTest do
       end
 
       assert advertised(context) == []
+    end
+  end
+
+  for {label, context} <- @shared do
+    test "no open-loop tool is advertised or executed in a #{label}" do
+      context =
+        base(
+          Map.merge(
+            %{source_trust: :operator, computer_use_origin: :interactive},
+            unquote(Macro.escape(context))
+          )
+        )
+
+      for tool <- open_loop_tools() do
+        refute tool.advertise?(context), "#{tool.name()} was advertised in a #{unquote(label)}"
+
+        assert {:ok, result} = tool.execute(%{}, context)
+        refute result.success, "#{tool.name()} executed in a #{unquote(label)}"
+        assert result.error =~ tool.name()
+      end
+
+      assert advertised(context) == []
+    end
+  end
+
+  for {label, context} <- @private do
+    test "the owner's #{label} is offered the three main tools" do
+      context =
+        base(
+          Map.merge(
+            %{source_trust: :operator, computer_use_origin: :interactive},
+            unquote(Macro.escape(context))
+          )
+        )
+
+      assert advertised(context) == ["open_loop_list", "open_loop_note", "open_loop_update"]
     end
   end
 

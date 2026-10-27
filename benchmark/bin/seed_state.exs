@@ -355,6 +355,9 @@ defmodule SeedState do
       owner_id: MemoryConfig.owner_id(),
       dedupe_key: dedupe_key!(intention),
       intention: intention,
+      # The fixture is the owner's own words, as a loop noted on a turn that read
+      # nothing is.
+      noted_after_outside_content: false,
       why_it_matters: Map.get(spec, "why_it_matters"),
       matters_by_kind: "date",
       matters_by_date: matters_on,

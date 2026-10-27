@@ -70,7 +70,10 @@ What this deliberately does not cover:
   them freely. With the coding runs set up this holds on macOS too: such a job
   could start one. A request that runs again after the owner's `/confirm` (a
   directory grant, a coding-agent config acknowledgment) is the same request
-  and keeps what it had read.
+  and keeps what it had read. Two things carry it further: an open loop noted
+  in such a turn is marked, and the later turn its due note rides counts as
+  having read outside content; and on a GPT-Live or Grok voice call, once one
+  task has read it, every later task of that call has.
 - A finished coding run reports back as a follow-up turn, which may start the
   next run of the chain without asking (the owner's choice): with the same
   coding agent and the same starting folder as the run that finished, once per

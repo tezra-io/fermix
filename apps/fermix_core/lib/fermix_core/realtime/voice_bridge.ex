@@ -44,10 +44,13 @@ defmodule FermixCore.Realtime.VoiceBridge do
   reached it while it settled. Only a call in the chat detaches; a private
   call's tasks are cancelled as before.
 
-  A running turn reports one fact besides its progress and its result:
-  `history_tainted`, before the result, when the turn read Computer History
+  A running turn reports two facts besides its progress and its result, both
+  before the result: `history_tainted`, when the turn read Computer History
   content and its reply will carry the stamp (M56 §9), so the session never
-  gives that reply to a voice provider that may not carry it.
+  gives that reply to a voice provider that may not carry it; and
+  `outside_sources`, what the turn read that someone else could have written,
+  which the call keeps and hands every later delegation (`request`), since its
+  voice model heard the reply.
   """
 
   @typedoc """
@@ -69,6 +72,8 @@ defmodule FermixCore.Realtime.VoiceBridge do
   One delegation of a call. `turn_session_id` is minted by the SESSION (as
   `voice_delegation_<n>`) so the agent turn it produces is correlatable, and
   `revision` fences a re-asked task against a late answer to the earlier one.
+  `outside_sources` is what the call's earlier hand-offs read that someone else
+  could have written; the turn starts with it.
   """
   @type request :: %{
           call_id: String.t(),
@@ -76,7 +81,8 @@ defmodule FermixCore.Realtime.VoiceBridge do
           revision: pos_integer(),
           turn_session_id: String.t(),
           text: String.t(),
-          screen_frame: nil | %{mime_type: String.t(), data: binary()}
+          screen_frame: nil | %{mime_type: String.t(), data: binary()},
+          outside_sources: MapSet.t()
         }
 
   @typedoc """
@@ -88,6 +94,7 @@ defmodule FermixCore.Realtime.VoiceBridge do
           progress: (String.t() -> :ok),
           activity: (term() -> :ok),
           history_tainted: (-> :ok),
+          outside_sources: (MapSet.t() -> :ok),
           result: ({:ok, String.t()} | {:cancelled} | {:error, String.t()} -> :ok)
         }
 

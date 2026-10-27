@@ -42,6 +42,29 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   have; a mandate that fails its checks is "inactive", without the validator's
   path; and an approval that cannot be read is reported without the database
   error. The full reason still reaches the agent, the call's record and you.
+- **Open loops stay in your private chats.** Loops are recorded, listed,
+  settled and raised only in a direct message, the phone or Mac app, or a
+  voice call. A group chat or a Slack channel mention never sees them, and a
+  due loop waits for your next private message. Slack mentions now count as a
+  shared channel unless Slack marks them a direct message.
+- **A loop noted while reading someone else's content is marked, not
+  trusted.** The loop is still kept. Its words come back framed as data that
+  may not be yours: in the due note, the list, and the check-in, which asks
+  whether you meant it instead of saying you said it. When a due note carries
+  such a loop, that request counts as having read outside content, so commands
+  wait for you as after a web page. Every due note quotes a loop's words as
+  data, and loops kept before this change are not marked.
+- **Only your own words settle a loop after outside content.** In a request
+  that read something someone else wrote, a loop is closed, stopped, moved or
+  dropped only with words you typed in that message; a forwarded message or an
+  attachment never counts. In a voice call, once any task has read such
+  content, the loop waits for you to settle it in your chat.
+- **A voice call remembers what its tasks read.** On a GPT-Live or Grok call,
+  once one task reads a web page, an attachment or a plugin result, every
+  later task in that call counts as having read it: an access-sensitive
+  command then waits for your spoken yes, and a command on Linux or a coding
+  agent is refused, as in a call that read it itself. A call whose tasks read
+  nothing is unchanged.
 
 ## [0.17.0] - 2026-10-26
 

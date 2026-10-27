@@ -56,7 +56,8 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
     :close_reason,
     :revision,
     :created_at,
-    :updated_at
+    :updated_at,
+    :noted_after_outside_content
   ]
 
   @timestamp_columns [
@@ -190,6 +191,19 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
   @spec schema_sql() :: String.t()
   def schema_sql, do: @schema_sql
 
+  @doc """
+  The DDL of migration 49 (§08): `noted_after_outside_content`, 1 when the loop
+  is known to have been noted on a turn that had read content someone else
+  could have written, so its words are framed wherever they come back. Every
+  write states it. A row written before the column is 0: it is not known to
+  have been, and it keeps coming back as the owner's words, as it always has.
+  """
+  @spec outside_content_schema_sql() :: String.t()
+  def outside_content_schema_sql do
+    "ALTER TABLE open_loops ADD COLUMN noted_after_outside_content INTEGER NOT NULL " <>
+      "DEFAULT 0 CHECK (noted_after_outside_content IN (0, 1));"
+  end
+
   # --- normalization (caller process) --------------------------------------
 
   @doc "Validates a new loop's attributes into stored column values."
@@ -212,6 +226,7 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
     with {:ok, id} <- loop_id(Map.get(attrs, :id)),
          {:ok, dedupe_key} <- text(attrs, :dedupe_key, 1, Defaults.dedupe_key_max()),
          {:ok, intention} <- text(attrs, :intention, 1, Defaults.intention_max()),
+         {:ok, outside?} <- boolean(attrs, :noted_after_outside_content),
          {:ok, why} <- optional_text(attrs, :why_it_matters, Defaults.why_it_matters_max()),
          {:ok, agent_id} <- text(Map.put_new(attrs, :agent_id, "main"), :agent_id, 1, @text_max),
          {:ok, owner_id} <-
@@ -223,6 +238,7 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
          owner_id: owner_id,
          dedupe_key: dedupe_key,
          intention: intention,
+         noted_after_outside_content: outside?,
          why_it_matters: why
        }}
     end
@@ -385,6 +401,15 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
 
   defp optional_text(attrs, key, max_bytes),
     do: optional_bounded(Map.get(attrs, key), key, max_bytes)
+
+  # Stored as SQLite's 0 or 1; never defaulted, so every write says it.
+  defp boolean(attrs, key) do
+    case Map.get(attrs, key) do
+      true -> {:ok, 1}
+      false -> {:ok, 0}
+      _other -> {:error, {:invalid, key, :not_a_boolean}}
+    end
+  end
 
   defp optional_bounded(nil, _key, _max_bytes), do: {:ok, nil}
 
@@ -902,7 +927,8 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
     |> Map.new(fn column -> {column, parse_optional_timestamp(Map.fetch!(raw, column))} end)
     |> Map.merge(%{
       matters_by_date: Date.from_iso8601!(raw.matters_by_date),
-      matters_by_time: parse_optional_time(raw.matters_by_time)
+      matters_by_time: parse_optional_time(raw.matters_by_time),
+      noted_after_outside_content: raw.noted_after_outside_content == 1
     })
     |> then(&Map.merge(raw, &1))
   end

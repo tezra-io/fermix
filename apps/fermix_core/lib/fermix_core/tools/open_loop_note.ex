@@ -10,9 +10,10 @@ defmodule FermixCore.Tools.OpenLoopNote do
   absolutely, its first check and the delivery platform, never a destination.
   Capture is silent, so the description tells the model to say nothing about it.
 
-  Offered and run only while `[fermix_core.open_loops] enabled`, on an attended
-  owner turn that is not a check-in run (`OpenLoops.Access.mutate?/1`); both
-  halves of the gate ask the same question.
+  Offered and run only while `[fermix_core.open_loops] enabled`, on the owner's
+  attended turn in a private chat that is not a check-in run
+  (`OpenLoops.Access.mutate?/1`); both halves of the gate ask the same question.
+  What that turn had read is stamped on the loop (`OpenLoops.Registry`).
 
   Context seams: `:memory_repo` (the Repo), `:open_loop_scheduler` (the
   scheduler a new loop signals; nil signals none) and `:now_fn` (the clock),
@@ -134,7 +135,9 @@ defmodule FermixCore.Tools.OpenLoopNote do
       %{tag: "no_conversation", description: "the turn has no conversation to record against"},
       %{
         tag: "not_attended",
-        description: "the turn is not an attended top-level owner turn, or is a check-in run"
+        description:
+          "the turn is not the owner's attended top-level turn in a private chat, or is a " <>
+            "check-in run"
       },
       %{tag: "disabled", description: "open loops are turned off on this install"}
     ]
@@ -203,7 +206,7 @@ defmodule FermixCore.Tools.OpenLoopNote do
     %{
       "open_loop_id" => loop.id,
       "status" => Atom.to_string(noted.status),
-      "intention" => loop.intention,
+      "intention" => intention(noted.status, loop),
       "matters_by" => noted.stated_as,
       "horizon_class" => loop.horizon_class,
       "first_check" => noted.first_check,
@@ -211,4 +214,10 @@ defmodule FermixCore.Tools.OpenLoopNote do
       "live_loops" => noted.live_loops
     }
   end
+
+  # A created loop's words are the ones this call just gave. A restated one comes
+  # back as stored, framed when it was noted after outside content, as the list
+  # shows it.
+  defp intention(:created, loop), do: loop.intention
+  defp intention(:existing, loop), do: Registry.result_view(loop)["intention"]
 end

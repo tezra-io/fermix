@@ -7,12 +7,13 @@ defmodule FermixCore.Tools.OpenLoopUpdate do
   owner's date and no earlier; `not_yet` keeps it open for one more check;
   `asked` records that this reply raised it (rung 1). `owner_words` is a control
   argument, as `event_update`'s `owner_direction` is: validated for presence and
-  length by `OpenLoops.Registry`, never stored. The result is the loop as
-  `open_loop_list` renders it, plus its previous state.
+  length by `OpenLoops.Registry`, never stored, and on a turn that read outside
+  content refused unless it is in the message the owner typed. The result is
+  the loop as `open_loop_list` renders it, plus its previous state.
 
-  Offered and run only while `[fermix_core.open_loops] enabled`, on an attended
-  owner turn that is not a check-in run (`OpenLoops.Access.mutate?/1`); both
-  halves of the gate ask the same question.
+  Offered and run only while `[fermix_core.open_loops] enabled`, on the owner's
+  attended turn in a private chat that is not a check-in run
+  (`OpenLoops.Access.mutate?/1`); both halves of the gate ask the same question.
 
   Context seams: `:memory_repo`, `:open_loop_scheduler` and `:now_fn`, as
   `open_loop_note` takes them.
@@ -69,8 +70,9 @@ defmodule FermixCore.Tools.OpenLoopUpdate do
         owner_words: %{
           type: "string",
           description:
-            "The owner's words this answer rests on, excerpted near-verbatim as just the " <>
-              "clause. Required for every answer but asked. At most 240 characters."
+            "The owner's words this answer rests on, copied word for word from their own " <>
+              "message as just the clause. Required for every answer but asked. At most 240 " <>
+              "characters."
         },
         plan_at: %{
           type: "object",
@@ -124,13 +126,25 @@ defmodule FermixCore.Tools.OpenLoopUpdate do
       },
       %{tag: "missing_owner_words", description: "every answer but asked needs owner_words"},
       %{tag: "owner_words_too_long", description: "owner_words is over 240 characters"},
+      %{
+        tag: "owner_words_not_in_message",
+        description:
+          "the turn read outside content and owner_words is not in the message the owner typed"
+      },
+      %{
+        tag: "owner_words_unverifiable",
+        description:
+          "the turn read outside content and has no typed message to check owner_words against"
+      },
       %{tag: "plan_requires_date", description: "plan needs plan_at"},
       %{tag: "plan_after_date", description: "the plan is later than the loop's own date"},
       %{tag: "plan_passed", description: "the plan's time has already passed"},
       %{tag: "plan_at_without_plan", description: "plan_at goes only with answer plan"},
       %{
         tag: "not_attended",
-        description: "the turn is not an attended top-level owner turn, or is a check-in run"
+        description:
+          "the turn is not the owner's attended top-level turn in a private chat, or is a " <>
+            "check-in run"
       },
       %{tag: "disabled", description: "open loops are turned off on this install"}
     ]
@@ -207,6 +221,6 @@ defmodule FermixCore.Tools.OpenLoopUpdate do
   # already the absolute statement a plan or not_yet answer owes), plus the
   # state it left.
   defp view(%{loop: loop, previous_state: previous}) do
-    loop |> Registry.view() |> Map.put("previous_state", previous)
+    loop |> Registry.result_view() |> Map.put("previous_state", previous)
   end
 end

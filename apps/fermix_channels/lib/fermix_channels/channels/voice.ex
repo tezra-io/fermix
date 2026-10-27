@@ -18,10 +18,12 @@ defmodule FermixChannels.Channels.Voice do
     ordinary replies, and each reply is one delegation result. Taking the raw
     tier keeps the gateway from chunking, and this adapter then drops every
     delta — the session speaks the final answer once, and partial text reaching
-    the voice model would be spoken twice. The stream carries one thing on to
-    the session: `:history_tainted`, the runner's word, before the reply, that
-    the reply is drawn from Computer History (M56 §9), so the session gives it
-    to no voice that may not carry it.
+    the voice model would be spoken twice. The stream carries two things on to
+    the session, each the runner's word before the reply: `:history_tainted`,
+    that the reply is drawn from Computer History (M56 §9), so the session gives
+    it to no voice that may not carry it; and `{:outside_sources, sources}`,
+    what the turn read that someone else could have written, so the call's
+    later hand-offs start with it.
   - **Media goes to the chat.** The voice wire carries audio and text only, so
     a picture or file a delegation sends is written to the owner's chat
     (`Channels.Companion.send_media/3`), under the delegation's fence, in a
@@ -90,8 +92,8 @@ defmodule FermixChannels.Channels.Voice do
   The `:raw` tier's stream callback — a deliberate drop (see the moduledoc).
   Its job is to OWN the streaming decision, not to stream: with it the gateway
   never builds a draft or block engine, so one delegation produces exactly one
-  delivered answer. `:history_tainted` alone goes on to the session, fenced
-  like the answer it comes before.
+  delivered answer. `:history_tainted` and `{:outside_sources, sources}` alone
+  go on to the session, fenced like the answer they come before.
   """
   @impl true
   def build_raw_stream_callback(%Message{} = message) do
@@ -99,6 +101,7 @@ defmodule FermixChannels.Channels.Voice do
 
     fn
       :history_tainted -> notify(route, {:provenance, :history_tainted})
+      {:outside_sources, sources} -> notify(route, {:provenance, {:outside_sources, sources}})
       _event -> :ok
     end
   end
@@ -254,6 +257,12 @@ defmodule FermixChannels.Channels.Voice do
   defp dispatch(%{history_tainted: tainted}, {:provenance, :history_tainted})
        when is_function(tainted, 0) do
     _ = tainted.()
+    :ok
+  end
+
+  defp dispatch(%{outside_sources: read}, {:provenance, {:outside_sources, sources}})
+       when is_function(read, 1) do
+    _ = read.(sources)
     :ok
   end
 

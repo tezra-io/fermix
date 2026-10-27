@@ -71,6 +71,7 @@ defmodule FermixCore.Memory.Repo do
   @harness_continued_from_migration_version 46
   @cue_live_intake_migration_version 47
   @cue_retention_index_migration_version 48
+  @open_loop_outside_content_migration_version 49
   @sqlite_open_intent :readwritecreate
 
   # The cue SQL modules (M60), one per lane, all served by `cues_call/3`.
@@ -1078,6 +1079,7 @@ defmodule FermixCore.Memory.Repo do
           owner_id: String.t(),
           dedupe_key: String.t(),
           intention: String.t(),
+          noted_after_outside_content: boolean(),
           why_it_matters: String.t() | nil,
           matters_by_kind: String.t(),
           matters_by_date: Date.t(),
@@ -4729,7 +4731,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_cue_stop_reason_migration(conn, versions),
          :ok <- apply_harness_continued_from_migration(conn, versions),
          :ok <- apply_cue_live_intake_migration(conn, versions),
-         :ok <- apply_cue_retention_index_migration(conn, versions) do
+         :ok <- apply_cue_retention_index_migration(conn, versions),
+         :ok <- apply_open_loop_outside_content_migration(conn, versions) do
       :ok
     end
   end
@@ -4821,6 +4824,26 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{CuesSql.retention_index_schema_sql()}
         INSERT INTO schema_migrations(version) VALUES (#{@cue_retention_index_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # Whether an open loop is known to have been noted after outside content (M78
+  # §08), a column beside the loop's words, with its version in one transaction.
+  # It runs after 43, which made the table. A row written before is not known to
+  # have been, so it reads as not stamped: only captures from 49 on are stamped.
+  defp apply_open_loop_outside_content_migration(conn, versions) do
+    if Enum.member?(versions, @open_loop_outside_content_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{OpenLoopsSql.outside_content_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@open_loop_outside_content_migration_version});
         COMMIT;
         """
       )

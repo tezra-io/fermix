@@ -177,8 +177,29 @@ defmodule FermixChannels.Channels.SlackTest do
       assert message.chat_id == "C12345"
       assert message.reply_target == "C12345"
       assert message.thread_ts == "1714000000.000100"
-      assert message.metadata.channel_type == "channel"
-      assert message.metadata.chat_type == "channel"
+    end
+
+    # A mention carries no channel type, so the adapter names the room shared
+    # itself: a mention is how the bot is reached in a room others read, and only
+    # Slack's own word makes one a direct message.
+    test "a mention is a shared chat unless Slack says it is a direct message" do
+      assert {:ok, [mention]} = Slack.parse_webhook(app_mention_payload("<@U999> hello there"))
+
+      assert mention.metadata.channel_type == "channel"
+      assert mention.metadata.chat_type == "channel"
+
+      for undocumented <- ["group", "mpim", "app_home"] do
+        payload =
+          put_in(app_mention_payload("<@U999> hi"), ["event", "channel_type"], undocumented)
+
+        assert {:ok, [message]} = Slack.parse_webhook(payload)
+        assert message.metadata.chat_type == "channel", undocumented
+      end
+
+      direct = put_in(app_mention_payload("<@U999> hi"), ["event", "channel_type"], "im")
+      assert {:ok, [message]} = Slack.parse_webhook(direct)
+      assert message.metadata.channel_type == "im"
+      assert message.metadata.chat_type == "im"
     end
 
     # A channel-root mention carries no `thread_ts`, so the adapter falls back to
@@ -856,6 +877,8 @@ defmodule FermixChannels.Channels.SlackTest do
     }
   end
 
+  # Slack's documented `app_mention` shape: unlike a `message` event it names no
+  # `channel_type`, so nothing in the event says whether the room is shared.
   defp app_mention_payload(text) do
     %{
       "type" => "event_callback",
@@ -864,11 +887,10 @@ defmodule FermixChannels.Channels.SlackTest do
       "event" => %{
         "type" => "app_mention",
         "channel" => "C12345",
-        "channel_type" => "channel",
         "user" => "U12345",
-        "username" => "alice",
         "text" => text,
-        "ts" => "1714000000.000100"
+        "ts" => "1714000000.000100",
+        "event_ts" => "1714000000.000100"
       }
     }
   end

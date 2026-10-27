@@ -22,10 +22,14 @@ defmodule FermixCore.OpenLoops.RegistryTest do
     source_trust: :operator,
     computer_use_origin: :interactive,
     conversation_key: {"telegram", "40001", :root},
+    chat_type: "private",
+    outside_sources: MapSet.new(),
     memory_owner_id: "default",
     memory_agent_id: "main",
     session_id: "sess_open_loops_registry"
   }
+
+  @read_a_page MapSet.new([{:tool, "web_fetch"}])
 
   setup do
     unique = System.unique_integer([:positive])
@@ -333,6 +337,33 @@ defmodule FermixCore.OpenLoops.RegistryTest do
       assert {:error, :no_conversation} =
                Registry.note(params, Map.delete(@attended, :conversation_key), opts)
     end
+
+    # MILESTONE_78 §08: a group chat never produces a loop, and a chat with no
+    # label is shared, as a Slack channel mention is.
+    test "a group chat or an unlabelled chat may not record", %{opts: opts} do
+      params = %{"intention" => @intention, "matters_by" => @date}
+
+      for context <- [%{@attended | chat_type: "group"}, Map.delete(@attended, :chat_type)] do
+        assert {:error, :not_attended} = Registry.note(params, context, opts)
+      end
+    end
+
+    # What the turn that noted a loop had read is stamped on the row, so the
+    # loop's words are framed when they come back. A context the loop never
+    # stamped is read as having read outside content, as the access gate reads it.
+    test "a capture after outside content is stamped; a clean one is not", %{opts: opts} do
+      refute note!(opts).loop.noted_after_outside_content
+
+      read_a_page = %{@attended | outside_sources: @read_a_page}
+      params = %{"intention" => "Renew the Pellworth lease", "matters_by" => @date}
+      assert {:ok, %{loop: stamped}} = Registry.note(params, read_a_page, opts)
+      assert stamped.noted_after_outside_content
+
+      unstamped = Map.delete(@attended, :outside_sources)
+      params = %{"intention" => "Book the Ardent Hall for the launch", "matters_by" => @date}
+      assert {:ok, %{loop: unknown}} = Registry.note(params, unstamped, opts)
+      assert unknown.noted_after_outside_content
+    end
   end
 
   describe "update/4" do
@@ -504,6 +535,100 @@ defmodule FermixCore.OpenLoops.RegistryTest do
     end
   end
 
+  # A turn that read outside content can be steered by it, so on such a turn an
+  # answer rests only on words the owner typed: `owner_words` must appear, after
+  # the dedupe key's normalisation, in the owner's own text for the turn
+  # (`:owner_text`, the message as typed, before any attachment manifest, and
+  # empty when it was forwarded). `asked` names no words, and a clean turn is
+  # unchanged.
+  describe "update/4 on a turn that read outside content" do
+    setup %{opts: opts} do
+      %{loop: note!(opts).loop}
+    end
+
+    defp read_a_page(owner_text),
+      do: Map.merge(@attended, %{outside_sources: @read_a_page, owner_text: owner_text})
+
+    defp settle(loop, answer, words, context, opts),
+      do: Registry.update(loop.id, %{"answer" => answer, "owner_words" => words}, context, opts)
+
+    test "the owner's own words settle it, however cased or punctuated",
+         %{loop: loop, opts: opts} do
+      typed = "Good news: I SENT the Kestrel Valley application off, this morning!"
+
+      assert {:ok, %{loop: %{state: "closed"}}} =
+               settle(
+                 loop,
+                 "done",
+                 "sent the kestrel valley application off this morning",
+                 read_a_page(typed),
+                 opts
+               )
+    end
+
+    test "words found only in what the turn read are refused, and nothing changes",
+         %{loop: loop, opts: opts, repo: repo} do
+      # Words from a fetched page, words that matched only inside a longer word,
+      # words from an attachment's manifest (never part of the typed text), and
+      # anything at all when the message was forwarded (no typed text).
+      for {typed, words} <- [
+            {"What does this page say about the fellowship?", "the application was submitted"},
+            {"I redid the forms", "did the forms"},
+            {"Here is the form, have a look", "attachments 1 kestrel_form.pdf"},
+            {"", "I submitted it last night"}
+          ] do
+        assert {:error, :owner_words_not_in_message} =
+                 settle(loop, "done", words, read_a_page(typed), opts),
+               inspect({typed, words})
+      end
+
+      assert {:ok, %{state: "open"}} = Repo.get_open_loop(loop.id, server: repo)
+    end
+
+    test "every answer that names words is bound; asked names none", %{loop: loop, opts: opts} do
+      for answer <- ~w(done stop drop not_yet) do
+        assert {:error, :owner_words_not_in_message} =
+                 settle(loop, answer, "please stop asking", read_a_page("hi"), opts),
+               answer
+      end
+
+      later = at(opts, ~U[2031-06-07 14:00:00Z])
+
+      assert {:ok, %{loop: %{state: "asked"}}} =
+               Registry.update(loop.id, %{"answer" => "asked"}, read_a_page(""), later)
+    end
+
+    # The realtime voice session reads outside content into the whole call and
+    # carries no typed text at all: there is nothing to check the words against.
+    test "a call with no typed text cannot settle after outside content",
+         %{loop: loop, opts: opts} do
+      call = Map.put(@attended, :outside_sources, @read_a_page)
+
+      assert {:error, :owner_words_unverifiable} = settle(loop, "done", "done", call, opts)
+    end
+
+    # A Live or Grok hand-off's text is the exchange the call's session put
+    # together, so even words found in it were not typed by the owner: after
+    # outside content its answer waits for the owner's chat, as a realtime
+    # call's does.
+    test "a voice hand-off cannot settle after outside content", %{loop: loop, opts: opts} do
+      hand_off =
+        "user: the deposit is done"
+        |> read_a_page()
+        |> Map.merge(%{computer_use_origin: :voice, voice_call_id: "voice_live_7"})
+
+      assert {:error, :owner_words_unverifiable} =
+               settle(loop, "done", "the deposit is done", hand_off, opts)
+    end
+
+    test "a turn that read nothing is unchanged", %{loop: loop, opts: opts} do
+      clean = Map.put(@attended, :owner_text, "What's the weather like on Friday?")
+
+      assert {:ok, %{loop: %{state: "closed"}}} =
+               settle(loop, "done", "sent it off this morning", clean, opts)
+    end
+  end
+
   describe "list/3 and view/1" do
     setup %{opts: opts} do
       live = note!(opts).loop
@@ -619,6 +744,8 @@ defmodule FermixCore.OpenLoops.RegistryTest do
         :already_asked,
         :missing_owner_words,
         :owner_words_too_long,
+        :owner_words_not_in_message,
+        :owner_words_unverifiable,
         :plan_after_date,
         :plan_requires_date,
         :plan_passed,
@@ -636,6 +763,8 @@ defmodule FermixCore.OpenLoops.RegistryTest do
       end
 
       assert Registry.describe_error(:too_many_loops) =~ "20"
+      assert Registry.describe_error(:owner_words_not_in_message) =~ "owner's own words"
+      assert Registry.describe_error(:owner_words_not_in_message) =~ "ask the owner"
     end
   end
 end

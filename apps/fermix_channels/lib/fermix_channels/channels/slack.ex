@@ -322,6 +322,7 @@ defmodule FermixChannels.Channels.Slack do
 
   defp build_message(event, payload) do
     channel_id = Map.fetch!(event, "channel")
+    chat_type = chat_type(event)
 
     Message.new!(%{
       id: Map.fetch!(event, "ts"),
@@ -334,13 +335,21 @@ defmodule FermixChannels.Channels.Slack do
       metadata: %{
         team_id: Map.get(payload, "team_id"),
         user_id: Map.get(event, "user"),
-        channel_type: Map.get(event, "channel_type"),
-        chat_type: Map.get(event, "channel_type"),
+        channel_type: chat_type,
+        chat_type: chat_type,
         message_type: Map.get(event, "type")
       },
       attachments: parse_attachments(Map.get(event, "files", []))
     })
   end
+
+  # Slack's `app_mention` event names no `channel_type`, and a mention is how the
+  # bot is reached in a room others read, so a mention is a shared channel unless
+  # Slack itself says it is a direct message. Left unnamed, a check that lists
+  # the shared kinds (the "shared chat" addressing line) missed the room.
+  defp chat_type(%{"type" => "app_mention", "channel_type" => "im"}), do: "im"
+  defp chat_type(%{"type" => "app_mention"}), do: "channel"
+  defp chat_type(event), do: Map.get(event, "channel_type")
 
   defp content(%{"type" => "app_mention"} = event) do
     event

@@ -278,7 +278,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   Whether `context` is the owner's own attended turn in a private chat, whatever
   it has read: every condition of `owner_consent_turn?/1` except the last.
   `manage_watcher` asks it for a `drop` example, which a tainted private turn
-  may add.
+  may add, and `OpenLoops.Access` builds its own private turn on it.
   """
   @spec owner_private_turn?(map()) :: boolean()
   def owner_private_turn?(context) when is_map(context) do

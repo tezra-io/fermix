@@ -7,6 +7,7 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
 
   @tz "America/New_York"
   @open_loops_version 43
+  @outside_content_version 49
   # Monday 2031-06-02, 10:00 EDT; June 2031 is EDT (UTC-4). Every value here is invented.
   @now ~U[2031-06-02 14:00:00Z]
   @m ~U[2031-06-11 04:00:00Z]
@@ -42,6 +43,7 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
         owner_id: "default",
         dedupe_key: "send the harbourview grant report #{n}",
         intention: "Send the Harbourview grant report #{n}",
+        noted_after_outside_content: false,
         why_it_matters: "the foundation releases the second tranche on receipt",
         matters_by_kind: "date",
         matters_by_date: ~D[2031-06-10],
@@ -168,6 +170,49 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
     end
   end
 
+  # The stamp of what the turn that noted a loop had read (M78 §08), a column
+  # beside the loop's words: set when the loop is known to have been noted after
+  # outside content. A row written before it is not known to have been, so it
+  # reads as not stamped and keeps coming back as the owner's words.
+  describe "migration 49" do
+    test "a stamped loop and a clean one load back as they were written", %{repo: repo} do
+      create!(repo, 1)
+      create!(repo, 2, %{noted_after_outside_content: true})
+
+      assert {:ok, %{noted_after_outside_content: false}} =
+               Repo.get_open_loop(loop_id(1), server: repo)
+
+      assert {:ok, %{noted_after_outside_content: true}} =
+               Repo.get_open_loop(loop_id(2), server: repo)
+    end
+
+    test "a database at 48 gains the column, and its rows read as not stamped",
+         %{repo: repo, db_path: db_path} do
+      create!(repo, 1)
+      :ok = stop_supervised(repo)
+
+      with_raw_conn(db_path, fn conn ->
+        :ok =
+          Sqlite3.execute(conn, "ALTER TABLE open_loops DROP COLUMN noted_after_outside_content")
+
+        :ok = Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version = 49")
+        assert [[48]] = query!(conn, "SELECT MAX(version) FROM schema_migrations")
+      end)
+
+      reopened = :"#{repo}_reopened"
+      start_supervised!({Repo, name: reopened, enabled: true, database_path: db_path})
+
+      assert {:ok, versions} = Repo.migration_versions(server: reopened)
+      assert Enum.count(versions, &(&1 == @outside_content_version)) == 1
+
+      assert {:ok, %{noted_after_outside_content: false}} =
+               Repo.get_open_loop(loop_id(1), server: reopened)
+
+      assert :ok = Repo.migrate(server: reopened)
+      assert {:ok, ^versions} = Repo.migration_versions(server: reopened)
+    end
+  end
+
   describe "create and load" do
     test "a row saved from normalised shapes loads back with every column", %{repo: repo} do
       input = attrs(1, %{matters_by_kind: "datetime", matters_by_time: ~T[15:00:00]})
@@ -183,6 +228,7 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
                owner_id: "default",
                dedupe_key: "send the harbourview grant report 1",
                intention: "Send the Harbourview grant report 1",
+               noted_after_outside_content: false,
                why_it_matters: "the foundation releases the second tranche on receipt",
                matters_by_kind: "datetime",
                matters_by_date: ~D[2031-06-10],
@@ -302,6 +348,19 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
 
       assert {:error, {:invalid, :matters_by_time, :required}} =
                Repo.create_open_loop(attrs(1, %{matters_by_kind: "datetime"}), server: repo)
+
+      # What the noting turn had read is always stated, never assumed.
+      for provenance <- [nil, "yes", 1] do
+        assert {:error, {:invalid, :noted_after_outside_content, :not_a_boolean}} =
+                 Repo.create_open_loop(attrs(1, %{noted_after_outside_content: provenance}),
+                   server: repo
+                 )
+      end
+
+      assert {:error, {:invalid, :noted_after_outside_content, :not_a_boolean}} =
+               Repo.create_open_loop(Map.delete(attrs(1), :noted_after_outside_content),
+                 server: repo
+               )
 
       assert {:error, {:invalid, :last_message, :too_long}} =
                Repo.settle_open_loop(loop_id(1), %{last_message: String.duplicate("b", 1_801)},
