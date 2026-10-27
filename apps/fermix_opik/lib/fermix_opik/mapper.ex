@@ -170,8 +170,9 @@ defmodule FermixOpik.Mapper do
             # A cue run's mandate call (M60 §14): whether a validator decided
             # (`program | none`), its `cue_mandate_calls` row, and Fermix's own
             # sentence for a refusal (a validator's words stay in the row, and no
-            # argument the model sent is in it). No outside text, so all three
-            # ride outside the capture_content gate like the label above.
+            # argument the model sent, value the mandate pins, operator path or
+            # database error is in it). No outside text, so all three ride
+            # outside the capture_content gate like the label above.
             :validator,
             :mandate_call_id,
             :mandate_reason,

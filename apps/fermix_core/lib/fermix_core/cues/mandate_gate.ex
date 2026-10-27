@@ -264,12 +264,14 @@ defmodule FermixCore.Cues.MandateGate do
 
   # A reader writes no row, so its event carries no `mandate_call_id`; every
   # reader refusal carries `validator` (always "none": no validator judges a
-  # reader) and `mandate_reason`, Fermix's own sentence.
-  defp refuse_reader(capability, args, context, label, reason, validator) do
+  # reader) and `mandate_reason`, Fermix's own sentence as `reasons/2` traces it.
+  defp refuse_reader(capability, args, context, label, refusal, validator) do
+    {reason, traced} = reasons(validator, refusal)
+
     text =
       "#{capability.name} was not run: #{reason}. Report what you found with the tools you have."
 
-    metadata = %{validator: validator, mandate_reason: reason}
+    metadata = %{validator: validator, mandate_reason: traced}
     hold(capability, args, context, text, label, :deny, metadata)
   end
 
@@ -528,10 +530,15 @@ defmodule FermixCore.Cues.MandateGate do
     end
   end
 
-  # Fermix's words to the model for `Mandates.in_force/2`'s reasons.
+  # Fermix's words to the model for `Mandates.in_force/2`'s reasons. A load
+  # check's sentence can name a file under the home, and the Repo's error is
+  # not Fermix's to word, so those two are pairs whose traced half leaves them
+  # out (`reasons/2`).
   defp not_in_force(:switched_off), do: "the mandate is switched off (enabled = false)"
   defp not_in_force(:mandates_off), do: "unattended mandate calls are switched off in settings"
-  defp not_in_force({:inactive, why}), do: "the mandate is inactive: #{why}"
+
+  defp not_in_force({:inactive, why}),
+    do: {"the mandate is inactive: #{why}", "the mandate is inactive"}
 
   defp not_in_force(:unapproved),
     do: "the mandate is not approved yet; the owner approves it in settings"
@@ -540,7 +547,9 @@ defmodule FermixCore.Cues.MandateGate do
     do: "the mandate is disabled until the owner approves it again (#{why})"
 
   defp not_in_force({:approval_unreadable, reason}),
-    do: "the mandate's approval could not be read (#{inspect(reason)})"
+    do:
+      {"the mandate's approval could not be read (#{inspect(reason)})",
+       "the mandate's approval could not be read"}
 
   # The run follows its task as the claim read it (`Repo.claim_cue_run/4`
   # reads the job in the claim's transaction), so an approval given after the
@@ -615,10 +624,12 @@ defmodule FermixCore.Cues.MandateGate do
     end
   end
 
+  # A pair, as `reasons/2` reads it: the sentence with the value the argument
+  # must have, and the same sentence without it for the event.
   defp pin_args(mandate, call) do
     case Mandates.outside_grant(mandate, call.capability.name, call.prepared.args) do
       nil -> :ok
-      reason -> {:refuse, "mandate_refused", reason, "none"}
+      {sentence, traced} -> {:refuse, "mandate_refused", {sentence, traced}, "none"}
     end
   end
 
@@ -654,7 +665,9 @@ defmodule FermixCore.Cues.MandateGate do
 
   # --- the decision's effect -------------------------------------------------------------
 
-  defp refuse_call(call, context, label, reason, validator, opts, now) do
+  defp refuse_call(call, context, label, refusal, validator, opts, now) do
+    {reason, traced} = reasons(validator, refusal)
+
     case repo_call({:decide_refuse, call.id, reason, validator, now}, opts) do
       {:ok, :ok} ->
         :ok
@@ -668,7 +681,7 @@ defmodule FermixCore.Cues.MandateGate do
     hold(call.capability, call.prepared.args, context, text, label, :deny, %{
       validator: validator,
       mandate_call_id: call.id,
-      mandate_reason: metadata_reason(validator, reason)
+      mandate_reason: traced
     })
   end
 
@@ -803,11 +816,17 @@ defmodule FermixCore.Cues.MandateGate do
     {:held, Tool.error(text)}
   end
 
-  # Telemetry carries Fermix's own reasons only; a validator's words (which
-  # may echo arguments written from outside text) stay in the row and the
-  # model's result.
-  defp metadata_reason("program", _reason), do: "validator refused"
-  defp metadata_reason(_validator, reason), do: reason
+  # The reason the row and the model's result keep, and the one telemetry
+  # carries, for every refusal: a mandate call's and a reader's. Telemetry
+  # carries Fermix's own reasons only, and never what they quote: a
+  # validator's words (which may echo arguments written from outside text),
+  # the value a pinned argument must have (which may be the owner's own
+  # content), a load check's paths (which name the account) and the Repo's
+  # error stay in the row and the model's result. A reason that quotes
+  # nothing is one string, traced as it is.
+  defp reasons("program", reason), do: {reason, "validator refused"}
+  defp reasons(_validator, {sentence, traced}), do: {sentence, traced}
+  defp reasons(_validator, reason), do: {reason, reason}
 
   # The same words reach the model framed, labelled with the mandate (S12).
   defp refused_text(tool, "program", mandate_name, reason) do

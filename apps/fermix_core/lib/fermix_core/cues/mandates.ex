@@ -385,21 +385,37 @@ defmodule FermixCore.Cues.Mandates do
   @doc """
   Why a call of `tool` with `args` is outside `mandate` as it reads now (the
   tool is not one of its `tools`, or a `pin_args` entry does not have its
-  value), as the sentence a refusal gives; nil when it is inside. One rule for
-  the gate's call and a proposal's confirm.
+  value), as `{sentence, traced}`; nil when it is inside. One rule for the
+  gate's call and a proposal's confirm.
+
+  `sentence` is what a refusal gives the model and the owner, with the value a
+  pinned argument must have, so the model can correct its call. `traced` is
+  the same reason without that value, for telemetry, which is exported outside
+  the content-capture gate: what a mandate pins may be the owner's own
+  content, such as an address.
   """
-  @spec outside_grant(t(), String.t(), map()) :: String.t() | nil
+  @spec outside_grant(t(), String.t(), map()) :: {String.t(), String.t()} | nil
   def outside_grant(%__MODULE__{tools: tools, pin_args: pins}, tool, args)
       when is_binary(tool) and is_map(args) do
     if tool in tools,
       do: unpinned_arg(pins, args),
-      else: "#{tool} is no longer one of the mandate's tools"
+      else: not_a_tool(tool)
+  end
+
+  # The tool's name is the one the model called, which its event names already.
+  defp not_a_tool(tool) do
+    sentence = "#{tool} is no longer one of the mandate's tools"
+    {sentence, sentence}
   end
 
   defp unpinned_arg(pins, args) do
     case Enum.find(pins, fn {key, value} -> Map.fetch(args, key) != {:ok, value} end) do
-      nil -> nil
-      {key, value} -> "the argument #{key} must be #{inspect(value)}, as the mandate pins it"
+      nil ->
+        nil
+
+      {key, value} ->
+        {"the argument #{key} must be #{inspect(value)}, as the mandate pins it",
+         "the argument #{key} differs from what the mandate pins"}
     end
   end
 

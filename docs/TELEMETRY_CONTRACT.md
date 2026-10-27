@@ -150,7 +150,13 @@ call is refused as `refused_mandate_files`. Every mandate call also carries
 owner's validator program decided), and an event the gate emitted itself adds
 `mandate_reason`, Fermix's own sentence for the decision (a validator's own
 words stay in the row as "validator refused"; no argument the model sent is in
-it). A proposal the owner confirms runs later, from `/confirm` or an answer
+it, and neither is a value the mandate pins, an operator path from its
+configuration or a Repo error: a pinned argument the call got wrong is named
+alone, as "the argument <key> differs from what the mandate pins", a mandate
+that fails its load checks is "the mandate is inactive", and an approval that
+cannot be read is "the mandate's approval could not be read", while the full
+sentence reaches only the model's result, the call's row and the owner). A
+proposal the owner confirms runs later, from `/confirm` or an answer
 from one of the owner's devices (the Mac app, the management socket), under the
 proposing run's `session_id`, and its executor's event carries
 `access_gate: "confirmed"` and the call's `mandate_call_id`. `Mapper.tool_span/3`

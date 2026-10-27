@@ -709,7 +709,7 @@ defmodule FermixCore.Cues.Proposals do
   defp in_grant(mandate, tool, args) do
     case Mandates.outside_grant(mandate, tool, args) do
       nil -> :ok
-      reason -> {:refuse, reason}
+      {sentence, _traced} -> {:refuse, sentence}
     end
   end
 

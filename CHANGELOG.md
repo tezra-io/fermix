@@ -36,6 +36,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   after you stopped them), is refused unless it comes from you through the
   Fermix app or your own terminal, as every other cue change already was.
   Every other secret and setting is unchanged.
+- **Refused cue actions no longer quote your data in traces.** When a cue
+  task's call is refused, traces and Opik now say why without what the reason
+  quotes: a pinned argument the call got wrong is named, not the value it must
+  have; a mandate that fails its checks is "inactive", without the validator's
+  path; and an approval that cannot be read is reported without the database
+  error. The full reason still reaches the agent, the call's record and you.
 
 ## [0.17.0] - 2026-10-26
 
