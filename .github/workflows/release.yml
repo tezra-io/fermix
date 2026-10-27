@@ -702,10 +702,18 @@ jobs:
           fi
 
           brew tap tezra-io/tap
+          # Homebrew 6 loads nothing from a tap it was not told to trust, and
+          # `brew info` below reads the formula before an install would trust
+          # it, so trust the one formula this step checks (not the whole tap).
+          # The tap also has a cask called fermix, which a bare name loads too,
+          # so `info` and `install` name the formula. The update first brings
+          # `brew trust` to an older runner image.
+          brew update >/dev/null
+          brew trust --formula tezra-io/tap/fermix
           visible_version=""
           for attempt in $(seq 1 12); do
             brew update >/dev/null
-            visible_version="$(brew info --json=v2 tezra-io/tap/fermix | jq -r '.formulae[0].versions.stable // empty')"
+            visible_version="$(brew info --formula --json=v2 tezra-io/tap/fermix | jq -r '.formulae[0].versions.stable // empty')"
             [ "$visible_version" = "$version" ] && break
             [ "$attempt" -eq 12 ] || sleep 10
           done
@@ -713,5 +721,5 @@ jobs:
             echo "::error::Homebrew still exposes $visible_version instead of $version after 12 checks."
             exit 1
           }
-          brew install tezra-io/tap/fermix
+          brew install --formula tezra-io/tap/fermix
           fermix --version | grep -F "$version"

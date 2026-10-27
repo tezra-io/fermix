@@ -322,7 +322,11 @@ class ReleaseWorkflowTest(unittest.TestCase):
 
     def test_homebrew_formula_is_installed_and_reports_the_release_version(self):
         self.assertIn("runs-on: macos-15", self.release)
-        self.assertIn("brew install tezra-io/tap/fermix", self.release)
+        # Homebrew 6 refuses a tap it was not told to trust, and the tap's cask
+        # shares the formula's name, so the step trusts the formula and names it.
+        self.assertIn("brew trust --formula tezra-io/tap/fermix", self.release)
+        self.assertIn("brew info --formula --json=v2 tezra-io/tap/fermix", self.release)
+        self.assertIn("brew install --formula tezra-io/tap/fermix", self.release)
         self.assertIn('fermix --version | grep -F "$version"', self.release)
 
     def _job(self, name):
