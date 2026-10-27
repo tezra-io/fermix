@@ -29,7 +29,6 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.ComputerHistory.Gate, as: ComputerHistoryGate
   alias FermixCore.ComputerUse.Background
   alias FermixCore.Config, as: CoreConfig
-  alias FermixCore.Cues
   alias FermixCore.Harness.Artifacts, as: HarnessArtifacts
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Harness.Identity
@@ -3399,26 +3398,28 @@ defmodule Fermix.CLI.Doctor.Checks do
   UI-less `cron_*`, `meeting_*` and `filter_*` keys — is caught here at the
   operator's desk rather than at the next unattended job fire, meeting summary
   or cue filter call. (Whether a routing provider is actually authed is the
-  `auth_probe` check's job.) The `filter_*` keys are read and named only where
-  the build admits cues (`Cues.available?/0`; `cues_available?:` for a test).
+  `auth_probe` check's job.)
   """
-  @spec routing_overrides(keyword()) :: result()
-  def routing_overrides(opts \\ []) when is_list(opts) do
+  @spec routing_overrides() :: result()
+  def routing_overrides do
     subagent = RoutingOverrides.subagent()
     cron = RoutingOverrides.cron()
     meeting = RoutingOverrides.meeting()
-    filter = if cues_available?(opts), do: RoutingOverrides.filter()
+    filter = RoutingOverrides.filter()
 
-    entries =
-      [{"subagent_model", subagent}, {"cron_model", cron}, {"meeting_model", meeting}] ++
-        if(filter, do: [{"filter_model", filter}], else: [])
+    entries = [
+      {"subagent_model", subagent},
+      {"cron_model", cron},
+      {"meeting_model", meeting},
+      {"filter_model", filter}
+    ]
 
     case validate_routing_models(entries) do
       :ok ->
         ok(
           "routing",
           "subagent: #{describe_override(subagent)}; cron: #{describe_override(cron)}; " <>
-            "meeting: #{describe_override(meeting)}" <> filter_line(filter)
+            "meeting: #{describe_override(meeting)}; filter: #{describe_override(filter)}"
         )
 
       {:error, message} ->
@@ -3427,11 +3428,6 @@ defmodule Fermix.CLI.Doctor.Checks do
   rescue
     error in ArgumentError -> fail("routing", Exception.message(error))
   end
-
-  defp cues_available?(opts), do: Keyword.get_lazy(opts, :cues_available?, &Cues.available?/0)
-
-  defp filter_line(nil), do: ""
-  defp filter_line(filter), do: "; filter: #{describe_override(filter)}"
 
   # Parsing only proves the provider/effort *atoms* are known. A model slug is
   # free-form, so a typo or a model removed from the catalog (or left pointing at

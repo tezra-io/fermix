@@ -26,7 +26,6 @@ defmodule FermixChannels.Companion.Proposals do
   require Logger
 
   alias FermixChannels.Channels.Companion
-  alias FermixCore.Cues
   alias FermixCore.Cues.Proposals, as: CueProposals
   alias FermixCore.Text
 
@@ -66,16 +65,12 @@ defmodule FermixChannels.Companion.Proposals do
   end
 
   @doc """
-  The `proposal` event of every proposal still waiting, oldest first; none on a
-  build without cues or with memory off. A read that fails is logged and sends
+  The `proposal` event of every proposal still waiting, oldest first; none with
+  memory off. A read that fails is logged and sends
   none: the cards come back at the next connect.
   """
   @spec waiting(keyword()) :: [map()]
   def waiting(opts) when is_list(opts) do
-    if Cues.available?(), do: read_waiting(opts), else: []
-  end
-
-  defp read_waiting(opts) do
     case CueProposals.waiting_cards(opts) do
       {:ok, cards} ->
         Enum.map(cards, &offered/1)

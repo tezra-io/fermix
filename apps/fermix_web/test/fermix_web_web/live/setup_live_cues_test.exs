@@ -21,7 +21,6 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
   alias FermixTestSupport.CueDeliveryFixtures
   alias FermixTestSupport.CueFixtures
   alias FermixTestSupport.SecretWriterStub
-  alias FermixWebWeb.SetupLive.CuesState
 
   @now ~U[2026-10-17 12:00:00Z]
   @cue_text "Invented outside text 7781 that must stay off the owner page"
@@ -97,13 +96,18 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
   end
 
   describe "the tab" do
-    test "is absent from a build that does not admit cues, and sits before Doctor when it does" do
-      base = [%{id: "memory"}, %{id: "personalization"}, %{id: "doctor"}]
+    test "sits after Personalization and before Doctor", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/setup")
 
-      assert CuesState.visible_tabs(base, false) == base
+      order =
+        html
+        |> LazyHTML.from_fragment()
+        |> LazyHTML.query("[phx-value-tab]")
+        |> Enum.flat_map(&LazyHTML.attribute(&1, "phx-value-tab"))
+        |> Enum.uniq()
+        |> Enum.filter(&(&1 in ~w(personalization cues doctor)))
 
-      assert Enum.map(CuesState.visible_tabs(base, true), & &1.id) ==
-               ["memory", "personalization", "cues", "doctor"]
+      assert order == ~w(personalization cues doctor)
     end
 
     test "renders the switches, the door, the filter model and the chat-made watchers", %{

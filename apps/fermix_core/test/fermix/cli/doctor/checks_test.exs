@@ -817,17 +817,6 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "filter: provider=anthropic, model=claude-haiku-4-5"
     end
 
-    # The filter keys mean something only where the build admits cues, so a
-    # build without them neither names nor checks the filter.
-    test "a build without cues names no filter line" do
-      Application.put_env(:fermix_core, :routing, filter_model: "claude-opus-4-7")
-
-      result = Checks.routing_overrides(cues_available?: false)
-
-      assert result.status == :ok
-      refute result.detail =~ "filter"
-    end
-
     test "summarizes a valid meeting override (M21 Phase 3)" do
       Application.put_env(:fermix_core, :routing,
         meeting_provider: "anthropic",

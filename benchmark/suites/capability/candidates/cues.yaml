@@ -9,8 +9,8 @@ description: >
   runs' tool spans (checkers/cue_outcome.py). No user turn: the model under test is
   the watcher's filter and the watcher's task, reached through the real path.
 
-  CANDIDATE, parked out of the ranking sweep until the owner promotes it (cues are a
-  development-build feature, and a new task changes the composite): run it by name,
+  CANDIDATE, parked out of the ranking sweep until the owner promotes it (cues are off
+  by default, and a new task changes the composite): run it by name,
   `run_capability.py --candidates --suite cap_cues --confirm-daemon-isolated
   --confirm-isolated-env`.
 

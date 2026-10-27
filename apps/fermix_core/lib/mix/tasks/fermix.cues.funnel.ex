@@ -2,8 +2,9 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
   @shortdoc "Mounts or removes one webhook source's path on Tailscale Funnel for the current FERMIX_HOME"
 
   @moduledoc """
-  Puts one webhook source on the internet through Tailscale Funnel (M60 §6.5),
-  before the app has a surface for it:
+  Puts one webhook source on the internet through Tailscale Funnel (M60 §6.5)
+  from a source checkout; a release's setup page shows the same mount command
+  (`Cues.Webhook.funnel_args/2`) without this task's port check:
 
       mix fermix.cues.funnel <source_ref> [--apply]
       mix fermix.cues.funnel <source_ref> --remove [--apply]
@@ -96,14 +97,14 @@ defmodule Mix.Tasks.Fermix.Cues.Funnel do
   defp mount(ref, apply?, runner) do
     {port, random} = source_url!(ref)
     path = Webhook.path(ref, random)
-    target = "http://127.0.0.1:#{port}" <> path
+    [_funnel, _bg, _set_path, target] = args = Webhook.funnel_args(path, port)
     url = "https://#{tailnet_host!(runner)}#{path}"
     mounts = funnel_mounts!(runner)
     check_port!(mounts)
 
     case Enum.filter(mounts, &own_mount?(&1, ref)) do
       [] ->
-        add_mount(["funnel", "--bg", "--set-path=" <> path, target], url, apply?, runner)
+        add_mount(args, url, apply?, runner)
 
       [%{path: ^path, target: ^target}] ->
         Mix.shell().info("Source #{ref} is already mounted at #{url}")

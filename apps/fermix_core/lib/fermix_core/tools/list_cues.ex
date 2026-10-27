@@ -290,8 +290,7 @@ defmodule FermixCore.Tools.ListCues do
 
   defp answer("sources", args, context) do
     with :ok <- setup_filters("sources", args),
-         {:ok, %{"sources" => rows}} <-
-           setup_rows(ManagementCues.sources_list(read_opts(context))),
+         {:ok, %{"sources" => rows}} <- ManagementCues.sources_list(read_opts(context)),
          {:ok, rows} <- named_source(rows, string(args, "source")) do
       {:ok, sources_body(Enum.map(rows, &source_view/1))}
     end
@@ -301,7 +300,7 @@ defmodule FermixCore.Tools.ListCues do
     read_opts = read_opts(context)
 
     with :ok <- setup_filters("mandates", args),
-         {:ok, %{"mandates" => rows}} <- setup_rows(ManagementCues.mandates_list(read_opts)) do
+         {:ok, %{"mandates" => rows}} <- ManagementCues.mandates_list(read_opts) do
       {:ok, mandates_body(mandates_enabled?(read_opts), Enum.map(rows, &mandate_view/1))}
     end
   end
@@ -370,9 +369,6 @@ defmodule FermixCore.Tools.ListCues do
   defp takes("mandates"), do: "no filter"
 
   defp joined(keys), do: keys |> Enum.sort() |> Enum.join(", ")
-
-  defp setup_rows({:error, {:unavailable, _capability, sentence}}), do: {:error, sentence}
-  defp setup_rows(result), do: result
 
   defp named_source(rows, nil), do: {:ok, rows}
 

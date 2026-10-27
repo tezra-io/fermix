@@ -28,7 +28,6 @@ defmodule FermixCore.Management.CuesTest do
   alias FermixTestSupport.SecretWriterStub
 
   @now ~U[2026-10-17 12:00:00.000000Z]
-  @unavailable %{"capability" => "cues", "sentence" => "Cues are not part of this build."}
   @memory_off "Cues keep their records in memory, which is off."
 
   # Stands in for `Cues.Proposals` (lane E2's `records/2`, `card/2` and
@@ -98,7 +97,6 @@ defmodule FermixCore.Management.CuesTest do
     %{repo: repo, conn: conn} = CueFixtures.start_repo("management")
 
     opts = [
-      available?: true,
       memory?: true,
       running?: false,
       repo: repo,
@@ -168,19 +166,6 @@ defmodule FermixCore.Management.CuesTest do
   end
 
   describe "cues.status" do
-    test "a build without cues says so and counts nothing", %{opts: opts} do
-      assert {:ok, status} = Cues.status(Keyword.put(opts, :available?, false))
-
-      assert %{
-               "available" => false,
-               "state" => "unavailable",
-               "status_sentence" => "Cues are not part of this build.",
-               "door" => %{"state" => "not_running", "reason" => nil}
-             } = status
-
-      assert Enum.all?(status["counts"], fn {_key, count} -> count == 0 end)
-    end
-
     test "off, waiting for memory, waiting for a restart, and running", %{opts: opts} do
       assert {:ok, %{"state" => "off", "status_sentence" => "Cues are off."}} = Cues.status(opts)
 
@@ -247,54 +232,12 @@ defmodule FermixCore.Management.CuesTest do
     end
   end
 
-  describe "a build without cues" do
-    # D1: the methods join the catalog on every build; only the status answers.
-    test "every method but the status answers unavailable with the daemon's sentence", %{
-      opts: opts
-    } do
-      opts = Keyword.put(opts, :available?, false)
-
-      cases = [
-        {"cues.sources.list", %{}},
-        {"cues.sources.get", %{"ref" => "a"}},
-        {"cues.sources.form", %{}},
-        {"cues.sources.add", %{"ref" => "a", "kind" => "feed", "values" => %{}}},
-        {"cues.sources.update", %{"ref" => "a", "values" => %{}}},
-        {"cues.sources.remove", %{"ref" => "a"}},
-        {"cues.sources.enable", %{"ref" => "a"}},
-        {"cues.sources.disable", %{"ref" => "a"}},
-        {"cues.sources.token.new", %{"ref" => "a"}},
-        {"cues.sources.url.get", %{"ref" => "a"}},
-        {"cues.watchers.list", %{}},
-        {"cues.watchers.get", %{"name" => "a"}},
-        {"cues.mandates.list", %{}},
-        {"cues.mandates.choices", %{}},
-        {"cues.mandates.add", %{"name" => "a", "values" => %{}}},
-        {"cues.mandates.update", %{"name" => "a", "values" => %{}}},
-        {"cues.mandates.remove", %{"name" => "a"}},
-        {"cues.mandates.enable", %{"name" => "a"}},
-        {"cues.mandates.disable", %{"name" => "a"}},
-        {"cues.mandates.approve", %{"name" => "a"}},
-        {"cues.proposals.list", %{}},
-        {"cues.proposals.get", %{"proposal_id" => "cpr_1"}},
-        {"cues.proposals.decide", %{"proposal_id" => "cpr_1", "decision" => "deny"}}
-      ]
-
-      for {method, params} <- cases do
-        assert route(method, params, opts) == {:error, :unavailable, @unavailable}, method
-      end
-
-      assert {:ok, %{"available" => false}} = route("cues.status", %{}, opts)
-    end
-
-    test "publishes no cues section" do
-      refute Enum.any?(Settings.sections(cues_available?: false), &(&1.id == "cues"))
-      assert Settings.get("cues", cues_available?: false) == {:error, {:unknown_section, "cues"}}
-    end
-
-    test "refuses a cue source's secret as unavailable" do
-      assert Secrets.set("cue_source:gh:secret", "s3cret", cues_available?: false) ==
-               {:error, {:unavailable, "cues", "Cues are not part of this build."}}
+  describe "every build" do
+    # D1: every build has cues, so the methods, the status and the section are
+    # on all of them.
+    test "publishes the cues section and a status that says cues are here", %{opts: opts} do
+      assert Enum.any?(Settings.sections(), &(&1.id == "cues"))
+      assert {:ok, %{"available" => true}} = route("cues.status", %{}, opts)
     end
   end
 
@@ -837,7 +780,7 @@ defmodule FermixCore.Management.CuesTest do
 
   describe "the source form" do
     test "with nothing chosen it is a feed's" do
-      assert {:ok, form} = Cues.sources_form(nil, nil, nil, available?: true)
+      assert {:ok, form} = Cues.sources_form(nil, nil, nil)
 
       assert Enum.map(form["kinds"], & &1["id"]) == ~w(feed stream webhook local_push)
       assert Enum.map(form["presets"], & &1["id"]) == ~w(github rss)
@@ -849,7 +792,7 @@ defmodule FermixCore.Management.CuesTest do
     # A webhook has no URL to type and a local push no token to paste: the
     # kind's own line says Fermix makes them when the source is added.
     test "a kind that Fermix makes an address or a token for says so" do
-      assert {:ok, form} = Cues.sources_form(nil, nil, nil, available?: true)
+      assert {:ok, form} = Cues.sources_form(nil, nil, nil)
       sentences = Map.new(form["kinds"], &{&1["id"], &1["sentence"]})
 
       assert sentences["webhook"] =~ "address Fermix makes when you add this source"
@@ -857,7 +800,7 @@ defmodule FermixCore.Management.CuesTest do
     end
 
     test "a preset decides the kind and fills its fields under More options" do
-      assert {:ok, form} = Cues.sources_form(nil, "github", nil, available?: true)
+      assert {:ok, form} = Cues.sources_form(nil, "github", nil)
 
       keys = Enum.map(form["rows"], & &1["key"])
       assert keys == ~w(ref verify header algorithm prefix id_header content_hash type_header
@@ -877,7 +820,7 @@ defmodule FermixCore.Management.CuesTest do
     test "every row keeps its explanation behind info, with no footer" do
       rows =
         for {kind, preset} <- [{"feed", nil}, {"stream", nil}, {nil, "github"}],
-            {:ok, form} = Cues.sources_form(kind, preset, nil, available?: true),
+            {:ok, form} = Cues.sources_form(kind, preset, nil),
             row <- form["rows"],
             do: row
 
@@ -895,7 +838,7 @@ defmodule FermixCore.Management.CuesTest do
     # with an example for its empty state, its API key and secret straight after
     # its address, and a note saying what it does.
     test "a stream with no preset is the general WebSocket source's form" do
-      assert {:ok, form} = Cues.sources_form("stream", nil, nil, available?: true)
+      assert {:ok, form} = Cues.sources_form("stream", nil, nil)
 
       assert Enum.map(form["rows"], & &1["key"]) ==
                ~w(ref url key secret key_header secret_header auth_message subscribe_message
@@ -941,19 +884,19 @@ defmodule FermixCore.Management.CuesTest do
 
     test "the engine ships no Bluesky preset: its form is refused" do
       for kind <- [nil, "stream"] do
-        assert Cues.sources_form(kind, "bluesky_jetstream", nil, available?: true) ==
+        assert Cues.sources_form(kind, "bluesky_jetstream", nil) ==
                  {:error, {:invalid_params, "preset", "Fermix has no preset by that name."}}
       end
     end
 
     test "a choice it does not know, or a preset of another kind, is refused" do
-      assert Cues.sources_form("pigeon", nil, nil, available?: true) ==
+      assert Cues.sources_form("pigeon", nil, nil) ==
                {:error, {:invalid_params, "kind", "Fermix has no source kind by that name."}}
 
-      assert Cues.sources_form("feed", "github", nil, available?: true) ==
+      assert Cues.sources_form("feed", "github", nil) ==
                {:error, {:invalid_params, "preset", "The GitHub preset makes a Webhook source."}}
 
-      assert Cues.sources_form("webhook", nil, "md5", available?: true) ==
+      assert Cues.sources_form("webhook", nil, "md5") ==
                {:error,
                 {:invalid_params, "verify", "This setting takes one of its published values."}}
     end
@@ -1630,19 +1573,14 @@ defmodule FermixCore.Management.CuesTest do
     # The two forms are the daemon's words, so their goldens are held to the
     # very rows and sentences the form answers, not only their shape.
     test "the golden forms are the ones the daemon answers" do
-      assert Cues.sources_form(nil, "github", nil, available?: true) ==
+      assert Cues.sources_form(nil, "github", nil) ==
                {:ok, named_result("cues_sources_form")}
 
-      assert Cues.sources_form("stream", nil, nil, available?: true) ==
+      assert Cues.sources_form("stream", nil, nil) ==
                {:ok, named_result("cues_sources_form_stream")}
     end
 
     test "the cue refusals are the golden ones", %{opts: opts} do
-      assert {:error, :unavailable, details} =
-               route("cues.sources.list", %{}, Keyword.put(opts, :available?, false))
-
-      assert details == golden_error("unavailable_cues_build")
-
       assert {:error, :unavailable, details} =
                route("cues.watchers.list", %{}, Keyword.put(opts, :memory?, false))
 

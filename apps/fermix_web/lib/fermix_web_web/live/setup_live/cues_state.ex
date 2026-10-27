@@ -18,8 +18,7 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   timezone`, through `ComputerHistory.Config.timezone/1`), so the pane can
   write a row's time short and local.
 
-  The tab exists only in a build that admits cues (`visible_tabs/2`). Nothing
-  here shows cue text: watchers are counts and ids, sources are Fermix's own
+  Nothing here shows cue text: watchers are counts and ids, sources are Fermix's own
   status columns, and a secret is shown as set or not set. The two values a
   page shows once (a new local-push token, a webhook URL) live in `reveal`,
   which every following event clears. The presets are
@@ -42,7 +41,6 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretWriter
 
-  @tab %{id: "cues", label: "Cues", component: nil, description: "Outside input"}
   @url_note "Keep it private: it is half of what a request needs."
   @door FermixCore.Cues.Door
 
@@ -84,15 +82,6 @@ defmodule FermixWebWeb.SetupLive.CuesState do
           | :refresh
           | {:saved, String.t(), keyword()}
           | {:error, term(), map()}
-
-  @doc "The setup tabs with Cues before Doctor when `available?` (the build admits cues)."
-  @spec visible_tabs([map()], boolean()) :: [map()]
-  def visible_tabs(tabs, false) when is_list(tabs), do: tabs
-
-  def visible_tabs(tabs, true) when is_list(tabs) do
-    {before, rest} = Enum.split_while(tabs, &(&1.id != "doctor"))
-    before ++ [@tab | rest]
-  end
 
   @doc "The tab's state from the wizard's config snapshot and the daemon's reports."
   @spec build(map(), keyword()) :: map()
@@ -249,12 +238,13 @@ defmodule FermixWebWeb.SetupLive.CuesState do
     end
   end
 
-  # Removing a webhook source leaves a Tailscale Funnel mount of it in place;
-  # the funnel task takes it down, even once the source has left the config.
+  # Removing a webhook source leaves a Tailscale Funnel mount of it in place.
   defp funnel_note(state, ref) do
     if Enum.any?(state.sources, &(&1.ref == ref and &1.kind == "webhook")),
       do: [
-        "If you put it on Tailscale Funnel, mix fermix.cues.funnel #{ref} --remove --apply takes the mount down."
+        "If you put it on Tailscale Funnel, its mount stays: tailscale funnel status lists it " <>
+          "under /cues/hooks/#{ref}/, and tailscale funnel --https=443 --set-path=<that path> off " <>
+          "takes it down."
       ],
       else: []
   end

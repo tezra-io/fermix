@@ -37,13 +37,13 @@ to the sandbox `allowed_roots` (e.g. the repo checkout for behavioral
 repo-read cases); omit it for capability runs, whose preconditions refuse any
 root outside the home (the always-present `<home>/skills` root is in-home).
 
-`--cues` (M60, development builds) turns cues on for the cue suites: `[fermix_core.cues]`
+`--cues` (M60) turns cues on for the cue suites: `[fermix_core.cues]`
 enabled on a free door port picked at seed time (so two eval homes never share
 one), the local-push sources the cue suites post to with their tokens in the
 `@file` store, and the default filter model (the scored model unless
 `--cue-filter-model PROVIDER/MODEL` names a cheaper one). It is off by default:
 cues add `manage_watcher` and `list_cues` to every owner turn, which would move
-the measured surface of every unrelated suite for a feature no release ships. The
+the measured surface of every unrelated suite for a feature that is off by default. The
 watchers and their tasks live in memory.db, so `seed_cues.exs` makes them after
 this script, with the daemon still down (`capability-daemon.sh up` runs it when
 `eval-fixtures/cues.json` exists). That manifest records the door port and the

@@ -107,8 +107,8 @@ redacting logger, attaches telemetry, and starts the core tree under
 10. children gated by config or platform: the daemon socket
     (`Fermix.CLI.Daemon` and the management workers), `Realtime`,
     `ComputerUse`, `ComputerHistory` (macOS only), and `SkillCuration.Scheduler`
-11. `Cues.Supervisor`, last, only in a development build with cues enabled
-    (see `FermixCore.Cues` below)
+11. `Cues.Supervisor`, last, only with cues enabled (see `FermixCore.Cues`
+    below)
 
 Architecture Invariant: core is the only place where agent runtime state, memory
 state, prompt composition, capability state, and provider calls meet. Channels
@@ -452,8 +452,7 @@ another; owner edits write only the columns they own.
 
 ### `FermixCore.Cues`: Cues and Watchers
 
-`Cues` turns push input into agent work. It exists only in a build compiled for
-`:dev` or `:test` (`Cues.available?/0`), and its tree starts at boot only when
+`Cues` turns push input into agent work. Its tree starts at boot only when
 `[fermix_core.cues] enabled` and memory are on (`Cues.enabled?/0`); everything
 that asks at runtime (a tool's advertisement, the scheduler's admission) asks
 `Cues.running?/0`, whether the tree is alive, so a live flip of the switch

@@ -8,13 +8,8 @@ defmodule FermixCore.Cues do
 
   ## Gates
 
-  `available?/0` is the compile-time gate: the subsystem exists only in builds
-  compiled for `:dev` or `:test`, and in the Mac app's local development build
-  (`BuildInfo.development_build?/0`, a prod release its dev loop builds on the
-  developer's machine), so cues can be tried end to end with the app (design
-  §15, B1). No published release can turn it on. `enabled?/0` adds the
-  `[fermix_core.cues] enabled` flag (default off) and memory being on, since
-  every cue is a row in `memory.db`.
+  `enabled?/0` is the `[fermix_core.cues] enabled` flag (default off) with
+  memory on, since every cue is a row in `memory.db`.
 
   `enabled?/0` is for decisions taken at boot (whether the tree starts, which
   tools are seeded). Everything that asks at runtime (a tool's advertisement,
@@ -23,35 +18,17 @@ defmodule FermixCore.Cues do
   until a restart, and no runtime check sees half of the feature.
   """
 
-  alias FermixCore.BuildInfo
   alias FermixCore.Cues.Config
   alias FermixCore.Cues.Filters
   alias FermixCore.Jobs.Scheduler
   alias FermixCore.Memory.Config, as: MemoryConfig
 
-  @compiled_env Mix.env()
-  @available_envs [:dev, :test]
-
   @doc """
-  Whether this build admits cues at all: compiled for `:dev` or `:test`, or the
-  Mac app's development build. The arguments exist for the gate's own tests;
-  callers use the compiled defaults.
-  """
-  @spec available?(atom(), boolean()) :: boolean()
-  def available?(
-        compiled_env \\ @compiled_env,
-        development_build? \\ BuildInfo.development_build?()
-      )
-      when is_atom(compiled_env) and is_boolean(development_build?),
-      do: compiled_env in @available_envs or development_build?
-
-  @doc """
-  Whether the cue subsystem is switched on: available, `enabled`, and memory
-  on. A boot decision (the tree, the seeded tools); runtime asks `running?/0`.
+  Whether the cue subsystem is switched on: `enabled`, and memory on. A boot decision (the tree, the seeded tools); runtime asks `running?/0`.
   """
   @spec enabled?() :: boolean()
   def enabled? do
-    available?() and Config.enabled?() == true and MemoryConfig.enabled?()
+    Config.enabled?() == true and MemoryConfig.enabled?()
   end
 
   @doc """

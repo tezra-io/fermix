@@ -176,8 +176,8 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.ListMeetings
   ]
 
-  # Cues and watchers (M60 §15): seeded only when `Cues.enabled?()` — a build
-  # that admits cues, `[fermix_core.cues] enabled` and memory on. Off is zero
+  # Cues and watchers (M60 §15): seeded only when `Cues.enabled?()` —
+  # `[fermix_core.cues] enabled` and memory on. Off is zero
   # residue; on, `manage_watcher` and `list_cues` are offered only on an attended
   # operator turn and `cue_history` only in a run a cue woke, each `execute/2`
   # refusing any other turn. Re-evaluated each boot, which is when the cue

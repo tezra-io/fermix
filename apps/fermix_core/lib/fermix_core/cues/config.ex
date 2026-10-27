@@ -668,9 +668,22 @@ defmodule FermixCore.Cues.Config do
     else
       # The value is never repeated: it may be the secret itself.
       raise ArgumentError,
-            ~s(cues.sources.#{ref}.#{field} must be "@keyring" or "@file"; store the value ) <>
-              "with mix fermix.cues.secret #{ref} #{field}"
+            ~s(cues.sources.#{ref}.#{field} must be "@keyring" or "@file"; ) <>
+              store_words(ref, field)
     end
+  end
+
+  # Where a release stores each secret field: Fermix makes the token and the
+  # webhook address; the owner types a key or a secret.
+  defp store_words(_ref, :token), do: "make a token with New token in the source's settings"
+
+  defp store_words(_ref, :path_secret),
+    do: "make the address with Generate URL in the source's settings"
+
+  defp store_words(ref, field) do
+    "type the value into the source's settings (the setup page's Cues tab or the app's " <>
+      "Cues pane), or on a host without a browser run " <>
+      "fermix settings secret set cue_source:#{ref}:#{field}"
   end
 
   # --- mandate values ----------------------------------------------------------

@@ -486,7 +486,6 @@ defmodule FermixCore.Management.CopyTest do
         "Fermix recorded your answer but could not read the proposal back.",
         "Not run: Fermix could not finish checking it.",
         ManagementCues.memory_off_sentence(),
-        ManagementCues.unavailable_sentence(),
         ManagementCues.owner_only_sentence()
       ]
 

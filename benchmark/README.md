@@ -853,7 +853,7 @@ server on an ephemeral port, binds one token, and prints every page's URL plus
 the `state` endpoint, so a page can be opened by hand and its recorded state read
 back. No run uses it.
 
-### Cues and watchers (M60, development builds)
+### Cues and watchers (M60)
 
 Cues are opt-in, because they add `manage_watcher` and `list_cues` to every owner
 turn of every suite: seed with `--cues` and `seed_capability_home.py` writes the

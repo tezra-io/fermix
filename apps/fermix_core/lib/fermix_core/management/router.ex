@@ -802,7 +802,7 @@ defmodule FermixCore.Management.Router do
   end
 
   defp settings_opts(opts),
-    do: Keyword.take(opts, [:snapshot, :supervised, :macos?, :cues_available?])
+    do: Keyword.take(opts, [:snapshot, :supervised, :macos?])
 
   defp invalid_params(field), do: {:error, :invalid_params, %{"field" => field}}
 

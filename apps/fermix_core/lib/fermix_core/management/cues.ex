@@ -4,14 +4,11 @@ defmodule FermixCore.Management.Cues do
   §3.6): the cue subsystem's status, its sources, watchers and mandates, and
   the proposals waiting for the owner.
 
-  **Every build publishes them** (D1). On a build that does not admit cues
-  (`FermixCore.Cues.available?/0` false) `cues.status` answers
-  `available: false` and every other method answers `unavailable` for the
-  `cues` capability with "Cues are not part of this build.", the precedent of
-  iMessage off a Mac. With memory off, `cues.status` says so (`needs_memory`),
-  the lists are drawn from configuration, and the reads that need rows
-  (watchers, proposals, the mandate choices) answer `unavailable` with the
-  daemon's sentence.
+  **Every build publishes them** (D1), and every build has cues, so
+  `cues.status` always answers `available: true`. With memory off,
+  `cues.status` says so (`needs_memory`), the lists are drawn from
+  configuration, and the reads that need rows (watchers, proposals, the
+  mandate choices) answer `unavailable` with the daemon's sentence.
 
   **One write path.** Every write calls the `Cues.Settings` function the
   setup page calls (and a webhook's address `Cues.Webhook.ensure_path_secret/2`),
@@ -28,8 +25,8 @@ defmodule FermixCore.Management.Cues do
   turn in chat. Which callers may write is the daemon socket's owner check
   (`Fermix.CLI.Daemon`), not this module's.
 
-  Seams (opts): `:available?`, `:memory?`, `:running?` (booleans for the
-  build, memory and the cue tree), `:config` (the normalized
+  Seams (opts): `:memory?`, `:running?` (booleans for memory and the cue
+  tree), `:config` (the normalized
   `[fermix_core.cues]` keyword a read uses in place of the applied one),
   `:repo`, `:door`, `:now` (zero-arity, a
   `DateTime`), `:mandate_opts` (the `Cues.Mandates` and `Cues.Pins` seams),
@@ -59,7 +56,6 @@ defmodule FermixCore.Management.Cues do
   alias FermixCore.Setup.SecretWriter
 
   @capability "cues"
-  @unavailable_sentence "Cues are not part of this build."
   @memory_off_sentence "Cues keep their records in memory, which is off."
   @owner_sentence "Only the owner can change cues: use the Fermix app or your own terminal."
   @door FermixCore.Cues.Door
@@ -84,10 +80,6 @@ defmodule FermixCore.Management.Cues do
   @spec owner_only_sentence() :: String.t()
   def owner_only_sentence, do: @owner_sentence
 
-  @doc "The sentence every method but `cues.status` answers on a build without cues."
-  @spec unavailable_sentence() :: String.t()
-  def unavailable_sentence, do: @unavailable_sentence
-
   @doc "The sentence a read that needs rows answers with memory off."
   @spec memory_off_sentence() :: String.t()
   def memory_off_sentence, do: @memory_off_sentence
@@ -95,7 +87,7 @@ defmodule FermixCore.Management.Cues do
   # --- status ------------------------------------------------------------------
 
   @doc """
-  `cues.status`: whether this build admits cues, the switches, the cue tree,
+  `cues.status`: the switches, the cue tree,
   memory, the door, and the counts the pane's header and the menu bar read.
   """
   @spec status(keyword()) :: {:ok, map()}
@@ -105,29 +97,28 @@ defmodule FermixCore.Management.Cues do
 
     {:ok,
      %{
-       "available" => facts.available?,
+       "available" => true,
        "enabled" => facts.enabled?,
        "running" => facts.running?,
        "memory_enabled" => facts.memory?,
        "mandates_enabled" => CuesConfig.mandates_enabled?(cue_config(opts)),
        "state" => state,
        "status_sentence" => sentence,
-       "door" => door(facts, opts),
+       "door" => door(opts),
        "counts" => counts(facts, opts)
      }}
   end
 
-  defp state(%{available?: false}), do: {"unavailable", @unavailable_sentence}
   defp state(%{enabled?: true, memory?: false}), do: {"needs_memory", @memory_off_sentence}
   defp state(%{enabled?: true, running?: true}), do: {"running", "Cues are running."}
   defp state(%{enabled?: false, running?: false}), do: {"off", "Cues are off."}
   defp state(%{enabled?: true}), do: {"needs_restart", "Restart Fermix to start cues."}
   defp state(_running_but_off), do: {"needs_restart", "Restart Fermix to stop cues."}
 
-  defp door(facts, opts) do
+  defp door(opts) do
     port = CuesConfig.door_port(cue_config(opts))
 
-    case door_state(facts, opts) do
+    case door_state(opts) do
       {:listening, _ip, listening} ->
         door_view("listening", listening, nil, "The door is listening on this Mac.")
 
@@ -139,8 +130,7 @@ defmodule FermixCore.Management.Cues do
     end
   end
 
-  defp door_state(%{available?: false}, _opts), do: :not_running
-  defp door_state(_facts, opts), do: Overview.door(Keyword.get(opts, :door, @door))
+  defp door_state(opts), do: Overview.door(Keyword.get(opts, :door, @door))
 
   defp door_view(state, port, reason, sentence),
     do: %{"state" => state, "port" => port, "reason" => reason, "sentence" => sentence}
@@ -156,8 +146,6 @@ defmodule FermixCore.Management.Cues do
 
   defp door_failure(_listen_failed, port), do: "The door could not listen on port #{port}."
 
-  defp counts(%{available?: false}, _opts), do: zero_counts()
-
   defp counts(facts, opts) do
     sources = source_rows(facts, opts)
     watchers = watcher_rows(facts, opts)
@@ -172,14 +160,6 @@ defmodule FermixCore.Management.Cues do
       "mandates_attention" => Enum.count(mandates, &mandate_attention?/1),
       "proposals_waiting" => waiting_count(facts, opts)
     }
-  end
-
-  defp zero_counts do
-    Map.new(
-      ~w(sources sources_attention watchers watchers_held mandates mandates_attention
-         proposals_waiting),
-      &{&1, 0}
-    )
   end
 
   defp readable_length({:ok, rows}), do: length(rows)
@@ -208,17 +188,15 @@ defmodule FermixCore.Management.Cues do
   @doc "`cues.sources.list`: every source's row, whether one more can be added, and the bound."
   @spec sources_list(keyword()) :: {:ok, map()} | {:error, error()}
   def sources_list(opts \\ []) when is_list(opts) do
-    with :ok <- available(opts) do
-      rows = source_rows(facts(opts), opts)
-      max = CuesConfig.max_sources()
+    rows = source_rows(facts(opts), opts)
+    max = CuesConfig.max_sources()
 
-      {:ok,
-       %{
-         "sources" => Enum.take(rows, max),
-         "can_add" => length(rows) < max,
-         "limits" => %{"max_sources" => max}
-       }}
-    end
+    {:ok,
+     %{
+       "sources" => Enum.take(rows, max),
+       "can_add" => length(rows) < max,
+       "limits" => %{"max_sources" => max}
+     }}
   end
 
   @doc """
@@ -227,8 +205,7 @@ defmodule FermixCore.Management.Cues do
   """
   @spec sources_get(String.t(), keyword()) :: {:ok, map()} | {:error, error()}
   def sources_get(ref, opts \\ []) when is_binary(ref) and is_list(opts) do
-    with :ok <- available(opts),
-         {:ok, source} <- fetch_source(ref, opts),
+    with {:ok, source} <- fetch_source(ref, opts),
          {:ok, section} <- values_section(ref, opts) do
       facts = facts(opts)
       db_row = Map.get(readable(Overview.sources(repo_opts(opts)), "sources"), ref)
@@ -247,9 +224,7 @@ defmodule FermixCore.Management.Cues do
   @spec sources_form(String.t() | nil, String.t() | nil, String.t() | nil, keyword()) ::
           {:ok, map()} | {:error, error()}
   def sources_form(kind, preset, verify, opts \\ []) when is_list(opts) do
-    with :ok <- available(opts) do
-      kind |> SourceForm.form(preset, verify) |> refused_field()
-    end
+    kind |> SourceForm.form(preset, verify) |> refused_field()
   end
 
   @doc """
@@ -260,8 +235,7 @@ defmodule FermixCore.Management.Cues do
           {:ok, map()} | {:error, error()}
   def sources_add(ref, kind, preset, values, opts \\ [])
       when is_binary(ref) and is_map(values) and is_list(opts) do
-    with :ok <- available(opts),
-         {:ok, section} <- kind |> SourceForm.new_section(preset, values) |> refused_field(),
+    with {:ok, section} <- kind |> SourceForm.new_section(preset, values) |> refused_field(),
          {:ok, %{token: token}} <-
            save(CueSettings.save_source(ref, section, %{}, :create), "ref"),
          {:ok, source} <- fetch_source(ref, opts) do
@@ -272,8 +246,7 @@ defmodule FermixCore.Management.Cues do
   @doc "`cues.sources.update`: changes the fields `values` names and answers the row."
   @spec sources_update(String.t(), map(), keyword()) :: {:ok, map()} | {:error, error()}
   def sources_update(ref, values, opts \\ []) when is_binary(ref) and is_map(values) do
-    with :ok <- available(opts),
-         {:ok, source} <- fetch_source(ref, opts),
+    with {:ok, source} <- fetch_source(ref, opts),
          {:ok, section} <- saved_section(:sources, ref, "ref"),
          kept = drop_secrets(section),
          {:ok, merged} <-
@@ -296,8 +269,7 @@ defmodule FermixCore.Management.Cues do
   """
   @spec sources_remove(String.t(), keyword()) :: {:ok, map()} | {:error, error()}
   def sources_remove(ref, opts \\ []) when is_binary(ref) and is_list(opts) do
-    with :ok <- available(opts),
-         {:ok, _source} <- fetch_source(ref, opts) do
+    with {:ok, _source} <- fetch_source(ref, opts) do
       watchers = listeners(ref, opts)
 
       with {:ok, %{left: left}} <- save(CueSettings.remove_source(ref), "ref") do
@@ -309,8 +281,7 @@ defmodule FermixCore.Management.Cues do
   @doc "`cues.sources.enable` / `.disable`: turns a source on or off and answers its row."
   @spec sources_switch(String.t(), boolean(), keyword()) :: {:ok, map()} | {:error, error()}
   def sources_switch(ref, enabled?, opts \\ []) when is_binary(ref) and is_boolean(enabled?) do
-    with :ok <- available(opts),
-         {:ok, _source} <- fetch_source(ref, opts),
+    with {:ok, _source} <- fetch_source(ref, opts),
          {:ok, _saved} <- save(CueSettings.set_enabled(:sources, ref, enabled?), "ref") do
       source_answer(ref, opts)
     end
@@ -322,8 +293,7 @@ defmodule FermixCore.Management.Cues do
   """
   @spec sources_token_new(String.t(), keyword()) :: {:ok, map()} | {:error, error()}
   def sources_token_new(ref, opts \\ []) when is_binary(ref) and is_list(opts) do
-    with :ok <- available(opts),
-         {:ok, _source} <- fetch_source(ref, opts),
+    with {:ok, _source} <- fetch_source(ref, opts),
          {:ok, token} <- save(CueSettings.new_token(ref), "ref") do
       {:ok, %{"ref" => ref, "token" => token}}
     end
@@ -335,8 +305,7 @@ defmodule FermixCore.Management.Cues do
   """
   @spec sources_url_get(String.t(), keyword()) :: {:ok, map()} | {:error, error()}
   def sources_url_get(ref, opts \\ []) when is_binary(ref) and is_list(opts) do
-    with :ok <- available(opts),
-         {:ok, _source} <- fetch_source(ref, opts) do
+    with {:ok, _source} <- fetch_source(ref, opts) do
       case Webhook.ensure_path_secret(ref) do
         {:ok, path} -> {:ok, %{"ref" => ref, "url" => door_url(opts) <> path, "path" => path}}
         {:error, sentence} when is_binary(sentence) -> invalid("ref", sentence)
@@ -347,7 +316,7 @@ defmodule FermixCore.Management.Cues do
 
   defp door_url(opts) do
     port =
-      case door_state(facts(opts), opts) do
+      case door_state(opts) do
         {:listening, _ip, port} -> port
         _not_listening -> CuesConfig.door_port(cue_config(opts))
       end
@@ -484,8 +453,7 @@ defmodule FermixCore.Management.Cues do
   @doc "`cues.watchers.list`: every watcher's row, oldest first, at most 200."
   @spec watchers_list(keyword()) :: {:ok, map()} | {:error, error()}
   def watchers_list(opts \\ []) when is_list(opts) do
-    with :ok <- available(opts),
-         :ok <- memory(opts),
+    with :ok <- memory(opts),
          {:ok, rows} <- watcher_rows(facts(opts), opts) do
       {:ok,
        %{
@@ -502,8 +470,7 @@ defmodule FermixCore.Management.Cues do
   """
   @spec watchers_get(String.t(), keyword()) :: {:ok, map()} | {:error, error()}
   def watchers_get(name, opts \\ []) when is_binary(name) and is_list(opts) do
-    with :ok <- available(opts),
-         :ok <- memory(opts),
+    with :ok <- memory(opts),
          {:ok, rows} <- watcher_rows(facts(opts), opts),
          {:ok, row} <- find_watcher(rows, name),
          {:ok, stored} <- stored_watcher(name, opts) do
@@ -548,17 +515,15 @@ defmodule FermixCore.Management.Cues do
   @doc "`cues.mandates.list`: every mandate's row, whether one more can be added, and the bound."
   @spec mandates_list(keyword()) :: {:ok, map()} | {:error, error()}
   def mandates_list(opts \\ []) when is_list(opts) do
-    with :ok <- available(opts) do
-      rows = mandate_rows(facts(opts), opts)
-      max = CuesConfig.max_mandates()
+    rows = mandate_rows(facts(opts), opts)
+    max = CuesConfig.max_mandates()
 
-      {:ok,
-       %{
-         "mandates" => Enum.take(rows, max),
-         "can_add" => length(rows) < max,
-         "limits" => %{"max_mandates" => max}
-       }}
-    end
+    {:ok,
+     %{
+       "mandates" => Enum.take(rows, max),
+       "can_add" => length(rows) < max,
+       "limits" => %{"max_mandates" => max}
+     }}
   end
 
   @doc """
@@ -568,8 +533,7 @@ defmodule FermixCore.Management.Cues do
   """
   @spec mandates_choices(keyword()) :: {:ok, map()} | {:error, error()}
   def mandates_choices(opts \\ []) when is_list(opts) do
-    with :ok <- available(opts),
-         :ok <- memory(opts),
+    with :ok <- memory(opts),
          {:ok, jobs} <- choice_jobs(opts) do
       {:ok, %{"jobs" => jobs, "tools" => choice_tools(opts)}}
     end
@@ -578,8 +542,7 @@ defmodule FermixCore.Management.Cues do
   @doc "`cues.mandates.add`: saves a new mandate from its form values and answers its row."
   @spec mandates_add(String.t(), map(), keyword()) :: {:ok, map()} | {:error, error()}
   def mandates_add(name, values, opts \\ []) when is_binary(name) and is_map(values) do
-    with :ok <- available(opts),
-         {:ok, section} <- [] |> MandateRow.section(values) |> refused_field(),
+    with {:ok, section} <- [] |> MandateRow.section(values) |> refused_field(),
          {:ok, _saved} <- save(CueSettings.save_mandate(name, section, :create), "name") do
       mandate_answer(name, opts)
     end
@@ -592,8 +555,7 @@ defmodule FermixCore.Management.Cues do
   """
   @spec mandates_update(String.t(), map(), keyword()) :: {:ok, map()} | {:error, error()}
   def mandates_update(name, values, opts \\ []) when is_binary(name) and is_map(values) do
-    with :ok <- available(opts),
-         {:ok, section} <- saved_section(:mandates, name, "name"),
+    with {:ok, section} <- saved_section(:mandates, name, "name"),
          {:ok, merged} <- section |> MandateRow.section(values) |> refused_field(),
          {:ok, _saved} <- save(CueSettings.save_mandate(name, merged, :update), "name") do
       mandate_answer(name, opts)
@@ -603,8 +565,7 @@ defmodule FermixCore.Management.Cues do
   @doc "`cues.mandates.remove`: removes a mandate."
   @spec mandates_remove(String.t(), keyword()) :: {:ok, map()} | {:error, error()}
   def mandates_remove(name, opts \\ []) when is_binary(name) and is_list(opts) do
-    with :ok <- available(opts),
-         {:ok, _saved} <- save(CueSettings.remove_mandate(name), "name") do
+    with {:ok, _saved} <- save(CueSettings.remove_mandate(name), "name") do
       {:ok, %{"name" => name, "removed" => true}}
     end
   end
@@ -612,8 +573,7 @@ defmodule FermixCore.Management.Cues do
   @doc "`cues.mandates.enable` / `.disable`: turns a mandate on or off and answers its row."
   @spec mandates_switch(String.t(), boolean(), keyword()) :: {:ok, map()} | {:error, error()}
   def mandates_switch(name, enabled?, opts \\ []) when is_binary(name) and is_boolean(enabled?) do
-    with :ok <- available(opts),
-         {:ok, _saved} <- save(CueSettings.set_enabled(:mandates, name, enabled?), "name") do
+    with {:ok, _saved} <- save(CueSettings.set_enabled(:mandates, name, enabled?), "name") do
       mandate_answer(name, opts)
     end
   end
@@ -625,8 +585,7 @@ defmodule FermixCore.Management.Cues do
   """
   @spec mandates_approve(String.t(), keyword()) :: {:ok, map()} | {:error, error()}
   def mandates_approve(name, opts \\ []) when is_binary(name) and is_list(opts) do
-    with :ok <- available(opts),
-         :ok <- memory(opts),
+    with :ok <- memory(opts),
          {:ok, _section} <- saved_section(:mandates, name, "name"),
          mandate_opts = Overview.mandate_opts(live_cues(opts), mandate_seams(opts)),
          {:ok, _status} <-
@@ -718,8 +677,7 @@ defmodule FermixCore.Management.Cues do
   """
   @spec proposals_list(:waiting | :recent, keyword()) :: {:ok, map()} | {:error, error()}
   def proposals_list(state, opts \\ []) when state in [:waiting, :recent] and is_list(opts) do
-    with :ok <- available(opts),
-         :ok <- memory(opts),
+    with :ok <- memory(opts),
          {:ok, records} <- records(state, opts),
          {:ok, waiting} <- waiting_records(state, records, opts) do
       {:ok, %{"proposals" => Enum.map(records, &wire/1), "waiting" => length(waiting)}}
@@ -729,8 +687,7 @@ defmodule FermixCore.Management.Cues do
   @doc "`cues.proposals.get`: one proposal's record and its card, outside text apart."
   @spec proposals_get(String.t(), keyword()) :: {:ok, map()} | {:error, error()}
   def proposals_get(proposal_id, opts \\ []) when is_binary(proposal_id) and is_list(opts) do
-    with :ok <- available(opts),
-         :ok <- memory(opts) do
+    with :ok <- memory(opts) do
       case proposals(opts).card(proposal_id, proposal_opts(opts)) do
         {:ok, card} -> {:ok, %{"proposal" => wire(card)}}
         {:error, :not_found} -> invalid("proposal_id", "There is no proposal with that id.")
@@ -749,8 +706,7 @@ defmodule FermixCore.Management.Cues do
           {:ok, map()} | {:error, error()}
   def proposals_decide(proposal_id, decision, opts \\ [])
       when is_binary(proposal_id) and decision in [:confirm, :deny] and is_list(opts) do
-    with :ok <- available(opts),
-         :ok <- memory(opts) do
+    with :ok <- memory(opts) do
       proposal_id
       |> proposals(opts).decide(decision, @management_origin, proposal_opts(opts))
       |> decided()
@@ -792,18 +748,11 @@ defmodule FermixCore.Management.Cues do
 
   defp facts(opts) do
     %{
-      available?: Keyword.get_lazy(opts, :available?, &Cues.available?/0),
       enabled?: CuesConfig.enabled?(cue_config(opts)),
       running?: Keyword.get_lazy(opts, :running?, &Cues.running?/0),
       memory?: Keyword.get_lazy(opts, :memory?, &MemoryConfig.enabled?/0),
       now: now(opts)
     }
-  end
-
-  defp available(opts) do
-    if Keyword.get_lazy(opts, :available?, &Cues.available?/0),
-      do: :ok,
-      else: {:error, {:unavailable, @capability, @unavailable_sentence}}
   end
 
   defp memory(opts) do

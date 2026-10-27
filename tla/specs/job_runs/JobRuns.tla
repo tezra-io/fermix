@@ -174,7 +174,7 @@ CONSTANTS
                         \* own HTTP timeouts are outside the sources)
     \* Configuration: what kind of home and job.
     CuesOn,             \* the cue tree runs (Cues.running?/0, read by the Scheduler for every
-                        \* request and every admission; a development build with
+                        \* request and every admission; a home with
                         \* [fermix_core.cues] enabled): the Scheduler admits cue runs. Every
                         \* check before 36 sets it FALSE, the Scheduler of a home without cues
     CueTask,            \* the job is a watcher's task, a job that runs on cues (schedule_kind

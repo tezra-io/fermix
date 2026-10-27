@@ -15,6 +15,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
 
   use FermixWebWeb, :html
 
+  alias FermixCore.Cues.Webhook
   alias FermixCore.Management.Cues.SourceForm
   alias FermixCore.Management.Cues.WatcherRow
   alias FermixWebWeb.SetupLive.CuesState
@@ -114,7 +115,6 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       <div class="min-w-0">
         <div class="flex flex-wrap items-center gap-2">
           <h2 class="text-2xl font-semibold tracking-normal">Cues</h2>
-          <span class="badge badge-ghost badge-sm">Development build</span>
         </div>
         <p class="mt-1 text-sm text-base-content/70">
           Feeds, webhooks and your own scripts that wake a task.
@@ -183,7 +183,18 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       />
       <p class="text-xs leading-5 text-base-content/60">
         Give the service your tunnel's address followed by the path, with content type
-        application/json. For Tailscale Funnel, run <code class="font-mono">mix fermix.cues.funnel {@reveal.ref}</code>.
+        application/json. With Tailscale Funnel, this command puts this one path on the
+        internet, and the address is your machine's ts.net name followed by the path:
+      </p>
+      <.copy_block
+        id="cues-reveal-funnel"
+        text={funnel_command(@reveal.value, @port)}
+        label="Copy command"
+      />
+      <p class="text-xs leading-5 text-base-content/60">
+        Funnel opens port 443 as a whole: whatever else <code class="font-mono">tailscale serve</code>
+        has on 443 becomes public too, so check <code class="font-mono">tailscale funnel status</code>
+        first.
       </p>
     </section>
     """
@@ -259,6 +270,9 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       --data '#{event}'\
     """
   end
+
+  defp funnel_command(path, port),
+    do: Enum.join(["tailscale" | Webhook.funnel_args(path, port)], " ")
 
   # --- switches and door -----------------------------------------------------
 

@@ -80,11 +80,9 @@ defmodule FermixCore.Management.Secrets do
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
-  alias FermixCore.Cues
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.Settings, as: CueSettings
   alias FermixCore.Management.Auth
-  alias FermixCore.Management.Cues, as: ManagementCues
   alias FermixCore.Management.McpServers.PastedValues
   alias FermixCore.Management.Settings
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -217,8 +215,7 @@ defmodule FermixCore.Management.Secrets do
   # Every refusal that needs no storage call comes first, the settings file's
   # write guard among them, so a refused write has stored nothing.
   def set(@cue_prefix <> _rest = id, value, opts) when is_binary(value) and is_list(opts) do
-    with :ok <- cues_available(opts),
-         {:ok, ref, field} <- cue_target(id),
+    with {:ok, ref, field} <- cue_target(id),
          :ok <- validate_cue_value(value),
          :ok <- writable(id) do
       cue_result(id, ref, field, CueSettings.set_secret(ref, field, value))
@@ -252,8 +249,7 @@ defmodule FermixCore.Management.Secrets do
   end
 
   def clear(@cue_prefix <> _rest = id, opts) when is_list(opts) do
-    with :ok <- cues_available(opts),
-         {:ok, ref, field} <- cue_target(id),
+    with {:ok, ref, field} <- cue_target(id),
          :ok <- writable(id) do
       cue_result(id, ref, field, CueSettings.clear_secret(ref, field))
     end
@@ -572,14 +568,6 @@ defmodule FermixCore.Management.Secrets do
   end
 
   # --- cue sources ---------------------------------------------------------
-
-  defp cues_available(opts) do
-    if Keyword.get_lazy(opts, :cues_available?, &Cues.available?/0),
-      do: :ok,
-      else:
-        {:error,
-         {:unavailable, ManagementCues.capability(), ManagementCues.unavailable_sentence()}}
-  end
 
   # The ref and the field a `cue_source:` id names. The two values Fermix makes
   # are refused by name; whether the source exists and its kind declares the

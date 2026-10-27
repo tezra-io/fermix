@@ -247,7 +247,7 @@ daemon onto anything else.
 | `mcp.servers.check.start` | `name` | Connects one server and lists its tools once. A job, kind `mcp_check`, whose result carries `tool_count` and `latency_ms`. Minimum version `2`. |
 | `mcp.servers.import.scan` | none | Reads the MCP servers in Claude Desktop's, Claude Code's, Cursor's, VS Code's, Windsurf's and Codex's settings on this Mac, now and only now, and answers `candidates`, each with its `source`, `source_label`, name, transport, summary, command line or URL, consent sentence, resolved program and `secret_names` (never a value), and `skipped`, what could not be offered with the daemon's sentence. Minimum version `2`. |
 | `mcp.servers.import` | `servers` (`[{source, name}]`, at most 32) | Reads those settings again and adds each server named through the add path, with the values its settings held stored in the Keychain and `origin` `imported:<source>`, and answers `{servers, refused}`: the new rows, and each server not added with its sentence. Minimum version `2`. |
-| `cues.status` | none | The cue subsystem as it stands: `available` (whether this build admits cues), the switches (`enabled`, `mandates_enabled`), whether the cue tree is `running`, `memory_enabled`, a `state` (`unavailable`, `off`, `needs_memory`, `needs_restart`, `running`) with its `status_sentence`, the `door` (`state` `listening`, `unavailable` or `not_running`, `port`, `reason`, `sentence`), and `counts` (`sources`, `sources_attention`, `watchers`, `watchers_held`, `mandates`, `mandates_attention`, `proposals_waiting`). Answers on every build. Minimum version `2`. |
+| `cues.status` | none | The cue subsystem as it stands: `available` (always `true`: every build has cues), the switches (`enabled`, `mandates_enabled`), whether the cue tree is `running`, `memory_enabled`, a `state` (`off`, `needs_memory`, `needs_restart`, `running`) with its `status_sentence`, the `door` (`state` `listening`, `unavailable` or `not_running`, `port`, `reason`, `sentence`), and `counts` (`sources`, `sources_attention`, `watchers`, `watchers_held`, `mandates`, `mandates_attention`, `proposals_waiting`). Answers on every build. Minimum version `2`. |
 | `cues.sources.list` | none | Every source as a row, at most 64, plus `can_add` and `limits` (`max_sources`). Minimum version `2`. |
 | `cues.sources.get` | `ref` | One source's row, its editable fields as settings rows (`values`), its open gaps (at most 20, each with the daemon's sentence) and its refused requests by reason (`rejected`). Minimum version `2`. |
 | `cues.sources.form` | `kind`, `preset`, `verify` (each optional) | The add form for that choice, and writes nothing: `kinds`, `presets`, `rows` (the name first, then the fields of that kind, preset and verification method, a secret field as a `secret` row with `present: false`), `consent_sentence` and `notes`. A stream has no preset; it is the general WebSocket source: each of its field rows but the name and the daily budget carries an `info` and an `example` (no row of the form carries a `footer`), and two `secret` rows, `key` (API key) and `secret` (API secret), follow its address. Minimum version `2`. |
@@ -988,12 +988,9 @@ Notes that the shapes alone do not carry:
   start, or waiting for a value) is refused with its own row's sentence, and a
   connection that fails ends the job with that sentence. After an add or an
   update, `mcp.servers.get` reads the row as it connects.
-- **The cue methods are on every build.** On a build that does not admit cues,
-  `cues.status` answers `available: false` and `state` `unavailable`, every
-  other `cues.*` method answers `unavailable` {`capability`: `cues`,
-  `sentence`: "Cues are not part of this build."}, and `settings.sections`
-  publishes no `cues` section. They are minimum version `2` with no protocol
-  bump, so a client finds them in `hello.capabilities.methods`. With memory
+- **The cue methods are on every build**, and so is the `cues` section of
+  `settings.sections`. They are minimum version `2` with no protocol bump, so a
+  client finds them in `hello.capabilities.methods`. With memory
   off, `cues.status` says `needs_memory`, the source and mandate lists are drawn
   from the settings file, and the reads that need rows (`cues.watchers.*`,
   `cues.mandates.choices`, `cues.proposals.*`) answer `unavailable` with the

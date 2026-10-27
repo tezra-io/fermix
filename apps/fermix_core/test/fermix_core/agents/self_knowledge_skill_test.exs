@@ -631,15 +631,15 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     assert presentation =~ "iMessage"
   end
 
-  # Cues exist only on a development daemon with the switch on, so an owner of
-  # any shipped build must be told it is not there, and an owner of a dev build
-  # must be sent to the surfaces that really configure it: settings for
-  # sources and mandates (the setup page's Cues tab, its Approve button, the two
-  # Mix tasks, and the Mac app's Cues pane) and chat for watchers, and told where
-  # a proposal can be answered (a chat, the Fermix app's card, the Linux app).
-  # Each string is a key, a command, a tool, a control or a boundary word, not a
-  # phrasing.
-  test "documents cues: the development-only gate, the boundaries and every surface" do
+  # Every build has cues, off until the owner turns them on, so the owner must
+  # be told the switch and sent to the surfaces that really configure it:
+  # settings for sources and mandates (the setup page's Cues tab, its Approve
+  # button, the Mac app's Cues pane, and `fermix settings` without a browser),
+  # the Tailscale command that puts a webhook on Funnel, and chat for watchers,
+  # and told where a proposal can be answered (a chat, the Fermix app's card,
+  # the Linux app). Each string is a key, a command, a tool, a control or a
+  # boundary word, not a phrasing. No sentence may still say a release lacks them.
+  test "documents cues: the off-by-default switch, the boundaries and every surface" do
     body = File.read!(self_knowledge_path())
     paragraph = cues_paragraph()
     # The reference is hard-wrapped in places; a phrase may span a line break.
@@ -649,7 +649,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
 
     for required <- [
           "[fermix_core.cues] enabled = true",
-          "Development builds only",
+          "off by default",
           "Signal",
           "Cues pane",
           "words to listen for"
@@ -659,7 +659,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
 
     for required <- [
           "[fermix_core.cues] enabled = true",
-          "Development builds only",
+          "Off by default",
           "restart",
           "At a time",
           "On a date",
@@ -670,8 +670,9 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "github",
           "application/json",
           "Generate URL",
-          "mix fermix.cues.secret",
-          "mix fermix.cues.funnel",
+          "fermix settings secret set cue_source:",
+          "tailscale funnel --bg --set-path=",
+          "tailscale funnel --https=443",
           "New token",
           "manage_watcher",
           "list_cues",
@@ -703,6 +704,11 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "Only the owner can change cues"
         ] do
       assert reference =~ required, "cues self-knowledge does not mention #{required}"
+    end
+
+    for gone <- ["Development builds only", "development daemon", "no published release"] do
+      refute paragraph =~ gone, "the Cues paragraph still says #{gone}"
+      refute reference =~ gone, "cues self-knowledge still says #{gone}"
     end
 
     # The self-reference carries no version numbers (AGENTS.md); an address such

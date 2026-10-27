@@ -4553,7 +4553,7 @@
       "additionalProperties": false,
       "properties": {
         "available": {
-          "type": "boolean"
+          "const": true
         },
         "enabled": {
           "type": "boolean"
@@ -4569,7 +4569,6 @@
         },
         "state": {
           "enum": [
-            "unavailable",
             "off",
             "needs_memory",
             "needs_restart",

@@ -1798,145 +1798,145 @@
       "method": "(schema)",
       "field": "methods:cues.mandates.add",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.mandates.approve",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.mandates.choices",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.mandates.disable",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.mandates.enable",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.mandates.list",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.mandates.remove",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.mandates.update",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.proposals.decide",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.proposals.get",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.proposals.list",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.sources.add",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.sources.disable",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.sources.enable",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.sources.form",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.sources.get",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.sources.list",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.sources.remove",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.sources.token.new",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.sources.update",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.sources.url.get",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.status",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.watchers.get",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
       "field": "methods:cues.watchers.list",
       "kind": "engine_only",
-      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build: where the build admits no cues, cues.status answers available false and every other cue method answers unavailable with the daemon's sentence. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
     },
     {
       "method": "(schema)",
@@ -2386,31 +2386,31 @@
       "method": "settings.get:cues",
       "field": "rows:cues_door_port",
       "kind": "engine_only",
-      "why": "M60 app surface gives cues their own settings section, cues, published only where the build admits cues: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."
+      "why": "M60 app surface gives cues their own settings section, cues, published on every build: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."
     },
     {
       "method": "settings.get:cues",
       "field": "rows:cues_enabled",
       "kind": "engine_only",
-      "why": "M60 app surface gives cues their own settings section, cues, published only where the build admits cues: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."
+      "why": "M60 app surface gives cues their own settings section, cues, published on every build: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."
     },
     {
       "method": "settings.get:cues",
       "field": "rows:cues_mandates_enabled",
       "kind": "engine_only",
-      "why": "M60 app surface gives cues their own settings section, cues, published only where the build admits cues: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."
+      "why": "M60 app surface gives cues their own settings section, cues, published on every build: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."
     },
     {
       "method": "settings.get:cues",
       "field": "rows:filter_model",
       "kind": "engine_only",
-      "why": "M60 app surface gives cues their own settings section, cues, published only where the build admits cues: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."
+      "why": "M60 app surface gives cues their own settings section, cues, published on every build: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."
     },
     {
       "method": "settings.get:cues",
       "field": "rows:filter_provider",
       "kind": "engine_only",
-      "why": "M60 app surface gives cues their own settings section, cues, published only where the build admits cues: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."
+      "why": "M60 app surface gives cues their own settings section, cues, published on every build: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."
     }
   ]
 }

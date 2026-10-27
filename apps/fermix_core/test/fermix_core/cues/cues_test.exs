@@ -22,20 +22,6 @@ defmodule FermixCore.CuesTest do
   defp restore(key, {:ok, value}), do: Application.put_env(:fermix_core, key, value)
   defp restore(key, :error), do: Application.delete_env(:fermix_core, key)
 
-  test "the compile-time gate admits the test environment" do
-    assert Cues.available?()
-  end
-
-  # A published release (`release-*`, `pr-*`) has no cues; the Mac app's local
-  # development loop builds a prod release stamped `dev-e2e`, and that build
-  # does, so cues can be tried end to end with the app before they ship.
-  test "a prod build admits cues only when it is the app's development build" do
-    assert Cues.available?(:dev, false)
-    assert Cues.available?(:test, false)
-    refute Cues.available?(:prod, false)
-    assert Cues.available?(:prod, true)
-  end
-
   test "enabled only with the flag on and memory on" do
     refute Cues.enabled?()
 

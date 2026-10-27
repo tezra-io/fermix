@@ -934,27 +934,31 @@ defmodule Fermix.CLI.DaemonTest do
   # M60 app surface §3.6: the cue writes that widen what reaches a task or what
   # a task may do, the two values handed out, and the answer to a proposal are
   # the owner's decisions. The refusal names the cues family's own capability
-  # and sentence. The router behind the socket answers as a build without cues
-  # would, so a call that got past the check is told apart by its sentence.
+  # and sentence. Every request carries no parameters, so a call that got past
+  # the check is refused by the router for a missing field and changes nothing.
   describe "owner decisions on cues" do
-    @cue_decisions [
-      {"cues.sources.add", %{"ref" => "a", "kind" => "local_push", "values" => %{}}},
-      {"cues.sources.update", %{"ref" => "a", "values" => %{}}},
-      {"cues.sources.remove", %{"ref" => "a"}},
-      {"cues.sources.enable", %{"ref" => "a"}},
-      {"cues.sources.disable", %{"ref" => "a"}},
-      {"cues.sources.token.new", %{"ref" => "a"}},
-      {"cues.sources.url.get", %{"ref" => "a"}},
-      {"cues.mandates.add", %{"name" => "m", "values" => %{}}},
-      {"cues.mandates.update", %{"name" => "m", "values" => %{}}},
-      {"cues.mandates.remove", %{"name" => "m"}},
-      {"cues.mandates.enable", %{"name" => "m"}},
-      {"cues.mandates.disable", %{"name" => "m"}},
-      {"cues.mandates.approve", %{"name" => "m"}},
-      {"cues.proposals.decide", %{"proposal_id" => "cpr_1", "decision" => "confirm"}}
-    ]
-    @no_cues %{"capability" => "cues", "sentence" => "Cues are not part of this build."}
+    @cue_decisions ~w(
+      cues.sources.add
+      cues.sources.update
+      cues.sources.remove
+      cues.sources.enable
+      cues.sources.disable
+      cues.sources.token.new
+      cues.sources.url.get
+      cues.mandates.add
+      cues.mandates.update
+      cues.mandates.remove
+      cues.mandates.enable
+      cues.mandates.disable
+      cues.mandates.approve
+      cues.proposals.decide
+    )
 
+    # Memory off: the reads come from the settings file, and none needs rows.
+    @memory_off %{
+      "capability" => "cues",
+      "sentence" => "Cues keep their records in memory, which is off."
+    }
     test "a process the daemon started is refused, and so is one it cannot place" do
       for peer <- [[daemon_os_pid: ParentProcess.os_pid()], [os: {:win32, :nt}]] do
         socket_path = start_peer_daemon([management_opts: cue_management_opts()] ++ peer)
@@ -965,9 +969,9 @@ defmodule Fermix.CLI.DaemonTest do
     test "a process the daemon did not start reaches the router" do
       socket_path = start_peer_daemon(management_opts: cue_management_opts())
 
-      for {method, params} <- @cue_decisions do
-        assert {:error, {:management_error, "unavailable", _message, @no_cues}} =
-                 Client.request_v1(method, params, socket_path: socket_path, timeout: 5_000),
+      for method <- @cue_decisions do
+        assert {:error, {:management_error, "invalid_params", _message, %{"field" => _field}}} =
+                 Client.request_v1(method, %{}, socket_path: socket_path, timeout: 5_000),
                method
       end
     end
@@ -979,17 +983,24 @@ defmodule Fermix.CLI.DaemonTest do
           daemon_os_pid: ParentProcess.os_pid()
         )
 
-      assert {:ok, %{"available" => false}} =
+      assert {:ok, %{"available" => true}} =
                Client.request_v1("cues.status", %{}, socket_path: socket_path, timeout: 5_000)
 
-      for {method, params} <- [{"cues.sources.list", %{}}, {"cues.proposals.list", %{}}] do
-        assert {:error, {:management_error, "unavailable", _message, @no_cues}} =
-                 Client.request_v1(method, params, socket_path: socket_path, timeout: 5_000)
-      end
+      assert {:ok, %{"sources" => _sources}} =
+               Client.request_v1("cues.sources.list", %{},
+                 socket_path: socket_path,
+                 timeout: 5_000
+               )
+
+      assert {:error, {:management_error, "unavailable", _message, @memory_off}} =
+               Client.request_v1("cues.proposals.list", %{},
+                 socket_path: socket_path,
+                 timeout: 5_000
+               )
     end
 
     defp cue_management_opts,
-      do: management_opts() ++ [operation_opts: [cues: [available?: false]]]
+      do: management_opts() ++ [operation_opts: [cues: [memory?: false, running?: false]]]
 
     defp assert_cue_decisions_refused(socket_path) do
       golden =
@@ -1008,9 +1019,9 @@ defmodule Fermix.CLI.DaemonTest do
 
       log =
         ExUnit.CaptureLog.capture_log(fn ->
-          for {method, params} <- @cue_decisions do
+          for method <- @cue_decisions do
             assert {:error, {:management_error, "unavailable", _message, ^golden}} =
-                     Client.request_v1(method, params, socket_path: socket_path, timeout: 5_000),
+                     Client.request_v1(method, %{}, socket_path: socket_path, timeout: 5_000),
                    method
           end
         end)

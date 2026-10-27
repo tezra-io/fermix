@@ -524,8 +524,7 @@ defmodule FermixCore.Application do
   end
 
   # Cue subsystem (M60 §5.3, §15): child-ABSENT when gated out, like the
-  # skill-curation clock above. `Cues.enabled?/0` already holds the
-  # compile-time gate (`:dev` and `:test` builds only), the
+  # skill-curation clock above. `Cues.enabled?/0` holds the
   # `[fermix_core.cues] enabled` switch and memory being on; `mix test` never
   # starts the tree on top of that, so no suite reaches the door's port or the
   # sweeps. Public (@doc false) for the gating test; production callers use the

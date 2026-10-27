@@ -34,9 +34,6 @@ defmodule FermixCore.BuildInfoTest do
     assert is_binary(identity.architecture)
     assert identity.architecture != ""
     refute BuildInfo.app_engine?()
-    # Only the Mac app's local dev loop stamps `dev-e2e`; an unstamped or
-    # published build (`release-*`, `pr-*`) is not a development build.
-    refute BuildInfo.development_build?()
   end
 
   test "runtime environment changes cannot alter compiled identity" do

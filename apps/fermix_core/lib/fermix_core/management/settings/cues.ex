@@ -5,8 +5,7 @@ defmodule FermixCore.Management.Settings.Cues do
   watchers and mandates are the `cues.*` methods (`Management.Cues`), as the
   phone channel has `channels.mobile` beside `mobile.*`.
 
-  Published only where the build admits cues (`Cues.available?/0`, design
-  B1), the precedent of iMessage off a Mac. Every write goes through
+  Every write goes through
   `Cues.Settings`, the setup page's own functions: the filter pair through
   `save_filter_model/2` in one call (both, or "None" to clear both), the
   switches through `save_switches/1`. `restart` is derived from
@@ -21,7 +20,6 @@ defmodule FermixCore.Management.Settings.Cues do
   explanation in `info`, with no footer.
   """
 
-  alias FermixCore.Cues
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.FilterChoices
   alias FermixCore.Cues.Settings, as: CueSettings
@@ -43,15 +41,13 @@ defmodule FermixCore.Management.Settings.Cues do
                  "much less than your main model."
   @door_info "The door listens on this Mac only. Applies after a restart."
 
-  @doc "The one section this module owns, where the build admits cues."
-  @spec sections(keyword()) :: [%{id: String.t(), pane: String.t(), title: String.t()}]
-  def sections(opts \\ []) when is_list(opts),
-    do: if(available?(opts), do: [@section], else: [])
+  @doc "The one section this module owns."
+  @spec sections() :: [%{id: String.t(), pane: String.t(), title: String.t()}]
+  def sections, do: [@section]
 
-  @doc "Whether this module owns the named section on this build."
-  @spec owns?(String.t(), keyword()) :: boolean()
-  def owns?(section, opts \\ []) when is_binary(section) and is_list(opts),
-    do: section == @section.id and available?(opts)
+  @doc "Whether this module owns the named section."
+  @spec owns?(String.t()) :: boolean()
+  def owns?(section) when is_binary(section), do: section == @section.id
 
   @doc "The rows of the owned section."
   @spec rows(String.t(), Source.snapshot()) :: [Row.t()]
@@ -147,6 +143,4 @@ defmodule FermixCore.Management.Settings.Cues do
       ],
       else: []
   end
-
-  defp available?(opts), do: Keyword.get_lazy(opts, :cues_available?, &Cues.available?/0)
 end

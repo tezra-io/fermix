@@ -227,8 +227,24 @@ defmodule FermixCore.Cues.ConfigTest do
 
       assert error.message =~ "sources.s1.token"
       assert error.message =~ ~s("@keyring" or "@file")
-      assert error.message =~ "mix fermix.cues.secret s1 token"
+      assert error.message =~ "New token"
+      refute error.message =~ "mix fermix.cues"
       refute error.message =~ "sk-live-very-secret"
+    end
+
+    # A release has no Mix tasks: a raw key or secret is sent to the source's
+    # settings, or to `fermix settings` on a host without a browser.
+    test "a raw secret is sent to the source's settings, and the error never repeats it" do
+      error =
+        assert_raise ArgumentError, fn ->
+          Config.normalize(source(%{"kind" => "stream", "key" => "pk-live-very-secret"}))
+        end
+
+      assert error.message =~ "sources.s1.key"
+      assert error.message =~ "Cues tab"
+      assert error.message =~ "fermix settings secret set cue_source:s1:key"
+      refute error.message =~ "mix fermix.cues"
+      refute error.message =~ "pk-live-very-secret"
     end
 
     test "a source needs a kind, from itself or a preset" do

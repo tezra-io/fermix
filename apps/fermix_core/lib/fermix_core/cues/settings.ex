@@ -27,7 +27,6 @@ defmodule FermixCore.Cues.Settings do
 
   require Logger
 
-  alias FermixCore.Cues
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.Pins
   alias FermixCore.Cues.Presets
@@ -60,8 +59,7 @@ defmodule FermixCore.Cues.Settings do
       raise ArgumentError, "unknown cue switch(es): #{inspect(unknown)}"
     end
 
-    with :ok <- available(),
-         {:ok, plan} <- plan(fn cues -> {:ok, put_switches(cues, changes), nil} end),
+    with {:ok, plan} <- plan(fn cues -> {:ok, put_switches(cues, changes), nil} end),
          {:ok, _report} <- commit(plan) do
       {:ok, %{restart?: restart?(plan.old, plan.new)}}
     end
@@ -86,8 +84,7 @@ defmodule FermixCore.Cues.Settings do
       |> put_or_delete(:filter_provider, provider)
       |> put_or_delete(:filter_model, model)
 
-    with :ok <- available(),
-         :ok <- both_or_neither(provider, model),
+    with :ok <- both_or_neither(provider, model),
          :ok <- validate_routing(routing),
          {:ok, _report} <- Wizard.commit_snapshot(put_core(snapshot, :routing, routing)) do
       {:ok, %{cleared?: is_nil(provider)}}
@@ -113,8 +110,7 @@ defmodule FermixCore.Cues.Settings do
   # `mint?` makes a local push source's first token where it has none: a new
   # source, or `new_token/1` on one that waits for it.
   defp store_source(ref, section, secrets, mode, mint?) do
-    with :ok <- available(),
-         :ok <- check_name(ref, "source"),
+    with :ok <- check_name(ref, "source"),
          {:ok, plan} <- plan(&put_source(&1, ref, section, secrets, mode, mint?)),
          {:ok, created} <- write_secrets(ref, plan.extra.writes),
          {:ok, _report} <- commit_or_take_back(plan, ref, created) do
@@ -129,8 +125,7 @@ defmodule FermixCore.Cues.Settings do
   """
   @spec remove_source(String.t()) :: {:ok, %{left: [String.t()]}} | {:error, refusal() | term()}
   def remove_source(ref) when is_binary(ref) do
-    with :ok <- available(),
-         {:ok, plan} <- plan(&drop_section(&1, :sources, ref, "source")),
+    with {:ok, plan} <- plan(&drop_section(&1, :sources, ref, "source")),
          {:ok, _report} <- commit(plan) do
       {:ok, %{left: delete_secrets(ref, plan.extra)}}
     end
@@ -147,8 +142,7 @@ defmodule FermixCore.Cues.Settings do
           {:ok, map()} | {:error, refusal() | secret_failure() | term()}
   def set_secret(ref, field, value)
       when is_binary(ref) and field in @typed_secret_fields and is_binary(value) do
-    with :ok <- available(),
-         {:ok, section} <- section(:sources, ref),
+    with {:ok, section} <- section(:sources, ref),
          :ok <- declared(ref, field) do
       kept = Keyword.drop(section, SecretWriter.cue_secret_fields())
 
@@ -169,8 +163,7 @@ defmodule FermixCore.Cues.Settings do
   @spec clear_secret(String.t(), :key | :secret) ::
           {:ok, map()} | {:error, refusal() | secret_failure() | term()}
   def clear_secret(ref, field) when is_binary(ref) and field in @typed_secret_fields do
-    with :ok <- available(),
-         {:ok, section} <- section(:sources, ref),
+    with {:ok, section} <- section(:sources, ref),
          :ok <- declared(ref, field) do
       forget_secret(ref, field, section)
     end
@@ -186,8 +179,7 @@ defmodule FermixCore.Cues.Settings do
           {:ok, map()} | {:error, refusal() | term()}
   def set_enabled(table, name, enabled?)
       when table in [:sources, :mandates] and is_binary(name) and is_boolean(enabled?) do
-    with :ok <- available(),
-         {:ok, plan} <- plan(&put_enabled(&1, table, name, enabled?)),
+    with {:ok, plan} <- plan(&put_enabled(&1, table, name, enabled?)),
          {:ok, _report} <- commit(plan) do
       {:ok, %{}}
     end
@@ -213,8 +205,7 @@ defmodule FermixCore.Cues.Settings do
   """
   @spec new_token(String.t()) :: {:ok, String.t()} | {:error, refusal() | secret_failure()}
   def new_token(ref) when is_binary(ref) do
-    with :ok <- available(),
-         {:ok, store} <- token_store(ref) do
+    with {:ok, store} <- token_store(ref) do
       replace_token(ref, store)
     end
   end
@@ -243,8 +234,7 @@ defmodule FermixCore.Cues.Settings do
           {:ok, map()} | {:error, refusal() | term()}
   def save_mandate(name, section, mode)
       when is_binary(name) and is_list(section) and mode in [:create, :update] do
-    with :ok <- available(),
-         :ok <- check_name(name, "mandate"),
+    with :ok <- check_name(name, "mandate"),
          {:ok, plan} <- plan(&put_mandate(&1, name, section, mode)),
          {:ok, _report} <- commit(plan) do
       {:ok, %{}}
@@ -254,8 +244,7 @@ defmodule FermixCore.Cues.Settings do
   @doc "Removes mandate `name`'s section."
   @spec remove_mandate(String.t()) :: {:ok, map()} | {:error, refusal() | term()}
   def remove_mandate(name) when is_binary(name) do
-    with :ok <- available(),
-         {:ok, plan} <- plan(&drop_section(&1, :mandates, name, "mandate")),
+    with {:ok, plan} <- plan(&drop_section(&1, :mandates, name, "mandate")),
          {:ok, _report} <- commit(plan) do
       {:ok, %{}}
     end
@@ -279,11 +268,9 @@ defmodule FermixCore.Cues.Settings do
           {:ok, Pins.status()} | {:error, refusal()}
   def approve_mandate(name, approved_from, %DateTime{} = now, opts)
       when is_binary(name) and is_binary(approved_from) and is_list(opts) do
-    with :ok <- available() do
-      case Pins.approve(name, approved_from, now, opts) do
-        {:ok, status} -> {:ok, status}
-        {:error, sentence} -> {:error, {:invalid, sentence}}
-      end
+    case Pins.approve(name, approved_from, now, opts) do
+      {:ok, status} -> {:ok, status}
+      {:error, sentence} -> {:error, {:invalid, sentence}}
     end
   end
 
@@ -647,12 +634,6 @@ defmodule FermixCore.Cues.Settings do
 
   defp both_or_neither(_provider, _model),
     do: {:error, {:invalid, "Pick a provider and a model, or clear both."}}
-
-  defp available do
-    if Cues.available?(),
-      do: :ok,
-      else: {:error, {:invalid, "Cues are not part of this build."}}
-  end
 
   # Replaces a key where it stands, so a save keeps the file's order.
   defp put_key(keyword, key, value) do

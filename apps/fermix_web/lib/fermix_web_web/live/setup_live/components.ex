@@ -64,8 +64,8 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :tabs, :list, required: true
   attr :tool_summary, :map, required: true
   attr :provider_statuses, :list, required: true
-  # The Cues tab's state (M60 §15); nil in a build that does not admit cues.
-  attr :cues, :map, default: nil
+  # The Cues tab's state (M60 §15).
+  attr :cues, :map, required: true
 
   def page(assigns) do
     ~H"""
