@@ -115,12 +115,20 @@ defmodule FermixCore.Management.ProvidersTest do
       assert Enum.all?(page["models"], &String.contains?(String.downcase(&1["id"]), "opus"))
     end
 
-    # A live listing and the catalog answer two different questions. Serving one
-    # under the other's label is the failure this refuses.
-    test "a provider with no live source refuses rather than degrading to the catalog" do
-      params = %{"provider" => "anthropic", "live" => true}
+    # A client asks `live` without knowing which providers have a listing of
+    # their own; the Cues pane opens the same picker for every one. A provider
+    # whose models ship in the catalog has no live answer to degrade from, so it
+    # answers its catalog under the catalog's label, and a query still narrows it.
+    test "a provider with no live source answers live from its catalog, labelled catalog" do
+      live = fn _provider, _opts -> flunk("a provider with no live source has no fetch") end
+      params = %{"provider" => "anthropic", "live" => true, "query" => "opus"}
 
-      assert {:error, {:unavailable, "model_listing"}} = Providers.models(params)
+      assert {:ok, page} = Providers.models(params, live_models: live)
+      assert page["source"] == "catalog"
+
+      catalog = Providers.models(%{"provider" => "anthropic", "live" => false, "query" => "opus"})
+      assert {:ok, %{"models" => [_first | _rest] = models}} = catalog
+      assert page["models"] == models
     end
 
     test "a live listing that fails refuses rather than degrading to the catalog" do

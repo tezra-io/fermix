@@ -11,7 +11,10 @@ defmodule FermixCore.Management.Providers do
   A live model listing never degrades to the catalog. The two are different
   answers to different questions — "what can this server run right now" against
   "what does this build know about" — and serving one under the other's label is
-  the failure this refuses.
+  the failure this refuses. A provider with no live listing of its own answers
+  `live` with its catalog, labelled `catalog`: there is no live answer for it to
+  degrade from, and a client asking for any provider's models cannot know which
+  ones have a live source.
   """
 
   alias FermixCore.Auth.Redaction
@@ -202,11 +205,13 @@ defmodule FermixCore.Management.Providers do
 
   defp entries(provider, false, _opts), do: {:ok, "catalog", catalog_entries(provider)}
 
+  # A provider whose models ship in the catalog has no live fetch to fail, so
+  # `live` answers that catalog under its own label.
   defp entries(provider, true, opts) do
     if ModelListing.live?(provider) do
       live_entries(provider, Keyword.get(opts, :live_models, &ModelListing.live_models/2))
     else
-      {:error, {:unavailable, "model_listing"}}
+      {:ok, "catalog", catalog_entries(provider)}
     end
   end
 

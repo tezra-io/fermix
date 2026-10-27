@@ -722,8 +722,17 @@ defmodule FermixCore.Management.RouterTest do
 
       live = %{"provider" => "anthropic", "live" => true}
 
-      assert {:error, :unavailable, %{"capability" => "model_listing"}} =
-               Router.route(v2("providers.models.list", live))
+      assert {:ok, %{"source" => "catalog"}} = Router.route(v2("providers.models.list", live))
+
+      ollama = %{"provider" => "ollama", "live" => true}
+      failed = fn :ollama, _opts -> {:error, "connection refused"} end
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, :unavailable, %{"capability" => "model_listing"}} =
+                 Router.route(v2("providers.models.list", ollama),
+                   operation_opts: [live_models: failed]
+                 )
+      end)
     end
 
     test "making a provider primary answers with restart and side effects" do

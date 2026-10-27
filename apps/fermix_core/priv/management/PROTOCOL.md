@@ -496,7 +496,9 @@ Notes that the shapes alone do not carry:
 - **A live model listing never degrades to the catalog.** The two answer
   different questions, so a live fetch that fails answers `unavailable`
   {`capability`: `model_listing`} and `source` always names where the rows on
-  the wire came from.
+  the wire came from. A provider with no live listing of its own, whose models
+  ship in the catalog, answers `live` true with that catalog and `source`
+  `catalog`, since there is no live fetch to fail.
 - **`default_model` is the model in force, never the config value alone.** A
   provider row in `setup.state.get`, the Model row of that provider's settings
   section and `provider.model` in `overview.get` carry the model the daemon
