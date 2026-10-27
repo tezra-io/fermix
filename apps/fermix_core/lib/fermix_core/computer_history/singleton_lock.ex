@@ -51,7 +51,7 @@ defmodule FermixCore.ComputerHistory.SingletonLock do
   @spec acquire(String.t(), keyword()) :: :ok | {:error, {:held_by, String.t() | nil}}
   def acquire(path, opts \\ []) when is_binary(path) do
     stale_after = Keyword.get(opts, :stale_after_ms, @stale_after_ms)
-    File.mkdir_p!(Path.dirname(path))
+    ensure_folder!(Path.dirname(path))
 
     case File.open(path, [:write, :exclusive]) do
       {:ok, io} ->
@@ -65,6 +65,14 @@ defmodule FermixCore.ComputerHistory.SingletonLock do
       {:error, reason} ->
         {:error, {:held_by, "unknown (#{inspect(reason)})"}}
     end
+  end
+
+  # `File.mkdir_p!/1` builds a path from the root down, asking the VM's one
+  # file server twice for every ancestor even when the folder exists: about
+  # ten queued calls under a macOS TMPDIR, on every acquire. One check covers
+  # the folder that is already there.
+  defp ensure_folder!(folder) do
+    if File.dir?(folder), do: :ok, else: File.mkdir_p!(folder)
   end
 
   defp break_or_yield(path, stale_after, opts) do

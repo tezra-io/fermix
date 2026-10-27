@@ -53,6 +53,16 @@ defmodule FermixCore.ComputerHistory.SingletonLockTest do
     test "release is idempotent on a missing lock", %{path: path} do
       assert :ok = SingletonLock.release(path)
     end
+
+    test "acquire creates the lock's folder when it does not exist yet" do
+      root = FermixTestSupport.SafeRm.make_tmp_dir!("singleton-lock-folder")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
+      path = Path.join([root, "not", "yet", "machine.lock"])
+
+      assert :ok = SingletonLock.acquire(path, home: "/tmp/home-a")
+      assert {:ok, contents} = File.read(path)
+      assert contents =~ "/tmp/home-a"
+    end
   end
 
   describe "heartbeat + staleness" do
