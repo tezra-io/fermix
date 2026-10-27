@@ -166,6 +166,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with `echo … | secret-tool store` keeps the line break `echo` added. To fix
   such a key, store it again through Fermix: with `fermix setup`, or in the
   app's Settings.
+- **Computer History starts with a Fermix home whose path has letters beyond
+  Latin-1.** The lock that keeps a Mac to one capturer wrote the holder's
+  `FERMIX_HOME` as Latin-1, so a home path with, say, Japanese or Cyrillic
+  letters kept Computer History from starting, and an accented one was
+  recorded garbled where status names the holder. It is written as UTF-8 now.
 - **A call Fermix holds for your confirmation shows as held in Opik, not as
   succeeded.** A tool call the access gate parked or refused, or a cue
   mandate held, exported to Opik as a successful span. It is now an errored

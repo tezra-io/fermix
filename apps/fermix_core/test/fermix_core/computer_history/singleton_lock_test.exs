@@ -9,6 +9,9 @@ defmodule FermixCore.ComputerHistory.SingletonLockTest do
 
   alias FermixCore.ComputerHistory.SingletonLock
 
+  require Record
+  Record.defrecordp(:file_info, Record.extract(:file_info, from_lib: "kernel/include/file.hrl"))
+
   setup do
     path =
       Path.join(System.tmp_dir!(), "fermix-ch-lock-#{System.unique_integer([:positive])}.lock")
@@ -22,10 +25,12 @@ defmodule FermixCore.ComputerHistory.SingletonLockTest do
     %{path: path}
   end
 
+  # Raw, like the lock's own calls, so the race test's 200 trials never queue
+  # on the VM's one file server either.
   defp make_stale(path, home) do
-    File.write!(path, "#{home}\nstale-holder\n")
+    :ok = :file.write_file(path, "#{home}\nstale-holder\n", [:raw])
     old = System.os_time(:second) - 3_600
-    File.touch!(path, old)
+    :ok = :file.write_file_info(path, file_info(atime: old, mtime: old), [:raw, {:time, :posix}])
   end
 
   describe "acquire / release" do
@@ -52,6 +57,15 @@ defmodule FermixCore.ComputerHistory.SingletonLockTest do
 
     test "release is idempotent on a missing lock", %{path: path} do
       assert :ok = SingletonLock.release(path)
+    end
+
+    test "a home beyond ASCII is recorded and named as it is", %{path: path} do
+      for {home, n} <- Enum.with_index(["/Users/josé/.fermix", "/Users/日本/.fermix"]) do
+        lock = "#{path}.#{n}"
+        on_exit(fn -> FermixTestSupport.SafeRm.rm(lock) end)
+        assert :ok = SingletonLock.acquire(lock, home: home)
+        assert {:error, {:held_by, ^home}} = SingletonLock.acquire(lock, home: "/tmp/home-b")
+      end
     end
 
     test "acquire creates the lock's folder when it does not exist yet" do

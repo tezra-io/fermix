@@ -53,11 +53,9 @@ defmodule FermixCore.ComputerHistory.SingletonLock do
     stale_after = Keyword.get(opts, :stale_after_ms, @stale_after_ms)
     ensure_folder!(Path.dirname(path))
 
-    case File.open(path, [:write, :exclusive]) do
-      {:ok, io} ->
-        IO.write(io, marker(opts))
-        File.close(io)
-        :ok
+    case open_exclusive(path) do
+      {:ok, fd} ->
+        write_marker(fd, opts)
 
       {:error, :eexist} ->
         break_or_yield(path, stale_after, opts)
@@ -67,12 +65,28 @@ defmodule FermixCore.ComputerHistory.SingletonLock do
     end
   end
 
-  # `File.mkdir_p!/1` builds a path from the root down, asking the VM's one
-  # file server twice for every ancestor even when the folder exists: about
-  # ten queued calls under a macOS TMPDIR, on every acquire. One check covers
-  # the folder that is already there.
+  # Acquiring, breaking and releasing make their file calls in this process
+  # (`:raw`, or `:prim_file` where `:file` has no raw form), never through the
+  # VM's one file server (`:file_server_2`), which runs each call to its end:
+  # on a loaded machine every other file call in the VM queues there, and an
+  # acquire waited behind them. `File.mkdir_p!/1` would also ask that server
+  # twice for every ancestor of the folder, so it runs only for a folder that
+  # is not there yet. The heartbeat's `File.touch/2` is raw already, and it
+  # must keep re-creating a lock that is missing: a late holder whose lock a
+  # breaker renamed away re-creates it, and the breaker's final O_EXCL create
+  # then loses. The marker is written as the UTF-8 it is; the old Latin-1 io
+  # device garbled an accented home and raised on one beyond Latin-1.
   defp ensure_folder!(folder) do
-    if File.dir?(folder), do: :ok, else: File.mkdir_p!(folder)
+    if File.dir?(folder, [:raw]), do: :ok, else: File.mkdir_p!(folder)
+  end
+
+  defp open_exclusive(path), do: :file.open(path, [:write, :exclusive, :raw, :binary])
+
+  defp write_marker(fd, opts) do
+    written = :file.write(fd, marker(opts))
+    closed = :file.close(fd)
+    :ok = written
+    :ok = closed
   end
 
   defp break_or_yield(path, stale_after, opts) do
@@ -95,7 +109,7 @@ defmodule FermixCore.ComputerHistory.SingletonLock do
   defp break_stale(path, stale_after, opts) do
     claim = "#{path}.break.#{System.system_time(:nanosecond)}.#{System.pid()}"
 
-    case File.rename(path, claim) do
+    case :prim_file.rename(path, claim) do
       :ok -> resolve_claim(path, claim, stale_after, opts)
       {:error, _lost_or_gone} -> {:error, {:held_by, holder_home(path)}}
     end
@@ -103,22 +117,20 @@ defmodule FermixCore.ComputerHistory.SingletonLock do
 
   defp resolve_claim(path, claim, stale_after, opts) do
     if stale?(claim, stale_after) do
-      _ = File.rm(claim)
+      _ = :file.delete(claim, [:raw])
       create_exclusive(path, opts)
     else
       # The lock was refreshed just before we grabbed it — it is live. Put it
       # back and stand down.
-      _ = File.rename(claim, path)
+      _ = :prim_file.rename(claim, path)
       {:error, {:held_by, holder_home(path)}}
     end
   end
 
   defp create_exclusive(path, opts) do
-    case File.open(path, [:write, :exclusive]) do
-      {:ok, io} ->
-        IO.write(io, marker(opts))
-        File.close(io)
-        :ok
+    case open_exclusive(path) do
+      {:ok, fd} ->
+        write_marker(fd, opts)
 
       _lost_the_race ->
         {:error, {:held_by, holder_home(path)}}
@@ -136,13 +148,14 @@ defmodule FermixCore.ComputerHistory.SingletonLock do
   @doc "Release the lock (rm). Idempotent."
   @spec release(String.t()) :: :ok
   def release(path) when is_binary(path) do
-    _ = File.rm(path)
+    _ = :file.delete(path, [:raw])
     :ok
   end
 
   defp stale?(path, stale_after_ms) do
-    case File.stat(path, time: :posix) do
-      {:ok, %File.Stat{mtime: mtime}} ->
+    case :file.read_file_info(path, [:raw, {:time, :posix}]) do
+      {:ok, info} ->
+        %File.Stat{mtime: mtime} = File.Stat.from_record(info)
         (System.os_time(:second) - mtime) * 1000 > stale_after_ms
 
       # A lock that vanished between the eexist and the stat is effectively free.
@@ -152,7 +165,7 @@ defmodule FermixCore.ComputerHistory.SingletonLock do
   end
 
   defp holder_home(path) do
-    case File.read(path) do
+    case :file.read_file(path, [:raw]) do
       {:ok, contents} -> parse_home(contents)
       {:error, _reason} -> nil
     end
