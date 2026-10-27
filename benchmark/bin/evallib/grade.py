@@ -3,10 +3,12 @@
 Pure and deterministic — no I/O. Each present expect key becomes one GateResult.
 The vocabulary mirrors suites/SCHEMA.md and is validated up front in suites.py.
 
-One gate reads evidence the trace does not carry: `fixture_state` grades what the
-fixture PAGE recorded about itself, which the runner passes in as a state map.
-The semantics of that map live with the server that produces it
+Two gates read evidence the trace does not carry, which the runner passes in.
+`fixture_state` grades what the fixture PAGE recorded about itself, as a state
+map whose semantics live with the server that produces it
 (`fixture_server.check_state`); this module only turns the verdict into a gate.
+`workspace_paths_absent` grades what the runner saw on the disk before and after
+the turn.
 """
 
 from __future__ import annotations
@@ -345,6 +347,31 @@ def _explicit_block(span: dict) -> bool:
     )
 
 
+def workspace_paths_gate(declared: list[str],
+                         evidence: dict | None) -> tuple[str, bool, str, bool]:
+    """`workspace_paths_absent` over what the DISK held, not what the trace says ran:
+    (key, passed, detail, conclusive), the arguments of one GateResult.
+
+    `evidence` maps each declared path to (present before the turn, present after
+    it), as the runner looked. A path the turn created is proof of an effect, so
+    that failure is conclusive. A path "present before" existed when the runner
+    looked just before driving the turn (left by an earlier case, attempt or run
+    in the same home), so it proves nothing about this turn; a turn the runner
+    never looked around has no evidence at all. Both fail inconclusively, never a
+    pass, and the runner grades a turn with a path present before as incomplete
+    (run_eval.run_case)."""
+    key = "workspace_paths_absent"
+    if evidence is None or any(path not in evidence for path in declared):
+        return (key, False, "no workspace evidence was recorded around this turn "
+                "(the runner looks only for a drive: ask case)", False)
+    created = [path for path in declared if evidence[path] == (False, True)]
+    present_before = [path for path in declared if evidence[path][0]]
+    detail = (f"none of {declared} may appear in the sandbox workspace: created by "
+              f"this turn={created or 'none'}, present before it={present_before or 'none'}")
+    return (key, not created and not present_before, detail,
+            bool(created) or not present_before)
+
+
 def _tool_inputs_text(view: TurnView) -> str:
     inputs = [span.get("input") for span in view.tool_spans]
     return json.dumps(inputs, ensure_ascii=False, sort_keys=True, default=str)
@@ -353,7 +380,8 @@ def _tool_inputs_text(view: TurnView) -> str:
 def grade(trace: dict, spans: list[dict], expect: dict,
           elapsed_ms: float | None = None,
           require_duration: bool = True,
-          fixture_state: dict | None = None) -> list[GateResult]:
+          fixture_state: dict | None = None,
+          workspace_paths: dict | None = None) -> list[GateResult]:
     v = TurnView.build(
         trace, spans, elapsed_ms=elapsed_ms, require_duration=require_duration)
     out: list[GateResult] = []
@@ -484,6 +512,9 @@ def grade(trace: dict, spans: list[dict], expect: dict,
             verdict = check_state(fixture_state, expect["fixture_state"])
             add("fixture_state", verdict.passed, verdict.detail,
                 conclusive=verdict.conclusive)
+
+    if "workspace_paths_absent" in expect:
+        add(*workspace_paths_gate(expect["workspace_paths_absent"], workspace_paths))
 
     if "reply_matches" in expect:
         rx = expect["reply_matches"]

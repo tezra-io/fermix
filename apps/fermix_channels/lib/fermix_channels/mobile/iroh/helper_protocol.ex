@@ -10,7 +10,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocol do
   process.
   """
 
-  @protocol_version 1
+  @protocol_version 2
   @max_line_bytes 65_536
   @max_text_bytes 512
   @alpn "fermix/mobile/1"
@@ -99,6 +99,18 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocol do
   @spec set_relays([map()]) :: map()
   def set_relays(relays) when is_list(relays) and relays != [],
     do: %{"op" => "set_relays", "relays" => relays}
+
+  @doc """
+  The `close` op: the helper closes the peer's connections once their streams
+  have ended. The id is the lowercase hex a preamble names; any other fails loud.
+  """
+  @spec close(String.t()) :: map()
+  def close(id) when is_binary(id) do
+    case endpoint_id(id) do
+      :ok -> %{"op" => "close", "endpoint_id" => id}
+      {:error, :invalid_endpoint_id} -> raise ArgumentError, "not an endpoint id: #{inspect(id)}"
+    end
+  end
 
   @doc "The `shutdown` op."
   @spec shutdown() :: map()
@@ -198,7 +210,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocol do
 
   @doc """
   Reads a bridge connection's preamble: the peer's kind and its endpoint id as
-  lowercase hex. A peer is a phone, the only kind protocol 1 knows.
+  lowercase hex. A peer is a phone, the only kind the protocol knows.
   """
   @spec decode_preamble(binary()) :: {:ok, :phone, String.t()} | {:error, :invalid_preamble}
   def decode_preamble(<<@preamble_magic, 1, id::binary-size(32)>>),

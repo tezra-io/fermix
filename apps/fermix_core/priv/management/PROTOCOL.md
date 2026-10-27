@@ -224,7 +224,7 @@ daemon onto anything else.
 | `meetings.signin.start` | none | Starts the notetaker's one-time interactive sign-in. A job, because it waits for a person. Minimum version `2`. |
 | `computer_use.grant.start` | none | Raises the OS permission prompts and answers with what was granted. A job, and only ever on an explicit ask. Minimum version `2`. |
 | `computer_use.permissions.get` | none | The current, non-prompting permission state: whether the helper is installed, which grants it holds, and when they were read. Minimum version `2`. |
-| `mobile.status` | none | The phone channel as it stands: whether it is enabled, whether it started, whether it was refused this boot and the class of that refusal, the listener (`status`, `reason`, `port`, `bind`, `candidates`), the local-network announcement, detected tailnet addresses, the gateway identity's presence and fingerprint, remote reach, push credentials and delivery, the paired-phone count, the mobile protocol version this daemon serves, and the pairing session open or newest retained. Answers with the channel off. Minimum version `2`. |
+| `mobile.status` | none | The phone channel as it stands: whether it is enabled, whether it started, whether it was refused this boot and the class of that refusal, whether it is held until setup is finished, the listener (`status`, `reason`, `port`, `bind`, `candidates`), the local-network announcement, detected tailnet addresses, the gateway identity's presence and fingerprint, remote reach, push credentials and delivery, the paired-phone count, the mobile protocol version this daemon serves, and the pairing session open or newest retained. Answers with the channel off. Minimum version `2`. |
 | `mobile.pair.start` | none | Opens the pairing window and answers with the pairing session view plus, once, the pairing link as `uri`. `busy` while a window is open. Minimum version `2`. |
 | `mobile.pair.get` | `session_id` | The pairing session as it stands. The pane polls it until the session is terminal. Minimum version `2`. |
 | `mobile.pair.decide` | `session_id`, `approved` (boolean) | Approves or denies the phone waiting in the session and answers the terminal view. Minimum version `2`. |
@@ -247,6 +247,30 @@ daemon onto anything else.
 | `mcp.servers.check.start` | `name` | Connects one server and lists its tools once. A job, kind `mcp_check`, whose result carries `tool_count` and `latency_ms`. Minimum version `2`. |
 | `mcp.servers.import.scan` | none | Reads the MCP servers in Claude Desktop's, Claude Code's, Cursor's, VS Code's, Windsurf's and Codex's settings on this Mac, now and only now, and answers `candidates`, each with its `source`, `source_label`, name, transport, summary, command line or URL, consent sentence, resolved program and `secret_names` (never a value), and `skipped`, what could not be offered with the daemon's sentence. Minimum version `2`. |
 | `mcp.servers.import` | `servers` (`[{source, name}]`, at most 32) | Reads those settings again and adds each server named through the add path, with the values its settings held stored in the Keychain and `origin` `imported:<source>`, and answers `{servers, refused}`: the new rows, and each server not added with its sentence. Minimum version `2`. |
+| `cues.status` | none | The cue subsystem as it stands: `available` (always `true`: every build has cues), the switches (`enabled`, `mandates_enabled`), whether the cue tree is `running`, `memory_enabled`, a `state` (`off`, `needs_memory`, `needs_restart`, `running`) with its `status_sentence`, the `door` (`state` `listening`, `unavailable` or `not_running`, `port`, `reason`, `sentence`), and `counts` (`sources`, `sources_attention`, `watchers`, `watchers_held`, `mandates`, `mandates_attention`, `proposals_waiting`). Answers on every build. Minimum version `2`. |
+| `cues.sources.list` | none | Every source as a row, at most 64, plus `can_add` and `limits` (`max_sources`). Minimum version `2`. |
+| `cues.sources.get` | `ref` | One source's row, its editable fields as settings rows (`values`), its open gaps (at most 20, each with the daemon's sentence) and its refused requests by reason (`rejected`). Minimum version `2`. |
+| `cues.sources.form` | `kind`, `preset`, `verify` (each optional) | The add form for that choice, and writes nothing: `kinds`, `presets`, `rows` (the name first, then the fields of that kind, preset and verification method, a secret field as a `secret` row with `present: false`), `consent_sentence` and `notes`. A stream has no preset; it is the general WebSocket source: each of its field rows but the name and the daily budget carries an `info` and an `example` (no row of the form carries a `footer`), and two `secret` rows, `key` (API key) and `secret` (API secret), follow its address. Minimum version `2`. |
+| `cues.sources.add` | `ref`, `kind` or `preset`, `values` | Saves a new source and answers `{source, token}`: its row, and for a new local push source its first token, returned once; null otherwise. Minimum version `2`. |
+| `cues.sources.update` | `ref`, `values` | Changes the fields `values` names and answers `{source}`. The name, kind and preset cannot change. Minimum version `2`. |
+| `cues.sources.remove` | `ref` | Removes a source and its stored secrets, and answers `{ref, removed: true, left, watchers}`: any secret that could not be deleted, as sentences, and the watchers that listened to it. Minimum version `2`. |
+| `cues.sources.enable` | `ref` | Turns a source on and answers `{source}`. Minimum version `2`. |
+| `cues.sources.disable` | `ref` | Turns a source off and answers `{source}`. Minimum version `2`. |
+| `cues.sources.token.new` | `ref` | A fresh token for a local push source, returned once, as `{ref, token}`. The old one stops working within a minute. Minimum version `2`. |
+| `cues.sources.url.get` | `ref` | A webhook source's address, `{ref, url, path}`: made on the first call and the same on every later one. Minimum version `2`. |
+| `cues.watchers.list` | none | Every watcher as a row, oldest first, at most 200, with `window_s` (86400) and `truncated`. Minimum version `2`. |
+| `cues.watchers.get` | `name` | One watcher's row plus its `purpose`, its words to listen for (`listen_for`), its `instructions` and how many of its examples are marked each way. Minimum version `2`. |
+| `cues.mandates.list` | none | Every mandate as a row, at most 64, plus `can_add` and `limits` (`max_mandates`). Minimum version `2`. |
+| `cues.mandates.choices` | none | What a mandate form offers: the jobs that run on cues, each with the watcher that wakes it and the mandate that names it, and the installed, enabled `http` plugin tools. Minimum version `2`. |
+| `cues.mandates.add` | `name`, `values` | Saves a new mandate and answers `{mandate}`. Durations travel as whole seconds (`approve_within_s`, `max_cue_age_s`). Minimum version `2`. |
+| `cues.mandates.update` | `name`, `values` | Changes the fields `values` names and answers `{mandate}`. Its approval covers the section, so the row then says `changed` until approved again. Minimum version `2`. |
+| `cues.mandates.remove` | `name` | Removes a mandate and answers `{name, removed: true}`. Minimum version `2`. |
+| `cues.mandates.enable` | `name` | Turns a mandate on and answers `{mandate}`. Minimum version `2`. |
+| `cues.mandates.disable` | `name` | Turns a mandate off and answers `{mandate}`. Minimum version `2`. |
+| `cues.mandates.approve` | `name` | Records the owner's approval of a mandate as it is now, from the Fermix app, and answers `{mandate}`. An inactive mandate is refused with its load sentence. Minimum version `2`. |
+| `cues.proposals.list` | `state` (`waiting`, the default, or `recent`) | Fermix's record of each waiting proposal (oldest first, at most 100) or of the last 7 days (at most 50), and `waiting`. No arguments and no cue text. Minimum version `2`. |
+| `cues.proposals.get` | `proposal_id` | `{proposal}`: the record plus the card, the outside text apart. Minimum version `2`. |
+| `cues.proposals.decide` | `proposal_id`, `decision` (`confirm` or `deny`) | Answers a waiting proposal and returns `{proposal}` once the decision is recorded: `denied`, or `confirmed` with a null `result_status` while the call runs. Minimum version `2`. |
 
 Notes that the shapes alone do not carry:
 
@@ -341,7 +365,12 @@ Notes that the shapes alone do not carry:
   follow it. `enabled` is the switch and `started` whether the channel runs;
   they differ when the channel could not start (`refused`), or when setup was
   not complete at boot, until the next start. Every verb goes by `started`,
-  never by the switch.
+  never by the switch. A boot whose setup was not finished starts no channel,
+  so while setup still is not finished `hold` is `setup`, the pairing verbs
+  are refused with "The phone channel starts once setup is finished.", and a
+  restart would start nothing. Once setup is finished `hold` is null and,
+  while the switch is on, the restart reasons carry a `channels` reason,
+  because the next start runs it.
   `refused` is true when the channel could not start this boot, and
   `refusal` names the class: `memory_disabled` (the conversation lives in the
   memory store, which is off), `identity`, `attachment_manifest` or
@@ -366,8 +395,10 @@ Notes that the shapes alone do not carry:
   last one failed or was lost (`apns.reason`: `connecting`, `connect_failed`
   or `connection_lost`; the next push reconnects), or `down` when no push
   dispatcher runs: the channel is not running, push is off, or its
-  credentials did not resolve. A connect is given up after ten seconds, and
-  the status answers while one runs.
+  settings did not resolve (a key the keychain could not give, one that is
+  not a P-256 key, a missing or invalid field), when `apns.credentials` reads
+  `missing` and the rest of the channel runs. A connect is given up after ten
+  seconds, and the status answers while one runs.
 - **Remote reach lets a paired phone reach this daemon from any network**,
   through Fermix's relays (M62). `remote.state` is `off` (its switch is off,
   or the channel is not running), `dormant` (no phone has been paired yet;
@@ -395,6 +426,17 @@ Notes that the shapes alone do not carry:
   to a caller the daemon cannot place, and the daemon log says so. The
   sentence is what tells this refusal from a channel that is not running.
   Reading a session and the status stay open to every caller.
+- **Cue writes, the two values handed out and a proposal's answer are the
+  owner's decisions too.** `cues.sources.add`, `.update`, `.remove`,
+  `.enable`, `.disable`, `.token.new`, `.url.get`, `cues.mandates.add`,
+  `.update`, `.remove`, `.enable`, `.disable`, `.approve` and
+  `cues.proposals.decide` answer `unavailable` {`capability`: `cues`,
+  `sentence`: "Only the owner can change cues: use the Fermix app or your own
+  terminal."} to the same callers. The capability and the sentence are the
+  method's family's. This raises the bar and authenticates nobody: it stops a
+  model's own command from approving a mandate or answering a proposal. Every
+  cue read stays open, and `settings.apply` on the `cues` section is not an
+  owner decision: its switches narrow or stop.
 - **`channels.mobile` is the phone channel's settings section**: the enable
   switch and the remote-reach switch `mobile_iroh` (on by default), each
   applied the moment it is written (their rows' `restart` is false), and the
@@ -575,6 +617,12 @@ Notes that the shapes alone do not carry:
   row, where the choice trades a keyring password for a file that is not
   encrypted; and the phone channel's reach-from-anywhere switch, which says
   what turning it off keeps the phone to.
+- **`example` is a sample value for an empty field.** A client shows it in an
+  empty text or list field, in place of its own empty prompt ("Not set", "New
+  entry"), so the field shows what goes in it. It is never a default: nothing
+  is saved from it, and a client never sends it. It is `null` on every row of
+  another kind and on every row with nothing to show; today the fields of a
+  stream source carry one.
 - **`advanced` marks a row most people never need to change.** A client draws
   a section's advanced rows after its other rows, under one disclosure that
   starts closed; a section with none draws no disclosure. It says nothing about
@@ -653,11 +701,12 @@ Notes that the shapes alone do not carry:
   null for every other family), so storing a value the daemon will not use
   still succeeds and says so. The field is optional: an older daemon omits it,
   which a client renders as no override reported.
-- **`id` names one of six families.** A bare registry key (`openai_api_key`,
+- **`id` names one of seven families.** A bare registry key (`openai_api_key`,
   `telegram_bot_token`, …), `plugin:<name>` for a plugin's own token,
   `oauth_client:<provider>` for a sign-in client's secret,
-  `anthropic_setup_token`, `env:<NAME>` for a sandbox environment variable, and
-  `mcp:<name>/…` for a value an MCP server declares.
+  `anthropic_setup_token`, `env:<NAME>` for a sandbox environment variable,
+  `mcp:<name>/…` for a value an MCP server declares, and `cue_source:<ref>:…`
+  for what the owner types for a cue source.
   The first three take the same keychain-first write.
   The fourth is a different mechanism and is documented as such: a
   `claude setup-token` value is a long-lived subscription credential, so it is
@@ -672,7 +721,8 @@ Notes that the shapes alone do not carry:
   `NAME` is any name matching `^[A-Za-z_][A-Za-z0-9_]{0,127}$` exactly, except
   `PATH`, `HOME`, `USER`, `LANG`, `SHELL`, `TMPDIR`, `FERMIX_HOME` and any name
   starting `LC_`, which Fermix sets itself. The value is one line of 1 to 8,192
-  bytes with no NUL, CR or LF, and at most 64 names are stored. `secret.set`
+  bytes of printable ASCII, space to `~` (so no NUL, CR, LF, tab or non-ASCII
+  character), and at most 64 names are stored. `secret.set`
   stores the value in the OS secret store in a namespace of its own (a skill's
   `OPENAI_API_KEY` never touches the OpenAI provider's key), reads it back to
   verify it, and then allows the name, removes it from the deny list and points
@@ -703,6 +753,19 @@ Notes that the shapes alone do not carry:
   `draft_id`, and `mcp.servers.add` stores it. A server whose name was
   written by hand outside the name rule holds no values, and the refusal says to
   add it again under a lowercase name.
+- **`cue_source:<ref>:key` and `cue_source:<ref>:secret` store what the owner
+  types for a cue source.** An id is accepted only when the source exists and
+  its kind declares the field (a webhook's signing or shared secret, a feed's
+  or a stream's key and secret). The value is one line of 1 to 8,192 bytes.
+  Storing writes the value and the reference that names it in one settings
+  write, so storing the last secret a source waits for starts it; clearing
+  deletes the value first, then the reference, and a source that needs that
+  secret waits for it again. `present` is "the settings file points this
+  field at a stored value". `cue_source:<ref>:token` and
+  `cue_source:<ref>:path_secret` are Fermix's to make and are refused with
+  `invalid_params` and a sentence: a new token comes from
+  `cues.sources.token.new`, an address from `cues.sources.url.get`. On a build
+  without cues the family answers `unavailable` {`capability`: `cues`}.
 - **A plugin row is one shape for two halves.** An installed plugin and a
   catalog entry that has never been fetched publish the same fields, so a client
   decodes one record rather than two. `installed` is what separates them.
@@ -925,6 +988,93 @@ Notes that the shapes alone do not carry:
   start, or waiting for a value) is refused with its own row's sentence, and a
   connection that fails ends the job with that sentence. After an add or an
   update, `mcp.servers.get` reads the row as it connects.
+- **The cue methods are on every build**, and so is the `cues` section of
+  `settings.sections`. They are minimum version `2` with no protocol bump, so a
+  client finds them in `hello.capabilities.methods`. With memory
+  off, `cues.status` says `needs_memory`, the source and mandate lists are drawn
+  from the settings file, and the reads that need rows (`cues.watchers.*`,
+  `cues.mandates.choices`, `cues.proposals.*`) answer `unavailable` with the
+  daemon's sentence. An unknown source, watcher, mandate or proposal is
+  `invalid_params` with the field and a sentence ("There is no source named
+  home-alerts.").
+- **`cues` is the cue section**, under pane `cues`: `cues_enabled` (the cue tree
+  starts at boot, so `restart` is true), `cues_mandates_enabled` (read at every
+  mandate call), `filter_provider` and `filter_model` (the Cues filter model,
+  the one every watcher's filter uses, read at every filter call) and
+  `cues_door_port` (`advanced`, 1024 to 65535, always on 127.0.0.1). The rows
+  carry their explanations in `info` and no `footer`; the filter model's says
+  a smaller, faster model works well. `filter_provider` offers `""`, the
+  default, labelled with the main model it resolves to ("Default: your main
+  model (Anthropic · claude-sonnet-5-5)"), then only the providers that are set
+  up; a saved provider that is no longer set up stays, disabled with its hint,
+  so the value is always an option. `filter_model` offers the chosen provider's
+  catalog as suggestions. With neither set, every filter runs on the main
+  model. The two are applied together in one `settings.apply`, both or `""`
+  for both; either alone is refused with "Pick a provider and a model, or
+  clear both."
+- **Every cue write goes through the setup page's own path**, so the outside
+  edit refusal (`external_change`), the baseline re-record, the secret
+  take-back and the source workers' reconcile apply identically from either
+  door, and a source or a mandate written here reads back from `config.toml`
+  as a hand edit would hold it, with no secret value in it. At most 64 sources
+  and 64 mandates are added; past that the add is refused with a sentence.
+  A form's refusal is `invalid_params` with `field` (the value's key, or `ref`
+  or `name`) and the daemon's sentence.
+- **A source row is the daemon's.** `state` is `off`, `needs_secret`,
+  `not_running` (cues off, or on and not yet restarted), then the status the
+  source last wrote: `idle`, `polling`, `connected`, `reconnecting`,
+  `auth_failed`, `over_budget`, `stopped` or `unavailable`. A client draws
+  `status_sentence` and switches on `primary_action` and `actions` (closed:
+  `enable`, `disable`, `set_secret`, `new_token`, `get_url`); edit and remove
+  are always available and are the client's controls. `secrets` reports each
+  field's presence and nothing else. Never on the wire: a payload, an item's
+  text or snapshot, a cursor, a secret's value, or a webhook's address.
+- **A source can wait for its secret.** A source that needs a secret (a
+  webhook's signing secret, a local push's token, or the `key` and `secret` a
+  stream with no preset signs in with, by a header or a placeholder in its
+  sign-in message) and has one not stored loads as `needs_secret` with
+  `missing_secret` naming the first such field (key before secret), for a
+  hand-edited file as much as for a socket write: the door refuses its
+  requests and no worker runs until each is stored. So `cues.sources.add`
+  saves a webhook or a stream first and the client stores its secrets with
+  `secret.set` after, one per secret row; `secrets` lists each field the
+  source needs with its own presence.
+- **Two values are handed out.** A new local push source's first token
+  (`cues.sources.add`) and a fresh one (`cues.sources.token.new`) are returned
+  once: never logged, never traced, never retained, and no later read repeats
+  them. A webhook's address is returned by `cues.sources.url.get` alone, on
+  every ask, and is never on a list.
+- **A watcher row is read-only**: watchers are made and changed in a chat with
+  Fermix, and every `llm` watcher filters with the one Cues filter model.
+  `state` is `on`, `paused`, `needs_update` or `held` (its filter cannot reach
+  its model). `needs_update` is a watcher saved before a rule every save now
+  keeps, which gets nothing until a change in chat: one that filters needs
+  words to listen for ("Needs words to listen for: update it in chat."), and
+  one with no filter cannot listen to a stream ("Passes everything, so it
+  can't listen to a stream: give it a filter in chat."). `counts` cover
+  `window_s`: `offered` is every item the watcher's words let through, kept or
+  not; a stream keeps only what passes, so its watchers' `offered`, `dropped`
+  and `failed` are counted by the hour rather than stored. `purpose`,
+  `listen_for` and `instructions` are the owner's own words and are on
+  `cues.watchers.get` alone; examples are counted, never shown; reasons and
+  hints never cross.
+- **A mandate row carries its load and its approval.** `load` is `active`, or
+  `inactive` with the check's sentence; `approval.state` is `unapproved`,
+  `approved`, `changed` or `disabled`, null where memory is off. A client
+  switches on `primary_action` (`approve` or null) and `actions` (closed:
+  `approve`, `enable`, `disable`); `consent_sentence` says what the mode lets
+  the task do. `cues.mandates.approve` records the approval as from "Fermix
+  app".
+- **A proposal is Fermix's record, and its card keeps the outside text
+  apart.** A record carries ids, names from the owner's configuration, times,
+  `decided_from` (`telegram`, `signal`, `whatsapp`, `imessage`, `companion`,
+  `mobile` or `management`) and Fermix's `status_sentence`, never an argument or
+  cue text. `cues.proposals.get` adds `received_at`, `summary` (Fermix's
+  sentence) and `outside`: `args_text` (the recorded call's arguments, at most
+  3,500 characters) and `cue` (`type`, `subject`, `text`, `occurred_at`) or
+  null, all outside text a client draws only as such. `cues.proposals.decide`
+  answers by id with no token; the first answer from any surface wins, and a
+  later one is refused with the daemon's sentence and runs nothing.
 - **A sign-in client appears only where a plugin needs one.** `oauth_clients` is
   derived from the providers the published rows name, so a client row for a
   family this Mac has no plugin for is never drawn. `client_id` is the public

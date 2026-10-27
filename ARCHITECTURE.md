@@ -107,6 +107,8 @@ redacting logger, attaches telemetry, and starts the core tree under
 10. children gated by config or platform: the daemon socket
     (`Fermix.CLI.Daemon` and the management workers), `Realtime`,
     `ComputerUse`, `ComputerHistory` (macOS only), and `SkillCuration.Scheduler`
+11. `Cues.Supervisor`, last, only with cues enabled (see `FermixCore.Cues`
+    below)
 
 Architecture Invariant: core is the only place where agent runtime state, memory
 state, prompt composition, capability state, and provider calls meet. Channels
@@ -212,7 +214,10 @@ names, in which case pooled requests use the `FermixCore.Finch.Proxied` twin and
 HTTPS is tunnelled with `CONNECT`. A direct dial tries IPv6 first and falls back
 to IPv4 (`Net.Egress.prefer_ipv6/1`). `Net.TimeoutPolicy`
 holds the receive timeout for each request kind, `Net.Tls` the verified TLS
-options for WebSockets, and `Net.Guard` the public-URL checks.
+options for WebSockets, and `Net.Guard` the public-URL checks. `Net.PinnedUrl`
+pins a public URL to the address the guard checked and builds the request to
+it (`Host` and the TLS name keep the original host), for `web_fetch`, link
+previews and Cue feeds.
 `FermixCore.Timeouts` names the non-HTTP deadlines.
 
 Architecture Invariant: core boot aborts if `auth.json` exists with a mode other
@@ -247,14 +252,18 @@ agent loop and the realtime voice bridge), and it asks
 `Capabilities.AccessGate.admit/3` before the executor. A capability whose plugin
 manifest marks it `access_sensitive` runs there only on an attended owner turn,
 not from a shared Buzz channel (`Acp.Identity.multi_principal?/1`), that read no
-outside content (`:outside_sources`, folded by the agent loop from
-`UntrustedContent.outside_source/1`), or on a scheduled run whose job names it;
-otherwise the call is parked in `AccessGate.Pending` for one owner
-confirmation, or refused. While a parked call waits, the turn (or Realtime
-call) that parked it runs nothing else: the loop stamps `:access_waiting` from
-the held result itself (the rest of that step included), the Realtime session
-from `AccessGate.waiting?/1`, and the gate refuses every call under it. Every
-other capability returns on one map lookup.
+outside content (`:outside_sources`, seeded by `TurnRunner` from
+`UntrustedContent.message_sources/1` with a forwarded message and the message's
+attachments, a voice note aside, and a Recent Activity note that rendered, then
+folded per call by the agent loop from `UntrustedContent.outside_source/2`), or
+on a scheduled run whose job names it; otherwise the call is parked in
+`AccessGate.Pending` for one owner confirmation, or refused. A built-in marked
+`host_command?` meets the same rule where the kernel does not hold commands,
+once its turn read outside content. While a parked call waits, the turn (or
+Realtime call) that parked it runs nothing else: the loop stamps
+`:access_waiting` from the held result itself (the rest of that step included),
+the Realtime session from `AccessGate.waiting?/1`, and the gate refuses every
+call under it. Every other capability returns on its metadata.
 
 `Capabilities.Registry` is a GenServer over a protected ETS table. Trust decides
 what a caller sees: an operator gets every capability; a guest, or a caller with
@@ -441,6 +450,134 @@ or running. The claim takes the job and inserts the run in one transaction, and
 `Repo.settle_job_run` writes the run's final row and releases the job in
 another; owner edits write only the columns they own.
 
+### `FermixCore.Cues`: Cues and Watchers
+
+`Cues` turns push input into agent work. Its tree starts at boot only when
+`[fermix_core.cues] enabled` and memory are on (`Cues.enabled?/0`); everything
+that asks at runtime (a tool's advertisement, the scheduler's admission) asks
+`Cues.running?/0`, whether the tree is alive, so a live flip of the switch
+changes nothing until a restart. `enabled` and `door_port` are boot-bound
+(`Setup.RestartState` says so); sources are reconciled on every config apply
+(`Cues.SourceManager.reconcile/0`), and mandates and the routing `filter_*`
+keys are read at each call. The path of one item:
+
+1. A feed, a webhook or a local push hands items to `Cues.Ingest.accept/3`: the
+   door (`Cues.Door`, Bandit on `127.0.0.1:door_port`, routes in
+   `Cues.Door.Router`: local-push CloudEvents on `/cues/v1/:ref`, webhooks on
+   `/cues/hooks/:ref/:random`, verified by `Cues.Webhook`), or
+   `Cues.Source.Feed`, a worker under `Cues.SourceSupervisor` that polls with
+   each hop pinned to the address `Net.Guard` checked (`Net.PinnedUrl`) and
+   feeds the body to a `Cues.FeedParser` reader as it inflates, XML read one
+   item at a time by `Cues.FeedXml`, so a feed's length bounds its work but not
+   its memory. A stream takes the path below instead. `Cues.SourceManager`
+   starts and stops the workers to match the config. A JSON API feed, a webhook
+   and the general stream read messages by the same dot paths
+   (`Cues.JsonPath`).
+2. Accept and route are one Repo transaction: the identity check, the cue row,
+   one `cue_deliveries` row per enabled watcher the item is routed to, inbox
+   eviction with its gap, and the wake-ups after the commit. Routing is by
+   words (`Cues.ListenFor`): a `none` watcher gets every item (`passed`), an
+   `llm` watcher only one its words to listen for match (`pending`), and an
+   item no watcher took is a receipt (identity and hashes, no payload). The
+   transaction is bounded: a Repo that does not answer in time is an error, a
+   failed poll for a feed and a `503` with `Retry-After` at the door, never an
+   exit.
+3. `Cues.Filters` claims at most one delivery per `llm` watcher (four calls in
+   all) and runs `Cues.Filter.Llm` under `Cues.FilterSupervisor` on the one
+   Cues filter model (`[fermix_core.routing] filter_*`), else the main route at
+   low effort; each call writes its own fenced settle.
+4. `Jobs.Scheduler` admits passed deliveries through `Jobs.CueAdmission`:
+   `Repo.claim_cue_run/4` claims the job and the delivery and inserts the run in
+   one transaction, at most three cue runs at once, oldest eligible delivery
+   first, and a delivery waits behind every older live delivery of its watcher
+   with the same subject. `Jobs.Runner` runs it as a cue run (`Jobs.CueRun`, on
+   the surface `Jobs.CueSurface` names), and `Repo.settle_cue_run/3` writes the
+   run, releases the job and moves the delivery in one transaction.
+5. A mandated tool call meets `Cues.MandateGate`, the first `AccessGate.admit/3`
+   clause for a cue run: switches, freshness, the hourly limit, the pins
+   (`Cues.Pins` holds the owner's approvals), `pin_args`, then the owner's
+   validator (`Cues.Validator`, whose answer is the last line of its standard
+   output). Approve mode goes through `Cues.Proposals` and the gateway's
+   `/confirm`.
+6. `Cues.Sweeper` expires, prunes and reports (retention, the 48-hour counts,
+   proposal expiry, unknown proposal outcomes, gap notices); `Cues.Notices`
+   tells the owner once per episode.
+
+A stream's item is judged before it is stored (M60_CUE_INTAKE_AT_SCALE.md).
+`Cues.Source.Stream` holds a WebSocket through a transport behind
+`Cues.Source.Stream.Transport`, reading it with `Cues.JsonStream`, the general
+source that signs in with the owner's key and secret and cannot rewind. It
+never calls `Cues.Ingest`: each item goes through the words of the source's
+`llm` watchers (an item none matched is counted `unmatched`; a stream routes
+nothing to a `none` watcher), then through the rate buckets and the daily
+budget, and is offered to `Cues.LiveFilters` with the watchers it matched. The
+worker reads its watchers and what a live call needs at connect and on its 10 s
+flush, which also writes its counts (`Cues.Counts`, into `cue_counts` as the
+hour's absolute totals per incarnation) and the source's row; a row write that
+fails closes the connection, which is dialled again. `Cues.LiveFilters` keeps a
+live queue of at most 250 items per watcher in memory and runs at most four
+calls (never two for one watcher's subject) under
+`Cues.LiveFilterSupervisor`. It makes no synchronous Repo call: each call's
+task writes its own result, a pass as one transaction (`CuesSql`'s
+`{:pass_live, …}`: the cue if its identity is new, this watcher's `passed`
+delivery, the call's ledger row) that wakes the scheduler, a drop or a failure
+as the call's ledger row (`delivery_id` null) and the watcher's backoff, so the
+filter budget and the hold count live calls as they count stored ones. Drops,
+overflow and failures become counts; the last 50 drops per watcher stay in
+`Cues.RecentDrops` (ETS) for labelling. From the `passed` delivery on, a
+stream's item takes steps 4 to 6 like any other.
+
+`Cues.Supervisor` is the last child of the core tree, so a crash of the job
+scheduler or anything before it restarts the cue tree, which re-reads its rows,
+and a crash inside it restarts nothing outside. It is `one_for_one` over four
+children: the live group (`rest_for_one`: the live task supervisor, then
+`Cues.LiveFilters`, first so a stream's watchers always reach it), the intake
+group (`rest_for_one`: `Cues.Buckets`, the ETS owner for
+token buckets, door slots and secret fingerprints, then the source supervisor,
+the source manager and the door), the filtering group (`rest_for_one`:
+`Cues.Filters`, then the filter task supervisor, so a dispatcher crash ends its
+calls) and `Cues.Sweeper`. The door is in core, not in `fermix_web`, so it exists
+under `--no-web` and in eval homes; a port in use leaves it `unavailable`, never
+a crashed tree. Rows are the truth: every durable fact is a row in `memory.db`,
+a process holds only timers and work in flight (a stream's live queues, recent
+drops and the counts since the last flush are such work, lost with their
+process by design), and the boot sweeps put a
+`filtering` delivery back to `pending` without spending an attempt and reap the
+runs a stop interrupted. No GenServer callback makes a provider call or a
+channel send: filter calls run as supervised tasks and sends go through the
+delivery layer with their timeouts.
+
+Architecture Invariant: no text from outside reaches a notice, a source's
+status or a source row. A stream service's error message goes to the log and,
+behind the content gate, the trace; the source's status and notices are
+Fermix's own sentences, so `list_cues` reads sources without tainting a turn.
+A stream's secrets are read at each connection and kept in no process state.
+
+Architecture Invariant: a cue is data, never an owner message. It never enters a
+conversation, and its text reaches a model only framed as outside text
+(`UntrustedContent`, label `cue:<source>`).
+
+Architecture Invariant: a cue run is tainted from its first token: its context
+carries the cue as an outside source, so the access gate refuses every
+access-sensitive command outside an approved mandate, and no consent check
+passes in it.
+
+Architecture Invariant: nothing a cue run reads reaches the owner's memory. A
+cue run writes no memory review input, profile or job summary; task notes are
+their own rows (`source_type` `cue_task`) that only that task reads.
+
+Architecture Invariant: every delivery transition is fenced. `CuesSql.transition/6`
+compares the row's state and its fence (`filter_call_id` or `claimed_run_id`);
+zero rows changed is `{:error, :stale}`, so a late write after a sweep or a
+restart is refused, never retried blindly.
+
+Architecture Invariant: a proposal runs at most once and only on the owner's
+confirm: one update matches `waiting`, the token's digest, the chat and user it
+was sent to, and an unexpired time. A call is proposed at most once per cue (the
+proposal's idempotency key, over the mandate, tool, arguments and cue, is
+unique), so a denied, expired or unreachable proposal is final for that cue. A cue run whose `job_runs.tools_started_at`
+is set (an allowed mandate call or a proposal) is never retried.
+
 ### Sandbox and Command Execution
 
 `FermixCore.Sandbox` is an in-process policy gate over paths, working
@@ -454,7 +591,25 @@ wraps every command a turn runs (the shell tool, the command tool, the git
 tools) in `sandbox-exec` with a Seatbelt profile built from the same roots, so
 the kernel holds the command to the mode and keeps Fermix's home and secrets
 out of its reach; `Sandbox.confine/3` is the one entry point. Linux has no
-kernel enforcement yet.
+kernel enforcement yet, so until it does, a built-in marked `host_command?`
+(`shell`, `git_write`, a declared command) in a turn that read outside content
+goes through `Capabilities.AccessGate` like an access-sensitive plugin command,
+keyed on `OsSandbox.enforced?/1`. One that runs unconfined everywhere
+(`host_command_confined?` false: the `codex`/`claude_code` presets and the
+coding runs `codex_run`/`claude_code_run`) goes through it on every platform;
+the next run a finished coding run's follow-up turn starts with the same coding
+agent in that run's own starting folder (both read from its ledger row), once
+per finished run (the admit links the child to it in
+`harness_run_continuations`, beside `harness_runs`, and refuses a second
+chained child in the same transaction) and with
+only its task, folder, model, effort and limits, dispatches
+there labelled `chained`. A request re-run after the owner's `/confirm` (a
+directory grant, a vendor-config acknowledgment) carries what its parked turn
+had read through the gateway's resume intent, and the resumed turn starts from
+it. A chain's metadata (`harness_continuation`, its depth, the finished run) is
+kept only on what the continuation dispatcher or the grant resume ingests
+(`keep_chain_metadata`); the gateway drops it from every other message, as it
+names the conversation.
 
 `CommandRunner` is the entry point for spawning external commands. In the daemon
 each command runs in a temporary `CommandHost` under `CommandHost.Supervisor`,

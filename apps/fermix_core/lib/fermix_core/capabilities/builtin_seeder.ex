@@ -16,6 +16,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerUse
+  alias FermixCore.Cues
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Harness.Vendors
   alias FermixCore.Meetings
@@ -37,6 +38,20 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.EventUpdate,
     FermixCore.Tools.EventRemove,
     FermixCore.Tools.ReminderSnooze
+  ]
+
+  # Open loops (MILESTONE_78 §07, §10), named as its own list for the same
+  # reason: `open_loop_tools_trust_invariant_test.exs` loops over it and asserts
+  # both directions of its membership for every `open_loop_*` built-in. Seeded
+  # always, like the event family: every member's `advertise?/1` and
+  # `execute/2` gate on `[fermix_core.open_loops] enabled`, so a disabled
+  # install offers none of them, and `open_loop_respond` is offered only inside
+  # a check-in run.
+  @open_loop_tool_modules [
+    FermixCore.Tools.OpenLoopNote,
+    FermixCore.Tools.OpenLoopUpdate,
+    FermixCore.Tools.OpenLoopList,
+    FermixCore.Tools.OpenLoopRespond
   ]
 
   @builtin_tool_modules [
@@ -94,7 +109,12 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.EventList,
     FermixCore.Tools.EventUpdate,
     FermixCore.Tools.EventRemove,
-    FermixCore.Tools.ReminderSnooze
+    FermixCore.Tools.ReminderSnooze,
+    # The open-loop family; keep `@open_loop_tool_modules` in step.
+    FermixCore.Tools.OpenLoopNote,
+    FermixCore.Tools.OpenLoopUpdate,
+    FermixCore.Tools.OpenLoopList,
+    FermixCore.Tools.OpenLoopRespond
   ]
 
   def child_spec(opts) do
@@ -156,6 +176,18 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.ListMeetings
   ]
 
+  # Cues and watchers (M60 §15): seeded only when `Cues.enabled?()` —
+  # `[fermix_core.cues] enabled` and memory on. Off is zero
+  # residue; on, `manage_watcher` and `list_cues` are offered only on an attended
+  # operator turn and `cue_history` only in a run a cue woke, each `execute/2`
+  # refusing any other turn. Re-evaluated each boot, which is when the cue
+  # subsystem itself starts or not.
+  @cue_tool_modules [
+    FermixCore.Tools.ManageWatcher,
+    FermixCore.Tools.ListCues,
+    FermixCore.Tools.CueHistory
+  ]
+
   # Coding harness: seeded only when the harness is enabled (config) AND the
   # relevant vendor CLI is detected at boot — the §7.3 boot snapshot. The two run
   # tools seed per-vendor (codex_run needs `codex`, claude_code_run needs
@@ -204,7 +236,8 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     do:
       @builtin_tool_modules ++
         @bridge_tool_modules ++
-        @computer_use_tool_modules ++ @harness_tool_modules ++ @meetings_tool_modules
+        @computer_use_tool_modules ++
+        @harness_tool_modules ++ @meetings_tool_modules ++ @cue_tool_modules
 
   @doc """
   The temporal-event tool family (MILESTONE_30 §12.1). Exposed so the
@@ -215,6 +248,14 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   def event_tool_modules, do: @event_tool_modules
 
   @doc """
+  The open-loop tool family (MILESTONE_78 §07, §10). Exposed so the
+  whole-surface invariant test gates EVERY member: none is offered while the
+  feature is off, none outside an attended owner turn or a check-in run.
+  """
+  @spec open_loop_tool_modules() :: [module()]
+  def open_loop_tool_modules, do: @open_loop_tool_modules
+
+  @doc """
   The meetings notetaker tool family (MILESTONE_21 C2 §14.1). Exposed so the
   not-ready invariant test gates the WHOLE feature surface: the assertion is
   that NO member is advertised when `Meetings.ready?()` is false, looped over
@@ -222,6 +263,14 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   """
   @spec meetings_tool_modules() :: [module()]
   def meetings_tool_modules, do: @meetings_tool_modules
+
+  @doc """
+  The cue tool family (M60 §15), seeded only while `Cues.enabled?()`. Exposed so
+  a whole-surface test asserts none of them is advertised on a turn that is
+  neither an attended operator turn nor (for `cue_history`) a cue run.
+  """
+  @spec cue_tool_modules() :: [module()]
+  def cue_tool_modules, do: @cue_tool_modules
 
   defp builtin_modules(opts) do
     case Keyword.fetch(opts, :tool_modules) do
@@ -231,7 +280,8 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
       :error ->
         @builtin_tool_modules ++
           bridge_modules() ++
-          computer_use_modules() ++ auto_harness_modules() ++ meetings_modules()
+          computer_use_modules() ++
+          auto_harness_modules() ++ meetings_modules() ++ cue_modules()
     end
   end
 
@@ -256,6 +306,10 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
 
   defp meetings_modules do
     if Meetings.ready?(), do: @meetings_tool_modules, else: []
+  end
+
+  defp cue_modules do
+    if Cues.enabled?(), do: @cue_tool_modules, else: []
   end
 
   @doc """

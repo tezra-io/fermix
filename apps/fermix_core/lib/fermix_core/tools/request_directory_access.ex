@@ -21,10 +21,12 @@ defmodule FermixCore.Tools.RequestDirectoryAccess do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.ConfigMutation
   alias FermixCore.Sandbox.Mode
   alias FermixCore.Sandbox.PathPolicy
+  alias FermixCore.Temporal.Access
   alias FermixCore.Tools.Support
 
   @unattended_error "directory access requests need an attended owner conversation"
@@ -71,7 +73,7 @@ defmodule FermixCore.Tools.RequestDirectoryAccess do
     Map.get(context, :source_trust) == :operator and
       is_function(Map.get(context, :reply_fn), 1) and
       is_function(Map.get(context, :approval_fn), 1) and
-      Map.get(context, :subagent_depth, 0) == 0
+      not Access.worker?(context)
   end
 
   # Intentionally NOT terminal (no `terminal?/0`): a terminal empty completion
@@ -148,15 +150,18 @@ defmodule FermixCore.Tools.RequestDirectoryAccess do
 
   @doc """
   Whether this turn can raise an owner approval on the sandbox `/confirm` flow:
-  operator trust, a live `reply_fn` and the gateway's `approval_fn` seam. The
-  one predicate for that surface; the coding harness's vendor-config
-  acknowledgment (`Tools.HarnessRun`) asks it too.
+  operator trust, a live `reply_fn` and the gateway's `approval_fn` seam, on a
+  turn that is not a delegated worker (`Temporal.Access.worker?/1`: a skill
+  worker keeps its parent turn's trust and both seams). The one predicate for
+  that surface; the coding harness's vendor-config acknowledgment
+  (`Tools.HarnessRun`) asks it too.
   """
   @spec attended_operator?(map()) :: boolean()
   def attended_operator?(context) when is_map(context) do
     Map.get(context, :source_trust) == :operator and
       is_function(Map.get(context, :reply_fn), 1) and
-      is_function(Map.get(context, :approval_fn), 1)
+      is_function(Map.get(context, :approval_fn), 1) and
+      not Access.worker?(context)
   end
 
   defp process_request(canonical, reason, context) do
@@ -192,7 +197,14 @@ defmodule FermixCore.Tools.RequestDirectoryAccess do
     approval_fn = Map.fetch!(context, :approval_fn)
     diff = ConfigMutation.diff(current, proposed)
 
-    case approval_fn.(%{path: canonical, reason: reason, diff: diff}) do
+    request = %{
+      path: canonical,
+      reason: reason,
+      diff: diff,
+      provenance: UntrustedContent.resume_provenance(context)
+    }
+
+    case approval_fn.(request) do
       {:ok, token, :existing} ->
         {:ok,
          Tool.success(
@@ -282,9 +294,16 @@ defmodule FermixCore.Tools.RequestDirectoryAccess do
   # label (a harness completion continuation is synthesized from a ledger row,
   # design §23.2) may well be a group, so the token line is suppressed whenever a
   # private button can carry the token instead. Only an explicit DM label prints it.
-  defp shared_chat?(chat_type) do
-    not (is_binary(chat_type) and chat_type in @dm_chat_types)
-  end
+  defp shared_chat?(chat_type), do: not private_chat?(chat_type)
+
+  @doc """
+  Whether `chat_type` is a direct-message label (Telegram `private`, Slack
+  `im`). Every other value is a shared chat, an absent one included (a Slack
+  channel mention carries none). The one allowlist for that question:
+  `Capabilities.AccessGate.owner_consent_turn?/1` asks it too.
+  """
+  @spec private_chat?(term()) :: boolean()
+  def private_chat?(chat_type), do: is_binary(chat_type) and chat_type in @dm_chat_types
 
   defp canonicalize(path) do
     path |> Path.expand() |> PathPolicy.canonical_path()

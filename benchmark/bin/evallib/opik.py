@@ -354,6 +354,34 @@ class OpikClient:
                 return None
             time.sleep(min(interval_s, remaining))
 
+    def find_job_run_trace(self, job_id: str, run_id: str,
+                           after: datetime | None) -> dict | None:
+        """The trace of one scheduled run: a job run exports under thread_id = its job
+        id, with the run id in the trace metadata (fermix_opik). A cue run (`drive:
+        cue`) has no user turn to find it by, so this is how it is found."""
+        if not job_id or not run_id:
+            raise ValueError("job_id and run_id must be non-empty")
+        filters = [{"field": "thread_id", "operator": "=", "value": job_id}]
+        hits = [t for t in self._filtered_traces(filters, after)
+                if t.get("thread_id") == job_id
+                and (t.get("metadata") or {}).get("run_id") == run_id]
+        return hits[0] if len(hits) == 1 else None
+
+    def poll_for_job_run(self, job_id: str, run_id: str, after: datetime | None,
+                         timeout_s: float, interval_s: float) -> dict | None:
+        """Block until the run's trace appears in Opik or timeout elapses."""
+        if timeout_s < 0 or interval_s <= 0:
+            raise ValueError("timeout_s must be non-negative and interval_s must be positive")
+        deadline = time.monotonic() + timeout_s
+        while True:
+            hit = self.find_job_run_trace(job_id, run_id, after)
+            if hit is not None:
+                return hit
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            time.sleep(min(interval_s, remaining))
+
     def find_marker_trace(self, thread_prefix: str, marker: str, after: datetime | None,
                           seen_ids: set[str]) -> dict | None:
         """Unique unseen trace on a `<thread_prefix>*` thread containing `marker`.

@@ -12,10 +12,12 @@ defmodule FermixCore.Memory.ReviewTools do
 
   require Logger
 
+  alias FermixCore.Cues.TaskNotes
   alias FermixCore.Memory.Admission
   alias FermixCore.Memory.Repo
 
   @archive_actor "memory_reviewer"
+  @task_note_source TaskNotes.source_type()
 
   @type context :: %{
           required(:agent_id) => String.t(),
@@ -190,14 +192,24 @@ defmodule FermixCore.Memory.ReviewTools do
     end
   end
 
+  # A cue task's note belongs to that task (M60 §9.10): the reviewer never
+  # changes one, whatever its category.
   defp get_owned_memory(id, ctx) do
     case Repo.get_memory(
            %{id: id, agent_id: ctx.agent_id, owner_id: ctx.owner_id, archived?: false},
            server: ctx.repo
          ) do
-      {:ok, memory} -> {:ok, memory}
-      {:error, :not_found} -> {:skip, {:memory_not_found, id}}
-      {:error, reason} -> {:error, reason}
+      {:ok, %{source_type: source_type}} when source_type == @task_note_source ->
+        {:skip, {:task_note, id}}
+
+      {:ok, memory} ->
+        {:ok, memory}
+
+      {:error, :not_found} ->
+        {:skip, {:memory_not_found, id}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

@@ -275,6 +275,54 @@ defmodule FermixCore.Tools.WebToolsTest do
     assert result.error =~ "blocked"
   end
 
+  # A redirect target is looked up once and dialled at that answer: a check
+  # that looked it up again could land somewhere other than what was checked.
+  test "web_fetch dials a redirect target at the address its one lookup answered" do
+    test_pid = self()
+    lookups = :counters.new(1, [])
+
+    resolver = fn
+      "example.com" ->
+        {:ok, [{93, 184, 216, 34}]}
+
+      "mirror.example.com" ->
+        :counters.add(lookups, 1, 1)
+
+        if :counters.get(lookups, 1) == 1,
+          do: {:ok, [{93, 184, 216, 35}]},
+          else: {:ok, [{127, 0, 0, 1}]}
+    end
+
+    adapter = fn request ->
+      send(test_pid, {:hop, request.url.host, Req.Request.get_header(request, "host")})
+
+      response =
+        if request.url.host == "93.184.216.34",
+          do:
+            Req.Response.new(
+              status: 302,
+              headers: [{"location", "https://mirror.example.com/docs"}]
+            ),
+          else: Req.Response.new(status: 200, body: "<h1>moved</h1>")
+
+      {request, response}
+    end
+
+    context =
+      Map.merge(@context, %{
+        req_options: [adapter: adapter],
+        net_resolver: resolver,
+        net_egress: Egress.new([])
+      })
+
+    assert {:ok, %{success: true, output: output}} =
+             WebFetch.execute(%{"url" => "https://example.com/start"}, context)
+
+    assert output =~ "moved"
+    assert_receive {:hop, "93.184.216.34", ["example.com"]}
+    assert_receive {:hop, "93.184.216.35", ["mirror.example.com"]}
+  end
+
   test "web_search parses DuckDuckGo HTML results" do
     test_id = :"web_search_#{System.unique_integer([:positive])}"
 

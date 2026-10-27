@@ -17,6 +17,29 @@ reviewer approves once per release, and that approval publishes the verified dra
 `HOMEBREW_TAP_TOKEN` and is limited to `v*` tags, so the tap moves without a second
 approval and the token reaches no other ref.
 
+**The bundled `fermix-iroh` helper.** Every release tree carries the helper that
+`apps/fermix_core/priv/iroh_helper/PIN.json` pins, with the helper's third-party
+notices beside it (`iroh_helper/THIRD-PARTY-NOTICES.txt`, one file for all four
+targets); the Linux packages also install them as
+`/usr/share/doc/fermix/fermix-iroh-THIRD-PARTY-NOTICES.txt`, which their copyright
+file names. `preflight` re-verifies the pin, notices included, against its GitHub
+release with cosign (`pin_iroh_helper.py --check`), so a tag also fails when
+`github.com/tezra-io/fermix-iroh` cannot be reached. Moving to a new helper release
+goes in this order:
+
+1. The fermix-iroh release is tagged and published, its bare binaries and its
+   `fermix-iroh-THIRD-PARTY-NOTICES.txt` each with a `.sha256`, `.sig` and `.pem`.
+2. `uv run scripts/release/pin_iroh_helper.py --tag vX.Y.Z` rewrites the pin (it needs
+   `cosign` on `PATH` and refuses a release without the notices); never edit the pin
+   by hand. The fermix_channels test that holds the pin's `protocol_version` and
+   `iroh_version` to the engine's then has to pass, and a dispatched
+   `linux-packages.yml` run installs and verifies a package carrying the new helper
+   and its notices. The pin reaches `main` like any other change.
+3. The engine release is tagged.
+
+The Mac app picks the helper up at its next engine pin bump, after its own signing
+change for the helper has landed.
+
 ## Install paths to walk before announcing
 
 The release rail proves the *artifact*: it is signed, its checksum matches, it runs,

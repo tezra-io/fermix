@@ -59,31 +59,103 @@ exports them outside the content-capture gate — a blocked-before-execution cla
 must stay provable in a content-free export.
 
 A second source stamps the marker: `Capabilities.AccessGate`, the one gate in
-`Capability.execute/3` for plugin tools whose manifest marks them
-`access_sensitive`. It derives the map from `AccessGate.pre_execution_marker/1`
+`Capability.execute/3`. It decides plugin tools whose manifest marks them
+`access_sensitive`; a built-in host command (`shell`, `git_write`, a declared
+command, the local coding runs `codex_run` and `claude_code_run`) after the turn
+read outside content, where Fermix cannot sandbox that call (no kernel
+enforcement, or a preset or coding run that runs unconfined; the next run a
+finished coding run's follow-up turn starts in that run's folder dispatches as
+`chained`); any call made
+while another call of the same turn is parked,
+and, through its first clause (`Cues.MandateGate`), **every** call a run woken
+by a cue makes, flagged or not (see "Access-gate labels"). It derives the map
+from `AccessGate.pre_execution_marker/1`
 (`source: "access_gate"`, `decision: "confirm"` when it held the call for the
 owner's confirmation, `"deny"` when it refused it, `phase: "pre_execution"`),
 and only on the held and refused branches, where the executor was never called.
 Because the executor never ran, the gate itself emits that model call's single
 `[:fermix, :tool, :exec]` event through `Tools.Telemetry.exec/5`, under the
-capability's name and with `success: false`.
+capability's name and with `success: false`. That event also carries a bounded
+`error_code` (the access-gate label) and a fixed `error_summary` ("held by the
+access gate for the owner's confirmation" or "refused by the access gate", no
+user content), both from `AccessGate.held_metadata/2`, so its Opik span carries
+`error_info` and is errored: a held or refused call never exports as a span that
+succeeded. A confirmed call (`access_gate: "confirmed"`) runs its executor,
+whose own event reports its own outcome.
 
 ### Access-gate labels
 
-Every access-sensitive call also carries `access_gate`, a closed enum of how the
-gate settled it: `direct` (the owner's clean, attended request), `scheduled` (a
-job whose `allowed_tools` names it), `confirmed`, or one of `held_this_chat`,
+Every call the gate decides (every access-sensitive call, every host command it
+decides, and every call of a run a cue woke) also carries
+`access_gate`, a closed enum of how the gate
+settled it: `direct` (the owner's clean, attended request), `scheduled` (a
+job whose `allowed_tools` names it), `confirmed`, `chained` (the next run of a
+coding-run chain: a finished run's follow-up turn starting the same coding
+agent in that run's own starting folder, both read from its ledger row, once
+per finished run (no run yet names it as the run it continued), having read
+nothing but the run's report, with only its task,
+folder, model, effort and limits), or one of `held_this_chat`,
 `held_owner_inbox`, `held_voice`, `already_confirmed`, `refused_worker`,
-`refused_unattended`, `refused_not_allowlisted`, `refused_no_surface`,
-`refused_full`, `refused_confirm_mismatch`. A held call also carries
-`access_intent`, the opaque id of the parked record. `refused_waiting` is the
-one label on a call to any tool, flagged or not: the turn (or Realtime call)
+`refused_cue_run`, `refused_unattended`, `refused_not_allowlisted`,
+`refused_no_surface`, `refused_full`, `refused_confirm_mismatch`,
+`refused_voice_surface` (a host command on a voice call, which cannot show the
+owner the exact command), `refused_command_too_long` (a host command too long to
+show the owner whole), `refused_unshown_file` (a coding run naming
+`append_system_prompt_file`, whose contents the owner could not review). The refused
+labels are one function's output (`refused_<reason>`), so a new refusal reason
+is a new label here. `refused_cue_run` is an access-sensitive call made by a job
+run a cue woke (`trigger: "cue"` on the context) outside its mandate: it read
+content an outsider wrote and no owner is in its loop, so the gate refuses it
+right after the worker check and before the job-row allowlist, whatever the
+job's `allowed_tools` say. A held call also carries
+`access_intent`, the opaque id of the parked record. `refused_waiting` lands on
+a call to any tool, flagged or not: the turn (or Realtime call)
 that made it has a parked call still waiting on the owner, so the gate refused
 it (`:access_waiting` on the context) with the same `deny` marker. The gate stamps a
 dispatched call's label on the context it hands the executor, and `exec/5`
-copies `access_gate` and `access_intent` from the context into the executor's
-own event, so no executor knows the gate exists and the context wins over a
-caller's `:metadata`.
+copies `access_gate`, `access_intent`, `validator` and `mandate_call_id` from
+the context into the executor's own event, so no executor knows the gate exists
+and the context wins over a caller's `:metadata`.
+
+In a run a cue woke, `Cues.MandateGate` decides every call first, flagged or
+not, and adds its own labels to the enum. A call to a tool the run's mandate
+names (`tools`) is a **mandate call**: it is recorded as a `cue_mandate_calls`
+row before any check, then decided `mandate_allowed` (the executor ran it; its
+own event carries the label through the context, with no marker),
+`mandate_proposed` (held for the owner's `/confirm`, marker `confirm`), or
+refused with marker `deny` as `mandate_refused` (its arguments, `pin_args`, the
+hourly limit of ten allowed or proposed calls per task, or the validator said
+no), `mandate_disabled` (the mandate or `mandates_enabled` is switched off, it
+fails its load checks, or it is not approved, or was approved only after the
+run began or while the call's pins were checked), `mandate_stale` (the cue is older
+than `max_cue_age`, or its time is unknown) or `mandate_unpinned` (what the
+mandate pins changed since the owner approved it; the mandate is disabled until
+approved again). A mandate with `read_tools` is also checked at the start of
+each cue run, since a reader call never reaches the pin check otherwise: a
+change found there disables it the same way, with one notice and no tool event;
+a mandate with no readers is disabled at its next call. A call to one of the mandate's `read_tools` is not a mandate
+call and writes no row: it runs only while its capability is still marked
+read-only and the mandate passes a mandate call's first steps, and is otherwise
+refused as `refused_reader_writes` (no longer read-only), `mandate_disabled`
+(the load checks, the switches, or an approval missing, disabled or given after
+the run began), `mandate_unpinned` (what the mandate pins changed; the mandate
+is disabled until approved again) or `mandate_refused` (the pins could not be
+verified). A refused read tool carries `validator: "none"` and
+`mandate_reason`, and no `mandate_call_id`. A call to a tool outside the run's tool set is refused
+as `refused_cue_surface`, or, when the tool is access-sensitive, falls through
+to `refused_cue_run`. In a mandated run a file tool reads only inside the job's
+skill folder; when the job names no skill, or the folder cannot be read, the
+call is refused as `refused_mandate_files`. Every mandate call also carries
+`mandate_call_id` (its row) and `validator: "program" | "none"` (whether the
+owner's validator program decided), and an event the gate emitted itself adds
+`mandate_reason`, Fermix's own sentence for the decision (a validator's own
+words stay in the row as "validator refused"; no argument the model sent is in
+it). A proposal the owner confirms runs later, from `/confirm` or an answer
+from one of the owner's devices (the Mac app, the management socket), under the
+proposing run's `session_id`, and its executor's event carries
+`access_gate: "confirmed"` and the call's `mandate_call_id`. `Mapper.tool_span/3`
+exports `validator`, `mandate_call_id` and `mandate_reason` outside the
+content-capture gate beside the label.
 
 The run the owner confirmed is not a model call. The daemon runs it later (a
 tap, `/confirm`, a spoken yes), with the parking turn's `session_id` and
@@ -93,7 +165,8 @@ pairs "held" with "ran". Both keys are exported outside the content-capture
 gate (a closed enum and an opaque id). When the parking turn's trace has
 already shipped, `Aggregation` ships the confirmed exec as its own
 self-closing `access_gate:confirmed` trace instead of dropping it at the
-closed-session tombstone. Park, confirm, decline, expiry, a changed plugin and
+closed-session tombstone, or, once that tombstone is pruned, opening a phantom
+root for the turn. Park, confirm, decline, expiry, a changed plugin and
 an unreachable owner inbox are one `Logger` line each (tool, intent id,
 reason; never argument values or transcript text).
 
@@ -194,8 +267,10 @@ A subagent or scheduled job is a *run*. New run kinds (anything that calls
 `AgentLoop.run/1` in its own context) must:
 
 1. give the loop `context` a **unique `session_id`** (e.g. `"main-<n>"`,
-   `"cron_<job>_<ts>"`), and a **`parent_session`** if it was spawned by another
-   run (that's what nests it under its parent in the trace);
+   `"cron_<job>_<YYYYMMDD_HHMMSS>_<6 hex>"`), and a **`parent_session`** if it
+   was spawned by another run (that's what nests it under its parent in the
+   trace). A job run's id ends in a random suffix so two runs of one job started
+   in the same second never share a trace (see "Cue runs" below);
 2. emit **lifecycle bookend events** — start / complete / error — carrying that
    `session_id`. Model them on `FermixCore.Jobs.Telemetry` (jobs) or
    `FermixCore.Agents.LifecycleTelemetry` (subagents/skills). Without an opener
@@ -389,6 +464,329 @@ harness/plugin-dist/MCP-client precedent): `mix opik.replay` skips reminder
 rows. The event tools themselves (`event_store`, `event_list`, `event_update`,
 `event_remove`) are ordinary built-ins riding `[:fermix, :tool, :exec]` with
 `input:` passed explicitly.
+
+## Open loop check-ins
+
+An open loop (M78) is an intention the owner stated with the date it matters
+by. The scheduler decides when one is due, and a **check-in** is the one
+isolated run that may speak about it. A check-in calls `AgentLoop.run/1`, so it
+is a **run kind**, and it is always a **root**:
+`FermixCore.OpenLoops.Telemetry.correlation/2` mints
+`session_id = "open_loop_<id>_<touch>"` (`touch` is the touch the run would
+make, the row's `touches + 1`) and `agent: "open_loop:<id>"`, and the run's loop
+context takes both from it, so its provider and tool spans correlate with the
+bookends by construction. There is no `parent_session`: the scheduler spawned
+the run, not another run, and the turn that captured the loop closed days
+before (the follow-up reason). A retry after a timeout or an error keeps its
+touch, and so its session id. The `followup_` prefix belongs to the reminder
+follow-up and stays there.
+
+Every emission goes through `FermixCore.OpenLoops.Telemetry` — never
+hand-rolled. The bookends are `[:fermix, :open_loop, :checkin, :start |
+:complete | :error]`, with shared metadata `agent`, `session_id`,
+`open_loop_id`, `touch` and `component: "open_loop_checkin"`. `start`
+(`count: 1`) adds `rung` (`1 | 2`), `horizon_class` (`long | medium | short |
+imminent`), `active_hours` (the `HH:MM-HH:MM` hours the run was admitted under,
+snapshotted) and `max_duration_ms`, the run's watchdog and the exporter's sweep
+floor. `complete` (`duration_ms`) adds `outcome`: `spoke | silent | closed |
+empty | delivery_failed`, each a run that finished. `error` (`duration_ms`)
+adds `status` (`timeout | error`) and `error`, a string (a binary as it is, any
+other term inspected). The message a `spoke` run sent rides as `output`, shaped
+by `Telemetry.preview/1`, only when `capture_content?/0` is on. The delivery
+destination reaches no field: no function in the emitter accepts one.
+
+Two point events have no run behind them, so they are sessionless, as the
+reminder rail's pre-run skips are. `[:fermix, :open_loop, :skipped]`
+(`count: 1`) is the scheduler declining to start a check-in: `open_loop_id`
+(absent when the skip concerns no single loop), `reason` (`disabled | budget |
+active_hours | no_target | max_children | closed_meanwhile`) and
+`component: "open_loop_scheduler"`, and never a `session_id`.
+`[:fermix, :open_loop, :settled]` (`count: 1`) is a loop's state moving:
+`open_loop_id`, `from` (the live state the write left: `open | due | asked`),
+`to`, `answer` (`done | plan | not_yet | stop | drop | asked`, absent when no
+answer caused the move), `by` (`main_agent | checkin | scheduler`; every expiry
+is `scheduler`) and `component: "open_loops"`, plus the settling turn's
+`session_id` only when the caller has one. That is the whole allowlist. The
+emitter checks every word against its closed set and raises on anything else
+rather than emit a word no consumer knows, and drops nils rather than emit
+them.
+
+`Trace.TelemetryHandler` registers all five as `agent_event` rows:
+`open_loop_checkin_start`, `_complete` and `_error` keyed on `agent`,
+`open_loop_skipped` and `open_loop_settled` keyed on `component`. `FermixOpik`
+binds all five. The bookends open and close a root of kind `:open_loop_checkin`
+(`infer_kind("open_loop_" <> _)`, so a closer arriving without its opener does
+not read as a `:subagent` phantom root), named by the agent with the session id
+as its fallback, unthreaded, and swept by `max_duration_ms`. `complete` closes
+it with status `ok` and the outcome in its metadata; `error` closes it with its
+`status` word and the error as its output. The root's metadata is the allowlist
+`component`, `open_loop_id`, `touch`, `rung`, `horizon_class`, `active_hours`,
+`outcome`. Because a retry reuses its session id inside the closed-session
+tombstone window, the opener lifts that session's tombstone: an opener is a new
+run, never a late span of the one that shipped. `skipped` and `settled` render
+as self-closing `open_loop:<reason>` and `open_loop:settled` traces tagged
+`open_loop`, correlated by `open_loop_id`; a settlement's `session_id` is
+metadata there, never a parent, because the settling turn may already have
+shipped. `TraceFile.normalize_agent_event/2` is deliberately not extended (the
+reminder precedent): `mix opik.replay` skips open-loop rows. The main agent's
+loop tools and the check-in's `open_loop_respond` are ordinary built-ins riding
+`[:fermix, :tool, :exec]` through `Tools.Telemetry.exec/5`.
+
+`[:fermix, :open_loop, :fault]` (`count: 1`) is the third sessionless point
+event, the open-loop counterpart of the reminder rail's `scheduler_error`
+phase: `OpenLoops.Scheduler` logs and traces every failed step through
+`OpenLoops.Telemetry.fault/3`. Its metadata is `stage` (`scan | claim | release
+| timer | start_checkin | sweep`; a read needed to weigh a due loop is `scan`,
+and a dead run's claim that could not be recovered is `release`),
+`open_loop_id` (absent when the fault concerns no single loop),
+`component: "open_loop_scheduler"` and `error_class`, derived exactly as the
+reminder emitter derives it (an atom, a tagged tuple's atom head, else
+`unclassified`); the reason itself stays in the log line. A full supervisor
+stays the `max_children` skip. It is the trace row `open_loop_fault`, keyed on
+`component`, and in `FermixOpik` a self-closing `open_loop:fault` trace tagged
+`open_loop` carrying `stage`, `open_loop_id` and `error_class`; both consumers
+bind it beside the five above.
+
+## Cues: lifecycle, sources, filter calls and cue runs
+
+A cue is an item an outside source sent (a feed entry, a stream event, a local
+push). A watcher with no filter that listens to the source gets a delivery of
+it, and a filtering watcher one only when its words to listen for match; a
+filter call may pass or drop the delivery, and a cue run (a job run with
+`trigger: "cue"`) settles it. A stream's item is judged before it is stored,
+and only a pass becomes a cue (M60_CUE_INTAKE_AT_SCALE.md): what it does not
+store, it counts. Items and deliveries move through two stable
+event names, both emitted only through `FermixCore.Cues.Telemetry` — never
+hand-rolled, and never a `[:fermix, :cue, <phase>]` tail of their own
+(exact-name binding would drop it, the reminder lifecycle's rule):
+
+- `[:fermix, :cue, :lifecycle]`, `Cues.Telemetry.lifecycle(phase,
+  measurements, metadata)`: one event per item or delivery transition.
+- `[:fermix, :cue, :source]`, `Cues.Telemetry.source(phase, metadata)`: one
+  event per source worker transition.
+
+**Ids and counts only.** A cue carries an outside party's text, so both
+emitters build their metadata from a fixed allowlist and raise on any other key;
+there is no pass-through map a caller could put text into. Lifecycle metadata
+may hold the ids `source_ref`, `cue_id`, `delivery_id`, `watcher_id`, `gap_id`,
+`job_id`, `run_id`, `filter_call_id`, `mandate_call_id`, `proposal_id`,
+`session_id`, `parent_session`; the labels `reason`, `outcome`, `state`,
+`decision`, `validator`, `mandate`, `tool`, `provider`, `model`, `kind`,
+`status` (an atom, or a string of at most 128 bytes); the counts `attempt` and
+`count`; `result` (`:ok | {:ok, _} | :error | {:error, _}`), which reaches the
+event only as its tag plus a **derived** `error_class` (the reason's atom, a
+tagged tuple's atom head, else `"unclassified"`); and one content key,
+`content`, dropped unless `FermixCore.Telemetry.capture_content?/0` is on (today
+only a filter decision's reason, on `passed` and `dropped`). The emitter adds
+`phase` and `component: "cues"`. Measurements are non-negative integers among
+`count`, `accept_ms` (receipt to commit, on `accepted`), `queue_ms` (receipt to
+the task's claim, on `claimed`) and `duration_ms`; none given means
+`%{count: 1}`. An event names one delivery (`delivery_id`); there is no
+`cue_count`. The counted phases are the exception: one event names a source or
+a watcher and carries how many items its `count` stands for.
+
+**A phase's class is its session**, and the emitter enforces it:
+
+| Class | Phases | `session_id` |
+|---|---|---|
+| sessionless | `accepted`, `duplicate`, `conflict`, `stale`, `rejected`, `rate_limited`, `over_budget`, `routed`, `gap`, `expired`, `unmatched`, `overflow`, `write_failed`, `ingest_error`, `sweep_error` | refused (raises) |
+| filter-scoped | `passed`, `dropped`, `filter_retry`, `filter_held`, `filter_failed` | the filter call's; optional |
+| run-scoped | `claimed`, `settled`, `retry`, `exhausted` | the cue run's; required |
+| proposal-scoped | `proposed`, `confirmed`, `denied`, `proposal_expired`, `proposal_refused` | the proposing run's; required |
+
+Who emits what:
+
+- **Accept and route** (`Cues.Ingest`, for feeds, webhooks and local push;
+  one event per item after the transaction commits): `accepted` (`cue_id`,
+  `accept_ms`), or what happened
+  instead: `duplicate` (seen before), `conflict` (same identity, different content),
+  `stale` (older than the 7-day horizon), `rejected` (it failed validation),
+  `rate_limited`, `over_budget`. Then `routed` per delivery created
+  (`delivery_id`, `watcher_id`, `state` `pending` or `passed`; a filtering
+  watcher gets one only when its words matched), and for a
+  watcher with no filter `passed` at once, with no session and
+  `reason: "no filter"` (no filter call exists for it). A delivery evicted from
+  a full inbox is `expired` with `reason: "inbox_full"`. A refusal at the HTTP
+  door (401, 413, 429, …) emits nothing: it is counted in
+  `cue_sources.reject_counts`. A watcher switched to no filter passes what
+  waited for its filter in the switch's transaction, and `Cues.Watchers` then
+  emits the same sessionless `passed` (`reason: "no filter"`, `cue_id`,
+  `source_ref`) for each.
+- **Counted phases** (a stream's items, which are not stored): what is not
+  stored is counted in memory (`Cues.Counts`) and written to `cue_counts`
+  every 10 s as the hour's totals, and each such flush emits one event per
+  phase that grew, with no session and no item id, its measurement `count`
+  the items since the last flush. Per source, from `Cues.Source.Stream`
+  (`source_ref`): `unmatched` (no watcher's words matched), `rate_limited`,
+  `over_budget` (the daily budget), `rejected` (it failed validation) and
+  `stale`. Per watcher, from `Cues.LiveFilters` (`watcher_id`): `overflow` (its
+  live queue was full), `over_budget` (its filter budget was spent),
+  `dropped`, `filter_failed` (three content failures) and `write_failed` (a
+  pass whose write kept failing). The `received`, `offered` and `passed` counts
+  are rows only; a pass keeps its own events (below).
+- **Gaps and expiry**: `gap` (`gap_id`, `reason`, measurement `count`) when
+  ingest, the sweeper or a watcher's removal opens or extends a gap; `expired`
+  with `reason: "lifetime"` from `Cues.Sweeper` and `"watcher_removed"` from
+  `Cues.Watchers`.
+- **Errors**: `ingest_error` (an ingest transaction, a source worker's Repo
+  call, or `Cues.SourceManager`'s write of a crashed-out source's `stopped`
+  status, failed or did not answer in time; `result`) and `sweep_error`, whose
+  `reason` names the step that failed: a retention step of `Cues.Sweeper`
+  (`expire_lifetime`, `drop_payloads`, …, `prune_counts`), the filter
+  dispatcher's `filter_reset`, `filter_claim` or `filter_reclaim` (its sweep's
+  reclaim of `filtering` rows no task holds), the live dispatcher's
+  `live_counts` (its count flush),
+  or cue admission's `cue_claim` (the candidate scan, or one
+  job's claim with its `job_id`) or `cue_settle` (a cue run's settle, with its
+  `job_id` and `run_id`). Every
+  `{:error, reason}` from ingest, a sweep, the dispatcher or admission is traced
+  before it is returned or logged (the reminders' `scheduler_error` precedent).
+  A stored row that cannot be read back (`{:error, {:corrupt, table, detail}}`,
+  for instance a `cue_sources` row) reads `error_class: "corrupt"`.
+- **Filter calls** (`Cues.Filters`, after the call's result is written and
+  before its closer, each with the call's `session_id`, `filter_call_id`,
+  `watcher_id`, `delivery_id`, `cue_id`, `source_ref`, `job_id`, `attempt`):
+  `passed` or `dropped` (`decision`, the reason in `content`); `filter_retry`
+  (a provider failure before the hold, a content failure with retries left, or
+  a call stopped with its supervisor, `reason: "aborted"`); `filter_held` (the
+  third provider failure in a row, and each after it); `filter_failed` (the
+  third content failure: the delivery is exhausted). A failure adds `reason`
+  (`provider_failure | content_failure | aborted`), `kind` (the failure's typed
+  kind) and `result: {:error, kind}`. A live call (`Cues.LiveFilters`, a
+  stream's item) emits only a pass per item: `passed` once its cue and
+  delivery are written, with the call's `session_id`, `filter_call_id`,
+  `watcher_id`, `delivery_id` (absent when the watcher already had this
+  item), `cue_id`, `source_ref`, `decision` and the reason in `content`, then
+  `expired` and `gap` for a delivery its write evicted from a full inbox. A
+  pass onto a stored item of other content writes no delivery and emits, as
+  accept does, `conflict` (`cue_id`, `source_ref`, `watcher_id`, no session)
+  and its `identity_conflict` `gap` instead. Its drops and failures are
+  counted (above).
+- **Cue runs** (`Jobs.CueAdmission`, each with the run's `session_id`,
+  `job_id`, `run_id`, `delivery_id`, `watcher_id`, `source_ref`, `state`,
+  `attempt`): `claimed` when the scheduler's claim commits (`queue_ms`), then
+  one of `settled` (the delivery is acked), `retry` (back to `passed` for
+  another attempt) or `exhausted`, from the runner's settle or, for a reaped or
+  crashed run, the scheduler's; these add `outcome` and `reason`
+  (`ignored | acted | provider_failure | run_failure | reaped`). A settle that
+  finds its delivery no longer held by the run emits nothing (it is logged).
+- **Proposals** (`Cues.Proposals`, each with the proposing run's `session_id`,
+  `proposal_id`, `mandate_call_id`, `job_id`, `run_id`, `delivery_id`,
+  `watcher_id`, `mandate`, `tool` and `state`): `proposed` once an approve-mode
+  mandate call's proposal is stored and waits for the owner (sent to the
+  owner's chat when there is one, and offered to every app surface),
+  `confirmed` or `denied` on the owner's answer, with `kind` naming the surface
+  it came from (`telegram`, `signal`, `whatsapp` or `imessage` for `/confirm`
+  and `/deny` in the owner's chat; `companion`, `mobile` or `management` for an
+  answer from one of the owner's devices, `Cues.Proposals.decide/4`),
+  `proposal_expired` from the sweeper, and `proposal_refused` with
+  `reason: "unreachable"` (the chat's message could not be sent and no app can
+  show the proposal) or `"recheck"` (at the owner's yes the mandate's switches,
+  pins or validator no longer allowed the call). Every phase keeps the
+  proposing run's `session_id`, whichever surface answered; no surface adds an
+  event name. The confirmed call itself is its executor's own
+  `[:fermix, :tool, :exec]` (see "Access-gate labels").
+
+`[:fermix, :cue, :source]` metadata needs `source_ref` and may hold `kind`
+(`feed | stream`), `status`, `reason`, `attempt`, `result` (tag plus derived
+`error_class`) and `content` (a stream service's own error message, at most 512
+bytes with control characters removed, kept only when content capture is on);
+`count` and `skipped` become its measurements. Phases:
+`connect` and `reconnect` (a feed's first good poll, and its first after a
+failure, with `skipped`, the items it skipped as older than the receipt
+horizon; a stream's handshake), `disconnect` (`attempt`, `reason`, `result`;
+`reason: :service_error` when a stream with no preset closed on its service's
+error, with that error as `content`), `auth_failure` (a stream's refused
+handshake), `budget` (the daily budget is spent), `gap` (`reason` is the gap's,
+`count`) and `stopped` (a worker that gave up: `reason: :refused` after a
+stream's eighth connection in a row ended on its service's error, with the last
+as `content`; `reason: :read_limit` for a feed larger than Fermix reads; or
+`reason: "crashed"` from `Cues.SourceManager` after a worker's
+fifth crash in an hour). Emitted by the feed and stream workers (`Cues.Source.Feed`,
+`Cues.Source.Stream`, through `Cues.Source.Worker.trace/3`) and by
+`Cues.SourceManager`.
+
+`Trace.TelemetryHandler` records the two events as `cue_lifecycle` and
+`cue_source` `agent_event` rows (agent field `component`, so every row reads
+`cues`).
+
+**Opik.** `FermixOpik.Reporter` binds `[:fermix, :cue, :lifecycle]`, and
+`Aggregation` places each phase by its session id alone:
+- no session (every sessionless phase, and a filterless watcher's `passed`): its
+  own self-closing `cue:<phase>` trace (tag `cue`), built like a reminder's and
+  never tracked in state;
+- the session of a filter call or a cue run that is still open: a `cue:<phase>`
+  child span of that run, so a filter decision sits in the `cue_filter_` trace
+  beside its model call, and a claim, settle or proposal in the run's trace;
+- `claimed` is traced by the scheduler before the runner exists, so it opens
+  the run's root itself; the job's `run_start` then adopts that root (its name,
+  metadata, thread and sweep floor) as if it had created it;
+- any other session, shipped or never seen (a proposal confirmed hours after
+  its run's trace shipped, a crashed run reaped later): its own self-closing
+  `cue:<phase>` trace that keeps the `session_id` in its metadata, so it is
+  found beside the run's trace instead of being dropped at the closed-session
+  tombstone or opening a phantom root.
+
+The span and trace metadata is the emitter's allowlist, labels as strings, plus
+the measurements. The exporter does not bind `[:fermix, :cue, :source]`: no
+source transition has a session to nest under (the channel transport
+precedent), so source traces are read from the JSONL stream.
+`TraceFile.normalize_agent_event/2` is not extended for either event (the
+reminder precedent): `mix opik.replay` skips cue rows.
+
+### Filter calls (a run kind with one model call)
+
+A filter call is one bounded model call deciding one delivery for one watcher,
+in the shape of a Live call's gist. `Cues.Filters` mints its session id (and
+`Cues.LiveFilters` a live call's, for a stream's item),
+`cue_filter_<watcher_id>_<YYYYMMDD_HHMMSS>_<6 hex>` (UTC claim time; the
+watcher id keeps its `cwt_` prefix), with **no** `parent_session`: no turn asked
+for it, so it is always a root. Its bookends go through
+`FermixCore.Cues.Filter.Telemetry` — never hand-rolled:
+`[:fermix, :cue_filter, :run_start]` (`%{count: 1}`) as the call goes out, and
+one closer after the result is written, `[:fermix, :cue_filter, :run_complete]`
+or `[:fermix, :cue_filter, :run_error]` (`%{count: 1, duration_ms}`). Shared
+metadata: `agent: "cue_filter"`, `session_id`, `filter_call_id`, `watcher_id`,
+`delivery_id`, `cue_id`, `source_ref`, `attempt`, and `provider`/`model` only
+when the Cues filter model is set (the main model otherwise). A live call's
+bookends add `live: true` and carry no `delivery_id` or `cue_id` until a pass
+wrote them: only the closer after a pass has them. `run_complete` adds `status: "ok"` and
+`decision: "pass" | "drop"`; `run_error` adds `status` (`provider_failure`,
+`content_failure`, `aborted`, `stale` when the delivery had moved on before the
+write, `settle_failed` when the write itself failed) and `error_kind`, the
+failure's typed kind, never a message. The cue's text, the decision's reason and
+the hint never reach a bookend. The model call is the adapter's own
+`[:fermix, :provider, :call]` through `Providers.Telemetry.emit_call/3`, with
+`agent: "cue_filter"` and the call's `session_id`; failover events carry
+`agent: "cue_filter"`, `surface: :cue_filter` and the same `session_id`, so a
+failover nests in the call's trace beside its model call. `Trace.TelemetryHandler`
+records the bookends as `cue_filter_run_start`, `cue_filter_run_complete` and
+`cue_filter_run_error` `agent_event` rows. `FermixOpik` binds them
+(`kind: :cue_filter`, `infer_kind("cue_filter_" <> _)`, the trace named by the
+session id); the closer's metadata adds `decision`, `status`, `error_kind` and
+`duration_ms`, and a `run_error` carries `error_info` `CueFilterError` with the
+kind. A watcher with no filter makes no filter call and has no filter session.
+
+### Cue runs
+
+A cue run is a scheduled-job run (`FermixCore.Jobs.Telemetry`, the
+`[:fermix, :job, :run_start | :run_complete | :run_error]` bookends). Every job
+run's session id is `cron_<job_id>_<YYYYMMDD_HHMMSS>_<6 lowercase hex>` (UTC
+claim time), scheduled, manual and cue runs alike: the random suffix keeps two
+runs started in one second apart, and the `cron_` prefix is kept, so
+`fermix_opik`'s `infer_kind`, `Meetings.Session`'s origin and every other prefix
+check read a cue run as a scheduled one. The bookends carry `trigger`
+(`"schedule"`, `"manual"` or `"cue"`) on every run, and on a cue run also
+`watcher_id` (which the runner puts on the run map it passes, since the run row
+does not hold it) and `delivery_id` (the row's `cue_delivery_id`, the
+`cue_deliveries.id` the run held); both are absent on any other run. The Opik
+run trace's metadata carries `trigger`, `watcher_id` and `delivery_id`, and
+`mix opik.replay` keeps all three. A cue run's tools are ordinary
+`[:fermix, :tool, :exec]` events under the run's session, one per model call:
+the gate labels each call it decides, a mandate call with a `mandate_*` label,
+a refused read tool `refused_reader_writes` or a `mandate_*` label, a call
+outside the run's tools `refused_cue_surface`, an access-sensitive one outside
+its mandate `refused_cue_run` (see "Access-gate labels").
 
 ## Meeting notetaker runs
 

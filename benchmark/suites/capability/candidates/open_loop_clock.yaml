@@ -1,0 +1,52 @@
+suite: cap_open_loop_clock
+risk: isolated_mutation
+title: "Capability — the day a loop was said, read on one clock"
+description: >
+  One clock across the engine: the current-date note and every date a model is
+  shown (here, the day an open loop was said) are stated in the owner's time zone
+  by FermixCore.Clock, so "today" and the day something was said cannot disagree.
+  Before it, the date note gave the UTC date while the open-loop note gave the
+  owner's local day, and in the hours when the two dates differ a loop said
+  minutes earlier was reported as said yesterday.
+
+  The first turn states a task due before noon tomorrow, which open loops record
+  as an imminent loop. The second turn runs in a fresh session, as the original
+  report did (the task said on one channel, the question on another), so the only
+  source for the day is the open-loop listing, which names the day each loop was
+  said, never the conversation history. The due note names the same day, but an
+  imminent loop is noted only from three hours after it was said, so no turn of
+  this case sees it. The reply must say today and never yesterday.
+
+  PRECONDITIONS: `[fermix_core.open_loops] enabled = true` and an owner inbox
+  (both pre-granted by bin/seed_capability_home.py). The defect this case guards
+  shows only while the owner's local date differs from the UTC date: 20:00 to
+  midnight in the eval home's America/New_York (19:00 after the November change).
+  A run outside that window passes on the old clock too, so the suite is parked
+  under candidates/ and stays out of the ranking sweep; run it in that window with
+  `--candidates --suite cap_open_loop_clock`.
+
+  SAFETY: the turns ask for advice and a day; no tool gate could trip. The first
+  turn's own gate requires the loop to be recorded, so a trial that recorded
+  nothing never reaches the question.
+defaults:
+  judge: false
+  timeout_ms: 180000
+
+scenarios:
+  - id: said_today
+    title: "A loop said earlier today is reported as said today, from a fresh session"
+    severity: normal
+    tags: [capability, open_loops, clock]
+    cases:
+      - id: said_today_fresh_session
+        cross_session: true
+        turns:
+          - query: >
+              I have to call the {subject} clinic back before noon tomorrow to keep my
+              appointment slot. What should I ask them about the rescheduling fee?
+            expect:
+              tools_any: [open_loop_note]
+          - query: >
+              When did I first tell you about calling the {subject} clinic? Answer with
+              only one of: today, yesterday, or how many days ago.
+        score: { match: regex, expected: "(?is)\\A(?!.*\\byesterday\\b).*\\btoday\\b" }

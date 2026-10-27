@@ -11,7 +11,8 @@ defmodule FermixCore.Temporal.Access do
   All four conditions must hold:
 
     * `source_trust == :operator` — the owner, not a guest;
-    * `subagent_depth` absent or `0` — a top-level turn, not a delegated worker;
+    * not a delegated worker (`worker?/1`: `subagent_depth` and `skill_depth`
+      each absent or `0`) — a top-level turn;
     * `computer_use_origin in [:interactive, :voice]` — an attended surface with
       a live owner. `TurnRunner.computer_use_origin/1` is the one resolver: its
       catch-all is `:interactive`, a live call is `:voice`, the turns nobody
@@ -33,8 +34,28 @@ defmodule FermixCore.Temporal.Access do
   def attended_operator_turn?(context) when is_map(context) do
     Map.get(context, :source_trust) == :operator and
       Map.get(context, :computer_use_origin) in @attended_origins and
-      top_level?(context, :subagent_depth) and
+      not worker?(context) and
       top_level?(context, :harness_continuation_depth)
+  end
+
+  @doc """
+  The one definition of a delegated worker, shared with `Harness.Authorization`
+  and `Capabilities.AccessGate`: a `subagents` worker (`subagent_depth`) or a
+  skill's (`skill_depth`; `Capabilities.Skill.invoke` keeps the parent turn's
+  trust, origin and reply surface and raises only that depth), at any depth.
+  Only an absent depth or `0` is a top-level turn; any other value, `nil`
+  included, counts as a worker, so a malformed context can only narrow a gate.
+  """
+  @spec worker?(map()) :: boolean()
+  def worker?(context) when is_map(context),
+    do: delegated?(context, :subagent_depth) or delegated?(context, :skill_depth)
+
+  defp delegated?(context, key) do
+    case Map.fetch(context, key) do
+      :error -> false
+      {:ok, 0} -> false
+      {:ok, _set} -> true
+    end
   end
 
   @doc """
@@ -54,7 +75,7 @@ defmodule FermixCore.Temporal.Access do
   defp operator_scheduled_turn?(context) do
     Map.get(context, :source_trust) == :operator and
       not Map.has_key?(context, :computer_use_origin) and
-      top_level?(context, :subagent_depth) and
+      not worker?(context) and
       top_level?(context, :harness_continuation_depth)
   end
 

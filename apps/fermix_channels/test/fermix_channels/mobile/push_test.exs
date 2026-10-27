@@ -87,6 +87,18 @@ defmodule FermixChannels.Mobile.PushTest do
     refute inspected =~ "PRIVATE KEY"
   end
 
+  # The reason a bad key is refused with reaches the log at boot and at every
+  # push, and a DER decoder's own words quote the bytes it could not match.
+  test "a key the decoder cannot read is refused by class, never quoting its bytes" do
+    der = <<4, 3, 0xFE, 0xED, 0xFA>>
+
+    pem =
+      "-----BEGIN EC PRIVATE KEY-----\n#{Base.encode64(der)}\n-----END EC PRIVATE KEY-----\n"
+
+    assert {:error, {:invalid_push_config, :key, :invalid_pem}} =
+             Config.new(Keyword.put(valid_config(), :key, pem))
+  end
+
   test "builds an encrypted mutable APNs preview with no plaintext content" do
     {gateway_public, gateway_private} = keypair(4)
     {device_public, device_private} = keypair(5)
@@ -478,6 +490,107 @@ defmodule FermixChannels.Mobile.PushTest do
     assert log =~ "mobile push dependency :list_devices raised"
     assert log =~ "KeyError"
     assert log =~ "push_test.exs"
+  end
+
+  # Fermix pushes through APNs alone: an Android phone that registered a token
+  # is refused by name with a typed reason, never sent through APNs.
+  describe "Android phones" do
+    setup do
+      {_gateway_public, gateway_private} = keypair(40)
+      {android_public, _android_private} = keypair(41)
+      {iphone_public, _iphone_private} = keypair(42)
+      salt = :binary.copy(<<43>>, 32)
+
+      android = %{device("pixel", android_public, salt, "android-token") | platform: "android"}
+      iphone = %{device("iphone", iphone_public, salt, "apns-token") | platform: "ios"}
+
+      %{gateway_private: gateway_private, android: android, iphone: iphone}
+    end
+
+    test "an Android phone is refused by name and type while the iPhones are pushed", ctx do
+      test_pid = self()
+
+      apns = fn notifications, _config ->
+        send(test_pid, {:apns, Enum.map(notifications, & &1.device_token)})
+        {:ok, Enum.map(notifications, &%{&1 | response: :success})}
+      end
+
+      legacy = %{ctx.iphone | device_id: "old-iphone", push_token: "apns-legacy", platform: nil}
+
+      {result, log} =
+        with_log(fn ->
+          notify_phones(ctx, [ctx.android, ctx.iphone, legacy], dispatcher: apns)
+        end)
+
+      assert {:ok, %{status: :sent, sent: 2}} = result
+      assert_receive {:apns, ["apns-token", "apns-legacy"]}
+
+      assert log =~ "[warning]"
+
+      assert log =~
+               "mobile push refused pixel {:no_push_service, :android}: " <>
+                 "Fermix has no push service for Android phones; nothing was sent"
+
+      refute log =~ "android-token"
+    end
+
+    test "with only Android phones registered nothing is sent, each refused", ctx do
+      second = %{ctx.android | device_id: "pixel-2", push_token: "android-token-2"}
+
+      {result, log} =
+        with_log(fn ->
+          notify_phones(ctx, [ctx.android, second],
+            load_identity: fn -> flunk("nothing to send loaded the identity") end,
+            dispatcher: fn _, _ -> flunk("an Android phone was sent to APNs") end
+          )
+        end)
+
+      assert {:ok, %{status: :unconfigured_platform, sent: 0}} = result
+      assert log =~ "mobile push refused pixel {:no_push_service, :android}"
+      assert log =~ "mobile push refused pixel-2 {:no_push_service, :android}"
+    end
+
+    test "an approval reaches only the iPhones", ctx do
+      test_pid = self()
+
+      apns = fn notifications, _config ->
+        send(test_pid, {:apns, Enum.map(notifications, & &1.device_token)})
+        {:ok, Enum.map(notifications, &%{&1 | response: :success})}
+      end
+
+      {result, log} =
+        with_log(fn ->
+          Push.notify_approval("main",
+            config: valid_config(),
+            profile_connected: fn "main" -> {:ok, false} end,
+            list_devices: fn -> {:ok, [ctx.android, ctx.iphone]} end,
+            load_identity: fn -> {:ok, %{gateway_private_key: ctx.gateway_private}} end,
+            dispatcher: apns
+          )
+        end)
+
+      assert {:ok, %{status: :sent, sent: 1}} = result
+      assert_receive {:apns, ["apns-token"]}
+      assert log =~ "mobile push refused pixel {:no_push_service, :android}"
+    end
+  end
+
+  defp notify_phones(ctx, devices, opts) do
+    Push.notify(
+      "main",
+      52,
+      "hi",
+      Keyword.merge(
+        [
+          config: valid_config(),
+          profile_connected: fn _ -> {:ok, false} end,
+          read_frontier: fn _ -> {:ok, 51} end,
+          list_devices: fn -> {:ok, devices} end,
+          load_identity: fn -> {:ok, %{gateway_private_key: ctx.gateway_private}} end
+        ],
+        opts
+      )
+    )
   end
 
   defp notify_with_dispatcher(device, gateway_private, dispatcher) do

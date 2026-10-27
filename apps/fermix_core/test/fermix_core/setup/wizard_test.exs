@@ -62,6 +62,7 @@ defmodule FermixCore.Setup.WizardTest do
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
+    open_loops = Application.fetch_env(:fermix_core, :open_loops)
     secret_writer = Application.get_env(:fermix_core, :secret_writer)
     fermix_home = System.get_env("FERMIX_HOME")
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-wizard")
@@ -116,6 +117,7 @@ defmodule FermixCore.Setup.WizardTest do
       Application.put_env(:fermix_core, :personalization, personalization)
       Application.put_env(:fermix_core, :agent, agent)
       Application.put_env(:fermix_core, :realtime, realtime)
+      restore_env(:fermix_core, :open_loops, open_loops)
       restore_secret_writer(secret_writer)
       FermixTestSupport.SecretWriterStub.reset()
 
@@ -879,6 +881,81 @@ defmodule FermixCore.Setup.WizardTest do
 
     assert persisted.fermix_core |> Keyword.get(:skill_curation, []) |> Keyword.get(:enabled) ==
              false
+  end
+
+  # `[fermix_core.open_loops] enabled` defaults OFF, the inverse of skill
+  # curation, so the answers write the inverse. Each case starts from the
+  # production posture (no app-env pin), since config/test.exs pins it off.
+  test "save_answers writes open_loops enabled only on accept" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-open-loops")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.put_env(:fermix_core, :open_loops, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    # Accepting writes the explicit enable.
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "openai",
+               openai_api_key: "sk-x",
+               open_loops_enabled: "yes"
+             )
+
+    assert {:ok, accepted} = ConfigStore.load_runtime_config()
+    assert Keyword.get(accepted.fermix_core, :open_loops) == [enabled: true]
+
+    # Declining writes NOTHING: the default is already off.
+    assert {:ok, _} = Wizard.report().wizard |> Wizard.save_answers(open_loops_enabled: "no")
+
+    assert {:ok, declined} = ConfigStore.load_runtime_config()
+    assert Keyword.get(declined.fermix_core, :open_loops) == []
+    refute File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_core.open_loops]"
+  end
+
+  test "a blank or absent open_loops answer writes nothing and keeps the current state" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-open-loops-preserve")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.put_env(:fermix_core, :open_loops, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "openai",
+               openai_api_key: "sk-x",
+               open_loops_enabled: ""
+             )
+
+    refute File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_core.open_loops]"
+
+    assert {:ok, _} = Wizard.report().wizard |> Wizard.save_answers(open_loops_enabled: true)
+    assert {:ok, _} = Wizard.report().wizard |> Wizard.save_answers(open_loops_enabled: "")
+    assert {:ok, _} = Wizard.report().wizard |> Wizard.save_answers(anthropic_api_key: "sk-ant")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    assert Keyword.get(persisted.fermix_core, :open_loops) == [enabled: true]
+  end
+
+  test "the open_loops question names the owner inbox check-ins will arrive in" do
+    label = Wizard.open_loops_label(configured_owners: %{"telegram" => "40417"}, jobs_config: [])
+
+    assert label =~ "Check-ins will arrive in telegram."
+    assert label =~ "blank = no"
+  end
+
+  test "the open_loops question says check-ins wait when no channel owner is configured" do
+    label = Wizard.open_loops_label(configured_owners: %{}, jobs_config: [])
+
+    assert label =~ "Until a channel has an owner configured, Fermix records no loops."
+    refute label =~ "will arrive in"
   end
 
   test "save_answers clears the harness default_vendor when the answer is blank" do

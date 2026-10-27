@@ -51,6 +51,30 @@ defmodule FermixOpik.TraceFileTest do
     assert meta.job_id == "j"
   end
 
+  # M60 §9.6: a cue run's bookends name its watcher and the delivery it held.
+  test "a cue run's job rows keep its trigger, watcher and delivery" do
+    base = %{
+      "ts" => "2026-06-02T12:00:00.000Z",
+      "type" => "agent_event",
+      "job_id" => "j",
+      "session_id" => "cron_j_20261017_120000_a1b2c3",
+      "trigger" => "cue",
+      "watcher_id" => "cwt_1",
+      "delivery_id" => 17
+    }
+
+    for event <- ["job_run_start", "job_run_complete", "job_run_error"] do
+      assert {_name, _measurements, meta} =
+               TraceFile.normalize("agent_event", Map.put(base, "event", event))
+
+      assert meta.watcher_id == "cwt_1", "#{event} dropped watcher_id"
+      assert meta.delivery_id == 17, "#{event} dropped delivery_id"
+    end
+
+    assert {_name, _measurements, %{trigger: "cue"}} =
+             TraceFile.normalize("agent_event", Map.put(base, "event", "job_run_start"))
+  end
+
   test "a job_run_complete row carries its tool failure count" do
     row = %{
       "ts" => "2026-06-02T12:00:00.000Z",
@@ -102,6 +126,54 @@ defmodule FermixOpik.TraceFileTest do
     assert meta.selector == "#go"
     assert meta.error_code == "timeout"
     assert meta.error_summary == "navigation timed out"
+  end
+
+  test "tool_exec normalize keeps a held call's gate label and pre-execution marker" do
+    marker = %{"source" => "access_gate", "decision" => "confirm", "phase" => "pre_execution"}
+
+    row = %{
+      "ts" => "2026-06-02T12:00:00.000Z",
+      "type" => "tool_exec",
+      "tool" => "shell",
+      "agent" => "main",
+      "success" => false,
+      "duration_ms" => 0,
+      "access_gate" => "held_this_chat",
+      "access_intent" => "3d5a37f90059b2bc",
+      "policy_enforcement" => marker,
+      "error_code" => "held_this_chat",
+      "error_summary" => "held by the access gate for the owner's confirmation"
+    }
+
+    assert {[:fermix, :tool, :exec], %{duration_ms: 0}, meta} =
+             TraceFile.normalize("tool_exec", row)
+
+    assert meta.access_gate == "held_this_chat"
+    assert meta.access_intent == "3d5a37f90059b2bc"
+    assert meta.policy_enforcement == marker
+    assert meta.error_code == "held_this_chat"
+  end
+
+  test "tool_exec normalize keeps a mandate decision's record" do
+    row = %{
+      "ts" => "2026-06-02T12:00:00.000Z",
+      "type" => "tool_exec",
+      "tool" => "google_calendar_create_event",
+      "agent" => "main",
+      "success" => false,
+      "duration_ms" => 0,
+      "access_gate" => "mandate_disabled",
+      "validator" => "none",
+      "mandate_call_id" => "mc_1",
+      "mandate_reason" => "the mandate is switched off (enabled = false)"
+    }
+
+    assert {[:fermix, :tool, :exec], _measurements, meta} =
+             TraceFile.normalize("tool_exec", row)
+
+    assert meta.validator == "none"
+    assert meta.mandate_call_id == "mc_1"
+    assert meta.mandate_reason == "the mandate is switched off (enabled = false)"
   end
 
   # ExUnit owns this directory: it clears and recreates it per test, so the

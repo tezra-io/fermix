@@ -14,6 +14,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Tools.ComputerUse
   alias FermixCore.Tools.ScheduleJob
+  alias FermixCore.Tools.Subagents
+  alias FermixCore.Tools.UpdateJob
   alias FermixTestSupport.RealtimeSocket
 
   defmodule FakeOpenAIClient do
@@ -409,7 +411,12 @@ defmodule FermixCore.Realtime.SessionServerTest do
     # The voice call is the operator at the keyboard: its default tool context
     # carries `source_trust: :operator`, so a scheduled job it creates is stamped
     # with the creator's real trust rather than a minted default.
-    context = Map.put(:sys.get_state(server).tool_context, :memory_repo, repo)
+    # The bridge's context, which every tool call of the session runs on,
+    # stamped as the session stamps a call that read nothing.
+    context =
+      :sys.get_state(server).tool_bridge.context
+      |> Map.put(:memory_repo, repo)
+      |> Map.put(:outside_sources, MapSet.new())
 
     assert {:ok, result} =
              ScheduleJob.execute(
@@ -427,6 +434,87 @@ defmodule FermixCore.Realtime.SessionServerTest do
 
     assert {:ok, job} = Registry.get_job(job_id, repo: repo)
     assert job.created_by_trust == "operator"
+  end
+
+  # A voice call's surface leaves out the channel, media and delegation tools to
+  # fit a live call, not to limit what the owner may authorize: the call is not
+  # narrowed for the job rule. It changes a job with no list, and a job it sets
+  # up with none keeps none.
+  test "a voice call is not narrowed for the jobs it sets up or changes" do
+    unique = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-realtime-jobs-#{unique}.db")
+    repo = :"realtime_jobs_repo_#{unique}"
+    registry = :"realtime_jobs_caps_#{unique}"
+
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+    start_supervised!({CapabilityRegistry, name: registry})
+    task_supervisor = start_supervised!({Task.Supervisor, []}, id: :voice_jobs_task_sup)
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+    end)
+
+    for tool <- [ScheduleJob, UpdateJob, Subagents] do
+      :ok = CapabilityRegistry.register(registry, Builtin.from_tool_module(tool))
+    end
+
+    {:ok, every_tool_job} =
+      Registry.create_job(
+        %{
+          name: "Every Tool Job",
+          schedule: "every 15 minutes",
+          task_prompt: "Report.",
+          allowed_tools: [],
+          created_by_trust: "operator"
+        },
+        repo: repo
+      )
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capability_registry: registry,
+        task_supervisor: task_supervisor,
+        context: %{
+          agent_name: "realtime",
+          conversation_key: {"realtime", "device-#{unique}", :root},
+          memory_agent_id: "main",
+          memory_repo: repo,
+          source_trust: :operator
+        },
+        prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
+      )
+
+    assert :ok = SessionServer.call_start(server)
+
+    calls = [
+      {"call-update", "update_job", %{"job_id" => every_tool_job.id, "task" => "Report later."}},
+      {"call-schedule", "schedule_job",
+       %{"name" => "Voice Job", "schedule" => "every 15 minutes", "task" => "Report."}}
+    ]
+
+    for {call_id, name, arguments} <- calls do
+      call = %{"call_id" => call_id, "name" => name, "arguments" => Jason.encode!(arguments)}
+      assert :ok = SessionServer.handle_provider_event(server, {:function_call, call})
+
+      assert_receive {:realtime, %{type: "tool_event", name: ^name, status: status}}
+                     when status in ["completed", "error"]
+
+      [%{item: %{output: output}}] =
+        server |> SessionServer.openai_pid() |> FakeOpenAIClient.events() |> outputs_for(call_id)
+
+      assert %{"success" => true} = Jason.decode!(output), output
+    end
+
+    assert {:ok, %{task_prompt: "Report later."}} =
+             Registry.get_job(every_tool_job.id, repo: repo)
+
+    assert {:ok, jobs} = Registry.list_jobs(repo: repo)
+    assert %{allowed_tools: []} = Enum.find(jobs, &(&1.name == "Voice Job"))
   end
 
   test "reload_runtime sends active realtime sessions a refreshed tool list" do

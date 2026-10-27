@@ -222,6 +222,28 @@ defmodule FermixCore.Delivery.OwnerInboxTest do
     end
   end
 
+  describe "dm_origin/1" do
+    test "a DM whose chat id is the owner's user id answers that chat and user" do
+      for platform <- ~w(telegram signal whatsapp imessage) do
+        inbox = %{platform: platform, destination: "owner-1", thread_scope: "root"}
+
+        assert OwnerInbox.dm_origin(inbox) ==
+                 {:ok, %{platform: platform, chat_id: "owner-1", user_id: "owner-1"}}
+      end
+    end
+
+    test "any other inbox has no origin a confirm can be checked against" do
+      for inbox <- [
+            %{platform: "slack", destination: "U1"},
+            %{platform: "discord", destination: "123"},
+            %{platform: "mobile", destination: "phone-1"},
+            %{platform: "telegram", destination: ""}
+          ] do
+        assert OwnerInbox.dm_origin(inbox) == :error
+      end
+    end
+  end
+
   describe "configured_owners/0" do
     setup do
       previous = Map.new(@owner_channels, &{&1, Application.get_env(:fermix_channels, &1)})

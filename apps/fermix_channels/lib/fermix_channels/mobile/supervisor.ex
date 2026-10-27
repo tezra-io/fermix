@@ -61,7 +61,8 @@ defmodule FermixChannels.Mobile.Supervisor do
   the phone's whole timeline lives in `Memory.Repo`, which then refuses every
   call. Environmental faults (an address not up yet, a port another daemon
   holds, APNs unreachable) never refuse or stop anything: the listener and the
-  push dispatcher stay up, degraded, and say why.
+  push dispatcher stay up, degraded, and say why. Push settings that do not
+  resolve never refuse it either: the subtree starts without the dispatcher.
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) when is_list(opts) do
@@ -306,38 +307,30 @@ defmodule FermixChannels.Mobile.Supervisor do
        rail: names.iroh_helper}
     ]
 
-    with {:ok, push_children} <- push_children(config, names) do
-      children =
-        base_children ++
-          push_children ++
-          [
-            Supervisor.child_spec(
-              {RequestCoordinator,
-               name: names.request_coordinator,
-               boot_epoch: boot_epoch,
-               store_opts: Keyword.put(Keyword.get(opts, :store_opts, []), :transport, "mobile"),
-               recovery_limit: Keyword.get(opts, :recovery_limit, 200),
-               device_store: names.device_store},
-              id: names.request_coordinator
-            ),
-            {Discovery, name: names.discovery, bind: listener_bind(opts)},
-            {Listener, listener_opts(opts, root, names)},
-            {MdnsAdvertiser, mdns_opts(opts, names)},
-            # Last, so its restart, and its live switch, touch nothing else.
-            {Iroh, iroh_opts(opts, root, names)}
-          ]
+    push_children = push_children(config, names)
+    opts = Keyword.put(opts, :push_services, push_services(push_children))
 
-      Supervisor.init(children, strategy: :rest_for_one)
-    else
-      # `{:stop, reason}` is a GenServer init return, not a Supervisor one:
-      # OTP matches only `{:ok, {flags, children}}` or `:ignore` and wraps
-      # anything else as `{:bad_return, {__MODULE__, :init, ...}}`, which buries
-      # the actual reason. Push was explicitly enabled with credentials that do
-      # not resolve, so raise the reason the way `boot_epoch/1` below already
-      # does rather than degrading to a mobile surface with push silently off.
-      {:error, reason} ->
-        raise ArgumentError, "invalid mobile push config: #{inspect(reason)}"
-    end
+    children =
+      base_children ++
+        push_children ++
+        [
+          Supervisor.child_spec(
+            {RequestCoordinator,
+             name: names.request_coordinator,
+             boot_epoch: boot_epoch,
+             store_opts: Keyword.put(Keyword.get(opts, :store_opts, []), :transport, "mobile"),
+             recovery_limit: Keyword.get(opts, :recovery_limit, 200),
+             device_store: names.device_store},
+            id: names.request_coordinator
+          ),
+          {Discovery, name: names.discovery, bind: listener_bind(opts)},
+          {Listener, listener_opts(opts, root, names)},
+          {MdnsAdvertiser, mdns_opts(opts, names)},
+          # Last, so its restart, and its live switch, touch nothing else.
+          {Iroh, iroh_opts(opts, root, names)}
+        ]
+
+    Supervisor.init(children, strategy: :rest_for_one)
   end
 
   defp root(opts) do
@@ -381,13 +374,19 @@ defmodule FermixChannels.Mobile.Supervisor do
     Map.merge(defaults, Keyword.get(opts, :names, %{}))
   end
 
+  # Push settings that do not resolve never refuse this subtree (M51 §10): in
+  # a release the channels application is permanent, and a raise here took
+  # every channel down with it. Chat, pairing and the rail start without the
+  # dispatcher, the log says why with the typed reason, and
+  # `Management.status/1` reads APNs credentials missing, which `fermix
+  # doctor` names.
   defp push_children(config, names) do
     push = Keyword.get(config, :push, [])
 
     case Keyword.get(push, :enabled, false) do
-      false -> {:ok, []}
+      false -> []
       true -> enabled_push_child(push, names.push_dispatcher)
-      value -> {:error, {:invalid_push_enabled, value}}
+      value -> without_push({:invalid_push_enabled, value})
     end
   end
 
@@ -398,7 +397,7 @@ defmodule FermixChannels.Mobile.Supervisor do
   # under KeepAlive over a keychain the operator can simply unlock. Mirror the
   # secret store's posture: start the mobile surface without the dispatcher, say
   # so loudly, and let `Management.status/1` report APNs credentials missing so
-  # `fermix doctor` names it. Every other push-config fault still raises.
+  # `fermix doctor` names it.
   defp enabled_push_child(push, name) do
     key = Keyword.get(push, :key)
 
@@ -409,7 +408,7 @@ defmodule FermixChannels.Mobile.Supervisor do
           "unlock the keychain and restart, or run `fermix doctor` to confirm."
       )
 
-      {:ok, []}
+      []
     else
       validated_push_child(push, name)
     end
@@ -418,11 +417,27 @@ defmodule FermixChannels.Mobile.Supervisor do
   defp validated_push_child(push, name) do
     case PushConfig.new(push) do
       {:ok, %PushConfig{enabled: true} = config} ->
-        {:ok, [{PigeonDispatcher, name: name, config: config}]}
+        [{PigeonDispatcher, name: name, config: config}]
 
       {:error, reason} ->
-        {:error, reason}
+        without_push(reason)
     end
+  end
+
+  defp without_push(reason) do
+    Logger.error(
+      "mobile push settings do not resolve (#{inspect(reason)}). " <>
+        "Mobile started WITHOUT push; fix [fermix_channels.mobile.push] and restart, " <>
+        "or run `fermix doctor` to confirm."
+    )
+
+    []
+  end
+
+  # The services a phone is told this daemon pushes through: those whose
+  # dispatcher starts, so a phone never registers for one that cannot send.
+  defp push_services(push_children) do
+    Enum.map(push_children, fn {PigeonDispatcher, _opts} -> "apns" end)
   end
 
   defp media_opts(opts, root, name),
@@ -438,13 +453,13 @@ defmodule FermixChannels.Mobile.Supervisor do
       bind: listener_bind(opts),
       port: Keyword.get(explicit, :port, Keyword.get(config, :port, 4_031)),
       start_listener?: Keyword.get(opts, :start_listener?, true),
-      router_opts: session_opts(config, names)
+      router_opts: session_opts(config, names, Keyword.fetch!(opts, :push_services))
     ]
   end
 
   # What every carrier's sessions are started with: the WebSocket's through the
   # router, the bridge's directly.
-  defp session_opts(config, names) do
+  defp session_opts(config, names, push_services) do
     [
       device_store: names.device_store,
       device_registry: names.device_registry,
@@ -454,13 +469,14 @@ defmodule FermixChannels.Mobile.Supervisor do
       discovery: names.discovery,
       iroh_helper: names.iroh_helper,
       max_media_bytes: Keyword.get(config, :max_media_bytes, @default_max_media_bytes),
-      push_environment: config |> Keyword.get(:push, []) |> Keyword.get(:environment)
+      push_environment: config |> Keyword.get(:push, []) |> Keyword.get(:environment),
+      push_services: push_services
     ]
   end
 
   defp iroh_opts(opts, root, names) do
     config = Keyword.get(opts, :config, [])
-    session = session_opts(config, names)
+    session = session_opts(config, names, Keyword.fetch!(opts, :push_services))
     max_media_bytes = Keyword.fetch!(session, :max_media_bytes)
 
     [

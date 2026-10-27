@@ -6,6 +6,7 @@ defmodule FermixCore.Tools.RunJobNow do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Jobs.Registry
   alias FermixCore.Jobs.Scheduler
   alias FermixCore.Tools.JobRegistrySupport, as: Support
 
@@ -49,7 +50,8 @@ defmodule FermixCore.Tools.RunJobNow do
       %{tag: "not_found", description: "job id does not exist"},
       %{tag: "not_runnable", description: "job is paused, disabled, or already completed"},
       %{tag: "expired", description: "job has passed its expiry"},
-      %{tag: "already_running", description: "the job already has an active run"}
+      %{tag: "already_running", description: "the job already has an active run"},
+      %{tag: "runs_on_cues", description: "the job runs on cues, never by hand"}
     ]
   end
 
@@ -66,7 +68,8 @@ defmodule FermixCore.Tools.RunJobNow do
 
   defp do_execute(args, context) do
     with {:ok, job_id} <- Support.required_string(args, "job_id"),
-         :ok <- Support.check_job_access(job_id, context) do
+         :ok <- Registry.check_run_now(job_id, repo: Support.repo(context)),
+         {:ok, _job} <- Support.check_job_access(job_id, context) do
       scheduler = Map.get(context, :scheduler, Scheduler)
 
       case Scheduler.run_now(scheduler, job_id) do

@@ -95,4 +95,21 @@ defmodule FermixCore.Tools.ToolHelpTest do
     assert result.success == true
     assert result.output =~ "# content_search"
   end
+
+  # The run's trust, not its person's: a plugin skill's worker runs at guest
+  # under the owner's turn (`CapabilityRegistry.run_trust/1`).
+  test "a run at guest trust under the owner cannot read an owner-only capability's docs" do
+    name = :"tool_help_run_trust_#{System.unique_integer([:positive])}"
+    start_supervised!({Registry, name: name})
+    :ok = Registry.register(name, Builtin.from_tool_module(ContentSearch))
+
+    context =
+      @context
+      |> Map.put(:capability_registry, name)
+      |> Map.merge(%{source_trust: :operator, effective_trust: :guest})
+
+    assert {:ok, result} = ToolHelp.execute(%{"name" => "content_search"}, context)
+    assert result.success == false
+    assert result.error =~ "Unknown capability"
+  end
 end

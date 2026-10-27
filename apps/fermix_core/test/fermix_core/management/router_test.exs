@@ -1003,8 +1003,8 @@ defmodule FermixCore.Management.RouterTest do
       assert {:ok, view} = Router.route(v2("mobile.status"), mobile({:ok, mobile_status()}))
 
       assert Enum.sort(Map.keys(view)) ==
-               ~w(apns enabled identity listener mdns paired_devices pairing protocol_version
-                  refusal refused remote started tailnet)
+               ~w(apns enabled hold identity listener mdns paired_devices pairing
+                  protocol_version refusal refused remote started tailnet)
     end
 
     test "the no-parameter methods refuse parameters rather than ignoring them" do
@@ -1167,6 +1167,7 @@ defmodule FermixCore.Management.RouterTest do
       started: false,
       refused: false,
       refusal: nil,
+      hold: nil,
       listener: %{status: :down, reason: nil, port: 4031, bind: "0.0.0.0", candidates: []},
       mdns: :disabled,
       tailnet: %{detected: false, candidates: []},

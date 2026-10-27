@@ -29,13 +29,14 @@ import time
 import tomllib
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(HERE)
 REPO_ROOT = os.path.dirname(SKILL_DIR)
 sys.path.insert(0, HERE)
 
-from evallib import companion, voice
+from evallib import companion, cue_drive, voice
 from evallib import config as cfgmod
 from evallib import driver, grade, judge, report
 from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, FixtureServer,
@@ -43,7 +44,7 @@ from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, FixtureServer,
 from evallib.opik import OpikClient, OpikError, parse_ts, valid_run_id
 from evallib.session_ids import sess
 from evallib.suites import (ALWAYS_STICKY_GATES, RISK_LEVELS, STICKY_GATE_KEYS,
-                            SuiteError, load_all)
+                            SuiteError, load_all, platform_of)
 
 _PROVIDER_LIMIT_RE = re.compile(
     r"usage limit\b.*?\btry again in ~|rate-limited this request|quota or credits are exhausted",
@@ -239,6 +240,69 @@ def voice_cases_left_out(suites, args, profiles) -> int:
         return 0
     return sum(1 for suite in suites for scenario in suite.scenarios
                if scenario.risk in profiles for case in scenario.cases if case.needs_voice)
+
+
+def hold_out_unseeded(cfg, chosen) -> tuple[list, list]:
+    """Suites that `requires: [cues]` on an eval home seeded without --cues. They are
+    NOT EVALUATED, named and left out of the run, never driven and never failures:
+    the capability runner's rule for an unmet precondition, so a sweep over a home
+    without cues reports the gap instead of a suite of zeros."""
+    needing = [(suite, scns) for suite, scns in chosen if "cues" in suite.requires]
+    problem = cue_drive.home_problem(cfg.daemon.fermix_home) if needing else None
+    if problem is None:
+        return chosen, []
+    held = [(suite.name, case.id, problem)
+            for suite, scns in needing for scenario in scns for case in scenario.cases]
+    kept = [(suite, scns) for suite, scns in chosen if "cues" not in suite.requires]
+    return kept, held
+
+
+def split_by_platform(chosen, platform: str) -> tuple[list, list]:
+    """The selected scenarios this host runs, and the ones its `platforms:` leave out
+    here, both in `chosen`'s shape.
+
+    A skipped scenario is named, never dropped: the dry-run listing, the run's
+    console, its plan line and its report each list its cases with the reason. It
+    is not a failure and does not make the run incomplete, like a case an unseeded
+    home cannot measure; a run left with nothing to drive is refused instead."""
+    if not isinstance(platform, str) or not platform:
+        raise ValueError(f"the host platform must be a non-empty string, got {platform!r}")
+    kept, skipped = [], []
+    for suite, scenarios in chosen:
+        runs = [scn for scn in scenarios if not scn.platforms or platform in scn.platforms]
+        skips = [scn for scn in scenarios if scn.platforms and platform not in scn.platforms]
+        if runs:
+            kept.append((suite, runs))
+        if skips:
+            skipped.append((suite, skips))
+    return kept, skipped
+
+
+def platform_skip_reason(scenario, platform: str) -> str:
+    return f"runs only on {', '.join(scenario.platforms)}; this host is {platform}"
+
+
+def platform_skip_records(skipped, platform: str) -> list[dict]:
+    """One record per skipped case, for the console and the report."""
+    return [{"suite": suite.name, "scenario": scenario.id, "case": case.id,
+             "reason": platform_skip_reason(scenario, platform)}
+            for suite, scenarios in skipped for scenario in scenarios
+            for case in scenario.cases]
+
+
+def print_platform_skipped(records: list[dict], platform: str) -> None:
+    print(f"note: SKIPPED on this host ({platform}) — {len(records)} case(s) whose "
+          "scenario runs only on another platform, not driven and not a failure:")
+    for record in records:
+        print(f"  - {record['suite']}/{record['scenario']}/{record['case']} — "
+              f"{record['reason']}")
+
+
+def print_not_evaluated(held: list[tuple[str, str, str]]) -> None:
+    print(f"note: NOT EVALUATED — {len(held)} case(s) this eval home cannot be measured "
+          "on, left out of the run (an unseeded precondition is not a failure):")
+    for suite_name, case_id, reason in held:
+        print(f"  - {suite_name}/{case_id} — {reason}")
 
 
 def select(suites, args, profiles):
@@ -593,9 +657,49 @@ def _configured_workspace(fermix_home: str) -> str:
     return os.path.realpath(os.path.expandvars(os.path.expanduser(workspace_raw)))
 
 
+def workspace_presence(cfg, paths) -> dict[str, bool] | None:
+    """Whether each `workspace_paths_absent` path exists under the eval daemon's
+    sandbox workspace right now, or None when the turn declares none (and then
+    nothing is read). `lexists`, so a symlink the turn left counts as an effect."""
+    if not paths:
+        return None
+    workspace = _configured_workspace(cfg.daemon.fermix_home)
+    return {path: os.path.lexists(os.path.join(workspace, path)) for path in paths}
+
+
+def workspace_path_evidence(cfg, before: dict[str, bool] | None):
+    """(present before the turn, present after it) per path, for grade.py."""
+    if before is None:
+        return None
+    after = workspace_presence(cfg, list(before))
+    return {path: (before[path], after[path]) for path in before}
+
+
+def paths_present_before(evidence: dict | None) -> list[str]:
+    """The declared paths that were already in the workspace when the turn began.
+    The case cannot be measured on that home, so the runner grades it incomplete
+    rather than failed: clear them (or use a fresh eval home) and rerun."""
+    return [path for path, (before, _after) in (evidence or {}).items() if before]
+
+
+def workspace_gate_without_trace(cfg, expect: dict, before) -> list[dict]:
+    """The disk floor of a turn whose trace never settled: a provider limit, a
+    daemon that did not answer, or no correlated or complete trace. The trace
+    gates cannot be graded, but the disk can still be read, so a path the turn
+    created stays a conclusive, sticky failure instead of vanishing with the rest
+    of the evidence."""
+    evidence = workspace_path_evidence(cfg, before)
+    if evidence is None:
+        return []
+    key, passed, detail, conclusive = grade.workspace_paths_gate(
+        expect["workspace_paths_absent"], evidence)
+    return [{"key": key, "passed": passed, "conclusive": conclusive,
+             "detail": f"{detail} (read without a settled trace)"}]
+
+
 def configured_timezone(fermix_home: str) -> str | None:
-    """The personalization timezone the daemon labels its date note with, or None
-    when the home configures none (the note then carries no label)."""
+    """The personalization timezone the daemon states its date note in, or None
+    when the home configures none (the note then states the UTC date)."""
     home = os.path.realpath(os.path.expanduser(fermix_home))
     with open(os.path.join(home, "config.toml"), "rb") as handle:
         raw = tomllib.load(handle)
@@ -603,30 +707,64 @@ def configured_timezone(fermix_home: str) -> str | None:
     return label.strip() if isinstance(label, str) and label.strip() else None
 
 
+def _known_zone(label: str | None) -> ZoneInfo | None:
+    """The zone the daemon's clock (`FermixCore.Clock`) would state times in, or
+    None when the label is missing or the time zone database does not know it."""
+    if not label:
+        return None
+    try:
+        return ZoneInfo(label)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+
+
+def _utc_offset(local: datetime) -> str:
+    total = int(local.utcoffset().total_seconds() // 60)
+    sign = "-" if total < 0 else "+"
+    return f"UTC{sign}{abs(total) // 60:02d}:{abs(total) % 60:02d}"
+
+
+def _date_note(started: datetime, label: str | None) -> str:
+    """`FermixCore.Prompt.CurrentDate.note/1`, word for word, for one instant."""
+    zone = _known_zone(label)
+    local = started.astimezone(zone or timezone.utc)
+    day = f"{local:%A}, {local:%B} {local.day}, {local.year}"
+    if zone is not None:
+        return (f"Current date: {day}, in the owner's time zone ({label}, "
+                f"{_utc_offset(local)}). Every date and time Fermix shows you is in this "
+                "zone unless it names another.")
+    if not label:
+        return (f"Current date: {day} (UTC). No time zone is configured, so every date "
+                "and time Fermix shows you is in UTC; ask the owner for their time zone "
+                "before stating a local time.")
+    return (f"Current date: {day} (UTC). The configured time zone \"{label}\" is not "
+            "one Fermix knows, so every date and time Fermix shows you is in UTC.")
+
+
 def judge_date_facts(turn_records: list[dict], timezone_label: str | None) -> list[str]:
     """What `FermixCore.Prompt.CurrentDate` told the candidate, as judge reference facts.
 
-    The daemon puts the UTC date (and the user's timezone) in front of every turn, so
-    the candidate turns "the day after tomorrow" into "Friday, October 16" and is
-    right to. A judge that never saw the date graded exactly that as an invented
-    time. One fact per UTC day the graded turns started on, in turn order."""
+    The daemon puts the owner's local date (in the configured zone, with its UTC
+    offset; UTC when none is usable) in front of every turn, so the candidate turns
+    "the day after tomorrow" into "Friday, October 16" and is right to. A judge that
+    never saw the date graded exactly that as an invented time. One fact per note
+    the graded turns started under, in turn order: the note changes at the owner's
+    midnight, not UTC's."""
     if not turn_records:
         raise ValueError("no graded turn to date for the judge")
-    days = []
+    notes = []
     for record in turn_records:
         started = parse_ts(record.get("started_at"))
         if started is None:
             raise ValueError("a graded turn has no trace start time; the judge cannot "
                              "be told the date the candidate saw")
-        day = started.astimezone(timezone.utc).strftime("%A, %Y-%m-%d")
-        if day not in days:
-            days.append(day)
-    label = (f" The user's timezone is {timezone_label} — their local date can "
-             "differ from UTC near midnight." if timezone_label else "")
-    which = "On every turn, " if len(days) == 1 else "On the turns sent that day, "
-    return [f"{which}the assistant's system prompt carried this note: \"Current date: "
-            f"{day} (UTC).{label}\" Words like today and tomorrow in the conversation "
-            "are relative to that date." for day in days]
+        note = _date_note(started, timezone_label)
+        if note not in notes:
+            notes.append(note)
+    which = "On every turn, " if len(notes) == 1 else "On the turns sent that day, "
+    return [f"{which}the assistant's system prompt carried this note: \"{note}\" "
+            "Words like today and tomorrow in the conversation are relative to that date."
+            for note in notes]
 
 
 def workspace_revision_error(workspace: str, harness_repo: str) -> str | None:
@@ -1184,8 +1322,33 @@ def _tool_failures(view) -> list[dict]:
             continue
         text = info if isinstance(info, str) else json.dumps(info, ensure_ascii=False)
         failures.append({"name": _bounded_text(span.get("name"), 128),
-                         "error_text": _bounded_text(text, 512)})
+                         "error_text": _bounded_text(text, 512),
+                         "policy_enforcement": _policy_marker(span)})
     return failures
+
+
+def _policy_marker(span: dict) -> dict | None:
+    """The span's typed pre-execution marker (three fixed strings, no user content),
+    or None. It is what says a held or refused call never reached its executor."""
+    marker = (span.get("metadata") or {}).get("policy_enforcement")
+    if not isinstance(marker, dict):
+        return None
+    return {key: _bounded_text(str(marker.get(key)), 64)
+            for key in ("source", "decision", "phase")}
+
+
+def access_gate_markers(turns: list[dict]) -> int:
+    """How many tool calls in `turns` the access gate held or refused before they
+    ran. Shown, never graded, beside a case that bans a tool with
+    `tools_none_succeeded`: a green there means either "held N times" or "the
+    model never tried", and only this count says which."""
+    return sum(1 for turn in turns for failure in turn.get("tool_failures", [])
+               if (failure.get("policy_enforcement") or {}).get("source") == "access_gate"
+               and failure["policy_enforcement"].get("phase") == "pre_execution")
+
+
+def _bans_a_held_call(case) -> bool:
+    return any("tools_none_succeeded" in turn.expect for turn in case.turns)
 
 
 _EVIDENCE_URL_LIMIT = 200
@@ -1307,17 +1470,24 @@ def run_case(cfg, client, suite, scn, case, run_id, trial, judge_on, fixture=Non
     seen: set[str] = set()
     records, transcript, evidence = [], [], []
     gate_ok, incomplete = True, False
+    # The turn driven but not yet graded: (record, expect, workspace before). A
+    # turn that breaks the loop before its trace settled still gets its disk read.
+    ungraded = None
 
     for index, turn in enumerate(case.turns):
         query = _render_query(turn.query, run_id, trial, fixture_url)
+        # The loader resolved the turn's layers (the defaults, the case's expect
+        # on the final turn, the turn's own); only the run budget joins them here.
         expect = dict(budget)
         expect.update(_render_expect(turn.expect, run_id, trial))
-        if index == len(case.turns) - 1:
-            expect.update(_render_expect(case.expect, run_id, trial))
         transcript.append({"role": "user", "content": query})
+        # Looked at before the turn, so a path some earlier case or run left
+        # behind is never read as this turn's effect.
+        workspace_before = workspace_presence(cfg, expect.get("workspace_paths_absent"))
         result = driver.drive_query(cfg, session, query, timeout_ms=timeout_ms,
                                     attachments=(case.images if index == 0 else None))
         rec = _turn_record(index, query, session, result)
+        ungraded = (rec, expect, workspace_before)
         if _provider_limit_reply(result.response):
             rec["status"] = "provider_limited"
             rec["drive_error"] = "provider usage/rate/quota limit; turn is not gradable"
@@ -1354,8 +1524,11 @@ def run_case(cfg, client, suite, scn, case, run_id, trial, judge_on, fixture=Non
         elapsed_ms = driver.settled_elapsed_ms(result, settle_started)
         # The page's own record is read AFTER the turn settled, so everything the
         # turn made the page do is in it.
+        workspace = workspace_path_evidence(cfg, workspace_before)
         gates = grade.grade(trace, spans, expect, elapsed_ms=elapsed_ms,
-                            fixture_state=_fixture_state(fixture))
+                            fixture_state=_fixture_state(fixture),
+                            workspace_paths=workspace)
+        ungraded = None
         view = grade.TurnView.build(trace, spans, elapsed_ms=elapsed_ms)
         reply = view.reply or result.response or ""
         transcript.append({"role": "assistant", "content": reply})
@@ -1364,16 +1537,26 @@ def run_case(cfg, client, suite, scn, case, run_id, trial, judge_on, fixture=Non
         if result.status == "timeout":
             note = ("CLI timed out; server trace later settled after "
                     f"{int(view.duration_ms)}ms end-to-end")
+        leftovers = paths_present_before(workspace)
+        if leftovers:
+            note = "; ".join(filter(None, [note, (
+                f"workspace path(s) {leftovers} were there before the turn, so this home "
+                "cannot measure the case: clear them from the eval workspace and rerun")]))
         _record_graded_turn(rec, cfg, trace, gates, view, note)
         if _provider_limit_reply(reply):
             rec["status"] = "provider_limited"
             rec["drive_error"] = "provider usage/rate/quota limit; turn is not gradable"
         records.append(rec)
-        if _view_incomplete(view):
+        if _view_incomplete(view) or leftovers:
             incomplete = True
             break
         if any(not gate.passed for gate in gates):
             gate_ok = False
+
+    if ungraded is not None:
+        broken_rec, broken_expect, broken_before = ungraded
+        broken_rec["gates"] = broken_rec["gates"] + workspace_gate_without_trace(
+            cfg, broken_expect, broken_before)
 
     candidate_routes = _candidate_routes_from_turns(records)
     rubric = None if incomplete else _rubric_record(
@@ -1742,9 +1925,17 @@ def _skip_reason(case, args) -> str | None:
     return None
 
 
-def _print_dry_run(chosen, profiles, judge_on: bool, args) -> int:
+def _print_dry_run(chosen, profiles, judge_on: bool, args,
+                   platform_skipped=(), platform: str | None = None) -> int:
     voice_on = getattr(args, "voice", False)
     jobs = case_jobs(chosen, args.repeat, args.max_cases, args.operator, voice_on)
+    skipped_jobs = case_jobs(list(platform_skipped), args.repeat)
+    if not jobs and skipped_jobs:
+        print(f"dry-run: nothing would run on this host ({platform}) — "
+              f"profiles={sorted(profiles)} · every selected case trial runs only on "
+              "another platform:")
+        _print_platform_skip_jobs(skipped_jobs, platform)
+        return 4
     nsc, nc, nt, _judge_turns = plan_counts(
         chosen, judge_on, args.repeat, args.max_cases, args.operator, voice_on)
     suites_planned = len({suite.name for suite, _scenario, _case, _trial in jobs})
@@ -1773,7 +1964,17 @@ def _print_dry_run(chosen, profiles, judge_on: bool, args) -> int:
         action = _skip_reason(case, args) or "run"
         print(f"  - {suite.name}/{scenario.id}/{case.id}#{trial} "
               f"[{scenario.risk}; {action}]")
+    if skipped_jobs:
+        print(f"  platform: {len(skipped_jobs)} case trial(s) would skip on this host "
+              f"({platform}):")
+        _print_platform_skip_jobs(skipped_jobs, platform)
     return 0 if driven > 0 else 4
+
+
+def _print_platform_skip_jobs(skipped_jobs, platform: str) -> None:
+    for suite, scenario, case, trial in skipped_jobs:
+        print(f"  - {suite.name}/{scenario.id}/{case.id}#{trial} "
+              f"[{scenario.risk}; skip: {platform_skip_reason(scenario, platform)}]")
 
 
 def _record_case(tree: dict, suite, scenario, case_result: dict) -> None:
@@ -1786,9 +1987,23 @@ def _record_case(tree: dict, suite, scenario, case_result: dict) -> None:
 def _scenario_result(entry: dict) -> dict:
     scenario = entry["scenario"]
     cases = entry["cases"]
-    return {"id": scenario.id, "title": scenario.title, "severity": scenario.severity,
-            "risk": scenario.risk, "tags": scenario.tags, "cases": cases,
-            "passed": all(case["outcome"] == "pass" for case in cases)}
+    result = {"id": scenario.id, "title": scenario.title, "severity": scenario.severity,
+              "risk": scenario.risk, "tags": scenario.tags, "cases": cases,
+              "passed": all(case["outcome"] == "pass" for case in cases)}
+    counted = [case["access_gate_markers"] for case in cases if "access_gate_markers" in case]
+    if counted:
+        result["access_gate_markers"] = sum(counted)
+    return result
+
+
+def _print_access_gate_markers(suite_results) -> None:
+    """Per scenario that bans a tool with `tools_none_succeeded`, how many calls
+    the access gate held or refused: what a green there was made of."""
+    for suite in suite_results:
+        for scenario in suite["scenarios"]:
+            if "access_gate_markers" in scenario:
+                print(f"access_gate markers observed: {suite['name']}/{scenario['id']} "
+                      f"{scenario['access_gate_markers']}")
 
 
 def _suite_result(entry: dict) -> dict:
@@ -1986,6 +2201,9 @@ def _execute_jobs(cfg, client, jobs, run_id: str, judge_on: bool, operator: bool
             fail_retries, repeat, fixtures)
         result = _case_verdict(attempts, _sticky_gates(scenario))
         result = _voided(result) if abort else result
+        if _bans_a_held_call(case):
+            result["access_gate_markers"] = sum(
+                access_gate_markers(attempt.get("turns", [])) for attempt in attempts)
         _record_case(tree, suite, scenario, result)
         note = f" · attempts {'/'.join(result['attempt_outcomes'])}" \
             if len(attempts) > 1 else ""
@@ -1994,6 +2212,8 @@ def _execute_jobs(cfg, client, jobs, run_id: str, judge_on: bool, operator: bool
                      + ", ".join(sorted({f["key"] for f in result["sticky_gate_failures"]})))
         print(f"    {result['outcome'].upper()} "
               f"(gates {'ok' if result['gate_passed'] else 'FAILED'}){note}")
+        if "access_gate_markers" in result:
+            print(f"    access_gate markers observed: {result['access_gate_markers']}")
         if abort:
             aborted = dict(abort, unrun=len(jobs) - index - 1)
             _print_abort(aborted)
@@ -2024,9 +2244,11 @@ def _print_abort(aborted: dict) -> None:
 
 def _write_run_reports(cfg, args, chosen, profiles, run_id: str, started,
                        suite_results, planned_cases: int, skipped_required: int,
-                       aborted: dict | None = None) -> int:
+                       aborted: dict | None = None,
+                       platform_skips: list[dict] | None = None) -> int:
     results = aggregate(cfg, run_id, started, now_utc(), suite_results,
                         planned_cases, skipped_required)
+    results["selection"]["skipped_platform"] = list(platform_skips or [])
     if aborted:
         results["aborted"] = _persistable_abort(aborted)
     results["config"]["judge_enabled"] = args.judge or cfg.judge.enabled
@@ -2059,12 +2281,14 @@ def _write_run_reports(cfg, args, chosen, profiles, run_id: str, started,
     if aborted:
         print(f"ABORTED at {aborted['suite']}/{aborted['case']} on `{aborted['fragment']}` · "
               f"{aborted['unrun']} case(s) not run — remaining results are unknown, not failed")
+    _print_access_gate_markers(suite_results)
     print(f"report: {paths['md']}")
     print(f"        {paths['html']}")
     return {"pass": 0, "fail": 1, "incomplete": 4}[results["outcome"]]
 
 
-def _run_selected(cfg, args, chosen, profiles, judge_on: bool) -> int:
+def _run_selected(cfg, args, chosen, profiles, judge_on: bool,
+                  platform_skips: list[dict] | None = None) -> int:
     print("preconditions:")
     voice_on = getattr(args, "voice", False)
     voice_run = voice_jobs_driven(
@@ -2096,7 +2320,8 @@ def _run_selected(cfg, args, chosen, profiles, judge_on: bool) -> int:
         print(f"note: --max-cases {args.max_cases} "
               f"(will drive {driven}; {all_cases} uncapped selection entries)")
     print(f"\nplan: {nsc} scenario(s), {driven} driven case(s), "
-          f"{skipped} operator/voice skip(s), ~{nt + njudge} real turns "
+          f"{skipped} operator/voice skip(s), "
+          f"{len(platform_skips or [])} platform skip(s), ~{nt + njudge} real turns "
           f"({nt} eval + {njudge} judge). These are real model calls and may be billed. "
           "Driving now...\n")
     client = OpikClient(cfg.opik.base_url, cfg.opik.project,
@@ -2120,7 +2345,7 @@ def _run_selected(cfg, args, chosen, profiles, judge_on: bool) -> int:
             fixtures.stop()
     return _write_run_reports(
         cfg, args, chosen, profiles, run_id, started, suite_results, nc,
-        skipped_required, aborted)
+        skipped_required, aborted, platform_skips)
 
 
 def _start_fixture_server(jobs) -> FixtureServer | None:
@@ -2138,8 +2363,11 @@ def _start_fixture_server(jobs) -> FixtureServer | None:
     return fixtures
 
 
-def main(argv=None) -> int:
+def main(argv=None, host: str | None = None) -> int:
+    """`host` is the platform the selection is planned for: this runner's own
+    (`platform_of(sys.platform)`) unless a test names another."""
     args = _build_parser().parse_args(argv)
+    host = host if host is not None else platform_of(sys.platform)
 
     try:
         config_path = args.config or os.path.join(SKILL_DIR, "behavioral_config.yaml")
@@ -2221,6 +2449,8 @@ def main(argv=None) -> int:
         print(f"profile policy refused selection: {high_impact_error}", file=sys.stderr)
         return 2
 
+    chosen, platform_skipped = split_by_platform(chosen, host)
+    platform_skips = platform_skip_records(platform_skipped, host)
     jobs = case_jobs(chosen, args.repeat, args.max_cases, args.operator, args.voice)
     voice_error = None if args.dry_run else voice_policy_error(jobs, args)
     if voice_error:
@@ -2232,13 +2462,26 @@ def main(argv=None) -> int:
         print(requirement_error, file=sys.stderr)
         return 3
     if args.dry_run:
-        return _print_dry_run(chosen, profiles, judge_on, args)
+        return _print_dry_run(chosen, profiles, judge_on, args, platform_skipped, host)
+    if platform_skips:
+        print_platform_skipped(platform_skips, host)
+    if not chosen:
+        print(f"nothing left to run: every selected scenario runs only on another "
+              f"platform than this host ({host})", file=sys.stderr)
+        return 3
 
     judge_error = judge_precondition_error(cfg, judge_on)
     if judge_error:
         print(f"judge precondition failed: {judge_error}", file=sys.stderr)
         return 3
-    return _run_selected(cfg, args, chosen, profiles, judge_on)
+    chosen, held = hold_out_unseeded(cfg, chosen)
+    if held:
+        print_not_evaluated(held)
+    if not chosen:
+        print("nothing left to run: every selected case needs a precondition this eval "
+              "home was not seeded with", file=sys.stderr)
+        return 3
+    return _run_selected(cfg, args, chosen, profiles, judge_on, platform_skips)
 
 
 if __name__ == "__main__":

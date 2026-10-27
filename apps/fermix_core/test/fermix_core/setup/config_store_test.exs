@@ -3,7 +3,11 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Cues.SourceManager
+  alias FermixCore.Cues.SourceSupervisor
   alias FermixCore.Meetings.Config, as: MeetingsConfig
+  alias FermixCore.OpenLoops.Config, as: OpenLoopsConfig
   alias FermixCore.Setup.ConfigStore
 
   setup do
@@ -15,6 +19,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     network = Application.get_env(:fermix_core, :network, [])
     harness = Application.get_env(:fermix_core, :harness, [])
     skill_curation = Application.get_env(:fermix_core, :skill_curation, [])
+    open_loops = Application.get_env(:fermix_core, :open_loops, [])
     memory = Application.get_env(:fermix_core, :memory, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
     computer_use = Application.get_env(:fermix_core, :computer_use, [])
@@ -39,6 +44,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       Application.put_env(:fermix_core, :network, network)
       Application.put_env(:fermix_core, :harness, harness)
       Application.put_env(:fermix_core, :skill_curation, skill_curation)
+      Application.put_env(:fermix_core, :open_loops, open_loops)
       Application.put_env(:fermix_core, :memory, memory)
       Application.put_env(:fermix_core, :realtime, realtime)
       Application.put_env(:fermix_core, :computer_use, computer_use)
@@ -826,6 +832,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
   [fermix_core.routing]
   subagent_model = "gpt-5.4-mini"
+  filter_provider = "anthropic"
+  filter_model = "claude-haiku-4-5"
+  filter_reasoning_effort = "low"
 
   [fermix_core.compaction]
   threshold = 0.85
@@ -844,6 +853,32 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
   [fermix_core.skill_curation]
   enabled = true
+
+  [fermix_core.open_loops]
+  enabled = true
+
+  [fermix_core.cues]
+  enabled = true
+  door_port = 4555
+
+  [fermix_core.cues.sources.home-alerts]
+  kind = "local_push"
+  token = "@keyring"
+
+  [fermix_core.cues.sources.eng-blogs]
+  preset = "rss"
+  url = "https://example.org/releases.atom"
+  interval = 300
+
+  [fermix_core.cues.mandates.release-issues]
+  job = "release_watch_4b1e"
+  mode = "approve"
+  approve_within = "30m"
+  tools = ["github_create_issue"]
+
+  [fermix_core.cues.mandates.release-issues.pin_args]
+  owner = "example-org"
+  draft = true
 
   [fermix_core.memory]
   review_interval_hours = 24
@@ -1769,7 +1804,10 @@ defmodule FermixCore.Setup.ConfigStoreTest do
           subagent_reasoning_effort: "low",
           cron_model: "claude-haiku-4-5",
           meeting_model: "claude-haiku-4-5",
-          meeting_reasoning_effort: "low"
+          meeting_reasoning_effort: "low",
+          filter_provider: "anthropic",
+          filter_model: "claude-haiku-4-5",
+          filter_reasoning_effort: "low"
         ]
       ],
       fermix_channels: [],
@@ -1795,6 +1833,10 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     # every summary back to the main model (M21 Phase 3).
     assert Keyword.get(routing, :meeting_model) == "claude-haiku-4-5"
     assert Keyword.get(routing, :meeting_reasoning_effort) == "low"
+    # The default cue-filter route (M60 §8.2).
+    assert Keyword.get(routing, :filter_provider) == "anthropic"
+    assert Keyword.get(routing, :filter_model) == "claude-haiku-4-5"
+    assert Keyword.get(routing, :filter_reasoning_effort) == "low"
     refute Keyword.has_key?(routing, :coding_model)
     refute Keyword.has_key?(routing, :default_provider)
   end
@@ -2594,6 +2636,326 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     end
   end
 
+  # `[fermix_core.open_loops]` (MILESTONE_78_OPEN_LOOPS §10) is wired like
+  # skill curation with the inverse default: off until the file says otherwise.
+  test "a fresh home loads an empty open_loops section, which reads as disabled" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    open_loops = Keyword.fetch!(loaded.fermix_core, :open_loops)
+    assert open_loops == []
+    refute OpenLoopsConfig.enabled?(open_loops)
+  end
+
+  test "save/load round-trips the open_loops config section" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [open_loops: [enabled: true]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.open_loops]\nenabled = true"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    assert Keyword.get(loaded.fermix_core, :open_loops) == [enabled: true]
+  end
+
+  test "an empty open_loops section is omitted from the TOML" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    assert :ok =
+             ConfigStore.save_snapshot(%{
+               fermix_core: [open_loops: []],
+               fermix_channels: [],
+               fermix_web: []
+             })
+
+    refute File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_core.open_loops]"
+  end
+
+  test "apply_snapshot replaces open_loops config in Application env" do
+    Application.put_env(:fermix_core, :open_loops, enabled: true)
+
+    ConfigStore.apply_snapshot(%{
+      fermix_core: [open_loops: []],
+      fermix_channels: [],
+      fermix_web: []
+    })
+
+    assert Application.get_env(:fermix_core, :open_loops) == []
+  end
+
+  test "load refuses to boot on an unknown open_loops key" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.open_loops]
+    enabled = true
+    max_touches = 5
+    """)
+
+    assert_raise ArgumentError,
+                 ~r/\[fermix_core.open_loops\].*unknown key\(s\): max_touches/s,
+                 fn -> ConfigStore.load_runtime_config() end
+  end
+
+  test "load refuses to boot on an invalid open_loops value" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.open_loops]
+    enabled = "yes"
+    """)
+
+    assert_raise ArgumentError, ~r/open_loops\.enabled "yes"/s, fn ->
+      ConfigStore.load_runtime_config()
+    end
+  end
+
+  describe "[fermix_core.cues] (M60 §6.2, §10.1)" do
+    setup do
+      cues = Application.get_env(:fermix_core, :cues)
+
+      on_exit(fn ->
+        case cues do
+          nil -> Application.delete_env(:fermix_core, :cues)
+          value -> Application.put_env(:fermix_core, :cues, value)
+        end
+      end)
+
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+      %{home: tmp_home}
+    end
+
+    # Seeded with what application environment holds after a load (atoms for
+    # enumerations), because the live snapshot is what setup persists.
+    defp normalized_cues do
+      [
+        enabled: true,
+        mandates_enabled: false,
+        door_port: 4555,
+        sources: %{
+          "home-alerts" => [kind: :local_push, daily_budget: 500, token: "@keyring"],
+          "gh-hooks" => [
+            kind: :webhook,
+            id: :content_hash,
+            verify: :hmac,
+            header: "X-Hub-Signature-256",
+            algorithm: "sha256",
+            prefix: "sha256=",
+            secret: "@file"
+          ],
+          "eng-blogs" => [
+            preset: "rss",
+            enabled: false,
+            url: "https://example.org/a?b=c&d=\"e\"",
+            interval: 300
+          ],
+          # The general WebSocket source with every field it takes, its JSON
+          # messages carrying quotes, braces and a backslash.
+          "live-news" => [
+            kind: :stream,
+            url: "wss://stream.example.com/v2/news",
+            items_path: "data",
+            id_path: "id",
+            revision_path: "updated_at",
+            type_path: "T",
+            subject_path: "symbols.0",
+            time_path: "created_at",
+            item_types: ["n"],
+            error_types: ["error", "warning"],
+            key_header: "X-Feed-Key",
+            secret_header: "X-Feed-Secret",
+            auth_message: ~S({"action":"auth","key":"{{key}}","note":"a\\b \"c\""}),
+            subscribe_message: ~s({"action":"subscribe","news":["*"]}),
+            daily_budget: 2_000,
+            key: "@keyring",
+            secret: "@file"
+          ]
+        },
+        mandates: %{
+          "release-issues" => [
+            job: "release_watch_4b1e",
+            enabled: true,
+            mode: :auto,
+            approve_within: "2h",
+            tools: ["github_create_issue"],
+            read_tools: [],
+            max_cue_age: "0",
+            validator: "/usr/local/libexec/fermix/validators/release.py",
+            interpreter: "/usr/bin/python3",
+            validator_env: ["GITHUB_TOKEN"],
+            idempotency_arg: "client_id",
+            unpinned: ["memory/"],
+            pin_args: %{"owner" => "example-org", "draft" => true, "limit" => 3, "ratio" => 0.5}
+          ]
+        }
+      ]
+    end
+
+    test "save then load gives back the normalized sections, nested tables included", ctx do
+      snapshot = %{fermix_core: [cues: normalized_cues()], fermix_channels: [], fermix_web: []}
+
+      assert :ok = ConfigStore.save_snapshot(snapshot)
+
+      contents = File.read!(Path.join(ctx.home, "config.toml"))
+      assert contents =~ "[fermix_core.cues]\nenabled = true"
+      assert contents =~ "[fermix_core.cues.sources.home-alerts]\nkind = \"local_push\""
+      assert contents =~ "[fermix_core.cues.mandates.release-issues]"
+      assert contents =~ "[fermix_core.cues.mandates.release-issues.pin_args]"
+      refute contents =~ "pin_args ="
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      assert Keyword.fetch!(loaded.fermix_core, :cues) == normalized_cues()
+
+      # And again: the loaded shape saves to the same file.
+      assert :ok = ConfigStore.save_snapshot(loaded)
+      assert File.read!(Path.join(ctx.home, "config.toml")) == contents
+    end
+
+    test "apply_snapshot puts the normalized shape in application environment" do
+      Application.put_env(:fermix_core, :cues, enabled: false, door_port: 5000)
+
+      ConfigStore.apply_snapshot(%{
+        fermix_core: [cues: CuesConfig.to_keyword(normalized_cues())],
+        fermix_channels: [],
+        fermix_web: []
+      })
+
+      assert Application.get_env(:fermix_core, :cues) == normalized_cues()
+    end
+
+    defmodule FakeSourceWorker do
+      @moduledoc false
+      use GenServer, restart: :temporary
+
+      def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+      @impl true
+      def init(opts), do: {:ok, opts}
+    end
+
+    # The config-apply hook (M60 §6.3): a saved source reaches its worker
+    # without a restart.
+    test "apply_snapshot has the running source manager start the new source's worker" do
+      Application.put_env(:fermix_core, :cues, [])
+      supervisor = :"config_store_cue_sources_#{System.unique_integer([:positive])}"
+      start_supervised!({SourceSupervisor, name: supervisor})
+
+      start_supervised!(
+        {SourceManager,
+         supervisor: supervisor, workers: %{feed: FakeSourceWorker, stream: FakeSourceWorker}}
+      )
+
+      assert SourceManager.workers() == %{}
+
+      ConfigStore.apply_snapshot(%{
+        fermix_core: [
+          cues: [
+            sources: %{
+              "eng-blogs" => [preset: "rss", url: "https://example.org/feed.xml", interval: 300]
+            }
+          ]
+        ],
+        fermix_channels: [],
+        fermix_web: []
+      })
+
+      assert %{"eng-blogs" => worker} = SourceManager.workers()
+      assert is_pid(worker)
+    end
+
+    test "current_snapshot persists the live section in the parser's spellings" do
+      Application.put_env(:fermix_core, :cues, normalized_cues())
+
+      cues = Keyword.fetch!(ConfigStore.current_snapshot().fermix_core, :cues)
+      assert cues[:sources]["home-alerts"][:kind] == "local_push"
+      assert cues[:mandates]["release-issues"][:mode] == "auto"
+    end
+
+    test "an empty section is omitted from the file", ctx do
+      assert :ok =
+               ConfigStore.save_snapshot(%{
+                 fermix_core: [cues: []],
+                 fermix_channels: [],
+                 fermix_web: []
+               })
+
+      refute File.read!(Path.join(ctx.home, "config.toml")) =~ "fermix_core.cues"
+    end
+
+    test "load refuses an unknown key at the top and in a source, naming the section", ctx do
+      File.mkdir_p!(ctx.home)
+
+      File.write!(Path.join(ctx.home, "config.toml"), """
+      [fermix_core.cues]
+      enabld = true
+      """)
+
+      assert_raise ArgumentError, ~r/\[fermix_core\.cues\].*unknown key\(s\): enabld/s, fn ->
+        ConfigStore.load_runtime_config()
+      end
+
+      File.write!(Path.join(ctx.home, "config.toml"), """
+      [fermix_core.cues.sources.home-alerts]
+      kind = "local_push"
+      token = "@keyring"
+      intervall = 60
+      """)
+
+      assert_raise ArgumentError,
+                   ~r/\[fermix_core\.cues\.sources\.home-alerts\].*unknown key\(s\): intervall/s,
+                   fn -> ConfigStore.load_runtime_config() end
+    end
+
+    test "load refuses an inline pin_args table with the way to write it", ctx do
+      File.mkdir_p!(ctx.home)
+
+      File.write!(Path.join(ctx.home, "config.toml"), """
+      [fermix_core.cues.mandates.release-issues]
+      job = "release_watch_4b1e"
+      pin_args = { owner = "example-org" }
+      """)
+
+      assert_raise ArgumentError,
+                   ~r/pin_args.*\[fermix_core\.cues\.mandates\.<name>\.pin_args\]/s,
+                   fn ->
+                     ConfigStore.load_runtime_config()
+                   end
+    end
+  end
+
   test "save/load round-trips memory.review_interval_hours" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
@@ -2987,6 +3349,103 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(mobile, :media_store_max_bytes) == 2_147_483_648
     assert Keyword.get(mobile, :push)[:key] == "@keyring"
     assert Keyword.get(mobile, :push)[:environment] == "development"
+  end
+
+  # Android push straight through FCM was retired before any release shipped
+  # it, and the owner's dev home carries exactly this table today: it must keep
+  # booting. It is accepted at parse, named once at warning, its keychain
+  # sentinel never read, and dropped, so the next save writes the file without
+  # it.
+  @retired_fcm_toml """
+  [fermix_channels.mobile]
+  enabled = true
+
+  [fermix_channels.mobile.push]
+  enabled = false
+
+  [fermix_channels.mobile.fcm]
+  enabled = true
+  project_id = "fermix-owner-123"
+  service_account = "@keyring"
+  """
+
+  describe "retired [fermix_channels.mobile.fcm] table" do
+    setup do
+      tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-retired-fcm")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+      %{config_path: Path.join(tmp_home, "config.toml")}
+    end
+
+    test "load accepts it, names it at warning, reads no secret for it, and drops it",
+         %{config_path: path} do
+      File.write!(path, @retired_fcm_toml)
+      Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.CountingSecretWriter)
+      :ok = FermixTestSupport.CountingSecretWriter.watch()
+      on_exit(&FermixTestSupport.CountingSecretWriter.unwatch/0)
+
+      {result, log} = with_log(fn -> ConfigStore.load_runtime_config() end)
+
+      assert {:ok, loaded} = result
+      mobile = Keyword.fetch!(loaded.fermix_channels, :mobile)
+      assert Enum.sort(mobile) == [enabled: true, push: [enabled: false]]
+      assert log =~ "[warning]"
+      assert log =~ "config.toml [fermix_channels.mobile.fcm] is retired"
+      refute_received {:secret_writer_get, _key}
+    end
+
+    test "a save after the load writes the file without it, and the next load is silent",
+         %{config_path: path} do
+      File.write!(path, @retired_fcm_toml)
+
+      {{:ok, loaded}, _log} =
+        with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end)
+
+      assert :ok = ConfigStore.save_snapshot(loaded)
+
+      contents = File.read!(path)
+      assert contents =~ "[fermix_channels.mobile]"
+      assert contents =~ "[fermix_channels.mobile.push]"
+      refute contents =~ "[fermix_channels.mobile.fcm]"
+      refute contents =~ "project_id"
+      refute contents =~ "service_account"
+
+      {result, log} =
+        with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end)
+
+      assert {:ok, reloaded} = result
+      assert reloaded.fermix_channels[:mobile] == loaded.fermix_channels[:mobile]
+      refute log =~ "retired"
+    end
+
+    # The running app env of a daemon that hydrated the table before it was
+    # retired holds it in its normalized shape; a save from it drops it too.
+    test "a snapshot holding the normalized table saves without it" do
+      snapshot = %{
+        fermix_core: [],
+        fermix_channels: [
+          mobile: [
+            enabled: true,
+            push: [enabled: false],
+            fcm: [enabled: true, project_id: "fermix-owner-123", service_account: "@keyring"]
+          ]
+        ],
+        fermix_web: []
+      }
+
+      {result, log} = with_log(fn -> ConfigStore.save_snapshot(snapshot) end)
+
+      assert :ok = result
+      assert log =~ "config.toml [fermix_channels.mobile.fcm] is retired"
+      contents = File.read!(ConfigStore.path())
+      refute contents =~ "[fermix_channels.mobile.fcm]"
+      refute contents =~ "project_id"
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+
+      assert Enum.sort(Keyword.fetch!(loaded.fermix_channels, :mobile)) ==
+               [enabled: true, push: [enabled: false]]
+    end
   end
 
   test "mobile config rejects unsafe ports, modes, media caps, and push environments" do

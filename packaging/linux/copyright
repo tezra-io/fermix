@@ -46,6 +46,20 @@ Comment:
    * The Elixir and Erlang libraries this project depends on, each under its
      own licence; `fermix capabilities` and the project's mix.lock name them.
  .
+ /usr/bin/fermix also contains the fermix-iroh helper, which lets a paired
+ phone reach this machine from any network.
+ Copyright (c) 2026 Tezra.io, MIT License.
+ Upstream: https://github.com/tezra-io/fermix-iroh
+ The helper is a static Rust executable. The third-party components compiled
+ into it are each under their own licence, and the notices that name them
+ with their licence texts are installed as
+ /usr/share/doc/fermix/fermix-iroh-THIRD-PARTY-NOTICES.txt
+ .
+ One crate in the helper, attohttpc, is under the Mozilla Public License 2.0.
+ The helper carries it unmodified. Its Source Code Form is the crate as
+ published on crates.io, at the version and sha256 the notices name.
+ Upstream: https://github.com/sbstp/attohttpc
+ .
  /usr/lib/fermix/runtime-payload/libc-musl-<digest>.so is the musl libc
  dynamic loader the bundled ERTS was linked against, MIT License. The package
  configuration step copies it to /var/lib/fermix/runtimes/<digest>/libc-musl.so

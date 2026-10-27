@@ -16,6 +16,10 @@ credential): every way it can fail (a refusal, an API error, a failed token
 exchange, no credential at all) must leave the case incomplete with a sentence
 naming the cause, never a pass and never a silent fail. Credential resolution
 itself runs the real SDK against a throwaway HOME.
+
+The preflight (bin/judge_preflight.py) sends one real verdict through either
+backend before a judged tier runs, and refuses a judge that is the candidate
+before it sends anything.
 """
 
 from __future__ import annotations
@@ -163,6 +167,72 @@ def test_the_request_asks_for_exactly_the_verdict_the_parser_accepts(dispatch):
     assert set(schema["properties"]) == {"pass", "score", "rationale"}
     assert set(schema["required"]) == set(schema["properties"])
     assert schema["additionalProperties"] is False
+
+
+def test_the_openai_request_pins_its_reasoning_effort(dispatch):
+    # gpt-6-luna is a reasoning model: the effort is explicit, so neither a model
+    # nor an API default can move the judge's depth (or its token spend) silently.
+    result = dispatch.run([_ok_body()])
+    body = json.loads(dispatch.requests[0].data)
+    assert body["reasoning_effort"] == "medium"
+    assert "temperature" not in body
+    assert result.reasoning_effort == "medium"
+
+
+# 2026-10-23, eval-nightly run 39910831669: the gpt-6-luna judge spent the whole
+# old 2,048-token completion cap reasoning on launch_day_update's numbered
+# rubric (2,569 input tokens) and returned finish_reason "length" with no
+# verdict. A reasoning model's hidden reasoning counts toward
+# max_completion_tokens, so the cap must hold that reasoning AND the verdict.
+_OBSERVED_REASONING_TOKENS = 2_048
+_VERDICT_TOKENS = 400
+
+
+def _reasoning_judge(state):
+    """A scripted endpoint that, like gpt-6-luna, reasons before it answers: it
+    truncates with finish_reason "length" when the cap cannot hold the observed
+    reasoning plus a verdict, and records the timeout it was given."""
+
+    def fake_urlopen(req, *_args, timeout=None, **_kwargs):
+        state.requests.append(req)
+        state.timeouts.append(timeout)
+        cap = json.loads(req.data)["max_completion_tokens"]
+        need = _OBSERVED_REASONING_TOKENS + _VERDICT_TOKENS
+        if cap < need:
+            return _Response(json.dumps({
+                "model": "judge-model",
+                "choices": [{"finish_reason": "length", "message": {"content": ""}}],
+                "usage": {"prompt_tokens": 2_569, "completion_tokens": cap,
+                          "total_tokens": 2_569 + cap}}).encode())
+        return _Response(_ok_body())
+
+    return fake_urlopen
+
+
+def test_the_openai_cap_holds_the_reasoning_the_live_judge_spent(dispatch, monkeypatch):
+    state = SimpleNamespace(requests=[], timeouts=[])
+    fake = _reasoning_judge(state)
+    # dispatch.run installs its own scripted urlopen; this case needs the cap-aware one.
+    cfg = SimpleNamespace(judge=SimpleNamespace(backend="openai", model="judge-model"))
+    monkeypatch.setattr(judge.urllib.request, "urlopen", fake)
+    result = judge.judge_case(cfg, "q", "r", "Judge this.", "case",
+                              candidate_routes=[{"provider": "anthropic",
+                                                 "model": "candidate-model"}])
+    assert result.evaluated is True, result.error
+    assert result.finish_reason == "stop"
+    assert len(state.requests) == 1
+
+
+def test_the_openai_timeout_covers_the_whole_output_budget(dispatch, monkeypatch):
+    # The response arrives only when generation ends, so one attempt's timeout must
+    # outlast the full cap at a conservative 100 completion tokens a second.
+    state = SimpleNamespace(requests=[], timeouts=[])
+    monkeypatch.setattr(judge.urllib.request, "urlopen", _reasoning_judge(state))
+    cfg = SimpleNamespace(judge=SimpleNamespace(backend="openai", model="judge-model"))
+    judge.judge_case(cfg, "q", "r", "Judge this.", "case",
+                     candidate_routes=[{"provider": "anthropic", "model": "candidate-model"}])
+    (timeout,) = state.timeouts
+    assert timeout * 100 >= judge._MAX_JUDGE_OUTPUT_TOKENS
 
 
 def test_a_missing_tool_record_is_sent_as_not_recorded_not_as_no_tools(dispatch):
@@ -769,6 +839,18 @@ def test_the_preflight_refuses_another_credential_source(preflight, sdk):
     assert "ANTHROPIC_API_KEY" in r.output and PROFILE_SOURCE in r.output
 
 
+def test_the_preflight_proves_the_api_key_source_the_eval_box_expects(preflight, sdk):
+    # The eval box holds ANTHROPIC_API_KEY on its judged steps and requires the judge
+    # to answer through it, not through a profile the capability tier wrote for
+    # Claude Code.
+    sdk.credentials, sdk.api_key = None, "invented-key"
+    r = preflight(_message(model="claude-haiku-5-5"), expect="ANTHROPIC_API_KEY",
+                  model="claude-haiku-5-5")
+    assert r.status == 0, r.output
+    assert "judge anthropic/claude-haiku-5-5 answered through ANTHROPIC_API_KEY" in r.output
+    assert "invented-key" not in r.output
+
+
 def test_the_preflight_refuses_another_served_model(preflight):
     r = preflight(_message(model="claude-opus-5"))
     assert r.status == 1
@@ -782,13 +864,131 @@ def test_the_preflight_fails_with_the_judges_own_sentence(preflight):
     assert "HTTP 401" in r.output and "authentication_error" in r.output
 
 
-def test_the_preflight_refuses_a_backend_that_is_not_anthropic(tmp_path, capsys, monkeypatch):
+def test_the_anthropic_preflight_refuses_a_judge_that_is_the_candidate(preflight, sdk,
+                                                                      tmp_path):
+    sdk.outcomes = [_message()]
+    status = judge_preflight.main(["--config", _preflight_config(tmp_path),
+                                   "--candidate-model", "anthropic/claude-opus-5-5"])
+    assert status == 1
+    assert sdk.requests == []
+
+
+# --- the CI preflight on the openai backend (the eval box's judge) ---------------
+
+OPENAI_JUDGE = "gpt-6-luna"
+
+
+@pytest.fixture
+def openai_preflight(tmp_path, capsys, monkeypatch):
+    """Runs bin/judge_preflight.py's main against a scripted urlopen, with the judge
+    settings an `openai` runner config gives and EVAL_JUDGE_API_KEY set."""
+    for name in ("EVAL_JUDGE_BACKEND", "EVAL_JUDGE_MODEL", "EVAL_JUDGE_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("EVAL_JUDGE_API_KEY", "invented-openai-key")
+    state = SimpleNamespace(requests=[])
+    path = tmp_path / "judge.yaml"
+    path.write_text(f"judge: {{backend: openai, model: {OPENAI_JUDGE}, enabled: false}}\n")
+
+    def run(*outcomes, candidate=None):
+        remaining = list(outcomes)
+
+        def fake_urlopen(req, *_args, **_kwargs):
+            state.requests.append(req)
+            outcome = remaining.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return _Response(outcome)
+
+        monkeypatch.setattr(judge.urllib.request, "urlopen", fake_urlopen)
+        argv = ["--config", str(path)]
+        if candidate is not None:
+            argv += ["--candidate-model", candidate]
+        status = judge_preflight.main(argv)
+        out = capsys.readouterr()
+        return SimpleNamespace(status=status, output=out.out + out.err)
+
+    state.run = run
+    return state
+
+
+def test_the_openai_preflight_sends_one_real_verdict_and_names_the_model(openai_preflight):
+    r = openai_preflight.run(_ok_body(model=OPENAI_JUDGE), candidate="claude-opus-5-5")
+    assert r.status == 0, r.output
+    assert f"judge openai/{OPENAI_JUDGE} answered through EVAL_JUDGE_API_KEY: pass" in r.output
+    # One verdict, in the request shape a tier sends, and never the key in the output.
+    (request,) = openai_preflight.requests
+    body = json.loads(request.data)
+    assert body["model"] == OPENAI_JUDGE
+    assert body["response_format"]["json_schema"]["schema"] == judge._VERDICT_SCHEMA
+    assert request.get_header("Authorization") == "Bearer invented-openai-key"
+    assert "invented-openai-key" not in r.output
+
+
+def test_the_openai_preflight_accepts_the_configured_model_with_its_release_date(
+        openai_preflight):
+    r = openai_preflight.run(_ok_body(model=f"{OPENAI_JUDGE}-2026-09-22"))
+    assert r.status == 0, r.output
+
+
+def test_the_openai_preflight_refuses_another_served_model(openai_preflight):
+    r = openai_preflight.run(_ok_body(model="gpt-6-sol"))
+    assert r.status == 1
+    assert "gpt-6-sol" in r.output and OPENAI_JUDGE in r.output
+
+
+def test_the_openai_preflight_without_a_key_says_so_and_sends_nothing(openai_preflight,
+                                                                     monkeypatch):
+    monkeypatch.delenv("EVAL_JUDGE_API_KEY")
+    r = openai_preflight.run()
+    assert r.status == 1
+    assert "openai judge needs EVAL_JUDGE_API_KEY" in r.output
+    assert openai_preflight.requests == []
+
+
+def test_the_openai_preflight_fails_with_the_judges_own_sentence(openai_preflight):
+    r = openai_preflight.run(_http_error(401))
+    assert r.status == 1
+    assert "openai judge error" in r.output and "401" in r.output
+
+
+@pytest.mark.parametrize("candidate", [OPENAI_JUDGE, f"openai/{OPENAI_JUDGE}",
+                                       "GPT-6-Luna", f"{OPENAI_JUDGE}-2026-09-22"])
+def test_the_preflight_refuses_a_judge_that_is_the_candidate_before_any_call(
+        openai_preflight, candidate):
+    r = openai_preflight.run(candidate=candidate)
+    assert r.status == 1
+    assert openai_preflight.requests == []
+    assert f"judge model {OPENAI_JUDGE!r}" in r.output and candidate in r.output
+    assert "must differ" in r.output and "judge.model" in r.output
+
+
+def test_the_preflight_refuses_a_backend_that_cannot_answer(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("EVAL_JUDGE_BACKEND", raising=False)
     monkeypatch.delenv("EVAL_JUDGE_MODEL", raising=False)
     path = tmp_path / "judge.yaml"
-    path.write_text("judge: {backend: openai, model: gpt-6-luna, enabled: false}\n")
+    path.write_text("judge: {backend: none, enabled: false}\n")
     assert judge_preflight.main(["--config", str(path)]) == 1
-    assert "anthropic" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "anthropic" in out and "openai" in out
+
+
+def test_the_separation_sentence_names_both_models_and_the_setting(sdk):
+    result = sdk.run(_message(), candidates=[{"provider": "openrouter",
+                                              "model": "anthropic/claude-opus-5-5"}])
+    assert result.error == ("judge model 'claude-opus-5-5' matches candidate model "
+                            "'anthropic/claude-opus-5-5'; the judge must differ from the "
+                            "candidate: set judge.model to another model")
+
+
+@pytest.mark.parametrize("a,b,same", [
+    ("gpt-6-luna", "gpt-6-luna-2026-09-22", True),
+    ("openai/gpt-6-luna", "GPT-6-LUNA", True),
+    ("anthropic.claude-opus-5-5", "claude-opus-5-5", True),
+    ("claude-opus-5-5", "gpt-6-luna", False),
+    ("claude-opus-5", "claude-opus-5-5", False),
+])
+def test_same_model_ignores_vendor_prefix_case_and_release_date(a, b, same):
+    assert judge.same_model(a, b) is same
 
 
 if __name__ == "__main__":

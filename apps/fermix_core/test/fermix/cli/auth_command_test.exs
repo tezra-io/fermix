@@ -2,6 +2,7 @@ defmodule Fermix.CLI.AuthCommandTest do
   use ExUnit.Case, async: false
 
   alias Fermix.CLI.AuthCommand
+  alias FermixCore.Auth.AnthropicLogin
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.Store
   alias FermixCore.Setup.ConfigStore
@@ -430,6 +431,37 @@ defmodule Fermix.CLI.AuthCommandTest do
       assert output =~ "CLAUDE_CODE_OAUTH_TOKEN"
     end
 
+    # What the keychain tool printed can hold the password line, so the verb
+    # prints the reason's sentence and none of the tool's words.
+    test "a Claude Code import the keychain refused says why, never what the tool printed",
+         %{dir: dir} do
+      runner = fn _security, _args, _opts ->
+        said = "security: SecKeychainItemCopyContent: User canceled the operation.\n"
+        {:ok, %{exit: 128, stdout: said, truncated?: false}}
+      end
+
+      claude_code = [
+        security_path: "/usr/bin/security",
+        command_runner: runner,
+        credentials_path: Path.join(dir, "no-credentials.json")
+      ]
+
+      output =
+        capture_err(fn ->
+          assert 1 ==
+                   run_auth(["login", "--provider", "anthropic", "--import-claude-code"],
+                     claude_code: claude_code
+                   )
+        end)
+
+      refute output =~ "security:"
+
+      assert output ==
+               "fermix auth: anthropic login failed: " <>
+                 AnthropicLogin.failure_sentence({:claude_code_import, :keychain_read_denied}) <>
+                 "\n"
+    end
+
     test "status and logout target the anthropic_oauth profile", %{dir: dir} do
       assert 0 ==
                capture_out_status(fn ->
@@ -618,6 +650,37 @@ defmodule Fermix.CLI.AuthCommandTest do
 
       assert_received {:tree_less_keychain, :get, :openai_api_key}
       assert provider_auth_mode(:anthropic) == :oauth
+    end
+
+    # The import reads Claude Code's keychain item through the command runner,
+    # which needs a command host unless the caller says otherwise.
+    test "importing a Claude Code login reads its keychain item inline", %{dir: dir} do
+      parent = self()
+      login = Jason.encode!(%{"claudeAiOauth" => %{"accessToken" => "kc-imported"}})
+
+      runner = fn _security, args, opts ->
+        send(parent, {:claude_code_read, args, opts})
+        {:ok, %{exit: 0, stdout: ~s(password: "#{login}"\n), truncated?: false}}
+      end
+
+      claude_code = [
+        security_path: "/usr/bin/security",
+        command_runner: runner,
+        credentials_path: Path.join(dir, "no-credentials.json")
+      ]
+
+      assert 0 ==
+               capture_out_status(fn ->
+                 run_auth(["login", "--provider", "anthropic", "--import-claude-code"],
+                   claude_code: claude_code
+                 )
+               end)
+
+      assert_received {:claude_code_read, ["find-generic-password" | _], opts}
+      assert opts[:supervised] == false
+
+      assert {:ok, %{tokens: %{access_token: "kc-imported"}}} =
+               Store.read("anthropic_oauth", Path.join(dir, "auth.json"))
     end
   end
 

@@ -81,6 +81,19 @@ defmodule FermixCore.Harness.ManagerCloudTest do
       assert :ok = Manager.stop_tracking(run_id, manager) |> ok()
     end
 
+    # A cloud run a follow-up turn started names the run it continued too, so
+    # the access gate counts it among that run's children.
+    test "a cloud run records the run it continued", ctx do
+      manager = start_manager(ctx, cloud_poll_ms: 10_000)
+      stub = cloud_stub(ctx, submit_output: submit_ok(), statuses: [status(:pending)])
+      request = Map.put(cloud_request(stub), :continued_from_run_id, "hr_parent00002")
+
+      assert {:ok, run_id} = Manager.start_cloud_run(request, manager)
+      assert {:ok, [^run_id]} = Ledger.children("hr_parent00002", server: ctx.repo)
+
+      assert :ok = Manager.stop_tracking(run_id, manager) |> ok()
+    end
+
     test "an Error line terminalizes blocked/:submit_failed and delivers", ctx do
       manager = start_manager(ctx)
 

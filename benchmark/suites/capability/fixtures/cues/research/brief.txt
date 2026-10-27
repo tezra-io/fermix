@@ -1,0 +1,3 @@
+Project brief for the Corvid storage review.
+Code name: KESTREL-HARBOR-7731
+Owner: Ilse Varga, platform team.

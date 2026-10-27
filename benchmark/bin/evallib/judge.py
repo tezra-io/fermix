@@ -3,9 +3,10 @@
 Backends (config `judge.backend`, one code path each):
   anthropic — the Claude API through the official SDK. The client is built with no
               credential argument, so the SDK resolves the credential itself:
-              ANTHROPIC_API_KEY, else ANTHROPIC_AUTH_TOKEN, else the selected or
-              active profile under ~/.config/anthropic (an `ant auth login` profile
-              locally, the eval box's Workload Identity Federation profile in CI).
+              ANTHROPIC_API_KEY (bin/tier.sh exports it from the keychain locally;
+              the eval box's judged steps hold the repository secret), else
+              ANTHROPIC_AUTH_TOKEN, else the selected or active profile under
+              ~/.config/anthropic (an `ant auth login` profile).
   openai    — an explicit OpenAI-compatible /chat/completions endpoint using
               EVAL_JUDGE_API_KEY, EVAL_JUDGE_BASE_URL, and judge.model.
   none      — skip judging.
@@ -41,20 +42,32 @@ from .rubric import numbered_requirements
 NOT_RECORDED = "not recorded"
 _MAX_JUDGE_PAYLOAD_BYTES = 64 * 1024
 _MAX_JUDGE_OUTPUT_BYTES = 16 * 1024
-_MAX_JUDGE_OUTPUT_TOKENS = 2_048
+# The OpenAI judge's request policy. gpt-6-luna is a reasoning model: its hidden
+# reasoning counts toward max_completion_tokens, so the cap holds that reasoning
+# beside the verdict, the same rule as the Claude judge's cap below. The old
+# 2,048 was sized for a verdict alone, and on 2026-10-23 (eval-nightly run
+# 39910831669) gpt-6-luna spent all of it reasoning on launch_day_update and
+# returned no verdict. The effort is explicit so neither a model nor an API
+# default can move the judge's depth or its spend silently.
+_MAX_JUDGE_OUTPUT_TOKENS = 16_000
+_OPENAI_REASONING_EFFORT = "medium"
 _MAX_JUDGE_HTTP_RESPONSE_BYTES = 64 * 1024
 # Four attempts over ~13s. The judge is an external provider whose 5xx is the
 # documented transient class, so one bad minute must not void a whole run.
 _JUDGE_RETRY_DELAYS_S = (1.0, 3.0, 9.0)
-_JUDGE_HTTP_TIMEOUT_S = 30
+# The response arrives only when generation ends, so one attempt must outlast the
+# whole output cap: 16,000 tokens at a conservative 100 a second.
+_JUDGE_HTTP_TIMEOUT_S = 180
 _RETRYABLE_JUDGE_STATUS = frozenset({500, 502, 503, 504})
 _COMPLETION_REASONS = {"stop", "end_turn", "stop_sequence", "completed"}
 _TRUNCATION_REASONS = {"length", "max_tokens", "max_output_tokens", "incomplete"}
 
-# The Claude judge's request policy. Claude Opus 5.5 always thinks (a request that
-# disables thinking is a 400) and defaults to medium effort; the effort is set
-# here so neither a model nor an SDK default can move the judge silently. Thinking
-# counts toward max_tokens, so the cap leaves room for it beside the verdict.
+# The Claude judge's request policy. The current Claude models (claude-haiku-5-5,
+# the configured judge, like Claude Opus 5.5) think by default and default to
+# medium effort; the effort is set here so neither a model nor an SDK default can
+# move the judge silently, and no request tries to turn thinking off (a 400 on
+# Opus 5.5). Thinking counts toward max_tokens, so the cap leaves room for it
+# beside the verdict.
 _ANTHROPIC_EFFORT = "medium"
 _MAX_ANTHROPIC_OUTPUT_TOKENS = 16_000
 _ANTHROPIC_TIMEOUT_S = 180
@@ -64,8 +77,8 @@ _MAX_ERROR_DETAIL_CHARS = 300
 _NO_ANTHROPIC_CREDENTIAL = (
     "anthropic judge found no credential: export ANTHROPIC_API_KEY (bin/tier.sh "
     "exports it from the macOS keychain item fermix:ANTHROPIC_API_KEY) or sign in "
-    "with `ant auth login`; on the eval box the federation sign-in step writes the "
-    "profile")
+    "with `ant auth login`; on the eval box the judged steps hold the "
+    "ANTHROPIC_API_KEY secret")
 # A release date at the end of a model id: claude-haiku-4-5-20251001, gpt-4o-2024-08-06.
 _MODEL_DATE_SUFFIX = re.compile(r"-\d{4}-?\d{2}-?\d{2}$")
 
@@ -463,11 +476,25 @@ def _model_key(model: str) -> str:
     return _MODEL_DATE_SUFFIX.sub("", key)
 
 
+def same_model(a: str, b: str) -> bool:
+    """Whether two model ids name one model, spelled with or without a vendor
+    prefix, a release date or a different case."""
+    return _model_key(a) == _model_key(b)
+
+
+def separation_error(judge_model: str, candidate_model: str) -> str | None:
+    """The sentence refusing a judge that is the candidate, or None."""
+    if not same_model(judge_model, candidate_model):
+        return None
+    return (f"judge model {judge_model!r} matches candidate model {candidate_model!r}; "
+            "the judge must differ from the candidate: set judge.model to another model")
+
+
 def _same_model_error(route: dict, candidates: list[dict]) -> str | None:
-    judge_key = _model_key(route["model"])
-    if any(_model_key(candidate["model"]) == judge_key for candidate in candidates):
-        return (f"judge model {route['model']!r} matches candidate actual model; "
-                "configure a different judge_model")
+    for candidate in candidates:
+        error = separation_error(route["model"], candidate["model"])
+        if error:
+            return error
     return None
 
 
@@ -584,7 +611,7 @@ def _judge_openai(cfg, data: dict, candidates: list[dict], count: int | None) ->
         route = {
             "provider": "openai",
             "model": response_data.get("model"),
-            "reasoning_effort": "default",
+            "reasoning_effort": _OPENAI_REASONING_EFFORT,
         }
         route, route_error = _route_from(route)
         if route_error:
@@ -688,8 +715,9 @@ def _anthropic_error(exc: anthropic.AnthropicError) -> str:
 
 
 def _anthropic_request(cfg, data: dict, count: int | None) -> dict:
-    # No `thinking` (always on for Claude Opus 5.5; disabling it is a 400) and no
-    # `temperature` (sampling parameters are rejected); effort is the only control.
+    # No `thinking` (on by default for the current Claude models; disabling it is a
+    # 400 on Claude Opus 5.5) and no `temperature` (sampling parameters are
+    # rejected); effort is the only control.
     return {
         "model": cfg.judge.model,
         "max_tokens": _MAX_ANTHROPIC_OUTPUT_TOKENS,
@@ -803,11 +831,15 @@ _PREFLIGHT_DATA = {
 
 
 def preflight(cfg) -> tuple[str | None, JudgeResult]:
-    """One real verdict through the configured Claude judge, exactly as a tier
-    would send it: (the credential source the SDK selected, the result)."""
-    if cfg.judge.backend != "anthropic":
-        return None, _failure(str(cfg.judge.backend),
-                              "the judge preflight checks the anthropic backend only")
+    """One real verdict through the configured judge, exactly as a tier would send
+    it: (the credential source it used, the result)."""
+    backend = cfg.judge.backend
+    if backend == "openai":
+        source = "EVAL_JUDGE_API_KEY" if os.environ.get("EVAL_JUDGE_API_KEY") else None
+        return source, _judge_openai(cfg, _PREFLIGHT_DATA, [], None)
+    if backend != "anthropic":
+        return None, _failure(str(backend), "the judge preflight checks the anthropic "
+                                            "and openai backends only")
     source, response, failure = _anthropic_exchange(cfg, _PREFLIGHT_DATA, None)
     return source, failure or _anthropic_verdict(response, [], None)
 
@@ -824,6 +856,7 @@ def _openai_request_body(cfg, data: dict, count: int | None) -> bytes:
                                                        allow_nan=False)},
         ],
         "max_completion_tokens": _MAX_JUDGE_OUTPUT_TOKENS,
+        "reasoning_effort": _OPENAI_REASONING_EFFORT,
         "response_format": {
             "type": "json_schema",
             "json_schema": {"name": "verdict", "strict": True,

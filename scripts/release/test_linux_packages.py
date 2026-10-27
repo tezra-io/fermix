@@ -43,6 +43,21 @@ SCRIPT = Path(__file__).with_name("build_linux_packages.sh")
 TARGET = "linux_aarch64"
 VERSION = "9.9.9"
 SOURCE_COMMIT = "a" * 40
+NOTICES_URL = (
+    "https://github.com/tezra-io/fermix-iroh/releases/download/v0.1.1/fermix-iroh-THIRD-PARTY-NOTICES.txt"
+)
+
+
+def iroh_pin(notices_sha256: str, **changes) -> str:
+    """A pin as pin_iroh_helper.py writes it, cut to what the package build reads."""
+
+    pin = {
+        "schema_version": 2,
+        "repository": "tezra-io/fermix-iroh",
+        "tag": "v0.1.1",
+        "notices": {"asset": "fermix-iroh-THIRD-PARTY-NOTICES.txt", "sha256": notices_sha256},
+    }
+    return json.dumps({**pin, **changes}, indent=2) + "\n"
 
 
 def digest_of(payload: bytes) -> str:
@@ -155,6 +170,21 @@ class PureHelpersTest(unittest.TestCase):
         rendered = packages.debian_changelog(markdown, newest)
 
         self.assertTrue(rendered.startswith(f"fermix ({newest}) stable; urgency=medium"))
+
+    def test_the_iroh_pin_names_the_notices_url_and_digest(self):
+        self.assertEqual(packages.iroh_notices(iroh_pin("b" * 64)), (NOTICES_URL, "b" * 64))
+
+    # A pin from before the notices names none, so the package cannot carry them.
+    def test_the_iroh_pin_must_name_the_notices(self):
+        for text, message in (
+            (iroh_pin("b" * 64, schema_version=1), "is not schema_version 2"),
+            (iroh_pin("b" * 64, notices=None), "must name the repository, the tag and the notices asset"),
+            (iroh_pin("B" * 64), "has no sha256 for the notices"),
+            (iroh_pin("b" * 64, notices={"asset": "../notices", "sha256": "b" * 64}), "the notices asset"),
+            ("{", "is not JSON"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(packages.BuildError, message):
+                packages.iroh_notices(text)
 
     def test_gzip_bytes_is_deterministic(self):
         first = packages.gzip_bytes(b"the man page")
@@ -273,6 +303,10 @@ class BuildTest(unittest.TestCase):
 
         self.nfpm_archive = self._nfpm_archive()
         self.cosign_payload = b"the pinned cosign"
+        self.notices_payload = "MIT License\n\nthe helper's third-party notices\n".encode()
+        self.served_notices = self.notices_payload
+        self.downloads = []
+        self._write_iroh_pin(digest_of(self.notices_payload))
 
         # The pins are data, and the verifier that reads them is what is under
         # test: the fixtures get their own digests so `download_verified` still
@@ -332,11 +366,19 @@ class BuildTest(unittest.TestCase):
             archive.addfile(entry, io.BytesIO(payload))
         return buffer.getvalue()
 
+    def _write_iroh_pin(self, notices_sha256, **changes):
+        pin = self.source / packages.IROH_PIN
+        pin.parent.mkdir(parents=True, exist_ok=True)
+        pin.write_text(iroh_pin(notices_sha256, **changes), encoding="utf-8")
+
     def _opener(self, url):
+        self.downloads.append(url)
         if "nfpm" in url:
             return FakeResponse(self.nfpm_archive)
         if "cosign" in url:
             return FakeResponse(self.cosign_payload)
+        if url == NOTICES_URL:
+            return FakeResponse(self.served_notices)
         raise AssertionError(f"unexpected download: {url}")
 
     def _runner(self, argv, **_options):
@@ -413,6 +455,7 @@ class BuildTest(unittest.TestCase):
         self.assertIn('release: ""', config)
         self.assertIn("maintainer: Tezra <hello@fermix.ai>", config)
         self.assertIn(f"runtime-payload/libc-musl-{self.loader_digest}.so", config)
+        self.assertIn("dst: /usr/share/doc/fermix/fermix-iroh-THIRD-PARTY-NOTICES.txt", config)
         self.assertIn("postinstall: ", config)
         self.assertNotIn("{{", config)
 
@@ -429,6 +472,48 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(payload.read_bytes(), self.loader_payload)
         self.assertEqual((self.staged / "usr/bin/fermix").read_bytes(), b"the burrito wrapper")
         self.assertEqual((self.staged / "usr/lib/fermix/cosign").read_bytes(), self.cosign_payload)
+        self.assertEqual((self.staged / packages.IROH_NOTICES).read_bytes(), self.notices_payload)
+
+    # The notices are the bytes the source tree's pin names, from the release
+    # it names, the same bytes the release build put beside the helper.
+    def test_the_staged_notices_are_the_pinned_ones_from_the_pinned_release(self):
+        self.assertEqual(self._build(), 0)
+
+        self.assertIn(NOTICES_URL, self.downloads)
+        self.assertEqual((self.staged / packages.IROH_NOTICES).read_bytes(), self.notices_payload)
+
+    def test_refuses_notices_whose_bytes_are_not_the_pinned_digest(self):
+        self.served_notices = b"some other notices"
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(self._build(), 1)
+
+        self.assertIn(f"{NOTICES_URL} has digest {digest_of(b'some other notices')}", stderr.getvalue())
+        self.assertIsNone(self.staged)
+
+    def test_refuses_a_pin_that_names_no_notices_before_anything_is_staged(self):
+        self._write_iroh_pin(digest_of(self.notices_payload), schema_version=1)
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(self._build(), 1)
+
+        self.assertIn(f"{packages.IROH_PIN} is not schema_version 2", stderr.getvalue())
+        self.assertNotIn(NOTICES_URL, self.downloads)
+        self.assertIsNone(self.staged)
+
+    def test_refuses_a_source_tree_without_the_pin_before_anything_is_staged(self):
+        pin = self.source.resolve() / packages.IROH_PIN
+        pin.unlink()
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(self._build(), 1)
+
+        self.assertIn(f"{pin} is missing, so the fermix-iroh notices cannot be staged", stderr.getvalue())
+        self.assertNotIn(NOTICES_URL, self.downloads)
+        self.assertIsNone(self.staged)
 
     def test_the_staged_manifest_reports_the_installed_identity(self):
         self._build()

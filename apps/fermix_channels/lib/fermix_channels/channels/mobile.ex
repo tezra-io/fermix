@@ -491,13 +491,19 @@ defmodule FermixChannels.Channels.Mobile do
   # phone subtree runs (`Mobile.Supervisor.running?/1`): a job or reminder
   # delivered here while it does not is still a row of the shared timeline,
   # which the Mac has heard, and nobody is pushed. Its links are previewed
-  # either way, as every row's are.
+  # either way, as every row's are, unless the send asked for no previews (a
+  # cue run's message, M60 §9.5: nothing it names is fetched).
   defp delivered_effects(store, profile, server_seq, text, opts) do
     _ =
       if MobileSupervisor.running?(), do: maybe_schedule_proactive_push(profile, server_seq, opts)
 
-    LinkPreviews.schedule(profile, server_seq, ReplyBlocks.links(text), store: store)
+    schedule_previews(store, profile, server_seq, text, Keyword.get(opts, :link_previews))
   end
+
+  defp schedule_previews(_store, _profile, _server_seq, _text, false), do: :ok
+
+  defp schedule_previews(store, profile, server_seq, text, _default),
+    do: LinkPreviews.schedule(profile, server_seq, ReplyBlocks.links(text), store: store)
 
   # One durable timeline row is one delivered outbound message. A row the store
   # deduplicated (`:existing`) was already counted when it was created, so a

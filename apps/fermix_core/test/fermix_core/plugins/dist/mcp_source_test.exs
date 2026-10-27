@@ -3,12 +3,27 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
 
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Auth.TokenSupervisor
+  alias FermixCore.Capabilities.MCP.Remote.Budget
   alias FermixCore.Capabilities.MCP.Remote.Contract
+  alias FermixCore.Capabilities.MCP.Remote.Proxy
   alias FermixCore.Plugins.Dist.McpSource
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Plugin
 
   @pat "acme_pat_canary_do_not_leak"
+
+  # The remote dispatch seam: each call goes to the test process its target
+  # names, so a test sees exactly what would have reached the server.
+  defmodule RecordingDispatch do
+    @moduledoc false
+    @behaviour FermixCore.Capabilities.MCP.Remote.Proxy
+
+    @impl true
+    def call_tool(test, tool, args, _timeout) do
+      send(test, {:dispatched, tool, args})
+      {:ok, %{"content" => [%{"type" => "text", "text" => ~s({"ok":true,"items":[]})}]}}
+    end
+  end
 
   # A fixed, host-independent vendored target: `probe/3` and
   # `vendored_command_path/3` both take it from the same `:target` seam, so the
@@ -489,11 +504,56 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
       assert Map.keys(spec.allowed_tools) |> Enum.sort() == ["acme_get_note", "acme_search"]
 
       assert spec.allowed_tools["acme_search"] == %{
+               description: "Search the selected Acme workspace — notes and links.",
                read_only: true,
                replay_safe: false,
                required_credential_scope: "read",
-               descriptor_sha256: digest_hex("sha-search")
+               descriptor_sha256: digest_hex("sha-search"),
+               collection_policy: search_collection_policy(),
+               argument_guards: []
              }
+
+      assert spec.allowed_tools["acme_get_note"].collection_policy == nil
+    end
+
+    # The signed per-tool policy is enforced at the call proxy, which reads
+    # only the compiled contract: a fact the materialized spec drops is a limit
+    # that silently stops applying. Walk it from the plugin to the proxy.
+    test "the signed collection policy and argument guards reach the call proxy" do
+      connect(profile: "capture", workspace: "ws_opaque_id", secret: @pat)
+      assert {:ok, spec} = McpSource.remote_spec(acme())
+      assert {:ok, contract} = Contract.compile(spec)
+
+      budget =
+        start_supervised!({Budget, name: :"mcp_source_budget_#{System.unique_integer()}"})
+
+      proxy =
+        start_supervised!(
+          {Proxy, contract: contract, dispatch: RecordingDispatch, target: self(), budget: budget}
+        )
+
+      read = %{
+        source_id: {:plugin, "acme"},
+        session_id: "turn-#{System.unique_integer([:positive])}",
+        turn_pid: self(),
+        profile: "capture",
+        read_only: true,
+        replay_safe: false
+      }
+
+      assert {:ok, _text} = Proxy.call(proxy, read, "acme_search", %{"query" => "q"})
+      assert_receive {:dispatched, "acme_search", args}
+      assert args == %{"query" => "q", "limit" => 25, "workspaceId" => "ws_opaque_id"}
+
+      assert {:error, {:collection, :request_limit_too_large}} =
+               Proxy.call(proxy, read, "acme_search", %{"query" => "q", "limit" => 26})
+
+      urls = for n <- 1..3, do: "https://example.org/source/#{n}"
+
+      assert {:error, {:argument_guard, "public_http_url_array", :too_many_items}} =
+               Proxy.call(proxy, %{read | read_only: false}, "acme_create_note", %{"urls" => urls})
+
+      refute_received {:dispatched, _tool, _args}
     end
 
     test "a setup-only tool never enters the agent-facing allowlist" do
@@ -677,22 +737,46 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
 
   defp acme_tools do
     [
-      remote_tool("acme_search", true, "read", "sha-search"),
+      remote_tool("acme_search", true, "read", "sha-search", %{
+        "description" => "Search the selected Acme workspace — notes and links.",
+        "collection_policy" => search_collection_policy()
+      }),
       remote_tool("acme_get_note", true, "read", "sha-get"),
-      remote_tool("acme_create_note", false, "write", "sha-create"),
+      remote_tool("acme_create_note", false, "write", "sha-create", %{
+        "argument_guards" => [
+          %{"pointer" => "/urls", "kind" => "public_http_url_array", "max_items" => 2}
+        ]
+      }),
       remote_tool("acme_list_workspaces", true, "read", "sha-workspaces")
     ]
   end
 
-  defp remote_tool(name, read_only?, scope, digest) do
+  # The decoder requires `collection_policy` and `argument_guards` on every
+  # remote tool (null and empty when the tool signs none).
+  defp remote_tool(name, read_only?, scope, digest, extra \\ %{}) do
+    Map.merge(
+      %{
+        "name" => name,
+        "description" => name,
+        "rail" => "mcp",
+        "read_only" => read_only?,
+        "replay_safe" => false,
+        "required_credential_scope" => scope,
+        "descriptor_sha256" => digest_hex(digest),
+        "collection_policy" => nil,
+        "argument_guards" => []
+      },
+      extra
+    )
+  end
+
+  defp search_collection_policy do
     %{
-      "name" => name,
-      "description" => name,
-      "rail" => "mcp",
-      "read_only" => read_only?,
-      "replay_safe" => false,
-      "required_credential_scope" => scope,
-      "descriptor_sha256" => digest_hex(digest)
+      "paginated" => true,
+      "request_limit_pointer" => "/limit",
+      "default_limit" => 25,
+      "result_items_pointer" => "/items",
+      "max_returned_items" => 25
     }
   end
 

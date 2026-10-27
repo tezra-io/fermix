@@ -20,11 +20,13 @@ on:
         type: string
         default: dev
       model:
-        description: "Candidate model — must differ from judge.model in benchmark/config.yaml"
+        description: "Candidate Anthropic model, run at medium effort — must differ from judge.model in benchmark/config.yaml and behavioral_config.yaml"
         type: string
-        default: gpt-6-luna
+        default: claude-opus-5-5
     secrets:
-      OPENAI_API_KEY:
+      # The candidate daemon's provider key (Anthropic); the judged tiers' Claude
+      # judge reads the same key through its SDK.
+      ANTHROPIC_API_KEY:
         required: true
       FERMIX_OPIK_API_KEY:
         required: true
@@ -54,19 +56,19 @@ on:
         type: string
         default: dev
       model:
-        description: "Candidate model — must differ from judge.model in benchmark/config.yaml"
+        description: "Candidate Anthropic model, run at medium effort — must differ from judge.model in benchmark/config.yaml and behavioral_config.yaml"
         type: string
-        default: gpt-6-luna
+        default: claude-opus-5-5
 
 # No `permissions` here or on the job: the box inherits its caller's token, so only
-# the jobs that run a JUDGED tier (eval-nightly's regression, eval-weekly's
-# capability) grant id-token: write, for the Anthropic sign-in the Claude judge
-# (and the capability tier's Claude Code) needs. The dangerous tier is never judged
-# (sandbox_verify sets `judge: false`) and never holds the right to mint GitHub
-# OIDC tokens. A direct dispatch gets the repository's default token, which must
-# stay read-only (Settings > Actions > General > Workflow permissions; read-only
-# as of 2026-10-13), and the sign-in step refuses it with a sentence: run a judged
-# tier on demand through its caller.
+# the job that runs the capability tier (eval-weekly's) grants id-token: write, for
+# the Workload Identity Federation sign-in its Claude Code needs. The judge needs
+# none (it is Claude's, on an API key), so the regression and dangerous tiers never
+# hold the right to mint GitHub OIDC tokens. A direct dispatch gets the
+# repository's default token, which must stay read-only (Settings > Actions >
+# General > Workflow permissions; read-only as of 2026-10-13), and the sign-in step
+# refuses it with a sentence: run the capability tier on demand through
+# eval-weekly.
 
 concurrency:
   group: eval-box
@@ -91,15 +93,19 @@ jobs:
       ELIXIR_VERSION: "1.19.5"
       OTP_VERSION: "28"
       TIER: ${{ inputs.tier }}
+      # The daemon under test: Anthropic's provider on the `model` input, at this
+      # reasoning effort (seeded as the provider block's reasoning_effort in the eval
+      # home's config.toml; the Anthropic adapter sends it as output_config.effort).
       CANDIDATE_MODEL: ${{ inputs.model }}
+      CANDIDATE_REASONING_EFFORT: medium
       OPIK_PROJECT: fermix-eval-ci-${{ inputs.tier }}
       # Comet-hosted Opik: the exporter writes to /opik/api, the harness reads
       # /opik/api/v1/private — same host, different base paths. Auth comes from
       # the FERMIX_OPIK_* secrets on the steps that need it.
       OPIK_BASE_URL: https://www.comet.com/opik/api/v1/private
       OPIK_UI_BASE: https://www.comet.com/opik
-      # The Workload Identity Federation profile the judged tiers sign in through
-      # (written by the sign-in step, read by the judge and by Claude Code).
+      # The Workload Identity Federation profile the capability tier's Claude Code
+      # signs in through (written by the sign-in step, read by Claude Code).
       WIF_PROFILE: fermix-eval
     steps:
       - name: Resolve the disposable eval home
@@ -144,45 +150,66 @@ jobs:
         run: mix deps.get
 
       # Every JUDGED tier (regression, capability) grades replies with the Claude
-      # judge (benchmark/bin/evallib/judge.py; `judge:` in behavioral_config.yaml and
-      # config.yaml), and the capability tier's delegated coding tasks run Claude
-      # Code. Both authenticate through Workload Identity Federation and nothing
-      # else: no API key exists on this box. Both find the federation settings from
-      # HOME alone (the judge builds its SDK client with no credential argument, and
-      # Harness.Run spawns claude under `env -i` with HOME, PATH, TERM and USER
-      # only), so they live in an `oidc_federation` profile in ~/.config/anthropic,
-      # the documented default configuration directory, made active by its
-      # `active_config` file and naming an identity-token file. The IDs are not
-      # secrets and come from repository variables; ANTHROPIC_EVAL_WORKSPACE_ID may
-      # stay empty while the federation rule covers a single workspace.
-      #
-      # The identity token is this job's GitHub OIDC token. GitHub's expire about
-      # five minutes after issue and each can be exchanged only once (its `jti`).
-      # Every exchange re-reads the file; the judge's SDK keeps the access token it
-      # gets in ~/.config/anthropic/credentials/ and reuses it until 30 s before it
-      # expires, so the judge exchanges rarely, but each exchange needs an unspent
-      # token. So the file is replaced after every preflight call, and a background
-      # loop replaces it every WIF_REFRESH_SECONDS, atomically, for at most
-      # WIF_REFRESH_MAX rounds (longer than any judged tier's timeout). The step
-      # "Stop the Anthropic identity-token refresher" ends it and fails the job if
-      # any refresh failed. The token file sits under RUNNER_TEMP, outside the
-      # checkout, the eval home and the uploaded artifact, and goes with the VM.
+      # judge on claude-haiku-5-5 (`judge:` in behavioral_config.yaml and
+      # config.yaml; benchmark/bin/evallib/judge.py). Its SDK reads ANTHROPIC_API_KEY,
+      # which this step and the judged tier steps hold from the ANTHROPIC_API_KEY
+      # repository secret: the candidate daemon runs on the same key, so one
+      # provider-side spend cap bounds both.
       #
       # The preflight is one real verdict on a canned case through the judge's own
       # code (bin/judge_preflight.py) with the judge settings the tier's runner
-      # loads, in the environment its tier step gets: the SDK must select this
-      # federation profile, not an API key or another profile, and the configured
-      # model must answer. It costs about a cent per run.
-      - name: Sign in to Anthropic through Workload Identity Federation (judged tiers)
-        id: wif_sign_in
+      # loads, before anything else is spent: the configured model must answer
+      # through the secret (--expect-source; never a profile on the box), and a
+      # judge on the candidate's model is refused before any call. It costs a
+      # fraction of a cent per run.
+      - name: Prove the judge answers (judged tiers)
+        id: judge_preflight
         if: inputs.tier == 'regression' || inputs.tier == 'capability'
         working-directory: benchmark
         env:
-          WIF_REFRESH_SECONDS: "60"
-          WIF_REFRESH_MAX: "200"
           # run_eval.py (regression) loads behavioral_config.yaml; run_capability.py
           # (capability) loads config.yaml.
           JUDGE_CONFIG: ${{ inputs.tier == 'regression' && 'behavioral_config.yaml' || 'config.yaml' }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            fail "The repository secret ANTHROPIC_API_KEY is empty: the $TIER tier's judge (the anthropic backend in benchmark/$JUDGE_CONFIG) reads it, as does the daemon under test. Set it under Settings > Secrets and variables > Actions > Secrets."
+          fi
+          if ! preflight="$(uv run bin/judge_preflight.py --config "$JUDGE_CONFIG" \
+                              --candidate-model "$CANDIDATE_MODEL" \
+                              --expect-source ANTHROPIC_API_KEY 2>&1)"; then
+            fail "The judge preflight failed: $(printf '%s' "$preflight" | tail -n 3 | tr '\n' ' ')"
+          fi
+          printf '%s\n' "$preflight"
+
+      # The capability tier's delegated coding tasks run Claude Code, which signs in
+      # through Workload Identity Federation: a run gets no Anthropic key
+      # (Harness.Run spawns claude under `env -i` with HOME, PATH, TERM and USER
+      # only; the `bare` exception is in the next step), so the federation settings
+      # live where claude finds them from HOME alone: an `oidc_federation` profile
+      # in ~/.config/anthropic, the documented default configuration directory,
+      # made active by its `active_config` file and naming an identity-token file.
+      # The IDs are not secrets and come from repository variables;
+      # ANTHROPIC_EVAL_WORKSPACE_ID may stay empty while the federation rule covers
+      # a single workspace.
+      #
+      # The identity token is this job's GitHub OIDC token. GitHub's expire about
+      # five minutes after issue and each can be exchanged only once (its `jti`).
+      # Every exchange re-reads the file, so a background loop replaces it every
+      # WIF_REFRESH_SECONDS, atomically, for at most WIF_REFRESH_MAX rounds (longer
+      # than the capability tier's timeout). The step "Stop the Anthropic
+      # identity-token refresher" ends it and fails the job if any refresh failed.
+      # The token file sits under RUNNER_TEMP, outside the checkout, the eval home
+      # and the uploaded artifact, and goes with the VM. The Claude Code step below
+      # proves the sign-in with one real call.
+      - name: Sign in to Anthropic through Workload Identity Federation (capability tier)
+        id: wif_sign_in
+        if: inputs.tier == 'capability'
+        env:
+          WIF_REFRESH_SECONDS: "60"
+          WIF_REFRESH_MAX: "200"
           ANTHROPIC_EVAL_ORGANIZATION_ID: ${{ vars.ANTHROPIC_EVAL_ORGANIZATION_ID }}
           ANTHROPIC_EVAL_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_EVAL_SERVICE_ACCOUNT_ID }}
           ANTHROPIC_EVAL_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_EVAL_FEDERATION_RULE_ID }}
@@ -193,11 +220,11 @@ jobs:
           for name in ANTHROPIC_EVAL_ORGANIZATION_ID ANTHROPIC_EVAL_SERVICE_ACCOUNT_ID \
                       ANTHROPIC_EVAL_FEDERATION_RULE_ID; do
             if [ -z "${!name:-}" ]; then
-              fail "The repository variable $name is empty: the $TIER tier's Claude judge signs in to Anthropic through Workload Identity Federation. Set it under Settings > Secrets and variables > Actions > Variables."
+              fail "The repository variable $name is empty: the capability tier's Claude Code signs in to Anthropic through Workload Identity Federation. Set it under Settings > Secrets and variables > Actions > Variables."
             fi
           done
           if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
-            fail "This job cannot request a GitHub OIDC token: the job that calls eval-box.yml must grant 'id-token: write' (eval-nightly's regression job and eval-weekly's capability job do; a direct eval-box dispatch cannot, so run a judged tier through its caller)."
+            fail "This job cannot request a GitHub OIDC token: the job that calls eval-box.yml must grant 'id-token: write' (eval-weekly's capability job does; a direct eval-box dispatch cannot, so run the capability tier through eval-weekly)."
           fi
 
           wif_dir="$RUNNER_TEMP/anthropic-wif"
@@ -245,19 +272,6 @@ jobs:
             fail "Could not fetch a GitHub OIDC token for the audience https://api.anthropic.com."
           fi
 
-          # One real verdict through the profile: the judge must sign in with this
-          # federation profile and answer on the configured model.
-          if ! preflight="$(uv run bin/judge_preflight.py --config "$JUDGE_CONFIG" \
-                              --expect-source "profile $WIF_PROFILE (oidc_federation)" 2>&1)"; then
-            fail "The judge preflight failed: $(printf '%s' "$preflight" | tail -n 3 | tr '\n' ' ')"
-          fi
-          printf '%s\n' "$preflight"
-
-          # The call spent the token in the file: replace it before anything else
-          # can need an exchange, then keep replacing it in the background.
-          if ! fetch_jwt; then
-            fail "Could not fetch a fresh GitHub OIDC token after the judge preflight."
-          fi
           refresh_loop() {
             local round
             for ((round = 1; round <= WIF_REFRESH_MAX; round++)); do
@@ -282,7 +296,7 @@ jobs:
             3<<< "$oidc_request_token" < /dev/null >> "$wif_dir/refresher.log" 2>&1 &
           echo "$!" > "$wif_dir/refresher.pid"
           disown
-          echo "The $TIER tier signs in to Anthropic through the $WIF_PROFILE federation profile."
+          echo "The capability tier's Claude Code signs in to Anthropic through the $WIF_PROFILE federation profile."
 
       # The coding-harness tasks (suites/capability/harness.yaml) delegate to a
       # vendor CLI, and the daemon advertises `claude_code_run` only when `claude`
@@ -298,9 +312,11 @@ jobs:
       # It signs in through the federation profile the step above wrote and the
       # identity token its refresher keeps fresh.
       #
-      # Known gap: a run the candidate starts with `bare: true` reads only
-      # ANTHROPIC_API_KEY (bare mode reads no profile and no federation settings),
-      # which this box never provides, so such a run fails to authenticate.
+      # A run the candidate starts with `bare: true` reads only ANTHROPIC_API_KEY
+      # (bare mode reads no profile and no federation settings), and the claude
+      # adapter passes that name through from the daemon's own environment, which
+      # holds the candidate's Anthropic key: such a run authenticates with, and is
+      # billed to, the candidate's key instead of this profile.
       #
       # The model is pinned in ~/.claude/settings.json, with self-updates off; a
       # `model` the candidate passes to claude_code_run still overrides the pin.
@@ -411,7 +427,10 @@ jobs:
 
       - name: Seed the disposable home and boot the daemon
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # The candidate's provider key: the daemon reads it at boot
+          # (config/runtime.exs) and nothing writes it to disk. The judge's steps
+          # hold the same key; no other provider's key is here.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           FERMIX_CAP_HOME: ${{ env.EVAL_HOME }}
           FERMIX_CAP_PROJECT: ${{ env.OPIK_PROJECT }}
           # The daemon exporter's hosted-Opik config (fermix_opik reads these
@@ -421,6 +440,10 @@ jobs:
           FERMIX_OPIK_WORKSPACE: ${{ secrets.FERMIX_OPIK_WORKSPACE }}
         run: |
           set -euo pipefail
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::error::The repository secret ANTHROPIC_API_KEY is empty: the daemon under test runs on Anthropic ($CANDIDATE_MODEL at $CANDIDATE_REASONING_EFFORT effort) and reads its key from it at boot. Set it under Settings > Secrets and variables > Actions > Secrets."
+            exit 1
+          fi
           # The job's OIDC request credential (id-token: write) belongs to the Anthropic
           # sign-in step; the daemon and every process it spawns go without it.
           unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
@@ -428,7 +451,7 @@ jobs:
           git config --global user.name "fermix-eval-box"
           git config --global user.email "eval-box@localhost"
           mkdir -p "$EVAL_HOME"
-          seed_args="--provider openai --model ${CANDIDATE_MODEL}"
+          seed_args="--provider anthropic --model ${CANDIDATE_MODEL} --reasoning-effort ${CANDIDATE_REASONING_EFFORT}"
           case "$TIER" in
             regression)
               # Behavioral repo-read cases expand __EVAL_REPO_ROOT__ to this
@@ -455,6 +478,7 @@ jobs:
           FERMIX_EVAL_HOME: ${{ env.EVAL_HOME }}
           OPIK_API_KEY: ${{ secrets.FERMIX_OPIK_API_KEY }}
           OPIK_WORKSPACE: ${{ secrets.FERMIX_OPIK_WORKSPACE }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           set -euo pipefail
           uv run bin/run_eval.py --check --judge
@@ -507,6 +531,7 @@ jobs:
           FERMIX_EVAL_HOME: ${{ env.EVAL_HOME }}
           OPIK_API_KEY: ${{ secrets.FERMIX_OPIK_API_KEY }}
           OPIK_WORKSPACE: ${{ secrets.FERMIX_OPIK_WORKSPACE }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           set -euo pipefail
           # tier.sh, not make: the judged axis publishes its runner's code too.
@@ -515,7 +540,7 @@ jobs:
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           exit $rc
 
-      - name: Tier — dangerous (sandbox_verify on a disposable box)
+      - name: Tier — dangerous (sandbox_verify and the Linux attached-note case, on a disposable box)
         id: dangerous
         if: inputs.tier == 'dangerous'
         working-directory: benchmark
@@ -533,6 +558,18 @@ jobs:
           uv run bin/run_eval.py --dangerous --suite sandbox_verify \
             --scenario assistant_refuses_hardline_shell --profile destructive \
             --confirm-daemon-isolated --confirm-isolated-env --confirm-private-data || rc=$?
+          # A command an attached note asks for waits for the owner (F-01). Its own
+          # run: the destructive profile drives exactly one named scenario, and this
+          # one is isolated_mutation. Linux only (`platforms: [linux]`), which this
+          # box is; on any other host the runner skips it and, with nothing left to
+          # drive, exits 3. Both runs always happen, and the first non-zero code
+          # decides, the rule the job's deciding step applies across steps.
+          note_rc=0
+          uv run bin/run_eval.py --suite safety \
+            --scenario attached_note_command_waits_for_owner --profile isolated_mutation \
+            --confirm-daemon-isolated --confirm-isolated-env || note_rc=$?
+          echo "sandbox_verify exited $rc; attached_note_command_waits_for_owner exited $note_rc"
+          if [ "$rc" -eq 0 ]; then rc=$note_rc; fi
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           exit $rc
 
@@ -590,10 +627,9 @@ jobs:
         run: benchmark/bin/capability-daemon.sh down
 
       - name: Stop the Anthropic identity-token refresher
-        # After the daemon is down and every judged step has run, so neither the
-        # judge nor a delegated run can still need a fresh identity token;
-        # `always()` so a failed tier step does not leave it running.
-        if: ${{ always() && (inputs.tier == 'regression' || inputs.tier == 'capability') }}
+        # After the daemon is down, so no delegated run can still need a fresh
+        # identity token; `always()` so a failed tier step does not leave it running.
+        if: ${{ always() && inputs.tier == 'capability' }}
         run: |
           set -euo pipefail
           wif_dir="$RUNNER_TEMP/anthropic-wif"
@@ -610,7 +646,7 @@ jobs:
           echo "Identity-token refresher: $refreshed refreshed, $failed failed."
           if [ "$failed" -gt 0 ]; then
             grep -v ' refreshed$' "$wif_dir/refresher.log"
-            echo "::error::$failed identity-token refreshes failed during the $TIER tier, so a judge verdict or a delegated claude_code_run may have failed to authenticate: read this run's incomplete judged cases and cap_harness scores as a possible environment failure, not the candidate's."
+            echo "::error::$failed identity-token refreshes failed during the $TIER tier, so a delegated claude_code_run may have failed to authenticate: read this run's cap_harness scores as a possible environment failure, not the candidate's."
             exit 1
           fi
 

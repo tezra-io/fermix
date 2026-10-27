@@ -35,6 +35,45 @@ defmodule FermixOpik.Aggregation do
   # [:fermix, :mcp_client, :lifecycle] clause).
   @mcp_client_turn_phases [:security_block, :drift, :reconnect]
 
+  # The cue lifecycle's metadata allowlist, mirroring the emitter's
+  # (`FermixCore.Cues.Telemetry`): ids and counts pass as they are, labels as
+  # strings, `content` only exists when the operator turned capture on.
+  @cue_value_keys [
+    :session_id,
+    :parent_session,
+    :source_ref,
+    :cue_id,
+    :delivery_id,
+    :watcher_id,
+    :gap_id,
+    :job_id,
+    :run_id,
+    :filter_call_id,
+    :mandate_call_id,
+    :proposal_id,
+    :attempt,
+    :count,
+    :content
+  ]
+  @cue_label_keys [
+    :phase,
+    :component,
+    :reason,
+    :outcome,
+    :state,
+    :decision,
+    :validator,
+    :mandate,
+    :tool,
+    :provider,
+    :model,
+    :kind,
+    :status,
+    :result,
+    :error_class
+  ]
+  @cue_measurement_keys [:count, :accept_ms, :queue_ms, :duration_ms]
+
   @enforce_keys [:project, :ttl_ms]
   defstruct project: nil,
             ttl_ms: 120_000,
@@ -83,9 +122,11 @@ defmodule FermixOpik.Aggregation do
   # A confirmed access-sensitive run (`Capabilities.AccessGate`) is not a model
   # call: the daemon runs it when the owner confirms, usually after the turn that
   # parked it has shipped. It carries that turn's session_id so it pairs with the
-  # held call by `access_intent`; past the turn's close that id is tombstoned, so
-  # the run ships as its own self-closing trace holding its one tool span instead
-  # of being dropped. While the turn is still open it nests like any tool span.
+  # held call by `access_intent`; once the turn has closed, the run ships as its
+  # own self-closing trace holding its one tool span: not dropped at the
+  # tombstone, and not a phantom root once the tombstone is pruned (a cue
+  # proposal is often confirmed hours after its run). While the turn is still
+  # open it nests like any tool span.
   def apply_event(
         state,
         [:fermix, :tool, :exec],
@@ -93,7 +134,7 @@ defmodule FermixOpik.Aggregation do
         %{access_gate: "confirmed", session_id: session_id} = meta,
         at
       )
-      when is_map_key(state.closed_sessions, session_id) do
+      when is_binary(session_id) and not is_map_key(state.sessions, session_id) do
     {state, [confirmed_access_trace(state, meas, meta, at)]}
   end
 
@@ -274,14 +315,17 @@ defmodule FermixOpik.Aggregation do
               run_id: Map.get(meta, :run_id),
               schedule_kind: Map.get(meta, :schedule_kind),
               schedule_expr: Map.get(meta, :schedule_expr),
-              trigger: Map.get(meta, :trigger)
+              trigger: Map.get(meta, :trigger),
+              # A cue run's watcher and the delivery it held (M60 §9.6).
+              watcher_id: Map.get(meta, :watcher_id),
+              delivery_id: Map.get(meta, :delivery_id)
             }),
           at: at.at,
           mono: at.mono
         }
 
-        {state, _ref} = ensure_session(state, session_id, ctx)
-        {state, []}
+        {state, ref} = ensure_session(state, session_id, ctx)
+        {adopt_opener(state, session_id, ref, ctx), []}
     end
   end
 
@@ -292,7 +336,13 @@ defmodule FermixOpik.Aggregation do
     close_root(state, meta, at, %{
       output: Map.get(meta, :output) || Map.get(meta, :error),
       status: status,
-      metadata: compact(%{job_id: Map.get(meta, :job_id), run_id: Map.get(meta, :run_id)})
+      metadata:
+        compact(%{
+          job_id: Map.get(meta, :job_id),
+          run_id: Map.get(meta, :run_id),
+          watcher_id: Map.get(meta, :watcher_id),
+          delivery_id: Map.get(meta, :delivery_id)
+        })
     })
   end
 
@@ -867,6 +917,83 @@ defmodule FermixOpik.Aggregation do
     })
   end
 
+  # An open-loop check-in (M78 §09) drives the loop in its own context, so it
+  # owns a session and gets a real root trace with the run's provider/tool spans
+  # nested under it — the follow-up shape.
+  #
+  # `parent_session` is hard-coded nil: the scheduler spawned the run, not
+  # another run, and the turn that captured the loop closed days before. There
+  # is deliberately no `thread_id` either — the family never carries the
+  # delivery destination, so the run is an unthreaded root, found by its
+  # `open_loop_` session prefix and its `open_loop_id`.
+  #
+  # The session id is `open_loop_<id>_<touch>`, and a run that timed out or
+  # failed is retried under the same touch seconds later, inside the
+  # closed-session tombstone window. An opener is a new run by definition, never
+  # a late span of the one that shipped, so it lifts that session's tombstone
+  # before opening; otherwise the retry's provider and tool spans would be
+  # dropped as late arrivals.
+  def apply_event(state, [:fermix, :open_loop, :checkin, :start], _meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: nil,
+          kind: :open_loop_checkin,
+          name: Map.get(meta, :agent),
+          input: nil,
+          max_duration_ms: Map.get(meta, :max_duration_ms),
+          trace_metadata: open_loop_checkin_metadata(meta),
+          at: at.at,
+          mono: at.mono
+        }
+
+        state = %{state | closed_sessions: Map.delete(state.closed_sessions, session_id)}
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  # `complete` closes a run that reached a decision — `spoke`, `silent`,
+  # `closed`, `empty`, `delivery_failed` — and each is a run that finished, so
+  # the status is "ok" and the `outcome` says which. Only a run that never
+  # reached one (`error`) carries its own status word (`timeout`/`error`). The
+  # sent text rides `output` and exists only when content capture is on.
+  def apply_event(state, [:fermix, :open_loop, :checkin, run], _meas, meta, at)
+      when run in [:complete, :error] do
+    status = if run == :error, do: Map.get(meta, :status, "error"), else: "ok"
+
+    close_root(state, meta, at, %{
+      output: Map.get(meta, :output) || Map.get(meta, :error),
+      status: status,
+      metadata: open_loop_checkin_metadata(meta)
+    })
+  end
+
+  # A skipped check-in and a settled loop have no run behind them: a skip never
+  # reached a model, and a settlement is one row write. Each is a point event
+  # that becomes its own self-closing trace, built inline like the reminder
+  # lifecycle and never tracked in state. Correlation is by `open_loop_id`; a
+  # settlement's `session_id` names the settling turn as metadata only, because
+  # nesting under it would resurrect a turn that may already have shipped.
+  def apply_event(state, [:fermix, :open_loop, :skipped], _meas, meta, at) do
+    name = "open_loop:#{stringify(Map.get(meta, :reason))}"
+    {state, [%{trace: open_loop_point_trace(state, name, meta, at), spans: []}]}
+  end
+
+  def apply_event(state, [:fermix, :open_loop, :settled], _meas, meta, at) do
+    {state, [%{trace: open_loop_point_trace(state, "open_loop:settled", meta, at), spans: []}]}
+  end
+
+  # A scheduler fault (a failed scan, claim, release, timer read, boot sweep or
+  # check-in start) is the same kind of point event: its own self-closing trace,
+  # carrying the stage and the emitter's derived `error_class`, never a reason.
+  def apply_event(state, [:fermix, :open_loop, :fault], _meas, meta, at) do
+    {state, [%{trace: open_loop_point_trace(state, "open_loop:fault", meta, at), spans: []}]}
+  end
+
   # A Live call's gist (M56 §4.2, §7) is one bounded summarising call made
   # after the call's own run closed at `call_stop`, minted with its own
   # `voice_gist:<call_uuid>` session: a root of its own, never nested under the
@@ -908,6 +1035,75 @@ defmodule FermixOpik.Aggregation do
           })
         )
     })
+  end
+
+  # A cue filter call (M60 §14) is one bounded model call deciding one cue for
+  # one watcher, minted with its own `cue_filter_<watcher>_<ts>_<hex>` session
+  # by the dispatcher, which no turn asked for: always a root. run_start opens
+  # it, its provider call nests via the shared session id, and one closer ends
+  # it once the decision is written: run_complete with the decision, run_error
+  # with the wall it hit (`provider_failure`, `content_failure`, `aborted`,
+  # `stale`, `settle_failed`) and the failure's typed kind. Ids and labels only:
+  # the cue's text and the decision's reason never reach these events.
+  def apply_event(state, [:fermix, :cue_filter, :run_start], _meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: nil,
+          kind: :cue_filter,
+          name: nil,
+          input: nil,
+          trace_metadata: cue_filter_metadata(meta),
+          at: at.at,
+          mono: at.mono
+        }
+
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  def apply_event(state, [:fermix, :cue_filter, run], meas, meta, at)
+      when run in [:run_complete, :run_error] do
+    close_root(state, meta, at, %{
+      status: Map.get(meta, :status),
+      error_info: cue_filter_error_info(run, meta),
+      metadata:
+        compact(
+          Map.merge(cue_filter_metadata(meta), %{
+            status: Map.get(meta, :status),
+            decision: Map.get(meta, :decision),
+            error_kind: Map.get(meta, :error_kind),
+            duration_ms: Map.get(meas, :duration_ms)
+          })
+        )
+    })
+  end
+
+  # Cue lifecycle ([:fermix, :cue, :lifecycle], M60 §14): one stable name for
+  # every item and delivery transition, placed by its session id alone.
+  #
+  # - No session (`accepted` … `expired`, the two error phases, and a `none`
+  #   watcher's `passed`): a self-closing `cue:<phase>` trace, built inline like
+  #   the reminder lifecycle's and never tracked in state.
+  # - The session of a filter call or a cue run that is open: a child span of
+  #   that run (filter phases under the `cue_filter_` root, run and proposal
+  #   phases under the run's `cron_` root).
+  # - `claimed` is traced by the scheduler before the runner exists, so it may
+  #   open the run's session itself; the job's opener adopts it (`adopt_opener/4`).
+  # - Any other session, closed or never seen (a proposal confirmed after its
+  #   run shipped, a crashed run reaped later): a self-closing trace carrying the
+  #   session id, so the phase is neither dropped at the tombstone nor left as a
+  #   phantom root.
+  def apply_event(state, [:fermix, :cue, :lifecycle], meas, meta, at) do
+    if cue_nests?(state, meta) do
+      add_child_span(state, meta, at, &cue_span(meta, meas, &1))
+    else
+      {state, [%{trace: cue_trace(state, meas, meta, at), spans: []}]}
+    end
   end
 
   # A meeting run (M21 §11.1) is a detached run that outlives the turn which
@@ -1557,6 +1753,8 @@ defmodule FermixOpik.Aggregation do
   defp infer_kind("soul_curation:" <> _), do: :soul_curation
   defp infer_kind("memory_review:" <> _), do: :memory_review
   defp infer_kind("followup_" <> _), do: :reminder_followup
+  # An open-loop check-in, minted in `OpenLoops.Telemetry.correlation/2`.
+  defp infer_kind("open_loop_" <> _), do: :open_loop_checkin
   defp infer_kind("meeting_" <> _), do: :meeting
   # A Live voice call and the backend turns it delegates to. Both prefixes are
   # minted outside this app (LocalVoiceSocket / LiveSessionServer); keep them in
@@ -1567,6 +1765,9 @@ defmodule FermixOpik.Aggregation do
   # A call's gist, minted in `Realtime.GistTelemetry.session_id/1` after the
   # call's run closed: its own root, whichever of its bookends arrives first.
   defp infer_kind("voice_gist:" <> _), do: :voice_gist
+  # A cue filter call, minted in `Cues.Filter.Telemetry.session_id/2`: its own
+  # root, whichever of its bookends (or its provider call) arrives first.
+  defp infer_kind("cue_filter_" <> _), do: :cue_filter
   # The computer-history summarizer (§22.4) is a headless single-call run with
   # no bookend events: its provider span creates the session, so the kind must
   # come from the id prefix or the root would read as a :subagent of nothing.
@@ -1593,6 +1794,9 @@ defmodule FermixOpik.Aggregation do
   # its session id ("followup_<reminder_id>") is its own fallback — the generic
   # "<kind>:<name>" shape would only say "followup" twice.
   defp wrapper_name(:reminder_followup, name, session), do: name || session
+  # Same shape: the agent name is already "open_loop:<id>", and the session id
+  # ("open_loop_<id>_<touch>") is its own fallback.
+  defp wrapper_name(:open_loop_checkin, name, session), do: name || session
   # Same shape: the run's agent name is already "meeting:<id>", and its session
   # id ("meeting_<id>_<ts>") is its own fallback — the generic "<kind>:<name>"
   # would only say "meeting" twice.
@@ -1605,6 +1809,9 @@ defmodule FermixOpik.Aggregation do
   defp wrapper_name(:voice_delegation, _name, session), do: session
   # "voice_gist:<call_uuid>" already says what it is and which call.
   defp wrapper_name(:voice_gist, _name, session), do: session
+  # "cue_filter_<watcher>_<ts>_<hex>" already says what it is and for which
+  # watcher; the agent name ("cue_filter") would only repeat the kind.
+  defp wrapper_name(:cue_filter, _name, session), do: session
   # Same shape again: the agent name is "computer_history_summarizer" and the
   # session id starts "computer_history_summarize:" — prefixing the kind would
   # say "computer history" twice.
@@ -1691,6 +1898,94 @@ defmodule FermixOpik.Aggregation do
     })
   end
 
+  # Whether a cue lifecycle phase nests (see the [:fermix, :cue, :lifecycle]
+  # clause): only under a session that is open (a shipped one has left
+  # `sessions`), or as the claim that opens a run's session before the runner
+  # does.
+  defp cue_nests?(state, meta) do
+    session_id = Map.get(meta, :session_id)
+
+    cond do
+      not is_binary(session_id) -> false
+      is_map_key(state.sessions, session_id) -> true
+      true -> stringify(Map.get(meta, :phase)) == "claimed"
+    end
+  end
+
+  # A point span for one cue phase inside its run. The session places it, so it
+  # is not repeated in the span's metadata.
+  defp cue_span(metadata, measurements, opts) do
+    ended = Keyword.fetch!(opts, :ended)
+    started = Mapper.start_of(ended, Map.get(measurements, :duration_ms, 0))
+
+    Mapper.drop_nil(%{
+      id: Mapper.new_id(started),
+      trace_id: Keyword.fetch!(opts, :trace_id),
+      parent_span_id: Keyword.get(opts, :parent_span_id),
+      project_name: Keyword.fetch!(opts, :project_name),
+      name: "cue:#{stringify(Map.get(metadata, :phase))}",
+      type: "general",
+      start_time: Mapper.iso(started),
+      end_time: Mapper.iso(ended),
+      metadata: cue_metadata(Map.drop(metadata, [:session_id, :parent_session]), measurements)
+    })
+  end
+
+  # A self-closing trace for one cue phase with no open run to nest under,
+  # built like `reminder_trace/4`. A phase that names a run's session keeps it
+  # in the metadata, which is how it is found beside that run's trace.
+  defp cue_trace(state, measurements, metadata, at) do
+    started = Mapper.start_of(at.at, Map.get(measurements, :duration_ms, 0))
+
+    Mapper.drop_nil(%{
+      id: Mapper.new_id(started),
+      project_name: state.project,
+      name: "cue:#{stringify(Map.get(metadata, :phase))}",
+      start_time: Mapper.iso(started),
+      end_time: Mapper.iso(at.at),
+      metadata: cue_metadata(metadata, measurements),
+      tags: ["cue"]
+    })
+  end
+
+  defp cue_metadata(metadata, measurements) do
+    labels = Map.new(Map.take(metadata, @cue_label_keys), fn {k, v} -> {k, stringify(v)} end)
+
+    metadata
+    |> Map.take(@cue_value_keys)
+    |> Map.merge(labels)
+    |> Map.merge(Map.take(measurements, @cue_measurement_keys))
+    |> compact()
+  end
+
+  # A cue run's claim phase is traced by the scheduler before the runner
+  # exists, so it can open the run's session first. The job's opener then gives
+  # that root what creating it would have: its name, metadata, thread and sweep
+  # floor. When the opener created the session itself this changes nothing.
+  defp adopt_opener(state, session_id, ref, ctx) do
+    name = wrapper_name(ref.kind, ctx.name, session_id)
+    update_trace(state, ref.trace_id, &adopt_root(&1, session_id, ref.span_id, ctx, name))
+  end
+
+  defp adopt_root(%{root_session: session_id} = acc, session_id, span_id, ctx, name) do
+    spans =
+      Enum.map(acc.spans, fn
+        %{id: ^span_id} = span -> %{span | name: name}
+        span -> span
+      end)
+
+    %{
+      acc
+      | name: name,
+        metadata: Map.merge(acc.metadata, ctx.trace_metadata),
+        thread_id: acc.thread_id || ctx.thread_id,
+        sweep_floor_mono: acc.sweep_floor_mono || sweep_floor(ctx),
+        spans: spans
+    }
+  end
+
+  defp adopt_root(acc, _session_id, _span_id, _ctx, _name), do: acc
+
   # The follow-up bookends' correlation allowlist, shared by the opener and the
   # closer so a run whose opener never arrived still carries the ids. `outcome`
   # exists only on the closer; `compact` drops it everywhere else.
@@ -1701,6 +1996,50 @@ defmodule FermixOpik.Aggregation do
       reminder_id: Map.get(metadata, :reminder_id),
       occurrence_key: Map.get(metadata, :occurrence_key),
       outcome: Map.get(metadata, :outcome)
+    })
+  end
+
+  # The check-in bookends' allowlist, shared by the opener and the closers so a
+  # run whose opener never arrived still carries its ids. The opener's snapshot
+  # (`rung`, `horizon_class`, `active_hours`) survives the closer's merge;
+  # `outcome` exists only on `complete`, and `compact` drops it everywhere else.
+  defp open_loop_checkin_metadata(metadata) do
+    compact(%{
+      component: Map.get(metadata, :component),
+      open_loop_id: Map.get(metadata, :open_loop_id),
+      touch: Map.get(metadata, :touch),
+      rung: Map.get(metadata, :rung),
+      horizon_class: Map.get(metadata, :horizon_class),
+      active_hours: Map.get(metadata, :active_hours),
+      outcome: Map.get(metadata, :outcome)
+    })
+  end
+
+  # A self-closing trace for one open-loop point event (`skipped`/`settled`/
+  # `fault`). None times any work, so the trace is an instant and carries no
+  # duration: a fabricated zero would read as a measurement. The metadata is
+  # exactly the three emitters' fixed keys.
+  defp open_loop_point_trace(state, name, metadata, at) do
+    Mapper.drop_nil(%{
+      id: Mapper.new_id(at.at),
+      project_name: state.project,
+      name: name,
+      start_time: Mapper.iso(at.at),
+      end_time: Mapper.iso(at.at),
+      metadata:
+        compact(%{
+          component: Map.get(metadata, :component),
+          open_loop_id: Map.get(metadata, :open_loop_id),
+          reason: Map.get(metadata, :reason),
+          from: Map.get(metadata, :from),
+          to: Map.get(metadata, :to),
+          answer: Map.get(metadata, :answer),
+          by: Map.get(metadata, :by),
+          session_id: Map.get(metadata, :session_id),
+          stage: Map.get(metadata, :stage),
+          error_class: Map.get(metadata, :error_class)
+        }),
+      tags: ["open_loop"]
     })
   end
 
@@ -1765,6 +2104,24 @@ defmodule FermixOpik.Aggregation do
     do: error_info("VoiceGistError", stringify(Map.get(metadata, :error)))
 
   defp voice_gist_error_info(_run, _metadata), do: nil
+
+  defp cue_filter_metadata(metadata) do
+    compact(%{
+      filter_call_id: Map.get(metadata, :filter_call_id),
+      watcher_id: Map.get(metadata, :watcher_id),
+      delivery_id: Map.get(metadata, :delivery_id),
+      cue_id: Map.get(metadata, :cue_id),
+      source_ref: Map.get(metadata, :source_ref),
+      attempt: Map.get(metadata, :attempt),
+      provider: Map.get(metadata, :provider),
+      model: Map.get(metadata, :model)
+    })
+  end
+
+  defp cue_filter_error_info(:run_error, metadata),
+    do: error_info("CueFilterError", stringify(Map.get(metadata, :error_kind)))
+
+  defp cue_filter_error_info(_run, _metadata), do: nil
 
   defp reminder_metadata(metadata, duration_ms) do
     %{

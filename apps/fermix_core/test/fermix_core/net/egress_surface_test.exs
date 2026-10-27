@@ -76,7 +76,7 @@ defmodule FermixCore.Net.EgressSurfaceTest do
   # find it: a gate that walked the wrong files would pass forever.
   @known_req_sites [
     "apps/fermix_core/lib/fermix_core/net/http_client.ex",
-    "apps/fermix_core/lib/fermix_core/tools/web_fetch.ex",
+    "apps/fermix_core/lib/fermix_core/net/pinned_url.ex",
     "apps/fermix_core/lib/fermix_core/auth/refresh_client.ex",
     "apps/fermix_core/lib/fermix_core/setup/doctor.ex",
     "apps/fermix_core/lib/fermix_core/computer_use/sidecar_installer.ex",

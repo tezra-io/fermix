@@ -11,7 +11,7 @@ one nFPM configuration rendered from the checked-in template, and one run of
 nFPM per format. Both packages therefore come from one file list, which is what
 keeps the two families from drifting apart.
 
-Two facts this script refuses to assume:
+Three facts this script refuses to assume:
 
 * **The loader is the loader.** `packaging/linux/out/<target>/libc-musl-<digest>.so`
   is hashed and refused when its bytes are not the digest its name carries. The
@@ -20,6 +20,11 @@ Two facts this script refuses to assume:
 * **A tool is the tool that was pinned.** nFPM and cosign are downloaded by
   exact version and verified against a pinned sha256 before either is used or
   shipped.
+* **The notices are the notices that were pinned.** The third-party notices of
+  the fermix-iroh helper inside the wrapper are downloaded from the release
+  `apps/fermix_core/priv/iroh_helper/PIN.json` names and verified against the
+  sha256 it pins, the bytes the release build put beside the helper, before
+  they are installed as /usr/share/doc/fermix/fermix-iroh-THIRD-PARTY-NOTICES.txt.
 
 Every download goes through `opener` and every subprocess through `runner`, so
 the whole flow is reachable from a test with no network and no nFPM.
@@ -86,6 +91,13 @@ COSIGN_RELEASES = {
 }
 COSIGN_URL = "https://github.com/sigstore/cosign/releases/download/v{version}/{asset}"
 
+# The pin scripts/release/pin_iroh_helper.py writes, in the source tree.
+IROH_PIN = "apps/fermix_core/priv/iroh_helper/PIN.json"
+IROH_PIN_SCHEMA_VERSION = 2
+IROH_RELEASE_URL = "https://github.com/{repository}/releases/download/{tag}/{asset}"
+IROH_NOTICES = "usr/share/doc/fermix/fermix-iroh-THIRD-PARTY-NOTICES.txt"
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+
 LOADER_PATTERN = re.compile(r"^libc-musl-([0-9a-f]{64})\.so$")
 VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 PLACEHOLDER_PATTERN = re.compile(r"\{\{([A-Z_]+)\}\}")
@@ -107,6 +119,7 @@ STAGED_MODES = {
     "usr/share/man/man1/fermix.1.gz": 0o644,
     "usr/share/doc/fermix/copyright": 0o644,
     "usr/share/doc/fermix/changelog.Debian.gz": 0o644,
+    IROH_NOTICES: 0o644,
 }
 
 
@@ -263,6 +276,30 @@ def _bullets(body: list[str]) -> list[str]:
     return bullets
 
 
+def iroh_notices(pin_text: str) -> tuple[str, str]:
+    """The URL and sha256 of the fermix-iroh notices a pin names."""
+
+    try:
+        pin = json.loads(pin_text)
+    except ValueError as error:
+        raise BuildError(f"{IROH_PIN} is not JSON: {error}") from None
+    if not isinstance(pin, dict) or pin.get("schema_version") != IROH_PIN_SCHEMA_VERSION:
+        raise BuildError(
+            f"{IROH_PIN} is not schema_version {IROH_PIN_SCHEMA_VERSION}, so it names no notices; "
+            "re-pin with scripts/release/pin_iroh_helper.py"
+        )
+
+    notices = pin.get("notices") if isinstance(pin.get("notices"), dict) else {}
+    repository, tag = pin.get("repository"), pin.get("tag")
+    asset, sha256 = notices.get("asset"), notices.get("sha256")
+    if not all(isinstance(value, str) and value for value in (repository, tag, asset)) or "/" in asset:
+        raise BuildError(f"{IROH_PIN} must name the repository, the tag and the notices asset")
+    if not isinstance(sha256, str) or not SHA256_PATTERN.fullmatch(sha256):
+        raise BuildError(f"{IROH_PIN} has no sha256 for the notices")
+
+    return IROH_RELEASE_URL.format(repository=repository, tag=tag, asset=asset), sha256
+
+
 def loader_in(directory: Path) -> tuple[Path, str]:
     """The one verified loader this target's release published."""
 
@@ -354,6 +391,14 @@ def resolve_cosign(target: str, cache: Path, opener) -> Path:
     return cosign
 
 
+def resolve_iroh_notices(source_root: Path, cache: Path, opener) -> Path:
+    pin = source_root / IROH_PIN
+    if not pin.is_file():
+        raise BuildError(f"{pin} is missing, so the fermix-iroh notices cannot be staged")
+    url, sha256 = iroh_notices(pin.read_text(encoding="utf-8"))
+    return download_verified(url, sha256, cache / f"fermix-iroh-notices-{sha256}.txt", opener)
+
+
 # ── the staging tree ────────────────────────────────────────────────────────
 
 
@@ -364,6 +409,7 @@ def stage(
     wrapper: Path,
     loader: Path,
     cosign: Path,
+    notices: Path,
     manifest: dict,
     changelog: str,
 ) -> None:
@@ -372,6 +418,7 @@ def stage(
     copies = {
         "usr/bin/fermix": wrapper,
         "usr/lib/fermix/cosign": cosign,
+        IROH_NOTICES: notices,
         "usr/lib/systemd/user/fermix.service": packaging / "systemd/fermix.service",
         "usr/share/bash-completion/completions/fermix": packaging / "completions/fermix.bash",
         "usr/share/zsh/site-functions/_fermix": packaging / "completions/_fermix",
@@ -523,6 +570,7 @@ def run_build(arguments, *, opener, runner) -> list[Path]:
 
     nfpm = resolve_nfpm(arguments.host_machine, cache, opener, runner)
     cosign = resolve_cosign(target, cache, opener)
+    notices = resolve_iroh_notices(source_root, cache, opener)
 
     work = Path(tempfile.mkdtemp(prefix=f"fermix-linux-package-{target}-"))
     try:
@@ -533,6 +581,7 @@ def run_build(arguments, *, opener, runner) -> list[Path]:
             wrapper=wrapper,
             loader=loader,
             cosign=cosign,
+            notices=notices,
             manifest=manifest,
             changelog=changelog,
         )

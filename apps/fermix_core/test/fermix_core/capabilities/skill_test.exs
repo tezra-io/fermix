@@ -3,9 +3,14 @@ defmodule FermixCore.Capabilities.SkillTest do
 
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Agents.AgentSupervisor
+  alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Capabilities.Skill
+  alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo, as: MemoryRepo
+  alias FermixCore.Tools.ScheduleJob
+  alias FermixCore.Tools.UpdateJob
 
   defmodule MockProvider do
     @behaviour FermixCore.Providers.Provider
@@ -13,19 +18,25 @@ defmodule FermixCore.Capabilities.SkillTest do
 
     @responses :skill_capability_mock_responses
     @captured :skill_capability_mock_captured
+    @tools :skill_capability_mock_tools
 
     def init do
       cleanup()
       {:ok, _} = Agent.start_link(fn -> [] end, name: @responses)
       {:ok, _} = Agent.start_link(fn -> [] end, name: @captured)
+      {:ok, _} = Agent.start_link(fn -> [] end, name: @tools)
       :ok
     end
 
     def set_responses(responses), do: Agent.update(@responses, fn _ -> responses end)
     def captured_messages, do: Agent.get(@captured, & &1)
 
+    # The tool names each model call was offered, oldest first; taking them
+    # clears the record.
+    def take_tools, do: Agent.get_and_update(@tools, &{&1, []})
+
     def cleanup do
-      Enum.each([@responses, @captured], fn name ->
+      Enum.each([@responses, @captured, @tools], fn name ->
         case Process.whereis(name) do
           nil -> :ok
           pid -> try_stop(pid)
@@ -45,6 +56,7 @@ defmodule FermixCore.Capabilities.SkillTest do
     @impl FermixCore.Providers.Adapter
     def chat(messages, capabilities, _opts) do
       Agent.update(@captured, fn prior -> prior ++ [messages] end)
+      Agent.update(@tools, fn prior -> prior ++ [Enum.map(capabilities, & &1.name)] end)
 
       case pop_response() do
         {:ok, response} -> {:ok, to_turn(response, messages, capabilities)}
@@ -89,7 +101,7 @@ defmodule FermixCore.Capabilities.SkillTest do
 
       %{
         content: content || "",
-        tool_calls: [],
+        tool_calls: Map.get(response, :tool_calls, []),
         provider_state: %{
           messages: messages ++ [assistant],
           capabilities: capabilities
@@ -110,9 +122,9 @@ defmodule FermixCore.Capabilities.SkillTest do
      }}
   end
 
-  defp build_definition(name, prompt) do
+  defp build_definition(name, prompt, attrs \\ %{}) do
     {:ok, definition} =
-      AgentDefinition.new(%{
+      %{
         "name" => name,
         "description" => "Use #{name}.",
         "system_prompt" => prompt,
@@ -120,7 +132,9 @@ defmodule FermixCore.Capabilities.SkillTest do
         "allowed_tools" => [],
         "max_iterations" => 4,
         "timeout_seconds" => 30
-      })
+      }
+      |> Map.merge(attrs)
+      |> AgentDefinition.new()
 
     AgentDefinition.with_trust(definition, :operator)
   end
@@ -322,5 +336,289 @@ defmodule FermixCore.Capabilities.SkillTest do
       assert result.error =~ "missing_argument"
       assert AgentSupervisor.list_agents(agent_supervisor) == []
     end
+  end
+
+  # A skill's worker gets at most its parent run's surface, as a `subagents`
+  # worker does: the skill's allowlist and policy classes meet the
+  # `effective_allowed_tools` and `effective_policy` the parent's loop stamped.
+  describe "a skill worker within its parent run" do
+    setup %{agent_supervisor: agent_supervisor, task_supervisor: task_supervisor} = ctx do
+      registry = :"skill_worker_caps_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry})
+
+      for {name, class} <- [
+            {"notes_read", :read_only},
+            {"web_search", :network},
+            {"shell", :exec}
+          ] do
+        :ok = CapabilityRegistry.register(registry, stand_in(name, class))
+      end
+
+      context = %{
+        agent_name: "main",
+        session_id: "main-session",
+        provider: MockProvider,
+        agent_supervisor: agent_supervisor,
+        task_supervisor: task_supervisor,
+        journal_base_dir: ctx.journal_dir,
+        skill_depth: 0,
+        capability_registry: registry
+      }
+
+      %{context: context, tools: %{"allowed_tools" => ["notes_read", "web_search", "shell"]}}
+    end
+
+    test "a narrowed parent's worker gets the skill's tools within the parent's", %{
+      context: context,
+      tools: tools
+    } do
+      # The last meets no class at all: a tool-less worker, since the registry
+      # would read `policy: []` as the trust default.
+      for {attrs, stamps, offered} <- [
+            {tools, %{effective_allowed_tools: ["web_search", "file_read"]}, ["web_search"]},
+            {tools, %{effective_policy: [:read_only, :network]}, ["notes_read", "web_search"]},
+            {Map.put(tools, "policy", ["read_only"]), %{effective_policy: [:network]}, []}
+          ] do
+        definition = build_definition("alpha", "Alpha skill body.", attrs)
+        assert {stamps, worker_tools(definition, Map.merge(context, stamps))} == {stamps, offered}
+      end
+    end
+
+    test "an un-narrowed parent's worker gets the skill's own tools, unchanged", %{
+      context: context,
+      tools: tools
+    } do
+      definition = build_definition("alpha", "Alpha skill body.", tools)
+
+      full_trust = %{
+        effective_allowed_tools: nil,
+        effective_policy: CapabilityRegistry.default_policy_classes(:operator),
+        effective_trust: :operator
+      }
+
+      for parent <- [context, Map.merge(context, full_trust)] do
+        assert worker_tools(definition, parent) == ["notes_read", "shell", "web_search"]
+      end
+    end
+
+    # A parent loop running at guest (a guest's turn, a guest skill's worker)
+    # hands an operator skill no owner-only tool: the worker runs at the lower
+    # of the two trusts.
+    test "a guest parent's worker runs at guest, whatever the skill's trust", %{
+      context: context
+    } do
+      registry = context.capability_registry
+
+      :ok =
+        CapabilityRegistry.register(registry, %{
+          stand_in("owner_diary", :read_only)
+          | owner_only?: true
+        })
+
+      definition =
+        build_definition("alpha", "Alpha skill body.", %{
+          "allowed_tools" => ["owner_diary", "notes_read", "shell"]
+        })
+
+      guest_parent = %{effective_trust: :guest, effective_policy: [:read_only]}
+      assert worker_tools(definition, Map.merge(context, guest_parent)) == ["notes_read"]
+
+      # A guest's own turn that no loop stamped runs it at guest the same way:
+      # its run trust is its `source_trust` (`CapabilityRegistry.run_trust/1`).
+      assert worker_tools(definition, Map.put(context, :source_trust, :guest)) == ["notes_read"]
+    end
+  end
+
+  # A plugin skill loads at guest trust whoever calls it, so its worker runs at
+  # guest under the owner's turn: a job it sets up holds no owner-only tool
+  # and records guest trust, never the operator's.
+  test "a guest skill's worker gives a job only its own guest-trust tools", %{
+    agent_supervisor: agent_supervisor,
+    task_supervisor: task_supervisor,
+    journal_dir: journal_dir
+  } do
+    suffix = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-skill-guest-job-#{suffix}.db")
+    repo = :"skill_guest_job_repo_#{suffix}"
+    start_supervised!({MemoryRepo, name: repo, enabled: true, database_path: db_path})
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+    end)
+
+    registry = :"skill_guest_caps_#{suffix}"
+    start_supervised!({CapabilityRegistry, name: registry})
+    :ok = CapabilityRegistry.register(registry, Builtin.from_tool_module(ScheduleJob))
+    :ok = CapabilityRegistry.register(registry, stand_in("file_note", :read_write))
+    :ok = CapabilityRegistry.register(registry, stand_in("web_search", :network))
+
+    :ok =
+      CapabilityRegistry.register(registry, %{
+        stand_in("owner_notes", :read_only)
+        | owner_only?: true
+      })
+
+    definition =
+      "helper"
+      |> build_definition("Helper skill body.", %{
+        "allowed_tools" => nil,
+        "policy" => ["read_only", "read_write"]
+      })
+      |> AgentDefinition.with_trust(:guest)
+
+    arguments = %{"name" => "Helper Job", "schedule" => "every 15 minutes", "task" => "Note."}
+
+    MockProvider.set_responses([
+      {:ok,
+       %{
+         content: "",
+         tool_calls: [
+           %{
+             id: "fc_1",
+             call_id: "call_1",
+             name: "schedule_job",
+             arguments: Jason.encode!(arguments)
+           }
+         ],
+         usage: %{prompt_tokens: 10, completion_tokens: 0, total_tokens: 10},
+         model: "mock-model"
+       }},
+      mock_response("Scheduled.")
+    ])
+
+    context = %{
+      agent_name: "main",
+      session_id: "main-session",
+      provider: MockProvider,
+      agent_supervisor: agent_supervisor,
+      task_supervisor: task_supervisor,
+      journal_base_dir: journal_dir,
+      skill_depth: 0,
+      capability_registry: registry,
+      memory_repo: repo,
+      memory_agent_id: "main",
+      source_trust: :operator,
+      conversation_key: {"telegram", "chat-1", :root},
+      outside_sources: MapSet.new()
+    }
+
+    assert {:ok, %{success: true}} = Skill.invoke(%{"task" => "Set it up."}, context, definition)
+
+    assert {:ok, [job]} = JobsRegistry.list_jobs(repo: repo)
+    assert job.allowed_tools == ["file_note", "schedule_job"]
+    assert job.created_by_trust == "guest"
+  end
+
+  # A plugin skill's worker runs at guest under the owner's turn, so it may not
+  # rewrite an operator job, even one whose tools all fit its own: the job would
+  # keep running at operator on guest-authored instructions.
+  test "a guest skill's worker cannot change an operator job", %{
+    agent_supervisor: agent_supervisor,
+    task_supervisor: task_supervisor,
+    journal_dir: journal_dir
+  } do
+    suffix = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-skill-guest-update-#{suffix}.db")
+    repo = :"skill_guest_update_repo_#{suffix}"
+    start_supervised!({MemoryRepo, name: repo, enabled: true, database_path: db_path})
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+    end)
+
+    registry = :"skill_guest_update_caps_#{suffix}"
+    start_supervised!({CapabilityRegistry, name: registry})
+    :ok = CapabilityRegistry.register(registry, Builtin.from_tool_module(UpdateJob))
+    :ok = CapabilityRegistry.register(registry, stand_in("file_note", :read_write))
+
+    {:ok, job} =
+      JobsRegistry.create_job(
+        %{
+          name: "Owner Notes",
+          schedule: "every 15 minutes",
+          task_prompt: "Tidy the notes.",
+          allowed_tools: ["file_note"],
+          created_by_trust: "operator"
+        },
+        repo: repo
+      )
+
+    definition =
+      "helper"
+      |> build_definition("Helper skill body.", %{
+        "allowed_tools" => nil,
+        "policy" => ["read_only", "read_write"]
+      })
+      |> AgentDefinition.with_trust(:guest)
+
+    arguments = %{"job_id" => job.id, "task" => "Mail the notes out."}
+
+    MockProvider.set_responses([
+      {:ok,
+       %{
+         content: "",
+         tool_calls: [
+           %{
+             id: "fc_1",
+             call_id: "call_1",
+             name: "update_job",
+             arguments: Jason.encode!(arguments)
+           }
+         ],
+         usage: %{prompt_tokens: 10, completion_tokens: 0, total_tokens: 10},
+         model: "mock-model"
+       }},
+      mock_response("Done.")
+    ])
+
+    context = %{
+      agent_name: "main",
+      session_id: "main-session",
+      provider: MockProvider,
+      agent_supervisor: agent_supervisor,
+      task_supervisor: task_supervisor,
+      journal_base_dir: journal_dir,
+      skill_depth: 0,
+      capability_registry: registry,
+      memory_repo: repo,
+      source_trust: :operator,
+      conversation_key: {"telegram", "chat-1", :root},
+      outside_sources: MapSet.new()
+    }
+
+    assert {:ok, %{success: true}} = Skill.invoke(%{"task" => "Edit it."}, context, definition)
+
+    assert {:ok, %{task_prompt: "Tidy the notes."}} = JobsRegistry.get_job(job.id, repo: repo)
+
+    tool_replies =
+      for messages <- MockProvider.captured_messages(),
+          %{role: "tool", content: content} <- messages,
+          do: content
+
+    assert Enum.any?(tool_replies, &(&1 =~ "below the operator trust this job was set up at"))
+  end
+
+  def stand_in_never_runs(_args, _context), do: raise("a stand-in tool must never run")
+
+  defp stand_in(name, policy_class) do
+    Capability.new(%{
+      name: name,
+      description: "Stands in for #{name}.",
+      parameters: %{"type" => "object"},
+      kind: :builtin,
+      executor: {__MODULE__, :stand_in_never_runs, []},
+      policy_class: policy_class
+    })
+  end
+
+  # The tools the skill's worker was offered on its first model call. Each
+  # invocation journals into its own folder, so two in one second never meet.
+  defp worker_tools(definition, context) do
+    MockProvider.set_responses([mock_response("Done.")])
+    journal_dir = Path.join(context.journal_base_dir, "#{System.unique_integer([:positive])}")
+    context = Map.put(context, :journal_base_dir, journal_dir)
+    assert {:ok, %{success: true}} = Skill.invoke(%{"task" => "Work."}, context, definition)
+    [first | _] = MockProvider.take_tools()
+    Enum.sort(first)
   end
 end

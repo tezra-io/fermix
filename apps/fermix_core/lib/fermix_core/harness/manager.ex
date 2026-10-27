@@ -113,7 +113,9 @@ defmodule FermixCore.Harness.Manager do
           optional(:params) => map(),
           optional(:timeout_minutes) => pos_integer(),
           optional(:progress) => atom() | String.t(),
-          optional(:continuation_depth) => non_neg_integer()
+          optional(:continuation_depth) => non_neg_integer(),
+          optional(:continued_from_run_id) => String.t() | nil,
+          optional(:sole_continuation) => boolean()
         }
 
   # --- Public API ---------------------------------------------------------
@@ -144,7 +146,7 @@ defmodule FermixCore.Harness.Manager do
   command), so a param error (`:unknown_param`/`:invalid_param`/`:query_too_large`)
   returns `{:error, _}` with NO row; a missing binary is the D8 environmental
   block. `request` carries `%{params, snapshot, origin_session_id, ctx,
-  continuation_depth}` where `params` is the adapter's `%{query, env_id, branch?,
+  continuation_depth, continued_from_run_id}` where `params` is the adapter's `%{query, env_id, branch?,
   attempts?}`.
   """
   @spec start_cloud_run(map(), GenServer.server()) :: {:ok, run_id()} | {:error, term()}
@@ -472,6 +474,12 @@ defmodule FermixCore.Harness.Manager do
       # run's own completion knows whether it may continue (§23.2). A `block`
       # request carries none.
       continuation_depth: Map.get(request, :continuation_depth, 0),
+      # The finished run whose follow-up turn launched this one, so the access
+      # gate continues each finished run as one run at most; a run it
+      # dispatched as the chain's next is admitted only as that run's first
+      # child, checked inside the admit.
+      continued_from_run_id: Map.get(request, :continued_from_run_id),
+      sole_continuation: Map.get(request, :sole_continuation, false),
       parent_job_id: Map.get(snapshot, :parent_job_id),
       delivery_mode: Map.fetch!(snapshot, :delivery_mode),
       platform: Map.get(snapshot, :platform),
@@ -687,6 +695,7 @@ defmodule FermixCore.Harness.Manager do
       origin_kind: Map.fetch!(snapshot, :origin_kind),
       origin_session_id: request.origin_session_id,
       continuation_depth: Map.get(request, :continuation_depth, 0),
+      continued_from_run_id: Map.get(request, :continued_from_run_id),
       parent_job_id: Map.get(snapshot, :parent_job_id),
       delivery_mode: Map.fetch!(snapshot, :delivery_mode),
       platform: Map.get(snapshot, :platform),
@@ -1562,7 +1571,9 @@ defmodule FermixCore.Harness.Manager do
       # present-but-nil key.
       timeout_minutes: Map.get(request, :timeout_minutes) || Config.default_timeout_minutes(),
       progress: Map.get(request, :progress, :quiet),
-      continuation_depth: Map.get(request, :continuation_depth, 0)
+      continuation_depth: Map.get(request, :continuation_depth, 0),
+      continued_from_run_id: Map.get(request, :continued_from_run_id),
+      sole_continuation: Map.get(request, :sole_continuation, false)
     }
   end
 
@@ -1608,7 +1619,8 @@ defmodule FermixCore.Harness.Manager do
       snapshot: Map.fetch!(request, :snapshot),
       origin_session_id: Map.fetch!(request, :origin_session_id),
       ctx: Map.get(request, :ctx, %{}),
-      continuation_depth: Map.get(request, :continuation_depth, 0)
+      continuation_depth: Map.get(request, :continuation_depth, 0),
+      continued_from_run_id: Map.get(request, :continued_from_run_id)
     }
   end
 

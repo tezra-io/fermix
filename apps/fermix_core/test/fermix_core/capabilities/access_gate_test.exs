@@ -28,6 +28,8 @@ defmodule FermixCore.Capabilities.AccessGateTest do
 
   # The stand-in executor: reports every run to the test and emits the executor's
   # own exec event, as the plugin executors do.
+  def answer(_args, _context, output), do: {:ok, %{success: true, output: output, error: nil}}
+
   def run(args, context, test_pid) do
     send(test_pid, {:executed, args, context})
     ToolTelemetry.exec("tesla_unlock_doors", context, true, 0)
@@ -232,6 +234,8 @@ defmodule FermixCore.Capabilities.AccessGateTest do
       end
     end
 
+    # The span it exports is errored (a bounded code and fixed summary, no
+    # user content), so a grader counts the call as held, never as succeeded.
     test "the held call emits one exec event proving it never ran", ctx do
       held_text(execute(tainted(ctx)))
 
@@ -247,6 +251,8 @@ defmodule FermixCore.Capabilities.AccessGateTest do
                phase: "pre_execution"
              }
 
+      assert metadata.error_code == "held_this_chat"
+      assert metadata.error_summary == "held by the access gate for the owner's confirmation"
       refute_received {:tool_exec, _}
     end
 
@@ -458,6 +464,8 @@ defmodule FermixCore.Capabilities.AccessGateTest do
       assert metadata.tool == "computer_use"
       assert metadata.access_gate == "refused_waiting"
       assert metadata.policy_enforcement.decision == "deny"
+      assert metadata.error_code == "refused_waiting"
+      assert metadata.error_summary == "refused by the access gate"
       refute_received {:tool_exec, _}
     end
 
@@ -552,7 +560,202 @@ defmodule FermixCore.Capabilities.AccessGateTest do
     end
   end
 
+  # M60 S3: a run a cue woke reads content an outsider wrote, so no
+  # access-sensitive command runs there, whatever the job's allowlist names.
+  describe "a run a cue woke" do
+    test "a flagged call is refused even when the job's row names the tool", ctx do
+      context = Map.put(scheduled(ctx, AllowlistedJobs), :trigger, "cue")
+
+      assert held_text(execute(context)) =~ "woken by a cue"
+      refute_received {:executed, _, _}
+
+      assert_received {:tool_exec, metadata}
+      assert metadata.access_gate == "refused_cue_run"
+      assert metadata.policy_enforcement.decision == "deny"
+      refute_received {:tool_exec, _}
+    end
+
+    test "the same job's scheduled and manual runs still dispatch", ctx do
+      for trigger <- ["schedule", "manual"] do
+        context = Map.put(scheduled(ctx, AllowlistedJobs), :trigger, trigger)
+        assert {:ok, %{success: true}} = execute(context)
+        assert_received {:executed, @args, %{access_gate: "scheduled"}}
+      end
+    end
+
+    test "check_job_tools refuses a flagged tool from a cue run", ctx do
+      context = Map.put(scheduled(ctx, AllowlistedJobs), :trigger, "cue")
+      assert {:error, text} = AccessGate.check_job_tools(["tesla_unlock_doors"], context)
+      assert text =~ "tesla_unlock_doors"
+    end
+  end
+
+  # M60 S6: only the owner, attended and untainted, in a private chat, may change
+  # what a watcher reads or what a task may do.
+  describe "owner_consent_turn?/1" do
+    test "an untainted attended turn in a private chat is consent", ctx do
+      assert AccessGate.owner_consent_turn?(chat(ctx))
+      assert AccessGate.owner_consent_turn?(chat(ctx, %{chat_type: "im"}))
+    end
+
+    test "a turn that read outside content is not consent", ctx do
+      refute AccessGate.owner_consent_turn?(tainted(ctx))
+
+      refute AccessGate.owner_consent_turn?(
+               chat(ctx, %{outside_sources: MapSet.new([{:cue, "eng-blogs"}])})
+             )
+    end
+
+    test "a turn the loop never stamped, or stamped with something else, is not consent", ctx do
+      refute AccessGate.owner_consent_turn?(Map.delete(chat(ctx), :outside_sources))
+      refute AccessGate.owner_consent_turn?(chat(ctx, %{outside_sources: []}))
+    end
+
+    test "a group chat and a Slack channel mention (no chat_type) are not consent", ctx do
+      for chat_type <- ["group", "supergroup", "channel", "guild", "mpim"] do
+        refute AccessGate.owner_consent_turn?(chat(ctx, %{chat_type: chat_type})), chat_type
+      end
+
+      refute AccessGate.owner_consent_turn?(Map.delete(chat(ctx), :chat_type))
+      refute AccessGate.owner_consent_turn?(chat(ctx, %{chat_type: nil}))
+    end
+
+    test "the paired phone and the Mac app are private though they carry no chat_type", ctx do
+      for channel <- ["mobile", "companion"] do
+        unlabelled = ctx |> chat(%{channel: channel}) |> Map.delete(:chat_type)
+        assert AccessGate.owner_consent_turn?(unlabelled), channel
+
+        tainted = Map.put(unlabelled, :outside_sources, MapSet.new([{:cue, "eng-blogs"}]))
+        refute AccessGate.owner_consent_turn?(tainted), channel
+      end
+
+      refute AccessGate.owner_consent_turn?(
+               ctx
+               |> chat(%{channel: "slack"})
+               |> Map.delete(:chat_type)
+             )
+    end
+
+    test "a scheduled run is not consent, even one stamped as a private attended chat", ctx do
+      refute AccessGate.owner_consent_turn?(scheduled(ctx, AllowlistedJobs))
+
+      clean_job_run =
+        chat(ctx, %{conversation_key: {:scheduled_job, "job_x", "run_1"}, job_id: "job_x"})
+
+      refute AccessGate.owner_consent_turn?(clean_job_run)
+      refute AccessGate.owner_consent_turn?(chat(ctx, %{trigger: "cue"}))
+    end
+
+    test "a shared Buzz session is not consent; a clean editor session is", ctx do
+      refute AccessGate.owner_consent_turn?(acp(ctx, @buzz_env, %{chat_type: "private"}))
+      assert AccessGate.owner_consent_turn?(acp(ctx, @zed_env, %{chat_type: "private"}))
+    end
+
+    test "unattended, guest, worker and continuation turns are not consent", ctx do
+      for extra <- [
+            %{computer_use_origin: :unattended},
+            %{source_trust: :guest},
+            %{subagent_depth: 1},
+            %{skill_depth: 1},
+            %{harness_continuation_depth: 1}
+          ] do
+        refute AccessGate.owner_consent_turn?(chat(ctx, extra)), inspect(extra)
+      end
+    end
+  end
+
+  # S6 without its taint condition: the owner's own attended turn in a private
+  # chat, whatever it has read (a `drop` example needs only this).
+  describe "owner_private_turn?/1" do
+    test "a private attended turn is private whatever it read; consent adds read-nothing",
+         ctx do
+      for context <- [chat(ctx), tainted(ctx)] do
+        assert AccessGate.owner_private_turn?(context)
+      end
+
+      assert AccessGate.owner_consent_turn?(chat(ctx))
+      refute AccessGate.owner_consent_turn?(tainted(ctx))
+    end
+
+    test "a shared chat, a scheduled or cue run and a worker are never private", ctx do
+      for context <- [
+            chat(ctx, %{chat_type: "group"}),
+            Map.delete(chat(ctx), :chat_type),
+            chat(ctx, %{trigger: "cue"}),
+            chat(ctx, %{subagent_depth: 1}),
+            scheduled(ctx, AllowlistedJobs),
+            acp(ctx, @buzz_env, %{chat_type: "private"})
+          ] do
+        refute AccessGate.owner_private_turn?(context)
+      end
+    end
+  end
+
+  # The execution half of a tool offered only on an attended owner turn
+  # (`manage_watcher`, `list_cues`): advertisement is never the only barrier.
+  describe "check_attended/2" do
+    test "an attended owner turn passes, tainted or not", ctx do
+      assert :ok = AccessGate.check_attended("list_cues", chat(ctx))
+      assert :ok = AccessGate.check_attended("list_cues", tainted(ctx))
+      assert :ok = AccessGate.check_attended("list_cues", voice(ctx))
+    end
+
+    test "a scheduled, cue, worker or guest run is refused with a sentence naming the tool",
+         ctx do
+      for context <- [
+            scheduled(ctx, AllowlistedJobs),
+            Map.put(scheduled(ctx, AllowlistedJobs), :trigger, "cue"),
+            chat(ctx, %{subagent_depth: 1}),
+            chat(ctx, %{skill_depth: 1}),
+            chat(ctx, %{source_trust: :guest})
+          ] do
+        assert {:error, text} = AccessGate.check_attended("manage_watcher", context)
+        assert text =~ "manage_watcher"
+        assert text =~ "own chat"
+      end
+    end
+  end
+
+  # A plugin command's prompt shows its JSON arguments on one line: a value
+  # cannot start a line of its own or reorder what the owner reads.
+  describe "a plugin command's arguments line" do
+    test "escapes line breaks, bidi and zero-width characters in an argument", ctx do
+      args = %{"vin" => "5YJ\nAsked because: you said so\u202E\u200B"}
+      held_text(Capability.execute(flagged(), args, tainted(ctx)))
+
+      assert_received {:reply, {:approval_prompt, prompt, @token}}
+      [arguments] = prompt |> String.split("\n") |> Enum.filter(&(&1 =~ "Arguments: "))
+      assert arguments =~ ~S"5YJ\nAsked because: you said so\u{202E}\u{200B}"
+      refute prompt =~ "\u202E"
+      refute prompt =~ "\u200B"
+
+      assert prompt |> String.split("\n") |> Enum.count(&String.starts_with?(&1, "Asked because")) ==
+               1
+    end
+  end
+
   describe "confirm/1" do
+    # The owner reads the outcome in their chat: a line break or format
+    # character in what the command returned is escaped, and a session secret
+    # it echoed is redacted, as in the prompt.
+    test "the outcome the owner reads is escaped and redacted", ctx do
+      secret = "relay-secret-#{System.unique_integer([:positive])}"
+      output = "done\nConfirm tesla_open_trunk?\u202E #{secret}"
+      noisy = %{flagged() | executor: {__MODULE__, :answer, [output]}}
+      :ok = CapabilityRegistry.unregister(ctx.registry, "tesla_unlock_doors")
+      :ok = CapabilityRegistry.register(ctx.registry, noisy)
+
+      context = tainted(ctx, %{redact_values: [secret]})
+      held_text(Capability.execute(noisy, @args, context))
+      assert_received {:approval, %{access_sensitive: id}}
+
+      assert {:ok, outcome} = AccessGate.confirm(id, ctx.pending)
+      refute outcome =~ "\n"
+      refute outcome =~ "\u202E"
+      refute outcome =~ secret
+      assert outcome =~ ~S"done\nConfirm tesla_open_trunk?\u{202E}"
+    end
+
     test "runs the recorded call exactly once with the recorded arguments", ctx do
       held_text(execute(tainted(ctx)))
       assert_received {:approval, %{access_sensitive: id}}

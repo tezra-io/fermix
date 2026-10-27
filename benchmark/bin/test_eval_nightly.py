@@ -503,13 +503,29 @@ def test_a_skipped_tier_on_a_changed_night_still_files(jobs):
 
 
 def test_the_macos_smoke_runs_the_box_candidate():
-    # One nightly, one candidate: the ungraded smoke answers on the model the
-    # graded tier measures.
-    box = (NIGHTLY.parent / "eval-box.yml").read_text(encoding="utf-8")
+    # One nightly, one candidate: the ungraded smoke answers on the provider, model
+    # and effort the graded tier measures.
+    box = yaml.safe_load((NIGHTLY.parent / "eval-box.yml").read_text(encoding="utf-8"))
     smoke = (HERE.parent / "ci" / "macos_smoke.sh").read_text(encoding="utf-8")
-    box_defaults = set(re.findall(r"default: (gpt-[\w.-]+)", box))
+    # PyYAML reads the bare key `on` as the boolean True.
+    box_defaults = {box[True][kind]["inputs"]["model"]["default"]
+                    for kind in ("workflow_call", "workflow_dispatch")}
+    effort = box["jobs"]["box"]["env"]["CANDIDATE_REASONING_EFFORT"]
     smoke_default = re.findall(r'SMOKE_MODEL="\$\{SMOKE_MODEL:-([\w.-]+)\}"', smoke)
     assert len(box_defaults) == 1 and smoke_default == list(box_defaults)
+    seed_args = re.findall(r'FERMIX_CAP_SEED_ARGS="([^"]+)"', smoke)
+    assert seed_args == [f"--provider anthropic --model $SMOKE_MODEL --reasoning-effort {effort}"]
+    assert '[ -n "${ANTHROPIC_API_KEY:-}" ]' in smoke
+
+
+def test_the_macos_smoke_gets_the_candidate_key_and_not_the_judges(jobs):
+    (step,) = [s for s in jobs["macos-smoke"]["steps"] if s.get("name") == "Run the smoke"]
+    assert step["env"] == {"ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY }}"}
+
+
+def test_the_regression_caller_grants_no_id_token(jobs):
+    # Its judge signs in with an API key and it runs no Claude Code.
+    assert jobs["regression"]["permissions"] == {"contents": "read"}
 
 
 def test_these_tests_run_in_the_tests_loop():

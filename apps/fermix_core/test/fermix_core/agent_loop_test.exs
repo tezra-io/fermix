@@ -1412,6 +1412,54 @@ defmodule FermixCore.AgentLoopTest do
 
       assert_received {:sources, ^inherited}
     end
+
+    # M60 S2: a cue run's context arrives seeded with the cue's source, so the run
+    # is tainted from its first token, before any of its tools read anything, and
+    # what it reads later adds to that seed. S3 holds through the loop too: a
+    # flagged call in its first step is refused, whatever the job's row names.
+    # The probe and the reader carry cue-surface names (`Jobs.CueSurface`): the
+    # access gate refuses any other tool in a cue run (M60 §10.5).
+    test "a cue run's seeded source survives the loop and taints its first step" do
+      attach_tool_exec()
+
+      set_mock_responses([
+        turn("",
+          tool_calls: [
+            tool_call("c1", "file_read", %{}),
+            tool_call("c2", "tesla_unlock_doors", %{"vin" => "5YJ"}),
+            tool_call("c3", "content_search", %{})
+          ]
+        ),
+        turn("", tool_calls: [tool_call("c4", "file_read", %{})]),
+        turn("Done")
+      ])
+
+      seeded = MapSet.new([{:cue, "eng-blogs"}])
+
+      context = %{
+        agent_name: "scheduled:job_cue",
+        conversation_key: {:scheduled_job, "job_cue", "run_cue"},
+        session_id: "cue-run-#{System.unique_integer([:positive])}",
+        source_trust: :operator,
+        job_id: "job_cue",
+        trigger: "cue",
+        outside_sources: seeded
+      }
+
+      cue_caps = [
+        taint_cap("file_read", executor: {__MODULE__, :report_sources, []}),
+        taint_cap("content_search", policy_class: :network)
+      ]
+
+      assert {:ok, _result} = run_loop(capabilities: cue_caps ++ access_caps(), context: context)
+
+      assert_received {:sources, ^seeded}
+      assert_received {:sources, later}
+      assert MapSet.subset?(MapSet.put(seeded, {:tool, "content_search"}), later)
+
+      assert_received {:tool_exec, _,
+                       %{tool: "tesla_unlock_doors", access_gate: "refused_cue_run"}}
+    end
   end
 
   # -- Multiple tool calls in one turn --

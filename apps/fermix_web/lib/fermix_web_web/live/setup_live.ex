@@ -19,6 +19,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.ComputerHistory.InstalledApps
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.SidecarInstaller
+  alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Harness.Vendors, as: HarnessVendors
   alias FermixCore.IMessage
   alias FermixCore.IMessage.Control, as: IMessageControl
@@ -31,6 +32,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
   alias FermixCore.Meetings.SignIn
   alias FermixCore.Memory.CompactionConfig
+  alias FermixCore.OpenLoops.Config, as: OpenLoopsConfig
   alias FermixCore.Plugins.Auth, as: PluginAuth
   alias FermixCore.Plugins.Catalog, as: PluginCatalog
   alias FermixCore.Plugins.Config, as: PluginConfig
@@ -61,6 +63,11 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
   alias FermixWebWeb.SetupLive.Components
+  alias FermixWebWeb.SetupLive.CuesState
+  alias FermixWebWeb.SetupLive.Phone
+
+  require AnthropicLogin
+  require Logger
 
   # Computer use is a core feature, not a plugin whose branding we receive, so its
   # card name + logo are owned here. The SVG is inlined as a data URI at compile
@@ -98,6 +105,7 @@ defmodule FermixWebWeb.SetupLive do
       component: "personalization",
       description: "User profile"
     },
+    %{id: "cues", label: "Cues", component: nil, description: "Outside input"},
     %{id: "doctor", label: "Doctor", component: nil, description: "Final checks"}
   ]
 
@@ -168,6 +176,8 @@ defmodule FermixWebWeb.SetupLive do
   # Flipping skill curation adds/removes the Scheduler child (child-absent
   # gating), so it only takes effect on a daemon restart.
   @skill_curation_restart_keys [:skill_curation_enabled]
+  # The open-loops scheduler is gated the same way (child-absent at boot).
+  @open_loops_restart_keys [:open_loops_enabled]
   # `[fermix_core.meetings]` is written as a section rather than through wizard
   # answers, so these never reach `runtime_restart_answers?/1`; they are the keys
   # `Meetings.ready?/0` reads, and tool registration reads it only at boot.
@@ -216,6 +226,7 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:chatgpt_auth_url, nil)
       |> assign(:chatgpt_notice?, false)
       |> assign(:chatgpt_signing_out?, false)
+      |> assign(:anthropic_importing?, false)
       |> assign(:plugin_auth_tasks, %{})
       |> assign(:plugin_auth_url, nil)
       |> assign(:plugin_install_tasks, %{})
@@ -226,10 +237,16 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:resource_picker, nil)
       |> assign(:computer_history_picker, nil)
       |> assign(:meetings_config_open?, false)
+      |> assign(:phone, Phone.initial())
       |> assign_report(report)
 
     {:ok, socket}
   end
+
+  # A pairing window this page still shows is cancelled when the page goes away
+  # (the tab closed or the socket dropped).
+  @impl true
+  def terminate(_reason, socket), do: Phone.terminate(socket)
 
   defp setup_authorization(session) do
     session["setup_authorized"] || session[:setup_authorized]
@@ -238,7 +255,12 @@ defmodule FermixWebWeb.SetupLive do
   @impl true
   def handle_event("select_tab", %{"tab" => tab_id}, socket) do
     active_tab = if tab_known?(tab_id), do: tab_id, else: socket.assigns.active_tab
-    {:noreply, assign(socket, :active_tab, active_tab) |> assign(:saved_flash, nil)}
+
+    {:noreply,
+     socket
+     |> assign(:active_tab, active_tab)
+     |> assign(:saved_flash, nil)
+     |> refresh_cues_on(active_tab)}
   end
 
   def handle_event("next_step", _params, socket) do
@@ -348,11 +370,12 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
+  # One read: the import itself says when there is no login to import.
   def handle_event("anthropic_import", _params, socket) do
-    if anthropic_login_impl().claude_code_available?() do
-      {:noreply, connect_anthropic(socket, fn -> anthropic_login_impl().import_claude_code() end)}
+    if socket.assigns.anthropic_importing? do
+      {:noreply, socket}
     else
-      {:noreply, flash_error(socket, "No Claude Code login found to import.")}
+      {:noreply, start_anthropic_import(socket)}
     end
   end
 
@@ -413,7 +436,19 @@ defmodule FermixWebWeb.SetupLive do
 
   def handle_event("select_channel", %{"channel" => channel}, socket) do
     channel = parse_channel_field(channel, socket.assigns.channels_form.editing)
-    {:noreply, assign(socket, :channels_form, %{socket.assigns.channels_form | editing: channel})}
+    socket = assign(socket, :channels_form, %{socket.assigns.channels_form | editing: channel})
+
+    # The Phone card reads the phone channel only while it is the one shown.
+    {:noreply, if(channel == :mobile, do: Phone.load(socket), else: socket)}
+  end
+
+  # The Phone card's events. A settings write refreshes the report, so the card,
+  # the banner and the restart notice follow it, and keeps the Phone card shown.
+  def handle_event("phone_" <> _rest = event, params, socket) do
+    case Phone.handle_event(event, params, socket) do
+      {socket, nil} -> {:noreply, socket}
+      {socket, write} -> {:noreply, refresh_after_phone_write(socket, write)}
+    end
   end
 
   def handle_event("search_changed", %{"search_form" => params}, socket) do
@@ -839,6 +874,7 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:timezone, params["timezone"])
       |> maybe_put_string(:communication_style, params["communication_style"])
       |> maybe_put_skill_curation_enabled(params)
+      |> maybe_put_open_loops_enabled(params)
 
     {:noreply,
      save_answers(socket, answers, "Personalization saved.", Map.get(root, "__nav"),
@@ -859,6 +895,13 @@ defmodule FermixWebWeb.SetupLive do
      save_answers(socket, answers, "Coding agents saved.", Map.get(root, "__nav"),
        restart_required?: runtime_restart_answers?(answers)
      )}
+  end
+
+  # The Cues tab (M60 §15): `CuesState` turns each `cues_*` event into a
+  # change and says what follows.
+  def handle_event("cues_" <> action, params, socket) do
+    result = CuesState.handle(action, params, socket.assigns.cues, cues_opts())
+    {:noreply, apply_cues(socket, result)}
   end
 
   # The one action offered while the settings file has changed outside this
@@ -953,6 +996,10 @@ defmodule FermixWebWeb.SetupLive do
   def handle_info({:DOWN, ref, :process, _pid, reason}, socket) do
     {:noreply, fail_task(socket, ref, reason)}
   end
+
+  def handle_info({phone_read, _gen} = message, socket)
+      when phone_read in [:phone_poll, :phone_reach],
+      do: {:noreply, Phone.handle_info(message, socket)}
 
   def handle_info(:perform_restart, socket) do
     # Supervised release only (gated in apply_restart): exit non-zero so the OS
@@ -1092,6 +1139,24 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, finish_chatgpt_logout(socket, {:error, reason})}
   end
 
+  def handle_async(:anthropic_import, {:ok, result}, socket) do
+    {:noreply, socket |> assign(:anthropic_importing?, false) |> connect_anthropic(result)}
+  end
+
+  # Only the exception's name reaches the log: a crash reason's stack can hold
+  # the arguments of the call it stopped in, and those can be the login.
+  def handle_async(:anthropic_import, {:exit, reason}, socket) do
+    Logger.error("setup: the Claude Code import stopped: #{exit_kind(reason)}")
+
+    {:noreply,
+     socket
+     |> assign(:anthropic_importing?, false)
+     |> flash_error(
+       "The Claude Code import stopped before it answered, so nothing was imported. " <>
+         "See the daemon log."
+     )}
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -1100,6 +1165,7 @@ defmodule FermixWebWeb.SetupLive do
       active_tab={@active_tab}
       embed?={@embed?}
       channels_form={@channels_form}
+      phone={@phone}
       doctor_result={@doctor_result}
       memory_form={@memory_form}
       personalization_form={@personalization_form}
@@ -1116,7 +1182,7 @@ defmodule FermixWebWeb.SetupLive do
           @chatgpt_signing_out?
         )
       }
-      anthropic_auth={@anthropic_auth}
+      anthropic_auth={Map.put(@anthropic_auth, :importing?, @anthropic_importing?)}
       anthropic_import_available?={@anthropic_import_available?}
       doctor_probe_running?={@doctor_probe_running?}
       provider_form={@provider_form}
@@ -1146,6 +1212,7 @@ defmodule FermixWebWeb.SetupLive do
       skill_summary={@skill_summary}
       tabs={@tabs}
       tool_summary={@tool_summary}
+      cues={@cues}
     />
     """
   end
@@ -1206,7 +1273,68 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:tool_summary, tool_summary())
     |> assign(:skill_summary, skill_summary())
     |> assign(:plugin_summary, plugin_summary(snapshot))
+    |> assign(:cues, build_cues(snapshot))
   end
+
+  # --- cues (M60 §15) ---
+
+  # Built with every report, so a save in any tab leaves it current.
+  defp build_cues(snapshot), do: CuesState.build(snapshot, cues_opts())
+
+  # Opening the tab re-reads what the daemon reports (the door, source rows).
+  defp refresh_cues_on(socket, "cues"),
+    do: assign(socket, :cues, build_cues(socket.assigns.report.wizard.config_snapshot))
+
+  defp refresh_cues_on(socket, _tab), do: socket
+
+  defp apply_cues(socket, {:edit, cues}), do: assign(socket, :cues, cues)
+  defp apply_cues(socket, :refresh), do: refresh_cues_on(socket, "cues")
+
+  # A save re-reads the report (so the section, and any sentinel the change
+  # wrote, come from the daemon), then shows a value meant to be seen once. A
+  # save that went through while a step after it did not (a new webhook whose
+  # URL could not be made) says so in the error tone.
+  defp apply_cues(socket, {:saved, message, opts}) do
+    restart? = Keyword.get(opts, :restart?, false)
+
+    socket
+    |> assign(:restart_pending?, socket.assigns.restart_pending? or restart?)
+    |> refresh_report(message, restart_required?: restart?)
+    |> cues_flash_tone(Keyword.get(opts, :tone, :info), message)
+    |> put_cues_reveal(Keyword.get(opts, :reveal))
+  end
+
+  # A refused save is said in the banner and, while the source editor is open,
+  # inside it beside Save, where the owner is looking.
+  defp apply_cues(socket, {:error, reason, cues}),
+    do: socket |> assign(:cues, editor_refusal(cues, reason)) |> save_refused(reason)
+
+  defp editor_refusal(%{source_editor: %{} = editor} = cues, reason),
+    do: %{cues | source_editor: %{editor | refusal: format_config_error(reason)}}
+
+  defp editor_refusal(cues, _reason), do: cues
+
+  defp cues_flash_tone(socket, :info, _message), do: socket
+
+  defp cues_flash_tone(socket, :error, message),
+    do: socket |> assign_config_banner() |> flash_error(message)
+
+  defp put_cues_reveal(socket, nil), do: socket
+
+  # A step that failed after the save carries its refusal, said in the words
+  # every other refused save on this page uses.
+  defp put_cues_reveal(%{assigns: %{cues: cues}} = socket, %{reason: reason} = reveal)
+       when is_map(cues) do
+    reveal = reveal |> Map.delete(:reason) |> Map.put(:sentence, format_config_error(reason))
+    assign(socket, :cues, %{cues | reveal: reveal})
+  end
+
+  defp put_cues_reveal(%{assigns: %{cues: cues}} = socket, reveal) when is_map(cues),
+    do: assign(socket, :cues, %{cues | reveal: reveal})
+
+  # The tab's seams for a LiveView test (`:repo`, `:door`, `:now`,
+  # `:mandate_opts`); production reads the daemon's own.
+  defp cues_opts, do: Application.get_env(:fermix_web, :cues_pane_opts, [])
 
   defp assign_config_banner(socket),
     do: assign(socket, :config_banner, config_banner_state(RestartState.config_state()))
@@ -1220,6 +1348,18 @@ defmodule FermixWebWeb.SetupLive do
   # reload re-runs the read that failed, so the button would be a loop.
   defp config_banner_state({:config_unreadable, sentence}),
     do: %{message: sentence, action: nil}
+
+  # After a Phone card write: the card, the banner and the restart notice follow
+  # the new settings, and the Phone card stays the one shown.
+  defp refresh_after_phone_write(socket, write) do
+    editing = socket.assigns.channels_form.editing
+    restart? = get_in(write, ["restart", "required"]) == true
+    socket = assign_report(socket, Wizard.report())
+
+    socket
+    |> assign(:channels_form, %{socket.assigns.channels_form | editing: editing})
+    |> assign(:restart_pending?, socket.assigns.restart_pending? or restart?)
+  end
 
   defp save_answers(socket, answers, message, nav, opts \\ []) do
     socket.assigns.report.wizard
@@ -1304,6 +1444,9 @@ defmodule FermixWebWeb.SetupLive do
   defp format_config_error({:secret_store_failed, _key, sentence}) when is_binary(sentence),
     do: sentence
 
+  # A cue setting the config refused, with its own sentence (M60 §15).
+  defp format_config_error({:invalid, sentence}) when is_binary(sentence), do: sentence
+
   defp format_config_error(reason), do: Redaction.format(reason)
 
   defp external_change_message(sections) do
@@ -1367,7 +1510,8 @@ defmodule FermixWebWeb.SetupLive do
         @realtime_restart_keys ++
         @channel_restart_keys ++
         @harness_restart_keys ++
-        @skill_curation_restart_keys
+        @skill_curation_restart_keys ++
+        @open_loops_restart_keys
 
     Enum.any?(answers, fn {key, _value} -> key in restart_keys end)
   end
@@ -1749,6 +1893,7 @@ defmodule FermixWebWeb.SetupLive do
       signal: signal_form(channels),
       imessage: imessage_form(channels),
       acp: acp_form(channels),
+      mobile: mobile_form(channels),
       imessage_available?: imessage_available?()
     }
   end
@@ -1825,6 +1970,13 @@ defmodule FermixWebWeb.SetupLive do
   # actually running rather than offering to turn off something already on.
   defp acp_form(channels) do
     %{enabled: channel_enabled?(Keyword.get(channels, :acp, []), true)}
+  end
+
+  # The card's pill only; the Phone panel reads the channel itself
+  # (`FermixWebWeb.SetupLive.Phone`). Off unless the block says on, as the
+  # `channels.mobile` switch row reads it.
+  defp mobile_form(channels) do
+    %{enabled: channel_enabled?(Keyword.get(channels, :mobile, []), false)}
   end
 
   defp build_sandbox_form(snapshot) do
@@ -2292,7 +2444,9 @@ defmodule FermixWebWeb.SetupLive do
       communication_style: Keyword.get(personalization, :communication_style, ""),
       skill_curation_enabled:
         snapshot |> get_fermix_core(:skill_curation) |> Keyword.get(:enabled, true),
-      skill_curation_destination: skill_curation_destination()
+      skill_curation_destination: skill_curation_destination(),
+      open_loops_enabled: snapshot |> get_fermix_core(:open_loops) |> OpenLoopsConfig.enabled?(),
+      open_loops_destination: open_loops_destination()
     }
   end
 
@@ -2302,6 +2456,15 @@ defmodule FermixWebWeb.SetupLive do
     case SkillCurationDelivery.resolve_target() do
       {:ok, target} -> "Proposals arrive in #{target.platform}."
       :no_delivery_target -> "Proposals wait in /skills proposals until a channel owner is set."
+    end
+  end
+
+  # Names where check-ins will land (MILESTONE_78_OPEN_LOOPS §10): the owner
+  # inbox they are sent to, pure config reads.
+  defp open_loops_destination do
+    case OwnerInbox.resolve() do
+      {:ok, inbox} -> "Check-ins will arrive in #{inbox.platform}."
+      :no_delivery_target -> "Until a channel has an owner configured, Fermix records no loops."
     end
   end
 
@@ -3417,6 +3580,10 @@ defmodule FermixWebWeb.SetupLive do
   # nothing was spent: the flash says to retry rather than naming the reason.
   defp sign_in_failure(_label, :profile_busy), do: Store.busy_sentence()
 
+  # A Claude Code import's own failure, in the words every surface uses.
+  defp sign_in_failure("Anthropic", reason) when AnthropicLogin.is_import_failure(reason),
+    do: AnthropicLogin.failure_sentence(reason)
+
   defp sign_in_failure(label, reason),
     do: "#{label} sign-in failed: #{Redaction.format(reason)}"
 
@@ -3961,10 +4128,21 @@ defmodule FermixWebWeb.SetupLive do
   defp chatgpt_logout_outcome(socket, {:error, reason}),
     do: flash_error(socket, ChatGPT.failure_sentence(reason))
 
-  # --- Anthropic setup-token / Claude Code import (synchronous, no loopback) -
+  # --- Claude Code import (off the page's process, no loopback) --------------
 
-  defp connect_anthropic(socket, login_fun) do
-    with {:ok, _entry} <- login_fun.(),
+  # The read can wait on the login keychain's prompt for as long as a pushed
+  # event waits for its reply, and the browser reloads the page when that wait
+  # runs out, so the import answers the page through `handle_async/3`.
+  defp start_anthropic_import(socket) do
+    impl = anthropic_login_impl()
+
+    socket
+    |> assign(:anthropic_importing?, true)
+    |> start_async(:anthropic_import, fn -> impl.import_claude_code() end)
+  end
+
+  defp connect_anthropic(socket, login_result) do
+    with {:ok, _entry} <- login_result,
          {:ok, _report} <- Wizard.set_provider_auth_mode(:anthropic, :oauth) do
       socket
       |> assign(:restart_pending?, true)
@@ -3980,14 +4158,19 @@ defmodule FermixWebWeb.SetupLive do
 
   defp anthropic_auth_summary, do: oauth_profile_summary(Store.profile(:anthropic))
 
+  defp exit_kind({%{__exception__: true, __struct__: module}, _stacktrace}), do: inspect(module)
+  defp exit_kind(reason) when is_atom(reason), do: inspect(reason)
+  defp exit_kind(_reason), do: "an exit"
+
   defp anthropic_login_impl do
     Application.get_env(:fermix_web, :anthropic_login_impl, AnthropicLogin)
   end
 
-  # Probe only when Anthropic is the active provider — claude_code_available?
-  # can shell out (keychain), so it should not run on every render.
+  # Asked on every report (mount and each save) in this process, so it asks
+  # only whether a Claude Code login exists, which reads no secret and raises
+  # no keychain prompt, and only while Anthropic is the active provider.
   defp anthropic_import_available?(snapshot) do
-    current_provider(snapshot) == :anthropic and anthropic_login_impl().claude_code_available?()
+    current_provider(snapshot) == :anthropic and anthropic_login_impl().claude_code_present?()
   end
 
   # Shared connected/error read for the oauth profiles: a missing auth file or
@@ -4106,6 +4289,7 @@ defmodule FermixWebWeb.SetupLive do
   defp parse_channel_field("signal", _default), do: :signal
   defp parse_channel_field("imessage", _default), do: :imessage
   defp parse_channel_field("acp", _default), do: :acp
+  defp parse_channel_field("mobile", _default), do: :mobile
   defp parse_channel_field(_, default), do: default
 
   defp parse_effort_field(field, default) do
@@ -4292,6 +4476,17 @@ defmodule FermixWebWeb.SetupLive do
     case Map.fetch(params, "skill_curation_enabled") do
       {:ok, "true"} -> [{:skill_curation_enabled, true} | answers]
       {:ok, "false"} -> [{:skill_curation_enabled, false} | answers]
+      _absent -> answers
+    end
+  end
+
+  # The open-loops toggle (MILESTONE_78_OPEN_LOOPS §10), the same hidden-false
+  # pairing; the wizard reducer writes `enabled = true` on accept and deletes
+  # the key on decline (default already false).
+  defp maybe_put_open_loops_enabled(answers, params) do
+    case Map.fetch(params, "open_loops_enabled") do
+      {:ok, "true"} -> [{:open_loops_enabled, true} | answers]
+      {:ok, "false"} -> [{:open_loops_enabled, false} | answers]
       _absent -> answers
     end
   end

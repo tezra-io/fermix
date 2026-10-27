@@ -260,11 +260,14 @@ defmodule FermixCore.AgentLoop do
   # can never spawn workers that regain the tools it lost. Correct for every run
   # type, including workers themselves: a worker's own loop re-stamps its
   # (already-intersected) values. `effective_allowed_tools` is `nil` when the
-  # run is unrestricted.
+  # run is unrestricted. `effective_trust` is the trust the loop resolved its
+  # surface at, which a skill's worker can hold below its person's
+  # `source_trust` (a plugin skill runs at guest under the owner's turn).
   defp stamp_effective_surface(context, trust, policy, allowed_tools) do
     context
     |> Map.put(:effective_policy, CapabilityRegistry.resolved_policy_classes(trust, policy))
     |> Map.put(:effective_allowed_tools, allowed_tools)
+    |> Map.put(:effective_trust, trust)
   end
 
   defp index_by_name(capabilities) do
@@ -622,12 +625,27 @@ defmodule FermixCore.AgentLoop do
   defp record_outside_sources(context, tool_calls, state) do
     sources =
       tool_calls
-      |> Enum.map(&Map.get(state.capabilities_by_name, &1.name))
-      |> Enum.reject(&is_nil/1)
-      |> Enum.map(&UntrustedContent.outside_source/1)
+      |> Enum.map(&outside_source(&1, state))
       |> Enum.reject(&is_nil/1)
 
     Map.update!(context, :outside_sources, &Enum.into(sources, &1))
+  end
+
+  # A call's arguments say what it read (`list_cues`' view). Arguments that would
+  # not parse, or are not a JSON object, classify as none given, the tool's
+  # default view, so they can never clear a read.
+  defp outside_source(call, state) do
+    case Map.get(state.capabilities_by_name, call.name) do
+      nil -> nil
+      capability -> UntrustedContent.outside_source(capability, outside_arguments(call))
+    end
+  end
+
+  defp outside_arguments(call) do
+    case parse_arguments(call.arguments) do
+      {:ok, %{} = arguments} -> arguments
+      _unparsed_or_not_an_object -> %{}
+    end
   end
 
   defp continue_turn(turn, tool_results, warning, state) do

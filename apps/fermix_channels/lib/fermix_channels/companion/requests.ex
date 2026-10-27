@@ -708,20 +708,31 @@ defmodule FermixChannels.Companion.Requests do
   defp timeline_ref(attachment) do
     %{
       "ref" => value(attachment, :ref),
-      "kind" => value(attachment, :kind),
+      "kind" => attachment |> value(:kind) |> timeline_kind(),
       "mime" => value(attachment, :mime_type),
       "size_bytes" => value(attachment, :size_bytes)
     }
     |> maybe_put("filename", value(attachment, :file_name))
   end
 
+  # `voice` is a recording the owner made in the app: the `:voice` hint a
+  # channel-declared voice note carries, so it is the owner's own voice and not
+  # outside content (`UntrustedContent.attachment_sources/1`); an attached audio
+  # file is `audio` and is. An older daemon reads `voice` as no hint at all.
   defp hint(kind) when is_atom(kind) and not is_nil(kind), do: kind |> Atom.to_string() |> hint()
   defp hint("image"), do: :photo
   defp hint("animation"), do: :animation
   defp hint("video"), do: :video
   defp hint("audio"), do: :audio
+  defp hint("voice"), do: :voice
   defp hint(kind) when kind in ["document", "file"], do: :document
   defp hint(_unknown), do: nil
+
+  # `voice` declares who made a recording, not a new kind of media: the row and
+  # every media event name it `audio`, as a phone's recording always was, so a
+  # client that does not know `voice` draws it as before.
+  defp timeline_kind(kind) when kind in ["voice", :voice], do: "audio"
+  defp timeline_kind(kind), do: kind
 
   defp emit(opts, target, event), do: Keyword.fetch!(opts, :event_sink).(target, event)
 

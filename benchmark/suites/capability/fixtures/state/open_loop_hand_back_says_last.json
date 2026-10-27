@@ -1,0 +1,10 @@
+{"open_loops": [{"key": "lease",
+                 "intention": "Return the signed Ravelston lease renewal to the letting agent",
+                 "why_it_matters": "the agent re-lets the flat if it is not returned",
+                 "horizon_class": "medium",
+                 "said_days_ago": 10,
+                 "matters_in_days": -1,
+                 "touches": 2,
+                 "last_touch_days_ago": 2,
+                 "last_message": "Last week you said you'd return the signed Ravelston lease renewal, and the letting agent wants it by tomorrow; would it help if I drafted a short cover note to send with it?",
+                 "due_hours_ago": 4}]}

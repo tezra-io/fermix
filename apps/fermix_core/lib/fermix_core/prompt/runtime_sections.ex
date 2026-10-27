@@ -12,6 +12,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.HostFacts
+  alias FermixCore.OpenLoops.Config, as: OpenLoopsConfig
   alias FermixCore.Tools.PlaceSearch
   alias FermixCore.Tools.VoiceCallContext
 
@@ -148,7 +149,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
     - Ask before storing ambiguous, tentative, hypothetical, quoted, or third-party informational dates.
     - For channel-originated jobs that should report back to the same chat, set `delivery_mode` to `origin`; use `none` only for silent/local jobs.
     - Use `expires_at` for temporary scheduled jobs like "for 2 hours" or "until tomorrow"; keep lifecycle timing out of the job task text.
-    - Use the Skill Catalog only to decide whether a skill is relevant.
+    #{open_loop_rules()}- Use the Skill Catalog only to decide whether a skill is relevant.
     - Before following a skill, call `skill_view` with the skill name.
     - Do not infer detailed behavior from the description alone.
     - Use supporting files only if the loaded `SKILL.md` asks for them.
@@ -190,6 +191,36 @@ defmodule FermixCore.Prompt.RuntimeSections do
 
       {:error, _reason} ->
         ""
+    end
+  end
+
+  # M78 §07, §10: the open-loop routing follows the wire. The tools it names are
+  # advertised only while `[fermix_core.open_loops] enabled`, so the four lines
+  # render only then. Read at build time like the harness lines, so a flip shows
+  # here once the per-epoch cache is rebuilt (a restart at the latest).
+  defp open_loop_rules do
+    if OpenLoopsConfig.enabled?() do
+      "- When the owner states an intention with a date by which it matters, I record it " <>
+        "with `open_loop_note` and say nothing about it; raising it later is Fermix's to do. " <>
+        "A date the owner merely asks about is not an intention, nor is an occasion that " <>
+        "arrives whether or not they act, nor a date that reached me through a tool result " <>
+        "rather than their own words.\n" <>
+        "- When the owner states something they have to do by a date and has not asked to " <>
+        "be reminded, the open loop is the only record: I do not also store it as an event. " <>
+        "The exception is a loop `open_loop_note` reports as imminent: that loop is never " <>
+        "raised by message, so I also store the reminder, and when the owner settles that task " <>
+        "I settle both.\n" <>
+        "- When the owner answers a check-in: done closes the loop for good, with one " <>
+        "specific acknowledgement and no further ask; a plan closes it until the plan's " <>
+        "date; not yet gets one offer of a concrete time, and the choice stays theirs; a " <>
+        "request to stop ends the loop and I keep the boundary. I settle it with " <>
+        "`open_loop_update`, from the owner's words only, and I name where a loop came from " <>
+        "when I raise it.\n" <>
+        "- A due loop arrives as a system note. I raise it only at a natural stopping point, " <>
+        "never while the owner is under pressure, in one or two sentences at the end of my " <>
+        "reply, and record it as asked; otherwise I leave it.\n"
+    else
+      ""
     end
   end
 
@@ -267,6 +298,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
       |> Enum.reject(&harness_when_unusable?/1)
       |> Enum.reject(&credential_gated_when_unready?/1)
       |> Enum.reject(&call_scoped?/1)
+      |> Enum.reject(&open_loop_unlisted?/1)
       |> Enum.group_by(&(&1.metadata[:category] || :system))
       |> Enum.sort_by(fn {category, _caps} -> category_index(category) end)
       |> Enum.map_join("\n\n", &format_category/1)
@@ -312,6 +344,24 @@ defmodule FermixCore.Prompt.RuntimeSections do
   # a call names it instead, and the wire carries its schema then.
   defp call_scoped?(%{metadata: %{tool_module: VoiceCallContext}}), do: true
   defp call_scoped?(_capability), do: false
+
+  @doc """
+  Whether a capability is an open-loop tool no prompt may name right now (M78
+  §10): the whole surface follows the wire, as the harness does above. Disabled,
+  no open-loop tool is advertised, so a catalog names none of them. Enabled,
+  `open_loop_respond` is still offered only inside a check-in run, which renders
+  no catalog, so a main turn's or a voice call's catalog never names it. Keyed
+  on the family's name token, which every member carries. Public so the Live
+  voice frontend's catalog (`Realtime.LivePrompt`) asks the same question
+  instead of keeping a copy that drifts.
+  """
+  @spec open_loop_unlisted?(map()) :: boolean()
+  def open_loop_unlisted?(%{kind: :builtin, name: "open_loop_respond"}), do: true
+
+  def open_loop_unlisted?(%{kind: :builtin, name: "open_loop_" <> _rest}),
+    do: not OpenLoopsConfig.enabled?()
+
+  def open_loop_unlisted?(_capability), do: false
 
   # The coding-harness category carries a section-level PREAMBLE line (design
   # §7.4) before its tool list — a new touchpoint, rendered only when the bucket

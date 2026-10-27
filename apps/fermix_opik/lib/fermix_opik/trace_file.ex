@@ -133,7 +133,16 @@ defmodule FermixOpik.TraceFile do
        # Fermix-minted task id that tell a refused or cancelled call from one
        # that ran. Never the request the model sent.
        :status,
-       :task_id
+       :task_id,
+       # A call the access gate or a cue mandate decided: the closed outcome
+       # label, the parked intent, the typed pre-execution marker and the
+       # mandate's record. Fixed strings and ids — never the call's arguments.
+       :access_gate,
+       :access_intent,
+       :policy_enforcement,
+       :validator,
+       :mandate_call_id,
+       :mandate_reason
      ])}
   end
 
@@ -205,7 +214,9 @@ defmodule FermixOpik.TraceFile do
        :schedule_kind,
        :schedule_expr,
        :trigger,
-       :input
+       :input,
+       :watcher_id,
+       :delivery_id
      ])}
   end
 
@@ -216,12 +227,22 @@ defmodule FermixOpik.TraceFile do
        iterations: int(row["iterations"]),
        total_tokens: int(row["total_tokens"]),
        tool_failures: int(row["tool_failures"])
-     }, meta(row, [:agent, :job_id, :run_id, :session_id, :status, :output])}
+     },
+     meta(row, [
+       :agent,
+       :job_id,
+       :run_id,
+       :session_id,
+       :status,
+       :output,
+       :watcher_id,
+       :delivery_id
+     ])}
   end
 
   defp normalize_agent_event("job_run_error", row) do
     {[:fermix, :job, :run_error], %{count: 1, duration_ms: int(row["duration_ms"])},
-     meta(row, [:agent, :job_id, :run_id, :session_id, :status, :error])}
+     meta(row, [:agent, :job_id, :run_id, :session_id, :status, :error, :watcher_id, :delivery_id])}
   end
 
   defp normalize_agent_event("realtime_call_start", row) do

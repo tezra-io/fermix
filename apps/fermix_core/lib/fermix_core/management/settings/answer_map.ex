@@ -41,7 +41,9 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   # sent it, rather than landing and failing somewhere later (MGMT-1).
   @prose_keys ~w(meetings_announce_message communication_style)
 
-  @type writer :: :wizard | :sandbox | :meetings | :browser
+  @cues_prefix "cues_"
+
+  @type writer :: :wizard | :sandbox | :meetings | :browser | :cues
   @type answer :: {atom(), term()}
 
   @doc """
@@ -55,6 +57,7 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   def writer("sandbox"), do: :sandbox
   def writer("meetings"), do: :meetings
   def writer("browser"), do: :browser
+  def writer("cues"), do: :cues
   def writer(section) when is_binary(section), do: :wizard
 
   @doc """
@@ -175,6 +178,7 @@ defmodule FermixCore.Management.Settings.AnswerMap do
 
   defp answer_key("meetings", @meetings_prefix <> key), do: String.to_existing_atom(key)
   defp answer_key("browser", @browser_prefix <> key), do: String.to_existing_atom(key)
+  defp answer_key("cues", @cues_prefix <> key), do: String.to_existing_atom(key)
   defp answer_key("sandbox", key), do: Map.fetch!(@sandbox_answers, key)
   defp answer_key(_section, key), do: String.to_existing_atom(key)
 end

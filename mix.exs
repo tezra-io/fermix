@@ -4,7 +4,7 @@ defmodule Fermix.MixProject do
   def project do
     [
       apps_path: "apps",
-      version: "0.16.0",
+      version: "0.17.0",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
@@ -66,7 +66,10 @@ defmodule Fermix.MixProject do
             ],
             linux_aarch64: [os: :linux, cpu: :aarch64],
             linux_x86_64: [os: :linux, cpu: :x86_64]
-          ]
+          ],
+          # Each target places its pinned fermix-iroh helper in its own
+          # work_dir, after the NIF recompile and before packing (M62 stage 5).
+          extra_steps: [patch: [post: [FermixCore.Release.IrohHelper]]]
         ]
       ],
       fermix_app_engine: [
@@ -76,6 +79,7 @@ defmodule Fermix.MixProject do
           &__MODULE__.validate_app_engine/1,
           &__MODULE__.build_app_engine_assets/1,
           :assemble,
+          &__MODULE__.place_app_engine_iroh_helper/1,
           &__MODULE__.write_app_engine_manifest/1
         ]
       ],
@@ -84,8 +88,10 @@ defmodule Fermix.MixProject do
       # (`fermix_linux_package_erts-…`) and its own override variable
       # (`FERMIX_LINUX_PACKAGE_INSTALL_DIR`, which the vendor unit sets), so a
       # standalone install and a packaged one at the same version never touch
-      # each other's extracted tree. The two extra steps move the musl loader
-      # off `/tmp` and onto the root-owned address the package materialises.
+      # each other's extracted tree. The musl steps move the musl loader off
+      # `/tmp` and onto the root-owned address the package materialises; the
+      # pinned fermix-iroh helper is placed before the interpreter rewrite, so
+      # the payload it scans is the one that ships.
       fermix_linux_package: [
         applications: applications,
         include_executables_for: [:unix],
@@ -97,7 +103,9 @@ defmodule Fermix.MixProject do
           ],
           extra_steps: [
             fetch: [post: [FermixCore.Release.PackagedMuslRuntime]],
-            patch: [post: [FermixCore.Release.PackagedInterpreter]]
+            patch: [
+              post: [FermixCore.Release.IrohHelper, FermixCore.Release.PackagedInterpreter]
+            ]
           ]
         ]
       ]
@@ -161,6 +169,14 @@ defmodule Fermix.MixProject do
       {_streamed, status} ->
         Mix.raise("cannot assemble fermix_app_engine: `mix #{task}` exited #{status}")
     end
+  end
+
+  # After `:assemble` and before the manifest, so the inventory lists the
+  # helper and checks its architecture (M62 stage 5).
+  @doc false
+  @spec place_app_engine_iroh_helper(Mix.Release.t()) :: Mix.Release.t()
+  def place_app_engine_iroh_helper(release) do
+    FermixCore.Release.IrohHelper.place_in_release(release)
   end
 
   @doc false

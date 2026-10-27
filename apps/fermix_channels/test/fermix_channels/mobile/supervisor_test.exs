@@ -1,5 +1,7 @@
 defmodule FermixChannels.Mobile.SupervisorTest do
-  use ExUnit.Case, async: true
+  # async: false — the APNs key tests assert what the log never says, and an
+  # async module's captured log also holds other modules' lines.
+  use ExUnit.Case, async: false
 
   import ExUnit.CaptureLog
 
@@ -251,9 +253,21 @@ defmodule FermixChannels.Mobile.SupervisorTest do
 
     assert Enum.find_index(ids, &(&1 == instance_names.push_dispatcher)) <
              Enum.find_index(ids, &(&1 == Listener))
+
+    # The sessions on either carrier tell a phone the service this daemon has.
+    assert router_opts(children)[:push_services] == ["apns"]
+    assert iroh_session_opts(children)[:push_services] == ["apns"]
   end
 
-  test "disabled push starts no dispatcher and enabled invalid config fails loud" do
+  test "with push off, sessions say this daemon pushes through nothing" do
+    children =
+      init_children(config: [advertise_mdns: false, push: [enabled: false]], names: names())
+
+    assert router_opts(children)[:push_services] == []
+    assert iroh_session_opts(children)[:push_services] == []
+  end
+
+  test "disabled push starts no dispatcher" do
     assert {:ok, {_flags, children}} =
              MobileSupervisor.init(
                root: "/tmp/fermix-mobile-supervisor-disabled-push-test",
@@ -264,20 +278,36 @@ defmodule FermixChannels.Mobile.SupervisorTest do
              )
 
     refute Enum.any?(children, &(&1.id == FermixChannels.Mobile.Push.PigeonDispatcher))
+  end
 
-    error =
-      assert_raise ArgumentError, fn ->
-        MobileSupervisor.init(
-          root: "/tmp/fermix-mobile-supervisor-invalid-push-test",
-          boot_epoch: "invalid-push-test-epoch",
-          config: [advertise_mdns: false, push: [enabled: true]],
-          start_listener?: false,
-          names: names()
-        )
-      end
+  # M51 §10: a push setting that does not resolve starts the phone channel
+  # without the dispatcher and says why; it never takes the channels down.
+  test "an APNs table that does not parse starts mobile without push and names the fault" do
+    key = X509.PrivateKey.new_ec(:secp256r1) |> X509.PrivateKey.to_pem()
+    staging = push_config(key) |> Keyword.fetch!(:push) |> Keyword.put(:environment, "staging")
 
-    assert error.message =~ "invalid mobile push config"
-    assert error.message =~ "{:invalid_push_config, :team_id, :missing}"
+    for {push, reason} <- [
+          {[enabled: true], "{:invalid_push_config, :team_id, :missing}"},
+          {[enabled: "yes"], ~s({:invalid_push_enabled, "yes"})},
+          {staging, ~s({:invalid_push_config, :environment, "staging"})}
+        ] do
+      instance_names = names()
+
+      {children, log} =
+        with_log(fn ->
+          init_children(config: [advertise_mdns: false, push: push], names: instance_names)
+        end)
+
+      ids = Enum.map(children, & &1.id)
+      refute instance_names.push_dispatcher in ids
+      assert Listener in ids
+      assert Iroh in ids
+      assert router_opts(children)[:push_services] == []
+      assert iroh_session_opts(children)[:push_services] == []
+      assert log =~ "[error]"
+      assert log =~ "Mobile started WITHOUT push"
+      assert log =~ reason
+    end
   end
 
   test "an unresolved APNs credential starts mobile without push instead of crash-looping" do
@@ -303,21 +333,51 @@ defmodule FermixChannels.Mobile.SupervisorTest do
     assert log =~ SecretWriter.sentinel()
   end
 
-  test "a structurally invalid APNs key still refuses the boot" do
-    error =
-      assert_raise ArgumentError, fn ->
-        MobileSupervisor.init(
-          root: "/tmp/fermix-mobile-supervisor-bad-key-test",
-          boot_epoch: "bad-key-test-epoch",
-          config:
-            push_config("-----BEGIN PRIVATE KEY-----\nnot a key\n-----END PRIVATE KEY-----"),
-          start_listener?: false,
-          names: names()
-        )
-      end
+  test "a structurally invalid APNs key starts mobile without push, never logging the key" do
+    instance_names = names()
+    key = "-----BEGIN PRIVATE KEY-----\nnot a key\n-----END PRIVATE KEY-----"
 
-    assert error.message =~ "invalid mobile push config"
-    assert error.message =~ ":key"
+    {children, log} =
+      with_log(fn -> init_children(config: push_config(key), names: instance_names) end)
+
+    ids = Enum.map(children, & &1.id)
+    refute instance_names.push_dispatcher in ids
+    assert Listener in ids
+    assert router_opts(children)[:push_services] == []
+    assert log =~ "Mobile started WITHOUT push"
+    assert log =~ "{:invalid_push_config, :key, :invalid_pem}"
+    refute log =~ "not a key"
+    refute log =~ "missing_padding"
+  end
+
+  # A raise here used to fail the subtree's start, and with it the channels
+  # application, which a release runs :permanent: every channel went down.
+  test "a bad APNs key never takes the channels down: the subtree starts beside them" do
+    instance_names = names()
+    key = "-----BEGIN PRIVATE KEY-----\nnot a key\n-----END PRIVATE KEY-----"
+    opts = switch_opts(instance_names, fn -> true end) ++ [config: push_config(key)]
+
+    siblings = [
+      Supervisor.child_spec({Agent, fn -> :other_channel end}, id: :sibling_channel),
+      Supervisor.child_spec({MobileSupervisor, opts}, id: :mobile_subtree)
+    ]
+
+    {parent, log} =
+      with_log(fn ->
+        start_supervised!(%{
+          id: :push_fault_parent,
+          start: {Supervisor, :start_link, [siblings, [strategy: :one_for_one]]},
+          type: :supervisor
+        })
+      end)
+
+    started = Map.new(Supervisor.which_children(parent), fn {id, pid, _t, _m} -> {id, pid} end)
+    assert is_pid(started[:sibling_channel])
+    assert is_pid(started[:mobile_subtree])
+    assert is_pid(Process.whereis(instance_names.device_store))
+    assert is_pid(Process.whereis(instance_names.pair_manager))
+    refute Process.whereis(instance_names.push_dispatcher)
+    assert log =~ "Mobile started WITHOUT push"
   end
 
   test "defaults a cryptographically random epoch for the request coordinator" do
@@ -577,12 +637,15 @@ defmodule FermixChannels.Mobile.SupervisorTest do
   defp init_children(opts) do
     assert {:ok, {_flags, children}} =
              MobileSupervisor.init(
-               [
-                 root: "/tmp/fermix-mobile-supervisor-children-test",
-                 boot_epoch: "children-test-epoch",
-                 start_listener?: false,
-                 names: names()
-               ] ++ opts
+               Keyword.merge(
+                 [
+                   root: "/tmp/fermix-mobile-supervisor-children-test",
+                   boot_epoch: "children-test-epoch",
+                   start_listener?: false,
+                   names: names()
+                 ],
+                 opts
+               )
              )
 
     children
@@ -592,6 +655,10 @@ defmodule FermixChannels.Mobile.SupervisorTest do
     %{start: {_module, :start_link, [opts]}} = Enum.find(children, &(&1.id == id))
     opts
   end
+
+  # What the listener's sessions and the rail's are started with.
+  defp router_opts(children), do: child_opts(children, Listener)[:router_opts]
+  defp iroh_session_opts(children), do: child_opts(children, Iroh)[:session_opts]
 
   defp switch_opts(instance_names, switch) do
     root =

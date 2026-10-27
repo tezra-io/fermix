@@ -6,8 +6,8 @@ box anatomy; thin callers own cadence:
 
 | Tier | What runs | Where | When |
 |---|---|---|---|
-| T1 regression | `run_eval.py --check --judge` → `make dry` → `bin/tier.sh regression` (host-safe-core, judged by Claude Opus 5.5 signed in through Workload Identity Federation) | `eval-nightly.yml` → eval-box | nightly 07:17 UTC |
-| T3 macOS smoke | `macos_smoke.sh` — ungraded daemon boot/converse/trace/refuse on a clean Mac | `eval-nightly.yml` (macos-15 job) | nightly |
+| T1 regression | `run_eval.py --check --judge` → `make dry` → `bin/tier.sh regression` (host-safe-core; the candidate is Claude Opus 5.5 at medium effort, judged by Claude Haiku 5.5 on the same Anthropic key) | `eval-nightly.yml` → eval-box | nightly 07:17 UTC |
+| T3 macOS smoke | `macos_smoke.sh` — ungraded daemon boot/converse/trace/refuse on a clean Mac, on the box's candidate | `eval-nightly.yml` (macos-15 job) | nightly |
 | T2a capability | `make check` / `make estimate` then `bin/tier.sh capability` and `bin/tier.sh capability-judged` (deterministic composite, 27 tasks / 140 turns at k=5 including the `cap_untrusted_content` safety pack, with a pinned Claude Code CLI on Claude Haiku 5.5, signed in through Workload Identity Federation, for the delegated coding tasks + the judged response-quality axis, which has no release verdict), each publishing its runner's exit code | `eval-weekly.yml` → eval-box | weekly Sat 06:23 UTC |
 | T2b dangerous | `sandbox_verify` named scenario, destructive profile | `eval-weekly.yml` → eval-box, after T2a | weekly; red files a critical issue |
 
@@ -86,27 +86,36 @@ and recorded"* about a sweep that never happened.
    still defaults to the unauthenticated `http://localhost:5173` Opik.
 2. Disposable `FERMIX_HOME` under the runner temp (leaf contains `eval`),
    seeded by `benchmark/bin/seed_capability_home.py` in **explicit mode**
-   (`--provider openai --model <candidate>`): no keychain, no auth.json in the
-   eval home — the daemon reads `OPENAI_API_KEY` from its environment at boot.
-3. Judged tiers only (regression, capability), before the daemon boots: the
-   Anthropic sign-in. No API key exists on the box: the Claude judge (and, on
-   the capability tier, Claude Code) signs in through Workload Identity
-   Federation. An `oidc_federation` profile in `~/.config/anthropic`, active
-   through its `active_config` file, carries the IDs from the repository
-   variables below and names a file under the runner temp that holds this job's
-   GitHub OIDC token. The judge builds its SDK client with no credential
-   argument and a harness run spawns claude under `env -i` (HOME, PATH, TERM,
-   USER), which is why all of it lives under HOME. A preflight (`bin/judge_preflight.py`,
-   about a cent) sends one real verdict through the judge's own code with the
-   judge settings the tier's runner loads, and requires the SDK to select that
-   federation profile and the configured model to answer. GitHub's tokens live
-   about five minutes and each can be exchanged once, so the file is replaced
-   after every preflight call, a background loop replaces it every 60 s, and a
+   (`--provider anthropic --model <candidate> --reasoning-effort medium`): the
+   provider block carries `reasoning_effort = "medium"`, which the Anthropic
+   adapter sends as `output_config.effort`; no keychain, no auth.json in the
+   eval home — the daemon reads `ANTHROPIC_API_KEY` from its environment at
+   boot, and the boot step fails with a sentence when that secret is empty. The
+   judge runs on the same key from its own steps; the daemon holds no other
+   provider's key.
+3. Judged tiers only (regression, capability), before anything else is spent:
+   the judge preflight. The judge is Claude Haiku 5.5 (`judge:` in
+   `config.yaml` and `behavioral_config.yaml`) through the official SDK, which
+   reads `ANTHROPIC_API_KEY`; this step and the judged tier steps hold the
+   `ANTHROPIC_API_KEY` secret. `bin/judge_preflight.py` (a fraction of a cent)
+   refuses a judge on the candidate's model before any call, then sends one
+   real verdict through the judge's own code with the judge settings the
+   tier's runner loads and requires the configured model to answer through the
+   secret (`--expect-source ANTHROPIC_API_KEY`), never through a profile on the
+   box. An empty secret or a failed preflight fails the tier: an unusable judge
+   would leave every judged case INCOMPLETE.
+
+   Capability tier only: the Anthropic sign-in for Claude Code, which signs in
+   through Workload Identity Federation and no API key. An `oidc_federation`
+   profile in `~/.config/anthropic`, active through its `active_config` file,
+   carries the IDs from the repository variables below and names a file under
+   the runner temp that holds this job's GitHub OIDC token. A harness run
+   spawns claude under `env -i` (HOME, PATH, TERM, USER), which is why all of
+   it lives under HOME. GitHub's tokens live about five minutes and each can be
+   exchanged once, so a background loop replaces the file every 60 s, and a
    step after the daemon stops ends the loop and fails the job if any refresh
-   failed. The judge's SDK keeps the access token it gets in
-   `~/.config/anthropic/credentials/` until 30 s before expiry, so it exchanges
-   rarely. The token file, the profile and the cached Anthropic tokens sit
-   outside the eval home and the uploaded artifact, and go with the VM.
+   failed. The token file and the profile sit outside the eval home and the
+   uploaded artifact, and go with the VM.
 
    Capability tier only, after the sign-in: a pinned Claude Code binary
    (version and sha256 in the step's `env`, checked before anything runs; the
@@ -119,12 +128,12 @@ and recorded"* about a sweep that never happened.
    cent) to succeed on `claude-haiku-5-5` with no API key in play; the step then
    waits for the refresher's next rotation so the first delegated run finds an
    unspent token. An empty variable, a failed checksum, a failed token fetch, a
-   failed judge preflight or call, another credential or another model each fail
-   the tier: an unusable judge would leave every judged case INCOMPLETE, and an
+   failed call, another credential or another model each fail the tier: an
    advertised but unusable `claude_code_run` would score its tasks 0.00 as the
-   candidate's failure. Known gap: a run the candidate starts with `bare: true`
-   reads only `ANTHROPIC_API_KEY`, which the box never provides, so that run
-   fails to authenticate.
+   candidate's failure. A run the candidate starts with `bare: true` reads only
+   `ANTHROPIC_API_KEY`, which the claude adapter passes through from the
+   daemon's environment: it authenticates with, and bills, the candidate's key
+   instead of the federation profile.
 4. Daemon lifecycle via `benchmark/bin/capability-daemon.sh up/down`
    (`mix fermix.dev --no-web --no-realtime`; channels stay ON — CLI turns
    route through the channels Gateway queue; none are configured, so none poll).
@@ -140,8 +149,12 @@ strict preflight requires the workspace HEAD to match the harness checkout.
 
 ## Secrets (repo Actions secrets — no .env files anywhere)
 
-- `OPENAI_API_KEY` — dedicated eval key with a provider-side spend cap; fills
-  the provider block at daemon boot and pays for candidate turns.
+- `ANTHROPIC_API_KEY` — the candidate's key and the judge's: fills the
+  Anthropic provider block at daemon boot and pays for candidate turns
+  (eval-box's boot step and the macOS smoke), and the judged steps (the judge
+  preflight, the regression tier, the capability tier's judged axis) hold it
+  for the Claude judge's SDK. Give it a provider-side spend cap; it bounds
+  both.
 - `FERMIX_OPIK_API_KEY` + `FERMIX_OPIK_WORKSPACE` — Comet-hosted Opik auth
   for both the daemon exporter and the harness read side. Project names are
   workflow config, not secrets (`fermix-eval-ci-<tier>`); a
@@ -149,29 +162,30 @@ strict preflight requires the workspace HEAD to match the harness checkout.
   span quota (~25k/month): nightly regression + weekly capability sit close
   to it — check the workspace usage after the first weeks.
 
-The Anthropic sign-in on the judged tiers (box anatomy, step 3) uses
+The Anthropic sign-in on the capability tier (box anatomy, step 3) uses
 repository **variables**, not secrets, because they are identifiers:
 `ANTHROPIC_EVAL_ORGANIZATION_ID`, `ANTHROPIC_EVAL_SERVICE_ACCOUNT_ID` and
 `ANTHROPIC_EVAL_FEDERATION_RULE_ID` (an empty one fails the tier), plus
 `ANTHROPIC_EVAL_WORKSPACE_ID`, needed only when the federation rule spans more
 than one workspace. The rule must match this job's OIDC token: a scheduled run
 presents `sub` `repo:tezra-io/fermix:ref:refs/heads/main`, a manual run the ref
-it was dispatched from. Judge verdicts and delegated runs bill the service
-account's workspace, and none of that spend shows in Opik turn cost. Only the
-judged tiers' callers (eval-nightly's regression job, eval-weekly's capability
-job) grant `id-token: write`: eval-box declares no permissions and inherits its
-caller's token, so the dangerous tier, which is never judged, never holds the
-right to mint a GitHub OIDC token. A direct eval-box dispatch gets the
-repository's default token, so that default must stay read-only (Settings →
-Actions → General → Workflow permissions), and the sign-in step refuses it: run
-a judged tier on demand through its caller. Only the sign-in step mints a token,
-and the daemon's environment drops the request credential. No workflow reads the
-`EVAL_JUDGE_API_KEY` secret any more (it fed the retired OpenAI judge).
+it was dispatched from. Delegated runs bill the service account's workspace,
+and none of that spend shows in Opik turn cost. Only the capability tier's
+caller (eval-weekly's capability job) grants `id-token: write`: eval-box
+declares no permissions and inherits its caller's token, so the regression and
+dangerous tiers never hold the right to mint a GitHub OIDC token. A direct
+eval-box dispatch gets the repository's default token, so that default must
+stay read-only (Settings → Actions → General → Workflow permissions), and the
+sign-in step refuses it: run the capability tier on demand through eval-weekly.
+Only the sign-in step mints a token, and the daemon's environment drops the
+request credential.
 
 **Model rule:** the candidate model (eval-box input `model`, default
-`gpt-6-luna`) must differ from `judge.model` in `benchmark/config.yaml` and
-`benchmark/behavioral_config.yaml` (`claude-opus-5-5`) — the harness refuses a
-judge that matches the candidate, vendor prefixes and release dates aside.
+`claude-opus-5-5` on Anthropic at medium effort) must differ from `judge.model`
+in `benchmark/config.yaml` and `benchmark/behavioral_config.yaml`
+(`claude-haiku-5-5`) — the judge preflight refuses a judge on the candidate's model
+before any call, and the harness refuses any verdict whose judge matches a
+model the candidate actually ran on, vendor prefixes and release dates aside.
 
 Secrets are reachable only from `schedule`/`workflow_dispatch` runs — no
 PR-triggered workflow declares them.

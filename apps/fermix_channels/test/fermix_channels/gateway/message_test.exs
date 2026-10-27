@@ -51,6 +51,41 @@ defmodule FermixChannels.Gateway.MessageTest do
     end
   end
 
+  # One helper records a forward the channel read: on the metadata stored with
+  # the message, on each declared attachment, and as a label the model reads
+  # before non-blank text. The owner's own message is returned as it came.
+  describe "mark_forwarded/2" do
+    defp forwardable(content) do
+      Message.new!(%{
+        id: "1",
+        content: content,
+        sender: "alice",
+        channel: "telegram",
+        chat_id: "42",
+        reply_target: "42",
+        metadata: %{chat_type: "private"},
+        attachments: [%{hint: :photo, file_id: "p1"}]
+      })
+    end
+
+    test "a forwarded message is marked on its metadata, attachments and text" do
+      marked = Message.mark_forwarded(forwardable("meet at the dock"), true)
+
+      assert marked.metadata == %{chat_type: "private", forwarded: true}
+      assert [%{hint: :photo, forwarded?: true}] = marked.attachments
+      assert marked.content == "[forwarded message]\nmeet at the dock"
+    end
+
+    test "a forwarded message with no text keeps its blank content" do
+      assert Message.mark_forwarded(forwardable(""), true).content == ""
+    end
+
+    test "the owner's own message is returned unchanged" do
+      owner = forwardable("meet at the dock")
+      assert Message.mark_forwarded(owner, false) == owner
+    end
+  end
+
   describe "actionable?/1 and unusable_only?/1" do
     test "non-blank text is actionable" do
       assert Message.actionable?(message(content: "hello", inbound_attachments: []))

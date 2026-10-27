@@ -101,7 +101,31 @@ defmodule FermixCore.Management.Protocol do
     {"mcp.servers.tool.set", 2},
     {"mcp.servers.check.start", 2},
     {"mcp.servers.import.scan", 2},
-    {"mcp.servers.import", 2}
+    {"mcp.servers.import", 2},
+    {"cues.status", 2},
+    {"cues.sources.list", 2},
+    {"cues.sources.get", 2},
+    {"cues.sources.form", 2},
+    {"cues.sources.add", 2},
+    {"cues.sources.update", 2},
+    {"cues.sources.remove", 2},
+    {"cues.sources.enable", 2},
+    {"cues.sources.disable", 2},
+    {"cues.sources.token.new", 2},
+    {"cues.sources.url.get", 2},
+    {"cues.watchers.list", 2},
+    {"cues.watchers.get", 2},
+    {"cues.mandates.list", 2},
+    {"cues.mandates.choices", 2},
+    {"cues.mandates.add", 2},
+    {"cues.mandates.update", 2},
+    {"cues.mandates.remove", 2},
+    {"cues.mandates.enable", 2},
+    {"cues.mandates.disable", 2},
+    {"cues.mandates.approve", 2},
+    {"cues.proposals.list", 2},
+    {"cues.proposals.get", 2},
+    {"cues.proposals.decide", 2}
   ]
   @methods Enum.map(@method_minimums, fn {method, _minimum} -> method end)
   @method_minimum_versions Map.new(@method_minimums)

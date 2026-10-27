@@ -74,7 +74,14 @@ delivery's after its push; each preview is stored on that row later and
 announced as `row_updated`, which the header already leaves out (no seq, no
 cursor), and `PROTOCOL.md` naming a stored preview's optional `link`. Every
 row, seq, ending and settlement is as before, so nothing the spec models
-changed.
+changed. The re-read after M60 found companion protocol 4: the daemon's
+window moves to {3, 4}, and `proposal` and `proposal_resolved` reach only the
+owner's version 4 connections, the cards of the proposals still waiting
+written after the approval cards in the step that joined the registry
+(`send_waiting_proposals`). A proposal has no seq, request or turn, and a
+`proposal_answer` is served in the Connection's own step, so `server_hello`,
+the approval cards behind it and every rule here are as before; the header
+leaves proposals out.
 
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
@@ -194,8 +201,9 @@ answers however busy it is, so the model folds the Queue's stop into that
   lets it end with no reply may answer exactly `[SILENT]`. With it off the
   silence decision is never taken and the state space is the one before.
   `V1Clients` names the clients on companion protocol 1. Since protocol 3 the
-  daemon refuses a version 1 hello, so only checks 34 and 35, which prove the
-  silence gate the code keeps, name one.
+  daemon refuses a version 1 hello (since protocol 4 a version 2 one too, its
+  window being {3, 4}), so only checks 34 and 35, which prove the silence gate
+  the code keeps, name one.
 
 **Mechanism switches** (`TRUE` is the real code; each is switched off only by
 the checks that show a rule needs it):
@@ -479,6 +487,17 @@ of an entity its rules are about. All still hold:
   settlement is still skipped.
 - The grant resume a confirmed approval re-ingests as a new turn (`sandbox.ex`
   `resume_request`).
+- Companion protocol 4's proposals (M60). `proposal` and `proposal_resolved`
+  reach only the owner's version 4 connections (`write_in_version`), announced
+  through `Channels.Companion.broadcast` (`Companion.Proposals`) with no seq,
+  request or turn, so they move no cursor. The card of every proposal still
+  waiting follows the approval cards in the step that joined the registry
+  (`join`, `send_waiting_proposals`), so `server_hello` and the approval cards
+  keep their order, and a write there that fails ends the connection as a drop
+  does. A `proposal_answer` is served in the Connection's own step against
+  `cue_proposals`, which no step here reads, and its `accepted` answers no
+  `msg` or `command`, so no outbox rule reads it. That a confirmed proposal
+  runs at most once is `cue_inbox`'s.
 - The peer check at the hand-over (`handle_info(:socket_handover)`,
   `connection.ex:126-133`). A client the daemon cannot place is sent
   `error: unidentified_client` and closed before a line is read, which the

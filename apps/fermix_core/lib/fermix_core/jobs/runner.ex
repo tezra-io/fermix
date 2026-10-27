@@ -10,9 +10,18 @@ defmodule FermixCore.Jobs.Runner do
   require Logger
 
   alias FermixCore.AgentLoop
+  alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Agents.TurnRunner
+  alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Capabilities.Skill
+  alias FermixCore.Clock
+  alias FermixCore.Cues.Mandates
+  alias FermixCore.Cues.Notices
+  alias FermixCore.Jobs.CueAdmission
+  alias FermixCore.Jobs.CueRun
+  alias FermixCore.Jobs.CueSurface
   alias FermixCore.Jobs.Delivery
   alias FermixCore.Jobs.MediaBridge
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
@@ -69,7 +78,10 @@ defmodule FermixCore.Jobs.Runner do
           readiness_enabled: boolean(),
           readiness_host: String.t() | nil,
           readiness_port: :inet.port_number() | nil,
-          readiness_opts: keyword()
+          readiness_opts: keyword(),
+          cue: nil | {:ok, CueRun.context()} | {:error, term()},
+          cue_mandate: Mandates.t() | nil,
+          cue_mandate_opts: keyword()
         }
 
   # A runner spends its whole run inside `handle_continue/2`, so it cannot answer
@@ -158,7 +170,15 @@ defmodule FermixCore.Jobs.Runner do
       readiness_host: Keyword.get(opts, :readiness_host),
       readiness_port: Keyword.get(opts, :readiness_port),
       readiness_opts: Keyword.get(opts, :readiness_opts, []),
-      egress: Keyword.get_lazy(opts, :egress, &Egress.active/0)
+      egress: Keyword.get_lazy(opts, :egress, &Egress.active/0),
+      # A cue run's delivery, cue and watcher (M60 §9.3), read at the start of
+      # the run from the delivery its row holds; nil for every other run.
+      cue: nil,
+      # The mandate a cue run acts under, read once at its start; nil otherwise.
+      cue_mandate: nil,
+      # Test seams for that read and for the run's mandate gate, one set for
+      # both (the gate's `cue_mandate_opts`); none in production.
+      cue_mandate_opts: Keyword.get(opts, :cue_mandate_opts, [])
     }
 
     :ok = put_run_id(state.run.id)
@@ -168,6 +188,8 @@ defmodule FermixCore.Jobs.Runner do
 
   @impl true
   def handle_continue(:run, state) do
+    state = load_cue(state)
+
     case build_loop_input(state) do
       {:ok, loop_input} ->
         run = mark_running(state, loop_input)
@@ -203,12 +225,7 @@ defmodule FermixCore.Jobs.Runner do
 
     case result do
       {:ok, result} ->
-        {completed_run, job} = mark_completed(state, result)
-        completed_state = %{state | run: completed_run}
-
-        persist_run_summary_memory(completed_state, result)
-        update_memory_source_status(job, "ok", completed_run.completed_at, state.repo)
-        finalize_delivery(completed_state, result.response)
+        complete_run(state, result)
 
       {:timeout, reason} ->
         mark_failed(state, "timeout", reason)
@@ -217,6 +234,54 @@ defmodule FermixCore.Jobs.Runner do
         mark_failed(state, "error", reason)
     end
   end
+
+  # A cue run (M60 §9.3, §9.4) settles its delivery with its outcome, writes no
+  # `latest` summary, and sends the owner its prefixed message with Fermix's
+  # report of its mandate calls, even when the reply is the silent marker.
+  defp complete_run(%{cue: {:ok, cue}} = state, result) do
+    calls = run_calls!(state)
+    outcome = CueRun.outcome({:ok, result}, state.job, calls)
+    message = CueRun.message(state.job, cue, result.response, calls)
+    {completed_run, job} = mark_cue_completed(state, result, outcome, message)
+    completed_state = %{state | run: completed_run}
+
+    update_memory_source_status(job, "ok", completed_run.completed_at, state.repo)
+    finalize_cue_delivery(completed_state, message)
+  end
+
+  defp complete_run(state, result) do
+    {completed_run, job} = mark_completed(state, result)
+    completed_state = %{state | run: completed_run}
+
+    persist_run_summary_memory(completed_state, result)
+    update_memory_source_status(job, "ok", completed_run.completed_at, state.repo)
+    finalize_delivery(completed_state, result.response)
+  end
+
+  # Read once the loop has returned, so every call the run made is in it. A
+  # Repo that cannot answer fails the runner loudly; the scheduler's crash
+  # settle then moves the delivery by the run row.
+  defp run_calls!(state) do
+    {:ok, calls} = CueRun.list_run_calls(state.run.id, repo: state.repo)
+    calls
+  end
+
+  # The mandate is read once, at the run's start, on the run's Repo (as its
+  # gate reads it): that read may disable a changed mandate and tell the owner
+  # (`CueRun.mandate/2`), and the run's tool list and context both use it.
+  defp load_cue(%{run: %{trigger: "cue", cue_delivery_id: delivery_id}} = state)
+       when is_integer(delivery_id) do
+    case CueRun.load(delivery_id, repo: state.repo) do
+      {:ok, _cue} = cue ->
+        opts = Keyword.put_new(state.cue_mandate_opts, :repo, state.repo)
+        %{state | cue: cue, cue_mandate: CueRun.mandate(state.job, opts)}
+
+      error ->
+        %{state | cue: error}
+    end
+  end
+
+  defp load_cue(state), do: state
 
   defp mark_running(state, loop_input) do
     now = DateTime.utc_now()
@@ -233,9 +298,14 @@ defmodule FermixCore.Jobs.Runner do
       })
 
     {:ok, run} = Repo.upsert_job_run(attrs, server: state.repo)
-    JobTelemetry.run_start(state.job, run, loop_input, state.timeout_ms)
+    JobTelemetry.run_start(state.job, telemetry_run(state, run), loop_input, state.timeout_ms)
     run
   end
+
+  # `Jobs.Telemetry` reads a cue run's watcher from the run map: the row does
+  # not carry it.
+  defp telemetry_run(%{cue: {:ok, cue}}, run), do: Map.put(run, :watcher_id, cue.watcher.id)
+  defp telemetry_run(_state, run), do: run
 
   # The final run row and the job's release land in one settle
   # (`Repo.settle_job_run/2`): a runner that dies after it leaves a released
@@ -265,6 +335,55 @@ defmodule FermixCore.Jobs.Runner do
     JobTelemetry.run_complete(state.job, run, result)
     {run, job}
   end
+
+  # The cue run's settle (`CueAdmission.settle/3`) moves its delivery in the
+  # same transaction. Its artifact holds ids and the outcome, never the reply;
+  # the reply stays on the run row, which `get_job_run` withholds outside an
+  # attended turn (§9.3).
+  defp mark_cue_completed(state, result, outcome, message) do
+    now = DateTime.utc_now()
+    {:ok, output_ref} = write_run_artifact(state, "output.md", cue_artifact(state, "ok", outcome))
+
+    attrs =
+      state.run
+      |> Map.merge(%{
+        status: "ok",
+        completed_at: now,
+        output_ref: output_ref,
+        final_response: result.response,
+        iterations: result.iterations,
+        tool_failures: result.tool_failures,
+        token_usage: %{"total" => result.total_tokens},
+        latency: %{},
+        delivery_status: Delivery.initial_status(state.job, message),
+        updated_at: now
+      })
+
+    {:ok, {run, job, settlement}} = CueAdmission.settle(attrs, outcome, server: state.repo)
+    mark_gaps_told(state, settlement)
+    JobTelemetry.run_complete(state.job, telemetry_run(state, run), result)
+    {run, job}
+  end
+
+  # The gaps a run's prompt named are marked reported (and closed) once the
+  # owner is told: by an acked run, or by the final failure, whose text names
+  # them. A retried attempt leaves them for the next one. A mark that fails is
+  # logged; the gap stays unreported and the hourly gap sweep tells the owner.
+  defp mark_gaps_told(_state, %{disposition: :retry}), do: :ok
+
+  defp mark_gaps_told(%{cue: {:ok, cue}} = state, _settlement) do
+    case CueRun.mark_gaps_reported(cue, DateTime.utc_now(), repo: state.repo) do
+      {:ok, _marked} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Cue run #{state.run.id}: its gaps were not marked reported: #{inspect(reason)}"
+        )
+    end
+  end
+
+  defp mark_gaps_told(_state, _settlement), do: :ok
 
   defp persist_run_summary_memory(state, result) do
     if Delivery.silent?(result.response, state.job.silent_marker) do
@@ -305,6 +424,40 @@ defmodule FermixCore.Jobs.Runner do
     end
   end
 
+  # A cue run's failure settles its delivery by its outcome (M60 §9.4). A
+  # retried attempt sends and writes nothing the owner reads: no failure text,
+  # no memory-source status. The delivery's final failure sends the failure
+  # text once, prefixed, with Fermix's report of the run's mandate calls.
+  defp mark_failed(%{cue: cue} = state, status, reason)
+       when not is_nil(cue) and status in ["error", "timeout"] do
+    now = DateTime.utc_now()
+    error = persisted_error(status, reason)
+    calls = run_calls!(state)
+    outcome = CueRun.outcome(failure_result(status, reason), state.job, calls)
+    text = cue_failure_text(state, status, reason, calls)
+
+    {:ok, output_ref} =
+      write_run_artifact(state, "error.md", cue_artifact(state, status, outcome))
+
+    attrs =
+      state.run
+      |> Map.merge(%{
+        status: status,
+        completed_at: now,
+        output_ref: output_ref,
+        error: error,
+        delivery_status: Delivery.initial_status(state.job, text),
+        updated_at: now
+      })
+
+    {:ok, {run, job, settlement}} = CueAdmission.settle(attrs, outcome, server: state.repo)
+    mark_gaps_told(state, settlement)
+    JobTelemetry.run_error(state.job, telemetry_run(state, run), status, error)
+    failed_state = %{state | run: run}
+    notify_provider_down(failed_state, settlement, outcome)
+    finish_cue_failure(failed_state, job, settlement, {status, now, text})
+  end
+
   defp mark_failed(state, status, reason) when status in ["error", "timeout"] do
     now = DateTime.utc_now()
     error = persisted_error(status, reason)
@@ -331,10 +484,66 @@ defmodule FermixCore.Jobs.Runner do
     finalize_delivery(failed_state, text)
   end
 
+  # A provider failure that will be retried tells the owner once per outage
+  # (design §9.4 row 3, §9.5): `Cues.Notices` keeps `:task_provider_down` to
+  # once per 24 hours and logs a send that failed.
+  defp notify_provider_down(
+         %{cue: {:ok, cue}} = state,
+         %{disposition: :retry},
+         {:failed, :provider}
+       ) do
+    opts = [
+      repo: state.repo,
+      adapter: state.delivery_adapter,
+      channels: state.delivery_channels,
+      delivery_opts: state.delivery_opts,
+      timeout_ms: state.delivery_timeout_ms
+    ]
+
+    _sent_or_logged = Notices.watcher(cue.watcher.id, :task_provider_down, %{}, opts)
+    :ok
+  end
+
+  defp notify_provider_down(_state, _settlement, _outcome), do: :ok
+
+  # Nothing will retry a delivery that ended `exhausted`, or that left the run
+  # (`untouched`), so only those tell the owner.
+  defp finish_cue_failure(state, _job, %{disposition: :retry}, _failure),
+    do: mark_delivery(state, "skipped", nil)
+
+  defp finish_cue_failure(state, job, _final, {status, now, text}) do
+    update_memory_source_status(job, status, now, state.repo)
+    finalize_cue_delivery(state, text)
+  end
+
+  defp failure_result("timeout", reason), do: {:timeout, reason}
+  defp failure_result("error", reason), do: {:error, reason}
+
+  # Without its context (the delivery could not be read) the run has no
+  # watcher to name and read no cue: the plain failure text goes.
+  defp cue_failure_text(%{cue: {:ok, cue}} = state, status, reason, calls),
+    do: CueRun.failure_message(cue, failure_delivery_text(state, status, reason), calls)
+
+  defp cue_failure_text(state, status, reason, _calls),
+    do: failure_delivery_text(state, status, reason)
+
+  # Every message a cue run causes goes through `CueRun.deliver/3`: only to a
+  # channel a cue run may reach, and with link previews off (§9.5).
+  defp finalize_cue_delivery(state, text) do
+    case CueRun.deliver(state.job, text, delivery_opts(state)) do
+      {:ok, delivery_status} -> mark_delivery(state, delivery_status, nil)
+      {:error, reason} -> mark_delivery(state, "failed", inspect(reason))
+    end
+  end
+
   # The ledger's machine-readable reason (run row, job row, telemetry): a
   # watchdog timeout's reason is already its own sentence; an error keeps the
-  # inspected term.
+  # inspected term. A run with no route keeps the text it had before the
+  # reason was tagged.
   defp persisted_error("timeout", reason) when is_binary(reason), do: reason
+  defp persisted_error("error", {:no_route, message}), do: inspect(message)
+  defp persisted_error("error", {:skill_grants_nothing, sentence}), do: inspect(sentence)
+  defp persisted_error("error", {:cue_history_lost, sentence}), do: inspect(sentence)
   defp persisted_error("error", reason), do: inspect(reason)
 
   defp finalize_delivery(state, text) do
@@ -395,11 +604,34 @@ defmodule FermixCore.Jobs.Runner do
     Logger.warning("Scheduled job #{job.id} memory source update failed: #{inspect(reason)}")
   end
 
+  defp build_loop_input(%{cue: {:error, reason}}), do: {:error, {:cue_run_context, reason}}
+
+  # A cue run sends no attachment (`send_attachment` is outside its surface),
+  # so it binds no media route. The watcher's gaps its prompt names are marked
+  # reported by the settle that tells the owner (`mark_gaps_told/2`).
+  defp build_loop_input(%{cue: {:ok, cue}} = state) do
+    media = {:unavailable, :cue_run}
+
+    with {:ok, skill} <- load_skill(state),
+         {:ok, loop_opts, _media} <- loop_opts(state, skill, media) do
+      messages = cue_prompt_messages(state.job, skill, cue)
+
+      {:ok,
+       %{
+         messages: messages,
+         prompt_snapshot: prompt_snapshot(messages),
+         route_used: resolved_route_used(loop_opts, state.job),
+         loop_opts: Keyword.put(loop_opts, :messages, messages),
+         media_active: nil
+       }}
+    end
+  end
+
   defp build_loop_input(state) do
     media = build_media_bridge(state)
 
     with {:ok, skill} <- load_skill(state),
-         {:ok, loop_opts} <- loop_opts(state, skill, media) do
+         {:ok, loop_opts, media} <- loop_opts(state, skill, media) do
       messages = prompt_messages(state.job, skill, media)
 
       {:ok,
@@ -442,6 +674,23 @@ defmodule FermixCore.Jobs.Runner do
   defp run_deadline_ms(%{timeout_ms: nil}), do: nil
   defp run_deadline_ms(%{timeout_ms: timeout_ms}), do: monotonic_ms() + timeout_ms
 
+  # One fact draws both the prompt's attachment line and the media `reply_fn`
+  # on the context: which tools that send files through the job's media route
+  # (`send_attachment`, the `:media` generators) are on the run's own surface,
+  # the registry list its loop resolves from the same options. A run with none
+  # is neither told it can send files nor handed the route.
+  defp media_on_surface({:unavailable, _reason} = media, _surface), do: media
+
+  defp media_on_surface({:ok, route}, surface) do
+    case for(%Capability{} = capability <- surface, media_tool?(capability), do: capability.name) do
+      [] -> {:unavailable, :no_media_tool}
+      tools -> {:ok, Map.put(route, :tools, tools)}
+    end
+  end
+
+  defp media_tool?(%Capability{name: "send_attachment"}), do: true
+  defp media_tool?(%Capability{metadata: metadata}), do: Map.get(metadata, :category) == :media
+
   defp media_active_ref({:ok, %{active: active}}), do: active
   defp media_active_ref({:unavailable, _reason}), do: nil
 
@@ -452,7 +701,7 @@ defmodule FermixCore.Jobs.Runner do
     messages = [
       %{role: "system", content: cron_guidance()},
       %{role: "system", content: CurrentDate.note()},
-      %{role: "user", content: state.job.task_prompt}
+      run_message(state.job.task_prompt)
     ]
 
     %{
@@ -481,7 +730,27 @@ defmodule FermixCore.Jobs.Runner do
       skill_prompt_message(skill, job),
       %{role: "system", content: job_context_prompt(job, media)},
       %{role: "system", content: CurrentDate.note()},
-      %{role: "user", content: job.task_prompt}
+      run_message(job.task_prompt)
+    ]
+    |> Enum.reject(&is_nil/1)
+  end
+
+  # The run's own message opens with the current time to the minute: scheduled
+  # work reasons about time left, and the date note above stays date-only so
+  # the cached prefix holds between runs.
+  defp run_message(text),
+    do: %{role: "user", content: Clock.now_line(DateTime.utc_now()) <> "\n\n" <> text}
+
+  # A cue run's prompt (M60 §9.3): the cue guidance, the skill's prompt when
+  # the job names one, the job context, the date, then one user message with
+  # the task prompt, the framed cue and Fermix's gap notices.
+  defp cue_prompt_messages(job, skill, cue) do
+    [
+      %{role: "system", content: CueRun.guidance(job)},
+      skill_prompt_message(skill, job),
+      %{role: "system", content: CueRun.job_context(job, cue)},
+      %{role: "system", content: CurrentDate.note()},
+      run_message(CueRun.user_message(job, cue))
     ]
     |> Enum.reject(&is_nil/1)
   end
@@ -526,10 +795,15 @@ defmodule FermixCore.Jobs.Runner do
   # The prompt says what is actually wired (M46 §7.2), derived from the SAME
   # resolution the closure came from — never a hopeful sentence the run cannot
   # honour. Execute-time refusal stays the hard gate either way.
-  defp attachment_line({:ok, %{platform: platform}}) do
-    "Attachments: send_attachment delivers files to this job's configured " <>
+  defp attachment_line({:ok, %{platform: platform, tools: tools}}) do
+    verb = if length(tools) == 1, do: "delivers", else: "deliver"
+
+    "Attachments: #{Enum.join(tools, ", ")} #{verb} files to this job's configured " <>
       "#{platform} destination"
   end
+
+  defp attachment_line({:unavailable, :no_media_tool}),
+    do: "Attachments: unavailable (this run has no tool that sends files)"
 
   defp attachment_line({:unavailable, reason}) do
     "Attachments: unavailable (#{MediaBridge.unavailable_reason(reason)})"
@@ -541,23 +815,118 @@ defmodule FermixCore.Jobs.Runner do
     end)
   end
 
+  # The run's trust is the job's, met with its skill's: a plugin skill loads at
+  # guest whoever calls it, so a job bound to one runs at guest, as `skill_run`
+  # of it would. The context keeps the job's own trust as its `source_trust`
+  # (the person), so the loop's `effective_trust` stamp marks the run as
+  # narrowed by trust for any job it sets up or changes.
+  #
+  # Every registry read sits inside this rescue, so a failing registry is a run
+  # error, recorded, never a runner crash.
   defp loop_opts(state, skill, media) do
-    trust = effective_trust(state.job)
-    {routing_opts, worker_routing} = resolve_run_routing(state)
+    job_trust = effective_trust(state.job)
+    trust = loop_trust(job_trust, skill)
+    allowed_tools = run_allowed_tools(state, skill)
 
-    base = [
-      context: loop_context(state, skill, trust, worker_routing, media),
-      capability_registry: state.capability_registry,
-      allowed_tools: effective_allowed_tools(state.job, skill),
-      policy: effective_policy(state.job, trust, skill),
-      trust: trust,
-      max_iterations: state.job.max_iterations
-    ]
+    with {:ok, policy} <- run_policy(state.job, job_trust, skill),
+         surface = surface(state.capability_registry, trust, policy, allowed_tools),
+         :ok <- check_cue_history(state, surface, skill),
+         media = media_on_surface(media, surface),
+         {:ok, {routing_opts, worker_routing}} <- run_routing(state) do
+      base = [
+        context: loop_context(state, skill, job_trust, worker_routing, media),
+        capability_registry: state.capability_registry,
+        allowed_tools: allowed_tools,
+        policy: policy,
+        trust: trust,
+        max_iterations: state.job.max_iterations
+      ]
 
-    {:ok, base ++ routing_opts}
+      {:ok, base ++ routing_opts, media}
+    end
   rescue
     error -> {:error, Exception.message(error)}
   end
+
+  # The registry list the run's loop resolves from the same options (`AgentLoop`).
+  defp surface(registry, trust, policy, allowed_tools) do
+    CapabilityRegistry.list_for(registry,
+      allowed_tools: allowed_tools,
+      policy: policy,
+      trust: trust
+    )
+  end
+
+  @cue_history "cue_history"
+
+  @doc """
+  Whether a cue run of `job`, bound to `skill`, has `cue_history` on its
+  surface: listed at the trust the run's loop runs at (the job's met with the
+  skill's) with the classes it gets (`Capabilities.Skill.classes_within/2` of
+  the job's grant). `cue_history` is owner-only and `:read_only`, so a plugin
+  skill (guest) or one asking only for other classes leaves a watcher's task
+  unable to read its watcher's deliveries. The one predicate behind
+  `update_job`'s refusal and a cue run's failure (`cue_skill_sentence/1`).
+  """
+  @spec cue_history_on_surface?(map(), AgentDefinition.t() | nil, GenServer.server()) ::
+          boolean()
+  def cue_history_on_surface?(job, skill, registry) when is_map(job) do
+    job_trust = effective_trust(job)
+
+    case run_policy(job, job_trust, skill) do
+      {:ok, policy} ->
+        registry
+        |> surface(loop_trust(job_trust, skill), policy, [@cue_history])
+        |> cue_history?()
+
+      {:error, _no_classes} ->
+        false
+    end
+  end
+
+  @doc "The sentence a watcher's task bound to `skill` without `cue_history` gets."
+  @spec cue_skill_sentence(map()) :: String.t()
+  def cue_skill_sentence(skill) do
+    "Skill #{skill.name} leaves a watcher's task without cue_history, which the task " <>
+      "reads its watcher's deliveries through: at the trust and capability classes the " <>
+      "skill runs with, cue_history is not on its runs' surface. Bind another skill, or " <>
+      "drop skill_name."
+  end
+
+  defp cue_history?(surface), do: Enum.any?(surface, &(&1.name == @cue_history))
+
+  # A cue run whose skill leaves `cue_history` off its surface fails before the
+  # model is asked, rather than run half-blind (a row bound before `update_job`
+  # refused it). The surface is the run's own: its allowlist is the cue surface
+  # built from the mandate and skill this run loaded once (`load_cue/1`).
+  defp check_cue_history(%{cue: {:ok, _cue}}, surface, skill) do
+    if cue_history?(surface),
+      do: :ok,
+      else: {:error, {:cue_history_lost, cue_skill_sentence(skill)}}
+  end
+
+  defp check_cue_history(_state, _surface, _skill), do: :ok
+
+  # A route that cannot be resolved (no provider to select, an unknown pinned
+  # provider) is tagged, so a cue run tells "no route", a provider failure,
+  # from its other setup failures (M60 §9.4). The ledger and the failure text
+  # read as they did before the tag (`persisted_error/2`, `job_error_sentence/1`).
+  defp run_routing(state) do
+    {:ok, resolve_run_routing(state)}
+  rescue
+    error -> {:error, {:no_route, Exception.message(error)}}
+  end
+
+  # The trust the run's loop runs at: the job's, met with its skill's.
+  defp loop_trust(job_trust, nil), do: job_trust
+  defp loop_trust(job_trust, skill), do: CapabilityRegistry.lower_trust(job_trust, skill.trust)
+
+  # A cue run's exact surface is `Jobs.CueSurface`'s (M60 §9.3, S5), whatever
+  # the job names; every other run keeps its job and skill allowlists.
+  defp run_allowed_tools(%{cue: {:ok, cue}} = state, skill),
+    do: CueSurface.tools(state.job, skill, cue.watcher, state.cue_mandate)
+
+  defp run_allowed_tools(state, skill), do: effective_allowed_tools(state.job, skill)
 
   # `:operator` jobs run with the trust-derived registry default (full
   # operator surface). The static scheduled-job policy default
@@ -567,39 +936,39 @@ defmodule FermixCore.Jobs.Runner do
   defp scheduled_policy(_explicit, :operator), do: nil
   defp scheduled_policy(explicit, _trust), do: capability_policy(explicit)
 
-  # A named skill's declared `policy` narrows the run further, clamped to the
-  # classes the job's own trust actually grants — so naming an operator skill
-  # from a guest job can never widen the run past guest. A skill with no policy
-  # (or `policy: []`, which `Registry.resolve_policy/2` reads as "use the trust
-  # default") leaves the job's trust-derived policy untouched. An empty clamp
-  # means the skill demanded only classes the trust forbids: fail the run loudly
-  # rather than silently leak back to the trust default.
-  defp effective_policy(job, trust, skill) do
-    base = scheduled_policy(job.capability_policy, trust)
+  # The run's policy classes. With no skill, the job's own at the job's trust.
+  # With one, the classes the skill declares at its own trust kept to the job's
+  # grant, read at the job's trust: an operator job grants its trust's whole
+  # default (its row's own policy is not read), a guest job its row's policy or
+  # the scheduled-job default. That is `Capabilities.Skill.classes_within/2`,
+  # the meet `skill_run` of the skill uses, so the job offers what `skill_run`
+  # would within its grant. They are passed explicitly, since the loop runs at
+  # the trust a plugin skill lowers. Only a guest job's grant can leave a skill
+  # no class: the run fails loudly, with a sentence the owner can act on, rather
+  # than leak back to a trust default.
+  defp run_policy(job, job_trust, nil),
+    do: {:ok, scheduled_policy(job.capability_policy, job_trust)}
 
-    case skill_policy(skill) do
-      nil -> base
-      skill_classes -> clamp_skill_policy(base, skill_classes, trust, skill)
+  defp run_policy(job, job_trust, skill) do
+    granted = job_policy_classes(scheduled_policy(job.capability_policy, job_trust), job_trust)
+
+    case Skill.classes_within(skill, granted) do
+      [] -> {:error, {:skill_grants_nothing, no_classes_sentence(skill, granted)}}
+      classes -> {:ok, classes}
     end
   end
 
-  defp skill_policy(nil), do: nil
-  defp skill_policy(%{policy: classes}) when is_list(classes) and classes != [], do: classes
-  defp skill_policy(_skill), do: nil
-
-  defp clamp_skill_policy(base, skill_classes, trust, skill) do
-    granted = job_policy_classes(base, trust)
-
-    case Enum.filter(skill_classes, &(&1 in granted)) do
-      [] ->
-        raise ArgumentError,
-              "skill #{inspect(skill.name)} policy #{inspect(skill_classes)} grants no " <>
-                "capability classes under job trust #{inspect(trust)}"
-
-      classes ->
-        classes
-    end
+  defp no_classes_sentence(skill, granted) do
+    "Skill #{skill.name} asks only for capability classes this job does not grant " <>
+      "(it asks for #{class_words(skill)}; the job grants #{class_words(granted)}). The job " <>
+      "was set up at guest trust, which is its limit: set it up again from the owner's own " <>
+      "turn, bind another skill, or drop skill_name."
   end
+
+  defp class_words(classes) when is_list(classes),
+    do: Enum.map_join(classes, ", ", &Atom.to_string/1)
+
+  defp class_words(skill), do: skill |> Skill.declared_classes() |> class_words()
 
   # The concrete class set the job runs with absent a skill: the explicit
   # scheduled-job policy when set, else the trust's registry default.
@@ -772,11 +1141,17 @@ defmodule FermixCore.Jobs.Runner do
       memory_read_scopes: state.job.memory_read_scopes,
       job_id: state.job.id,
       run_id: state.run.id,
+      # What started this run, from its row ("schedule", "manual", or "cue" for
+      # a run a cue woke): `Capabilities.AccessGate` refuses every
+      # access-sensitive command in a cue run on it (M60 §10.5).
+      trigger: Map.fetch!(state.run, :trigger),
       skill_name: if(skill, do: skill.name),
-      # Part B §11.1: the same run trust that selects the capability surface also
-      # selects any delegated worker's surface (one derivation, two consumers),
-      # so an operator cron run can fan out via `subagents` while a guest run
-      # never sees the tool (policy-class exclusion). `worker_routing` places
+      # Part B §11.1: the job's own trust is the run's person. The loop runs at
+      # the run trust (lowered by a plugin skill) and stamps it as
+      # `effective_trust`; a delegated worker's surface derives from the lower of
+      # the two (`CapabilityRegistry.run_trust/1`), so an operator cron run can
+      # fan out via `subagents` while a guest run never sees the tool
+      # (policy-class exclusion). `worker_routing` places
       # workers on the run's own route (an injected adapter rides `:provider`, a
       # resolved chain rides `:ordered_routes`) rather than re-resolving the
       # global primary.
@@ -789,7 +1164,18 @@ defmodule FermixCore.Jobs.Runner do
     }
     |> Map.merge(worker_routing)
     |> put_media_reply_fn(media)
+    |> put_cue_context(state)
   end
+
+  # A cue run is tainted by its cue's source from its first token (S2) and
+  # carries the cue's ids for the tools and gates that read them (PLAN §4.3).
+  defp put_cue_context(context, %{cue: {:ok, cue}} = state) do
+    context
+    |> Map.merge(CueRun.run_context(cue, state.cue_mandate, state.run.claimed_at))
+    |> Map.put(:cue_mandate_opts, state.cue_mandate_opts)
+  end
+
+  defp put_cue_context(context, _state), do: context
 
   # Present only when the run actually has a media route: a `reply_fn` a tool
   # cannot use is worse than none, because `send_attachment` would report a
@@ -1189,6 +1575,34 @@ defmodule FermixCore.Jobs.Runner do
     """
   end
 
+  # A cue run's artifact records its ids and outcome only (M60 §9.3): its
+  # reply and error can carry text the model wrote from the cue, and a file
+  # tool or a shell in another run can read this folder.
+  defp cue_artifact(state, status, outcome) do
+    """
+    # Cue Run #{if status == "ok", do: "Output", else: "Failure"}
+
+    Job: #{state.job.name}
+    Job ID: #{state.job.id}
+    Run ID: #{state.run.id}
+    Session ID: #{state.run.session_id}
+    Delivery ID: #{state.run.cue_delivery_id}
+    Watcher ID: #{cue_watcher_id(state)}
+    Status: #{status}
+    Outcome: #{outcome_label(outcome)}
+
+    A cue run's reply and error are kept on its run record only.
+    """
+  end
+
+  defp cue_watcher_id(%{cue: {:ok, cue}}), do: cue.watcher.id
+  defp cue_watcher_id(_state), do: "unknown (the delivery could not be read)"
+
+  defp outcome_label(:ignored), do: "ignored"
+  defp outcome_label(:acted), do: "acted"
+  defp outcome_label({:failed, :provider}), do: "failed on a provider failure"
+  defp outcome_label({:failed, :other}), do: "failed"
+
   defp failure_artifact_error("timeout", reason), do: persisted_error("timeout", reason)
 
   defp failure_artifact_error("error", reason) do
@@ -1218,6 +1632,11 @@ defmodule FermixCore.Jobs.Runner do
     |> String.trim()
   end
 
+  defp job_error_sentence({:no_route, message}),
+    do: TurnRunner.error_reply(message, surface: :job)
+
+  defp job_error_sentence({:skill_grants_nothing, sentence}), do: sentence
+  defp job_error_sentence({:cue_history_lost, sentence}), do: sentence
   defp job_error_sentence(reason), do: TurnRunner.error_reply(reason, surface: :job)
 
   defp job_config_snapshot(job, loop_input) do

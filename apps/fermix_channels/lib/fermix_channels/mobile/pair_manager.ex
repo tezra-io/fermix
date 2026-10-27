@@ -3,12 +3,13 @@ defmodule FermixChannels.Mobile.PairManager do
   Daemon-owned lifecycle for the single live mobile pairing window.
 
   Secrets and pending requests exist only in this process. A window lasts at
-  most 120 seconds. Failed handshakes are counted per source address: the
-  fifth from one address refuses that address for the rest of the window, and
-  nothing is counted while a phone is waiting for the owner's decision. No
-  number of failures ends the window, so a stranger cannot end the ceremony
-  at all: only the owner, the phone and the 120 seconds can. The same phone
-  reconnecting (proven by its Noise key) takes its waiting request over.
+  most 120 seconds. Failed handshakes are counted per source (an address, or a
+  remote phone's iroh endpoint): the fifth from one source refuses that source
+  for the rest of the window, and nothing is counted while a phone is waiting
+  for the owner's decision. No number of failures ends the window or refuses
+  any other source, so a stranger cannot end the ceremony at all: only the
+  owner, the phone and the 120 seconds can. The same phone reconnecting
+  (proven by its Noise key) takes its waiting request over.
   Identity, listener, persistence, clocks, timers, and randomness are
   injected at the boundary so tests never bind ports, touch the host
   filesystem, or sleep for expiry.
@@ -34,20 +35,20 @@ defmodule FermixChannels.Mobile.PairManager do
   require Logger
 
   @max_ttl_ms 120_000
-  # Per source address: one noisy peer is refused alone. A failed handshake
-  # proves nothing about who sent it (garbage needs neither the pairing secret
-  # nor the gateway key, and the gateway key is in every pairing QR), so no
-  # count of them may end the window for everyone. The addresses one window
-  # remembers are bounded; a failure from an address past the bound is not
-  # counted, since a peer with that many addresses gains nothing from one more.
+  # Per source: one noisy peer is refused alone. A failed handshake proves
+  # nothing about who sent it (garbage needs neither the pairing secret nor the
+  # gateway key, and the gateway key is in every pairing QR), so no count of
+  # them may end the window, or refuse another source, for everyone. The
+  # sources one window remembers are bounded; a failure from a source past the
+  # bound is not counted, since a peer with that many sources gains nothing
+  # from one more. A remote peer's source is its iroh endpoint key, which costs
+  # nothing to replace, so these counts bound no sender's attempts, and nothing
+  # needs them to: the secret is 32 random bytes, a phone that proves it still
+  # waits for the owner's approval, and the bridge's 64 connections and the
+  # 10 s handshake deadline bound what attempts cost (`Iroh.Bridge`,
+  # `Mobile.Session`).
   @max_failures 5
   @max_tracked_sources 1_024
-  # An iroh peer is its endpoint key, which costs nothing to replace, so a
-  # per-peer count alone bounds nothing: past this many failures summed over
-  # every iroh peer, the window refuses iroh peers until it closes. Peers on the
-  # home network or Tailscale, and a phone already waiting, are untouched, and
-  # the window itself never closes over it (M62 §7, M65).
-  @max_iroh_failures 64
   @max_wait_ms 120_000
   @max_text_bytes 128
   @max_retained 8
@@ -137,7 +138,7 @@ defmodule FermixChannels.Mobile.PairManager do
   @spec retention_ms() :: pos_integer()
   def retention_ms, do: @retention_ms
 
-  @doc "Most source addresses one window counts failed handshakes for."
+  @doc "Most sources one window counts failed handshakes for."
   @spec max_tracked_sources() :: pos_integer()
   def max_tracked_sources, do: @max_tracked_sources
 
@@ -238,7 +239,7 @@ defmodule FermixChannels.Mobile.PairManager do
   Count one failed handshake from `source`. Its fifth refuses that source for
   the rest of the window, which stays open for everyone else. With a request
   waiting for the owner, or once the window remembers
-  `max_tracked_sources/0` other addresses, nothing is counted.
+  `max_tracked_sources/0` other sources, nothing is counted.
   """
   @spec record_failure(GenServer.server(), session_id(), source()) ::
           {:ok, 0..4} | {:error, :timeout | :rate_limited | :session_not_found}
@@ -512,7 +513,6 @@ defmodule FermixChannels.Mobile.PairManager do
         timer_ref: timer_ref,
         timer_token: timer_token,
         failures_by_source: %{},
-        iroh_failures: 0,
         request: nil,
         refusal: nil,
         request_waiter: nil,
@@ -630,21 +630,14 @@ defmodule FermixChannels.Mobile.PairManager do
   defp failure_reply(state, window, source) do
     counts = window.failures_by_source
 
-    window = count_iroh_failure(window, source)
-
     if Map.has_key?(counts, source) or map_size(counts) < @max_tracked_sources do
       count = min(source_failures(window, source) + 1, @max_failures)
       window = %{window | failures_by_source: Map.put(counts, source, count)}
       {:reply, counted_failure(count), %{state | window: window}}
     else
-      {:reply, {:ok, 0}, %{state | window: window}}
+      {:reply, {:ok, 0}, state}
     end
   end
-
-  defp count_iroh_failure(window, {:iroh, _endpoint_id}),
-    do: %{window | iroh_failures: min(window.iroh_failures + 1, @max_iroh_failures)}
-
-  defp count_iroh_failure(window, _source), do: window
 
   defp counted_failure(count) when count >= @max_failures, do: {:error, :rate_limited}
   defp counted_failure(count), do: {:ok, count}
@@ -654,15 +647,10 @@ defmodule FermixChannels.Mobile.PairManager do
   defp current_for(nil, _source), do: :none
 
   defp current_for(window, source) do
-    if source_failures(window, source) >= @max_failures or iroh_refused?(window, source),
+    if source_failures(window, source) >= @max_failures,
       do: :none,
       else: {:ok, public_window(window)}
   end
-
-  defp iroh_refused?(window, {:iroh, _endpoint_id}),
-    do: window.iroh_failures >= @max_iroh_failures
-
-  defp iroh_refused?(_window, _source), do: false
 
   defp close_window(state, status, socket_result \\ nil) do
     window = state.window

@@ -2,7 +2,7 @@ defmodule FermixCore.Setup.SecretWriter do
   @moduledoc """
   Facade for setup-managed secret storage.
 
-  A key is one of three shapes. A registry atom names a `SecretPaths` entry and
+  A key is one of four shapes. A registry atom names a `SecretPaths` entry and
   is stored under that entry's environment name. `{:external_env, name}` is a
   skill's own credential (M45 §4.1), stored under `external_env:<NAME>` so it
   can never share an item with a provider key of the same variable name. The
@@ -10,6 +10,11 @@ defmodule FermixCore.Setup.SecretWriter do
   before it becomes an address. `{:mcp, id}` is a value an operator MCP server
   declares (M74 E6), stored under its id, `mcp:<server>/env/<NAME>` and its
   siblings, which `Capabilities.MCP.Secrets` validates the same way.
+  `{:cue_source, ref, field}` is one secret field of a cue source (M60 §6.2),
+  stored under `cue_source:<ref>:<field>`; the ref is validated by
+  `Cues.Config.valid_name?/1` and the field is one of `token`, `key`,
+  `secret` or `path_secret` (a webhook URL's random part, M60 §6.5), so
+  neither part can become an arbitrary address.
 
   There are two stores, and `config.toml` says which one a home writes to
   (`[fermix_core] secret_store`, default `keyring`) and which one each secret
@@ -24,6 +29,7 @@ defmodule FermixCore.Setup.SecretWriter do
   """
 
   alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
+  alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Sandbox.ExternalEnv
   alias FermixCore.Setup.SecretPaths
 
@@ -34,9 +40,12 @@ defmodule FermixCore.Setup.SecretWriter do
   @default_profile "general"
   @compiled_env Mix.env()
   @external_prefix "external_env:"
+  @cue_source_prefix "cue_source:"
+  @cue_secret_fields [:token, :key, :secret, :path_secret]
   @type external_key :: {:external_env, String.t()}
   @type mcp_key :: {:mcp, String.t()}
-  @type secret_key :: atom() | external_key() | mcp_key()
+  @type cue_source_key :: {:cue_source, String.t(), :token | :key | :secret | :path_secret}
+  @type secret_key :: atom() | external_key() | mcp_key() | cue_source_key()
   @type writer_error :: {:error, term()}
   @type store :: :keyring | :file
 
@@ -61,11 +70,18 @@ defmodule FermixCore.Setup.SecretWriter do
           optional(:evidence) => String.t()
         }
 
-  @doc "Whether `key` is one of the three key shapes every writer accepts."
+  @doc "Whether `key` is one of the four key shapes every writer accepts."
   defguard is_secret_key(key)
            when is_atom(key) or
                   (is_tuple(key) and tuple_size(key) == 2 and
-                     elem(key, 0) in [:external_env, :mcp] and is_binary(elem(key, 1)))
+                     elem(key, 0) in [:external_env, :mcp] and is_binary(elem(key, 1))) or
+                  (is_tuple(key) and tuple_size(key) == 3 and elem(key, 0) == :cue_source and
+                     is_binary(elem(key, 1)) and
+                     elem(key, 2) in [:token, :key, :secret, :path_secret])
+
+  @doc "The secret fields a cue source may declare, in its `{:cue_source, ref, field}` key."
+  @spec cue_secret_fields() :: [:token | :key | :secret | :path_secret]
+  def cue_secret_fields, do: @cue_secret_fields
 
   @callback put(secret_key(), String.t(), keyword()) :: :ok | writer_error()
   @callback get(secret_key(), keyword()) :: {:ok, String.t()} | writer_error()
@@ -212,12 +228,13 @@ defmodule FermixCore.Setup.SecretWriter do
   @spec attemptable?(verdict()) :: boolean()
   def attemptable?(%{state: state} = verdict), do: usable?(verdict) or state == :locked
 
-  # A write gives the operator time to answer the desktop's unlock prompt; a
-  # read never waits for one, because the reads that happen with nobody
-  # present (boot) are refused by the probe before they are tried.
+  # A write, and the read `fermix setup --migrate-secrets` makes of a secret it
+  # moves, give the operator time to answer the desktop's unlock prompt. A read
+  # with nobody present (boot) never waits for one: the probe refuses it before
+  # it is tried.
   @unlock_prompt_timeout_ms 120_000
 
-  @doc "How long a write waits for the operator to answer an unlock prompt."
+  @doc "How long a write, or a migration's read, waits for the operator to answer an unlock prompt."
   @spec unlock_prompt_timeout_ms() :: pos_integer()
   def unlock_prompt_timeout_ms, do: @unlock_prompt_timeout_ms
 
@@ -230,9 +247,10 @@ defmodule FermixCore.Setup.SecretWriter do
 
   @doc """
   The name an OS store files `key` under, before the profile prefix: a
-  registry key's environment name, `external_env:<NAME>`, or an MCP server's
-  id. Raises for an external name or an id that fails validation, so an
-  unvalidated name can never reach a keychain address.
+  registry key's environment name, `external_env:<NAME>`, an MCP server's id,
+  or `cue_source:<ref>:<field>`. Raises for an external name, an id or a ref
+  that fails validation, so an unvalidated name can never reach a keychain
+  address.
   """
   @spec item_name(secret_key()) :: String.t()
   def item_name(key) when is_atom(key), do: SecretPaths.fetch!(key).env
@@ -248,6 +266,14 @@ defmodule FermixCore.Setup.SecretWriter do
     case McpSecrets.parse_id(id) do
       {:ok, _server, _ref} -> id
       :error -> raise ArgumentError, "MCP secret id refused"
+    end
+  end
+
+  def item_name({:cue_source, ref, field}) when is_binary(ref) and field in @cue_secret_fields do
+    if CuesConfig.valid_name?(ref) do
+      @cue_source_prefix <> ref <> ":" <> Atom.to_string(field)
+    else
+      raise ArgumentError, "cue source ref refused"
     end
   end
 
@@ -301,6 +327,13 @@ defmodule FermixCore.Setup.SecretWriter do
   end
 
   defp format_reason(:unavailable), do: "no supported OS secret helper is available"
+
+  defp format_reason(:unreadable_keychain_password),
+    do: "the login Keychain answered in a form Fermix does not read, so nothing was used"
+
+  defp format_reason(:helper_output_too_large),
+    do: "the secret helper answered with more than Fermix reads, so none of it was used"
+
   defp format_reason(reason), do: inspect(reason)
 end
 
@@ -420,7 +453,7 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
   def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do
     write_opts = Keyword.put_new(opts, :timeout_ms, SecretWriter.unlock_prompt_timeout_ms())
 
-    with {:ok, binary} <- fetch_secret_tool_binary(),
+    with {:ok, binary} <- fetch_secret_tool_binary(opts),
          {:ok, shell} <- fetch_shell_binary() do
       with_temp_secret(value, fn secret_file ->
         run_with_stdin(shell, secret_file, binary, put_args(key, opts), write_opts)
@@ -428,13 +461,15 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
     end
   end
 
+  # `secret-tool lookup` writes the secret's bytes, and a newline after them
+  # only when its stdout is a terminal (libsecret tool/secret-tool.c,
+  # write_password_stdout: `if (isatty (1))`). The runner's stdout is a pipe,
+  # so the output is the stored value, its own trailing newlines included.
   @impl true
   def get(key, opts \\ []) when is_secret_key(key) do
-    with {:ok, binary} <- fetch_secret_tool_binary(),
+    with {:ok, binary} <- fetch_secret_tool_binary(opts),
          {:ok, output} <- run(binary, lookup_args(key, opts), opts) do
-      output
-      |> String.trim_trailing("\n")
-      |> case do
+      case output do
         "" -> {:error, :missing_secret}
         value -> {:ok, value}
       end
@@ -445,7 +480,7 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
   # item needs no special case here (unlike macOS `security`, which exits 44).
   @impl true
   def delete(key, opts \\ []) when is_secret_key(key) do
-    with {:ok, binary} <- fetch_secret_tool_binary(),
+    with {:ok, binary} <- fetch_secret_tool_binary(opts),
          {:ok, _output} <- run(binary, clear_args(key, opts), opts) do
       :ok
     end
@@ -481,8 +516,11 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
     ["service", service, "account", @account, "env", SecretWriter.item_name(key)]
   end
 
-  defp fetch_secret_tool_binary do
-    case secret_tool_binary() do
+  # `opts[:find_executable]` and `opts[:command_runner]` (`CommandRunner.run/3`'s
+  # shape) stand in for the host in a test, so every answer the tool can give
+  # reaches `get/2` without a keyring or the tool installed.
+  defp fetch_secret_tool_binary(opts) do
+    case Keyword.get(opts, :find_executable, &System.find_executable/1).("secret-tool") do
       nil -> {:error, :unavailable}
       binary -> {:ok, binary}
     end
@@ -551,13 +589,17 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
     timeout_ms = timeout(opts)
     command = Enum.join([binary | args], " ")
 
-    case CommandRunner.run(
+    case command_runner(opts).(
            binary,
            args,
            [timeout_ms: timeout_ms] ++ Keyword.take(opts, [:supervised])
          ) do
       {:ok, %{exit: 0, stdout: output, truncated?: false}} ->
         {:ok, output}
+
+      # What was read is the start of the answer, which can be the secret.
+      {:ok, %{truncated?: true}} ->
+        {:error, :helper_output_too_large}
 
       {:ok, %{exit: code, stdout: output}} ->
         {:error, {:helper_failed, command, code, String.slice(output, 0, 200)}}
@@ -570,6 +612,17 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp command_runner(opts) do
+    case Keyword.get(opts, :command_runner, &CommandRunner.run/3) do
+      runner when is_function(runner, 3) ->
+        runner
+
+      other ->
+        raise ArgumentError,
+              ":command_runner must be a function of arity 3, got: #{inspect(other)}"
     end
   end
 end
@@ -606,7 +659,7 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
   def put(key, value, opts \\ []) when is_secret_key(key) and is_binary(value) do
     write_opts = Keyword.put_new(opts, :timeout_ms, SecretWriter.unlock_prompt_timeout_ms())
 
-    with {:ok, binary} <- fetch_security_binary() do
+    with {:ok, binary} <- fetch_security_binary(opts) do
       [delete, add] = put_commands(key, value, opts)
       # Best-effort delete FIRST so the add re-creates the item fresh with `-A`'s
       # open ACL (see put_commands/put_args). A missing item just errors and falls
@@ -636,14 +689,67 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
 
   @impl true
   def get(key, opts \\ []) when is_secret_key(key) do
-    with {:ok, binary} <- fetch_security_binary(),
-         {:ok, output} <- run(binary, get_args(key, opts), opts) do
-      output
-      |> String.trim_trailing("\n")
-      |> case do
-        "" -> {:error, :missing_secret}
-        value -> {:ok, value}
-      end
+    with {:ok, binary} <- fetch_security_binary(opts) do
+      binary
+      |> run(get_args(key, opts), opts)
+      |> get_result()
+    end
+  end
+
+  @doc """
+  The `security` argument list `get/2` runs. It reads with `-g`, never `-w`:
+  `-w` prints a value holding any byte outside space to tilde (a newline, a tab,
+  any non-ASCII character) as bare hex, which no reader can tell from a value
+  made of hex digits. Exposed as data so the flag is unit-testable without a
+  keychain.
+  """
+  @spec get_command(SecretWriter.secret_key(), keyword()) :: [String.t()]
+  def get_command(key, opts \\ []) when is_secret_key(key), do: get_args(key, opts)
+
+  @doc """
+  Classifies a `get/2` helper result: the stored bytes, `:missing_secret` for
+  an empty value, `:unreadable_keychain_password` for an answer in no form
+  `security -g` prints, or the helper's own failure, unchanged. Exposed as a
+  pure function so every form `security` prints is testable without a keychain.
+  """
+  @spec get_result({:ok, String.t()} | {:error, term()}) :: {:ok, String.t()} | {:error, term()}
+  def get_result({:ok, output}) when is_binary(output) do
+    case password_lines(output) do
+      [line] -> parse_password(line)
+      _none_or_several -> {:error, :unreadable_keychain_password}
+    end
+  end
+
+  def get_result({:error, reason}), do: {:error, reason}
+
+  # `-g` writes `password: ` and the value to stderr, which the runner captures
+  # in one stream with the item's attributes on stdout. Where the line falls in
+  # that stream depends on stdio buffering (an attribute dump past the 64 KiB
+  # buffer can split a row around it), so the parser does not rely on order: it
+  # takes the one line that starts with `password: `, and refuses an answer with
+  # none, several, or one in neither form below. No attribute line starts with
+  # `password: `, and no form below holds a raw newline.
+  @password_prefix "password: "
+  # Every byte printable and none a backslash: the bytes themselves, in quotes
+  # that are not escaped inside.
+  @text_form ~r/\Apassword: "([\x20-\x5B\x5D-\x7E]+)"\z/
+  # Any other value: `0x` and every byte in uppercase hex, then one space, or
+  # two and the value again with octal escapes when any byte is printable.
+  @hex_form ~r/\Apassword: 0x((?:[0-9A-F]{2})+)(?: |  ".*")\z/
+
+  defp password_lines(output) do
+    output
+    |> String.split("\n")
+    |> Enum.filter(&String.starts_with?(&1, @password_prefix))
+  end
+
+  defp parse_password(@password_prefix), do: {:error, :missing_secret}
+
+  defp parse_password(line) do
+    case {Regex.run(@text_form, line), Regex.run(@hex_form, line)} do
+      {[_line, text], nil} -> {:ok, text}
+      {nil, [_line, hex]} -> {:ok, Base.decode16!(hex)}
+      _neither -> {:error, :unreadable_keychain_password}
     end
   end
 
@@ -655,7 +761,7 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
 
   @impl true
   def delete(key, opts \\ []) when is_secret_key(key) do
-    with {:ok, binary} <- fetch_security_binary() do
+    with {:ok, binary} <- fetch_security_binary(opts) do
       binary
       |> run(delete_args(key, opts), opts)
       |> delete_result()
@@ -681,13 +787,18 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
 
   def delete_result({:error, reason}), do: {:error, reason}
 
+  # A command source's whole stdout is its value, so it reads with `-w`. Settings
+  # files record these exact arguments, and `Sandbox.ExternalEnv` knows a stored
+  # name by them, so they stay as they are. `-w` prints any byte outside space
+  # to tilde as hex, so only a printable ASCII value arrives intact this way,
+  # and `ExternalEnv.validate_value/1` refuses any other when it is stored.
   @impl true
   @spec command_source(SecretWriter.secret_key(), keyword()) :: map()
   def command_source(key, opts \\ []) when is_secret_key(key) do
     %{
       source: :command,
       command: security_binary() || "/usr/bin/security",
-      args: get_args(key, opts),
+      args: lookup_args(key, opts),
       timeout_ms: @default_timeout_ms
     }
   end
@@ -710,21 +821,28 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
   end
 
   defp get_args(key, opts) do
+    ["find-generic-password", "-a", @account, "-s", service(key, opts), "-g"]
+  end
+
+  defp lookup_args(key, opts) do
     ["find-generic-password", "-a", @account, "-s", service(key, opts), "-w"]
   end
 
   defp service(key, opts),
     do: "#{SecretWriter.scoped_prefix(opts)}:#{SecretWriter.item_name(key)}"
 
-  defp fetch_security_binary do
-    case security_binary() do
+  # `opts[:find_executable]` and `opts[:command_runner]` (`CommandRunner.run/3`'s
+  # shape) stand in for the host in a test, so every answer `security` can give
+  # reaches `get/2` without a keychain or a Mac.
+  defp fetch_security_binary(opts) do
+    case security_binary(Keyword.get(opts, :find_executable, &System.find_executable/1)) do
       nil -> {:error, :unavailable}
       binary -> {:ok, binary}
     end
   end
 
-  defp security_binary do
-    System.find_executable("security") ||
+  defp security_binary(find \\ &System.find_executable/1) do
+    find.("security") ||
       if File.exists?("/usr/bin/security"), do: "/usr/bin/security"
   end
 
@@ -739,13 +857,17 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
     timeout_ms = timeout(opts)
     command = Enum.join([binary | args_without_secret(args)], " ")
 
-    case CommandRunner.run(
+    case command_runner(opts).(
            binary,
            args,
            [timeout_ms: timeout_ms] ++ Keyword.take(opts, [:supervised])
          ) do
       {:ok, %{exit: 0, stdout: output, truncated?: false}} ->
         {:ok, output}
+
+      # What was read is the start of the answer, which can be the secret.
+      {:ok, %{truncated?: true}} ->
+        {:error, :helper_output_too_large}
 
       {:ok, %{exit: code, stdout: output}} ->
         {:error, {:helper_failed, command, code, String.slice(output, 0, 200)}}
@@ -772,4 +894,15 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
   end
 
   defp args_without_secret(args), do: args
+
+  defp command_runner(opts) do
+    case Keyword.get(opts, :command_runner, &CommandRunner.run/3) do
+      runner when is_function(runner, 3) ->
+        runner
+
+      other ->
+        raise ArgumentError,
+              ":command_runner must be a function of arity 3, got: #{inspect(other)}"
+    end
+  end
 end

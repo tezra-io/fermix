@@ -113,6 +113,35 @@ defmodule FermixCore.Tools.ToolSearchTest do
     assert names == ["x_create_post"]
   end
 
+  # Discovery follows the run's trust: a run at guest under the owner (a plugin
+  # skill's worker) finds no owner-only tool (`CapabilityRegistry.run_trust/1`).
+  test "a run at guest trust under the owner finds no owner-only tool", %{registry: registry} do
+    cap =
+      Capability.new(%{
+        name: "diary_search",
+        description: "Search the owner's diary.",
+        parameters: %{type: "object", properties: %{}},
+        kind: :builtin,
+        executor: {FakeMod, :execute, []},
+        policy_class: :read_only,
+        owner_only?: true,
+        metadata: %{plugin_owned?: true, category: :plugin}
+      })
+
+    :ok = CapabilityRegistry.register(registry, cap)
+    owner = %{capability_registry: registry, agent_name: "test", source_trust: :operator}
+
+    for {context, found} <- [
+          {owner, ["diary_search"]},
+          {Map.put(owner, :effective_trust, :guest), []}
+        ] do
+      {:ok, %{success: true, output: output}} =
+        ToolSearch.execute(%{"query" => "diary"}, context)
+
+      assert Enum.map(Jason.decode!(output)["matches"], & &1["name"]) == found
+    end
+  end
+
   # `[:fermix, :tool_search, :query]` coverage lives in
   # `tool_search_telemetry_test.exs`: the content gate is read from application
   # env, so those tests must set it and cannot be async.

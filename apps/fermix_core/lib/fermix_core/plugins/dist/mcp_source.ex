@@ -514,12 +514,18 @@ defmodule FermixCore.Plugins.Dist.McpSource do
     |> Map.get("tools", [])
   end
 
+  # The description is the model-facing text (§7.6 rule 7), and the collection
+  # policy and argument guards are what the call proxy enforces: all three are
+  # signed, so all three come from the manifest, never from the live server.
   defp tool_facts(tool) do
     %{
+      description: Map.get(tool, "description"),
       read_only: Map.get(tool, "read_only"),
       replay_safe: Map.get(tool, "replay_safe"),
       required_credential_scope: Map.get(tool, "required_credential_scope"),
-      descriptor_sha256: Map.get(tool, "descriptor_sha256")
+      descriptor_sha256: Map.get(tool, "descriptor_sha256"),
+      collection_policy: Map.get(tool, "collection_policy"),
+      argument_guards: Map.get(tool, "argument_guards")
     }
   end
 

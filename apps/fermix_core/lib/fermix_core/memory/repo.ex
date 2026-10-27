@@ -9,11 +9,19 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo.ComputerHistorySql
+  alias FermixCore.Memory.Repo.CuesDeliveriesSql
+  alias FermixCore.Memory.Repo.CuesFilterSql
+  alias FermixCore.Memory.Repo.CuesMandateSql
+  alias FermixCore.Memory.Repo.CuesRunsSql
+  alias FermixCore.Memory.Repo.CuesSql
+  alias FermixCore.Memory.Repo.CuesWatchersSql
   alias FermixCore.Memory.Repo.MeetingsSql
   alias FermixCore.Memory.Repo.MobileSql
+  alias FermixCore.Memory.Repo.OpenLoopsSql
   alias FermixCore.Memory.Repo.TemporalSql
   alias FermixCore.Memory.Repo.VoiceCallsSql
   alias FermixCore.Memory.Scope
+  alias FermixCore.OpenLoops.Defaults, as: OpenLoopsDefaults
   alias FermixCore.Timeouts
 
   @base_migration_version 1
@@ -56,7 +64,24 @@ defmodule FermixCore.Memory.Repo do
   @voice_call_gist_taint_migration_version 38
   @phone_joins_chat_migration_version 39
   @reply_blocks_migration_version 41
+  @cues_migration_version 42
+  @open_loops_migration_version 43
+  # 44 is reserved.
+  @cue_stop_reason_migration_version 45
+  @harness_continued_from_migration_version 46
+  @cue_live_intake_migration_version 47
+  @cue_retention_index_migration_version 48
   @sqlite_open_intent :readwritecreate
+
+  # The cue SQL modules (M60), one per lane, all served by `cues_call/3`.
+  @cue_sql_modules [
+    CuesSql,
+    CuesWatchersSql,
+    CuesFilterSql,
+    CuesRunsSql,
+    CuesDeliveriesSql,
+    CuesMandateSql
+  ]
 
   @base_schema_sql """
   CREATE TABLE IF NOT EXISTS messages (
@@ -604,6 +629,24 @@ defmodule FermixCore.Memory.Repo do
   ALTER TABLE harness_runs ADD COLUMN vendor_config_cleared_at TEXT;
   """
 
+  # The finished run whose follow-up turn started a run (a coding-run chain,
+  # `Capabilities.AccessGate`): the gate continues each finished run as one run
+  # at most, which only a durable link from the child can say across resumes
+  # and restarts. A table beside `harness_runs`, as migration 41 put a reply's
+  # blocks beside the timeline: `harness_runs` rows are read positionally
+  # (`SELECT *`), so a new column there would break every row for an engine
+  # rolled back to before this one. One row per child; the parent is indexed,
+  # since the gate asks for a run's children. Not unique: a cloud or blocked row
+  # may name the same parent.
+  @harness_continued_from_schema_sql """
+  CREATE TABLE IF NOT EXISTS harness_run_continuations (
+    run_id TEXT PRIMARY KEY,
+    continued_from_run_id TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_harness_run_continuations_parent
+    ON harness_run_continuations(continued_from_run_id);
+  """
+
   # Durable counts-only skill-usage counters (MILESTONE_26_SKILL_CURATION §6.9):
   # one row per skill, upserted on skill_view/skill_run, bounded by the skill
   # inventory by construction. No content is stored — staleness is a counter
@@ -1028,6 +1071,45 @@ defmodule FermixCore.Memory.Repo do
         }
 
   @type temporal_cursor :: {String.t(), String.t()}
+
+  @type open_loop_row :: %{
+          id: String.t(),
+          agent_id: String.t(),
+          owner_id: String.t(),
+          dedupe_key: String.t(),
+          intention: String.t(),
+          why_it_matters: String.t() | nil,
+          matters_by_kind: String.t(),
+          matters_by_date: Date.t(),
+          matters_by_time: Time.t() | nil,
+          matters_by_at: DateTime.t(),
+          timezone: String.t(),
+          horizon_class: String.t(),
+          said_at: DateTime.t(),
+          source_channel: String.t(),
+          source_chat_id: String.t(),
+          source_thread_scope: String.t(),
+          state: String.t(),
+          touches: 0..3,
+          next_touch_at: DateTime.t() | nil,
+          claimed_at: DateTime.t() | nil,
+          last_touch_at: DateTime.t() | nil,
+          last_touch_rung: 1 | 2 | nil,
+          last_rung2_at: DateTime.t() | nil,
+          last_answer: String.t() | nil,
+          plan_at: DateTime.t() | nil,
+          last_outcome: String.t() | nil,
+          last_outcome_at: DateTime.t() | nil,
+          last_message: String.t() | nil,
+          delivery_platform: String.t(),
+          delivery_destination: String.t(),
+          delivery_thread_scope: String.t(),
+          closed_at: DateTime.t() | nil,
+          close_reason: String.t() | nil,
+          revision: pos_integer(),
+          created_at: DateTime.t(),
+          updated_at: DateTime.t()
+        }
 
   @type resource_selector :: %{
           required(:agent_id) => String.t(),
@@ -2341,6 +2423,23 @@ defmodule FermixCore.Memory.Repo do
     call({:claim_job_now, id, job_attrs, run_attrs}, opts)
   end
 
+  @doc """
+  Claims one cue run of the task job `job_id` (M60 §9.2): in one
+  `BEGIN IMMEDIATE`, the task's oldest eligible `passed` delivery
+  (`CuesRunsSql.eligible_delivery/3`), the job taken with `state: "running"`
+  for every schedule kind, the run inserted with `trigger: "cue"` and
+  `cue_delivery_id`, and the delivery moved `passed → claimed` with
+  `claimed_run_id`. `{:error, :nothing_due}` when the task has no eligible
+  delivery (nothing written); `{:error, :busy}` when the write lock is held.
+  """
+  @spec claim_cue_run(String.t(), job_run_attrs(), DateTime.t(), keyword()) ::
+          {:ok, %{job: scheduled_job_row(), run: job_run_row(), delivery: map()}}
+          | {:error, :nothing_due | :busy | term()}
+  def claim_cue_run(job_id, run_attrs, %DateTime{} = now, opts \\ [])
+      when is_binary(job_id) and is_map(run_attrs) do
+    call({:claim_cue_run, job_id, run_attrs, now}, opts)
+  end
+
   @spec upsert_scheduled_job(scheduled_job_attrs(), keyword()) ::
           {:ok, scheduled_job_row()} | {:error, term()}
   def upsert_scheduled_job(attrs, opts \\ []) when is_map(attrs) do
@@ -2419,6 +2518,36 @@ defmodule FermixCore.Memory.Repo do
   def settle_job_run(%{id: id, status: status, completed_at: %DateTime{}} = attrs, opts \\ [])
       when is_binary(id) and status in @final_job_run_statuses do
     call({:settle_job_run, attrs}, opts)
+  end
+
+  @cue_settles [:ignored, :acted, {:failed, :provider}, {:failed, :other}, :scheduler]
+
+  @doc """
+  Settles a cue run (M60 §9.4): its final row, its job's release and its
+  delivery's move, in one `BEGIN IMMEDIATE`. `settle_job_run/2` refuses a cue
+  run (`{:error, :cue_run}`), so no path releases one without moving its
+  delivery.
+
+  `settle_by` is the runner's outcome (`:ignored`, `:acted`,
+  `{:failed, :provider}`, `{:failed, :other}`) or `:scheduler` for a reap or a
+  monitored crash, which reads the run row instead
+  (`CuesRunsSql.settle_delivery/4` has the mapping). The release moves the job
+  from `running` back to `scheduled` and leaves `last_run_at`, `last_status`
+  and `last_error` as they were. `{:error, :run_not_active}` when the run
+  already settled: nothing is written, the delivery included. The settlement
+  says what became of the delivery (`disposition` `:acked`, `:retry`,
+  `:exhausted` or `:untouched`).
+  """
+  @spec settle_cue_run(job_run_attrs(), CuesRunsSql.settle_by(), keyword()) ::
+          {:ok, {job_run_row(), scheduled_job_row(), CuesRunsSql.settlement()}}
+          | {:error, :run_not_active | :not_a_cue_run | term()}
+  def settle_cue_run(
+        %{id: id, status: status, completed_at: %DateTime{}} = attrs,
+        settle_by,
+        opts \\ []
+      )
+      when is_binary(id) and status in @final_job_run_statuses and settle_by in @cue_settles do
+    call({:settle_cue_run, attrs, settle_by}, opts)
   end
 
   # Two index reads, each bounded by the limit: the active rows through
@@ -2539,6 +2668,15 @@ defmodule FermixCore.Memory.Repo do
           {:ok, harness_run_row()} | {:error, :not_found | term()}
   def get_harness_run(id, opts \\ []) when is_binary(id) do
     call({:get_harness_run, id}, opts)
+  end
+
+  @doc """
+  The runs that name `parent_id` as the finished run they continued (a coding
+  run's follow-up turn launched them), from `harness_run_continuations`.
+  """
+  @spec harness_run_children(String.t(), keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  def harness_run_children(parent_id, opts \\ []) when is_binary(parent_id) do
+    call({:harness_run_children, parent_id}, opts)
   end
 
   @spec list_harness_runs(map(), keyword()) :: {:ok, [harness_run_row()]} | {:error, term()}
@@ -2917,6 +3055,203 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  # --- open loops (MILESTONE_78 §06, §18) ----------------------------------
+
+  @doc """
+  Creates an open loop (§18). A live loop of the same owner with the same
+  dedupe key is returned as stored, with no write (`{:existing, row}`);
+  otherwise the owner's live-loop cap (`OpenLoops.Defaults.max_live_loops/0`)
+  is checked and the row inserted (`{:created, row}`), atomically. Bounds and
+  shapes are validated here, in the caller.
+  """
+  @spec create_open_loop(map(), keyword()) ::
+          {:ok, {:created | :existing, open_loop_row()}} | {:error, :too_many_loops | term()}
+  def create_open_loop(attrs, opts \\ []) when is_map(attrs) do
+    with {:ok, row} <- OpenLoopsSql.normalize_create(attrs) do
+      call({:create_open_loop, row}, opts)
+    end
+  end
+
+  @spec get_open_loop(String.t(), keyword()) ::
+          {:ok, open_loop_row()} | {:error, :not_found | term()}
+  def get_open_loop(id, opts \\ []) when is_binary(id) do
+    call({:get_open_loop, id}, opts)
+  end
+
+  @doc """
+  One owner's loops: `state: "live"` (open, due, asked; by date), `"closed"`
+  (the last 25 closed or expired, newest first), or `"any"` (both).
+  """
+  @spec list_open_loops(map(), keyword()) :: {:ok, [open_loop_row()]} | {:error, term()}
+  def list_open_loops(filter, opts \\ []) when is_map(filter) do
+    with {:ok, normalized} <- OpenLoopsSql.normalize_filter(filter) do
+      call({:list_open_loops, normalized}, opts)
+    end
+  end
+
+  @spec count_live_open_loops(String.t(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def count_live_open_loops(owner_id, opts \\ []) when is_binary(owner_id) do
+    call({:count_live_open_loops, owner_id}, opts)
+  end
+
+  @doc """
+  The one write for an owner's answer or a scheduler outcome: applies
+  `changes` (the columns `OpenLoops.Lifecycle` returns) to a live row, clears
+  any claim and bumps `revision`. A closed or expired row is `:not_live` and
+  never reopens. `opts[:now]` stamps `updated_at`.
+  """
+  @spec settle_open_loop(String.t(), map(), keyword()) ::
+          {:ok, open_loop_row()} | {:error, :not_found | :not_live | term()}
+  def settle_open_loop(id, changes, opts \\ []) when is_binary(id) and is_map(changes) do
+    with {:ok, normalized} <- OpenLoopsSql.normalize_changes(changes) do
+      call({:settle_open_loop, id, normalized, write_stamp(opts)}, opts)
+    end
+  end
+
+  @doc """
+  The due scan (§18): at most `limit` live, unclaimed rows whose touch has
+  arrived, each decided by `OpenLoops.Lifecycle.due_decision/2` in its own
+  transaction. Returns the rows it made due, expired, or moved to their
+  hand-back; the due rows it read and left waiting (the rows a rung 2 claim
+  may take); and each expired row's state before the scan, by id.
+  """
+  @spec scan_due_open_loops(DateTime.t(), pos_integer(), keyword()) ::
+          {:ok,
+           %{
+             due: [open_loop_row()],
+             expired: [open_loop_row()],
+             skipped_to_handback: [open_loop_row()],
+             waiting: [open_loop_row()],
+             expired_from: %{String.t() => String.t()}
+           }}
+          | {:error, term()}
+  def scan_due_open_loops(%DateTime{} = now, limit, opts \\ [])
+      when is_integer(limit) and limit > 0 do
+    call({:scan_due_open_loops, now, limit}, opts)
+  end
+
+  @doc "Claims a due, unclaimed loop for a check-in run (compare-and-set)."
+  @spec claim_open_loop_checkin(String.t(), DateTime.t(), keyword()) ::
+          {:ok, open_loop_row()} | {:error, :not_claimable | term()}
+  def claim_open_loop_checkin(id, %DateTime{} = now, opts \\ []) when is_binary(id) do
+    call({:claim_open_loop_checkin, id, OpenLoopsSql.stamp!(now)}, opts)
+  end
+
+  @doc """
+  A check-in's finalising write, a compare-and-set on `(id, state = 'due',
+  claimed_at)` with the claim it holds. `:closed_meanwhile` means the owner
+  settled the loop during the run, and the run must not send. `opts[:now]`
+  stamps `updated_at`.
+  """
+  @spec finalize_open_loop_checkin(String.t(), DateTime.t(), map(), keyword()) ::
+          {:ok, open_loop_row()} | {:error, :closed_meanwhile | term()}
+  def finalize_open_loop_checkin(id, %DateTime{} = claimed_at, changes, opts \\ [])
+      when is_binary(id) and is_map(changes) do
+    with {:ok, normalized} <- OpenLoopsSql.normalize_changes(changes) do
+      claim = OpenLoopsSql.stamp!(claimed_at)
+      call({:finalize_open_loop_checkin, id, claim, normalized, write_stamp(opts)}, opts)
+    end
+  end
+
+  @doc """
+  Spends the owner's daily rung 2 budget for a check-in about to send: stamps
+  `last_rung2_at` and `updated_at` with `now`, a compare-and-set on `(id, state
+  = 'due', claimed_at)` with the claim the run holds, refused `:budget_spent`
+  when any loop of the owner's already carries a stamp since `since`, the
+  owner's local day start (`OpenLoops.ActiveHours.day_start/2`). The check
+  and the stamp are one transaction on the single writer, so two runs can
+  never both spend one day. `revision` and the claim stay, since no answer or
+  outcome moved. `:closed_meanwhile` means the owner settled the loop during
+  the run, or its claim was swept, and the run must not send.
+  """
+  @spec spend_open_loop_budget(
+          String.t(),
+          DateTime.t(),
+          DateTime.t(),
+          DateTime.t(),
+          keyword()
+        ) ::
+          {:ok, open_loop_row()} | {:error, :closed_meanwhile | :budget_spent | term()}
+  def spend_open_loop_budget(
+        id,
+        %DateTime{} = claimed_at,
+        %DateTime{} = since,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_binary(id) do
+    claim = OpenLoopsSql.stamp!(claimed_at)
+
+    request =
+      {:spend_open_loop_budget, id, claim, OpenLoopsSql.stamp!(since), OpenLoopsSql.stamp!(now)}
+
+    call(request, opts)
+  end
+
+  @doc "The boot sweep: clears every check-in claim, returning the ids it cleared."
+  @spec sweep_open_loop_claims(keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  def sweep_open_loop_claims(opts \\ []) do
+    call(:sweep_open_loop_claims, opts)
+  end
+
+  @doc """
+  The earliest moment after `now` at which a live, unclaimed loop can next
+  move (`OpenLoops.Lifecycle.next_wake/2`), or nil. Waiting for the owner's
+  active hours or the next day's budget is the scheduler's own.
+  """
+  @spec next_open_loop_touch_at(DateTime.t(), keyword()) ::
+          {:ok, DateTime.t() | nil} | {:error, term()}
+  def next_open_loop_touch_at(%DateTime{} = now, opts \\ []) do
+    call({:next_open_loop_touch_at, now}, opts)
+  end
+
+  @doc """
+  Due, unclaimed loops of one owner and agent inside their rung 1 window:
+  `next_touch_at <= now < next_touch_at + window`, the window
+  `opts[:window_ms]` (default `OpenLoops.Defaults.rung1_window_ms/0`); an
+  imminent loop until its date has passed (rung 1 only, until the date).
+  """
+  @spec due_open_loops_for_note(String.t(), String.t(), DateTime.t(), keyword()) ::
+          {:ok, [open_loop_row()]} | {:error, term()}
+  def due_open_loops_for_note(owner_id, agent_id, %DateTime{} = now, opts \\ [])
+      when is_binary(owner_id) and is_binary(agent_id) do
+    window_ms = Keyword.get(opts, :window_ms, OpenLoopsDefaults.rung1_window_ms())
+    opened_after = now |> DateTime.add(-window_ms, :millisecond) |> OpenLoopsSql.stamp!()
+
+    request =
+      {:due_open_loops_for_note, owner_id, agent_id, OpenLoopsSql.stamp!(now), opened_after}
+
+    call(request, opts)
+  end
+
+  @doc """
+  Whether the owner's daily rung 2 budget was spent since `since`
+  (`spend_open_loop_budget/5`), on any of the owner's loops, closed and expired
+  ones included.
+  """
+  @spec open_loop_budget_spent_since(String.t(), DateTime.t(), keyword()) ::
+          {:ok, boolean()} | {:error, term()}
+  def open_loop_budget_spent_since(owner_id, %DateTime{} = since, opts \\ [])
+      when is_binary(owner_id) do
+    call({:open_loop_budget_spent_since, owner_id, OpenLoopsSql.stamp!(since)}, opts)
+  end
+
+  @doc """
+  When the owner's own user chat messages were written since `since`, guest
+  rows excluded, newest first and bounded (for `OpenLoops.ActiveHours`).
+  """
+  @spec owner_message_hours(String.t(), String.t(), DateTime.t(), keyword()) ::
+          {:ok, [DateTime.t()]} | {:error, term()}
+  def owner_message_hours(agent_id, owner_id, %DateTime{} = since, opts \\ [])
+      when is_binary(agent_id) and is_binary(owner_id) do
+    call({:owner_message_hours, agent_id, owner_id, OpenLoopsSql.stamp!(since)}, opts)
+  end
+
+  defp write_stamp(opts) do
+    opts |> Keyword.get_lazy(:now, &DateTime.utc_now/0) |> OpenLoopsSql.stamp!()
+  end
+
   @doc """
   Records a requested meeting (M21 §8.2).
 
@@ -3130,6 +3465,17 @@ defmodule FermixCore.Memory.Repo do
   end
 
   @doc """
+  Serves one cue request (M60) with the SQL module that owns it: `CuesSql`,
+  `CuesWatchersSql`, `CuesFilterSql`, `CuesRunsSql`, `CuesDeliveriesSql` or
+  `CuesMandateSql`, each a `handle(conn, request)` with one head per request
+  tuple. Only the `Cues.*` domain modules call it.
+  """
+  @spec cues_call(module(), tuple(), keyword()) :: term()
+  def cues_call(module, request, opts \\ [])
+      when module in @cue_sql_modules and is_tuple(request) and is_list(opts),
+      do: call({:cues, module, request}, opts)
+
+  @doc """
   The base schema as SQL, for a test that seeds a store an older release wrote.
 
   Every statement is `IF NOT EXISTS`, so a fixture can lay the base tables down
@@ -3291,6 +3637,73 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:list_temporal_reminders, filter}, _from, state) do
     reply = with_connection(state, &TemporalSql.list_reminders(&1, filter))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:create_open_loop, row}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopsSql.create(&1, row)), state}
+  end
+
+  def handle_call({:get_open_loop, id}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopsSql.fetch(&1, id)), state}
+  end
+
+  def handle_call({:list_open_loops, filter}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopsSql.list(&1, filter)), state}
+  end
+
+  def handle_call({:count_live_open_loops, owner_id}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopsSql.count_live(&1, owner_id)), state}
+  end
+
+  def handle_call({:settle_open_loop, id, changes, now}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopsSql.settle(&1, id, changes, now)), state}
+  end
+
+  def handle_call({:scan_due_open_loops, now, limit}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopsSql.scan_due(&1, now, limit)), state}
+  end
+
+  def handle_call({:claim_open_loop_checkin, id, now}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopsSql.claim(&1, id, now)), state}
+  end
+
+  def handle_call({:finalize_open_loop_checkin, id, claimed_at, changes, now}, _from, state) do
+    reply = with_connection(state, &OpenLoopsSql.finalize(&1, id, claimed_at, changes, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:spend_open_loop_budget, id, claimed_at, since, now}, _from, state) do
+    reply =
+      with_connection(state, &OpenLoopsSql.spend_budget(&1, id, claimed_at, since, now))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(:sweep_open_loop_claims, _from, state) do
+    {:reply, with_connection(state, &OpenLoopsSql.sweep_claims/1), state}
+  end
+
+  def handle_call({:next_open_loop_touch_at, now}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopsSql.next_wake(&1, now)), state}
+  end
+
+  def handle_call({:due_open_loops_for_note, owner_id, agent_id, now, opened}, _from, state) do
+    reply =
+      with_connection(state, &OpenLoopsSql.due_for_note(&1, owner_id, agent_id, now, opened))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:open_loop_budget_spent_since, owner_id, since}, _from, state) do
+    reply = with_connection(state, &OpenLoopsSql.budget_spent_since(&1, owner_id, since))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:owner_message_hours, agent_id, owner_id, since}, _from, state) do
+    reply =
+      with_connection(state, &OpenLoopsSql.owner_message_hours(&1, agent_id, owner_id, since))
+
     {:reply, reply, state}
   end
 
@@ -3987,6 +4400,11 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:claim_cue_run, job_id, run_attrs, now}, _from, state) do
+    reply = with_connection(state, &claim_cue_run_tx(&1, job_id, run_attrs, now))
+    {:reply, reply, state}
+  end
+
   def handle_call({:upsert_scheduled_job, attrs}, _from, state) do
     reply = with_connection(state, &upsert_scheduled_job_row(&1, attrs))
     {:reply, reply, state}
@@ -4037,6 +4455,11 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:settle_cue_run, attrs, settle_by}, _from, state) do
+    reply = with_connection(state, &settle_cue_run_tx(&1, attrs, settle_by))
+    {:reply, reply, state}
+  end
+
   def handle_call({:unsettled_job_runs, limit}, _from, state) do
     reply = with_connection(state, &fetch_unsettled_job_runs(&1, limit))
     {:reply, reply, state}
@@ -4074,6 +4497,11 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:list_harness_runs, selector, limit}, _from, state) do
     reply = with_connection(state, &fetch_harness_runs(&1, selector, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:harness_run_children, parent_id}, _from, state) do
+    reply = with_connection(state, &fetch_harness_run_children(&1, parent_id))
     {:reply, reply, state}
   end
 
@@ -4187,6 +4615,10 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:cues, module, request}, _from, state) when module in @cue_sql_modules do
+    {:reply, with_connection(state, &module.handle(&1, request)), state}
+  end
+
   # Every request is served in order by this one process, so a call waits
   # behind every request ahead of it. A timed-out call exits its caller unless
   # the caller passed `on_timeout: :error` (`periodic_opts/2`). The request
@@ -4291,8 +4723,107 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_voice_calls_migration(conn, versions),
          :ok <- apply_voice_call_gist_taint_migration(conn, versions),
          :ok <- apply_phone_joins_chat_migration(conn, versions),
-         :ok <- apply_reply_blocks_migration(conn, versions) do
+         :ok <- apply_reply_blocks_migration(conn, versions),
+         :ok <- apply_cues_migration(conn, versions),
+         :ok <- apply_open_loops_migration(conn, versions),
+         :ok <- apply_cue_stop_reason_migration(conn, versions),
+         :ok <- apply_harness_continued_from_migration(conn, versions),
+         :ok <- apply_cue_live_intake_migration(conn, versions),
+         :ok <- apply_cue_retention_index_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # The cue inbox (M60 §7.2): every cue table and the two `job_runs` columns,
+  # with its version in one transaction.
+  defp apply_cues_migration(conn, versions) do
+    if Enum.member?(versions, @cues_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{CuesSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@cues_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # Open loops (M78 §18), their table and version in one transaction. 42 is
+  # M60's cue inbox, so this claims 43.
+  defp apply_open_loops_migration(conn, versions) do
+    if Enum.member?(versions, @open_loops_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{OpenLoopsSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@open_loops_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # Why a cue source stopped (`cue_sources.stop_reason`), a column beside its
+  # status, with its version in one transaction. It runs after 42, which made
+  # the table; a row written before has none.
+  defp apply_cue_stop_reason_migration(conn, versions) do
+    if Enum.member?(versions, @cue_stop_reason_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{CuesSql.stop_reason_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@cue_stop_reason_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # Cue intake at scale (M60_CUE_INTAKE_AT_SCALE.md): a watcher's words to
+  # listen for, one filter model (the per-watcher columns go), a filter call
+  # with no delivery (a stream item judged before it is stored), and the
+  # counts of what was not stored, with its version in one transaction.
+  defp apply_cue_live_intake_migration(conn, versions) do
+    if Enum.member?(versions, @cue_live_intake_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{CuesSql.live_intake_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@cue_live_intake_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # The cue retention indexes: a sweep step searches only the rows it changes,
+  # never every receipt, with its version in one transaction.
+  defp apply_cue_retention_index_migration(conn, versions) do
+    if Enum.member?(versions, @cue_retention_index_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{CuesSql.retention_index_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@cue_retention_index_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 
@@ -4466,6 +4997,22 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{ComputerHistorySql.purges_schema_sql(migrated_at)}
         INSERT INTO schema_migrations(version) VALUES (#{@computer_history_purges_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_harness_continued_from_migration(conn, versions) do
+    if Enum.member?(versions, @harness_continued_from_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@harness_continued_from_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@harness_continued_from_migration_version});
         COMMIT;
         """
       )
@@ -5286,6 +5833,16 @@ defmodule FermixCore.Memory.Repo do
                AND COALESCE(
                      CASE WHEN json_valid(metadata_json)
                           THEN json_extract(metadata_json, '$.spoken') END,
+                     0
+                   ) != 1
+               AND COALESCE(
+                     CASE WHEN json_valid(metadata_json)
+                          THEN json_extract(metadata_json, '$.harness_continuation') END,
+                     0
+                   ) != 1
+               AND COALESCE(
+                     CASE WHEN json_valid(metadata_json)
+                          THEN json_extract(metadata_json, '$.forwarded') END,
                      0
                    ) != 1
              ORDER BY id ASC
@@ -6356,6 +6913,34 @@ defmodule FermixCore.Memory.Repo do
     end)
   end
 
+  # A cue claim (M60 §9.2): the eligible delivery, the job and its run, and the
+  # delivery's move to `claimed`, in one BEGIN IMMEDIATE. The job is taken with
+  # `state: "running"` alone whatever its schedule kind, so a one-off's instant
+  # is never consumed by a cue (design §2.4 row 1). The delivery is read inside
+  # the transaction, so a row moved since the candidate read is nothing due.
+  defp claim_cue_run_tx(conn, job_id, run_attrs, now) do
+    CuesSql.with_immediate_transaction(conn, fn ->
+      claim_cue_run_in_tx(conn, job_id, run_attrs, now)
+    end)
+  end
+
+  defp claim_cue_run_in_tx(conn, job_id, run_attrs, now) do
+    job_attrs = %{state: "running", updated_at: now}
+
+    with {:ok, delivery} <- CuesRunsSql.eligible_delivery(conn, job_id, now),
+         run_attrs = Map.merge(run_attrs, %{trigger: "cue", cue_delivery_id: delivery.id}),
+         {:ok, {job, run}} <-
+           claim_in_tx(conn, job_id, job_attrs, run_attrs, fetch_claimable_job(conn, job_id)),
+         :ok <- claim_delivery(conn, delivery.id, run.id) do
+      claimed = Map.merge(delivery, %{state: "claimed", claimed_run_id: run.id})
+      {:ok, %{job: job, run: run, delivery: claimed}}
+    end
+  end
+
+  defp claim_delivery(conn, delivery_id, run_id) do
+    CuesSql.transition(conn, delivery_id, "passed", :none, "claimed", %{claimed_run_id: run_id})
+  end
+
   defp transact_claim(conn, claim_fun) do
     with :ok <- execute(conn, "BEGIN IMMEDIATE", []),
          result <- claim_fun.(),
@@ -6467,11 +7052,70 @@ defmodule FermixCore.Memory.Repo do
 
   defp settle_job_run_in_tx(conn, attrs) do
     with :ok <- ensure_job_run_active(conn, attrs.id),
+         :ok <- ensure_not_cue_run(conn, attrs.id),
          {:ok, run} <- upsert_job_run_row(conn, attrs),
          :ok <- release_settled_job(conn, run),
          {:ok, job} <- fetch_scheduled_job(conn, run.job_id) do
       {:ok, {run, job}}
     end
+  end
+
+  # A cue run's final write, its job's release and its delivery's move (M60
+  # §9.4), in the one transaction `settle_job_run_tx/2` uses for the first two.
+  defp settle_cue_run_tx(conn, attrs, settle_by) do
+    with :ok <- execute(conn, "BEGIN IMMEDIATE", []) do
+      conn
+      |> settle_cue_run_in_tx(attrs, settle_by)
+      |> finish_job_settle(conn)
+    end
+  end
+
+  defp settle_cue_run_in_tx(conn, attrs, settle_by) do
+    with :ok <- ensure_job_run_active(conn, attrs.id),
+         {:ok, "cue"} <- active_run_trigger(conn, attrs.id),
+         {:ok, run} <- upsert_job_run_row(conn, attrs),
+         :ok <- release_cue_job(conn, run),
+         {:ok, settlement} <- CuesRunsSql.settle_delivery(conn, run, settle_by, run.completed_at),
+         {:ok, job} <- fetch_scheduled_job(conn, run.job_id) do
+      {:ok, {run, job, settlement}}
+    else
+      {:ok, _other_trigger} -> {:error, :not_a_cue_run}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # A cue run settles only through `settle_cue_run_tx/3`, which moves its
+  # delivery; this refusal keeps every other settle from releasing one alone.
+  defp ensure_not_cue_run(conn, id) do
+    case active_run_trigger(conn, id) do
+      {:ok, "cue"} -> {:error, :cue_run}
+      {:ok, _trigger} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp active_run_trigger(conn, id) do
+    with {:ok, [[trigger]]} <-
+           query_all(conn, "SELECT trigger FROM job_runs WHERE id = ? LIMIT 1", [id]) do
+      {:ok, trigger}
+    end
+  end
+
+  # A cue run's release (M60 §9.4): only `running` goes back to `scheduled`.
+  # `last_run_at`, `last_status` and `last_error` stay as the job's non-cue
+  # runs left them: a cue run's error can quote text the model wrote from a
+  # cue, and `list_jobs` returns `last_error` unframed.
+  defp release_cue_job(conn, run) do
+    execute(
+      conn,
+      """
+      UPDATE scheduled_jobs
+      SET state = CASE WHEN state = 'running' THEN 'scheduled' ELSE state END,
+          updated_at = ?
+      WHERE id = ?
+      """,
+      [timestamp_string(run.updated_at), run.job_id]
+    )
   end
 
   defp ensure_job_run_active(conn, id) do
@@ -6729,9 +7373,11 @@ defmodule FermixCore.Memory.Repo do
                latency_json,
                created_at,
                updated_at,
-               tool_failures
+               tool_failures,
+               tools_started_at,
+               cue_delivery_id
              )
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id)
              DO UPDATE SET
                job_id = excluded.job_id,
@@ -6753,7 +7399,9 @@ defmodule FermixCore.Memory.Repo do
                token_usage_json = excluded.token_usage_json,
                latency_json = excluded.latency_json,
                updated_at = excluded.updated_at,
-               tool_failures = excluded.tool_failures
+               tool_failures = excluded.tool_failures,
+               tools_started_at = coalesce(job_runs.tools_started_at, excluded.tools_started_at),
+               cue_delivery_id = coalesce(job_runs.cue_delivery_id, excluded.cue_delivery_id)
              """,
              job_run_upsert_params(run)
            ),
@@ -6817,8 +7465,51 @@ defmodule FermixCore.Memory.Repo do
 
   defp admit_harness_run_in_tx(conn, run, max_active) do
     with :ok <- ensure_harness_capacity(conn, max_active),
-         :ok <- ensure_harness_lock_free(conn, run.lock_roots) do
-      insert_harness_run_row(conn, run)
+         :ok <- ensure_harness_lock_free(conn, run.lock_roots),
+         :ok <- ensure_sole_continuation(conn, run),
+         {:ok, row} <- insert_harness_run_row(conn, run),
+         :ok <- insert_harness_run_continuation(conn, run) do
+      {:ok, row}
+    end
+  end
+
+  # A run the access gate dispatched as the chain's next is admitted only as
+  # its finished run's first child, checked in the admit's own transaction so
+  # two chained launches cannot both pass it.
+  defp ensure_sole_continuation(conn, %{sole_continuation: true, continued_from_run_id: parent})
+       when is_binary(parent) do
+    case fetch_harness_run_children(conn, parent) do
+      {:ok, []} -> :ok
+      {:ok, [_child | _rest]} -> {:error, {:already_continued, parent}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp ensure_sole_continuation(_conn, _run), do: :ok
+
+  defp insert_harness_run_continuation(conn, %{continued_from_run_id: parent, id: id})
+       when is_binary(parent) do
+    execute(
+      conn,
+      "INSERT INTO harness_run_continuations (run_id, continued_from_run_id) VALUES (?, ?)",
+      [id, parent]
+    )
+  end
+
+  defp insert_harness_run_continuation(_conn, _run), do: :ok
+
+  defp fetch_harness_run_children(conn, parent) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT run_id FROM harness_run_continuations
+             WHERE continued_from_run_id = ?
+             ORDER BY run_id ASC
+             """,
+             [parent]
+           ) do
+      {:ok, Enum.map(rows, fn [run_id] -> run_id end)}
     end
   end
 
@@ -7354,7 +8045,12 @@ defmodule FermixCore.Memory.Repo do
       token_usage: Map.get(attrs, :token_usage),
       latency: Map.get(attrs, :latency),
       created_at: timestamp_string(Map.get(attrs, :created_at, DateTime.utc_now())),
-      updated_at: timestamp_string(Map.get(attrs, :updated_at, DateTime.utc_now()))
+      updated_at: timestamp_string(Map.get(attrs, :updated_at, DateTime.utc_now())),
+      # Write-once (the upsert keeps a stored value): the cue claim sets the
+      # delivery, the mandate gate sets the marker in its own Repo call, and a
+      # runner's later whole-row write never clears either.
+      tools_started_at: optional_timestamp_string(Map.get(attrs, :tools_started_at)),
+      cue_delivery_id: optional_non_negative_integer!(attrs, :cue_delivery_id)
     }
   end
 
@@ -7379,6 +8075,11 @@ defmodule FermixCore.Memory.Repo do
       origin_kind: fetch_string!(attrs, :origin_kind),
       origin_session_id: fetch_string!(attrs, :origin_session_id),
       continuation_depth: non_negative_integer_with_default!(attrs, :continuation_depth, 0),
+      # Not columns: the chain's parent link is written beside the row
+      # (`harness_run_continuations`), and `sole_continuation` asks the admit to
+      # refuse a second child of that parent.
+      continued_from_run_id: optional_string!(attrs, :continued_from_run_id),
+      sole_continuation: bool_with_default!(attrs, :sole_continuation, false),
       client_origin: Map.get(attrs, :client_origin),
       vendor_config: Map.get(attrs, :vendor_config),
       parent_job_id: optional_string!(attrs, :parent_job_id),
@@ -7679,7 +8380,9 @@ defmodule FermixCore.Memory.Repo do
       encode_metadata(run.latency),
       run.created_at,
       run.updated_at,
-      run.tool_failures
+      run.tool_failures,
+      run.tools_started_at,
+      run.cue_delivery_id
     ]
   end
 
@@ -7936,6 +8639,11 @@ defmodule FermixCore.Memory.Repo do
 
   defp search_memory_where_term({:archived?, true}, params),
     do: {"memories.archived_at IS NOT NULL", params}
+
+  # Leaves out one `source_type` (rows without one stay in): the main agent's
+  # `all` search leaves out a cue task's notes (M60 §9.10).
+  defp search_memory_where_term({:except_source_type, value}, params) when is_binary(value),
+    do: {"(memories.source_type IS NULL OR memories.source_type <> ?)", params ++ [value]}
 
   defp search_memory_where_term({key, value}, params),
     do: {"memories.#{search_memory_column_name(key)} = ?", params ++ [value]}
@@ -8494,13 +9202,17 @@ defmodule FermixCore.Memory.Repo do
          latency_json,
          created_at,
          updated_at,
-         tool_failures
+         tool_failures,
+         tools_started_at,
+         cue_delivery_id
        ]) do
     %{
       id: id,
       job_id: job_id,
       session_id: session_id,
       trigger: trigger,
+      tools_started_at: parse_optional_timestamp(tools_started_at),
+      cue_delivery_id: cue_delivery_id,
       status: status,
       claimed_at: parse_optional_timestamp(claimed_at),
       started_at: parse_optional_timestamp(started_at),

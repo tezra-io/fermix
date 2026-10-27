@@ -3,6 +3,7 @@ defmodule FermixCore.Management.AuthTest do
 
   import ExUnit.CaptureLog, only: [with_log: 1]
 
+  alias FermixCore.Auth.AnthropicLogin
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.Store
@@ -324,6 +325,26 @@ defmodule FermixCore.Management.AuthTest do
 
       assert done["status"] == "failed"
       assert done["failure"]["sentence"] == "No existing sign-in was found on this Mac."
+    end
+
+    # The keychain read's own failures each have a sentence; only a failure no
+    # one has worded is sent to the daemon log.
+    test "an import the keychain refused fails with the sentence naming why", %{jobs: jobs} do
+      for refused <- [
+            :keychain_read_denied,
+            :unreadable_keychain_password,
+            :helper_output_too_large
+          ] do
+        reason = {:claude_code_import, refused}
+        importer = fn -> {:error, reason} end
+
+        assert {:ok, started} = Auth.import_start("claude_code", jobs: jobs, importer: importer)
+        assert {:ok, done} = terminal(jobs, started["job_id"])
+
+        assert done["status"] == "failed"
+        refute done["failure"]["sentence"] =~ "daemon log"
+        assert done["failure"]["sentence"] == AnthropicLogin.failure_sentence(reason)
+      end
     end
 
     # `codex_cli` is still a source the contract names. `openai_codex` signs in

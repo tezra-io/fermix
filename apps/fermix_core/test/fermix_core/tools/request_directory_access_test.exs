@@ -111,6 +111,25 @@ defmodule FermixCore.Tools.RequestDirectoryAccessTest do
       refute_received {:approval_called, _}
     end
 
+    # `Capabilities.Skill.invoke` keeps the parent turn's trust, reply_fn and
+    # approval_fn, so only its depth tells a skill worker apart: it must not
+    # raise a directory-access prompt in the owner's chat.
+    test "a skill worker of an attended turn is refused with no approval or reply call",
+         %{grant_dir: grant_dir} do
+      for depth <- [%{skill_depth: 1}, %{subagent_depth: 1}] do
+        context = attended_context(depth)
+
+        assert {:ok, %{success: false, error: error}} =
+                 Tool.execute(%{"path" => grant_dir, "reason" => "need it"}, context)
+
+        assert error =~ "attended owner conversation"
+        refute Tool.attended_operator?(context)
+      end
+
+      refute_received {:approval_called, _}
+      refute_received {:reply_called, _}
+    end
+
     test "a turn with no approval_fn is refused", %{grant_dir: grant_dir} do
       context = attended_context() |> Map.delete(:approval_fn)
 
@@ -158,10 +177,22 @@ defmodule FermixCore.Tools.RequestDirectoryAccessTest do
                Capability.execute(
                  cap,
                  %{"path" => grant_dir, "reason" => "the task spans this repo"},
-                 attended_context()
+                 attended_context(%{outside_sources: MapSet.new()})
                )
 
-      assert_received {:approval_called, %{path: ^canonical, reason: "the task spans this repo"}}
+      assert_received {:approval_called,
+                       %{path: ^canonical, reason: "the task spans this repo"} = request}
+
+      # What the turn had read rides the request, so the request resumed after
+      # the owner's `/confirm` is the same request (`Gateway`'s resume intent).
+      assert request.provenance == %{outside_sources: MapSet.new()}
+
+      # A context the loop never stamped is never handed on as clean.
+      assert {:ok, %{success: true}} =
+               Tool.execute(%{"path" => grant_dir, "reason" => "again"}, attended_context())
+
+      assert_received {:approval_called, %{provenance: %{outside_sources: unstamped}}}
+      assert MapSet.size(unstamped) == 1
       # Abstract approval part: the channel renders the one-tap button; the prompt
       # text still carries the tap-to-copy `/confirm <token>` fallback + the token.
       assert_received {:reply_called, {:approval_prompt, prompt, "TOKEN123"}}
@@ -169,6 +200,29 @@ defmodule FermixCore.Tools.RequestDirectoryAccessTest do
       assert prompt =~ "`/confirm TOKEN123`"
       assert prompt =~ "the task spans this repo"
       assert output =~ "TOKEN123"
+    end
+
+    test "a turn that read outside content, or a coding run's follow-up, hands that on",
+         %{grant_dir: grant_dir} do
+      sources = MapSet.new([{:harness, "a coding run"}, {:tool, "web_fetch"}])
+
+      context =
+        attended_context(%{
+          outside_sources: sources,
+          harness_continuation_depth: 2,
+          harness_run_id: "hr_parent00001"
+        })
+
+      assert {:ok, %{success: true}} =
+               Tool.execute(%{"path" => grant_dir, "reason" => "spans repo"}, context)
+
+      assert_received {:approval_called, %{provenance: provenance}}
+
+      assert provenance == %{
+               outside_sources: sources,
+               harness_continuation_depth: 2,
+               harness_run_id: "hr_parent00001"
+             }
     end
 
     test "an :existing dedupe result sends NO second owner message", %{grant_dir: grant_dir} do
@@ -293,6 +347,10 @@ defmodule FermixCore.Tools.RequestDirectoryAccessTest do
 
     test "hidden inside a subagent (depth > 0)" do
       refute Tool.advertise?(advertise_ctx(%{subagent_depth: 1}))
+    end
+
+    test "hidden inside a skill worker" do
+      refute Tool.advertise?(advertise_ctx(%{skill_depth: 1}))
     end
   end
 

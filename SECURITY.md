@@ -40,6 +40,60 @@ channels. Areas of particular interest:
 - inbound/outbound MCP and channel ingress authorization,
 - the signed `fermix upgrade` path.
 
+On macOS the kernel (Seatbelt) holds the commands a turn runs (the shell, git
+and operator-declared command tools; not coding agents or plugin processes) to
+the sandbox mode and keeps Fermix's own secrets out of their reach. Linux has no
+kernel confinement yet: a command is checked only for the folder it starts in
+and for catastrophic patterns, so it can read and send whatever the account can.
+Until that lands, a command (shell, git writes, operator-declared commands) in a
+turn that has read content someone else could have written — a web page, a
+plugin's or MCP server's result, a worker's report, a forwarded message, an
+attachment, the Recent Activity note — waits for the owner's own confirmation,
+and never runs from a delegated worker, a cue-woken task or another unattended
+run; a scheduled job runs one only when its allowlist names it. The `codex`
+and `claude_code` command presets and the local coding runs (`codex_run`,
+`claude_code_run`) start a vendor CLI with the owner's account authority
+outside the sandbox everywhere, so they wait the same way on macOS, and the
+owner's confirmation shows every argument the vendor CLI is handed; once
+confirmed, a coding run still meets its own authorization, consent and
+vendor-config checks.
+The same gate holds access-sensitive plugin commands (a car unlock) on every
+platform.
+
+What this deliberately does not cover:
+
+- Only the turn that read the content waits. Replayed history on a later turn,
+  and memory, skills or a job's task that a tainted turn wrote, run clean later.
+  A tainted turn cannot set up, change or run now a job whose tools would
+  include such a command (one naming it, one with no allowlist, or one that can
+  start a skill or manage jobs), but a job it creates with narrower tools runs
+  them freely. With the coding runs set up this holds on macOS too: such a job
+  could start one. A request that runs again after the owner's `/confirm` (a
+  directory grant, a coding-agent config acknowledgment) is the same request
+  and keeps what it had read.
+- A finished coding run reports back as a follow-up turn, which may start the
+  next run of the chain without asking (the owner's choice): with the same
+  coding agent and the same starting folder as the run that finished, once per
+  finished run (a resumed or later turn included), while that run's report is
+  all it has read, and with nothing but its task, folder, model, effort and
+  limits. The starting folder is not a boundary: a coding agent reads whatever
+  the owner's account can, and Codex's read-only and workspace-write modes
+  still read the whole disk. The chain stops after three follow-ups; any other
+  run from that turn is refused.
+- In a shared Buzz channel, the other members' messages are not outside content
+  for commands (the owner's choice: a Buzz session replies through the shell);
+  they still hold access-sensitive plugin commands.
+- A voice note or Telegram video note is treated as the owner's own words when
+  the channel declares it a recording and does not mark it forwarded; a
+  forwarded one counts as outside content. A phone app that sends its
+  recordings as plain audio files gets no exemption.
+- Telegram and WhatsApp mark a forwarded message, text or recording, and it
+  counts as outside content, also when it runs again after a `/confirm`. The
+  model reads its text under a `[forwarded message]` label, it is never taken
+  as the owner's command, and the memory review never reads it as the owner's
+  words. The other channels do not mark forwards yet, so a message forwarded
+  there reads as the owner's own.
+
 ### Out of scope
 
 Fermix defends the operator's account, not the machine against its own users. A

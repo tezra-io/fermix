@@ -152,7 +152,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   # that happens to mention setup (e.g. `--migrate-secrets`) stays legal while a
   # re-added mobile setup step or flag, or the withdrawn "no setup surface"
   # claim, fails here.
-  test "documents mobile's management surface and the config route, never a setup step" do
+  test "documents mobile's management surface, its Phone surfaces and the config route" do
     reference = File.read!(mobile_reference_path())
     paragraph = mobile_paragraph()
 
@@ -164,9 +164,11 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
       assert text =~ "fermix pair"
       assert text =~ "never the CLI"
       assert text =~ "Phone row"
+      assert text =~ "Phone card"
+      assert text =~ "browser setup"
       refute text =~ "Phone pane on them yet"
+      refute text =~ "Phone pane yet"
       refute text =~ "Channels page"
-      refute text =~ "Channels tab"
       refute text =~ "--mobile-enabled"
       refute text =~ "--mobile-push"
       refute text =~ "no setup surface"
@@ -297,7 +299,8 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "acp.sock",
           "realtime.sock",
           "fermix.service",
-          "No Phone pane",
+          "**Phone** row",
+          "**Pair a phone…**",
           "read-only"
         ] do
       assert reference =~ fact, "linux_app reference does not say #{fact}"
@@ -626,6 +629,99 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
 
     assert presentation =~ "iMessage"
+  end
+
+  # Every build has cues, off until the owner turns them on, so the owner must
+  # be told the switch and sent to the surfaces that really configure it:
+  # settings for sources and mandates (the setup page's Cues tab, its Approve
+  # button, the Mac app's Cues pane, and `fermix settings` without a browser),
+  # the Tailscale command that puts a webhook on Funnel, and chat for watchers,
+  # and told where a proposal can be answered (a chat, the Fermix app's card,
+  # the Linux app). Each string is a key, a command, a tool, a control or a
+  # boundary word, not a phrasing. No sentence may still say a release lacks them.
+  test "documents cues: the off-by-default switch, the boundaries and every surface" do
+    body = File.read!(self_knowledge_path())
+    paragraph = cues_paragraph()
+    # The reference is hard-wrapped in places; a phrase may span a line break.
+    reference = "cues" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    assert body =~ ~s(file: "cues")
+
+    for required <- [
+          "[fermix_core.cues] enabled = true",
+          "off by default",
+          "Signal",
+          "Cues pane",
+          "words to listen for"
+        ] do
+      assert paragraph =~ required, "the Cues paragraph does not mention #{required}"
+    end
+
+    for required <- [
+          "[fermix_core.cues] enabled = true",
+          "Off by default",
+          "restart",
+          "At a time",
+          "On a date",
+          "Signal",
+          "local_push",
+          "/cues/v1/<ref>",
+          "Authorization: Bearer",
+          "github",
+          "application/json",
+          "Generate URL",
+          "fermix settings secret set cue_source:",
+          "tailscale funnel --bg --set-path=",
+          "tailscale funnel --https=443",
+          "New token",
+          "manage_watcher",
+          "list_cues",
+          "cue_history",
+          "filter_model",
+          "listen_for",
+          "needs_update",
+          "drop_key",
+          "stream_counts",
+          "unmatched",
+          "daily_cap",
+          "drop",
+          "pass",
+          "task_notes",
+          "[fermix_core.cues.mandates.<name>]",
+          "approve",
+          "auto",
+          "pin_args",
+          "validator",
+          "Approve",
+          "/confirm",
+          "/deny",
+          "mandates_enabled",
+          "Cues tab",
+          "Cues pane",
+          "Copy URL",
+          "Confirm",
+          "Linux app",
+          "Only the owner can change cues"
+        ] do
+      assert reference =~ required, "cues self-knowledge does not mention #{required}"
+    end
+
+    for gone <- ["Development builds only", "development daemon", "no published release"] do
+      refute paragraph =~ gone, "the Cues paragraph still says #{gone}"
+      refute reference =~ gone, "cues self-knowledge still says #{gone}"
+    end
+
+    # The self-reference carries no version numbers (AGENTS.md); an address such
+    # as 127.0.0.1 is not one.
+    refute reference =~ ~r/(?<![\d.])v?\d+\.\d+\.\d+(?![\d.])/
+  end
+
+  defp cues_paragraph do
+    self_knowledge_path()
+    |> File.read!()
+    |> String.split("\n## ")
+    |> Enum.filter(&String.starts_with?(&1, "Cues & watchers"))
+    |> Enum.join("\n")
   end
 
   defp channels_paragraph do

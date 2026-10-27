@@ -99,9 +99,87 @@ def test_always_sticky_gates_are_the_prohibitions_and_recorded_state():
     and its other failure kind grades inconclusive (grade.py), so a positive
     clause stays as retryable as any other quality assertion."""
     assert suites.ALWAYS_STICKY_GATES == (
-        "tools_none", "tools_none_succeeded", "fixture_state")
+        "tools_none", "tools_none_succeeded", "fixture_state", "workspace_paths_absent")
     assert set(suites.ALWAYS_STICKY_GATES) <= set(suites.STICKY_GATE_KEYS)
     assert set(suites.STICKY_GATE_KEYS) <= set(suites.EXPECT_SPEC)
+
+
+# --- platforms (scenario level) ---------------------------------------------
+
+def test_a_scenario_without_platforms_runs_on_every_host(tmp_path):
+    assert _load_one_scenario(tmp_path).platforms == ()
+
+
+def test_platforms_accepts_known_hosts(tmp_path):
+    assert _load_one_scenario(tmp_path, {"platforms": ["linux"]}).platforms == ("linux",)
+    both = _load_one_scenario(tmp_path, {"platforms": ["linux", "macos"]})
+    assert both.platforms == ("linux", "macos")
+
+
+@pytest.mark.parametrize("value", [["windows"], ["Linux"], ["linux", "darwin"],
+                                   [], "linux", None])
+def test_platforms_refuses_an_unknown_host_an_empty_list_or_a_non_list(tmp_path, value):
+    problems = _problems(tmp_path, {"platforms": value})
+    assert any("`platforms` must be a non-empty list" in p for p in problems), problems
+
+
+def test_a_capability_suite_cannot_declare_platforms(tmp_path):
+    """run_capability.py does not read it, so the case would run on every host."""
+    doc = {"suite": "cap_spec", "title": "Cap spec", "risk": "isolated_mutation",
+           "scenarios": [{"id": "scn", "title": "Scenario", "platforms": ["linux"],
+                          "cases": [{"id": "only", "query": "q",
+                                     "score": {"match": "exact", "expected": "x"}}]}]}
+    with open(os.path.join(str(tmp_path), "cap_spec.yaml"), "w", encoding="utf-8") as fh:
+        yaml.safe_dump(doc, fh)
+    with pytest.raises(suites.SuiteError) as exc:
+        suites.load_all(str(tmp_path))
+    assert any("read by run_eval.py only" in p for p in exc.value.problems)
+
+
+@pytest.mark.parametrize("sys_platform, name", [
+    ("linux", "linux"), ("linux2", "linux"), ("darwin", "macos"),
+    ("win32", "win32"), ("freebsd14", "freebsd14")])
+def test_the_host_is_named_in_the_platforms_vocabulary(sys_platform, name):
+    # Another host keeps its own name, which no scenario can declare.
+    assert suites.platform_of(sys_platform) == name
+
+
+# --- workspace_paths_absent (expect) -----------------------------------------
+
+def test_workspace_paths_absent_loads_on_an_ask_case(tmp_path):
+    cases = [dict(BASE_CASE, expect={"workspace_paths_absent": ["kiosk/kernel.txt"]}),
+             dict(FILLER_CASE)]
+    scn = _load_one_scenario(tmp_path, cases=cases)
+    assert scn.cases[0].turns[0].expect["workspace_paths_absent"] == ["kiosk/kernel.txt"]
+
+
+@pytest.mark.parametrize("value", [[], ["/etc/passwd"], ["../outside.txt"],
+                                   ["kiosk/../../outside.txt"], ["."], [""], [3],
+                                   "kiosk/kernel.txt"])
+def test_workspace_paths_absent_refuses_traversal_absolute_or_empty_paths(tmp_path, value):
+    cases = [dict(BASE_CASE, expect={"workspace_paths_absent": value}), dict(FILLER_CASE)]
+    problems = _problems(tmp_path, cases=cases)
+    assert any("workspace_paths_absent" in p for p in problems), problems
+
+
+def test_workspace_paths_absent_needs_the_ask_drive(tmp_path):
+    case = {"id": "case_a", "drive": "telegram_operator", "query": "q",
+            "expect": {"workspace_paths_absent": ["kiosk/kernel.txt"]}}
+    problems = _problems(tmp_path, cases=[case, dict(FILLER_CASE)])
+    assert any("needs `drive: ask`" in p for p in problems), problems
+
+
+def test_a_capability_case_cannot_declare_workspace_paths_absent(tmp_path):
+    doc = {"suite": "cap_spec", "title": "Cap spec", "risk": "isolated_mutation",
+           "scenarios": [{"id": "scn", "title": "Scenario",
+                          "cases": [{"id": "only", "query": "q",
+                                     "score": {"match": "exact", "expected": "x"},
+                                     "expect": {"workspace_paths_absent": ["k.txt"]}}]}]}
+    with open(os.path.join(str(tmp_path), "cap_spec.yaml"), "w", encoding="utf-8") as fh:
+        yaml.safe_dump(doc, fh)
+    with pytest.raises(suites.SuiteError) as exc:
+        suites.load_all(str(tmp_path))
+    assert any("graded by run_eval.py only" in p for p in exc.value.problems)
 
 
 # --- requires_tools_all (case level) ----------------------------------------
@@ -478,7 +556,31 @@ def test_the_shipped_numbered_rubrics_parse():
                       "rice_question_while_stocktake_runs": 3,
                       "never_mind_cancel": 2, "stop_the_stocktake": 2,
                       "thirteenth_corrected_to_twentieth": 3,
-                      "twentieth_corrected_to_thirteenth": 3}
+                      "twentieth_corrected_to_thirteenth": 3,
+                      # open_loops.yaml
+                      "grant_overhead": 3, "contractor_choice": 3,
+                      "fence_paint_route_sanity": 3,
+                      "permit_forms_tomorrow_route_sanity": 3, "deadline_question": 2,
+                      "colleague_visa": 2, "hypothetical_race": 2,
+                      "forwarded_school_notice": 2, "concert_occasion": 2,
+                      "reminder_listed_back": 3, "fetched_notice": 2,
+                      "allotment_application": 2,
+                      "insurance_renewal": 2, "invoices_sent": 3,
+                      "volunteer_form_submitted": 3, "venue_booking_plan": 5,
+                      "lease_signing_plan": 5, "onboarding_course_not_started": 5,
+                      "photos_not_sorted": 5, "storage_unit_stop": 4,
+                      "gym_decision_stop": 4,
+                      # cues.yaml
+                      "releases_and_outages": 3, "security_fixes_only": 3,
+                      "sanity_watcher_tool_reached": 2,
+                      "firehose_failover_news": 4, "flooded_source_replication_lag": 4,
+                      "ignore_conference_talks": 3, "skip_vendor_webinars": 3,
+                      "funding_story_not_useful": 3, "meetup_item_useless": 3,
+                      "alerts_to_dana_on_signal": 2, "alerts_to_sister_on_signal": 2,
+                      "sources_and_anything_broken": 4, "anything_waiting_on_me": 4,
+                      "sanity_sources_read": 2, "broker_news_websocket": 3,
+                      "market_headlines_wss": 3, "mandates_and_approval": 3,
+                      "mandates_needing_approval": 3}
 
 
 if __name__ == "__main__":

@@ -8,6 +8,8 @@ defmodule FermixCore.Tools.UpdateJob do
 
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Cues.Mandates
+  alias FermixCore.Cues.Pins
   alias FermixCore.Jobs.DeliveryDefaults
   alias FermixCore.Jobs.Registry
   alias FermixCore.Tools.JobRegistrySupport, as: Support
@@ -39,7 +41,7 @@ defmodule FermixCore.Tools.UpdateJob do
         schedule: %{
           type: "string",
           description:
-            "Replacement schedule expression: an interval like every 15 minutes, a 5-field cron like 0 8 * * * (8am daily), or an ISO8601 UTC timestamp. Cron fields support *, lists, ranges, and steps. Recomputes the next run time."
+            "Replacement schedule expression: an interval like every 15 minutes, a 5-field cron like 0 8 * * * (8am daily), or an ISO 8601 datetime with a UTC offset (the owner's offset unless they named another zone). Cron fields support *, lists, ranges, and steps. Recomputes the next run time."
         },
         description: %{
           type: "string",
@@ -107,6 +109,19 @@ defmodule FermixCore.Tools.UpdateJob do
       %{
         tag: "route_pin_conflict",
         description: "clear_route_pin was combined with provider or model"
+      },
+      %{
+        tag: "outside_run_tools",
+        description: "the job, after the change, holds tools the calling run does not have itself"
+      },
+      %{
+        tag: "below_job_trust",
+        description: "the calling run is at guest trust and the job was set up at operator trust"
+      },
+      %{
+        tag: "skill_drops_cue_history",
+        description:
+          "skill_name binds a watcher's task job to a skill whose trust or classes drop cue_history"
       }
     ]
   end
@@ -124,14 +139,21 @@ defmodule FermixCore.Tools.UpdateJob do
 
   defp do_execute(args, context) do
     with {:ok, job_id} <- Support.required_string(args, "job_id"),
-         {:ok, skill_name} <- validate_skill_name(args, context),
+         {:ok, skill} <- validate_skill_name(args, context),
          {:ok, delivery} <- resolve_delivery(args, context),
          {:ok, clear_route_pin?} <- validate_clear_route_pin(args),
          {:ok, route_pin} <- Support.validate_route_pin(args),
-         {:ok, attrs} <- update_attrs(args, skill_name, delivery, route_pin, clear_route_pin?),
-         :ok <- Support.check_job_access(job_id, context) do
+         {:ok, attrs} <-
+           update_attrs(args, skill_name(skill), delivery, route_pin, clear_route_pin?),
+         {:ok, job} <- Support.check_job_access(job_id, context),
+         :ok <- Support.check_change_trust(job, context),
+         :ok <- Support.check_cue_skill(job, skill, context),
+         :ok <- Support.check_within_run_tools(job, skill, context),
+         :ok <- Support.check_watcher_consent(job_id, context),
+         :ok <- Mandates.check_update_consent(job_id, context),
+         :ok <- disable_mandates(job_id, context) do
       case Registry.update_job(job_id, attrs, repo: Support.repo(context)) do
-        {:ok, job} -> Support.success_json(Support.job_payload(job))
+        {:ok, job} -> Support.success_json(Support.job_payload(job, Support.repo(context)))
         {:error, reason} -> Support.error(reason)
       end
     else
@@ -139,6 +161,12 @@ defmodule FermixCore.Tools.UpdateJob do
       {:error, reason} -> Support.error(reason)
     end
   end
+
+  # M60 §10.4: a job a mandate names changes only with the mandate disabled
+  # until the owner approves it again, so the change is written after the
+  # disable (a failed disable leaves the job as it was).
+  defp disable_mandates(job_id, context),
+    do: Pins.disable_for_job(job_id, DateTime.utc_now(), repo: Support.repo(context))
 
   # Clearing a pin and setting one are mutually exclusive: clear_route_pin=true
   # un-pins to default routing, so combining it with a provider/model is an
@@ -191,7 +219,8 @@ defmodule FermixCore.Tools.UpdateJob do
   end
 
   # A re-bound skill must already exist; the run-time confinement is enforced in
-  # Jobs.Runner. Absent skill_name leaves the existing binding untouched.
+  # Jobs.Runner. Absent skill_name leaves the existing binding untouched. The
+  # loaded definition rides on to `Support.check_within_run_tools/3`.
   defp validate_skill_name(args, context) do
     case Support.optional_string(args, "skill_name") do
       nil ->
@@ -201,13 +230,16 @@ defmodule FermixCore.Tools.UpdateJob do
         registry = Map.get(context, :skill_registry, SkillRegistry)
 
         case SkillRegistry.load(registry, name) do
-          {:ok, _definition} -> {:ok, name}
+          {:ok, definition} -> {:ok, definition}
           {:error, {:unknown_skill, _}} -> {:error, "unknown_skill: #{name}"}
         end
     end
   catch
     :exit, reason -> {:error, "skill_registry_unavailable: #{inspect(reason)}"}
   end
+
+  defp skill_name(nil), do: nil
+  defp skill_name(skill), do: Map.get(skill, :name)
 
   defp put_delivery(map, :no_change), do: map
 

@@ -95,17 +95,23 @@ defmodule FermixCore.Tools.ToolHelp do
   end
 
   # Both axes, mirroring `Capabilities.Registry.apply_filters/2`: `owner_only?`
-  # bounds whose data a capability returns, `policy_class` bounds what it does.
-  # An absent trust or policy is an internal caller (a unit test, a non-loop
-  # entry point) and stays unfiltered, matching the registry's storage-primitive
-  # semantics.
-  defp visible?(%Capability{owner_only?: true}, %{source_trust: :guest}), do: false
+  # bounds whose data a capability returns, at the run's trust
+  # (`Registry.run_trust/1`, so a plugin skill's guest worker under the owner
+  # counts as guest), and `policy_class` bounds what it does. An absent trust or
+  # policy is an internal caller (a unit test, a non-loop entry point) and stays
+  # unfiltered, matching the registry's storage-primitive semantics.
+  defp visible?(%Capability{} = capability, context) do
+    owner_visible?(capability, Registry.run_trust(context)) and
+      class_visible?(capability, Map.get(context, :effective_policy))
+  end
 
-  defp visible?(%Capability{policy_class: class}, %{effective_policy: classes})
-       when is_list(classes),
-       do: class in classes
+  defp owner_visible?(%Capability{owner_only?: true}, :guest), do: false
+  defp owner_visible?(%Capability{}, _trust), do: true
 
-  defp visible?(%Capability{}, _context), do: true
+  defp class_visible?(%Capability{}, nil), do: true
+
+  defp class_visible?(%Capability{policy_class: class}, classes) when is_list(classes),
+    do: class in classes
 
   defp format_capability(capability) do
     [

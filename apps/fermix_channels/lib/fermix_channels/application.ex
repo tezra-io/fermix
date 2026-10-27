@@ -11,11 +11,13 @@ defmodule FermixChannels.Application do
   alias FermixChannels.Gateway.ChannelRegistry
   alias FermixChannels.LinkPreviews
   alias FermixChannels.Mobile.MediaStore
+  alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
   alias FermixCore.Readiness
 
   require Logger
 
   @compiled_env Mix.env()
+  @held_key {__MODULE__, :held_at_boot}
 
   @impl true
   def start(_type, _args) do
@@ -56,7 +58,36 @@ defmodule FermixChannels.Application do
     # registers itself here and is present iff this application runs.
     Application.put_env(:fermix_core, :voice_bridge, FermixChannels.Voice.Bridge)
 
+    # A mandate proposal (M60 §10.9) goes to the owner's DM through the
+    # gateway's approval delivery. Core must not compile-depend on channels, so
+    # the sender registers itself here and is present iff this application runs;
+    # without it a proposal cannot reach the owner and is refused.
+    Application.put_env(
+      :fermix_core,
+      :cue_proposal_sender,
+      FermixChannels.Gateway.OwnerInboxApproval
+    )
+
+    # Every waiting proposal is offered to the Mac app's chat, and its end told
+    # there (M60 app surface §3.7): core announces through this listener, which
+    # registers itself here for the same reason.
+    Application.put_env(
+      :fermix_core,
+      :cue_proposal_listener,
+      FermixChannels.Companion.Proposals
+    )
+
+    # Core's restart state asks which transports wait for a restart: a boot
+    # whose setup was not finished registers none, and finishing setup changes
+    # no setting core could compare (`waiting_for_restart/1`). Registered here
+    # for the same reason, so it is present iff this application runs.
+    Application.put_env(:fermix_core, :transport_restart_provider, __MODULE__)
+
     request_boot_epoch = request_boot_epoch()
+
+    # What this boot holds is decided here, once, and read from this record
+    # rather than from the supervisor, which a read must never wait on.
+    :persistent_term.put(@held_key, held_by(readiness, request_boot_epoch))
 
     children =
       [
@@ -126,6 +157,62 @@ defmodule FermixChannels.Application do
       )
     ]
   end
+
+  @doc """
+  The transports a boot with this readiness holds, by child id: those a boot
+  whose setup was finished registers and this one does not. Empty once setup is
+  finished. This boot's answer is recorded at boot (`held_at_boot/0`).
+  """
+  @spec held_by(Readiness.report(), String.t()) :: [module()]
+  def held_by(readiness, request_boot_epoch) when is_map(readiness),
+    do:
+      ids(transport_children(%{status: :ready}, request_boot_epoch)) --
+        ids(transport_children(readiness, request_boot_epoch))
+
+  @doc """
+  The transports this boot held because setup was not finished, as recorded at
+  boot. Empty where setup was finished at boot, and before this application
+  starts.
+  """
+  @spec held_at_boot() :: [module()]
+  def held_at_boot, do: :persistent_term.get(@held_key, [])
+
+  @doc """
+  The transports this boot held that the next boot would start: setup is
+  finished now, each is still set to start, and the phone's switch is on (the
+  phone's subtree is registered on or off, so a held phone that is off would
+  start nothing). Read by core's restart state through
+  `:transport_restart_provider`, so finishing setup asks for the restart that
+  starts them. Readiness is read only when this boot held something.
+  `:held`, `:readiness` and `:phone_switch` replace the three reads in a test.
+  """
+  @spec waiting_for_restart(keyword()) :: [module()]
+  def waiting_for_restart(opts \\ []) when is_list(opts) do
+    case Keyword.get_lazy(opts, :held, &held_at_boot/0) do
+      [] -> []
+      held -> Enum.filter(held, &starts_at_next_boot?(&1, next_boot_ids(opts), opts))
+    end
+  end
+
+  # What a boot with readiness as it stands now would register. The phone's
+  # id is the registry's here as at boot: a held list never names it in a test
+  # tree, which registers no phone (`phone_child/1`).
+  defp next_boot_ids(opts) do
+    opts
+    |> Keyword.get(:readiness, &Readiness.report/0)
+    |> then(& &1.())
+    |> ChannelRegistry.transport_children()
+    |> ids()
+  end
+
+  defp starts_at_next_boot?(MobileSupervisor, next_ids, opts),
+    do:
+      MobileSupervisor in next_ids and
+        Keyword.get(opts, :phone_switch, &MobileSupervisor.switch_on?/0).()
+
+  defp starts_at_next_boot?(transport, next_ids, _opts), do: transport in next_ids
+
+  defp ids(children), do: Enum.map(children, &Supervisor.child_spec(&1, []).id)
 
   defp transport_children(readiness, request_boot_epoch) do
     readiness

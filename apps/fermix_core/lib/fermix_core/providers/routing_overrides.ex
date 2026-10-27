@@ -9,6 +9,9 @@ defmodule FermixCore.Providers.RoutingOverrides do
       unpinned scheduled jobs run on.
     * `meeting_provider` / `meeting_model` / `meeting_reasoning_effort` — the
       model the meeting summarizer runs on.
+    * `filter_provider` / `filter_model` / `filter_reasoning_effort` — the
+      default model a cue watcher's `llm` filter runs on when the watcher names
+      none (M60 §8.2).
 
   Plus the per-call override the main agent may pass as `subagents` tool args
   (`parse_tool_args/1`), which `merge/2`s field-level over the config default.
@@ -48,14 +51,19 @@ defmodule FermixCore.Providers.RoutingOverrides do
   @spec meeting() :: override()
   def meeting, do: parse(routing_config(), :meeting)
 
+  @doc "The configured cue-filter default (`[fermix_core.routing] filter_*`)."
+  @spec filter() :: override()
+  def filter, do: parse(routing_config(), :filter)
+
   defp routing_config, do: Application.get_env(:fermix_core, :routing, [])
 
   @doc """
   Reads + validates the `<prefix>_provider/model/reasoning_effort` keys from a
   routing keyword list. Raises `ArgumentError` on an unknown provider or effort.
   """
-  @spec parse(keyword(), :subagent | :cron | :meeting) :: override()
-  def parse(routing, prefix) when is_list(routing) and prefix in [:subagent, :cron, :meeting] do
+  @spec parse(keyword(), :subagent | :cron | :meeting | :filter) :: override()
+  def parse(routing, prefix)
+      when is_list(routing) and prefix in [:subagent, :cron, :meeting, :filter] do
     provider = validate_provider(get(routing, prefix, :provider), label(prefix, :provider))
     model = normalize_model(get(routing, prefix, :model), label(prefix, :model))
     validate_pairing(provider, model, label(prefix, :model))

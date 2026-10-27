@@ -12,7 +12,13 @@ defmodule FermixChannels.Gateway.Commands do
           {:command, String.t(), [String.t()], Message.t()} | {:passthrough, Message.t()}
 
   @spec parse(Message.t(), keyword()) :: result()
-  def parse(%Message{content: content} = message, opts \\ []) do
+  def parse(message, opts \\ [])
+
+  # A message the owner forwarded is someone else's words, never a command the
+  # owner gave, whatever its first word: it passes through as text.
+  def parse(%Message{metadata: %{forwarded: true}} = message, _opts), do: {:passthrough, message}
+
+  def parse(%Message{content: content} = message, opts) do
     bot_name = Keyword.get(opts, :bot_name)
 
     case parse_leading_command(content, bot_name) do

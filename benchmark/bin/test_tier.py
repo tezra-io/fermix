@@ -31,6 +31,7 @@ KEYCHAIN_ITEM = "fermix:ANTHROPIC_API_KEY"
 KEYCHAIN_SOURCE = f"<keychain {KEYCHAIN_ITEM}>"
 # An invented key: it may reach the runner's environment, never any output.
 INVENTED_KEY = "invented-anthropic-key-5c1e"
+JUDGE_KEY = "ANTHROPIC_API_KEY"
 
 # Holds exactly one item, the daemon's Anthropic key, and answers for it only when
 # the test sets STUB_KEYCHAIN_KEY; every lookup is logged when STUB_SECURITY_LOG is set.
@@ -69,7 +70,7 @@ def plan(tier, stub_path, **env_overrides):
     assert p.returncode == 0, p.stderr
     lines = p.stdout.strip().split("\n")
     judge = None
-    if lines and lines[0].startswith("ANTHROPIC_API_KEY="):
+    if lines and lines[0].startswith(f"{JUDGE_KEY}="):
         judge = lines[0].split("=", 1)[1]
         lines = lines[1:]
     return judge, lines
@@ -138,7 +139,7 @@ def test_capability_readonly_selects_only_the_read_only_suites(stub_path):
 # --- the judge's Anthropic credential ----------------------------------------
 
 def test_the_judge_key_value_is_never_printed(stub_path):
-    for env in ({"ANTHROPIC_API_KEY": INVENTED_KEY}, {"STUB_KEYCHAIN_KEY": INVENTED_KEY}):
+    for env in ({JUDGE_KEY: INVENTED_KEY}, {"STUB_KEYCHAIN_KEY": INVENTED_KEY}):
         p = run_print("regression", stub_path, **env)
         assert p.returncode == 0, p.stderr
         assert INVENTED_KEY not in p.stdout + p.stderr
@@ -162,19 +163,21 @@ def test_an_exported_key_wins_and_the_keychain_is_not_read(stub_path, tmp_path):
 
 
 def test_an_unanswered_keychain_leaves_the_judge_key_unset(stub_path):
-    # Not fatal here: the SDK may still find an `ant auth login` profile (or the
-    # eval box's federation profile), and the runner's judge precondition refuses
-    # the run with a sentence when nothing resolves.
+    # Not fatal here: the SDK may still find an `ant auth login` profile, and the
+    # runner's judge precondition refuses the run with a sentence when nothing
+    # resolves.
     judge, argv = plan("regression", stub_path)
     assert judge == "<unset>"
     assert argv[:3] == ["uv", "run", "bin/run_eval.py"]
 
 
 def test_the_retired_openai_judge_key_is_not_resolved(stub_path):
+    # The OpenAI judge's credential is no longer resolved: an exported
+    # EVAL_JUDGE_API_KEY neither feeds the judge nor is named for it.
     p = run_print("regression", stub_path, EVAL_JUDGE_API_KEY=INVENTED_KEY)
     assert p.returncode == 0, p.stderr
-    assert p.stdout.splitlines()[0] == "ANTHROPIC_API_KEY=<unset>"
-    assert "EVAL_JUDGE_API_KEY" not in p.stdout + p.stderr
+    assert p.stdout.splitlines()[0] == f"{JUDGE_KEY}=<unset>"
+    assert "EVAL_JUDGE" not in p.stdout + p.stderr
 
 
 @pytest.mark.parametrize("tier", ["capability", "capability-readonly"])

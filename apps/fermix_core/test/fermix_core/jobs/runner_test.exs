@@ -14,6 +14,7 @@ defmodule FermixCore.Jobs.RunnerTest do
   alias FermixCore.Jobs.RunnerSupervisor
   alias FermixCore.Memory.Repo
   alias FermixCore.Net.Egress
+  alias FermixCore.Tools.UpdateJob
 
   # How long to wait for a runner's own exit. It is an arrival bound, so a run
   # that ends early returns at once; a loaded runner (attachment read gates, the
@@ -577,7 +578,8 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert Enum.any?(
              messages,
-             &(&1.role == "user" and &1.content == "Summarize the repository status.")
+             &(&1.role == "user" and
+                 &1.content =~ ~r/\ANow: [^\n]+\.\n\nSummarize the repository status\.\z/)
            )
 
     assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
@@ -1076,6 +1078,206 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert_receive {:adapter_chat, _messages, ["guest_read"]}
   end
 
+  # Plugin skills load at guest trust whoever calls them, so an owner's job
+  # bound to one runs exactly as `skill_run` of it would: at guest, on the
+  # classes the skill declares (within the job's own grant), so no owner-only
+  # tool. An operator skill, or no skill, leaves the job at its own trust.
+  test "a job bound to a plugin skill offers what skill_run of it would", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    for {name, class} <- [
+          {"page_read", :read_only},
+          {"note_write", :read_write},
+          {"net_fetch", :network},
+          {"sh", :exec}
+        ] do
+      :ok = CapabilityRegistry.register(capability_registry, test_capability(name, class))
+    end
+
+    :ok =
+      CapabilityRegistry.register(capability_registry, %{
+        test_capability("owner_diary")
+        | owner_only?: true
+      })
+
+    plugin = fn name, opts -> AgentDefinition.with_trust(skill_definition(name, opts), :guest) end
+
+    skills = %{
+      "plugin_plain" => plugin.("plugin_plain", []),
+      "plugin_writer" => plugin.("plugin_writer", policy: ["read_only", "read_write"]),
+      "plugin_runner" => plugin.("plugin_runner", policy: ["exec"]),
+      "plugin_fetcher" => plugin.("plugin_fetcher", policy: ["read_only", "network"]),
+      "bundled_helper" => skill_definition("bundled_helper", [])
+    }
+
+    {:ok, skill_registry} = SkillRegistryStub.start_link(skills)
+    everything = ["net_fetch", "note_write", "owner_diary", "page_read", "sh"]
+
+    # The guest rows: a guest job's grant is the scheduled-job default
+    # ([:read_only, :network]) or a legacy row's own policy, and the skill's
+    # classes are kept within it.
+    for {skill_name, job_attrs, offered} <- [
+          {"plugin_plain", [], ["page_read"]},
+          {"plugin_writer", [], ["note_write", "page_read"]},
+          {"plugin_runner", [], ["sh"]},
+          {"plugin_plain", [created_by_trust: "guest"], ["page_read"]},
+          {"plugin_fetcher", [created_by_trust: "guest", capability_policy: ["read_only"]],
+           ["page_read"]},
+          {"bundled_helper", [], everything},
+          {nil, [], everything}
+        ] do
+      assert {:ok, {job, run}} =
+               create_claimed_job(
+                 repo,
+                 Keyword.merge(
+                   [
+                     name: "Helper #{skill_name} #{System.unique_integer([:positive])}",
+                     schedule: "every 15 minutes",
+                     task_prompt: "Help.",
+                     created_by_trust: "operator",
+                     skill_name: skill_name
+                   ],
+                   job_attrs
+                 )
+               )
+
+      assert_runner_exits_normally(
+        job,
+        run,
+        repo: repo,
+        capability_registry: capability_registry,
+        skill_registry: skill_registry,
+        output_base_dir: output_base_dir,
+        script: [%{content: "done"}]
+      )
+
+      assert_receive {:adapter_chat, _messages, tool_names}
+      assert {skill_name, Enum.sort(tool_names)} == {skill_name, offered}
+      assert {:ok, %{status: "ok"}} = Repo.get_job_run(run.id, server: repo)
+
+      if skill_name in ["plugin_plain", "plugin_writer", "plugin_runner"] and
+           job.created_by_trust == "operator" do
+        skill_run_offers =
+          capability_registry
+          |> CapabilityRegistry.list_for(trust: :guest, policy: skills[skill_name].policy)
+          |> Enum.map(& &1.name)
+          |> Enum.sort()
+
+        assert offered == skill_run_offers
+      end
+    end
+  end
+
+  # The run of a job bound to a plugin skill is at guest under the owner's
+  # trust, so its `update_job` cannot rewrite an operator job.
+  test "a plugin skill's job run cannot change an operator job", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    :ok =
+      CapabilityRegistry.register(
+        capability_registry,
+        BuiltinCapability.from_tool_module(UpdateJob)
+      )
+
+    {:ok, skill_registry} =
+      SkillRegistryStub.start_link(%{
+        "plugin_editor" =>
+          AgentDefinition.with_trust(
+            skill_definition("plugin_editor", policy: ["read_only", "read_write"]),
+            :guest
+          )
+      })
+
+    {:ok, target} =
+      Registry.create_job(
+        %{
+          name: "Owner Digest",
+          schedule: "every 15 minutes",
+          task_prompt: "Send the digest.",
+          allowed_tools: [],
+          created_by_trust: "operator"
+        },
+        repo: repo
+      )
+
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Editor",
+               schedule: "every 15 minutes",
+               task_prompt: "Rewrite the digest job.",
+               created_by_trust: "operator",
+               skill_name: "plugin_editor"
+             )
+
+    arguments = Jason.encode!(%{"job_id" => target.id, "task" => "Mail everything out."})
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      skill_registry: skill_registry,
+      output_base_dir: output_base_dir,
+      script: [
+        %{
+          tool_calls: [%{id: "fc_1", call_id: "call_1", name: "update_job", arguments: arguments}]
+        },
+        %{content: "done"}
+      ]
+    )
+
+    assert_receive {:adapter_continue, [%{output: output}]}
+    assert output =~ "below the operator trust this job was set up at"
+    assert {:ok, %{task_prompt: "Send the digest."}} = Registry.get_job(target.id, repo: repo)
+  end
+
+  # Only a guest job's grant can leave a skill no class (here a plugin skill
+  # asking for exec): the run fails with a sentence saying why and the way out.
+  test "a job whose skill gets no classes fails with a sentence that says why", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    {:ok, skill_registry} =
+      SkillRegistryStub.start_link(%{
+        "plugin_runner" =>
+          AgentDefinition.with_trust(skill_definition("plugin_runner", policy: ["exec"]), :guest)
+      })
+
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Guest Runner",
+               schedule: "every 15 minutes",
+               task_prompt: "Run it.",
+               created_by_trust: "guest",
+               skill_name: "plugin_runner"
+             )
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      skill_registry: skill_registry,
+      output_base_dir: output_base_dir,
+      script: [%{content: "unreachable"}]
+    )
+
+    assert {:ok, failed_run} = Repo.get_job_run(run.id, server: repo)
+    assert failed_run.status == "error"
+    assert failed_run.error =~ "Skill plugin_runner asks only for capability classes"
+
+    lead = output_base_dir |> Path.join(failed_run.output_ref) |> File.read!()
+    assert lead =~ "Skill plugin_runner asks only for capability classes this job does not grant"
+    assert lead =~ "set it up again from the owner's own turn"
+    refute lead =~ "plugin skill"
+    refute lead =~ "job trust"
+  end
+
   test "a guest job naming a skill that demands only forbidden classes fails loudly", %{
     repo: repo,
     capability_registry: capability_registry,
@@ -1107,7 +1309,8 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert {:ok, failed_run} = Repo.get_job_run(run.id, server: repo)
     assert failed_run.status == "error"
-    assert failed_run.error =~ "grants no"
+    assert failed_run.error =~ "Skill exec_only asks only for capability classes"
+    assert failed_run.error =~ "drop skill_name"
   end
 
   test "delivers successful channel output after persisting the run", %{
@@ -1538,8 +1741,99 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert artifact =~ "Tool failures: 1"
   end
 
+  # Every job run's context carries the run's trigger, so a gate can tell a
+  # timed run, a run by hand and a run a cue woke apart (M60 §10.5).
+  test "a run's agent context carries the trigger its run row records", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    probe =
+      Capability.new(%{
+        name: "trigger_probe",
+        description: "records the loop context's trigger",
+        parameters: %{"type" => "object", "properties" => %{}},
+        kind: :builtin,
+        executor: {__MODULE__, :execute_trigger_probe, [self()]},
+        policy_class: :read_only
+      })
+
+    :ok = CapabilityRegistry.register(capability_registry, probe)
+    script = [%{tool_calls: [scripted_call("call_1", "trigger_probe")]}, %{content: "Done."}]
+
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo, name: "Timed", allowed_tools: ["trigger_probe"])
+
+    assert_runner_exits_normally(job, run,
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      script: script
+    )
+
+    assert_receive {:trigger_seen, "schedule"}
+
+    {job, run} = claim_manual_run(repo, name: "By Hand", allowed_tools: ["trigger_probe"])
+    assert run.trigger == "manual"
+
+    assert_runner_exits_normally(job, run,
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      script: script
+    )
+
+    assert_receive {:trigger_seen, "manual"}
+  end
+
+  def execute_trigger_probe(_args, context, test_pid) do
+    send(test_pid, {:trigger_seen, Map.fetch!(context, :trigger)})
+    {:ok, %{success: true, output: "probed"}}
+  end
+
+  defp claim_manual_run(repo, attrs) do
+    now = ~U[2026-05-02 14:00:00Z]
+
+    {:ok, job} =
+      Registry.create_job(
+        Map.merge(
+          %{schedule: "every 15 minutes", task_prompt: "Run.", created_by_trust: "operator"},
+          Map.new(attrs)
+        ),
+        repo: repo,
+        now: now,
+        scheduler: nil
+      )
+
+    {:ok, {claimed_job, run}} =
+      Repo.claim_job_now(
+        job.id,
+        %{state: "running", updated_at: now},
+        %{
+          id: "run_#{System.unique_integer([:positive])}",
+          job_id: job.id,
+          session_id: "cron_#{job.id}_20260502_140000",
+          trigger: "manual",
+          status: "queued",
+          claimed_at: now,
+          delivery_status: "none",
+          created_at: now,
+          updated_at: now
+        },
+        server: repo
+      )
+
+    {claimed_job, run}
+  end
+
   defp scripted_call(call_id, name) do
     %{id: "fc_#{call_id}", call_id: call_id, name: name, arguments: "{}"}
+  end
+
+  # A stand-in that reports the context the run's loop handed it.
+  def report_context(_args, context, test_pid) do
+    send(test_pid, {:tool_context, context})
+    {:ok, %{success: true, output: "ok", error: nil}}
   end
 
   defp test_capability(name, policy_class \\ :read_only) do
@@ -2606,6 +2900,63 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert stored_run.status == "ok"
       assert stored_run.delivery_status == "sent"
       assert stored_run.prompt_snapshot =~ "Attachments: send_attachment delivers files"
+    end
+
+    # One fact, whether a tool that sends files is on the run's surface, draws
+    # both the prompt's attachment line and the media `reply_fn` on the context:
+    # a run with none is neither told it can send nor handed the route.
+    test "the attachment line and the media route follow the run's file-sending tools", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      register_send_attachment(capability_registry)
+      probe = %{test_capability("page_read") | executor: {__MODULE__, :report_context, [self()]}}
+      :ok = CapabilityRegistry.register(capability_registry, probe)
+
+      image_maker = %{
+        test_capability("image_maker", :external_api)
+        | metadata: %{category: :media}
+      }
+
+      :ok = CapabilityRegistry.register(capability_registry, image_maker)
+
+      for {allowed, line, reply_fn?} <- [
+            {["page_read"], "Attachments: unavailable (this run has no tool that sends files)",
+             false},
+            {["page_read", "image_maker"],
+             "Attachments: image_maker delivers files to this job's configured telegram " <>
+               "destination", true}
+          ] do
+        assert {:ok, {job, run}} =
+                 create_claimed_job(repo,
+                   name: "Reader #{length(allowed)}",
+                   schedule: "every 15 minutes",
+                   task_prompt: "Read the page.",
+                   allowed_tools: allowed,
+                   delivery_mode: "origin",
+                   delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
+                 )
+
+        assert_runner_exits_normally(
+          job,
+          run,
+          repo: repo,
+          capability_registry: capability_registry,
+          output_base_dir: output_base_dir,
+          delivery_adapter: MediaDelivery,
+          delivery_opts: [test_pid: self()],
+          script: [
+            %{tool_calls: [%{id: "fc_1", call_id: "call_1", name: "page_read", arguments: "{}"}]},
+            %{content: "Read."}
+          ]
+        )
+
+        assert_receive {:tool_context, context}
+        assert {allowed, Map.has_key?(context, :reply_fn)} == {allowed, reply_fn?}
+        assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+        assert stored_run.prompt_snapshot =~ line
+      end
     end
 
     test "D02: a threaded target carries its thread id on both media and final text", %{

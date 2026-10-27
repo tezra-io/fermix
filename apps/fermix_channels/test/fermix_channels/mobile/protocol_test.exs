@@ -5,7 +5,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
   @client_events ~w(
     hello msg attach_begin attach_chunk attach_end command cancel history_pull media_fetch
-    push_register ack read_state request_status pair_request unpair ping
+    push_register push_unregister ack read_state request_status pair_request unpair ping
   )
   @server_events ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
@@ -441,7 +441,8 @@ defmodule FermixChannels.Mobile.ProtocolTest do
       "device_id" => "device-1",
       "candidates" => [],
       "profiles" => [%{"id" => "main", "name" => "Fermix"}],
-      "push_salt" => Base.encode64(:binary.copy(<<7>>, 32))
+      "push_salt" => Base.encode64(:binary.copy(<<7>>, 32)),
+      "push" => ["apns"]
     }
 
     assert {:ok, _frame} = Protocol.encode_server_frame("pair_approved", approved, 1)
@@ -453,6 +454,83 @@ defmodule FermixChannels.Mobile.ProtocolTest do
       assert {:error, {:invalid_field, "push_salt"}} =
                Protocol.encode_server_frame("pair_approved", %{approved | "push_salt" => salt}, 1)
     end
+  end
+
+  # The daemon pushes through APNs alone, so `apns` is the whole catalog: the
+  # codec never sends `fcm`, or any other service, in either list.
+  test "pair_approved and hello_ack name the push services this daemon has" do
+    approved = %{
+      "device_id" => "device-1",
+      "candidates" => [],
+      "profiles" => [%{"id" => "main", "name" => "Fermix"}],
+      "push_salt" => Base.encode64(:binary.copy(<<7>>, 32)),
+      "push" => ["apns"]
+    }
+
+    for push <- [[], ["apns"]] do
+      assert {:ok, _frame} =
+               Protocol.encode_server_frame("pair_approved", %{approved | "push" => push}, 1)
+    end
+
+    # Protocol 2 shipped pair_approved without the list (engine 0.16.0), so
+    # an approval that has none is still one.
+    assert {:ok, _frame} =
+             Protocol.encode_server_frame("pair_approved", Map.delete(approved, "push"), 1)
+
+    for push <- [["fcm"], ["apns", "fcm"], ["gcm"], ["apns", "apns"], "apns"] do
+      assert {:error, {:invalid_field, "push"}} =
+               Protocol.encode_server_frame("pair_approved", %{approved | "push" => push}, 1)
+    end
+
+    ack = %{
+      "session_id" => "s",
+      "min_version" => 2,
+      "max_version" => 2,
+      "profiles" => [],
+      "candidates" => [],
+      "history_head_seq" => 0,
+      "read_up_to_seq" => 0,
+      "caps" => %{"commands" => [], "max_media_bytes" => 1, "push" => ["apns"]}
+    }
+
+    assert {:ok, _frame} = Protocol.encode_server_frame("hello_ack", ack, 1)
+
+    for push <- [["fcm"], ["apns", "fcm"], ["web"]] do
+      assert {:error, {:invalid_field, "caps.push"}} =
+               Protocol.encode_server_frame("hello_ack", put_in(ack, ["caps", "push"], push), 1)
+    end
+  end
+
+  # Protocol 2 shipped push_register as {apns_token, environment} (engine
+  # 0.16.0), and one protocol number keeps one shape of an event, so the
+  # {platform, token, environment?} shape it had on dev for a while is refused
+  # like any other malformed push_register.
+  test "push_register is the APNs token and environment protocol 2 shipped with" do
+    fields = %{"apns_token" => "0123456789abcdef", "environment" => "development"}
+
+    assert {:ok, %{type: "push_register", payload: ^fields}} =
+             Protocol.decode_client_frame(client_frame("push_register", 1, fields))
+
+    refused = [
+      {%{"environment" => "production"}, {:missing_field, "apns_token"}},
+      {%{"apns_token" => "abc123"}, {:missing_field, "environment"}},
+      {%{"apns_token" => "", "environment" => "production"}, {:invalid_field, "apns_token"}},
+      {%{"apns_token" => "abc123", "environment" => "staging"}, {:invalid_field, "environment"}},
+      {%{"platform" => "ios", "token" => "abc123", "environment" => "production"},
+       {:missing_field, "apns_token"}},
+      {%{"platform" => "android", "token" => "fcm-token"}, {:missing_field, "apns_token"}}
+    ]
+
+    for {fields, reason} <- refused do
+      assert {:error, ^reason} =
+               Protocol.decode_client_frame(client_frame("push_register", 1, fields)),
+             inspect(fields)
+    end
+  end
+
+  test "push_unregister carries nothing" do
+    assert {:ok, %{type: "push_unregister", payload: %{}}} =
+             Protocol.decode_client_frame(client_frame("push_unregister", 1, %{}))
   end
 
   test "fails loudly on malformed, oversized, and unknown frames" do

@@ -114,7 +114,7 @@ defmodule FermixCore.Tools.ToolSearch do
   defp deferred_catalog(registry, context) do
     registry
     |> Registry.list_for(
-      trust: Map.get(context, :source_trust),
+      trust: Registry.run_trust(context),
       policy_classes: Map.get(context, :effective_policy)
     )
     |> Enum.filter(&Deferral.deferred?/1)

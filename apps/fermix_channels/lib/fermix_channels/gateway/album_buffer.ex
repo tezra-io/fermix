@@ -220,7 +220,9 @@ defmodule FermixChannels.Gateway.AlbumBuffer do
   # Merge album parts into one message: keep every non-empty caption (WhatsApp
   # attaches a caption per message; Telegram carries one group caption — both
   # collapse to the right thing here), join them in arrival order, and
-  # concatenate all attachments. Other fields come from the first part.
+  # concatenate all attachments, each keeping its part's `forwarded?`; a
+  # forwarded part's caption keeps its own label. The album is forwarded when
+  # any part is. Other fields come from the first part.
   defp merge_album([first | _] = messages) do
     content =
       messages
@@ -228,7 +230,18 @@ defmodule FermixChannels.Gateway.AlbumBuffer do
       |> Enum.reject(&blank?/1)
       |> Enum.join("\n")
 
-    %{first | content: content, attachments: Enum.flat_map(messages, & &1.attachments)}
+    %{
+      first
+      | content: content,
+        attachments: Enum.flat_map(messages, & &1.attachments),
+        metadata: merged_metadata(first.metadata, messages)
+    }
+  end
+
+  defp merged_metadata(metadata, messages) do
+    if Enum.any?(messages, &(Map.get(&1.metadata, :forwarded) == true)),
+      do: Map.put(metadata, :forwarded, true),
+      else: metadata
   end
 
   defp deliver_album([single], state), do: deliver([single], [part_id(single)], state)

@@ -49,6 +49,7 @@ defmodule FermixCore.Management.Auth do
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.Wizard
 
+  require AnthropicLogin
   require Logger
 
   # The two providers with a browser sign-in flow of their own. Anthropic is
@@ -719,19 +720,15 @@ defmodule FermixCore.Management.Auth do
     if uri.port == URI.default_port(uri.scheme), do: uri.host, else: "#{uri.host}:#{uri.port}"
   end
 
-  # The absent case in the two spellings that reach it: an injected importer's
-  # `:not_found`, and the atom the Claude Code importer answers with.
-  defp import_sentence(absent) when absent in [:not_found, :no_claude_code_credentials],
-    do: "No existing sign-in was found on this Mac."
-
-  defp import_sentence(:claude_code_credentials_expired),
-    do: "The sign-in on this Mac has expired, so there was nothing to adopt."
+  # An injected importer's spelling of the absent case.
+  defp import_sentence(:not_found), do: "No existing sign-in was found on this Mac."
 
   # Refused before the other tool's token was spent, so it is still signed in.
   defp import_sentence(:profile_busy), do: Store.busy_sentence()
 
-  defp import_sentence(:claude_code_credentials_invalid),
-    do: "The sign-in on this Mac could not be read, so there was nothing to adopt."
+  # Claude Code's own failures, in the words every surface that imports uses.
+  defp import_sentence(reason) when AnthropicLogin.is_import_failure(reason),
+    do: AnthropicLogin.failure_sentence(reason)
 
   defp import_sentence(reason) do
     log("the sign-in could not be imported", reason)

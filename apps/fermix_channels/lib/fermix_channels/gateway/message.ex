@@ -37,6 +37,12 @@ defmodule FermixChannels.Gateway.Message do
     # and over anything the message carried. `ConversationKey.from/1` answers
     # it; `nil` keys the message on its own channel, chat and thread.
     :conversation_key,
+    # What a request re-run after the owner's `/confirm` had read before it
+    # parked (`FermixCore.Capabilities.UntrustedContent.resume_provenance/1`),
+    # set ONLY by that re-ingest (`Commands.Sandbox`), never from channel input;
+    # the turn seeds it as its starting outside sources. Turn-local: the
+    # message's metadata, not this, is stored.
+    :resumed_sources,
     thread_scope: :root,
     metadata: %{},
     # What the channel declared (`FermixCore.Attachments.declared/0`).
@@ -61,6 +67,7 @@ defmodule FermixChannels.Gateway.Message do
           request_cwd: String.t() | nil,
           session_env: %{String.t() => String.t()} | nil,
           conversation_key: FermixCore.Agents.ConversationKey.t() | nil,
+          resumed_sources: MapSet.t() | nil,
           thread_scope: thread_scope(),
           metadata: map(),
           attachments: [FermixCore.Attachments.declared()],
@@ -72,6 +79,36 @@ defmodule FermixChannels.Gateway.Message do
     attrs
     |> Map.put(:thread_scope, thread_scope(attrs))
     |> then(&struct!(__MODULE__, &1))
+  end
+
+  @forwarded_label "[forwarded message]"
+
+  @doc """
+  Record that the platform marked `message` forwarded (`forwarded?`, the
+  channel's one reading of its own markers: Telegram's `forward_*` fields,
+  WhatsApp's `context.forwarded`). Someone else wrote it, so:
+  `metadata.forwarded` is set (stored with the message, so a replay still knows
+  it), each declared attachment is marked `forwarded?`, and non-blank text
+  gains a `[forwarded message]` line the model reads, as a forwarded
+  recording's transcript arrives under its own forwarded label. The turn counts
+  such a message as outside content
+  (`FermixCore.Capabilities.UntrustedContent.message_sources/1`). A message the
+  owner wrote is returned unchanged.
+  """
+  @spec mark_forwarded(t(), boolean()) :: t()
+  def mark_forwarded(%__MODULE__{} = message, false), do: message
+
+  def mark_forwarded(%__MODULE__{} = message, true) do
+    %{
+      message
+      | metadata: Map.put(message.metadata, :forwarded, true),
+        attachments: Enum.map(message.attachments, &Map.put(&1, :forwarded?, true)),
+        content: label_forwarded(message.content)
+    }
+  end
+
+  defp label_forwarded(content) when is_binary(content) do
+    if String.trim(content) == "", do: content, else: @forwarded_label <> "\n" <> content
   end
 
   @doc """

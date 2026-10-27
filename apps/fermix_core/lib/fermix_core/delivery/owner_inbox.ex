@@ -74,6 +74,29 @@ defmodule FermixCore.Delivery.OwnerInbox do
 
   @type owners :: %{String.t() => String.t()}
 
+  @typedoc "Where the owner's answer to a prompt sent to their DM comes from."
+  @type dm_origin :: %{platform: String.t(), chat_id: String.t(), user_id: String.t()}
+
+  @doc """
+  The one owner of the rule "a DM's chat id is the owner's user id": on
+  Telegram, Signal, WhatsApp and iMessage the owner's DM `inbox` is keyed by the
+  owner's own id, so an answer to a prompt sent there (`/confirm`) can be held
+  to that chat and that user. Answers that origin, or `:error` for any other
+  inbox, which then cannot carry such a confirmation.
+  """
+  @spec dm_origin(%{
+          required(:platform) => String.t(),
+          required(:destination) => String.t(),
+          optional(atom()) => term()
+        }) :: {:ok, dm_origin()} | :error
+  def dm_origin(%{platform: platform, destination: owner})
+      when platform in @derived_inbox_order and is_binary(owner) and owner != "",
+      do: {:ok, %{platform: platform, chat_id: owner, user_id: owner}}
+
+  def dm_origin(%{platform: platform, destination: destination})
+      when is_binary(platform) and is_binary(destination),
+      do: :error
+
   @doc """
   Resolves the owner's inbox through the full precedence.
 

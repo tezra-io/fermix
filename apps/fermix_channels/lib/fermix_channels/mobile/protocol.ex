@@ -40,6 +40,8 @@ defmodule FermixChannels.Mobile.Protocol do
   @max_u64 18_446_744_073_709_551_615
   @default_max_media_bytes 20 * 1_024 * 1_024
   @platforms ~w(ios android)
+  # This daemon pushes through APNs alone, so it is the wire's whole catalog.
+  @push_services ~w(apns)
   @attestation_kinds ~w(android_keymint apple_app_attest)
   @max_attestation_certs 6
   @max_attestation_chain_bytes 16 * 1_024
@@ -48,7 +50,7 @@ defmodule FermixChannels.Mobile.Protocol do
 
   @client_events ~w(
     hello msg attach_begin attach_chunk attach_end command cancel history_pull media_fetch
-    push_register ack read_state request_status pair_request unpair ping
+    push_register push_unregister ack read_state request_status pair_request unpair ping
   )
   @server_events ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
@@ -67,6 +69,7 @@ defmodule FermixChannels.Mobile.Protocol do
     "history_pull" => ~w(profile_id limit),
     "media_fetch" => ~w(ref),
     "push_register" => ~w(apns_token environment),
+    "push_unregister" => [],
     "ack" => ~w(server_seq),
     "request_status" => ~w(client_msg_ids),
     "pair_request" => ~w(device_name model app_version platform attestation),
@@ -490,7 +493,10 @@ defmodule FermixChannels.Mobile.Protocol do
     do: validate_request_status(payload)
 
   defp validate_client_payload("pair_request", payload, _max), do: validate_pair_request(payload)
-  defp validate_client_payload(type, _payload, _max) when type in ~w(unpair ping), do: :ok
+
+  defp validate_client_payload(type, _payload, _max)
+       when type in ~w(push_unregister unpair ping),
+       do: :ok
 
   defp validate_hello(payload) do
     with :ok <- nonempty(payload, "device_id"),
@@ -662,10 +668,25 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- list_field(payload, "profiles"),
          :ok <- list_field(payload, "candidates"),
          :ok <- nonnegative_u64(payload, "history_head_seq"),
-         :ok <- nonnegative_u64(payload, "read_up_to_seq") do
-      map_field(payload, "caps")
+         :ok <- nonnegative_u64(payload, "read_up_to_seq"),
+         :ok <- map_field(payload, "caps") do
+      optional_push_services(payload["caps"], "caps.push")
     end
   end
+
+  # Absent from a daemon older than the list, as every field protocol 2 gained
+  # after it shipped may be.
+  defp optional_push_services(%{"push" => services}, field), do: push_services(services, field)
+  defp optional_push_services(_payload, _field), do: :ok
+
+  # The push services this daemon has configured, each named once.
+  defp push_services(services, field) when is_list(services) do
+    if Enum.all?(services, &(&1 in @push_services)) and Enum.uniq(services) == services,
+      do: :ok,
+      else: {:error, {:invalid_field, field}}
+  end
+
+  defp push_services(_services, field), do: {:error, {:invalid_field, field}}
 
   defp valid_version_range(%{
          "min_version" => @min_supported_version,
@@ -747,8 +768,9 @@ defmodule FermixChannels.Mobile.Protocol do
   defp validate_pair_approved(payload) do
     with :ok <- nonempty(payload, "device_id"),
          :ok <- list_field(payload, "candidates"),
-         :ok <- list_field(payload, "profiles") do
-      base64_bytes(payload, "push_salt", 32)
+         :ok <- list_field(payload, "profiles"),
+         :ok <- base64_bytes(payload, "push_salt", 32) do
+      optional_push_services(payload, "push")
     end
   end
 

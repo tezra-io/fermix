@@ -4,6 +4,8 @@ defmodule FermixWebWeb.SetupLive.Components do
   alias FermixCore.Auth.Redaction
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
+  alias FermixWebWeb.SetupLive.CuesPane
+  alias FermixWebWeb.SetupLive.Phone
 
   @local_process_consent "Runs a local process with direct access to the folders you configure."
 
@@ -14,6 +16,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     {:slack, "Slack"},
     {:signal, "Signal"},
     {:imessage, "iMessage"},
+    {:mobile, "Phone"},
     {:acp, "ACP (editors & agent clients)"}
   ]
 
@@ -22,6 +25,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   # dress — transparent ground, label-only rail, unboxed pane, -sm controls.
   attr :embed?, :boolean, default: false
   attr :channels_form, :map, required: true
+  attr :phone, :map, required: true
   attr :xai_auth, :map, required: true
   attr :xai_auth_running?, :boolean, required: true
   attr :xai_auth_url, :string, default: nil
@@ -60,6 +64,8 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :tabs, :list, required: true
   attr :tool_summary, :map, required: true
   attr :provider_statuses, :list, required: true
+  # The Cues tab's state (M60 §15).
+  attr :cues, :map, required: true
 
   def page(assigns) do
     ~H"""
@@ -132,6 +138,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               active_tab={@active_tab}
               embed?={@embed?}
               channels_form={@channels_form}
+              phone={@phone}
               xai_auth={@xai_auth}
               xai_auth_running?={@xai_auth_running?}
               xai_auth_url={@xai_auth_url}
@@ -168,6 +175,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               skill_summary={@skill_summary}
               tabs={@tabs}
               tool_summary={@tool_summary}
+              cues={@cues}
             />
           </div>
         </section>
@@ -286,6 +294,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :active_tab, :string, required: true
   attr :embed?, :boolean, default: false
   attr :channels_form, :map, required: true
+  attr :phone, :map, required: true
   attr :xai_auth, :map, required: true
   attr :xai_auth_running?, :boolean, required: true
   attr :xai_auth_url, :string, default: nil
@@ -322,6 +331,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :tabs, :list, required: true
   attr :tool_summary, :map, required: true
   attr :provider_statuses, :list, required: true
+  attr :cues, :map, default: nil
 
   defp active_pane(assigns), do: render_active_pane(assigns.active_tab, assigns)
 
@@ -337,6 +347,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp render_active_pane("memory", assigns), do: memory_pane(assigns)
   defp render_active_pane("personalization", assigns), do: personalization_pane(assigns)
   defp render_active_pane("doctor", assigns), do: doctor_pane(assigns)
+  defp render_active_pane("cues", assigns), do: CuesPane.pane(assigns)
 
   defp provider_pane(assigns) do
     ~H"""
@@ -1130,8 +1141,15 @@ defmodule FermixWebWeb.SetupLive.Components do
       </label>
 
       <div :if={@anthropic_import_available?} class="mt-2">
-        <button type="button" class="btn btn-ghost btn-sm" phx-click="anthropic_import">
-          Import Claude Code login
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm"
+          phx-click="anthropic_import"
+          disabled={@anthropic_auth[:importing?]}
+        >
+          {if @anthropic_auth[:importing?],
+            do: "Importing Claude Code login…",
+            else: "Import Claude Code login"}
         </button>
       </div>
 
@@ -1387,7 +1405,11 @@ defmodule FermixWebWeb.SetupLive.Components do
         </div>
       </section>
 
-      <form phx-submit="save_channels" class="mt-6 space-y-5">
+      <div :if={@editing == :mobile} class="mt-6">
+        <Phone.panel phone={@phone} />
+      </div>
+
+      <form :if={@editing != :mobile} phx-submit="save_channels" class="mt-6 space-y-5">
         <.integration_panel title={@editing_section.title} status={@editing_section.status}>
           <.channel_field :for={field <- @editing_section.fields} field={field} />
         </.integration_panel>
@@ -2387,6 +2409,28 @@ defmodule FermixWebWeb.SetupLive.Components do
           <p class="max-w-prose pt-1 text-xs leading-relaxed text-base-content/60">
             Repeated tasks become skill proposals every couple of weeks; each needs your
             approval. {@personalization_form.skill_curation_destination} Applies after restart.
+          </p>
+        </div>
+        <div
+          class="form-control"
+          data-open-loops={to_string(@personalization_form.open_loops_enabled)}
+        >
+          <label class="label cursor-pointer justify-start gap-3">
+            <input type="hidden" name="personalization_form[open_loops_enabled]" value="false" />
+            <input
+              type="checkbox"
+              name="personalization_form[open_loops_enabled]"
+              value="true"
+              checked={@personalization_form.open_loops_enabled}
+              class="toggle toggle-sm toggle-primary"
+            />
+            <span class="label-text text-sm font-medium">
+              Check in on things you plan to do by a date
+            </span>
+          </label>
+          <p class="max-w-prose pt-1 text-xs leading-relaxed text-base-content/60">
+            When you mention something you plan to do by a date, Fermix checks in before it
+            matters and stops when you say so. {@personalization_form.open_loops_destination} Applies after restart.
           </p>
         </div>
         <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save personalization" />
@@ -4228,6 +4272,9 @@ defmodule FermixWebWeb.SetupLive.Components do
       action_field("Confirm who Fermix may message", "imessage_policy_confirm", nil)
     ]
   end
+
+  # The Phone card has no token form: its panel acts at once (`Phone.panel/1`).
+  defp channel_fields(:mobile, _form), do: []
 
   defp channel_fields(:acp, form) do
     [

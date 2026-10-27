@@ -4,6 +4,228 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-10-26
+
+### Added
+
+- **GPT-6.1 Terra is in the model lists.** OpenAI's new balanced model sits
+  between GPT-6.1 Sol and GPT-6 Luna for an OpenAI API key and on OpenRouter;
+  no provider's default changes. A ChatGPT sign-in offers it whenever the
+  account does, and Fermix now knows its context window there, so a
+  conversation on it compacts where the rest of the GPT-6 generation does.
+
+- **Cues and watchers: something that happens elsewhere can wake a task.** A
+  source hands Fermix items: an RSS, Atom or JSON feed it polls, a WebSocket
+  stream it keeps open, a webhook from a service such as GitHub, or a program
+  on this machine posting to Fermix's local door. A watcher you make in chat
+  judges each item against what you asked it to watch for, and an item that
+  passes wakes the watcher's task, which reads it and reports to you. A task
+  acts on the outside world only through a mandate you grant in settings, and
+  in approve mode each action waits for your yes. Sources and mandates are
+  set on browser setup's Cues tab or in the Mac app's Settings → Cues; the
+  Linux app has no Cues pane. Cues are off until you turn on **Run cues** and
+  restart, and they need memory on. A webhook from the internet needs a
+  tunnel to the door: for Tailscale Funnel, the Cues tab shows the command for
+  that one source. A feed connects only to the address Fermix checked. A
+  watcher's task can't be bound to a skill that would leave it without its
+  cue history.
+- **Fermix can check in on something you said you would do by a date.** With
+  open loops on, when you tell the assistant you mean to do or decide
+  something by a date, it keeps that as an open loop without saying so. A
+  question about a date, someone else's deadline, a hypothetical, an occasion
+  that happens whether or not you act, a date from a fetched page, or anything
+  said by a guest or in a group chat never becomes one. As the date nears, the
+  assistant may raise it at a natural pause the next time you write in a
+  private chat; otherwise a short check-in may send one message to your chat
+  app, inside the hours you usually write and never more than one a day across
+  all your loops. Each loop is raised at most three times. Say it's done, give
+  a plan, say not yet, or ask it to stop; a loop left unanswered expires. A
+  loop due within two days is raised only in a chat, from three hours after
+  you mentioned it, and gets a reminder as well, and asking to be reminded
+  still makes a reminder. "What are you keeping an eye on?" lists your loops.
+  Turn it on with **Check in on things you plan to do by a date** on browser
+  setup's Personalization tab, or `enabled = true` under
+  `[fermix_core.open_loops]` in `~/.fermix/config.toml` (the Mac app has no
+  switch for it), then restart. It needs a chat app to reply in: without
+  `[fermix_core.jobs] default_delivery_target` or a Telegram, Signal, WhatsApp
+  or iMessage owner id, nothing is recorded. Nothing runs on a timer looking
+  for something to say: the only extra model run is a check-in for a loop that
+  is due.
+- **Reach from anywhere works out of the box.** The `fermix-iroh` helper it
+  needs ships inside the Homebrew binaries, the Mac app's engine and the Linux
+  packages, so the switch works with no download and no extra step. A source
+  checkout installs it with `mix fermix.iroh_helper`, and `fermix doctor`
+  fails a release that lacks it. Strangers cannot lock pairing over it,
+  because failed attempts count per remote endpoint, and silence cannot hold
+  it for long: when every connection place is taken, the one that has gone
+  longest with no stream open makes way, and when every session place is
+  taken, the oldest one that has not proved itself does. A phone that has
+  proved its key, or whose pairing request waits for you, keeps its place. A
+  stranger who opens about 200 new connections a second can still keep a
+  phone out, or push out one still completing its pairing handshake.
+- **The `fermix-iroh` helper's third-party notices ship with it.** The
+  licences of what is compiled into the helper ask for their notices to
+  travel with it. Every release carries them beside the helper, and the Linux
+  packages also install them as
+  `/usr/share/doc/fermix/fermix-iroh-THIRD-PARTY-NOTICES.txt` and name them
+  in their copyright file.
+- **Pair a phone from the browser setup.** The Channels tab has a Phone card,
+  with the same steps as the Phone row in the Mac and Linux apps: it turns the
+  phone channel on where it is off, shows a code to scan with the Fermix phone
+  app (or the pairing link, behind "Can't scan the code?"), then the six
+  digits to compare before you Approve or Deny. Change… lists your paired
+  phones with Forget…, and holds Reach from anywhere and the advanced
+  settings. A code still open when you close the tab is cancelled, so it does
+  not wait out its two minutes.
+
+### Changed
+
+- **A CAPTCHA no longer stops a browser task by rule.** The browser guidance
+  listed CAPTCHAs among the things that always end a task and report back; it
+  now leaves a CAPTCHA to the assistant's judgment. Two-factor prompts,
+  payment confirmations, missing credentials, URL-policy blocks and unsafe
+  dialogs still stop it and report.
+
+### Fixed
+
+- **Running out of Anthropic credit no longer stops Fermix when a backup
+  provider is set up.** Anthropic reports an empty credit balance as an HTTP
+  400, which Fermix read as a plain request error, so every turn and
+  scheduled job stopped at Anthropic while backups such as OpenAI Codex sat
+  unused. It now counts as used-up quota: the next configured provider
+  answers, and with none the reply says Anthropic's quota or credits are
+  exhausted.
+- **A bad phone push setting no longer stops Fermix starting.** With iPhone
+  push turned on in `[fermix_channels.mobile.push]`, a key that is not a
+  P-256 `.p8`, or a missing field, stopped the channels from starting, and
+  with them Fermix. The phone channel now starts without push: chat, pairing
+  and reach from anywhere work, the daemon log names the fault, and
+  `fermix doctor` and the phone channel's status say APNs credentials are
+  missing until it is fixed and Fermix restarts. A value of the wrong type,
+  an unknown key, or an `environment` other than `development` or
+  `production` is still refused when `config.toml` loads.
+- **Pairing a phone no longer asks for a restart that cannot help.** Fermix
+  starts its channels only once setup is finished, so a daemon that started
+  before setup was done (a provider not signed in yet, for one) held the phone
+  channel, and every restart before setup held it again while pairing kept
+  saying to restart. Pairing now says "The phone channel starts once setup is
+  finished.", `mobile.status` names the hold, and finishing setup afterwards
+  asks for the one restart that starts the channels it held.
+- **Every date and time Fermix shows its model is in your time zone.** The
+  current date in front of every conversation was the UTC date while
+  reminders and computer history were stated in your zone, so in the evening
+  hours when the two dates differ, something you said minutes earlier could
+  be called yesterday. The date (with your zone and its UTC offset), the times
+  in tool results, check-ins, reminder follow-ups, scheduled runs and
+  voice-call notes now all use the time zone set in Personality
+  (Personalization in browser setup); with none set they are UTC and the
+  assistant is told so. A new scheduled job runs on your time zone unless you
+  name another, and `date` in a shell command reports it.
+- **Web fetches and link previews follow `proxy_bypass`, and reach sites that
+  have only an IPv6 address.** Each request still goes to the address the
+  network guard checked, but now carries the host's name, so a
+  `proxy_bypass` entry naming the host applies, and an IPv6 address is written
+  correctly. Behind a proxy, a site reachable only over IPv6 gets a clear
+  refusal instead of the proxy's.
+- **A multi-line secret stored in the macOS keychain is read back exactly.** A
+  secret holding a newline, a tab or any character outside plain ASCII (a
+  pretty-printed JSON key, a PEM private key) came back from the login
+  Keychain as a string of hex digits, and Fermix used that string as the
+  secret, so a key it has to parse could stop it starting. Every secret is now
+  read back byte for byte, and a keychain answer Fermix cannot read is refused
+  with that reason rather than used. A secret too large to read whole, from
+  the keychain or a Linux keyring, is refused too, and no part of it reaches
+  the log.
+- **A value stored for sandboxed commands that holds a character outside
+  printable ASCII is refused with the reason.** On a Mac, storing a value in
+  Settings > Sandbox (or with `fermix settings secret set env:NAME`) that held
+  a tab, an accented letter or any other such character failed as if the
+  secret store were unavailable, because the keychain read it back as hex,
+  and a new value for a name already stored was kept behind that error, so
+  commands got the hex. Now that secrets read back exactly, the keychain
+  lookup commands use would still hand them that hex, so such a value is
+  refused when you store it, with a sentence saying why. The rule holds on
+  every platform, so Linux refuses these values too.
+- **Importing a Claude Code login on a Mac reads it exactly.** Fermix read
+  Claude Code's keychain item in a form that turns a line break or any
+  character outside plain ASCII into hex, so such a login was refused as
+  unreadable. The item is now read byte for byte, the way Fermix reads its own
+  secrets, and a keychain read that fails, such as one you deny, is reported
+  instead of being answered from `~/.claude/.credentials.json`: the Mac app,
+  browser setup and `fermix auth login` each say why, in the same words.
+  Browser setup also stopped reading the login, and raising the keychain's
+  prompt, every time it loaded while Anthropic was your provider; it now only
+  checks that one exists, and reads it when you choose to import it, without
+  reloading the page while the prompt waits for you.
+- **A secret in a Linux keyring that ends with a line break is read back with
+  it.** Fermix dropped every line break at the end of what the keyring handed
+  back, so a value ending in one lost it, and a value of line breaks alone
+  read as missing. The keyring adds nothing after a secret when Fermix reads
+  it, so the value now comes back exactly as it was stored: one stored with a
+  trailing line break now reaches the provider with it, and one stored by hand
+  with `echo … | secret-tool store` keeps the line break `echo` added. To fix
+  such a key, store it again through Fermix: with `fermix setup`, or in the
+  app's Settings.
+- **Computer History starts with a Fermix home whose path has letters beyond
+  Latin-1.** The lock that keeps a Mac to one capturer wrote the holder's
+  `FERMIX_HOME` as Latin-1, so a home path with, say, Japanese or Cyrillic
+  letters kept Computer History from starting, and an accented one was
+  recorded garbled where status names the holder. It is written as UTF-8 now.
+- **A call Fermix holds for your confirmation shows as held in Opik, not as
+  succeeded.** A tool call the access gate parked or refused, or a cue
+  mandate held, exported to Opik as a successful span. It is now an errored
+  span with a fixed code and summary that say it was held or refused, never
+  the call's arguments, and a replayed trace file shows it the same way.
+
+### Security
+
+- **On Linux, a command waits for you once a request has read something
+  someone else wrote.** Linux has no kernel sandbox for commands yet, so after
+  a request reads a web page, an attachment, a forwarded message, or a plugin
+  or MCP result, `shell`, `git_write` and your declared commands ask you once
+  in your chat, showing the exact command and, when the call names one, its
+  folder; a command too long to show in full is refused. Files on disk, a
+  command's own output and what an earlier request read do not count. A
+  scheduled job that has read such content runs one only if its allowed tools
+  name it, a job that could run one cannot be set up from such a request, and
+  on a voice call these commands are refused rather than asked aloud. The
+  `codex` and `claude_code` command presets, which run outside the sandbox
+  everywhere, ask the same way on a Mac.
+- **Attachments and Computer History count as content someone else wrote.** A
+  file, picture, PDF or video sent with a request, the Recent Activity note,
+  and what Computer History recalls now make an access-sensitive command such
+  as a Tesla unlock ask first in that request. Your own voice notes on
+  Telegram and WhatsApp, and those the phone app marks as recorded in the app,
+  do not; forwarded ones do.
+- **A limited run can no longer hand out more than it has.** A scheduled job
+  or skill run narrowed to some tools, some capability classes or a lower
+  trust can only create jobs, change jobs and start skill or sub-agent
+  workers within that; a job it creates with no tool list keeps the run's
+  own. Your own chat, voice and editor turns are not limited this way. It can
+  still run or resume an existing job with `run_job_now` or `resume_job`,
+  with that job's own tools.
+- **A job bound to a plugin skill runs at guest trust,** as running that
+  skill directly always did, with the same capability classes; it no longer
+  sees owner-only tools such as file reads.
+- **Starting a coding agent waits for you once a request has read something
+  someone else wrote, on every platform.** `codex_run` and `claude_code_run`
+  launch a coding agent with your account's access, outside Fermix's
+  sandbox, so after a web page, attachment, plugin or MCP result they ask you
+  once, showing the task, every other argument and the folder; a voice call,
+  a delegated worker or an unattended run is refused, and a scheduled job
+  runs one only if it names it. A call that names a file of extra
+  instructions, or is too long to show in full, is refused. A finished run's
+  follow-up may still start the next run of its chain on its own, with the
+  same coding agent in the same folder, once per finished run and up to three
+  runs deep, as long as it has read nothing else. A request re-run after your
+  `/confirm` keeps what it had read, and a skill's worker is no longer treated
+  as your own turn.
+- **A forwarded message counts as someone else's words.** Text, voice notes
+  and video notes forwarded on Telegram or WhatsApp are marked forwarded, so
+  in the request that carries one, an access-sensitive command or, on Linux,
+  a command waits for you; the model reads them as forwarded, they never run
+  as a slash command, and the memory review does not learn from them.
+
 ## [0.16.0] - 2026-10-21
 
 ### Added

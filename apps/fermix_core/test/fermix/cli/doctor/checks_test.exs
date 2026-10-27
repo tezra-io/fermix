@@ -795,6 +795,28 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "not a known model for any provider"
     end
 
+    # M60: an unset filter default inherits the main model like the other
+    # routing keys; a typo'd filter model fails like the rest.
+    test "the filter default is checked, and an unset one inherits the main model" do
+      Application.put_env(:fermix_core, :routing, [])
+      result = Checks.routing_overrides()
+      assert result.detail =~ "filter: inherits main"
+
+      Application.put_env(:fermix_core, :routing, filter_model: "claude-opus-4-7")
+      result = Checks.routing_overrides()
+      assert result.status == :fail
+      assert result.detail =~ "filter_model"
+
+      Application.put_env(:fermix_core, :routing,
+        filter_provider: "anthropic",
+        filter_model: "claude-haiku-4-5"
+      )
+
+      result = Checks.routing_overrides()
+      assert result.status == :ok
+      assert result.detail =~ "filter: provider=anthropic, model=claude-haiku-4-5"
+    end
+
     test "summarizes a valid meeting override (M21 Phase 3)" do
       Application.put_env(:fermix_core, :routing,
         meeting_provider: "anthropic",

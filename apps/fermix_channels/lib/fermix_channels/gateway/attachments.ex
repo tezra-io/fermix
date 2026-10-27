@@ -443,7 +443,8 @@ defmodule FermixChannels.Gateway.Attachments do
       name: MediaDownload.value(declared, :file_name),
       size_bytes: MediaDownload.value(declared, :size_bytes),
       duration_s: MediaDownload.value(declared, :duration_s),
-      hint: MediaDownload.value(declared, :hint)
+      hint: MediaDownload.value(declared, :hint),
+      forwarded?: MediaDownload.value(declared, :forwarded?) == true
     }
   end
 

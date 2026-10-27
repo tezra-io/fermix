@@ -35,6 +35,7 @@ defmodule FermixCore.Temporal.Registry do
 
   require Logger
 
+  alias FermixCore.Clock
   alias FermixCore.Delivery.ChannelSend
   alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Memory.Config, as: MemoryConfig
@@ -300,7 +301,7 @@ defmodule FermixCore.Temporal.Registry do
     now = now(opts)
     server = repo(context)
 
-    with {:ok, zone} <- configured_timezone(opts),
+    with {:ok, zone} <- Clock.zone(opts),
          {:ok, source, selection} <- snooze_source(params, context, now, server),
          {:ok, event} <- owned_parent_event(source, context, server),
          {:ok, at} <- snooze_instant(Map.get(params, :snooze), now, zone),
@@ -622,7 +623,10 @@ defmodule FermixCore.Temporal.Registry do
   defp iso(nil), do: nil
   defp iso(%Date{} = value), do: Date.to_iso8601(value)
   defp iso(%Time{} = value), do: Time.to_iso8601(value)
-  defp iso(%DateTime{} = value), do: DateTime.to_iso8601(value)
+  # Every view here is read by a model, so an instant is stated on the owner's
+  # clock, with the owner's offset rather than UTC's `Z`: the same clock as the
+  # current-date note and every other time a model is shown.
+  defp iso(%DateTime{} = value), do: Clock.iso(value)
   defp iso(value) when is_binary(value), do: value
 
   # --- error vocabulary ----------------------------------------------------
@@ -1017,30 +1021,9 @@ defmodule FermixCore.Temporal.Registry do
 
   defp resolve_timezone(params, opts) do
     case Map.get(params, :timezone) do
-      zone when is_binary(zone) and zone != "" -> validate_zone(zone)
-      nil -> configured_timezone(opts)
+      zone when is_binary(zone) and zone != "" -> Clock.validate_zone(zone)
+      nil -> Clock.zone(opts)
       other -> {:error, {:invalid_timezone, other}}
-    end
-  end
-
-  defp configured_timezone(opts) do
-    opts
-    |> Keyword.get_lazy(:personalization, fn ->
-      Application.get_env(:fermix_core, :personalization, [])
-    end)
-    |> Keyword.get(:timezone)
-    |> case do
-      zone when is_binary(zone) and zone != "" -> validate_zone(zone)
-      _missing -> {:error, :timezone_not_configured}
-    end
-  end
-
-  # Real IANA validation against the shipped database: a name the tz database
-  # does not know must fail loudly here rather than silently becoming UTC.
-  defp validate_zone(zone) do
-    case DateTime.shift_zone(DateTime.utc_now(), zone) do
-      {:ok, _shifted} -> {:ok, zone}
-      {:error, _reason} -> {:error, {:invalid_timezone, zone}}
     end
   end
 

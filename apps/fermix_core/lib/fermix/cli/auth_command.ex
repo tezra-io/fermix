@@ -20,9 +20,11 @@ defmodule Fermix.CLI.AuthCommand do
   state.
 
   `run/2` takes test seams: `:login`, `:read_line` and `:browser` for the
-  ChatGPT sign-in (`TerminalLogin.run/1`), `:logout` for its sign-out, and
+  ChatGPT sign-in (`TerminalLogin.run/1`), `:logout` for its sign-out,
   `:restart_route` (default `RestartCommand.route/0`) for how a restart hint
-  names the restart that works for this home's daemon.
+  names the restart that works for this home's daemon, and `:claude_code`
+  (`AnthropicLogin` options) for the keychain and file a Claude Code import
+  reads.
   """
 
   alias Fermix.CLI.Daemon.Client, as: DaemonClient
@@ -34,6 +36,8 @@ defmodule Fermix.CLI.AuthCommand do
   alias FermixCore.Auth.XAILogin
   alias FermixCore.Setup.LiveModel
   alias FermixCore.Setup.Wizard
+
+  require AnthropicLogin
 
   @login_switches [
     no_browser: :boolean,
@@ -49,7 +53,7 @@ defmodule Fermix.CLI.AuthCommand do
   @anthropic_profile Store.profile(:anthropic)
   @xai_profile Store.profile(:xai)
   @codex_profile Store.profile(:openai_codex)
-  @seams [:login, :read_line, :browser, :logout, :live_model, :restart_route]
+  @seams [:login, :read_line, :browser, :logout, :live_model, :restart_route, :claude_code]
 
   @spec run([String.t()], keyword()) :: non_neg_integer()
   def run(argv, seams \\ []) when is_list(argv) and is_list(seams) do
@@ -140,7 +144,7 @@ defmodule Fermix.CLI.AuthCommand do
         anthropic_result(AnthropicLogin.store_setup_token(token), seams)
 
       Keyword.get(opts, :import_claude_code, false) ->
-        anthropic_result(AnthropicLogin.import_claude_code(), seams)
+        anthropic_result(import_claude_code(seams), seams)
 
       token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN") ->
         anthropic_result(AnthropicLogin.store_setup_token(token), seams)
@@ -151,6 +155,14 @@ defmodule Fermix.CLI.AuthCommand do
             "or CLAUDE_CODE_OAUTH_TOKEN in the environment"
         )
     end
+  end
+
+  # The verb runs without the supervision tree, so the keychain read runs inline.
+  defp import_claude_code(seams) do
+    seams
+    |> Keyword.get(:claude_code, [])
+    |> Keyword.put(:supervised, false)
+    |> AnthropicLogin.import_claude_code()
   end
 
   defp anthropic_result({:ok, entry}, seams) do
@@ -168,6 +180,11 @@ defmodule Fermix.CLI.AuthCommand do
         error("connected, but failed to set anthropic auth_mode = oauth: #{inspect(reason)}")
     end
   end
+
+  # A Claude Code import's own failure in the words every surface uses, which
+  # never quote the keychain tool.
+  defp anthropic_result({:error, reason}, _seams) when AnthropicLogin.is_import_failure(reason),
+    do: error("anthropic login failed: #{AnthropicLogin.failure_sentence(reason)}")
 
   defp anthropic_result({:error, reason}, _seams),
     do: error("anthropic login failed: #{reason_text(reason)}")

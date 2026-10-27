@@ -32,12 +32,13 @@ usage() {
 }
 
 # The Claude judge's credential (judge.backend in config.yaml and
-# behavioral_config.yaml): ANTHROPIC_API_KEY if exported, else the daemon's
-# configured Anthropic key from the macOS keychain (the entry `@keyring` resolves
-# to), so judged targets need no separate setup. When neither answers nothing is
-# exported and the SDK resolves a profile on its own (an `ant auth login` profile,
-# or the eval box's federation profile, where no keychain exists); the runner's
-# judge precondition refuses the run with a sentence when nothing resolves.
+# behavioral_config.yaml): ANTHROPIC_API_KEY if exported (the CI eval box feeds it
+# from the ANTHROPIC_API_KEY repository secret, the candidate daemon's own key),
+# else the daemon's configured Anthropic key from the macOS keychain (the entry
+# `@keyring` resolves to), so judged targets need no separate setup. When neither
+# answers nothing is exported and the SDK resolves a profile on its own (an `ant
+# auth login` profile); the runner's judge precondition refuses the run with a
+# sentence when nothing resolves.
 JUDGE_KEYCHAIN_ITEM="fermix:ANTHROPIC_API_KEY"
 judge_keychain_key() {
   security find-generic-password -s "$JUDGE_KEYCHAIN_ITEM" -a fermix -w 2>/dev/null || true
@@ -125,7 +126,7 @@ fi
 case "$judge_source" in
   "") ;;
   "<unset>")
-    printf 'tier.sh: no ANTHROPIC_API_KEY in the environment or the keychain item %s; the judge signs in with an Anthropic profile, or the runner refuses the run\n' \
+    printf 'tier.sh: no ANTHROPIC_API_KEY in the environment or the keychain item %s; the judge signs in with an `ant auth login` profile, or the runner refuses the judged run\n' \
       "$JUDGE_KEYCHAIN_ITEM" >&2 ;;
   *)
     printf 'tier.sh: the judge signs in with ANTHROPIC_API_KEY from %s\n' "$judge_source" >&2 ;;

@@ -40,14 +40,20 @@ defmodule FermixCore.Management.Mobile do
   @delivery_states ~w(ready degraded down)a
   @delivery_reasons ~w(connecting connect_failed connection_lost)a
   @refusal_classes ~w(memory_disabled identity attachment_manifest trust_store)a
-  # The channel is off, it could not start this boot, or it was turned on
-  # after boot and has not started yet. None is a defect of the call, so none
-  # is logged here.
-  @channel_down ~w(mobile_disabled mobile_surface_refused mobile_not_started)a
+  # What an enabled channel that is not running waits for, where a restart
+  # alone would not start it.
+  @holds ~w(setup)a
+  # The channel is off, it could not start this boot, this boot held it for
+  # setup that is still not finished, or it was turned on and has not started
+  # yet. None is a defect of the call, so none is logged here.
+  @channel_down ~w(mobile_disabled mobile_surface_refused mobile_waiting_for_setup mobile_not_started)a
 
   @off_sentence "The mobile channel is turned off."
   @surface_sentence "The mobile channel could not start this boot. See the daemon log."
   @not_started_sentence "The mobile channel has not started yet. Restart Fermix to apply the change."
+  # A boot whose setup was not finished starts no channel, and a restart before
+  # setup is finished holds it again, so the sentence names setup, not a restart.
+  @setup_sentence "The phone channel starts once setup is finished."
   @identity_sentence "The gateway identity files are incomplete; nothing was regenerated."
   @listener_sentence "The phone listener could not start. See the daemon log."
   @device_store_sentence "The paired-device list could not be read. See the daemon log."
@@ -98,6 +104,7 @@ defmodule FermixCore.Management.Mobile do
       @off_sentence,
       @surface_sentence,
       @not_started_sentence,
+      @setup_sentence,
       @identity_sentence,
       @listener_sentence,
       @device_store_sentence,
@@ -146,6 +153,7 @@ defmodule FermixCore.Management.Mobile do
       {:ok, {:ok, state}} when state in [:started, :stopped] -> :ok
       {:ok, {:ok, :not_started}} -> {:error, @switch_not_started_sentence}
       {:ok, {:error, :not_ready}} -> {:error, @switch_not_ready_sentence}
+      {:ok, {:error, :waiting_for_setup}} -> {:error, @setup_sentence}
       other -> switch_failed(enabled?, other)
     end
   end
@@ -275,6 +283,9 @@ defmodule FermixCore.Management.Mobile do
 
   defp start_reply({:error, :mobile_not_started}),
     do: failed_start("unavailable", @not_started_sentence)
+
+  defp start_reply({:error, :mobile_waiting_for_setup}),
+    do: failed_start("unavailable", @setup_sentence)
 
   defp start_reply({:error, :identity_unavailable}),
     do: failed_start("refused", @identity_sentence)
@@ -415,6 +426,7 @@ defmodule FermixCore.Management.Mobile do
       "started" => status.started,
       "refused" => status.refused,
       "refusal" => refusal_word(status.refusal),
+      "hold" => hold_word(status.hold),
       "listener" => listener_view(status.listener),
       "mdns" => mdns_word(status.mdns),
       "tailnet" => %{
@@ -479,6 +491,8 @@ defmodule FermixCore.Management.Mobile do
   defp delivery_word(delivery) when delivery in @delivery_states, do: Atom.to_string(delivery)
   defp refusal_word(nil), do: nil
   defp refusal_word(class) when class in @refusal_classes, do: Atom.to_string(class)
+  defp hold_word(nil), do: nil
+  defp hold_word(hold) when hold in @holds, do: Atom.to_string(hold)
   defp listener_reason(nil), do: nil
   defp listener_reason(reason) when reason in @listener_reasons, do: Atom.to_string(reason)
   defp delivery_reason(nil), do: nil

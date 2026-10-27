@@ -331,6 +331,17 @@ defmodule FermixCore.Management.SecretsEnvTest do
       assert_nothing_happened(home)
     end
 
+    test "a value with a byte outside printable ASCII", %{home: home} do
+      for value <- ["tab\tinside", "café"] do
+        assert {:error, {:invalid_params, "value", sentence}} = Secrets.set("env:X_KEY", value)
+
+        assert sentence ==
+                 "A stored variable is printable ASCII, with no tabs or accented letters."
+      end
+
+      assert_nothing_happened(home)
+    end
+
     test "a sixty-fifth stored name", %{home: home} do
       names = for n <- 1..64, do: "STORED_#{n}"
       put_env_policy(sources: Map.new(names, &{&1, ExternalEnv.managed_source(&1)}))

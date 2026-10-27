@@ -1106,6 +1106,40 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
       assert params["maxResults"] == "10"
     end
 
+    # M60 §10.2: a mandate call arrives normalised by the gate, which checked
+    # exactly that map; the executor builds the request from it as it is.
+    test "a mandate call's normalised arguments are sent without normalising again" do
+      parent = self()
+
+      plug = fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+        send(parent, {:declarative, conn.request_path, conn.query_params, auth_header(conn)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"items" => []}))
+      end
+
+      context = %{
+        mandate_args_normalized?: true,
+        plugin_url_guard: fn _ -> :ok end,
+        plugin_req_options: [plug: plug],
+        plugin_token_getter: fn "google_calendar:primary" -> {:ok, "tok"} end,
+        plugin_granted_scopes_getter: fn _ ->
+          ["https://www.googleapis.com/auth/calendar.readonly"]
+        end
+      }
+
+      args = %{"query" => "standup", "calendar_id" => "work"}
+
+      assert {:ok, %{success: true}} =
+               ToolExecutor.execute(args, context, "google_calendar", declarative_tool())
+
+      assert_received {:declarative, "/calendar/v3/calendars/work/events", params, "Bearer tok"}
+      assert params["q"] == "standup"
+      refute params["maxResults"] == "10"
+    end
+
     test "refreshes the token once on a 401 for a read-only declarative tool" do
       parent = self()
 

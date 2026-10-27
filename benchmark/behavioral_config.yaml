@@ -15,15 +15,17 @@ opik:
   ui_base: "http://localhost:5173"
 
 judge:
-  # Independent external judge: the Claude API through the official SDK, which
-  # resolves the credential itself. bin/tier.sh exports ANTHROPIC_API_KEY from the
-  # daemon's keychain slot (fermix:ANTHROPIC_API_KEY) when the env var isn't
-  # exported, so `make regression` works with zero setup; otherwise an `ant auth
-  # login` profile, and in CI the eval box's federation profile. Valid backends:
-  # "anthropic" | "openai" (EVAL_JUDGE_API_KEY) | "none" — there is no in-daemon
-  # judge backend. The judge model must differ from the candidate model.
+  # Independent external judge: the Claude API, called directly by the harness
+  # through the official SDK, which reads ANTHROPIC_API_KEY (else an `ant auth
+  # login` profile). bin/tier.sh exports it from the daemon's Anthropic keychain
+  # slot (fermix:ANTHROPIC_API_KEY) when the env var isn't exported, so `make
+  # regression` works with zero setup; the CI eval box feeds it from the
+  # ANTHROPIC_API_KEY repository secret. Valid backends: "anthropic" | "openai" (an
+  # OpenAI-compatible API on EVAL_JUDGE_API_KEY) | "none" — there is no in-daemon
+  # judge backend. The judge model must differ from the candidate model (the CI
+  # candidate is claude-opus-5-5).
   backend: "anthropic"
-  model: "claude-opus-5-5"
+  model: "claude-haiku-5-5"
   enabled: false
 
 # Behavioral regressions fail incomplete on provider limits; they never wait for

@@ -215,7 +215,7 @@ defmodule FermixCore.Realtime.SessionServer do
            screen_feed_opts: Keyword.get(opts, :screen_feed_opts, []),
            screen_probe: Keyword.get(opts, :screen_probe, &ComputerUseProbe.run/0),
            # Content someone else could have written that this call has read
-           # (`UntrustedContent.outside_source/1`, plus a shared screen). Never
+           # (`UntrustedContent.outside_source/2`, plus a shared screen). Never
            # reset: the provider keeps every tool output for the whole call, so
            # a page read at minute one can still steer a command at minute five.
            outside_sources: MapSet.new(),
@@ -1265,8 +1265,12 @@ defmodule FermixCore.Realtime.SessionServer do
 
   defp record_outside_source(state, call) do
     case Map.fetch(state.tool_bridge.capabilities, tool_name(call)) do
-      {:ok, capability} -> add_outside_source(state, UntrustedContent.outside_source(capability))
-      :error -> state
+      {:ok, capability} ->
+        source = UntrustedContent.outside_source(capability, call_arguments(call))
+        add_outside_source(state, source)
+
+      :error ->
+        state
     end
   end
 

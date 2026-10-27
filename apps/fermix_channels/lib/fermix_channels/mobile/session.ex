@@ -29,8 +29,10 @@ defmodule FermixChannels.Mobile.Session do
     which is the session's back-pressure;
   - closes with the `t:close/0` a `:stop` names, after sending its frames;
   - calls `terminate/2` once as it closes, also after `init/1` itself stopped,
-    passing the reason of the session's `:stop` unchanged, or `:timeout` when it
-    closed an idle carrier.
+    passing the reason of the session's `:stop` unchanged, `:timeout` when it
+    closed an idle carrier, or `:made_room` when it closed one not yet
+    `past_handshake?/1` to make room for another, with the handshake deadline's
+    close.
 
   The carrier also sets its own process's memory bound before `hello`; the
   session raises it to `:authenticated_max_heap_size` once a paired phone says
@@ -74,6 +76,7 @@ defmodule FermixChannels.Mobile.Session do
   @rekey_after_frames 1_048_576
   @session_lifetime_ms 3_600_000
   @handshake_deadline_ms 10_000
+  @handshake_deadline_close {1008, "mobile handshake deadline"}
   # The phases a peer passes through before it is a paired device or a phone
   # waiting for the owner; the handshake deadline bounds all of them.
   @deadline_phases [:prelude, :await_hello, :await_pair_request]
@@ -135,6 +138,30 @@ defmodule FermixChannels.Mobile.Session do
   @spec idle_timeout_ms() :: pos_integer()
   def idle_timeout_ms, do: PairManager.max_ttl_ms() + @idle_grace_ms
 
+  @doc """
+  Whether the peer is past its handshake: its IK handshake proved a paired
+  phone's key (`authenticated_device`, which an approved pairing phone also
+  holds), or its pairing request waits for the owner. Until then the connection
+  may be a stranger's, held for as long as the handshake deadline lets it:
+  IKpsk2's first message proves no pairing secret, so a peer awaiting its
+  `pair_request` has shown only that it knows the gateway key, which every
+  pairing QR shows.
+
+  A replayed IK first message gets past too, until its deadline, but capturing
+  one takes breaking the transport's encryption (iroh's QUIC TLS, the
+  WebSocket's TLS) or an endpoint, not a stranger's stream.
+  """
+  @spec past_handshake?(state()) :: boolean()
+  def past_handshake?(%{phase: :await_pair_decision}), do: true
+  def past_handshake?(%{authenticated_device: device}), do: not is_nil(device)
+
+  @doc """
+  The close of a connection the handshake deadline ends, which a carrier short
+  of room also gives a connection not yet `past_handshake?/1`.
+  """
+  @spec handshake_deadline_close() :: close()
+  def handshake_deadline_close, do: @handshake_deadline_close
+
   @doc "The carrier process's memory bound before the phone has said `hello`."
   @spec unauthenticated_heap_cap() :: map()
   def unauthenticated_heap_cap, do: heap_cap(@unauthenticated_heap_bytes)
@@ -191,6 +218,7 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:discovery, Discovery)
     |> Map.put_new(:max_media_bytes, @default_max_media_bytes)
     |> Map.put_new(:push_environment, nil)
+    |> Map.put_new(:push_services, [])
     |> Map.put_new(:profile_id, @profile_id)
     |> Map.put_new(:device_id, nil)
     |> Map.put_new(:authenticated_device, nil)
@@ -329,7 +357,7 @@ defmodule FermixChannels.Mobile.Session do
     cancel_uploads(state)
     close_media_transfer(state)
     record_abandoned_pair(reason, state)
-    :ok
+    close_unauthenticated_iroh_peer(state)
   end
 
   defp put_default_dependencies(state) do
@@ -362,6 +390,7 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:discover, fn -> Discovery.candidates(discovery) end)
     |> Map.put_new(:iroh_candidate, fn -> Helper.candidate(iroh_helper) end)
     |> Map.put_new(:relay_list_acknowledged, fn -> Helper.relays_acknowledged(iroh_helper) end)
+    |> Map.put_new(:close_iroh_peer, &Helper.close(iroh_helper, &1))
     |> Map.put_new(:pending_approvals, &Approvals.pending(Approvals.server(), &1, :mobile))
     |> Map.put_new(:media_descriptor, &Timeline.media_descriptor/2)
     |> Map.put_new(:event_router, &EventRouter.route/3)
@@ -763,7 +792,8 @@ defmodule FermixChannels.Mobile.Session do
            "media" => true,
            "streaming" => true,
            "turn_done" => true,
-           "max_media_bytes" => state.max_media_bytes
+           "max_media_bytes" => state.max_media_bytes,
+           "push" => state.push_services
          }
        }}
     end
@@ -853,7 +883,8 @@ defmodule FermixChannels.Mobile.Session do
       "device_id" => value(device, :device_id),
       "candidates" => current_candidates(state),
       "profiles" => profiles(state),
-      "push_salt" => Base.encode64(value(device, :apns_key_salt))
+      "push_salt" => Base.encode64(value(device, :apns_key_salt)),
+      "push" => state.push_services
     }
 
     # The owner's decision can come at any time in the window, so the hello
@@ -909,20 +940,17 @@ defmodule FermixChannels.Mobile.Session do
     end
   end
 
+  # Kept for every phone: Push sends only an iPhone's, and refuses the rest by
+  # name, so an Android phone's token is never sent through APNs.
   defp dispatch_event(%{type: "push_register", payload: payload}, state) do
-    with :ok <- validate_push_environment(payload["environment"], state.push_environment),
-         result <-
-           state.update_device.(state.device_store, state.device_id, %{
-             push_token: payload["apns_token"]
-           }) do
-      case result do
-        {:ok, _device} -> {:ok, nil, state}
-        {:error, reason} -> {:error, reason, state}
-      end
-    else
+    case validate_push_environment(payload["environment"], state.push_environment) do
+      :ok -> store_push_token(payload["apns_token"], state)
       {:error, reason} -> {:error, reason, state}
     end
   end
+
+  # The phone's notifications cannot show, so no push may come (M51 §10).
+  defp dispatch_event(%{type: "push_unregister"}, state), do: store_push_token(nil, state)
 
   defp dispatch_event(%{type: "media_fetch", payload: payload}, state) do
     queue_media_fetch(payload["ref"], state)
@@ -1417,7 +1445,7 @@ defmodule FermixChannels.Mobile.Session do
   defp handshake_deadline(state), do: handshake_timeout(state)
 
   defp handshake_timeout(state),
-    do: {:stop, :handshake_timeout, {1008, "mobile handshake deadline"}, state}
+    do: {:stop, :handshake_timeout, @handshake_deadline_close, state}
 
   defp mark_session_start(state) do
     now = Map.get(state, :clock, fn -> System.monotonic_time(:millisecond) end).()
@@ -1538,6 +1566,15 @@ defmodule FermixChannels.Mobile.Session do
 
   defp record_abandoned_pair(_reason, _state), do: :ok
 
+  # A peer whose session failed before hello or a pair request keeps no iroh
+  # connection: otherwise stream after failing stream holds one of the
+  # helper's connection places for as long as the peer likes.
+  defp close_unauthenticated_iroh_peer(%{peer: {:iroh, endpoint_id}, phase: phase} = state)
+       when phase in @deadline_phases,
+       do: :ok = state.close_iroh_peer.(endpoint_id)
+
+  defp close_unauthenticated_iroh_peer(_state), do: :ok
+
   defp record_pair_failure(%{pair_failure_recorded?: true} = state), do: state
 
   defp record_pair_failure(%{pairing_session_id: session_id, pair_manager: manager} = state)
@@ -1631,6 +1668,13 @@ defmodule FermixChannels.Mobile.Session do
        do: reason |> elem(0) |> Atom.to_string()
 
   defp error_code(_reason), do: "request_failed"
+
+  defp store_push_token(token, state) do
+    case state.update_device.(state.device_store, state.device_id, %{push_token: token}) do
+      {:ok, _device} -> {:ok, nil, state}
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
 
   defp validate_push_environment(received, configured)
        when received in ["development", "production"] and

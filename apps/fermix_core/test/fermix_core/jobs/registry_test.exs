@@ -465,6 +465,245 @@ defmodule FermixCore.Jobs.RegistryTest do
     assert {:ok, []} = Registry.list_jobs(repo: repo)
   end
 
+  # M60 §9.1: a watcher's task is a job with no schedule of its own. Only
+  # `create_cue_job/2` makes one; `Schedule.parse/2` has no word for it.
+  describe "a job that runs on cues" do
+    @report_to %{"platform" => "telegram", "chat_id" => "4242"}
+
+    defp cue_attrs(extra) do
+      Map.merge(
+        %{
+          created_by_trust: "operator",
+          name: "Release Notes Task",
+          task_prompt: "Tell me what changed in the release the cue names.",
+          delivery_mode: "origin",
+          delivery_target: @report_to
+        },
+        extra
+      )
+    end
+
+    defp create_cue_job!(repo, extra \\ %{}) do
+      {:ok, job} = Registry.create_cue_job(cue_attrs(extra), repo: repo, scheduler: nil)
+      job
+    end
+
+    test "is created with no schedule, no next run, no expiry and a 10-minute timeout", %{
+      repo: repo
+    } do
+      job = create_cue_job!(repo)
+
+      assert job.schedule_kind == "cue"
+      assert job.schedule_expr == "cue"
+      assert job.next_run_at == nil
+      assert job.expires_at == nil
+      assert job.timeout_seconds == 600
+      assert job.delivery_mode == "origin"
+      assert job.delivery_target == @report_to
+      assert job.state == "scheduled"
+      assert job.enabled? == true
+      assert Registry.cue_job?(job)
+
+      assert {:ok, source} = Registry.get_memory_source(job.memory_source_id, repo: repo)
+      assert source.schedule_summary == "runs on cues"
+    end
+
+    test "takes a timeout of up to 30 minutes and refuses 45", %{repo: repo} do
+      assert create_cue_job!(repo, %{timeout_seconds: 1_800}).timeout_seconds == 1_800
+
+      assert {:error, "A job that runs on cues may run for at most 30 minutes."} =
+               Registry.create_cue_job(cue_attrs(%{timeout_seconds: 2_700}),
+                 repo: repo,
+                 scheduler: nil
+               )
+    end
+
+    test "refuses a schedule of any kind, a timezone and an expiry", %{repo: repo} do
+      for extra <- [
+            %{schedule: "2099-05-03T12:00:00Z"},
+            %{schedule: "every 15 minutes"},
+            %{timezone: "America/New_York"}
+          ] do
+        assert {:error, "A job that runs on cues has no schedule of its own."} =
+                 Registry.create_cue_job(cue_attrs(extra), repo: repo, scheduler: nil)
+      end
+
+      assert {:error, "A job that runs on cues cannot expire."} =
+               Registry.create_cue_job(cue_attrs(%{expires_at: ~U[2099-05-03 12:00:00Z]}),
+                 repo: repo,
+                 scheduler: nil
+               )
+
+      assert {:ok, []} = Registry.list_jobs(repo: repo)
+    end
+
+    test "refuses a delivery that does not reach the owner", %{repo: repo} do
+      for extra <- [
+            %{delivery_mode: "none", delivery_target: nil},
+            %{delivery_mode: "local", delivery_target: nil},
+            %{delivery_mode: "channel", delivery_target: nil},
+            %{delivery_mode: nil, delivery_target: nil}
+          ] do
+        assert {:error, "A watcher's task must reach you: pick where it reports."} =
+                 Registry.create_cue_job(cue_attrs(extra), repo: repo, scheduler: nil)
+      end
+
+      assert {:ok, []} = Registry.list_jobs(repo: repo)
+    end
+
+    # Its surface is `Jobs.CueSurface`'s alone: a policy would narrow it
+    # silently (the note tools, a mandate's write tools).
+    test "refuses a capability policy at creation and on update_job", %{repo: repo} do
+      sentence = "A job that runs on cues uses the cue surface; it takes no capability policy."
+
+      assert {:error, ^sentence} =
+               Registry.create_cue_job(cue_attrs(%{capability_policy: ["read_only"]}),
+                 repo: repo,
+                 scheduler: nil
+               )
+
+      job = create_cue_job!(repo, %{capability_policy: []})
+      assert job.capability_policy == []
+
+      for attrs <- [%{capability_policy: ["read_only"]}, %{"capability_policy" => ["network"]}] do
+        assert {:error, ^sentence} =
+                 Registry.update_job(job.id, attrs, repo: repo, scheduler: nil)
+      end
+
+      assert {:ok, ^job} = Registry.get_job(job.id, repo: repo)
+    end
+
+    test "resumes with no next run", %{repo: repo} do
+      job = create_cue_job!(repo)
+      assert {:ok, _paused} = Registry.pause_job(job.id, repo: repo, scheduler: nil)
+
+      assert {:ok, resumed} =
+               Registry.resume_job(job.id,
+                 repo: repo,
+                 scheduler: nil,
+                 now: ~U[2026-05-02 18:00:00Z]
+               )
+
+      assert resumed.state == "scheduled"
+      assert resumed.enabled? == true
+      assert resumed.next_run_at == nil
+      assert resumed.schedule_kind == "cue"
+    end
+
+    test "update_job refuses a schedule, a timezone or an expiry and leaves the job unchanged",
+         %{repo: repo} do
+      job = create_cue_job!(repo)
+
+      for attrs <- [
+            %{schedule: "2099-05-03T12:00:00Z"},
+            %{schedule: "0 8 * * *"},
+            %{"schedule" => "every 15 minutes"},
+            %{timezone: "America/New_York"},
+            %{expires_at: ~U[2099-05-03 12:00:00Z]},
+            %{task_prompt: "A new prompt.", schedule: "every 1 hour"}
+          ] do
+        assert {:error, "This job runs on cues; its schedule cannot change."} =
+                 Registry.update_job(job.id, attrs, repo: repo, scheduler: nil)
+      end
+
+      assert {:ok, ^job} = Registry.get_job(job.id, repo: repo)
+    end
+
+    test "update_job refuses a silent delivery and takes any other edit", %{repo: repo} do
+      job = create_cue_job!(repo)
+
+      for mode <- ["none", "local", "channel"] do
+        assert {:error, "A watcher's task must reach you: pick where it reports."} =
+                 Registry.update_job(job.id, %{delivery_mode: mode, delivery_target: nil},
+                   repo: repo,
+                   scheduler: nil
+                 )
+      end
+
+      assert {:ok, updated} =
+               Registry.update_job(job.id, %{task_prompt: "Summarize the release."},
+                 repo: repo,
+                 scheduler: nil
+               )
+
+      assert updated.task_prompt == "Summarize the release."
+      assert updated.schedule_kind == "cue"
+      assert updated.next_run_at == nil
+      assert updated.delivery_mode == "origin"
+    end
+
+    test "no other job becomes one: the schedule parser has no word for it", %{repo: repo} do
+      job = create_frequent_job!(repo, "Cron Job")
+
+      assert {:error, {:invalid_schedule, "cue"}} =
+               Registry.update_job(job.id, %{schedule: "cue"}, repo: repo, scheduler: nil)
+
+      assert {:error, {:invalid_schedule, "cue"}} =
+               Registry.create_job(
+                 %{
+                   created_by_trust: "operator",
+                   name: "Typed Cue",
+                   schedule: "cue",
+                   task_prompt: "Run."
+                 },
+                 repo: repo,
+                 scheduler: nil
+               )
+
+      assert {:ok, %{schedule_kind: "interval"}} = Registry.get_job(job.id, repo: repo)
+      refute Registry.cue_job?(job)
+    end
+
+    test "check_run_now refuses it and passes any other job", %{repo: repo} do
+      cue_job = create_cue_job!(repo)
+      cron_job = create_frequent_job!(repo, "Cron Job")
+
+      assert {:error, "This job runs on cues."} = Registry.check_run_now(cue_job.id, repo: repo)
+      assert :ok = Registry.check_run_now(cron_job.id, repo: repo)
+      assert {:error, :not_found} = Registry.check_run_now("job_missing", repo: repo)
+    end
+
+    test "the due scan and the next-wakeup lookup never see it", %{repo: repo} do
+      _job = create_cue_job!(repo)
+
+      assert {:ok, []} = Repo.due_scheduled_jobs(~U[2099-12-31 23:59:00Z], server: repo)
+      assert {:ok, nil} = Repo.next_scheduled_job(server: repo)
+    end
+
+    test "a settled run hands it back to scheduled, never completed", %{repo: repo} do
+      job = create_cue_job!(repo)
+      claimed_at = ~U[2026-05-02 14:00:00Z]
+
+      assert {:ok, {running, run}} =
+               Repo.claim_job_now(
+                 job.id,
+                 %{state: "running", updated_at: claimed_at},
+                 %{
+                   id: "run_cue_settle",
+                   job_id: job.id,
+                   session_id: "cron_#{job.id}_20260502_140000",
+                   trigger: "manual",
+                   status: "queued",
+                   claimed_at: claimed_at,
+                   delivery_status: "none",
+                   created_at: claimed_at,
+                   updated_at: claimed_at
+                 },
+                 server: repo
+               )
+
+      assert running.state == "running"
+
+      final =
+        Map.merge(run, %{status: "ok", completed_at: @released_at, updated_at: @released_at})
+
+      assert {:ok, {_settled, released}} = Repo.settle_job_run(final, server: repo)
+      assert released.state == "scheduled"
+      assert released.enabled? == true
+      assert released.next_run_at == nil
+    end
+  end
+
   # An owner write lands in the middle of a run's life, and the run's release
   # (state and last_* bookkeeping) can land between the owner's read and write.
   # Each owner verb writes only the columns it owns, so neither write reverts

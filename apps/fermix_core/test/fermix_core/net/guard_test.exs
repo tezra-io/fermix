@@ -17,6 +17,35 @@ defmodule FermixCore.Net.GuardTest do
     assert {:error, {:blocked_host, :local_domain}} = Guard.validate("http://printer.local")
   end
 
+  # A cue stream's address is `wss://` (M60 §3.2): the same public-web policy,
+  # asked for that scheme explicitly. Every other caller keeps http and https.
+  test "takes the schemes it is given in place of http and https, under the same policy" do
+    resolver = fn "news.example.test" -> {:ok, [{203, 0, 114, 21}]} end
+
+    assert {:ok, {203, 0, 114, 21}} =
+             Guard.resolve_and_validate("wss://news.example.test/v1/news",
+               schemes: ["wss"],
+               resolver: resolver
+             )
+
+    assert {:error, {:scheme_not_allowed, ["wss"]}} =
+             Guard.resolve_and_validate("https://news.example.test/v1/news",
+               schemes: ["wss"],
+               resolver: resolver
+             )
+
+    assert {:error, :scheme_not_http_or_https} =
+             Guard.resolve_and_validate("wss://news.example.test/v1/news", resolver: resolver)
+
+    cgnat = fn "relay.example.test" -> {:ok, [{100, 64, 0, 9}]} end
+
+    assert {:error, {:resolved_to_private_address, {100, 64, 0, 9}}} =
+             Guard.resolve_and_validate("wss://relay.example.test",
+               schemes: ["wss"],
+               resolver: cgnat
+             )
+  end
+
   test "blocks private IP literals and IPv4-mapped IPv6 literals" do
     assert {:error, {:blocked_host, :private_address}} =
              Guard.validate("http://169.254.169.254/latest/meta-data")

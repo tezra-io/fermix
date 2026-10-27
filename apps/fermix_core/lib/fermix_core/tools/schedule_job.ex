@@ -38,7 +38,7 @@ defmodule FermixCore.Tools.ScheduleJob do
         schedule: %{
           type: "string",
           description:
-            "Schedule expression: an interval like every 15 minutes, a 5-field cron like 0 8 * * * (8am daily), or an ISO8601 UTC timestamp for a one-off run. Cron fields support *, lists (1,15), ranges (9-17), and steps (*/15)."
+            "Schedule expression: an interval like every 15 minutes, a 5-field cron like 0 8 * * * (8am daily), or an ISO 8601 datetime with a UTC offset for a one-off run (the owner's offset unless they named another zone). Cron fields support *, lists (1,15), ranges (9-17), and steps (*/15)."
         },
         task: %{
           type: "string",
@@ -46,11 +46,15 @@ defmodule FermixCore.Tools.ScheduleJob do
             "Work instructions for the future Fermix scheduled run. Do not execute the task now unless the user separately asks for an immediate run. Keep lifecycle timing in schedule and expires_at, not in the task text. Bake any values the run will need (such as a location, zip code, or account) into this text — scheduled runs run in isolation and cannot see this conversation. Use update_job to revise these instructions later."
         },
         description: %{type: "string", description: "Short description for the source catalog."},
-        timezone: %{type: "string", description: "IANA timezone label stored with the job."},
+        timezone: %{
+          type: "string",
+          description:
+            "IANA timezone the schedule is read in; the owner's time zone when left out."
+        },
         expires_at: %{
           type: "string",
           description:
-            "Optional ISO8601 UTC datetime for temporary jobs. When reached, Fermix stops running the job and marks it expired."
+            "Optional ISO 8601 datetime with a UTC offset for temporary jobs (the owner's offset unless they named another zone). When reached, Fermix stops running the job and marks it expired."
         },
         allowed_tools: %{
           type: "array",
@@ -124,6 +128,10 @@ defmodule FermixCore.Tools.ScheduleJob do
       %{
         tag: "invalid_route_pin",
         description: "provider is unknown, or provider/model are not paired"
+      },
+      %{
+        tag: "outside_run_tools",
+        description: "allowed_tools names a tool the calling run does not have itself"
       }
     ]
   end
@@ -148,10 +156,11 @@ defmodule FermixCore.Tools.ScheduleJob do
            Support.optional_positive_integer(args, "inactivity_timeout_seconds"),
          {:ok, expires_at} <- Support.optional_datetime(args, "expires_at"),
          {:ok, {delivery_mode, delivery_target}} <- DeliveryDefaults.resolve(args, context),
-         {:ok, allowed_tools} <- caller_scoped_allowed_tools(args, context),
+         {:ok, requested_tools} <- caller_scoped_allowed_tools(args, context),
+         {:ok, allowed_tools} <- Support.within_run_tools(requested_tools, context),
          :ok <- AccessGate.check_job_tools(allowed_tools, context),
          {:ok, skill_name} <- validate_skill_name(args, context),
-         {:ok, created_by_trust} <- require_source_trust(context),
+         {:ok, created_by_trust} <- creator_trust(context),
          {:ok, {provider, model}} <- Support.validate_route_pin(args) do
       attrs = %{
         name: name,
@@ -161,7 +170,7 @@ defmodule FermixCore.Tools.ScheduleJob do
         provider: provider,
         model: model,
         description: Support.optional_string(args, "description"),
-        timezone: Support.optional_string(args, "timezone", "UTC"),
+        timezone: Support.optional_string(args, "timezone"),
         allowed_tools: allowed_tools,
         capability_policy: [],
         timeout_seconds: timeout_seconds,
@@ -176,14 +185,39 @@ defmodule FermixCore.Tools.ScheduleJob do
       }
 
       case Registry.create_job(attrs, repo: Support.repo(context)) do
-        {:ok, job} -> Support.success_json(Support.job_payload(job))
-        {:error, reason} -> Support.error(reason)
+        {:ok, job} ->
+          job
+          |> Support.job_payload(Support.repo(context))
+          |> put_run_tools_note(requested_tools, allowed_tools, context)
+          |> Support.success_json()
+
+        {:error, reason} ->
+          Support.error(reason)
       end
     else
       {:error, reason} when is_binary(reason) -> {:ok, Tool.error(reason)}
       {:error, reason} -> Support.error(reason)
     end
   end
+
+  # No list asked for, yet the job stores one: a narrowed run gave it its own
+  # tools (`Support.within_run_tools/2`), which the model is told, with any
+  # name the run was granted that no capability carries now.
+  defp put_run_tools_note(payload, [], [_ | _] = run_tools, context) do
+    note =
+      "allowed_tools was empty or left out, so this job gets this run's own tools " <>
+        "(#{Enum.join(run_tools, ", ")}): a run can't give a job tools it doesn't have itself." <>
+        dropped_note(Support.unregistered_grants(context))
+
+    Map.put(payload, :note, note)
+  end
+
+  defp put_run_tools_note(payload, _requested, _allowed, _context), do: payload
+
+  defp dropped_note([]), do: ""
+
+  defp dropped_note(names),
+    do: " Granted to this run but unavailable now, so left out: #{Enum.join(names, ", ")}."
 
   # Audit F-08: tool names in `allowed_tools` must be a subset of the
   # capabilities the caller can currently see. A remote-channel main-agent
@@ -194,7 +228,7 @@ defmodule FermixCore.Tools.ScheduleJob do
     if requested == [] do
       {:ok, []}
     else
-      visible = caller_visible_tool_names(context)
+      visible = Support.tool_names(context, trust: Map.get(context, :source_trust))
 
       case Enum.reject(requested, &(&1 in visible)) do
         [] -> {:ok, requested}
@@ -223,30 +257,16 @@ defmodule FermixCore.Tools.ScheduleJob do
     :exit, reason -> {:error, "skill_registry_unavailable: #{inspect(reason)}"}
   end
 
-  defp caller_visible_tool_names(context) do
-    registry =
-      Map.get(context, :capability_registry) ||
-        FermixCore.Capabilities.Registry
-
-    opts =
-      []
-      |> maybe_put(:trust, Map.get(context, :source_trust))
-
-    registry
-    |> CapabilityRegistry.list(opts)
-    |> Enum.map(& &1.name)
-  end
-
-  defp maybe_put(opts, _key, nil), do: opts
-  defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
-
   # A scheduled job inherits its creator's trust. A context with no
   # source_trust cannot create jobs — surface a clear tool error to the model
-  # instead of minting a trust the caller never had.
-  defp require_source_trust(context) do
+  # instead of minting a trust the caller never had. A run's own trust, which
+  # its loop stamps (`effective_trust`), can sit below its person's: a plugin
+  # skill's worker runs at guest under the owner's turn. The job gets the run's
+  # trust, the lower of the two (`CapabilityRegistry.run_trust/1`).
+  defp creator_trust(context) do
     case Map.get(context, :source_trust) do
       trust when is_atom(trust) and not is_nil(trust) ->
-        {:ok, Atom.to_string(trust)}
+        {:ok, Atom.to_string(CapabilityRegistry.run_trust(context))}
 
       _absent ->
         {:error,

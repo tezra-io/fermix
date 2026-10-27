@@ -55,8 +55,8 @@ defmodule FermixCore.Management.SettingsTest do
   @channel_keys [:telegram, :whatsapp, :discord, :slack, :signal, :acp, :mobile, :imessage]
 
   @row_fields ~w(
-    key kind label footer info advanced value present options min max step restart read_only
-    suggestions unit format
+    key kind label footer info example advanced value present options min max step restart
+    read_only suggestions unit format
   )
 
   setup do
@@ -129,7 +129,7 @@ defmodule FermixCore.Management.SettingsTest do
     end
 
     test "every pane a section names is a pane the app routes to" do
-      panes = ~w(providers personality memory channels voice meetings computer coding
+      panes = ~w(providers personality memory channels cues voice meetings computer coding
                  search images sandbox browser secrets)
 
       for section <- Settings.sections() do
@@ -349,7 +349,9 @@ defmodule FermixCore.Management.SettingsTest do
       assert "claude-sonnet-5-5" in published.("providers.anthropic")
       assert "grok-4.7" in published.("providers.xai")
 
-      assert ["gpt-6.1-sol", "gpt-6-luna"] -- published.("providers.openai") == []
+      assert ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"] -- published.("providers.openai") ==
+               []
+
       refute "gpt-6-sol" in published.("providers.openai")
 
       assert [
@@ -358,6 +360,7 @@ defmodule FermixCore.Management.SettingsTest do
                "anthropic/claude-opus-5.5",
                "openai/gpt-6-astra",
                "openai/gpt-6.1-sol",
+               "openai/gpt-6.1-terra",
                "openai/gpt-6-luna",
                "x-ai/grok-4.7"
              ] -- published.("providers.openrouter") == []

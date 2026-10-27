@@ -1034,7 +1034,9 @@ defmodule FermixCore.Jobs.SchedulerTest do
       agent_name: "test_agent",
       memory_repo: repo,
       session_id: "telegram:chat-1:root",
-      scheduler: scheduler
+      scheduler: scheduler,
+      # A turn that read nothing from outside, as the agent loop stamps one.
+      outside_sources: MapSet.new()
     }
 
     assert {:ok, result} = RunJobNow.execute(%{"job_id" => job_id}, context)

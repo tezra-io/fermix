@@ -12,15 +12,20 @@ defmodule FermixCore.Capabilities.Advertisement do
   concerned — and a gate that reads it directly skips itself exactly when it
   matters (2026-09-10: `recall_activity` was advertised on a turn whose Gate then
   refused it, because `RecallActivity` had never been loaded).
+
+  Last, in a cue run under a mandate, a mandate tool's schema loses the
+  mandate's `idempotency_arg`, which Fermix sets itself (M60 §10.2, C39).
   """
 
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Cues.Mandates
 
   @spec prepare([Capability.t()], map()) :: [Capability.t()]
   def prepare(capabilities, context) when is_list(capabilities) and is_map(context) do
     capabilities
     |> Enum.filter(&advertised?(&1, context))
     |> Enum.map(&refresh_schema(&1, context))
+    |> Enum.map(&Mandates.hide_set_arguments(&1, context))
   end
 
   defp advertised?(%Capability{executor: {mod, _fun, _args}}, context) when is_atom(mod) do

@@ -20,7 +20,7 @@ Elixir-native multi-agent AI platform that runs as a local daemon and reaches yo
 Fermix is a personal, self-hosted AI agent: it runs as a background service on your own machine and reaches you through the chat apps you already use. You bring your own model provider key — there is no Fermix cloud, and your config, history, and logs stay under `~/.fermix`.
 
 - **One runtime.** Everything is a single Elixir/OTP application in one BEAM VM — no HTTP bridges, no external worker pool, no message broker. Persistent agents, concurrent conversations, and in-process sub-agents all fall out of that design.
-- **Reaches you anywhere.** Telegram, WhatsApp, Slack, Discord, Signal, iMessage (on a Mac), and a local CLI all terminate in the same agent loop. The daemon side of a first-party iPhone companion — the `mobile` channel and its pairing ceremony — ships alongside them as groundwork: dormant behind a config flag, with no setup surface, until the app is released.
+- **Reaches you anywhere.** Telegram, WhatsApp, Slack, Discord, Signal, iMessage (on a Mac), and a local CLI all terminate in the same agent loop. The daemon side of a first-party iPhone companion — the `mobile` channel and its pairing ceremony — ships alongside them as groundwork until the phone app is released.
 - **Bring your own model.** Eight providers — OpenAI, OpenAI Codex, Anthropic, SpaceXAI, OpenRouter, Mistral, Venice, and a keyless local Ollama — chosen as one primary with an automatic fallback chain. Sub-agents and scheduled jobs can be pinned to their own cheaper model.
 - **Always on.** Scheduled jobs run digests, watchers, reminders, and checks — each isolated, bounded, stored durably, and delivered back through your channels. Work survives reboots.
 - **Self-contained.** Ships as one self-extracting binary per platform and installs an OS service unit on first run.
@@ -204,22 +204,19 @@ The unit calls `fermix run`, which boots the OTP supervision tree, binds the Pho
 
 ### Local voice companion
 
-Realtime voice is an optional local mode: **FermixPet**, a native macOS app (macOS 13+) that lets you talk to the agent by voice. The daemon owns provider auth, prompts, tools, memory, and cost caps; the app only captures and plays audio, over a `0600` Unix socket at `~/.fermix/realtime.sock`.
+Realtime voice is an optional local mode: **Fermix**, the native Mac app (macOS 15 or later), lets you talk to the agent by voice. The daemon owns provider auth, prompts, tools, memory, and cost caps; the app only captures and plays audio, over a `0600` Unix socket at `~/.fermix/realtime.sock`.
 
 Enable it on the **setup page** under the *Realtime* tab (it needs an OpenAI API key), then restart the daemon. Check it with `fermix voice status`.
 
 Realtime uses the same capability surface as the main agent, so voice tool scope is governed by the sandbox mode and command profile rather than a voice-specific knob.
 
-FermixPet lives in its own repo, [tezra-io/fermix-macos](https://github.com/tezra-io/fermix-macos), which ships it as a Developer ID-signed, notarized DMG (universal2) with a Homebrew cask. Grab the DMG from that repo's releases, or build from its source:
+The Mac app, Fermix, ships as a Developer ID-signed, notarized DMG (universal2) with this engine inside it. Download it from [fermix.ai/download](https://fermix.ai/download/), or install the cask:
 
 ```bash
-git clone https://github.com/tezra-io/fermix-macos
-cd fermix-macos/Apps/FermixPet
-./script/build_and_run.sh install
-open "$HOME/Applications/FermixPet.app"
+brew install --cask tezra-io/tap/fermix
 ```
 
-Full setup options, the dev workflow, and troubleshooting are in the [fermix-macos repo](https://github.com/tezra-io/fermix-macos).
+Setup and troubleshooting are in the [installation guide](https://fermix.ai/docs/installation/).
 
 ### Channels
 
@@ -231,7 +228,7 @@ All channels normalize inbound messages and dispatch them through the same `Ferm
 - **Discord** — Gateway DM and app-mention ingress, REST replies.
 - **Signal** — `signal-cli` receive loop, subprocess send path.
 - **iMessage (Mac only)** — a signed helper app, Fermix Messages, reads and sends through Messages on the Mac Fermix runs on; it holds the Full Disk Access and Automation grants and the confirmed list of who Fermix may message. Direct iMessage conversations, plain-text replies.
-- **Mobile (phone)** — daemon-side groundwork for a first-party phone companion: a dedicated Noise-encrypted listener on `:4031`, reachable over the LAN or a tailnet. One socket per paired device carries streaming replies, tool activity, chunked media, slash commands, and cursor-exact history sync. The channel is on by default (its listener starts once the first pairing begins; the mDNS announcement is off unless turned on) and is managed over the management protocol: the `channels.mobile` settings section (the enable switch applies at once; a port, listen address or mDNS announcement change needs a restart) and the `mobile.*` pairing and paired-device methods that the Mac app's Phone row is built on (it turns the channel on and pairs in one place; the Linux app has no Phone pane yet). A dev or Linux host pairs with `fermix pair`, which drives the same methods, and revokes with `fermix devices revoke`; where the channel is off (`enabled = false` under `[fermix_channels.mobile]`), `fermix pair` asks to turn it on first, with no restart. On an app-managed Mac, pairing happens in the app, never through the CLI. No phone app is released yet (the iPhone app ships in its own release, and an Android app is in design), so there is nothing to pair with today.
+- **Mobile (phone)** — daemon-side groundwork for a first-party phone companion: a dedicated Noise-encrypted listener on `:4031`, reachable over the LAN or a tailnet. One socket per paired device carries streaming replies, tool activity, chunked media, slash commands, and cursor-exact history sync. The channel is on by default (its listener starts once the first pairing begins; the mDNS announcement is off unless turned on) and is managed over the management protocol: the `channels.mobile` settings section (the enable switch applies at once; a port, listen address or mDNS announcement change needs a restart) and the `mobile.*` pairing and paired-device methods that the Mac app's and the Linux app's Phone rows and the browser setup's Phone card are built on (each turns the channel on and pairs in one place). A dev or Linux host also pairs with `fermix pair`, which drives the same methods, and revokes with `fermix devices revoke`; where the channel is off (`enabled = false` under `[fermix_channels.mobile]`), `fermix pair` asks to turn it on first, with no restart. On an app-managed Mac, pairing happens in the app, never through the CLI. No phone app is released yet (the iPhone app ships in its own release, and an Android app is in design), so there is nothing to pair with today.
 - **CLI** — local stdin/stdout smoke path through the same dispatcher and `MainAgent`.
 
 ### HTTP endpoints
@@ -341,7 +338,7 @@ fermix/ (umbrella)
 └── apps/fermix_nif/        # C NIF (elixir_make): kill_pgid process-group signal shim
 ```
 
-The native macOS voice companion (FermixPet) lives in [tezra-io/fermix-macos](https://github.com/tezra-io/fermix-macos) and talks to the daemon over the local Realtime socket.
+The Mac app ([fermix.ai/download](https://fermix.ai/download/)) talks to the daemon over the local management, Realtime and companion sockets.
 
 One BEAM VM, all `:permanent` under OTP. The data flow is straight-line:
 
@@ -462,12 +459,7 @@ echo "summarize current health" | fermix ask --stdin --json    # stdin + JSON ou
 curl -s http://127.0.0.1:4030/health/ready | jq .              # Phoenix readiness
 ```
 
-For the macOS Realtime companion (from [tezra-io/fermix-macos](https://github.com/tezra-io/fermix-macos)), point it at the same `FERMIX_HOME`:
-
-```bash
-cd fermix-macos/Apps/FermixPet
-FERMIX_HOME=~/.fermix-dev ./script/build_and_run.sh
-```
+The Mac app's development loop lives in its own repository (`scripts/dev_e2e.sh up` in `tezra-io/fermix-macos`): it builds this engine from a checkout and runs it under its own home, `~/.fermix-macos`, never this one.
 
 ### Unit and integration tests
 

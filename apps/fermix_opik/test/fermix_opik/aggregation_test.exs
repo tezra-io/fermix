@@ -726,6 +726,42 @@ defmodule FermixOpik.AggregationTest do
     assert llm.provider == "openai"
   end
 
+  test "a cue run's trace carries its trigger, watcher and delivery" do
+    {_state, closed} =
+      run([
+        {[:fermix, :job, :run_start], %{},
+         %{
+           agent: "scheduled:job-8",
+           job_id: "job-8",
+           run_id: "run-2",
+           name: "release watch",
+           session_id: "cron_job-8_20261017_120000_a1b2c3",
+           schedule_kind: "cue",
+           trigger: "cue",
+           watcher_id: "cwt_1",
+           delivery_id: 17
+         }},
+        {[:fermix, :job, :run_complete], %{duration_ms: 900, iterations: 1, total_tokens: 10},
+         %{
+           agent: "scheduled:job-8",
+           job_id: "job-8",
+           run_id: "run-2",
+           status: "ok",
+           session_id: "cron_job-8_20261017_120000_a1b2c3",
+           trigger: "cue",
+           watcher_id: "cwt_1",
+           delivery_id: 17
+         }}
+      ])
+
+    assert [%{trace: trace}] = closed
+    assert "scheduled" in trace.tags
+    assert trace.metadata.trigger == "cue"
+    assert trace.metadata.watcher_id == "cwt_1"
+    assert trace.metadata.delivery_id == 17
+    refute Map.has_key?(trace.metadata, :cue_count)
+  end
+
   test "a soul-curation draft is its own trace nesting the bounded provider call" do
     {_state, closed} =
       run([
@@ -1862,6 +1898,385 @@ defmodule FermixOpik.AggregationTest do
     end
   end
 
+  # Open-loop check-ins ([:fermix, :open_loop, :checkin, :start | :complete |
+  # :error], M78 §09). A check-in drives the loop in its own context, so it owns
+  # a session, opens a ROOT trace, and its provider/tool spans nest under it
+  # through the shared session_id. `skipped` and `settled` have no run behind
+  # them and render as self-closing traces, the reminder-lifecycle shape.
+  @open_loop_start [:fermix, :open_loop, :checkin, :start]
+  @open_loop_complete [:fermix, :open_loop, :checkin, :complete]
+  @open_loop_error [:fermix, :open_loop, :checkin, :error]
+  @open_loop_skipped [:fermix, :open_loop, :skipped]
+  @open_loop_settled [:fermix, :open_loop, :settled]
+  @open_loop_fault [:fermix, :open_loop, :fault]
+  @open_loop_events [
+    @open_loop_start,
+    @open_loop_complete,
+    @open_loop_error,
+    @open_loop_skipped,
+    @open_loop_settled,
+    @open_loop_fault
+  ]
+  @open_loop_id "loop_Vq3kT9wZrHc"
+  @open_loop_agent "open_loop:loop_Vq3kT9wZrHc"
+  @open_loop_session "open_loop_loop_Vq3kT9wZrHc_2"
+
+  # Mirrors the closed set in FermixCore.OpenLoops.Telemetry by hand:
+  # `fermix_opik` declares no dependency on `fermix_core`, exactly as
+  # `@reminder_phases` mirrors the reminder emitter.
+  @open_loop_skip_reasons [
+    "disabled",
+    "budget",
+    "active_hours",
+    "no_target",
+    "max_children",
+    "closed_meanwhile"
+  ]
+  @open_loop_fault_stages ["scan", "claim", "release", "timer", "start_checkin", "sweep"]
+
+  # The emitter's own bookend metadata shape (FermixCore.OpenLoops.Telemetry),
+  # mirrored by hand like `followup_meta/1` above.
+  defp open_loop_meta(extra) do
+    Map.merge(
+      %{
+        component: "open_loop_checkin",
+        agent: @open_loop_agent,
+        session_id: @open_loop_session,
+        open_loop_id: @open_loop_id,
+        touch: 2
+      },
+      extra
+    )
+  end
+
+  defp open_loop_start_meta(extra \\ %{}) do
+    open_loop_meta(
+      Map.merge(
+        %{
+          rung: 2,
+          horizon_class: "medium",
+          active_hours: "08:30-22:00",
+          max_duration_ms: 120_000
+        },
+        extra
+      )
+    )
+  end
+
+  defp open_loop_provider_call(extra \\ %{}) do
+    {[:fermix, :provider, :call], %{duration_ms: 600},
+     Map.merge(
+       %{
+         provider: :anthropic,
+         model: "claude-opus-4-8",
+         status: :ok,
+         session_id: @open_loop_session,
+         tokens: %{prompt: 120, completion: 30}
+       },
+       extra
+     )}
+  end
+
+  describe "open-loop check-in runs" do
+    test "the reporter subscribes to all six events" do
+      for event <- @open_loop_events do
+        assert event in FermixOpik.Reporter.events(),
+               "#{inspect(event)} is not subscribed, so it is invisible to Opik"
+      end
+    end
+
+    test "a check-in is its own root trace nesting its provider and tool spans" do
+      {state, closed} =
+        run([
+          {@open_loop_start, %{count: 1}, open_loop_start_meta()},
+          open_loop_provider_call(),
+          {[:fermix, :tool, :exec], %{duration_ms: 9},
+           %{tool: "open_loop_respond", success: true, session_id: @open_loop_session}},
+          {@open_loop_complete, %{duration_ms: 3_900},
+           open_loop_meta(%{outcome: "spoke", output: "How did the kiln booking go?"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == @open_loop_agent
+      assert trace.tags == ["open_loop_checkin"]
+      assert trace.output == %{text: "How did the kiln booking go?"}
+
+      # The metadata is the allowlist and nothing else: the opener's snapshot
+      # survives the closer, and no session id, agent or ceiling leaks in.
+      assert trace.metadata == %{
+               component: "open_loop_checkin",
+               open_loop_id: @open_loop_id,
+               touch: 2,
+               rung: 2,
+               horizon_class: "medium",
+               active_hours: "08:30-22:00",
+               outcome: "spoke"
+             }
+
+      # Unthreaded: the family never carries the delivery destination.
+      refute Map.has_key?(trace, :thread_id)
+
+      wrapper = span_named(spans, @open_loop_agent)
+      refute Map.has_key?(wrapper, :parent_span_id)
+
+      assert [llm] = spans_of_type(spans, "llm")
+      assert [tool] = spans_of_type(spans, "tool")
+      assert llm.parent_span_id == wrapper.id
+      assert tool.parent_span_id == wrapper.id
+      assert llm.trace_id == trace.id
+      assert tool.trace_id == trace.id
+      assert state.traces == %{}
+    end
+
+    # The scheduler spawned the run, not another run: the opener hard-codes nil,
+    # which this pins by naming a live parent and proving it is ignored.
+    test "the run stays a root even when a live parent session is named" do
+      {_state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 100},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-1"}},
+          {@open_loop_start, %{count: 1}, open_loop_start_meta(%{parent_session: "main-1"})},
+          {@open_loop_complete, %{duration_ms: 900}, open_loop_meta(%{outcome: "silent"})},
+          {[:fermix, :agent, :message], %{iterations: 1},
+           %{channel: :telegram, chat_id: "c1", session_id: "main-1", agent: "main"}}
+        ])
+
+      names = closed |> Enum.map(& &1.trace.name) |> Enum.sort()
+      assert names == ["agent:main", @open_loop_agent]
+
+      check_in = Enum.find(closed, &(&1.trace.name == @open_loop_agent))
+      assert check_in.trace.metadata.outcome == "silent"
+      refute Map.has_key?(check_in.trace, :output)
+      refute Map.has_key?(check_in.trace.metadata, :status)
+      refute Map.has_key?(span_named(check_in.spans, @open_loop_agent), :parent_span_id)
+
+      turn = Enum.find(closed, &(&1.trace.name == "agent:main"))
+      refute span_named(turn.spans, @open_loop_agent)
+    end
+
+    test "a run that never reached a decision closes with its own status word" do
+      for status <- ["timeout", "error"] do
+        {_state, closed} =
+          run([
+            {@open_loop_start, %{count: 1}, open_loop_start_meta()},
+            {@open_loop_error, %{duration_ms: 120_000},
+             open_loop_meta(%{status: status, error: "watchdog fired at 120000ms"})}
+          ])
+
+        assert [%{trace: trace}] = closed
+        assert trace.metadata.status == status, "the #{status} status never reached the trace"
+        assert trace.output == %{text: "watchdog fired at 120000ms"}
+        assert trace.metadata.open_loop_id == @open_loop_id
+        assert trace.metadata.horizon_class == "medium"
+      end
+    end
+
+    test "a check-in is swept by its max duration, not the idle TTL" do
+      agg = Aggregation.new(project: "fermix", ttl_ms: 1)
+
+      {agg, []} =
+        Aggregation.apply_event(
+          agg,
+          @open_loop_start,
+          %{count: 1},
+          open_loop_start_meta(%{max_duration_ms: 1_000}),
+          %{at: ~U[2026-06-02 12:00:00.000Z], mono: 0}
+        )
+
+      # mono is microseconds; floor = (1_000 + 60_000) * 1_000 = 61_000_000us.
+      {agg, []} = Aggregation.sweep(agg, 500_000)
+
+      {_agg, closed} = Aggregation.sweep(agg, 61_000_001)
+      assert [%{trace: trace}] = closed
+      assert trace.name == @open_loop_agent
+      assert trace.tags == ["open_loop_checkin"]
+      refute Map.has_key?(trace, :thread_id)
+    end
+
+    # A run whose first exported event is a provider call (the opener lost the
+    # race, or was never delivered) classifies from its session prefix alone, and
+    # with no agent name to go by it is named by that session id.
+    test "a span arriving with no opener classifies the run by its session prefix" do
+      agg = Aggregation.new(project: "fermix", ttl_ms: 1)
+
+      {agg, []} =
+        Aggregation.apply_event(
+          agg,
+          [:fermix, :provider, :call],
+          %{duration_ms: 600},
+          %{provider: :openai, model: "gpt-5", status: :ok, session_id: @open_loop_session},
+          %{at: ~U[2026-06-02 12:00:00.000Z], mono: 0}
+        )
+
+      {_agg, closed} = Aggregation.sweep(agg, 10_000)
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.tags == ["open_loop_checkin"]
+      assert trace.name == @open_loop_session
+      assert [_llm] = spans_of_type(spans, "llm")
+    end
+
+    test "a closer arriving without its opener still carries the run's ids" do
+      {_state, closed} =
+        run([
+          open_loop_provider_call(%{agent: @open_loop_agent}),
+          {@open_loop_complete, %{duration_ms: 800}, open_loop_meta(%{outcome: "empty"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.tags == ["open_loop_checkin"]
+      assert trace.name == @open_loop_agent
+      assert trace.metadata.outcome == "empty"
+      assert trace.metadata.open_loop_id == @open_loop_id
+      assert [llm] = spans_of_type(spans, "llm")
+      assert llm.parent_span_id == span_named(spans, @open_loop_agent).id
+    end
+
+    # A run that timed out is retried under the same touch, so the same session
+    # id, seconds later: inside the closed-session tombstone window. The retry's
+    # opener begins a new run, so its spans nest in its own trace instead of
+    # being dropped as late spans of the run that already shipped.
+    test "a retried check-in under the same touch keeps its spans" do
+      {state, closed} =
+        run([
+          {@open_loop_start, %{count: 1}, open_loop_start_meta()},
+          {@open_loop_error, %{duration_ms: 120_000},
+           open_loop_meta(%{status: "timeout", error: "watchdog fired"})},
+          {@open_loop_start, %{count: 1}, open_loop_start_meta()},
+          open_loop_provider_call(),
+          {@open_loop_complete, %{duration_ms: 2_000}, open_loop_meta(%{outcome: "silent"})}
+        ])
+
+      assert [%{trace: first}, %{trace: retry, spans: spans}] = closed
+      assert first.metadata.status == "timeout"
+      assert retry.metadata.outcome == "silent"
+      assert retry.id != first.id
+      assert [llm] = spans_of_type(spans, "llm")
+      assert llm.parent_span_id == span_named(spans, @open_loop_agent).id
+      assert state.dropped_after_close == 0
+    end
+
+    # Registry completeness: every skip reason hits a real clause, never the
+    # catch-all (which returns `{state, []}` and leaves nothing behind).
+    test "every skip is its own self-closing trace and opens no session" do
+      for reason <- @open_loop_skip_reasons do
+        {state, closed} =
+          run([
+            {@open_loop_skipped, %{count: 1},
+             %{open_loop_id: @open_loop_id, reason: reason, component: "open_loop_scheduler"}}
+          ])
+
+        assert [%{trace: trace, spans: []}] = closed,
+               "reason #{inspect(reason)} produced no trace — it fell to the catch-all"
+
+        assert trace.name == "open_loop:#{reason}"
+        assert trace.tags == ["open_loop"]
+
+        assert trace.metadata == %{
+                 component: "open_loop_scheduler",
+                 open_loop_id: @open_loop_id,
+                 reason: reason
+               }
+
+        assert state.traces == %{}
+        assert state.sessions == %{}
+      end
+    end
+
+    # A settlement names the settling turn's session as correlation, but it is
+    # a point event of its own: it never nests under that turn or opens one.
+    test "a settlement is its own self-closing trace, even beside a live turn" do
+      settled_meta = %{
+        open_loop_id: @open_loop_id,
+        from: "asked",
+        to: "closed",
+        answer: "done",
+        by: "main_agent",
+        component: "open_loops",
+        session_id: "main-1"
+      }
+
+      {state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 100},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-1"}},
+          {@open_loop_settled, %{count: 1}, settled_meta},
+          {[:fermix, :agent, :message], %{iterations: 1},
+           %{channel: :telegram, chat_id: "c1", session_id: "main-1", agent: "main"}}
+        ])
+
+      assert [%{trace: settled, spans: []}, %{trace: turn, spans: turn_spans}] = closed
+      assert settled.name == "open_loop:settled"
+      assert settled.tags == ["open_loop"]
+      assert settled.metadata == settled_meta
+      assert turn.name == "agent:main"
+      refute span_named(turn_spans, "open_loop:settled")
+      assert state.traces == %{}
+    end
+
+    test "a scheduler expiry with no answer and no session carries neither" do
+      {state, closed} =
+        run([
+          {@open_loop_settled, %{count: 1},
+           %{
+             open_loop_id: @open_loop_id,
+             from: "asked",
+             to: "expired",
+             by: "scheduler",
+             component: "open_loops"
+           }}
+        ])
+
+      assert [%{trace: trace, spans: []}] = closed
+      assert trace.name == "open_loop:settled"
+      refute Map.has_key?(trace.metadata, :answer)
+      refute Map.has_key?(trace.metadata, :session_id)
+      assert trace.metadata.to == "expired"
+      assert state.sessions == %{}
+    end
+
+    # Registry completeness again: every scheduler fault stage hits a real
+    # clause, never the catch-all, and the trace carries the derived class only.
+    test "every scheduler fault is its own self-closing trace and opens no session" do
+      for stage <- @open_loop_fault_stages do
+        fault_meta = %{
+          stage: stage,
+          open_loop_id: @open_loop_id,
+          component: "open_loop_scheduler",
+          error_class: "repo_timeout"
+        }
+
+        {state, closed} = run([{@open_loop_fault, %{count: 1}, fault_meta}])
+
+        assert [%{trace: trace, spans: []}] = closed,
+               "stage #{inspect(stage)} produced no trace — it fell to the catch-all"
+
+        assert trace.name == "open_loop:fault"
+        assert trace.tags == ["open_loop"]
+        assert trace.metadata == fault_meta
+        assert trace.start_time == trace.end_time
+        assert state.traces == %{}
+        assert state.sessions == %{}
+      end
+    end
+
+    test "a fault that concerns no single loop carries no loop id" do
+      {_state, closed} =
+        run([
+          {@open_loop_fault, %{count: 1},
+           %{stage: "scan", component: "open_loop_scheduler", error_class: "unclassified"}}
+        ])
+
+      assert [%{trace: trace, spans: []}] = closed
+      assert trace.name == "open_loop:fault"
+
+      assert trace.metadata == %{
+               stage: "scan",
+               component: "open_loop_scheduler",
+               error_class: "unclassified"
+             }
+    end
+  end
+
   # Meeting runs ([:fermix, :meeting, :run_start | :run_complete | :run_error |
   # :phase], M21 §11.1). A meeting outlives the turn that asked for it by an
   # hour, so it is a root run of its own — the follow-up/harness shape — with the
@@ -2501,6 +2916,373 @@ defmodule FermixOpik.AggregationTest do
       assert trace.tags == ["voice_gist"]
       assert trace.metadata.status == "failed"
       assert trace.error_info.message == "timeout"
+    end
+  end
+
+  @cue_filter_start [:fermix, :cue_filter, :run_start]
+  @cue_filter_complete [:fermix, :cue_filter, :run_complete]
+  @cue_filter_error [:fermix, :cue_filter, :run_error]
+  @cue_filter_session "cue_filter_cwt_9f2e_20261017_120000_a1b2c3"
+
+  # The emitter's own metadata shape (FermixCore.Cues.Filter.Telemetry),
+  # mirrored by hand like `voice_gist_meta/1`.
+  defp cue_filter_meta(extra) do
+    Map.merge(
+      %{
+        agent: "cue_filter",
+        session_id: @cue_filter_session,
+        filter_call_id: "cfc_1",
+        watcher_id: "cwt_9f2e",
+        delivery_id: 17,
+        cue_id: 9,
+        source_ref: "eng-feeds",
+        attempt: 0
+      },
+      extra
+    )
+  end
+
+  # M60 §14: one filter call for one cue is a run kind of its own, a root with
+  # its provider call nested by the shared session id.
+  describe "a cue filter call" do
+    test "the reporter subscribes to every cue_filter event" do
+      for event <- [@cue_filter_start, @cue_filter_complete, @cue_filter_error] do
+        assert event in FermixOpik.Reporter.events(),
+               "#{inspect(event)} is not subscribed, so the run is invisible to Opik"
+      end
+    end
+
+    test "a filter call is one root trace nesting its model call, closed with the decision" do
+      {_state, closed} =
+        run([
+          {@cue_filter_start, %{count: 1}, cue_filter_meta(%{})},
+          {[:fermix, :provider, :call], %{duration_ms: 900},
+           %{
+             provider: :openai,
+             model: "gpt-5.4-mini",
+             status: :ok,
+             agent: "cue_filter",
+             session_id: @cue_filter_session,
+             tokens: %{prompt: 400, completion: 20}
+           }},
+          {@cue_filter_complete, %{count: 1, duration_ms: 950},
+           cue_filter_meta(%{status: "ok", decision: "pass"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.tags == ["cue_filter"]
+      assert trace.name == @cue_filter_session
+      assert trace.metadata.decision == "pass"
+      assert trace.metadata.watcher_id == "cwt_9f2e"
+      assert trace.metadata.delivery_id == 17
+      assert [llm] = spans_of_type(spans, "llm")
+      assert llm.trace_id == trace.id
+      refute Map.has_key?(span_named(spans, @cue_filter_session), :parent_span_id)
+    end
+
+    # Without the prefix clause a closer arriving with no opener would mint a
+    # root `infer_kind/1` reads as `:subagent`.
+    test "a failed call with no opener still closes as a cue_filter root with its status" do
+      {_state, closed} =
+        run([
+          {@cue_filter_error, %{count: 1, duration_ms: 60_000},
+           cue_filter_meta(%{status: "provider_failure", error_kind: "timeout"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.tags == ["cue_filter"]
+      assert trace.metadata.status == "provider_failure"
+      assert trace.error_info.message == "timeout"
+    end
+
+    # `Cues.Filter.Llm` puts the call's session id in the chain's failover
+    # telemetry, as the adapter's own call event carries it.
+    test "a failover on the filter call's chain nests under the call's root" do
+      {_state, closed} =
+        run([
+          {@cue_filter_start, %{count: 1}, cue_filter_meta(%{})},
+          {[:fermix, :provider, :failover], %{count: 1},
+           %{
+             from_provider: :openai,
+             from_model: "gpt-5.4-mini",
+             to_provider: :openai,
+             to_model: "gpt-5.4",
+             reason_kind: :timeout,
+             agent: "cue_filter",
+             surface: :cue_filter,
+             session_id: @cue_filter_session
+           }},
+          {@cue_filter_complete, %{count: 1, duration_ms: 950},
+           cue_filter_meta(%{status: "ok", decision: "pass"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == @cue_filter_session
+      root = span_named(spans, @cue_filter_session)
+      failover = span_named(spans, "failover:openai->openai")
+      assert failover.trace_id == trace.id
+      assert failover.parent_span_id == root.id
+    end
+  end
+
+  # Cue lifecycle ([:fermix, :cue, :lifecycle], M60 §14). `@cue_phases` mirrors
+  # `FermixCore.Cues.Telemetry.phases/0` by hand, as `@reminder_phases` does:
+  # `fermix_opik` declares no dependency on `fermix_core`, and
+  # `apps/fermix_core/test/fermix_core/cues/telemetry_test.exs` pins `phases/0`
+  # against the same literal list.
+  @cue_event [:fermix, :cue, :lifecycle]
+  @cue_phases ~w(accepted duplicate conflict stale rejected rate_limited over_budget
+                 routed gap expired unmatched overflow write_failed ingest_error sweep_error
+                 passed dropped filter_retry filter_held filter_failed claimed settled retry
+                 exhausted proposed confirmed denied proposal_expired proposal_refused)a
+  @cue_run_session "cron_job-8_20261017_120000_a1b2c3"
+
+  # The emitter's own metadata shape (FermixCore.Cues.Telemetry): ids, labels
+  # and counts, the phase and the component.
+  defp cue_meta(phase, extra) do
+    Map.merge(%{phase: phase, component: "cues", source_ref: "eng-feeds"}, extra)
+  end
+
+  defp cue_run_meta(phase, extra) do
+    cue_meta(
+      phase,
+      Map.merge(
+        %{
+          session_id: @cue_run_session,
+          job_id: "job-8",
+          run_id: "run-2",
+          delivery_id: 17,
+          watcher_id: "cwt_9f2e"
+        },
+        extra
+      )
+    )
+  end
+
+  defp cue_job_meta(extra) do
+    Map.merge(
+      %{
+        agent: "scheduled:job-8",
+        job_id: "job-8",
+        run_id: "run-2",
+        name: "release watch",
+        session_id: @cue_run_session,
+        schedule_kind: "cue",
+        schedule_expr: "cue",
+        trigger: "cue",
+        watcher_id: "cwt_9f2e",
+        delivery_id: 17
+      },
+      extra
+    )
+  end
+
+  describe "cue lifecycle" do
+    test "the reporter subscribes to the event" do
+      assert @cue_event in FermixOpik.Reporter.events()
+    end
+
+    # Registry completeness: with no session to nest under, every phase must
+    # ship as its own trace, never fall to the catch-all.
+    test "every phase without a session is its own self-closing trace" do
+      for phase <- @cue_phases do
+        {state, closed} = run([{@cue_event, %{count: 1}, cue_meta(phase, %{cue_id: 9})}])
+
+        assert [%{trace: trace, spans: []}] = closed,
+               "phase #{inspect(phase)} produced no trace — it fell to the catch-all"
+
+        assert trace.name == "cue:#{phase}"
+        assert trace.tags == ["cue"]
+        assert state.traces == %{}
+      end
+    end
+
+    test "a sessionless trace carries the emitter's ids, labels and measurements only" do
+      {_state, closed} =
+        run([
+          {@cue_event, %{count: 1, accept_ms: 14},
+           cue_meta(:accepted, %{cue_id: 9, result: :ok, unknown_key: "dropped"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.metadata.phase == "accepted"
+      assert trace.metadata.component == "cues"
+      assert trace.metadata.source_ref == "eng-feeds"
+      assert trace.metadata.cue_id == 9
+      assert trace.metadata.result == "ok"
+      assert trace.metadata.accept_ms == 14
+      refute Map.has_key?(trace.metadata, :unknown_key)
+    end
+
+    test "a sessionless phase never nests under a run that is open" do
+      {state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 10},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-1"}},
+          {@cue_event, %{count: 1}, cue_meta(:routed, %{cue_id: 9, delivery_id: 17})},
+          {[:fermix, :agent, :message], %{iterations: 1},
+           %{channel: :cli, chat_id: "c1", session_id: "main-1", agent: "main"}}
+        ])
+
+      turn = Enum.find(closed, &(&1.trace.name == "agent:main"))
+      refute span_named(turn.spans, "cue:routed")
+      assert Enum.any?(closed, &(&1.trace.name == "cue:routed"))
+      assert state.traces == %{}
+    end
+
+    test "a filter-scoped phase is a child span of the filter call's trace" do
+      {_state, closed} =
+        run([
+          {@cue_filter_start, %{count: 1}, cue_filter_meta(%{})},
+          {@cue_event, %{count: 1},
+           cue_meta(:dropped, %{
+             session_id: @cue_filter_session,
+             filter_call_id: "cfc_1",
+             watcher_id: "cwt_9f2e",
+             delivery_id: 17,
+             cue_id: 9,
+             decision: :drop,
+             attempt: 0
+           })},
+          {@cue_filter_complete, %{count: 1, duration_ms: 950},
+           cue_filter_meta(%{status: "ok", decision: "drop"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == @cue_filter_session
+      wrapper = span_named(spans, @cue_filter_session)
+      assert %{parent_span_id: parent, metadata: metadata} = span_named(spans, "cue:dropped")
+      assert parent == wrapper.id
+      assert metadata.decision == "drop"
+      assert metadata.filter_call_id == "cfc_1"
+    end
+
+    # A `none` watcher's delivery passes at acceptance with no filter call (§14).
+    test "a pass with no filter session ships as its own trace" do
+      {_state, closed} =
+        run([
+          {@cue_event, %{count: 1},
+           cue_meta(:passed, %{cue_id: 9, delivery_id: 17, reason: "no filter"})}
+        ])
+
+      assert [%{trace: trace, spans: []}] = closed
+      assert trace.name == "cue:passed"
+      assert trace.metadata.reason == "no filter"
+    end
+
+    # The claim is traced in the scheduler before the runner exists, so its
+    # phase opens the run's session; the job's opener must still give the trace
+    # its name, metadata, thread and sweep floor.
+    test "a cue run's trace holds its claim and settle, with the job opener's fields" do
+      {state, closed} =
+        run([
+          {@cue_event, %{queue_ms: 2_500}, cue_run_meta(:claimed, %{state: "claimed"})},
+          {[:fermix, :job, :run_start], %{}, cue_job_meta(%{max_duration_ms: 600_000})}
+        ])
+
+      assert closed == []
+      # Past the idle TTL but inside the run's own timeout: still open.
+      {state, []} = Aggregation.sweep(state, 3 * 1_000_000 + 130_000_000)
+
+      {_state, closed} =
+        Enum.reduce(
+          [
+            {@cue_event, %{count: 1},
+             cue_run_meta(:settled, %{state: "acked", outcome: "acted", reason: "acted"})},
+            {[:fermix, :job, :run_complete], %{duration_ms: 900, iterations: 1},
+             cue_job_meta(%{status: "ok"})}
+          ],
+          {state, []},
+          fn {event, meas, meta}, {st, acc} ->
+            at = %{at: ~U[2026-06-02 12:05:00.000Z], mono: 200_000_000}
+            {st, new} = Aggregation.apply_event(st, event, meas, meta, at)
+            {st, acc ++ new}
+          end
+        )
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == "scheduled:release watch"
+      assert trace.thread_id == "job-8"
+      assert trace.metadata.trigger == "cue"
+      assert trace.metadata.schedule_kind == "cue"
+      assert trace.metadata.delivery_id == 17
+
+      wrapper = span_named(spans, "scheduled:release watch")
+      assert %{parent_span_id: claim_parent} = claimed = span_named(spans, "cue:claimed")
+      assert claim_parent == wrapper.id
+      assert claimed.metadata.queue_ms == 2_500
+      assert span_named(spans, "cue:settled").parent_span_id == wrapper.id
+    end
+
+    # A proposal is confirmed, or a crashed run reaped, after the run's trace
+    # shipped: the phase still ships, as its own trace naming the run's session,
+    # rather than being dropped at the tombstone or minting a phantom root.
+    test "a run-scoped phase after the run's trace shipped is its own trace" do
+      {state, closed} =
+        run([
+          {[:fermix, :job, :run_start], %{}, cue_job_meta(%{})},
+          {[:fermix, :job, :run_complete], %{duration_ms: 900}, cue_job_meta(%{status: "ok"})},
+          {@cue_event, %{count: 1},
+           cue_run_meta(:confirmed, %{proposal_id: "cpr_1", state: "confirmed"})}
+        ])
+
+      assert [%{trace: run_trace}, %{trace: late, spans: []}] = closed
+      assert run_trace.name == "scheduled:release watch"
+      assert late.name == "cue:confirmed"
+      assert late.metadata.session_id == @cue_run_session
+      assert late.metadata.proposal_id == "cpr_1"
+      assert state.dropped_after_close == 0
+      assert state.traces == %{}
+    end
+
+    test "a run-scoped phase for a run that was never seen opens no root" do
+      {state, closed} =
+        run([{@cue_event, %{count: 1}, cue_run_meta(:exhausted, %{reason: "reaped"})}])
+
+      assert [%{trace: trace, spans: []}] = closed
+      assert trace.name == "cue:exhausted"
+      assert trace.metadata.session_id == @cue_run_session
+      assert state.traces == %{}
+      assert state.sessions == %{}
+    end
+
+    # The owner confirms a proposal hours after its run's trace shipped and its
+    # tombstone was pruned: the call still ships as its own trace, not as a
+    # phantom `scheduled:` root holding one span.
+    test "a proposal's confirmed call long after its run is its own trace" do
+      {state, _closed} =
+        run([
+          {[:fermix, :job, :run_start], %{}, cue_job_meta(%{})},
+          {[:fermix, :job, :run_complete], %{duration_ms: 900}, cue_job_meta(%{status: "ok"})}
+        ])
+
+      {state, []} = Aggregation.sweep(state, 10_000_000_000)
+      assert state.closed_sessions == %{}
+
+      confirmed = %{
+        tool: "ops_create_issue",
+        success: true,
+        session_id: @cue_run_session,
+        access_gate: "confirmed",
+        mandate_call_id: "cmc_1"
+      }
+
+      at = %{at: ~U[2026-06-02 15:00:00.000Z], mono: 10_000_000_001}
+
+      {state, closed} =
+        Aggregation.apply_event(
+          state,
+          [:fermix, :tool, :exec],
+          %{duration_ms: 400},
+          confirmed,
+          at
+        )
+
+      assert [%{trace: trace, spans: [span]}] = closed
+      assert trace.name == "access_gate:confirmed"
+      assert trace.metadata.session_id == @cue_run_session
+      assert span.metadata.mandate_call_id == "cmc_1"
+      assert state.traces == %{}
     end
   end
 

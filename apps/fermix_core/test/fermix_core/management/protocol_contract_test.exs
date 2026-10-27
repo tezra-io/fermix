@@ -13,6 +13,11 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias Fermix.CLI.Daemon.Client
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.MCP.RuntimeStatus
+  alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Jobs.Registry, as: JobsRegistry
+  alias FermixCore.Management.Cues.MandateRow, as: CueMandateRow
+  alias FermixCore.Management.Cues.SourceRow, as: CueSourceRow
+  alias FermixCore.Management.Cues.WatcherRow, as: CueWatcherRow
   alias FermixCore.Management.Detect
   alias FermixCore.Management.Doctor
   alias FermixCore.Management.Doctor.Descriptor
@@ -32,8 +37,12 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Management.Router
   alias FermixCore.Management.Settings
   alias FermixCore.Management.Settings.Row
+  alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Readiness
   alias FermixCore.Setup.ConfigStore
+  alias FermixTestSupport.CueFixtures
+  alias FermixTestSupport.MandateFixtures
   alias FermixTestSupport.SafeRm
 
   @protocol_doc Application.app_dir(:fermix_core, "priv/management/PROTOCOL.md")
@@ -600,6 +609,21 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert settings_row["properties"] |> Map.keys() |> Enum.sort() == fields
   end
 
+  # An example stands in an empty text or list field. A row with no such field
+  # to show it in refuses one (a secret's above all), and so does an empty one,
+  # which would show nothing where the client's own prompt stood.
+  test "a row carries an example only where an empty field can show it" do
+    assert Row.new("k", :text, "Label", restart: false, example: "id")["example"] == "id"
+    assert Row.new("k", :list, "Label", restart: false, example: "news")["example"] == "news"
+    assert Row.new("k", :secret, "Label", restart: false)["example"] == nil
+
+    for {kind, example} <- [secret: "PK7Q2ZTW9M", toggle: "on", number: "5", text: ""] do
+      assert_raise ArgumentError, ~r/unshowable example/, fn ->
+        Row.new("k", kind, "Label", restart: false, example: example)
+      end
+    end
+  end
+
   # Every job kind, status word and failure code a client may meet is pinned to
   # the module that mints them, so a kind added in Elixir fails here rather than
   # reaching a client whose decoder has never heard of it.
@@ -930,6 +954,78 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert details == golden_error_details("invalid_params_mcp_servers_import_servers")
   end
 
+  # The cue rows are "every field always present" and the schema closes them,
+  # so a field added in Elixir and not declared is a frame the app refuses.
+  # Pinned to the goldens, which `CuesTest` and the router cases above pin to
+  # the builders.
+  test "the schema declares exactly the fields the cue rows carry", %{schema: schema} do
+    defs = schema["$defs"]
+
+    rows = [
+      {"cueSourceRow", named_fixture_result("cues_sources_list")["sources"] |> hd()},
+      {"cueWatcherRow", named_fixture_result("cues_watchers_list")["watchers"] |> hd()},
+      {"cueWatcherDetail", named_fixture_result("cues_watchers_get")["watcher"]},
+      {"cueMandateRow", named_fixture_result("cues_mandates_list")["mandates"] |> hd()},
+      {"cueProposalRecord", named_fixture_result("cues_proposals_list")["proposals"] |> hd()},
+      {"cueProposalCard", named_fixture_result("cues_proposals_get")["proposal"]}
+    ]
+
+    for {name, row} <- rows do
+      fields = row |> Map.keys() |> Enum.sort()
+
+      assert defs[name]["additionalProperties"] == false, name
+      assert Enum.sort(defs[name]["required"]) == fields, name
+      assert defs[name]["properties"] |> Map.keys() |> Enum.sort() == fields, name
+    end
+  end
+
+  test "the schema's cue vocabulary matches the row builders", %{schema: schema} do
+    published = schema["x-cue-vocabulary"]
+    defs = schema["$defs"]
+
+    assert published["source_states"] == CueSourceRow.states()
+    assert published["source_actions"] == CueSourceRow.actions()
+    assert published["watcher_states"] == CueWatcherRow.states()
+    assert published["mandate_actions"] == CueMandateRow.actions()
+    assert defs["cueSourceAction"]["enum"] == CueSourceRow.actions()
+    assert defs["cueMandateAction"]["enum"] == CueMandateRow.actions()
+
+    assert defs["cueProposalRecord"]["properties"]["state"]["enum"] ==
+             published["proposal_states"]
+  end
+
+  # One golden per state a proposal can be in, so the app draws each card.
+  test "the golden proposal cards cover every proposal state", %{schema: schema} do
+    states =
+      @successes
+      |> fixtures()
+      |> Enum.filter(&(&1["method"] == "cues.proposals.get"))
+      |> Enum.map(& &1["response"]["result"]["proposal"]["state"])
+      |> Enum.sort()
+
+    assert states == Enum.sort(schema["x-cue-vocabulary"]["proposal_states"])
+  end
+
+  test "every golden cue row routes on its own closed actions" do
+    for record <- fixtures(@successes),
+        String.starts_with?(record["method"], "cues."),
+        row <- cue_rows_in(record["response"]["result"]) do
+      allowed =
+        if Map.has_key?(row, "ref"), do: CueSourceRow.actions(), else: CueMandateRow.actions()
+
+      assert Enum.all?(row["actions"], &(&1 in allowed)), record["name"]
+
+      assert is_nil(row["primary_action"]) or row["primary_action"] in row["actions"],
+             record["name"]
+    end
+  end
+
+  defp cue_rows_in(%{"sources" => rows}) when is_list(rows), do: rows
+  defp cue_rows_in(%{"mandates" => rows}) when is_list(rows), do: rows
+  defp cue_rows_in(%{"source" => row}) when is_map(row), do: [row]
+  defp cue_rows_in(%{"mandate" => row}) when is_map(row), do: [row]
+  defp cue_rows_in(_result), do: []
+
   test "every golden MCP server row routes on its own closed actions", %{schema: schema} do
     published = schema["$defs"]["mcpServerAction"]["enum"]
     rows = golden_mcp_rows()
@@ -1127,7 +1223,158 @@ defmodule FermixCore.Management.ProtocolContractTest do
       # the live projection rather than an injected stand-in.
       {"plugins.list", %{}, []}
     ] ++
-      settings_cases() ++ job_view_cases() ++ flow_cases() ++ mobile_cases() ++ mcp_cases()
+      settings_cases() ++
+      job_view_cases() ++ flow_cases() ++ mobile_cases() ++ mcp_cases() ++ cues_cases()
+  end
+
+  # Stands in for `Cues.Proposals` with the record and the card in the shape
+  # `Cues.ProposalView` mints, so the proposal reads and the answer are
+  # compared without a proposal of their own in the Repo.
+  defmodule FakeProposals do
+    @moduledoc false
+
+    def records(_which, _opts), do: {:ok, [record("waiting")]}
+
+    def card(id, _opts) do
+      card =
+        Map.merge(record("waiting"), %{
+          proposal_id: id,
+          received_at: "2026-10-17T11:49:58Z",
+          summary: "A task wants to run github_create_issue under your mandate release-issues.",
+          outside: %{
+            args_text: "{}",
+            cue: %{type: "feed.item", subject: nil, text: "Invented.", occurred_at: nil}
+          }
+        })
+
+      {:ok, card}
+    end
+
+    def decide(_id, _decision, _origin, _opts), do: {:ok, record("confirmed")}
+
+    defp record(state) do
+      %{
+        proposal_id: "cpr_1",
+        state: state,
+        mandate: "release-issues",
+        tool: "github_create_issue",
+        task: %{job_id: "job_1", name: "Release watch"},
+        watcher: "release-watch",
+        source_ref: "eng-blogs",
+        created_at: "2026-10-17T11:50:00Z",
+        expires_at: "2026-10-17T12:20:00Z",
+        decided_at: nil,
+        decided_from: nil,
+        result_status: nil,
+        status_sentence: "Waiting for your answer; it runs only if you confirm."
+      }
+    end
+  end
+
+  # The cue reads against settings of this case's own (`:config`), a temp Repo
+  # of its own and the proposal stand-in above; every write answers from a home
+  # and is pinned to its golden in `CuesTest`.
+  defp cues_cases do
+    %{repo: repo, conn: conn} = CueFixtures.start_repo("contract")
+    now = ~U[2026-10-17 12:00:00.000000Z]
+
+    {:ok, job} =
+      JobsRegistry.create_cue_job(
+        %{
+          name: "Release watch",
+          task_prompt: "Open an issue for each release.",
+          delivery_mode: "channel",
+          delivery_target: %{"platform" => "telegram", "chat_id" => "4417"},
+          created_by_trust: "operator"
+        },
+        repo: repo,
+        scheduler: nil
+      )
+
+    watcher =
+      CueFixtures.insert_watcher(conn, %{
+        name: "release-watch",
+        filter: "llm",
+        sources: ["eng-blogs"]
+      })
+
+    CueFixtures.exec!(
+      conn,
+      "INSERT INTO cue_watcher_instructions (id, watcher_id, number, text, added_at) " <>
+        "VALUES ('cwi_c1', ?, 1, 'Ignore opinion pieces.', '2026-10-12T09:00:00.000000Z')",
+      [watcher]
+    )
+
+    CueFixtures.exec!(conn, "UPDATE cue_watchers SET listen_for = ? WHERE id = ?", [
+      Jason.encode!(["release", "outage"]),
+      watcher
+    ])
+
+    for request <- [
+          {:source_reject, "gh-hooks", %{"unauthorized" => 3}, now},
+          {:extend_gap, "gh-hooks", nil, "rate_limited", 4, nil, now}
+        ] do
+      {:ok, _} = Repo.cues_call(CuesSql, request, server: repo)
+    end
+
+    config =
+      CuesConfig.normalize(%{
+        "enabled" => true,
+        "sources" => %{
+          "eng-blogs" => %{"preset" => "rss", "url" => "https://example.org/releases.atom"},
+          "gh-hooks" => %{
+            "preset" => "github",
+            "secret" => "@keyring",
+            "path_secret" => "@keyring"
+          },
+          "home-alerts" => %{"kind" => "local_push", "token" => "@keyring"}
+        },
+        "mandates" => %{
+          "release-issues" => %{
+            "job" => job.id,
+            "mode" => "approve",
+            "tools" => ["github_create_issue"],
+            "read_tools" => ["github_search_issues"]
+          }
+        }
+      })
+
+    plugin = %{
+      name: "github",
+      tools: [%{"name" => "github_create_issue", "title" => "Create an issue", "request" => %{}}]
+    }
+
+    opts = [
+      operation_opts: [
+        cues: [
+          available?: true,
+          memory?: true,
+          running?: true,
+          config: config,
+          repo: repo,
+          door: :contract_cues_no_door,
+          now: fn -> now end,
+          proposals: FakeProposals,
+          mandate_opts: [plugin_tool: MandateFixtures.plugin_tool()],
+          plugins: fn -> {:ok, [plugin]} end,
+          enabled_plugins: fn -> ["github"] end
+        ]
+      ]
+    ]
+
+    [
+      {"cues.status", %{}, opts},
+      {"cues.sources.list", %{}, opts},
+      {"cues.sources.get", %{"ref" => "gh-hooks"}, opts},
+      {"cues.sources.form", %{"preset" => "github"}, opts},
+      {"cues.watchers.list", %{}, opts},
+      {"cues.watchers.get", %{"name" => "release-watch"}, opts},
+      {"cues.mandates.list", %{}, opts},
+      {"cues.mandates.choices", %{}, opts},
+      {"cues.proposals.list", %{}, opts},
+      {"cues.proposals.get", %{"proposal_id" => "cpr_1"}, opts},
+      {"cues.proposals.decide", %{"proposal_id" => "cpr_1", "decision" => "confirm"}, opts}
+    ]
   end
 
   # Stands in for the MCP tree: every server's subtree runs and answers one
@@ -1206,6 +1453,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
          started: true,
          refused: false,
          refusal: nil,
+         hold: nil,
          listener: %{
            status: :ready,
            reason: nil,

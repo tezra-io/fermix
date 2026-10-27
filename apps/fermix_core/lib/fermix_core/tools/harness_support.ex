@@ -131,6 +131,19 @@ defmodule FermixCore.Tools.HarnessSupport do
     end
   end
 
+  @doc """
+  The finished run a coding run's follow-up turn continues (its
+  `harness_run_id`), recorded on the run it launches so the access gate
+  continues each finished run as one run at most. `nil` on any other turn.
+  """
+  @spec continued_from_run_id(map()) :: String.t() | nil
+  def continued_from_run_id(context) when is_map(context) do
+    case {continuation_depth(context), Map.get(context, :harness_run_id)} do
+      {depth, run_id} when depth > 0 and is_binary(run_id) -> run_id
+      _not_a_follow_up -> nil
+    end
+  end
+
   @spec success_json(term()) :: {:ok, Tool.tool_result()}
   def success_json(value), do: {:ok, Tool.success(Jason.encode!(value))}
 
@@ -424,6 +437,11 @@ defmodule FermixCore.Tools.HarnessSupport do
   # Reached only where no `/confirm` prompt could be raised (`Tools.HarnessRun`),
   # so it names the files and both ways the owner clears them.
   defp format_error({:vendor_config_changed, change}), do: VendorConfig.guidance(change)
+
+  defp format_error({:already_continued, parent}),
+    do:
+      "The finished coding run #{parent} has already continued as another run, so this " <>
+        "follow-up starts no second one. Report the outcome; the owner can start a new run."
 
   defp format_error(:missing_session),
     do: "This turn has no session id, so a coding run cannot be correlated."

@@ -167,6 +167,14 @@ defmodule FermixOpik.Mapper do
             # capture_content gate like the marker above.
             :access_gate,
             :access_intent,
+            # A cue run's mandate call (M60 §14): whether a validator decided
+            # (`program | none`), its `cue_mandate_calls` row, and Fermix's own
+            # sentence for a refusal (a validator's words stay in the row, and no
+            # argument the model sent is in it). No outside text, so all three
+            # ride outside the capture_content gate like the label above.
+            :validator,
+            :mandate_call_id,
+            :mandate_reason,
             # Allowed sandbox variables the shell tool could not pass: names
             # only, operator configuration rather than user content, so what a
             # command ran without stays visible in a content-free export.

@@ -100,18 +100,19 @@ How it scores (see `EVAL_CAPABILITY_SCORING.md`, beside this file):
   is the scoring source. Choose a separate local eval/e2e project when the
   held-out material should not appear in `fermix-dev`.
 - Rubric-only tasks use an **independent external LLM judge** with `--judge` —
-  the Claude API through the official `anthropic` SDK, called directly by the
-  harness (no daemon or core involvement). `judge.backend: anthropic` and
-  `judge.model` live in **this benchmark's config** (`config.yaml` /
-  `behavioral_config.yaml`); the model must differ from the candidate (the harness
-  refuses a match). The SDK resolves the credential: `ANTHROPIC_API_KEY`, which the
+  the Claude API, called directly by the harness through the official SDK (no
+  daemon or core involvement). `judge.backend: anthropic` and `judge.model`
+  (`claude-haiku-5-5`) live in **this benchmark's config** (`config.yaml` /
+  `behavioral_config.yaml`); the model must differ from the candidate (the
+  harness refuses a match). The SDK resolves `ANTHROPIC_API_KEY`, which the
   `make` judged targets export from the same Anthropic key the daemon uses (macOS
   keychain `fermix:ANTHROPIC_API_KEY`) when it isn't exported, else an `ant auth
-  login` profile; the CI eval box signs in through Workload Identity Federation.
-  `judge.backend: openai` remains selectable (`EVAL_JUDGE_API_KEY`,
-  `EVAL_JUDGE_BASE_URL`). Because it's a different provider from the daemon's
-  candidate model, it is a genuinely independent oracle. The judge scores only
-  prose; structural gates remain the hard safety/flow signal.
+  login` profile; the CI eval box feeds it from the `ANTHROPIC_API_KEY`
+  repository secret. `judge.backend: openai` remains selectable (an
+  OpenAI-compatible API on `EVAL_JUDGE_API_KEY`). The judge is a different model
+  from the CI candidate (`claude-opus-5-5` on Anthropic) and runs outside the
+  daemon, so it is an independent oracle on the same vendor. The judge scores
+  only prose; structural gates remain the hard safety/flow signal.
 - Each task runs **k trials**; results aggregate to strict **pass@1** (fraction of
   trials clearing the pass threshold), **pass^k** (reliability — all k pass),
   **mean success** (partial credit preserved, a *different* quantity from pass@1),
@@ -296,11 +297,11 @@ leaderboard row; the board re-ranks. The matrix of rankable configs comes from
 2. **Opik-enabled development daemon up**: safe/read-only behavioral runs and the
    response-quality capability suite default to `~/.fermix-dev` and Opik project
    `fermix-dev`. The production home `~/.fermix` is always rejected.
-3. **Judge credential for judged runs**: `judge.backend: anthropic` + `judge.model`
-   in the benchmark config; the SDK authenticates with `ANTHROPIC_API_KEY`, which
-   the `make` judged targets export from the daemon's configured Anthropic key
-   (keychain `fermix:ANTHROPIC_API_KEY`), else an `ant auth login` profile. The
-   judge model must differ from the candidate.
+3. **Judge credential for judged runs**: `judge.backend: anthropic` +
+   `judge.model` in the benchmark config; the judge's SDK authenticates with
+   `ANTHROPIC_API_KEY`, which the `make` judged targets export from the daemon's
+   configured Anthropic key (keychain `fermix:ANTHROPIC_API_KEY`), else an `ant
+   auth login` profile. The judge model must differ from the candidate.
 4. **uv installed** (`brew install uv`, or the Astral installer). The runner is a
    self-contained `uv run` script — its only dependency (PyYAML) is declared inline
    (PEP 723) and fetched/cached on first run. No venv to set up.
@@ -540,9 +541,9 @@ To manage the traces:
 
 - **See only eval traces:** filter CLI/judge threads by `thread_id contains e2e-`;
   operator turns stay on `telegram:*` and carry the exact run marker in input.
-- **Independent judge:** `--judge` calls the OpenAI API directly (no daemon or
-  Fermix agent turn), so it is a genuinely independent oracle. The judge model
-  must differ from the candidate (the harness refuses a match). Evidence is capped
+- **Independent judge:** `--judge` calls the Claude API directly (no daemon or
+  Fermix agent turn), on a model that must differ from the candidate (the harness
+  refuses a match), so it is an independent oracle. Evidence is capped
   at 64 KiB and the returned verdict is byte-bounded; a missing, unknown, or
   truncated completion becomes `INCOMPLETE` rather than a score.
 - **Purge one run:** `--purge-run 20260715T151102Z01234567` previews CLI, judge, and

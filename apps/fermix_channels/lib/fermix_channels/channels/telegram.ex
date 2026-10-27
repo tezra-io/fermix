@@ -1028,6 +1028,7 @@ defmodule FermixChannels.Channels.Telegram do
           |> maybe_put_media_group(msg["media_group_id"]),
         attachments: parse_attachments(msg)
       })
+      |> Message.mark_forwarded(forwarded?(msg))
 
     {:ok, [message]}
   end
@@ -1080,6 +1081,16 @@ defmodule FermixChannels.Channels.Telegram do
        do: [declare(document, Map.get(document, "mime_type"), :document)]
 
   defp parse_attachments(_msg), do: []
+
+  # A forwarded message and its attachments are someone else's, which the hint
+  # (the media) does not say: `Message.mark_forwarded/2` records it from this
+  # one reading, so a forwarded voice or video note is processed as the owner's
+  # would be but does not count as the owner's words.
+  # Bot API 7.0 marks a forwarded message with `forward_origin`; older payloads
+  # carry the `forward_*` fields it replaced.
+  @forward_keys ~w(forward_origin forward_from forward_from_chat forward_sender_name forward_date)
+
+  defp forwarded?(msg), do: Enum.any?(@forward_keys, &Map.has_key?(msg, &1))
 
   defp declare(%{"file_id" => file_id} = object, mime_type, hint) do
     %{

@@ -1,15 +1,17 @@
-# Per-trial jobs and reminders for a capability task (`checker.state`).
+# Per-trial jobs, reminders and open loops for a capability task (`checker.state`).
 #
 #   FERMIX_HOME=<eval home> mix run --no-start --no-compile benchmark/bin/seed_state.exs <spec.json>
 #
 # Restores the task's baseline in the disposable eval home's memory.db before a
-# trial: once no job run is in flight, removes every scheduled job and cancels
-# every active reminder, then creates the spec's jobs (with their past
-# runs) and reminders through the same registry and claim/settle calls the
-# daemon uses, so validation, schedule parsing and reminder planning are the
-# product's own. Run history is back-dated relative to now; reminders take
-# absolute local dates in the home's configured timezone. Prints one JSON
-# manifest line last: the created ids, job snapshots, the zone and local date.
+# trial: once no job run is in flight, removes every scheduled job, cancels
+# every active reminder and closes every live open loop, then creates the
+# spec's jobs (with their past runs) and reminders through the same registry
+# and claim/settle calls the daemon uses, so validation, schedule parsing and
+# reminder planning are the product's own. Run history is back-dated relative
+# to now; reminders take absolute local dates in the home's configured
+# timezone. Open loops are written through Memory.Repo already due (see
+# seed_open_loop!/3), with dates relative to now. Prints one JSON manifest line
+# last: the created ids, job snapshots, loops, the zone and local date.
 #
 # It runs in its own BEAM beside the eval daemon; SQLite (WAL, busy_timeout)
 # serialises the two writers. Every value a spec carries is invented.
@@ -18,6 +20,10 @@ defmodule SeedState do
   alias FermixCore.Jobs.Registry, as: Jobs
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Store, as: MemoryStore
+  alias FermixCore.OpenLoops.ActiveHours
+  alias FermixCore.OpenLoops.Defaults, as: OpenLoopDefaults
+  alias FermixCore.OpenLoops.Registry, as: OpenLoopRegistry
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Temporal.Registry, as: Temporal
 
@@ -35,10 +41,12 @@ defmodule SeedState do
     same_database!(home)
     {:ok, _} = Application.ensure_all_started(:exqlite)
     {:ok, _} = Repo.start_link([])
+    {:ok, _} = MemoryStore.start_link([])
     now = DateTime.utc_now()
     reset!(now, System.monotonic_time(:millisecond) + @reset_wait_ms)
     jobs = Map.new(Map.get(spec, "jobs", []), &seed_job!(&1, now, config))
     reminders = Enum.map(Map.get(spec, "reminders", []), &seed_reminder!(&1, now, config))
+    open_loops = seed_open_loops!(Map.get(spec, "open_loops", []), now, config)
     # `today` is the home's local date at seed time: what a checker grading "tomorrow"
     # counts from, so it needs no timezone database of its own.
     today = now |> DateTime.shift_zone!(config.zone) |> DateTime.to_date() |> Date.to_iso8601()
@@ -49,7 +57,8 @@ defmodule SeedState do
         zone: config.zone,
         today: today,
         jobs: jobs,
-        reminders: reminders
+        reminders: reminders,
+        open_loops: open_loops
       })
     )
   end
@@ -100,9 +109,9 @@ defmodule SeedState do
 
   # --- reset -------------------------------------------------------------------
 
-  # Delete every job and cancel every reminder, once nothing is running. Removal goes
-  # through Jobs.Registry so each job's memory source is marked removed, exactly as
-  # the remove_job tool leaves it.
+  # Delete every job, cancel every reminder and close every live open loop, once
+  # nothing is running. Removal goes through Jobs.Registry so each job's memory
+  # source is marked removed, exactly as the remove_job tool leaves it.
   defp reset!(now, deadline) do
     case clear(now) do
       :ok ->
@@ -127,8 +136,14 @@ defmodule SeedState do
 
     cond do
       unsettled != [] -> {:error, :run_in_flight}
-      true -> with :ok <- remove_jobs(jobs), do: cancel_active_events(now, @max_event_pages)
+      true -> remove_all(jobs, now)
     end
+  end
+
+  defp remove_all(jobs, now) do
+    with :ok <- remove_jobs(jobs),
+         :ok <- cancel_active_events(now, @max_event_pages),
+         do: close_open_loops(now)
   end
 
   defp remove_jobs(jobs) do
@@ -272,6 +287,186 @@ defmodule SeedState do
   defp reminder_instant(spec) do
     {Date.from_iso8601!(Map.fetch!(spec, "date")), Map.fetch!(spec, "time")}
   end
+
+  # --- open loops ----------------------------------------------------------------
+
+  # Each live loop closes as dropped, and its spent rung 2 budget (`last_rung2_at`)
+  # is cleared in the same settle. Closing alone would not reset the day: one rung 2
+  # check-in a day is counted across every loop of the owner, closed ones included
+  # (`Repo.open_loop_budget_spent_since/3`), so the first trial's check-in would turn
+  # every later trial that day into a budget skip. A loop the daemon ended between
+  # the listing and the settle is already where the reset wants it (`:not_live`).
+  defp close_open_loops(now) do
+    {:ok, live} = Repo.list_open_loops(%{owner_id: MemoryConfig.owner_id(), state: "live"})
+
+    Enum.reduce_while(live, :ok, fn loop, :ok ->
+      case Repo.settle_open_loop(loop.id, reset_changes(now), now: now) do
+        {:ok, _closed} -> {:cont, :ok}
+        {:error, :not_live} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp reset_changes(now) do
+    %{
+      state: "closed",
+      close_reason: "dropped",
+      closed_at: now,
+      next_touch_at: nil,
+      last_rung2_at: nil
+    }
+  end
+
+  defp seed_open_loops!([], _now, _config), do: []
+
+  defp seed_open_loops!(specs, now, config) do
+    budget_unspent!(now, config.zone)
+    Enum.map(specs, &seed_open_loop!(&1, now, config))
+  end
+
+  # The reset must leave the day's rung 2 budget unspent, or every trial would be a
+  # skip rather than a measurement: say so here instead of after a column of them.
+  defp budget_unspent!(now, zone) do
+    day_start = ActiveHours.day_start(now, zone)
+
+    case Repo.open_loop_budget_spent_since(MemoryConfig.owner_id(), day_start) do
+      {:ok, false} -> :ok
+      {:ok, true} -> raise "a closed open loop already spent today's rung 2 budget"
+    end
+  end
+
+  # Written through Memory.Repo, not OpenLoops.Registry: the Registry would schedule
+  # the loop days out, and the task needs one that is due now with its rung 1 window
+  # closed, which no management verb can arrange. The row is created with its touch
+  # a day ahead, so no due scan can act on it, then settled due in one more write.
+  # It is delivered to the home's own cli chat, whose adapter needs no credentials.
+  defp seed_open_loop!(spec, now, config) do
+    zone = config.zone
+    said_at = DateTime.add(now, -Map.fetch!(spec, "said_days_ago") * 86_400, :second)
+    matters_on = Date.add(local_date(now, zone), Map.fetch!(spec, "matters_in_days"))
+    matters_by_at = ActiveHours.local_instant(Date.add(matters_on, 1), ~T[00:00:00], zone)
+    class = horizon_class!(spec, said_at, matters_by_at, zone)
+    intention = Map.fetch!(spec, "intention")
+
+    attrs = %{
+      id: "loop_" <> Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false),
+      agent_id: MemoryConfig.agent_id(),
+      owner_id: MemoryConfig.owner_id(),
+      dedupe_key: dedupe_key!(intention),
+      intention: intention,
+      why_it_matters: Map.get(spec, "why_it_matters"),
+      matters_by_kind: "date",
+      matters_by_date: matters_on,
+      matters_by_time: nil,
+      matters_by_at: matters_by_at,
+      timezone: zone,
+      horizon_class: class,
+      said_at: said_at,
+      source_channel: "cli",
+      source_chat_id: "cli",
+      source_thread_scope: "root",
+      next_touch_at: DateTime.add(now, 86_400, :second),
+      delivery_platform: "cli",
+      delivery_destination: "cli",
+      delivery_thread_scope: "root",
+      created_at: said_at
+    }
+
+    changes = due_changes(spec, now, matters_by_at)
+    {:ok, {:created, created}} = Repo.create_open_loop(attrs)
+    {:ok, loop} = Repo.settle_open_loop(created.id, changes, now: now)
+    seed_memory_fact!(Map.get(spec, "memory_fact"))
+    open_loop_manifest(spec, loop, zone)
+  end
+
+  # A spec's class must be the one the dates give, so a fixture cannot claim a
+  # long loop whose dates make it medium.
+  defp horizon_class!(spec, said_at, matters_by_at, zone) do
+    stated = Map.fetch!(spec, "horizon_class")
+    derived = OpenLoopDefaults.horizon_class(said_at, matters_by_at, zone)
+
+    unless stated == derived do
+      raise "open loop #{spec["key"]}: horizon_class #{stated}, but its dates make it #{derived}"
+    end
+
+    stated
+  end
+
+  defp due_changes(spec, now, matters_by_at) do
+    due_ms = Map.fetch!(spec, "due_hours_ago") * 3_600_000
+
+    unless due_ms > OpenLoopDefaults.rung1_window_ms() do
+      raise "open loop #{spec["key"]}: due_hours_ago must exceed the rung 1 window"
+    end
+
+    next_touch_at = DateTime.add(now, -div(due_ms, 1000))
+    handback_phase!(spec, next_touch_at, matters_by_at)
+    touches = Map.fetch!(spec, "touches")
+
+    %{state: "due", touches: touches, next_touch_at: next_touch_at}
+    |> Map.merge(last_touch(spec, touches, now))
+  end
+
+  # A loop whose date has passed is at its hand-back only while its pending touch
+  # is after the date too; seeded before local midnight plus `due_hours_ago` it
+  # would read as a passed before-the-date slot, and the due scan would move it.
+  defp handback_phase!(spec, next_touch_at, matters_by_at) do
+    passed = Map.fetch!(spec, "matters_in_days") < 0
+
+    if passed and DateTime.compare(next_touch_at, matters_by_at) == :lt do
+      raise "open loop #{spec["key"]}: seed a hand-back at least due_hours_ago after local midnight"
+    end
+  end
+
+  # A previous message makes the last touch a rung 2 send; a touch without one was
+  # a rung 1 raise in conversation.
+  defp last_touch(spec, 0, _now) do
+    if Map.has_key?(spec, "last_message") or Map.has_key?(spec, "last_touch_days_ago") do
+      raise "open loop #{spec["key"]}: a previous touch needs touches above 0"
+    end
+
+    %{}
+  end
+
+  defp last_touch(spec, _touches, now) do
+    message = Map.get(spec, "last_message")
+    days_ago = Map.fetch!(spec, "last_touch_days_ago")
+
+    %{
+      last_touch_at: DateTime.add(now, -days_ago * 86_400, :second),
+      last_touch_rung: if(message, do: 2, else: 1),
+      last_message: message
+    }
+  end
+
+  defp seed_memory_fact!(nil), do: :ok
+
+  defp seed_memory_fact!(%{"key" => key, "value" => value}) do
+    {:ok, :durable} = MemoryStore.store({:owner, MemoryConfig.owner_id()}, key, value)
+    :ok
+  end
+
+  # The very key a captured loop gets, so a seeded loop is recognised the same way.
+  defp dedupe_key!(intention) do
+    {:ok, key} = OpenLoopRegistry.dedupe_key(intention)
+    key
+  end
+
+  defp open_loop_manifest(spec, loop, zone) do
+    %{
+      key: Map.fetch!(spec, "key"),
+      id: loop.id,
+      intention: loop.intention,
+      said_on: loop.said_at |> local_date(zone) |> Date.to_iso8601(),
+      matters_on: Date.to_iso8601(loop.matters_by_date),
+      touches: loop.touches,
+      last_message: loop.last_message
+    }
+  end
+
+  defp local_date(%DateTime{} = at, zone),
+    do: at |> DateTime.shift_zone!(zone) |> DateTime.to_date()
 end
 
 SeedState.main(System.argv())

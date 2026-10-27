@@ -273,6 +273,33 @@ defmodule FermixCore.Capabilities.Registry do
   def resolve_policy(nil, _policy), do: @guest_default_policy
 
   @doc """
+  The lower of two trusts: `:operator` only when both are, else `:guest`
+  (`nil` reads as `:guest`, as `resolve_policy/2` reads it). A run that hands
+  work on (a skill's or sub-agent's worker, a scheduled job) takes the lower of
+  its own trust and the one it hands to, so it can never raise it.
+  """
+  @spec lower_trust(trust(), trust()) :: :operator | :guest
+  def lower_trust(:operator, :operator), do: :operator
+  def lower_trust(_trust, _other), do: :guest
+
+  @doc """
+  The trust a tool call runs at: the lower of its person's `source_trust` and
+  the trust its loop resolved its surface at (`effective_trust`, which
+  `AgentLoop` stamps). A context no loop stamped runs at its `source_trust`;
+  one with no `source_trust` (a sub-agent worker strips it) at its loop's.
+  The one reading of a run's trust for the job tools, `Capabilities.Skill` and
+  `Tools.Subagents`.
+  """
+  @spec run_trust(map()) :: trust()
+  def run_trust(context) when is_map(context) do
+    case {Map.get(context, :source_trust), Map.fetch(context, :effective_trust)} do
+      {source_trust, :error} -> source_trust
+      {nil, {:ok, loop_trust}} -> loop_trust
+      {source_trust, {:ok, loop_trust}} -> lower_trust(source_trust, loop_trust)
+    end
+  end
+
+  @doc """
   Return the concrete policy-class list a `trust` is granted by default,
   before any explicit policy narrowing: `:operator` gets the full surface,
   `:guest`/`nil` get read-only.

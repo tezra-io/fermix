@@ -77,9 +77,9 @@ defmodule FermixCore.Realtime.RecentCallsTest do
     assert note =~ ~s(<untrusted_tool_result source="voice_call_gists">)
 
     assert note =~
-             "- 2026-10-03 14:05 UTC: Read the lease.\n" <>
-               "- 2026-10-02 18:40 UTC: Planned the trip.\n" <>
-               "- 2026-10-01 09:15 UTC: Booked the dentist."
+             "- Saturday, October 3, 2026 at 2:05 PM UTC: Read the lease.\n" <>
+               "- Friday, October 2, 2026 at 6:40 PM UTC: Planned the trip.\n" <>
+               "- Thursday, October 1, 2026 at 9:15 AM UTC: Booked the dentist."
 
     refute note =~ "Oldest call."
   end

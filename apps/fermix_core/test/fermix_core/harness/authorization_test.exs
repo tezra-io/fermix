@@ -76,7 +76,7 @@ defmodule FermixCore.Harness.AuthorizationTest do
       assert {:error, :unattended} = Authorization.authorize("codex_run", ctx)
     end
 
-    test "an operator subagent (depth > 0) is not attended" do
+    test "an operator subagent (depth > 0) is refused as the worker it is" do
       ctx = %{
         source_trust: :operator,
         subagent_depth: 1,
@@ -84,7 +84,15 @@ defmodule FermixCore.Harness.AuthorizationTest do
         conversation_key: @chat_key
       }
 
-      assert {:error, :unattended} = Authorization.authorize("codex_run", ctx)
+      assert {:error, :worker_context} = Authorization.authorize("codex_run", ctx)
+    end
+
+    # `Capabilities.Skill.invoke` keeps the parent's `:reply_fn` and
+    # `:source_trust` and raises only `skill_depth`, so a skill worker of an
+    # attended owner turn looks like that turn but for its depth.
+    test "a skill worker of an attended owner turn is refused :worker_context" do
+      ctx = Map.put(attended_operator(), :skill_depth, 1)
+      assert {:error, :worker_context} = Authorization.authorize("codex_run", ctx)
     end
   end
 
@@ -150,6 +158,11 @@ defmodule FermixCore.Harness.AuthorizationTest do
 
       assert {:error, :worker_context} = Authorization.authorize("codex_run", worker)
     end
+
+    test "a skill worker inside an allowlisted job cannot ride the scheduled gate" do
+      worker = Map.put(scheduled(AllowlistedRegistry), :skill_depth, 1)
+      assert {:error, :worker_context} = Authorization.authorize("codex_run", worker)
+    end
   end
 
   # The one definition of a scheduled context, shared with
@@ -167,6 +180,8 @@ defmodule FermixCore.Harness.AuthorizationTest do
                conversation_key: @scheduled_key,
                job_id: "job_x"
              })
+
+      refute Authorization.scheduled?(Map.put(scheduled(AllowlistedRegistry), :skill_depth, 1))
     end
   end
 

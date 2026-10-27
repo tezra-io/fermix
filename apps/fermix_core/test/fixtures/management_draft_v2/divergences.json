@@ -572,9 +572,21 @@
     },
     {
       "method": "settings.get",
+      "field": "channels.discord:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "channels.signal:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.signal:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -584,9 +596,21 @@
     },
     {
       "method": "settings.get",
+      "field": "channels.slack:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "channels.telegram:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.telegram:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -596,9 +620,21 @@
     },
     {
       "method": "settings.get",
+      "field": "channels.whatsapp:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "computer_history:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "computer_history:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -608,9 +644,21 @@
     },
     {
       "method": "settings.get",
+      "field": "computer_use:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "editors:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "editors:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -620,9 +668,21 @@
     },
     {
       "method": "settings.get",
+      "field": "generate_image:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "harness:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "harness:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -632,9 +692,21 @@
     },
     {
       "method": "settings.get",
+      "field": "meetings:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "memory:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "memory:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -644,9 +716,21 @@
     },
     {
       "method": "settings.get",
+      "field": "personalization:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "providers.anthropic:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.anthropic:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -656,9 +740,21 @@
     },
     {
       "method": "settings.get",
+      "field": "providers.mistral:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "providers.ollama:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.ollama:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -668,9 +764,21 @@
     },
     {
       "method": "settings.get",
+      "field": "providers.openai:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "providers.openai_codex:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.openai_codex:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -680,9 +788,21 @@
     },
     {
       "method": "settings.get",
+      "field": "providers.openrouter:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "providers.xai:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.xai:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -692,9 +812,21 @@
     },
     {
       "method": "settings.get",
+      "field": "realtime:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "routing:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "routing:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get",
@@ -704,15 +836,33 @@
     },
     {
       "method": "settings.get",
+      "field": "sandbox:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "transcription:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
     },
     {
       "method": "settings.get",
+      "field": "transcription:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
+    },
+    {
+      "method": "settings.get",
       "field": "web_search:rows[].advanced",
       "kind": "engine_only",
       "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "web_search:rows[].example",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: a sample value a surface shows in an empty text or list field in place of its own empty prompt (\"Not set\", \"New entry\"), so the field shows what goes in it. Never a default: nothing is saved from it and a client never sends it. Null on every row the draft draws; today only the fields of a stream cue source carry one. E5: show it as the empty field's placeholder; an absent key means null."
     },
     {
       "method": "settings.get:computer_use",
@@ -1643,6 +1793,624 @@
       "field": "params:name",
       "kind": "engine_only",
       "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.mandates.add",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.mandates.approve",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.mandates.choices",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.mandates.disable",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.mandates.enable",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.mandates.list",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.mandates.remove",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.mandates.update",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.proposals.decide",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.proposals.get",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.proposals.list",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.sources.add",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.sources.disable",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.sources.enable",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.sources.form",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.sources.get",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.sources.list",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.sources.remove",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.sources.token.new",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.sources.update",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.sources.url.get",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.status",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.watchers.get",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:cues.watchers.list",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. They join the catalog on every build, and every build has cues. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.mandates.add=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.mandates.approve=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.mandates.choices=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.mandates.disable=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.mandates.enable=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.mandates.list=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.mandates.remove=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.mandates.update=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.proposals.decide=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.proposals.get=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.proposals.list=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.sources.add=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.sources.disable=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.sources.enable=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.sources.form=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.sources.get=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.sources.list=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.sources.remove=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.sources.token.new=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.sources.update=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.sources.url.get=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.status=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.watchers.get=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:cues.watchers.list=2",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "x-extensions:x-cue-vocabulary",
+      "kind": "engine_only",
+      "why": "M60 app surface: the closed sets the cue rows draw on (source and watcher states, source and mandate action ids, proposal states and the surfaces an answer comes from), published beside the plugin and MCP vocabularies so a reader can enumerate them. The draft predates the rows."
+    },
+    {
+      "method": "cues.mandates.add",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.mandates.add",
+      "field": "params:values",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.mandates.approve",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.mandates.disable",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.mandates.enable",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.mandates.remove",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.mandates.update",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.mandates.update",
+      "field": "params:values",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.proposals.decide",
+      "field": "params:decision",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.proposals.decide",
+      "field": "params:proposal_id",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.proposals.get",
+      "field": "params:proposal_id",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.sources.add",
+      "field": "params:preset",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.sources.add",
+      "field": "params:ref",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.sources.add",
+      "field": "params:values",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.sources.disable",
+      "field": "params:ref",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.sources.enable",
+      "field": "params:ref",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.sources.form",
+      "field": "params:kind",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.sources.form",
+      "field": "params:preset",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.sources.get",
+      "field": "params:ref",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.sources.remove",
+      "field": "params:ref",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.sources.token.new",
+      "field": "params:ref",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.sources.update",
+      "field": "params:ref",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.sources.update",
+      "field": "params:values",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.sources.url.get",
+      "field": "params:ref",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "cues.watchers.get",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M60 app surface: the cue methods postdate the draft. A source is named by its ref and a mandate or a watcher by its name; an add or an update carries the form's values by row key, and a source's add its kind or preset; a proposal is answered by its id and a decision, with no token."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.mandates.add",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.mandates.approve",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.mandates.choices",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.mandates.disable",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.mandates.enable",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.mandates.list",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.mandates.remove",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.mandates.update",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.proposals.decide",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.proposals.get",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.proposals.list",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.sources.add",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.sources.disable",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.sources.enable",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.sources.form",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.sources.get",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.sources.list",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.sources.remove",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.sources.token.new",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.sources.update",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.sources.url.get",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.status",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.watchers.get",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.cues.watchers.list",
+      "kind": "engine_only",
+      "why": "The cue methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "settings.get:cues",
+      "field": "rows:cues_door_port",
+      "kind": "engine_only",
+      "why": "M60 app surface gives cues their own settings section, cues, published on every build: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:cues",
+      "field": "rows:cues_enabled",
+      "kind": "engine_only",
+      "why": "M60 app surface gives cues their own settings section, cues, published on every build: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:cues",
+      "field": "rows:cues_mandates_enabled",
+      "kind": "engine_only",
+      "why": "M60 app surface gives cues their own settings section, cues, published on every build: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:cues",
+      "field": "rows:filter_model",
+      "kind": "engine_only",
+      "why": "M60 app surface gives cues their own settings section, cues, published on every build: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:cues",
+      "field": "rows:filter_provider",
+      "kind": "engine_only",
+      "why": "M60 app surface gives cues their own settings section, cues, published on every build: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."
     }
   ]
 }

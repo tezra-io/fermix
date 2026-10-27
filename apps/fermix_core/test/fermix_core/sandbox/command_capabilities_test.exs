@@ -47,8 +47,13 @@ defmodule FermixCore.Sandbox.CommandCapabilitiesTest do
     assert capability.policy_class == :exec
     assert capability.metadata[:sandbox_command?]
 
+    # A turn the loop stamped as having read nothing from outside: on a host
+    # whose kernel does not hold commands, an unstamped one would wait for the
+    # owner (`Capabilities.AccessGate`).
+    context = %{sandbox_config: config, outside_sources: MapSet.new()}
+
     assert {:ok, %{success: true, output: "visible::hello"}} =
-             Capability.execute(capability, %{"prompt" => "hello"}, %{sandbox_config: config})
+             Capability.execute(capability, %{"prompt" => "hello"}, context)
   end
 
   # Only the codex and claude presets run outside the kernel sandbox for now; a

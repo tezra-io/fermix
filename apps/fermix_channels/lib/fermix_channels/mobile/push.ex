@@ -10,6 +10,11 @@ defmodule FermixChannels.Mobile.Push do
   An approval waiting for the owner is announced to an away phone with no
   content at all: the encrypted preview is null, as for an oversized one, and
   the alert is a fixed string.
+
+  Only an iPhone is pushed. A phone paired before pairing recorded a platform
+  was an iPhone, the only phone there was, and is pushed through APNs too. Any
+  other phone, an Android one, is refused by name with a typed reason in the
+  log and never sent through APNs: Fermix has no push service for it.
   """
 
   require Logger
@@ -33,7 +38,10 @@ defmodule FermixChannels.Mobile.Push do
   @zero_key <<0::256>>
 
   @type delivery_status ::
-          %{status: :disabled | :no_registered_devices | :sent, sent: non_neg_integer()}
+          %{
+            status: :disabled | :no_registered_devices | :unconfigured_platform | :sent,
+            sent: non_neg_integer()
+          }
           | %{status: :suppressed, reason: :connected | :read, sent: 0}
 
   @doc "Maximum APNs JSON payload size accepted by the v1 contract."
@@ -191,12 +199,41 @@ defmodule FermixChannels.Mobile.Push do
     do: {:ok, %{status: :no_registered_devices, sent: 0}}
 
   defp send_registered(devices, config, profile_id, preview_text, opts) do
+    case apns_devices(devices) do
+      [] -> {:ok, %{status: :unconfigured_platform, sent: 0}}
+      iphones -> send_apns(iphones, config, profile_id, preview_text, opts)
+    end
+  end
+
+  defp send_apns(devices, config, profile_id, preview_text, opts) do
     with {:ok, gateway_private} <- load_gateway_private(opts),
          {:ok, deliveries} <-
            build_deliveries(devices, gateway_private, profile_id, preview_text, config, opts) do
       dispatch(deliveries, config, opts)
     end
   end
+
+  # APNs reaches an iPhone alone; every other phone is refused by name, its
+  # typed reason in the log, and never sent through APNs.
+  defp apns_devices(devices) do
+    {iphones, refused} = Enum.split_with(devices, &(&1.platform in [nil, "ios"]))
+    Enum.each(refused, &log_refusal/1)
+    iphones
+  end
+
+  defp log_refusal(%Device{device_id: device_id, platform: platform}) do
+    {reason, sentence} = refusal(platform)
+
+    Logger.warning(
+      "mobile push refused #{device_id} #{inspect(reason)}: #{sentence}; nothing was sent"
+    )
+  end
+
+  defp refusal("android"),
+    do: {{:no_push_service, :android}, "Fermix has no push service for Android phones"}
+
+  defp refusal(platform),
+    do: {{:no_push_service, :unknown_platform}, "its platform #{inspect(platform)} has no push"}
 
   defp build_deliveries(devices, gateway_private, profile_id, preview_text, config, opts) do
     Enum.reduce_while(devices, {:ok, []}, fn device, {:ok, deliveries} ->

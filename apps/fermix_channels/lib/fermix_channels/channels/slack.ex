@@ -116,6 +116,7 @@ defmodule FermixChannels.Channels.Slack do
     body =
       %{channel: channel_id, text: chunk}
       |> maybe_put_thread_ts(opts)
+      |> maybe_disable_unfurls(opts)
 
     Req.new(url: "#{@api_base}/chat.postMessage", method: :post, json: body)
     |> Req.Request.put_header("authorization", "Bearer #{token}")
@@ -429,6 +430,15 @@ defmodule FermixChannels.Channels.Slack do
     case Keyword.get(opts, :thread_ts) do
       nil -> body
       thread_ts -> Map.put(body, :thread_ts, thread_ts)
+    end
+  end
+
+  # `link_previews: false` (a cue run's message, M60 §9.5): Slack unfurls no
+  # link and no media the text names.
+  defp maybe_disable_unfurls(body, opts) do
+    case Keyword.get(opts, :link_previews) do
+      false -> Map.merge(body, %{unfurl_links: false, unfurl_media: false})
+      _default -> body
     end
   end
 

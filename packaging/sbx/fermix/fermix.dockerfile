@@ -50,6 +50,16 @@ LABEL com.docker.sandboxes.flavor="fermix"
 LABEL com.docker.sandboxes.base="${BASE_IMAGE}"
 
 USER agent
+# The fermix binary unpacks its runtime into the user's home on its first run,
+# with no lock: a second fermix started meanwhile, such as a session's
+# `fermix status` beside the boot hook's setup, reads half-written files and
+# crashes. Unpacked here, no sandbox start unpacks it. The run also writes the
+# web secret_key_base into a new Fermix home, which every sandbox of a public
+# image would share, so the home goes, and rmdir fails the build on anything
+# else it leaves.
+RUN fermix version >/dev/null && \
+    rm "$HOME/.fermix/secret_key_base" && rmdir "$HOME/.fermix"
+
 # sbx runs this per session: headless it follows the daemon log, and the kit's
 # `lifecycle@1` interactive tail (--shell) opens a login shell instead.
 ENTRYPOINT ["/usr/lib/fermix/sandbox/fermix-sandbox-session"]

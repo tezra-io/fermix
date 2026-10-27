@@ -5,6 +5,10 @@ defmodule FermixCore.Prompt.CurrentDateTest do
 
   alias FermixCore.Prompt.CurrentDate
 
+  # 20:17 on Saturday in New York is already Sunday in UTC: the evening window
+  # where a UTC "today" and an owner-zone "said on" disagree by a day.
+  @evening_utc ~U[2026-10-25 00:17:00Z]
+
   setup do
     previous = Application.get_env(:fermix_core, :personalization)
 
@@ -18,33 +22,52 @@ defmodule FermixCore.Prompt.CurrentDateTest do
     :ok
   end
 
-  test "note carries the current UTC date with the weekday and no clock time" do
+  test "note states the owner's local date, not the UTC date, in the evening window" do
     Application.put_env(:fermix_core, :personalization, timezone: "America/New_York")
 
-    note = CurrentDate.note()
-    now = DateTime.utc_now()
+    note = CurrentDate.note(@evening_utc)
 
-    assert note =~ "Current date:"
-    assert note =~ "UTC"
-    assert note =~ Integer.to_string(now.year)
-    assert note =~ Calendar.strftime(now, "%A")
+    assert note =~ "Current date: Saturday, October 24, 2026"
+    assert note =~ "(America/New_York, UTC-04:00)"
+    refute note =~ "Sunday"
+    refute note =~ "(UTC)"
+  end
+
+  test "note says every date and time shown is in the owner's zone" do
+    Application.put_env(:fermix_core, :personalization, timezone: "America/New_York")
+
+    assert CurrentDate.note(@evening_utc) =~
+             "Every date and time Fermix shows you is in this zone"
+  end
+
+  test "note carries no clock time" do
+    Application.put_env(:fermix_core, :personalization, timezone: "America/New_York")
+
     # Date-only on purpose: the note sits ahead of history in every request,
     # so a minute-level stamp would bust provider prompt caches every turn.
-    refute note =~ ~r/\d{1,2}:\d{2}/
+    # The zone's UTC offset is a label, not a time of day.
+    for note <- [CurrentDate.note(@evening_utc), CurrentDate.note()] do
+      refute note
+             |> String.replace(~r/UTC[+-]\d{2}:\d{2}/, "")
+             |> String.match?(~r/\d{1,2}:\d{2}/)
+    end
   end
 
-  test "note appends the configured timezone label" do
-    Application.put_env(:fermix_core, :personalization, timezone: "America/New_York")
-
-    assert CurrentDate.note() =~ "The user's timezone is America/New_York"
-  end
-
-  test "note omits the timezone clause when none is configured" do
+  test "with no zone configured the note states the UTC date and says why" do
     Application.put_env(:fermix_core, :personalization, [])
 
-    note = CurrentDate.note()
+    note = CurrentDate.note(@evening_utc)
 
-    assert note =~ "Current date:"
-    refute note =~ "timezone is"
+    assert note =~ "Current date: Sunday, October 25, 2026 (UTC)"
+    assert note =~ "No time zone is configured"
+  end
+
+  test "with an unknown zone configured the note states the UTC date and names the zone" do
+    Application.put_env(:fermix_core, :personalization, timezone: "Mars/Olympus_Mons")
+
+    note = CurrentDate.note(@evening_utc)
+
+    assert note =~ "Current date: Sunday, October 25, 2026 (UTC)"
+    assert note =~ "Mars/Olympus_Mons"
   end
 end

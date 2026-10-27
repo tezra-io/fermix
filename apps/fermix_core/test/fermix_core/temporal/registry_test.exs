@@ -894,7 +894,9 @@ defmodule FermixCore.Temporal.RegistryTest do
       assert previous["title"] == "Dentist appointment"
       assert previous["local_date"] == "2026-08-16"
       assert previous["local_time"] == "15:00:00"
-      assert previous["occurrence_at"] == "2026-08-16T19:00:00.000000Z"
+      # No zone is configured in this async file's application env, so the
+      # owner's clock states the instant in UTC.
+      assert previous["occurrence_at"] == "2026-08-16T19:00:00Z"
 
       # Untouched fields say nothing: an unchanged value is not a "was".
       refute Map.has_key?(previous, "kind")
@@ -1933,7 +1935,7 @@ defmodule FermixCore.Temporal.RegistryTest do
       assert view["title"] == "Submit the report"
       assert view["kind"] == "explicit_reminder"
       assert view["timezone"] == @tz
-      assert view["scheduled_for"] == "2026-08-16T13:00:00.000000Z"
+      assert view["scheduled_for"] == "2026-08-16T13:00:00Z"
       assert view["scheduled_for_local"] == "2026-08-16T09:00:00.000000-04:00"
       assert view["zone_abbr"] == "EDT"
       assert view["delivery"]["platform"] == "telegram"

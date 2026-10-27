@@ -11,7 +11,8 @@
   (`push_attempted_seq`);
 - the `DeviceRegistry` and each device's socket, which carries the phone's
   `ack`;
-- the push platform (FCM or APNs), which holds what it accepted;
+- the push platform, the service a phone is pushed through, which holds what
+  it accepted;
 - each phone's app: it takes rows off its socket, announces them, and handles
   a push;
 - the owner, who opens, leaves and navigates the app, and may read the reply
@@ -46,7 +47,7 @@ shows up as a broken `ChatAccounted` instead.
 
 | Switch | When `TRUE` |
 |---|---|
-| `SocketsCanFreeze` | The OS suspends an app with no clean close. The daemon keeps its socket registered until the 150 s idle timeout (`Session.idle_timeout_ms`, `session.ex:136`), which the WebSocket (`router.ex:53-60`) and the iroh bridge connection (`bridge_connection.ex:199-206`) both apply. |
+| `SocketsCanFreeze` | The OS suspends an app with no clean close. The daemon keeps its socket registered until the 150 s idle timeout (`Session.idle_timeout_ms`, `session.ex:139`), which the WebSocket (`router.ex:53-60`) and the iroh bridge connection (`bridge_connection.ex:199-206`) both apply. |
 | `DispatchCanFail` | A dispatcher call returns a transient error. |
 | `AnswerCanBeLost` | The platform accepted a push and the daemon saw a timeout instead. |
 | `DaemonCanCrash` | The daemon dies with push tasks in flight, and boots again. |
@@ -57,11 +58,11 @@ one check):
 
 | Switch | The design | Switched off |
 |---|---|---|
-| `DecidesOnEvidence` | D20: the decision reads the read frontier and each device's acked cursor. | **Today's code:** one registered socket of the profile suppresses the push for every device (`push.ex:164`, `:407-417`). |
+| `DecidesOnEvidence` | D20: the decision reads the read frontier and each device's acked cursor. | **Today's code:** one registered socket of the profile suppresses the push for every device (`push.ex:172`, `:444-454`). |
 | `AcksAfterAnnounce` | The app acks a row once it has announced it: shown it on screen, or posted its notification. | The design's first draft: the app acks as soon as the row is persisted (PUSH-2). |
 | `LocalNotify` | The app posts the notification itself for a row that arrives while its chat is off screen. | The row is only listed. |
 | `NotifiedSet` | D22: the app announces an id once, whichever path brought it. | Every arrival alerts. |
-| `RetriesTransient` | D21: a transient dispatcher error is retried. | **Today's code:** one attempt, its failure logged (`channels/mobile.ex:601-608`). |
+| `RetriesTransient` | D21: a transient dispatcher error is retried. | **Today's code:** one attempt, its failure logged (`notify_timeline_row`, `channels/mobile.ex:575-582`). |
 | `AttemptCap` | D21: at most three attempts per device. | The retry has no bound. |
 | `BootCheck` | D21: a boot step reads `push_attempted_seq` and decides once for the newest unread row above it. | **Today's code:** nothing runs at boot. |
 
@@ -107,16 +108,15 @@ timeout and a running app's own work (its reconnect loop, taking and
 announcing rows, its `ack` and its `read_state`). Nothing is assumed of the
 writer, the owner, the OS, the push platform or the faults.
 
-"Held by the push platform" is where the daemon's duty ends. Whether FCM
-delivers a push it accepted is outside Fermix (M51 §15.1 item 8 measures it).
+"Held by the push platform" is where the daemon's duty ends. Whether the push
+service delivers a push it accepted is outside Fermix.
 
 **Witnesses:**
 - 16: a phone alerts for a reply the owner has already read. The decision ran
   before the read, and the phone had no socket to learn of it. The optional
   clearing push of M51 §11.7 is the design's answer.
 - 17: a push is on its way to a phone that has already told its owner of that
-  reply. The notified set hides it, but it still spends FCM priority
-  (onboarding gotcha 10).
+  reply. The notified set hides it, but the push is still sent.
 - 18: the decision marks a device for a push while its socket is registered,
   because the socket's `ack` has not reached the row. This is the case D20
   exists for.
@@ -165,6 +165,52 @@ none of the three. What it changed around them:
   modelled"); presence is wrong for them for the same reason as for a reply.
 
 Today's app-side rules are the iOS app's and are not pinned here.
+
+Re-read on 2026-10-17 against M60 (cues and watchers, not yet committed on
+`release/0.17.0`), which staled the `mobile.ex` pin: `delivered_effects`
+(`channels/mobile.ex:496-501`) skips the link-preview fetch when a send
+passes `link_previews: false` (a cue run's message, M60 §9.5,
+`schedule_previews`, `:503-506`). The push launch beside it is unchanged, and
+no push rule reads a preview, so nothing the spec models changed. Re-read
+again on 2026-10-23 for the commit of M60 (on dev `b0246d74`): that is the
+only change to the pinned functions, and the comments' `mobile.ex` numbers
+(13 lines low past `build_turn_result` after the move onto dev) now point at
+the committed file.
+
+Re-read on 2026-10-24 for Android push through FCM (M51 §10, on dev
+`a8c399b4`), which staled the `push.ex` and `session.ex` pins and moved the
+`mobile.ex` numbers. Each registered device is now pushed through its own
+platform's service (APNs or FCM), which is the abstract push platform the
+spec already has; an approval's push carries its id and expiry; and a phone's
+`push_unregister` clears its token, so the phone is no longer registered. The
+decision is unchanged (any socket of the profile suppresses the push, then the
+read frontier, then one attempt per row, nothing at boot), so nothing the
+spec models changed; the comments' line numbers now point at the new file.
+
+Re-read on 2026-10-25 for the removal of direct FCM push (`dc3025a0`),
+which staled the `push.ex` pin and moved the `mobile.ex` numbers. Fermix
+pushes through APNs alone: an iPhone, or a phone paired before pairing
+recorded a platform, is pushed as before, and an Android phone is refused by
+name with a typed reason in the log before any attempt, never sent through
+APNs. An approval's push carries no id or expiry again. The spec does not
+model a device's platform: its devices are the phones a push service reaches.
+Since `dbf03a86`, push settings that do not resolve start the channel
+without the dispatcher instead of refusing its boot, which is push turned off
+and also outside the spec. The decision is unchanged (any socket of the
+profile suppresses the push, then the read frontier, then one attempt per row,
+nothing at boot), so nothing the spec models changed; the comments' line
+numbers now point at the new file.
+
+Re-read on 2026-10-25 for `push_register`'s return to the shape engine 0.16.0
+shipped, `{apns_token, environment}` (M82 D16), which staled the `session.ex`
+pin. `dispatch_event` stores any phone's `apns_token` once its environment
+matches the configured APNs one, as 0.16.0 did, and no longer checks the
+phone's platform; Push still refuses an Android phone by name before any
+attempt. The spec models neither registration nor a phone's platform: a
+device is registered throughout, and its `platform` is the push service. The
+`ack` clause, `terminate` and `idle_timeout_ms` are unchanged, so nothing the
+spec models changed; the comments' `session.ex` numbers, which had drifted
+since `e6042f1f`, now point at the committed file.
 
 ## What the spec changed in the design
 

@@ -4,15 +4,16 @@ defmodule FermixChannels.Mobile.Unfurl do
   names, which `FermixChannels.LinkPreviews` chooses.
 
   No client ever fetches page or thumbnail URLs. Every target and redirect is
-  resolved and pinned through `FermixCore.Net.Guard`; Host and TLS SNI retain
-  the original hostname. Resolution is bounded to four links, as many as a row
-  keeps, five redirects, and a one-MiB body per response. A preview keeps the
-  link it was read for (`link`) beside the address its page answered from
-  after redirects (`url`), so a client pairs it with the link as written.
+  resolved, checked by `FermixCore.Net.Guard` and pinned to the checked address
+  (`FermixCore.Net.PinnedUrl`); Host and TLS SNI retain the original hostname.
+  Resolution is bounded to four links, as many as a row keeps, five redirects,
+  and a one-MiB body per response. A preview keeps the link it was read for
+  (`link`) beside the address its page answered from after redirects (`url`),
+  so a client pairs it with the link as written.
   """
 
   alias FermixCore.Net.Egress
-  alias FermixCore.Net.Guard
+  alias FermixCore.Net.PinnedUrl
   alias FermixCore.Net.TimeoutPolicy
 
   @max_links 4
@@ -212,51 +213,32 @@ defmodule FermixChannels.Mobile.Unfurl do
     end
   end
 
-  defp pin(url, opts) do
-    case Guard.resolve_and_validate(url, resolver: Keyword.get(opts, :resolver)) do
-      :ok -> {:ok, %{url: url, original_url: url, original_host: URI.parse(url).host}}
-      {:ok, ip} -> {:ok, pinned_url(url, ip)}
-      {:error, reason} -> {:error, reason}
+  defp pin(url, opts), do: PinnedUrl.pin(url, resolver: Keyword.get(opts, :resolver))
+
+  # An injected `:request` is handed what `PinnedUrl.request/3` would send.
+  # Through a proxy the tunnel is opened to the pinned address, never the name.
+  defp request(pinned, opts) do
+    options = request_options(opts)
+
+    case Keyword.get(opts, :request) do
+      nil -> PinnedUrl.request(pinned, options, Egress.active())
+      request -> request.(pinned, PinnedUrl.request_options(pinned, options))
     end
   end
 
-  defp pinned_url(url, ip) do
-    host = URI.parse(url).host
-    pinned = %{URI.parse(url) | host: ip_string(ip)} |> URI.to_string()
-    %{url: pinned, original_url: url, original_host: host}
-  end
-
-  defp request(pinned, opts) do
-    request = Keyword.get(opts, :request, &default_request/2)
-    request.(pinned, request_options(pinned, opts))
-  end
-
-  # Through a proxy the tunnel is opened to the pinned address, never the name.
-  defp default_request(pinned, options) do
-    [method: :get, url: pinned.url]
-    |> Keyword.merge(options)
-    |> Req.new()
-    |> Egress.attach(:direct)
-    |> Req.request()
-  end
-
-  defp request_options(pinned, opts) do
+  defp request_options(opts) do
     base = [
-      redirect: false,
+      method: :get,
       retry: false,
       receive_timeout: TimeoutPolicy.receive_timeout_for(:unfurl),
-      connect_options: connect_options(pinned.original_host),
-      headers: [{"host", pinned.original_host}, {"user-agent", user_agent()}]
+      connect_options: [timeout: 3_000],
+      headers: [{"user-agent", user_agent()}]
     ]
 
     base
     |> Keyword.merge(Keyword.get(opts, :req_options, []))
     |> Keyword.put(:decode_body, false)
     |> Keyword.put(:into, capped_collector(@max_body_bytes))
-  end
-
-  defp connect_options(host) do
-    [timeout: 3_000, transport_opts: [server_name_indication: String.to_charlist(host)]]
   end
 
   defp capped_collector(max) do
@@ -334,11 +316,6 @@ defmodule FermixChannels.Mobile.Unfurl do
     do: scrub_utf8(rest, acc <> <<codepoint::utf8>>)
 
   defp scrub_utf8(<<_byte, rest::binary>>, acc), do: scrub_utf8(rest, acc <> "�")
-
-  defp ip_string({_a, _b, _c, _d} = ip), do: ip |> :inet.ntoa() |> to_string()
-
-  defp ip_string({_a, _b, _c, _d, _e, _f, _g, _h} = ip),
-    do: "[" <> (ip |> :inet.ntoa() |> to_string()) <> "]"
 
   defp user_agent do
     "fermix/#{Application.spec(:fermix_core, :vsn) || "0.1.0"}"

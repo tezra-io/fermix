@@ -12,6 +12,7 @@ defmodule FermixCore.Management.Router do
   alias FermixCore.Management.Auth
   alias FermixCore.Management.Capabilities
   alias FermixCore.Management.ComputerUse
+  alias FermixCore.Management.Cues
   alias FermixCore.Management.Detect
   alias FermixCore.Management.Diagnostics
   alias FermixCore.Management.Doctor
@@ -38,7 +39,8 @@ defmodule FermixCore.Management.Router do
     settings.sections settings.reload job.list plugins.list meetings.signin.start
     computer_use.grant.start computer_use.permissions.get mobile.status mobile.pair.start
     mobile.devices.list browser.install.start imessage.permissions.get imessage.policy.confirm
-    mcp.servers.list mcp.servers.import.scan
+    mcp.servers.list mcp.servers.import.scan cues.status cues.sources.list cues.watchers.list
+    cues.mandates.list cues.mandates.choices
   )
   @lease_params ~w(lease_id)
   @doctor_session_params ~w(session_id)
@@ -70,6 +72,17 @@ defmodule FermixCore.Management.Router do
   @mcp_draft_params ~w(text)
   @mcp_import_params ~w(servers)
   @mcp_tool_params ~w(name tool enabled)
+  @cue_ref_params ~w(ref)
+  @cue_form_params ~w(kind preset verify)
+  @cue_add_params ~w(ref kind preset values)
+  @cue_update_params ~w(ref values)
+  @cue_name_params ~w(name)
+  @cue_mandate_params ~w(name values)
+  @cue_proposal_params ~w(proposal_id)
+  @cue_list_params ~w(state)
+  @cue_decide_params ~w(proposal_id decision)
+  @cue_proposal_states %{"waiting" => :waiting, "recent" => :recent}
+  @cue_decisions %{"confirm" => :confirm, "deny" => :deny}
   # A published name, an opaque workspace id and a display label are all bounded
   # strings; the widest of them is the workspace id's own 256-byte bound.
   @max_text_bytes 256
@@ -231,6 +244,75 @@ defmodule FermixCore.Management.Router do
 
   defp route_known("mcp.servers.check.start", params, opts),
     do: mcp_by_name(&McpServers.check_start/2, params, opts)
+
+  defp route_known("cues." <> _rest = method, params, opts), do: route_cues(method, params, opts)
+
+  defp route_cues("cues.status", %{}, opts), do: operation_result(Cues.status(cues_opts(opts)))
+
+  defp route_cues("cues.sources.list", %{}, opts),
+    do: operation_result(Cues.sources_list(cues_opts(opts)))
+
+  defp route_cues("cues.sources.get", params, opts),
+    do: cue_by_ref(&Cues.sources_get/2, params, opts)
+
+  defp route_cues("cues.sources.form", params, opts), do: cue_form(params, opts)
+  defp route_cues("cues.sources.add", params, opts), do: cue_add(params, opts)
+  defp route_cues("cues.sources.update", params, opts), do: cue_update(params, opts)
+
+  defp route_cues("cues.sources.remove", params, opts),
+    do: cue_by_ref(&Cues.sources_remove/2, params, opts)
+
+  defp route_cues("cues.sources.enable", params, opts),
+    do: cue_by_ref(&Cues.sources_switch(&1, true, &2), params, opts)
+
+  defp route_cues("cues.sources.disable", params, opts),
+    do: cue_by_ref(&Cues.sources_switch(&1, false, &2), params, opts)
+
+  defp route_cues("cues.sources.token.new", params, opts),
+    do: cue_by_ref(&Cues.sources_token_new/2, params, opts)
+
+  defp route_cues("cues.sources.url.get", params, opts),
+    do: cue_by_ref(&Cues.sources_url_get/2, params, opts)
+
+  defp route_cues("cues.watchers.list", %{}, opts),
+    do: operation_result(Cues.watchers_list(cues_opts(opts)))
+
+  defp route_cues("cues.watchers.get", params, opts),
+    do: cue_by_name(&Cues.watchers_get/2, params, opts)
+
+  defp route_cues("cues.mandates.list", %{}, opts),
+    do: operation_result(Cues.mandates_list(cues_opts(opts)))
+
+  defp route_cues("cues.mandates.choices", %{}, opts),
+    do: operation_result(Cues.mandates_choices(cues_opts(opts)))
+
+  defp route_cues("cues.mandates.add", params, opts),
+    do: cue_mandate(&Cues.mandates_add/3, params, opts)
+
+  defp route_cues("cues.mandates.update", params, opts),
+    do: cue_mandate(&Cues.mandates_update/3, params, opts)
+
+  defp route_cues("cues.mandates.remove", params, opts),
+    do: cue_by_name(&Cues.mandates_remove/2, params, opts)
+
+  defp route_cues("cues.mandates.enable", params, opts),
+    do: cue_by_name(&Cues.mandates_switch(&1, true, &2), params, opts)
+
+  defp route_cues("cues.mandates.disable", params, opts),
+    do: cue_by_name(&Cues.mandates_switch(&1, false, &2), params, opts)
+
+  defp route_cues("cues.mandates.approve", params, opts),
+    do: cue_by_name(&Cues.mandates_approve/2, params, opts)
+
+  defp route_cues("cues.proposals.list", params, opts), do: cue_proposals(params, opts)
+
+  defp route_cues("cues.proposals.get", params, opts) do
+    with {:ok, id} <- fetch_string(params, "proposal_id", @cue_proposal_params) do
+      operation_result(Cues.proposals_get(id, cues_opts(opts)))
+    end
+  end
+
+  defp route_cues("cues.proposals.decide", params, opts), do: cue_decide(params, opts)
 
   defp setup_detect(params, opts) do
     with :ok <- reject_unknown_params(params, @detect_params),
@@ -488,6 +570,92 @@ defmodule FermixCore.Management.Router do
     end
   end
 
+  # Every source verb but add, update and the form takes one ref and nothing
+  # else, so the parameter check is written once.
+  defp cue_by_ref(verb, params, opts) when is_function(verb, 2) do
+    with {:ok, ref} <- fetch_string(params, "ref", @cue_ref_params) do
+      operation_result(verb.(ref, cues_opts(opts)))
+    end
+  end
+
+  defp cue_by_name(verb, params, opts) when is_function(verb, 2) do
+    with {:ok, name} <- fetch_string(params, "name", @cue_name_params) do
+      operation_result(verb.(name, cues_opts(opts)))
+    end
+  end
+
+  # The three choices are each optional; one that is present is a name.
+  defp cue_form(params, opts) do
+    with :ok <- reject_unknown_params(params, @cue_form_params),
+         {:ok, kind} <- fetch_optional_text(params, "kind"),
+         {:ok, preset} <- fetch_optional_text(params, "preset"),
+         {:ok, verify} <- fetch_optional_text(params, "verify") do
+      operation_result(Cues.sources_form(kind, preset, verify, cues_opts(opts)))
+    end
+  end
+
+  # A value's type is the form's to refuse, under the field it names; this
+  # closes the set and checks only that `values` is an object.
+  defp cue_add(params, opts) do
+    with :ok <- reject_unknown_params(params, @cue_add_params),
+         {:ok, ref} <- fetch_text(params, "ref", 1),
+         {:ok, kind} <- fetch_optional_text(params, "kind"),
+         {:ok, preset} <- fetch_optional_text(params, "preset"),
+         :ok <- kind_or_preset(kind, preset),
+         {:ok, values} <- fetch_values(params) do
+      operation_result(Cues.sources_add(ref, kind, preset, values, cues_opts(opts)))
+    end
+  end
+
+  defp cue_update(params, opts) do
+    with :ok <- reject_unknown_params(params, @cue_update_params),
+         {:ok, ref} <- fetch_text(params, "ref", 1),
+         {:ok, values} <- fetch_values(params) do
+      operation_result(Cues.sources_update(ref, values, cues_opts(opts)))
+    end
+  end
+
+  defp cue_mandate(verb, params, opts) when is_function(verb, 3) do
+    with :ok <- reject_unknown_params(params, @cue_mandate_params),
+         {:ok, name} <- fetch_text(params, "name", 1),
+         {:ok, values} <- fetch_values(params) do
+      operation_result(verb.(name, values, cues_opts(opts)))
+    end
+  end
+
+  defp cue_proposals(params, opts) do
+    with :ok <- reject_unknown_params(params, @cue_list_params),
+         {:ok, state} <- fetch_choice(params, "state", @cue_proposal_states, "waiting") do
+      operation_result(Cues.proposals_list(state, cues_opts(opts)))
+    end
+  end
+
+  defp cue_decide(params, opts) do
+    with :ok <- reject_unknown_params(params, @cue_decide_params),
+         {:ok, id} <- fetch_text(params, "proposal_id", 1),
+         {:ok, decision} <- fetch_choice(params, "decision", @cue_decisions, nil) do
+      operation_result(Cues.proposals_decide(id, decision, cues_opts(opts)))
+    end
+  end
+
+  defp kind_or_preset(nil, nil), do: invalid_params("kind")
+  defp kind_or_preset(_kind, _preset), do: :ok
+
+  defp fetch_optional_text(params, field) do
+    case Map.get(params, field) do
+      nil -> {:ok, nil}
+      _present -> fetch_text(params, field, 1)
+    end
+  end
+
+  # A closed word, or its default where the field is absent and one exists.
+  defp fetch_choice(params, field, choices, default) do
+    case Map.get(params, field, default) do
+      value when is_map_key(choices, value) -> {:ok, Map.fetch!(choices, value)}
+      _invalid -> invalid_params(field)
+    end
+  end
+
   defp fetch_boolean(params, field) do
     case Map.get(params, field) do
       value when is_boolean(value) -> {:ok, value}
@@ -512,6 +680,7 @@ defmodule FermixCore.Management.Router do
   defp operation_opts(opts), do: Keyword.get(opts, :operation_opts, [])
   defp jobs_opts(opts), do: opts |> operation_opts() |> Keyword.get(:jobs, [])
   defp mobile_opts(opts), do: opts |> operation_opts() |> Keyword.get(:mobile, [])
+  defp cues_opts(opts), do: opts |> operation_opts() |> Keyword.get(:cues, [])
 
   defp settings_sections(opts) do
     inventory =
@@ -582,6 +751,9 @@ defmodule FermixCore.Management.Router do
   defp operation_result({:error, {:unavailable, capability}}),
     do: {:error, :unavailable, %{"capability" => capability}}
 
+  defp operation_result({:error, {:unavailable, capability, sentence}}),
+    do: {:error, :unavailable, %{"capability" => capability, "sentence" => sentence}}
+
   defp operation_result({:error, {:invalid_params, field, sentence}}),
     do: {:error, :invalid_params, %{"field" => field, "sentence" => sentence}}
 
@@ -629,7 +801,8 @@ defmodule FermixCore.Management.Router do
     end
   end
 
-  defp settings_opts(opts), do: Keyword.take(opts, [:snapshot, :supervised, :macos?])
+  defp settings_opts(opts),
+    do: Keyword.take(opts, [:snapshot, :supervised, :macos?])
 
   defp invalid_params(field), do: {:error, :invalid_params, %{"field" => field}}
 

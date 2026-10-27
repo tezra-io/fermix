@@ -5,7 +5,8 @@ defmodule FermixCore.Tools.Subagents do
   The model supplies only the work (task goals) and orchestration knobs
   (concurrency, timeout, result shape) — never `policy`, `allowed_tools`, or
   `trust`. Fermix computes the worker surface from the parent turn's
-  `:source_trust`: a worker runs at the parent's trust with the parent's policy
+  `:source_trust`: a worker runs at the parent's trust (lowered to the trust the
+  parent's loop ran at, when that is lower) with the parent's policy
   classes **minus `:read_write` and `:gui_control`**, so it can read, browse the
   web, use MCP/plugin tools, run skills, and run sandbox-bounded `shell`, but cannot
   directly mutate local/Fermix state and can never drive the desktop/GUI (computer
@@ -29,6 +30,7 @@ defmodule FermixCore.Tools.Subagents do
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Providers.RoutingOverrides
+  alias FermixCore.Temporal.Access
   alias FermixCore.Tools.Support
 
   # Regular-mode caps (fallback defaults; the live values come from the
@@ -54,6 +56,9 @@ defmodule FermixCore.Tools.Subagents do
     # The owner's grant-approval closure never reaches a delegated worker: a
     # subagent must not be able to widen the sandbox on the owner's behalf.
     :approval_fn,
+    # Nor the owner-inbox one: a worker must not be able to put a prompt in the
+    # owner's own chat (M60 §11, a cue run's worker most of all).
+    :owner_inbox_approval_fn,
     :channel,
     :source_channel,
     :source_trust,
@@ -157,18 +162,19 @@ defmodule FermixCore.Tools.Subagents do
   end
 
   @doc """
-  Advertise `subagents` only where a call could execute (§12): a top-level turn
-  (`subagent_depth == 0`) whose context carries a delegating trust. This mirrors
-  the two execution guards (`check_recursion`, `fetch_source_trust`) so the tool
-  — schema and model-slug hint and all — is dropped from every AgentLoop-driven
-  context where a call is guaranteed to fail (workers, any trust-less context),
-  instead of burning a model iteration on a doomed call. The guards stay; this
-  is advertisement, not enforcement. Discovered via `function_exported?` at
-  `AgentLoop.build_state`.
+  Advertise `subagents` only on a top-level turn (not a delegated worker,
+  `Temporal.Access.worker?/1`) whose context carries a delegating trust. This
+  mirrors the two execution guards (`check_recursion`, `fetch_source_trust`) so
+  the tool — schema and model-slug hint and all — is dropped from every
+  AgentLoop-driven context where a call would fail (workers, any trust-less
+  context), instead of burning a model iteration on a doomed call; a skill
+  worker is neither offered it nor runs it. The guards stay; this is
+  advertisement, not enforcement.
+  Discovered via `function_exported?` at `AgentLoop.build_state`.
   """
   @spec advertise?(map()) :: boolean()
   def advertise?(context) when is_map(context) do
-    Map.get(context, :subagent_depth, 0) == 0 and
+    not Access.worker?(context) and
       Map.get(context, :source_trust) in [:operator, :guest]
   end
 
@@ -227,14 +233,13 @@ defmodule FermixCore.Tools.Subagents do
 
   defp do_execute(args, context) do
     with {:ok, depth} <- check_recursion(context),
-         {:ok, source_trust} <- fetch_source_trust(context),
+         {:ok, _source_trust} <- fetch_source_trust(context),
          {:ok, tasks} <- validate_tasks(args, context),
          {:ok, max_concurrency} <- validate_concurrency(args, context),
          {:ok, timeout_seconds} <- validate_timeout(args),
          {:ok, override} <- resolve_override(args) do
       run_fanout(
         tasks,
-        source_trust,
         max_concurrency,
         timeout_seconds,
         depth,
@@ -266,7 +271,6 @@ defmodule FermixCore.Tools.Subagents do
 
   defp run_fanout(
          tasks,
-         source_trust,
          max_concurrency,
          timeout_seconds,
          depth,
@@ -274,7 +278,11 @@ defmodule FermixCore.Tools.Subagents do
          context,
          override
        ) do
-    policy = worker_policy(source_trust, context)
+    # The parent's run trust: its `source_trust`, lowered to the trust its loop
+    # ran at when that is lower (a plugin skill's worker), so it hands workers
+    # no more.
+    trust = CapabilityRegistry.run_trust(context)
+    policy = worker_policy(trust, context)
     allowed_tools = worker_allowed_tools(policy, context)
     worker_context = sanitize_context(context, depth)
     spawn_opts = base_spawn_opts(context)
@@ -289,7 +297,7 @@ defmodule FermixCore.Tools.Subagents do
         tasks,
         fn task ->
           run_one(task, %{
-            source_trust: source_trust,
+            source_trust: trust,
             policy: policy,
             allowed_tools: allowed_tools,
             timeout_seconds: timeout_seconds,
@@ -383,9 +391,9 @@ defmodule FermixCore.Tools.Subagents do
   # still answer from the model alone. An interactive main-agent parent's
   # effective surface is its full trust default, so the intersection is the
   # identity — today's worker surface, unchanged.
-  defp worker_policy(source_trust, context) do
+  defp worker_policy(trust, context) do
     baseline =
-      CapabilityRegistry.default_policy_classes(source_trust) -- [:read_write, :gui_control]
+      CapabilityRegistry.default_policy_classes(trust) -- [:read_write, :gui_control]
 
     intersect_policy(baseline, Map.get(context, :effective_policy))
   end
@@ -544,11 +552,15 @@ defmodule FermixCore.Tools.Subagents do
     }
   end
 
+  # The one delegated-worker rule (`Temporal.Access.worker?/1`): a `subagents`
+  # worker or a skill's, which keeps its parent turn's trust and is not
+  # offered this tool either.
   defp check_recursion(context) do
-    case Map.get(context, :subagent_depth, 0) do
-      0 -> {:ok, 0}
-      depth -> {:error, "subagents cannot be called from within a subagent (depth #{depth})."}
-    end
+    if Access.worker?(context),
+      do:
+        {:error,
+         "subagents cannot be called from within a subagent or any other delegated worker."},
+      else: {:ok, 0}
   end
 
   defp fetch_source_trust(context) do

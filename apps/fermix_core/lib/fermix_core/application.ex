@@ -26,6 +26,8 @@ defmodule FermixCore.Application do
   alias FermixCore.ComputerHistory.Supervisor, as: ComputerHistorySupervisor
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.Supervisor, as: ComputerUseSupervisor
+  alias FermixCore.Cues
+  alias FermixCore.Cues.Supervisor, as: CuesSupervisor
   alias FermixCore.Harness.Supervisor, as: HarnessSupervisor
   alias FermixCore.HostFacts
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
@@ -43,6 +45,9 @@ defmodule FermixCore.Application do
   alias FermixCore.Native.Provider, as: NativeProvider
   alias FermixCore.NativeHost.Supervisor, as: NativeHostSupervisor
   alias FermixCore.Net.Egress
+  alias FermixCore.OpenLoops.CheckInSupervisor, as: OpenLoopsCheckInSupervisor
+  alias FermixCore.OpenLoops.Config, as: OpenLoopsConfig
+  alias FermixCore.OpenLoops.Scheduler, as: OpenLoopsScheduler
   alias FermixCore.Plugins.CapabilitySeeder, as: PluginCapabilitySeeder
   alias FermixCore.Plugins.Dist.Installer, as: PluginInstaller
   alias FermixCore.Prompt.BootstrapRename
@@ -261,6 +266,12 @@ defmodule FermixCore.Application do
         {TemporalScheduler, temporal_scheduler_opts()},
         TemporalDeliverySupervisor,
         TemporalFollowupSupervisor,
+        # Open-loop check-ins (M78 §04 stage 3), the temporal shape: the
+        # scheduler starts BEFORE its check-in supervisor, so under
+        # `:rest_for_one` a scheduler crash tears down every in-flight check-in
+        # (and every later child) before it restarts, and its boot sweep then
+        # returns the claims those runs held. Absent unless enabled.
+        maybe_open_loops_children(),
         # Coding-harness local rail (design §6.4 / spec §5): one `:rest_for_one`
         # supervisor (Manager → RunSupervisor → DeliveryWorker) so a Manager crash
         # tears down and re-reconciles live runs instead of orphaning them. Always
@@ -273,7 +284,13 @@ defmodule FermixCore.Application do
         maybe_realtime_supervisor(),
         maybe_computer_use_supervisor(),
         maybe_computer_history_supervisor(),
-        maybe_skill_curation_scheduler()
+        maybe_skill_curation_scheduler(),
+        # Cue tree (M60 §5.3) LAST, and that order is load-bearing, as it is
+        # for the temporal rail above: under `:rest_for_one` a crash of
+        # `JobScheduler` or anything before it restarts the cue subsystem,
+        # which re-reads its rows, and a crash inside it restarts nothing
+        # outside it. Present only where `Cues.enabled?/0` admits it.
+        maybe_cues_supervisor()
       ]
       |> List.flatten()
 
@@ -483,6 +500,39 @@ defmodule FermixCore.Application do
     if compiled_env != :test and SkillCurationConfig.enabled?() and
          FermixCore.Memory.Config.enabled?() do
       [SkillCurationScheduler]
+    else
+      []
+    end
+  end
+
+  # Open loops (MILESTONE_78 §10): child-ABSENT when gated out, the
+  # skill-curation precedent. The compile-time env gate (so `mix test` never
+  # starts the rail and `config/test.exs` never needs to reach its timers), the
+  # config switch, default off, and memory persistence (every loop lives in
+  # memory.db; with memory off the scheduler would only log a failed scan every
+  # five seconds). Read once at boot: a switch flipped afterwards takes effect
+  # at the next start. Public (@doc false) so tests can pin the gating; the env
+  # param exists only for the non-test branches.
+  @doc false
+  def maybe_open_loops_children(compiled_env \\ @compiled_env) do
+    if compiled_env != :test and OpenLoopsConfig.enabled?() and
+         FermixCore.Memory.Config.enabled?() do
+      [{OpenLoopsScheduler, [timer_enabled: true]}, OpenLoopsCheckInSupervisor]
+    else
+      []
+    end
+  end
+
+  # Cue subsystem (M60 §5.3, §15): child-ABSENT when gated out, like the
+  # skill-curation clock above. `Cues.enabled?/0` holds the
+  # `[fermix_core.cues] enabled` switch and memory being on; `mix test` never
+  # starts the tree on top of that, so no suite reaches the door's port or the
+  # sweeps. Public (@doc false) for the gating test; production callers use the
+  # baked default.
+  @doc false
+  def maybe_cues_supervisor(compiled_env \\ @compiled_env) do
+    if compiled_env != :test and Cues.enabled?() do
+      [CuesSupervisor]
     else
       []
     end

@@ -489,6 +489,19 @@ defmodule FermixCore.Tools.SubagentsTest do
       assert error =~ "within a subagent"
     end
 
+    # A skill worker keeps its parent turn's trust, so only its depth tells it
+    # apart: it is a delegated worker, and may not fan out, as it is not offered.
+    test "recursion: a skill worker", ctx do
+      tasks = [%{"id" => "t1", "task" => "a"}]
+
+      for depth <- [%{skill_depth: 1}, %{skill_depth: nil}] do
+        assert {:ok, %{success: false, error: error}} =
+                 Subagents.execute(%{"tasks" => tasks}, context(ctx, depth))
+
+        assert error =~ "delegated worker"
+      end
+    end
+
     test "max_concurrency out of range", ctx do
       tasks = [%{"id" => "t1", "task" => "a"}]
 
@@ -718,6 +731,28 @@ defmodule FermixCore.Tools.SubagentsTest do
       assert worker_caps == []
     end
 
+    # The parent loop ran at guest under an operator person (a guest skill's
+    # worker): its workers run at guest too, so no owner-only tool and only the
+    # guest classes.
+    test "a parent loop below its person's trust hands workers that lower trust", ctx do
+      register_surface(ctx)
+
+      :ok =
+        CapabilityRegistry.register(ctx.registry, %{
+          stub_cap("diary", :read_only)
+          | owner_only?: true
+        })
+
+      tasks = [%{"id" => "t1", "task" => "inspect"}]
+
+      _ =
+        Subagents.execute(%{"tasks" => tasks}, context(ctx, %{effective_trust: :guest}))
+        |> decode_output()
+
+      [worker_caps | _] = MockAdapter.captured_capabilities()
+      assert worker_caps == ["reader"]
+    end
+
     test "a full-surface parent is an identity intersection (interactive parent guard)", ctx do
       register_surface(ctx)
       tasks = [%{"id" => "t1", "task" => "inspect"}]
@@ -748,6 +783,8 @@ defmodule FermixCore.Tools.SubagentsTest do
       parent =
         context(ctx, %{
           reply_fn: fn _ -> :ok end,
+          approval_fn: fn _ -> {:ok, "TOKEN", :new} end,
+          owner_inbox_approval_fn: fn _ -> {:ok, "TOKEN", :new} end,
           channel: :telegram,
           source_channel: :telegram,
           sandbox_config: %{mode: :open},
@@ -766,10 +803,12 @@ defmodule FermixCore.Tools.SubagentsTest do
       assert is_map(worker_ctx)
       assert worker_ctx[:subagent_depth] == 1
 
-      # every stripped key is gone — channel-reply targeting, sandbox relaxation,
-      # parent trust, and all memory handles
+      # every stripped key is gone — channel-reply targeting, both owner-approval
+      # closures, sandbox relaxation, parent trust, and all memory handles
       for key <- [
             :reply_fn,
+            :approval_fn,
+            :owner_inbox_approval_fn,
             :channel,
             :source_channel,
             :source_trust,
@@ -786,6 +825,17 @@ defmodule FermixCore.Tools.SubagentsTest do
       # scope, so a worker's browser shares the parent conversation's one Chrome
       # instead of spawning its own per-worker instance.
       assert worker_ctx[:conversation_key] == "conv-1"
+    end
+  end
+
+  # Advertisement follows the one delegated-worker rule
+  # (`Temporal.Access.worker?/1`): a skill worker keeps its parent turn's trust,
+  # so only its depth tells it apart.
+  describe "advertise?/1" do
+    test "offered on a top-level turn, not inside a subagents or skill worker" do
+      assert Subagents.advertise?(%{source_trust: :operator})
+      refute Subagents.advertise?(%{source_trust: :operator, subagent_depth: 1})
+      refute Subagents.advertise?(%{source_trust: :operator, skill_depth: 1})
     end
   end
 end

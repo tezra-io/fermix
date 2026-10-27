@@ -45,6 +45,7 @@ defmodule FermixCore.Temporal.Followup do
 
   alias FermixCore.AgentLoop
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Clock
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
   alias FermixCore.Prompt.CurrentDate
@@ -330,6 +331,8 @@ defmodule FermixCore.Temporal.Followup do
 
   defp occasion(state) do
     """
+    #{Clock.now_line(DateTime.utc_now())}
+
     The reminder Fermix has just delivered to the owner, verbatim:
 
     #{state.delivered_text}

@@ -342,6 +342,36 @@ defmodule FermixCore.Realtime.LivePromptTest do
       assert LivePrompt.capability_lines([capability("odd_tool", :system)]) ==
                "- System: odd_tool"
     end
+
+    # M78 §10: the open-loop surface follows the wire on every prompt that names
+    # tools, the voice frontend's included. Off, a call hears of no open-loop
+    # tool; on, it still never hears of `open_loop_respond`, which only a check-in
+    # run can call. One predicate, `RuntimeSections.open_loop_unlisted?/1`, decides
+    # both catalogs, so the two cannot drift.
+    test "names open-loop tools only while the feature is on, and never the outcome tool" do
+      previous = Application.get_env(:fermix_core, :open_loops)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:fermix_core, :open_loops)
+          value -> Application.put_env(:fermix_core, :open_loops, value)
+        end
+      end)
+
+      capabilities = [
+        capability("open_loop_note", :scheduling),
+        capability("open_loop_respond", :scheduling),
+        capability("read_file", :file)
+      ]
+
+      Application.put_env(:fermix_core, :open_loops, enabled: false)
+      assert LivePrompt.capability_lines(capabilities) == "- File & Code: read_file"
+
+      Application.put_env(:fermix_core, :open_loops, enabled: true)
+      lines = LivePrompt.capability_lines(capabilities)
+      assert lines =~ "open_loop_note"
+      refute lines =~ "open_loop_respond"
+    end
   end
 
   describe "backend_addendum/1" do

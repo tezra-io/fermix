@@ -225,11 +225,14 @@ defmodule FermixChannels.DispatcherTest do
     assert_receive {:agent_message, agent_message}
     assert is_function(agent_message.approval_fn, 1)
 
+    provenance = %{outside_sources: MapSet.new([{:tool, "web_fetch"}])}
+
     assert {:ok, token, :new} =
              agent_message.approval_fn.(%{
                path: "/Users/me/repos/acme",
                reason: "the task needs it",
-               diff: "allowed_roots + /Users/me/repos/acme"
+               diff: "allowed_roots + /Users/me/repos/acme",
+               provenance: provenance
              })
 
     assert {:ok, record} = Confirmations.take(token)
@@ -238,12 +241,27 @@ defmodule FermixChannels.DispatcherTest do
     assert record.thread_ts == 77
     assert record.user_id == "test-sender"
     assert record.mutation == {:add_allowed_root, "/Users/me/repos/acme"}
-    # A remote chat origin captures the verbatim request for auto-resume.
+    # A remote chat origin captures the verbatim request for auto-resume, with
+    # what the parked turn had read, so the re-run is the same request.
     assert record.resume == %{
              content: "please read /Users/me/repos/acme/README",
              reply_target: "123",
-             sender: "alice"
+             sender: "alice",
+             provenance: provenance
            }
+
+    # A request that hands no provenance is never resumed as clean.
+    assert {:ok, other, :new} =
+             agent_message.approval_fn.(%{
+               path: "/Users/me/repos/other",
+               reason: "the task needs it",
+               diff: "allowed_roots + /Users/me/repos/other"
+             })
+
+    assert {:ok, %{resume: %{provenance: %{outside_sources: unrecorded}}}} =
+             Confirmations.take(other)
+
+    assert MapSet.size(unrecorded) == 1
   end
 
   test "attaches no approval_fn on a guest agent message" do

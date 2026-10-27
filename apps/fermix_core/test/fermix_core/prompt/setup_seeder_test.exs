@@ -181,6 +181,17 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       assert_received {:telemetry, [:fermix, :prompt, :seed_user_memories], %{count: 4},
                        %{agent_id: ^agent_id, owner_id: ^owner_id}}
     end
+
+    test "with no time zone given, USER.md says it is not set rather than claiming UTC", %{
+      agent_id: agent_id,
+      repo: repo
+    } do
+      assert {:ok, _results} = SetupSeeder.seed(%{user_name: "Wren"}, repo: repo)
+
+      user_content = File.read!(PromptFiles.user_path(agent_id))
+      assert user_content =~ "timezone: not set"
+      refute user_content =~ "timezone: UTC"
+    end
   end
 
   describe "seed/2 idempotency" do

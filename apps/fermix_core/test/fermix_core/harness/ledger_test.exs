@@ -74,6 +74,39 @@ defmodule FermixCore.Harness.LedgerTest do
     assert {:ok, %{continuation_depth: 2}} = Ledger.get(continued.id, server: repo)
   end
 
+  # A run started by a finished run's follow-up turn names that run, so the
+  # access gate lets each finished run continue as one run. The link lives in a
+  # table of its own, never a `harness_runs` column: an older engine reads
+  # those rows positionally, and must still read them after a rollback.
+  test "an admitted child names the run it continued, beside its row", %{repo: repo} do
+    assert {:ok, parent} = Ledger.admit(base_attrs(), server: repo)
+
+    attrs = continued(parent.id, "/repo-continued")
+    assert {:ok, child} = Ledger.admit(attrs, server: repo)
+
+    assert {:ok, [child_id]} = Ledger.children(parent.id, server: repo)
+    assert child_id == child.id
+    assert {:ok, []} = Ledger.children(child.id, server: repo)
+    refute Map.has_key?(child, :continued_from_run_id)
+  end
+
+  # The one-child check runs inside the admit, so two chained launches cannot
+  # both pass it. A run not flagged as the chain's next (a cloud or blocked
+  # row) is admitted whatever the parent already has.
+  test "a sole continuation is refused once its run has a child", %{repo: repo} do
+    assert {:ok, parent} = Ledger.admit(base_attrs(), server: repo)
+    assert {:ok, _done} = Ledger.terminalize(parent.id, "completed", %{}, server: repo)
+    assert {:ok, child} = Ledger.admit(continued(parent.id, "/repo-a"), server: repo)
+    assert {:ok, _done} = Ledger.terminalize(child.id, "completed", %{}, server: repo)
+
+    sole = Map.put(continued(parent.id, "/repo-b"), :sole_continuation, true)
+    assert {:error, {:already_continued, parent_id}} = Ledger.admit(sole, server: repo)
+    assert parent_id == parent.id
+    assert {:ok, [_only]} = Ledger.children(parent.id, server: repo)
+
+    assert {:ok, _other} = Ledger.admit(continued(parent.id, "/repo-c"), server: repo)
+  end
+
   test "admit keeps a caller-pinned id", %{repo: repo} do
     attrs = Map.put(base_attrs(), :id, "hr_deadbeef0001")
     assert {:ok, run} = Ledger.admit(attrs, server: repo)
@@ -422,5 +455,9 @@ defmodule FermixCore.Harness.LedgerTest do
       },
       overrides
     )
+  end
+
+  defp continued(parent_id, root) do
+    base_attrs(%{continued_from_run_id: parent_id, worktree_root: root, lock_roots: [root]})
   end
 end

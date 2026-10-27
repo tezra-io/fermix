@@ -44,13 +44,23 @@ defmodule FermixCore.Companion.Protocol do
   A reply's `text_done`, its `row` and its history message carry `blocks`
   when the reply has one (M72): records its text links, drawn beside it
   (`FermixCore.ReplyBlocks`). Additive and optional, so on every version.
+
+  Version 4 brings a mandate's proposals to the owner's Mac (M60 app surface
+  §3.7, D28): `proposal` carries the card (Fermix's record, its sentence and
+  the outside text apart, `Cues.ProposalView`), sent when a proposal is stored
+  and again after `server_hello` for each still waiting; `proposal_resolved`
+  says it left `waiting`; and the client's `proposal_answer` confirms or denies
+  it by id. They reach, and are taken from, only a connection the daemon
+  placed as the owner's (`FermixCore.SocketPeer`, `:independent`), and only on
+  version 4. The window is now {3, 4}, so a version 2 client is refused as too
+  old.
   """
 
   alias FermixCore.ReplyBlocks
 
   # Bumped in lockstep with any wire-shape change. The supported range is an
   # N/N-1 window derived from this single constant.
-  @protocol_version 3
+  @protocol_version 4
   @min_supported_version max(1, @protocol_version - 1)
 
   # The inbound line cap, the same as the Realtime socket's.
@@ -69,25 +79,40 @@ defmodule FermixCore.Companion.Protocol do
   @media_ref ~r/\A[0-9a-f]{64}\z/
   # A row holds at most this many link previews, as the timeline stores them.
   @max_link_previews 4
+  # A proposal's card and its end (version 4): the outside text each carries
+  # is bounded as `Cues.Proposals` bounds it.
+  @max_proposal_args_chars 3_500
+  @max_proposal_result_chars 2_000
+  @proposal_states ~w(waiting confirmed denied expired refused)
+  @proposal_end_states ~w(confirmed denied expired refused)
+  @proposal_result_statuses ~w(ok error unknown)
+  @proposal_surfaces ~w(telegram signal whatsapp imessage companion mobile management)
+  @proposal_card_strings ~w(proposal_id mandate tool created_at expires_at status_sentence summary)
+  @proposal_card_optional ~w(watcher source_ref received_at decided_at)
 
   @client_events ~w(
     client_hello msg command cancel history_pull history_search read_state media_fetch
-    media_release
+    media_release proposal_answer
   )
   @server_events ~w(
     server_hello accepted turn_started text_delta tool_event text_done turn_error turn_done row
     row_updated approval approval_resolved read_state history_page search_results media_path
-    media_missing error
+    media_missing proposal proposal_resolved error
   )
 
   # The events a version after 1 brought; every other one is version 1.
-  @client_event_versions %{"media_fetch" => 3, "media_release" => 3}
+  @client_event_versions %{"media_fetch" => 3, "media_release" => 3, "proposal_answer" => 4}
   @server_event_versions %{
     "turn_done" => 2,
     "row_updated" => 3,
     "media_path" => 3,
-    "media_missing" => 3
+    "media_missing" => 3,
+    "proposal" => 4,
+    "proposal_resolved" => 4
   }
+
+  # The events only the owner's connection is sent or may send (version 4).
+  @owner_server_events ~w(proposal proposal_resolved)
 
   # A row a Live call writes carries `metadata.call` (M56 §6): what happened
   # on the call, and which task it was about.
@@ -121,7 +146,8 @@ defmodule FermixCore.Companion.Protocol do
     "history_search" => ~w(profile_id query limit),
     "read_state" => ~w(profile_id read_up_to_seq),
     "media_fetch" => ~w(profile_id ref),
-    "media_release" => ~w(profile_id ref)
+    "media_release" => ~w(profile_id ref),
+    "proposal_answer" => ~w(client_msg_id profile_id proposal_id decision)
   }
 
   @server_required %{
@@ -142,6 +168,8 @@ defmodule FermixCore.Companion.Protocol do
     "search_results" => ~w(profile_id query hits),
     "media_path" => ~w(ref path kind mime size_bytes sha256),
     "media_missing" => ~w(ref),
+    "proposal" => ~w(profile_id proposal),
+    "proposal_resolved" => ~w(profile_id proposal_id state sentence),
     "error" => ~w(reason)
   }
 
@@ -184,6 +212,21 @@ defmodule FermixCore.Companion.Protocol do
       do: Map.get(@server_event_versions, type, 1),
       else: raise(ArgumentError, "unknown companion server event #{inspect(type)}")
   end
+
+  @doc """
+  The server events only a connection placed as the owner's is sent (version
+  4's proposals): a process the daemon started never holds a proposal.
+  """
+  @spec owner_server_events() :: [String.t()]
+  def owner_server_events, do: @owner_server_events
+
+  @doc "The longest `outside.args_text` of a proposal's card, in characters."
+  @spec max_proposal_args_chars() :: pos_integer()
+  def max_proposal_args_chars, do: @max_proposal_args_chars
+
+  @doc "The longest `result_text` of a `proposal_resolved`, in characters."
+  @spec max_proposal_result_chars() :: pos_integer()
+  def max_proposal_result_chars, do: @max_proposal_result_chars
 
   @doc "The client chat events whose payload the mobile wire shares verbatim."
   @spec shared_client_events() :: [String.t()]
@@ -422,6 +465,12 @@ defmodule FermixCore.Companion.Protocol do
     end
   end
 
+  defp validate_client("proposal_answer", payload) do
+    with :ok <- strings(payload, ~w(client_msg_id profile_id proposal_id)) do
+      enum(payload, "decision", ~w(confirm deny))
+    end
+  end
+
   # Version 2 (M56 §4.6): a cancel may name a task that outlived its call by
   # exactly its three ids, the ones its `task_running` row carries.
   defp optional_task_ref(%{"task_ref" => task_ref}) do
@@ -552,9 +601,81 @@ defmodule FermixCore.Companion.Protocol do
 
   defp validate_server("media_missing", payload), do: media_ref(payload, "ref")
 
+  defp validate_server("proposal", payload) do
+    with :ok <- nonempty(payload, "profile_id") do
+      if proposal_card?(payload["proposal"]),
+        do: :ok,
+        else: {:error, {:invalid_field, "proposal"}}
+    end
+  end
+
+  defp validate_server("proposal_resolved", payload) do
+    with :ok <- strings(payload, ~w(profile_id proposal_id sentence)),
+         :ok <- enum(payload, "state", @proposal_end_states),
+         :ok <- optional_enum(payload, "result_status", @proposal_result_statuses) do
+      optional_bounded(payload, "result_text", @max_proposal_result_chars)
+    end
+  end
+
   defp validate_server("error", payload) do
     with :ok <- nonempty(payload, "reason") do
       if Map.has_key?(payload, "ref"), do: media_ref(payload, "ref"), else: :ok
+    end
+  end
+
+  # The card, string keyed as it travels, with no null anywhere: an absent
+  # value is an absent key on this wire, nested as at the top.
+  defp proposal_card?(%{} = card) do
+    Enum.all?(@proposal_card_strings, &(nonempty(card, &1) == :ok)) and
+      card["state"] in @proposal_states and
+      proposal_task?(card["task"]) and
+      proposal_outside?(card["outside"]) and
+      Enum.all?(@proposal_card_optional, &(optional_nonempty(card, &1) == :ok)) and
+      optional_enum(card, "decided_from", @proposal_surfaces) == :ok and
+      optional_enum(card, "result_status", @proposal_result_statuses) == :ok and
+      not has_null?(card)
+  end
+
+  defp proposal_card?(_card), do: false
+
+  defp proposal_task?(%{} = task),
+    do: nonempty(task, "job_id") == :ok and optional_nonempty(task, "name") == :ok
+
+  defp proposal_task?(_task), do: false
+
+  defp proposal_outside?(%{"args_text" => args} = outside) when is_binary(args) do
+    String.length(args) <= @max_proposal_args_chars and
+      proposal_cue?(Map.get(outside, "cue", %{}))
+  end
+
+  defp proposal_outside?(_outside), do: false
+
+  defp proposal_cue?(%{} = cue),
+    do:
+      Enum.all?(cue, fn {key, value} ->
+        key in ~w(type subject text occurred_at) and is_binary(value)
+      end)
+
+  defp proposal_cue?(_cue), do: false
+
+  defp has_null?(%{} = map), do: Enum.any?(map, fn {_key, value} -> has_null?(value) end)
+  defp has_null?(nil), do: true
+  defp has_null?(_value), do: false
+
+  defp optional_enum(payload, field, values) do
+    if Map.has_key?(payload, field), do: enum(payload, field, values), else: :ok
+  end
+
+  defp optional_bounded(payload, field, max_length) do
+    case Map.fetch(payload, field) do
+      :error ->
+        :ok
+
+      {:ok, value} when is_binary(value) ->
+        if String.length(value) <= max_length, do: :ok, else: {:error, {:invalid_field, field}}
+
+      {:ok, _value} ->
+        {:error, {:invalid_field, field}}
     end
   end
 

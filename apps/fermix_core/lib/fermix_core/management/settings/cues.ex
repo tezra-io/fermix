@@ -1,0 +1,146 @@
+defmodule FermixCore.Management.Settings.Cues do
+  @moduledoc """
+  The `cues` section (M60 app surface §3.2): the cue switches, the door's
+  port and the default filter model. Its rows are the scalars; the sources,
+  watchers and mandates are the `cues.*` methods (`Management.Cues`), as the
+  phone channel has `channels.mobile` beside `mobile.*`.
+
+  Every write goes through
+  `Cues.Settings`, the setup page's own functions: the filter pair through
+  `save_filter_model/2` in one call (both, or "None" to clear both), the
+  switches through `save_switches/1`. `restart` is derived from
+  `Setup.RestartState`, which treats `routing.filter_*` and the mandates
+  switch as live and the cue tree's switch and port as boot-bound.
+
+  The filter rows come from `Cues.FilterChoices`, the setup page's own reader:
+  the empty value is the default, labelled with the main model it resolves to,
+  then only the providers that are set up, and the chosen provider's catalog
+  models as suggestions. A provider whose list is the account's own publishes
+  none, and the client asks `providers.models.list`. Each row keeps its
+  explanation in `info`, with no footer.
+  """
+
+  alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Cues.FilterChoices
+  alias FermixCore.Cues.Settings, as: CueSettings
+  alias FermixCore.Management.Settings.Row
+  alias FermixCore.Management.Settings.Source
+  alias FermixCore.Providers.Descriptor
+  alias FermixCore.Providers.ModelCatalog
+
+  @section %{id: "cues", pane: "cues", title: "Cues"}
+  @switch_answers [:enabled, :mandates_enabled, :door_port]
+  @filter_answers [:filter_provider, :filter_model]
+  @pair_sentence "Pick a provider and a model, or clear both."
+  @not_set_up "Set up this provider first."
+  @enabled_info "Starts the sources, the door, the filters and the tasks watchers wake. " <>
+                  "Applies after a restart."
+  @mandates_info "Off stops the next call of every mandate at once, even in a run already " <>
+                   "going. No restart needed."
+  @filter_info "Judges each item on its own, so a smaller, faster model works well and costs " <>
+                 "much less than your main model."
+  @door_info "The door listens on this Mac only. Applies after a restart."
+
+  @doc "The one section this module owns."
+  @spec sections() :: [%{id: String.t(), pane: String.t(), title: String.t()}]
+  def sections, do: [@section]
+
+  @doc "Whether this module owns the named section."
+  @spec owns?(String.t()) :: boolean()
+  def owns?(section) when is_binary(section), do: section == @section.id
+
+  @doc "The rows of the owned section."
+  @spec rows(String.t(), Source.snapshot()) :: [Row.t()]
+  def rows("cues", snapshot) when is_map(snapshot) do
+    cues = CuesConfig.normalize(Source.core(snapshot, :cues))
+    routing = Source.core(snapshot, :routing)
+    provider = Source.string(routing, :filter_provider)
+
+    [
+      Row.new("cues_enabled", :toggle, "Run cues",
+        info: @enabled_info,
+        value: CuesConfig.enabled?(cues),
+        restart: Row.restart?([:cues, :enabled])
+      ),
+      Row.new("cues_mandates_enabled", :toggle, "Let mandates act",
+        info: @mandates_info,
+        value: CuesConfig.mandates_enabled?(cues),
+        restart: Row.restart?([:cues, :mandates_enabled])
+      ),
+      Row.new("filter_provider", :choice, "Filter model",
+        info: @filter_info,
+        value: provider,
+        options: provider_options(snapshot, provider),
+        restart: Row.restart?([:routing, :filter_provider])
+      ),
+      Row.new("filter_model", :choice, "Model",
+        value: Source.string(routing, :filter_model),
+        options: Enum.map(FilterChoices.models(provider), &Row.option(&1.id, &1.label)),
+        suggestions: true,
+        restart: Row.restart?([:routing, :filter_model])
+      ),
+      Row.new("cues_door_port", :number, "Door port",
+        info: @door_info,
+        value: CuesConfig.door_port(cues),
+        min: 1_024,
+        max: 65_535,
+        step: 1,
+        format: :integer,
+        restart: Row.restart?([:cues, :door_port]),
+        advanced: true
+      )
+    ]
+  end
+
+  @doc """
+  Writes one `settings.apply` of the section: the filter pair first, through
+  `Cues.Settings.save_filter_model/2`, then the switches through
+  `save_switches/1`. Either filter key alone is refused before anything is
+  written. A refusal answers `{:invalid_value, sentence}`, which the settings
+  write names under the field that was sent.
+  """
+  @spec save(keyword()) :: {:ok, map()} | {:error, {:invalid_value, String.t()} | term()}
+  def save(answers) when is_list(answers) do
+    filter = Keyword.take(answers, @filter_answers)
+    switches = Keyword.take(answers, @switch_answers)
+
+    with :ok <- whole_pair(filter),
+         {:ok, _filter} <- save_filter(filter),
+         {:ok, _switches} <- save_switches(switches) do
+      {:ok, %{}}
+    end
+  end
+
+  defp whole_pair([]), do: :ok
+  defp whole_pair([_provider, _model]), do: :ok
+  defp whole_pair([_one]), do: {:error, {:invalid_value, @pair_sentence}}
+
+  defp save_filter([]), do: {:ok, :untouched}
+
+  defp save_filter(filter),
+    do: refused(CueSettings.save_filter_model(filter[:filter_provider], filter[:filter_model]))
+
+  defp save_switches([]), do: {:ok, :untouched}
+  defp save_switches(switches), do: switches |> CueSettings.save_switches() |> refused()
+
+  defp refused({:error, {:invalid, sentence}}), do: {:error, {:invalid_value, sentence}}
+  defp refused(result), do: result
+
+  # The main model first, then only the providers that are set up. A saved
+  # provider that is no longer set up stays, disabled with its hint, so the
+  # row's value is always one of its options.
+  defp provider_options(snapshot, saved) do
+    set_up = Enum.map(FilterChoices.providers(snapshot), &Row.option(&1.id, &1.label))
+    [Row.option("", FilterChoices.main_model_label(snapshot)) | set_up] ++ stale(saved, set_up)
+  end
+
+  defp stale(saved, set_up) do
+    provider = Enum.find(ModelCatalog.providers(), &(Atom.to_string(&1) == saved))
+
+    if provider && not Enum.any?(set_up, &(&1["value"] == saved)),
+      do: [
+        Row.option(saved, Descriptor.fetch!(provider).label, disabled: true, hint: @not_set_up)
+      ],
+      else: []
+  end
+end

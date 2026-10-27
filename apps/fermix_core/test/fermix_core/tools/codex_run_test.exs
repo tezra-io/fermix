@@ -232,6 +232,34 @@ defmodule FermixCore.Tools.CodexRunTest do
       assert {:ok, %{success: true}} = CodexRun.execute(run_args(ctx.cwd), context)
       assert_received {:start_run, request}
       assert request.continuation_depth == 2
+      assert request.continued_from_run_id == nil
+
+      # On a finished run's follow-up turn, the run it continues rides too, and
+      # a run the access gate dispatched as the chain's next asks the Manager to
+      # admit it only as that run's sole child.
+      followed = Map.put(context, :harness_run_id, "hr_parent00001")
+      assert {:ok, %{success: true}} = CodexRun.execute(run_args(ctx.cwd), followed)
+
+      assert_received {:start_run,
+                       %{continued_from_run_id: "hr_parent00001", sole_continuation: false}}
+
+      chained = Map.put(followed, :access_gate, "chained")
+      assert {:ok, %{success: true}} = CodexRun.execute(run_args(ctx.cwd), chained)
+      assert_received {:start_run, %{sole_continuation: true}}
+    end
+
+    test "a chained run whose finished run already continued is refused in a sentence", ctx do
+      manager = stub_manager(start_run_reply: {:error, {:already_continued, "hr_parent00001"}})
+
+      context =
+        ctx.cwd
+        |> attended_context(manager)
+        |> Map.merge(%{harness_continuation_depth: 1, harness_run_id: "hr_parent00001"})
+
+      assert {:ok, %{success: false, error: error}} =
+               CodexRun.execute(run_args(ctx.cwd), context)
+
+      assert error =~ "hr_parent00001 has already continued as another run"
     end
 
     test "an unknown vendor param fails loud before admission", ctx do

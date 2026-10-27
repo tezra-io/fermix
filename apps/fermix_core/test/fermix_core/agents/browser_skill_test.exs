@@ -40,5 +40,9 @@ defmodule FermixCore.Agents.BrowserGuidanceSkillTest do
     # `download` starts nothing: a click starts the file, `download` collects it.
     assert definition.system_prompt =~ "`download` starts nothing"
     assert definition.system_prompt =~ "click the file's link with `act` and then call `download`"
+
+    # A CAPTCHA is the model's own call, not a Fermix stop; the human gates stay.
+    refute definition.system_prompt =~ ~r/captcha/i
+    assert definition.system_prompt =~ "Stop and report for 2FA, payment confirmation"
   end
 end

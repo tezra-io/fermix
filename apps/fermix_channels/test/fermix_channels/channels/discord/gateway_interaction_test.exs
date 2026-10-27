@@ -9,6 +9,9 @@ defmodule FermixChannels.Channels.Discord.GatewayInteractionTest do
   """
   use ExUnit.Case, async: false
 
+  # A resume intent carries what its parked turn had read; these turns read nothing.
+  @clean %{outside_sources: MapSet.new()}
+
   alias FermixChannels.Channels.Discord.Gateway
   alias FermixChannels.Gateway.Commands.Sandbox, as: SandboxCommand
   alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
@@ -77,7 +80,12 @@ defmodule FermixChannels.Channels.Discord.GatewayInteractionTest do
 
     origin =
       grant_origin("111",
-        resume: %{content: "finish it", reply_target: @channel_id, sender: "alice"}
+        resume: %{
+          content: "finish it",
+          reply_target: @channel_id,
+          sender: "alice",
+          provenance: @clean
+        }
       )
 
     {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), origin)
@@ -110,7 +118,9 @@ defmodule FermixChannels.Channels.Discord.GatewayInteractionTest do
     stub_discord(test_pid)
 
     origin =
-      grant_origin("111", resume: %{content: "x", reply_target: @channel_id, sender: "alice"})
+      grant_origin("111",
+        resume: %{content: "x", reply_target: @channel_id, sender: "alice", provenance: @clean}
+      )
 
     {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), origin)
 

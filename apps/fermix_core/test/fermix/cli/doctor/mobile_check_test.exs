@@ -6,10 +6,17 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
 
   defmodule StandaloneBuildInfo do
     def app_engine?, do: false
+    def linux_package?, do: false
   end
 
   defmodule AppBuildInfo do
     def app_engine?, do: true
+    def linux_package?, do: false
+  end
+
+  defmodule PackageBuildInfo do
+    def app_engine?, do: false
+    def linux_package?, do: true
   end
 
   # A P-256 key with SHA-256 signatures, which any TLS 1.3 client accepts.
@@ -160,8 +167,6 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
       {%{"state" => "off"}, :ok, "reach from anywhere off"},
       {%{"state" => "dormant"}, :ok, "reach from anywhere waits for the first pairing"},
       {%{"state" => "starting"}, :ok, "reach from anywhere starting"},
-      {%{"state" => "helper_missing"}, :warn,
-       "reach from anywhere unavailable: this build carries no fermix-iroh helper"},
       {%{"state" => "ready", "connected" => false, "relay_error" => "connection refused"}, :warn,
        "reach from anywhere not connected to a relay (connection refused)"},
       {%{"state" => "ready", "connected" => false, "relay_error" => nil}, :warn,
@@ -195,6 +200,54 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
       assert result.detail =~ words
       assert result.detail =~ "1 paired device"
     end
+  end
+
+  # M62 stage 5: every release tree carries the helper, so a release without it
+  # is broken and Doctor names the install's own way back; a source checkout has
+  # none until its owner installs one.
+  test "a missing helper fails a release and names its way back", %{mobile_dir: mobile_dir} do
+    write_identity_files(mobile_dir)
+    Application.put_env(:fermix_channels, :mobile, enabled: true)
+
+    cases = [
+      {[build_info: AppBuildInfo, standalone?: fn -> false end],
+       "reach from anywhere unavailable: this release is missing its fermix-iroh helper; " <>
+         "reinstall Fermix.app"},
+      {[build_info: PackageBuildInfo, standalone?: fn -> true end],
+       "reach from anywhere unavailable: this release is missing its fermix-iroh helper; " <>
+         "reinstall the package with `sudo apt install --reinstall fermix` (Fedora and RHEL: " <>
+         "`sudo dnf reinstall fermix`; openSUSE: `sudo zypper install --force fermix`)"},
+      {[build_info: StandaloneBuildInfo, standalone?: fn -> true end],
+       "reach from anywhere unavailable: this release is missing its fermix-iroh helper; " <>
+         "reinstall it, with `brew reinstall fermix` for a Homebrew install"}
+    ]
+
+    for {build, words} <- cases do
+      result = helper_missing_result(mobile_dir, build)
+
+      assert result.status == :fail, "#{inspect(build)}: #{result.detail}"
+      assert result.detail =~ words
+      assert result.detail =~ "1 paired device"
+    end
+  end
+
+  test "a missing helper in a source checkout is a warning naming the task", %{
+    mobile_dir: mobile_dir
+  } do
+    write_identity_files(mobile_dir)
+    Application.put_env(:fermix_channels, :mobile, enabled: true)
+
+    result =
+      helper_missing_result(mobile_dir,
+        build_info: StandaloneBuildInfo,
+        standalone?: fn -> false end
+      )
+
+    assert result.status == :warn
+
+    assert result.detail =~
+             "reach from anywhere unavailable: this checkout has no fermix-iroh helper; " <>
+               "install it with `mix fermix.iroh_helper`, then restart the daemon"
   end
 
   test "enabled mobile requires one bounded TLS health candidate", %{mobile_dir: mobile_dir} do
@@ -540,6 +593,22 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
       {:ok, data} = :ssl.recv(socket, 0, 5_000)
       read_request(socket, received <> data)
     end
+  end
+
+  defp helper_missing_result(mobile_dir, build) do
+    client =
+      live_client(%{
+        "listener" => %{"status" => "ready", "candidates" => ["wss://lan:4031/ws"]},
+        "mdns" => "disabled",
+        "tailnet" => %{"detected" => false, "candidates" => []},
+        "apns" => %{"enabled" => false, "credentials" => "missing"},
+        "paired_devices" => 1,
+        "remote" => %{"state" => "helper_missing"}
+      })
+
+    Checks.mobile(
+      [mobile_dir: mobile_dir, client: client, health_probe: fn _url, _ms -> :ok end] ++ build
+    )
   end
 
   # The daemon's report for a channel that runs: the facts each case sets, plus

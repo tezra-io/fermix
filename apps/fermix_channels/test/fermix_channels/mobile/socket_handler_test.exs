@@ -145,6 +145,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         device_registry: :registry,
         noise: :noise,
         max_media_bytes: 12_345,
+        push_services: ["apns"],
         profile_name: "Orbit",
         wall_clock: fn -> ~U[2026-08-12 19:00:00Z] end,
         decrypt: fn :noise, "ciphertext" -> {:ok, "plaintext", :noise1} end,
@@ -160,6 +161,8 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
           assert payload["caps"]["max_media_bytes"] == 12_345
           # Every turn a request opens ends on this wire (mobile protocol 2).
           assert payload["caps"]["turn_done"] == true
+          # The phone offers notifications only when its platform's service is here.
+          assert payload["caps"]["push"] == ["apns"]
           assert payload["profiles"] == [%{"id" => "main", "name" => "Orbit"}]
           {:ok, "encoded"}
         end,
@@ -709,6 +712,108 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     assert {:ok, next} = SocketHandler.handle_in({"ciphertext", opcode: :binary}, state)
     assert_received :updated
     assert next.client_seq == 1
+  end
+
+  # M82 D16: push_register keeps the shape protocol 2 shipped with (engine
+  # 0.16.0), read here by the live codec rather than a stub.
+  test "an iPhone's push_register, as protocol 2 shipped it, is stored" do
+    test_pid = self()
+
+    frame =
+      encode_client_frame(
+        "push_register",
+        %{"apns_token" => "0123456789abcdef", "environment" => "production"},
+        1
+      )
+
+    {:ok, state} =
+      init_socket(%{
+        phase: :ready,
+        device_id: "iphone",
+        noise: :noise,
+        push_environment: :production,
+        authenticated_device: %{device_id: "iphone", platform: "ios"},
+        authorize_socket: fn _registry, "iphone", _pid -> :ok end,
+        decrypt: fn :noise, ^frame -> {:ok, frame, :noise} end,
+        update_device: fn :store, "iphone", %{push_token: token} ->
+          send(test_pid, {:push_token, token})
+          {:ok, %{}}
+        end,
+        device_store: :store
+      })
+
+    assert {:ok, next} = SocketHandler.handle_in({frame, opcode: :binary}, state)
+    assert_received {:push_token, "0123456789abcdef"}
+    assert next.client_seq == 1
+  end
+
+  # The event means one thing for every phone: an Android phone's token is
+  # kept, answered with nothing, and never pushed (Push refuses it by name).
+  test "an Android phone's push_register is kept, and push_unregister clears it" do
+    test_pid = self()
+
+    register =
+      encode_client_frame(
+        "push_register",
+        %{"apns_token" => "android-token", "environment" => "production"},
+        1
+      )
+
+    unregister = encode_client_frame("push_unregister", %{}, 2)
+
+    {:ok, state} =
+      init_socket(%{
+        phase: :ready,
+        device_id: "pixel",
+        noise: :noise,
+        push_environment: :production,
+        authenticated_device: %{device_id: "pixel", platform: "android"},
+        authorize_socket: fn _registry, "pixel", _pid -> :ok end,
+        decrypt: fn :noise, frame -> {:ok, frame, :noise} end,
+        update_device: fn :store, "pixel", %{push_token: token} ->
+          send(test_pid, {:push_token, token})
+          {:ok, %{}}
+        end,
+        device_store: :store
+      })
+
+    assert {:ok, state} = SocketHandler.handle_in({register, opcode: :binary}, state)
+    assert_received {:push_token, "android-token"}
+
+    assert {:ok, state} = SocketHandler.handle_in({unregister, opcode: :binary}, state)
+    assert_received {:push_token, nil}
+    assert state.client_seq == 2
+  end
+
+  # The {platform, token, environment?} shape dev carried for a while never
+  # shipped: it is a malformed push_register, closed as any malformed frame.
+  test "a push_register in the platform and token shape closes as a malformed frame" do
+    test_pid = self()
+
+    for fields <- [
+          %{"platform" => "ios", "token" => "token", "environment" => "production"},
+          %{"platform" => "android", "token" => "fcm-token"}
+        ] do
+      frame = encode_client_frame("push_register", fields, 1)
+
+      {:ok, state} =
+        init_socket(%{
+          phase: :ready,
+          device_id: "phone",
+          noise: :noise,
+          push_environment: :production,
+          decrypt: fn :noise, ^frame -> {:ok, frame, :noise} end,
+          update_device: fn _store, _id, _attrs ->
+            send(test_pid, :updated)
+            {:ok, %{}}
+          end
+        })
+
+      assert {:stop, {:missing_field, "apns_token"}, {1002, "mobile protocol error"}, _state} =
+               SocketHandler.handle_in({frame, opcode: :binary}, state)
+
+      refute_received :updated
+    end
   end
 
   test "an authenticated application error still consumes its client sequence" do
@@ -2212,10 +2317,12 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         noise: :noise,
         negotiated_version: 2,
         profile_name: "Orbit",
+        push_services: ["apns"],
         discover: fn -> {:ok, candidates} end,
         encode_server: fn "pair_approved", payload, 1 ->
           assert length(payload["candidates"]) == 16
           assert payload["push_salt"] == Base.encode64(<<9::256>>)
+          assert payload["push"] == ["apns"]
           {:ok, "approved"}
         end,
         encrypt: fn :noise, "approved" -> {:ok, "encrypted-approved", :noise} end

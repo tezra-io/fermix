@@ -8,6 +8,35 @@ defmodule FermixChannels.Mobile.SessionTest do
 
   @peer {10, 0, 0, 7}
 
+  test "a session that ends before hello or a pair request closes its iroh peer, and only then" do
+    test_pid = self()
+
+    close = fn id ->
+      send(test_pid, {:close_iroh_peer, id})
+      :ok
+    end
+
+    id = String.duplicate("ab", 32)
+    iroh = {:iroh, id}
+
+    ended = fn peer, phase ->
+      {:ok, state} = Session.init(device_registry: :registry, peer: peer, close_iroh_peer: close)
+      :ok = Session.terminate(:handshake_timeout, %{state | phase: phase})
+    end
+
+    for phase <- [:prelude, :await_hello, :await_pair_request] do
+      ended.(iroh, phase)
+      assert_received {:close_iroh_peer, ^id}
+    end
+
+    # A phone the owner is deciding on, or a paired phone's session, ends with
+    # its own close; a WebSocket peer has no iroh connection.
+    ended.(iroh, :await_pair_decision)
+    ended.(iroh, :ready)
+    ended.(@peer, :prelude)
+    refute_received {:close_iroh_peer, _id}
+  end
+
   test "a session needs its carrier's peer, and fails loud without one" do
     assert_raise ArgumentError, ~r/:peer/, fn -> Session.init(device_registry: :registry) end
     assert {:ok, %{peer: @peer}} = Session.init(device_registry: :registry, peer: @peer)
@@ -32,6 +61,28 @@ defmodule FermixChannels.Mobile.SessionTest do
              Session.handle_frame(<<"FXM1", 1, "handshake">>, state)
 
     assert next.phase == :await_hello
+  end
+
+  # A carrier short of room may close only a connection a stranger could hold.
+  # IK's first message proves a paired phone's key; IKpsk2's carries no proof of
+  # the pairing secret (the psk is mixed in the daemon's reply), so a peer
+  # awaiting its pair request has proved nothing but that it knows the gateway
+  # key, which every pairing QR shows.
+  test "a peer is past its handshake once IK proved its key or its request waits for the owner" do
+    {:ok, fresh} = Session.init(handshake_stubs())
+    refute Session.past_handshake?(fresh)
+
+    assert {:push, ["response"], paired} =
+             Session.handle_frame(<<"FXM1", 1, "handshake">>, fresh)
+
+    assert paired.phase == :await_hello
+    assert Session.past_handshake?(paired)
+    assert Session.past_handshake?(%{paired | phase: :ready})
+
+    assert {:push, ["response"], pairing} = Session.handle_frame(<<"FXM1", 2, "pairing">>, fresh)
+    assert pairing.phase == :await_pair_request
+    refute Session.past_handshake?(pairing)
+    assert Session.past_handshake?(%{pairing | phase: :await_pair_decision})
   end
 
   test "the session's own bounds close the same way on every carrier" do
@@ -69,5 +120,26 @@ defmodule FermixChannels.Mobile.SessionTest do
 
     assert_receive {:current_pair, @peer}
     assert_receive {:failure_recorded, @peer}
+  end
+
+  # Both Noise modes with stubbed crypto, no timer left running.
+  defp handshake_stubs do
+    %{
+      peer: @peer,
+      device_registry: :registry,
+      device_store: :store,
+      pair_manager: :pair,
+      gateway_keypair: %{private: <<1::256>>, public: <<2::256>>},
+      schedule_handshake_deadline: fn _message, _delay_ms -> make_ref() end,
+      cancel_handshake_deadline: fn _ref -> false end,
+      schedule_session_timer: fn _message, _delay_ms -> make_ref() end,
+      current_pair: fn :pair, @peer -> {:ok, %{session_id: "pair", secret: <<3::256>>}} end,
+      noise_initialize: fn :responder, pattern, _opts -> {:ok, {pattern, 0}} end,
+      noise_read: fn {pattern, 0}, _wire -> {:ok, <<>>, {pattern, 1}} end,
+      noise_write: fn {pattern, 1}, <<>> -> {:ok, "response", {pattern, 2}} end,
+      noise_remote_static: fn {_pattern, 2} -> {:ok, <<7::256>>} end,
+      noise_sas: fn {:ikpsk2, 2} -> "123456" end,
+      find_device: fn :store, <<7::256>> -> {:ok, %{device_id: "paired-device"}} end
+    }
   end
 end

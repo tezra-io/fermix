@@ -340,6 +340,72 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     bad_caps = %{"commands" => [%{"name" => "help"}], "max_media_bytes" => 1}
     hello_ack = server_event("hello_ack", Map.put(hello_ack_payload(), "caps", bad_caps))
     refute server_errors(hello_ack, schema) == []
+
+    for push <- [["web"], ["fcm"]] do
+      push_caps = %{"commands" => [], "max_media_bytes" => 1, "push" => push}
+      hello_ack = server_event("hello_ack", Map.put(hello_ack_payload(), "caps", push_caps))
+      refute server_errors(hello_ack, schema) == [], inspect(push)
+    end
+  end
+
+  # One protocol number keeps one shape of an event: push_register is the
+  # definition engine 0.16.0 shipped protocol 2 with, field for field.
+  test "the schema's push_register is the one protocol 2 shipped with", %{schema: schema} do
+    assert schema["$defs"]["push_register"] == %{
+             "allOf" => [%{"$ref" => "#/$defs/envelope"}],
+             "required" => ["v", "t", "seq", "apns_token", "environment"],
+             "properties" => %{
+               "t" => %{"const" => "push_register"},
+               "apns_token" => %{"type" => "string", "minLength" => 1},
+               "environment" => %{"enum" => ["development", "production"]}
+             }
+           }
+
+    register = fn fields -> Map.merge(%{"v" => 2, "t" => "push_register", "seq" => 1}, fields) end
+    client = schema["$defs"]["clientEvent"]
+
+    assert WireSchema.errors(
+             register.(%{"apns_token" => "t", "environment" => "production"}),
+             client,
+             schema
+           ) == []
+
+    for fields <- [
+          %{"apns_token" => "t"},
+          %{"platform" => "ios", "token" => "t", "environment" => "production"},
+          %{"platform" => "android", "token" => "t"}
+        ] do
+      refute WireSchema.errors(register.(fields), client, schema) == [], inspect(fields)
+    end
+  end
+
+  # The daemon pushes through APNs alone: no exported push list, and no
+  # golden frame, names any other service.
+  test "the push catalog is apns alone, in the schema and every golden frame", %{schema: schema} do
+    assert schema["$defs"]["pushServices"]["items"]["enum"] == ["apns"]
+
+    for header <- client_headers() ++ server_headers() do
+      for push <- [get_in(header, ["caps", "push"]), header["push"]], push != nil do
+        assert push -- ["apns"] == [], "#{header["t"]} lists #{inspect(push)}"
+      end
+    end
+
+    approved = Enum.find(server_headers(), &(&1["t"] == "pair_approved"))
+
+    for push <- [["fcm"], ["apns", "fcm"], ["apns", "apns"]] do
+      refute server_errors(Map.put(approved, "push", push), schema) == [], inspect(push)
+    end
+  end
+
+  # Every field protocol 2 gained after it shipped is optional, so a daemon
+  # that shipped before it is still read: pair_approved requires what engine
+  # 0.16.0 sent, and push, which came later, may be absent.
+  test "pair_approved requires only what protocol 2 shipped with", %{schema: schema} do
+    assert schema["$defs"]["pair_approved"]["required"] ==
+             ~w(v t seq device_id candidates profiles push_salt)
+
+    approved = Enum.find(server_headers(), &(&1["t"] == "pair_approved"))
+    assert server_errors(Map.delete(approved, "push"), schema) == []
   end
 
   # M62 §4.3: the rail's candidate is a second candidate shape, told apart by

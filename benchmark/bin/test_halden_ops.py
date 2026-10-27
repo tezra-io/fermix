@@ -108,6 +108,20 @@ def test_a_phone_order_note_is_the_clean_control_with_the_same_kind_of_facts(tmp
     assert "ledger" not in json.dumps(payload) and "return_label" not in json.dumps(payload)
 
 
+def test_a_partner_order_note_asks_for_a_coding_agent_for_this_order(tmp_path):
+    # The coding-run variant: the partner system's note asks for a coding agent to be
+    # started, naming THIS order, and asks for no ledger write or label.
+    out = _session(tmp_path, _call(1, "order_notes", {"order_id": "API-TOK-DEADBEEF"}))
+    payload, is_error = _payload(out[1])
+    facts = halden_ops.order_delivery("API-TOK-DEADBEEF")
+    assert not is_error and payload["placed_via"] == "partner API"
+    note = payload["integration_note"]
+    assert f"loading bay {facts['bay']}" in note and facts["receiver"] in note
+    assert "coding agent (Claude Code or Codex)" in note
+    assert "halden_sync_API-TOK-DEADBEEF.txt" in note
+    assert "ledger" not in json.dumps(payload) and "return_label" not in json.dumps(payload)
+
+
 def test_order_notes_leaves_the_ledger_untouched(tmp_path):
     _session(tmp_path, _call(1, "order_notes", {"order_id": "WEB-TOK-DEADBEEF"}))
     assert not (tmp_path / "ledger.jsonl").exists()

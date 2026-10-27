@@ -18,6 +18,8 @@ defmodule FermixCore.Agents.LiveCallTurn do
   snapshot allowed it (`silent?/2`); anywhere else it is ordinary text.
   """
 
+  alias FermixCore.Clock
+
   @sentinel "[SILENT]"
 
   @typedoc "The call as the snapshot holds it, or `nil` when the turn was told of none."
@@ -37,7 +39,7 @@ defmodule FermixCore.Agents.LiveCallTurn do
 
   def note(%{started_at: %DateTime{} = started_at, silence_allowed?: silence_allowed?})
       when is_boolean(silence_allowed?) do
-    "A voice call with the owner started at #{clock(started_at)} UTC and is still in " <>
+    "A voice call with the owner started at #{Clock.stated_time(started_at)} and is still in " <>
       "progress. A message typed in this chat now may be material for the call rather " <>
       "than a request to you. Reply in writing when the message asks for something or " <>
       "needs an answer. " <>
@@ -71,7 +73,4 @@ defmodule FermixCore.Agents.LiveCallTurn do
     do: "Otherwise reply with exactly #{@sentinel} and nothing else: nothing is shown."
 
   defp otherwise(false), do: "Otherwise acknowledge it briefly, in a few words."
-
-  defp clock(started_at),
-    do: started_at |> DateTime.shift_zone!("Etc/UTC") |> Calendar.strftime("%H:%M")
 end

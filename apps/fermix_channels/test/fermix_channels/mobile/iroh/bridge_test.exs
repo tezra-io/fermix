@@ -4,12 +4,17 @@ defmodule FermixChannels.Mobile.Iroh.BridgeTest do
   # phone's session.
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
+  alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.Iroh.Bridge
   alias FermixChannels.Mobile.Iroh.Carrier
   alias FermixTestSupport.SafeRm
 
   @fixture_id "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664"
   @preamble "FXB1" <> <<1>> <> Base.decode16!(@fixture_id, case: :lower)
+  @paired <<"FXM1", 1, "handshake">>
+  @pairing <<"FXM1", 2, "pairing">>
 
   setup do
     # A Unix socket path is at most 104 bytes on macOS: a short prefix.
@@ -56,6 +61,146 @@ defmodule FermixChannels.Mobile.Iroh.BridgeTest do
         {:ok, %{device_id: "paired-device"}}
       end
     ]
+  end
+
+  # A bridge whose sessions can each get to one of the places a stream holds,
+  # with stubbed crypto: in its handshake (the prelude, or IKpsk2's first
+  # message), past it as a paired phone (IK, then "hello"), or past it as a
+  # pairing phone waiting for the owner (IKpsk2, then "pair-request"). The
+  # handshake deadline and the idle bound never fire, so only the bridge closes
+  # a stream here. The bridge is traced (`trace/1`).
+  defp start_held_bridge(ctx, opts) do
+    registry = start_supervised!({DeviceRegistry, name: nil})
+    opts = Keyword.merge([session_opts: held_session(registry), idle_timeout_ms: 600_000], opts)
+    %{bridge: bridge} = started = start_bridge(ctx, opts)
+    trace(bridge)
+    started
+  end
+
+  # The bridge's own messages are the events these tests wait on: it sends each
+  # connection it admits `:socket_handover`, casts `:make_room` to each it asks
+  # for its place, and is cast `{:past_handshake, pid}` by each whose session
+  # got past its handshake. One `:sys.get_state/1` after such a message was seen
+  # reads the bridge after it.
+  defp trace(bridge), do: 1 = :erlang.trace(bridge, true, [:send, :receive])
+
+  defp admitted(bridge) do
+    assert_receive {:trace, ^bridge, :send, :socket_handover, connection}
+    connection
+  end
+
+  defp assert_made_room(bridge, connection),
+    do: assert_receive({:trace, ^bridge, :send, {:"$gen_cast", :make_room}, ^connection})
+
+  defp heard_past_handshake(bridge, connection) do
+    assert_receive {:trace, ^bridge, :receive, {:"$gen_cast", {:past_handshake, ^connection}}}
+    :sys.get_state(bridge)
+  end
+
+  defp held_session(registry) do
+    [
+      device_registry: registry,
+      device_store: :store,
+      pair_manager: :pair,
+      gateway_keypair: %{private: <<1::256>>, public: <<2::256>>},
+      schedule_handshake_deadline: fn _message, _delay_ms -> make_ref() end,
+      cancel_handshake_deadline: fn _ref -> false end,
+      current_pair: fn :pair, _peer ->
+        {:ok, %{session_id: "pair-session", secret: <<3::256>>}}
+      end,
+      noise_initialize: fn :responder, pattern, _opts -> {:ok, {pattern, 0}} end,
+      noise_read: fn {pattern, 0}, _wire -> {:ok, <<>>, {pattern, 1}} end,
+      noise_write: fn {pattern, 1}, <<>> -> {:ok, "response", {pattern, 2}} end,
+      noise_remote_static: fn {_pattern, 2} -> {:ok, <<7::256>>} end,
+      noise_sas: fn {:ikpsk2, 2} -> "123456" end,
+      find_device: fn :store, <<7::256>> -> {:ok, %{device_id: "paired-device"}} end,
+      decrypt: fn {pattern, 2}, ciphertext -> {:ok, ciphertext, {pattern, 3}} end,
+      decode_client: fn plaintext, _opts -> {:ok, client_event(plaintext)} end,
+      update_device: fn :store, "paired-device", %{last_seen: %DateTime{}} ->
+        {:ok, %{device_id: "paired-device"}}
+      end,
+      attach_socket: fn ^registry, "paired-device", _pid, _opts -> :ok end,
+      hello_ack_builder: fn _state -> {:ok, %{"session_id" => "session"}} end,
+      pending_approvals: fn _profile -> [] end,
+      encode_server: fn "hello_ack", _payload, 1 -> {:ok, "encoded"} end,
+      encrypt: fn {:ik, 3}, "encoded" -> {:ok, "hello-ack", {:ik, 4}} end,
+      verify_pair: fn :pair, "pair-session", _evidence -> {:ok, %{}} end,
+      submit_pair: fn :pair, "pair-session", _attrs -> {:ok, %{}} end,
+      record_pair_failure: fn :pair, "pair-session", _peer -> {:ok, 1} end
+    ]
+  end
+
+  defp client_event("hello") do
+    payload = %{
+      "device_id" => "paired-device",
+      "app_version" => "1.0",
+      "last_server_seq" => 0,
+      "protocol_v" => 2
+    }
+
+    %{version: 2, type: "hello", seq: 1, payload: payload, bytes: <<>>}
+  end
+
+  defp client_event("pair-request") do
+    payload = %{
+      "device_name" => "Phone",
+      "model" => "Pixel",
+      "app_version" => "1.0",
+      "platform" => "android",
+      "attestation" => %{"kind" => "android_key", "cert_lengths" => []}
+    }
+
+    %{version: 2, type: "pair_request", seq: 1, payload: payload, bytes: <<>>}
+  end
+
+  defp in_handshake(ctx) do
+    socket = connect(ctx)
+    send_frame(socket, @preamble)
+    framed(socket)
+  end
+
+  defp ready(ctx) do
+    socket = in_handshake(ctx)
+    assert {:message, "response"} = handshake(socket, @paired)
+    assert {:message, "hello-ack"} = send_and_recv(socket, "hello")
+    socket
+  end
+
+  # A pairing request that waits for the owner gets no reply until the owner
+  # decides; the bridge's state shows it got past its handshake.
+  defp awaiting_owner(ctx) do
+    socket = in_handshake(ctx)
+    assert {:message, "response"} = handshake(socket, @pairing)
+    send_frame(socket, Carrier.message("pair-request"))
+    socket
+  end
+
+  defp handshake(socket, prelude), do: send_and_recv(socket, prelude)
+
+  defp send_and_recv(socket, payload) do
+    send_frame(socket, Carrier.message(payload))
+    recv_frame(socket)
+  end
+
+  defp held(state), do: Enum.count(state.connections, fn {_pid, c} -> c.past_handshake? end)
+
+  # The captured lines the bridge process itself logged that carry `words`.
+  defp bridge_lines(log, bridge, words) do
+    pid = "pid=" <> List.to_string(:erlang.pid_to_list(bridge))
+
+    log
+    |> String.split("\n")
+    |> Enum.filter(&(String.contains?(&1, pid) and String.contains?(&1, words)))
+  end
+
+  # Closing every connection sends each the shutdown's close: a stream the
+  # bridge had closed to make room would read its 1008 first.
+  defp assert_untouched(sockets) do
+    :ok = stop_supervised(DynamicSupervisor)
+
+    for socket <- sockets do
+      assert {:close, 1000, "daemon shutting down"} = recv_frame(socket)
+    end
   end
 
   defp connect(ctx) do
@@ -223,6 +368,30 @@ defmodule FermixChannels.Mobile.Iroh.BridgeTest do
     assert {:error, :closed} = :gen_tcp.recv(socket, 0, 1_000)
   end
 
+  # A peer refused before it is a paired phone's session keeps no iroh
+  # connection, so opening stream after failing stream holds none of the
+  # helper's connection places.
+  test "a session refused in its handshake asks the helper to close its iroh peer", ctx do
+    test_pid = self()
+
+    refused =
+      paired_session(test_pid)
+      |> Keyword.put(:find_device, fn :store, <<7::256>> -> {:error, :not_found} end)
+      |> Keyword.put(:close_iroh_peer, fn id ->
+        send(test_pid, {:close_iroh_peer, id})
+        :ok
+      end)
+
+    start_bridge(ctx, session_opts: refused)
+    socket = connect(ctx)
+    send_frame(socket, @preamble)
+    socket = framed(socket)
+
+    send_frame(socket, Carrier.message(<<"FXM1", 1, "handshake">>))
+    assert {:close, 1002, "mobile protocol error"} = recv_frame(socket)
+    assert_receive {:close_iroh_peer, @fixture_id}
+  end
+
   test "a frame over 65,536 bytes is refused before it is read", ctx do
     start_bridge(ctx, [])
     socket = connect(ctx)
@@ -252,14 +421,159 @@ defmodule FermixChannels.Mobile.Iroh.BridgeTest do
     assert {:error, :closed} = :gen_tcp.recv(socket, 0, 1_000)
   end
 
-  test "connections past the bridge's bound are closed at accept", ctx do
-    start_bridge(ctx, max_connections: 1)
-    first = connect(ctx)
-    send_frame(first, @preamble)
-    Process.sleep(100)
+  # A stranger who knows the node id can open streams that never say a word;
+  # the phone's own stream must still find a place (M62 §7).
+  test "a full bridge closes its oldest stream still in its handshake for a new one", ctx do
+    %{bridge: bridge} = start_held_bridge(ctx, [])
 
-    second = connect(ctx)
-    assert {:error, :closed} = :gen_tcp.recv(second, 0, 1_000)
+    [{oldest, oldest_connection}, {next, _next_connection} | _rest] =
+      for _stream <- 1..Bridge.max_connections() do
+        socket = in_handshake(ctx)
+        {socket, admitted(bridge)}
+      end
+
+    log =
+      capture_log(fn ->
+        newcomer = in_handshake(ctx)
+        assert_made_room(bridge, oldest_connection)
+        _newcomer_connection = admitted(bridge)
+        assert {:close, 1008, "mobile handshake deadline"} = recv_frame(oldest)
+        assert {:error, :closed} = :gen_tcp.recv(oldest, 0, 1_000)
+        assert {:message, "response"} = handshake(newcomer, @pairing)
+      end)
+
+    assert log =~ "bridge socket full: closed 1 remote stream still in the handshake"
+    assert {:message, "response"} = handshake(next, @pairing)
+    assert map_size(:sys.get_state(bridge).connections) == Bridge.max_connections()
+  end
+
+  # A phone whose IK handshake proved its paired key, and a pairing phone
+  # waiting for the owner, keep their places whatever arrives; only streams in
+  # a handshake make room, IKpsk2's first message included.
+  test "a session past its handshake keeps its place in a full bridge", ctx do
+    %{bridge: bridge} = start_held_bridge(ctx, max_connections: 4)
+    phone = ready(ctx)
+    heard_past_handshake(bridge, admitted(bridge))
+    pairing = awaiting_owner(ctx)
+    heard_past_handshake(bridge, admitted(bridge))
+    [first, second] = for _stream <- 1..2, do: {in_handshake(ctx), admitted(bridge)}
+
+    third = in_handshake(ctx)
+    third_connection = admitted(bridge)
+    assert {:close, 1008, "mobile handshake deadline"} = recv_frame(elem(first, 0))
+    assert {:message, "response"} = handshake(third, @paired)
+    heard_past_handshake(bridge, third_connection)
+
+    _fourth = in_handshake(ctx)
+    fourth_connection = admitted(bridge)
+    assert_made_room(bridge, elem(second, 1))
+    assert {:close, 1008, "mobile handshake deadline"} = recv_frame(elem(second, 0))
+
+    _fifth = in_handshake(ctx)
+    _fifth_connection = admitted(bridge)
+    assert_made_room(bridge, fourth_connection)
+
+    assert held(:sys.get_state(bridge)) == 3
+    assert_untouched([phone, pairing, third])
+  end
+
+  test "a full bridge whose every session is past its handshake turns a stream away", ctx do
+    %{bridge: bridge} = start_held_bridge(ctx, max_connections: 2)
+    phone = ready(ctx)
+    heard_past_handshake(bridge, admitted(bridge))
+    pairing = awaiting_owner(ctx)
+    heard_past_handshake(bridge, admitted(bridge))
+
+    turned_away = connect(ctx)
+    assert {:error, :closed} = :gen_tcp.recv(turned_away, 0, 2_000)
+    refute_received {:trace, ^bridge, :send, {:"$gen_cast", :make_room}, _connection}
+    assert map_size(:sys.get_state(bridge).connections) == 2
+    assert_untouched([phone, pairing])
+  end
+
+  # The bridge chose a stream to make room before it read that the stream's
+  # session had just got past its handshake: the session stays, and the bridge
+  # serves one over its bound until a connection ends.
+  test "a stream past its handshake by the time the bridge asks for its place stays", ctx do
+    %{bridge: bridge} = start_held_bridge(ctx, max_connections: 1)
+    phone = in_handshake(ctx)
+    phone_connection = admitted(bridge)
+
+    :ok = :sys.suspend(bridge)
+    assert {:message, "response"} = handshake(phone, @paired)
+
+    assert_receive {:trace, ^bridge, :receive,
+                    {:"$gen_cast", {:past_handshake, ^phone_connection}}}
+
+    _newcomer = in_handshake(ctx)
+    :ok = :sys.resume(bridge)
+
+    assert_made_room(bridge, phone_connection)
+    newcomer_connection = admitted(bridge)
+    state = :sys.get_state(bridge)
+    assert %{^phone_connection => %{past_handshake?: true}} = state.connections
+    assert %{^newcomer_connection => %{past_handshake?: false}} = state.connections
+    assert map_size(state.connections) == 2
+    assert_untouched([phone])
+  end
+
+  # A stream that ended frees its place for the next one: nothing is closed
+  # to make room.
+  test "a stream that ends frees its place without closing another", ctx do
+    %{bridge: bridge} = start_held_bridge(ctx, max_connections: 2)
+    {ending, ending_connection} = {in_handshake(ctx), admitted(bridge)}
+    {staying, staying_connection} = {in_handshake(ctx), admitted(bridge)}
+
+    :ok = :gen_tcp.close(ending)
+    assert_receive {:trace, ^bridge, :receive, {:DOWN, _ref, :process, ^ending_connection, _}}
+    assert map_size(:sys.get_state(bridge).connections) == 1
+
+    _next = in_handshake(ctx)
+    next_connection = admitted(bridge)
+    refute_received {:trace, ^bridge, :send, {:"$gen_cast", :make_room}, _connection}
+    assert {:message, "response"} = handshake(staying, @pairing)
+
+    connections = :sys.get_state(bridge).connections
+    assert Enum.sort(Map.keys(connections)) == Enum.sort([staying_connection, next_connection])
+  end
+
+  # The word can reach the bridge after the connection that sent it ended.
+  test "a connection that ended before its word arrived takes no place", ctx do
+    %{bridge: bridge} = start_held_bridge(ctx, max_connections: 1)
+    gone = spawn(fn -> :ok end)
+    monitor = Process.monitor(gone)
+    assert_receive {:DOWN, ^monitor, :process, ^gone, _reason}
+
+    :ok = GenServer.cast(bridge, {:past_handshake, gone})
+    assert_receive {:trace, ^bridge, :receive, {:DOWN, _ref, :process, ^gone, :noproc}}
+    assert :sys.get_state(bridge).connections == %{}
+
+    _stream = in_handshake(ctx)
+    _connection = admitted(bridge)
+    refute_received {:trace, ^bridge, :send, {:"$gen_cast", :make_room}, _connection}
+  end
+
+  # M62 §7: a flood is said at 1, 10, 100… streams, never once per stream.
+  test "refused streams are warned about at each power of ten", ctx do
+    %{bridge: bridge} = start_held_bridge(ctx, max_connections: 1)
+    _phone = ready(ctx)
+    heard_past_handshake(bridge, admitted(bridge))
+
+    log =
+      capture_log([format: "$metadata$message\n", metadata: [:pid]], fn ->
+        for _stream <- 1..12 do
+          turned_away = connect(ctx)
+          assert {:error, :closed} = :gen_tcp.recv(turned_away, 0, 2_000)
+        end
+      end)
+
+    # Other async modules log into the capture too: only this bridge's own
+    # lines are read, and its state holds how many streams it refused.
+    warnings = bridge_lines(log, bridge, "bridge socket full: refused")
+    assert [one, ten] = warnings
+    assert one =~ "refused 1 remote stream"
+    assert ten =~ "refused 10 remote streams"
+    assert :sys.get_state(bridge).refused == 12
   end
 
   # The helper opens a bridge connection per stream as the streams arrive; a

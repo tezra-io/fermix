@@ -58,7 +58,11 @@ defmodule FermixCore.Management.MobileTest do
       assert {:error, not_ready} = Mobile.apply_enabled(true, fake({:error, :not_ready}))
       assert not_ready == "The phone channel starts the next time Fermix starts."
 
-      for sentence <- [not_started, not_ready], do: assert(sentence in Mobile.sentences())
+      assert {:error, waiting} = Mobile.apply_enabled(true, fake({:error, :waiting_for_setup}))
+      assert waiting == "The phone channel starts once setup is finished."
+
+      for sentence <- [not_started, not_ready, waiting],
+          do: assert(sentence in Mobile.sentences())
     end
 
     test "a failure is logged and answered with a fixed sentence" do
@@ -255,6 +259,8 @@ defmodule FermixCore.Management.MobileTest do
         mobile_not_started:
           {"unavailable",
            "The mobile channel has not started yet. Restart Fermix to apply the change."},
+        mobile_waiting_for_setup:
+          {"unavailable", "The phone channel starts once setup is finished."},
         identity_unavailable:
           {"refused", "The gateway identity files are incomplete; nothing was regenerated."},
         listener_unavailable:
@@ -320,7 +326,12 @@ defmodule FermixCore.Management.MobileTest do
     end
 
     test "a channel that is off, refused this boot, or not started yet cannot answer" do
-      for reason <- [:mobile_disabled, :mobile_surface_refused, :mobile_not_started] do
+      for reason <- [
+            :mobile_disabled,
+            :mobile_surface_refused,
+            :mobile_not_started,
+            :mobile_waiting_for_setup
+          ] do
         assert Mobile.pair_get(@session_id, fake({:error, reason})) == @unavailable
         assert Mobile.pair_decide(@session_id, true, fake({:error, reason})) == @unavailable
         assert Mobile.pair_cancel(@session_id, fake({:error, reason})) == @unavailable
@@ -387,6 +398,7 @@ defmodule FermixCore.Management.MobileTest do
                "started" => true,
                "refused" => false,
                "refusal" => nil,
+               "hold" => nil,
                "listener" => %{
                  "status" => "ready",
                  "reason" => nil,
@@ -474,6 +486,18 @@ defmodule FermixCore.Management.MobileTest do
       assert view["refusal"] == "trust_store"
     end
 
+    # A boot whose setup was not finished registers no transport: the channel is
+    # on, not running and not refused, and what it waits for is published.
+    test "a channel held until setup is finished is published as held for setup" do
+      held = Map.merge(status(), %{started: false, hold: :setup, pairing: nil})
+
+      assert {:ok, view} = Mobile.status(fake({:ok, held}))
+      assert view["enabled"] == true
+      assert view["started"] == false
+      assert view["refused"] == false
+      assert view["hold"] == "setup"
+    end
+
     # STB-16: memory off refuses the surface, and the refusal is named.
     test "each refusal class is published by its word" do
       for word <- ~w(memory_disabled identity attachment_manifest trust_store)a do
@@ -556,6 +580,7 @@ defmodule FermixCore.Management.MobileTest do
              "The mobile channel is turned off.",
              "The mobile channel could not start this boot. See the daemon log.",
              "The mobile channel has not started yet. Restart Fermix to apply the change.",
+             "The phone channel starts once setup is finished.",
              "The gateway identity files are incomplete; nothing was regenerated.",
              "The phone listener could not start. See the daemon log.",
              "The paired-device list could not be read. See the daemon log.",
@@ -643,6 +668,7 @@ defmodule FermixCore.Management.MobileTest do
       started: true,
       refused: false,
       refusal: nil,
+      hold: nil,
       listener: %{
         status: :ready,
         reason: nil,

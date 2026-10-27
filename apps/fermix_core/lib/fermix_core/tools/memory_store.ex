@@ -7,11 +7,16 @@ defmodule FermixCore.Tools.MemoryStore do
   corrects a row already there. With neither it is a note kept for the current
   conversation (`Memory.Store`). The result says which of those happened and
   whether it is durable — never "stored" for a write that did not land.
+
+  In a run a cue woke it writes only the task's own notes (`Cues.TaskNotes`,
+  M60 §9.10): no category, at most 50 notes, and only while the watcher's task
+  notes are on.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Cues.TaskNotes
   alias FermixCore.Memory.Admission
   alias FermixCore.Memory.LongTerm
   alias FermixCore.Memory.Store
@@ -123,6 +128,9 @@ defmodule FermixCore.Tools.MemoryStore do
   # A model that fills every schema property sends the optional ones as null;
   # an absent argument and a null one are the same request.
   defp given(args), do: Map.reject(args, fn {_name, value} -> is_nil(value) end)
+
+  # A cue run keeps only its task's notes, whatever the call asks for (M60 S7).
+  defp do_execute(args, %{trigger: "cue"} = context), do: TaskNotes.store(args, context)
 
   defp do_execute(%{"value" => value, "id" => id}, context) when is_binary(value) do
     case MemorySupport.parse_id(id) do

@@ -6,6 +6,7 @@ defmodule FermixCore.Tools.ListJobRuns do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Jobs.CueRun
   alias FermixCore.Memory.Repo
   alias FermixCore.Tools.JobRegistrySupport, as: Support
 
@@ -80,11 +81,22 @@ defmodule FermixCore.Tools.ListJobRuns do
       selector = build_selector(job_id, args)
 
       case Repo.list_job_runs(selector, server: Support.repo(context), limit: limit(args)) do
-        {:ok, runs} -> Support.success_json(%{runs: Enum.map(runs, &Support.job_run_summary/1)})
+        {:ok, runs} -> present(runs, context)
         {:error, reason} -> Support.error(reason)
       end
     else
       {:error, reason} -> {:ok, Tool.error(reason)}
+    end
+  end
+
+  # A cue run's reply and error are held back off an attended owner turn and
+  # framed on one (M60 §9.3).
+  defp present(runs, context) do
+    pairs = Enum.map(runs, &{Support.job_run_summary(&1), &1})
+
+    case CueRun.present_runs(pairs, context, repo: Support.repo(context)) do
+      {:ok, payloads} -> Support.success_json(%{runs: payloads})
+      {:error, reason} -> Support.error(reason)
     end
   end
 

@@ -9,7 +9,7 @@
 | `name` | yes | — | non-empty; slugged into the id |
 | `schedule` | yes | — | see Schedule grammar |
 | `task` | yes | — | non-empty |
-| `timezone` | no | `UTC` | IANA zone; unknown is rejected |
+| `timezone` | no | the owner's zone | IANA zone; unknown is rejected; UTC only when no owner zone is configured |
 | `description` | no | none | for the source catalog |
 | `expires_at` | no | none | ISO8601 + offset, future |
 | `delivery_mode` | no | config default, else `none` | `none`/`origin`/`channel`/`local` |
@@ -21,6 +21,11 @@
 | `inactivity_timeout_seconds` | no | unarmed | positive integer |
 
 No other parameters exist: the iteration cap (100), isolation, the `job:<id>` memory scope, the `[SILENT]` marker and `capability_policy` are fixed.
+
+A job gets at most the tools of the run that creates or changes it, when that run is limited in what it is authorized for: it was given its own `allowed_tools` (a job's run, a skill's worker), its `policy` lacks a class its trust grants, or it runs at guest under the owner (a plugin skill's worker). Its tools are then the ones its trust, `policy` and `allowed_tools` admit. The owner's own turns are never limited: what a voice call or an ACP session leaves out to fit the channel does not count.
+
+- **Creating:** from a limited run, `allowed_tools` naming any other tool is refused, and leaving it out (or `[]`) stores the tools the run can call as the list; the result's `note` says so, and names any tool the run was granted that is unavailable now (a disabled plugin's) and so left out. The stored list is fixed at creation: `update_job` cannot change it.
+- **Changing:** a limited run's `update_job` is refused unless the job's tools after the change, its list narrowed by its skill's (the newly bound one when `skill_name` is given), are all the run's own, a tool unavailable now counting when the run was granted it; a job whose list and skill name no tools is bounded only by its trust, so a limited run cannot change it. A run at guest trust (a plugin skill's worker under the owner, or a job bound to a plugin skill) cannot change a job set up at operator trust at all. A watcher's task job cannot be bound to a skill that leaves `cue_history` off its runs (a plugin skill, or one asking only for classes other than `read_only`), and a task already bound to one fails its runs saying so.
 
 **Access-sensitive tools** (a plugin tool its manifest marks `access_sensitive`, such as a car unlock) are reached by a scheduled run only when the job's `allowed_tools` names them; an empty allowlist does not cover them, and a run that calls one anyway gets a refusal (a tool failure in that run). `schedule_job` naming one, and `update_job`, `resume_job` or `run_job_now` on a job that names one, are refused unless the request is the owner's own clean, direct ask (their chat, app or voice, having read nothing from outside this turn, not a delegated worker); jobs that already name one keep running.
 
@@ -34,7 +39,7 @@ Exactly one of three forms. Free-form English ("daily at 8am") is rejected.
 - Cron: `minute hour day-of-month month day-of-week`. Fields take `*`, a value, a list (`1,15`), a range (`9-17`), or a step (`*/15`, `8-18/4`). Weekday `0` and `7` are Sunday. Day-of-month and day-of-week must both match. Malformed or out-of-range fields are rejected.
 - One-off: one ISO8601 instant with an offset, `2035-09-10T16:00:00Z` or `2035-09-10T12:00:00-04:00`. No offset is rejected. A past instant fires on the next tick.
 
-`timezone` affects cron only: `0 9 * * 1` with `timezone: "America/New_York"` fires 09:00 local and tracks DST, and without `timezone` fires 09:00 UTC. Interval and one-off are absolute instants. The owner's zone is in the current-date system note; pass it whenever the owner spoke in local time.
+`timezone` affects cron only: `0 9 * * 1` fires 09:00 in the job's zone and tracks DST; without `timezone` that is the owner's zone. Interval and one-off are absolute instants; write a one-off or `expires_at` as ISO 8601 with the owner's UTC offset, which the current-date note states. Pass `timezone` only when the owner named another zone. Each run's message opens with the current time to the minute.
 
 ## Delivery
 
@@ -42,13 +47,13 @@ Exactly one of three forms. Free-form English ("daily at 8am") is rejected.
 
 `channel` with no target and no configured default is rejected, as is a target missing `platform` or a destination key. `origin` derives platform, chat id and thread from the creating chat and is rejected without one; an ACP session and a private GPT-Live call refuse it outright (each one's conversation ends with it), so schedule to an explicit channel there. A task of a call in the chat reports back into the Mac chat. From the Mac app's chat it delivers into the companion timeline, written even while the app is closed and caught up when it reconnects (`companion` reference).
 
-A final response of exactly `[SILENT]` delivers nothing and stores no run summary; the run prompt tells it to answer that way when there is nothing new. Under `origin`/`channel` the run can also send files with `send_attachment` and `generate_image` (16 media sends max, always to the job's own destination — `images` reference); under `local`/`none` they refuse first.
+A final response of exactly `[SILENT]` delivers nothing and stores no run summary; the run prompt tells it to answer that way when there is nothing new. Under `origin`/`channel` a run whose tools include `send_attachment` or `generate_image` can also send files (16 media sends max, always to the job's own destination — `images` reference), and its prompt says which it has; under `local`/`none` they refuse first.
 
 ## Runs
 
 Each run is a fresh bounded loop with the job prompt, the current date and the task; no chat history.
 
-Trust is stamped from the creating turn and never widens; a context carrying no trust cannot create a job. `skill_name` runs the job inside that skill's prompt, its tools and policy intersected with the job's, never wider; a skill granting nothing under the job's trust fails the run loudly. Unpinned runs resolve `[fermix_core.routing] cron_*`, else the primary/fallback chain, at run time.
+Trust is stamped from the creating run and never widens: the lower of its person's trust and the run's own, so a plugin skill's worker creates guest jobs. A context carrying no trust cannot create a job. `skill_name` runs the job inside that skill's prompt, never wider than the job: its tools intersected with the job's, the classes the skill declares kept to the job's own grant, at the lower of the job's trust and the skill's. A job bound to a plugin skill therefore runs at guest on what `skill_run` of that skill offers, even when the owner created it. Only a guest job's grant can leave a skill no class; such a run fails with a sentence saying so (set the job up again from the owner's own turn, bind another skill, or drop `skill_name`). Unpinned runs resolve `[fermix_core.routing] cron_*`, else the primary/fallback chain, at run time.
 
 `timeout_seconds` bounds the run's wall clock and `inactivity_timeout_seconds` fails a loop that stops progressing. Both are creation-only — `update_job` cannot change them — and `get_job_run` echoes what a run executed under.
 

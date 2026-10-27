@@ -7,8 +7,10 @@ defmodule FermixCore.Sandbox.ExternalEnv do
 
     * **Validation.** Which names and values may be stored at all. A name is a
       shell-exportable identifier that Fermix does not set itself; a value is
-      one line, because the command-source reader refuses multi-line output and
-      a value that stored fine but never read back would be the worst failure.
+      one line of printable ASCII, because the command-source reader refuses
+      multi-line output, the macOS keychain's lookup prints any other byte as
+      hex, and a value that stored fine but never read back as itself would be
+      the worst failure.
     * **The managed predicate.** A name is managed exactly when its
       `[sandbox.env.<NAME>]` source is the writer's own lookup for
       `{:external_env, NAME}` under the active profile. The settings rows,
@@ -33,9 +35,11 @@ defmodule FermixCore.Sandbox.ExternalEnv do
   @max_value_bytes 8_192
   @max_managed 64
   @line_breaks ["\n", "\r", <<0>>]
+  @printable_ascii ~r/\A[\x20-\x7E]*\z/
 
   @type name_error :: :invalid_name | :reserved_name
-  @type value_error :: :empty_value | :value_too_large | :value_not_single_line
+  @type value_error ::
+          :empty_value | :value_too_large | :value_not_single_line | :value_not_printable
   @type source_kind :: :managed | :engine_env | :alias | :helper
 
   @doc "The writer key a stored name lives under."
@@ -63,13 +67,18 @@ defmodule FermixCore.Sandbox.ExternalEnv do
     end
   end
 
-  @doc "Whether `value` may be stored: 1 to 8,192 bytes, no NUL, CR or LF."
+  @doc """
+  Whether `value` may be stored: 1 to 8,192 bytes of printable ASCII, space to
+  tilde. A NUL, CR or LF is `:value_not_single_line`; any other byte outside
+  that range is `:value_not_printable`.
+  """
   @spec validate_value(String.t()) :: :ok | {:error, value_error()}
   def validate_value(value) when is_binary(value) do
     cond do
       value == "" -> {:error, :empty_value}
       byte_size(value) > @max_value_bytes -> {:error, :value_too_large}
       String.contains?(value, @line_breaks) -> {:error, :value_not_single_line}
+      not Regex.match?(@printable_ascii, value) -> {:error, :value_not_printable}
       true -> :ok
     end
   end

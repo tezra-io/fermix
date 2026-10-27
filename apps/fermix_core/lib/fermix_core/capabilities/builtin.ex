@@ -6,12 +6,30 @@ defmodule FermixCore.Capabilities.Builtin do
   Policy class defaults are pinned per built-in so the §4.6 sub-agent gate
   has stable metadata to filter against. Built-ins not listed here default
   to `:read_only` — fail closed.
+
+  `host_command?: true` marks a built-in that starts a host process whose effect
+  the model chooses (`shell`; `git_write`, whose git runs the repository's
+  hooks; `codex_run` and `claude_code_run`, which start a coding agent on a
+  model-written task). `host_command_confined?` says whether the OS sandbox
+  wraps it where the kernel enforces: true for `shell` and `git_write`, false
+  for the coding agents, which run outside it. `coding_run?: true` marks those
+  two, whose confirmation shows every argument handed to the vendor CLI and
+  whose chain a run's follow-up turn may continue in the same folder. All three
+  reach the capability's metadata, where `Capabilities.AccessGate` reads them: a
+  host command in a turn that read outside content waits for the owner where
+  the call is not confined or the host has no kernel enforcement.
   """
 
   alias FermixCore.Capabilities.Capability
 
   @policy_defaults %{
-    "shell" => %{policy_class: :exec, hidden_from_agent?: false, owner_only?: false},
+    "shell" => %{
+      policy_class: :exec,
+      hidden_from_agent?: false,
+      owner_only?: false,
+      host_command?: true,
+      host_command_confined?: true
+    },
     "file_read" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
     # Returns the owner's own image files, exactly like `file_read` returns their
     # text — so it carries the same owner-only bound and a guest never sees it.
@@ -21,7 +39,13 @@ defmodule FermixCore.Capabilities.Builtin do
     "glob_search" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
     "content_search" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
     "git_read" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
-    "git_write" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
+    "git_write" => %{
+      policy_class: :read_write,
+      hidden_from_agent?: false,
+      owner_only?: false,
+      host_command?: true,
+      host_command_confined?: true
+    },
     "web_fetch" => %{policy_class: :network, hidden_from_agent?: false, owner_only?: false},
     "web_search" => %{policy_class: :network, hidden_from_agent?: false, owner_only?: false},
     # Provider place data, not owner data: the owner's saved default location is
@@ -117,9 +141,26 @@ defmodule FermixCore.Capabilities.Builtin do
     # an operator's `:exec` ceiling — but the execute-time `Harness.Authorization`
     # gate (attended operator or allowlisted cron) is the real barrier, not the
     # policy class. Only seeded when the harness is enabled AND the vendor CLI is
-    # present (BuiltinSeeder), so a disabled daemon never advertises them.
-    "codex_run" => %{policy_class: :exec, hidden_from_agent?: false, owner_only?: false},
-    "claude_code_run" => %{policy_class: :exec, hidden_from_agent?: false, owner_only?: false},
+    # present (BuiltinSeeder), so a disabled daemon never advertises them. The two
+    # local run tools start a vendor CLI on a model-written task with the owner's
+    # account authority, outside Fermix's sandbox on every platform: unconfined
+    # host commands. `codex_cloud_run` runs remotely and is not one.
+    "codex_run" => %{
+      policy_class: :exec,
+      hidden_from_agent?: false,
+      owner_only?: false,
+      host_command?: true,
+      host_command_confined?: false,
+      coding_run?: true
+    },
+    "claude_code_run" => %{
+      policy_class: :exec,
+      hidden_from_agent?: false,
+      owner_only?: false,
+      host_command?: true,
+      host_command_confined?: false,
+      coding_run?: true
+    },
     "codex_cloud_run" => %{policy_class: :exec, hidden_from_agent?: false, owner_only?: false},
     "list_coding_runs" => %{
       policy_class: :read_only,
@@ -150,6 +191,22 @@ defmodule FermixCore.Capabilities.Builtin do
       hidden_from_agent?: false,
       owner_only?: true
     },
+    # Open loops (MILESTONE_78 §08). Owner-only because every row is an
+    # intention the owner stated; the advertise?/execute gates (`OpenLoops.Access`
+    # and `[fermix_core.open_loops] enabled`) are the hard barrier, and these
+    # registry fields do not replace it.
+    "open_loop_note" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: true},
+    "open_loop_update" => %{
+      policy_class: :read_write,
+      hidden_from_agent?: false,
+      owner_only?: true
+    },
+    "open_loop_list" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
+    "open_loop_respond" => %{
+      policy_class: :read_write,
+      hidden_from_agent?: false,
+      owner_only?: true
+    },
     # Meetings notetaker (MILESTONE_21 C2 §14.1). `:external_api` sits in the
     # operator's default policy and the guest deny-list, and owner-only keeps
     # the owner's own meetings out of a guest's surface; the attended-operator
@@ -171,7 +228,18 @@ defmodule FermixCore.Capabilities.Builtin do
       policy_class: :external_api,
       hidden_from_agent?: false,
       owner_only?: true
-    }
+    },
+    # Watchers (M60 §8): the owner's own settings for what reaches a task. A
+    # write, owner-only; the attended advertise?/execute gate and the consent
+    # turn (S6) are the hard barriers. Only seeded while cues are enabled.
+    "manage_watcher" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: true},
+    # What the watchers received and did (M60 §9.5): the owner's data, read-only,
+    # behind the same attended advertise?/execute gate; it relays cue text, so it
+    # taints the turn (UntrustedContent). Only seeded while cues are enabled.
+    "list_cues" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
+    # A cue run's own watcher's deliveries (M60 §9.10): offered and run only in a
+    # run a cue woke. Only seeded while cues are enabled.
+    "cue_history" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true}
   }
 
   @doc """
@@ -215,7 +283,11 @@ defmodule FermixCore.Capabilities.Builtin do
       policy_class: defaults.policy_class,
       hidden_from_agent?: Map.get(defaults, :hidden_from_agent?, false),
       owner_only?: Map.get(defaults, :owner_only?, false),
-      metadata: metadata(tool_module)
+      metadata:
+        Map.merge(
+          metadata(tool_module),
+          Map.take(defaults, [:host_command?, :host_command_confined?, :coding_run?])
+        )
     })
   end
 

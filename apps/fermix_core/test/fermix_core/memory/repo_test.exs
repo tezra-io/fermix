@@ -81,7 +81,13 @@ defmodule FermixCore.Memory.RepoTest do
               37,
               38,
               39,
-              41
+              41,
+              42,
+              43,
+              45,
+              46,
+              47,
+              48
             ]} =
              Repo.migration_versions(server: repo)
   end
@@ -138,7 +144,13 @@ defmodule FermixCore.Memory.RepoTest do
               37,
               38,
               39,
-              41
+              41,
+              42,
+              43,
+              45,
+              46,
+              47,
+              48
             ]} =
              Repo.migration_versions(server: repo)
 
@@ -185,7 +197,13 @@ defmodule FermixCore.Memory.RepoTest do
               37,
               38,
               39,
-              41
+              41,
+              42,
+              43,
+              45,
+              46,
+              47,
+              48
             ]} =
              Repo.migration_versions(server: repo)
   end
@@ -472,6 +490,12 @@ defmodule FermixCore.Memory.RepoTest do
                "vendor_config_changes_json",
                "vendor_config_cleared_at"
              ]
+
+      # Migration 46 adds the chain's parent links beside the runs, not to them:
+      # an engine from before it still reads every `harness_runs` row after a
+      # rollback, since those rows are read positionally.
+      assert {:ok, links} = sqlite_column_names(conn, "harness_run_continuations")
+      assert links == ["run_id", "continued_from_run_id"]
     after
       Sqlite3.close(conn)
     end

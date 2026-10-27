@@ -1,0 +1,10 @@
+{"open_loops": [{"key": "permit",
+                 "intention": "Submit the Kessock harbour survey permit application",
+                 "why_it_matters": "the survey boat is booked for the week after",
+                 "horizon_class": "long",
+                 "said_days_ago": 10,
+                 "matters_in_days": 6,
+                 "touches": 0,
+                 "due_hours_ago": 4,
+                 "memory_fact": {"key": "kessock_survey_permit",
+                                 "value": "The owner submitted the Kessock harbour survey permit application, and the port office acknowledged receiving it."}}]}

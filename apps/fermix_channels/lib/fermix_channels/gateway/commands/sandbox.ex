@@ -11,6 +11,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
   alias FermixChannels.Gateway.Message
   alias FermixCore.Capabilities.AccessGate
+  alias FermixCore.Cues.Proposals
   alias FermixCore.Harness.Ledger
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.ConfigMutation
@@ -32,19 +33,30 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
           resume: grant_resume() | nil
         }
 
-  @typedoc "Enough of the original inbound message to faithfully re-ingest it after the grant is confirmed."
-  @type grant_resume :: %{content: String.t(), reply_target: String.t(), sender: String.t()}
+  @typedoc """
+  Enough of the original inbound message to faithfully re-ingest it after the
+  grant is confirmed, with what its parked turn had read (`provenance`,
+  `FermixCore.Capabilities.UntrustedContent.resume_provenance/1`) so the re-run
+  is the same request.
+  """
+  @type grant_resume :: %{
+          required(:content) => String.t(),
+          required(:reply_target) => String.t(),
+          required(:sender) => String.t(),
+          required(:provenance) => map()
+        }
 
   @typedoc """
   What core passes to the injected approval closure: a directory grant from the
   `request_directory_access` tool, a coding run's vendor-config change for the
   owner to acknowledge before the next harness launch (GAP3-1), or an
   access-sensitive plugin command parked by `Capabilities.AccessGate` (its
-  intent id; the call itself stays in core).
+  intent id; the call itself stays in core). The two that re-run a request
+  hand what their turn had read (`provenance`).
   """
   @type grant_request ::
-          %{path: String.t(), reason: String.t(), diff: String.t()}
-          | %{acknowledge_vendor_config: String.t()}
+          %{path: String.t(), reason: String.t(), diff: String.t(), provenance: map()}
+          | %{acknowledge_vendor_config: String.t(), provenance: map()}
           | %{access_sensitive: String.t()}
 
   @impl true
@@ -130,11 +142,20 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp dispatch("revoke", ["path", path], _message, reply_fn, _context),
     do: apply_now({:remove_allowed_root, path}, reply_fn)
 
-  defp dispatch("confirm", [token], message, reply_fn, context),
-    do: confirm(token, message, reply_fn, context)
+  # A mandate proposal's token (M60 §10.9) is core's: the proposal is durable in
+  # `memory.db` and core checks the message's origin against the chat it was
+  # sent to. Every other token is this store's.
+  defp dispatch("confirm", [token], message, reply_fn, context) do
+    if Proposals.token?(token),
+      do: confirm_proposal(token, message, reply_fn, context),
+      else: confirm(token, message, reply_fn, context)
+  end
 
-  defp dispatch("deny", [token], message, reply_fn, context),
-    do: deny(token, message, reply_fn, context)
+  defp dispatch("deny", [token], message, reply_fn, context) do
+    if Proposals.token?(token),
+      do: deny_proposal(token, message, reply_fn, context),
+      else: deny(token, message, reply_fn, context)
+  end
 
   defp dispatch(_name, _args, _message, reply_fn, _context),
     do:
@@ -395,7 +416,9 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
           [
             channel: adapter,
             agent: Map.fetch!(context, :agent),
-            agent_server: Map.fetch!(context, :agent_server)
+            agent_server: Map.fetch!(context, :agent_server),
+            # The re-run carries its parked turn's chain position.
+            keep_chain_metadata: true
           ]
           |> maybe_put(:ingress_context, Map.get(record, :ingress_context))
 
@@ -455,6 +478,45 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp access_outcome_text({:ok, outcome}), do: "Confirmed. #{outcome}"
   defp access_outcome_text({:error, reason}), do: "Confirmed, but #{reason}"
 
+  # The confirmed call runs its HTTP request, so it runs on the task supervisor
+  # (the `spawn_access_confirm/3` hop) and replies once with core's words.
+  defp confirm_proposal(token, message, reply_fn, context) do
+    finish = defer_command(context)
+    origin = proposal_origin(message)
+
+    {:ok, _pid} =
+      Task.Supervisor.start_child(FermixCore.TaskSupervisor, fn ->
+        result = Proposals.confirm(token, origin, proposal_opts(context))
+        reply(reply_fn, proposal_text(result))
+        settle_command(finish, result)
+      end)
+
+    :ok
+  end
+
+  defp deny_proposal(token, message, reply_fn, context) do
+    result = Proposals.deny(token, proposal_origin(message), proposal_opts(context))
+    reply(reply_fn, proposal_text(result))
+  end
+
+  # Who answered, and where: core accepts the answer only from the owner's DM
+  # the proposal was sent to (platform, chat and user), so a group chat or
+  # another platform is refused there.
+  defp proposal_origin(message) do
+    %{
+      platform: message.channel,
+      chat_id: message.chat_id,
+      user_id: stable_user_id(message.metadata || %{})
+    }
+  end
+
+  # Core's seams for a test that runs the command against its own repo; the
+  # gateway passes none.
+  defp proposal_opts(context), do: Map.get(context, :cue_proposal_opts, [])
+
+  defp proposal_text({:ok, text}), do: text
+  defp proposal_text({:error, text}), do: text
+
   defp defer_command(context) do
     case Map.get(context, :defer_command_fn) do
       defer when is_function(defer, 0) -> defer.()
@@ -466,7 +528,13 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp settle_command(finish, {:ok, _outcome}), do: finish.(:completed)
   defp settle_command(finish, {:error, reason}), do: finish.({:failed, reason})
 
+  # The re-run is the request that parked: it carries what that turn had read
+  # (`resumed_sources`, which the turn seeds) and, in the metadata the turn and
+  # the store read them from, a forwarded message's mark and, on a coding run's
+  # follow-up, its chain depth and finished run.
   defp synthesize_resume_message(record, resume, token) do
+    provenance = Map.fetch!(resume, :provenance)
+
     Message.new!(%{
       id: "grant-resume-#{System.unique_integer([:positive])}",
       content: resume.content,
@@ -475,7 +543,12 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
       chat_id: record.chat_id,
       reply_target: resume.reply_target,
       thread_ts: record.thread_ts,
-      metadata: %{user_id: record.user_id, resumed_from_grant: token}
+      metadata:
+        provenance
+        |> Map.take([:harness_continuation_depth, :harness_run_id])
+        |> Map.merge(Map.take(resume, [:forwarded]))
+        |> Map.merge(%{user_id: record.user_id, resumed_from_grant: token}),
+      resumed_sources: Map.get(provenance, :outside_sources)
     })
   end
 

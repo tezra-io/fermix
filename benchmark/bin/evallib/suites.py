@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import yaml
 
-from . import companion, voice
+from . import companion, cue_drive, voice
 from .fixture_server import (FIXTURE_URL_PLACEHOLDER, case_uses_fixture,
                              clause_problems)
 from .rubric import numbered_requirements
@@ -22,15 +22,24 @@ from .scoring import MATCH_METHODS, _parse_number
 _SCORE_KEYS = {"match", "expected", "tolerance", "single"}
 _TOP_KEYS = {
     "suite", "title", "description", "risk", "confirm_cost", "defaults", "scenarios", "soft",
-    "abort_on_tool_error",
+    "abort_on_tool_error", "requires",
 }
+# What a suite may require of the eval home beyond the defaults (`requires:`). A
+# home seeded without it holds the suite's cases out as NOT EVALUATED, never as
+# zeros. `cues`: seeded with `seed_capability_home.py --cues` and seed_cues.exs.
+REQUIREMENTS = ("cues",)
 _DEFAULT_KEYS = {"timeout_ms", "judge", "expect"}
 _SCENARIO_KEYS = {"id", "title", "severity", "risk", "confirm_cost", "tags", "cases",
-                  "sticky_gates"}
+                  "sticky_gates", "platforms"}
+# The hosts a scenario may be limited to (`platforms:`), named as the docs name
+# them. A scenario without the key runs on every host; `run_eval.py` names the
+# host it runs on with `platform_of(sys.platform)` and reports every scenario it
+# skips for this, with the reason.
+PLATFORMS = ("linux", "macos")
 _CASE_KEYS = {
     "id", "query", "turns", "expect", "rubric", "judge", "timeout_ms", "drive",
     "image", "images", "score", "checker", "requires_tools", "requires_tools_all",
-    "cross_session", "companion", "watch", "voice",
+    "cross_session", "companion", "watch", "voice", "cue",
 }
 _TURN_KEYS = {"query", "expect"}
 
@@ -56,6 +65,16 @@ EXPECT_SPEC: dict[str, tuple] = {
     # consequential control was not pressed, rather than that the reply did not
     # mention pressing it (evallib/fixture_server.py owns the semantics).
     "fixture_state": (list,),
+    # Paths under the eval daemon's sandbox workspace that the turn must not
+    # create, read off the disk by the runner before and after the turn: the
+    # floor under a tool ban that does not depend on the trace being right about
+    # what ran (run_eval.workspace_path_evidence, grade.workspace_paths_gate).
+    # Created by the turn: a conclusive, always-sticky failure, also on a turn
+    # whose trace never settled. "Present before the turn" (it existed when the
+    # runner looked just before driving the turn: an earlier case's, attempt's or
+    # run's file) proves nothing about this turn, so the gate fails
+    # inconclusively and the runner grades the case INCOMPLETE, never failed.
+    "workspace_paths_absent": (list,),
     # Source fidelity as a hard fact: every URL in the reply must appear in the
     # tool-evidence URL inventory (grade.evidence_urls). Mechanically checkable,
     # so it is a gate — never rubric material (SCHEMA.md: rubrics judge, gates
@@ -81,8 +100,10 @@ EXPECT_SPEC: dict[str, tuple] = {
 
 # `ask` and `companion` run unattended; `telegram_operator` needs a human to
 # send the message, so it runs only with --operator; `voice` spends a paid voice
-# minute against a Grok-enabled eval daemon, so it runs only with --voice.
-DRIVES = ("ask", "companion", "telegram_operator", "voice")
+# minute against a Grok-enabled eval daemon, so it runs only with --voice; `cue`
+# posts cues to the eval daemon's door and is capability-tier only
+# (evallib/cue_drive.py).
+DRIVES = ("ask", "companion", "telegram_operator", "voice", "cue")
 OPERATOR_DRIVES = ("telegram_operator",)
 VOICE_DRIVES = ("voice",)
 
@@ -142,6 +163,8 @@ class Case:
     #   around the message (cancel, reads, an offline wait); evallib/companion.py.
     voice: dict = field(default_factory=dict)  # drive: voice — the clips the call says
     #   and when; evallib/voice.py.
+    cue: dict = field(default_factory=dict)  # drive: cue — the source and the events
+    #   the runner posts to the door; evallib/cue_drive.py.
 
     @property
     def needs_operator(self) -> bool:
@@ -163,6 +186,7 @@ class Scenario:
     confirm_cost: bool = False      # additive spend acknowledgement; independent of risk
     sticky_gates: tuple[str, ...] = ()  # negative gates whose failure in ANY retry attempt
     #   fails the case — see STICKY_GATE_KEYS.
+    platforms: tuple[str, ...] = ()  # the hosts it runs on (PLATFORMS); empty = every host
 
 
 @dataclass
@@ -176,6 +200,8 @@ class Suite:
     # Matching one voids the rest of the run rather than failing it — see
     # `run_eval._abort_signal`.
     abort_on_tool_error: list[str] = field(default_factory=list)
+    requires: tuple[str, ...] = ()   # what the eval home must be seeded with (REQUIREMENTS);
+    #   a home without it holds every case out as NOT EVALUATED.
     soft: bool = False               # judge/taste axis: EXCLUDED from the correctness
     #   composite unless named explicitly with --suite (a noisy 0..1 taste score must not
     #   be averaged into task-success or share its tasks_hash — see run_capability).
@@ -229,6 +255,11 @@ def _validate_expect(expect, where: str, problems: list[str]) -> None:
                         f"{where}: expect `{key}` contains an invalid regex {pattern!r}: {exc}")
         if key == "fixture_state":
             problems.extend(clause_problems(val, f"{where}: expect `fixture_state`"))
+        if key == "workspace_paths_absent" and (
+                not val or not all(_valid_workspace_path(item) for item in val)):
+            problems.append(f"{where}: expect `{key}` must be a non-empty list of paths "
+                            "relative to the sandbox workspace, without traversal; "
+                            f"got {val!r}")
         if key in ("reply_matches", "reply_not_matches", "main_model_matches", "subagent_model_matches"):
             try:
                 re.compile(val)
@@ -246,6 +277,19 @@ def _validate_expect(expect, where: str, problems: list[str]) -> None:
 # forbidden tool and thereby dropped the eight-tool write guard the defaults set,
 # so the profile-boundary assertion those cases appeared to make was not running.
 _PROHIBITION_KEYS = ("tools_none", "tools_none_succeeded")
+
+
+def _final_turn_conflicts(case_declared: dict, turn_declared: dict, cloc: str) -> list[str]:
+    """The case's expect is graded on the final turn beside that turn's own, so a
+    key both declare with different values is two gates for one trace: refused,
+    never resolved silently. Prohibition lists accumulate instead."""
+    conflicts = sorted(key for key in turn_declared
+                       if key not in _PROHIBITION_KEYS and key in case_declared
+                       and case_declared[key] != turn_declared[key])
+    if not conflicts:
+        return []
+    return [f"{cloc}: the case's expect and its final turn's expect disagree on "
+            f"{conflicts}; declare each gate once"]
 
 
 def _merge_expect(base: dict, override: dict) -> dict:
@@ -266,7 +310,10 @@ def _merge_expect(base: dict, override: dict) -> dict:
 # failure kind — an expected value that never arrived — grades inconclusive
 # (grade.py), so a positive clause stays retryable exactly like the "errored
 # without typed pre-execution evidence" half of `tools_none_succeeded`.
-ALWAYS_STICKY_GATES = (*_PROHIBITION_KEYS, "fixture_state")
+# `workspace_paths_absent` joins on the same terms: a path the turn created is on
+# the disk whatever a retry does, while one that was there before the turn
+# proves nothing about it and grades inconclusive.
+ALWAYS_STICKY_GATES = (*_PROHIBITION_KEYS, "fixture_state", "workspace_paths_absent")
 # The negative gates grade.py implements: each one asserts that something did NOT
 # happen. Only these may be declared `sticky_gates:` — a positive gate is a
 # quality assertion a later attempt can legitimately satisfy, while a disclosed
@@ -288,6 +335,36 @@ def _validate_sticky_gates(value, where: str, problems: list[str]) -> tuple[str,
         problems.append(f"{where}: `sticky_gates` entry {key!r} is not a negative gate "
                         f"(allowed: {list(STICKY_GATE_KEYS)})")
     return tuple(dict.fromkeys(gates))
+
+
+def platform_of(sys_platform: str) -> str:
+    """The `platforms:` name of a Python `sys.platform` value. Any other host keeps
+    its own name, which no scenario can declare, so a limited scenario skips there."""
+    if not isinstance(sys_platform, str) or not sys_platform:
+        raise ValueError(f"sys.platform must be a non-empty string, got {sys_platform!r}")
+    if sys_platform.startswith("linux"):
+        return "linux"
+    if sys_platform == "darwin":
+        return "macos"
+    return sys_platform
+
+
+def _validate_platforms(value, suite_name: str, where: str,
+                        problems: list[str]) -> tuple[str, ...]:
+    """Validate a scenario-level `platforms:` list into a tuple of PLATFORMS.
+
+    A capability suite may not declare it: `run_capability.py` does not read it,
+    so its case would run on every host as if the key were absent."""
+    if suite_name.startswith(CAPABILITY_SUITE_PREFIX):
+        problems.append(f"{where}: `platforms` is read by run_eval.py only; a capability "
+                        "suite's case would run on every host")
+        return ()
+    if (not isinstance(value, list) or not value
+            or any(item not in PLATFORMS for item in value)):
+        problems.append(f"{where}: `platforms` must be a non-empty list drawn from "
+                        f"{list(PLATFORMS)}, got {value!r}")
+        return ()
+    return tuple(dict.fromkeys(value))
 
 
 def _validate_keys(value: dict, allowed: set[str], where: str, problems: list[str]) -> None:
@@ -357,6 +434,12 @@ def _valid_checker_path(path) -> bool:
     parts = path.replace("\\", "/").split("/")
     portable_absolute = bool(re.match(r"^[A-Za-z]:[\\/]", path)) or path.startswith("\\\\")
     return not os.path.isabs(path) and not drive and not portable_absolute and ".." not in parts
+
+
+def _valid_workspace_path(item) -> bool:
+    """A `workspace_paths_absent` entry: a relative path naming something below
+    the sandbox workspace, never the workspace itself."""
+    return _valid_checker_path(item) and os.path.normpath(item) != "."
 
 
 def _validate_reset_paths(value, where: str, problems: list[str]) -> list[str]:
@@ -442,7 +525,8 @@ def _validate_tool_list(cs: dict, key: str, cloc: str, problems: list[str]) -> l
     return []
 
 
-def _refuse_misplaced_fixture_state(case, cloc: str, problems: list[str]) -> None:
+def _refuse_misplaced_fixture_state(case, turn_expects: list[dict], cloc: str,
+                                    problems: list[str]) -> None:
     """Where a `fixture_state` gate may be declared, and what it needs.
 
     It is a CASE-level assertion. A turn-level one is refused because the
@@ -459,7 +543,7 @@ def _refuse_misplaced_fixture_state(case, cloc: str, problems: list[str]) -> Non
     case would grade against an empty map for the life of the suite — every
     `absent:` clause vacuously green, which is the reassuring checkmark a safety
     gate exists to prevent."""
-    if any("fixture_state" in turn.expect for turn in case.turns):
+    if any("fixture_state" in texp for texp in turn_expects):
         problems.append(f"{cloc}: `fixture_state` belongs to the case, not to a turn — "
                         "the capability runner reads the case's expect, so a "
                         "turn-level one is never scored; page state accumulates "
@@ -469,8 +553,23 @@ def _refuse_misplaced_fixture_state(case, cloc: str, problems: list[str]) -> Non
                         f"server — use {FIXTURE_URL_PLACEHOLDER} in `query`")
 
 
-def _companion_spec(cs: dict, drive: str, case_expect: dict, turns: list[Turn], cloc: str,
-                    problems: list[str]) -> dict:
+def _refuse_misplaced_workspace_paths(case, suite_name: str, cloc: str,
+                                      problems: list[str]) -> None:
+    """Only run_eval.py's `drive: ask` path reads the workspace around a turn; any
+    other runner or drive would grade the gate with no evidence at all."""
+    expects = [case.expect, *(turn.expect for turn in case.turns)]
+    if not any("workspace_paths_absent" in expect for expect in expects):
+        return
+    if suite_name.startswith(CAPABILITY_SUITE_PREFIX):
+        problems.append(f"{cloc}: `workspace_paths_absent` is graded by run_eval.py only; "
+                        "a capability case checks its end state in its `checker`")
+    elif case.drive != "ask":
+        problems.append(f"{cloc}: `workspace_paths_absent` needs `drive: ask`, the one "
+                        f"drive that reads the workspace around its turn (got {case.drive!r})")
+
+
+def _companion_spec(cs: dict, drive: str, case_expect: dict, turn_expects: list[dict],
+                    cloc: str, problems: list[str]) -> dict:
     """Validate a case's `companion:` map and its `expect.wire` against each other.
 
     Both belong to `drive: companion` alone: the socket is the only place the
@@ -478,7 +577,7 @@ def _companion_spec(cs: dict, drive: str, case_expect: dict, turns: list[Turn], 
     cancelled while it waits has no trace at all, so such a case asserts the
     wire and nothing the trace would have to show."""
     spec = cs.get("companion", {})
-    if any("wire" in turn.expect for turn in turns):
+    if any("wire" in texp for texp in turn_expects):
         problems.append(f"{cloc}: `wire` belongs to the case's expect, not to a turn")
     if drive != "companion":
         if "companion" in cs:
@@ -531,6 +630,37 @@ def _voice_spec(cs: dict, drive: str, case_expect: dict, cloc: str, fixtures_dir
     if found:
         return {}, None
     return spec, voice.spoken_text(spec, fixtures_dir)
+
+
+def _cue_spec(cs: dict, drive: str, case_expect: dict, suite_name: str, cloc: str,
+              problems: list[str]) -> dict:
+    """Validate a case's `cue:` map. A cue case has no user turn: the runner posts the
+    events to the eval daemon's door and its checker grades the rows they left
+    (deliveries, filter calls, runs, mandate calls) and the runs' tool spans, so it is
+    a capability case with a json checker and nothing else to grade it by."""
+    if drive != "cue":
+        if "cue" in cs:
+            problems.append(f"{cloc}: `cue` needs `drive: cue`")
+        return {}
+    spec = cs.get("cue")
+    if spec is None:
+        problems.append(f"{cloc}: `drive: cue` needs a `cue` map with its `source` and `posts`")
+        return {}
+    found = cue_drive.spec_problems(spec, f"{cloc}.cue")
+    if not suite_name.startswith(CAPABILITY_SUITE_PREFIX):
+        found.append(f"{cloc}: `drive: cue` belongs to a capability suite (cap_*): its "
+                     "outcome is rows a checker grades, not a reply")
+    checker_spec = cs.get("checker")
+    if not isinstance(checker_spec, dict) or checker_spec.get("mode") != "json":
+        found.append(f"{cloc}: a `drive: cue` case is graded by a json-mode `checker`")
+    for key in ("score", "rubric", "image", "images"):
+        if cs.get(key) is not None:
+            found.append(f"{cloc}: a `drive: cue` case takes no `{key}`")
+    if case_expect:
+        found.append(f"{cloc}: a `drive: cue` case declares what it requires in "
+                     f"`checker.expect`, not in `expect` ({sorted(case_expect)})")
+    problems.extend(found)
+    return {} if found else spec
 
 
 def _validate_watch(raw, rubric: str | None, cloc: str, problems: list[str]
@@ -672,6 +802,8 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
             sc.get("confirm_cost", suite_confirm_cost),
             f"{loc}: confirm_cost", problems, suite_confirm_cost)
         sticky_gates = _validate_sticky_gates(sc.get("sticky_gates", []), loc, problems)
+        platforms = (_validate_platforms(sc["platforms"], str(name), loc, problems)
+                     if "platforms" in sc else ())
 
         cases_raw = sc.get("cases")
         min_cases = min_cases_for(str(name))
@@ -703,29 +835,40 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                 drive = "ask"
             has_query = "query" in cs
             has_turns = "turns" in cs
-            if drive == "voice":
+            if drive in ("voice", "cue"):
                 if has_query or has_turns:
-                    problems.append(f"{cloc}: a `drive: voice` case says its `voice.clips`; "
+                    what = "says its `voice.clips`" if drive == "voice" else "posts its `cue.posts`"
+                    problems.append(f"{cloc}: a `drive: {drive}` case {what}; "
                                     "drop `query` and `turns`")
             elif has_query == has_turns:
                 problems.append(f"{cloc}: provide exactly one of `query` or `turns`")
             case_expect_raw = cs.get("expect", {})
             _validate_expect(case_expect_raw, f"{cloc}.expect", problems)
-            case_expect = _merge_expect(
-                default_expect, case_expect_raw if isinstance(case_expect_raw, dict) else {})
+            case_declared = case_expect_raw if isinstance(case_expect_raw, dict) else {}
+            case_expect = _merge_expect(default_expect, case_declared)
 
+            # Each turn's `expect` is resolved here, once, most specific last: the
+            # suite defaults, then on the final turn the case's expect (graded on
+            # that turn's trace), then the turn's own. The runner grades exactly
+            # this. A second merge in the runner used to put the case layer,
+            # defaults included, back over the final turn, so a suite-wide
+            # `max_tool_calls: 0` beat the `max_tool_calls: 2` an author had
+            # lifted a last turn to. `turn_expects` keeps the declarations for the
+            # checks that refuse a case-only key on a turn.
             turns: list[Turn] = []
+            turn_expects: list[dict] = []
             if has_query:
                 q = cs.get("query")
                 if not isinstance(q, str) or not q.strip():
                     problems.append(f"{cloc}: `query` must be a non-empty string")
                     q = q or ""
-                turns = [Turn(query=q, expect={})]
+                turns = [Turn(query=q, expect=case_expect)]
             elif has_turns:
                 tr = cs.get("turns")
                 if not isinstance(tr, list) or not tr:
                     problems.append(f"{cloc}: `turns` must be a non-empty list")
                     tr = []
+                declared: list[tuple[str, dict]] = []
                 for ti, tt in enumerate(tr):
                     tloc = f"{cloc}.turns[{ti}]"
                     if not isinstance(tt, dict):
@@ -738,8 +881,13 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                         q = q or ""
                     texp_raw = tt.get("expect", {})
                     _validate_expect(texp_raw, f"{tloc}.expect", problems)
-                    texp = texp_raw if isinstance(texp_raw, dict) else {}
-                    turns.append(Turn(query=q, expect=_merge_expect(default_expect, texp)))
+                    declared.append((q, texp_raw if isinstance(texp_raw, dict) else {}))
+                turn_expects = [texp for _q, texp in declared]
+                for ti, (q, texp) in enumerate(declared):
+                    layer = case_expect if ti == len(declared) - 1 else default_expect
+                    turns.append(Turn(query=q, expect=_merge_expect(layer, texp)))
+                if declared:
+                    problems.extend(_final_turn_conflicts(case_declared, declared[-1][1], cloc))
 
             rubric = cs.get("rubric")
             if rubric is not None and not isinstance(rubric, str):
@@ -779,10 +927,14 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
 
             if drive in ("telegram_operator", "companion") and has_turns:
                 problems.append(f"{cloc}: `drive: {drive}` supports only single-turn `query` cases")
-            companion_spec = _companion_spec(cs, drive, case_expect, turns, cloc, problems)
+            companion_spec = _companion_spec(cs, drive, case_expect, turn_expects, cloc,
+                                             problems)
             voice_spec, spoken = _voice_spec(cs, drive, case_expect, cloc, fixtures_dir, problems)
             if spoken is not None:
                 turns = [Turn(query=spoken, expect={})]
+            cue_spec = _cue_spec(cs, drive, case_expect, str(name), cloc, problems)
+            if cue_spec:
+                turns = [Turn(query=text, expect={}) for text in cue_drive.turn_texts(cue_spec)]
 
             # `image: <path>` (single) or `images: [<path>...]` (multi-image /
             # album) names known local fixtures. `drive: ask` passes each one to
@@ -832,13 +984,14 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                         score_spec=score_spec, checker_spec=checker_spec,
                         requires_tools=requires_tools, cross_session=cross_session,
                         requires_tools_all=tuple(requires_all), companion=companion_spec,
-                        watch=watch, voice=voice_spec)
-            _refuse_misplaced_fixture_state(case, cloc, problems)
+                        watch=watch, voice=voice_spec, cue=cue_spec)
+            _refuse_misplaced_fixture_state(case, turn_expects, cloc, problems)
+            _refuse_misplaced_workspace_paths(case, str(name), cloc, problems)
             cases.append(case)
 
         scenarios.append(Scenario(id=sid, title=stitle, severity=severity, tags=tags,
                                   cases=cases, risk=risk, confirm_cost=confirm_cost,
-                                  sticky_gates=sticky_gates))
+                                  sticky_gates=sticky_gates, platforms=platforms))
 
     description = raw.get("description", "")
     if not isinstance(description, str):
@@ -846,9 +999,21 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
         description = ""
     soft = _boolean(raw.get("soft", False), f"{fname}: top level soft", problems, False)
     aborts = _abort_fragments(raw.get("abort_on_tool_error", []), fname, problems)
+    requires = _requirements(raw.get("requires", []), fname, problems)
+    if "cues" not in requires and any(case.drive == "cue" for scenario in scenarios
+                                      for case in scenario.cases):
+        problems.append(f"{fname}: a `drive: cue` suite declares `requires: [cues]`, so a "
+                        "home seeded without --cues holds it out")
     return Suite(name=name, title=title, description=description,
                  path=path, scenarios=scenarios, soft=soft,
-                 abort_on_tool_error=aborts)
+                 abort_on_tool_error=aborts, requires=requires)
+
+
+def _requirements(value, fname: str, problems: list[str]) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(item not in REQUIREMENTS for item in value):
+        problems.append(f"{fname}: `requires` must be a list drawn from {list(REQUIREMENTS)}")
+        return ()
+    return tuple(dict.fromkeys(value))
 
 
 def _abort_fragments(value, fname: str, problems: list[str]) -> list[str]:

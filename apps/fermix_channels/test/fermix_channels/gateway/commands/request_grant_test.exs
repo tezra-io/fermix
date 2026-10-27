@@ -6,6 +6,9 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
   """
   use ExUnit.Case, async: false
 
+  # A resume intent carries what its parked turn had read; these turns read nothing.
+  @clean %{outside_sources: MapSet.new()}
+
   alias FermixChannels.Channels.Telegram
   alias FermixChannels.CLI
   alias FermixChannels.Gateway.Authorizer
@@ -73,7 +76,7 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
     test "builds an origin-bound, TTL'd record with a chat resume intent", %{root: root} do
       origin =
         chat_origin("owner-1",
-          resume: %{content: "do it", reply_target: "chat-1", sender: "alice"}
+          resume: %{content: "do it", reply_target: "chat-1", sender: "alice", provenance: @clean}
         )
 
       assert {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), origin)
@@ -84,7 +87,14 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
       assert record.chat_id == "chat-1"
       assert record.thread_ts == nil
       assert record.user_id == "owner-1"
-      assert record.resume == %{content: "do it", reply_target: "chat-1", sender: "alice"}
+
+      assert record.resume == %{
+               content: "do it",
+               reply_target: "chat-1",
+               sender: "alice",
+               provenance: @clean
+             }
+
       refute Map.has_key?(record, :ingress_context)
       assert record.expires_at > System.monotonic_time(:millisecond)
     end
@@ -102,7 +112,7 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
     } do
       origin =
         chat_origin("owner-1",
-          resume: %{content: "do it", reply_target: "chat-1", sender: "alice"}
+          resume: %{content: "do it", reply_target: "chat-1", sender: "alice", provenance: @clean}
         )
 
       assert {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), origin)
@@ -121,12 +131,12 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
     test "mobile grants from different authenticated devices do not dedupe", %{root: root} do
       origin =
         mobile_origin("device-1",
-          resume: %{content: "do it", reply_target: "main", sender: "alice"}
+          resume: %{content: "do it", reply_target: "main", sender: "alice", provenance: @clean}
         )
 
       other_device =
         mobile_origin("device-2",
-          resume: %{content: "do it", reply_target: "main", sender: "alice"}
+          resume: %{content: "do it", reply_target: "main", sender: "alice", provenance: @clean}
         )
 
       assert {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), origin)
@@ -143,7 +153,12 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
          %{root: root} do
       origin =
         chat_origin("owner-1",
-          resume: %{content: "finish the refactor", reply_target: "chat-1", sender: "alice"}
+          resume: %{
+            content: "finish the refactor",
+            reply_target: "chat-1",
+            sender: "alice",
+            provenance: @clean
+          }
         )
 
       {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), origin)
@@ -164,7 +179,12 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
     test "a mobile grant resumes with its connection-authenticated ingress context", %{root: root} do
       origin =
         mobile_origin(pair_device!(),
-          resume: %{content: "finish on mobile", reply_target: "main", sender: "alice"}
+          resume: %{
+            content: "finish on mobile",
+            reply_target: "main",
+            sender: "alice",
+            provenance: @clean
+          }
         )
 
       {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), origin)
@@ -197,7 +217,9 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
       # operator-only, so the guest is refused at authorization — before the
       # pending record is ever peeked — and the owner's token survives intact.
       origin =
-        chat_origin("owner-1", resume: %{content: "x", reply_target: "chat-1", sender: "alice"})
+        chat_origin("owner-1",
+          resume: %{content: "x", reply_target: "chat-1", sender: "alice", provenance: @clean}
+        )
 
       {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), origin)
 
@@ -222,7 +244,7 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
         chat_id: "chat-1",
         thread_ts: nil,
         user_id: "owner-1",
-        resume: %{content: "x", reply_target: "chat-1", sender: "alice"},
+        resume: %{content: "x", reply_target: "chat-1", sender: "alice", provenance: @clean},
         expires_at: System.monotonic_time(:millisecond) - 1_000
       })
 
@@ -264,7 +286,12 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
     } do
       origin =
         chat_origin("owner-1",
-          resume: %{content: "now have Claude review it", reply_target: "chat-1", sender: "alice"}
+          resume: %{
+            content: "now have Claude review it",
+            reply_target: "chat-1",
+            sender: "alice",
+            provenance: @clean
+          }
         )
 
       {:ok, token, :new} = SandboxCommand.store_pending_grant(ack(run_id), origin)
@@ -621,7 +648,14 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
 
     test "a tap persists the grant, auto-resumes, and the token is single-use", %{root: root} do
       origin =
-        callback_origin(resume: %{content: "finish it", reply_target: "123", sender: "alice"})
+        callback_origin(
+          resume: %{
+            content: "finish it",
+            reply_target: "123",
+            sender: "alice",
+            provenance: @clean
+          }
+        )
 
       {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), origin)
 
@@ -644,7 +678,11 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
     end
 
     test "a tap from a non-owner is refused and never persists", %{root: root} do
-      origin = callback_origin(resume: %{content: "x", reply_target: "123", sender: "alice"})
+      origin =
+        callback_origin(
+          resume: %{content: "x", reply_target: "123", sender: "alice", provenance: @clean}
+        )
+
       {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), origin)
 
       {:ok, [tap]} = Telegram.parse_update(callback_update(token, 222))

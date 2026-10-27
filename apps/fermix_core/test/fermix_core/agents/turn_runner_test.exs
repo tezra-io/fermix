@@ -15,6 +15,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Harness.Delivery, as: HarnessDelivery
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
+  alias FermixCore.OpenLoops.Registry, as: OpenLoopsRegistry
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.LivePrompt
@@ -2227,6 +2228,116 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
   end
 
+  # MILESTONE_78 §04 stage 3, rung 1: while an open loop is due, an owner's
+  # private turn carries the due note in its leading system run.
+  defmodule OpenLoopInbox do
+    @moduledoc false
+    def send_message(_destination, _text, _opts), do: :ok
+  end
+
+  describe "the open-loop due note" do
+    setup do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-tr-open-loop-#{unique}.db")
+      repo = :"tr_open_loop_repo_#{unique}"
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path}, id: repo)
+
+      previous = Application.get_env(:fermix_core, :open_loops)
+      Application.put_env(:fermix_core, :open_loops, enabled: true)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:fermix_core, :open_loops)
+          value -> Application.put_env(:fermix_core, :open_loops, value)
+        end
+
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      end)
+
+      %{repo: repo, loop: note_imminent_loop!(repo)}
+    end
+
+    test "an owner's chat turn carries it after the date note", %{repo: repo, loop: loop} do
+      messages = capture_prompt(%{channel: "telegram", chat_id: "40031"}, memory_repo: repo)
+
+      system_run = Enum.take_while(messages, &(&1.role == "system"))
+      note_index = Enum.find_index(system_run, &(&1.content =~ "Open loop due."))
+      date_index = Enum.find_index(system_run, &(&1.content =~ "Current date:"))
+
+      assert is_integer(note_index)
+      assert note_index > date_index
+
+      note = Enum.at(system_run, note_index).content
+      assert note =~ ~s(the owner said: "Post the Quillfeather newsletter draft")
+      assert note =~ "\nopen_loop_id: #{loop.id}"
+    end
+
+    test "a loop said a minute ago is not carried into the next turn", %{repo: repo} do
+      said_at = DateTime.add(DateTime.utc_now(), -60, :second)
+      note_loop!(repo, "Return the Ellery library books", said_at)
+      {:ok, %{due: []}} = Repo.scan_due_open_loops(DateTime.utc_now(), 50, server: repo)
+
+      messages = capture_prompt(%{channel: "telegram", chat_id: "40031"}, memory_repo: repo)
+
+      assert Enum.any?(messages, &(&1.content =~ "Post the Quillfeather newsletter draft"))
+      refute Enum.any?(messages, &(&1.content =~ "Return the Ellery library books"))
+    end
+
+    test "a guest's turn does not carry it", %{repo: repo} do
+      messages =
+        capture_prompt(%{channel: "telegram", chat_id: "guest-7", source_trust: :guest},
+          memory_repo: repo
+        )
+
+      refute Enum.any?(messages, &(&1.content =~ "Open loop due."))
+    end
+  end
+
+  # An imminent loop is due from the moment it is noted until its date passes,
+  # so a turn, which reads the real clock, finds it inside its window. The
+  # names and ids are invented.
+  # An imminent loop is noted from three hours after it was said, so this one was
+  # said just over three hours ago.
+  defp note_imminent_loop!(repo) do
+    said_at = DateTime.add(DateTime.utc_now(), -(3 * 3_600 + 60), :second)
+    loop = note_loop!(repo, "Post the Quillfeather newsletter draft", said_at)
+    {:ok, %{due: [_due]}} = Repo.scan_due_open_loops(DateTime.utc_now(), 50, server: repo)
+    loop
+  end
+
+  defp note_loop!(repo, intention, said_at) do
+    matters_by = DateTime.add(DateTime.utc_now(), 10 * 3_600, :second)
+
+    params = %{
+      "intention" => intention,
+      "timezone" => "Etc/UTC",
+      "matters_by" => %{
+        "type" => "datetime",
+        "date" => matters_by |> DateTime.to_date() |> Date.to_iso8601(),
+        "time" => matters_by |> DateTime.to_time() |> Time.truncate(:second) |> Time.to_iso8601()
+      }
+    }
+
+    attended = %{
+      source_trust: :operator,
+      computer_use_origin: :interactive,
+      conversation_key: {"telegram", "40031", :root},
+      memory_owner_id: "default",
+      memory_agent_id: "main"
+    }
+
+    opts = [
+      repo: repo,
+      now: said_at,
+      jobs_config: [delivery_channels: %{"telegram" => OpenLoopInbox}],
+      configured_owners: %{"telegram" => "40031"},
+      scheduler: nil
+    ]
+
+    {:ok, %{loop: loop}} = OpenLoopsRegistry.note(params, attended, opts)
+    loop
+  end
+
   # M67: the gateway's attachments become the manifest in the persisted user
   # text and the turn-local parts the encoders read.
   describe "inbound attachments" do
@@ -2406,7 +2517,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert line_index > date_index
 
       line = Enum.at(system_run, line_index).content
-      assert line =~ "started at 14:05 UTC"
+      assert line =~ "started at 2:05 PM UTC"
       assert line =~ "material for the call"
       assert line =~ "Reply in writing when"
       assert line =~ "exactly [SILENT]"
@@ -2422,7 +2533,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
         )
 
       line = Enum.find(messages, &(&1.content =~ "voice call")).content
-      assert line =~ "started at 14:05 UTC"
+      assert line =~ "started at 2:05 PM UTC"
       assert line =~ "briefly"
       refute line =~ "SILENT"
     end
@@ -2469,7 +2580,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert note_index == date_index + 1
 
       assert Enum.at(system_run, note_index).content =~
-               "- 2026-10-03 14:05 UTC: You booked the room"
+               "- Saturday, October 3, 2026 at 2:05 PM UTC: You booked the room"
     end
 
     # M56 D9: the phone's turns run in the chat, and are owner turns of it.
@@ -2480,7 +2591,10 @@ defmodule FermixCore.Agents.TurnRunnerTest do
           memory_repo: repo
         )
 
-      assert Enum.any?(messages, &(&1.content =~ "- 2026-10-03 14:05 UTC: You booked the room"))
+      assert Enum.any?(
+               messages,
+               &(&1.content =~ "- Saturday, October 3, 2026 at 2:05 PM UTC: You booked the room")
+             )
     end
 
     test "a hand-off is not told: it is the call", %{repo: repo} do

@@ -26,8 +26,11 @@ defmodule FermixCore.Net.Guard do
   # One bound for each address family's system lookup.
   @owner_lookup_ms 10_000
 
+  # The schemes the public-web policy takes unless a caller names its own.
+  @web_schemes ["http", "https"]
+
   @type resolver :: (String.t() -> {:ok, [:inet.ip_address()]} | {:error, term()})
-  @type opts :: [resolver: resolver()]
+  @type opts :: [resolver: resolver(), schemes: [String.t(), ...]]
 
   @spec validate(String.t(), opts()) :: :ok | {:error, term()}
   def validate(url, opts \\ []) when is_binary(url) do
@@ -61,13 +64,17 @@ defmodule FermixCore.Net.Guard do
   Audit F-04: prior `Guard.validate/2` resolved DNS once at preflight,
   then Req re-resolved at connect; this entry point hands the validated
   IP to the caller so the connect is pinned to it.
+
+  `:schemes` names the URL schemes taken, http and https by default; a cue
+  stream passes `["wss"]` (M60 §3.2). The address policy is the same for
+  every scheme.
   """
   @spec resolve_and_validate(String.t(), opts()) ::
           :ok | {:ok, :inet.ip_address()} | {:error, term()}
   def resolve_and_validate(url, opts \\ []) when is_binary(url) do
     with :ok <- validate_text(url),
          %URI{} = uri <- URI.parse(url),
-         :ok <- validate_scheme(uri.scheme),
+         :ok <- validate_scheme(uri.scheme, Keyword.get(opts, :schemes, @web_schemes)),
          {:ok, host} <- fetch_host(uri),
          :ok <- validate_host(host),
          {:ok, validated_ip_or_skip} <- resolve_validated_ip(host, opts) do
@@ -88,7 +95,7 @@ defmodule FermixCore.Net.Guard do
   def owner_peers(url, opts \\ []) when is_binary(url) do
     with :ok <- validate_text(url),
          %URI{} = uri <- URI.parse(url),
-         :ok <- validate_scheme(uri.scheme),
+         :ok <- validate_scheme(uri.scheme, @web_schemes),
          {:ok, host} <- fetch_host(uri) do
       case parse_ip(host) do
         {:ok, ip} -> owner_literal(ip)
@@ -232,8 +239,13 @@ defmodule FermixCore.Net.Guard do
 
   defp normalize_headers(_headers), do: []
 
-  defp validate_scheme(scheme) when scheme in ["http", "https"], do: :ok
-  defp validate_scheme(_scheme), do: {:error, :scheme_not_http_or_https}
+  defp validate_scheme(scheme, schemes) do
+    cond do
+      scheme in schemes -> :ok
+      schemes == @web_schemes -> {:error, :scheme_not_http_or_https}
+      true -> {:error, {:scheme_not_allowed, schemes}}
+    end
+  end
 
   defp fetch_host(%URI{host: host}) when is_binary(host) and host != "" do
     {:ok, String.downcase(host)}

@@ -12,11 +12,12 @@ defmodule FermixCore.Harness.Authorization do
 
   Two ways in, enforced in order:
 
-    * **Live attended operator turn** — `source_trust == :operator`,
-      `subagent_depth == 0`, and a channel `reply_fn` present (the owner is on
-      the other end and can see the outcome).
+    * **Live attended operator turn** — `source_trust == :operator`, not a
+      delegated worker (`Temporal.Access.worker?/1`), and a channel `reply_fn`
+      present (the owner is on the other end and can see the outcome).
     * **Scheduled context** — the run is a non-delegated cron loop
-      (`subagent_depth == 0`) whose `conversation_key` is `{:scheduled_job, _, _}`
+      (not `Temporal.Access.worker?/1`) whose `conversation_key` is
+      `{:scheduled_job, _, _}`
       and whose *raw job row* names the exact tool in its persisted
       `allowed_tools`. The runner narrows `[]` → `nil` before the loop context is
       built, so the allowlist is read straight from the job row via
@@ -24,18 +25,20 @@ defmodule FermixCore.Harness.Authorization do
       insufficient, and an empty/absent job allowlist is not an authorization.
       The depth guard is load-bearing: a subagent worker fanned out inside a cron
       job inherits the scheduled `conversation_key`/`job_id` (subagents strip
-      `:source_trust`, never those keys), so without it an allowlisted job would
-      authorize its own workers — the worker-exclusion invariant (§7.1) forbids
-      that.
+      `:source_trust`, never those keys), and a skill worker inherits the whole
+      context, `:reply_fn` and `:source_trust` included, so without it an
+      allowlisted job or an attended turn would authorize its own workers — the
+      worker-exclusion invariant (§7.1) forbids that.
 
   Anything else is refused with a class-distinct reason: `:worker_context`
-  (a delegated subagent — `source_trust` is stripped), `:guest_context`,
+  (a delegated `subagents` or skill worker), `:guest_context`,
   `:unattended` (an operator context with no live reply surface, e.g. a
   `/background` run), or `:cron_not_allowlisted`.
   """
 
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
+  alias FermixCore.Temporal.Access
 
   @type reason ::
           :worker_context
@@ -63,7 +66,7 @@ defmodule FermixCore.Harness.Authorization do
 
   defp attended_operator?(context) do
     Map.get(context, :source_trust) == :operator and
-      Map.get(context, :subagent_depth, 0) == 0 and
+      not Access.worker?(context) and
       is_function(Map.get(context, :reply_fn), 1)
   end
 
@@ -75,12 +78,13 @@ defmodule FermixCore.Harness.Authorization do
   `{:scheduled_job, _, _}`.
 
   A delegated worker inherits the scheduled `conversation_key`/`job_id` but runs
-  at `subagent_depth >= 1`; the real cron loop context carries no depth (→ 0).
-  Gating the scheduled path on depth 0 keeps a worker out of the job allowlist.
+  at a `subagent_depth` or `skill_depth` of 1 or more; the real cron loop
+  context carries neither (→ 0). Gating the scheduled path on
+  `Temporal.Access.worker?/1` keeps a worker out of the job allowlist.
   """
   @spec scheduled?(map()) :: boolean()
   def scheduled?(context) when is_map(context) do
-    Map.get(context, :subagent_depth, 0) == 0 and
+    not Access.worker?(context) and
       match?({:scheduled_job, _job_id, _run_id}, Map.get(context, :conversation_key))
   end
 
@@ -123,12 +127,13 @@ defmodule FermixCore.Harness.Authorization do
 
   # --- Refusal classification ---------------------------------------------
 
+  # A worker first: a skill worker keeps its parent's operator trust.
   defp refusal_reason(context) do
-    case Map.get(context, :source_trust) do
-      :guest -> :guest_context
-      :operator -> :unattended
-      nil -> :worker_context
-      _other -> :worker_context
+    case {Access.worker?(context), Map.get(context, :source_trust)} do
+      {true, _trust} -> :worker_context
+      {false, :guest} -> :guest_context
+      {false, :operator} -> :unattended
+      {false, _stripped_or_other} -> :worker_context
     end
   end
 end

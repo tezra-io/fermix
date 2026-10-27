@@ -323,6 +323,11 @@ defmodule FermixCore.Temporal.FollowupTest do
       assert prompt =~ @delivered_text
       assert prompt =~ event.title
       assert prompt =~ "[SILENT]"
+
+      # The run reasons about time left, so its own message opens with the time to
+      # the minute on the owner's clock.
+      [occasion] = for %{role: "user", content: content} <- messages, do: content
+      assert occasion =~ ~r/\ANow: \w+day, \w+ \d{1,2}, \d{4} at \d{1,2}:\d{2} [AP]M \S+\.\n\n/
     end
 
     test "a provider failure closes the run as an error rather than a bare crash", ctx do

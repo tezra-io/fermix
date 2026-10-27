@@ -43,7 +43,9 @@ defmodule FermixChannels.Gateway.Transcription do
   @doc """
   Compose a transcript into the message (D15): it stands alone when the audio
   came without a caption, and follows the caption under a labelled delimiter
-  when one came with it. The metadata records the attachment and the backend.
+  when one came with it. A forwarded recording's transcript is always labelled,
+  as forwarded, so the model reads whose words they are. The metadata records
+  the attachment and the backend.
   """
   @spec put_transcript(message(), transcript()) :: message()
   def put_transcript(message, %{text: text, backend: backend, attachment: attachment})
@@ -121,21 +123,31 @@ defmodule FermixChannels.Gateway.Transcription do
     transcription = %{attachment: attachment, backend: backend}
     metadata = normalize_metadata(message_value(message, :metadata))
     metadata = Map.put(metadata, map_key(metadata, :transcription), transcription)
-    content = compose_content(message_value(message, :content), transcript)
+
+    content =
+      compose_content(
+        message_value(message, :content),
+        transcript,
+        Map.get(attachment, :forwarded?) == true
+      )
 
     message
     |> Map.put(map_key(message, :content), content)
     |> Map.put(map_key(message, :metadata), metadata)
   end
 
-  # D15: the transcript stands alone when the audio arrived without a caption;
-  # when a caption accompanied it, the caption stays first and the transcript
-  # follows under a labeled delimiter so the model sees both.
-  defp compose_content(caption, transcript) do
-    if present?(caption) do
-      "#{caption}\n\n[voice note transcript]\n#{transcript}"
-    else
-      transcript
+  # D15: the owner's own transcript stands alone when the audio arrived
+  # without a caption; when a caption accompanied it, the caption stays first
+  # and the transcript follows under a labeled delimiter so the model sees both.
+  # A forwarded recording is someone else's words, so its label always comes.
+  defp compose_content(caption, transcript, forwarded?) do
+    label =
+      if forwarded?, do: "[forwarded voice note transcript]", else: "[voice note transcript]"
+
+    cond do
+      present?(caption) -> "#{caption}\n\n#{label}\n#{transcript}"
+      forwarded? -> "#{label}\n#{transcript}"
+      true -> transcript
     end
   end
 
@@ -168,7 +180,8 @@ defmodule FermixChannels.Gateway.Transcription do
       url: attachment_value(attachment, :url),
       mime_type: attachment_value(attachment, :mime_type),
       file_id: attachment_value(attachment, :file_id),
-      size_bytes: attachment_value(attachment, :size_bytes)
+      size_bytes: attachment_value(attachment, :size_bytes),
+      forwarded?: attachment_value(attachment, :forwarded?) == true
     }
   end
 

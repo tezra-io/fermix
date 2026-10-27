@@ -99,6 +99,29 @@ defmodule FermixCore.Providers.ErrorTest do
     end
   end
 
+  # Anthropic answers an API account with no credit left with HTTP 400
+  # `invalid_request_error`: no code, no 402, no "quota" (2026-10-26). Read as a
+  # generic provider error it stopped every turn and job at Anthropic while
+  # OpenAI Codex and OpenAI sat configured as fallbacks.
+  describe "api/5 on an exhausted credit balance" do
+    @credit_message "Your credit balance is too low to access the Anthropic API. " <>
+                      "Please go to Plans & Billing to upgrade or purchase credits."
+
+    test "Anthropic's 400 is quota, fails over, and keeps the provider's words" do
+      body = %{
+        "type" => "error",
+        "error" => %{"type" => "invalid_request_error", "message" => @credit_message},
+        "request_id" => "req_011CgRWc5bMspSVNSrYBU8d5"
+      }
+
+      reason = ProviderError.api(:anthropic, :messages, 400, body)
+
+      assert {:provider_error, %{kind: :quota, status: 400, message: @credit_message}} = reason
+      assert Failover.eligible?(reason)
+      refute Transient.retryable?(reason)
+    end
+  end
+
   describe "api/5 when the body carries no reason" do
     # Codex answered the first call of a cron run with HTTP 404 and a zero-byte
     # body (2026-09-15). That decoded to a message of "" rather than nil, so the

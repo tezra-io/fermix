@@ -53,6 +53,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Contract do
 
   @type tool_policy :: %{
           name: String.t(),
+          description: String.t(),
           read_only: boolean(),
           replay_safe: boolean(),
           credential_scope: :read | :write,
@@ -139,7 +140,9 @@ defmodule FermixCore.Capabilities.MCP.Remote.Contract do
 
   @doc """
   Verify every selected descriptor against its signed `descriptor_sha256` and
-  build the registrable view.
+  build the registrable view. The view's description is the manifest's (§7.6
+  rule 7): the live one is covered by no signature, so it is neither checked
+  nor shown.
 
   All-or-none: the first missing or changed descriptor returns
   `{:error, {:upstream_contract_mismatch, detail}}` and nothing registers.
@@ -261,7 +264,8 @@ defmodule FermixCore.Capabilities.MCP.Remote.Contract do
   defp compile_tools(_spec), do: {:error, {:invalid_remote_config, :allowed_tools}}
 
   defp compile_tool(name, facts) when is_binary(name) and is_map(facts) do
-    with :ok <- require_boolean(facts, :read_only, name),
+    with {:ok, description} <- description(facts, name),
+         :ok <- require_boolean(facts, :read_only, name),
          :ok <- require_boolean(facts, :replay_safe, name),
          {:ok, scope} <- credential_scope(facts, name),
          {:ok, digest} <- descriptor_sha256(facts, name),
@@ -270,6 +274,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Contract do
       {:ok,
        %{
          name: name,
+         description: description,
          read_only: Map.fetch!(facts, :read_only),
          replay_safe: Map.fetch!(facts, :replay_safe),
          credential_scope: scope,
@@ -281,6 +286,15 @@ defmodule FermixCore.Capabilities.MCP.Remote.Contract do
   end
 
   defp compile_tool(name, _facts), do: {:error, {:invalid_remote_config, {:tool_facts, name}}}
+
+  # The model reads the manifest's description, which the plugin's signature
+  # covers; without one there is nothing signed to show.
+  defp description(facts, name) do
+    case Map.get(facts, :description) do
+      description when is_binary(description) and description != "" -> {:ok, description}
+      _missing -> {:error, {:invalid_remote_config, {:description, name}}}
+    end
+  end
 
   defp require_boolean(facts, key, name) do
     if is_boolean(Map.get(facts, key)),
@@ -302,13 +316,14 @@ defmodule FermixCore.Capabilities.MCP.Remote.Contract do
     end
   end
 
-  # A tool that returns no collection carries no collection policy; that is a
-  # signed state, not a missing one.
+  # A tool that returns no collection carries a `nil` collection policy; that
+  # is a signed state. An absent key is a spec that dropped it, refused like any
+  # other missing field rather than read as "no limit".
   defp collection_policy(facts, name) do
-    case Map.get(facts, :collection_policy) do
-      nil -> {:ok, nil}
-      %{} = policy -> validate_collection_policy(policy, name)
-      _invalid -> {:error, {:invalid_remote_config, {:collection_policy, name}}}
+    case Map.fetch(facts, :collection_policy) do
+      {:ok, nil} -> {:ok, nil}
+      {:ok, %{} = policy} -> validate_collection_policy(policy, name)
+      _missing_or_invalid -> {:error, {:invalid_remote_config, {:collection_policy, name}}}
     end
   end
 
@@ -324,9 +339,9 @@ defmodule FermixCore.Capabilities.MCP.Remote.Contract do
   end
 
   defp argument_guards(facts, name) do
-    case Map.get(facts, :argument_guards, []) do
-      guards when is_list(guards) -> validate_guards(guards, name)
-      _invalid -> {:error, {:invalid_remote_config, {:argument_guards, name}}}
+    case Map.fetch(facts, :argument_guards) do
+      {:ok, guards} when is_list(guards) -> validate_guards(guards, name)
+      _missing_or_invalid -> {:error, {:invalid_remote_config, {:argument_guards, name}}}
     end
   end
 
@@ -419,7 +434,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Contract do
        %{
          name: name,
          final_name: final,
-         description: Map.get(descriptor, :description) || "",
+         description: policy.description,
          parameters: agent_parameters(contract, input),
          policy: policy
        }}

@@ -38,6 +38,7 @@ defmodule FermixCore.Temporal.AccessTest do
 
     test "a delegated worker inside a scheduled run is refused" do
       refute Access.operator_read_turn?(%{source_trust: :operator, subagent_depth: 1})
+      refute Access.operator_read_turn?(%{source_trust: :operator, skill_depth: 1})
     end
 
     test "a coding continuation inside a scheduled run is refused" do
@@ -83,6 +84,13 @@ defmodule FermixCore.Temporal.AccessTest do
       refute Access.attended_operator_turn?(attended(%{subagent_depth: 1}))
     end
 
+    # `Capabilities.Skill.invoke` keeps the parent turn's trust and origin and
+    # raises only `skill_depth`, so the depth is all that tells its worker apart.
+    test "a skill worker of an attended owner turn is refused" do
+      refute Access.attended_operator_turn?(attended(%{skill_depth: 1}))
+      assert Access.attended_operator_turn?(attended(%{skill_depth: 0}))
+    end
+
     test "a synthesized coding continuation is refused" do
       refute Access.attended_operator_turn?(attended(%{harness_continuation_depth: 1}))
     end
@@ -94,6 +102,31 @@ defmodule FermixCore.Temporal.AccessTest do
 
     test "an empty context fails closed" do
       refute Access.attended_operator_turn?(%{})
+    end
+  end
+
+  # The one definition of a delegated worker, shared with
+  # `Harness.Authorization` and `Capabilities.AccessGate`.
+  describe "worker?/1" do
+    test "a subagents or skill worker at any depth is one; a top-level turn is not" do
+      assert Access.worker?(%{subagent_depth: 1})
+      assert Access.worker?(%{skill_depth: 2})
+      assert Access.worker?(attended(%{skill_depth: 1}))
+      refute Access.worker?(attended())
+      refute Access.worker?(attended(%{subagent_depth: 0, skill_depth: 0}))
+    end
+
+    test "a malformed depth counts as a worker" do
+      assert Access.worker?(%{subagent_depth: "0"})
+      assert Access.worker?(%{skill_depth: -1})
+    end
+
+    # Only an absent depth or a zero is a top-level turn; a key someone set to
+    # nil is not proof of one.
+    test "an explicit nil depth counts as a worker" do
+      assert Access.worker?(%{subagent_depth: nil})
+      assert Access.worker?(%{skill_depth: nil})
+      refute Access.attended_operator_turn?(attended(%{skill_depth: nil}))
     end
   end
 

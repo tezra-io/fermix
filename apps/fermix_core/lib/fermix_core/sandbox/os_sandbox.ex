@@ -25,7 +25,8 @@ defmodule FermixCore.Sandbox.OsSandbox do
   one filtered write allowance, as a `require-not`.
 
   Linux is a later stage (Landlock); until it lands, commands there run as they
-  did before this module existed.
+  did before this module existed, and `Capabilities.AccessGate` asks the owner
+  before one runs in a turn that read outside content (`enforced?/1`).
   """
 
   alias FermixCore.Browser.Bridge.HostManifest
@@ -171,7 +172,14 @@ defmodule FermixCore.Sandbox.OsSandbox do
       else: "not held by the kernel on this system"
   end
 
-  defp enforced?(opts), do: Keyword.get(opts, :os, :os.type()) == @darwin
+  @doc """
+  Whether the kernel holds commands to the sandbox on this host: macOS
+  (Seatbelt) today. `:os` is the platform seam, as in `wrap/5`. The one source
+  of this fact: `Capabilities.AccessGate` reads it too, to ask the owner before
+  a host command runs after outside content where it is false.
+  """
+  @spec enforced?(keyword()) :: boolean()
+  def enforced?(opts \\ []) when is_list(opts), do: Keyword.get(opts, :os, :os.type()) == @darwin
 
   @doc "The path sets for `config`. Options as `wrap/5`."
   @spec rules(Config.t(), String.t() | nil, keyword()) :: {:ok, rules()} | {:error, term()}

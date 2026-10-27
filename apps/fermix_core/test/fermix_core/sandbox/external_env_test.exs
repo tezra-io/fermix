@@ -75,6 +75,21 @@ defmodule FermixCore.Sandbox.ExternalEnvTest do
                inspect(value)
       end
     end
+
+    # The macOS keychain's lookup, the command source a stored name reads
+    # through, prints a value holding any byte outside space to tilde as bare
+    # hex on one line, so the command would get the hex and nothing would say so.
+    test "refuses any byte outside printable ASCII" do
+      for value <- ["a\tb", "del\x7Fbyte", "café", "no break", "\e[0m", "秘"] do
+        assert ExternalEnv.validate_value(value) == {:error, :value_not_printable},
+               inspect(value)
+      end
+    end
+
+    test "accepts every printable ASCII byte, quotes and backslashes included" do
+      assert ExternalEnv.validate_value(List.to_string(Enum.to_list(0x20..0x7E))) == :ok
+      assert ExternalEnv.validate_value(~S|a"b\c|) == :ok
+    end
   end
 
   describe "managed?/3 and source_kind/3" do

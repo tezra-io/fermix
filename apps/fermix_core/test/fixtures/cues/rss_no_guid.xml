@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Pellucid Link Board</title>
+    <link>https://board.example.org/</link>
+    <description>Links people submit.</description>
+    <item>
+      <title>Mapping old canals</title>
+      <link>https://maps.example.com/canals</link>
+      <pubDate>Tue, 13 Oct 2026 10:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Mapping old canals, a second look</title>
+      <link>https://maps.example.com/canals</link>
+      <pubDate>Tue, 13 Oct 2026 10:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Mapping old canals</title>
+      <link>https://maps.example.com/canals</link>
+      <pubDate>Wed, 14 Oct 2026 10:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Empty guid</title>
+      <link>https://maps.example.com/rivers</link>
+      <guid>   </guid>
+      <pubDate>Wed, 14 Oct 2026 11:30:00 +0000</pubDate>
+    </item>
+  </channel>
+</rss>

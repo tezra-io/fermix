@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<!DOCTYPE rss [
+  <!ENTITY xxe SYSTEM "file://__TARGET__">
+  <!ENTITY % remote SYSTEM "file://__TARGET__">
+  %remote;
+]>
+<rss version="2.0">
+  <channel>
+    <title>Entity probe</title>
+    <item>
+      <title>&xxe;</title>
+      <guid>xxe-1</guid>
+      <description>before &xxe; after</description>
+    </item>
+  </channel>
+</rss>

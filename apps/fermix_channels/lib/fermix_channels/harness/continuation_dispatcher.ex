@@ -243,10 +243,13 @@ defmodule FermixChannels.Harness.ContinuationDispatcher do
   defp run_ingest(message, adapter, opts) do
     ingest = Keyword.get(opts, :ingest, &Gateway.ingest/2)
 
+    # The notice's chain metadata is why the follow-up turn exists: the one
+    # sender, with the grant resume, the gateway keeps it from.
     ingest_opts = [
       channel: adapter,
       agent: Keyword.get(opts, :agent, Queue),
-      agent_server: agent_server(opts)
+      agent_server: agent_server(opts),
+      keep_chain_metadata: true
     ]
 
     case ingest.([message], ingest_opts) do
