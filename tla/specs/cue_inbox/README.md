@@ -80,12 +80,12 @@ if it was sent, is already in the Repo's mailbox ahead of the reset.
   anyway. Admission is gated on `cues_running?` (the cue tree alive,
   `scheduler.ex:202`), always true here, and no longer reads
   `cue_watchers.enabled` (a paused watcher's passed items still run); watchers
-  are always enabled. The daily budget read and spent inside the accept
-  transaction, the gap marking at a settle, the cap notices and the
-  `sweep_error` traces of a failed scan, claim or settle touch no delivery
-  state. `with_immediate_transaction/2` re-raising a raise, throw or exit
-  crashes the Repo process, which restarts everything after it in the core
-  tree: a daemon-level restart, outside this spec.
+  are always enabled and keep every source. The daily budget read and spent
+  inside the accept transaction, the gap marking at a settle, the cap notices
+  and the `sweep_error` traces of a failed scan, claim or settle touch no
+  delivery state. `with_immediate_transaction/2` re-raising a raise, throw or
+  exit crashes the Repo process, which restarts everything after it in the
+  core tree: a daemon-level restart, outside this spec.
 - **The reclaim's age cutoff and its failures (R3).** The sweep reclaims a
   `filtering` row only once its call started more than the 60 s call deadline
   plus a 30 s margin ago (`filters.ex:70`, `:196`); that changes when, not
@@ -152,6 +152,15 @@ if it was sent, is already in the Repo's mailbox ahead of the reset.
   rows they change. `delete_receipts` now searches receipts no watcher was
   offered from 8 days and routed ones from 30, and deletes the same rows. All
   three touch terminal rows only, which the model leaves out, so no step moved.
+- **Pause and source changes (2026-10-27).** A pass whose watcher was paused
+  while its call ran is withheld: `filtering → pending`, fence cleared,
+  attempts unchanged, the provider-failure branch's move; watchers are always
+  enabled here, so it is not taken. A change to a watcher's sources expires
+  its `pending` and `filtering` rows from a source it no longer has, in the
+  change's transaction: `pending → expired` is the lifetime sweep's move, and
+  `filtering → expired` leaves that call's settle the modelled stale branch
+  (`SettleFenced`). Sources are not modelled, so no step moved. A live pass
+  for a paused watcher, or one that lost the item's source, writes no row.
 
 ## Switches
 

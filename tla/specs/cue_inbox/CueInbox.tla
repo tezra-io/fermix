@@ -41,12 +41,12 @@
 (* answering a proposal. Line numbers below are those of that commit.      *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/ingest.ex @ e49c9f5c2100
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/filters.ex @ 297db329d3f6
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/filters.ex @ 1511e4ab8573
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/supervisor.ex @ e1b36533a8b3
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/sweeper.ex @ 7472388b5bc0
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/proposals.ex @ 9830af99b55d
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_sql.ex @ b5ac2f927c84
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_filter_sql.ex @ 7581db5069b1
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/proposals.ex @ 47e885432444
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_sql.ex @ 1dd10d992767
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_filter_sql.ex @ 1853615291ea
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_runs_sql.ex#@open_sql,@cap_room_sql,@eligible_sql,@candidates_sql,@eligible_delivery_sql,@settle_facts_sql,eligible_delivery,settle_delivery,settle_facts,settle_held,settle_move,unspent_retry,spent_retry,move_patch,untouched @ f65310ef1716
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_mandate_sql.ex#mark_tools_started,decide_propose,store_proposal,point_at_existing,decide_waiting,decided_or_why,decide_by_id,decided_by_id,end_denied,settle_proposal,expire_proposals @ 029c6975cee1
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/cue_admission.ex @ 94f9aac007e9
@@ -408,7 +408,10 @@ SettleRows(c, res) ==
        ELSE /\ staleFilterWrite' = (staleFilterWrite \/ ~Holds(c))
             /\ callOpen' = [callOpen EXCEPT ![c] = FALSE]
             /\ CASE res = "pass" ->
-                      \* :482: passed, ready_at = now; the fence is kept
+                      \* :482: passed, ready_at = now; the fence is kept. A
+                      \* watcher paused while the call ran gets filtering ->
+                      \* pending instead (fence cleared, attempts unchanged);
+                      \* watchers are always enabled here, so that is never taken.
                       /\ dstate' = [dstate EXCEPT ![d] = "passed"]
                       /\ due' = [due EXCEPT ![d] = TRUE]
                       /\ UNCHANGED <<fcall, fatt, wblocked>>
