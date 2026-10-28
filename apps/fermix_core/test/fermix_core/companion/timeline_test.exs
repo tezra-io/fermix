@@ -11,10 +11,20 @@ defmodule FermixCore.Companion.TimelineTest do
   @max_u64 18_446_744_073_709_551_615
   @day_seconds 86_400
   @media_ref String.duplicate("b", 64)
+  @icon_ref String.duplicate("f", 64)
 
   # Takes a database back to the shape it had before migration 36: every object
-  # the migration adds, and its version row.
+  # the migration adds, and its version row. Migration 50's icon index hangs
+  # off 36's preview table, so it goes first (its triggers go with the table).
+  @rewind_icon_index_migration """
+  DROP TRIGGER mobile_timeline_icons_ai;
+  DROP TRIGGER mobile_timeline_icons_au;
+  DROP TABLE mobile_timeline_icons;
+  DELETE FROM schema_migrations WHERE version = 50;
+  """
+
   @rewind_media_index_migration """
+  #{@rewind_icon_index_migration}
   DROP TRIGGER mobile_timeline_media_ai;
   DROP TRIGGER mobile_timeline_media_au;
   DROP TABLE mobile_timeline_link_previews;
@@ -1163,6 +1173,140 @@ defmodule FermixCore.Companion.TimelineTest do
              attach.(Map.put(link_preview(), "link", ""))
   end
 
+  # Links in the sentence (note 01): a preview's icon is stored beside its
+  # image and served through its row the same way, from an index of its own
+  # that the media index never names, so an engine before migration 50
+  # answers an icon ref not_found instead of a wrong descriptor.
+  test "a link preview's icon is served through its row, and a ref no row names is refused", %{
+    db_path: db_path,
+    repo: repo
+  } do
+    assert {:ok, parent} =
+             Timeline.append("main", %{role: "assistant", content: "x"}, store_opts(repo))
+
+    preview = Map.put(link_preview(), "icon", icon_descriptor())
+    seq = parent.server_seq
+
+    assert {:ok, %{link_previews: [^preview]}} =
+             Timeline.attach_link_preview("main", seq, preview, store_opts(repo))
+
+    icon = icon_descriptor()
+    image = preview["image"]
+
+    assert {:ok, %{server_seq: ^seq, media: ^icon}} =
+             Timeline.media_descriptor("main", @icon_ref, store_opts(repo))
+
+    assert {:ok, %{server_seq: ^seq, media: ^image}} =
+             Timeline.media_descriptor("main", @media_ref, store_opts(repo))
+
+    unnamed = String.duplicate("e", 64)
+    assert {:error, :not_found} = Timeline.media_descriptor("main", unnamed, store_opts(repo))
+    assert {:error, :not_found} = Timeline.media_descriptor("work", @icon_ref, store_opts(repo))
+
+    with_raw_conn(db_path, fn conn ->
+      params = ["agent-a", "owner-a", "main", @icon_ref]
+      assert {:ok, []} = raw_query(conn, MobileSql.media_descriptor_sql(), params)
+    end)
+
+    for broken <- [
+          put_in(preview, ["icon", "ref"], "not-a-digest"),
+          Map.put(preview, "icon", %{"kind" => "image"})
+        ] do
+      assert {:error, {:invalid_link_preview, {:icon, _reason}}} =
+               Timeline.attach_link_preview("main", seq, broken, store_opts(repo))
+    end
+  end
+
+  # A second card on the row rewrites its previews; the icon index follows the
+  # rewrite as the media index does, so both icons stay served.
+  test "every icon a row's previews name stays served once another card is stored", %{
+    repo: repo
+  } do
+    assert {:ok, parent} =
+             Timeline.append("main", %{role: "assistant", content: "x"}, store_opts(repo))
+
+    other_ref = String.duplicate("e", 64)
+    first = Map.put(link_preview(), "icon", icon_descriptor())
+
+    second =
+      link_preview()
+      |> Map.merge(%{"url" => "https://example.test/other", "icon" => icon_descriptor(other_ref)})
+      |> Map.delete("image")
+
+    assert {:ok, _row} =
+             Timeline.attach_link_preview("main", parent.server_seq, first, store_opts(repo))
+
+    assert {:ok, %{link_previews: [^first, ^second]}} =
+             Timeline.attach_link_preview("main", parent.server_seq, second, store_opts(repo))
+
+    assert {:ok, %{media: served}} =
+             Timeline.media_descriptor("main", @icon_ref, store_opts(repo))
+
+    assert served == icon_descriptor()
+
+    assert {:ok, %{media: other}} = Timeline.media_descriptor("main", other_ref, store_opts(repo))
+    assert other == icon_descriptor(other_ref)
+  end
+
+  # PERF-4 for icons: an icon ref is one index lookup too.
+  test "an icon ref is authorized through the icon index, never a timeline scan", %{
+    db_path: db_path,
+    repo: repo
+  } do
+    assert {:ok, parent} =
+             Timeline.append("main", %{role: "assistant", content: "x"}, store_opts(repo))
+
+    preview = Map.put(link_preview(), "icon", icon_descriptor())
+
+    assert {:ok, _row} =
+             Timeline.attach_link_preview("main", parent.server_seq, preview, store_opts(repo))
+
+    plan =
+      with_raw_conn(db_path, fn conn ->
+        {:ok, stmt} =
+          Sqlite3.prepare(conn, "EXPLAIN QUERY PLAN " <> MobileSql.icon_descriptor_sql())
+
+        :ok = Sqlite3.bind(stmt, ["agent-a", "owner-a", "main", @icon_ref])
+        {:ok, rows} = Sqlite3.fetch_all(conn, stmt)
+        :ok = Sqlite3.release(conn, stmt)
+        Enum.map_join(rows, "\n", &List.last/1)
+      end)
+
+    assert plan =~ "USING COVERING INDEX idx_mobile_timeline_icons_ref"
+    refute plan =~ "TEMP B-TREE"
+    refute plan =~ "SCAN"
+  end
+
+  # Migration 50 adds the icon index beside migration 36's tables and no
+  # column: an engine before it reads the timeline as before, and the triggers
+  # index the icons any engine's preview writes name.
+  test "the icon index migration adds its table to a database written before it", context do
+    %{db_path: db_path, repo: repo} = context
+
+    assert {:ok, parent} =
+             Timeline.append("main", %{role: "assistant", content: "before"}, store_opts(repo))
+
+    stop_supervised!(Repo)
+
+    with_raw_conn(db_path, fn conn ->
+      assert :ok = Sqlite3.execute(conn, @rewind_icon_index_migration)
+    end)
+
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+    assert {:ok, versions} = Repo.migration_versions(server: repo)
+    assert 50 in versions
+
+    preview = Map.put(link_preview(), "icon", icon_descriptor())
+
+    assert {:ok, _row} =
+             Timeline.attach_link_preview("main", parent.server_seq, preview, store_opts(repo))
+
+    assert {:ok, %{media: icon}} = Timeline.media_descriptor("main", @icon_ref, store_opts(repo))
+    assert icon == icon_descriptor()
+    assert legacy_rows(db_path) == {[1], []}
+  end
+
   test "a link preview on a request output from an older attempt is refused", %{repo: repo} do
     assert {:ok, {:claimed, _request}} = claim_request(repo, "client-preview")
     assert {:ok, {:started, %{attempt: 1}}} = start_request(repo, "client-preview")
@@ -1588,6 +1732,16 @@ defmodule FermixCore.Companion.TimelineTest do
       "description" => "What it says",
       "image" => media_descriptor(%{"kind" => "image", "mime" => "image/webp", "size_bytes" => 9})
     }
+  end
+
+  defp icon_descriptor(ref \\ @icon_ref) do
+    media_descriptor(%{
+      "ref" => ref,
+      "sha256" => ref,
+      "kind" => "image",
+      "mime" => "image/png",
+      "size_bytes" => 5
+    })
   end
 
   defp reply_blocks do

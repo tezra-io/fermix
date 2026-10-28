@@ -114,8 +114,13 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
     rows = seed_rows!()
     photo = hd(rows)
 
-    LinkPreviews.schedule("main", photo.server_seq, ["https://example.com"],
-      resolver: fn _links, _thumbnail -> {:ok, unfurled_previews(), []} end,
+    links = Enum.map(unfurled_previews(), & &1.link)
+
+    LinkPreviews.schedule("main", photo.server_seq, links,
+      resolver: fn _links, _thumbnail, on_preview ->
+        Enum.each(unfurled_previews(), on_preview)
+        {:ok, []}
+      end,
       launcher: fn task -> task.() && :ok end,
       event_sink: ctx.sink,
       store: RepoTimeline
@@ -124,6 +129,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
     previews = received_sink_events("link_preview")
     assert length(previews) == 2
     for preview <- previews, do: assert_on_the_wire!(preview, schema)
+    assert Enum.any?(previews, &match?(%{"link" => _, "image_ref" => _, "icon_ref" => _}, &1))
 
     # Each stored preview also tells the Mac its row changed, an event this
     # wire does not carry (`Companion.Fanout` sends it to the Mac alone).
@@ -689,7 +695,8 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
         url: "https://example.org/post",
         site: "Example Org",
         title: "A post",
-        image: %{ref: String.duplicate("d", 64), mime: "image/png", size_bytes: 1_024}
+        image: %{ref: String.duplicate("d", 64), mime: "image/png", size_bytes: 1_024},
+        icon: %{ref: String.duplicate("e", 64), mime: "image/x-icon", size_bytes: 318}
       },
       %{
         link: "https://example.net/long",

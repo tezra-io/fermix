@@ -360,10 +360,13 @@ defmodule FermixChannels.Companion.TurnsTest do
       test_pid = self()
       Application.put_env(:fermix_channels, :link_preview_launcher, &Task.start/1)
 
-      Application.put_env(:fermix_channels, :link_preview_resolver, fn links, _thumbnail ->
+      Application.put_env(:fermix_channels, :link_preview_resolver, fn links,
+                                                                       _thumb,
+                                                                       on_preview ->
         send(test_pid, {:previewing, links})
         guide = "https://guide.example/soho"
-        {:ok, [%{link: guide, url: guide <> "/", site: "Guide", title: "SoHo on foot"}], []}
+        on_preview.(%{link: guide, url: guide <> "/", site: "Guide", title: "SoHo on foot"})
+        {:ok, []}
       end)
 
       id = unique()

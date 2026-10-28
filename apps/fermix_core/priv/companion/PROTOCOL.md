@@ -93,11 +93,11 @@ reads `turn_done`.
 
 Version 3 lets the Mac's chat show what the phones put in the timeline: a
 voice note, a picture or a file sent from a phone, a picture Fermix sent to
-one, and the picture of a link preview stored on a row. A picture or file
-Fermix sends in the Mac's chat, or from a voice call, is the same: an
-assistant row of `kind: "media"` whose `media_refs[]` names it, announced as a
-`row`. Their bytes are in the daemon's media store, by `ref`, the sha256 of
-the bytes. It adds:
+one, and the picture and site icon of a link preview stored on a row. A
+picture or file Fermix sends in the Mac's chat, or from a voice call, is the
+same: an assistant row of `kind: "media"` whose `media_refs[]` names it,
+announced as a `row`. Their bytes are in the daemon's media store, by `ref`,
+the sha256 of the bytes. It adds:
 
 - two client events: `media_fetch { profile_id, ref }` asks for a managed
   local file holding the bytes of a ref, and `media_release { profile_id,
@@ -251,10 +251,11 @@ written, whichever client's row it is: `url` (at most 2,048 bytes), where the
 page answered from after redirects, `site` (120), `title` (300), and optional
 `link` (2,048), the address the row's text wrote, which is what a client pairs
 the card with (a preview stored before links were kept has none, and pairs by
-its `url`), `description` (600) and `image_ref`; a row carries at most 4, and
-has the key only when it has one. A reply's previews are of the links its
-`blocks[]` do not draw. `metadata` never holds a null. Internal storage columns
-are never shipped.
+its `url`), `description` (600), `image_ref` (the page's picture) and
+`icon_ref` (the site's icon, read by the daemon under the phone protocol's
+bounds); a row carries at most 4, and has the key only when it has one. A
+reply's previews are of the links its `blocks[]` do not draw. `metadata` never
+holds a null. Internal storage columns are never shipped.
 
 A `search_results` hit carries `server_seq`, `role`, `ts`, `excerpt` (plain
 text around the matches, `…` where it was cut), and `ranges[]`, each
@@ -319,7 +320,7 @@ the app can say the result is in the chat.
 ## Managed media files
 
 A `media_fetch` names a ref a row of the profile names, in its `media_refs` or
-as a link preview's `image_ref`. The daemon answers with one of:
+as a link preview's `image_ref` or `icon_ref`. The daemon answers with one of:
 
 - `media_path { ref, path, kind, mime, size_bytes, sha256 }`, the grant.
   `path` is absolute: the managed file `$FERMIX_HOME/companion/media/<ref><ext>`,

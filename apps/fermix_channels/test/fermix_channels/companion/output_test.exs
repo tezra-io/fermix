@@ -67,6 +67,42 @@ defmodule FermixChannels.Companion.OutputTest do
            }
   end
 
+  # Links in the sentence (note 01): a stored card's image and icon ship as
+  # their refs, which `media_fetch` serves through the row.
+  test "a row's link previews ship as cards carrying their image and icon refs" do
+    image_ref = String.duplicate("a", 64)
+    icon_ref = String.duplicate("b", 64)
+
+    row = %{
+      server_seq: 9,
+      role: "assistant",
+      content: "see https://example.test",
+      media_refs: [],
+      link_previews: [
+        %{
+          "link" => "https://example.test",
+          "url" => "https://example.test/",
+          "site" => "Example",
+          "title" => "A page",
+          "image" => %{"ref" => image_ref, "kind" => "image", "mime" => "image/png"},
+          "icon" => %{"ref" => icon_ref, "kind" => "image", "mime" => "image/x-icon"}
+        }
+      ],
+      created_at: ~U[2026-10-27 09:00:00Z]
+    }
+
+    assert {:ok, %{"link_previews" => [card]}} = Output.timeline_message(row)
+
+    assert card == %{
+             "link" => "https://example.test",
+             "url" => "https://example.test/",
+             "site" => "Example",
+             "title" => "A page",
+             "image_ref" => image_ref,
+             "icon_ref" => icon_ref
+           }
+  end
+
   defmodule AppendStore do
     def append(profile_id, attrs, _opts) do
       send(self(), {:append, profile_id, attrs})

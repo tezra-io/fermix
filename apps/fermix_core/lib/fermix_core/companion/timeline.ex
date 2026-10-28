@@ -169,8 +169,9 @@ defmodule FermixCore.Companion.Timeline do
 
   @doc """
   Store one link preview on its row (`url`, `site`, `title`, an optional
-  `description` and an optional `image` media descriptor). The row's history
-  carries it from then on, and `media_descriptor/3` serves its image.
+  `description`, and optional `image` and `icon` media descriptors). The row's
+  history carries it from then on, and `media_descriptor/3` serves its image
+  and icon.
   """
   @spec attach_link_preview(String.t(), pos_integer(), map(), keyword()) ::
           {:ok, Repo.mobile_timeline_row()} | {:error, term()}

@@ -278,14 +278,15 @@
     "place": {"type": "object", "description": "One place as the search returned it, a subset of its record under the record's own names. A field the source did not give is absent. canonical_url and source_url are HTTPS addresses exactly as returned, at least one of them present. apple_place_id is Apple Maps' identifier for a place Apple Maps found, which a Mac opens the place by. opening_hours.current_day is today's hours as the source wrote them.", "required": ["name", "location"], "anyOf": [{"required": ["canonical_url"]}, {"required": ["source_url"]}], "properties": {"name": {"type": "string", "minLength": 1}, "canonical_url": {"type": "string", "minLength": 1}, "source_url": {"type": "string", "minLength": 1}, "apple_place_id": {"type": "string", "minLength": 1}, "location": {"type": "object", "required": ["latitude", "longitude"], "properties": {"latitude": {"type": "number", "minimum": -90, "maximum": 90}, "longitude": {"type": "number", "minimum": -180, "maximum": 180}}}, "address": {"type": "string", "minLength": 1}, "rating": {"type": "object", "properties": {"value": {"type": "number"}, "best": {"type": "number"}, "count": {"type": "number"}}}, "price_range": {"type": "string", "minLength": 1}, "categories": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "string", "minLength": 1}}, "opening_hours": {"type": "object", "required": ["current_day"], "properties": {"current_day": {"type": "string", "minLength": 1}}}, "distance": {"type": "object", "required": ["value", "units"], "properties": {"value": {"type": "number"}, "units": {"type": "string", "minLength": 1}}}}},
     "linkPreviewCard": {
       "type": "object", "required": ["url", "site", "title"],
-      "description": "A link preview stored on its row: link is the address the row's text wrote, which a client pairs the card with (absent on a preview stored before it was kept); url is where the page answered from after redirects. The bounds are bytes of UTF-8 (x-max-bytes).",
+      "description": "A link preview stored on its row: link is the address the row's text wrote, which a client pairs the card with (absent on a preview stored before it was kept); url is where the page answered from after redirects; image_ref is the page's picture and icon_ref the site's icon, each served by media_fetch through the row. The bounds are bytes of UTF-8 (x-max-bytes).",
       "properties": {
         "link": {"type": "string", "minLength": 1, "maxLength": 2048, "x-max-bytes": 2048},
         "url": {"type": "string", "minLength": 1, "maxLength": 2048, "x-max-bytes": 2048},
         "site": {"type": "string", "minLength": 1, "maxLength": 120, "x-max-bytes": 120},
         "title": {"type": "string", "minLength": 1, "maxLength": 300, "x-max-bytes": 300},
         "description": {"type": "string", "maxLength": 600, "x-max-bytes": 600},
-        "image_ref": {"type": "string", "minLength": 1}
+        "image_ref": {"type": "string", "minLength": 1},
+        "icon_ref": {"type": "string", "minLength": 1}
       }
     },
     "accepted": {
@@ -370,8 +371,8 @@
     },
     "link_preview": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "in_reply_to", "url", "site", "title"],
-      "description": "in_reply_to is the server_seq of the row the preview belongs to. The bounds are bytes of UTF-8 (x-max-bytes).",
-      "properties": {"t": {"const": "link_preview"}, "in_reply_to": {"type": "integer", "minimum": 1}, "url": {"type": "string", "minLength": 1, "maxLength": 2048, "x-max-bytes": 2048}, "site": {"type": "string", "minLength": 1, "maxLength": 120, "x-max-bytes": 120}, "title": {"type": "string", "minLength": 1, "maxLength": 300, "x-max-bytes": 300}, "description": {"type": "string", "maxLength": 600, "x-max-bytes": 600}, "image_ref": {"type": "string", "minLength": 1}}
+      "description": "in_reply_to is the server_seq of the row the preview belongs to; link, image_ref and icon_ref are the stored card's (linkPreviewCard). The bounds are bytes of UTF-8 (x-max-bytes).",
+      "properties": {"t": {"const": "link_preview"}, "in_reply_to": {"type": "integer", "minimum": 1}, "link": {"type": "string", "minLength": 1, "maxLength": 2048, "x-max-bytes": 2048}, "url": {"type": "string", "minLength": 1, "maxLength": 2048, "x-max-bytes": 2048}, "site": {"type": "string", "minLength": 1, "maxLength": 120, "x-max-bytes": 120}, "title": {"type": "string", "minLength": 1, "maxLength": 300, "x-max-bytes": 300}, "description": {"type": "string", "maxLength": 600, "x-max-bytes": 600}, "image_ref": {"type": "string", "minLength": 1}, "icon_ref": {"type": "string", "minLength": 1}}
     },
     "history_page": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "profile_id", "messages", "next_after_seq", "history_head_seq"],

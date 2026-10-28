@@ -768,7 +768,17 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
     assert {:ok, _frame} = Protocol.encode_server_frame("link_preview", preview, 1)
 
-    for field <- ["description", "image_ref"] do
+    # Links in the sentence (note 01): the link as the row wrote it and the
+    # site's icon ride the live card, optional, never empty.
+    with_icon = Map.merge(preview, %{"link" => "https://e.com", "icon_ref" => "c"})
+    assert {:ok, _frame} = Protocol.encode_server_frame("link_preview", with_icon, 1)
+
+    for field <- ["link", "icon_ref"] do
+      assert {:error, {:invalid_field, ^field}} =
+               Protocol.encode_server_frame("link_preview", Map.put(preview, field, ""), 1)
+    end
+
+    for field <- ["description", "image_ref", "link", "icon_ref"] do
       assert {:error, {:null_field, ^field}} =
                Protocol.encode_server_frame("link_preview", Map.put(preview, field, nil), 1)
 

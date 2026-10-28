@@ -39,7 +39,7 @@ Every row is announced live to connected clients the moment it is written, whoev
 
 ## The phone's media
 
-The chat shows what the phones put in the timeline (voice notes, pictures and files, Fermix's pictures to a phone, link preview images) without the bytes crossing the socket: the app asks for a ref a row names, and the daemon grants a read-only copy at `$FERMIX_HOME/companion/media/<ref><ext>`, checked against the ref. A file is held while the app uses it, kept a minute after it lets go, removed beyond a 512 MiB budget (never while held), and every one is removed when the daemon starts. A ref no row names, whose bytes the phone's store no longer holds, or whose phone channel is off, is reported missing. Fermix makes no thumbnails and converts nothing: the app does.
+The chat shows what the phones put in the timeline (voice notes, pictures and files, Fermix's pictures to a phone, link preview images and site icons) without the bytes crossing the socket: the app asks for a ref a row names, and the daemon grants a read-only copy at `$FERMIX_HOME/companion/media/<ref><ext>`, checked against the ref. A file is held while the app uses it, kept a minute after it lets go, removed beyond a 512 MiB budget (never while held), and every one is removed when the daemon starts. A ref no row names, whose bytes the phone's store no longer holds, or whose phone channel is off, is reported missing. Fermix makes no thumbnails and converts nothing: the app does.
 
 ## What it does not carry
 

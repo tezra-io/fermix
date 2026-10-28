@@ -210,20 +210,19 @@ defmodule FermixChannels.Channels.MobileTest do
       :ok
     end)
 
-    Application.put_env(:fermix_channels, :link_preview_resolver, fn links, _store_thumbnail ->
+    Application.put_env(:fermix_channels, :link_preview_resolver, fn links, _store, on_preview ->
       send(test_pid, {:previews_resolve, links})
 
-      {:ok,
-       [
-         %{
-           link: "https://example.com",
-           url: "https://example.com",
-           site: "Example",
-           title: "Example title",
-           description: "Description",
-           image: nil
-         }
-       ], []}
+      on_preview.(%{
+        link: "https://example.com",
+        url: "https://example.com",
+        site: "Example",
+        title: "Example title",
+        description: "Description",
+        image: nil
+      })
+
+      {:ok, []}
     end)
 
     Application.put_env(:fermix_channels, :link_preview_launcher, fn task ->
@@ -796,8 +795,8 @@ defmodule FermixChannels.Channels.MobileTest do
       {:error, :apns_down}
     end)
 
-    Application.put_env(:fermix_channels, :link_preview_resolver, fn _links, _store ->
-      {:ok, [], []}
+    Application.put_env(:fermix_channels, :link_preview_resolver, fn _links, _store, _on ->
+      {:ok, []}
     end)
 
     log =

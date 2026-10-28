@@ -108,7 +108,7 @@ defmodule FermixChannels.Companion.AttachmentKindTest do
         task.()
         :ok
       end,
-      link_preview_resolver: fn _links, _store_thumbnail -> {:ok, [], []} end
+      link_preview_resolver: fn _links, _store_thumbnail, _on_preview -> {:ok, []} end
     ]
 
     %{opts: opts, context: %{transport: :mobile, authenticated_device_id: "device-1"}}

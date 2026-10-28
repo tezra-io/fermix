@@ -72,6 +72,7 @@ defmodule FermixCore.Memory.Repo do
   @cue_live_intake_migration_version 47
   @cue_retention_index_migration_version 48
   @open_loop_outside_content_migration_version 49
+  @mobile_icon_index_migration_version 50
   @sqlite_open_intent :readwritecreate
 
   # The cue SQL modules (M60), one per lane, all served by `cues_call/3`.
@@ -4732,7 +4733,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_harness_continued_from_migration(conn, versions),
          :ok <- apply_cue_live_intake_migration(conn, versions),
          :ok <- apply_cue_retention_index_migration(conn, versions),
-         :ok <- apply_open_loop_outside_content_migration(conn, versions) do
+         :ok <- apply_open_loop_outside_content_migration(conn, versions),
+         :ok <- apply_mobile_icon_index_migration(conn, versions) do
       :ok
     end
   end
@@ -4917,6 +4919,25 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{VoiceCallsSql.schema_sql()}
         INSERT INTO schema_migrations(version) VALUES (#{@voice_calls_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # The icon index beside the link-preview table (Links in the sentence, note
+  # 01), its triggers and version in one transaction; no row before it names
+  # an icon, so nothing is backfilled.
+  defp apply_mobile_icon_index_migration(conn, versions) do
+    if Enum.member?(versions, @mobile_icon_index_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MobileSql.icon_index_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@mobile_icon_index_migration_version});
         COMMIT;
         """
       )

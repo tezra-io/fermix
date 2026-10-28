@@ -8,6 +8,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A link in the chat shows its site's icon.** A link preview now carries
+  the site's icon beside the page's picture, read from the page's own head
+  (its PNG icon nearest 64 px, else its Apple touch icon, else another icon
+  that is not SVG, else `/favicon.ico`), at most 64 KiB and never SVG,
+  fetched under the same guard as the page and once a site for a message.
+  The phone's live preview also names the link as the message wrote it, so
+  a link that redirects still pairs with its preview. A message's previews
+  are now sent one by one as each resolves, so a slow site no longer costs
+  the message the previews that already finished.
 - **Cues take an X account's posts through X's own webhooks.** A new X
   preset for webhook sources needs only your X app's OAuth 2.0 Client Secret:
   Fermix checks X's signature on each delivery and answers X's check of the

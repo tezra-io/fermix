@@ -488,7 +488,7 @@ A client must not upload chunks after `present`.
 | `reaction` | `in_reply_to`, `emoji` | reacts to a client message id |
 | `approval` | `approval_id`, `kind`, `text`, `token`, `ttl_s`, `approve_command`, `deny_command`; `detail?` | command routes are nonempty and at most 1,024 characters; token is submitted but never rendered |
 | `approval_resolved` | `approval_id`, `outcome` | approved, denied, or expired |
-| `link_preview` | `in_reply_to`, `url`, `site`, `title`; `description?`, `image_ref?` | host-resolved preview of the row at `in_reply_to` |
+| `link_preview` | `in_reply_to`, `url`, `site`, `title`; `link?`, `description?`, `image_ref?`, `icon_ref?` | host-resolved preview of the row at `in_reply_to` |
 | `read_state` | `profile_id`, `read_up_to_seq` | the frontier, after any client moved it |
 | `history_page` | `profile_id`, `messages[]`, `next_after_seq`, `history_head_seq`; `prev_before_seq?` | exact server-sequence cursor page; see *History pages* |
 | `request_status_page` | `requests[]` | how each request `request_status` named stands |
@@ -540,10 +540,10 @@ A `media_refs[]` entry carries `ref`, `kind`, `mime`, and `size_bytes`, plus
 optional `sha256`, `filename`, and `caption`.
 
 A `link_previews[]` entry is a preview stored on its row, as `link_preview`
-sent it: `url`, `site`, `title`, and optional `description` and `image_ref`,
-plus optional `link`, the address the row's text wrote (a preview stored
-before links were kept has none). A row carries at most 4, and has the key
-only when it has one.
+sent it: `url`, `site`, `title`, and optional `description`, `image_ref` and
+`icon_ref`, plus optional `link`, the address the row's text wrote (a preview
+stored before links were kept has none). A row carries at most 4, and has the
+key only when it has one.
 
 `blocks[]` are records a reply's text links, such as the places a search found
 that it recommends, which the Mac's chat draws beside the text: the shape and
@@ -738,10 +738,10 @@ still unused.
 ## Media downloads
 
 `media_fetch{ref}` downloads a blob a row names: any `ref` of its
-`media_refs[]`, or the `image_ref` of one of its link previews. Blobs are
-served one at a time, first in, first out, and up to 8 fetches wait; one more
-is refused at once with `error{code:"media_fetch_backlog_full", ref}`, naming
-the fetch it refuses.
+`media_refs[]`, or the `image_ref` or `icon_ref` of one of its link previews.
+Blobs are served one at a time, first in, first out, and up to 8 fetches
+wait; one more is refused at once with `error{code:"media_fetch_backlog_full",
+ref}`, naming the fetch it refuses.
 
 A blob streams as `media_begin`, its `media_chunk`s (indexes from 0, each at
 most 60 KiB) and `media_end`, one chunk a step: other frames, `pong`
@@ -758,16 +758,29 @@ A media reply is sent to every phone the same way, as it is written, with no
 ## Link previews
 
 After a row with links is written, the daemon may resolve previews for it,
-store each on the row, and only then send it as
-`link_preview{in_reply_to, url, site, title, description?, image_ref?}`, where
-`in_reply_to` is the row's `server_seq`. From then on the row's history
-carries it in `link_previews[]`.
+store each on the row as it resolves, and only then send it as
+`link_preview{in_reply_to, url, site, title, link?, description?, image_ref?,
+icon_ref?}`, where `in_reply_to` is the row's `server_seq`. From then on the
+row's history carries it in `link_previews[]`.
 
+- `link` is the address the row's text wrote, which a client pairs the card
+  with; `url` is where its page answered from after redirects. A daemon from
+  before `link` was sent live omits it, and such a card pairs by `url`.
 - `site` is at most 120 bytes, `title` 300 and `description` 600, cut on a
-  UTF-8 boundary; a `url` over 2,048 bytes is no preview at all.
+  UTF-8 boundary; a `url` or `link` over 2,048 bytes is no preview at all.
 - A row gets at most 4. Resolving them has a 20 s deadline for the whole row,
-  and at most 4 rows resolve at once; past either, no preview.
-- `image_ref` is served by `media_fetch`; it never appears in `media_refs[]`.
+  and at most 4 rows resolve at once. Past the deadline, the previews that
+  already resolved stay and the rest never come; past the row bound, no
+  preview.
+- `image_ref` is the page's picture and `icon_ref` the site's icon, each
+  served by `media_fetch` and never in `media_refs[]`. The icon is read from
+  the page's head: a PNG `rel="icon"` nearest 64 px, else `apple-touch-icon`,
+  else another icon that is not SVG, else `/favicon.ico` at the page's final
+  origin, at most two fetches a site, and links on one site share one. It is
+  at most 64 KiB and one of PNG, GIF, JPEG, WebP or ICO by content type and by
+  its first bytes; SVG is refused. Its bytes are stored as fetched, so a
+  client decodes them under its own bounds. The same icon bytes have the same
+  ref, so a site's icon is fetched once.
 
 ## Push notifications (APNs)
 

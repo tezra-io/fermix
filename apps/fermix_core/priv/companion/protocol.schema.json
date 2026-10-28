@@ -282,7 +282,7 @@
     },
     "media_fetch": {
       "type": "object",
-      "description": "Version 3. Asks for a managed local file holding the bytes of ref, a media ref a row of the profile names (in its media_refs, or as a link preview's image_ref). Answered by media_path, media_missing, or error request_failed naming the ref. Not the phone's media_fetch, which streams the bytes.",
+      "description": "Version 3. Asks for a managed local file holding the bytes of ref, a media ref a row of the profile names (in its media_refs, or as a link preview's image_ref or icon_ref). Answered by media_path, media_missing, or error request_failed naming the ref. Not the phone's media_fetch, which streams the bytes.",
       "x-since-version": 3,
       "required": ["type", "profile_id", "ref"],
       "properties": {
@@ -749,7 +749,7 @@
     },
     "linkPreviewCard": {
       "type": "object",
-      "description": "A link preview stored on its row: link is the address the row's text wrote, which a client pairs the card with (absent on a preview stored before it was kept); url is where the page answered from after redirects. The bounds are bytes of UTF-8 (x-max-bytes).",
+      "description": "A link preview stored on its row: link is the address the row's text wrote, which a client pairs the card with (absent on a preview stored before it was kept); url is where the page answered from after redirects; image_ref is the page's picture and icon_ref the site's icon, each served by media_fetch through the row. The bounds are bytes of UTF-8 (x-max-bytes).",
       "required": ["url", "site", "title"],
       "properties": {
         "link": { "type": "string", "minLength": 1, "maxLength": 2048, "x-max-bytes": 2048 },
@@ -757,7 +757,8 @@
         "site": { "type": "string", "minLength": 1, "maxLength": 120, "x-max-bytes": 120 },
         "title": { "type": "string", "minLength": 1, "maxLength": 300, "x-max-bytes": 300 },
         "description": { "type": "string", "maxLength": 600, "x-max-bytes": 600 },
-        "image_ref": { "type": "string", "minLength": 1 }
+        "image_ref": { "type": "string", "minLength": 1 },
+        "icon_ref": { "type": "string", "minLength": 1 }
       }
     },
     "mediaRef": {

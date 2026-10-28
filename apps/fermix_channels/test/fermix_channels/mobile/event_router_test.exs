@@ -289,20 +289,19 @@ defmodule FermixChannels.Mobile.EventRouterTest do
         task.()
         :ok
       end,
-      link_preview_resolver: fn links, _store_thumbnail ->
+      link_preview_resolver: fn links, _store_thumbnail, on_preview ->
         send(test_pid, {:previews_resolved, links})
 
-        {:ok,
-         [
-           %{
-             link: "https://example.com",
-             url: "https://example.com",
-             site: "Example",
-             title: "Example title",
-             description: nil,
-             image: nil
-           }
-         ], []}
+        on_preview.(%{
+          link: "https://example.com",
+          url: "https://example.com",
+          site: "Example",
+          title: "Example title",
+          description: nil,
+          image: nil
+        })
+
+        {:ok, []}
       end
     ]
 

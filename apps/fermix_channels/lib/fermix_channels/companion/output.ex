@@ -160,7 +160,8 @@ defmodule FermixChannels.Companion.Output do
   The exported shape of one timeline row, a history page's message. Internal
   columns never ship, so a column added later can never leak to a client, and
   `ts` is always there. A row's link previews ship as the cards `link_preview`
-  sent, the image as its ref, and its blocks (M72) as they were stored.
+  sent, the image and icon as their refs, and its blocks (M72) as they were
+  stored.
   Nothing ships as an explicit null.
   """
   @spec timeline_message(map()) :: {:ok, map()} | {:error, term()}
@@ -376,6 +377,7 @@ defmodule FermixChannels.Companion.Output do
       preview
       |> Map.take(~w(link url site title description))
       |> maybe_put("image_ref", get_in(preview, ["image", "ref"]))
+      |> maybe_put("icon_ref", get_in(preview, ["icon", "ref"]))
     end)
   end
 

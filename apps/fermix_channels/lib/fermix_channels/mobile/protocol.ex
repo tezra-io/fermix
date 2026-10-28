@@ -728,8 +728,10 @@ defmodule FermixChannels.Mobile.Protocol do
   defp validate_link_preview(payload) do
     with :ok <- nonnegative_u64(payload, "in_reply_to"),
          :ok <- strings(payload, ~w(url site title)),
-         :ok <- optional_binary(payload, "description") do
-      optional_nonempty(payload, "image_ref")
+         :ok <- optional_nonempty(payload, "link"),
+         :ok <- optional_binary(payload, "description"),
+         :ok <- optional_nonempty(payload, "image_ref") do
+      optional_nonempty(payload, "icon_ref")
     end
   end
 

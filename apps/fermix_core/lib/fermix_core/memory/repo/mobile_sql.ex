@@ -249,6 +249,56 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   WHERE json_type(timeline.media_refs_json, refs.fullkey || '.ref') = 'text';
   """
 
+  # The index rows for the icons one written preview row names, by position
+  # in `previews_json`, as `@index_preview_images_sql` indexes its images.
+  @index_preview_icons_sql """
+  INSERT INTO mobile_timeline_icons (agent_id, owner_id, profile_id, server_seq, idx, ref)
+  SELECT new.agent_id, new.owner_id, new.profile_id, new.server_seq,
+         CAST(previews.key AS INTEGER),
+         json_extract(new.previews_json, previews.fullkey || '.icon.ref')
+  FROM json_each(new.previews_json) AS previews
+  WHERE json_type(new.previews_json, previews.fullkey || '.icon.ref') = 'text';
+  """
+
+  # Migration 50, the icon index (Links in the sentence, note 01). A preview's
+  # icon is a media descriptor beside its image, served by `media_fetch` the
+  # same way, but indexed in a table of its own rather than under a new
+  # `source` of `mobile_timeline_media`: that table's query in every engine
+  # before this one reads an unknown source as a preview image, and would
+  # answer an icon ref with its image's descriptor or crash on a preview that
+  # has none. The media index never names an icon, so an older engine answers
+  # an icon ref `not_found`, which no client of its own ever asks it for.
+  # Triggers on the preview table keep it, for every writer, as migration 36's
+  # keep the media index; no column is added, and no row before it has an icon
+  # to backfill.
+  @icon_index_schema_sql """
+  CREATE TABLE IF NOT EXISTS mobile_timeline_icons (
+    agent_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    server_seq INTEGER NOT NULL CHECK (server_seq > 0),
+    idx INTEGER NOT NULL CHECK (idx >= 0),
+    ref TEXT NOT NULL,
+    PRIMARY KEY (agent_id, owner_id, profile_id, server_seq, idx)
+  ) WITHOUT ROWID;
+
+  CREATE INDEX IF NOT EXISTS idx_mobile_timeline_icons_ref
+    ON mobile_timeline_icons(agent_id, owner_id, profile_id, ref, server_seq DESC, idx);
+
+  CREATE TRIGGER IF NOT EXISTS mobile_timeline_icons_ai
+  AFTER INSERT ON mobile_timeline_link_previews BEGIN
+    #{@index_preview_icons_sql}
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS mobile_timeline_icons_au
+  AFTER UPDATE OF previews_json ON mobile_timeline_link_previews BEGIN
+    DELETE FROM mobile_timeline_icons
+    WHERE agent_id = old.agent_id AND owner_id = old.owner_id AND profile_id = old.profile_id
+      AND server_seq = old.server_seq;
+    #{@index_preview_icons_sql}
+  END;
+  """
+
   # Migration 41, a reply's blocks (M72): the records its text links, kept in
   # their own row beside the timeline row as link previews are, so no column
   # is added and an older engine reads the timeline as before. A row's blocks
@@ -308,6 +358,19 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   LIMIT 1
   """
 
+  # The newest preview naming the ref as its icon wins, first position first.
+  @icon_descriptor_sql """
+  SELECT icons.server_seq,
+         json_extract(previews.previews_json, '$[' || icons.idx || '].icon')
+  FROM mobile_timeline_icons AS icons
+  JOIN mobile_timeline_link_previews AS previews
+    ON previews.agent_id = icons.agent_id AND previews.owner_id = icons.owner_id
+   AND previews.profile_id = icons.profile_id AND previews.server_seq = icons.server_seq
+  WHERE icons.agent_id = ? AND icons.owner_id = ? AND icons.profile_id = ? AND icons.ref = ?
+  ORDER BY icons.server_seq DESC, icons.idx ASC
+  LIMIT 1
+  """
+
   @search_rows_sql """
   SELECT t.server_seq, t.role, t.created_at,
          snippet(mobile_timeline_fts, 0, ?, ?, '…', #{@excerpt_tokens})
@@ -337,6 +400,9 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   @spec media_index_schema_sql() :: String.t()
   def media_index_schema_sql, do: @media_index_schema_sql
 
+  @spec icon_index_schema_sql() :: String.t()
+  def icon_index_schema_sql, do: @icon_index_schema_sql
+
   @spec reply_blocks_schema_sql() :: String.t()
   def reply_blocks_schema_sql, do: @reply_blocks_schema_sql
 
@@ -347,6 +413,10 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   @doc "The media authorization query, whose plan a test pins to its index."
   @spec media_descriptor_sql() :: String.t()
   def media_descriptor_sql, do: @media_descriptor_sql
+
+  @doc "The icon authorization query, whose plan a test pins to its index."
+  @spec icon_descriptor_sql() :: String.t()
+  def icon_descriptor_sql, do: @icon_descriptor_sql
 
   @doc "The search page query, whose plan a test pins to the full-text index's order."
   @spec search_rows_sql() :: String.t()
@@ -468,18 +538,26 @@ defmodule FermixCore.Memory.Repo.MobileSql do
           {:ok, %{server_seq: pos_integer(), media: map()}}
           | {:error, :not_found | {:malformed_media_descriptor, term()} | term()}
   def media_descriptor(conn, selector, ref) do
-    profile = normalize_profile(selector)
+    params = profile_params(normalize_profile(selector)) ++ [ref]
 
-    with {:ok, rows} <- query_all(conn, @media_descriptor_sql, profile_params(profile) ++ [ref]) do
+    with {:ok, media_rows} <- query_all(conn, @media_descriptor_sql, params),
+         {:ok, rows} <- icon_descriptor_rows(conn, media_rows, params) do
       media_descriptor_result(rows, ref)
     end
   end
 
+  # A ref is an attachment or a preview image (the media index), or else a
+  # preview icon (the icon index): one index lookup each, the first that
+  # names it answering.
+  defp icon_descriptor_rows(conn, [], params), do: query_all(conn, @icon_descriptor_sql, params)
+  defp icon_descriptor_rows(_conn, media_rows, _params), do: {:ok, media_rows}
+
   @doc """
   Add one link preview to a row: its `url`, `site` and `title`, an optional
-  `description`, and an optional `image` media descriptor, which `media_fetch`
-  then serves through this row. A preview whose url the row already has is
-  the same preview. A request output from an older attempt is refused.
+  `description`, and optional `image` and `icon` media descriptors, which
+  `media_fetch` then serves through this row. A preview whose url the row
+  already has is the same preview. A request output from an older attempt is
+  refused.
   """
   @spec attach_link_preview(term(), map(), pos_integer(), map()) ::
           {:ok, map()} | {:error, term()}
@@ -1522,22 +1600,23 @@ defmodule FermixCore.Memory.Repo.MobileSql do
 
   # What a stored preview may hold: a url, a site and a title, the link the
   # row wrote when present (a preview stored before links were kept has
-  # none), a description as text when present, and an image that is a
-  # well-formed media descriptor of its own ref. An absent field is an absent
-  # key, never a null.
+  # none), a description as text when present, and an image and an icon that
+  # are each a well-formed media descriptor of its own ref. An absent field
+  # is an absent key, never a null.
   defp validate_link_preview(preview) when is_map(preview) do
     with :ok <- known_preview_keys(preview),
          :ok <- required_preview_text(preview, ~w(url site title)),
          :ok <- optional_preview_link(preview),
-         :ok <- optional_preview_text(preview, "description") do
-      preview_image(Map.fetch(preview, "image"))
+         :ok <- optional_preview_text(preview, "description"),
+         :ok <- preview_media(preview, :image) do
+      preview_media(preview, :icon)
     end
   end
 
   defp validate_link_preview(_preview), do: invalid_preview(:not_a_map)
 
   defp known_preview_keys(preview) do
-    case Map.keys(preview) -- ~w(link url site title description image) do
+    case Map.keys(preview) -- ~w(link url site title description image icon) do
       [] -> :ok
       [key | _rest] -> invalid_preview({:unknown_field, key})
     end
@@ -1568,16 +1647,20 @@ defmodule FermixCore.Memory.Repo.MobileSql do
     end
   end
 
-  defp preview_image(:error), do: :ok
-
-  defp preview_image({:ok, %{"ref" => ref} = image}) do
-    case validate_media_descriptor(image, ref) do
-      :ok -> :ok
-      {:error, {:malformed_media_descriptor, reason}} -> invalid_preview({:image, reason})
+  defp preview_media(preview, key) do
+    case Map.fetch(preview, Atom.to_string(key)) do
+      :error -> :ok
+      {:ok, %{"ref" => ref} = media} -> preview_media_descriptor(media, ref, key)
+      {:ok, _media} -> invalid_preview({key, {:missing_field, "ref"}})
     end
   end
 
-  defp preview_image({:ok, _image}), do: invalid_preview({:image, {:missing_field, "ref"}})
+  defp preview_media_descriptor(media, ref, key) do
+    case validate_media_descriptor(media, ref) do
+      :ok -> :ok
+      {:error, {:malformed_media_descriptor, reason}} -> invalid_preview({key, reason})
+    end
+  end
 
   defp invalid_preview(reason), do: {:error, {:invalid_link_preview, reason}}
 
@@ -1599,7 +1682,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   defp preview_key(preview), do: Map.get(preview, "link", preview["url"])
 
   # A row's previews are one row of their own, keyed like it; its triggers
-  # index their images.
+  # index their images and icons.
   defp update_link_previews(conn, profile, row, previews) do
     with :ok <-
            execute(

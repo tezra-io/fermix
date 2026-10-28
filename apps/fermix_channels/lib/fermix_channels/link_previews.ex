@@ -1,21 +1,28 @@
 defmodule FermixChannels.LinkPreviews do
   @moduledoc """
   A timeline row's link previews: once a row is durable, the pages its links
-  name are read, each preview is stored on the row, and then announced, the
-  phones hearing the card (`link_preview`) and the Mac that the row changed
-  (`row_updated`), each wire only its own event.
+  name are read, each preview is stored on the row as it resolves, and then
+  announced, the phones hearing the card (`link_preview`) and the Mac that the
+  row changed (`row_updated`), each wire only its own event.
 
   The links are the caller's, read by `FermixCore.ReplyBlocks.links/2`: a
   reply's, less the ones its blocks draw (M72), or a phone user's own
   message's. Every row of the one timeline is previewed the same way, whether
   or not a phone is paired: the bounded task supervisor resolutions run under
   starts with the channels application, a launch past its bound is refused
-  and logged, never queued, and one resolution has one deadline. A preview's
-  picture is a blob in `FermixChannels.Mobile.MediaStore`, the timeline's
-  media store, served by `media_fetch` only through the preview on its row.
+  and logged, never queued, and one resolution has one deadline (SEC-11). The
+  resolution runs in a process of its own, which the deadline kills; each
+  preview it hands over is stored and announced by the process that owns the
+  row's resolution, so a slow site costs the row nothing that already
+  finished, and a kill can never leave a stored card unannounced. A preview's
+  picture and the site's icon are blobs in `FermixChannels.Mobile.MediaStore`,
+  the timeline's media store, served by `media_fetch` only through the preview
+  on its row.
 
-  An injected `:resolver` is called as `resolver.(links, store_thumbnail)`,
-  the shape `FermixChannels.Mobile.Unfurl.resolve/2` receives.
+  An injected `:resolver` is called as `resolver.(links, store_thumbnail,
+  on_preview)`: it hands each preview to `on_preview` as it resolves and
+  returns `{:ok, warnings}` once every link was read, as
+  `FermixChannels.Mobile.Unfurl.resolve/2` is wrapped here.
   """
 
   require Logger
@@ -27,9 +34,9 @@ defmodule FermixChannels.LinkPreviews do
   alias FermixCore.Companion.Timeline
   alias FermixCore.Text
 
-  # One resolution fetches up to four pages, their redirects and thumbnails,
-  # each read chunk by chunk: the whole of it has one deadline, and only so
-  # many run at once (SEC-11).
+  # One resolution fetches up to four pages, their redirects, thumbnails and
+  # icons, each read chunk by chunk: the whole of it has one deadline, and
+  # only so many run at once (SEC-11).
   @deadline_ms 20_000
   @max_concurrent 4
   @supervisor FermixChannels.LinkPreviews.Supervisor
@@ -41,8 +48,8 @@ defmodule FermixChannels.LinkPreviews do
 
   @doc """
   Resolve the previews of `links` for the row at `server_seq` asynchronously,
-  store each on the row, then announce it. A row that names no link asks for
-  nothing.
+  store each on the row as it resolves, then announce it. A row that names no
+  link asks for nothing.
   """
   @spec schedule(String.t(), pos_integer(), [String.t()], keyword()) :: :ok
   def schedule(profile_id, server_seq, links, opts \\ [])
@@ -94,60 +101,95 @@ defmodule FermixChannels.LinkPreviews do
     end
   end
 
+  # The resolution hands each preview back here, tagged for this row, then
+  # its result the same way, and the row's own process publishes each; the
+  # deadline is absolute, so each wait is for what is left of it.
   defp resolve(profile_id, server_seq, links, opts) do
     deadline_ms = Keyword.get(opts, :deadline_ms, @deadline_ms)
+    parent = self()
+    tag = make_ref()
+    on_preview = fn preview -> send(parent, {:link_preview, tag, preview}) end
+    resolution = resolution(links, opts, on_preview)
 
-    links
-    |> resolution(opts)
-    |> within_deadline(deadline_ms)
-    |> handle_result(profile_id, server_seq, opts)
+    collect(%{
+      task: Task.async(fn -> send(parent, {:link_previews_done, tag, resolution.()}) end),
+      tag: tag,
+      deadline: System.monotonic_time(:millisecond) + deadline_ms,
+      deadline_ms: deadline_ms,
+      slots: length(links),
+      publish: &publish(profile_id, server_seq, &1, opts)
+    })
   end
 
   # Both seams are looked up here, in the calling process, so a mis-shaped
   # injection raises where it was made.
-  defp resolution(links, opts) do
+  defp resolution(links, opts, on_preview) do
     store_thumbnail = thumbnail_writer(opts)
 
     case resolver(opts) do
-      nil -> fn -> Unfurl.resolve(links, store_thumbnail: store_thumbnail) end
-      resolver -> fn -> resolver.(links, store_thumbnail) end
+      nil -> fn -> unfurl(links, store_thumbnail, on_preview) end
+      resolver -> fn -> resolver.(links, store_thumbnail, on_preview) end
     end
   end
 
-  # A resolution past its deadline is killed along with the fetch it holds.
-  defp within_deadline(resolution, deadline_ms) do
-    task = Task.async(resolution)
-
-    case Task.yield(task, deadline_ms) || Task.shutdown(task, :brutal_kill) do
-      {:ok, result} -> result
-      {:exit, reason} -> {:error, {:resolution_exit, reason}}
-      nil -> {:error, {:resolution_deadline, deadline_ms}}
+  defp unfurl(links, store_thumbnail, on_preview) do
+    case Unfurl.resolve(links, store_thumbnail: store_thumbnail, on_preview: on_preview) do
+      {:ok, _previews, warnings} -> {:ok, warnings}
+      {:error, reason} -> {:error, reason}
     end
   end
+
+  # One hand-over a link at most, then the resolution's result; a resolution
+  # past the deadline, or handing over more than the row has links, is killed
+  # where it stands along with the fetch it holds. Every way out reaps the
+  # task, done or killed, with its own reply.
+  defp collect(%{task: task, tag: tag, slots: slots} = state) do
+    receive do
+      {:link_preview, ^tag, preview} when slots > 0 ->
+        state.publish.(preview)
+        collect(%{state | slots: slots - 1})
+
+      {:link_preview, ^tag, preview} ->
+        reap(task)
+        log_error(:resolution_overflow, preview)
+
+      {:link_previews_done, ^tag, result} ->
+        reap(task)
+        finish(result)
+    after
+      remaining(state.deadline) ->
+        reap(task)
+        log_error(:resolution_failed, {:resolution_deadline, state.deadline_ms})
+    end
+  end
+
+  # The task has sent everything it had to by now, or is past its bound: its
+  # reply, if any, carries nothing the tagged messages did not.
+  defp reap(task) do
+    _reply = Task.shutdown(task, :brutal_kill)
+    :ok
+  end
+
+  defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
+
+  defp finish({:ok, warnings}) when is_list(warnings) do
+    Enum.each(warnings, &log_error(:resolution_warning, &1))
+    :ok
+  end
+
+  defp finish({:error, reason}), do: log_error(:resolution_failed, reason)
+  defp finish(other), do: log_error(:invalid_resolver_result, other)
 
   defp resolver(opts) do
     override =
       Keyword.get(opts, :resolver) ||
         Application.get_env(:fermix_channels, :link_preview_resolver)
 
-    injected(override, 2, :link_preview_resolver)
+    injected(override, 3, :link_preview_resolver)
   end
-
-  defp handle_result({:ok, previews, warnings}, profile_id, server_seq, opts)
-       when is_list(previews) and is_list(warnings) do
-    Enum.each(previews, &publish(profile_id, server_seq, &1, opts))
-    Enum.each(warnings, &log_error(:resolution_warning, &1))
-    :ok
-  end
-
-  defp handle_result({:error, reason}, _profile_id, _server_seq, _opts),
-    do: log_error(:resolution_failed, reason)
-
-  defp handle_result(other, _profile_id, _server_seq, _opts),
-    do: log_error(:invalid_resolver_result, other)
 
   # The card is stored on its row before anyone hears of it: history rebuilds
-  # it from there, and `media_fetch` serves its image only through it.
+  # it from there, and `media_fetch` serves its image and icon only through it.
   defp publish(profile_id, server_seq, preview, opts) do
     with {:ok, card} <- card(preview),
          {:ok, _row} <- attach(profile_id, server_seq, card, opts),
@@ -177,7 +219,8 @@ defmodule FermixChannels.LinkPreviews do
          "description",
          bounded_text(value(preview, :description), @max_description_bytes)
        )
-       |> maybe_put("image", image(value(preview, :image)))}
+       |> maybe_put("image", image(value(preview, :image)))
+       |> maybe_put("icon", image(value(preview, :icon)))}
     end
   end
 
@@ -211,12 +254,14 @@ defmodule FermixChannels.LinkPreviews do
     %{
       "t" => "link_preview",
       "in_reply_to" => server_seq,
+      "link" => card["link"],
       "url" => card["url"],
       "site" => card["site"],
       "title" => card["title"]
     }
     |> maybe_put("description", card["description"])
     |> maybe_put("image_ref", get_in(card, ["image", "ref"]))
+    |> maybe_put("icon_ref", get_in(card, ["icon", "ref"]))
   end
 
   defp emit(profile_id, event, opts) do

@@ -195,7 +195,9 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
         :ok =
           Sqlite3.execute(conn, "ALTER TABLE open_loops DROP COLUMN noted_after_outside_content")
 
-        :ok = Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version = 49")
+        # 50 follows 49 and only adds IF NOT EXISTS objects, so a database at
+        # 48 lacks its version row too, and reapplying it changes nothing.
+        :ok = Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version IN (49, 50)")
         assert [[48]] = query!(conn, "SELECT MAX(version) FROM schema_migrations")
       end)
 

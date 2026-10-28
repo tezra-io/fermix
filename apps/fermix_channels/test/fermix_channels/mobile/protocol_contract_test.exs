@@ -297,6 +297,49 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     end
   end
 
+  # Links in the sentence (note 01): the live card carries the link as the row
+  # wrote it and the site's icon, each bounded as the stored card bounds it,
+  # and a golden of each shape carries both.
+  test "the live link_preview carries link and icon_ref as the stored card does", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    card = schema["$defs"]["linkPreviewCard"]["properties"]
+    live = schema["$defs"]["link_preview"]["properties"]
+
+    for field <- ~w(link url site title description image_ref icon_ref) do
+      assert live[field] == card[field], "#{field} differs between the live and stored card"
+    end
+
+    assert card["link"]["maxLength"] == 2_048
+    assert card["icon_ref"] == card["image_ref"]
+    refute "link" in schema["$defs"]["link_preview"]["required"]
+    refute "icon_ref" in schema["$defs"]["link_preview"]["required"]
+
+    golden = Enum.find(server_headers(), &(&1["t"] == "link_preview" and &1["icon_ref"]))
+    assert %{"link" => _link, "image_ref" => _image, "icon_ref" => _icon} = golden
+
+    paged =
+      server_headers()
+      |> Enum.filter(&(&1["t"] == "history_page"))
+      |> Enum.flat_map(& &1["messages"])
+      |> Enum.flat_map(&Map.get(&1, "link_previews", []))
+
+    assert Enum.any?(paged, &match?(%{"link" => _, "icon_ref" => _}, &1))
+
+    preview = %{"in_reply_to" => 12, "url" => "https://e.com", "site" => "E", "title" => "T"}
+    long_link = Map.put(preview, "link", "https://e.com/" <> String.duplicate("é", 1_020))
+
+    assert ["link: more than 2048 bytes"] =
+             server_errors(server_event("link_preview", long_link), schema)
+
+    assert protocol =~
+             "| `link_preview` | `in_reply_to`, `url`, `site`, `title`; `link?`, `description?`, `image_ref?`, `icon_ref?` |"
+
+    assert protocol =~ "64 KiB"
+    assert protocol =~ "SVG"
+  end
+
   test "every golden fixture validates against the vendored schema", %{schema: schema} do
     for header <- client_headers() do
       assert WireSchema.errors(header, WireSchema.ref("clientEvent"), schema) == [],
