@@ -1,9 +1,9 @@
 defmodule FermixCore.Cues.Door.Router do
   @moduledoc """
-  The door's only routes (M60 §6.5–§6.7): `POST /cues/v1/:ref` (local push)
-  and `POST /cues/hooks/:ref/:random` (webhooks). Everything else is 404. No
-  debugger, no session, no parsers: the body is read here, under the door's
-  own bounds.
+  The door's only routes (M60 §6.5–§6.7): `POST /cues/v1/:ref` (local push),
+  `POST /cues/hooks/:ref/:random` (webhooks) and `GET /cues/hooks/:ref/:random`
+  (X's CRC check). Everything else is 404. No debugger, no session, no
+  parsers: the body is read here, under the door's own bounds.
 
   Local push, in order:
 
@@ -42,6 +42,14 @@ defmodule FermixCore.Cues.Door.Router do
     4. Rate as for local push (429); the body decoded, duplicate keys refused
        (400), into one item; `Cues.Ingest.accept/3`, answered `200` with its
        result.
+
+  X's CRC check (`GET /cues/hooks/:ref/:random?crc_token=…`), in order: the
+  source is an enabled `x` webhook source that is not waiting for its secret,
+  and the path matches as for a delivery (else 404, so any other source's
+  path answers as before); one `crc_token` that `Cues.Webhook.crc_response/2`
+  will sign (400); then, in the source's authenticated slot (429), the answer
+  under the signing key, `200` `{"response_token": "sha256=…"}`. A Funnel
+  request is welcome: X reaches the door the way its deliveries do.
 
   A refusal writes nothing except a coalesced count in `Cues.Buckets`, and only
   for a configured source. Every `503` (the door busy, a secret that cannot be
@@ -88,6 +96,10 @@ defmodule FermixCore.Cues.Door.Router do
 
   post "/cues/hooks/:ref/:random" do
     webhook(conn, ref, random)
+  end
+
+  get "/cues/hooks/:ref/:random" do
+    crc_check(conn, ref, random)
   end
 
   match _ do
@@ -524,6 +536,60 @@ defmodule FermixCore.Cues.Door.Router do
         {:refuse, 400, :malformed, decode_sentence(:invalid_json)}
     end
   end
+
+  # --- X's CRC check ---------------------------------------------------------
+
+  defp crc_check(conn, ref, random) do
+    opts = conn.assigns.door
+    known = Config.source(ref)
+
+    case handle_crc(conn, ref, random, known, opts) do
+      {:respond, conn, status, body} ->
+        send_json(conn, status, body)
+
+      {:refuse, status, reason, message} ->
+        count_refusal(known, ref, reason)
+        send_refusal(conn, status, message)
+    end
+  end
+
+  defp handle_crc(conn, ref, random, known, opts) do
+    with {:ok, source} <- crc_source(known),
+         :ok <- hook_path(source, random, opts),
+         {:ok, token} <- crc_token(conn) do
+      with_slot(:auth, ref, fn -> crc_answer(conn, ref, token, opts) end)
+    end
+  end
+
+  defp crc_source({:ok, %{verify: :x}} = known), do: hook_source(known)
+  defp crc_source(_unknown_or_another_method), do: not_found()
+
+  # Exactly one token, refused before any secret is read when the answer would
+  # refuse it. `URI.query_decoder/1` keeps a repeated key and never raises, so
+  # a malformed query is this refusal too, never an adapter error.
+  defp crc_token(conn) do
+    case for {"crc_token", token} <- URI.query_decoder(conn.query_string), do: token do
+      [token] -> if Webhook.crc_token?(token), do: {:ok, token}, else: bad_crc_token()
+      _none_or_several -> bad_crc_token()
+    end
+  end
+
+  # The key is the delivery's signing key, kept a minute the same way.
+  defp crc_answer(conn, ref, token, opts) do
+    load = fn -> load_hook_secret(ref, :secret, opts) end
+
+    case Buckets.hook_key({ref, :secret}, now_ms: clock(opts).(), load: load) do
+      {:ok, secret} ->
+        {:ok, answer} = Webhook.crc_response(token, secret)
+        {:respond, conn, 200, %{"response_token" => answer}}
+
+      {:error, _reason} ->
+        unusable_secret()
+    end
+  end
+
+  defp bad_crc_token,
+    do: {:refuse, 400, :malformed, "Send one crc_token, as X's CRC check does."}
 
   # --- helpers ---------------------------------------------------------------
 

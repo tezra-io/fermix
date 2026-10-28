@@ -17,6 +17,8 @@ defmodule FermixCore.Cues.DoorWebhookTest do
   @github_secret "gh-signing-secret"
   @shared_secret "shared-token-1"
   @std_key "a 24-byte Standard key.."
+  @x_secret "x-client-secret-0417"
+  @crc_token "Y2hhbGxlbmdlLTA0MTc"
   @path_random "R4nd0m-path_secret0123"
   @token "tok-home-alerts"
   @wait_ms 10_000
@@ -55,7 +57,7 @@ defmodule FermixCore.Cues.DoorWebhookTest do
 
     Application.put_env(:fermix_core, :cues, Config.normalize(%{"sources" => sources()}))
 
-    for ref <- ~w(gh-hooks std-hooks shared-hooks off-hooks) do
+    for ref <- ~w(gh-hooks std-hooks shared-hooks off-hooks x-posts x-waiting x-off) do
       :ok = put_secret(ref, :path_secret, @path_random)
     end
 
@@ -64,6 +66,8 @@ defmodule FermixCore.Cues.DoorWebhookTest do
     :ok = put_secret("fresh-hooks", :secret, @github_secret)
     :ok = put_secret("std-hooks", :secret, "whsec_" <> Base.encode64(@std_key))
     :ok = put_secret("shared-hooks", :secret, @shared_secret)
+    :ok = put_secret("x-posts", :secret, @x_secret)
+    :ok = put_secret("x-off", :secret, @x_secret)
     :ok = put_secret("home-alerts", :token, @token)
 
     on_exit(fn ->
@@ -95,6 +99,14 @@ defmodule FermixCore.Cues.DoorWebhookTest do
         "verify" => "shared_secret",
         "header" => "X-Hook-Token",
         "id" => "content_hash",
+        "secret" => "@keyring",
+        "path_secret" => "@keyring"
+      },
+      "x-posts" => %{"preset" => "x", "secret" => "@keyring", "path_secret" => "@keyring"},
+      "x-waiting" => %{"preset" => "x", "path_secret" => "@keyring"},
+      "x-off" => %{
+        "preset" => "x",
+        "enabled" => false,
         "secret" => "@keyring",
         "path_secret" => "@keyring"
       },
@@ -491,6 +503,140 @@ defmodule FermixCore.Cues.DoorWebhookTest do
       headers = std_headers(body, "msg_2", timestamp, std_signature("msg_1", timestamp, body))
 
       assert post_hook(hook_path("std-hooks"), body, headers).status == 401
+    end
+  end
+
+  describe "an X webhook" do
+    defp x_body do
+      Jason.encode!(%{
+        "data" => %{
+          "event_uuid" => "evt-5512-alpha",
+          "created_at" => "2026-10-10T11:58:30.000Z",
+          "event_type" => "post.create",
+          "filter" => %{"user_id" => "4401876523"},
+          "payload" => %{"id" => "1981000000000000042", "text" => "Office opens Monday."}
+        }
+      })
+    end
+
+    defp x_signature(secret, body),
+      do: "sha256=" <> Base.encode64(:crypto.mac(:hmac, :sha256, secret, body))
+
+    defp x_headers(body, signature_headers) do
+      [
+        {"content-type", "application/json"},
+        {"content-length", Integer.to_string(byte_size(body))}
+        | signature_headers
+      ]
+    end
+
+    defp crc(path, query, headers \\ [], opts \\ router_opts()),
+      do: :get |> build(path <> query, "", headers) |> call(opts)
+
+    defp crc_query(token), do: "?" <> URI.encode_query(%{"crc_token" => token})
+
+    test "X's CRC check is answered with the base64 HMAC of its token under the secret" do
+      conn = crc(hook_path("x-posts"), crc_query(@crc_token))
+
+      assert conn.status == 200
+      mac = :crypto.mac(:hmac, :sha256, @x_secret, @crc_token)
+      assert json(conn) == %{"response_token" => "sha256=" <> Base.encode64(mac)}
+      refute_received {:ingest, _source, _entries, _opts}
+    end
+
+    test "a CRC check through Funnel is answered: Funnel is the way in" do
+      headers = [{"tailscale-funnel-request", "?1"}]
+      assert crc(hook_path("x-posts"), crc_query(@crc_token), headers).status == 200
+    end
+
+    test "C05: a CRC token that decodes as a body is 400 and signs nothing" do
+      conn = crc(hook_path("x-posts"), crc_query(x_body()))
+
+      assert conn.status == 400
+      refute Map.has_key?(json(conn), "response_token")
+      assert Buckets.take_rejects() == %{"x-posts" => %{malformed: 1}}
+    end
+
+    test "a CRC check without one token, or with a malformed query, is 400" do
+      for query <- [
+            "",
+            "?crc=#{@crc_token}",
+            "?crc_token[a]=b",
+            "?crc_token=#{@crc_token}&crc_token=other",
+            "?crc_token=%FF"
+          ] do
+        conn = crc(hook_path("x-posts"), query)
+        assert conn.status == 400, query
+        assert json(conn)["error"] =~ "crc_token", query
+      end
+    end
+
+    # The answer is the HMAC a delivery's signature is, so this is the replay
+    # the guard exists for: it verifies, and a body that is not JSON is refused.
+    test "C05: a CRC answer sent back as a delivery's signature stores nothing" do
+      answer = json(crc(hook_path("x-posts"), crc_query(@crc_token)))["response_token"]
+      signed = [{"x-twitter-webhooks-signature-oauth2", answer}]
+
+      conn = post_hook(hook_path("x-posts"), @crc_token, x_headers(@crc_token, signed))
+
+      assert conn.status == 400
+      refute_received {:ingest, _source, _entries, _opts}
+    end
+
+    test "C05: a CRC check on a wrong path, another method's source or one waiting is 404" do
+      for path <- [
+            hook_path("x-posts", "wrong-random"),
+            hook_path("gh-hooks"),
+            hook_path("std-hooks"),
+            hook_path("x-waiting"),
+            hook_path("x-off")
+          ] do
+        conn = crc(path, crc_query(@crc_token))
+        assert conn.status == 404, path
+        assert json(conn) == %{"error" => "Not found."}
+      end
+    end
+
+    test "a secret that cannot be read is 503" do
+      load = fn
+        _ref, :path_secret -> {:ok, @path_random}
+        _ref, :secret -> {:error, :missing_secret}
+      end
+
+      opts = router_opts(load_secret: load)
+      assert crc(hook_path("x-posts"), crc_query(@crc_token), [], opts).status == 503
+    end
+
+    test "a signed delivery is accepted under its event id, with its type, account and time" do
+      body = x_body()
+      signed = [{"x-twitter-webhooks-signature-oauth2", x_signature(@x_secret, body)}]
+
+      conn = post_hook(hook_path("x-posts"), body, x_headers(body, signed))
+
+      assert conn.status == 200
+
+      assert json(conn) == %{
+               "results" => [%{"index" => 0, "id" => "evt-5512-alpha", "status" => "accepted"}]
+             }
+
+      assert_received {:ingest, %{ref: "x-posts"}, [%Item{} = item], _opts}
+      assert item.type == "post.create"
+      assert item.subject == "4401876523"
+      assert DateTime.compare(item.occurred_at, ~U[2026-10-10 11:58:30Z]) == :eq
+    end
+
+    test "C05: a delivery signed in hex, or under the legacy header alone, is 401" do
+      body = x_body()
+      hex = "sha256=" <> hmac_hex(@x_secret, body)
+
+      for signed <- [
+            [{"x-twitter-webhooks-signature-oauth2", hex}],
+            [{"x-twitter-webhooks-signature", x_signature(@x_secret, body)}]
+          ] do
+        assert post_hook(hook_path("x-posts"), body, x_headers(body, signed)).status == 401
+      end
+
+      refute_received {:ingest, _source, _entries, _opts}
     end
   end
 

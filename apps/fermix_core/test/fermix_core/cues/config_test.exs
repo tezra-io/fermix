@@ -268,7 +268,7 @@ defmodule FermixCore.Cues.ConfigTest do
     test "a section written for the removed Bluesky preset is refused, naming the problem" do
       assert_raise ArgumentError,
                    ~s(cues.sources.s1: unknown preset "bluesky_jetstream"; known presets: ) <>
-                     "github, rss",
+                     "github, rss, x",
                    fn -> Config.normalize(source(%{"preset" => "bluesky_jetstream"})) end
 
       for {section, unknown} <- [

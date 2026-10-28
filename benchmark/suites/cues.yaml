@@ -36,7 +36,9 @@ description: >
   reports only to the owner; "which sources and mandates do I have?" is answered
   from Fermix's own record, the source waiting for its secret included; a
   broker's real-time news over WebSocket is a Stream source with no preset,
-  its keys typed in settings, never in chat.
+  its keys typed in settings, never in chat; an X account's posts come in
+  through a Webhook source with the X preset, its client secret typed in
+  settings.
 defaults:
   timeout_ms: 240000
   judge: true
@@ -414,6 +416,64 @@ scenarios:
           Not required: naming every field of the form. Saying the stream cannot
           catch up on what was sent while it was disconnected is correct and must
           never be penalized.
+
+  # An X account's posts: a Webhook source with the X preset, whose client
+  # secret is typed into the source's settings, and X pointed at its address.
+  # Nothing is created in a chat. The gate is the WebSocket cases' floor on
+  # asking for a credential here; what the reply says is the rubric's.
+  - id: x_account_posts_source
+    title: "The owner wants an X account's new posts to come in as cues"
+    severity: normal
+    risk: isolated_mutation
+    tags: [cues, sources, setup]
+    cases:
+      - id: x_account_new_posts
+        drive: companion
+        query: >
+          I'd like every new post from one X account to come into Fermix as soon as
+          it's published, so a watcher can look at each one. How do I set that up?
+        expect:
+          status: ok
+          reply_not_matches: "(?i)(?<!\\bnot )(?<!n't )(?<!never )(?<!ever )\\b(?:send|paste|share|give|provide|post|drop|type)\\b\\s+(?:me\\s+)?(?:your|the)\\s+(?:\\w+\\s+){0,2}(?:keys?|secrets?|tokens?|passwords?|credentials?)\\b(?:\\s+\\w+){0,4}\\s+(?:here|in (?:this|the) chat|to me)\\b"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. The reply says the posts come in through a Webhook source with the X
+             preset, added in settings (the Mac app's Cues pane or the setup page's
+             Cues tab).
+          2. The reply says the X app's client secret (its OAuth 2.0 Client Secret)
+             is entered in that source's settings.
+          3. The reply says X has to be pointed at the source's address: the address
+             registered as a webhook with X and subscribed to that account's posts.
+          4. The reply asks for no key, secret, token or password in the chat, and
+             does not claim that Fermix added, changed or connected a source.
+          Not required: the exact X endpoints, the tunnel command, or naming every
+          field of the form. Saying X bills each delivered post, or that a protected
+          account's posts are not delivered, is correct and must never be penalized.
+      - id: x_handle_through_webhooks
+        drive: companion
+        query: >
+          Can Fermix pick up posts from @orrindb on X through X's webhooks? I have an
+          X developer app with a client secret.
+        expect:
+          status: ok
+          reply_not_matches: "(?i)(?<!\\bnot )(?<!n't )(?<!never )(?<!ever )\\b(?:send|paste|share|give|provide|post|drop|type)\\b\\s+(?:me\\s+)?(?:your|the)\\s+(?:\\w+\\s+){0,2}(?:keys?|secrets?|tokens?|passwords?|credentials?)\\b(?:\\s+\\w+){0,4}\\s+(?:here|in (?:this|the) chat|to me)\\b"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. The reply says yes: a Webhook source with the X preset, added in settings
+             (the Mac app's Cues pane or the setup page's Cues tab), takes X's webhook
+             deliveries as cues.
+          2. The reply says the client secret is entered in that source's settings.
+          3. The reply says X has to be pointed at the source's address: the address
+             registered as a webhook with X and subscribed to that account's posts.
+          4. The reply asks for no key, secret, token or password in the chat, and
+             does not claim that Fermix added, changed or connected a source.
+          Not required: the exact X endpoints, the tunnel command, or naming every
+          field of the form. Saying X bills each delivered post, or that a protected
+          account's posts are not delivered, is correct and must never be penalized.
 
   - id: which_mandates_are_set_up
     title: "The owner asks which mandates exist and whether each is approved"

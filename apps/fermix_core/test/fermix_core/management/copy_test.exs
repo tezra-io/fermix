@@ -426,7 +426,9 @@ defmodule FermixCore.Management.CopyTest do
               {"webhook", nil, "hmac"},
               {"webhook", nil, "shared_secret"},
               {"webhook", nil, "standard_webhooks"},
+              {"webhook", nil, "x"},
               {nil, "github", nil},
+              {nil, "x", nil},
               {nil, "rss", nil}
             ] do
           {:ok, form} = CueSourceForm.form(kind, preset, verify)

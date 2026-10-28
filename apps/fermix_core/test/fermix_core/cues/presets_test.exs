@@ -36,8 +36,19 @@ defmodule FermixCore.Cues.PresetsTest do
     assert {:ok, %{kind: :feed}} = Presets.fill(%{preset: "rss", kind: :feed})
   end
 
+  test "x makes a webhook checked by X's own method, read from the Activity API's envelope" do
+    assert {:ok, filled} = Presets.fill(%{preset: "x"})
+
+    assert filled.kind == :webhook
+    assert filled.verify == :x
+    assert filled.id_path == "data.event_uuid"
+    assert filled.type_path == "data.event_type"
+    assert filled.subject_path == "data.filter.user_id"
+    assert filled.time_path == "data.created_at"
+  end
+
   test "names lists every preset, and the engine ships no Bluesky preset" do
-    assert Presets.names() == ["github", "rss"]
+    assert Presets.names() == ["github", "rss", "x"]
     assert Presets.defaults("bluesky_jetstream") == :error
   end
 end

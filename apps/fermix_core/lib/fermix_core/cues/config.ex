@@ -51,7 +51,7 @@ defmodule FermixCore.Cues.Config do
 
   @config_keys [:enabled, :mandates_enabled, :door_port, :sources, :mandates]
   @kinds [:stream, :feed, :webhook, :local_push]
-  @verify_methods [:shared_secret, :hmac, :standard_webhooks]
+  @verify_methods [:shared_secret, :hmac, :standard_webhooks, :x]
   @id_choices [:content_hash]
   # How a signed or shared-secret webhook tells one delivery from another.
   @identity_fields [:id_header, :id_path, :id]
@@ -250,19 +250,22 @@ defmodule FermixCore.Cues.Config do
     identity_needed?(kind, verify || Map.get(filled, :verify)) and not identified?(filled)
   end
 
-  # A signed or shared-secret webhook names the header that carries it and
-  # how one delivery is told from another; a stream with no preset names where
-  # each message keeps its id.
+  # An HMAC or shared-secret webhook names the header that carries its
+  # signature; it and an X webhook name how one delivery is told from another;
+  # a stream with no preset names where each message keeps its id.
   defp needed_fields(kind, method, preset) do
     Map.fetch!(@required_by_kind, kind) ++
       method_needs(kind, method) ++ preset_needs(kind, preset)
   end
 
-  defp method_needs(kind, method),
-    do: if(identity_needed?(kind, method), do: [:header], else: [])
+  defp method_needs(:webhook, method)
+       when method in [:hmac, :shared_secret, "hmac", "shared_secret"],
+       do: [:header]
+
+  defp method_needs(_kind, _method), do: []
 
   defp identity_needed?(:webhook, method),
-    do: method in [:hmac, :shared_secret, "hmac", "shared_secret"]
+    do: method in [:hmac, :shared_secret, :x, "hmac", "shared_secret", "x"]
 
   defp identity_needed?(_kind, _method), do: false
 

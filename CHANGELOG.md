@@ -6,6 +6,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Cues take an X account's posts through X's own webhooks.** A new X
+  preset for webhook sources needs only your X app's OAuth 2.0 Client Secret:
+  Fermix checks X's signature on each delivery and answers X's check of the
+  address, which no other webhook method could, so X could not register a
+  Fermix address before. Each X Activity API event becomes a cue with its own
+  id, type, account and time, so subscribing the address to an account's
+  posts sends each new post to the watchers on that source. In the source
+  form, the X preset asks only for a name and the client secret, and a
+  GitHub source's content toggle moves under More options with the rest of
+  what its preset settles.
+
 ### Fixed
 
 - **The Mac app lists Anthropic's models when you pick it for the Cues

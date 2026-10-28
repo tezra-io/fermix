@@ -8,8 +8,9 @@ defmodule FermixCore.Management.Cues.SourceForm do
   The form is the daemon's: a client draws its `rows` with the descriptor
   rows Settings uses and writes no field list per kind. A field a preset
   fills is published with the preset's value under More options (`advanced`),
-  and a value equal to it is not written, so the section stays as short as a
-  hand edit would be. `Cues.Config.normalize/1` is still the one that accepts
+  as is one whose purpose the preset settles another way (an identity, a
+  type), and a value equal to it is not written, so the section stays as
+  short as a hand edit would be. `Cues.Config.normalize/1` is still the one that accepts
   or refuses a section; this module only shapes the values and refuses what
   is not a field of the form.
 
@@ -55,12 +56,14 @@ defmodule FermixCore.Management.Cues.SourceForm do
   @kind_ids Enum.map(@kinds, & &1.id)
   @preset_labels %{
     "rss" => "RSS, Atom or JSON Feed",
-    "github" => "GitHub"
+    "github" => "GitHub",
+    "x" => "X"
   }
   @verify_options [
     {"hmac", "A signature over the body"},
     {"standard_webhooks", "Standard Webhooks"},
-    {"shared_secret", "A shared secret in a header"}
+    {"shared_secret", "A shared secret in a header"},
+    {"x", "X's signature"}
   ]
   @verify_ids Enum.map(@verify_options, &elem(&1, 0))
   @algorithms ~w(sha256 sha512 sha1)
@@ -74,6 +77,8 @@ defmodule FermixCore.Management.Cues.SourceForm do
   @webhook_note "The door listens on this Mac only. A service outside reaches it through a " <>
                   "tunnel you run."
   @github_note "In GitHub's webhook form, choose `application/json` as the content type."
+  @x_note "The client secret is your X app's `OAuth 2.0 Client Secret`. Fermix answers X's " <>
+            "check of the address with it, so save it before you give X the address."
   @push_note "Send each item as a CloudEvent, with the token as a bearer token."
   @general_stream_note "Any WebSocket service. Fermix signs in with your API key and secret, " <>
                          "sends the subscribe message, and keeps each message of a type you list."
@@ -409,6 +414,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
   end
 
   defp notes("webhook", "github"), do: [@webhook_note, @github_note]
+  defp notes("webhook", "x"), do: [@webhook_note, @x_note]
   defp notes("webhook", _preset), do: [@webhook_note]
   defp notes("local_push", _preset), do: [@push_note]
   defp notes("stream", nil), do: [@general_stream_note]
@@ -433,7 +439,17 @@ defmodule FermixCore.Management.Cues.SourceForm do
 
   defp general_stream?(kind, preset), do: kind == "stream" and preset == nil
 
+  # A row is under More options when the preset fills it, or fills another way
+  # to settle what it is for: a preset that names the identity folds both
+  # identity rows, and one that names the type folds the type header.
   defp advanced?(%{config: config}, _defaults) when config in @more_options, do: true
+
+  defp advanced?(%{config: config}, defaults) when config in [:id_header, :id],
+    do: Enum.any?(CuesConfig.identity_fields(), &Map.has_key?(defaults, &1))
+
+  defp advanced?(%{config: :type_header}, defaults),
+    do: Map.has_key?(defaults, :type_header) or Map.has_key?(defaults, :type_path)
+
   defp advanced?(field, defaults), do: Map.has_key?(defaults, field.config)
 
   defp field_value(field, section, defaults) do
@@ -537,15 +553,17 @@ defmodule FermixCore.Management.Cues.SourceForm do
   # `secrets` (a source's sentinels by field): a webhook's signing or shared
   # secret, and the key and secret a stream with no preset signs in with. A
   # local push's token is Fermix's to make, and a feed needs none.
-  defp secret_rows("webhook", _preset, method, secrets) do
-    label = if method == "shared_secret", do: "Shared secret", else: "Signing secret"
-    [secret_row(:secret, label, secrets)]
-  end
+  defp secret_rows("webhook", _preset, method, secrets),
+    do: [secret_row(:secret, webhook_secret_label(method), secrets)]
 
   defp secret_rows("stream", nil, _method, secrets),
     do: [secret_row(:key, "API key", secrets), secret_row(:secret, "API secret", secrets)]
 
   defp secret_rows(_kind, _preset, _method, _secrets), do: []
+
+  defp webhook_secret_label("shared_secret"), do: "Shared secret"
+  defp webhook_secret_label("x"), do: "Client secret"
+  defp webhook_secret_label(_method), do: "Signing secret"
 
   # A stream with no preset asks for its API key and secret straight after its
   # address, ahead of the fields that say how they are sent, so a value is not
@@ -576,6 +594,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
 
   defp method_keys("hmac"), do: ~w(header algorithm prefix id_header content_hash)
   defp method_keys("shared_secret"), do: ~w(header id_header content_hash)
+  defp method_keys("x"), do: ~w(id_header content_hash)
   defp method_keys(_standard_or_none), do: []
 
   defp fields(keys), do: Enum.map(keys, &Map.fetch!(@field_by_key, &1))

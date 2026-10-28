@@ -49,7 +49,7 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   # that accepts or refuses a section.
   @kinds ~w(feed stream webhook local_push)
   @default_kind "feed"
-  @verify_methods ~w(hmac shared_secret standard_webhooks)
+  @verify_methods ~w(hmac shared_secret standard_webhooks x)
   # The method a webhook with no preset starts on: the menu's first, so the
   # form draws the fields of the method it shows and a save stores it.
   @default_verify "hmac"
@@ -593,6 +593,7 @@ defmodule FermixWebWeb.SetupLive.CuesState do
 
   defp method_fields("hmac"), do: [:header, :algorithm, :prefix, :id_header, :id]
   defp method_fields("shared_secret"), do: [:header, :id_header, :id]
+  defp method_fields("x"), do: [:id_header, :id]
   defp method_fields(_standard_or_none), do: []
 
   defp source_section(values, existing) do

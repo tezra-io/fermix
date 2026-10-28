@@ -582,7 +582,8 @@ def test_the_shipped_numbered_rubrics_parse():
                       "alerts_to_dana_on_signal": 2, "alerts_to_sister_on_signal": 2,
                       "sources_and_anything_broken": 4, "anything_waiting_on_me": 4,
                       "sanity_sources_read": 2, "broker_news_websocket": 3,
-                      "market_headlines_wss": 3, "mandates_and_approval": 3,
+                      "market_headlines_wss": 3, "x_account_new_posts": 4,
+                      "x_handle_through_webhooks": 4, "mandates_and_approval": 3,
                       "mandates_needing_approval": 3}
 
 

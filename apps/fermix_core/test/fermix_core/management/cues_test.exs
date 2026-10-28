@@ -783,7 +783,7 @@ defmodule FermixCore.Management.CuesTest do
       assert {:ok, form} = Cues.sources_form(nil, nil, nil)
 
       assert Enum.map(form["kinds"], & &1["id"]) == ~w(feed stream webhook local_push)
-      assert Enum.map(form["presets"], & &1["id"]) == ~w(github rss)
+      assert Enum.map(form["presets"], & &1["id"]) == ~w(github rss x)
       assert Enum.map(form["rows"], & &1["key"]) == ~w(ref url interval_minutes daily_budget)
       assert form["consent_sentence"] =~ "new items"
       assert form["notes"] == []
@@ -809,12 +809,41 @@ defmodule FermixCore.Management.CuesTest do
       assert %{"value" => "hmac", "advanced" => true} =
                Enum.find(form["rows"], &(&1["key"] == "verify"))
 
+      # GitHub's delivery id settles the identity, so the content toggle is
+      # under More options too.
+      assert %{"value" => false, "advanced" => true} =
+               Enum.find(form["rows"], &(&1["key"] == "content_hash"))
+
       assert %{"kind" => "secret", "present" => false, "label" => "Signing secret"} =
                List.last(form["rows"])
 
       assert "In GitHub's webhook form, choose `application/json` as the content type." in form[
                "notes"
              ]
+    end
+
+    # X's preset fixes the method and reads the identity, type, account and
+    # time from the Activity API's envelope, so only the name and the client
+    # secret are left open.
+    test "the X preset asks for its name and its client secret, the rest under More options" do
+      assert {:ok, form} = Cues.sources_form(nil, "x", nil)
+      rows = Map.new(form["rows"], &{&1["key"], &1})
+
+      assert Enum.map(form["rows"], & &1["key"]) ==
+               ~w(ref verify id_header content_hash type_header daily_budget secret)
+
+      assert for(row <- form["rows"], not row["advanced"], do: row["key"]) == ~w(ref secret)
+      assert %{"value" => "x", "kind" => "choice"} = rows["verify"]
+
+      assert %{"kind" => "secret", "label" => "Client secret", "present" => false} =
+               rows["secret"]
+
+      assert Enum.any?(form["notes"], &(&1 =~ "OAuth 2.0 Client Secret"))
+
+      assert {:ok, without_preset} = Cues.sources_form("webhook", nil, "x")
+
+      assert for(row <- without_preset["rows"], not row["advanced"], do: row["key"]) ==
+               ~w(ref verify id_header content_hash type_header secret)
     end
 
     test "every row keeps its explanation behind info, with no footer" do

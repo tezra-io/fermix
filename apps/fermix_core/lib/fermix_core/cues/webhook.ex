@@ -1,7 +1,8 @@
 defmodule FermixCore.Cues.Webhook do
   @moduledoc """
-  Webhook sources (M60 §6.5, §6.8, §6.10): the URL's random part, the three
-  verification methods, and one verified request body turned into one item.
+  Webhook sources (M60 §6.5, §6.8, §6.10): the URL's random part, the four
+  verification methods, X's CRC answer, and one verified request body turned
+  into one item.
 
   Pure, except `ensure_path_secret/2`, which writes a secret and the config
   sentinel that names it. The door (`Cues.Door.Router`) reads the request,
@@ -25,7 +26,11 @@ defmodule FermixCore.Cues.Webhook do
       key that follows `whsec_`; a timestamp more than 5 minutes from now is
       refused before the body is read;
     * `shared_secret` — the configured `header` carries the secret itself. It
-      authenticates the sender, not the body; the door compares its digest.
+      authenticates the sender, not the body; the door compares its digest;
+    * `x` — X's webhooks: `X-Twitter-Webhooks-Signature-OAuth2` carries
+      `sha256=` and then the base64 HMAC-SHA256 of the raw body under the X
+      app's OAuth 2.0 Client Secret. X proves the URL with a CRC check first
+      (`crc_response/2`), a GET the door answers for an `x` source only.
 
   **Items.** One request is one item. Identity comes from exactly one of
   `id_header`, `id_path` and the explicit `id = "content_hash"`, or, for
@@ -34,6 +39,11 @@ defmodule FermixCore.Cues.Webhook do
   paths. The raw body's SHA-256 is the item's `body_hash`, so a captured body
   replayed under a new delivery id is a duplicate (C38). The body is JSON,
   decoded with duplicate keys refused.
+
+  **X's CRC check** is the same HMAC under the same secret over a token X
+  chooses, so answering any token would sign any body for whoever holds the
+  URL. A token that decodes as JSON, which a body must, is refused: no answer
+  is the signature of a body the door would take.
 
   **The `github` preset** keeps a projection (event, action, repository, title,
   URL) of a body whose data is over 64 KiB, gives each item a title for its
@@ -60,6 +70,10 @@ defmodule FermixCore.Cues.Webhook do
   @algorithms @hmac_algorithms |> Map.keys() |> Enum.sort()
   @default_algorithm "sha256"
   @standard_secret_prefix "whsec_"
+  @x_signature_header "x-twitter-webhooks-signature-oauth2"
+  @x_prefix "sha256="
+  # Printable ASCII without a space, the shape of the tokens X sends.
+  @crc_token ~r/\A[\x21-\x7E]{1,1024}\z/
   @content_type "application/json"
 
   # `Cues.Item` refuses data whose canonical JSON is over 64 KiB.
@@ -272,6 +286,16 @@ defmodule FermixCore.Cues.Webhook do
     end
   end
 
+  defp method_fields(:x, filled) do
+    case present(filled, [:header, :algorithm, :prefix]) do
+      [] ->
+        :ok
+
+      [field | _rest] ->
+        {:error, "X fixes its signature header and algorithm, so #{field} does not apply"}
+    end
+  end
+
   defp identity_fields(:standard_webhooks, filled) do
     case present(filled, Config.identity_fields()) do
       [] ->
@@ -325,10 +349,10 @@ defmodule FermixCore.Cues.Webhook do
 
   @doc """
   What the request presents for its source's method, read from its headers
-  before the body: the signature header's value (`hmac`, `shared_secret`), or
-  Standard Webhooks' id, timestamp and signatures with the timestamp checked
-  against `now`. An absent, repeated, empty or malformed header is
-  `:missing_signature`.
+  before the body: the signature header's value (`hmac`, `shared_secret`, and
+  for `x` X's OAuth 2.0 header, never its legacy one), or Standard Webhooks'
+  id, timestamp and signatures with the timestamp checked against `now`. An
+  absent, repeated, empty or malformed header is `:missing_signature`.
   """
   @spec presented(Config.source(), headers(), DateTime.t()) ::
           {:ok, presented()} | {:error, :missing_signature | :outside_window}
@@ -340,6 +364,13 @@ defmodule FermixCore.Cues.Webhook do
          {:ok, seconds} <- unix_seconds(stamp) do
       within_window(seconds, now, %{id: id, timestamp: stamp, signatures: signatures})
     else
+      :error -> {:error, :missing_signature}
+    end
+  end
+
+  def presented(%{verify: :x}, headers, %DateTime{}) when is_list(headers) do
+    case header(headers, @x_signature_header) do
+      {:ok, value} -> {:ok, value}
       :error -> {:error, :missing_signature}
     end
   end
@@ -366,7 +397,7 @@ defmodule FermixCore.Cues.Webhook do
   end
 
   @doc """
-  Checks a signed method (`hmac`, `standard_webhooks`) over the raw `body`
+  Checks a signed method (`hmac`, `standard_webhooks`, `x`) over the raw `body`
   with the source's `secret`. `:bad_secret` means the stored secret is not one
   the method can use (a Standard Webhooks secret that is not base64): the
   source's fault, not the request's.
@@ -381,6 +412,19 @@ defmodule FermixCore.Cues.Webhook do
     with true <- String.starts_with?(presented, prefix),
          hex = binary_part(presented, byte_size(prefix), byte_size(presented) - byte_size(prefix)),
          {:ok, mac} <- Base.decode16(hex, case: :mixed),
+         true <- AccessToken.secure_equal?(mac, expected) do
+      :ok
+    else
+      _mismatch -> {:error, :bad_signature}
+    end
+  end
+
+  def verify(%{verify: :x}, presented, body, secret)
+      when is_binary(presented) and is_binary(body) and is_binary(secret) do
+    expected = :crypto.mac(:hmac, :sha256, secret, body)
+
+    with @x_prefix <> encoded <- presented,
+         {:ok, mac} <- Base.decode64(encoded, padding: false),
          true <- AccessToken.secure_equal?(mac, expected) do
       :ok
     else
@@ -404,6 +448,30 @@ defmodule FermixCore.Cues.Webhook do
         {:error, :bad_secret}
     end
   end
+
+  @doc """
+  The answer to X's CRC check: `sha256=` and the base64 HMAC-SHA256 of `token`
+  under the source's `secret`. A token X would not send (empty, over 1,024
+  characters, a space or a character outside printable ASCII) or one that
+  decodes as JSON is `:bad_token`, so no answer signs a body (the moduledoc).
+  """
+  @spec crc_response(String.t(), String.t()) :: {:ok, String.t()} | {:error, :bad_token}
+  def crc_response(token, secret) when is_binary(token) and is_binary(secret) do
+    if crc_token?(token),
+      do: {:ok, @x_prefix <> Base.encode64(:crypto.mac(:hmac, :sha256, secret, token))},
+      else: {:error, :bad_token}
+  end
+
+  @doc """
+  Whether `crc_response/2` answers `token`: printable ASCII without a space, at
+  most 1,024 characters, and not JSON. The JSON test is the body decoder's
+  own, so the two never disagree on what a body is.
+  """
+  @spec crc_token?(term()) :: boolean()
+  def crc_token?(token) when is_binary(token),
+    do: Regex.match?(@crc_token, token) and match?({:error, _reason}, CanonicalJson.decode(token))
+
+  def crc_token?(_token), do: false
 
   defp hmac_algorithm(source),
     do: Map.fetch!(@hmac_algorithms, source.algorithm || @default_algorithm)
