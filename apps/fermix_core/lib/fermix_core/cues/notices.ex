@@ -121,7 +121,8 @@ defmodule FermixCore.Cues.Notices do
 
   @doc """
   Sends source notice `kind` once per episode to the owner inbox. `data` may
-  hold `:budget`.
+  hold `:budget`, and an `:auth_failed` one `reason: "x_sign_in"` (an X
+  accounts source waiting for the X sign-in, which is not stopped).
   """
   @spec source(String.t(), atom(), map(), keyword()) :: result()
   def source(source_ref, kind, data, opts \\ [])
@@ -305,6 +306,11 @@ defmodule FermixCore.Cues.Notices do
         "are tried again."
 
   defp gap_text(gap), do: "Watcher #{gap.name}: " <> Gaps.sentence(gap)
+
+  defp source_text(:auth_failed, ref, %{reason: "x_sign_in"}),
+    do:
+      "Cue source #{ref} needs your X sign-in: connect X under Plugins. It starts by itself " <>
+        "once X is connected."
 
   defp source_text(:auth_failed, ref, _data),
     do: "Cue source #{ref} stopped: its credential was refused. Update it in settings."

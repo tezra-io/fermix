@@ -32,6 +32,8 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
     "stopped" => {"Stopped", "badge-ghost"},
     "unavailable" => {"Unavailable", "badge-error"}
   }
+  # A status whose reason changes what it means, by `{status, stop_reason}`.
+  @reason_pills %{{"auth_failed", "x_sign_in"} => {"Needs X sign-in", "badge-error"}}
 
   @kind_icons %{
     "feed" => "hero-rss",
@@ -585,13 +587,18 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
 
   defp source_pill(assigns) do
     status = assigns.source.status
-    {label, tone} = Map.get(@status_pills, status.status, {status.status, "badge-ghost"})
+    {label, tone} = status_pill(status)
     title = status.last_good_at && "Last good #{full_time(status.last_good_at, assigns.clock)}"
     assigns = assign(assigns, label: label, tone: tone, title: title)
 
     ~H"""
     <span class={["badge badge-sm", @tone]} title={@title}>{@label}</span>
     """
+  end
+
+  defp status_pill(status) do
+    Map.get(@reason_pills, {status.status, status.stop_reason}) ||
+      Map.get(@status_pills, status.status, {status.status, "badge-ghost"})
   end
 
   defp source_type(%{preset: preset}) when is_binary(preset), do: SourceForm.preset_label(preset)
@@ -724,13 +731,15 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   attr :values, :map, required: true
 
   # The kind first, then that kind's presets by label, then the line that says
-  # where the kind's items come from, and the name. An edit cannot change the
-  # kind or the preset, so it shows them as text, as the Mac sheet does.
+  # where the kind's items come from, the preset's note if it has one (the
+  # management form's words), and the name. An edit cannot change the kind or
+  # the preset, so it shows them as text, as the Mac sheet does.
   defp source_kind_fields(assigns) do
     assigns =
       assign(assigns,
-        line: kind_line(assigns.form.kind, assigns.editor.mode),
-        note: Map.get(@kind_notes, assigns.form.kind)
+        line: kind_line(assigns.form, assigns.editor.mode),
+        note: Map.get(@kind_notes, assigns.form.kind),
+        preset_note: SourceForm.preset_note(assigns.form.preset)
       )
 
     ~H"""
@@ -755,6 +764,13 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       class="flex items-center gap-1.5 text-xs text-base-content/60 lg:col-span-2"
     >
       {@line} <.info :if={@note} text={@note} />
+    </p>
+    <p
+      :if={@preset_note}
+      id="cue-source-preset-note"
+      class="text-xs text-base-content/60 lg:col-span-2"
+    >
+      {@preset_note}
     </p>
     <.field
       :if={@editor.mode == :create}
@@ -798,8 +814,16 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
     """
   end
 
-  defp kind_line(kind, mode) do
-    case {Map.get(@kind_lines, kind), mode} do
+  # A preset that words where its items come from (X accounts) says it
+  # instead of its kind (`SourceForm.preset_consent/1`).
+  defp kind_line(form, mode) do
+    lines =
+      case SourceForm.preset_consent(form.preset) do
+        nil -> Map.get(@kind_lines, form.kind)
+        sentence -> {sentence, nil}
+      end
+
+    case {lines, mode} do
       {nil, _mode} -> nil
       {{flow, made}, :create} when is_binary(made) -> "#{flow} #{made}"
       {{flow, _made}, _mode} -> flow
@@ -816,8 +840,11 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   # A field the source must fill itself is marked required; one a refused save
   # found empty says so under it until it has a value. A stream with no preset
   # asks for its API key and secret straight after its address, as the app's
-  # form does.
+  # form does. X accounts asks for its handles where a feed asks for its URL,
+  # in the management form's words (`SourceForm.handles_row/0`).
   defp source_main_fields(assigns) do
+    assigns = assign(assigns, :handles_row, SourceForm.handles_row())
+
     ~H"""
     <.field
       :if={:url in @form.fields}
@@ -828,6 +855,17 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       required={:url in @form.required}
       refusal={missing_refusal(:url, @missing, @values)}
       refusal_id="cue-source-url-refusal"
+    />
+    <.field
+      :if={:handles in @form.fields}
+      name="cue_source[handles]"
+      label={@handles_row.label}
+      value={@values["handles"]}
+      placeholder={@handles_row.example}
+      info={@handles_row.info}
+      required={:handles in @form.required}
+      refusal={missing_refusal(:handles, @missing, @values)}
+      refusal_id="cue-source-handles-refusal"
     />
     <.secret_input
       :for={field <- [:key, :secret]}

@@ -301,7 +301,13 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       assert selected(html, "cue_source[kind]") == "feed"
       assert selected(html, "cue_source[preset]") == "rss"
       assert kind_line(html) =~ "Fermix checks the feed's URL for new items on a schedule."
-      assert preset_options(html) == [{"", "No preset"}, {"rss", "RSS, Atom or JSON Feed"}]
+
+      assert preset_options(html) == [
+               {"", "No preset"},
+               {"rss", "RSS, Atom or JSON Feed"},
+               {"x_accounts", "X accounts"}
+             ]
+
       assert html =~ ~s(name="cue_source[url]")
 
       html = view |> form("#cue-source-form", cue_source: %{kind: "webhook"}) |> render_change()
@@ -479,6 +485,55 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       section = persisted_source("blog-notes")
       assert Keyword.get(section, :preset) == "rss"
       assert Keyword.get(section, :url) == "https://notes.example.org/feed.xml"
+    end
+
+    # M60_X_ACCOUNTS_SOURCE.md §4: X accounts builds its own address from the
+    # handles and reads with the X plugin's sign-in.
+    test "X accounts asks for handles instead of a URL, says how it signs in, and saves them",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+      view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
+
+      html =
+        view |> form("#cue-source-form", cue_source: %{preset: "x_accounts"}) |> render_change()
+
+      refute html =~ ~s(name="cue_source[url]")
+      assert open_field?(html, "handles")
+      assert required_field?(html, "handles")
+
+      assert kind_line(html) ==
+               "Fermix asks X for these accounts' new posts on the schedule you set."
+
+      assert source_form_text(html, "#cue-source-preset-note") ==
+               "Reads with your X sign-in from the X plugin. Connect X under Plugins first. X " <>
+                 "bills your X app for each post it returns."
+
+      html =
+        view
+        |> form("#cue-source-form",
+          cue_source: %{ref: "space-posts", preset: "x_accounts", handles: "@NASA, esa"}
+        )
+        |> render_submit()
+
+      assert html =~ "Source space-posts saved."
+      section = persisted_source("space-posts")
+      assert Keyword.get(section, :preset) == "x_accounts"
+      assert Keyword.get(section, :handles) == ["nasa", "esa"]
+      refute Keyword.has_key?(section, :url)
+      refute Keyword.has_key?(section, :interval)
+
+      view
+      |> element(~s(button[phx-click="cues_edit_source"][phx-value-ref="space-posts"]))
+      |> render_click()
+
+      html =
+        view
+        |> form("#cue-source-form", cue_source: %{handles: "nasa, not-a-handle"})
+        |> render_submit()
+
+      assert html =~ "not-a-handle"
+      assert Keyword.get(persisted_source("space-posts"), :handles) == ["nasa", "esa"]
     end
 
     test "a field the kind needs and no preset fills is marked, and its absence is refused in the editor",
@@ -1167,6 +1222,27 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       assert html =~ ~s(title="Last good 2026-10-17 11:45 UTC")
       assert html =~ "7 today"
       assert html =~ "rate_limited 3"
+    end
+
+    test "an X accounts source waiting for the X sign-in says so in its pill", %{conn: conn} do
+      %{repo: repo, conn: db} = CueFixtures.start_repo("setup_x_sign_in")
+      Application.put_env(:fermix_web, :cues_pane_opts, now: fn -> @now end, repo: repo)
+      put_cues(sources: %{"space-posts" => [preset: "x_accounts", handles: ["nasa"]]})
+
+      CueFixtures.exec!(
+        db,
+        """
+        INSERT INTO cue_sources (source_ref, status, stop_reason, items_today, items_day,
+          reject_counts, updated_at)
+        VALUES ('space-posts', 'auth_failed', 'x_sign_in', 0, '2026-10-17', '{}',
+          '2026-10-17T11:45:00.000000Z')
+        """
+      )
+
+      {:ok, _view, html} = live(conn, "/setup?tab=cues")
+
+      assert html =~ "Needs X sign-in"
+      refute html =~ "Credential refused"
     end
 
     test "a source row shows its last item as a short time in the owner's zone", %{conn: conn} do

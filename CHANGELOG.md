@@ -18,6 +18,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   form, the X preset asks only for a name and the client secret, and a
   GitHub source's content toggle moves under More options with the rest of
   what its preset settles.
+- **Watch X accounts with the X sign-in you already have.** A new X accounts
+  preset for feed sources takes up to 20 handles, typed with or without `@`,
+  and brings each new post from those accounts in as a cue, replies and
+  quotes included and reposts left out. It reads X's recent search with the
+  X plugin's sign-in, so there is no token to paste, no webhook to register
+  and no tunnel to keep up: connect X under Plugins, add a Feed source with
+  the X accounts preset in Settings → Cues or the setup page's Cues tab, and
+  ask for a watcher in chat. Watching starts when it first reads with your X
+  sign-in, each post carries its whole text, its author and its link on
+  x.com, and a source stopped for more than a week picks up from X's last
+  seven days. Without the X sign-in
+  the source says "Needs your X sign-in: connect X under Plugins.", tells
+  you once, and starts by itself as soon as X is connected. X bills your X
+  app for each post it returns; a check that finds nothing costs nothing.
 
 ### Fixed
 

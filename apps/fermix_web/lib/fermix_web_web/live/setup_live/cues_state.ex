@@ -36,6 +36,7 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   alias FermixCore.Cues.Presets
   alias FermixCore.Cues.Settings
   alias FermixCore.Cues.Webhook
+  alias FermixCore.Cues.XAccounts
   alias FermixCore.Management.Cues.SourceForm
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Setup.ConfigStore
@@ -64,10 +65,10 @@ defmodule FermixWebWeb.SetupLive.CuesState do
   @general_stream_rows SourceForm.general_stream_rows() |> Enum.reject(&(&1.field == :url))
   @general_stream_fields Enum.map(@general_stream_rows, & &1.field)
   @path_fields ~w(items_path id_path revision_path type_path subject_path time_path)a
-  @form_fields ~w(preset kind enabled url interval)a ++
+  @form_fields ~w(preset kind enabled url handles interval)a ++
                  @general_stream_fields ++
                  ~w(daily_budget verify header algorithm prefix id_header id type_header)a
-  @list_fields for(row <- @general_stream_rows, row.kind == :list, do: row.field)
+  @list_fields [:handles | for(row <- @general_stream_rows, row.kind == :list, do: row.field)]
   # The secrets the form takes, each read from the submit alone.
   @typed_secret_keys ~w(key secret)
   @integer_fields ~w(interval daily_budget)a
@@ -303,6 +304,7 @@ defmodule FermixWebWeb.SetupLive.CuesState do
 
     %{
       status: row.status,
+      stop_reason: row.stop_reason,
       last_good_at: row.last_good_at,
       last_accepted_at: row.last_accepted_at,
       items_today: if(row.items_day == today, do: row.items_today, else: 0),
@@ -428,6 +430,7 @@ defmodule FermixWebWeb.SetupLive.CuesState do
 
     with :ok <- same_choice(editor.mode, editor.values, existing),
          :ok <- needed_fields(editor.values, section),
+         {:ok, section} <- x_handles(section),
          {:ok, %{token: token}} <- Settings.save_source(ref, section, secrets, editor.mode) do
       saved_source(ref, token, source_kind(editor.values), editor.mode, opts)
     else
@@ -468,6 +471,19 @@ defmodule FermixWebWeb.SetupLive.CuesState do
       id_header: form_value(values, :id_header),
       id: if(checked?(values["id"]), do: "content_hash")
     ]
+  end
+
+  # X accounts keeps its handles as X spells them in a search, as the
+  # management form does (`Cues.XAccounts.handles/1`); one X would not take is
+  # refused in its words before anything is written.
+  defp x_handles(section) do
+    with {:ok, typed} <- Keyword.fetch(section, :handles),
+         {:ok, handles} <- XAccounts.handles(typed) do
+      {:ok, List.keyreplace(section, :handles, 0, {:handles, handles})}
+    else
+      :error -> {:ok, section}
+      {:error, words} -> {:error, {:invalid, "Handles: " <> words}}
+    end
   end
 
   # The name, kind and preset cannot change on an edit, as in the management
@@ -582,7 +598,9 @@ defmodule FermixWebWeb.SetupLive.CuesState do
     base ++ kind_fields(kind, preset, verify)
   end
 
-  # A stream shows the general WebSocket source's fields.
+  # A stream shows the general WebSocket source's fields; X accounts shows its
+  # handles where a feed shows its URL.
+  defp kind_fields("feed", "x_accounts", _verify), do: [:handles, :interval]
   defp kind_fields("feed", _preset, _verify), do: [:url, :interval]
   defp kind_fields("stream", nil, _verify), do: [:url | @general_stream_fields]
 

@@ -219,6 +219,20 @@ defmodule FermixCore.Cues.NoticesTest do
       assert :sent = Notices.source("eng-blogs", :auth_failed, %{}, opts(ctx, 2))
     end
 
+    # An X accounts source without the X sign-in is not stopped: it starts by
+    # itself once X is connected (M60_X_ACCOUNTS_SOURCE.md §3).
+    test "a source waiting for the X sign-in says where to connect X, not that it stopped", ctx do
+      data = %{reason: "x_sign_in"}
+      assert :sent = Notices.source("space-posts", :auth_failed, data, opts(ctx, 0))
+      assert_receive {:sent, "owner-1", text, _opts}
+
+      assert text ==
+               "Cue source space-posts needs your X sign-in: connect X under Plugins. It " <>
+                 "starts by itself once X is connected."
+
+      assert :already_sent = Notices.source("space-posts", :auth_failed, data, opts(ctx, 1))
+    end
+
     test "a stream the service kept refusing is told once per episode, in Fermix's words", ctx do
       assert :sent = Notices.source("live-news", :refused, %{}, opts(ctx, 0))
       assert_receive {:sent, "owner-1", text, _opts}

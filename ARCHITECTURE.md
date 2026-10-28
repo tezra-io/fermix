@@ -469,7 +469,9 @@ keys are read at each call. The path of one item:
    each hop pinned to the address `Net.Guard` checked (`Net.PinnedUrl`) and
    feeds the body to a `Cues.FeedParser` reader as it inflates, XML read one
    item at a time by `Cues.FeedXml`, so a feed's length bounds its work but not
-   its memory. A stream takes the path below instead. `Cues.SourceManager`
+   its memory. An X accounts feed (`Cues.XAccounts`) builds its search address
+   from its handles, signs in with the X plugin's token and reads X's answer as
+   one JSON document. A stream takes the path below instead. `Cues.SourceManager`
    starts and stops the workers to match the config. A JSON API feed, a webhook
    and the general stream read messages by the same dot paths
    (`Cues.JsonPath`).

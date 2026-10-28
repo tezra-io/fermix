@@ -71,8 +71,9 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   @item_rejects ~w(invalid stale rate_limited over_budget)
   @reject_gaps %{"stale" => "stale", "rate_limited" => "rate_limited", "over_budget" => "budget"}
   @source_times [:last_good_at, :last_accepted_at, :last_rejected_at]
-  # Why a source stopped, beside the status that says it did.
-  @stop_reasons ~w(too_large)
+  # Why a source stopped or waits, beside the status that says it does: a
+  # feed too large to read, an X accounts source without its X sign-in.
+  @stop_reasons ~w(too_large x_sign_in)
   @reason_pattern ~r/^[a-z][a-z_]{0,31}$/
 
   @schema_sql """

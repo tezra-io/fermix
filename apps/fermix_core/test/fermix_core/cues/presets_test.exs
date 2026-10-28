@@ -47,8 +47,16 @@ defmodule FermixCore.Cues.PresetsTest do
     assert filled.time_path == "data.created_at"
   end
 
+  test "x_accounts makes a feed that polls every 5 minutes, with no address of its own" do
+    assert {:ok, filled} = Presets.fill(%{preset: "x_accounts", handles: ["nasa"]})
+
+    assert filled.kind == :feed
+    assert filled.interval == 300
+    refute Map.has_key?(filled, :url)
+  end
+
   test "names lists every preset, and the engine ships no Bluesky preset" do
-    assert Presets.names() == ["github", "rss", "x"]
+    assert Presets.names() == ["github", "rss", "x", "x_accounts"]
     assert Presets.defaults("bluesky_jetstream") == :error
   end
 end

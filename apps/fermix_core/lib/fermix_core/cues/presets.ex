@@ -18,6 +18,9 @@ defmodule FermixCore.Cues.Presets do
   # x: an X Activity API webhook, checked by X's own method (its signature and
   # CRC check), each event's id, type, account and time read from its `data`
   # envelope; the owner gives the X app's OAuth 2.0 Client Secret.
+  # x_accounts: a feed of X's recent search for the handles the owner gives,
+  # every 5 minutes, signed in with the X plugin (`Cues.XAccounts`), which
+  # builds its address.
   @presets %{
     "rss" => %{kind: :feed, interval: 900},
     "github" => %{
@@ -36,7 +39,8 @@ defmodule FermixCore.Cues.Presets do
       type_path: "data.event_type",
       subject_path: "data.filter.user_id",
       time_path: "data.created_at"
-    }
+    },
+    "x_accounts" => %{kind: :feed, interval: 300}
   }
 
   @doc "Every preset name, sorted."

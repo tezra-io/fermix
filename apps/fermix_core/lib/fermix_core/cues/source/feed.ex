@@ -59,6 +59,22 @@ defmodule FermixCore.Cues.Source.Feed do
   after 15 s idle, and a failure is an ordinary failed poll, retried after a
   minute. A pool with no connection to give is such a failure too.
 
+  **X accounts** (preset `x_accounts`, M60_X_ACCOUNTS_SOURCE.md). The address
+  is X's recent search for the source's handles (`Cues.XAccounts`), the
+  request carries the X plugin's sign-in (`:token_getter`) and follows no
+  redirect, the cursor is `start_time`/`since_id` instead of the validators,
+  and X's answer is read whole as JSON. Watching starts at the first poll
+  with a sign-in: that is when `start_time` is stamped. X refusing the token
+  (401) gets one refresh (`:token_refresher`) and one more request in the same
+  poll. No sign-in (no X plugin, X switched off, no token, a token server that
+  does not answer, a refresh that fails) and a second 401 set the row to
+  `auth_failed` with `stop_reason` `x_sign_in`, tell the owner once
+  (`:auth_failed`), and are checked again on the same backoff without counting
+  toward the eighth failure, so connecting X starts the source with no save;
+  the wait writes no cursor. Any other refusal (a 403 or 429 among them) is an
+  ordinary failure, X's own `title` and `detail` going to the log only, and
+  one that ends a sign-in wait sets the row back to `polling`.
+
   The process's printed state (a crash report, `:sys.get_status/1`) names the
   source by ref, never its URL or secrets.
 
@@ -75,6 +91,7 @@ defmodule FermixCore.Cues.Source.Feed do
   alias FermixCore.Cues.Ingest
   alias FermixCore.Cues.Item
   alias FermixCore.Cues.Source.Worker
+  alias FermixCore.Cues.XAccounts
   alias FermixCore.Net.Egress
   alias FermixCore.Net.PinnedUrl
 
@@ -97,6 +114,7 @@ defmodule FermixCore.Cues.Source.Feed do
   @unchanged %{truncation: :complete, skipped: 0}
   @accept "application/feed+json, application/atom+xml, application/rss+xml, " <>
             "application/json;q=0.9, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5"
+  @x_accounts "x_accounts"
 
   @doc """
   Starts the worker for `opts[:source]` (a `Cues.Config.sources/0` map of kind
@@ -106,14 +124,20 @@ defmodule FermixCore.Cues.Source.Feed do
   request; a test's `plug:`), `:resolver` (for `Net.Guard`), `:egress`,
   `:admit` (`(ref, n, now_ms) -> admitted`, default `Cues.Buckets.admit/3`),
   `:notify` (default `Cues.Notices.source/4`), `:manager` (a pid linked from
-  `init`; `Cues.SourceManager` passes itself).
+  `init`; `Cues.SourceManager` passes itself), `:token_getter` and
+  `:token_refresher` (zero-arity, `{:ok, token} | {:error, reason}`, defaults
+  `Cues.XAccounts.sign_in_token/0` and `Cues.XAccounts.sign_in_refresh/0`; an
+  X accounts source's sign-in).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
-    %{ref: ref, kind: :feed, url: url} = Keyword.fetch!(opts, :source)
-    true = is_binary(ref) and is_binary(url)
+    %{ref: ref, kind: :feed} = source = Keyword.fetch!(opts, :source)
+    true = is_binary(ref) and addressed?(source)
     GenServer.start_link(__MODULE__, opts)
   end
+
+  defp addressed?(%{preset: @x_accounts, handles: [_first | _rest]}), do: true
+  defp addressed?(%{url: url}), do: is_binary(url)
 
   @impl true
   def init(opts) do
@@ -124,9 +148,13 @@ defmodule FermixCore.Cues.Source.Feed do
         req_options: Keyword.get(opts, :req_options, []),
         resolver: Keyword.get(opts, :resolver),
         egress: Keyword.get(opts, :egress),
+        token_getter: Keyword.get(opts, :token_getter, &XAccounts.sign_in_token/0),
+        token_refresher: Keyword.get(opts, :token_refresher, &XAccounts.sign_in_refresh/0),
         cursor: %{},
         polled?: false,
-        failures: 0
+        failures: 0,
+        sign_in_failures: 0,
+        sign_in_told?: false
       })
 
     # Spread so that sources started together do not all poll at once.
@@ -174,27 +202,92 @@ defmodule FermixCore.Cues.Source.Feed do
 
   # --- the poll ------------------------------------------------------------------
 
+  # Only an X accounts source answers `x_sign_in`, and only its refusals carry
+  # X's words (`{:http_status, status, problem}`), so X refusing its sign-in is
+  # told apart here: one refresh and one more request, never more in a poll.
   defp fetch_and_accept(state, now) do
-    case fetch(state, state.source.url, 0) do
-      {:ok, %Req.Response{status: 304}, _url} -> accepted(state, {[], nil, @unchanged}, now)
-      {:ok, response, url} -> read(state, response, url, now)
-      {:error, reason} -> failed(state, reason, now)
+    with {:ok, state, target} <- target(state, state.token_getter, now),
+         {:ok, response, url} <- fetch(state, target, target.url, 0) do
+      read(state, response, url, now)
+    else
+      {:error, {:http_status, 401, _problem}} -> refresh_and_retry(state, now)
+      {:error, reason} -> fetch_failed(state, reason, now)
     end
   end
 
-  defp read(state, response, url, now) do
-    opts = reader_opts(state.source, url, now)
+  defp refresh_and_retry(state, now) do
+    with {:ok, state, target} <- target(state, state.token_refresher, now),
+         {:ok, response, url} <- fetch(state, target, target.url, 0) do
+      read(state, response, url, now)
+    else
+      {:error, {:http_status, 401, _problem} = refused} -> sign_in_failed(state, refused, now)
+      {:error, reason} -> fetch_failed(state, reason, now)
+    end
+  end
 
-    with {:ok, reader} <- FeedParser.reader(content_type(response), opts),
+  defp fetch_failed(state, {:x_sign_in, reason}, now), do: sign_in_failed(state, reason, now)
+  defp fetch_failed(state, reason, now), do: failed(state, reason, now)
+
+  # What one poll asks for: the address, the headers and how many redirects
+  # it follows. An X accounts source's request carries the token `sign_in`
+  # gives, so it follows none, and its watching starts with the first poll
+  # that has one (`start_time`).
+  defp target(%{source: %{preset: @x_accounts} = source} = state, sign_in, now) do
+    case sign_in.() do
+      {:ok, token} ->
+        state = %{state | cursor: XAccounts.start_watching(state.cursor, now)}
+
+        {:ok, state,
+         %{
+           url: XAccounts.search_url(source.handles, state.cursor, now),
+           headers: [{"user-agent", user_agent()} | XAccounts.headers(token)],
+           max_redirects: 0
+         }}
+
+      {:error, reason} ->
+        {:error, {:x_sign_in, reason}}
+    end
+  end
+
+  defp target(state, _sign_in, _now) do
+    headers =
+      [{"user-agent", user_agent()}, {"accept", @accept}, {"accept-encoding", "gzip"}] ++
+        conditional_headers(state.cursor)
+
+    {:ok, state, %{url: state.source.url, headers: headers, max_redirects: @max_redirects}}
+  end
+
+  defp read(state, %Req.Response{status: 304}, _url, now),
+    do: accepted(state, {[], nil, @unchanged}, now)
+
+  defp read(state, response, url, now) do
+    with {:ok, reader} <- new_reader(state.source, response, url, now),
          {:ok, reader} <- read_body(response, reader),
-         {:ok, fields, outcome} <- FeedParser.finish(reader) do
+         {:ok, fields, cursor, outcome} <- finish(state, reader, response) do
       first? = state.last_good_at == nil
       entries = Enum.map(fields, &entry(&1, first?, now))
-      accepted(state, {entries, cursor_json(response), outcome}, now)
+      accepted(state, {entries, cursor, outcome}, now)
     else
       {:error, :read_limit} -> too_large(state, now)
       {:error, reason} -> failed(state, reason, now)
     end
+  end
+
+  # X's answer is one JSON document, read whole (`Cues.XAccounts.read/2`).
+  defp new_reader(%{preset: @x_accounts}, _response, _url, _now),
+    do: {:ok, FeedParser.document_reader()}
+
+  defp new_reader(source, response, url, now),
+    do: FeedParser.reader(content_type(response), reader_opts(source, url, now))
+
+  defp finish(%{source: %{preset: @x_accounts}} = state, reader, _response) do
+    with {:ok, document} <- FeedParser.finish_document(reader),
+         do: XAccounts.read(document, state.cursor)
+  end
+
+  defp finish(_state, reader, response) do
+    with {:ok, fields, outcome} <- FeedParser.finish(reader),
+         do: {:ok, fields, cursor_json(response), outcome}
   end
 
   # One transaction for the items, the new cursor and the last good time; the
@@ -225,12 +318,15 @@ defmodule FermixCore.Cues.Source.Feed do
   defp polled(state, cursor, skipped, now) do
     phase = if state.polled?, do: :reconnect, else: :connect
     trace = %{status: "polling", attempt: state.failures, skipped: skipped}
-    if state.failures > 0 or not state.polled?, do: Worker.trace(state, phase, trace)
+    waited? = state.failures > 0 or state.sign_in_failures > 0
+    if waited? or not state.polled?, do: Worker.trace(state, phase, trace)
 
     %{
       state
       | polled?: true,
         failures: 0,
+        sign_in_failures: 0,
+        sign_in_told?: false,
         last_good_at: now,
         cursor: if(cursor, do: decode_cursor(cursor), else: state.cursor)
     }
@@ -249,42 +345,48 @@ defmodule FermixCore.Cues.Source.Feed do
 
   # --- fetch -------------------------------------------------------------------------
 
-  defp fetch(_state, _url, hop) when hop > @max_redirects, do: {:error, :too_many_redirects}
+  defp fetch(_state, %{max_redirects: max}, _url, hop) when hop > max,
+    do: {:error, :too_many_redirects}
 
   # `url` is the name, never the address: a relative `Location` and the items'
   # relative links resolve against it, and each hop is pinned on its own.
-  defp fetch(state, url, hop) do
+  defp fetch(state, target, url, hop) do
     with :ok <- https(url),
          {:ok, pinned} <- PinnedUrl.pin(url, resolver: state.resolver),
-         {:ok, response} <- request(state, pinned) do
-      follow(state, url, response, hop)
+         {:ok, response} <- request(state, pinned, target.headers) do
+      follow(state, target, url, response, hop)
     end
   end
 
-  defp follow(state, url, %Req.Response{status: status} = response, hop)
+  defp follow(state, target, url, %Req.Response{status: status} = response, hop)
        when status in @redirect_statuses do
     case Req.Response.get_header(response, "location") do
-      [location | _rest] -> fetch(state, url |> URI.merge(location) |> URI.to_string(), hop + 1)
-      [] -> {:error, :redirect_without_location}
+      [location | _rest] ->
+        fetch(state, target, url |> URI.merge(location) |> URI.to_string(), hop + 1)
+
+      [] ->
+        {:error, :redirect_without_location}
     end
   end
 
-  defp follow(_state, url, %Req.Response{status: status} = response, _hop)
+  defp follow(_state, _target, url, %Req.Response{status: status} = response, _hop)
        when status in [200, 304],
        do: {:ok, response, url}
 
-  defp follow(_state, _url, %Req.Response{status: status}, _hop),
-    do: {:error, {:http_status, status}}
+  defp follow(state, _target, _url, %Req.Response{} = response, _hop),
+    do: {:error, http_error(state.source, response)}
+
+  # X's refusal keeps its own words for the log.
+  defp http_error(%{preset: @x_accounts}, response),
+    do: XAccounts.refusal(response.status, raw_body(response))
+
+  defp http_error(_source, response), do: {:http_status, response.status}
 
   defp https(url) do
     if URI.parse(url).scheme == "https", do: :ok, else: {:error, :not_https}
   end
 
-  defp request(state, pinned) do
-    headers =
-      [{"user-agent", user_agent()}, {"accept", @accept}, {"accept-encoding", "gzip"}] ++
-        conditional_headers(state.cursor)
-
+  defp request(state, pinned, headers) do
     options =
       [
         method: :get,
@@ -346,7 +448,7 @@ defmodule FermixCore.Cues.Source.Feed do
     do: {:error, :read_limit}
 
   defp read_body(response, reader) do
-    raw = if is_binary(response.body), do: response.body, else: ""
+    raw = raw_body(response)
 
     response
     |> Req.Response.get_header("content-encoding")
@@ -389,6 +491,8 @@ defmodule FermixCore.Cues.Source.Feed do
       end
     end
   end
+
+  defp raw_body(response), do: if(is_binary(response.body), do: response.body, else: "")
 
   defp content_type(response),
     do: response |> Req.Response.get_header("content-type") |> List.first()
@@ -439,6 +543,7 @@ defmodule FermixCore.Cues.Source.Feed do
   # --- failures ----------------------------------------------------------------------
 
   defp failed(state, reason, now) do
+    state = left_sign_in_wait(state, now)
     failures = state.failures + 1
     label = failure_label(reason)
     Worker.trace(state, :disconnect, %{reason: label, attempt: failures, result: {:error, label}})
@@ -484,6 +589,43 @@ defmodule FermixCore.Cues.Source.Feed do
     {:stop, :normal, state}
   end
 
+  # A failure that ends a sign-in wait (X answered, or was reached, with a
+  # token) leaves the row no longer claiming the sign-in is missing; a status
+  # written without a reason clears it.
+  defp left_sign_in_wait(%{sign_in_failures: 0} = state, _now), do: state
+
+  defp left_sign_in_wait(state, now) do
+    Worker.touch(state, %{status: "polling"}, now)
+    %{state | sign_in_failures: 0}
+  end
+
+  # No X sign-in, or X refusing it: the source waits for one, told once,
+  # checked again on the same backoff, never stopped by the failure count. It
+  # writes no cursor: a `since_id` is already in the row (the poll that read
+  # it wrote it), and a start that no signed-in poll used is no start.
+  defp sign_in_failed(state, reason, now) do
+    attempt = state.sign_in_failures + 1
+
+    Worker.trace(state, :auth_failure, %{
+      status: "auth_failed",
+      reason: :x_sign_in,
+      attempt: attempt,
+      result: {:error, :x_sign_in}
+    })
+
+    Logger.warning(
+      "Cue feed #{state.source.ref} has no X sign-in (#{inspect(reason)}); checking again"
+    )
+
+    Worker.touch(state, %{status: "auth_failed", stop_reason: "x_sign_in"}, now)
+
+    unless state.sign_in_told?,
+      do: Worker.notify(state, :auth_failed, %{reason: "x_sign_in"}, now)
+
+    state = %{state | sign_in_failures: attempt, sign_in_told?: true}
+    {:noreply, Worker.schedule(state, :poll, retry_ms(attempt))}
+  end
+
   defp retry_ms(failures), do: Worker.backoff_ms(failures, @first_retry_ms, @max_retry_ms)
 
   # A short label for the trace; the whole reason goes to the log.
@@ -503,6 +645,13 @@ defmodule FermixCore.Cues.Source.Feed do
   defp failure_label(_reason), do: :failed
 
   # --- the source's row ------------------------------------------------------------
+
+  defp check_source(%{preset: @x_accounts} = source) do
+    case XAccounts.handles(source.handles) do
+      {:ok, [_first | _rest]} -> :ok
+      _none_or_refused -> {:error, {:misconfigured, :invalid_handles}}
+    end
+  end
 
   defp check_source(source) do
     with :ok <- https_url(source.url) do

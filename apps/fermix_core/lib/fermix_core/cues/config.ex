@@ -29,11 +29,17 @@ defmodule FermixCore.Cues.Config do
 
   A stream is `wss://` only. It is the general WebSocket source, and the shape
   rules of its own fields are `Cues.JsonStream.check_config/1`'s.
+
+  A feed with preset `x_accounts` names `handles` instead of a `url`: it
+  builds its own address, and the handle rule is `Cues.XAccounts.handles/1`'s
+  (stored without `@`, lowercased, once each). `handles` applies to no other
+  source.
   """
 
   alias FermixCore.Cues.JsonStream
   alias FermixCore.Cues.Presets
   alias FermixCore.Cues.Webhook
+  alias FermixCore.Cues.XAccounts
   alias FermixCore.Setup.SecretWriter
 
   @default_door_port 4032
@@ -65,7 +71,7 @@ defmodule FermixCore.Cues.Config do
                           @path_fields ++ @sign_in_fields
   @list_source_fields [:item_types, :error_types]
 
-  @source_keys [:kind, :preset, :enabled, :url, :interval] ++
+  @source_keys [:kind, :preset, :enabled, :url, :handles, :interval] ++
                  @path_fields ++
                  [:item_types, :error_types] ++
                  @sign_in_fields ++
@@ -94,6 +100,7 @@ defmodule FermixCore.Cues.Config do
                  Map.new(@path_fields, &{&1, [:stream, :feed, :webhook]}),
                  %{
                    url: [:stream, :feed],
+                   handles: [:feed],
                    interval: [:feed],
                    item_types: [:stream],
                    error_types: [:stream],
@@ -254,9 +261,12 @@ defmodule FermixCore.Cues.Config do
   # signature; it and an X webhook name how one delivery is told from another;
   # a stream with no preset names where each message keeps its id.
   defp needed_fields(kind, method, preset) do
-    Map.fetch!(@required_by_kind, kind) ++
-      method_needs(kind, method) ++ preset_needs(kind, preset)
+    kind_needs(kind, preset) ++ method_needs(kind, method) ++ preset_needs(kind, preset)
   end
+
+  # X accounts builds its own address from the handles it names.
+  defp kind_needs(:feed, "x_accounts"), do: [:handles, :interval]
+  defp kind_needs(kind, _preset), do: Map.fetch!(@required_by_kind, kind)
 
   defp method_needs(:webhook, method)
        when method in [:hmac, :shared_secret, "hmac", "shared_secret"],
@@ -409,6 +419,7 @@ defmodule FermixCore.Cues.Config do
       item_types: Map.get(filled, :item_types, []),
       error_types: Map.get(filled, :error_types, []),
       interval: Map.get(filled, :interval),
+      handles: Map.get(filled, :handles, []),
       id: Map.get(filled, :id),
       verify: Map.get(filled, :verify),
       secrets: secrets
@@ -560,6 +571,13 @@ defmodule FermixCore.Cues.Config do
   defp source_value(:daily_budget, value, ref),
     do: integer_at_least!(value, 0, "cues.sources.#{ref}.daily_budget", "items per UTC day")
 
+  defp source_value(:handles, value, ref) do
+    case XAccounts.handles(value) do
+      {:ok, handles} -> handles
+      {:error, words} -> raise ArgumentError, "invalid cues.sources.#{ref}.handles: #{words}"
+    end
+  end
+
   defp source_value(key, value, ref) when key in @list_source_fields,
     do: string_list!(value, "cues.sources.#{ref}.#{key}")
 
@@ -582,10 +600,26 @@ defmodule FermixCore.Cues.Config do
     check_required!(ref, kind, filled)
     check_identity!(ref, kind, filled)
     check_webhook!(ref, kind, filled)
+    check_x_accounts!(ref, filled)
     check_url_scheme!(ref, kind, Map.get(filled, :url))
     check_item_paths!(ref, filled)
     check_general_stream!(ref, kind, filled)
   end
+
+  # X accounts makes its address from its handles, and only it takes handles.
+  defp check_x_accounts!(ref, %{preset: "x_accounts", url: _url}) do
+    raise ArgumentError,
+          "cues.sources.#{ref}.url is not used: x_accounts builds its own address from handles"
+  end
+
+  defp check_x_accounts!(_ref, %{preset: "x_accounts"}), do: :ok
+
+  defp check_x_accounts!(ref, %{handles: _handles}) do
+    raise ArgumentError,
+          ~s(cues.sources.#{ref}.handles applies only to preset = "x_accounts")
+  end
+
+  defp check_x_accounts!(_ref, _filled), do: :ok
 
   # Fermix reads sources only over an encrypted connection: a feed over https,
   # a stream over wss (a WebSocket).

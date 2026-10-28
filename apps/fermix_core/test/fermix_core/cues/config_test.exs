@@ -268,7 +268,7 @@ defmodule FermixCore.Cues.ConfigTest do
     test "a section written for the removed Bluesky preset is refused, naming the problem" do
       assert_raise ArgumentError,
                    ~s(cues.sources.s1: unknown preset "bluesky_jetstream"; known presets: ) <>
-                     "github, rss, x",
+                     "github, rss, x, x_accounts",
                    fn -> Config.normalize(source(%{"preset" => "bluesky_jetstream"})) end
 
       for {section, unknown} <- [
@@ -456,6 +456,73 @@ defmodule FermixCore.Cues.ConfigTest do
 
       assert Config.normalize(mandate(%{"tools" => [], "pin_args" => %{}})) ==
                [mandates: %{"m1" => [job: "j", tools: []]}]
+    end
+  end
+
+  # M60_X_ACCOUNTS_SOURCE.md §3, §4: the handles are the source's whole
+  # address; X accounts builds the rest.
+  describe "an X accounts source" do
+    test "its handles load lowercased, without @ and once each, and it polls every 5 minutes" do
+      cues =
+        Config.normalize(
+          source(%{"preset" => "x_accounts", "handles" => ["@NASA", "nasa", "ESA"]})
+        )
+
+      assert cues[:sources]["s1"][:handles] == ["nasa", "esa"]
+      assert Config.normalize(Config.to_keyword(cues)) == cues
+
+      assert [x] = Config.sources(cues)
+      assert %{kind: :feed, preset: "x_accounts", handles: ["nasa", "esa"], url: nil} = x
+      assert x.interval == 300
+    end
+
+    test "it needs only its handles" do
+      assert Config.required_fields(:feed, "x_accounts", nil) == [:handles]
+
+      for empty <- [%{"preset" => "x_accounts"}, %{"preset" => "x_accounts", "handles" => []}] do
+        assert_raise ArgumentError, ~r/sources\.s1 is a feed source and needs handles/, fn ->
+          Config.normalize(source(empty))
+        end
+      end
+    end
+
+    test "a handle X would not take, or more than 20, is refused naming the field" do
+      assert_raise ArgumentError, ~r/sources\.s1\.handles.*"no-dashes"/, fn ->
+        Config.normalize(source(%{"preset" => "x_accounts", "handles" => ["nasa", "no-dashes"]}))
+      end
+
+      many = for n <- 1..21, do: "account_#{n}"
+
+      assert_raise ArgumentError, ~r/sources\.s1\.handles.*20/, fn ->
+        Config.normalize(source(%{"preset" => "x_accounts", "handles" => many}))
+      end
+    end
+
+    test "a URL with the preset, or handles without it, is refused" do
+      assert_raise ArgumentError, ~r/sources\.s1\.url.*x_accounts builds its own address/, fn ->
+        Config.normalize(
+          source(%{
+            "preset" => "x_accounts",
+            "handles" => ["nasa"],
+            "url" => "https://api.x.com/2/tweets/search/recent"
+          })
+        )
+      end
+
+      for other <- [
+            %{"preset" => "rss", "url" => "https://example.org/feed.xml"},
+            %{"kind" => "feed", "url" => "https://example.org/feed.xml", "interval" => 300}
+          ] do
+        assert_raise ArgumentError, ~r/sources\.s1\.handles.*x_accounts/, fn ->
+          Config.normalize(source(Map.put(other, "handles", ["nasa"])))
+        end
+      end
+
+      assert_raise ArgumentError, ~r/sources\.s1\.handles applies only to feed/, fn ->
+        Config.normalize(
+          source(%{"kind" => "local_push", "token" => "@keyring", "handles" => ["nasa"]})
+        )
+      end
     end
   end
 

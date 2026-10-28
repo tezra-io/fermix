@@ -580,6 +580,61 @@ defmodule FermixCore.Management.CuesTest do
       assert config_text(home) =~ "https://example.org/releases.atom"
     end
 
+    test "an X accounts source is added and updated with its handles, and takes no URL", %{
+      opts: opts,
+      home: home
+    } do
+      assert Cues.sources_add("space-posts", nil, "x_accounts", %{}, opts) ==
+               {:error, {:invalid_params, "handles", "Needed when no preset fills it."}}
+
+      assert Cues.sources_add(
+               "space-posts",
+               nil,
+               "x_accounts",
+               %{"handles" => ["nasa"], "url" => "https://api.x.com/2/tweets/search/recent"},
+               opts
+             ) ==
+               {:error,
+                {:invalid_params, "url", "This setting does not apply to this kind of source."}}
+
+      assert {:error, {:invalid_params, "handles", sentence}} =
+               Cues.sources_add(
+                 "space-posts",
+                 nil,
+                 "x_accounts",
+                 %{"handles" => ["no-dashes"]},
+                 opts
+               )
+
+      assert sentence =~ "no-dashes"
+
+      assert {:ok, %{"source" => row}} =
+               Cues.sources_add(
+                 "space-posts",
+                 nil,
+                 "x_accounts",
+                 %{"handles" => ["@NASA", " esa "]},
+                 opts
+               )
+
+      assert %{"preset" => "x_accounts", "label" => "X accounts", "url" => nil} = row
+      assert row["location"] == "@nasa, @esa"
+      # Kept as X spells them in a search: no @, lowercased.
+      assert config_text(home) =~ ~s(preset = "x_accounts")
+      assert config_text(home) =~ ~s(handles = ["nasa", "esa"])
+      refute config_text(home) =~ ~r/^url = /m
+
+      assert {:ok, %{"values" => values}} = Cues.sources_get("space-posts", opts)
+      assert %{"value" => ["nasa", "esa"]} = Enum.find(values, &(&1["key"] == "handles"))
+
+      assert {:ok, %{"source" => %{"location" => "@spacex"}}} =
+               Cues.sources_update("space-posts", %{"handles" => ["spacex"]}, opts)
+
+      assert {:ok, persisted} = RestartState.load_persisted()
+      sources = persisted.fermix_core |> Keyword.fetch!(:cues) |> Keyword.fetch!(:sources)
+      assert Keyword.get(sources["space-posts"], :handles) == ["spacex"]
+    end
+
     test "an update changes the fields it names and keeps the rest", %{opts: opts, home: home} do
       add_feed(opts)
 
@@ -783,7 +838,7 @@ defmodule FermixCore.Management.CuesTest do
       assert {:ok, form} = Cues.sources_form(nil, nil, nil)
 
       assert Enum.map(form["kinds"], & &1["id"]) == ~w(feed stream webhook local_push)
-      assert Enum.map(form["presets"], & &1["id"]) == ~w(github rss x)
+      assert Enum.map(form["presets"], & &1["id"]) == ~w(github rss x x_accounts)
       assert Enum.map(form["rows"], & &1["key"]) == ~w(ref url interval_minutes daily_budget)
       assert form["consent_sentence"] =~ "new items"
       assert form["notes"] == []
@@ -844,6 +899,38 @@ defmodule FermixCore.Management.CuesTest do
 
       assert for(row <- without_preset["rows"], not row["advanced"], do: row["key"]) ==
                ~w(ref verify id_header content_hash type_header secret)
+    end
+
+    # M60_X_ACCOUNTS_SOURCE.md §4: the handles are the only field to type; the
+    # X plugin's sign-in reads, so there is no URL and no secret.
+    test "the X accounts preset asks for a name and the handles, signed in through the X plugin" do
+      assert {:ok, form} = Cues.sources_form(nil, "x_accounts", nil)
+      rows = Map.new(form["rows"], &{&1["key"], &1})
+
+      assert Enum.find(form["presets"], &(&1["id"] == "x_accounts")) ==
+               %{"id" => "x_accounts", "label" => "X accounts", "kind" => "feed"}
+
+      assert Enum.map(form["rows"], & &1["key"]) == ~w(ref handles interval_minutes daily_budget)
+      assert for(row <- form["rows"], not row["advanced"], do: row["key"]) == ~w(ref handles)
+
+      assert %{
+               "kind" => "list",
+               "label" => "Handles",
+               "value" => [],
+               "example" => "nasa",
+               "info" => "X usernames, with or without @. Up to 20."
+             } = rows["handles"]
+
+      assert %{"label" => "Poll every", "value" => 5} = rows["interval_minutes"]
+
+      # It asks X, not an address the owner gave.
+      assert form["consent_sentence"] ==
+               "Fermix asks X for these accounts' new posts on the schedule you set."
+
+      assert form["notes"] == [
+               "Reads with your X sign-in from the X plugin. Connect X under Plugins first. X " <>
+                 "bills your X app for each post it returns."
+             ]
     end
 
     test "every row keeps its explanation behind info, with no footer" do

@@ -429,7 +429,8 @@ defmodule FermixCore.Management.CopyTest do
               {"webhook", nil, "x"},
               {nil, "github", nil},
               {nil, "x", nil},
-              {nil, "rss", nil}
+              {nil, "rss", nil},
+              {nil, "x_accounts", nil}
             ] do
           {:ok, form} = CueSourceForm.form(kind, preset, verify)
           form
@@ -751,6 +752,7 @@ defmodule FermixCore.Management.CopyTest do
             "header" => "X-Token",
             "id" => "content_hash"
           },
+          "space-posts" => %{"preset" => "x_accounts", "handles" => ["nasa"]},
           "home-alerts" => %{"kind" => "local_push", "token" => "@keyring"},
           "new-alerts" => %{"kind" => "local_push"},
           "live-news" => %{
@@ -791,6 +793,12 @@ defmodule FermixCore.Management.CopyTest do
         [
           %{
             row: %{status: "unavailable", stop_reason: "too_large"},
+            running?: true,
+            cues_on?: true,
+            memory?: true
+          },
+          %{
+            row: %{status: "auth_failed", stop_reason: "x_sign_in"},
             running?: true,
             cues_on?: true,
             memory?: true

@@ -15,7 +15,8 @@ defmodule FermixCore.Management.Cues.SourceRow do
   names), `not_running` (cues off, or on and not yet restarted), then the
   `cue_sources` status the source last wrote, `idle` before it wrote one. An
   `unavailable` row's sentence follows the `stop_reason` written with that
-  status.
+  status, as does an `auth_failed` one waiting for the X sign-in. An X
+  accounts source's `location` is its handles.
 
   Never on the wire: a payload, an item's text or snapshot, a cursor, a
   secret's value, a webhook's address. A secret's presence is its sentinel in
@@ -106,6 +107,10 @@ defmodule FermixCore.Management.Cues.SourceRow do
   defp sentence("polling", _source, _facts), do: "Checking for new items on its schedule."
   defp sentence("connected", _source, _facts), do: "Connected."
   defp sentence("reconnecting", _source, _facts), do: "Reconnecting."
+
+  defp sentence("auth_failed", _source, %{row: %{stop_reason: "x_sign_in"}}),
+    do: "Needs your X sign-in: connect X under Plugins."
+
   defp sentence("auth_failed", _source, _facts), do: "Its credentials were refused."
 
   defp sentence("over_budget", _source, _facts),
@@ -158,6 +163,9 @@ defmodule FermixCore.Management.Cues.SourceRow do
 
   defp label(%{preset: preset}) when is_binary(preset), do: SourceForm.preset_label(preset)
   defp label(source), do: SourceForm.kind_label(source.kind)
+
+  defp location(%{preset: "x_accounts", handles: handles}),
+    do: Enum.map_join(handles, ", ", &("@" <> &1))
 
   defp location(%{kind: kind, url: url}) when kind in [:feed, :stream] and is_binary(url),
     do: URI.parse(url).host

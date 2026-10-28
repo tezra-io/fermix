@@ -7,9 +7,11 @@ defmodule FermixCore.Cues.Source.FeedTest do
   import FermixTestSupport.CueFixtures
 
   alias FermixCore.Cues.Source.Feed
+  alias FermixCore.Cues.XAccounts
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Net.Egress
+  alias FermixCore.Plugins.Plugin
   alias FermixTestSupport.TelemetryCapture
 
   @now ~U[2026-10-10 12:00:00Z]
@@ -767,6 +769,30 @@ defmodule FermixCore.Cues.Source.FeedTest do
       assert_received {:telemetry, [:fermix, :cue, :source], _m, %{phase: :stopped}}
     end
 
+    # Only X accounts reads a 401 as a sign-in to wait for; any other feed's 401
+    # is an ordinary failure that counts toward the eighth-failure stop.
+    test "a plain feed's 401 is an ordinary failure, counted toward the stop", ctx do
+      ref = ctx.ref
+      serve(ctx, %{status: 401, body: "no", etag: nil, headers: [], conditional?: false})
+
+      {pid, first} = start_feed(ctx)
+      monitor = Process.monitor(pid)
+      fire(pid, first)
+
+      assert_received {:telemetry, [:fermix, :cue, :source], _m,
+                       %{phase: :disconnect, attempt: 1, error_class: "http_status"}}
+
+      for delay <- [60_000, 120_000, 240_000, 480_000, 960_000, 1_920_000] do
+        fire(pid, next_poll(delay))
+      end
+
+      send(pid, next_poll(3_600_000))
+      assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, @wait_ms
+      assert_received {:notice, ^ref, :unreachable, %{failures: 8}}
+      refute_received {:notice, ^ref, :auth_failed, _data}
+      assert source_row(ctx).status == "stopped"
+    end
+
     test "a store that does not answer is a failed poll, backed off, and the worker runs on",
          ctx do
       stalling = start_supervised!({AcceptStallingRepo, forward_to: ctx.repo})
@@ -801,6 +827,432 @@ defmodule FermixCore.Cues.Source.FeedTest do
       assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, @wait_ms
       refute_received {:request, _host, _etag}
       assert source_row(ctx).status == "unavailable"
+    end
+  end
+
+  # --- X accounts ------------------------------------------------------------------
+
+  # M60_X_ACCOUNTS_SOURCE.md §3: a feed preset that asks X's recent search for
+  # the handles' new posts with the X plugin's sign-in. X is the plug: it
+  # reports each request (host, path, query, authorization) and answers what
+  # the test serves.
+  describe "an X accounts source" do
+    setup ctx do
+      Agent.update(ctx.server, fn _old -> {200, x_page([], nil)} end)
+      tokens = start_supervised!({Agent, fn -> {:ok, "x-access-1"} end}, id: :tokens)
+      refreshed = start_supervised!({Agent, fn -> {:ok, "x-access-2"} end}, id: :refreshed)
+      %{tokens: tokens, refreshed: refreshed}
+    end
+
+    test "the first poll asks for the posts since watching began, reposts left out, signed in",
+         ctx do
+      {pid, first} = start_x(ctx)
+      fire(pid, first)
+
+      assert_received {:x_request, "api.x.com", "/2/tweets/search/recent", query,
+                       ["Bearer x-access-1"]}
+
+      assert query["query"] == "(from:nasa OR from:esa) -is:retweet"
+      assert query["expansions"] == "author_id"
+      assert query["max_results"] == "100"
+      assert query["start_time"] == "2026-10-10T11:59:00Z"
+      refute Map.has_key?(query, "since_id")
+
+      row = source_row(ctx)
+      assert row.status == "polling"
+      assert Jason.decode!(row.cursor) == %{"start_time" => "2026-10-10T12:00:00Z"}
+    end
+
+    test "posts become items with their author and link, and the newest is the next since_id",
+         ctx do
+      insert_watcher(ctx.conn, %{filter: "none", sources: [ctx.ref]})
+      first = x_id(hours_ago(1))
+      second = x_id(hours_ago(2))
+
+      serve(
+        ctx,
+        {200,
+         x_page(
+           [x_post(first, "11", hours_ago(1)), x_post(second, "22", hours_ago(2))],
+           %{"newest_id" => first, "oldest_id" => second, "result_count" => 2}
+         )}
+      )
+
+      {pid, poll} = start_x(ctx)
+      fire(pid, poll)
+
+      assert cue_ids(ctx) == Enum.sort([first, second])
+      [nasa, other] = payloads(ctx, [first, second])
+      assert nasa["author"] == %{"id" => "11", "username" => "NASA", "name" => "NASA"}
+      assert nasa["url"] == "https://x.com/NASA/status/#{first}"
+      assert other["url"] == "https://x.com/i/status/#{second}"
+
+      assert Jason.decode!(source_row(ctx).cursor) ==
+               %{"since_id" => first, "start_time" => "2026-10-10T12:00:00Z"}
+
+      serve(ctx, {200, x_page([], %{"result_count" => 0})})
+      fire(pid, poll_every_interval())
+
+      assert_received {:x_request, _host, _path, _first_query, _auth}
+      assert_received {:x_request, _host, _path, query, _auth}
+      assert query["since_id"] == first
+      refute Map.has_key?(query, "start_time")
+
+      # The empty answer kept the cursor.
+      assert Jason.decode!(source_row(ctx).cursor) ==
+               %{"since_id" => first, "start_time" => "2026-10-10T12:00:00Z"}
+    end
+
+    test "a next page is recorded as a page_limit gap, and the poll moves on", ctx do
+      newest = x_id(hours_ago(1))
+
+      serve(
+        ctx,
+        {200,
+         x_page([x_post(newest, "11", hours_ago(1))], %{
+           "newest_id" => newest,
+           "result_count" => 1,
+           "next_token" => "b26v89c19zqg8o3f"
+         })}
+      )
+
+      {pid, poll} = start_x(ctx)
+      fire(pid, poll)
+
+      assert cue_ids(ctx) == [newest]
+      assert %{"page_limit" => %{count: 1}} = gaps(ctx)
+      assert Jason.decode!(source_row(ctx).cursor)["since_id"] == newest
+    end
+
+    test "with no X sign-in it waits as auth_failed, told once, checked on the backoff and " <>
+           "never stopped by the count; a sign-in starts it with no save",
+         ctx do
+      ref = ctx.ref
+      Agent.update(ctx.tokens, fn _old -> {:error, :x_plugin_not_installed} end)
+      {pid, poll} = start_x(ctx)
+      fire(pid, poll)
+
+      refute_received {:x_request, _host, _path, _query, _auth}
+      assert %{status: "auth_failed", stop_reason: "x_sign_in"} = source_row(ctx)
+      assert_received {:notice, ^ref, :auth_failed, %{reason: "x_sign_in"}}
+
+      assert_received {:telemetry, [:fermix, :cue, :source], _m,
+                       %{phase: :auth_failure, status: "auth_failed"}}
+
+      # Ten more checks, past the eighth-failure stop, on the feed's backoff.
+      delays =
+        [60_000, 120_000, 240_000, 480_000, 960_000, 1_920_000] ++ List.duplicate(3_600_000, 4)
+
+      for delay <- delays, do: fire(pid, next_poll(delay))
+
+      assert Process.alive?(pid)
+      refute_received {:notice, ^ref, _kind, _data}
+      assert source_row(ctx).status == "auth_failed"
+
+      Agent.update(ctx.tokens, fn _old -> {:ok, "x-access-2"} end)
+      fire(pid, next_poll(3_600_000))
+
+      assert_received {:x_request, _host, _path, _query, ["Bearer x-access-2"]}
+      assert %{status: "polling", stop_reason: nil} = source_row(ctx)
+      poll_every_interval()
+    end
+
+    # A token server that does not answer exits the call; that is a sign-in
+    # wait like any other, never a crash (five crashes would stop the source).
+    test "a token server that does not answer leaves it waiting for the X sign-in", ctx do
+      ref = ctx.ref
+
+      wedged = fn _profile ->
+        exit({:timeout, {GenServer, :call, [:x_tokens, :get_token, 15_000]}})
+      end
+
+      sign_in = fn ->
+        XAccounts.sign_in_token(
+          find: fn "x" -> {:ok, x_plugin()} end,
+          enabled: fn -> ["x"] end,
+          get_token: wedged
+        )
+      end
+
+      {pid, poll} = start_x(ctx, token_getter: sign_in)
+      log = ExUnit.CaptureLog.capture_log(fn -> fire(pid, poll) end)
+
+      assert Process.alive?(pid)
+      assert log =~ "token_server_unavailable"
+      assert %{status: "auth_failed", stop_reason: "x_sign_in"} = source_row(ctx)
+      assert_received {:notice, ^ref, :auth_failed, %{reason: "x_sign_in"}}
+      next_poll(60_000)
+    end
+
+    test "X refusing the token is refreshed once and asked again with the new one", ctx do
+      insert_watcher(ctx.conn, %{filter: "none", sources: [ctx.ref]})
+      newest = x_id(hours_ago(1))
+      page = x_page([x_post(newest, "11", hours_ago(1))], %{"newest_id" => newest})
+
+      serve(ctx, %{
+        "Bearer x-access-1" => {401, ~s({"title":"Unauthorized","status":401})},
+        "Bearer x-access-2" => {200, page}
+      })
+
+      {pid, poll} = start_x(ctx)
+      fire(pid, poll)
+
+      assert_received {:x_request, _host, _path, _query, ["Bearer x-access-1"]}
+      assert_received :refreshed
+      assert_received {:x_request, _host, _path, _query, ["Bearer x-access-2"]}
+      refute_received :refreshed
+      assert cue_ids(ctx) == [newest]
+      assert %{status: "polling", stop_reason: nil} = source_row(ctx)
+      poll_every_interval()
+    end
+
+    test "a second 401 after the refresh, or a refresh that fails, is the sign-in wait", ctx do
+      ref = ctx.ref
+      serve(ctx, {401, ~s({"title":"Unauthorized","status":401})})
+      {pid, poll} = start_x(ctx)
+      fire(pid, poll)
+
+      assert_received {:x_request, _host, _path, _query, ["Bearer x-access-1"]}
+      assert_received {:x_request, _host, _path, _query, ["Bearer x-access-2"]}
+      refute_received {:x_request, _host, _path, _query, _auth}
+      assert_received :refreshed
+      refute_received :refreshed
+      assert %{status: "auth_failed", stop_reason: "x_sign_in"} = source_row(ctx)
+      assert_received {:notice, ^ref, :auth_failed, %{reason: "x_sign_in"}}
+
+      Agent.update(ctx.refreshed, fn _old -> {:error, :refresh_token_revoked} end)
+      fire(pid, next_poll(60_000))
+
+      assert_received {:x_request, _host, _path, _query, ["Bearer x-access-1"]}
+      refute_received {:x_request, _host, _path, _query, _auth}
+      assert source_row(ctx).status == "auth_failed"
+      next_poll(120_000)
+    end
+
+    test "leaving the sign-in wait through another failure stops the row claiming a sign-in",
+         ctx do
+      Agent.update(ctx.tokens, fn _old -> {:error, :not_found} end)
+      {pid, poll} = start_x(ctx)
+      fire(pid, poll)
+      assert %{status: "auth_failed", stop_reason: "x_sign_in"} = source_row(ctx)
+
+      Agent.update(ctx.tokens, fn _old -> {:ok, "x-access-1"} end)
+      serve(ctx, {403, ~s({"title":"Forbidden","detail":"Invented 3301."})})
+      ExUnit.CaptureLog.capture_log(fn -> fire(pid, next_poll(60_000)) end)
+
+      assert %{status: "polling", stop_reason: nil} = source_row(ctx)
+
+      assert_received {:telemetry, [:fermix, :cue, :source], _m,
+                       %{phase: :disconnect, attempt: 1, error_class: "http_status"}}
+
+      next_poll(60_000)
+    end
+
+    test "watching starts at the first read with the X sign-in, not when the sign-in was missing",
+         ctx do
+      Agent.update(ctx.tokens, fn _old -> {:error, :not_found} end)
+      {pid, poll} = start_x(ctx)
+      fire(pid, poll)
+
+      # Nothing is written to the cursor while X is not connected.
+      assert source_row(ctx).cursor == nil
+
+      # X is connected eight days later: no week of backlog is asked for.
+      set_clock(ctx, ~U[2026-10-18 12:00:00Z])
+      Agent.update(ctx.tokens, fn _old -> {:ok, "x-access-1"} end)
+      fire(pid, next_poll(60_000))
+
+      assert_received {:x_request, _host, _path, query, ["Bearer x-access-1"]}
+      assert query["start_time"] == "2026-10-18T11:59:00Z"
+      assert Jason.decode!(source_row(ctx).cursor) == %{"start_time" => "2026-10-18T12:00:00Z"}
+    end
+
+    test "after a restart it asks for the posts after the newest one its row kept", ctx do
+      newest = x_id(hours_ago(3))
+      cursor = Jason.encode!(%{"since_id" => newest, "start_time" => "2026-10-09T08:00:00Z"})
+
+      {:ok, _row} =
+        Repo.cues_call(
+          CuesSql,
+          {:source_touch, ctx.ref, %{status: "polling", cursor: cursor}, hours_ago(2)},
+          server: ctx.repo
+        )
+
+      {pid, poll} = start_x(ctx)
+      fire(pid, poll)
+
+      assert_received {:x_request, _host, _path, query, _auth}
+      assert query["since_id"] == newest
+      refute Map.has_key?(query, "start_time")
+    end
+
+    test "the access token never reaches the log or a trace", ctx do
+      secret_1 = "x-access-invented-secret-5153"
+      secret_2 = "x-access-invented-secret-6264"
+      Agent.update(ctx.tokens, fn _old -> {:ok, secret_1} end)
+      Agent.update(ctx.refreshed, fn _old -> {:ok, secret_2} end)
+      serve(ctx, {401, ~s({"title":"Unauthorized","status":401})})
+      {pid, poll} = start_x(ctx)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          fire(pid, poll)
+          serve(ctx, {403, ~s({"title":"Forbidden","detail":"Invented 4410."})})
+          fire(pid, next_poll(60_000))
+        end)
+
+      assert_received {:x_request, _host, _path, _query, ["Bearer " <> ^secret_1]}
+      assert_received {:x_request, _host, _path, _query, ["Bearer " <> ^secret_2]}
+      assert log =~ "Invented 4410."
+
+      traces = drain_traces([])
+      assert traces != []
+
+      for secret <- [secret_1, secret_2] do
+        refute log =~ secret
+        refute inspect(traces, limit: :infinity, printable_limit: :infinity) =~ secret
+      end
+    end
+
+    test "X refusing the sign-in (401) is the same wait", ctx do
+      ref = ctx.ref
+      serve(ctx, {401, ~s({"title":"Unauthorized","detail":"Unauthorized","status":401})})
+      {pid, poll} = start_x(ctx)
+      fire(pid, poll)
+
+      assert %{status: "auth_failed", stop_reason: "x_sign_in"} = source_row(ctx)
+      assert_received {:notice, ^ref, :auth_failed, %{reason: "x_sign_in"}}
+      next_poll(60_000)
+    end
+
+    test "a 403 is an ordinary failure: X's words go to the log, never to a notice or the row",
+         ctx do
+      ref = ctx.ref
+      detail = "Your enrolled account does not have access to this endpoint (invented 5521)."
+
+      serve(ctx, {403, Jason.encode!(%{"title" => "Forbidden", "detail" => detail})})
+      {pid, poll} = start_x(ctx)
+
+      log = ExUnit.CaptureLog.capture_log(fn -> fire(pid, poll) end)
+
+      assert log =~ detail
+      next_poll(60_000)
+      refute_received {:notice, ^ref, _kind, _data}
+      refute match?(%{status: "auth_failed"}, source_row(ctx))
+
+      assert_received {:telemetry, [:fermix, :cue, :source], _m,
+                       %{phase: :disconnect, attempt: 1, error_class: "http_status"}}
+    end
+
+    test "a redirect is not followed with the X sign-in", ctx do
+      serve(ctx, {302, "", [{"location", "https://elsewhere.example.test/collect"}]})
+      {pid, poll} = start_x(ctx)
+      fire(pid, poll)
+
+      assert_received {:x_request, "api.x.com", _path, _query, _auth}
+      refute_received {:x_request, "elsewhere.example.test", _path, _query, _auth}
+      next_poll(60_000)
+    end
+  end
+
+  defp start_x(ctx, worker_opts \\ []) do
+    test = self()
+
+    refresher = fn ->
+      send(test, :refreshed)
+      Agent.get(ctx.refreshed, & &1)
+    end
+
+    opts = [
+      req_options: [plug: x_plug(ctx.server, test)],
+      token_getter: fn -> Agent.get(ctx.tokens, & &1) end,
+      token_refresher: refresher
+    ]
+
+    start_feed(
+      ctx,
+      %{preset: "x_accounts", url: nil, handles: ["nasa", "esa"]},
+      Keyword.merge(opts, worker_opts)
+    )
+  end
+
+  defp x_plugin do
+    %Plugin{
+      schema_version: 1,
+      name: "x",
+      display_name: "X",
+      description: "Post, search, and read on X.",
+      category: "productivity",
+      version: "1.0.1",
+      default_enabled?: false,
+      auth: %{type: :oauth2, provider: "x", scopes: []},
+      tools: [],
+      skills: [],
+      path: "/plugins/x"
+    }
+  end
+
+  defp drain_traces(acc) do
+    receive do
+      {:telemetry, _event, _measurements, _metadata} = trace -> drain_traces([trace | acc])
+    after
+      0 -> acc
+    end
+  end
+
+  defp x_plug(server, test) do
+    fn conn ->
+      query = URI.decode_query(conn.query_string)
+      auth = Plug.Conn.get_req_header(conn, "authorization")
+      send(test, {:x_request, host_seen(conn), conn.request_path, query, auth})
+      x_reply(conn, answer(Agent.get(server, & &1), auth))
+    end
+  end
+
+  # One answer for every request, or one per Authorization header.
+  defp answer(%{} = by_auth, [auth]), do: Map.fetch!(by_auth, auth)
+  defp answer(reply, _auth), do: reply
+
+  defp x_reply(conn, {status, body}), do: x_reply(conn, {status, body, []})
+
+  defp x_reply(conn, {status, body, headers}) do
+    [{"content-type", "application/json"} | headers]
+    |> Enum.reduce(conn, fn {name, value}, acc -> Plug.Conn.put_resp_header(acc, name, value) end)
+    |> Plug.Conn.send_resp(status, body)
+  end
+
+  # An X post id made at `at`, its time in the high bits as X makes them.
+  defp x_id(at) do
+    ms = DateTime.to_unix(at, :millisecond) - 1_288_834_974_657
+    Integer.to_string(Bitwise.bsl(ms, 22) + 1_031)
+  end
+
+  defp x_post(id, author_id, at) do
+    %{
+      "id" => id,
+      "text" => "Invented post #{id}",
+      "author_id" => author_id,
+      "created_at" => DateTime.to_iso8601(at)
+    }
+  end
+
+  # X's answer: no `data` or `includes` when nothing matched, as X sends it.
+  defp x_page([], meta), do: Jason.encode!(%{"meta" => meta || %{"result_count" => 0}})
+
+  defp x_page(posts, meta) do
+    users = [%{"id" => "11", "username" => "NASA", "name" => "NASA"}]
+    Jason.encode!(%{"data" => posts, "includes" => %{"users" => users}, "meta" => meta})
+  end
+
+  defp payloads(ctx, ids) do
+    for id <- ids do
+      [[payload]] =
+        rows(ctx.conn, "SELECT payload FROM cues WHERE source_ref = ? AND item_id = ?", [
+          ctx.ref,
+          id
+        ])
+
+      Jason.decode!(payload)
     end
   end
 

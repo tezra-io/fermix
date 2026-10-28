@@ -23,10 +23,16 @@ defmodule FermixCore.Management.Cues.SourceForm do
   keeps its id and type, and, under More options, the rest of its paths, each
   with an `info` saying what it is for, behind an info control like every cue
   row's explanation (no footers), and an `example` the empty field shows.
+
+  A feed with the X accounts preset has no address to type and no secret: its
+  one field is its handles (`handles_row/0`), kept as `Cues.XAccounts.handles/1`
+  keeps them, and its note says it reads with the X plugin's sign-in
+  (`preset_note/1`).
   """
 
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.Presets
+  alias FermixCore.Cues.XAccounts
   alias FermixCore.Management.Settings.Row
 
   @kinds [
@@ -57,7 +63,8 @@ defmodule FermixCore.Management.Cues.SourceForm do
   @preset_labels %{
     "rss" => "RSS, Atom or JSON Feed",
     "github" => "GitHub",
-    "x" => "X"
+    "x" => "X",
+    "x_accounts" => "X accounts"
   }
   @verify_options [
     {"hmac", "A signature over the body"},
@@ -79,6 +86,14 @@ defmodule FermixCore.Management.Cues.SourceForm do
   @github_note "In GitHub's webhook form, choose `application/json` as the content type."
   @x_note "The client secret is your X app's `OAuth 2.0 Client Secret`. Fermix answers X's " <>
             "check of the address with it, so save it before you give X the address."
+  @x_accounts_consent "Fermix asks X for these accounts' new posts on the schedule you set."
+  @x_accounts_note "Reads with your X sign-in from the X plugin. Connect X under Plugins " <>
+                     "first. X bills your X app for each post it returns."
+  @handles_row %{
+    label: "Handles",
+    info: "X usernames, with or without @. Up to 20.",
+    example: "nasa"
+  }
   @push_note "Send each item as a CloudEvent, with the token as a bearer token."
   @general_stream_note "Any WebSocket service. Fermix signs in with your API key and secret, " <>
                          "sends the subscribe message, and keeps each message of a type you list."
@@ -96,6 +111,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
   # kind, and the kinds it applies to. `Cues.Config` holds the same rule.
   @fields [
     %{key: "url", config: :url, kind: :text, kinds: [:feed, :stream]},
+    %{key: "handles", config: :handles, kind: :list, kinds: [:feed]},
     %{key: "interval_minutes", config: :interval, kind: :number, kinds: [:feed]},
     %{key: "key_header", config: :key_header, kind: :text, kinds: [:stream]},
     %{key: "secret_header", config: :secret_header, kind: :text, kinds: [:stream]},
@@ -229,6 +245,31 @@ defmodule FermixCore.Management.Cues.SourceForm do
     end
   end
 
+  @doc """
+  The handles row of an X accounts source: its label, info and example. The
+  browser setup page draws its field from these, so both surfaces say the
+  same thing.
+  """
+  @spec handles_row() :: %{label: String.t(), info: String.t(), example: String.t()}
+  def handles_row, do: @handles_row
+
+  @doc """
+  The note a feed preset's form carries, or nil: X accounts says it reads
+  with the X plugin's sign-in and that X bills for what it returns.
+  """
+  @spec preset_note(String.t() | nil) :: String.t() | nil
+  def preset_note("x_accounts"), do: @x_accounts_note
+  def preset_note(_preset), do: nil
+
+  @doc """
+  The sentence a preset says where its items come from in, or nil when its
+  kind's says it: X accounts asks X, not an address the owner gave. The form's
+  `consent_sentence` and the browser setup page's kind line read it.
+  """
+  @spec preset_consent(String.t() | nil) :: String.t() | nil
+  def preset_consent("x_accounts"), do: @x_accounts_consent
+  def preset_consent(_preset), do: nil
+
   @doc "A preset's name as a row shows it."
   @spec preset_label(String.t()) :: String.t()
   def preset_label(name) when is_binary(name), do: Map.get(@preset_labels, name, name)
@@ -254,7 +295,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
          "kinds" => kinds(),
          "presets" => presets(),
          "rows" => rows,
-         "consent_sentence" => Map.fetch!(@consent, kind),
+         "consent_sentence" => preset_consent(preset) || Map.fetch!(@consent, kind),
          "notes" => notes(kind, preset)
        }}
     end
@@ -418,6 +459,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
   defp notes("webhook", _preset), do: [@webhook_note]
   defp notes("local_push", _preset), do: [@push_note]
   defp notes("stream", nil), do: [@general_stream_note]
+  defp notes("feed", preset), do: List.wrap(preset_note(preset))
   defp notes(_kind, _preset), do: []
 
   # --- rows --------------------------------------------------------------------
@@ -472,6 +514,16 @@ defmodule FermixCore.Management.Cues.SourceForm do
 
   defp field_row(%{key: "url"}, value, advanced),
     do: Row.new("url", :text, "URL", value: value, advanced: advanced, restart: restart())
+
+  defp field_row(%{key: "handles"}, value, advanced) do
+    Row.new("handles", :list, @handles_row.label,
+      info: @handles_row.info,
+      example: @handles_row.example,
+      value: value,
+      advanced: advanced,
+      restart: restart()
+    )
+  end
 
   defp field_row(%{key: "interval_minutes"}, value, advanced) do
     Row.new("interval_minutes", :number, "Poll every",
@@ -585,6 +637,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
     )
   end
 
+  defp shown("feed", "x_accounts", _method), do: fields(~w(handles interval_minutes daily_budget))
   defp shown("feed", _preset, _method), do: fields(~w(url interval_minutes daily_budget))
   defp shown("stream", nil, _method), do: fields(@general_stream_keys)
   defp shown("local_push", _preset, _method), do: fields(~w(daily_budget))
@@ -663,7 +716,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
         {:error, {field.key, "This setting takes at most #{@max_list_items} values."}}
 
       Enum.all?(values, &is_binary/1) ->
-        {:ok, values |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))}
+        values |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> listed(field)
 
       true ->
         {:error, {field.key, "This setting takes a list of text values."}}
@@ -671,6 +724,16 @@ defmodule FermixCore.Management.Cues.SourceForm do
   end
 
   defp coerce(field, _value), do: {:error, {field.key, "This setting takes #{expected(field)}."}}
+
+  # X accounts keeps its handles as X spells them in a search.
+  defp listed(values, %{config: :handles} = field) do
+    case XAccounts.handles(values) do
+      {:ok, handles} -> {:ok, handles}
+      {:error, words} -> {:error, {field.key, words}}
+    end
+  end
+
+  defp listed(values, _field), do: {:ok, values}
 
   defp line(field, value) do
     line = String.trim(value)

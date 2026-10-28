@@ -8,7 +8,9 @@ defmodule FermixCore.Cues.FeedParser do
   same reader given a whole body.
 
   Formats: RSS 2.0, Atom 1.0 and JSON Feed 1.0/1.1, and a JSON API with
-  configured dot paths (the reader's `:paths`).
+  configured dot paths (the reader's `:paths`). A caller that reads a JSON
+  document its own way (`Cues.XAccounts`) takes it whole from
+  `document_reader/0` and `finish_document/1`, under the same JSON limit.
 
   XML is read as it arrives, one item at a time (`Cues.FeedXml`), and each
   item is turned into its fields as it closes, so what a read holds is one
@@ -151,10 +153,11 @@ defmodule FermixCore.Cues.FeedParser do
 
   @typedoc """
   A feed being read: `:sniff` until its first byte that is not blank decides
-  the syntax, then `:xml` or `:json`; `:json_api` from the start.
+  the syntax, then `:xml` or `:json`; `:json_api` and `:json_document` from
+  the start.
   """
   @opaque t :: %__MODULE__{
-            mode: :sniff | :xml | :json | :json_api,
+            mode: :sniff | :xml | :json | :json_api | :json_document,
             declared: :xml | :json | :unknown,
             options: map(),
             head: binary(),
@@ -200,6 +203,20 @@ defmodule FermixCore.Cues.FeedParser do
       paths -> with :ok <- validate_paths(paths), do: {:ok, new_reader(:json_api, nil, options)}
     end
   end
+
+  @doc """
+  A reader for a JSON document its caller reads whole (`finish_document/1`):
+  at most 4 MiB, a leading byte-order mark skipped, whatever the content type
+  says.
+  """
+  @spec document_reader() :: t()
+  def document_reader,
+    do: new_reader(:json_document, nil, %{base_url: nil, stale_before: nil, paths: nil})
+
+  @doc "Ends a `document_reader/0` body: the decoded document, with string keys."
+  @spec finish_document(t()) :: {:ok, term()} | {:error, :invalid_json}
+  def finish_document(%__MODULE__{mode: :json_document} = reader),
+    do: reader.json |> IO.iodata_to_binary() |> strip_bom() |> decode_json()
 
   @doc "Reads the next piece of the body, any size."
   @spec read(t(), binary()) :: {:ok, t()} | {:error, error()}
@@ -297,7 +314,7 @@ defmodule FermixCore.Cues.FeedParser do
     end
   end
 
-  defp consume(%{mode: mode} = reader, chunk) when mode in [:json, :json_api] do
+  defp consume(%{mode: mode} = reader, chunk) when mode in [:json, :json_api, :json_document] do
     with :ok <- within(reader, @max_json_bytes), do: {:ok, %{reader | json: [reader.json, chunk]}}
   end
 
