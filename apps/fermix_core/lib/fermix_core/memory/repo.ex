@@ -15,6 +15,7 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Memory.Repo.CuesRunsSql
   alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Memory.Repo.CuesWatchersSql
+  alias FermixCore.Memory.Repo.FtsMatch
   alias FermixCore.Memory.Repo.MeetingsSql
   alias FermixCore.Memory.Repo.MobileSql
   alias FermixCore.Memory.Repo.OpenLoopsSql
@@ -6576,7 +6577,8 @@ defmodule FermixCore.Memory.Repo do
   defp search_memory_rows(conn, query, selector, limit) do
     {where_sql, params} = search_memory_where_clause(selector)
 
-    with {:ok, rows} <-
+    with {:ok, match} <- FtsMatch.expression(query),
+         {:ok, rows} <-
            query_all(
              conn,
              """
@@ -6589,7 +6591,7 @@ defmodule FermixCore.Memory.Repo do
              ORDER BY bm25(memories_fts), memories.updated_at DESC, memories.id DESC
              LIMIT ?
              """,
-             [query | params] ++ [limit]
+             [match | params] ++ [limit]
            ) do
       {:ok, Enum.map(rows, &memory_search_row/1)}
     end
@@ -6598,7 +6600,8 @@ defmodule FermixCore.Memory.Repo do
   defp search_message_rows(conn, query, selector, limit) do
     {where_sql, params} = message_where_clause(selector)
 
-    with {:ok, rows} <-
+    with {:ok, match} <- FtsMatch.expression(query),
+         {:ok, rows} <-
            query_all(
              conn,
              """
@@ -6611,7 +6614,7 @@ defmodule FermixCore.Memory.Repo do
              ORDER BY bm25(messages_fts), messages.created_at DESC, messages.id DESC
              LIMIT ?
              """,
-             [query | params] ++ [limit]
+             [match | params] ++ [limit]
            ) do
       {:ok, Enum.map(rows, &message_search_row/1)}
     end

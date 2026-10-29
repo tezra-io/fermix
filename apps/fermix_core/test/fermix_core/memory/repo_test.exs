@@ -1292,6 +1292,61 @@ defmodule FermixCore.Memory.RepoTest do
              )
   end
 
+  test "a search term is words, never FTS syntax", %{repo: repo} do
+    assert {:ok, message} =
+             Repo.insert_message(
+               %{
+                 agent_id: "main",
+                 owner_id: "default",
+                 channel: "telegram",
+                 chat_id: "chat-fts-words",
+                 thread_scope: "root",
+                 sender: "alice",
+                 role: "user",
+                 kind: "chat_message",
+                 content: "the follow-up check-in is booked for Thursday"
+               },
+               server: repo
+             )
+
+    assert {:ok, memory} =
+             Repo.upsert_memory(
+               %{
+                 agent_id: "main",
+                 owner_id: "default",
+                 scope_type: "conversation",
+                 scope_id: "telegram:chat-fts-words:root",
+                 category: "fact",
+                 key: "dentist",
+                 value: "dentist follow-up after the crown"
+               },
+               server: repo
+             )
+
+    messages = [selector: %{agent_id: "main", chat_id: "chat-fts-words"}, server: repo]
+
+    memories = [
+      selector: %{agent_id: "main", scope_id: "telegram:chat-fts-words:root"},
+      server: repo
+    ]
+
+    for term <- ["follow-up", "check-in", "follow-up booked", ~s(booked")] do
+      assert {:ok, [%{id: id}]} = Repo.search_messages(term, messages), term
+      assert id == message.id
+    end
+
+    assert {:ok, [%{id: id}]} = Repo.search_memories("follow-up", memories)
+    assert id == memory.id
+
+    # An operator, a column filter or NEAR( is a literal word the row does not hold.
+    for term <- ["booked OR pancakes", "content:booked", "NEAR(follow booked)"] do
+      assert {:ok, []} = Repo.search_messages(term, messages), term
+    end
+
+    assert {:error, :empty_query} = Repo.search_messages("-- ***", messages)
+    assert {:error, :empty_query} = Repo.search_memories("***", memories)
+  end
+
   defp seed_legacy_agents_md(repo, legacy_path) do
     base = %{agent_id: "main", resource_type: "agents_md", scope_id: "global"}
 

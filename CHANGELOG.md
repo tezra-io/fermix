@@ -52,6 +52,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that publish a list of their own. Those four now answer with the models
   Fermix ships for them, the same list their own settings offer, and typing in
   their Model field narrows it.
+- **Searching memory for a hyphenated word works.** A memory or history search
+  for a word like "follow-up" or "check-in" failed outright ("no such column:
+  up"), because the search text was read as search syntax, where a hyphen
+  means something else. Search text is now always plain words, so a hyphen,
+  "OR", a colon or a stray quote is simply part of what is looked for.
 
 ### Security
 

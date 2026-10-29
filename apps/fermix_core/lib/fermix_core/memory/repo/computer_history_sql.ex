@@ -45,6 +45,7 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   require Logger
 
   alias Exqlite.Sqlite3
+  alias FermixCore.Memory.Repo.FtsMatch
 
   # Writable columns of computer_history_events (id/AUTOINCREMENT excluded), in
   # the order the INSERT binds them. The single source of truth for the writer.
@@ -866,16 +867,15 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
 
   @doc """
   Topic search (§24.1): the FTS5 companion, non-superseded rows of BOTH kinds,
-  newest first. `query` is user text, never FTS syntax — it is split on
-  whitespace and each token is passed as a quoted phrase, so `OR`, `NEAR(`, a
-  column filter or a stray quote are all literal words. A query with no
-  searchable token is refused rather than run as an empty MATCH.
+  newest first. `query` is user text, never FTS syntax (`FtsMatch.expression/1`):
+  `OR`, `NEAR(`, a column filter or a stray quote are all literal words. A query
+  with no searchable token is refused rather than run as an empty MATCH.
   """
   @spec search_memories(term(), String.t(), pos_integer()) ::
           {:ok, [map()]} | {:error, :empty_query | term()}
   def search_memories(conn, query, limit)
       when is_binary(query) and is_integer(limit) and limit > 0 do
-    case match_expression(query) do
+    case FtsMatch.expression(query) do
       {:ok, match} -> search_memories_matching(conn, match, limit)
       {:error, :empty_query} -> {:error, :empty_query}
     end
@@ -890,7 +890,7 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   @spec count_search_memories(term(), String.t()) ::
           {:ok, non_neg_integer()} | {:error, :empty_query | term()}
   def count_search_memories(conn, query) when is_binary(query) do
-    case match_expression(query) do
+    case FtsMatch.expression(query) do
       {:ok, match} -> count_matching(conn, match)
       {:error, :empty_query} -> {:error, :empty_query}
     end
@@ -919,25 +919,6 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
       {:ok, Enum.map(rows, &memory_row/1)}
     end
   end
-
-  # One quoted phrase per whitespace-separated token, ANDed: quoting is what
-  # makes user text data. A token with no letter or digit cannot be tokenized by
-  # FTS5 and would make the phrase a syntax error, so it is dropped.
-  defp match_expression(query) do
-    tokens =
-      query
-      |> String.split(~r/\s+/u, trim: true)
-      |> Enum.filter(&searchable_token?/1)
-
-    case tokens do
-      [] -> {:error, :empty_query}
-      tokens -> {:ok, Enum.map_join(tokens, " AND ", &quoted_token/1)}
-    end
-  end
-
-  defp searchable_token?(token), do: Regex.match?(~r/[\p{L}\p{N}]/u, token)
-
-  defp quoted_token(token), do: ~s("#{String.replace(token, ~s("), ~s(""))}")
 
   defp memory_row(row), do: Map.new(Enum.zip(@memory_read_columns, row))
 
