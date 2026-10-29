@@ -36,11 +36,11 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,call_or_timeout_error,periodic_opts,claim_due_reminders,recover_delivering_reminder,sweep_delivering_reminders,update_temporal_event @ ebd91fdc0e6f
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 9b06289e25ae
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/error.ex @ a3cd3a75d3ca
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex @ 9e95a610b074
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex @ bd39fbf519aa
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,temporal_scheduler_opts @ 50420065b6e9
 \* SOURCE: apps/fermix_core/lib/fermix_core/temporal/registry.ex @ 50ac9a86231c
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex @ b39e088f2603
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex @ 214348321d4a
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex @ 9f2f4c84f999
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
@@ -189,8 +189,8 @@ SweptTo ==
     ELSE "pending"
 
 \* The platform puts the reminder in front of the user. The companion timeline
-\* drops a second message with the same key (output.ex:257-259, which the
-\* mobile and companion adapters write through -> mobile_sql.ex:377-387,
+\* drops a second message with the same key (output.ex:258-260, which the
+\* mobile and companion adapters write through -> mobile_sql.ex:447-457,
 \* unique index :49-51); no other platform reads the key.
 AlreadyShownUnderKey == PlatformDedupes /\ StableKey /\ seen > 0
 Show ==

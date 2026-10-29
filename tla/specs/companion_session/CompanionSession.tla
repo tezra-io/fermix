@@ -150,7 +150,7 @@
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
 (* thing a client or the environment does.                                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ e538371fd2be
+\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 8e223927dfb5
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ 682bdb005ef6
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ b14ce70b09b6
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ ba55e94f8827
@@ -241,7 +241,7 @@ CONSTANTS
                          \* queue.ex:185, stop_named_in :1035-1072); FALSE is the
                          \* conversation stop (stop_conversation_runtime :1020-1024)
     CancelMarksRequest,  \* a cancel is recorded on its request first (Requests.cancel,
-                         \* requests.ex:157-173; cancel_request, mobile_sql.ex:567-586);
+                         \* requests.ex:157-173; cancel_request, mobile_sql.ex:645-664);
                          \* Turns reads the mark and enqueues in one step (hand_off,
                          \* turns.ex:335-350) and sends every stop itself, after its
                          \* enqueue (turns.ex:249-253, stop_in_queue :451-462). FALSE is
@@ -270,7 +270,7 @@ CONSTANTS
                          \* runs the command again
     SeqAssignedOnInsert, \* server_seq comes from the per-profile counter inside the one
                          \* transactional Repo call that inserts the row (append_in_tx,
-                         \* mobile_sql.ex:758-765); FALSE: a writer reads the counter,
+                         \* mobile_sql.ex:836-843); FALSE: a writer reads the counter,
                          \* then inserts in a second call
     SilenceGate          \* a turn may end with no reply only if every client joined when
                          \* it started declared version 2 (MainAgent.live_call ->
@@ -403,7 +403,7 @@ MaxOf(S) == IF S = {} THEN 0 ELSE CHOOSE x \in S : \A y \in S : y <= x
 Cursor(c) == IF view[c] = <<>> THEN 0 ELSE view[c][Len(view[c])]
 
 \* The per-profile counter, read and bumped inside the insert's transaction
-\* (next_server_seq, increment_server_seq, mobile_sql.ex:780, :786-795).
+\* (next_server_seq, increment_server_seq, mobile_sql.ex:858, :864-873).
 NextSeq == MaxOf(Range(tl)) + 1
 
 \* Companion.Fanout.announce (fanout.ex:47-67) -> Channels.Companion.broadcast
@@ -415,7 +415,7 @@ FanoutTo(w, ev) == [c \in Clients |-> IF sub[c] = "yes" THEN Append(w[c], ev) EL
 Fanout(ev) == FanoutTo(wire, ev)
 
 \* Timeline.history_page -> mobile_sql history (timeline.ex:84-91,
-\* mobile_sql.ex:391), then Requests.history's byte budget (fit_page, cut_page,
+\* mobile_sql.ex:461), then Requests.history's byte budget (fit_page, cut_page,
 \* requests.ex:127-139, :698-726): one Repo call reads the rows after a,
 \* oldest first, at most PageLimit of them, and the head. A page cut to fit
 \* keeps its oldest rows, at least one, and its next_after_seq names the last
@@ -511,7 +511,7 @@ Casts(m) ==
 \* msg{client_msg_id} (Requests.request -> claim_and_run -> acquire_and_run
 \* -> run_started -> ingest_span, requests.ex:104-111, :210-295):
 \*  - claim_client_request claims the id durably (claim_request_in_tx,
-\*    mobile_sql.ex:999-1008), and accepted{duplicate} goes to this client's
+\*    mobile_sql.ex:1077-1086), and accepted{duplicate} goes to this client's
 \*    Connection (accepted_event, requests.ex:599-602) before anything runs;
 \*  - the coordinator's acquire starts an attempt, or none for a request
 \*    running, completed or failed (request_coordinator.ex:125-132);
@@ -546,7 +546,7 @@ OnMsg(c, m) ==
 \* cancel{client_msg_id} (dispatch, connection.ex:235-236 -> Requests.cancel,
 \* requests.ex:157-173), in the Connection's own step.
 \*  - CancelMarksRequest: the mark is recorded on a request that has not
-\*    settled, in one Repo call (cancel_request, mobile_sql.ex:567-586;
+\*    settled, in one Repo call (cancel_request, mobile_sql.ex:645-664;
 \*    settled for one that has, not_found for one never claimed), then Turns
 \*    is asked (Turns.cancel, a call into its mailbox, turns.ex:187-190).
 \*  - Otherwise the old code: the Connection calls Queue.stop_turn itself,
@@ -802,7 +802,7 @@ Join(c) ==
 \*    then the request is completed (settle_completed, :530-542); one reply
 \*    here. A request already settled refuses the write as a stale attempt
 \*    (append_client_output_in_tx, ensure_running_attempt,
-\*    mobile_sql.ex:1178-1188): no row and no text_done;
+\*    mobile_sql.ex:1256-1266): no row and no text_done;
 \*  - {:completed} of a turn its runner said ends with no reply (handle_cast
 \*    {:silent, ...}, its [SILENT] reply dropped, silent_ending?): no row,
 \*    the request completed, and turn_done to the version 2 clients
