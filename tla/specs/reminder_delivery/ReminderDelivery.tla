@@ -15,7 +15,7 @@
 (* is a free choice while the window is open.                              *)
 (*                                                                         *)
 (* Not modelled: other rules of the same occurrence (so `superseded` is    *)
-(* folded into `expired`), snooze, follow-ups, the annual horizon, render  *)
+(* folded into `expired`), snooze, the annual horizon, render              *)
 (* and thread-option errors (terminal before any send), a send process     *)
 (* that crashes ({:delivery_crashed} is terminal), the pool-unavailable    *)
 (* retry inside ChannelSend (it fires before a connection exists),         *)

@@ -1,0 +1,12 @@
+{"open_loops": [{"key": "campsite",
+                 "intention": "Book the Sallow Point campsite for the August trip",
+                 "why_it_matters": "the lakeside pitches go first",
+                 "horizon_class": "long",
+                 "said_days_ago": 8,
+                 "matters_in_days": 20,
+                 "touches": 0,
+                 "due_hours_ago": 4}],
+ "owner_messages": [{"hours_ago": 6,
+                     "text": "My sister Ilse was rushed into emergency surgery this morning. I'm at the hospital."},
+                    {"hours_ago": 3,
+                     "text": "Still no word from the surgeons. Can't eat, can't think."}]}

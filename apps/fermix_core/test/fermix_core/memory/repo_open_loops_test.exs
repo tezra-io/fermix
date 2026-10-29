@@ -3,16 +3,34 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
 
   alias Exqlite.Sqlite3
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.OpenLoopsSql
   alias FermixCore.OpenLoops.Defaults
 
   @tz "America/New_York"
   @open_loops_version 43
   @outside_content_version 49
+  # 50, the phone's link-preview icon index, only adds IF NOT EXISTS objects: a
+  # database at 48 or 49 lacks its version row too, and reapplying it changes
+  # nothing.
+  @mobile_icon_index_version 50
+  @curiosity_version 51
+  # The columns migration 43 made, in its order: what a 48 database holds.
+  @columns_43 ~w(id agent_id owner_id dedupe_key intention why_it_matters matters_by_kind
+                 matters_by_date matters_by_time matters_by_at timezone horizon_class said_at
+                 source_channel source_chat_id source_thread_scope state touches next_touch_at
+                 claimed_at last_touch_at last_touch_rung last_rung2_at last_answer plan_at
+                 last_outcome last_outcome_at last_message delivery_platform
+                 delivery_destination delivery_thread_scope closed_at close_reason revision
+                 created_at updated_at)
+  # What a 49 database holds: 43's columns and the stamp 49 added after them.
+  @columns_49 @columns_43 ++ ~w(noted_after_outside_content)
   # Monday 2031-06-02, 10:00 EDT; June 2031 is EDT (UTC-4). Every value here is invented.
   @now ~U[2031-06-02 14:00:00Z]
   @m ~U[2031-06-11 04:00:00Z]
   # Saturday 2031-06-07, midnight EDT: the owner's local day the spends below fall in.
   @day_start ~U[2031-06-07 04:00:00Z]
+  # Saturday 2031-06-07, 09:00 EDT: the medium loops' first touch.
+  @now_due ~U[2031-06-07 13:00:00Z]
 
   setup do
     unique = System.unique_integer([:positive])
@@ -69,6 +87,101 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
     {:ok, {:created, row}} = Repo.create_open_loop(attrs(n, overrides), server: repo)
     row
   end
+
+  # A check-in's spoken outcome on a live loop, its message written after
+  # outside content when `after_outside?`.
+  defp spoke(after_outside?) do
+    %{
+      last_outcome: "spoke",
+      last_outcome_at: @now,
+      last_message: "An invented check-in.",
+      last_message_after_outside_content: after_outside?
+    }
+  end
+
+  # A loop waited on: the owner's interview ends 17:00 EDT on Tuesday the 3rd,
+  # and asking how it went first feels natural then.
+  defp after_attrs(n, overrides \\ %{}) do
+    attrs(
+      n,
+      Map.merge(
+        %{
+          anchor_kind: "ask_after",
+          matters_by_source: nil,
+          horizon_class: "after",
+          matters_by_kind: "datetime",
+          matters_by_date: ~D[2031-06-03],
+          matters_by_time: ~T[17:00:00],
+          matters_by_at: ~U[2031-06-03 21:00:00Z],
+          next_touch_at: ~U[2031-06-03 21:00:00Z]
+        },
+        overrides
+      )
+    )
+  end
+
+  defp schema!(conn) do
+    query!(
+      conn,
+      "SELECT type, name, tbl_name, sql FROM sqlite_master " <>
+        "WHERE tbl_name IN ('open_loops', 'open_loop_reactions') ORDER BY type, name"
+    )
+  end
+
+  defp execute!(conn, sql), do: :ok = Sqlite3.execute(conn, sql)
+
+  defp rows_by_id(conn, columns) do
+    conn
+    |> query!("SELECT #{Enum.join(columns, ", ")} FROM open_loops ORDER BY id")
+    |> Map.new(fn [id | _rest] = values -> {id, Enum.zip(columns, values) |> Map.new()} end)
+  end
+
+  # Puts the open_loops table back in migration 43's shape with its rows, drops
+  # what 49 and 51 add, and forgets 49, 50 and 51: the database an engine at
+  # version 48 left.
+  defp downgrade_to_48!(conn) do
+    downgrade_open_loops!(conn, @columns_43, [OpenLoopsSql.schema_sql()])
+
+    execute!(
+      conn,
+      "DELETE FROM schema_migrations WHERE version IN " <>
+        "(#{@outside_content_version}, #{@mobile_icon_index_version}, #{@curiosity_version})"
+    )
+  end
+
+  # Puts the open_loops table back in migration 49's shape with its rows, the
+  # stamp among them, drops what 51 adds, and forgets 50 and 51: the database an
+  # engine at version 49 left.
+  defp downgrade_to_49!(conn) do
+    downgrade_open_loops!(conn, @columns_49, [
+      OpenLoopsSql.schema_sql(),
+      OpenLoopsSql.outside_content_schema_sql()
+    ])
+
+    execute!(
+      conn,
+      "DELETE FROM schema_migrations " <>
+        "WHERE version IN (#{@mobile_icon_index_version}, #{@curiosity_version})"
+    )
+  end
+
+  defp downgrade_open_loops!(conn, columns, schema) do
+    columns = Enum.join(columns, ", ")
+    execute!(conn, "CREATE TABLE open_loops_old_rows AS SELECT #{columns} FROM open_loops")
+    execute!(conn, "DROP TABLE open_loops")
+    execute!(conn, "DROP TABLE open_loop_reactions")
+    Enum.each(schema, &execute!(conn, &1))
+
+    execute!(
+      conn,
+      "INSERT INTO open_loops (#{columns}) SELECT #{columns} FROM open_loops_old_rows"
+    )
+
+    execute!(conn, "DROP TABLE open_loops_old_rows")
+  end
+
+  defp column_names(conn),
+    do: conn |> query!("PRAGMA table_info(open_loops)") |> Enum.map(&Enum.at(&1, 1))
 
   # A due row claimed past its rung 1 window, as the scheduler claims it.
   defp claim!(repo, n) do
@@ -131,6 +244,7 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
 
       with_raw_conn(db_path, fn conn ->
         :ok = Sqlite3.execute(conn, "DROP TABLE open_loops")
+        :ok = Sqlite3.execute(conn, "DROP TABLE open_loop_reactions")
         :ok = Sqlite3.execute(conn, "ALTER TABLE cue_sources DROP COLUMN stop_reason")
         :ok = Sqlite3.execute(conn, "DROP TABLE harness_run_continuations")
         :ok = Sqlite3.execute(conn, "DROP TABLE cue_counts")
@@ -192,12 +306,8 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
       :ok = stop_supervised(repo)
 
       with_raw_conn(db_path, fn conn ->
-        :ok =
-          Sqlite3.execute(conn, "ALTER TABLE open_loops DROP COLUMN noted_after_outside_content")
-
-        # 50 follows 49 and only adds IF NOT EXISTS objects, so a database at
-        # 48 lacks its version row too, and reapplying it changes nothing.
-        :ok = Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version IN (49, 50)")
+        downgrade_to_48!(conn)
+        refute "noted_after_outside_content" in column_names(conn)
         assert [[48]] = query!(conn, "SELECT MAX(version) FROM schema_migrations")
       end)
 
@@ -206,12 +316,306 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
 
       assert {:ok, versions} = Repo.migration_versions(server: reopened)
       assert Enum.count(versions, &(&1 == @outside_content_version)) == 1
+      assert Enum.count(versions, &(&1 == @curiosity_version)) == 1
 
       assert {:ok, %{noted_after_outside_content: false}} =
                Repo.get_open_loop(loop_id(1), server: reopened)
 
       assert :ok = Repo.migrate(server: reopened)
       assert {:ok, ^versions} = Repo.migration_versions(server: reopened)
+    end
+  end
+
+  describe "migration 51" do
+    test "a fresh database gets the anchor, the reach, the window and the reactions table", %{
+      repo: repo,
+      db_path: db_path
+    } do
+      assert {:ok, versions} = Repo.migration_versions(server: repo)
+      assert @curiosity_version in versions
+
+      with_raw_conn(db_path, fn conn ->
+        columns = column_names(conn)
+
+        assert columns -- @columns_49 ==
+                 ~w(anchor_kind matters_by_source reach rung1_until
+                    last_message_after_outside_content)
+
+        assert @columns_49 -- columns == []
+
+        indexes = for ["index", name, _table, _sql] <- schema!(conn), do: name
+
+        for index <- ~w(idx_open_loops_due idx_open_loops_live_dedupe idx_open_loops_rung2_day
+                       idx_open_loop_reactions_raised idx_open_loop_reactions_conversation) do
+          assert index in indexes
+        end
+
+        reaction_columns =
+          conn |> query!("PRAGMA table_info(open_loop_reactions)") |> Enum.map(&Enum.at(&1, 1))
+
+        assert reaction_columns ==
+                 ~w(id owner_id agent_id open_loop_id rung raised_at session_id source_channel
+                    source_chat_id source_thread_scope raised_with reply_text reply_at outcome
+                    answer created_at updated_at raised_after_outside_content
+                    raised_history_tainted)
+
+        assert [] = query!(conn, "PRAGMA foreign_key_list(open_loop_reactions)")
+      end)
+    end
+
+    test "a 48 database with live and closed loops upgrades through 49 and 51, and ends as a fresh one does",
+         %{
+           repo: repo,
+           db_path: db_path
+         } do
+      create!(repo, 1)
+      create!(repo, 2, %{next_touch_at: ~U[2031-06-09 13:00:00Z]})
+      create!(repo, 3)
+
+      create!(repo, 4, %{
+        horizon_class: "imminent",
+        matters_by_date: ~D[2031-06-08],
+        matters_by_at: ~U[2031-06-09 04:00:00Z],
+        next_touch_at: ~U[2031-06-07 13:00:00Z]
+      })
+
+      create!(repo, 5)
+      {:ok, %{due: [_, _, _, _]}} = Repo.scan_due_open_loops(@now_due, 50, server: repo)
+      done = %{state: "closed", close_reason: "done", closed_at: @now, next_touch_at: nil}
+      {:ok, _closed} = Repo.settle_open_loop(loop_id(3), done, server: repo, now: @now)
+      expire = %{state: "expired", close_reason: "expired", closed_at: @now, next_touch_at: nil}
+      {:ok, _expired} = Repo.settle_open_loop(loop_id(5), expire, server: repo, now: @now)
+      :ok = stop_supervised(repo)
+
+      {fresh, before} =
+        with_raw_conn(db_path, fn conn ->
+          fresh = schema!(conn)
+          downgrade_to_48!(conn)
+          columns = column_names(conn)
+          refute "anchor_kind" in columns
+          refute "noted_after_outside_content" in columns
+          {fresh, rows_by_id(conn, @columns_43)}
+        end)
+
+      upgraded = :"#{repo}_upgraded"
+      start_supervised!({Repo, name: upgraded, enabled: true, database_path: db_path})
+      assert {:ok, versions} = Repo.migration_versions(server: upgraded)
+      assert Enum.count(versions, &(&1 == @outside_content_version)) == 1
+      assert Enum.count(versions, &(&1 == @curiosity_version)) == 1
+
+      with_raw_conn(db_path, fn conn ->
+        assert schema!(conn) == fresh
+        assert rows_by_id(conn, @columns_43) == before
+
+        added =
+          rows_by_id(
+            conn,
+            ~w(id anchor_kind reach matters_by_source rung1_until noted_after_outside_content
+               last_message_after_outside_content)
+          )
+
+        # A row from before 49 is not known to have been noted after outside
+        # content, nor its last message written after it, so it reads as not
+        # stamped.
+        unstamped = %{
+          "anchor_kind" => "matters_by",
+          "reach" => "message",
+          "matters_by_source" => "owner",
+          "noted_after_outside_content" => 0,
+          "last_message_after_outside_content" => 0
+        }
+
+        for {_id, row} <- added do
+          assert Map.take(row, Map.keys(unstamped)) == unstamped
+        end
+
+        # A due loop keeps today's window: three hours on from its touch, or an
+        # imminent one's date. Every other row has none.
+        assert added[loop_id(1)]["rung1_until"] == "2031-06-07T16:00:00.000000Z"
+        assert added[loop_id(4)]["rung1_until"] == "2031-06-09T04:00:00.000000Z"
+        assert added[loop_id(2)]["rung1_until"] == nil
+        assert added[loop_id(3)]["rung1_until"] == nil
+        assert added[loop_id(5)]["rung1_until"] == nil
+      end)
+
+      # The rows read back whole, the live dedupe index still holds, and the
+      # upgraded loops still reach the due note as they did.
+      assert {:ok, %{state: "due", reach: "message"}} =
+               Repo.get_open_loop(loop_id(1), server: upgraded)
+
+      assert {:ok, {:existing, %{id: "loop_00000000001"}}} =
+               Repo.create_open_loop(attrs(6, %{dedupe_key: attrs(1).dedupe_key}),
+                 server: upgraded
+               )
+
+      assert {:ok, {:created, _row}} =
+               Repo.create_open_loop(attrs(7, %{dedupe_key: attrs(3).dedupe_key}),
+                 server: upgraded
+               )
+
+      assert {:ok, notes} =
+               Repo.due_open_loops_for_note("default", "main", ~U[2031-06-07 15:59:59Z],
+                 server: upgraded
+               )
+
+      assert Enum.map(notes, & &1.id) == [loop_id(4), loop_id(1)]
+    end
+
+    test "a 49 database with a stamped loop upgrades, keeps the stamp, and ends as a fresh one does",
+         %{repo: repo, db_path: db_path} do
+      create!(repo, 1, %{noted_after_outside_content: true})
+      create!(repo, 2, %{next_touch_at: ~U[2031-06-09 13:00:00Z]})
+      create!(repo, 3, %{noted_after_outside_content: true})
+      {:ok, %{due: [_, _]}} = Repo.scan_due_open_loops(@now_due, 50, server: repo)
+      done = %{state: "closed", close_reason: "done", closed_at: @now, next_touch_at: nil}
+      {:ok, _closed} = Repo.settle_open_loop(loop_id(3), done, server: repo, now: @now)
+      {:ok, _spoke} = Repo.settle_open_loop(loop_id(2), spoke(true), server: repo, now: @now)
+      :ok = stop_supervised(repo)
+
+      {fresh, before} =
+        with_raw_conn(db_path, fn conn ->
+          fresh = schema!(conn)
+          downgrade_to_49!(conn)
+          columns = column_names(conn)
+          refute "anchor_kind" in columns
+          assert List.last(columns) == "noted_after_outside_content"
+          assert [[49]] = query!(conn, "SELECT MAX(version) FROM schema_migrations")
+          {fresh, rows_by_id(conn, @columns_49)}
+        end)
+
+      assert Map.new(before, fn {id, row} -> {id, row["noted_after_outside_content"]} end) ==
+               %{loop_id(1) => 1, loop_id(2) => 0, loop_id(3) => 1}
+
+      upgraded = :"#{repo}_upgraded"
+      start_supervised!({Repo, name: upgraded, enabled: true, database_path: db_path})
+      assert {:ok, versions} = Repo.migration_versions(server: upgraded)
+      assert Enum.count(versions, &(&1 == @outside_content_version)) == 1
+      assert Enum.count(versions, &(&1 == @curiosity_version)) == 1
+
+      with_raw_conn(db_path, fn conn ->
+        assert schema!(conn) == fresh
+        assert rows_by_id(conn, @columns_49) == before
+      end)
+
+      # A message sent before 51 is not known to have been written after
+      # outside content, so it reads as not stamped, as its loop would.
+      assert {:ok,
+              %{last_message: "An invented check-in.", last_message_after_outside_content: false}} =
+               Repo.get_open_loop(loop_id(2), server: upgraded)
+
+      assert {:ok, %{state: "due", noted_after_outside_content: true}} =
+               Repo.get_open_loop(loop_id(1), server: upgraded)
+
+      assert {:ok, %{state: "closed", noted_after_outside_content: true}} =
+               Repo.get_open_loop(loop_id(3), server: upgraded)
+
+      assert {:ok, %{noted_after_outside_content: false}} =
+               Repo.get_open_loop(loop_id(2), server: upgraded)
+    end
+
+    test "the table's checks hold the anchor, the source and the window together", %{
+      repo: repo,
+      db_path: db_path
+    } do
+      create!(repo, 1)
+      {:ok, _} = Repo.create_open_loop(after_attrs(2), server: repo)
+
+      with_raw_conn(db_path, fn conn ->
+        for sql <- [
+              "UPDATE open_loops SET horizon_class = 'after' WHERE id = '#{loop_id(1)}'",
+              "UPDATE open_loops SET anchor_kind = 'ask_after' WHERE id = '#{loop_id(1)}'",
+              "UPDATE open_loops SET matters_by_source = NULL WHERE id = '#{loop_id(1)}'",
+              "UPDATE open_loops SET matters_by_source = 'owner' WHERE id = '#{loop_id(2)}'",
+              "UPDATE open_loops SET matters_by_source = 'guess' WHERE id = '#{loop_id(1)}'",
+              "UPDATE open_loops SET reach = 'email' WHERE id = '#{loop_id(1)}'",
+              "UPDATE open_loops SET state = 'due' WHERE id = '#{loop_id(1)}'",
+              "UPDATE open_loops SET rung1_until = next_touch_at WHERE id = '#{loop_id(1)}'",
+              "UPDATE open_loops SET last_answer = 'later' WHERE id = '#{loop_id(1)}'",
+              "UPDATE open_loops SET last_outcome = 'deferred' WHERE id = '#{loop_id(1)}'",
+              "UPDATE open_loops SET noted_after_outside_content = 2 WHERE id = '#{loop_id(1)}'",
+              "UPDATE open_loops SET last_message_after_outside_content = 2 " <>
+                "WHERE id = '#{loop_id(1)}'"
+            ] do
+          assert {:error, message} = Sqlite3.execute(conn, sql), sql
+          assert message =~ "CHECK constraint failed", sql
+        end
+
+        assert :ok =
+                 Sqlite3.execute(
+                   conn,
+                   "UPDATE open_loops SET last_answer = 'moved' WHERE id = '#{loop_id(1)}'"
+                 )
+
+        assert :ok =
+                 Sqlite3.execute(
+                   conn,
+                   "UPDATE open_loops SET last_outcome = 'later' WHERE id = '#{loop_id(1)}'"
+                 )
+      end)
+    end
+
+    test "a reaction row keeps its own vocabulary", %{db_path: db_path} do
+      with_raw_conn(db_path, fn conn ->
+        row = fn rung, outcome, answer ->
+          "INSERT INTO open_loop_reactions (id, owner_id, agent_id, open_loop_id, rung, " <>
+            "raised_at, source_channel, source_chat_id, outcome, answer, created_at, updated_at) " <>
+            "VALUES ('reaction_#{System.unique_integer([:positive])}', 'default', 'main', " <>
+            "'#{loop_id(1)}', #{rung}, '2031-06-03T22:00:00.000000Z', 'telegram', '40001', " <>
+            "#{outcome}, #{answer}, '2031-06-03T22:00:00.000000Z', '2031-06-03T22:00:00.000000Z')"
+        end
+
+        assert :ok = Sqlite3.execute(conn, row.(1, "NULL", "NULL"))
+        assert :ok = Sqlite3.execute(conn, row.(2, "'replied'", "'moved'"))
+        assert :ok = Sqlite3.execute(conn, row.(1, "'no_reply'", "'reach'"))
+
+        for bad <- [
+              row.(3, "NULL", "NULL"),
+              row.(1, "'ignored'", "NULL"),
+              row.(1, "NULL", "'asked'")
+            ] do
+          assert {:error, message} = Sqlite3.execute(conn, bad)
+          assert message =~ "CHECK constraint failed"
+        end
+
+        assert [["root"]] =
+                 query!(conn, "SELECT DISTINCT source_thread_scope FROM open_loop_reactions")
+
+        # A raise not known to have come after outside content reads as not.
+        assert [[0]] =
+                 query!(
+                   conn,
+                   "SELECT DISTINCT raised_after_outside_content FROM open_loop_reactions"
+                 )
+
+        stamped = fn value ->
+          "INSERT INTO open_loop_reactions (id, owner_id, agent_id, open_loop_id, rung, " <>
+            "raised_at, source_channel, source_chat_id, raised_after_outside_content, " <>
+            "created_at, updated_at) VALUES ('reaction_#{System.unique_integer([:positive])}', " <>
+            "'default', 'main', '#{loop_id(1)}', 1, '2031-06-03T22:00:00.000000Z', 'telegram', " <>
+            "'40001', #{value}, '2031-06-03T22:00:00.000000Z', '2031-06-03T22:00:00.000000Z')"
+        end
+
+        assert :ok = Sqlite3.execute(conn, stamped.(1))
+        assert {:error, message} = Sqlite3.execute(conn, stamped.(2))
+        assert message =~ "CHECK constraint failed"
+
+        # Words not known to come from a reply stamped with the owner's computer
+        # activity read as not, and the mark is 0 or 1.
+        assert [[0]] =
+                 query!(conn, "SELECT DISTINCT raised_history_tainted FROM open_loop_reactions")
+
+        tainted = fn value ->
+          "INSERT INTO open_loop_reactions (id, owner_id, agent_id, open_loop_id, rung, " <>
+            "raised_at, source_channel, source_chat_id, raised_history_tainted, " <>
+            "created_at, updated_at) VALUES ('reaction_#{System.unique_integer([:positive])}', " <>
+            "'default', 'main', '#{loop_id(1)}', 1, '2031-06-03T22:00:00.000000Z', 'telegram', " <>
+            "'40001', #{value}, '2031-06-03T22:00:00.000000Z', '2031-06-03T22:00:00.000000Z')"
+        end
+
+        assert :ok = Sqlite3.execute(conn, tainted.(1))
+        assert {:error, message} = Sqlite3.execute(conn, tainted.(2))
+        assert message =~ "CHECK constraint failed"
+      end)
     end
   end
 
@@ -236,6 +640,9 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
                matters_by_date: ~D[2031-06-10],
                matters_by_time: ~T[15:00:00],
                matters_by_at: utc(~U[2031-06-10 19:00:00Z]),
+               anchor_kind: "matters_by",
+               matters_by_source: "owner",
+               reach: "message",
                timezone: @tz,
                horizon_class: "medium",
                said_at: utc(@now),
@@ -245,6 +652,7 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
                state: "open",
                touches: 0,
                next_touch_at: utc(~U[2031-06-07 13:00:00Z]),
+               rung1_until: nil,
                claimed_at: nil,
                last_touch_at: nil,
                last_touch_rung: nil,
@@ -254,6 +662,7 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
                last_outcome: nil,
                last_outcome_at: nil,
                last_message: nil,
+               last_message_after_outside_content: false,
                delivery_platform: "telegram",
                delivery_destination: "40001",
                delivery_thread_scope: "root",
@@ -276,7 +685,8 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
         last_touch_rung: 2,
         last_outcome: "spoke",
         last_outcome_at: ~U[2031-06-07 17:00:00Z],
-        last_message: "An invented check-in."
+        last_message: "An invented check-in.",
+        last_message_after_outside_content: true
       }
 
       assert {:ok, settled} =
@@ -365,7 +775,31 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
                )
 
       assert {:error, {:invalid, :last_message, :too_long}} =
-               Repo.settle_open_loop(loop_id(1), %{last_message: String.duplicate("b", 1_801)},
+               Repo.settle_open_loop(
+                 loop_id(1),
+                 %{
+                   last_message: String.duplicate("b", 1_801),
+                   last_message_after_outside_content: false
+                 },
+                 server: repo
+               )
+
+      # What the run that wrote a message had read is stated with the message,
+      # always, and never without it.
+      for provenance <- [nil, "yes", 1] do
+        assert {:error, {:invalid, :last_message_after_outside_content, :not_a_boolean}} =
+                 Repo.settle_open_loop(
+                   loop_id(1),
+                   %{last_message: "Sent.", last_message_after_outside_content: provenance},
+                   server: repo
+                 )
+      end
+
+      assert {:error, {:invalid, :last_message_after_outside_content, :apart_from_message}} =
+               Repo.settle_open_loop(loop_id(1), %{last_message: "Sent."}, server: repo)
+
+      assert {:error, {:invalid, :last_message_after_outside_content, :apart_from_message}} =
+               Repo.settle_open_loop(loop_id(1), %{last_message_after_outside_content: true},
                  server: repo
                )
 
@@ -480,7 +914,8 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
         last_touch_rung: 2,
         last_outcome: "spoke",
         last_outcome_at: ~U[2031-06-07 16:31:00Z],
-        last_message: "An invented check-in."
+        last_message: "An invented check-in.",
+        last_message_after_outside_content: false
       }
 
       assert {:error, :closed_meanwhile} =
@@ -639,11 +1074,18 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
                Repo.due_open_loops_for_note("default", "main", ~U[2031-06-07 16:00:00Z],
                  server: repo
                )
+    end
 
-      assert {:ok, [_]} =
-               Repo.due_open_loops_for_note("default", "main", ~U[2031-06-07 16:30:00Z],
-                 server: repo,
-                 window_ms: 4 * 60 * 60 * 1000
+    test "the due note reads each loop's own window, not a shared one", %{repo: repo} do
+      create!(repo, 1)
+      create!(repo, 2, %{reach: "conversation"})
+      {:ok, %{due: [_, _]}} = Repo.scan_due_open_loops(@now_due, 50, server: repo)
+
+      # Past the message loop's three hours, inside the conversation loop's
+      # window, which runs to its next slot, the 9th at 09:00 EDT.
+      assert {:ok, [%{id: "loop_00000000002"}]} =
+               Repo.due_open_loops_for_note("default", "main", ~U[2031-06-08 20:00:00Z],
+                 server: repo
                )
     end
 
@@ -689,6 +1131,201 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
 
       assert {:error, {:invalid, :state, :unsupported}} =
                Repo.list_open_loops(%{owner_id: "default", state: "due"}, server: repo)
+    end
+  end
+
+  describe "the rung 1 window and the anchor" do
+    test "the scan writes each loop's window as it marks it due", %{repo: repo} do
+      create!(repo, 1)
+      create!(repo, 2, %{reach: "conversation"})
+      create!(repo, 3, %{reach: "conversation", next_touch_at: ~U[2031-06-09 13:00:00Z]})
+
+      create!(repo, 4, %{
+        horizon_class: "imminent",
+        matters_by_date: ~D[2031-06-08],
+        matters_by_at: ~U[2031-06-09 04:00:00Z]
+      })
+
+      {:ok, _} = Repo.create_open_loop(after_attrs(5, %{reach: "conversation"}), server: repo)
+      {:ok, _} = Repo.create_open_loop(after_attrs(6), server: repo)
+
+      until = fn n ->
+        {:ok, %{state: "due", rung1_until: at}} = Repo.get_open_loop(loop_id(n), server: repo)
+        at
+      end
+
+      ids = fn rows -> rows |> Enum.map(& &1.id) |> Enum.sort() end
+
+      # By message: three hours on. For conversation: the next slot, or the
+      # date for the last one before it. Imminent: its date. Waited on, kept
+      # for conversation: fourteen days from its touch.
+      {:ok, %{due: waited}} = Repo.scan_due_open_loops(~U[2031-06-03 21:00:00Z], 50, server: repo)
+      assert ids.(waited) == [loop_id(5), loop_id(6)]
+      assert until.(5) == utc(~U[2031-06-17 21:00:00Z])
+      assert until.(6) == utc(~U[2031-06-04 00:00:00Z])
+
+      {:ok, %{due: dated}} = Repo.scan_due_open_loops(@now_due, 50, server: repo)
+      assert ids.(dated) == [loop_id(1), loop_id(2), loop_id(4)]
+      assert until.(1) == utc(~U[2031-06-07 16:00:00Z])
+      assert until.(2) == utc(~U[2031-06-09 13:00:00Z])
+      assert until.(4) == utc(~U[2031-06-09 04:00:00Z])
+
+      {:ok, %{due: last}} = Repo.scan_due_open_loops(~U[2031-06-09 13:00:00Z], 50, server: repo)
+      assert ids.(last) == [loop_id(3)]
+      assert until.(3) == utc(@m)
+    end
+
+    test "a conversation window that closes unraised opens the next, then the date ends it", %{
+      repo: repo
+    } do
+      create!(repo, 1, %{reach: "conversation"})
+      {:ok, %{due: [_]}} = Repo.scan_due_open_loops(@now_due, 50, server: repo)
+
+      assert {:ok, %{due: [], waiting: [lapsed]}} =
+               Repo.scan_due_open_loops(~U[2031-06-09 13:00:00Z], 50, server: repo)
+
+      assert %{state: "due", touches: 0, revision: 1} = lapsed
+      assert lapsed.next_touch_at == utc(~U[2031-06-09 13:00:00Z])
+      assert lapsed.rung1_until == utc(@m)
+
+      assert {:ok, %{expired: [expired], skipped_to_handback: []}} =
+               Repo.scan_due_open_loops(@m, 50, server: repo)
+
+      assert %{state: "expired", rung1_until: nil, next_touch_at: nil} = expired
+    end
+
+    test "every write that moves a loop out of due clears its window", %{repo: repo} do
+      for n <- 1..3, do: create!(repo, n)
+      {:ok, %{due: [_, _, _]}} = Repo.scan_due_open_loops(@now_due, 50, server: repo)
+
+      not_yet = %{state: "open", next_touch_at: ~U[2031-06-09 13:00:00Z], last_answer: "not_yet"}
+
+      assert {:ok, %{state: "open", rung1_until: nil}} =
+               Repo.settle_open_loop(loop_id(1), not_yet, server: repo, now: @now_due)
+
+      {:ok, %{claimed_at: claimed_at}} =
+        Repo.claim_open_loop_checkin(loop_id(2), ~U[2031-06-07 16:30:00Z], server: repo)
+
+      silent = %{
+        state: "open",
+        next_touch_at: ~U[2031-06-09 13:00:00Z],
+        last_outcome: "silent",
+        last_outcome_at: ~U[2031-06-07 16:31:00Z]
+      }
+
+      assert {:ok, %{state: "open", rung1_until: nil}} =
+               Repo.finalize_open_loop_checkin(loop_id(2), claimed_at, silent, server: repo)
+
+      # A release keeps the loop due, and its window with it.
+      {:ok, %{claimed_at: claim}} =
+        Repo.claim_open_loop_checkin(loop_id(3), ~U[2031-06-07 16:30:00Z], server: repo)
+
+      assert {:ok, %{state: "due", rung1_until: until}} =
+               Repo.finalize_open_loop_checkin(loop_id(3), claim, %{state: "due"}, server: repo)
+
+      assert until == utc(~U[2031-06-07 16:00:00Z])
+    end
+
+    test "a loop of the other timing with the same words is a kind conflict", %{repo: repo} do
+      dated = create!(repo, 1)
+      waited = after_attrs(2, %{dedupe_key: dated.dedupe_key})
+
+      assert {:error, {:kind_conflict, "loop_00000000001"}} =
+               Repo.create_open_loop(waited, server: repo)
+
+      assert {:error, :not_found} = Repo.get_open_loop(loop_id(2), server: repo)
+
+      assert {:ok, {:created, after_loop}} = Repo.create_open_loop(after_attrs(3), server: repo)
+
+      assert {:ok, {:existing, ^after_loop}} =
+               Repo.create_open_loop(after_attrs(4, %{dedupe_key: after_loop.dedupe_key}),
+                 server: repo
+               )
+    end
+
+    test "a loop waited on saves and loads with its anchor and no source", %{repo: repo} do
+      assert {:ok, {:created, created}} =
+               Repo.create_open_loop(after_attrs(1, %{reach: "conversation"}), server: repo)
+
+      assert {:ok, ^created} = Repo.get_open_loop(loop_id(1), server: repo)
+
+      assert %{
+               anchor_kind: "ask_after",
+               horizon_class: "after",
+               matters_by_source: nil,
+               reach: "conversation",
+               matters_by_kind: "datetime",
+               matters_by_time: ~T[17:00:00],
+               rung1_until: nil
+             } = created
+
+      assert created.matters_by_at == utc(~U[2031-06-03 21:00:00Z])
+    end
+
+    test "the anchor's kind, class and source are checked together before the writer", %{
+      repo: repo
+    } do
+      assert {:error, {:invalid, :horizon_class, :anchor_mismatch}} =
+               Repo.create_open_loop(attrs(1, %{anchor_kind: "ask_after"}), server: repo)
+
+      assert {:error, {:invalid, :horizon_class, :anchor_mismatch}} =
+               Repo.create_open_loop(after_attrs(1, %{anchor_kind: "matters_by"}), server: repo)
+
+      assert {:error, {:invalid, :matters_by_source, :ask_after}} =
+               Repo.create_open_loop(after_attrs(1, %{matters_by_source: "owner"}), server: repo)
+
+      assert {:error, {:invalid, :matters_by_source, :unsupported}} =
+               Repo.create_open_loop(attrs(1, %{matters_by_source: "guess"}), server: repo)
+
+      assert {:error, {:invalid, :reach, :unsupported}} =
+               Repo.create_open_loop(attrs(1, %{reach: "email"}), server: repo)
+
+      assert {:ok, {:created, %{matters_by_source: "lookup"}}} =
+               Repo.create_open_loop(attrs(1, %{matters_by_source: "lookup"}), server: repo)
+    end
+
+    test "a moved date settles whole, with its class and source", %{repo: repo} do
+      create!(repo, 1)
+
+      moved = %{
+        matters_by_kind: "datetime",
+        matters_by_date: ~D[2031-06-24],
+        matters_by_time: ~T[12:00:00],
+        matters_by_at: ~U[2031-06-24 16:00:00Z],
+        matters_by_source: "lookup",
+        horizon_class: "long",
+        state: "open",
+        last_answer: "moved",
+        next_touch_at: ~U[2031-06-17 13:00:00Z]
+      }
+
+      assert {:ok, settled} = Repo.settle_open_loop(loop_id(1), moved, server: repo, now: @now)
+
+      assert %{
+               matters_by_kind: "datetime",
+               matters_by_date: ~D[2031-06-24],
+               matters_by_time: ~T[12:00:00],
+               matters_by_source: "lookup",
+               horizon_class: "long",
+               last_answer: "moved",
+               anchor_kind: "matters_by"
+             } = settled
+
+      assert settled.matters_by_at == utc(~U[2031-06-24 16:00:00Z])
+
+      assert {:error, {:invalid, :matters_by, :partial_move}} =
+               Repo.settle_open_loop(loop_id(1), %{matters_by_at: ~U[2031-06-25 16:00:00Z]},
+                 server: repo
+               )
+
+      assert {:error, {:invalid, :matters_by_time, :required}} =
+               Repo.settle_open_loop(loop_id(1), %{moved | matters_by_time: nil}, server: repo)
+
+      assert {:error, {:invalid, :horizon_class, :anchor_mismatch}} =
+               Repo.settle_open_loop(loop_id(1), %{moved | horizon_class: "after"}, server: repo)
+
+      assert {:ok, %{reach: "conversation"}} =
+               Repo.settle_open_loop(loop_id(1), %{reach: "conversation"}, server: repo)
     end
   end
 

@@ -1,6 +1,7 @@
 defmodule FermixCore.OpenLoops.Registry do
   @moduledoc """
-  Validation and orchestration for open loops (MILESTONE_78 §04, §07, §18).
+  Validation and orchestration for open loops (MILESTONE_78 §04, §07, §18;
+  MILESTONE_83 §05, §10, §11).
 
   The only layer that turns the model's arguments into a stored loop or a
   settled one. It owns:
@@ -17,6 +18,12 @@ defmodule FermixCore.OpenLoops.Registry do
       `Temporal.Registry` resolves an event's `when`, in the owner-named zone or
       `[fermix_core.personalization] timezone`; a loop is dated, so the timer
       and yearly forms are refused;
+    * **the two timings** — exactly one of `matters_by` (something to do by a
+      date) and `ask_after` (something waited on or gone through, asked about
+      afterwards; a date alone means after that day ends, so it resolves to
+      the next day's active-hours start, and it lies between
+      `Defaults.ask_after_min_ms/0` and `Defaults.ask_after_max_ms/0` from
+      now), and the `reach` the loop may be raised by;
     * **the dedupe key** — the intention lowercased, punctuation stripped,
       whitespace collapsed and bounded, never model-authored;
     * **the delivery snapshot** — the owner inbox ladder
@@ -45,12 +52,32 @@ defmodule FermixCore.OpenLoops.Registry do
   alias FermixCore.OpenLoops.ActiveHours
   alias FermixCore.OpenLoops.Defaults
   alias FermixCore.OpenLoops.Lifecycle
+  alias FermixCore.OpenLoops.Reactions
   alias FermixCore.OpenLoops.Telemetry
   alias FermixCore.Temporal.Planner
 
   @notification_platform Notifications.platform()
-  @note_keys [:intention, :why_it_matters, :matters_by, :timezone]
-  @answers ~w(done plan not_yet stop drop asked)
+  @note_keys [
+    :intention,
+    :why_it_matters,
+    :matters_by,
+    :ask_after,
+    :reach,
+    :matters_by_source,
+    :timezone
+  ]
+  @update_keys [
+    :answer,
+    :owner_words,
+    :plan_at,
+    :matters_by,
+    :matters_by_source,
+    :ask_after,
+    :reach
+  ]
+  @answers ~w(done plan not_yet stop drop asked moved reach)
+  @sources ~w(owner lookup)
+  @reaches Defaults.reaches()
   @list_states ~w(live closed any)
   @live ~w(open due asked)
   @relative_units %{"days" => 1, "weeks" => 7}
@@ -77,27 +104,37 @@ defmodule FermixCore.OpenLoops.Registry do
   # --- note ------------------------------------------------------------------
 
   @doc """
-  Records the owner's stated intention with the date by which it matters.
+  Records something in the owner's own life to follow up: something to do by
+  a date, or something waited on or gone through.
 
-  `params` carries `intention`, `matters_by` (the tagged date form), and
-  optionally `why_it_matters` and `timezone`, atom- or string-keyed. The same
-  intention on a live loop returns that loop as stored (`status: :existing`)
-  and writes nothing. `stated_as` is the date stated absolutely with its
-  weekday, `first_check` the first slot in the loop's zone, `delivery` the
-  snapshotted platform and how it was resolved (nil for an existing loop), and
-  `live_loops` the owner's count after this call.
+  `params` carries `intention`, exactly one of `matters_by` and `ask_after`
+  (each the tagged date form; neither is `:missing_when`, both `:both_whens`),
+  `reach` (`"conversation"` or `"message"`), and optionally `why_it_matters`,
+  `timezone` and, with `matters_by` only, `matters_by_source` (`"owner"`, the
+  default, or `"lookup"`), atom- or string-keyed. The same intention on a
+  live loop of the same timing returns that loop as stored (`status:
+  :existing`) and writes nothing; on a live loop of the other timing it is
+  `{:kind_conflict, loop_id}`. `stated_as` is the anchor stated absolutely with
+  its weekday (an `ask_after` as the instant asking may start), `first_check`
+  the first slot in the loop's zone, `delivery` the snapshotted platform and
+  how it was resolved (nil for an existing loop), and `live_loops` the
+  owner's count after this call.
   """
   @spec note(map(), map(), keyword()) :: {:ok, note_result()} | {:error, term()}
   def note(params, context, opts \\ [])
       when is_map(params) and is_map(context) and is_list(opts) do
     now = now(opts)
+    params = take(params, @note_keys)
 
     with :ok <- mutation_gate(context),
          {:ok, source} <- source(context),
-         {:ok, spec} <- capture_spec(take(params, @note_keys), now, opts),
-         {:ok, target} <- delivery_target(opts),
+         {:ok, base} <- capture_base(params, opts),
          {:ok, hours} <-
-           active_hours(agent_id(context), owner_id(context), spec.timezone, now, opts),
+           active_hours(agent_id(context), owner_id(context), base.timezone, now, opts),
+         {:ok, anchor} <- capture_anchor(base.timing, params, base.timezone, {hours, now}),
+         {:ok, target} <- delivery_target(opts),
+         {:ok, how} <- capture_how(base.timing, params),
+         spec = base |> Map.merge(anchor) |> Map.merge(how),
          {:ok, attrs} <- capture_attrs(spec, source, target, context, {hours, now}),
          {:ok, {status, loop}} <- Repo.create_open_loop(attrs, repo_opts(opts)),
          {:ok, live} <- Repo.count_live_open_loops(loop.owner_id, repo_opts(opts)) do
@@ -110,7 +147,7 @@ defmodule FermixCore.OpenLoops.Registry do
     %{
       status: status,
       loop: loop,
-      stated_as: stated_matters_by(loop, opts),
+      stated_as: stated_anchor(loop, opts),
       first_check: Clock.stated_instant(loop.next_touch_at, opts),
       delivery: %{platform: loop.delivery_platform, source: delivery_source(status, target)},
       live_loops: live
@@ -120,28 +157,71 @@ defmodule FermixCore.OpenLoops.Registry do
   defp delivery_source(:created, target), do: target.source
   defp delivery_source(:existing, _target), do: nil
 
-  defp capture_spec(params, now, opts) do
-    with :ok <- required_present(params, [:intention, :matters_by]),
+  # What the loop is, which timing it has, and the zone its times resolve in.
+  defp capture_base(params, opts) do
+    with :ok <- required_present(params, [:intention]),
+         {:ok, timing} <- one_timing(params),
          {:ok, intention} <- bounded_text(params.intention, :intention, Defaults.intention_max()),
          {:ok, dedupe_key} <- dedupe_key(intention),
          {:ok, why} <- optional_text(params.why_it_matters, :why_it_matters),
-         {:ok, zone} <- resolve_timezone(params.timezone, opts),
-         {:ok, date} <- resolve_date(params.matters_by, zone, now),
-         :ok <- still_ahead(date.at, now) do
+         {:ok, zone} <- resolve_timezone(params.timezone, opts) do
       {:ok,
-       Map.merge(date, %{
+       %{
+         timing: timing,
          intention: intention,
          dedupe_key: dedupe_key,
          why_it_matters: why,
-         timezone: zone,
+         timezone: zone
+       }}
+    end
+  end
+
+  defp one_timing(%{matters_by: nil, ask_after: nil}), do: {:error, :missing_when}
+  defp one_timing(%{matters_by: nil}), do: {:ok, :ask_after}
+  defp one_timing(%{ask_after: nil}), do: {:ok, :matters_by}
+  defp one_timing(_both), do: {:error, :both_whens}
+
+  # The anchor: a dated loop's date, still ahead, with its horizon class; or
+  # the instant asking first feels natural, class `after`.
+  defp capture_anchor(:matters_by, params, zone, {_hours, now}) do
+    with {:ok, date} <- resolve_date(params.matters_by, zone, now),
+         :ok <- still_ahead(date.at, now) do
+      {:ok,
+       Map.merge(date, %{
+         anchor_kind: "matters_by",
          horizon_class: Defaults.horizon_class(now, date.at, zone)
        })}
     end
   end
 
+  defp capture_anchor(:ask_after, params, zone, {hours, now}) do
+    with {:ok, after_spec} <- resolve_ask_after(params.ask_after, zone, hours, now) do
+      {:ok, Map.merge(after_spec, %{anchor_kind: "ask_after", horizon_class: "after"})}
+    end
+  end
+
+  # How the loop may be raised, and who gave a dated loop's date.
+  defp capture_how(timing, params) do
+    with :ok <- required_present(params, [:reach]),
+         {:ok, reach} <- reach(params.reach),
+         {:ok, source} <- matters_by_source(timing, params.matters_by_source) do
+      {:ok, %{reach: reach, matters_by_source: source}}
+    end
+  end
+
+  defp reach(reach) when reach in @reaches, do: {:ok, reach}
+  defp reach(_reach), do: {:error, {:invalid_param, :reach}}
+
+  defp matters_by_source(:matters_by, nil), do: {:ok, "owner"}
+  defp matters_by_source(:matters_by, source) when source in @sources, do: {:ok, source}
+  defp matters_by_source(:matters_by, _source), do: {:error, {:invalid_param, :matters_by_source}}
+  defp matters_by_source(:ask_after, nil), do: {:ok, nil}
+  defp matters_by_source(:ask_after, _source), do: {:error, :source_without_matters_by}
+
   defp capture_attrs(spec, {channel, chat_id, scope}, target, context, {hours, now}) do
     loop = %{
       horizon_class: spec.horizon_class,
+      reach: spec.reach,
       matters_by_date: spec.date,
       matters_by_at: spec.at,
       timezone: spec.timezone
@@ -159,6 +239,8 @@ defmodule FermixCore.OpenLoops.Registry do
          why_it_matters: spec.why_it_matters,
          matters_by_kind: spec.kind,
          matters_by_time: spec.time,
+         anchor_kind: spec.anchor_kind,
+         matters_by_source: spec.matters_by_source,
          said_at: now,
          source_channel: channel,
          source_chat_id: chat_id,
@@ -178,33 +260,78 @@ defmodule FermixCore.OpenLoops.Registry do
     if DateTime.compare(at, now) == :gt, do: :ok, else: {:error, :date_passed}
   end
 
+  # A date alone means after that day ends: the next day's active-hours start.
+  # Asking must leave the owner at least the bound's hours and lie within its
+  # days, so a same-evening outcome can be asked about that night.
+  defp resolve_ask_after(form, zone, hours, now) do
+    with {:ok, date} <- resolve_date(form, zone, now) do
+      at = after_instant(date, zone, hours)
+
+      cond do
+        DateTime.compare(at, later(now, Defaults.ask_after_min_ms())) == :lt ->
+          {:error, :ask_after_too_soon}
+
+        DateTime.compare(at, later(now, Defaults.ask_after_max_ms())) == :gt ->
+          {:error, :ask_after_too_far}
+
+        true ->
+          {:ok, %{date | at: at}}
+      end
+    end
+  end
+
+  defp after_instant(%{kind: "date", date: date}, zone, hours),
+    do: ActiveHours.start_on(hours, Date.add(date, 1), zone)
+
+  defp after_instant(%{kind: "datetime", at: at}, _zone, _hours), do: at
+
+  defp later(%DateTime{} = at, ms), do: DateTime.add(at, div(ms, 1_000), :second)
+
   # --- update ----------------------------------------------------------------
 
   @doc """
   Settles or moves a loop from the owner's answer: `done`, `plan`, `not_yet`,
-  `stop`, `drop` or `asked` (`OpenLoops.Lifecycle.after_answer/5`).
+  `stop`, `drop`, `asked`, `moved` or `reach`
+  (`OpenLoops.Lifecycle.after_answer/5`).
 
   `owner_words` is required for every answer but `asked`, at most 240
   characters, and never stored. On a turn that read outside content it must
   also appear, normalised as the dedupe key is, in the owner's own text for the
   turn (`:owner_text` of `context`: the message as typed, empty when it was
-  forwarded): content the turn read could otherwise close, stop or move a loop
-  under words the owner never said. A voice call's turn cannot be checked (a
-  realtime call carries no `:owner_text`, and a hand-off's text is the
-  exchange its session put together), nor can any context with no
+  forwarded), for every answer but `asked` (`moved`, `reach` and `not_yet` with
+  `ask_after` included): content the turn read could otherwise close, stop or
+  move a loop under words the owner never said. A voice call's turn cannot be
+  checked (a realtime call carries no `:owner_text`, and a hand-off's text is
+  the exchange its session put together), nor can any context with no
   `:owner_text`, so such an answer is refused there, and the loop waits for the
   owner's chat.
 
-  `plan_at` (the tagged date form, in the loop's zone; a date-only plan arms
-  that day's active-hours start) goes with `plan` only. Traces
-  `[:fermix, :open_loop, :settled]` with `by: "main_agent"`. `next_check` is
-  stated after `plan` and `not_yet`.
+  Each other argument goes with one answer, in the loop's zone and in the
+  tagged date form where it is a time:
+
+    * `plan_at` with `plan`; a date alone arms that day's active-hours start
+      on a dated loop, and the next day's on an `after` loop;
+    * `ask_after` with `not_yet`, required on an `after` loop and refused on a
+      dated one, resolved and bounded as `note/3` resolves it;
+    * `matters_by` with `moved`, a dated loop's new date, and optionally
+      `matters_by_source` (`"owner"`, the default, or `"lookup"`);
+    * `reach` with `reach`, `"conversation"` or `"message"`.
+
+  Traces `[:fermix, :open_loop, :settled]` with `by: "main_agent"`.
+  `next_check` is stated after `plan`, `not_yet` and `moved`.
+
+  Then the follow-up record (`OpenLoops.Reactions`, M83 §07): `asked` records
+  a rung 1 follow-up in this turn's conversation and session, stamped when the
+  turn had read outside content, and none on a voice call, whose spoken reply
+  cannot be captured; `drop` deletes the loop's record, and every other answer
+  is stamped on its latest follow-up. The settle has committed by then, so a
+  record that cannot be written is logged and the answer stands.
   """
   @spec update(String.t(), map(), map(), keyword()) :: {:ok, update_result()} | {:error, term()}
   def update(id, params, context, opts \\ [])
       when is_binary(id) and is_map(params) and is_map(context) and is_list(opts) do
     now = now(opts)
-    params = take(params, [:answer, :owner_words, :plan_at])
+    params = take(params, @update_keys)
 
     with :ok <- mutation_gate(context),
          {:ok, answer} <- answer(params.answer),
@@ -213,8 +340,8 @@ defmodule FermixCore.OpenLoops.Registry do
          {:ok, loop} <- owned_loop(id, context, opts),
          :ok <- live(loop),
          {:ok, hours} <- active_hours(loop.agent_id, loop.owner_id, loop.timezone, now, opts),
-         {:ok, plan_at} <- plan_at(params.plan_at, loop, hours, now),
-         {:ok, changes} <- Lifecycle.after_answer(loop, answer, plan_at, now, hours),
+         {:ok, args} <- answer_args(params, loop, hours, now),
+         {:ok, changes} <- Lifecycle.after_answer(loop, answer, args, now, hours),
          {:ok, settled} <- Repo.settle_open_loop(loop.id, changes, repo_opts(opts, now)) do
       Telemetry.settled(
         loop.id,
@@ -225,6 +352,7 @@ defmodule FermixCore.OpenLoops.Registry do
         session_id(context)
       )
 
+      :ok = record_follow_up(answer, settled, context, now, opts)
       notify(opts)
 
       {:ok,
@@ -235,6 +363,28 @@ defmodule FermixCore.OpenLoops.Registry do
        }}
     end
   end
+
+  defp record_follow_up("asked", loop, context, now, opts),
+    do:
+      logged_follow_up("asked", Reactions.record_asked(loop, context, now, reactions_opts(opts)))
+
+  defp record_follow_up("drop", loop, _context, _now, opts),
+    do: logged_follow_up("drop", Reactions.forget(loop, reactions_opts(opts)))
+
+  defp record_follow_up(answer, loop, _context, now, opts),
+    do: logged_follow_up(answer, Reactions.stamp_answer(loop, answer, now, reactions_opts(opts)))
+
+  defp logged_follow_up(_answer, {:ok, _result}), do: :ok
+  defp logged_follow_up("asked", {:skipped, :reply_uncapturable}), do: :ok
+
+  defp logged_follow_up(answer, {:error, reason}) do
+    Logger.warning(
+      "open_loops: the follow-up record could not be written after the #{answer} answer, " <>
+        "which stands: #{inspect(reason)}"
+    )
+  end
+
+  defp reactions_opts(opts), do: [repo: Keyword.get(opts, :repo, Repo)]
 
   defp answer(answer) when answer in @answers, do: {:ok, answer}
   defp answer(nil), do: {:error, {:missing_parameters, [:answer]}}
@@ -290,12 +440,23 @@ defmodule FermixCore.OpenLoops.Registry do
   defp live(%{state: state}) when state in @live, do: :ok
   defp live(_loop), do: {:error, :not_live}
 
+  # Each argument resolved in the loop's zone; which answer it may go with is
+  # `Lifecycle.after_answer/5`'s to say.
+  defp answer_args(params, loop, hours, now) do
+    with {:ok, plan_at} <- plan_at(params.plan_at, loop, hours, now),
+         {:ok, ask_after} <- optional_ask_after(params.ask_after, loop, hours, now),
+         {:ok, anchor} <- moved_anchor(params.matters_by, params.matters_by_source, loop, now),
+         {:ok, reach} <- optional_reach(params.reach) do
+      {:ok, %{plan_at: plan_at, ask_after: ask_after, anchor: anchor, reach: reach}}
+    end
+  end
+
   defp plan_at(nil, _loop, _hours, _now), do: {:ok, nil}
 
   defp plan_at(form, loop, hours, now) do
     case resolve_date(form, loop.timezone, now) do
       {:ok, %{kind: "date", date: date}} ->
-        {:ok, ActiveHours.start_on(hours, date, loop.timezone)}
+        {:ok, ActiveHours.start_on(hours, plan_day(loop, date), loop.timezone)}
 
       {:ok, %{kind: "datetime", at: at}} ->
         {:ok, at}
@@ -305,7 +466,37 @@ defmodule FermixCore.OpenLoops.Registry do
     end
   end
 
-  defp next_check(answer, loop, opts) when answer in ["plan", "not_yet"],
+  # A plan for something waited on, like its `ask_after`, means after that day.
+  defp plan_day(%{horizon_class: "after"}, date), do: Date.add(date, 1)
+  defp plan_day(_dated, date), do: date
+
+  defp optional_ask_after(nil, _loop, _hours, _now), do: {:ok, nil}
+
+  defp optional_ask_after(form, loop, hours, now) do
+    with {:ok, %{at: at}} <- resolve_ask_after(form, loop.timezone, hours, now), do: {:ok, at}
+  end
+
+  defp moved_anchor(nil, nil, _loop, _now), do: {:ok, nil}
+  defp moved_anchor(nil, _source, _loop, _now), do: {:error, :source_without_matters_by}
+
+  defp moved_anchor(form, source, loop, now) do
+    with {:ok, date} <- resolve_date(form, loop.timezone, now),
+         {:ok, source} <- matters_by_source(:matters_by, source) do
+      {:ok,
+       %{
+         matters_by_kind: date.kind,
+         matters_by_date: date.date,
+         matters_by_time: date.time,
+         matters_by_at: date.at,
+         matters_by_source: source
+       }}
+    end
+  end
+
+  defp optional_reach(nil), do: {:ok, nil}
+  defp optional_reach(value), do: reach(value)
+
+  defp next_check(answer, loop, opts) when answer in ["plan", "not_yet", "moved"],
     do: Clock.stated_instant(loop.next_touch_at, opts)
 
   defp next_check(_answer, _loop, _opts), do: nil
@@ -331,10 +522,13 @@ defmodule FermixCore.OpenLoops.Registry do
   defp list_state(_state), do: {:error, {:invalid_param, :state}}
 
   @doc """
-  One loop as the model sees it: its words, its date stated absolutely, when
-  and where the owner said it, its state and touches, the next check, and for
-  a closed loop why and when it closed. Never a delivery destination, never a
-  check-in's message text.
+  One loop as the model sees it: its words, its anchor stated absolutely
+  (`matters_by` and who gave it, `matters_by_source`, for something to do;
+  `ask_after`, the instant asking may start, for something waited on), how it
+  may be raised (`reach`) and its `horizon_class`, when and where the owner
+  said it, its state and touches, the next check, and for a closed loop why
+  and when it closed. Never a delivery destination, never a check-in's
+  message text.
 
   Every time is stated on `FermixCore.Clock`, in the owner's current zone, the
   clock the current-date note reads, so the day it was said and "today" never
@@ -347,15 +541,27 @@ defmodule FermixCore.OpenLoops.Registry do
       "open_loop_id" => loop.id,
       "intention" => loop.intention,
       "why_it_matters" => loop.why_it_matters,
-      "matters_by" => stated_matters_by(loop, opts),
       "said_on" => Clock.stated_day(loop.said_at, opts),
       "source_channel" => loop.source_channel,
       "state" => loop.state,
       "touches" => loop.touches,
       "next_check" => next_check_view(loop, opts),
-      "last_answer" => loop.last_answer
+      "last_answer" => loop.last_answer,
+      "reach" => loop.reach,
+      "horizon_class" => loop.horizon_class
     }
+    |> Map.merge(anchor_view(loop, opts))
     |> Map.merge(closed_view(loop, opts))
+  end
+
+  defp anchor_view(%{anchor_kind: "ask_after"} = loop, opts),
+    do: %{"ask_after" => stated_anchor(loop, opts)}
+
+  defp anchor_view(loop, opts) do
+    %{
+      "matters_by" => stated_anchor(loop, opts),
+      "matters_by_source" => loop.matters_by_source
+    }
   end
 
   @doc """
@@ -364,19 +570,24 @@ defmodule FermixCore.OpenLoops.Registry do
   they may not be the owner's. `open_loop_list` and `open_loop_update` answer
   with it.
   """
-  @spec result_view(Repo.open_loop_row()) :: map()
-  def result_view(%{noted_after_outside_content: false} = loop), do: view(loop)
+  @spec result_view(Repo.open_loop_row(), keyword()) :: map()
+  def result_view(loop, opts \\ [])
 
-  def result_view(%{noted_after_outside_content: true} = loop),
-    do: loop |> view() |> Map.put("intention", framed_intention(loop))
+  def result_view(%{noted_after_outside_content: false} = loop, opts) when is_list(opts),
+    do: view(loop, opts)
+
+  def result_view(%{noted_after_outside_content: true} = loop, opts) when is_list(opts),
+    do: loop |> view(opts) |> Map.put("intention", framed_intention(loop))
 
   @doc """
   A loop's words as data that may not be the owner's: JSON-quoted, so no quote
   or line break in them ends the quotation, inside the untrusted-content frame
   attributed to the tool that recorded them. Every place a stamped loop's words
-  reach a model frames them this way.
+  reach a model frames them this way, a follow-up row carrying its loop's words
+  (`OpenLoops.Reactions.line/2`) among them.
   """
-  @spec framed_intention(Repo.open_loop_row()) :: String.t()
+  @spec framed_intention(%{required(:intention) => String.t(), optional(atom()) => term()}) ::
+          String.t()
   def framed_intention(%{intention: intention}) when is_binary(intention),
     do: UntrustedContent.frame("open_loop_note", Jason.encode!(intention))
 
@@ -397,11 +608,16 @@ defmodule FermixCore.OpenLoops.Registry do
   # --- stated dates ----------------------------------------------------------
 
   # Always absolute, always with the weekday and the year: the statement is read
-  # off the stored row, so it can only say what was written.
-  defp stated_matters_by(%{matters_by_kind: "date"} = loop, _opts),
+  # off the stored row, so it can only say what was written. An `ask_after` is
+  # the instant asking may start, a date alone having become the next day's
+  # active-hours start.
+  defp stated_anchor(%{anchor_kind: "ask_after"} = loop, opts),
+    do: Clock.stated_instant(loop.matters_by_at, opts)
+
+  defp stated_anchor(%{matters_by_kind: "date"} = loop, _opts),
     do: Calendar.strftime(loop.matters_by_date, "%A, %B %-d, %Y")
 
-  defp stated_matters_by(loop, opts), do: Clock.stated_instant(loop.matters_by_at, opts)
+  defp stated_anchor(loop, opts), do: Clock.stated_instant(loop.matters_by_at, opts)
 
   # --- tagged date form (Temporal.Registry's vocabulary) ---------------------
 
@@ -695,6 +911,16 @@ defmodule FermixCore.OpenLoops.Registry do
   def describe_error({:invalid_param, :state}),
     do: "state must be live, closed or any; call again with one of them."
 
+  def describe_error({:invalid_param, :reach}) do
+    "reach must be conversation, to raise it only in a conversation the owner starts, or " <>
+      "message, to also allow one message about it; call again with one of them."
+  end
+
+  def describe_error({:invalid_param, :matters_by_source}) do
+    "matters_by_source must be owner, or lookup for a looked-up date the owner confirmed; " <>
+      "call again with one of them or leave it out."
+  end
+
   def describe_error({:invalid_param, key}),
     do: "#{key} is not valid; call again with a value the schema allows."
 
@@ -706,9 +932,40 @@ defmodule FermixCore.OpenLoops.Registry do
   end
 
   def describe_error(:not_dated) do
-    "An open loop needs a calendar date by which it matters, so a timer in minutes or " <>
-      "hours or a yearly date cannot be one; record it with the date the owner named, or " <>
-      "not at all."
+    "An open loop's time is a calendar date or a date and time, so a timer in minutes or " <>
+      "hours or a yearly date cannot be one; call again with a date, or record nothing."
+  end
+
+  def describe_error(:missing_when) do
+    "Give exactly one time: matters_by for what the owner means to do or decide by a date, " <>
+      "or ask_after for what they are waiting on or going through; call again with one."
+  end
+
+  def describe_error(:both_whens) do
+    "Give only one of matters_by and ask_after: matters_by for something to do by a date, " <>
+      "ask_after for something waited on or gone through; call again with the one that fits."
+  end
+
+  def describe_error({:kind_conflict, open_loop_id}) do
+    "Open loop #{open_loop_id} already holds this in the other timing, so nothing was " <>
+      "recorded; leave it, or settle it from the owner's words with open_loop_update, rather " <>
+      "than recording a second one."
+  end
+
+  def describe_error(:ask_after_too_soon) do
+    "ask_after must be at least #{div(Defaults.ask_after_min_ms(), 3_600_000)} hours from " <>
+      "now; call again with when asking would first feel natural, after the news or the " <>
+      "event."
+  end
+
+  def describe_error(:ask_after_too_far) do
+    "ask_after must be at most #{div(Defaults.ask_after_max_ms(), 86_400_000)} days from " <>
+      "now; call again with a nearer time, or record nothing."
+  end
+
+  def describe_error(:source_without_matters_by) do
+    "matters_by_source goes only with matters_by, the date of something to do; call again " <>
+      "without it."
   end
 
   def describe_error(:date_passed) do
@@ -777,6 +1034,16 @@ defmodule FermixCore.OpenLoops.Registry do
       "it gets, so there is nothing to record."
   end
 
+  def describe_error(:not_due) do
+    "That loop is not due yet, so it was not recorded as raised; it will come up on its own " <>
+      "when its time arrives, and until then answer the owner without raising it."
+  end
+
+  def describe_error(:touches_spent) do
+    "That loop has been followed up twice, the most something waited on gets, so no new " <>
+      "time can be set; it ends on its own unless the owner settles it."
+  end
+
   def describe_error(:missing_owner_words) do
     "owner_words is required for this answer; call again with the owner's own words it " <>
       "rests on, excerpted as just the clause."
@@ -817,8 +1084,43 @@ defmodule FermixCore.OpenLoops.Registry do
   def describe_error(:plan_at_without_plan),
     do: "plan_at goes only with answer plan; call again without it."
 
+  def describe_error(:plan_too_far) do
+    "That plan is more than #{div(Defaults.ask_after_max_ms(), 86_400_000)} days away; ask " <>
+      "the owner for a nearer time, or settle not_yet with an ask_after."
+  end
+
+  def describe_error(:ask_after_required) do
+    "This loop is something the owner is waiting on or going through, so not_yet needs " <>
+      "ask_after: when asking again would first feel natural; call again with it."
+  end
+
+  def describe_error(:ask_after_without_not_yet),
+    do: "ask_after goes only with answer not_yet; call again without it."
+
+  def describe_error(:ask_after_on_dated_loop) do
+    "This loop has a date it matters by, so not_yet takes no ask_after; call again " <>
+      "without it, or settle moved with matters_by if the date changed."
+  end
+
+  def describe_error(:matters_by_without_moved),
+    do: "matters_by goes only with answer moved; call again without it."
+
+  def describe_error(:moved_requires_date) do
+    "moved needs matters_by, the new date the owner named; call again with it, or settle " <>
+      "plan if only their own timing changed."
+  end
+
+  def describe_error(:moved_on_after_loop) do
+    "This loop is something the owner is waiting on, with no date to move; settle not_yet " <>
+      "with ask_after, or plan, to change when it is asked about."
+  end
+
+  def describe_error(:reach_without_reach_answer),
+    do: "reach goes only with answer reach; call again without it."
+
   def describe_error({:invalid_answer, answer}) do
-    "#{inspect(answer)} is not an answer; use done, plan, not_yet, stop, drop or asked."
+    "#{inspect(answer)} is not an answer; use done, plan, not_yet, stop, drop, asked, moved " <>
+      "or reach."
   end
 
   def describe_error({:invalid, field, problem}) do
@@ -829,4 +1131,18 @@ defmodule FermixCore.OpenLoops.Registry do
     "Open loop storage failed (#{inspect(reason)}), so nothing changed; tell the owner it " <>
       "could not be saved and do not retry in this turn."
   end
+
+  @doc """
+  The tag a refused call is traced under, beside `describe_error/1`'s
+  sentence: the reason itself, or its leading atom (`{:invalid_param, :reach}`
+  is `invalid_param`), the tags the tools' failure modes name; a storage
+  failure with no such atom is `storage_failed`.
+  """
+  @spec error_tag(term()) :: String.t()
+  def error_tag(reason) when is_atom(reason), do: Atom.to_string(reason)
+
+  def error_tag(reason) when is_tuple(reason) and is_atom(elem(reason, 0)),
+    do: Atom.to_string(elem(reason, 0))
+
+  def error_tag(_reason), do: "storage_failed"
 end

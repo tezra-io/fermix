@@ -246,6 +246,20 @@ defmodule FermixCore.OpenLoops.SchedulerTest do
     row
   end
 
+  # Something waited on, asked about from `anchor`.
+  defp waited_on(%DateTime{} = anchor) do
+    %{
+      anchor_kind: "ask_after",
+      matters_by_source: nil,
+      horizon_class: "after",
+      matters_by_kind: "datetime",
+      matters_by_date: DateTime.to_date(anchor),
+      matters_by_time: ~T[17:00:00],
+      matters_by_at: anchor,
+      next_touch_at: anchor
+    }
+  end
+
   defp due!(ctx, overrides \\ %{}) do
     row = create!(ctx, overrides)
     {:ok, _scan} = Repo.scan_due_open_loops(row.next_touch_at, 50, server: ctx.repo)
@@ -415,7 +429,8 @@ defmodule FermixCore.OpenLoops.SchedulerTest do
             last_touch_rung: 2,
             last_outcome: "spoke",
             last_outcome_at: ~U[2031-06-07 14:00:00Z],
-            last_message: "An invented check-in."
+            last_message: "An invented check-in.",
+            last_message_after_outside_content: false
           },
           server: ctx.repo
         )
@@ -515,6 +530,60 @@ defmodule FermixCore.OpenLoops.SchedulerTest do
       assert %{claimed_at: nil} = stored(ctx, later.id)
     end
 
+    test "a loop kept for conversation never starts a run and traces no skip", ctx do
+      row = due!(ctx, %{reach: "conversation"})
+      capture(row)
+      scheduler = start_scheduler(ctx)
+      :ok = Scheduler.tick(scheduler, now: @now)
+
+      sync(scheduler)
+      refute_received {:checkin_started, _id, _pid, _args}
+      refute_received {:telemetry, @skipped, _measurements, _metadata}
+      assert %{state: "due", claimed_at: nil, reach: "conversation"} = stored(ctx, row.id)
+    end
+
+    # A deadline loses its value after its date; "how did it go" keeps a day.
+    test "a dated loop takes the day's message before a loop waited on", ctx do
+      waited = due!(ctx, waited_on(~U[2031-06-06 21:00:00Z]))
+      dated = due!(ctx)
+      scheduler = start_scheduler(ctx)
+      :ok = Scheduler.tick(scheduler, now: @now)
+
+      id = dated.id
+      assert_receive {:checkin_started, ^id, _pid, %{touch: 1, rung: 2}}
+      sync(scheduler)
+      refute_received {:checkin_started, _id, _pid, _args}
+      assert %{state: "due", claimed_at: nil} = stored(ctx, waited.id)
+    end
+
+    test "among loops waited on, the oldest anchor goes first", ctx do
+      newer = due!(ctx, waited_on(~U[2031-06-06 21:00:00Z]))
+      older = due!(ctx, waited_on(~U[2031-06-05 21:00:00Z]))
+      scheduler = start_scheduler(ctx)
+      :ok = Scheduler.tick(scheduler, now: @now)
+
+      id = older.id
+      assert_receive {:checkin_started, ^id, _pid, %{touch: 1, rung: 2}}
+      sync(scheduler)
+      refute_received {:checkin_started, _id, _pid, _args}
+      assert %{state: "due", claimed_at: nil} = stored(ctx, newer.id)
+    end
+
+    test "a conversation loop's closed window moves on to the next at the tick", ctx do
+      row = due!(ctx, %{reach: "conversation"})
+      assert DateTime.compare(stored(ctx, row.id).rung1_until, ~U[2031-06-09 13:00:00Z]) == :eq
+      scheduler = start_scheduler(ctx)
+
+      next_slot = ~U[2031-06-09 13:00:00Z]
+      set_now(ctx, next_slot)
+      :ok = Scheduler.tick(scheduler, now: next_slot)
+
+      moved_on = stored(ctx, row.id)
+      assert %{state: "due", touches: 0, claimed_at: nil} = moved_on
+      assert DateTime.compare(moved_on.next_touch_at, next_slot) == :eq
+      assert DateTime.compare(moved_on.rung1_until, ~U[2031-06-11 04:00:00Z]) == :eq
+    end
+
     test "an expiry is traced as settled by the scheduler", ctx do
       row = create!(ctx)
       capture(row)
@@ -572,6 +641,24 @@ defmodule FermixCore.OpenLoops.SchedulerTest do
       state = sync(scheduler)
       assert is_reference(state.due_timer)
       assert state.due_delay_ms == 1_800_000
+    end
+
+    test "a due loop's timer is its own window: three hours from when it came due", ctx do
+      create!(ctx)
+      late = ~U[2031-06-07 14:00:00Z]
+      {:ok, %{due: [_]}} = Repo.scan_due_open_loops(late, 50, server: ctx.repo)
+      set_now(ctx, late)
+
+      scheduler = start_scheduler(ctx, timer_enabled: true)
+      assert sync(scheduler).due_delay_ms == 3 * 3_600_000
+    end
+
+    test "a loop kept for conversation wakes when its window closes, not at its date", ctx do
+      due!(ctx, %{reach: "conversation"})
+      set_now(ctx, ~U[2031-06-08 14:00:00Z])
+
+      scheduler = start_scheduler(ctx, timer_enabled: true)
+      assert sync(scheduler).due_delay_ms == 23 * 3_600_000
     end
 
     test "a touch weeks out arms a bounded recheck, never a weeks-long timer", ctx do

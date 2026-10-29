@@ -1,0 +1,10 @@
+{"open_loops": [{"key": "school",
+                 "intention": "Hear from Wrenfield Primary whether Noor got a place",
+                 "why_it_matters": "the school sends its offers out this week",
+                 "anchor_kind": "ask_after",
+                 "horizon_class": "after",
+                 "reach": "conversation",
+                 "rung1_window": "open",
+                 "said_days_ago": 5,
+                 "touches": 0,
+                 "due_hours_ago": 1}]}

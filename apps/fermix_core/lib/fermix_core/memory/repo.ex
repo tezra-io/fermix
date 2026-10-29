@@ -18,11 +18,11 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Memory.Repo.FtsMatch
   alias FermixCore.Memory.Repo.MeetingsSql
   alias FermixCore.Memory.Repo.MobileSql
+  alias FermixCore.Memory.Repo.OpenLoopReactionsSql
   alias FermixCore.Memory.Repo.OpenLoopsSql
   alias FermixCore.Memory.Repo.TemporalSql
   alias FermixCore.Memory.Repo.VoiceCallsSql
   alias FermixCore.Memory.Scope
-  alias FermixCore.OpenLoops.Defaults, as: OpenLoopsDefaults
   alias FermixCore.Timeouts
 
   @base_migration_version 1
@@ -74,6 +74,7 @@ defmodule FermixCore.Memory.Repo do
   @cue_retention_index_migration_version 48
   @open_loop_outside_content_migration_version 49
   @mobile_icon_index_migration_version 50
+  @open_loop_curiosity_migration_version 51
   @sqlite_open_intent :readwritecreate
 
   # The cue SQL modules (M60), one per lane, all served by `cues_call/3`.
@@ -1087,6 +1088,9 @@ defmodule FermixCore.Memory.Repo do
           matters_by_date: Date.t(),
           matters_by_time: Time.t() | nil,
           matters_by_at: DateTime.t(),
+          anchor_kind: String.t(),
+          matters_by_source: String.t() | nil,
+          reach: String.t(),
           timezone: String.t(),
           horizon_class: String.t(),
           said_at: DateTime.t(),
@@ -1096,6 +1100,7 @@ defmodule FermixCore.Memory.Repo do
           state: String.t(),
           touches: 0..3,
           next_touch_at: DateTime.t() | nil,
+          rung1_until: DateTime.t() | nil,
           claimed_at: DateTime.t() | nil,
           last_touch_at: DateTime.t() | nil,
           last_touch_rung: 1 | 2 | nil,
@@ -1105,6 +1110,7 @@ defmodule FermixCore.Memory.Repo do
           last_outcome: String.t() | nil,
           last_outcome_at: DateTime.t() | nil,
           last_message: String.t() | nil,
+          last_message_after_outside_content: boolean(),
           delivery_platform: String.t(),
           delivery_destination: String.t(),
           delivery_thread_scope: String.t(),
@@ -1113,6 +1119,30 @@ defmodule FermixCore.Memory.Repo do
           revision: pos_integer(),
           created_at: DateTime.t(),
           updated_at: DateTime.t()
+        }
+
+  @type open_loop_reaction_row :: %{
+          required(:id) => String.t(),
+          required(:owner_id) => String.t(),
+          required(:agent_id) => String.t(),
+          required(:open_loop_id) => String.t(),
+          required(:rung) => 1 | 2,
+          required(:raised_at) => DateTime.t(),
+          required(:session_id) => String.t() | nil,
+          required(:source_channel) => String.t(),
+          required(:source_chat_id) => String.t(),
+          required(:source_thread_scope) => String.t(),
+          required(:raised_with) => String.t() | nil,
+          required(:reply_text) => String.t() | nil,
+          required(:reply_at) => DateTime.t() | nil,
+          required(:outcome) => String.t() | nil,
+          required(:answer) => String.t() | nil,
+          required(:created_at) => DateTime.t(),
+          required(:updated_at) => DateTime.t(),
+          required(:raised_after_outside_content) => boolean(),
+          required(:raised_history_tainted) => boolean(),
+          optional(:intention) => String.t(),
+          optional(:noted_after_outside_content) => boolean()
         }
 
   @type resource_selector :: %{
@@ -1709,6 +1739,32 @@ defmodule FermixCore.Memory.Repo do
     )
   end
 
+  # What the memory review reads as the owner's own words, and the check-in as
+  # what they said lately: a user message that is not a guest's, asked aloud on
+  # a call, a coding run's notice or forwarded from someone else.
+  @owner_words_sql """
+  AND COALESCE(
+        CASE WHEN json_valid(metadata_json)
+             THEN json_extract(metadata_json, '$.guest') END,
+        0
+      ) != 1
+  AND COALESCE(
+        CASE WHEN json_valid(metadata_json)
+             THEN json_extract(metadata_json, '$.spoken') END,
+        0
+      ) != 1
+  AND COALESCE(
+        CASE WHEN json_valid(metadata_json)
+             THEN json_extract(metadata_json, '$.harness_continuation') END,
+        0
+      ) != 1
+  AND COALESCE(
+        CASE WHEN json_valid(metadata_json)
+             THEN json_extract(metadata_json, '$.forwarded') END,
+        0
+      ) != 1
+  """
+
   @spec get_user_messages_after(
           memory_review_selector(),
           non_neg_integer() | nil,
@@ -1720,6 +1776,18 @@ defmodule FermixCore.Memory.Repo do
       when is_map(selector) and (is_nil(last_id) or (is_integer(last_id) and last_id >= 0)) and
              is_integer(limit) and limit > 0 do
     call({:get_user_messages_after, selector, last_id || 0, limit}, opts)
+  end
+
+  @doc """
+  The owner's own newest messages in one conversation since `since`, oldest
+  first, at most `limit`: read with the memory review's filter, so no guest's,
+  forwarded, spoken or coding run's message is among them.
+  """
+  @spec recent_owner_messages(memory_review_selector(), DateTime.t(), pos_integer(), keyword()) ::
+          {:ok, [message_row()]} | {:error, term()}
+  def recent_owner_messages(selector, %DateTime{} = since, limit, opts \\ [])
+      when is_map(selector) and is_integer(limit) and limit > 0 do
+    call({:recent_owner_messages, selector, since, limit}, opts)
   end
 
   @spec list_review_conversations(map(), keyword()) ::
@@ -3063,13 +3131,16 @@ defmodule FermixCore.Memory.Repo do
 
   @doc """
   Creates an open loop (§18). A live loop of the same owner with the same
-  dedupe key is returned as stored, with no write (`{:existing, row}`);
-  otherwise the owner's live-loop cap (`OpenLoops.Defaults.max_live_loops/0`)
-  is checked and the row inserted (`{:created, row}`), atomically. Bounds and
-  shapes are validated here, in the caller.
+  dedupe key and anchor kind is returned as stored, with no write
+  (`{:existing, row}`); one of the other anchor kind is refused
+  `{:kind_conflict, id}` (M83 §11); otherwise the owner's live-loop cap
+  (`OpenLoops.Defaults.max_live_loops/0`) is checked and the row inserted
+  (`{:created, row}`), atomically. Bounds and shapes are validated here, in
+  the caller.
   """
   @spec create_open_loop(map(), keyword()) ::
-          {:ok, {:created | :existing, open_loop_row()}} | {:error, :too_many_loops | term()}
+          {:ok, {:created | :existing, open_loop_row()}}
+          | {:error, :too_many_loops | {:kind_conflict, String.t()} | term()}
   def create_open_loop(attrs, opts \\ []) when is_map(attrs) do
     with {:ok, row} <- OpenLoopsSql.normalize_create(attrs) do
       call({:create_open_loop, row}, opts)
@@ -3212,21 +3283,14 @@ defmodule FermixCore.Memory.Repo do
 
   @doc """
   Due, unclaimed loops of one owner and agent inside their rung 1 window:
-  `next_touch_at <= now < next_touch_at + window`, the window
-  `opts[:window_ms]` (default `OpenLoops.Defaults.rung1_window_ms/0`); an
-  imminent loop until its date has passed (rung 1 only, until the date).
+  `now < rung1_until`, the window close the due scan wrote when it marked each
+  due (`OpenLoops.Lifecycle.due_decision/2`), nearest anchor first.
   """
   @spec due_open_loops_for_note(String.t(), String.t(), DateTime.t(), keyword()) ::
           {:ok, [open_loop_row()]} | {:error, term()}
   def due_open_loops_for_note(owner_id, agent_id, %DateTime{} = now, opts \\ [])
       when is_binary(owner_id) and is_binary(agent_id) do
-    window_ms = Keyword.get(opts, :window_ms, OpenLoopsDefaults.rung1_window_ms())
-    opened_after = now |> DateTime.add(-window_ms, :millisecond) |> OpenLoopsSql.stamp!()
-
-    request =
-      {:due_open_loops_for_note, owner_id, agent_id, OpenLoopsSql.stamp!(now), opened_after}
-
-    call(request, opts)
+    call({:due_open_loops_for_note, owner_id, agent_id, OpenLoopsSql.stamp!(now)}, opts)
   end
 
   @doc """
@@ -3254,6 +3318,107 @@ defmodule FermixCore.Memory.Repo do
 
   defp write_stamp(opts) do
     opts |> Keyword.get_lazy(:now, &DateTime.utc_now/0) |> OpenLoopsSql.stamp!()
+  end
+
+  # --- open-loop follow-ups (MILESTONE_83 §07) -----------------------------
+
+  @doc """
+  Records one follow-up of a loop (rung 1, a raise in conversation; rung 2, a
+  check-in message) and prunes the owner's record to the newest
+  `OpenLoops.Defaults.reactions_kept/0`, in one transaction.
+  """
+  @spec record_open_loop_reaction(map(), keyword()) ::
+          {:ok, open_loop_reaction_row()} | {:error, term()}
+  def record_open_loop_reaction(attrs, opts \\ []) when is_map(attrs) do
+    with {:ok, row} <- OpenLoopReactionsSql.normalize_raise(attrs) do
+      call({:record_open_loop_reaction, row}, opts)
+    end
+  end
+
+  @doc """
+  Takes the owner's message as the reply to every follow-up still awaiting one
+  in its conversation, raised since `since` and before the message. Returns
+  the follow-ups it answered (`id`, `open_loop_id`, `rung`, `raised_at`,
+  `reply_at`).
+  """
+  @spec capture_open_loop_replies(map(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def capture_open_loop_replies(attrs, opts \\ []) when is_map(attrs) do
+    with {:ok, capture} <- OpenLoopReactionsSql.normalize_capture(attrs) do
+      call({:capture_open_loop_replies, capture}, opts)
+    end
+  end
+
+  @doc """
+  Stores what Fermix said on the rung 1 follow-ups still without it, raised in
+  a turn's conversation since that turn started, with whether the reply was
+  stamped with the owner's computer activity. Returns how many it wrote.
+  """
+  @spec record_open_loop_raised_with(map(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def record_open_loop_raised_with(attrs, opts \\ []) when is_map(attrs) do
+    with {:ok, args} <- OpenLoopReactionsSql.normalize_raised_with(attrs) do
+      call({:record_open_loop_raised_with, args}, opts)
+    end
+  end
+
+  @doc """
+  Marks the rung 1 follow-ups raised in a turn's conversation since that turn
+  started as raised after outside content, once the turn is known to have read
+  some. Returns how many it marked.
+  """
+  @spec record_open_loop_raised_after_outside_content(map(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def record_open_loop_raised_after_outside_content(attrs, opts \\ []) when is_map(attrs) do
+    with {:ok, args} <- OpenLoopReactionsSql.normalize_outside_content(attrs) do
+      call({:record_open_loop_raised_after_outside_content, args}, opts)
+    end
+  end
+
+  @doc """
+  Marks the owner's follow-ups still awaiting a reply and raised before
+  `cutoff` as `no_reply`. Returns the ones it marked (`id`, `open_loop_id`,
+  `rung`).
+  """
+  @spec stamp_open_loop_no_replies(String.t(), DateTime.t(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def stamp_open_loop_no_replies(owner_id, %DateTime{} = cutoff, opts \\ [])
+      when is_binary(owner_id) and owner_id != "" do
+    call(
+      {:stamp_open_loop_no_replies, owner_id, OpenLoopsSql.stamp!(cutoff), write_stamp(opts)},
+      opts
+    )
+  end
+
+  @doc """
+  Stamps a settle's answer on a loop's latest follow-up, once. Returns 0 when
+  the loop has none, or its latest already carries an answer.
+  """
+  @spec answer_open_loop_reaction(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, 0 | 1} | {:error, term()}
+  def answer_open_loop_reaction(owner_id, open_loop_id, answer, opts \\ [])
+      when is_binary(owner_id) and owner_id != "" and is_binary(open_loop_id) do
+    with {:ok, answer} <- OpenLoopReactionsSql.normalize_answer(open_loop_id, answer) do
+      call({:answer_open_loop_reaction, owner_id, open_loop_id, answer, write_stamp(opts)}, opts)
+    end
+  end
+
+  @doc "Deletes every follow-up of one loop of the owner's. Returns how many."
+  @spec delete_open_loop_reactions(String.t(), String.t(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def delete_open_loop_reactions(owner_id, open_loop_id, opts \\ [])
+      when is_binary(owner_id) and owner_id != "" and is_binary(open_loop_id) do
+    call({:delete_open_loop_reactions, owner_id, open_loop_id}, opts)
+  end
+
+  @doc """
+  The owner's whole follow-up record, newest first, each row with its loop's
+  `intention`.
+  """
+  @spec list_open_loop_reactions(String.t(), keyword()) ::
+          {:ok, [open_loop_reaction_row()]} | {:error, term()}
+  def list_open_loop_reactions(owner_id, opts \\ [])
+      when is_binary(owner_id) and owner_id != "" do
+    call({:list_open_loop_reactions, owner_id}, opts)
   end
 
   @doc """
@@ -3692,9 +3857,9 @@ defmodule FermixCore.Memory.Repo do
     {:reply, with_connection(state, &OpenLoopsSql.next_wake(&1, now)), state}
   end
 
-  def handle_call({:due_open_loops_for_note, owner_id, agent_id, now, opened}, _from, state) do
+  def handle_call({:due_open_loops_for_note, owner_id, agent_id, now}, _from, state) do
     reply =
-      with_connection(state, &OpenLoopsSql.due_for_note(&1, owner_id, agent_id, now, opened))
+      with_connection(state, &OpenLoopsSql.due_for_note(&1, owner_id, agent_id, now))
 
     {:reply, reply, state}
   end
@@ -3709,6 +3874,46 @@ defmodule FermixCore.Memory.Repo do
       with_connection(state, &OpenLoopsSql.owner_message_hours(&1, agent_id, owner_id, since))
 
     {:reply, reply, state}
+  end
+
+  def handle_call({:record_open_loop_reaction, row}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopReactionsSql.insert(&1, row)), state}
+  end
+
+  def handle_call({:capture_open_loop_replies, capture}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopReactionsSql.capture(&1, capture)), state}
+  end
+
+  def handle_call({:record_open_loop_raised_with, args}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopReactionsSql.raised_with(&1, args)), state}
+  end
+
+  def handle_call({:record_open_loop_raised_after_outside_content, args}, _from, state) do
+    reply = with_connection(state, &OpenLoopReactionsSql.raised_after_outside_content(&1, args))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:stamp_open_loop_no_replies, owner_id, cutoff, now}, _from, state) do
+    reply =
+      with_connection(state, &OpenLoopReactionsSql.stamp_no_reply(&1, owner_id, cutoff, now))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:answer_open_loop_reaction, owner_id, loop_id, answer, now}, _from, state) do
+    reply =
+      with_connection(state, &OpenLoopReactionsSql.answer(&1, owner_id, loop_id, answer, now))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:delete_open_loop_reactions, owner_id, loop_id}, _from, state) do
+    reply = with_connection(state, &OpenLoopReactionsSql.delete_for_loop(&1, owner_id, loop_id))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_open_loop_reactions, owner_id}, _from, state) do
+    {:reply, with_connection(state, &OpenLoopReactionsSql.list(&1, owner_id)), state}
   end
 
   def handle_call(:migrate, _from, state) do
@@ -3992,6 +4197,11 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:get_user_messages_after, selector, last_id, limit}, _from, state) do
     reply = with_connection(state, &fetch_user_messages_after(&1, selector, last_id, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:recent_owner_messages, selector, since, limit}, _from, state) do
+    reply = with_connection(state, &fetch_recent_owner_messages(&1, selector, since, limit))
     {:reply, reply, state}
   end
 
@@ -4735,7 +4945,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_cue_live_intake_migration(conn, versions),
          :ok <- apply_cue_retention_index_migration(conn, versions),
          :ok <- apply_open_loop_outside_content_migration(conn, versions),
-         :ok <- apply_mobile_icon_index_migration(conn, versions) do
+         :ok <- apply_mobile_icon_index_migration(conn, versions),
+         :ok <- apply_open_loop_curiosity_migration(conn, versions) do
       :ok
     end
   end
@@ -4847,6 +5058,26 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{OpenLoopsSql.outside_content_schema_sql()}
         INSERT INTO schema_migrations(version) VALUES (#{@open_loop_outside_content_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # Open loop curiosity (M83 §11): open_loops rebuilt with its anchor's kind,
+  # its reach, its date's source and its rung 1 window, and the follow-up
+  # reactions table, with the version in one transaction. It runs after 49,
+  # whose stamp it copies, so a fresh install and an upgraded one end alike.
+  defp apply_open_loop_curiosity_migration(conn, versions) do
+    if Enum.member?(versions, @open_loop_curiosity_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{OpenLoopsSql.curiosity_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@open_loop_curiosity_migration_version});
         COMMIT;
         """
       )
@@ -5515,10 +5746,10 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
-  # Post-delivery follow-ups (MILESTONE_30 §22.3). Schema-additive: `followup` is
-  # APPENDED by its own ALTER so a migrated database and a fresh one share column
-  # order, and existing rows take the default — no event stored before this
-  # migration is retroactively flagged.
+  # The `followup` column is retired and unread: the post-delivery follow-up it
+  # flagged is gone, and every row keeps the DEFAULT 0. The migration stays
+  # because existing homes have run it, so a fresh database and a migrated one
+  # still share column order.
   defp apply_event_followup_migration(conn, versions) do
     if Enum.member?(versions, @event_followup_migration_version) do
       :ok
@@ -5870,26 +6101,7 @@ defmodule FermixCore.Memory.Repo do
                AND thread_scope = ?
                AND role = 'user'
                AND id > ?
-               AND COALESCE(
-                     CASE WHEN json_valid(metadata_json)
-                          THEN json_extract(metadata_json, '$.guest') END,
-                     0
-                   ) != 1
-               AND COALESCE(
-                     CASE WHEN json_valid(metadata_json)
-                          THEN json_extract(metadata_json, '$.spoken') END,
-                     0
-                   ) != 1
-               AND COALESCE(
-                     CASE WHEN json_valid(metadata_json)
-                          THEN json_extract(metadata_json, '$.harness_continuation') END,
-                     0
-                   ) != 1
-               AND COALESCE(
-                     CASE WHEN json_valid(metadata_json)
-                          THEN json_extract(metadata_json, '$.forwarded') END,
-                     0
-                   ) != 1
+               #{@owner_words_sql}
              ORDER BY id ASC
              LIMIT ?
              """,
@@ -5904,6 +6116,40 @@ defmodule FermixCore.Memory.Repo do
              ]
            ) do
       {:ok, Enum.map(rows, &message_row/1)}
+    end
+  end
+
+  defp fetch_recent_owner_messages(conn, selector, since, limit) do
+    review_selector = normalize_memory_review_selector(selector)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM messages
+             WHERE agent_id = ?
+               AND owner_id = ?
+               AND channel = ?
+               AND chat_id = ?
+               AND thread_scope = ?
+               AND role = 'user'
+               AND created_at >= ?
+               #{@owner_words_sql}
+             ORDER BY id DESC
+             LIMIT ?
+             """,
+             [
+               review_selector.agent_id,
+               review_selector.owner_id,
+               review_selector.channel,
+               review_selector.chat_id,
+               review_selector.thread_scope,
+               timestamp_string(since),
+               limit
+             ]
+           ) do
+      {:ok, rows |> Enum.map(&message_row/1) |> Enum.reverse()}
     end
   end
 

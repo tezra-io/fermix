@@ -34,8 +34,17 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   alias FermixCore.Tools.GetJobRun
   alias FermixCore.Tools.ListCues
   alias FermixCore.Tools.ListJobRuns
+  alias FermixCore.Tools.OpenLoopList
+  alias FermixCore.Tools.OpenLoopNote
+  alias FermixCore.Tools.OpenLoopUpdate
   alias FermixCore.Tools.RecallActivity
   alias FermixCore.Tools.SkillRun
+
+  # The open-loop tools whose result can show a loop noted after outside
+  # content, framed (`OpenLoops.Registry.result_view/2`): the list, an answer's
+  # result and a note that restates a stored loop. Their taint is in what they
+  # returned (`outside_source/3`).
+  @framing_result_modules [OpenLoopList, OpenLoopNote, OpenLoopUpdate]
 
   @typedoc """
   Where outside content came from: a plugin, one named tool, a cue source (its
@@ -148,8 +157,7 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   @doc """
   The outside source one call of `capability` with `arguments` brings into a
   turn: `outside_source/1`, except a `list_cues` call that reads only what is
-  set up (`ListCues.relays_outside_text?/1` false), which brings none. The agent
-  loop and the realtime session record a call's taint through this one rule.
+  set up (`ListCues.relays_outside_text?/1` false), which brings none.
   """
   @spec outside_source(Capability.t(), map()) :: outside_source() | nil
   def outside_source(%Capability{metadata: %{tool_module: ListCues}} = capability, arguments)
@@ -159,6 +167,26 @@ defmodule FermixCore.Capabilities.UntrustedContent do
 
   def outside_source(%Capability{} = capability, arguments) when is_map(arguments),
     do: outside_source(capability)
+
+  @doc """
+  The outside source one call of `capability` with `arguments` brought into a
+  turn, given the `output` the model received (nil when the call returned
+  none): `outside_source/2`, except an `open_loop_list`, `open_loop_update` or
+  `open_loop_note` call, whose taint is in its result rather than its
+  arguments. A result that shows a loop noted after outside content, or a
+  raise made after it, framed (`framed?/1`) brings `open_loop_source/0`, as a
+  due note that frames one does; a result showing only clean loops brings
+  none. The agent loop and the realtime session record a call's taint through
+  this one rule, once the call has returned.
+  """
+  @spec outside_source(Capability.t(), map(), term()) :: outside_source() | nil
+  def outside_source(%Capability{metadata: %{tool_module: module}}, arguments, output)
+      when module in @framing_result_modules and is_map(arguments) do
+    if is_binary(output) and framed?(output), do: open_loop_source(), else: nil
+  end
+
+  def outside_source(%Capability{} = capability, arguments, _output) when is_map(arguments),
+    do: outside_source(capability, arguments)
 
   @doc """
   The outside sources the attachments of a turn's message bring into its first
@@ -298,6 +326,14 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   end
 
   def frame(_source_name, output), do: output
+
+  @doc """
+  Whether `text` carries an untrusted-content frame (`frame/2`), by its opening
+  tag, which survives being escaped inside a JSON string. Text that merely
+  quotes the tag reads as framed too: it can over-report, never miss a frame.
+  """
+  @spec framed?(String.t()) :: boolean()
+  def framed?(text) when is_binary(text), do: String.contains?(text, "<untrusted_tool_result")
 
   @doc """
   Whether a durable-memory `source_type` marks its stored value as

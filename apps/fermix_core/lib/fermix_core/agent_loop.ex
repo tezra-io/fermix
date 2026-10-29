@@ -146,7 +146,7 @@ defmodule FermixCore.AgentLoop do
   arguments it could not parse); the loop went on and the model answered, so
   the run's status alone would never show it. `outside_sources` is what the
   run read that someone else could have written, as it ended
-  (`record_outside_sources/3`).
+  (`record_outside_sources/4`).
   """
   @type loop_result :: %{
           response: String.t(),
@@ -188,7 +188,7 @@ defmodule FermixCore.AgentLoop do
     {first_route_key, _first_opts} = hd(routes)
 
     # `:outside_sources` is this turn's record of content someone else could have
-    # written (`record_outside_sources/3`). `put_new` so a nested run keeps what
+    # written (`record_outside_sources/4`). `put_new` so a nested run keeps what
     # its parent already read.
     context =
       opts
@@ -604,7 +604,7 @@ defmodule FermixCore.AgentLoop do
       state = %{
         state
         | tool_failures: state.tool_failures + failures,
-          context: record_outside_sources(context, turn.tool_calls, state),
+          context: record_outside_sources(context, turn.tool_calls, tool_results, state),
           loop_detector: record_tool_runs(state, turn.tool_calls, tool_results)
       }
 
@@ -625,22 +625,28 @@ defmodule FermixCore.AgentLoop do
   # before that content existed, so only later steps count it. The calls are
   # already bridge-unwrapped, so a `tool_call` records the tool it ran. Read by
   # `Capabilities.AccessGate` through the context the next dispatch receives.
-  defp record_outside_sources(context, tool_calls, state) do
+  # The results are the batch's, one per call in its calls' order
+  # (`execute_tool_calls/2` maps over the calls), so the guard holds unless that
+  # invariant broke; a mismatch fails loud rather than letting the pairing drop
+  # a call, and its taint, silently.
+  defp record_outside_sources(context, tool_calls, tool_results, state)
+       when length(tool_calls) == length(tool_results) do
     sources =
       tool_calls
-      |> Enum.map(&outside_source(&1, state))
+      |> Enum.zip_with(tool_results, &outside_source(&1, &2, state))
       |> Enum.reject(&is_nil/1)
 
     Map.update!(context, :outside_sources, &Enum.into(sources, &1))
   end
 
-  # A call's arguments say what it read (`list_cues`' view). Arguments that would
-  # not parse, or are not a JSON object, classify as none given, the tool's
-  # default view, so they can never clear a read.
-  defp outside_source(call, state) do
+  # A call's arguments say what it read (`list_cues`' view), and for some tools
+  # its result does (`open_loop_list`, what it framed). Arguments that would not
+  # parse, or are not a JSON object, classify as none given, the tool's default
+  # view, so they can never clear a read.
+  defp outside_source(call, %{output: output}, state) do
     case Map.get(state.capabilities_by_name, call.name) do
       nil -> nil
-      capability -> UntrustedContent.outside_source(capability, outside_arguments(call))
+      capability -> UntrustedContent.outside_source(capability, outside_arguments(call), output)
     end
   end
 

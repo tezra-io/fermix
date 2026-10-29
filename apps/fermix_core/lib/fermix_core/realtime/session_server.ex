@@ -215,7 +215,7 @@ defmodule FermixCore.Realtime.SessionServer do
            screen_feed_opts: Keyword.get(opts, :screen_feed_opts, []),
            screen_probe: Keyword.get(opts, :screen_probe, &ComputerUseProbe.run/0),
            # Content someone else could have written that this call has read
-           # (`UntrustedContent.outside_source/2`, plus a shared screen). Never
+           # (`UntrustedContent.outside_source/3`, plus a shared screen). Never
            # reset: the provider keeps every tool output for the whole call, so
            # a page read at minute one can still steer a command at minute five.
            outside_sources: MapSet.new(),
@@ -436,7 +436,7 @@ defmodule FermixCore.Realtime.SessionServer do
       when is_reference(ref) and is_map_key(pending, ref) do
     Process.demonitor(ref, [:flush])
     {{_task, call}, remaining} = Map.pop(pending, ref)
-    state = record_outside_source(%{state | pending_tool_calls: remaining}, call)
+    state = record_outside_source(%{state | pending_tool_calls: remaining}, call, result)
     {:noreply, apply_tool_result(result, call, state)}
   end
 
@@ -1263,16 +1263,22 @@ defmodule FermixCore.Realtime.SessionServer do
 
   # --- Access-sensitive commands (`Capabilities.AccessGate`) ----------------
 
-  defp record_outside_source(state, call) do
+  # Recorded once the call has returned, with what the model receives: some
+  # tools' taint is in their result (`UntrustedContent.outside_source/3`).
+  defp record_outside_source(state, call, result) do
     case Map.fetch(state.tool_bridge.capabilities, tool_name(call)) do
       {:ok, capability} ->
-        source = UntrustedContent.outside_source(capability, call_arguments(call))
+        output = result_output(result)
+        source = UntrustedContent.outside_source(capability, call_arguments(call), output)
         add_outside_source(state, source)
 
       :error ->
         state
     end
   end
+
+  defp result_output({:ok, %{output: output}}), do: output
+  defp result_output({:error, _reason}), do: nil
 
   # What the gate reads for one call: what the call has read from outside, and
   # whether a command it parked still waits on the owner's answer. While one

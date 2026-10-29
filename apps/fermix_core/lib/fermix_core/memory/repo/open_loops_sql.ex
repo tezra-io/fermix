@@ -1,8 +1,16 @@
 defmodule FermixCore.Memory.Repo.OpenLoopsSql do
   @moduledoc false
   # Private SQL for `FermixCore.Memory.Repo`'s open-loop operations
-  # (MILESTONE_78 §06, §18). Every function that takes a `conn` is invoked only
-  # from Repo's `handle_call`s, so the single-writer architecture is unchanged.
+  # (MILESTONE_78 §06, §18; MILESTONE_83 §11). Every function that takes a
+  # `conn` is invoked only from Repo's `handle_call`s, so the single-writer
+  # architecture is unchanged.
+  #
+  # The `matters_by_*` columns are the loop's anchor (M83 §11): the date it
+  # matters by for something to do (`anchor_kind` `matters_by`), or the instant
+  # asking first feels natural for something waited on or gone through
+  # (`ask_after`, horizon class `after`). `rung1_until` is the close of a due
+  # loop's rung 1 window, written when the scan marks it due and cleared by
+  # every write that moves it out of due.
   #
   # Normalization (`normalize_*`) runs in the *caller* process, before the
   # GenServer call, so a bad value fails at the boundary with a clear error
@@ -31,6 +39,9 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
     :matters_by_date,
     :matters_by_time,
     :matters_by_at,
+    :anchor_kind,
+    :matters_by_source,
+    :reach,
     :timezone,
     :horizon_class,
     :said_at,
@@ -40,6 +51,7 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
     :state,
     :touches,
     :next_touch_at,
+    :rung1_until,
     :claimed_at,
     :last_touch_at,
     :last_touch_rung,
@@ -57,13 +69,15 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
     :revision,
     :created_at,
     :updated_at,
-    :noted_after_outside_content
+    :noted_after_outside_content,
+    :last_message_after_outside_content
   ]
 
   @timestamp_columns [
     :matters_by_at,
     :said_at,
     :next_touch_at,
+    :rung1_until,
     :claimed_at,
     :last_touch_at,
     :last_rung2_at,
@@ -77,32 +91,52 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
   @states ~w(open due asked closed expired)
   @live_sql "('open', 'due', 'asked')"
   @matters_by_kinds ~w(date datetime)
-  @horizon_classes ~w(long medium short imminent)
-  @answers ~w(done plan not_yet stop drop)
-  @outcomes ~w(spoke silent closed empty delivery_failed timeout error)
+  @anchor_kinds ~w(matters_by ask_after)
+  @sources ~w(owner lookup)
+  @reaches Defaults.reaches()
+  @horizon_classes ~w(long medium short imminent after)
+  @answers ~w(done plan not_yet stop drop moved)
+  @outcomes ~w(spoke silent later closed empty delivery_failed timeout error)
   @close_reasons ~w(done stop dropped reported_elsewhere expired)
   @list_states ~w(live closed any)
   @empty_scan %{due: [], expired: [], skipped_to_handback: [], waiting: [], expired_from: %{}}
 
   # Columns a settle or a check-in's finalising write may set. Identity,
-  # provenance, the date, the delivery snapshot, the claim and the bookkeeping
-  # are owned here, never by a caller's changes. `last_rung2_at` may only be
-  # cleared (`change_value/2`): the spend before a send is its one stamp.
-  @settle_columns [
-    :state,
-    :touches,
-    :next_touch_at,
-    :last_touch_at,
-    :last_touch_rung,
-    :last_rung2_at,
-    :last_answer,
-    :plan_at,
-    :last_outcome,
-    :last_outcome_at,
-    :last_message,
-    :closed_at,
-    :close_reason
+  # provenance, the anchor's kind, the delivery snapshot, the claim and the
+  # bookkeeping are owned here, never by a caller's changes. `last_rung2_at`
+  # may only be cleared (`change_value/2`): the spend before a send is its one
+  # stamp. A dated loop's date moves only whole (`@moved_columns`, a `moved`
+  # answer), `rung1_until` is cleared by any write that leaves due, and
+  # `last_message` moves only with `last_message_after_outside_content`, what
+  # the run that wrote it had read.
+  @moved_columns [
+    :matters_by_kind,
+    :matters_by_date,
+    :matters_by_time,
+    :matters_by_at,
+    :matters_by_source,
+    :horizon_class
   ]
+
+  @settle_columns @moved_columns ++
+                    [
+                      :reach,
+                      :rung1_until,
+                      :state,
+                      :touches,
+                      :next_touch_at,
+                      :last_touch_at,
+                      :last_touch_rung,
+                      :last_rung2_at,
+                      :last_answer,
+                      :plan_at,
+                      :last_outcome,
+                      :last_outcome_at,
+                      :last_message,
+                      :last_message_after_outside_content,
+                      :closed_at,
+                      :close_reason
+                    ]
 
   @id_pattern ~r/\Aloop_[A-Za-z0-9_-]{11}\z/
   @text_max 240
@@ -204,18 +238,205 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
       "DEFAULT 0 CHECK (noted_after_outside_content IN (0, 1));"
   end
 
+  # Migration 51 (M83 §11). SQLite cannot widen a CHECK in place, so the table
+  # is rebuilt in the copy-then-swap pattern migrations 11 and 47 use: a new
+  # table with the wider vocabulary and the four new columns, every row copied
+  # as a dated loop raised by message with a date the owner gave, its
+  # `noted_after_outside_content` stamp (migration 49, which always runs first)
+  # copied as it is, the old table dropped, the new one renamed, and every index
+  # recreated. A row already due keeps today's window: three hours from its
+  # touch, or an imminent loop's date. Its `last_message_after_outside_content`,
+  # new here, is 0: what the run that wrote its last message had read was never
+  # recorded, so it is not known to have been outside content, as a loop from
+  # before 49 is not known to have been noted after it. No table references
+  # open_loops, so foreign keys need not be lifted.
+  #
+  # The same migration creates open_loop_reactions, one row per follow-up and
+  # the owner's next message, each marked when it was raised after outside
+  # content, as a loop is when noted after it. It has no foreign key: M78 keeps
+  # none to messages, which compaction deletes, and one to open_loops would make
+  # every later rebuild of that table, this one's pattern, lift foreign keys
+  # around it. A drop deletes a loop's reactions explicitly.
+  @rung1_window_seconds div(Defaults.rung1_window_ms(), 1_000)
+  @columns_43 "id, agent_id, owner_id, dedupe_key, intention, why_it_matters, " <>
+                "matters_by_kind, matters_by_date, matters_by_time, matters_by_at, timezone, " <>
+                "horizon_class, said_at, source_channel, source_chat_id, source_thread_scope, " <>
+                "state, touches, next_touch_at, claimed_at, last_touch_at, last_touch_rung, " <>
+                "last_rung2_at, last_answer, plan_at, last_outcome, last_outcome_at, " <>
+                "last_message, delivery_platform, delivery_destination, " <>
+                "delivery_thread_scope, closed_at, close_reason, revision, created_at, updated_at"
+  @columns_49 @columns_43 <> ", noted_after_outside_content"
+
+  @curiosity_schema_sql """
+  CREATE TABLE open_loops_51 (
+    id TEXT PRIMARY KEY,                           -- "loop_" + 11 url-safe chars
+    agent_id TEXT NOT NULL DEFAULT 'main',
+    owner_id TEXT NOT NULL DEFAULT 'default',
+    dedupe_key TEXT NOT NULL,                      -- normalised intention: lowercased, punctuation
+                                                   -- stripped, whitespace collapsed
+    intention TEXT NOT NULL,
+    why_it_matters TEXT,
+    matters_by_kind TEXT NOT NULL CHECK (matters_by_kind IN ('date', 'datetime')),
+    matters_by_date TEXT NOT NULL,                 -- local YYYY-MM-DD
+    matters_by_time TEXT,                          -- local HH:MM:SS, datetime only
+    matters_by_at TEXT NOT NULL,                   -- the anchor, a UTC instant: the instant the
+                                                   -- date has passed, or the ask_after instant
+    timezone TEXT NOT NULL,                        -- IANA zone the dates were resolved in
+    horizon_class TEXT NOT NULL CHECK (
+      horizon_class IN ('long', 'medium', 'short', 'imminent', 'after')
+    ),                                             -- fixed at capture or by a moved answer
+    said_at TEXT NOT NULL,
+    source_channel TEXT NOT NULL,
+    source_chat_id TEXT NOT NULL,
+    source_thread_scope TEXT NOT NULL DEFAULT 'root',
+    state TEXT NOT NULL DEFAULT 'open' CHECK (
+      state IN ('open', 'due', 'asked', 'closed', 'expired')
+    ),
+    touches INTEGER NOT NULL DEFAULT 0 CHECK (touches BETWEEN 0 AND 3),
+    next_touch_at TEXT,                            -- the slot now pending; NULL only once terminal
+    claimed_at TEXT,                               -- set while a check-in run holds the row
+    last_touch_at TEXT,
+    last_touch_rung INTEGER CHECK (last_touch_rung IS NULL OR last_touch_rung IN (1, 2)),
+    last_rung2_at TEXT,                            -- the owner's daily rung 2 budget, spent by a
+                                                   -- check-in's run just before its one send
+    last_answer TEXT CHECK (
+      last_answer IS NULL OR last_answer IN ('done', 'plan', 'not_yet', 'stop', 'drop', 'moved')
+    ),
+    plan_at TEXT,                                  -- UTC instant of the plan the owner named
+    last_outcome TEXT CHECK (
+      last_outcome IS NULL OR last_outcome IN
+        ('spoke', 'silent', 'later', 'closed', 'empty', 'delivery_failed', 'timeout',
+         'error')
+    ),                                             -- the last check-in run's decision, sent or not
+    last_outcome_at TEXT,
+    last_message TEXT,                             -- the text the last run decided to speak
+    delivery_platform TEXT NOT NULL,
+    delivery_destination TEXT NOT NULL,
+    delivery_thread_scope TEXT NOT NULL DEFAULT 'root',
+    closed_at TEXT,
+    close_reason TEXT CHECK (
+      close_reason IS NULL OR close_reason IN
+        ('done', 'stop', 'dropped', 'reported_elsewhere', 'expired')
+    ),
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    noted_after_outside_content INTEGER NOT NULL DEFAULT 0 CHECK (
+      noted_after_outside_content IN (0, 1)
+    ),                                             -- noted on a turn that had read outside
+                                                   -- content (migration 49); 0 when not known
+    anchor_kind TEXT NOT NULL DEFAULT 'matters_by' CHECK (
+      anchor_kind IN ('matters_by', 'ask_after')
+    ),                                             -- something to do by a date, or something
+                                                   -- waited on or gone through
+    matters_by_source TEXT CHECK (
+      matters_by_source IS NULL OR matters_by_source IN ('owner', 'lookup')
+    ),                                             -- who gave a dated loop's date; NULL for after
+    reach TEXT NOT NULL DEFAULT 'message' CHECK (reach IN ('conversation', 'message')),
+    rung1_until TEXT,                              -- a due loop's rung 1 window close; NULL unless due
+    last_message_after_outside_content INTEGER NOT NULL DEFAULT 0 CHECK (
+      last_message_after_outside_content IN (0, 1)
+    ),                                             -- last_message written by a check-in run that
+                                                   -- had read outside content; 0 when not known
+    CHECK ((state IN ('closed', 'expired')) = (closed_at IS NOT NULL)),
+    CHECK ((state IN ('closed', 'expired')) = (close_reason IS NOT NULL)),
+    CHECK (state != 'expired' OR close_reason = 'expired'),
+    CHECK (state != 'closed' OR close_reason != 'expired'),
+    CHECK (state IN ('closed', 'expired') OR next_touch_at IS NOT NULL),
+    CHECK (claimed_at IS NULL OR state = 'due'),
+    CHECK (last_answer IS NULL OR last_answer != 'plan' OR plan_at IS NOT NULL),
+    CHECK (last_outcome IS NULL OR last_outcome != 'spoke' OR last_message IS NOT NULL),
+    CHECK ((horizon_class = 'after') = (anchor_kind = 'ask_after')),
+    CHECK ((anchor_kind = 'ask_after') = (matters_by_source IS NULL)),
+    CHECK ((state = 'due') = (rung1_until IS NOT NULL))
+  );
+  INSERT INTO open_loops_51 (#{@columns_49}, anchor_kind, matters_by_source, reach, rung1_until,
+                             last_message_after_outside_content)
+    SELECT #{@columns_49}, 'matters_by', 'owner', 'message',
+           CASE
+             WHEN state != 'due' THEN NULL
+             WHEN horizon_class = 'imminent' THEN matters_by_at
+             ELSE strftime('%Y-%m-%dT%H:%M:%S', next_touch_at, '+#{@rung1_window_seconds} seconds')
+                  || substr(next_touch_at, 20)
+           END,
+           0
+    FROM open_loops;
+  DROP TABLE open_loops;
+  ALTER TABLE open_loops_51 RENAME TO open_loops;
+  CREATE INDEX idx_open_loops_due ON open_loops(state, next_touch_at);
+  CREATE UNIQUE INDEX idx_open_loops_live_dedupe
+    ON open_loops(owner_id, dedupe_key)
+    WHERE state IN ('open', 'due', 'asked');
+  CREATE INDEX idx_open_loops_rung2_day ON open_loops(owner_id, last_rung2_at);
+
+  CREATE TABLE open_loop_reactions (
+    id TEXT PRIMARY KEY,                           -- "reaction_" + 11 url-safe chars
+    owner_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    open_loop_id TEXT NOT NULL,
+    rung INTEGER NOT NULL CHECK (rung IN (1, 2)),
+    raised_at TEXT NOT NULL,
+    session_id TEXT,
+    source_channel TEXT NOT NULL,
+    source_chat_id TEXT NOT NULL,
+    source_thread_scope TEXT NOT NULL DEFAULT 'root',
+    raised_with TEXT,                              -- what Fermix said, at most 280 characters
+    reply_text TEXT,                               -- the owner's next message, at most 280
+    reply_at TEXT,
+    outcome TEXT CHECK (outcome IS NULL OR outcome IN ('replied', 'no_reply')),
+    answer TEXT CHECK (
+      answer IS NULL OR answer IN ('done', 'plan', 'not_yet', 'stop', 'drop', 'moved', 'reach')
+    ),                                             -- the settle that followed, if any
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    raised_after_outside_content INTEGER NOT NULL DEFAULT 0 CHECK (
+      raised_after_outside_content IN (0, 1)
+    ),                                             -- raised on a turn or check-in run that had
+                                                   -- read outside content; 0 when not known
+    raised_history_tainted INTEGER NOT NULL DEFAULT 0 CHECK (
+      raised_history_tainted IN (0, 1)
+    )                                              -- raised_with is from a reply stamped with
+                                                   -- the owner's computer activity (M32 §13.6)
+  );
+  CREATE INDEX idx_open_loop_reactions_raised
+    ON open_loop_reactions(owner_id, agent_id, raised_at);
+  CREATE INDEX idx_open_loop_reactions_conversation
+    ON open_loop_reactions(owner_id, agent_id, source_channel, source_chat_id,
+                           source_thread_scope, outcome);
+  """
+
+  @doc """
+  Schema for migration 51 (M83 §11): `open_loops` rebuilt with the anchor's
+  kind, the reach, the date's source, the rung 1 window, the wider
+  vocabularies and `last_message_after_outside_content`, which marks a last
+  message written by a check-in run that had read outside content, keeping
+  migration 49's `noted_after_outside_content`; and the `open_loop_reactions`
+  table, whose `raised_after_outside_content` marks a follow-up raised after
+  outside content and whose `raised_history_tainted` marks words from a reply
+  stamped with the owner's computer activity.
+  """
+  @spec curiosity_schema_sql() :: String.t()
+  def curiosity_schema_sql, do: @curiosity_schema_sql
+
   # --- normalization (caller process) --------------------------------------
 
-  @doc "Validates a new loop's attributes into stored column values."
+  @doc """
+  Validates a new loop's attributes into stored column values. `anchor_kind`
+  defaults to `matters_by` and `reach` to `message`, as their columns do; a
+  dated loop's `matters_by_source` defaults to `owner`, and an `ask_after`
+  loop has none.
+  """
   @spec normalize_create(map()) :: {:ok, map()} | {:error, term()}
   def normalize_create(attrs) when is_map(attrs) do
     with {:ok, identity} <- normalize_identity(attrs),
          {:ok, date} <- normalize_date(attrs),
+         {:ok, anchor} <- normalize_anchor(attrs, date.horizon_class),
          {:ok, provenance} <- normalize_provenance(attrs),
          {:ok, stamps} <- normalize_create_stamps(attrs) do
       {:ok,
        identity
        |> Map.merge(date)
+       |> Map.merge(anchor)
        |> Map.merge(provenance)
        |> Map.merge(stamps)
        |> Map.merge(initial_ledger())}
@@ -263,6 +484,32 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
     end
   end
 
+  # The anchor's kind fixes the class family and whether a source exists: an
+  # `ask_after` loop is class `after` and has no source, a dated loop has a
+  # dated class and one.
+  defp normalize_anchor(attrs, class) do
+    attrs = Map.put_new(attrs, :anchor_kind, "matters_by")
+
+    with {:ok, kind} <- enum(attrs, :anchor_kind, @anchor_kinds),
+         :ok <- class_fits(kind, class),
+         {:ok, source} <- anchor_source(kind, Map.get(attrs, :matters_by_source, :unset)),
+         {:ok, reach} <- enum(Map.put_new(attrs, :reach, "message"), :reach, @reaches) do
+      {:ok, %{anchor_kind: kind, matters_by_source: source, reach: reach}}
+    end
+  end
+
+  defp class_fits("ask_after", "after"), do: :ok
+  defp class_fits("matters_by", class) when class != "after", do: :ok
+  defp class_fits(_kind, _class), do: {:error, {:invalid, :horizon_class, :anchor_mismatch}}
+
+  defp anchor_source("ask_after", source) when source in [nil, :unset], do: {:ok, nil}
+
+  defp anchor_source("ask_after", _source),
+    do: {:error, {:invalid, :matters_by_source, :ask_after}}
+
+  defp anchor_source("matters_by", :unset), do: {:ok, "owner"}
+  defp anchor_source("matters_by", source), do: member(source, :matters_by_source, @sources)
+
   defp normalize_provenance(attrs) do
     with {:ok, channel} <- text(attrs, :source_channel, 1, @text_max),
          {:ok, chat_id} <- text(attrs, :source_chat_id, 1, @text_max),
@@ -295,6 +542,7 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
     %{
       state: "open",
       touches: 0,
+      rung1_until: nil,
       claimed_at: nil,
       last_touch_at: nil,
       last_touch_rung: nil,
@@ -304,6 +552,7 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
       last_outcome: nil,
       last_outcome_at: nil,
       last_message: nil,
+      last_message_after_outside_content: 0,
       closed_at: nil,
       close_reason: nil,
       revision: 1
@@ -313,16 +562,57 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
   @doc """
   Validates a settle's or a finalising write's column changes. Unknown columns
   are refused; the claim, revision and `updated_at` are set by the write itself.
+  A dated loop's date moves only whole, a last message only with whether its
+  run had read outside content, and a write that moves the loop out of due
+  clears its rung 1 window.
   """
   @spec normalize_changes(map()) :: {:ok, map()} | {:error, term()}
   def normalize_changes(changes) when is_map(changes) and map_size(changes) > 0 do
-    case Enum.find(Map.keys(changes), &(&1 not in @settle_columns)) do
-      nil -> normalize_change_values(changes)
-      key -> {:error, {:unknown_field, key}}
+    with nil <- Enum.find(Map.keys(changes), &(&1 not in @settle_columns)),
+         :ok <- moved_whole(changes),
+         {:ok, values} <- normalize_change_values(changes),
+         :ok <- message_with_provenance(changes),
+         {:ok, time} <- moved_time(changes) do
+      {:ok, values |> Map.merge(time) |> window_cleared()}
+    else
+      key when is_atom(key) -> {:error, {:unknown_field, key}}
+      {:error, reason} -> {:error, reason}
     end
   end
 
   def normalize_changes(_changes), do: {:error, :empty_changes}
+
+  defp moved_whole(changes) do
+    case Enum.filter(@moved_columns, &Map.has_key?(changes, &1)) do
+      [] -> :ok
+      @moved_columns -> :ok
+      _partial -> {:error, {:invalid, :matters_by, :partial_move}}
+    end
+  end
+
+  # A message and what its run had read are written together, so a later message
+  # never inherits an earlier one's stamp, nor goes out without its own.
+  defp message_with_provenance(changes) do
+    if Map.has_key?(changes, :last_message) ==
+         Map.has_key?(changes, :last_message_after_outside_content),
+       do: :ok,
+       else: {:error, {:invalid, :last_message_after_outside_content, :apart_from_message}}
+  end
+
+  # The date's time follows its kind, as at capture.
+  defp moved_time(%{matters_by_kind: kind} = changes),
+    do:
+      with(
+        {:ok, time} <- matters_by_time(kind, changes.matters_by_time),
+        do: {:ok, %{matters_by_time: time}}
+      )
+
+  defp moved_time(_changes), do: {:ok, %{}}
+
+  defp window_cleared(%{state: state} = changes) when state != "due",
+    do: Map.put(changes, :rung1_until, nil)
+
+  defp window_cleared(changes), do: changes
 
   defp normalize_change_values(changes) do
     Enum.reduce_while(changes, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
@@ -334,6 +624,24 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
   end
 
   defp change_value(:state, value), do: member(value, :state, @states)
+  defp change_value(:reach, value), do: member(value, :reach, @reaches)
+
+  defp change_value(:matters_by_kind, value),
+    do: member(value, :matters_by_kind, @matters_by_kinds)
+
+  defp change_value(:matters_by_date, value),
+    do: date(%{matters_by_date: value}, :matters_by_date)
+
+  # Validated with its kind by `moved_time/1`.
+  defp change_value(:matters_by_time, value), do: {:ok, value}
+  defp change_value(:matters_by_source, value), do: member(value, :matters_by_source, @sources)
+
+  defp change_value(:horizon_class, value) when value != "after",
+    do: member(value, :horizon_class, @horizon_classes)
+
+  defp change_value(:horizon_class, _value),
+    do: {:error, {:invalid, :horizon_class, :anchor_mismatch}}
+
   defp change_value(:touches, value) when value in 0..3, do: {:ok, value}
   defp change_value(:touches, _value), do: {:error, {:invalid, :touches, :out_of_range}}
   defp change_value(:last_touch_rung, value) when value in [nil, 1, 2], do: {:ok, value}
@@ -354,6 +662,9 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
 
   defp change_value(:last_message, value),
     do: optional_bounded(value, :last_message, Defaults.message_max_bytes())
+
+  defp change_value(:last_message_after_outside_content, value),
+    do: boolean(%{last_message_after_outside_content: value}, :last_message_after_outside_content)
 
   defp change_value(key, nil) when key in @timestamp_columns, do: {:ok, nil}
   defp change_value(key, value) when key in @timestamp_columns, do: stamp(value, key)
@@ -448,20 +759,31 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
   # --- writes --------------------------------------------------------------
 
   @doc """
-  Creates a loop in one transaction: a live loop with the same owner and
-  dedupe key is returned as it is stored, with no write; otherwise the owner's
+  Creates a loop in one transaction: a live loop with the same owner, dedupe
+  key and anchor kind is returned as it is stored, with no write; one of the
+  other anchor kind is `{:kind_conflict, its_id}`, so a thing to do and a thing
+  waited on are never silently merged (M83 §11); otherwise the owner's
   live-loop cap is checked and the row inserted.
   """
-  @spec create(term(), map()) :: {:ok, {:created | :existing, map()}} | {:error, term()}
+  @spec create(term(), map()) ::
+          {:ok, {:created | :existing, map()}} | {:error, {:kind_conflict, String.t()} | term()}
   def create(conn, row) do
     in_transaction(conn, fn -> create_in_tx(conn, row) end)
   end
 
   defp create_in_tx(conn, row) do
     case fetch_live_dedupe(conn, row.owner_id, row.dedupe_key) do
-      {:ok, nil} -> insert_capped(conn, row)
-      {:ok, existing} -> {:ok, {:existing, existing}}
-      {:error, reason} -> {:error, reason}
+      {:ok, nil} ->
+        insert_capped(conn, row)
+
+      {:ok, %{anchor_kind: kind} = existing} when kind == row.anchor_kind ->
+        {:ok, {:existing, existing}}
+
+      {:ok, existing} ->
+        {:error, {:kind_conflict, existing.id}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -688,15 +1010,38 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
 
   defp apply_decision(_conn, _row, :not_yet, _stamp), do: {:ok, :unchanged}
 
-  defp apply_decision(conn, row, :due, stamp) do
-    move(conn, row, "state = 'due', updated_at = ?", [stamp], :due)
+  defp apply_decision(conn, row, {:due, rung1_until}, stamp) do
+    move(
+      conn,
+      row,
+      "state = 'due', rung1_until = ?, updated_at = ?",
+      [stamp!(rung1_until), stamp],
+      :due
+    )
+  end
+
+  # A conversation loop's window closed unraised and a later one of the same
+  # touch opens where it closed: still due, the pending time and the window
+  # moved on. Nothing was raised, so the ledger and the revision stay.
+  defp apply_decision(conn, row, {:lapse, next_touch_at, rung1_until}, stamp) do
+    with {:ok, {:due, moved}} <-
+           move(
+             conn,
+             row,
+             "next_touch_at = ?, rung1_until = ?, updated_at = ?",
+             [stamp!(next_touch_at), stamp!(rung1_until), stamp],
+             :due
+           ) do
+      {:ok, {:waiting, moved}}
+    end
   end
 
   defp apply_decision(conn, row, {:skip_to_handback, at}, stamp) do
     move(
       conn,
       row,
-      "state = CASE state WHEN 'due' THEN 'open' ELSE state END, next_touch_at = ?, updated_at = ?",
+      "state = CASE state WHEN 'due' THEN 'open' ELSE state END, next_touch_at = ?, " <>
+        "rung1_until = NULL, updated_at = ?",
       [stamp!(at), stamp],
       :skipped_to_handback
     )
@@ -708,7 +1053,7 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
              conn,
              row,
              "state = 'expired', close_reason = 'expired', closed_at = ?, next_touch_at = NULL, " <>
-               "revision = revision + 1, updated_at = ?",
+               "rung1_until = NULL, revision = revision + 1, updated_at = ?",
              [stamp, stamp],
              :expired
            ) do
@@ -828,24 +1173,22 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
   defp earliest(instants), do: Enum.min(instants, DateTime)
 
   @doc """
-  Due, unclaimed rows of one owner and agent inside their rung 1 window: from
-  `next_touch_at` for the window's length, or until the date for an imminent
-  loop (rung 1 only, until the date, §06).
+  Due, unclaimed rows of one owner and agent inside their rung 1 window, the
+  `rung1_until` the scan wrote when it marked each due (`Lifecycle`): nearest
+  anchor first.
   """
-  @spec due_for_note(term(), String.t(), String.t(), String.t(), String.t()) ::
+  @spec due_for_note(term(), String.t(), String.t(), String.t()) ::
           {:ok, [map()]} | {:error, term()}
-  def due_for_note(conn, owner_id, agent_id, now, window_opened_after) do
+  def due_for_note(conn, owner_id, agent_id, now) do
     select_rows(
       conn,
       """
       SELECT #{@select} FROM open_loops
       WHERE owner_id = ? AND agent_id = ? AND state = 'due' AND claimed_at IS NULL
-        AND next_touch_at <= ?
-        AND ((horizon_class = 'imminent' AND matters_by_at > ?)
-             OR (horizon_class != 'imminent' AND next_touch_at > ?))
+        AND rung1_until > ?
       ORDER BY matters_by_at, id LIMIT ?
       """,
-      [owner_id, agent_id, now, now, window_opened_after, @live_list_max]
+      [owner_id, agent_id, now, @live_list_max]
     )
   end
 
@@ -928,7 +1271,8 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
     |> Map.merge(%{
       matters_by_date: Date.from_iso8601!(raw.matters_by_date),
       matters_by_time: parse_optional_time(raw.matters_by_time),
-      noted_after_outside_content: raw.noted_after_outside_content == 1
+      noted_after_outside_content: raw.noted_after_outside_content == 1,
+      last_message_after_outside_content: raw.last_message_after_outside_content == 1
     })
     |> then(&Map.merge(raw, &1))
   end
@@ -950,7 +1294,12 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
   # only path allowed to return without ROLLBACK. Every failure after a
   # successful BEGIN — the wrapped work or COMMIT itself — must roll back, or
   # the single writer's one connection is left inside an open BEGIN IMMEDIATE.
-  defp in_transaction(conn, fun) do
+  # Public, with `query_all/3` and `execute/3`, for the follow-up record's SQL
+  # (`OpenLoopReactionsSql`), so the open-loop family has one plumbing.
+  @doc false
+  @spec in_transaction(term(), (-> {:ok, term()} | {:error, term()})) ::
+          {:ok, term()} | {:error, term()}
+  def in_transaction(conn, fun) do
     case execute(conn, "BEGIN IMMEDIATE", []) do
       :ok -> settle_transaction(conn, fun.())
       {:error, reason} -> {:error, reason}
@@ -981,7 +1330,9 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
     end
   end
 
-  defp query_all(conn, sql, params) do
+  @doc false
+  @spec query_all(term(), String.t(), list()) :: {:ok, [list()]} | {:error, term()}
+  def query_all(conn, sql, params) do
     with_statement(conn, sql, fn stmt ->
       with :ok <- bind(stmt, params) do
         Sqlite3.fetch_all(conn, stmt)
@@ -989,7 +1340,9 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
     end)
   end
 
-  defp execute(conn, sql, params) do
+  @doc false
+  @spec execute(term(), String.t(), list()) :: :ok | {:error, term()}
+  def execute(conn, sql, params) do
     with_statement(conn, sql, fn stmt ->
       with :ok <- bind(stmt, params) do
         step_result(Sqlite3.step(conn, stmt))

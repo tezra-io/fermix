@@ -9,7 +9,9 @@ defmodule FermixCore.OpenLoops.Access do
   the owner's paired phone or Mac app), or the owner's own voice call. So
   guests, group chats (a Slack channel mention, which carries no label, among
   them), shared Buzz sessions, and scheduled, background, delegated and
-  coding-continuation runs are refused by one rule.
+  coding-continuation runs are refused by one rule. What the owner tells a room
+  is not told to Fermix alone, so a shared room never sees, records or settles
+  a loop (MILESTONE_83 §09, §17).
 
   A check-in run is marked by the `:open_loop_checkin` key of its loop context,
   and that key is the whole gate between the two surfaces: a check-in may read

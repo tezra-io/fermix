@@ -1,8 +1,8 @@
 defmodule FermixCore.OpenLoops.Scheduler do
   @moduledoc """
   The single owner of open-loop due scans, check-in claims and check-in runs
-  (MILESTONE_78 §04 stage 2-3, §06, §11, §18), in the `Temporal.Scheduler`
-  shape.
+  (MILESTONE_78 §04 stage 2-3, §06, §11, §18; MILESTONE_83 §11), in the
+  `Temporal.Scheduler` shape.
 
   One process does four things and nothing else:
 
@@ -18,9 +18,11 @@ defmodule FermixCore.OpenLoops.Scheduler do
       (`due_delay_ms`). A capped timer only re-queries; it can never send early.
     * a **due tick**: the due scan moves arrived loops to due, to their
       hand-back, or to expiry (each expiry traced `settled` by `scheduler`);
-      then every due loop is weighed for rung 2, the nearest date first so it
-      wins the day's budget. An ineligible loop is silence while its rung 1
-      window is open or it is imminent, and a traced skip (`active_hours`,
+      then every due loop is weighed for rung 2 in the order that wins the
+      day's budget: dated loops first, the nearest date first, then loops
+      waited on, the oldest anchor first. An ineligible loop is silence while its
+      rung 1 window is open, it is imminent, or it is kept for conversation,
+      which never gets a check-in, and a traced skip (`active_hours`,
       `budget`) otherwise, once per loop, reason and local day. An eligible
       loop is claimed atomically and its `CheckIn` started under
       `CheckInSupervisor` and monitored. Capacity is read from the supervisor
@@ -226,7 +228,10 @@ defmodule FermixCore.OpenLoops.Scheduler do
     end)
   end
 
-  # The nearest date is weighed first, so it wins the day's budget (§18).
+  # The order that wins the day's one unprompted message (§18): a dated loop
+  # before a loop waited on, since a deadline loses its value after its date
+  # while "how did it go" keeps a day; dated loops nearest date first, loops
+  # waited on oldest anchor first.
   defp weigh_due(state, rows, now) do
     pass = %{
       state: %{state | waits: []},
@@ -241,12 +246,15 @@ defmodule FermixCore.OpenLoops.Scheduler do
 
     pass =
       rows
-      |> Enum.sort_by(&{DateTime.to_unix(&1.matters_by_at, :microsecond), &1.id})
+      |> Enum.sort_by(&{weigh_rank(&1), DateTime.to_unix(&1.matters_by_at, :microsecond), &1.id})
       |> Enum.reduce(pass, &weigh/2)
 
     skips = Map.take(pass.state.skips, MapSet.to_list(pass.seen))
     {pass.outcome, %{pass.state | skips: skips}}
   end
+
+  defp weigh_rank(%{horizon_class: "after"}), do: 1
+  defp weigh_rank(_dated), do: 0
 
   # A loop whose owner already has a run in flight waits for that run: its
   # settlement re-arms the timer, and two runs can never share a day's budget.
@@ -271,7 +279,8 @@ defmodule FermixCore.OpenLoops.Scheduler do
   defp decide(row, true, hours, pass), do: claim(row, hours, with_capacity(pass))
 
   # Silence, not a skip: the rung 1 window is still open, or the loop is
-  # imminent and only ever raised in conversation. `next_wake` covers both.
+  # imminent or kept for conversation and only ever raised in conversation.
+  # `next_wake` covers each.
   defp decide(_row, {:skip, reason}, _hours, pass) when reason not in @traced_skips, do: pass
 
   defp decide(row, {:skip, reason}, hours, pass) do

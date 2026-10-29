@@ -696,6 +696,7 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
     params = %{
       "intention" => intention,
       "timezone" => "Etc/UTC",
+      "reach" => "message",
       "matters_by" => %{
         "type" => "datetime",
         "date" => matters_by |> DateTime.to_date() |> Date.to_iso8601(),

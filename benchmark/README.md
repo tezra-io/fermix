@@ -435,7 +435,9 @@ re-renders it too). Open that page rather than reading the markdown. It has thre
 
 Time and cost sit in a column block labelled "beside the score, never ranked". Each run
 writes `run.json` (its identity, score and any invalidity reasons) and per-task tokens
-and rate-card cost into `results.json`. Runs from before that recorded neither their
+and rate-card cost into `results.json`, beside every trial's record (`trial_records`:
+its success, whether it was a valid measurement, its status and the checker's own
+detail, which `bin/judgment_agreement.py` reads). Runs from before that recorded neither their
 commit nor per-task cost or time: the page places them on the `origin/dev` commit that
 was current when they started, marked "inferred", and shows "—" for what was never
 recorded.

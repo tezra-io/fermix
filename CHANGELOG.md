@@ -41,6 +41,44 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the source says "Needs your X sign-in: connect X under Plugins.", tells
   you once, and starts by itself as soon as X is connected. X bills your X
   app for each post it returns; a check that finds nothing costs nothing.
+- **Open loops follow what you're waiting on or going through, not only what
+  you plan to do by a date.** With open loops on, when you mention an
+  interview, a result you're expecting or a hard conversation, Fermix may ask
+  afterwards how it went, without assuming the outcome or offering advice it
+  wasn't asked for. Each loop has a reach: it comes up only in a conversation
+  you start, or Fermix may also send one short check-in message; say "only
+  bring that up if I mention it" or "message me about it" to change it. How
+  you answered earlier follow-ups, in your own words and how soon, shapes the
+  next ones, and "What are you keeping an eye on?" shows each loop with its
+  follow-ups and your replies, which "drop that" deletes. When you're
+  preparing a submission with no known closing date, Fermix may end its reply
+  by asking once when it closes, and keeps it only once you give a date. A
+  raise during a voice call is not counted as unanswered, since your spoken
+  reply can't be recorded, and what Fermix said after reading someone else's
+  content comes back marked as such. What it said in a reply that drew on your
+  computer history is shown again only where your computer history may go.
+- **Follow-ups read the moment before they ask.** When what you've said shows
+  you're going through something hard, Fermix leaves anything unrelated that
+  can wait, in a conversation and in a check-in message. A check-in now reads
+  what you wrote in that chat over the last few days, your own words only, and
+  can decide to wait until the next day instead of asking now or dropping the
+  question; asking about the hard thing itself is never held back.
+
+### Changed
+
+- **Reminders read naturally.** A reminder now leads with the moment in plain
+  words, then what it's about: "Tonight at 7:00 PM EDT, in 3 hours: Dinner with
+  Sam." or "Sarah's birthday is this Monday, September 14." Every fact stays:
+  the date with its weekday, the time and time zone, and how far away it is.
+  The "Reminder:" label is gone, and reminders still arrive on time with no
+  model involved.
+
+### Removed
+
+- **The check-in message after a reminder.** A reminder is now always just the
+  reminder: fixed text, sent on time, with nothing model-written after it.
+  Asking later how something went is left to open loops, which remember your
+  reply and count toward their one message a day.
 
 ### Fixed
 

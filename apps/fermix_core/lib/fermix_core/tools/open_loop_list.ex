@@ -3,23 +3,43 @@ defmodule FermixCore.Tools.OpenLoopList do
   List the owner's open loops (MILESTONE_78 §07, §08, §18): what Fermix is
   keeping an eye on, with each loop's date stated absolutely, where and when
   the owner said it, its state, how many times it has been raised and its next
-  check. Never a delivery destination, never a check-in's message text. A loop
-  noted after outside content has its words framed (`Registry.result_view/1`).
+  check. Never a delivery destination. A loop noted after outside content has
+  its words framed (`Registry.result_view/2`).
+
+  Each loop also carries its `follow_ups` (MILESTONE_83 §07), newest first:
+  when and how Fermix raised it, Fermix's own raise text (a check-in message's
+  closing sentences, or those of the reply that raised it in conversation),
+  and the owner's reply with its delay, or that none came, each text quoted as
+  data (`OpenLoops.Reactions.follow_up/2`) and a raise made after outside
+  content framed as such, so nothing the record holds is hidden from the
+  owner, save what Fermix said on a turn that could see the owner's computer
+  activity, which is listed only on a turn that may carry it
+  (`ComputerHistory.RecentActivity.permitted?/1`). A dropped loop has none: a
+  drop deletes them.
+
+  A list that shows anything framed brings the turn or check-in run that
+  called it an outside source (`UntrustedContent.outside_source/3`), as a due
+  note that frames a loop does: what it shows may steer what the run does
+  next. A list of clean loops and raises brings none.
 
   Read-only. Offered and run only while `[fermix_core.open_loops] enabled`, on
   the owner's attended turn in a private chat or inside a check-in run
   (`OpenLoops.Access.read?/1`); both halves of the gate ask the same question.
 
-  Context seam: `:memory_repo` (the Repo).
+  Context seams: `:memory_repo` (the Repo) and `:now_fn` (the clock the
+  follow-up record is read on).
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.ComputerHistory.RecentActivity
   alias FermixCore.Memory.Repo
   alias FermixCore.OpenLoops.Access
   alias FermixCore.OpenLoops.Config
+  alias FermixCore.OpenLoops.Reactions
   alias FermixCore.OpenLoops.Registry
+  alias FermixCore.Telemetry
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   @impl true
@@ -95,11 +115,16 @@ defmodule FermixCore.Tools.OpenLoopList do
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
     start = System.monotonic_time(:millisecond)
-    result = gated(args, context)
+    {result, error} = gated(args, context)
     duration = System.monotonic_time(:millisecond) - start
     success = match?({:ok, %{success: true}}, result)
 
-    ToolTelemetry.exec(name(), context, success, duration, input: args, result: result)
+    ToolTelemetry.exec(name(), context, success, duration,
+      input: args,
+      result: result,
+      metadata: error
+    )
+
     result
   end
 
@@ -114,22 +139,52 @@ defmodule FermixCore.Tools.OpenLoopList do
   defp gated(args, context) do
     case gate(context) do
       :ok -> list(args, context)
-      {:error, reason} -> {:ok, Tool.error(Access.refusal(name(), reason))}
+      {:error, reason} -> refused(reason, Access.refusal(name(), reason))
     end
+  end
+
+  # A refusal is traced as the error it is (Opik's `error_info`): its tag, and
+  # the sentence the model receives, which carries no owner words.
+  defp refused(reason, sentence) do
+    error = %{error_code: Registry.error_tag(reason), error_summary: Telemetry.preview(sentence)}
+    {{:ok, Tool.error(sentence)}, error}
   end
 
   defp list(args, context) do
-    opts = [repo: Map.get(context, :memory_repo, Repo)]
+    repo = Map.get(context, :memory_repo, Repo)
 
-    case Registry.list(Map.take(args, ["state"]), context, opts) do
-      {:ok, loops} -> {:ok, Tool.success(Jason.encode!(%{"open_loops" => view(loops)}))}
-      {:error, reason} -> {:ok, Tool.error(Registry.describe_error(reason))}
+    with {:ok, loops} <- Registry.list(Map.take(args, ["state"]), context, repo: repo),
+         {:ok, follow_ups} <- follow_ups(context, repo) do
+      {{:ok, Tool.success(Jason.encode!(%{"open_loops" => view(loops, follow_ups)}))}, %{}}
+    else
+      {:error, reason} -> refused(reason, Registry.describe_error(reason))
     end
   end
 
-  # A stamped loop's words are framed, as its due note frames them. Listing one
-  # does not also count as the turn reading outside content: the agent loop and
-  # the realtime session take a call's taint from its capability and arguments,
-  # before any result exists, and a result has no way to add to it.
-  defp view(loops), do: Enum.map(loops, &Registry.result_view/1)
+  defp follow_ups(context, repo) do
+    owner_id = Map.get(context, :memory_owner_id, "default")
+    activity_allowed = RecentActivity.permitted?(context)
+
+    opts =
+      [repo: repo, session_id: Map.get(context, :session_id), activity_allowed: activity_allowed] ++
+        clock(context)
+
+    Reactions.by_loop(owner_id, opts)
+  end
+
+  defp clock(%{now_fn: now_fn}) when is_function(now_fn, 0), do: [now: now_fn.()]
+  defp clock(_context), do: []
+
+  # A stamped loop's words are framed, as its due note frames them, and so is a
+  # raise made after outside content; either makes the call bring its run an
+  # outside source (`UntrustedContent.outside_source/3`).
+  defp view(loops, follow_ups) do
+    Enum.map(loops, fn loop ->
+      reactions = Map.get(follow_ups, loop.id, [])
+
+      loop
+      |> Registry.result_view()
+      |> Map.put("follow_ups", Enum.map(reactions, &Reactions.follow_up/1))
+    end)
+  end
 end

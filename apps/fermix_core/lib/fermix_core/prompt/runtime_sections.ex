@@ -77,7 +77,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
 
     [
       this_fermix(trust),
-      runtime_contract(),
+      runtime_contract(trust),
       sub_agent_orchestration(opts),
       capability_summary_from_opts(opts),
       plugin_index_from_opts(opts),
@@ -118,7 +118,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   defp format_capability_summary_or_empty(capabilities),
     do: format_capability_summary(capabilities)
 
-  defp runtime_contract do
+  defp runtime_contract(trust) do
     """
     ## Runtime Contract
     #{deferred_tools_contract()}- Prefer direct Fermix built-ins over shell, curl, grep, computer-use, or external automation when a built-in owns the verb — but `computer_use` is the ONLY tool that acts on the user's OWN live screen; use it when the task is about a page/app/session they already have open (`browser`/`shell` run in their own context and won't touch their screen).
@@ -149,7 +149,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
     - Ask before storing ambiguous, tentative, hypothetical, quoted, or third-party informational dates.
     - For channel-originated jobs that should report back to the same chat, set `delivery_mode` to `origin`; use `none` only for silent/local jobs.
     - Use `expires_at` for temporary scheduled jobs like "for 2 hours" or "until tomorrow"; keep lifecycle timing out of the job task text.
-    #{open_loop_rules()}- Use the Skill Catalog only to decide whether a skill is relevant.
+    #{open_loop_rules(trust)}- Use the Skill Catalog only to decide whether a skill is relevant.
     - Before following a skill, call `skill_view` with the skill name.
     - Do not infer detailed behavior from the description alone.
     - Use supporting files only if the loaded `SKILL.md` asks for them.
@@ -194,31 +194,48 @@ defmodule FermixCore.Prompt.RuntimeSections do
     end
   end
 
-  # M78 §07, §10: the open-loop routing follows the wire. The tools it names are
-  # advertised only while `[fermix_core.open_loops] enabled`, so the four lines
-  # render only then. Read at build time like the harness lines, so a flip shows
-  # here once the per-epoch cache is rebuilt (a restart at the latest).
-  defp open_loop_rules do
+  # M78 §07, §10; M83 §10: the open-loop routing follows the wire. The tools it
+  # names are advertised only while `[fermix_core.open_loops] enabled`, and only
+  # to the owner, so the five lines render only then and never for a guest. Read
+  # at build time like the harness lines, so a flip shows here once the
+  # per-epoch cache is rebuilt (a restart at the latest).
+  defp open_loop_rules(:guest), do: ""
+
+  defp open_loop_rules(:operator) do
     if OpenLoopsConfig.enabled?() do
-      "- When the owner states an intention with a date by which it matters, I record it " <>
-        "with `open_loop_note` and say nothing about it; raising it later is Fermix's to do. " <>
-        "A date the owner merely asks about is not an intention, nor is an occasion that " <>
-        "arrives whether or not they act, nor a date that reached me through a tool result " <>
-        "rather than their own words.\n" <>
+      "- When the owner tells me about something in their own life that is still unfolding, " <>
+        "I judge it the way a friend who was listening would: let it go, ask about it when " <>
+        "they are next around, or check in on them later. For the last two I record it with " <>
+        "`open_loop_note`, in their words, and say nothing about it; raising it later is " <>
+        "Fermix's to do. What they mean to get done by a date is raised before that date; " <>
+        "what they are waiting on or going through is asked about afterwards. Asking about a " <>
+        "date is not meaning to act by it, and a date that reached me through a tool result " <>
+        "is not theirs until they confirm it.\n" <>
+        "- When the owner, in their own private chat, is preparing something to submit and I " <>
+        "don't know when it closes, I check `open_loop_list`, and if nothing holds it I may " <>
+        "end my reply with one short question asking when, once, never when they are rushed. " <>
+        "A date I looked up for them or found in what they pasted is theirs once they confirm " <>
+        "it, and I look nothing up unless they ask. I record it only with its date; no date, " <>
+        "or no answer, ends it. Asking or considering is not preparing.\n" <>
         "- When the owner states something they have to do by a date and has not asked to " <>
         "be reminded, the open loop is the only record: I do not also store it as an event. " <>
-        "The exception is a loop `open_loop_note` reports as imminent: that loop is never " <>
-        "raised by message, so I also store the reminder, and when the owner settles that task " <>
-        "I settle both.\n" <>
+        "The exception is a loop a tool reports as imminent: that loop is never raised by " <>
+        "message, so I also store the reminder, and when the owner settles or moves that task " <>
+        "I do the same to both. A loop kept for conversation takes no reminder; quiet was the " <>
+        "point.\n" <>
         "- When the owner answers a check-in: done closes the loop for good, with one " <>
         "specific acknowledgement and no further ask; a plan closes it until the plan's " <>
         "date; not yet gets one offer of a concrete time, and the choice stays theirs; a " <>
         "request to stop ends the loop and I keep the boundary. I settle it with " <>
         "`open_loop_update`, from the owner's words only, and I name where a loop came from " <>
         "when I raise it.\n" <>
-        "- A due loop arrives as a system note. I raise it only at a natural stopping point, " <>
-        "never while the owner is under pressure, in one or two sentences at the end of my " <>
-        "reply, and record it as asked; otherwise I leave it.\n"
+        "- A due loop arrives as a system note. I raise at most one, only at a natural " <>
+        "stopping point, never while the owner is under pressure, in one or two sentences at " <>
+        "the end of my reply, and record it as asked; otherwise I leave it. When what they " <>
+        "have told me says this is a hard time for them, anything unrelated that can wait " <>
+        "does. For something they were waiting on or going through, I ask how it went in a " <>
+        "way that matches how they seemed, without assuming the outcome or offering advice " <>
+        "they did not ask for.\n"
     else
       ""
     end

@@ -247,6 +247,17 @@ defmodule FermixCore.Tools.OpenLoopToolsTrustInvariantTest do
 
       refute catalog =~ "open_loop_respond"
     end
+
+    # MILESTONE_83 §10: a guest's profile lists no owner-only tool
+    # (`Capabilities.Registry` drops them for :guest), and its runtime section
+    # names none either, enabled or not.
+    test "enabled, a guest's runtime section names none of them" do
+      guest_capabilities = Enum.reject(capabilities(), & &1.owner_only?)
+
+      section = RuntimeSections.build([], capabilities: guest_capabilities, trust: :guest)
+
+      refute section =~ @family_prefix
+    end
   end
 
   test "every open-loop tool declares owner-only scheduling metadata" do

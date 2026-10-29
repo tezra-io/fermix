@@ -7,13 +7,22 @@ defmodule FermixCore.Temporal.Renderer do
   when the row was materialized, so a later event edit never rewrites sent
   history — plus the render-time clock.
 
+  The moment leads, in the words a person would use, then the title:
+  "Tonight at 7:00 PM EDT, in 3 hours: Dinner with Sam." A birthday or an
+  anniversary, whose title is a name and an occasion, reads as a sentence
+  instead: "Sarah's birthday is this Monday, September 14." Leading with the
+  moment keeps every other title grammatical, an instruction included.
+
   Rules the templates enforce:
 
-    * the absolute event date is always present, with the wall time and its zone
-      whenever the event carries one;
-    * the relative clause ("in 7 days", "in 1 hour") is computed at render time
-      and dropped whenever it would mislead — a retry that lands under an hour
-      before a timed event, or after the event has begun, simply omits it;
+    * the absolute event date is always present, with its weekday, and with the
+      wall time and its zone whenever the event carries one;
+    * how far away it is comes from the local calendar at render time: today
+      (tonight for a timed event from 6 PM), tomorrow, this weekday for two to
+      six days, a week from today, then the day count; a timed event later today
+      adds the hours left, dropped whenever they would mislead — a retry that
+      lands under half an hour before the event, or after it has begun, omits
+      them;
     * no ids, attempt counts, rule names, platforms, or other machinery appears
       in an owner-facing reminder;
     * one message of at most 1,800 UTF-8 bytes, truncated only at a grapheme
@@ -30,6 +39,13 @@ defmodule FermixCore.Temporal.Renderer do
            "October", "November", "December"}
 
   @weekdays {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"}
+
+  # Kinds whose title is a name and an occasion, so "<title> is <moment>." reads
+  # right; any other title may be an instruction and follows the moment instead.
+  @sentence_kinds ~w(birthday anniversary)
+
+  # A timed event at or after this local time, later today, is tonight.
+  @tonight_from ~T[18:00:00]
 
   @doc """
   Renders one reminder row for delivery at `now`.
@@ -49,8 +65,9 @@ defmodule FermixCore.Temporal.Renderer do
          {:ok, time} <- fetch_time(payload),
          {:ok, timezone} <- fetch_timezone(payload),
          {:ok, local_now} <- shift(now, timezone),
-         {:ok, absolute} <- absolute_text(date, time, timezone, local_now) do
-      {:ok, compose(title, absolute, date, time, occurrence_at, local_now)}
+         {:ok, clock} <- clock_with_zone(date, time, timezone) do
+      moment = moment(date, time, clock, occurrence_at, local_now)
+      {:ok, compose(Map.get(payload, "kind"), title, moment)}
     end
   end
 
@@ -60,10 +77,10 @@ defmodule FermixCore.Temporal.Renderer do
 
   @doc false
   # Shared with `Temporal.Registry`, which states back the occurrence a write
-  # actually stored. Unlike the reminder templates above it always carries the
-  # WEEKDAY and never a relative clause: a reminder arrives beside its event, but
-  # a confirmation has to settle which day was meant, and the weekday is the one
-  # part of the statement that separates one candidate day from the next.
+  # actually stored. Unlike the reminder templates below it never carries a
+  # relative word: a reminder arrives beside its event, but a confirmation has to
+  # settle which day was meant, and the WEEKDAY is the one part of the statement
+  # that separates one candidate day from the next.
   #
   # Bang, like the caller's own `DateTime.shift_zone!`: the zone was validated at
   # acceptance and the caller shifted the clock through it before calling, so a
@@ -75,19 +92,6 @@ defmodule FermixCore.Temporal.Renderer do
     case absolute_text(date, time, timezone, local_now) do
       {:ok, absolute} -> weekday(date) <> ", " <> absolute
       {:error, reason} -> raise ArgumentError, "cannot state #{date}: #{inspect(reason)}"
-    end
-  end
-
-  @doc false
-  # Shared with `Temporal.Followup`, whose one model-composed message rides the
-  # same channel under the same §13 one-message bound. Unlike `bounded/3` there
-  # is no load-bearing absolute date to protect, so the tail is what gives way.
-  @spec clamp(String.t()) :: String.t()
-  def clamp(text) when is_binary(text) do
-    if byte_size(text) <= @max_bytes do
-      text
-    else
-      truncate(text, @max_bytes - byte_size(@ellipsis)) <> @ellipsis
     end
   end
 
@@ -152,31 +156,66 @@ defmodule FermixCore.Temporal.Renderer do
 
   # --- composition ---------------------------------------------------------
 
-  # Date-only, and today in the event's own zone: the "today" template. Everything
-  # else is the lead-time template, which carries the relative clause when one is
-  # still truthful.
-  defp compose(title, absolute, date, nil, _occurrence_at, local_now) do
-    if Date.compare(date, DateTime.to_date(local_now)) == :eq do
-      bounded(title, "Today: ", " — " <> absolute <> ".")
-    else
-      bounded(
-        title,
-        "Reminder: ",
-        " is " <> absolute <> relative(date, nil, nil, local_now) <> "."
-      )
+  # The moment from the local calendar: a word a person would use when one is
+  # true, else the weekday, the date and the day count. `:named` moments start
+  # with that word, which a sentence lowercases; the others start with the
+  # weekday, and a past date carries no relative word at all.
+  defp moment(date, time, clock, occurrence_at, local_now) do
+    day = weekday(date) <> ", " <> calendar_text(date, local_now)
+
+    case Date.diff(date, DateTime.to_date(local_now)) do
+      0 -> {:named, same_day(day, time, clock, occurrence_at, local_now)}
+      1 -> {:named, "Tomorrow, " <> day <> at(clock)}
+      days when days in 2..6 -> {:named, "This " <> day <> at(clock)}
+      7 -> {:named, "A week from today, " <> day <> at(clock)}
+      days when days > 7 -> {:dated, day <> at(clock) <> ", in #{days} days"}
+      _past -> {:past, day <> at(clock)}
     end
   end
 
-  defp compose(title, absolute, date, time, occurrence_at, local_now) do
-    suffix = " — " <> absolute <> relative(date, time, occurrence_at, local_now) <> "."
-    bounded(title, "Reminder: ", suffix)
+  defp same_day(day, nil, nil, _occurrence_at, _local_now), do: "Today, " <> day
+
+  defp same_day(_day, %Time{} = time, clock, occurrence_at, local_now) do
+    word = if Time.compare(time, @tonight_from) == :lt, do: "Today", else: "Tonight"
+    word <> " at " <> clock <> hours_left(occurrence_at, local_now)
+  end
+
+  defp at(nil), do: ""
+  defp at(clock), do: ", at " <> clock
+
+  # A sentence for a birthday or an anniversary still to come; every other
+  # reminder, and a date already past, leads with the moment.
+  defp compose(kind, title, {class, moment}) when kind in @sentence_kinds and class != :past,
+    do: bounded(title, "", " is " <> sentence_moment(class, moment) <> ".")
+
+  defp compose(_kind, title, {_class, moment}),
+    do: bounded(title, moment <> ": ", full_stop(title))
+
+  defp sentence_moment(:named, moment), do: lowercase_first(moment)
+  defp sentence_moment(:dated, moment), do: moment
+
+  defp lowercase_first(text) do
+    {first, rest} = String.split_at(text, 1)
+    String.downcase(first) <> rest
+  end
+
+  defp full_stop(title) do
+    if String.ends_with?(title, [".", "!", "?", @ellipsis]), do: "", else: "."
   end
 
   defp absolute_text(date, nil, _timezone, local_now), do: {:ok, calendar_text(date, local_now)}
 
   defp absolute_text(date, %Time{} = time, timezone, local_now) do
+    with {:ok, clock} <- clock_with_zone(date, time, timezone) do
+      {:ok, calendar_text(date, local_now) <> " at " <> clock}
+    end
+  end
+
+  defp clock_with_zone(_date, nil, _timezone), do: {:ok, nil}
+
+  defp clock_with_zone(date, %Time{} = time, timezone) do
     with {:ok, zone} <- zone_abbr(date, time, timezone) do
-      {:ok, calendar_text(date, local_now) <> " at " <> clock_text(time) <> " " <> zone}
+      {:ok, clock_text(time) <> " " <> zone}
     end
   end
 
@@ -219,28 +258,20 @@ defmodule FermixCore.Temporal.Renderer do
     end
   end
 
-  # Date-only events count whole local calendar days; timed events count the real
-  # remaining duration. Anything under an hour, or already past, says nothing
-  # rather than something a delayed retry would make false.
-  defp relative(date, nil, _occurrence_at, local_now) do
-    case Date.diff(date, DateTime.to_date(local_now)) do
-      days when days > 0 -> " (in " <> plural(days, "day") <> ")"
-      _past_or_today -> ""
-    end
-  end
-
-  # Round half-down to the displayed unit: seconds of scheduler latency must
-  # never shave the number (23:59:59 left reads "in 24 hours", 59:30 reads
-  # "in 1 hour"), while exactly half a unit still rounds down, so a retry at
-  # 30 minutes keeps dropping the clause rather than promising an hour.
-  defp relative(_date, %Time{}, %DateTime{} = occurrence_at, local_now) do
+  # The hours left before a timed event later today. Under half an hour, or
+  # already past, says nothing rather than something a delayed retry would make
+  # false.
+  #
+  # Round half-down to the hour: seconds of scheduler latency must never shave
+  # the number (2:59:47 left reads "in 3 hours", 59:30 reads "in 1 hour"), while
+  # exactly half an hour still rounds down, so a retry at 30 minutes keeps
+  # dropping the clause rather than promising an hour.
+  defp hours_left(%DateTime{} = occurrence_at, local_now) do
     seconds = DateTime.diff(occurrence_at, local_now, :second)
-    hours = div(seconds + 1_799, 3_600)
 
-    cond do
-      hours < 1 -> ""
-      hours < 48 -> " (in " <> plural(hours, "hour") <> ")"
-      true -> " (in " <> plural(div(seconds + 43_199, 86_400), "day") <> ")"
+    case div(seconds + 1_799, 3_600) do
+      hours when hours < 1 -> ""
+      hours -> ", in " <> plural(hours, "hour")
     end
   end
 
@@ -256,9 +287,13 @@ defmodule FermixCore.Temporal.Renderer do
       message
     else
       budget = @max_bytes - byte_size(prefix) - byte_size(suffix) - byte_size(@ellipsis)
-      prefix <> truncate(title, budget) <> @ellipsis <> suffix
+      prefix <> truncate(title, budget) <> @ellipsis <> after_cut(suffix)
     end
   end
+
+  # A title that ends the message ends at its ellipsis, never "…."
+  defp after_cut("."), do: ""
+  defp after_cut(suffix), do: suffix
 
   defp truncate(title, budget) when budget <= 0, do: String.first(title) || ""
 

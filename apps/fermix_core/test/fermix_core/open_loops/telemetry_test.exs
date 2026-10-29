@@ -16,23 +16,25 @@ defmodule FermixCore.OpenLoops.TelemetryTest do
   @skipped_event [:fermix, :open_loop, :skipped]
   @settled_event [:fermix, :open_loop, :settled]
   @fault_event [:fermix, :open_loop, :fault]
+  @reaction_event [:fermix, :open_loop, :reaction]
 
-  # The check-in is a run kind (three bookends); the other three are sessionless
-  # point events. Exactly six, no more.
+  # The check-in is a run kind (three bookends); the other four are sessionless
+  # point events. Exactly seven, no more.
   @events [
     @start_event,
     @complete_event,
     @error_event,
     @skipped_event,
     @settled_event,
-    @fault_event
+    @fault_event,
+    @reaction_event
   ]
 
   @loop_id "loop_Vq3kT9wZrHc"
   @session_id "open_loop_loop_Vq3kT9wZrHc_2"
   @agent "open_loop:loop_Vq3kT9wZrHc"
 
-  @outcomes ["spoke", "silent", "closed", "empty", "delivery_failed"]
+  @outcomes ["spoke", "silent", "later", "closed", "empty", "delivery_failed"]
   @statuses ["timeout", "error"]
   @skip_reasons [
     "disabled",
@@ -112,6 +114,11 @@ defmodule FermixCore.OpenLoops.TelemetryTest do
                  active_hours: "08:00-22:30",
                  max_duration_ms: 120_000
                })
+    end
+
+    test "a check-in for something waited on opens with class after", %{run: run} do
+      assert :ok = OpenLoopTelemetry.run_start(run, 2, "after", "08:00-22:30", 120_000)
+      assert_receive {:telemetry, @start_event, _measurements, %{horizon_class: "after"}}
     end
 
     test "refuses a rung, horizon class, hours label or ceiling outside its shape", %{run: run} do
@@ -285,6 +292,22 @@ defmodule FermixCore.OpenLoops.TelemetryTest do
              }
     end
 
+    test "a moved date and a reach change are answers the trace names" do
+      for answer <- ["moved", "reach"] do
+        assert :ok =
+                 OpenLoopTelemetry.settled(
+                   @loop_id,
+                   "due",
+                   "open",
+                   answer,
+                   "main_agent",
+                   "main-7"
+                 )
+
+        assert_receive {:telemetry, @settled_event, _measurements, %{answer: ^answer}}
+      end
+    end
+
     test "a settlement with no answer and no session carries neither key" do
       for by <- @settlers do
         OpenLoopTelemetry.settled(@loop_id, "due", "expired", nil, by, nil)
@@ -395,6 +418,58 @@ defmodule FermixCore.OpenLoops.TelemetryTest do
     end
   end
 
+  describe "reaction/5" do
+    test "a reply names the loop, the rung and the delay, with the observing turn's session" do
+      assert :ok = OpenLoopTelemetry.reaction(@loop_id, 1, "replied", 7_200_000, "main-7")
+
+      assert_receive {:telemetry, @reaction_event, measurements, metadata}
+      assert measurements == %{count: 1, reply_after_ms: 7_200_000}
+
+      assert metadata == %{
+               open_loop_id: @loop_id,
+               rung: 1,
+               outcome: "replied",
+               component: "open_loops",
+               session_id: "main-7"
+             }
+    end
+
+    test "silence carries no delay, and no session when the caller has none" do
+      assert :ok = OpenLoopTelemetry.reaction(@loop_id, 2, "no_reply", nil, nil)
+
+      assert_receive {:telemetry, @reaction_event, measurements, metadata}
+      assert measurements == %{count: 1}
+
+      assert metadata == %{
+               open_loop_id: @loop_id,
+               rung: 2,
+               outcome: "no_reply",
+               component: "open_loops"
+             }
+    end
+
+    test "refuses an outcome, a rung or a delay outside the contract, and any text" do
+      for {rung, outcome, after_ms, session} <- [
+            {1, "warm", 10, nil},
+            {3, "replied", 10, nil},
+            {1, "replied", nil, nil},
+            {1, "replied", -1, nil},
+            {1, "no_reply", 10, nil},
+            {1, "replied", 10, :turn}
+          ] do
+        assert_raise FunctionClauseError, fn ->
+          OpenLoopTelemetry.reaction(@loop_id, rung, outcome, after_ms, session)
+        end
+      end
+
+      assert_raise FunctionClauseError, fn ->
+        OpenLoopTelemetry.reaction("rem_4", 1, "replied", 10, nil)
+      end
+
+      refute_received {:telemetry, @reaction_event, _measurements, _metadata}
+    end
+  end
+
   describe "trace registration" do
     test "every definition names an agent_field the emitter actually sets" do
       definitions = OpenLoopTelemetry.trace_event_definitions()
@@ -405,13 +480,14 @@ defmodule FermixCore.OpenLoops.TelemetryTest do
                {@error_event, "open_loop_checkin_error", :agent},
                {@skipped_event, "open_loop_skipped", :component},
                {@settled_event, "open_loop_settled", :component},
-               {@fault_event, "open_loop_fault", :component}
+               {@fault_event, "open_loop_fault", :component},
+               {@reaction_event, "open_loop_reaction", :component}
              ]
 
       assert Enum.all?(definitions, &(&1.trace_type == :agent_event))
     end
 
-    test "the shared handler writes each of the six events as an agent_event row", %{run: run} do
+    test "the shared handler writes each of the seven events as an agent_event row", %{run: run} do
       dir = SafeRm.make_tmp_dir!("open_loop_trace")
       server = :"open_loop_trace_#{System.unique_integer([:positive])}"
       prefix = "open-loop-test-#{System.unique_integer([:positive])}"
@@ -430,6 +506,7 @@ defmodule FermixCore.OpenLoops.TelemetryTest do
       OpenLoopTelemetry.skipped("budget", @loop_id)
       OpenLoopTelemetry.settled(@loop_id, "asked", "open", "not_yet", "main_agent", "main-9")
       OpenLoopTelemetry.fault("claim", @loop_id, {:repo_timeout, "chat 40001"})
+      OpenLoopTelemetry.reaction(@loop_id, 2, "replied", 5_400_000, "main-9")
 
       :sys.get_state(server)
 
@@ -447,10 +524,11 @@ defmodule FermixCore.OpenLoops.TelemetryTest do
                {"open_loop_checkin_error", @agent},
                {"open_loop_skipped", "open_loop_scheduler"},
                {"open_loop_settled", "open_loops"},
-               {"open_loop_fault", "open_loop_scheduler"}
+               {"open_loop_fault", "open_loop_scheduler"},
+               {"open_loop_reaction", "open_loops"}
              ]
 
-      [start, complete, error, skipped, settled, fault] = rows
+      [start, complete, error, skipped, settled, fault, reaction] = rows
 
       assert start["session_id"] == @session_id
       assert start["horizon_class"] == "long"
@@ -467,6 +545,10 @@ defmodule FermixCore.OpenLoops.TelemetryTest do
       assert fault["error_class"] == "repo_timeout"
       refute Map.has_key?(fault, "session_id")
       refute inspect(fault) =~ "40001"
+      assert reaction["rung"] == 2
+      assert reaction["outcome"] == "replied"
+      assert reaction["reply_after_ms"] == 5_400_000
+      assert reaction["session_id"] == "main-9"
     end
   end
 end

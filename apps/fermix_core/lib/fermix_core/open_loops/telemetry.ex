@@ -13,19 +13,24 @@ defmodule FermixCore.OpenLoops.Telemetry do
       [:fermix, :open_loop, :checkin, :complete]
       [:fermix, :open_loop, :checkin, :error]
 
-  Three point events have no run behind them, so they carry no session of their
+  Four point events have no run behind them, so they carry no session of their
   own:
 
       [:fermix, :open_loop, :skipped]   # the scheduler declined to start a run
       [:fermix, :open_loop, :settled]   # a loop's state moved
       [:fermix, :open_loop, :fault]     # a scheduler step failed
+      [:fermix, :open_loop, :reaction]  # a follow-up's outcome was recorded
 
   A skip never reached a model, which is the reminder rail's split: has a
   session or not. A settlement carries the settling turn's `session_id` only
   when the caller has one (the attended turn that recorded an answer); a
   scheduler expiry has none. A fault is the open-loop counterpart of the
   reminder rail's `scheduler_error` phase: it names the step that failed and a
-  class derived from the reason, never the reason itself.
+  class derived from the reason, never the reason itself. A reaction (M83 §07)
+  is the owner's reply to a follow-up, or its absence a day on: the loop, the
+  rung and `replied | no_reply`, the delay in `reply_after_ms`, never a word of
+  either side's text, and the observing turn's `session_id` only when the
+  caller has one.
 
   There is no `parent_session`: the scheduler spawned the run, not another run,
   and the turn that captured the loop closed days before (the follow-up and
@@ -48,14 +53,15 @@ defmodule FermixCore.OpenLoops.Telemetry do
   @skipped_event [:fermix, :open_loop, :skipped]
   @settled_event [:fermix, :open_loop, :settled]
   @fault_event [:fermix, :open_loop, :fault]
+  @reaction_event [:fermix, :open_loop, :reaction]
 
   @checkin_component "open_loop_checkin"
   @scheduler_component "open_loop_scheduler"
   @settle_component "open_loops"
 
   @rungs [1, 2]
-  @horizon_classes ["long", "medium", "short", "imminent"]
-  @outcomes ["spoke", "silent", "closed", "empty", "delivery_failed"]
+  @horizon_classes ["long", "medium", "short", "imminent", "after"]
+  @outcomes ["spoke", "silent", "later", "closed", "empty", "delivery_failed"]
   @statuses ["timeout", "error"]
   @skip_reasons [
     "disabled",
@@ -67,9 +73,10 @@ defmodule FermixCore.OpenLoops.Telemetry do
   ]
   @live_states ["open", "due", "asked"]
   @states @live_states ++ ["closed", "expired"]
-  @answers ["done", "plan", "not_yet", "stop", "drop", "asked"]
+  @answers ["done", "plan", "not_yet", "stop", "drop", "asked", "moved", "reach"]
   @settlers ["main_agent", "checkin", "scheduler"]
   @fault_stages ["scan", "claim", "release", "timer", "start_checkin", "sweep"]
+  @reaction_outcomes ["replied", "no_reply"]
 
   @active_hours_label ~r/\A\d{2}:\d{2}-\d{2}:\d{2}\z/
 
@@ -107,6 +114,12 @@ defmodule FermixCore.OpenLoops.Telemetry do
     %{
       event: @fault_event,
       trace_event: "open_loop_fault",
+      trace_type: :agent_event,
+      agent_field: :component
+    },
+    %{
+      event: @reaction_event,
+      trace_event: "open_loop_reaction",
       trace_type: :agent_event,
       agent_field: :component
     }
@@ -171,8 +184,8 @@ defmodule FermixCore.OpenLoops.Telemetry do
   end
 
   @doc """
-  Closes a run that reached a decision: `spoke`, `silent`, `closed`, `empty` or
-  `delivery_failed`. Each is a run that finished, recorded as itself.
+  Closes a run that reached a decision: `spoke`, `silent`, `later`, `closed`,
+  `empty` or `delivery_failed`. Each is a run that finished, recorded as itself.
   `sent_text` is the message a `spoke` run sent; it rides as `output` only when
   content capture is on.
   """
@@ -278,6 +291,34 @@ defmodule FermixCore.OpenLoops.Telemetry do
 
     execute(@fault_event, %{count: 1}, metadata)
   end
+
+  @doc """
+  A follow-up's outcome was recorded (M83 §07): the owner `replied` in the
+  follow-up's conversation within the day, after `reply_after_ms`, or the day
+  passed with `no_reply` (which carries no delay). `rung` is the follow-up's:
+  1 raised in conversation, 2 sent by message. `session_id` is the observing
+  turn's, nil when the caller has none. No text of the follow-up or the reply
+  rides the event.
+  """
+  @spec reaction(String.t(), 1 | 2, String.t(), non_neg_integer() | nil, String.t() | nil) :: :ok
+  def reaction(open_loop_id, rung, outcome, reply_after_ms, session_id)
+      when is_loop_id(open_loop_id) and rung in @rungs and outcome in @reaction_outcomes and
+             (is_nil(session_id) or is_binary(session_id)) do
+    metadata = %{
+      open_loop_id: open_loop_id,
+      rung: rung,
+      outcome: outcome,
+      component: @settle_component,
+      session_id: session_id
+    }
+
+    execute(@reaction_event, reaction_measurements(outcome, reply_after_ms), metadata)
+  end
+
+  defp reaction_measurements("replied", ms) when is_integer(ms) and ms >= 0,
+    do: %{count: 1, reply_after_ms: ms}
+
+  defp reaction_measurements("no_reply", nil), do: %{count: 1}
 
   defp base_metadata(run) do
     %{

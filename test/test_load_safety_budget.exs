@@ -28,7 +28,6 @@
     "apps/fermix_core/test/fermix_core/computer_use/session_manager_test.exs" => 1,
     "apps/fermix_core/test/fermix_core/management/doctor_session_test.exs" => 2,
     "apps/fermix_core/test/fermix_core/realtime/live_session_server_test.exs" => 6,
-    "apps/fermix_core/test/fermix_core/temporal/delivery_worker_test.exs" => 1,
     "apps/fermix_core/test/fermix_core/temporal/telemetry_test.exs" => 1
   },
   short_wait_helper_default: %{
@@ -88,8 +87,6 @@
     "apps/fermix_core/test/fermix_core/realtime/telemetry_test.exs" => 1,
     "apps/fermix_core/test/fermix_core/sandbox_test.exs" => 1,
     "apps/fermix_core/test/fermix_core/skill_curation_test.exs" => 1,
-    "apps/fermix_core/test/fermix_core/temporal/delivery_worker_test.exs" => 1,
-    "apps/fermix_core/test/fermix_core/temporal/followup_test.exs" => 1,
     "apps/fermix_core/test/fermix_core/temporal/registry_test.exs" => 2,
     "apps/fermix_core/test/fermix_core/temporal/scheduler_test.exs" => 1,
     "apps/fermix_core/test/fermix_core/tools/file_read_test.exs" => 1,

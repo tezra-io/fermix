@@ -46,7 +46,6 @@ defmodule FermixCore.Temporal.Scheduler do
   alias FermixCore.Temporal.Defaults
   alias FermixCore.Temporal.DeliverySupervisor
   alias FermixCore.Temporal.DeliveryWorker
-  alias FermixCore.Temporal.FollowupSupervisor
   alias FermixCore.Temporal.Planner
   alias FermixCore.Temporal.Telemetry, as: TemporalTelemetry
   alias FermixCore.Timeouts
@@ -82,7 +81,6 @@ defmodule FermixCore.Temporal.Scheduler do
           delivery_supervisor: Supervisor.supervisor(),
           delivery_worker_module: module(),
           delivery_opts: keyword(),
-          followup_supervisor: Supervisor.supervisor(),
           now_fn: (-> DateTime.t()),
           due_limit: pos_integer(),
           reconcile_limit: pos_integer(),
@@ -186,7 +184,6 @@ defmodule FermixCore.Temporal.Scheduler do
       delivery_supervisor: Keyword.get(opts, :delivery_supervisor, DeliverySupervisor),
       delivery_worker_module: Keyword.get(opts, :delivery_worker_module, DeliveryWorker),
       delivery_opts: Keyword.get(opts, :delivery_opts, []),
-      followup_supervisor: Keyword.get(opts, :followup_supervisor, FollowupSupervisor),
       now_fn: Keyword.get(opts, :now_fn, &DateTime.utc_now/0),
       due_limit: @due_limit,
       reconcile_limit: @reconcile_limit,
@@ -298,8 +295,7 @@ defmodule FermixCore.Temporal.Scheduler do
       reminder: row,
       repo: state.repo,
       now_fn: state.now_fn,
-      delivery_opts: state.delivery_opts,
-      followup_supervisor: state.followup_supervisor
+      delivery_opts: state.delivery_opts
     }
 
     case DeliverySupervisor.start_delivery(

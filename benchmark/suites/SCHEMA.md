@@ -865,8 +865,31 @@ the send, the history write and the touch ledger run the real path. The manifest
 gains `open_loops`: each entry's `key`, `id`, `intention`, `said_on` and
 `matters_on` (local dates), `touches` and `last_message`.
 
-The reset closes each live loop with the reason `dropped` and clears the rung 2
-budget it spent (`last_rung2_at`). Closing alone is not enough: one rung 2 check-in a day is
+MILESTONE_83 adds four optional keys to an entry and one list. `reach` is `message`
+(the default) or `conversation`. `anchor_kind` is `matters_by` (the default, dated by
+`matters_in_days`, with an optional `matters_by_source`) or `ask_after`: something the
+owner was waiting on, whose anchor is the touch now due (`due_hours_ago`), whose
+class must be `after`, and which takes neither `matters_in_days` nor a source.
+`rung1_window` is `closed` (the default) or `open`: the seed asks
+`OpenLoops.Lifecycle.due_decision/2` for the window its due scan would write at the
+touch, and refuses a spec whose times leave it otherwise, or a conversation loop with
+a closed window (it would take the quiet path at the next scan). The top-level
+`open_loop_replies` list seeds the owner's replies to earlier follow-ups as
+`open_loop_reactions` rows: each names a seeded `loop` by key, or an
+`other_intention` (seeded as a closed loop, `other_close_reason` defaulting to
+`dropped`), with `rung`, `raised_hours_ago`, `raised_with`, and either `reply_text`
+with `reply_after_minutes` (inside the one-day reply window) or neither (no reply,
+raised a day or more ago), plus an optional `answer`. The rows are written through the
+Repo calls the product records follow-ups with. Every entry of both lists, each
+`open_loops` entry included (the script's rules, the Repo's validation of its row and
+of its due settle, and no two entries sharing a key or an intention), is checked
+before the reset runs, so a spec refused on any entry leaves the home as it was. The manifest
+gains each loop's `anchor_kind`, `reach` and `rung1_until`, `open_loop_replies` and
+`reply_loops`.
+
+The reset closes each live loop with the reason `dropped`, clears the rung 2
+budget it spent (`last_rung2_at`), and deletes every `open_loop_reactions` row, so
+one task's seeded replies never reach the next. Closing alone is not enough: one rung 2 check-in a day is
 the product's rule across every loop of the owner, closed ones included, so the
 first trial's check-in would spend the budget for every later trial that day, and
 each would be a skip, not a measurement. The daemon's `OpenLoops.Scheduler` picks a

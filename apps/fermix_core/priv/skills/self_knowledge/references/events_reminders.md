@@ -1,6 +1,6 @@
 # Events and reminders
 
-A durable personal date plus a finite reminder plan, delivered to the owner through the default background channel or, where the build can ring it, as a notification on this computer. No model runs when a reminder fires.
+A durable personal date plus a finite reminder plan, delivered to the owner through the default background channel or, where the build can ring it, as a notification on this computer. No model runs when a reminder fires, and no message follows it: asking afterwards how something went is an open loop's job (skill_view(name: "self-knowledge", file: "open_loops")). The reminder is fixed text that leads with the moment in plain words (today, tonight from 6 PM, tomorrow, this weekday, a week from today, else the date and the day count), then the event's title; a birthday or anniversary reads as a sentence ("<title> is tomorrow, <weekday>, <date>."). It always states the date with its weekday, the time and zone for a timed event, and the hours left for one later today, dropped under half an hour or once it has begun.
 
 ## Event or scheduled job
 
@@ -30,13 +30,6 @@ A durable personal date plus a finite reminder plan, delivered to the owner thro
 - On Linux the desktop's notification server shows it while a desktop session is running. A headless host, a `--system` unit or a logged-out session has none, so a reminder for this computer is refused when stored, and a due one is retried on the same target and then expires.
 - A standalone Fermix on a Mac (a Homebrew formula or a download) and a source run on a Mac cannot ring here; `fermix migrate-to-app` moves a standalone install to the app.
 - A ring that fails is retried on the same target like any reminder; it never moves to a chat. "Snooze that" and "cancel that" after it rang resolve it from this computer's own surfaces, never from a remote chat, and the Mac notification's Snooze 10 minutes moves it with no turn.
-
-## The follow-up check-in
-
-- An event flagged `followup` gets, after each delivered reminder, one short model turn that may send at most one extra message: an offer to help, something remembered about the person, or one focused question. It runs only after delivery has settled, so it can never cost the reminder.
-- The flag is judged once, by the attended turn that stores or edits the event (`event_store`/`event_update` take `followup`; there is no per-kind default). Set it for an occasion the owner would plausibly want help acting on; leave it off for a logistics ping. The confirmation says a check-in will follow. Changing it later is an ordinary `event_update`. A yearly event keeps it across rollovers.
-- The run sees the delivered text and the stored event, can call only `event_list`, `memory_recall` and `memory_store`, cannot change the event, and answers with one message to the same conversation or exactly `[SILENT]`. When it sends, it stores a one-line memory in that conversation so a reply to it has context.
-- Best-effort: no queue, retry or boot sweep. A concurrency limit, a cancelled or unflagged event, a restart, a provider outage or a timeout skips it; an empty reply without `[SILENT]` sends nothing.
 
 ## Managing stored events
 

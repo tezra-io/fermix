@@ -10,7 +10,7 @@ defmodule FermixCore.Tools.OpenLoopRespond do
 
   `execute/2` validates the decision against its bounds, then sends
 
-      {:open_loop_respond, ref, %{decision: :speak | :silent | :close,
+      {:open_loop_respond, ref, %{decision: :speak | :silent | :later | :close,
                                   message: String.t() | nil,
                                   reason: String.t() | nil}}
 
@@ -28,12 +28,14 @@ defmodule FermixCore.Tools.OpenLoopRespond do
   alias FermixCore.OpenLoops.Access
   alias FermixCore.OpenLoops.Config
   alias FermixCore.OpenLoops.Defaults
+  alias FermixCore.OpenLoops.Registry
+  alias FermixCore.Telemetry
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
-  @decisions %{"speak" => :speak, "silent" => :silent, "close" => :close}
+  @decisions %{"speak" => :speak, "silent" => :silent, "later" => :later, "close" => :close}
 
   @type decision :: %{
-          decision: :speak | :silent | :close,
+          decision: :speak | :silent | :later | :close,
           message: String.t() | nil,
           reason: String.t() | nil
         }
@@ -46,8 +48,9 @@ defmodule FermixCore.Tools.OpenLoopRespond do
   @spec description() :: String.t()
   def description do
     "Report this check-in's decision. speak, with the message text, when one short message " <>
-      "would help the owner now; silent when it would not; close, with a reason, when the " <>
-      "owner has already reported this loop settled elsewhere. Exactly one call ends the run."
+      "would help the owner now; silent when it would not; later when now is the wrong " <>
+      "moment but the question still matters; close, with a reason, when the owner has " <>
+      "already reported this loop settled elsewhere. Exactly one call ends the run."
   end
 
   @impl true
@@ -59,10 +62,12 @@ defmodule FermixCore.Tools.OpenLoopRespond do
       properties: %{
         decision: %{
           type: "string",
-          enum: ["speak", "silent", "close"],
+          enum: ["speak", "silent", "later", "close"],
           description:
-            "speak: send the message. silent: send nothing now. close: the owner already " <>
-              "reported this settled, as memory shows."
+            "speak: send the message. silent: send nothing now. later: send nothing now and " <>
+              "look again at the start of the owner's next active hours, once; a second later " <>
+              "on the same touch is silent. close: the owner already reported this settled, " <>
+              "as memory shows."
         },
         message: %{
           type: "string",
@@ -97,7 +102,7 @@ defmodule FermixCore.Tools.OpenLoopRespond do
   @impl true
   def failure_modes do
     [
-      %{tag: "invalid_decision", description: "decision is not speak, silent or close"},
+      %{tag: "invalid_decision", description: "decision is not speak, silent, later or close"},
       %{tag: "missing_message", description: "speak needs the message text"},
       %{tag: "message_too_long", description: "the message is over 1,800 bytes; never cut"},
       %{tag: "missing_reason", description: "close needs the reason memory holds"},
@@ -124,11 +129,16 @@ defmodule FermixCore.Tools.OpenLoopRespond do
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
     start = System.monotonic_time(:millisecond)
-    result = gated(args, context)
+    {result, error} = gated(args, context)
     duration = System.monotonic_time(:millisecond) - start
     success = match?({:ok, %{success: true}}, result)
 
-    ToolTelemetry.exec(name(), context, success, duration, input: args, result: result)
+    ToolTelemetry.exec(name(), context, success, duration,
+      input: args,
+      result: result,
+      metadata: error
+    )
+
     result
   end
 
@@ -143,18 +153,25 @@ defmodule FermixCore.Tools.OpenLoopRespond do
   defp gated(args, context) do
     case gate(context) do
       :ok -> respond(args, context)
-      {:error, reason} -> {:ok, Tool.error(Access.refusal(name(), reason))}
+      {:error, reason} -> refused(reason, Access.refusal(name(), reason))
     end
+  end
+
+  # A refusal is traced as the error it is (Opik's `error_info`), as the other
+  # open-loop tools trace theirs: its tag, and the sentence the model receives.
+  defp refused(reason, sentence) do
+    error = %{error_code: Registry.error_tag(reason), error_summary: Telemetry.preview(sentence)}
+    {{:ok, Tool.error(sentence)}, error}
   end
 
   defp respond(args, context) do
     case decision(args) do
       {:ok, decision} ->
         :ok = report(context, decision)
-        {:ok, Tool.success(ended(decision))}
+        {{:ok, Tool.success(ended(decision))}, %{}}
 
       {:error, reason} ->
-        {:ok, Tool.error(describe_error(reason))}
+        refused(reason, describe_error(reason))
     end
   end
 
@@ -171,6 +188,7 @@ defmodule FermixCore.Tools.OpenLoopRespond do
     case Map.fetch(@decisions, Map.get(args, "decision")) do
       {:ok, :speak} -> speak(Map.get(args, "message"))
       {:ok, :silent} -> {:ok, %{decision: :silent, message: nil, reason: nil}}
+      {:ok, :later} -> {:ok, %{decision: :later, message: nil, reason: nil}}
       {:ok, :close} -> close(Map.get(args, "reason"))
       :error -> {:error, {:invalid_decision, Map.get(args, "decision")}}
     end
@@ -207,7 +225,7 @@ defmodule FermixCore.Tools.OpenLoopRespond do
   end
 
   defp describe_error({:invalid_decision, decision}) do
-    "#{inspect(decision)} is not a decision; call again with decision speak, silent or close."
+    "#{inspect(decision)} is not a decision; call again with decision speak, silent, later or close."
   end
 
   defp describe_error(:missing_message) do

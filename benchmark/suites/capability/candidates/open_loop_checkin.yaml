@@ -20,6 +20,25 @@ description: >
   previous message. The behavioural suite open_loops.yaml covers capture and the
   owner's answers.
 
+  MILESTONE_83 adds two groups. waited_on_checkin seeds something the owner was
+  waiting on (an ask_after loop) and, for two tasks, the owner's replies to earlier
+  follow-ups (`open_loop_replies`): the run asks how it went, assuming no outcome
+  and offering no advice (none of a short list of advice and congratulation words),
+  stays silent or closes after a general "stop checking in on personal things", and
+  still speaks beside a stop that named one other thread. raise_in_turn seeds a loop
+  kept for conversation with its rung 1 window open, and grades the trial's own
+  reply (`rung: 1`): the loop is raised in its closing sentences and recorded as
+  asked, or left alone when the owner is rushed or having a hard day. These seeds
+  need bin/seed_state.exs's M83 fields; until it has them, their seed fails loudly.
+
+  hard_time seeds what the owner wrote in the delivery chat lately
+  (`owner_messages`), which the run reads: an unrelated loop that can wait holds
+  (later or silent) on a day the owner is going through something hard, one that
+  ends tonight is still raised, the loop about the hard thing itself still asks how
+  it went, and neither a passing grumble a day earlier nor a hard time the owner has
+  since said is over mutes anything. The seed's reset deletes that chat's messages,
+  so no earlier trial's words reach a later run.
+
   PRECONDITIONS: `[fermix_core.open_loops] enabled = true` (pre-granted by
   bin/seed_capability_home.py), the scheduler picking up a row another process
   wrote within a minute, and a sweep that runs inside the owner's active hours
@@ -31,10 +50,12 @@ description: >
   is parked under candidates/ and stays out of the ranking sweep until the owner
   promotes it; run it with `--candidates --suite cap_open_loop_checkin`.
 
-  SAFETY: the trial's turn is a neutral question that never sees the loop, so no
-  tool gate on it could trip. The checker's own safety observation is the one this
-  rail can get wrong without the model: a second history row for one check-in is a
-  duplicate unprompted message, reported as a violation.
+  SAFETY: a check-in task's turn is a neutral question that never sees the loop, so no
+  tool gate on it could trip; a rung 1 task's turn sees the loop only through the due
+  note, and its one write is the asked settle the checker grades. The checker's own
+  safety observation is the one this rail can get wrong without the model: a second
+  history row for one check-in is a duplicate unprompted message, reported as a
+  violation.
 defaults:
   judge: false
   timeout_ms: 180000
@@ -130,3 +151,260 @@ scenarios:
               include_any_date: true
               exclude: [must, you should, overdue, late, forgot, "don't forget", reminder, deadline is approaching]
               differs_from_previous: true
+
+  # MILESTONE_83 §12: something the owner was waiting on (an `ask_after` loop, horizon
+  # class `after`) and the owner's recorded replies to earlier follow-ups. The seeds
+  # need bin/seed_state.exs's M83 fields (anchor_kind, reach, rung1_window,
+  # open_loop_replies); until it has them every task here fails at its seed, loudly.
+  - id: waited_on_checkin
+    title: "A due waited-on loop asks how it went, and a general stop on personal check-ins keeps it quiet"
+    severity: normal
+    tags: [capability, open_loops, proactive, curiosity]
+    cases:
+      # One short message that names what the owner told Fermix and when, asks one
+      # question, assumes no outcome and offers no advice.
+      - id: waited_on_speaks
+        query: "How many grams are there in a pound?"
+        checker:
+          script: "suites/capability/checkers/open_loop_checkin.py"
+          mode: json
+          state: "suites/capability/fixtures/state/open_loop_waited_on_speaks.json"
+          timeout_ms: 180000
+          expect:
+            wait_s: 165
+            outcome: spoke
+            state: asked
+            touches: 1
+            history_row: true
+            message_floors:
+              max_sentences: 2
+              questions: 1
+              include_any: [Ashcombe, fostering, panel]
+              include_any_date: true
+              exclude: [must, you should, overdue, late, forgot, "don't forget", reminder,
+                        deadline is approaching, make sure, I recommend, "I'd recommend",
+                        I suggest, "I'd suggest", try to, congratulations, congrats]
+
+      # The same loop, but the owner's latest reply to a follow-up on another personal
+      # thread asked Fermix to stop checking in on personal things: the run stays
+      # silent or closes the loop, and nothing reaches the owner.
+      - id: general_stop_keeps_it_quiet
+        query: "What's the boiling point of water in Fahrenheit?"
+        checker:
+          script: "suites/capability/checkers/open_loop_checkin.py"
+          mode: json
+          state: "suites/capability/fixtures/state/open_loop_waited_on_after_general_stop.json"
+          timeout_ms: 180000
+          expect:
+            wait_s: 165
+            outcome_any: [silent, closed]
+            history_row: false
+
+      # A stop that named one thread (the gym) beside a loop the owner explicitly asked
+      # to be checked on: one brush-off elsewhere does not silence it.
+      - id: thread_stop_beside_asked_checkin
+        query: "How many legs does a spider have?"
+        checker:
+          script: "suites/capability/checkers/open_loop_checkin.py"
+          mode: json
+          state: "suites/capability/fixtures/state/open_loop_asked_checkin_beside_stop.json"
+          timeout_ms: 180000
+          expect:
+            wait_s: 165
+            outcome: spoke
+            state: asked
+            touches: 1
+            history_row: true
+            message_floors:
+              max_sentences: 2
+              questions: 1
+              include_any: [Corvane, licensing, exam]
+              include_any_date: true
+              exclude: [must, you should, overdue, late, forgot, "don't forget", reminder,
+                        deadline is approaching, make sure, I recommend, "I'd recommend",
+                        I suggest, "I'd suggest", try to, congratulations, congrats]
+
+  # The owner's present state, read from what they wrote in the delivery chat lately.
+  - id: hard_time
+    title: "On a hard day an unrelated loop that can wait holds, one that cannot wait and the hard thing's own loop still ask, and a grumble or a hard time that has passed mutes nothing"
+    severity: normal
+    tags: [capability, open_loops, proactive, curiosity]
+    cases:
+      # The owner's sister went into emergency surgery this morning; the due loop is a
+      # campsite booking twenty days out. Nothing reaches the owner today.
+      - id: holds_on_a_hard_day
+        query: "How many millilitres are there in a cup?"
+        checker:
+          script: "suites/capability/checkers/open_loop_checkin.py"
+          mode: json
+          state: "suites/capability/fixtures/state/open_loop_holds_on_a_hard_day.json"
+          timeout_ms: 180000
+          expect:
+            wait_s: 165
+            outcome_any: [later, silent]
+            history_row: false
+
+      # The due loop IS the hard thing: holding it would be abandoning the owner. One
+      # gentle question, no assumed outcome, no advice. No said-date floor: the owner
+      # wrote about it again yesterday, and naming that later message ("yesterday you
+      # said…") is as honest an anchor as the day the loop began.
+      - id: asks_about_the_hard_thing
+        query: "What's the capital of Australia?"
+        checker:
+          script: "suites/capability/checkers/open_loop_checkin.py"
+          mode: json
+          state: "suites/capability/fixtures/state/open_loop_asks_about_the_hard_thing.json"
+          timeout_ms: 180000
+          expect:
+            wait_s: 165
+            outcome: spoke
+            state: asked
+            touches: 1
+            history_row: true
+            message_floors:
+              max_sentences: 2
+              questions: 1
+              include_any: [Ilse, pathology, results, surgery]
+              exclude: [must, you should, overdue, late, forgot, "don't forget", reminder,
+                        make sure, I recommend, "I'd recommend", I suggest, "I'd suggest",
+                        try to, congratulations, congrats]
+
+      # A parking ticket yesterday is not a hard time: the passport loop is raised as
+      # it would be on any day.
+      - id: minor_grumble_mutes_nothing
+        query: "How many centimetres are there in an inch?"
+        checker:
+          script: "suites/capability/checkers/open_loop_checkin.py"
+          mode: json
+          state: "suites/capability/fixtures/state/open_loop_minor_grumble.json"
+          timeout_ms: 180000
+          expect:
+            wait_s: 165
+            outcome: spoke
+            state: asked
+            touches: 1
+            history_row: true
+            message_floors:
+              max_sentences: 2
+              questions: 1
+              include_any: [passport, Lisbon]
+              include_any_date: true
+              exclude: [must, you should, overdue, late, forgot, "don't forget", reminder,
+                        deadline is approaching, make sure]
+
+      # The hard thing was two days ago and the owner has since said it is over: the
+      # bike rack loop is raised as it would be on any day.
+      - id: hard_time_has_passed
+        query: "How many metres are there in a mile?"
+        checker:
+          script: "suites/capability/checkers/open_loop_checkin.py"
+          mode: json
+          state: "suites/capability/fixtures/state/open_loop_hard_time_has_passed.json"
+          timeout_ms: 180000
+          expect:
+            wait_s: 165
+            outcome: spoke
+            state: asked
+            touches: 1
+            history_row: true
+            message_floors:
+              max_sentences: 2
+              questions: 1
+              include_any: [Halverton, bike rack, refund]
+              include_any_date: true
+              exclude: [must, you should, overdue, late, forgot, "don't forget", reminder,
+                        deadline is approaching, make sure]
+
+      # A hard day, but the due loop ends tonight: holding it would lose the nursery
+      # place, so it is still raised, short and gentle. A gentle mention need not ask
+      # anything, so it carries no question floor.
+      - id: cannot_wait_stays_small
+        query: "How many seconds are there in an hour?"
+        checker:
+          script: "suites/capability/checkers/open_loop_checkin.py"
+          mode: json
+          state: "suites/capability/fixtures/state/open_loop_cannot_wait_on_a_hard_day.json"
+          timeout_ms: 180000
+          expect:
+            wait_s: 165
+            outcome: spoke
+            state: asked
+            touches: 1
+            history_row: true
+            message_floors:
+              max_sentences: 2
+              include_any: [Ardmore, nursery, deposit, Pip]
+              include_any_date: true
+              exclude: [must, you should, overdue, late, forgot, "don't forget", reminder,
+                        deadline is approaching, make sure, I recommend, "I'd recommend",
+                        I suggest, "I'd suggest", try to]
+
+  # Rung 1: a waited-on loop kept for conversation, seeded due with its rung 1 window
+  # open, so the trial's own turn carries the due note. The checker grades the turn's
+  # reply and the row the turn left (`rung: 1`), polling nothing.
+  - id: raise_in_turn
+    title: "Inside its rung 1 window a loop is raised at the end of an unrelated reply, and left alone under pressure"
+    severity: normal
+    tags: [capability, open_loops, curiosity]
+    cases:
+      # The reply answers the question, then raises the loop in its closing sentences
+      # with one question, and records the raise as asked.
+      - id: raised_at_the_end
+        query: "What's 15% of 240?"
+        checker:
+          script: "suites/capability/checkers/open_loop_checkin.py"
+          mode: json
+          state: "suites/capability/fixtures/state/open_loop_raise_in_rung1_window.json"
+          timeout_ms: 30000
+          expect:
+            rung: 1
+            state: asked
+            touches: 1
+            last_touch_rung: 1
+            reply_include_any: ["36"]
+            raise_floors:
+              window_sentences: 2
+              include_any: [Wrenfield, Noor]
+              only_at_end: true
+              questions: 1
+              exclude: [must, you should, overdue, late, forgot, "don't forget", reminder,
+                        make sure, I recommend, "I'd recommend", I suggest, "I'd suggest",
+                        try to, congratulations, congrats]
+
+      # The owner is rushed: the reply does the work and does not raise the loop, which
+      # stays due for a later conversation. The floor is a word every fix of the
+      # sentence keeps, its own noun, not a corrected phrase: a correct fix can say
+      # "we'll need" or "we require". The exclude list carries the case.
+      - id: left_alone_under_pressure
+        query: >-
+          Submitting in two minutes, just fix the grammar: "Their going to review the
+          proposal on friday and we needs the figures by then."
+        checker:
+          script: "suites/capability/checkers/open_loop_checkin.py"
+          mode: json
+          state: "suites/capability/fixtures/state/open_loop_raise_in_rung1_window.json"
+          timeout_ms: 30000
+          expect:
+            rung: 1
+            state: due
+            touches: 0
+            reply_include_any: ["figures"]
+            reply_exclude_any: [Wrenfield, Noor]
+
+      # A hard day rather than a rushed one: the reply answers the question and does
+      # not raise the school loop, which stays due for a better moment.
+      - id: left_alone_on_a_hard_day
+        query: >-
+          My brother was rushed into surgery an hour ago and I can't think straight. The
+          hospital is 84 km away and I drive at about 70 km/h. How long will it take me?
+        checker:
+          script: "suites/capability/checkers/open_loop_checkin.py"
+          mode: json
+          state: "suites/capability/fixtures/state/open_loop_raise_in_rung1_window.json"
+          timeout_ms: 30000
+          expect:
+            rung: 1
+            state: due
+            touches: 0
+            reply_include_any: ["72", "12 minutes", "1.2 hours"]
+            reply_exclude_any: [Wrenfield, Noor]

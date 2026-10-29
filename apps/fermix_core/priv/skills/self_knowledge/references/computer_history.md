@@ -51,6 +51,7 @@ One gate, checked once per turn, governs every reader: the turn's model calls, t
 - `recall_activity` (owner-only) returns derived summaries only, never raw field text: a **time window** in the owner's time zone ("this morning", from session notes); `window: "current"` (the active threads, dated by last touch); or `about: "<topic>"` (a search across both layers and all dates; a topic with no searchable word is refused). Results are newest first, dated, with their apps and pages, and a header states the true total when more matched than shown.
 - The **Recent Activity** prompt section injects up to three current threads, then up to 8 dated sittings from the last 24 hours, each layer on its own budget.
 - Both frame activity as untrusted data. A reply built from activity is tainted, so compaction and replay never send it to an ungranted remote provider. Activity lives in its own tables in `memory.db`; general memory search never returns it.
+- When such a reply raises an open loop, the follow-up record keeps what Fermix said marked too: it comes back in a due note or `open_loop_list` only on a request that may carry activity, and never in a check-in run; anywhere else the follow-up shows only that Fermix raised it and what the owner replied.
 - Fermix's own automation (the managed browser, computer-use actions) is not excluded from capture: activity the agent caused can appear as the owner's. Never assume your own actions are absent.
 
 ## Commands

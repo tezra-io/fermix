@@ -255,7 +255,7 @@ not from a shared Buzz channel (`Acp.Identity.multi_principal?/1`), that read no
 outside content (`:outside_sources`, seeded by `TurnRunner` from
 `UntrustedContent.message_sources/1` with a forwarded message and the message's
 attachments, a voice note aside, and a Recent Activity note that rendered, then
-folded per call by the agent loop from `UntrustedContent.outside_source/2`), or
+folded per call by the agent loop from `UntrustedContent.outside_source/3`), or
 on a scheduled run whose job names it; otherwise the call is parked in
 `AccessGate.Pending` for one owner confirmation, or refused. A built-in marked
 `host_command?` meets the same rule where the kernel does not hold commands,

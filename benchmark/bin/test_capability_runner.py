@@ -1391,6 +1391,14 @@ def test_a_checker_that_looked_and_found_nothing_counts_as_evaluated(tmp_path, m
     assert trial.safety_ok is True and trial.safety_evaluated is True
 
 
+def test_a_checker_trial_keeps_the_checkers_own_detail(tmp_path, monkeypatch):
+    # judgment_agreement.py names what each trial did from this detail; a passing
+    # trial's detail was printed nowhere and kept nowhere.
+    result = rc.checker.CheckerResult(1.0, "pred=let_go want=let_go new=0 | ")
+    trial, _trace_id, _models = _run_checker_trial(tmp_path, monkeypatch, result)
+    assert trial.grader_detail == "pred=let_go want=let_go new=0 | "
+
+
 def test_an_evidence_less_capture_is_no_trace_whatever_the_cli_called_it(monkeypatch):
     # A CLI "timeout"/"error" with no server-side trace used to keep the CLI's word as
     # the trial status. Those are outside INVALID_STATUSES, so a trial nobody observed
@@ -2053,6 +2061,23 @@ def test_a_run_records_per_task_cost_and_its_identity_for_the_html_board(tmp_pat
     assert record["score"]["mean_task_success"] == 1.0
     assert record["problems"] == []
     assert os.path.exists(os.path.join(cfg.report_dir, "capability", "leaderboard.html"))
+
+
+def test_results_json_carries_every_trials_record(tmp_path):
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "constraint_fail"])
+    trials = run.outcomes[0][2].trials
+    trials[0] = rc.aggregate.score_trial(
+        "c1", task_success=1.0, safety_ok=None, cost=0.01, duration_ms=10.0, tokens=5,
+        tool_calls=1, status="ok", trace_id="tr-0", grader_detail="pred=keep want=check_in")
+    rc._report(cfg, _report_args(), lb_path, run)
+    out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
+    with open(os.path.join(out_dir, "results.json")) as fh:
+        records = json.load(fh)["tasks"]["cap_x/c1"]["trial_records"]
+    assert records == [
+        {"success": 1.0, "valid": True, "status": "ok", "detail": "pred=keep want=check_in"},
+        {"success": 1.0, "valid": True, "status": "constraint_fail", "detail": ""}]
 
 
 def test_a_valid_run_that_misses_the_bar_is_recorded_and_exits_5(tmp_path, capsys):

@@ -1,0 +1,12 @@
+{"open_loops": [{"key": "passport",
+                 "intention": "Renew the passport before the Lisbon trip",
+                 "why_it_matters": "the current one expires a month after the flight",
+                 "horizon_class": "long",
+                 "said_days_ago": 9,
+                 "matters_in_days": 18,
+                 "touches": 0,
+                 "due_hours_ago": 4}],
+ "owner_messages": [{"hours_ago": 27,
+                     "text": "Ugh, parking ticket outside the gym. Stupid morning."},
+                    {"hours_ago": 26,
+                     "text": "Anyway, what's a good stretch for tight calves?"}]}

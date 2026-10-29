@@ -39,7 +39,7 @@ defmodule FermixCore.Temporal.DeliveryTest do
     end
   end
 
-  test "reminder and follow-up retries use separate stable dedupe keys" do
+  test "a reminder's retries share one stable dedupe key" do
     channel = :"temporal_delivery_#{System.unique_integer([:positive])}"
 
     start_supervised!(%{
@@ -61,19 +61,11 @@ defmodule FermixCore.Temporal.DeliveryTest do
 
     assert :ok = Delivery.attempt(row, "Reminder", 1_000, opts)
     assert :ok = Delivery.attempt(row, "Reminder", 1_000, opts)
-    assert :ok = Delivery.attempt(row, "Follow-up", 1_000, opts, :followup)
-    assert :ok = Delivery.attempt(row, "Follow-up", 1_000, opts, :followup)
 
     state = Agent.get(channel, & &1)
 
-    assert state.attempts == [
-             "temporal:reminder-42",
-             "temporal:reminder-42",
-             "temporal:reminder-42:followup",
-             "temporal:reminder-42:followup"
-           ]
-
-    assert state.fanouts == ["Reminder", "Follow-up"]
+    assert state.attempts == ["temporal:reminder-42", "temporal:reminder-42"]
+    assert state.fanouts == ["Reminder"]
   end
 
   defp recipient! do
@@ -108,11 +100,11 @@ defmodule FermixCore.Temporal.DeliveryTest do
 
     computer = %{row | delivery_platform: "computer", delivery_thread_scope: "root"}
 
-    assert :ok = Delivery.attempt(computer, "Later", 1_000, [adapter: OptsAdapter], :followup)
-    assert_receive {:send_opts, followup_opts}
+    assert :ok = Delivery.attempt(computer, "Later", 1_000, adapter: OptsAdapter)
+    assert_receive {:send_opts, computer_opts}
 
-    assert Enum.sort(followup_opts) == [
-             proactive_key: "temporal:rem_42:followup",
+    assert Enum.sort(computer_opts) == [
+             proactive_key: "temporal:rem_42",
              reminder_id: "rem_42",
              title: "Tea"
            ]

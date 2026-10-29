@@ -14,6 +14,7 @@ the history row and the message. Gold (`checker.expect`):
 
   wait_s: 165                       # the poll budget; keep it below checker.timeout_ms
   outcome: spoke                    # last_outcome
+  outcome_any: [silent, closed]     # or: last_outcome is one of these (not with outcome)
   state: asked
   touches: 1
   close_reason: reported_elsewhere
@@ -30,6 +31,20 @@ the history row and the message. Gold (`checker.expect`):
 
 Floors carry facts and limits, never a phrasing: a wording list rots on every model
 change (AGENTS.md).
+
+RUNG 1 (`rung: 1`). The loop was seeded due with its rung 1 window still open, so the
+trial's own turn carries the due note and the raise, if any, is in its reply. Nothing
+is polled: the turn has settled when the checker runs. The row is graded as it stands
+(`state`, `touches`, `last_touch_rung`: 1 for a raise recorded as asked), then the reply:
+
+  reply_include_any: [...]          # the turn's own question was answered (a fact)
+  reply_exclude_any: [...]          # the reply does not raise the loop at all
+  raise_floors:                     # on the reply's closing `window_sentences` sentences
+    window_sentences: 2
+    include_any: [...]              # a term from the owner's own words, in the window
+    only_at_end: true               # and none of those terms before it
+    questions: 1                    # exactly this many questions in the window
+    exclude: [...]                  # duty, advice and outcome words, none in the window
 
 No decision within `wait_s` is graded from the home's trace, never assumed: a run the
 scheduler skipped (`open_loop_skipped`: active_hours, budget, disabled, ...) did not
@@ -54,7 +69,7 @@ import _checkerlib as lib  # noqa: E402
 
 POLL_S = 2.0
 ROW_COLUMNS = ("id", "state", "touches", "last_outcome", "close_reason", "last_message",
-               "next_touch_at", "last_touch_at", "claimed_at")
+               "next_touch_at", "last_touch_at", "last_touch_rung", "claimed_at")
 SKIP_EVENT = "open_loop_skipped"
 MONTHS = ("January", "February", "March", "April", "May", "June", "July", "August",
           "September", "October", "November", "December")
@@ -157,9 +172,13 @@ def history_rows(loop_id):
 
 def row_problem(gold, row):
     for column, key in (("last_outcome", "outcome"), ("state", "state"),
-                        ("touches", "touches"), ("close_reason", "close_reason")):
+                        ("touches", "touches"), ("close_reason", "close_reason"),
+                        ("last_touch_rung", "last_touch_rung")):
         if key in gold and row[column] != gold[key]:
             return f"{column} is {row[column]!r}, want {gold[key]!r} (row state {row['state']})"
+    if "outcome_any" in gold and row["last_outcome"] not in gold["outcome_any"]:
+        return (f"last_outcome is {row['last_outcome']!r}, want one of {gold['outcome_any']} "
+                f"(row state {row['state']})")
     if "next_touch_after_touch_hours" in gold:
         return next_touch_problem(gold["next_touch_after_touch_hours"], row)
     return None
@@ -191,11 +210,23 @@ def history_problem(gold, rows):
     return None
 
 
+def flattened(text):
+    """The text with the dots of abbreviations and decimals removed, so only a sentence's
+    end is left as . ! or ?."""
+    flat = ABBREVIATIONS.sub(lambda m: m.group(1).replace(".", ""), text)
+    return re.sub(r"(?<=\d)\.(?=\d)", "", flat)
+
+
 def sentences(text):
     """Sentence count: runs of . ! ? end a sentence; abbreviations and decimals do not."""
-    flat = ABBREVIATIONS.sub(lambda m: m.group(1).replace(".", ""), text)
-    flat = re.sub(r"(?<=\d)\.(?=\d)", "", flat)
-    return len([part for part in re.split(r"[.!?]+", flat) if part.strip()])
+    return len([part for part in re.split(r"[.!?]+", flattened(text)) if part.strip()])
+
+
+def split_window(text, count):
+    """(the reply before its closing `count` sentences, those closing sentences), each
+    sentence keeping the . ! or ? that ends it so its questions still count."""
+    parts = [part for part in re.findall(r"[^.!?]+[.!?]*", flattened(text)) if part.strip()]
+    return "".join(parts[:-count]), "".join(parts[-count:])
 
 
 def said_terms(said_on):
@@ -239,11 +270,52 @@ def message_problem(floors, message, loop):
     return None
 
 
+def raise_problem(floors, reply):
+    """The rung 1 raise in the reply's closing sentences: a term from the owner's words
+    there and nowhere before, the questions it asks, and none of the excluded words."""
+    count = floors.get("window_sentences")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        invalid(f"raise_floors.window_sentences must be a positive integer, got {count!r}")
+    text = (reply or "").replace("’", "'").strip()
+    before, window = split_window(text, count)
+    terms = floors.get("include_any") or ()
+    if terms and not any(lib.term_present(window, t) for t in terms):
+        return f"the reply's last {count} sentence(s) name none of {list(terms)}"
+    early = [t for t in terms if lib.term_present(before, t)]
+    if floors.get("only_at_end") and early:
+        return f"the reply raises {early} before its last {count} sentence(s)"
+    asked = len(re.findall(r"\?+", window))
+    if "questions" in floors and asked != floors["questions"]:
+        return f"the raise asks {asked} question(s), want {floors['questions']}"
+    found = [t for t in floors.get("exclude") or () if lib.term_present(window, t)]
+    return f"the raise uses {found}" if found else None
+
+
+def grade_raise(ev, gold, loop):
+    """Rung 1: the row as the trial's turn left it, then its reply."""
+    row = read_row(loop["id"])
+    reply = ev.get("reply") or ""
+    named = [t for t in gold.get("reply_exclude_any") or () if lib.term_present(reply, t)]
+    problem = (row_problem(gold, row) or lib.reply_problem(ev, gold)
+               or (f"the reply raises the loop ({named})" if named else None)
+               or (raise_problem(gold["raise_floors"], reply)
+                   if "raise_floors" in gold else None))
+    if problem:
+        lib.emit(0.0, problem)
+        return
+    lib.emit(1.0, f"{loop['id']}: rung 1, {row['state']}, touches {row['touches']}")
+
+
 def main():
     ev = lib.evidence()
     gold = lib.expected(ev)
     state = lib.seeded(ev)
     loop = seeded_loop(state)
+    if "outcome" in gold and "outcome_any" in gold:
+        invalid("checker.expect names both outcome and outcome_any")
+    if gold.get("rung") == 1:
+        grade_raise(ev, gold, loop)
+        return
     wait_s = gold.get("wait_s")
     if isinstance(wait_s, bool) or not isinstance(wait_s, (int, float)) or wait_s < 0:
         invalid(f"checker.expect.wait_s must be a non-negative number, got {wait_s!r}")

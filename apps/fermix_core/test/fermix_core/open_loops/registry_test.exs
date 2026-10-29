@@ -55,12 +55,21 @@ defmodule FermixCore.OpenLoops.RegistryTest do
   end
 
   defp note!(opts, params \\ %{}) do
-    params = Map.merge(%{"intention" => @intention, "matters_by" => @date}, params)
+    params =
+      Map.merge(%{"intention" => @intention, "matters_by" => @date, "reach" => "message"}, params)
+
     {:ok, result} = Registry.note(params, @attended, opts)
     result
   end
 
   defp at(opts, now), do: Keyword.put(opts, :now, now)
+
+  # The due scan at `at`, as the scheduler runs it: a loop whose touch has
+  # arrived becomes due, the only state a raise may be recorded on.
+  defp due!(opts, %DateTime{} = at) do
+    {:ok, _scan} = Repo.scan_due_open_loops(at, 50, server: Keyword.fetch!(opts, :repo))
+    :ok
+  end
 
   defp utc(%DateTime{microsecond: {value, _precision}} = at), do: %{at | microsecond: {value, 6}}
 
@@ -69,7 +78,8 @@ defmodule FermixCore.OpenLoops.RegistryTest do
       params = %{
         "intention" => "  #{@intention}  ",
         "why_it_matters" => "the panel only reads applications that arrive on time",
-        "matters_by" => @date
+        "matters_by" => @date,
+        "reach" => "message"
       }
 
       assert {:ok, result} = Registry.note(params, @attended, opts)
@@ -100,7 +110,11 @@ defmodule FermixCore.OpenLoops.RegistryTest do
 
     test "atom-keyed params are read the same way", %{opts: opts} do
       assert {:ok, %{status: :created}} =
-               Registry.note(%{intention: @intention, matters_by: @date}, @attended, opts)
+               Registry.note(
+                 %{intention: @intention, matters_by: @date, reach: "conversation"},
+                 @attended,
+                 opts
+               )
     end
 
     test "the same intention, however it is cased or punctuated, returns the stored loop",
@@ -110,7 +124,8 @@ defmodule FermixCore.OpenLoops.RegistryTest do
 
       restated = %{
         "intention" => "  SUBMIT the Kestrel Valley fellowship application!! ",
-        "matters_by" => %{"type" => "date", "date" => "2031-06-20"}
+        "matters_by" => %{"type" => "date", "date" => "2031-06-20"},
+        "reach" => "message"
       }
 
       assert {:ok, again} =
@@ -187,7 +202,11 @@ defmodule FermixCore.OpenLoops.RegistryTest do
       soon = %{"type" => "datetime", "date" => "2031-06-02", "time" => "12:00:00"}
 
       assert {:error, :imminent_without_window} =
-               Registry.note(%{"intention" => @intention, "matters_by" => soon}, @attended, opts)
+               Registry.note(
+                 %{"intention" => @intention, "matters_by" => soon, "reach" => "message"},
+                 @attended,
+                 opts
+               )
     end
 
     test "a zone the owner named wins over the configured one", %{opts: opts} do
@@ -205,7 +224,7 @@ defmodule FermixCore.OpenLoops.RegistryTest do
           ] do
         assert {:error, :not_dated} =
                  Registry.note(
-                   %{"intention" => @intention, "matters_by" => form},
+                   %{"intention" => @intention, "matters_by" => form, "reach" => "message"},
                    @attended,
                    opts
                  )
@@ -214,7 +233,7 @@ defmodule FermixCore.OpenLoops.RegistryTest do
       for form <- [%{"type" => "date", "date" => "June 10"}, %{"type" => "fortnight"}, "soon"] do
         assert {:error, {:invalid_when, ^form}} =
                  Registry.note(
-                   %{"intention" => @intention, "matters_by" => form},
+                   %{"intention" => @intention, "matters_by" => form, "reach" => "message"},
                    @attended,
                    opts
                  )
@@ -223,17 +242,28 @@ defmodule FermixCore.OpenLoops.RegistryTest do
 
     test "refuses missing and oversized parameters", %{opts: opts} do
       assert {:error, {:missing_parameters, [:intention]}} =
-               Registry.note(%{"matters_by" => @date}, @attended, opts)
+               Registry.note(%{"matters_by" => @date, "reach" => "message"}, @attended, opts)
 
       assert {:error, {:missing_parameters, [:intention]}} =
-               Registry.note(%{"intention" => " ?! ", "matters_by" => @date}, @attended, opts)
+               Registry.note(
+                 %{"intention" => " ?! ", "matters_by" => @date, "reach" => "message"},
+                 @attended,
+                 opts
+               )
 
-      assert {:error, {:missing_parameters, [:matters_by]}} =
-               Registry.note(%{"intention" => @intention}, @attended, opts)
+      assert {:error, :missing_when} =
+               Registry.note(%{"intention" => @intention, "reach" => "message"}, @attended, opts)
+
+      assert {:error, {:missing_parameters, [:reach]}} =
+               Registry.note(%{"intention" => @intention, "matters_by" => @date}, @attended, opts)
 
       assert {:error, {:too_long, :intention, 500}} =
                Registry.note(
-                 %{"intention" => String.duplicate("a", 501), "matters_by" => @date},
+                 %{
+                   "intention" => String.duplicate("a", 501),
+                   "matters_by" => @date,
+                   "reach" => "message"
+                 },
                  @attended,
                  opts
                )
@@ -243,7 +273,8 @@ defmodule FermixCore.OpenLoops.RegistryTest do
                  %{
                    "intention" => @intention,
                    "why_it_matters" => String.duplicate("b", 301),
-                   "matters_by" => @date
+                   "matters_by" => @date,
+                   "reach" => "message"
                  },
                  @attended,
                  opts
@@ -255,7 +286,8 @@ defmodule FermixCore.OpenLoops.RegistryTest do
                Registry.note(
                  %{
                    "intention" => @intention,
-                   "matters_by" => %{"type" => "date", "date" => "2031-06-01"}
+                   "matters_by" => %{"type" => "date", "date" => "2031-06-01"},
+                   "reach" => "message"
                  },
                  @attended,
                  opts
@@ -265,7 +297,7 @@ defmodule FermixCore.OpenLoops.RegistryTest do
     test "refuses without a timezone, or with one the tz database does not know", %{opts: opts} do
       assert {:error, :timezone_not_configured} =
                Registry.note(
-                 %{"intention" => @intention, "matters_by" => @date},
+                 %{"intention" => @intention, "matters_by" => @date, "reach" => "message"},
                  @attended,
                  Keyword.put(opts, :personalization, [])
                )
@@ -275,6 +307,7 @@ defmodule FermixCore.OpenLoops.RegistryTest do
                  %{
                    "intention" => @intention,
                    "matters_by" => @date,
+                   "reach" => "message",
                    "timezone" => "Mars/Olympus"
                  },
                  @attended,
@@ -283,7 +316,7 @@ defmodule FermixCore.OpenLoops.RegistryTest do
     end
 
     test "refuses without a chat-capable owner inbox", %{opts: opts} do
-      params = %{"intention" => @intention, "matters_by" => @date}
+      params = %{"intention" => @intention, "matters_by" => @date, "reach" => "message"}
 
       assert {:error, :no_target} =
                Registry.note(params, @attended, Keyword.put(opts, :configured_owners, %{}))
@@ -313,14 +346,18 @@ defmodule FermixCore.OpenLoops.RegistryTest do
 
       assert {:error, :too_many_loops} =
                Registry.note(
-                 %{"intention" => "One errand too many", "matters_by" => @date},
+                 %{
+                   "intention" => "One errand too many",
+                   "matters_by" => @date,
+                   "reach" => "message"
+                 },
                  @attended,
                  opts
                )
     end
 
     test "only an attended owner turn outside a check-in may record", %{opts: opts} do
-      params = %{"intention" => @intention, "matters_by" => @date}
+      params = %{"intention" => @intention, "matters_by" => @date, "reach" => "message"}
 
       assert {:error, :not_attended} =
                Registry.note(params, %{@attended | source_trust: :guest}, opts)
@@ -334,6 +371,10 @@ defmodule FermixCore.OpenLoops.RegistryTest do
       checkin = Map.put(@attended, :open_loop_checkin, %{id: "loop_AbCdEfGhIjK"})
       assert {:error, :not_attended} = Registry.note(params, checkin, opts)
 
+      group = Map.put(@attended, :chat_type, "group")
+      assert {:error, :not_attended} = Registry.note(params, group, opts)
+      assert {:ok, _} = Registry.note(params, Map.put(@attended, :chat_type, "private"), opts)
+
       assert {:error, :no_conversation} =
                Registry.note(params, Map.delete(@attended, :conversation_key), opts)
     end
@@ -341,7 +382,7 @@ defmodule FermixCore.OpenLoops.RegistryTest do
     # MILESTONE_78 §08: a group chat never produces a loop, and a chat with no
     # label is shared, as a Slack channel mention is.
     test "a group chat or an unlabelled chat may not record", %{opts: opts} do
-      params = %{"intention" => @intention, "matters_by" => @date}
+      params = %{"intention" => @intention, "matters_by" => @date, "reach" => "message"}
 
       for context <- [%{@attended | chat_type: "group"}, Map.delete(@attended, :chat_type)] do
         assert {:error, :not_attended} = Registry.note(params, context, opts)
@@ -355,14 +396,378 @@ defmodule FermixCore.OpenLoops.RegistryTest do
       refute note!(opts).loop.noted_after_outside_content
 
       read_a_page = %{@attended | outside_sources: @read_a_page}
-      params = %{"intention" => "Renew the Pellworth lease", "matters_by" => @date}
+
+      params = %{
+        "intention" => "Renew the Pellworth lease",
+        "matters_by" => @date,
+        "reach" => "message"
+      }
+
       assert {:ok, %{loop: stamped}} = Registry.note(params, read_a_page, opts)
       assert stamped.noted_after_outside_content
 
       unstamped = Map.delete(@attended, :outside_sources)
-      params = %{"intention" => "Book the Ardent Hall for the launch", "matters_by" => @date}
+
+      params = %{
+        "intention" => "Book the Ardent Hall for the launch",
+        "matters_by" => @date,
+        "reach" => "message"
+      }
+
       assert {:ok, %{loop: unknown}} = Registry.note(params, unstamped, opts)
       assert unknown.noted_after_outside_content
+    end
+  end
+
+  describe "note/3: something waited on or gone through" do
+    @interview "Final-round interview with Brightwell"
+    @tuesday_evening %{"type" => "datetime", "date" => "2031-06-03", "time" => "17:00:00"}
+
+    defp waited!(opts, params \\ %{}) do
+      params =
+        Map.merge(
+          %{"intention" => @interview, "ask_after" => @tuesday_evening, "reach" => "message"},
+          params
+        )
+
+      {:ok, result} = Registry.note(params, @attended, opts)
+      result
+    end
+
+    test "records it with its ask_after as the anchor, its reach and no source", %{opts: opts} do
+      result = waited!(opts, %{"reach" => "conversation"})
+      loop = result.loop
+
+      assert %{status: :created} = result
+      assert result.stated_as == "Tuesday, June 3, 2031 at 5:00 PM EDT"
+      assert result.first_check == "Tuesday, June 3, 2031 at 5:00 PM EDT"
+
+      assert %{
+               anchor_kind: "ask_after",
+               horizon_class: "after",
+               matters_by_source: nil,
+               reach: "conversation",
+               matters_by_kind: "datetime",
+               matters_by_date: ~D[2031-06-03],
+               matters_by_time: ~T[17:00:00]
+             } = loop
+
+      assert loop.matters_by_at == utc(~U[2031-06-03 21:00:00Z])
+      assert loop.next_touch_at == utc(~U[2031-06-03 21:00:00Z])
+    end
+
+    test "a date alone means after that day ends: the next day's active-hours start",
+         %{opts: opts} do
+      loop = waited!(opts, %{"ask_after" => %{"type" => "date", "date" => "2031-06-04"}}).loop
+
+      assert {loop.matters_by_kind, loop.matters_by_date} == {"date", ~D[2031-06-04]}
+      assert loop.matters_by_at == utc(~U[2031-06-05 13:00:00Z])
+
+      relative =
+        waited!(opts, %{
+          "intention" => "Hear back about the Juniper Row flat",
+          "ask_after" => %{"type" => "relative", "amount" => 2, "unit" => "days"}
+        }).loop
+
+      assert relative.matters_by_at == utc(~U[2031-06-05 13:00:00Z])
+    end
+
+    # A year is a sanity bound, not taste: a same-evening outcome works, and so
+    # do a birth due in about six weeks and a wedding next spring.
+    test "ask_after lies from three hours to a year out", %{opts: opts} do
+      tonight = %{"type" => "datetime", "date" => "2031-06-02", "time" => "13:00:00"}
+
+      assert waited!(opts, %{"ask_after" => tonight}).loop.next_touch_at ==
+               utc(~U[2031-06-02 17:00:00Z])
+
+      six_weeks = %{"type" => "relative", "amount" => 6, "unit" => "weeks"}
+
+      due = waited!(opts, %{"intention" => "The baby is due", "ask_after" => six_weeks}).loop
+      assert due.next_touch_at == utc(~U[2031-07-15 13:00:00Z])
+
+      for {form, reason} <- [
+            {%{"type" => "datetime", "date" => "2031-06-02", "time" => "12:59:59"},
+             :ask_after_too_soon},
+            {%{"type" => "date", "date" => "2031-06-01"}, :ask_after_too_soon},
+            {%{"type" => "date", "date" => "2032-06-01"}, :ask_after_too_far}
+          ] do
+        params = %{
+          "intention" => "Hear from the Ellery clinic",
+          "ask_after" => form,
+          "reach" => "message"
+        }
+
+        assert {:error, ^reason} = Registry.note(params, @attended, opts)
+      end
+
+      last =
+        waited!(opts, %{
+          "intention" => "Hear from the Ellery clinic",
+          "ask_after" => %{"type" => "date", "date" => "2032-05-31"}
+        })
+
+      assert last.loop.matters_by_at == utc(~U[2032-06-01 13:00:00Z])
+    end
+
+    test "exactly one time, and a reach the vocabulary knows", %{opts: opts} do
+      both = %{
+        "intention" => @interview,
+        "ask_after" => @tuesday_evening,
+        "matters_by" => @date,
+        "reach" => "message"
+      }
+
+      assert {:error, :both_whens} = Registry.note(both, @attended, opts)
+
+      bad_reach = %{
+        "intention" => @interview,
+        "ask_after" => @tuesday_evening,
+        "reach" => "email"
+      }
+
+      assert {:error, {:invalid_param, :reach}} = Registry.note(bad_reach, @attended, opts)
+    end
+
+    test "a dated loop records who gave its date; a loop waited on has none", %{opts: opts} do
+      assert note!(opts).loop.matters_by_source == "owner"
+
+      looked_up =
+        note!(opts, %{
+          "intention" => "Pay the Corvina parking fine",
+          "matters_by_source" => "lookup"
+        })
+
+      assert looked_up.loop.matters_by_source == "lookup"
+
+      assert {:error, :source_without_matters_by} =
+               Registry.note(
+                 %{
+                   "intention" => @interview,
+                   "ask_after" => @tuesday_evening,
+                   "reach" => "message",
+                   "matters_by_source" => "owner"
+                 },
+                 @attended,
+                 opts
+               )
+
+      assert {:error, {:invalid_param, :matters_by_source}} =
+               Registry.note(
+                 %{
+                   "intention" => "Renew the Tamsin permit",
+                   "matters_by" => @date,
+                   "reach" => "message",
+                   "matters_by_source" => "guess"
+                 },
+                 @attended,
+                 opts
+               )
+    end
+
+    test "the same words in the other timing are a kind conflict, naming the live loop",
+         %{opts: opts, repo: repo} do
+      dated = note!(opts, %{"intention" => @interview})
+
+      assert {:error, {:kind_conflict, id}} =
+               Registry.note(
+                 %{
+                   "intention" => @interview,
+                   "ask_after" => @tuesday_evening,
+                   "reach" => "message"
+                 },
+                 @attended,
+                 opts
+               )
+
+      assert id == dated.loop.id
+      assert {:ok, 1} = Repo.count_live_open_loops("default", server: repo)
+
+      waited = waited!(opts, %{"intention" => "Hear about the Fernhill lease"})
+      again = waited!(opts, %{"intention" => "hear about the fernhill lease!"})
+      assert again.status == :existing and again.loop == waited.loop
+    end
+
+    test "the model's view states the ask_after, the reach and the class", %{opts: opts} do
+      view = Registry.view(waited!(opts).loop, opts)
+
+      assert view["ask_after"] == "Tuesday, June 3, 2031 at 5:00 PM EDT"
+      assert view["reach"] == "message"
+      assert view["horizon_class"] == "after"
+      refute Map.has_key?(view, "matters_by")
+      refute Map.has_key?(view, "matters_by_source")
+    end
+  end
+
+  describe "update/4: moved, reach, and answers about something waited on" do
+    test "moved gives a dated loop a new date, re-derives its class and keeps its touches",
+         %{opts: opts} do
+      loop = note!(opts).loop
+      :ok = due!(opts, ~U[2031-06-07 14:00:00Z])
+
+      {:ok, %{loop: asked}} =
+        Registry.update(
+          loop.id,
+          %{"answer" => "asked"},
+          @attended,
+          at(opts, ~U[2031-06-07 14:00:00Z])
+        )
+
+      TelemetryCapture.attach([[:fermix, :open_loop, :settled]], open_loop_id: loop.id)
+
+      params = %{
+        "answer" => "moved",
+        "owner_words" => "they pushed it to the 24th at noon",
+        "matters_by" => %{"type" => "datetime", "date" => "2031-06-24", "time" => "12:00:00"},
+        "matters_by_source" => "lookup"
+      }
+
+      later = at(opts, ~U[2031-06-08 14:00:00Z])
+      assert {:ok, result} = Registry.update(asked.id, params, @attended, later)
+
+      assert %{
+               horizon_class: "long",
+               touches: 1,
+               state: "open",
+               last_answer: "moved",
+               matters_by_source: "lookup"
+             } =
+               result.loop
+
+      assert result.loop.matters_by_at == utc(~U[2031-06-24 16:00:00Z])
+      assert result.next_check == "Monday, June 23, 2031 at 9:00 AM EDT"
+
+      assert Registry.view(result.loop, later)["matters_by"] ==
+               "Tuesday, June 24, 2031 at 12:00 PM EDT"
+
+      assert_receive {:telemetry, [:fermix, :open_loop, :settled], _,
+                      %{answer: "moved", from: "asked", to: "open"}}
+    end
+
+    test "moved needs a date ahead with room for a touch, and only a dated loop has one",
+         %{opts: opts} do
+      loop = note!(opts).loop
+      waited = waited!(opts).loop
+      soon = %{"type" => "datetime", "date" => "2031-06-02", "time" => "12:00:00"}
+
+      for {id, params, reason} <- [
+            {loop.id, %{"answer" => "moved", "owner_words" => "moved"}, :moved_requires_date},
+            {loop.id, %{"answer" => "moved", "owner_words" => "noon", "matters_by" => soon},
+             :imminent_without_window},
+            {loop.id, %{"answer" => "done", "owner_words" => "done", "matters_by" => @date},
+             :matters_by_without_moved},
+            {loop.id,
+             %{"answer" => "moved", "owner_words" => "x", "matters_by_source" => "lookup"},
+             :source_without_matters_by},
+            {waited.id, %{"answer" => "moved", "owner_words" => "moved", "matters_by" => @date},
+             :moved_on_after_loop}
+          ] do
+        assert {:error, ^reason} = Registry.update(id, params, @attended, opts)
+      end
+
+      assert {:error, :missing_owner_words} =
+               Registry.update(
+                 loop.id,
+                 %{"answer" => "moved", "matters_by" => @date},
+                 @attended,
+                 opts
+               )
+    end
+
+    test "reach changes how a loop may be raised, from the owner's words", %{opts: opts} do
+      loop = note!(opts).loop
+      TelemetryCapture.attach([[:fermix, :open_loop, :settled]], open_loop_id: loop.id)
+
+      params = %{
+        "answer" => "reach",
+        "owner_words" => "just mention it when I'm around",
+        "reach" => "conversation"
+      }
+
+      assert {:ok, %{loop: %{reach: "conversation", state: "open"} = settled}} =
+               Registry.update(loop.id, params, @attended, opts)
+
+      assert settled.next_touch_at == loop.next_touch_at
+      assert settled.last_answer == nil
+      assert_receive {:telemetry, [:fermix, :open_loop, :settled], _, %{answer: "reach"}}
+
+      assert {:error, {:missing_parameters, [:reach]}} =
+               Registry.update(
+                 loop.id,
+                 %{"answer" => "reach", "owner_words" => "x"},
+                 @attended,
+                 opts
+               )
+
+      assert {:error, {:invalid_param, :reach}} =
+               Registry.update(loop.id, %{params | "reach" => "email"}, @attended, opts)
+
+      assert {:error, :reach_without_reach_answer} =
+               Registry.update(
+                 loop.id,
+                 %{"answer" => "done", "owner_words" => "x", "reach" => "message"},
+                 @attended,
+                 opts
+               )
+    end
+
+    test "not yet on something waited on needs ask_after, resolved as capture resolves it",
+         %{opts: opts} do
+      loop = waited!(opts).loop
+      later = at(opts, ~U[2031-06-03 22:00:00Z])
+      :ok = due!(opts, ~U[2031-06-03 22:00:00Z])
+      {:ok, %{loop: asked}} = Registry.update(loop.id, %{"answer" => "asked"}, @attended, later)
+
+      assert {:error, :ask_after_required} =
+               Registry.update(
+                 asked.id,
+                 %{"answer" => "not_yet", "owner_words" => "nothing yet"},
+                 @attended,
+                 later
+               )
+
+      friday = %{"type" => "date", "date" => "2031-06-06"}
+
+      params = %{
+        "answer" => "not_yet",
+        "owner_words" => "they decide by Friday",
+        "ask_after" => friday
+      }
+
+      assert {:ok, result} = Registry.update(asked.id, params, @attended, later)
+      assert result.loop.next_touch_at == utc(~U[2031-06-07 13:00:00Z])
+      assert result.next_check == "Saturday, June 7, 2031 at 9:00 AM EDT"
+
+      too_soon = %{
+        params
+        | "ask_after" => %{"type" => "datetime", "date" => "2031-06-03", "time" => "19:00:00"}
+      }
+
+      assert {:error, :ask_after_too_soon} = Registry.update(asked.id, too_soon, @attended, later)
+
+      dated = note!(opts).loop
+
+      assert {:error, :ask_after_on_dated_loop} =
+               Registry.update(dated.id, params, @attended, opts)
+
+      assert {:error, :ask_after_without_not_yet} =
+               Registry.update(asked.id, %{params | "answer" => "plan"}, @attended, later)
+    end
+
+    test "a plan on something waited on means after that day, bounded only by a year",
+         %{opts: opts} do
+      loop = waited!(opts).loop
+
+      august = %{
+        "answer" => "plan",
+        "owner_words" => "after the August trip",
+        "plan_at" => %{"type" => "date", "date" => "2031-08-15"}
+      }
+
+      far = %{august | "plan_at" => %{"type" => "date", "date" => "2032-06-01"}}
+      assert {:error, :plan_too_far} = Registry.update(loop.id, far, @attended, opts)
+
+      assert {:ok, %{loop: planned}} = Registry.update(loop.id, august, @attended, opts)
+      assert planned.next_touch_at == utc(~U[2031-08-16 13:00:00Z])
     end
   end
 
@@ -443,13 +848,24 @@ defmodule FermixCore.OpenLoops.RegistryTest do
 
     test "asked records the raise as a touch, once", %{loop: loop, opts: opts} do
       later = at(opts, ~U[2031-06-07 14:00:00Z])
+      :ok = due!(opts, ~U[2031-06-07 14:00:00Z])
 
-      assert {:ok, %{loop: asked, previous_state: "open"}} =
+      assert {:ok, %{loop: asked, previous_state: "due"}} =
                update(loop, %{"answer" => "asked"}, later)
 
       assert %{state: "asked", touches: 1, last_touch_rung: 1} = asked
 
       assert {:error, :already_asked} = update(loop, %{"answer" => "asked"}, later)
+    end
+
+    test "asked on a loop not yet due is refused: it comes up on its own", %{
+      loop: loop,
+      opts: opts
+    } do
+      assert {:error, :not_due} = update(loop, %{"answer" => "asked"}, opts)
+
+      assert {:ok, %{state: "open", touches: 0}} =
+               Repo.get_open_loop(loop.id, server: opts[:repo])
     end
 
     test "the owner's words are required, bounded, and never stored", %{loop: loop, opts: opts} do
@@ -593,6 +1009,7 @@ defmodule FermixCore.OpenLoops.RegistryTest do
       end
 
       later = at(opts, ~U[2031-06-07 14:00:00Z])
+      :ok = due!(opts, ~U[2031-06-07 14:00:00Z])
 
       assert {:ok, %{loop: %{state: "asked"}}} =
                Registry.update(loop.id, %{"answer" => "asked"}, read_a_page(""), later)
@@ -619,6 +1036,61 @@ defmodule FermixCore.OpenLoops.RegistryTest do
 
       assert {:error, :owner_words_unverifiable} =
                settle(loop, "done", "the deposit is done", hand_off, opts)
+    end
+
+    # MILESTONE_83's answers move a loop as surely as done closes one: moved,
+    # reach and not_yet with ask_after are held to the owner's typed words as the
+    # others are, and go through once the owner typed them.
+    test "moved, reach and a waited-on not_yet are bound too", %{loop: loop, opts: opts} do
+      waited = waited!(opts).loop
+      later = at(opts, ~U[2031-06-03 22:00:00Z])
+      :ok = due!(opts, ~U[2031-06-03 22:00:00Z])
+      {:ok, %{loop: asked}} = Registry.update(waited.id, %{"answer" => "asked"}, @attended, later)
+
+      moved = %{
+        "answer" => "moved",
+        "owner_words" => "they pushed it to the 24th",
+        "matters_by" => %{"type" => "date", "date" => "2031-06-24"}
+      }
+
+      reach = %{
+        "answer" => "reach",
+        "owner_words" => "only mention it when I'm around",
+        "reach" => "conversation"
+      }
+
+      not_yet = %{
+        "answer" => "not_yet",
+        "owner_words" => "they decide by Friday",
+        "ask_after" => %{"type" => "date", "date" => "2031-06-06"}
+      }
+
+      page = read_a_page("What does this page say about the panel?")
+
+      for {id, params, when_opts} <- [
+            {loop.id, moved, opts},
+            {loop.id, reach, opts},
+            {asked.id, not_yet, later}
+          ] do
+        assert {:error, :owner_words_not_in_message} =
+                 Registry.update(id, params, page, when_opts),
+               params["answer"]
+      end
+
+      typed = read_a_page("Only mention it when I'm around, please")
+
+      assert {:ok, %{loop: %{reach: "conversation"}}} =
+               Registry.update(loop.id, reach, typed, opts)
+
+      typed = read_a_page("Good news: they pushed it to the 24th!")
+
+      assert {:ok, %{loop: %{last_answer: "moved"}}} =
+               Registry.update(loop.id, moved, typed, opts)
+
+      typed = read_a_page("Nothing yet, they decide by Friday.")
+
+      assert {:ok, %{loop: %{state: "open"}}} =
+               Registry.update(asked.id, not_yet, typed, later)
     end
 
     test "a turn that read nothing is unchanged", %{loop: loop, opts: opts} do
@@ -677,6 +1149,9 @@ defmodule FermixCore.OpenLoops.RegistryTest do
                "intention" => @intention,
                "why_it_matters" => nil,
                "matters_by" => "Tuesday, June 10, 2031",
+               "matters_by_source" => "owner",
+               "reach" => "message",
+               "horizon_class" => "medium",
                "said_on" => "Monday, June 2, 2031",
                "source_channel" => "telegram",
                "state" => "open",
@@ -717,6 +1192,16 @@ defmodule FermixCore.OpenLoops.RegistryTest do
     end
   end
 
+  describe "error_tag/1" do
+    test "is the reason or its leading atom, as the failure modes name it" do
+      assert Registry.error_tag(:ask_after_too_far) == "ask_after_too_far"
+      assert Registry.error_tag({:invalid_param, :reach}) == "invalid_param"
+      assert Registry.error_tag({:kind_conflict, "loop_AbCdEfGhIjK"}) == "kind_conflict"
+      assert Registry.error_tag({:timeout, :repo_call, 5_000}) == "timeout"
+      assert Registry.error_tag("socket closed") == "storage_failed"
+    end
+  end
+
   describe "describe_error/1" do
     test "every reason is one sentence telling the model what to do" do
       reasons = [
@@ -750,6 +1235,25 @@ defmodule FermixCore.OpenLoops.RegistryTest do
         :plan_requires_date,
         :plan_passed,
         :plan_at_without_plan,
+        :missing_when,
+        :both_whens,
+        {:kind_conflict, "loop_AbCdEfGhIjK"},
+        :ask_after_too_soon,
+        :ask_after_too_far,
+        :source_without_matters_by,
+        {:invalid_param, :reach},
+        {:invalid_param, :matters_by_source},
+        {:missing_parameters, [:reach]},
+        :plan_too_far,
+        :ask_after_required,
+        :ask_after_without_not_yet,
+        :ask_after_on_dated_loop,
+        :matters_by_without_moved,
+        :moved_requires_date,
+        :moved_on_after_loop,
+        :reach_without_reach_answer,
+        :not_due,
+        :touches_spent,
         {:invalid_answer, "maybe"},
         {:invalid, :intention, :too_long},
         :repo_timeout
@@ -765,6 +1269,8 @@ defmodule FermixCore.OpenLoops.RegistryTest do
       assert Registry.describe_error(:too_many_loops) =~ "20"
       assert Registry.describe_error(:owner_words_not_in_message) =~ "owner's own words"
       assert Registry.describe_error(:owner_words_not_in_message) =~ "ask the owner"
+      assert Registry.describe_error(:not_due) =~ "not due yet"
+      assert Registry.describe_error(:touches_spent) =~ "twice"
     end
   end
 end

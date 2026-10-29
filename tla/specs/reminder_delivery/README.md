@@ -396,8 +396,8 @@ Re-read on 2026-10-17 against M60 (cues and watchers, not yet committed on
   LAST child, after the harness, realtime, computer-use, computer-history and
   skill-curation children. It is absent under `:test` and wherever
   `Cues.enabled?/0` is false. The children the spec relies on keep their
-  order (`Repo` … `JobScheduler`, then `TemporalScheduler`,
-  `DeliverySupervisor`, `FollowupSupervisor`, `:249`, `:263-265`), so a
+  order (`Repo` … `JobScheduler`, then `TemporalScheduler` and
+  `DeliverySupervisor`, `:249`, `:263-265`), so a
   temporal scheduler crash still tears down the delivery supervisor and its
   workers first. It now also restarts the cue subtree, which runs no reminder
   code, and a crash inside the cue subtree (its own supervisor is

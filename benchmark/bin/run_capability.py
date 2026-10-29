@@ -732,12 +732,14 @@ def _fail_trial(case, ep: _Episode, label: str = "") -> tuple[
 
 def _finish_trial(case, ep: _Episode, succ: float, label: str = "",
                   invalid_status: str | None = None,
-                  checker_safety: bool | None = None) -> tuple[
+                  checker_safety: bool | None = None,
+                  grader_detail: str = "") -> tuple[
         aggregate.TrialResult, str | None, list]:
     """Fold one driven episode into a trial result. `label` names the trial in the
     per-trial diagnostics ("<case> t<i>"). `invalid_status` marks the measurement
     invalid because the EVALUATOR failed — it wins over both the graded status and any
-    constraint fail, because an evaluator failure is never a model failure."""
+    constraint fail, because an evaluator failure is never a model failure.
+    `grader_detail` is the checker's own detail, kept on the trial for results.json."""
     final = ep.caps[-1]
     graded = final.status == "graded"
     # An ungradeable episode keeps its INVALID status: "we did not observe this" must
@@ -757,7 +759,7 @@ def _finish_trial(case, ep: _Episode, succ: float, label: str = "",
         cost=usage["cost"], duration_ms=usage["duration_ms"], tokens=usage["tokens"],
         tool_calls=usage["tool_calls"], status=status, trace_id=trace_id,
         cost_known=usage["cost_known"], status_detail=final.detail,
-        main_llm_calls=usage["main_llm_calls"],
+        grader_detail=grader_detail, main_llm_calls=usage["main_llm_calls"],
         **_episode_pricing(ep))
     if constraints:
         print(f"    · {label or case.id}: constraint fail — {'; '.join(constraints)}",
@@ -1118,7 +1120,8 @@ def _checker_trial(cfg, case, ep: _Episode, scoped, run_id, i, session, token, l
     if cr.score < 1.0:
         print(f"    · {label}: checker: {cr.detail}", file=sys.stderr)
     succ = _provenance_gate(case, ep, cr.score, label)
-    return _finish_trial(case, ep, succ, label, checker_safety=cr.safety_ok)
+    return _finish_trial(case, ep, succ, label, checker_safety=cr.safety_ok,
+                         grader_detail=cr.detail)
 
 
 def _provenance_gate(case, ep: _Episode, succ: float, label: str) -> float:
@@ -1612,20 +1615,28 @@ def write_results_json(path, arm, config_id, k, threshold, outcomes, valid: bool
     HTML leaderboard report: every trial's wall clock (`durations_ms`, so the
     comparison pools its own p50/p95 rather than re-deriving one from a summary), the
     mean main-model calls, and the task's tokens and rate-card cost over all its
-    trials (`priced_cost_usd` is null when a route had no card entry). All are
-    OPTIONAL in the format — an arm written by `run_baseline.py` has none — and
-    `uplift.compare_arms` never reads them."""
+    trials (`priced_cost_usd` is null when a route had no card entry), and every
+    trial's own record (`trial_records`: its raw success, whether it was a valid
+    measurement, its status and the grader's detail), which bin/judgment_agreement.py
+    reads to name what each trial did. All are OPTIONAL in the format — an arm written
+    by `run_baseline.py` has none — and `uplift.compare_arms` never reads them."""
     tasks = {f"{s}/{cid}": {"mean_success": round(o.stats.mean_success, 4),
                             "pass_hat_k": round(o.stats.pass_hat_k, 4),
                             "n": o.stats.n_trials,
                             "durations_ms": [round(ms, 1) for ms in o.stats.durations_ms],
                             "mean_main_llm_calls": o.stats.mean_main_llm_calls,
                             "total_tokens": o.stats.total_tokens,
-                            "priced_cost_usd": o.stats.priced_cost_usd}
+                            "priced_cost_usd": o.stats.priced_cost_usd,
+                            "trial_records": [_trial_record(t) for t in o.trials]}
              for s, cid, o in outcomes}
     uplift.write_arm(path, arm=arm, config_id=config_id,
                      suite=",".join(sorted({s for s, _c, _o in outcomes})),
                      k=k, threshold=threshold, tasks=tasks, valid=valid)
+
+
+def _trial_record(trial: aggregate.TrialResult) -> dict:
+    return {"success": trial.raw_success, "valid": trial.valid, "status": trial.status,
+            "detail": trial.grader_detail}
 
 
 # --- Opik writeback ---------------------------------------------------------

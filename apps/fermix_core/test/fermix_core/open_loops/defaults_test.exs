@@ -44,6 +44,20 @@ defmodule FermixCore.OpenLoops.DefaultsTest do
       assert Defaults.dedupe_key_max() == 240
       assert Defaults.closed_list_limit() == 25
     end
+
+    test "loops waited on and their replies keep M83's bounds" do
+      assert Defaults.after_max_touches() == 2
+      assert Defaults.conversation_window_ms() == 14 * 24 * 60 * 60 * 1000
+      assert Defaults.ask_after_min_ms() == 3 * 60 * 60 * 1000
+      assert Defaults.ask_after_max_ms() == 365 * 24 * 60 * 60 * 1000
+      assert Defaults.reactions_kept() == 50
+      assert Defaults.note_replies() == %{this_loop: 1, others: 2}
+      assert Defaults.checkin_replies() == %{this_loop: 1, others: 4}
+      assert Defaults.reply_window_ms() == 24 * 60 * 60 * 1000
+      assert Defaults.reply_text_max() == 280
+      assert Defaults.raised_with_max() == 280
+      assert Defaults.reaches() == ~w(conversation message)
+    end
   end
 
   describe "horizon_class/3" do
@@ -87,16 +101,47 @@ defmodule FermixCore.OpenLoops.DefaultsTest do
       assert Defaults.slots("medium") == [{:days_before, 3}, {:days_before, 1}, {:days_after, 1}]
       assert Defaults.slots("short") == [{:before_hours_min, 24}, {:days_after, 1}]
       assert Defaults.slots("imminent") == [{:after_hours, 3}]
+      assert Defaults.slots("after") == [{:at_anchor}]
     end
 
     test "no class has more slots than a loop has touches" do
-      for class <- ~w(long medium short imminent) do
+      for class <- ~w(long medium short imminent after) do
         assert length(Defaults.slots(class)) <= Defaults.max_touches()
       end
+
+      assert length(Defaults.slots("after")) < Defaults.after_max_touches()
     end
 
     test "an unknown class is refused loudly" do
       assert_raise FunctionClauseError, fn -> Defaults.slots("weekly") end
+    end
+  end
+
+  describe "slots/2" do
+    test "a message loop keeps its class's table" do
+      for class <- ~w(long medium short imminent after) do
+        assert Defaults.slots(class, "message") == Defaults.slots(class)
+      end
+    end
+
+    test "a conversation loop has no hand-back" do
+      assert Defaults.slots("long", "conversation") == [{:days_before, 7}, {:days_before, 1}]
+      assert Defaults.slots("medium", "conversation") == [{:days_before, 3}, {:days_before, 1}]
+      assert Defaults.slots("short", "conversation") == [{:before_hours_min, 24}]
+      assert Defaults.slots("imminent", "conversation") == [{:after_hours, 3}]
+      assert Defaults.slots("after", "conversation") == [{:at_anchor}]
+
+      for class <- ~w(long medium short imminent after) do
+        refute Defaults.handback?(class, "conversation")
+      end
+
+      for class <- ~w(long medium short), do: assert(Defaults.handback?(class, "message"))
+      refute Defaults.handback?("imminent", "message")
+      refute Defaults.handback?("after", "message")
+    end
+
+    test "an unknown reach is refused loudly" do
+      assert_raise FunctionClauseError, fn -> Defaults.slots("long", "email") end
     end
   end
 end

@@ -50,7 +50,7 @@ defmodule FermixCore.Capabilities.AccessGate do
        (`Temporal.Access.attended_operator_turn?/1`) is refused;
     6. a turn that read content someone else could have written
        (`:outside_sources`, folded by the agent loop from
-       `UntrustedContent.outside_source/2`, minus the target plugin's own reads),
+       `UntrustedContent.outside_source/3`, minus the target plugin's own reads),
        or any turn from a shared Buzz channel (`Acp.Identity.multi_principal?/1`:
        other people can post there, so the request is not proof the owner asked),
        parks the exact call and asks the owner once, on the surface the turn has

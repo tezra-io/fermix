@@ -23,8 +23,7 @@ defmodule FermixCore.Temporal.PlannerTest do
         recurrence_month: 9,
         recurrence_day: 14,
         leap_day_policy: nil,
-        reminder_plan: plan,
-        followup: false
+        reminder_plan: plan
       },
       overrides
     )
@@ -47,8 +46,7 @@ defmodule FermixCore.Temporal.PlannerTest do
         recurrence_month: nil,
         recurrence_day: nil,
         leap_day_policy: nil,
-        reminder_plan: plan,
-        followup: false
+        reminder_plan: plan
       },
       overrides
     )
@@ -124,21 +122,8 @@ defmodule FermixCore.Temporal.PlannerTest do
                "occurrence_key" => "2026-09-14",
                "event_local_date" => "2026-09-14",
                "event_local_time" => nil,
-               "timezone" => @tz,
-               "followup" => false
+               "timezone" => @tz
              }
-    end
-
-    # The payload is the snapshot the delivered reminder is read back through,
-    # so the flag has to survive JSON as a boolean: the storage integer would
-    # read false at every `== true` above it.
-    test "the follow-up flag rides the payload as a JSON boolean" do
-      assert {:ok, plan} =
-               Planner.materialize(birthday(%{followup: true}), ~U[2026-08-02 12:00:00Z])
-
-      payload = hd(plan.occurrences).payload
-      assert payload["followup"] === true
-      assert Jason.encode!(payload) =~ ~s("followup":true)
     end
 
     test "annual rollover uses local calendar arithmetic across a leap year" do

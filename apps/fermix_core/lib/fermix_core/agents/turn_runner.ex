@@ -45,6 +45,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Net.Egress
   alias FermixCore.OpenLoops.DueNote
+  alias FermixCore.OpenLoops.Reactions
   alias FermixCore.Prompt.ChannelPresentation
   alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Providers.Descriptor
@@ -169,15 +170,20 @@ defmodule FermixCore.Agents.TurnRunner do
     replayed =
       ConversationStore.get_history(conversation_key, server: turn_state.conversation_store)
 
+    tainted? = reply_tainted?(msg, turn_state, replayed)
+
     add_message_opts =
       [
         server: turn_state.conversation_store,
         sender: "main",
         agent_id: turn_state.memory_agent_id,
         owner_id: turn_state.memory_owner_id
-      ] ++ history_taint_opt(msg, turn_state, replayed)
+      ] ++ history_taint_opt(tainted?)
 
     ConversationStore.add_message(conversation_key, "assistant", response, add_message_opts)
+
+    :ok =
+      record_open_loop_raise(msg, turn_state, conversation_key, {response, tainted?}, replayed)
 
     # A Live voice delegation never dispatches a memory review (M41 §5.2): a
     # spoken fragment is not a durable fact about the owner, and an ephemeral
@@ -219,9 +225,8 @@ defmodule FermixCore.Agents.TurnRunner do
   # `/history off` or grant edit landing mid-turn can never make the stamp
   # disagree with the section — the exact drift the live re-derivation had. The
   # context re-derivation remains only for callers without a frozen snapshot.
-  defp history_taint_opt(msg, turn_state, replayed) do
-    if reply_tainted?(msg, turn_state, replayed), do: [metadata: Taint.metadata()], else: []
-  end
+  defp history_taint_opt(true), do: [metadata: Taint.metadata()]
+  defp history_taint_opt(false), do: []
 
   # The one decision above, also told ahead of a hand-off's reply (M56 §9).
   defp reply_tainted?(msg, turn_state, replayed) do
@@ -567,6 +572,9 @@ defmodule FermixCore.Agents.TurnRunner do
       memory_repo: state.memory_repo,
       memory_agent_id: state.memory_agent_id,
       memory_owner_id: state.memory_owner_id,
+      # The clock the turn's open-loop reads share (the reply capture, the due
+      # note, the open-loop tools); nil reads the real one.
+      now_fn: Map.get(state, :now_fn),
       # A memory tool that changes USER.md or MEMORY.md invalidates the cached
       # runtime context here, so the next turn is built from what it saved.
       main_agent_server: Map.get(state, :main_agent_server),
@@ -652,7 +660,8 @@ defmodule FermixCore.Agents.TurnRunner do
       outside_sources: initial_outside_sources(msg),
       # What the owner typed, before the attachment manifest was composed into
       # the content, and nothing for a forwarded message. An open-loop answer
-      # given after outside content must quote it (`OpenLoops.Registry`).
+      # given after outside content must quote it (`OpenLoops.Registry`), and it
+      # is the reply an open loop's follow-up captures (`OpenLoops.Reactions`).
       owner_text: owner_text
     }
 
@@ -666,6 +675,7 @@ defmodule FermixCore.Agents.TurnRunner do
     messages = inject_current_date(messages)
     messages = inject_recent_calls(messages, state, source_trust, voice_call)
     {messages, context} = inject_recent_activity(messages, context)
+    :ok = capture_open_loop_reply(context, owner_text)
     {messages, context} = inject_open_loop_due(messages, context)
     messages = inject_live_call(messages, Map.get(state, :live_call))
 
@@ -693,7 +703,10 @@ defmodule FermixCore.Agents.TurnRunner do
     tell_history_tainted(voice_call, msg, state, history, stream_callback)
     persist_user_message(conversation_key, msg, state, voice_call)
 
-    run_normal(loop_opts, context, msg, {start, Map.get(state, :live_call)})
+    # The instant the run starts, on the turn's own clock: every rung 1 raise
+    # the run records comes at or after it (`record_open_loop_outside_content/3`).
+    opened_at = open_loop_now(context)
+    run_normal(loop_opts, context, msg, {start, Map.get(state, :live_call), opened_at})
   end
 
   # M56 §9: a hand-off's reply reaches its Live session before `commit/4`
@@ -864,6 +877,83 @@ defmodule FermixCore.Agents.TurnRunner do
     end
   end
 
+  # The owner's message as the reply to an open loop's follow-up still awaiting
+  # one in this conversation (M83 §07), taken before the run so the due note
+  # reads it, on the turn's own clock, the one the due note reads. The reply is
+  # what the owner typed (`UntrustedContent.owner_text/1`, the same text an
+  # open-loop answer after outside content must quote): read before any
+  # attachment's manifest or inlined text is composed into the turn's content,
+  # and nothing for a forwarded message or a voice hand-off, so an attachment
+  # with no caption, someone else's words and a call's composed exchange are no
+  # reply. `Reactions.capture/3` does nothing on a turn the due note would not
+  # carry. Context, like the due note: a failure is logged and the turn goes on.
+  defp capture_open_loop_reply(context, owner_text) do
+    case Reactions.capture(context, owner_text, open_loop_now(context)) do
+      {:ok, _answered} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("open_loops: the owner's reply could not be recorded: #{inspect(reason)}")
+    end
+  end
+
+  defp open_loop_now(%{now_fn: now_fn}) when is_function(now_fn, 0), do: now_fn.()
+  defp open_loop_now(_context), do: DateTime.utc_now()
+
+  # What Fermix said when this turn raised an open loop (M83 §07): the delivered
+  # reply's closing sentences, recorded here because the Queue commits only a
+  # reply it delivered, past its `fresh?` check, so a stopped turn's reply is
+  # never recorded as said. Only a turn the record follows
+  # (`Reactions.noted_turn?/1`) reaches the store. The turn began at its own
+  # user message, the last one `replayed` holds; the rung 1 follow-ups it
+  # recorded are this conversation's raised since then and still without
+  # text, written in one statement, with the reply's own history stamp, so a
+  # reply that could see the owner's computer activity leaves words that come
+  # back only where activity may. Logged on failure: the reply is out either
+  # way.
+  defp record_open_loop_raise(msg, turn_state, conversation_key, reply, replayed) do
+    context = raise_context(msg, turn_state, conversation_key)
+    if Reactions.noted_turn?(context), do: record_raise(context, reply, replayed), else: :ok
+  end
+
+  defp record_raise(context, {response, tainted?}, replayed) do
+    with {:ok, since} <- turn_started_at(replayed),
+         {:ok, _written} <- Reactions.record_raised_with(context, response, since, tainted?) do
+      :ok
+    else
+      {:error, reason} ->
+        Logger.warning("open_loops: what Fermix raised could not be recorded: #{inspect(reason)}")
+    end
+  end
+
+  defp turn_started_at(replayed) do
+    case replayed |> Enum.reverse() |> Enum.find(&(&1.role == "user")) do
+      %{timestamp: %DateTime{} = at} -> {:ok, at}
+      _none -> {:error, :no_turn_start}
+    end
+  end
+
+  # The fields `Reactions.noted_turn?/1` (the private-turn check,
+  # `OpenLoops.Access.private_owner_turn?/1`) and `Reactions.record_raised_with/4`
+  # read, derived from the message as the turn's own context derived them.
+  defp raise_context(msg, turn_state, conversation_key) do
+    source_trust = Map.get(msg, :source_trust)
+
+    %{
+      conversation_key: conversation_key,
+      memory_repo: turn_state.memory_repo,
+      memory_owner_id: turn_state.memory_owner_id,
+      memory_agent_id: turn_state.memory_agent_id,
+      source_trust: source_trust,
+      computer_use_origin: computer_use_origin(msg),
+      harness_continuation_depth: harness_continuation_depth(msg),
+      channel: msg.channel,
+      chat_type: chat_type_of(msg),
+      session_env: session_env_for(source_trust, msg),
+      now_fn: Map.get(turn_state, :now_fn)
+    }
+  end
+
   # A typed chat turn during a Live call in the chat (M56 §4.4): the line exists
   # only while the call the snapshot froze does, and goes last in the leading
   # system run, so a call costs the prompt cache two breaks, not one per turn.
@@ -915,7 +1005,7 @@ defmodule FermixCore.Agents.TurnRunner do
     |> String.trim()
   end
 
-  defp run_normal(loop_opts, context, msg, {start, live_call}) do
+  defp run_normal(loop_opts, context, msg, {start, live_call, opened_at}) do
     case AgentLoop.run(loop_opts) do
       {:ok, result} ->
         duration_ms = System.monotonic_time(:millisecond) - start
@@ -937,6 +1027,7 @@ defmodule FermixCore.Agents.TurnRunner do
 
         if silent?, do: tell_silent(Keyword.get(loop_opts, :stream_callback))
         tell_outside_sources(context, Keyword.get(loop_opts, :stream_callback), result)
+        :ok = record_open_loop_outside_content(context, result, opened_at)
         {:ok, result.response, Map.get(result, :context_tokens, 0)}
 
       {:error, reason} ->
@@ -964,6 +1055,23 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp tell_outside_sources(_context, _stream_callback, _result), do: :ok
+
+  # A rung 1 raise is stamped from what the turn had read when the model
+  # recorded it as asked; a page read after that is known only now, with the
+  # run's whole read. A turn that read any marks every raise it recorded, so
+  # what it said comes back framed (M83 §07, `OpenLoops.Reactions`), before
+  # `commit/4` stores the text. Logged on failure: the reply is out either way.
+  defp record_open_loop_outside_content(context, %{outside_sources: read}, opened_at) do
+    case Reactions.record_raised_after_outside_content(context, read, opened_at) do
+      {:ok, _marked} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "open_loops: a raise after outside content could not be marked: #{inspect(reason)}"
+        )
+    end
+  end
 
   # M56 §4.4: the turn ends with no reply, and its channel, the one surface
   # that streams it, is told before the reply reaches it, from this same

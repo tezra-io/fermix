@@ -11,6 +11,9 @@ defmodule FermixCore.Capabilities.UntrustedContentTest do
   alias FermixCore.Tools.GitRead
   alias FermixCore.Tools.GlobSearch
   alias FermixCore.Tools.ListJobRuns
+  alias FermixCore.Tools.OpenLoopList
+  alias FermixCore.Tools.OpenLoopNote
+  alias FermixCore.Tools.OpenLoopUpdate
   alias FermixCore.Tools.Shell
   alias FermixCore.Tools.SkillRun
   alias FermixCore.Tools.SkillView
@@ -171,6 +174,53 @@ defmodule FermixCore.Capabilities.UntrustedContentTest do
         cap(%{name: "subagents", policy_class: :external_api, metadata: %{category: :delegation}})
 
       refute UntrustedContent.external?(subagents)
+    end
+  end
+
+  # The open-loop tools whose result can show a loop noted after outside
+  # content, framed: what they returned decides, not what they were asked.
+  describe "outside_source/3" do
+    test "an open-loop result that frames a loop brings the open-loop source; a clean one none" do
+      framed =
+        Jason.encode!(%{intention: UntrustedContent.frame("open_loop_note", ~s("Wire it"))})
+
+      for module <- [OpenLoopList, OpenLoopNote, OpenLoopUpdate] do
+        capability = Builtin.from_tool_module(module)
+
+        assert UntrustedContent.outside_source(capability, %{}, framed) ==
+                 UntrustedContent.open_loop_source(),
+               "#{inspect(module)} missed a framed result"
+
+        assert UntrustedContent.outside_source(capability, %{}, ~s({"intention":"Wire it"})) ==
+                 nil
+
+        assert UntrustedContent.outside_source(capability, %{}, nil) == nil
+      end
+    end
+
+    test "any other tool keeps the rule its capability and arguments give" do
+      framed = UntrustedContent.frame("open_loop_note", "words")
+      web = cap(%{name: "web_fetch", policy_class: :network})
+
+      assert UntrustedContent.outside_source(web, %{}, nil) == {:tool, "web_fetch"}
+      assert UntrustedContent.outside_source(cap(%{name: "file_read"}), %{}, framed) == nil
+    end
+  end
+
+  describe "framed?/1" do
+    test "a frame escaped inside a JSON string still reads as framed" do
+      assert UntrustedContent.framed?(Jason.encode!(UntrustedContent.frame("x", "y")))
+      refute UntrustedContent.framed?(Jason.encode!("y"))
+    end
+
+    # The check relies on the encoder leaving `<` literal, as Jason does by
+    # default: an encoder that escapes it hides the tag from the check.
+    test "a tag whose `<` is escaped does not read as framed" do
+      refute UntrustedContent.framed?("\\u003cuntrusted_tool_result source=\"x\">")
+
+      refute UntrustedContent.framed?(
+               Jason.encode!(UntrustedContent.frame("x", "y"), escape: :html_safe)
+             )
     end
   end
 end
