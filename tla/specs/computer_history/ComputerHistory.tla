@@ -18,14 +18,14 @@
 (* Deliberately not modelled:                                              *)
 (*  - the summarizer and the roll-up, and their purge guard: a note or    *)
 (*    thread is refused when a purge issued after its batch was read      *)
-(*    reaches it (computer_history_sql.ex:1141-1151, :1220-1228, the      *)
+(*    reaches it (computer_history_sql.ex:1122-1132, :1201-1209, the      *)
 (*    mark read first in Summarizer.run_session/4 and                     *)
 (*    Rollup.maybe_run/3); migration 32, which turns a stored watermark   *)
-(*    into one interval (repo.ex:4121, computer_history_sql.ex:284-298);  *)
-(*    pruning at the 48 h sweep (:437, far beyond MaxTime); `purge all`,  *)
+(*    into one interval (repo.ex:4121, computer_history_sql.ex:285-299);  *)
+(*    pruning at the 48 h sweep (:438, far beyond MaxTime); `purge all`,  *)
 (*    whose [0, now] has the shape of a window (purge.ex:79); more than   *)
 (*    one recorded interval (the owner purges once; the insert checks     *)
-(*    every interval, computer_history_sql.ex:394, :664-675); the Setup   *)
+(*    every interval, computer_history_sql.ex:395, :665-676); the Setup   *)
 (*    UI disable path: single-call facts covered by ExUnit                *)
 (*    (TLA_PLUS_MODELS.md 5.1);                                           *)
 (*  - the observe_start handshake: every Capturer starts already          *)
@@ -64,7 +64,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history.ex @ a209702c717c
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex @ 2f22405f1e30
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_use/sidecar_installer.ex @ a2681ba9c881
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/computer_history_sql.ex @ fe920569e2f8
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/computer_history_sql.ex @ 06ec5cd206ab
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,computer_history_insert_events,computer_history_purge_window,computer_history_set_pause_until @ cc133954e09f
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#computer_history_ensure_state @ ad9078b46f85
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/history.ex @ 1911dca78a4e
@@ -247,8 +247,8 @@ Split == [e \in Events |-> IF where[e] = "buffer"
                            ELSE where[e]]
 
 \* The spool insert's purge fence, per event: insert_unless_purged
-\* (computer_history_sql.ex:385-395) refuses a row whose ts lies inside any
-\* recorded interval, bounds inclusive like the purge's DELETE (:616, :664-675).
+\* (computer_history_sql.ex:386-396) refuses a row whose ts lies inside any
+\* recorded interval, bounds inclusive like the purge's DELETE (:617, :665-676).
 \* At tick granularity it also refuses an event captured after the purge in the
 \* same tick (ts = clock = hi): an over-approximation of the 1 ms edge that no
 \* property depends on.
@@ -350,7 +350,7 @@ FlushCheck ==
     /\ CapturerOthersUnchanged
 
 \* Ingest's second Repo call: computer_history_insert_events (ingest.ex:201,
-\* repo.ex:3434 -> computer_history_sql.ex:346-402), one BEGIN IMMEDIATE
+\* repo.ex:3434 -> computer_history_sql.ex:347-403), one BEGIN IMMEDIATE
 \* transaction that checks each row against the recorded purge intervals, then
 \* INSERT OR IGNOREs the rest. It does not read the pause.
 FlushInsert ==
@@ -668,7 +668,7 @@ CommandUnchanged ==
 
 \* The owner sends /history pause <d>: until = now + d (history.ex:370);
 \* persist_pause -> Repo.computer_history_set_pause_until (:382,
-\* computer_history_sql.ex:1205-1215), one Repo call.
+\* computer_history_sql.ex:1186-1196), one Repo call.
 PauseCommit(d) ==
     /\ OwnerCanPause
     /\ pausePc = "idle"
@@ -691,9 +691,9 @@ PauseReply ==
 
 \* The owner sends /history purge <w>: Purge.purge takes now and the window
 \* [now - w, now] (purge.ex:56-58, :80), then one Repo call, purge_window
-\* (computer_history_sql.ex:606-647): one BEGIN IMMEDIATE transaction that
-\* deletes the spool rows in the window (:616) and records the interval
-\* (:640). Rows still in a Capturer buffer, or in a batch past its pause
+\* (computer_history_sql.ex:607-648): one BEGIN IMMEDIATE transaction that
+\* deletes the spool rows in the window (:617) and records the interval
+\* (:641). Rows still in a Capturer buffer, or in a batch past its pause
 \* check, are not in the spool yet. The reply (history.ex:411-417) is folded
 \* in: no property depends on its timing.
 PurgeCommit(w) ==
@@ -874,7 +874,7 @@ Witness_WriteAfterPauseAck ==
 \* CH-2's path, now closed: a row stamped inside the purged window reaches the
 \* spool insert after the purge committed (buffered, or in a batch past its
 \* pause check), and the insert's purge fence refuses it
-\* (computer_history_sql.ex:385-395).
+\* (computer_history_sql.ex:386-396).
 Witness_LateRowFenced == \A e \in Events : where[e] /= "fenced"
 
 \* CH-4's second path, now harmless: the Controller's whereis returned a

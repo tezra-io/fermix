@@ -80,8 +80,8 @@ header lists everything else left out.
   deletes the child.
 - `InsertChecksIntervals`: the spool insert refuses, inside its own
   transaction, each row whose `ts` lies inside a recorded purge interval,
-  bounds inclusive like the purge's `DELETE` (`computer_history_sql.ex:358-402`,
-  `:664-675`), the CH-2 fix. Off, it is the plain `INSERT OR IGNORE` of
+  bounds inclusive like the purge's `DELETE` (`computer_history_sql.ex:359-403`,
+  `:665-676`), the CH-2 fix. Off, it is the plain `INSERT OR IGNORE` of
   693970b7.
 - `StopsBeforeFlush`: `terminate/2` runs `stop_driver` and the lock release
   before its best-effort flush (`capturer.ex:603-605`), the C1 fix. Off, it is
@@ -164,7 +164,7 @@ Witnesses:
   with no Capturer running.
 - Check 29: CH-2's path, now closed. A row stamped inside the purged window
   reaches the spool insert after the purge committed, and the fence refuses
-  it (`computer_history_sql.ex:385-395`), so the fence is not vacuous.
+  it (`computer_history_sql.ex:386-396`), so the fence is not vacuous.
 
 **One more of each entity, run by hand** (TLC 2.19, `-workers auto`): each row
 changes the check's constants as shown, and every other constant stays as in
@@ -214,13 +214,13 @@ Controller's split lookup and crashes at any point) both held: 01 with
   (`:178`, `:231-240`).
 - **Purge is one transaction that sets the watermark, and spool inserts do
   not check it: confirmed** (at 693970b7). `purge_window`
-  (`computer_history_sql.ex:509-561`) deleted, then raised
-  `purge_watermark_ts` (`:548`), inside one `BEGIN IMMEDIATE` (`:1231`), all
-  in one Repo call. `insert_events` (`:310-335`) was a plain `INSERT OR
+  (`computer_history_sql.ex:510-562`) deleted, then raised
+  `purge_watermark_ts` (`:549`), inside one `BEGIN IMMEDIATE` (`:1212`), all
+  in one Repo call. `insert_events` (`:311-336`) was a plain `INSERT OR
   IGNORE`. Only the summarizer's `write_cycle_result` read the watermark
-  (`:1015-1043`). Since the CH-2 and CH-5 fix the purge records an interval
-  in the same transaction (`:606-647`), and the insert checks every recorded
-  interval (`:358-402`).
+  (`:996-1024`). Since the CH-2 and CH-5 fix the purge records an interval
+  in the same transaction (`:607-648`), and the insert checks every recorded
+  interval (`:359-403`).
 - **`/history off`: env flip, then terminate the Capturer, then save
   config: confirmed.** The order is:
   1. flip (`history.ex:479-480`);
@@ -326,8 +326,8 @@ the fixed code.
   An event still in the buffer at the purge lands the same way.
 - **Code:**
   - The purge window is `[now - ms, now]` (`purge.ex:77`), and it deletes only
-    rows already in the spool (`computer_history_sql.ex:517`).
-  - The insert (`:322-335`) never reads the watermark (`:548`).
+    rows already in the spool (`computer_history_sql.ex:518`).
+  - The insert (`:323-336`) never reads the watermark (`:549`).
   - `ingest.ex:174` and `:188` are two Repo calls, so a purge can commit
     between them.
 - **Clock:** the purge window comes from the daemon's clock (`purge.ex:57`),
@@ -342,18 +342,18 @@ the fixed code.
     the summarizer's route, after the owner was told it was purged.
   - The summarizer then refuses the note, because its `provenance_from_ts`
     (the sitting's earliest `ts`, `summarizer.ex:952`) is at or before the
-    watermark (`computer_history_sql.ex:1040-1043`), and the cursor still
-    advances (`:1005-1012`), so the sitting's post-purge activity is never
+    watermark (`computer_history_sql.ex:1021-1024`), and the cursor still
+    advances (`:986-993`), so the sitting's post-purge activity is never
     summarized.
 - **Fix:** the one high-water watermark is replaced by recorded purge
   intervals (owner decision). `purge_window` records `[from, to]` with its
   `issued_at` in the transaction that deletes the rows
-  (`computer_history_sql.ex:606-647`). The spool insert checks each row's
+  (`computer_history_sql.ex:607-648`). The spool insert checks each row's
   integer `ts` against every recorded interval, inclusive, inside its own
-  transaction (`:358-402`, `:664-675`): that is the one placement that also
+  transaction (`:359-403`, `:665-676`): that is the one placement that also
   stops a batch already past Ingest's pause check, because the purge and the
   insert are each one transaction on the single writer. The fenced count is
-  logged (`:405-411`); a row with no integer `ts` is left to the `NOT NULL`
+  logged (`:406-412`); a row with no integer `ts` is left to the `NOT NULL`
   refusal. Every flush path reaches this insert (`ingest.ex:201` is its only
   caller). Tests: `purge_test.exs` "the spool fence" (a late row at and
   inside the bounds, and an older window still fencing after a newer one),
@@ -364,8 +364,8 @@ the fixed code.
   purge mark, the id of the latest recorded purge, before it reads
   (`Summarizer.run_session/4`, `Rollup.maybe_run/3`), and the write refuses
   when an interval with a higher id intersects the note's provenance
-  (`computer_history_sql.ex:1141-1151`) or the window of everything the
-  roll-up read (`:1220-1228`, `Rollup.read_scope/3`). A windowed purge no
+  (`computer_history_sql.ex:1122-1132`) or the window of everything the
+  roll-up read (`:1201-1209`, `Rollup.read_scope/3`). A windowed purge no
   longer voids every later note of a sitting that began before it, and a
   purge before the roll-up no longer refuses the threads built from the
   notes around it. Ids, not clocks: a clock step cannot reorder a purge and a
@@ -521,11 +521,11 @@ the fixed code.
     `{0, @max_ts}` (`:76`).
   - `purge_window` raises the watermark to the window's end and never lowers
     it: `SET purge_watermark_ts = MAX(COALESCE(purge_watermark_ts, 0), ?)`
-    (`computer_history_sql.ex:545-549`). After `purge all` it is
+    (`computer_history_sql.ex:546-550`). After `purge all` it is
     9_999_999_999_999 for good.
   - The summarizer's note write refuses any note whose
-    `provenance_from_ts <= watermark` (`computer_history_sql.ex:1040-1043`),
-    and the roll-up rejects threads the same way (`:1098-1100`). Every future
+    `provenance_from_ts <= watermark` (`computer_history_sql.ex:1021-1024`),
+    and the roll-up rejects threads the same way (`:1079-1081`). Every future
     timestamp is below the watermark, so every note and every thread is
     refused.
 - **Impact:** once the owner runs `/history purge all`, capture goes on and
@@ -535,7 +535,7 @@ the fixed code.
 - **Fix:** `purge all` is `[0, now]` (`purge.ex:75-79`; `@max_ts` is gone).
   A row stamped in the future by a backwards clock step is therefore not
   covered; the 48 h sweep deletes it 48 h after its stamp (owner decision).
-  Migration 32 (`repo.ex:4118-4137`, `computer_history_sql.ex:275-298`)
+  Migration 32 (`repo.ex:4118-4137`, `computer_history_sql.ex:276-299`)
   carries a stored watermark W over as one interval `[0, min(W, now)]` issued
   at the migration, the sentinel included; nothing reads or writes a
   watermark any more. The old column stays, unread, because `fermix upgrade`
@@ -545,7 +545,7 @@ the fixed code.
   refuses nothing, and the fence refuses only rows stamped before the
   upgrade, which a restarted daemon no longer holds. The retention sweep
   prunes an interval once it was both issued and ended before the 48 h cutoff
-  (`computer_history_sql.ex:420-444`). Tests: `persistence_test.exs`
+  (`computer_history_sql.ex:421-445`). Tests: `persistence_test.exs`
   "migration 32" (a windowed watermark, the sentinel, a store that never
   purged) and "purge intervals" (issue order, pruning), `purge_test.exs`
   "purge all records [0, now] and later capture is still stored",

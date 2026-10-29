@@ -167,7 +167,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox/confirmations.ex @ 7f77c69d0c1a
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/voice/bridge.ex#chat_call @ d1c29597e959
 \* SOURCE: apps/fermix_core/lib/fermix_core/agents/main_agent.ex#turn_state,live_call @ 4c76bdeeb9fd
-\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run_normal,tell_silent @ 82637c9a61b2
+\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run_normal,tell_silent @ e194fcaa3b51
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS

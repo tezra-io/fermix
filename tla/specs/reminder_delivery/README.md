@@ -39,7 +39,7 @@ known "duplicates without dedupe" below. Its delivery is one `ChannelSend`
 attempt like every platform's, so nothing here models it separately.
 - `WorkersCanCrash`: a worker exits before settling: a raise before the send, or
   its settlement Repo call returns an error and rolls back
-  (`delivery_worker.ex:210-213`, `:75`).
+  (`delivery_worker.ex:197-200`, `:66`).
 - `SchedulerCanRestart`: the scheduler crashes while the BEAM stays up. Any
   earlier child of the flat `:rest_for_one` list (`Repo`, `MainAgent`,
   `JobScheduler`, …; `application.ex:173-265`) restarts it too. A scheduler
@@ -54,20 +54,20 @@ attempt like every platform's, so nothing here models it separately.
 - `DownHandledBeforeRetryDue`: a timing fact, not a code mechanism. A worker
   that settles a retry exits at once, so its `:DOWN` reaches the scheduler long
   before the retry's `ready_at` (at least 60 s later, `delivery.ex:29`,
-  `delivery_worker.ex:143`). `delivery.ex:29` is a delay, not an ordering the
+  `delivery_worker.ex:130`). `delivery.ex:29` is a delay, not an ordering the
   code checks, so this cannot be a `needs` check. It is `TRUE` in every check
   except 20, which shows what breaks without it.
 
 **Mechanism switches** (`TRUE` is the real code; each is switched off by at
 least one check):
 - `AttemptCap`: `@max_attempts 5` (`temporal_sql.ex:24`), enforced by the claim
-  (`:1582`, `:1602`), `apply_retry` (`:1126`), the boot sweep (`:1196`) and the
-  schema `CHECK` (`:261`). The layers are redundant; the switch turns off all
+  (`:1573`, `:1593`), `apply_retry` (`:1117`), the boot sweep (`:1187`) and the
+  schema `CHECK` (`:255`). The layers are redundant; the switch turns off all
   of them.
 - `ClaimRequiresPending`: the claim takes only pending rows. The load-bearing
-  filter is the due scan's `status = 'pending'` (`temporal_sql.ex:1582`). The
-  per-row re-read (`:1602`) and the UPDATE's `WHERE status = 'pending'`
-  (`:1042`) repeat it inside the same Repo callback (`repo.ex:3029-3032`), where
+  filter is the due scan's `status = 'pending'` (`temporal_sql.ex:1573`). The
+  per-row re-read (`:1593`) and the UPDATE's `WHERE status = 'pending'`
+  (`:1033`) repeat it inside the same Repo callback (`repo.ex:3029-3032`), where
   no other writer can interleave, so removing only them would change nothing.
 - `WorkersDieWithScheduler`: `DeliverySupervisor` starts after the scheduler
   under `:rest_for_one` (`application.ex:266-267`, `:297`).
@@ -77,23 +77,23 @@ least one check):
   REMIND-2 fix: the send is `spawn_monitor`ed, not linked, and outlives its
   worker.
 - `ResetSkipsMonitored`: the 60 s check leaves rows with a monitored worker
-  alone (`scheduler.ex:532-535`).
+  alone (`scheduler.ex:528-531`).
 - `RecoverSkipsSettled`: recovery leaves a row that is no longer `delivering`
-  untouched (`temporal_sql.ex:1108-1111`).
+  untouched (`temporal_sql.ex:1099-1102`).
 - `RefusesWhileDelivering`: edit and cancel refuse while a row is `delivering`
-  (`temporal_sql.ex:1563-1571`, called at `:598` and `:642`).
+  (`temporal_sql.ex:1554-1562`, called at `:589` and `:633`).
 - `StableKey`: `proactive_key` is the row id on every attempt
-  (`delivery.ex:85-87`).
+  (`delivery.ex:68-70`).
 - `HasWatchdog`: the worker kills its send after `timeout_ms`
   (`channel_send.ex:239`, `kill_and_drain/3` at `:284-300`).
 - `ClampsWatchdog`: `timeout_ms = min(60 s, valid_until - now)`
-  (`delivery_worker.ex:111-119`).
+  (`delivery_worker.ex:102-110`).
 - `BoundaryExpires`: the 60 s page expires pending rows past `valid_until`
-  (`scheduler.ex:409-425` → `temporal_sql.ex:1212-1249`).
+  (`scheduler.ex:405-421` → `temporal_sql.ex:1203-1240`).
 
 **What holds:**
 - Check 01, with every fault on (no dedupe), 7,173 states:
-  - No sixth attempt (`scheduler.ex:330-333`). This rests on `AttemptCap`
+  - No sixth attempt (`scheduler.ex:326-329`). This rests on `AttemptCap`
     (check 02).
   - Never two workers for the row (`delivery_supervisor.ex:5-10`,
     `application.ex:253-265`). This rests on `ClaimRequiresPending` (check 03),
@@ -106,7 +106,7 @@ least one check):
   - A scheduler restart leaves no send running (M30 §6.3 :339,
     `channel_send.ex:98-105`; the unlink-to-kill residual below is under the
     spec's step granularity). This rests on `SendsDieWithWorker` (check 24).
-  - No edit or cancel is accepted while a send process runs (`registry.ex:678-681`,
+  - No edit or cancel is accepted while a send process runs (`registry.ex:676-679`,
     M30 §16 :1490). This rests on `RefusesWhileDelivering` (check 29) and
     `SendsDieWithWorker` (check 26: unlinked, the boot sweep sets the row back
     to `pending` while the orphan still sends, and the edit is accepted).
@@ -114,7 +114,7 @@ least one check):
   Before the REMIND-2 fix the same check covered 57,661 states: most of them
   were orphaned sends.
 - Check 06, **hypothetical**: no reminder platform reads `proactive_key`
-  (`registry.ex:48`, enforced at `:1458` and `:1503`). With every fault on and a
+  (`registry.ex:48`, enforced at `:1442` and `:1487`). With every fault on and a
   platform that deduplicates, the user sees the reminder at most once (5,223
   states). This rests on `StableKey` (check 07).
 - Check 08, with no faults and a platform that answers inside the watchdog, 268
@@ -156,9 +156,9 @@ least one check):
 **The claimed refusal rule.** The review asked for the literal claim, "an edit or
 cancel is refused while the row reads `delivering`", to be dropped as a
 property. The refusal and the write are one Repo call
-(`temporal_sql.ex:596-608`, `:640-648`), so the property held by construction.
+(`temporal_sql.ex:587-599`, `:631-639`), so the property held by construction.
 That single-call fact belongs in ExUnit. The spec checks what the refusal is
-for instead. `registry.ex:678-681` tells the owner "Wait for the attempt to
+for instead. `registry.ex:676-679` tells the owner "Wait for the attempt to
 finish", and M30's failure table (`:1490`) says the owner "retries after the
 bounded attempt", so the claimed rule is `NoChangeWhileSendRunning`: no change
 is accepted while a send process runs. M30 §7.3 (`:609-614`) scopes the refusal
@@ -172,10 +172,10 @@ abandoned at the platform, is a proposed rule (REMIND-3).
   shortest path is a claim that times out but still lands (`ClaimTimesOut`,
   three states). A `:DOWN` recovery that rolls back reaches it too, as does a
   restart between the claim and the worker's start followed by a boot sweep
-  that rolls back (`scheduler.ex:220`).
+  that rolls back (`scheduler.ex:217`).
 - 19: a row claimed while valid reaches its worker after `valid_until` (claim,
   then the boundary passes, then `handle_continue`), a path
-  `delivery_worker.ex:173-176` calls impossible (see the drift note).
+  `delivery_worker.ex:160-163` calls impossible (see the drift note).
 - 20: with `DownHandledBeforeRetryDue = FALSE`, `SingleWorker` breaks in 14
   states. A worker settles a retry, the retry comes due and is claimed before
   the old `:DOWN` is handled, then that `:DOWN`'s `recover_row` resets the new
@@ -211,9 +211,9 @@ still holds.
 - **At most once holds with dedupe:** true in the spec (check 06), but no real
   reminder runs in that configuration. Reminder targets are limited to
   `telegram slack discord signal whatsapp` (`registry.ex:48`, enforced at
-  `:1458` and `:1503`). The only adapters that read `proactive_key` are mobile
+  `:1442` and `:1487`). The only adapters that read `proactive_key` are mobile
   and companion, both through `output.ex:257-259`. The `temporal:<id>` key that
-  `delivery.ex:70` attaches to every send is ignored by every platform a
+  `delivery.ex:53` attaches to every send is ignored by every platform a
   reminder can reach.
 - **Never attempt six, never two workers:** both hold (check 01), each covered
   by its mechanism checks.
@@ -253,14 +253,14 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
 - **Code:**
   - The watchdog reports `:delivery_timeout` without knowing whether the request
     landed (`channel_send.ex:239`, `:284-300`), and that result is retryable
-    (`error.ex:191`, `delivery_worker.ex:134-151`). A result the send posted
+    (`error.ex:191`, `delivery_worker.ex:121-138`). A result the send posted
     just before the kill is discarded too, so a send that did deliver can still
     be reported as a timeout and sent again.
   - A failed settlement exits with `{:settlement_failed, _}`
-    (`delivery_worker.ex:75`, `:210-213`). `recover_row` then applies the retry
-    rules to the still-delivering row (`temporal_sql.ex:1113-1135`).
-  - The boot sweep keeps `ready_at` (`temporal_sql.ex:1200`, in `sweep_row`,
-    `:1191-1202`), so the row is due again at once.
+    (`delivery_worker.ex:66`, `:197-200`). `recover_row` then applies the retry
+    rules to the still-delivering row (`temporal_sql.ex:1104-1126`).
+  - The boot sweep keeps `ready_at` (`temporal_sql.ex:1191`, in `sweep_row`,
+    `:1182-1193`), so the row is due again at once.
 - **Other accepted duplicate paths the spec folds into the watchdog or leaves
   out:**
   - the HTTP client's own receive timeout (Req's 15 s default;
@@ -276,7 +276,7 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
     (`telegram.ex:182`, `signal.ex:96-103`).
 - **Impact:** the user gets the reminder twice. The same timeout can also
   settle a row the user did see as `failed` (on the fifth attempt, which
-  `event_list` reports as a failed delivery, `temporal_sql.ex:1476-1481`) or
+  `event_list` reports as a failed delivery, `temporal_sql.ex:1467-1472`) or
   `expired` (near `valid_until`); §11.5's ambiguity clause covers that too.
 - **Why by design:** marking the row delivered before the send would lose
   reminders in the opposite crash window (M30 §11.5 :1193-1196), and no reminder
@@ -309,9 +309,9 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
   - The watchdog is the worker's own `receive … after`, so the orphan was
     bounded only by the HTTP client's own timeouts (for example the 15 s pool
     checkout, `http_client.ex:68`).
-  - The refusal sees only the status column (`temporal_sql.ex:1563-1571`),
+  - The refusal sees only the status column (`temporal_sql.ex:1554-1562`),
     which the boot sweep has already set back to `pending`
-    (`temporal_sql.ex:1191-1202`).
+    (`temporal_sql.ex:1182-1193`).
 - **Fix** (`monitored_call/2`, `channel_send.ex:219-300`), shared by every
   `with_timeout` caller:
   - The send process is spawned linked and monitored in one atomic call
@@ -359,8 +359,8 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
     not the 60 s watchdog but the HTTP client's own 15 s receive timeout,
     which ends the attempt the same way (see REMIND-1).
   - The refusal checks only for `delivering` rows
-    (`temporal_sql.ex:1563-1571`), and it tells the owner to "Wait for the
-    attempt to finish" (`registry.ex:678-681`), which is exactly when it stops
+    (`temporal_sql.ex:1554-1562`), and it tells the owner to "Wait for the
+    attempt to finish" (`registry.ex:676-679`), which is exactly when it stops
     refusing.
   - A daemon crash with a request in flight opens the same window.
 - **Impact:** after the owner moved or cancelled the event, they can still
@@ -425,9 +425,9 @@ push an id and expiry. No delivery path the spec models changed.
 
 ## Code and doc drift
 
-- `delivery_worker.ex:173-176` says a claim past the validity boundary "cannot
+- `delivery_worker.ex:160-163` says a claim past the validity boundary "cannot
   happen through the scheduler's due scan", and `expire_unclaimable` logs it as
-  an error (`:178-180`). Witness 19 reaches it in 6 states: the claim is valid,
+  an error (`:165-167`). Witness 19 reaches it in 6 states: the claim is valid,
   then `valid_until` passes before the worker's `handle_continue` computes its
   watchdog. The window is the claim-to-start latency, so it is rare, but the log
   line would report a broken invariant that is not broken.
@@ -449,7 +449,7 @@ push an id and expiry. No delivery path the spec models changed.
 
 - **Timing (`DownHandledBeforeRetryDue`).** See the environment switch and
   check 20. `recover_row` re-reads the row by id only
-  (`temporal_sql.ex:1100-1115`) and does not check that the `delivering` status
+  (`temporal_sql.ex:1091-1106`) and does not check that the `delivering` status
   belongs to the dead worker's claim. A future change that makes a retry due
   within the `:DOWN` latency (a zero delay, or a settlement path that does not
   exit) would turn check 20 into a real bug.
@@ -459,7 +459,7 @@ push an id and expiry. No delivery path the spec models changed.
   the watchdog, so the watchdog can only catch a send that never reached it.
 - **Repo call timeouts.** `Memory.Repo` serves every request in order, and a
   call gives up after 5 s (`repo.ex:3934-3957`). Every call the scheduler
-  process makes passes `Repo.periodic_opts/2` (`scheduler.ex:177-185`), so a
+  process makes passes `Repo.periodic_opts/2` (`scheduler.ex:175-183`), so a
   timeout returns `{:error, :repo_timeout}`: the scheduler takes that site's
   error branch and keeps running, monitors intact. The request is not
   cancelled. It still runs, ahead of anything the scheduler sends next, so its
