@@ -15,9 +15,6 @@ defmodule FermixCore.Cues.Presets do
   # github: a repository or organisation webhook (§6.10): GitHub's HMAC over
   # the raw body, its delivery id as identity and its event name as type; the
   # owner gives the signing secret (`Cues.Webhook` projects a body over 64 KiB).
-  # x: an X Activity API webhook, checked by X's own method (its signature and
-  # CRC check), each event's id, type, account and time read from its `data`
-  # envelope; the owner gives the X app's OAuth 2.0 Client Secret.
   # x_accounts: a feed of X's recent search for the handles the owner gives,
   # every 5 minutes, signed in with the X plugin (`Cues.XAccounts`), which
   # builds its address.
@@ -31,14 +28,6 @@ defmodule FermixCore.Cues.Presets do
       prefix: "sha256=",
       id_header: "X-GitHub-Delivery",
       type_header: "X-GitHub-Event"
-    },
-    "x" => %{
-      kind: :webhook,
-      verify: :x,
-      id_path: "data.event_uuid",
-      type_path: "data.event_type",
-      subject_path: "data.filter.user_id",
-      time_path: "data.created_at"
     },
     "x_accounts" => %{kind: :feed, interval: 300}
   }

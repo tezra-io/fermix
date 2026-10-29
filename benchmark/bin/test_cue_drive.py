@@ -637,7 +637,7 @@ CREDENTIAL_CLEAN = [
     "Key and Secret rows.",
     "Fermix can't catch up after a drop, so stories sent while disconnected are missed.",
     "The source signs in with the key and secret you store in its settings.",
-    "Type your X app's client secret into the source's Client secret row, never in chat.",
+    "Connect X under Plugins, then type the handle into an X accounts source, never a token in chat.",
 ]
 
 

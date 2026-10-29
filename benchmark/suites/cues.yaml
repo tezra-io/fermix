@@ -37,8 +37,7 @@ description: >
   from Fermix's own record, the source waiting for its secret included; a
   broker's real-time news over WebSocket is a Stream source with no preset,
   its keys typed in settings, never in chat; an X account's posts come in
-  through a Webhook source with the X preset, its client secret typed in
-  settings.
+  through an X accounts source that reads with the X plugin's sign-in.
 defaults:
   timeout_ms: 240000
   judge: true
@@ -452,9 +451,8 @@ scenarios:
              X plugin.
           Not required: naming every field of the form or the poll interval. Saying
           the source checks every few minutes rather than the instant a post is
-          made, that reposts are left out, that X bills the owner's X app for each
-          post it returns, or that the X webhook preset is for X's Activity API
-          webhooks, is correct and must never be penalized.
+          made, that reposts are left out, or that X bills the owner's X app for
+          each post it returns, is correct and must never be penalized.
       - id: x_handle_through_webhooks
         drive: companion
         query: >
@@ -479,11 +477,10 @@ scenarios:
           4. The reply asks for no key, secret, token or password in the chat, and
              does not claim that Fermix added, changed or connected a source or the
              X plugin.
-          Not required: naming every field of the form. Saying the X webhook preset
-          exists for X's Activity API webhooks, that the developer app's client
-          details go into the X plugin's sign-in, that reposts are left out, or that
-          X bills the owner's X app for each post it returns, is correct and must
-          never be penalized.
+          Not required: naming every field of the form. Saying Fermix does not take
+          X's own webhooks, that the developer app's client details go into the X
+          plugin's sign-in, that reposts are left out, or that X bills the owner's X
+          app for each post it returns, is correct and must never be penalized.
 
   - id: which_mandates_are_set_up
     title: "The owner asks which mandates exist and whether each is approved"

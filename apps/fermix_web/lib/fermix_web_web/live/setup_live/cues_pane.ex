@@ -73,8 +73,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   @verify_labels %{
     "hmac" => "HMAC signature",
     "shared_secret" => "Shared secret",
-    "standard_webhooks" => "Standard Webhooks",
-    "x" => "X's signature"
+    "standard_webhooks" => "Standard Webhooks"
   }
 
   @info %{
@@ -654,7 +653,6 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   defp missing_secret(_source), do: nil
 
   defp secret_label("shared_secret"), do: "Shared secret"
-  defp secret_label("x"), do: "Client secret"
   defp secret_label(_method), do: "Signing secret"
 
   defp secret_noun(method), do: method |> secret_label() |> String.downcase()
@@ -1161,10 +1159,6 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
 
   defp secret_info("standard_webhooks"),
     do: "Starts with whsec_. " <> secret_info(nil)
-
-  defp secret_info("x"),
-    do:
-      "Your X app's OAuth 2.0 Client Secret, kept in Fermix's secret store and never shown here. Fermix answers X's check of the URL with it, so save it before you give X the URL."
 
   defp secret_info(_method),
     do:

@@ -315,7 +315,7 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       assert kind_line(html) =~
                "A service sends items to Fermix. Saving makes its URL. Give the service that URL and the secret you enter here."
 
-      assert preset_options(html) == [{"", "No preset"}, {"github", "GitHub"}, {"x", "X"}]
+      assert preset_options(html) == [{"", "No preset"}, {"github", "GitHub"}]
       assert selected(html, "cue_source[preset]") == "github"
       refute html =~ ~s(name="cue_source[url]")
       # GitHub fills the method and its headers, so none of them is drawn open.
@@ -927,40 +927,6 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       refute fresh =~ signing
       assert fresh =~ ~s(id="cue-source-repo-events")
       refute fresh =~ "Needs a signing secret"
-    end
-
-    # X's preset reads the identity and type from the Activity API's envelope
-    # and checks X's own signature, so a name and the client secret save it.
-    test "an X webhook saves with its name and its client secret", %{conn: conn} do
-      client_secret = "invented-x-client-secret-7702"
-      {:ok, view, _html} = live(conn, "/setup")
-      open_cues(view)
-      view |> element(~s(button[phx-click="cues_new_source"])) |> render_click()
-      view |> form("#cue-source-form", cue_source: %{kind: "webhook"}) |> render_change()
-      html = view |> form("#cue-source-form", cue_source: %{preset: "x"}) |> render_change()
-
-      assert html =~ "Client secret"
-      assert html =~ "OAuth 2.0 Client Secret"
-      refute open_field?(html, "id_header")
-      refute open_field?(html, "id")
-
-      html =
-        view
-        |> form("#cue-source-form",
-          cue_source: %{ref: "team-posts", preset: "x", enabled: "true", secret: client_secret}
-        )
-        |> render_submit()
-
-      assert html =~ "Source team-posts saved."
-      refute html =~ client_secret
-
-      assert {:ok, ^client_secret} =
-               SecretWriter.get({:cue_source, "team-posts", :secret}, store: :keyring)
-
-      section = persisted_source("team-posts")
-      assert Keyword.get(section, :preset) == "x"
-      assert Keyword.get(section, :secret) == "@keyring"
-      refute Keyword.has_key?(section, :verify)
     end
 
     test "a source missing its secret says so, and only then", %{conn: conn} do

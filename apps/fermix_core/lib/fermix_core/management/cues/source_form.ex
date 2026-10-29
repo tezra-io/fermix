@@ -63,14 +63,12 @@ defmodule FermixCore.Management.Cues.SourceForm do
   @preset_labels %{
     "rss" => "RSS, Atom or JSON Feed",
     "github" => "GitHub",
-    "x" => "X",
     "x_accounts" => "X accounts"
   }
   @verify_options [
     {"hmac", "A signature over the body"},
     {"standard_webhooks", "Standard Webhooks"},
-    {"shared_secret", "A shared secret in a header"},
-    {"x", "X's signature"}
+    {"shared_secret", "A shared secret in a header"}
   ]
   @verify_ids Enum.map(@verify_options, &elem(&1, 0))
   @algorithms ~w(sha256 sha512 sha1)
@@ -84,8 +82,6 @@ defmodule FermixCore.Management.Cues.SourceForm do
   @webhook_note "The door listens on this Mac only. A service outside reaches it through a " <>
                   "tunnel you run."
   @github_note "In GitHub's webhook form, choose `application/json` as the content type."
-  @x_note "The client secret is your X app's `OAuth 2.0 Client Secret`. Fermix answers X's " <>
-            "check of the address with it, so save it before you give X the address."
   @x_accounts_consent "Fermix asks X for these accounts' new posts on the schedule you set."
   @x_accounts_note "Reads with your X sign-in from the X plugin. Connect X under Plugins " <>
                      "first. X bills your X app for each post it returns."
@@ -455,7 +451,6 @@ defmodule FermixCore.Management.Cues.SourceForm do
   end
 
   defp notes("webhook", "github"), do: [@webhook_note, @github_note]
-  defp notes("webhook", "x"), do: [@webhook_note, @x_note]
   defp notes("webhook", _preset), do: [@webhook_note]
   defp notes("local_push", _preset), do: [@push_note]
   defp notes("stream", nil), do: [@general_stream_note]
@@ -614,7 +609,6 @@ defmodule FermixCore.Management.Cues.SourceForm do
   defp secret_rows(_kind, _preset, _method, _secrets), do: []
 
   defp webhook_secret_label("shared_secret"), do: "Shared secret"
-  defp webhook_secret_label("x"), do: "Client secret"
   defp webhook_secret_label(_method), do: "Signing secret"
 
   # A stream with no preset asks for its API key and secret straight after its
@@ -647,7 +641,6 @@ defmodule FermixCore.Management.Cues.SourceForm do
 
   defp method_keys("hmac"), do: ~w(header algorithm prefix id_header content_hash)
   defp method_keys("shared_secret"), do: ~w(header id_header content_hash)
-  defp method_keys("x"), do: ~w(id_header content_hash)
   defp method_keys(_standard_or_none), do: []
 
   defp fields(keys), do: Enum.map(keys, &Map.fetch!(@field_by_key, &1))

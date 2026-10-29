@@ -10,7 +10,6 @@ defmodule FermixCore.Cues.WebhookTest do
   @now ~U[2026-10-10 12:00:00Z]
   @github_secret "gh-signing-secret"
   @std_key "a 24-byte Standard key.."
-  @x_secret "x-client-secret-0417"
 
   setup do
     writer = Application.get_env(:fermix_core, :secret_writer)
@@ -44,32 +43,8 @@ defmodule FermixCore.Cues.WebhookTest do
 
   defp github, do: source!(%{"preset" => "github", "secret" => "@keyring"})
 
-  defp x_source, do: source!(%{"preset" => "x", "secret" => "@keyring"})
-
   defp hmac_hex(secret, body),
     do: :crypto.mac(:hmac, :sha256, secret, body) |> Base.encode16(case: :lower)
-
-  defp x_signature(secret, body),
-    do: "sha256=" <> Base.encode64(:crypto.mac(:hmac, :sha256, secret, body))
-
-  # An X Activity API post.create delivery, in its documented envelope.
-  defp x_body do
-    Jason.encode!(%{
-      "data" => %{
-        "event_uuid" => "evt-5512-alpha",
-        "created_at" => "2026-10-10T11:58:30.000Z",
-        "event_type" => "post.create",
-        "tag" => "team-posts",
-        "filter" => %{"user_id" => "4401876523"},
-        "payload" => %{
-          "id" => "1981000000000000042",
-          "author_id" => "4401876523",
-          "created_at" => "2026-10-10T11:58:29.000Z",
-          "text" => "The Ostrava office opens on Monday."
-        }
-      }
-    })
-  end
 
   defp github_headers(body, overrides \\ %{}) do
     Map.merge(
@@ -114,20 +89,6 @@ defmodule FermixCore.Cues.WebhookTest do
       assert source.secrets == %{secret: :keyring}
     end
 
-    test "the x preset fills X's method and reads the Activity API's envelope" do
-      source = x_source()
-
-      assert source.kind == :webhook
-      assert source.preset == "x"
-      assert source.verify == :x
-      assert source.id_path == "data.event_uuid"
-      assert source.type_path == "data.event_type"
-      assert source.subject_path == "data.filter.user_id"
-      assert source.time_path == "data.created_at"
-      assert source.secrets == %{secret: :keyring}
-      assert Config.required_fields(:webhook, "x", nil) == []
-    end
-
     test "path_secret is a secret field of webhook sources only" do
       source = source!(%{"preset" => "github", "secret" => "@keyring", "path_secret" => "@file"})
       assert source.secrets == %{secret: :keyring, path_secret: :file}
@@ -168,11 +129,7 @@ defmodule FermixCore.Cues.WebhookTest do
         {%{"kind" => "webhook", "verify" => "standard_webhooks", "header" => "X-Sig"},
          ~r/Standard Webhooks.*header/},
         {%{"kind" => "webhook", "verify" => "standard_webhooks", "id_header" => "X-Id"},
-         ~r/takes its identity from webhook-id/},
-        {%{"preset" => "x", "header" => "X-Sig"},
-         ~r/X fixes its signature header and algorithm, so header does not apply/},
-        {%{"kind" => "webhook", "verify" => "x", "prefix" => "v1=", "id" => "content_hash"},
-         ~r/X fixes its signature header and algorithm, so prefix does not apply/}
+         ~r/takes its identity from webhook-id/}
       ]
 
       for {section, pattern} <- refusals do
@@ -202,19 +159,6 @@ defmodule FermixCore.Cues.WebhookTest do
           ] do
         assert [sources: %{"h" => _section}] = normalize(%{"h" => Map.merge(base, identity)})
       end
-    end
-
-    test "an X webhook names one identity and no signature header" do
-      base = %{"kind" => "webhook", "verify" => "x", "secret" => "@file"}
-
-      assert Config.required_fields(:webhook, nil, "x") == [:verify]
-
-      assert_raise ArgumentError, ~r/needs an identity/, fn ->
-        normalize(%{"h" => base})
-      end
-
-      assert [sources: %{"h" => _section}] =
-               normalize(%{"h" => Map.put(base, "id", "content_hash")})
     end
 
     test "a webhook item is the whole body, with one type source and valid paths" do
@@ -346,71 +290,6 @@ defmodule FermixCore.Cues.WebhookTest do
     end
   end
 
-  describe "X's signature" do
-    test "the base64 HMAC-SHA256 of the raw body after sha256=, in X's OAuth 2.0 header" do
-      source = x_source()
-      body = x_body()
-      headers = [{"x-twitter-webhooks-signature-oauth2", x_signature(@x_secret, body)}]
-
-      assert {:ok, presented} = Webhook.presented(source, headers, @now)
-      assert Webhook.verify(source, presented, body, @x_secret) == :ok
-
-      unpadded = String.trim_trailing(x_signature(@x_secret, body), "=")
-      assert Webhook.verify(source, unpadded, body, @x_secret) == :ok
-    end
-
-    test "another secret, GitHub's hex, no prefix or another body is refused" do
-      source = x_source()
-      body = x_body()
-
-      for presented <- [
-            x_signature("another secret", body),
-            "sha256=" <> hmac_hex(@x_secret, body),
-            Base.encode64(:crypto.mac(:hmac, :sha256, @x_secret, body)),
-            "sha256=not base64!"
-          ] do
-        assert Webhook.verify(source, presented, body, @x_secret) == {:error, :bad_signature}
-      end
-
-      assert Webhook.verify(source, x_signature(@x_secret, body), body <> " ", @x_secret) ==
-               {:error, :bad_signature}
-    end
-
-    test "only the OAuth 2.0 header counts: the legacy one alone is missing" do
-      source = x_source()
-      legacy = [{"x-twitter-webhooks-signature", x_signature(@x_secret, x_body())}]
-
-      assert Webhook.presented(source, legacy, @now) == {:error, :missing_signature}
-      assert Webhook.presented(source, [], @now) == {:error, :missing_signature}
-    end
-  end
-
-  describe "X's CRC check" do
-    test "the answer is sha256= and the base64 HMAC-SHA256 of the token under the secret" do
-      mac = :crypto.mac(:hmac, :sha256, @x_secret, "Y2hhbGxlbmdlLTA0MTc")
-
-      assert Webhook.crc_response("Y2hhbGxlbmdlLTA0MTc", @x_secret) ==
-               {:ok, "sha256=" <> Base.encode64(mac)}
-    end
-
-    # The answer and a delivery's signature are the same HMAC under the same
-    # secret, so a token the door would decode as a body is never signed.
-    test "a token that is a JSON document is refused, so no answer signs a body" do
-      for token <- [x_body(), ~s({"data":{}}), "12345", "-1.5e3", "true", "null", ~s("x"), "[]"] do
-        assert Webhook.crc_response(token, @x_secret) == {:error, :bad_token}, token
-      end
-    end
-
-    test "an empty, overlong, spaced or non-ASCII token is refused" do
-      for token <- ["", String.duplicate("a", 1025), "two words", "line\nbreak", "café"] do
-        assert Webhook.crc_response(token, @x_secret) == {:error, :bad_token}, token
-      end
-
-      assert {:ok, "sha256=" <> _mac} =
-               Webhook.crc_response(String.duplicate("a", 1024), @x_secret)
-    end
-  end
-
   defp standard_source do
     source!(%{"kind" => "webhook", "verify" => "standard_webhooks", "secret" => "@keyring"})
   end
@@ -495,18 +374,6 @@ defmodule FermixCore.Cues.WebhookTest do
       assert item.subject == "host-alpha"
       assert item.type == "disk.alert"
       assert item.occurred_at == ~U[2026-10-10 11:58:00Z]
-    end
-
-    test "an X delivery: id, type, account and time from its envelope, the post as data" do
-      body = x_body()
-
-      assert {:ok, %{id: "evt-5512-alpha", entry: %Item{} = item}} =
-               Webhook.entry(x_source(), [], body, @now)
-
-      assert item.type == "post.create"
-      assert item.subject == "4401876523"
-      assert DateTime.compare(item.occurred_at, ~U[2026-10-10 11:58:30Z]) == :eq
-      assert item.data["data"]["payload"]["text"] == "The Ostrava office opens on Monday."
     end
 
     test "content_hash identity: the same content is the same id, whatever its key order" do

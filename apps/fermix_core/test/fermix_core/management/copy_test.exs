@@ -426,9 +426,7 @@ defmodule FermixCore.Management.CopyTest do
               {"webhook", nil, "hmac"},
               {"webhook", nil, "shared_secret"},
               {"webhook", nil, "standard_webhooks"},
-              {"webhook", nil, "x"},
               {nil, "github", nil},
-              {nil, "x", nil},
               {nil, "rss", nil},
               {nil, "x_accounts", nil}
             ] do
