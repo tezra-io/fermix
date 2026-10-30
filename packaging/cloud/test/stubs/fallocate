@@ -1,0 +1,6 @@
+#!/bin/sh
+# Test stand-in for fallocate: logs the call and leaves an empty file where
+# the real one reserves the size, so no scenario writes gigabytes.
+set -eu
+printf 'fallocate %s\n' "$*" >>/var/log/fermix-test/calls.log
+: >"$3"

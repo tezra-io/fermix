@@ -2,9 +2,10 @@
 # Runs inside a throwaway debian:trixie-slim container started by
 # first_boot_test.sh, with packaging/cloud mounted read-only at /cloud, the
 # package's systemd units at /linux-systemd, /run on a tmpfs and NET_ADMIN, so
-# nft loads the real ruleset. useradd, runuser and nft are real; systemctl,
-# loginctl, curl, apt-get and fermix are the stand-ins in stubs/ (in the
-# chromium scenario apt-get is the real one). One scenario per container:
+# nft loads the real ruleset. useradd, runuser, nft and apt-config are real;
+# systemctl, loginctl, curl, apt-get, dpkg-query, swapon, fallocate, mkswap and
+# fermix are the stand-ins in stubs/ (in the chromium scenario apt-get and
+# dpkg-query are the real ones). One scenario per container:
 #
 #   existing-host  refusals, then the code typed at a terminal, the wait for
 #                  the primary, then a re-run; then the code in the
@@ -13,12 +14,16 @@
 #                  re-run once a home exists
 #   failures       each failure that stops the first boot: its exit status
 #                  and its one sentence on stderr
-#   ubuntu         no Chromium package, and the sentence that says to install one
+#   ubuntu         no Chromium package, and the sentence that says to install
+#                  one; swap of its own, which it keeps
+#   updates        the nightly update: no new release, a new one, a failed
+#                  installer, a reboot asked for, a failed restart, no home
 #   chromium       the distribution's Chromium installed for real and started
-#                  headless as the engine account, its own sandbox on
+#                  headless as the engine account, the way the engine's
+#                  launcher starts it, its own sandbox on
 set -eu
 
-SCENARIO=${1:?scenario: existing-host, restore, failures, ubuntu or chromium}
+SCENARIO=${1:?scenario: existing-host, restore, failures, ubuntu, updates or chromium}
 FIRST_BOOT=/cloud/first-boot.sh
 LOG=/var/log/fermix-test
 FIXTURES=/etc/fermix-test
@@ -70,15 +75,20 @@ code_absent_everywhere() {
 }
 
 install_stubs() {
-  for stub in systemctl loginctl curl; do install -m 0755 "/cloud/test/stubs/$stub" "/usr/local/bin/$stub"; done
+  for stub in systemctl loginctl curl swapon fallocate mkswap; do
+    install -m 0755 "/cloud/test/stubs/$stub" "/usr/local/bin/$stub"
+  done
   reset_log
 }
 
+# The real apt-get installs what the checks run for real, then the stand-ins
+# take over apt-get and dpkg-query.
 setup_tools() {
   apt-get -qq update >/dev/null
-  apt-get -qq -y install --no-install-recommends nftables >/dev/null 2>&1
+  apt-get -qq -y install --no-install-recommends nftables shellcheck >/dev/null 2>&1
   install_stubs
   install -m 0755 /cloud/test/stubs/apt-get /usr/local/sbin/apt-get
+  install -m 0755 /cloud/test/stubs/dpkg-query /usr/local/bin/dpkg-query
 }
 
 # Runs first-boot.sh with no terminal; $OUT gets stdout and stderr, $STATUS
@@ -193,8 +203,13 @@ expected_ruleset() {
 table inet fermix_metadata {
 	chain output {
 		type filter hook output priority filter; policy accept;
+		udp dport 53 accept
+		tcp dport 53 accept
+		udp dport 123 accept
 		ip daddr 169.254.169.254 meta skuid != 0 drop
+		ip daddr 100.100.100.200 meta skuid != 0 drop
 		ip6 daddr fd00:ec2::254 meta skuid != 0 drop
+		ip6 daddr fd20:ce::254 meta skuid != 0 drop
 	}
 }
 EOF
@@ -203,7 +218,9 @@ EOF
 check_metadata_block() {
   nft list table inet fermix_metadata >/tmp/ruleset 2>&1 || true
   expected_ruleset >/tmp/ruleset.expected
-  check "cmp -s /tmp/ruleset /tmp/ruleset.expected" "nft holds exactly the metadata block for every uid but 0"
+  check "cmp -s /tmp/ruleset /tmp/ruleset.expected" \
+    "nft holds exactly the metadata block: the four addresses, but DNS and time, dropped for every uid but 0"
+  cmp -s /tmp/ruleset /tmp/ruleset.expected || diff /tmp/ruleset.expected /tmp/ruleset | sed 's/^/    /' || true
   check "[ \"\$(nft list tables | grep -c fermix_metadata)\" -eq 1 ]" "the block is one table, however often it loads"
   unit=/etc/systemd/system/fermix-metadata-block.service
   check "[ \"\$(mode_owner $unit)\" = '644 root:root' ]" "the block's unit is root's"
@@ -259,11 +276,46 @@ check_package_unit() {
   done
 }
 
+# The swap file is root's alone, in /etc/fstab once (so it is on at every
+# boot), and nothing half made is left beside it.
+check_swap() {
+  check "[ \"\$(mode_owner /swapfile)\" = '600 root:root' ]" "the swap file /swapfile is root's alone"
+  check "[ \"\$(grep -c '^/swapfile ' /etc/fstab)\" -eq 1 ] && grep -qx '/swapfile none swap sw 0 0' /etc/fstab" \
+    "/etc/fstab lists the swap file once, so it is on at every boot"
+  check "[ ! -e /swapfile.incoming ]" "no half-made swap file is left"
+}
+
+periodic_on() {
+  [ "$(apt-config shell VALUE "APT::Periodic::$1")" = "VALUE='1'" ]
+}
+
+# Debian's daily updates on, and the nightly update's timer, unit and script.
+check_updates() {
+  conf=/etc/apt/apt.conf.d/21fermix-always-on
+  check "[ \"\$(mode_owner $conf)\" = '644 root:root' ]" "Debian's daily updates are set in a file of root's"
+  check "periodic_on Update-Package-Lists && periodic_on Unattended-Upgrade" \
+    "apt's own configuration runs unattended-upgrades every day"
+  timer=/etc/systemd/system/fermix-update.timer
+  for line in 'OnCalendar=*-*-* 04:00:00 UTC' 'Persistent=true' 'WantedBy=timers.target'; do
+    check "grep -qxF '$line' $timer" "the update timer has $line"
+  done
+  service=/etc/systemd/system/fermix-update.service
+  for line in 'Type=oneshot' 'ExecStart=/usr/local/sbin/fermix-update' 'TimeoutStartSec=30min'; do
+    check "grep -qxF '$line' $service" "the update's unit has $line"
+  done
+  check "contains $LOG/calls.log 'systemctl enable --now fermix-update.timer'" "the update timer is on"
+  update=/usr/local/sbin/fermix-update
+  check "[ \"\$(mode_owner $update)\" = '755 root:root' ]" "the update script is root's"
+  check "dash -n $update" "dash parses the update script"
+  check "shellcheck -s sh $update" "shellcheck finds nothing in the update script"
+}
+
 snapshot_files() {
   find /etc/fermix /etc/systemd/system /etc/tmpfiles.d/fermix-always-on.conf /run/fermix \
+    /etc/apt/apt.conf.d/21fermix-always-on /usr/local/sbin/fermix-update /etc/fstab /swapfile \
     -type f 2>/dev/null | sort | xargs sha256sum >"$1"
   nft list table inet fermix_metadata >>"$1"
-  stat -c '%n %a %U:%G' /run/fermix /home/fermix >>"$1"
+  stat -c '%n %a %U:%G' /run/fermix /home/fermix /swapfile >>"$1"
 }
 
 existing_host() {
@@ -283,9 +335,15 @@ apt-get -qq -y install --no-install-recommends nftables
 systemctl daemon-reload
 systemctl enable fermix-metadata-block.service
 systemctl restart fermix-metadata-block.service
+fallocate -l 2G /swapfile.incoming
+mkswap /swapfile.incoming
+swapon /swapfile
 apt-get -qq -y install --no-install-recommends ca-certificates curl
 curl GET https://fermix.ai/install
 installer --no-setup
+apt-get -qq -y install --no-install-recommends unattended-upgrades
+systemctl daemon-reload
+systemctl enable --now fermix-update.timer
 systemctl daemon-reload
 loginctl enable-linger fermix
 systemctl start user@$ENGINE_UID.service
@@ -296,14 +354,16 @@ fermix home status --json [as fermix]
 fermix home status --json [as fermix]
 EOF
   check "cmp -s $LOG/calls.log /tmp/calls.expected" \
-    "the steps run in order, enrolling with no bucket, then waiting until the primary accepts it"
+    "the steps run in order, swap and updates among them, enrolling with no bucket, then waiting until the primary accepts it"
   cmp -s "$LOG/calls.log" /tmp/calls.expected || diff /tmp/calls.expected "$LOG/calls.log" | sed 's/^/    /' || true
   grep '^==> ' "$OUT" | cut -c5- | cut -d' ' -f1-3 >/tmp/steps
   cat >/tmp/steps.expected <<'EOF'
 Writing the enrollment
 Blocking the instance
+Giving this server
 Installing Fermix with
 (test) installed the
+Turning on updates:
 Creating the account
 Enrolling this server
 Starting Fermix as
@@ -317,6 +377,8 @@ EOF
   check_account
   check_code_file
   check_metadata_block
+  check_swap
+  check_updates
   check_package_unit
 
   snapshot_files /tmp/state.first
@@ -333,9 +395,10 @@ EOF
   check "cmp -s /tmp/state.first /tmp/state.second" "a re-run leaves every file, mode and rule as it was"
   cmp -s /tmp/state.first /tmp/state.second || diff /tmp/state.first /tmp/state.second | sed 's/^/    /' || true
   check "[ \"\$(getent passwd | grep -c '^fermix:')\" -eq 1 ]" "a re-run creates no second account"
+  check "! grep -q 'fallocate\|mkswap\|swapon' $LOG/calls.log" "a re-run makes no second swap file and turns nothing on again"
 
   # The same host enrolled again, the code in the environment as cloud-init
-  # passes it, with a bucket.
+  # passes it, with a bucket. Its swap file is on by now, so no swap step runs.
   fresh_host
   run_first_boot env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT" \
     --snapshot-bucket fermix-snapshots-invented --snapshot-region eu-west-1
@@ -351,6 +414,9 @@ systemctl restart fermix-metadata-block.service
 apt-get -qq -y install --no-install-recommends ca-certificates curl
 curl GET https://fermix.ai/install
 installer --no-setup
+apt-get -qq -y install --no-install-recommends unattended-upgrades
+systemctl daemon-reload
+systemctl enable --now fermix-update.timer
 systemctl daemon-reload
 loginctl enable-linger fermix
 systemctl start user@$ENGINE_UID.service
@@ -393,8 +459,8 @@ restore() {
     "a restore host neither enrolls nor starts Fermix before the import"
   check "! grep -q 'Enrollment code' $OUT && [ ! -e /run/fermix/enroll.code ] && [ ! -e /home/fermix/.fermix ]" \
     "it asks for no code, writes none, and leaves the home empty for the import"
-  for step in 'Blocking the instance metadata address' 'Creating the account fermix' \
-    'Installing Chromium for the browser tasks'; do
+  for step in 'Blocking the instance metadata service' 'Giving this server 2G of swap' \
+    'Turning on updates' 'Creating the account fermix' 'Installing Chromium for the browser tasks'; do
     check "contains $OUT \"==> $step\"" "a restore host gets the same server: $step"
   done
   sed -n '/^==> Ready to restore/,$p' "$OUT" >/tmp/steps
@@ -403,6 +469,8 @@ restore() {
   cmp -s /tmp/steps /tmp/steps.expected || diff /tmp/steps.expected /tmp/steps | sed 's/^/    /' || true
   check_account
   check_metadata_block
+  check_swap
+  check_updates
   check_package_unit
 
   # A host with no bucket named: the step says to copy the file over.
@@ -441,6 +509,7 @@ failures() {
   check "[ $STATUS -eq 1 ] && ! grep -q 'fermix home enroll' $LOG/calls.log" "a step that stops unexpectedly ends the first boot there"
 }
 
+# An Ubuntu server the owner already had, with a swap partition of its own.
 ubuntu() {
   cat >/etc/os-release <<'EOF'
 PRETTY_NAME="Ubuntu 24.04.3 LTS"
@@ -449,6 +518,7 @@ VERSION_ID="24.04"
 ID=ubuntu
 ID_LIKE=debian
 EOF
+  printf '/dev/vda2\n' >"$FIXTURES/swaps"
   run_first_boot env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
   check "[ $STATUS -eq 0 ]" "an Ubuntu 24.04 host enrolls (exit $STATUS)"
   [ "$STATUS" -eq 0 ] || sed 's/^/    /' "$OUT"
@@ -459,11 +529,85 @@ EOF
     "the sentence says the owner installs a browser by hand, and what tasks answer until then"
   check "! grep -q 'ms-playwright' $OUT && ! grep -q 'Chrome for Testing' $OUT" \
     "and promises no browser Fermix downloads itself"
+  check "contains $OUT '==> This host has swap of its own, so no swap file is made' && [ ! -e /swapfile ]" \
+    "a host with swap of its own keeps it and gets no swap file"
+  check "! grep -q 'fallocate\|mkswap\|swapon' $LOG/calls.log && ! grep -q /swapfile /etc/fstab" \
+    "and nothing is formatted, turned on or added to /etc/fstab"
+}
+
+# The run failed, and the last line on stderr is its one sentence (the
+# installer's or fermix's own message comes before it).
+ended_with() {
+  if [ "$STATUS" -ne 0 ] && [ "$(tail -n 1 "$ERR")" = "fermix update: $1" ]; then
+    pass "$2"
+  else
+    fail "$2 (exit $STATUS)"
+    sed 's/^/    stderr: /' "$ERR"
+  fi
+}
+
+# One night's calls: the installer every time, then what the night adds.
+night_calls() {
+  printf 'curl GET https://fermix.ai/install\ninstaller --no-setup\n' >/tmp/calls.expected
+  if [ $# -gt 0 ]; then printf '%s\n' "$@" >>/tmp/calls.expected; fi
+  cmp -s "$LOG/calls.log" /tmp/calls.expected
+}
+
+# The nightly update, run by hand as fermix-update.service runs it, one night
+# per case, on a host first boot enrolled. Releases are invented versions.
+updates() {
+  run_first_boot env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
+  check "[ $STATUS -eq 0 ]" "a host enrolls (exit $STATUS)"
+  [ "$STATUS" -eq 0 ] || sed 's/^/    /' "$OUT"
+  check_updates
+  update=/usr/local/sbin/fermix-update
+
+  run_apart "$update"
+  check "[ $STATUS -eq 0 ] && night_calls" "a night with no new release runs the installer and nothing else"
+  check "contains $OUT '==> Fermix 1.2.3 is the newest release, so the engine keeps running'" "and says so"
+
+  printf '1.2.4\n' >"$FIXTURES/release"
+  run_apart "$update"
+  check "[ $STATUS -eq 0 ] && night_calls 'fermix restart [as fermix]'" \
+    "a new release restarts the engine as its own account"
+  check "contains $OUT '==> Fermix went from 1.2.3 to 1.2.4'" "and names both versions"
+  for name in HOME XDG_RUNTIME_DIR FERMIX_HOME; do
+    check "grep -qx $name $LOG/env-restart" "fermix restart has $name"
+  done
+
+  printf '1.2.5\n' >"$FIXTURES/release"
+  : >"$FIXTURES/installer-fails"
+  : >/run/reboot-required
+  run_apart "$update"
+  ended_with "The Fermix installer stopped, so the engine keeps running; its message above says why." \
+    "a failed installer ends the night with its sentence"
+  check "night_calls" "and neither restarts the engine nor reboots, though a reboot is asked for"
+
+  rm -f "$FIXTURES/installer-fails"
+  run_apart "$update"
+  check "[ $STATUS -eq 0 ] && night_calls 'fermix restart [as fermix]' 'systemctl reboot'" \
+    "the next night updates, restarts the engine, then reboots as asked"
+
+  printf '1.2.6\n' >"$FIXTURES/release"
+  : >"$FIXTURES/restart-fails"
+  run_apart "$update"
+  ended_with "Fermix is updated, but fermix restart stopped; its message above says why." \
+    "a restart that fails ends the night with its sentence"
+  check "night_calls 'fermix restart [as fermix]'" "and does not reboot"
+
+  rm -f "$FIXTURES/restart-fails" /run/reboot-required
+  rm -rf /home/fermix/.fermix
+  printf '1.2.7\n' >"$FIXTURES/release"
+  run_apart "$update"
+  check "[ $STATUS -eq 0 ] && night_calls" "a server with no home yet (a restore host) updates and restarts nothing"
+  check "contains $OUT '==> Fermix has no home here yet, so no engine runs to restart'" "and says so"
+  check "[ -z \"\$(find /run -maxdepth 1 -name 'fermix-update.*')\" ]" "no night leaves a work directory behind"
 }
 
 # The real package and the real browser: what the engine's launcher starts
-# (`chromium` on its PATH, headless, the launcher's Linux flags), as the engine
-# account, with no --no-sandbox, so Chromium's own sandbox has to come up.
+# (`chromium` on its PATH, headless, the launcher's Linux flags, through the
+# shell that first raises its oom_score_adj to 1000), as the engine account,
+# with no --no-sandbox, so Chromium's own sandbox has to come up.
 chromium() {
   apt-get -qq update >/dev/null
   apt-get -qq -y install --no-install-recommends nftables >/dev/null 2>&1
@@ -474,11 +618,14 @@ chromium() {
   check "dpkg-query -W -f='\${Status}' chromium | grep -q 'install ok installed'" "the chromium package is installed"
   check "[ \"\$(runuser -u fermix -- env -i PATH=/usr/bin:/bin sh -c 'command -v chromium')\" = /usr/bin/chromium ]" \
     "the engine account finds chromium on its PATH, where the launcher looks"
+  guard='echo 1000 >/proc/self/oom_score_adj && exec "$@"'
+  check "[ \"\$(runuser -u fermix -- /bin/sh -c '$guard' sh cat /proc/self/oom_score_adj)\" = 1000 ]" \
+    "the launcher's shell raises the engine account's score to 1000 for what it starts"
   profile=/home/fermix/.fermix/browser/profiles/fermix_headless
   runuser -u fermix -- mkdir -p "$profile"
   set +e
   runuser -u fermix -- env -i HOME=/home/fermix USER=fermix LOGNAME=fermix PATH=/usr/bin:/bin LANG=C.UTF-8 \
-    chromium --headless=new --disable-dev-shm-usage --no-first-run --no-default-browser-check \
+    /bin/sh -c "$guard" sh chromium --headless=new --disable-dev-shm-usage --no-first-run --no-default-browser-check \
     --disable-background-networking --disable-component-update --password-store=basic \
     --use-mock-keychain --user-data-dir="$profile" \
     --dump-dom 'data:text/html,<p id="probe">fermix-headless-ok</p>' >/tmp/chromium.out 2>/tmp/chromium.err
@@ -500,6 +647,7 @@ case "$SCENARIO" in
   restore) setup_tools; restore ;;
   failures) setup_tools; failures ;;
   ubuntu) setup_tools; ubuntu ;;
+  updates) setup_tools; updates ;;
   chromium) chromium ;;
   *)
     echo "unknown scenario $SCENARIO" >&2

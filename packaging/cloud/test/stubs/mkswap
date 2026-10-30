@@ -1,0 +1,4 @@
+#!/bin/sh
+# Test stand-in for mkswap: logs the call.
+set -eu
+printf 'mkswap %s\n' "$*" >>/var/log/fermix-test/calls.log

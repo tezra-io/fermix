@@ -559,6 +559,8 @@ def test_the_shipped_numbered_rubrics_parse():
                       "twentieth_corrected_to_thirteenth": 3,
                       # home_move.yaml
                       "move_to_vm_sanity": 4, "device_role_after_the_move": 3,
+                      "new_fermix_release_on_the_server": 3,
+                      "security_patches_and_reboots_on_the_server": 3,
                       # open_loops.yaml
                       "grant_overhead": 3, "contractor_choice": 3,
                       "fence_paint_route_sanity": 3,

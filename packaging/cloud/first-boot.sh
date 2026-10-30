@@ -8,7 +8,9 @@
 #   curl -fsSL https://fermix.ai/always-on | sudo sh
 #
 # With --restore it takes no code and enrolls nothing: it prepares the same
-# server and prints the steps that restore a snapshot onto it.
+# server and prints the steps that restore a snapshot onto it. Either way the
+# server gets swap when it has none, and keeps itself up to date: Debian's
+# security updates every day, Fermix every night at 04:00 UTC.
 #
 # Options: --restore, --snapshot-bucket NAME --snapshot-region REGION
 # (together). It never prints the code, never logs it
@@ -37,6 +39,16 @@ RESTORE_FILE=$ACCOUNT_HOME/restore.fxsnap
 # The import runs from a home of its own, so nothing it writes as it starts
 # lands in the empty home it restores into.
 RESTORE_CLI_HOME=$ACCOUNT_HOME/.fermix-restore
+# The memory guard's swap, for a host with none (Hetzner's images have none):
+# memory pressure then slows the server before the kernel stops a process, and
+# the engine starts Chromium as the process it stops first. 2 GB until a
+# measurement on the smallest server Fermix creates sets the size (M75 §3).
+SWAP_FILE=/swapfile
+SWAP_SIZE=2G
+# Updates: Debian's own through unattended-upgrades, Fermix's through its
+# installer, by a root timer every night at 04:00 UTC.
+UPGRADES_CONF=/etc/apt/apt.conf.d/21fermix-always-on
+UPDATE_SCRIPT=/usr/local/sbin/fermix-update
 
 CODE=""
 RESTORE=0
@@ -193,26 +205,37 @@ write_code_file() {
 }
 
 # 2. Only root reaches the instance metadata service, from now and at every
-# boot, before any account's services start. Both the IPv4 address every
-# cloud uses and the IPv6 one some offer are blocked, as the engine's own
-# service unit blocks them. The rule matches what the
-# host's own processes send; a container's packets take the forward path and
-# would pass it, which is why this server runs none (Fermix's Linux sandbox is
-# Landlock, not a container).
+# boot, before any account's services start: user data, which holds the
+# enrollment code, stays readable there for the server's life. Every packet
+# from any account but root to a metadata address (169.254.169.254 on most
+# clouds, 100.100.100.200 on Alibaba's, fd00:ec2::254 on AWS's IPv6,
+# fd20:ce::254 on Google's) is dropped, except DNS (udp and tcp 53) and time
+# (udp 123), which some clouds serve from the same address. Those are accepted
+# first; an accept only ends this table's chain, whose policy is accept
+# anyway, so it opens nothing another firewall closes. The rule matches what
+# the host's own processes send; a container's packets take the forward path
+# and would pass it, which is why this server runs none (Fermix's Linux
+# sandbox is Landlock, not a container).
 block_metadata() {
-  say "Blocking the instance metadata address for every account but root"
+  say "Blocking the instance metadata service for every account but root"
   apt_install nftables
   install -d -m 0755 /etc/fermix
   write_file /etc/fermix/metadata-block.nft 0644 <<'EOF'
-# Fermix Always On: the instance metadata service answers root only. Loaded
-# by fermix-metadata-block.service; replacing the table keeps a reload whole.
+# Fermix Always On: the instance metadata addresses answer root only, but for
+# DNS and time, which some clouds serve there. Loaded by
+# fermix-metadata-block.service; replacing the table keeps a reload whole.
 table inet fermix_metadata
 delete table inet fermix_metadata
 table inet fermix_metadata {
 	chain output {
 		type filter hook output priority filter; policy accept;
+		udp dport 53 accept
+		tcp dport 53 accept
+		udp dport 123 accept
 		ip daddr 169.254.169.254 meta skuid != 0 drop
+		ip daddr 100.100.100.200 meta skuid != 0 drop
 		ip6 daddr fd00:ec2::254 meta skuid != 0 drop
+		ip6 daddr fd20:ce::254 meta skuid != 0 drop
 	}
 }
 EOF
@@ -220,7 +243,7 @@ EOF
   # this unit follows it and loads the block again.
   write_file "$UNIT_DIR/fermix-metadata-block.service" 0644 <<'EOF'
 [Unit]
-Description=Fermix: block the instance metadata address for every account but root
+Description=Fermix: block the instance metadata service for every account but root
 DefaultDependencies=no
 Wants=network-pre.target
 Before=network-pre.target shutdown.target
@@ -245,7 +268,32 @@ EOF
     fail "The metadata block did not load: nft lists no table inet fermix_metadata."
 }
 
-# 3. The signed Linux package, through the same installer every host uses.
+# 3. Swap for a host that has none. A host with swap of its own keeps it; a
+# run again finds this file made, in /etc/fstab and on, and changes nothing.
+# The file takes its name only once mkswap has formatted it, so a run cut
+# short leaves no half-made swap file under that name.
+add_swap() {
+  swaps=$(swapon --show=NAME --noheadings) || fail "swapon could not list this host's swap."
+  if [ -n "$swaps" ] && ! printf '%s\n' "$swaps" | grep -qxF "$SWAP_FILE"; then
+    say "This host has swap of its own, so no swap file is made"
+    return 0
+  fi
+  say "Giving this server $SWAP_SIZE of swap in $SWAP_FILE"
+  if [ ! -e "$SWAP_FILE" ]; then
+    rm -f "$SWAP_FILE.incoming"
+    fallocate -l "$SWAP_SIZE" "$SWAP_FILE.incoming" ||
+      fail "Could not reserve $SWAP_SIZE for the swap file $SWAP_FILE. Check the free disk space."
+    chmod 0600 "$SWAP_FILE.incoming"
+    mkswap "$SWAP_FILE.incoming" >/dev/null || fail "mkswap could not format the swap file $SWAP_FILE."
+    mv -fT "$SWAP_FILE.incoming" "$SWAP_FILE"
+  fi
+  grep -qs "^$SWAP_FILE " /etc/fstab || printf '%s none swap sw 0 0\n' "$SWAP_FILE" >>/etc/fstab
+  if [ -z "$swaps" ]; then
+    swapon "$SWAP_FILE" || fail "The kernel refused $SWAP_FILE as swap; this host's filesystem may not hold a swap file."
+  fi
+}
+
+# 4. The signed Linux package, through the same installer every host uses.
 install_fermix() {
   say "Installing Fermix with $INSTALL_URL"
   apt_install ca-certificates curl
@@ -255,7 +303,165 @@ install_fermix() {
   [ -x "$FERMIX_BIN" ] || fail "The installer finished, but $FERMIX_BIN is not there."
 }
 
-# 4. The engine account: no login, its own lingering service manager, and a
+# Whether apt's effective configuration sets APT::Periodic::$1 to 1.
+apt_periodic_on() {
+  [ "$(apt-config shell VALUE "APT::Periodic::$1")" = "VALUE='1'" ]
+}
+
+# The script fermix-update.timer runs: first boot's account, home, binary and
+# installer address, then a fixed body.
+write_update_script() {
+  install -d -m 0755 "$(dirname "$UPDATE_SCRIPT")"
+  {
+    cat <<EOF
+#!/bin/sh
+# Fermix Always On: the nightly update fermix-update.timer runs at 04:00 UTC.
+# Written by Fermix's first boot, which writes it again whenever it runs.
+set -eu
+
+ENGINE_USER=$ENGINE_USER
+ACCOUNT_HOME=$ACCOUNT_HOME
+FERMIX_HOME_DIR=$FERMIX_HOME_DIR
+FERMIX_BIN=$FERMIX_BIN
+INSTALL_URL=$INSTALL_URL
+EOF
+    cat <<'FERMIX_UPDATE'
+REBOOT_FLAG=/run/reboot-required
+WORK=""
+
+# One sentence and a non-zero exit, before anything restarts or reboots.
+fail() {
+  printf 'fermix update: %s\n' "$1" >&2
+  exit 1
+}
+
+say() {
+  printf '==> %s\n' "$1"
+}
+
+finish() {
+  if [ -n "$WORK" ]; then rm -rf "$WORK"; fi
+}
+
+installed_version() {
+  # shellcheck disable=SC2016 # ${Version} is dpkg-query's own format syntax
+  dpkg-query -W -f='${Version}' fermix 2>/dev/null ||
+    fail "dpkg lists no fermix package on this server, so there is nothing to update."
+}
+
+# The installer every host uses, with its sha256 and cosign checks: it installs
+# the newest release's package, or nothing when that one is installed. The
+# package restarts nothing, so the running engine is untouched until the restart.
+update_fermix() {
+  curl -fsSL --proto '=https' "$INSTALL_URL" -o "$WORK/install.sh" ||
+    fail "Could not download the Fermix installer from $INSTALL_URL, so Fermix was not updated and the engine keeps running."
+  sh "$WORK/install.sh" --no-setup </dev/null ||
+    fail "The Fermix installer stopped, so the engine keeps running; its message above says why."
+}
+
+# The engine account's own `fermix restart`, the restart an owner runs after an
+# update: it restarts the service and waits for the new engine to answer.
+restart_engine() {
+  if [ ! -e "$FERMIX_HOME_DIR" ]; then
+    say "Fermix has no home here yet, so no engine runs to restart"
+    return 0
+  fi
+  say "Restarting the engine"
+  uid=$(id -u "$ENGINE_USER")
+  runuser -u "$ENGINE_USER" -- env -i HOME="$ACCOUNT_HOME" USER="$ENGINE_USER" \
+    LOGNAME="$ENGINE_USER" SHELL=/usr/sbin/nologin PATH=/usr/bin:/bin LANG=C.UTF-8 \
+    XDG_RUNTIME_DIR="/run/user/$uid" FERMIX_HOME="$FERMIX_HOME_DIR" \
+    "$FERMIX_BIN" restart </dev/null ||
+    fail "Fermix is updated, but fermix restart stopped; its message above says why."
+}
+
+main() {
+  umask 077
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  LC_ALL=C
+  DEBIAN_FRONTEND=noninteractive
+  NEEDRESTART_SUSPEND=1
+  export PATH LC_ALL DEBIAN_FRONTEND NEEDRESTART_SUSPEND
+  cd /
+  trap finish EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  [ "$(id -u)" -eq 0 ] || fail "Run this as root, as fermix-update.timer does."
+  WORK=$(mktemp -d /run/fermix-update.XXXXXX)
+  printf 'DPkg::Lock::Timeout "600";\n' >"$WORK/apt.conf"
+  APT_CONFIG=$WORK/apt.conf
+  export APT_CONFIG
+
+  before=$(installed_version) || exit 1
+  say "Updating Fermix $before through $INSTALL_URL"
+  update_fermix
+  after=$(installed_version) || exit 1
+  if [ "$after" = "$before" ]; then
+    say "Fermix $after is the newest release, so the engine keeps running"
+  else
+    say "Fermix went from $before to $after"
+    restart_engine
+  fi
+  if [ -e "$REBOOT_FLAG" ]; then
+    say "An installed update asks for a reboot ($REBOOT_FLAG), so this server reboots now"
+    systemctl reboot || fail "systemctl reboot was refused; the next night tries again."
+  fi
+}
+
+main "$@"
+FERMIX_UPDATE
+  } | write_file "$UPDATE_SCRIPT" 0755
+}
+
+# 5. Updates, as nobody logs in to this server. Debian's own: unattended-upgrades,
+# which the Debian 13 cloud image installs and turns on, installed here when a
+# provider's image lacks it, and its two daily switches set in a file of
+# Fermix's. Fermix's own: the package comes from the release files, not an apt
+# source, so unattended-upgrades never sees it; a root timer runs the
+# installer every night at 04:00 UTC, restarts the engine when its version
+# changed and reboots when an update asks for it. A run that fails stops
+# before both, says why in the journal, and the next night tries again.
+schedule_updates() {
+  say "Turning on updates: Debian's security updates every day, Fermix every night at 04:00 UTC"
+  apt_install unattended-upgrades
+  write_file "$UPGRADES_CONF" 0644 <<'EOF'
+// Fermix Always On: nobody logs in to this server, so Debian's own updates
+// install themselves every day. The nightly fermix-update reboots when one
+// asks for it.
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+  if ! apt_periodic_on Update-Package-Lists || ! apt_periodic_on Unattended-Upgrade; then
+    fail "Debian's daily updates stay off: a later apt setting overrides $UPGRADES_CONF (apt-config dump APT::Periodic shows it)."
+  fi
+  write_update_script
+  write_file "$UNIT_DIR/fermix-update.service" 0644 <<EOF
+[Unit]
+Description=Fermix: update Fermix through its installer, restart it when its version changed, reboot when an update asks
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$UPDATE_SCRIPT
+TimeoutStartSec=30min
+EOF
+  write_file "$UNIT_DIR/fermix-update.timer" 0644 <<'EOF'
+[Unit]
+Description=Fermix: the nightly update at 04:00 UTC
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now fermix-update.timer
+}
+
+# 6. The engine account: no login, its own lingering service manager, and a
 # user manager that refuses to start while the metadata block is missing.
 create_engine_user() {
   say "Creating the account $ENGINE_USER, which runs Fermix and cannot log in"
@@ -291,7 +497,7 @@ EOF
   systemctl start "user@$ENGINE_UID.service"
 }
 
-# 5. The engine account writes its candidate home from the code file.
+# 7. The engine account writes its candidate home from the code file.
 enroll() {
   if [ "$HOME_EXISTS" -eq 1 ]; then
     say "The Fermix home $FERMIX_HOME_DIR already exists, so this host is not enrolled again"
@@ -305,14 +511,14 @@ enroll() {
   as_engine "$@" || fail "fermix home enroll stopped; its message above says why."
 }
 
-# 6. The packaged user service, bound to that home and started.
+# 8. The packaged user service, bound to that home and started.
 start_service() {
   say "Starting Fermix as the background service of $ENGINE_USER"
   as_engine service install --home "$FERMIX_HOME_DIR" ||
     fail "fermix service install stopped; its message above says why."
 }
 
-# 7. A browser for the agent's tasks. On Debian the distribution's Chromium,
+# 9. A browser for the agent's tasks. On Debian the distribution's Chromium,
 # which the engine finds on its PATH and starts headless as the engine account.
 # Ubuntu ships Chromium only as a snap.
 install_browser() {
@@ -334,7 +540,7 @@ move_field() {
     sed -n 's/.*"'"$2"'": *"\(\([^"\\]\|\\.\)*\)".*/\1/p' | sed 's/\\"/"/g; s/\\\\/\\/g'
 }
 
-# 8. The engine dials the primary from the code; the first boot ends once
+# 10. The engine dials the primary from the code; the first boot ends once
 # the primary accepted this server, refused it, or did not answer.
 await_enrollment() {
   say "Waiting for your primary to accept this server"
@@ -432,7 +638,9 @@ main() {
     write_code_file
   fi
   block_metadata
+  add_swap
   install_fermix
+  schedule_updates
   create_engine_user
   if [ "$RESTORE" -eq 1 ] && [ "$HOME_EXISTS" -eq 0 ]; then
     finish_restore

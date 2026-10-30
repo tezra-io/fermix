@@ -131,16 +131,34 @@ it, never a second writer.
   without echoing it. After `sh -s --`:
   `--snapshot-bucket NAME --snapshot-region REGION`, `--restore`.
 - The first boot, as root: writes the code to `/run/fermix/enroll.code`
-  (memory only, the engine account's), blocks the instance metadata address
-  for every account but root at every boot (the host's own processes: the
-  server runs no containers, whose traffic that rule would not see), installs
-  the Linux package, creates the account `fermix` (home `/home/fermix`, no
-  login shell, lingering), runs `fermix home enroll` and `fermix service
-  install` as `fermix`, installs Chromium on Debian for browser tasks, and
-  waits up to 5 minutes for the primary to accept the server. The engine
-  starts in the candidate role, enrolls with the primary and waits for the
-  move. Running it again is safe: a host whose home exists is not enrolled
+  (memory only, the engine account's), blocks the instance metadata service
+  for every account but root at every boot (every packet to
+  `169.254.169.254`, `100.100.100.200`, `fd00:ec2::254` and `fd20:ce::254`
+  except DNS and time, which some clouds serve from the same address; the
+  host's own processes: the server runs no containers, whose traffic that rule
+  would not see), gives a host with no swap a 2 GB `/swapfile` (a host with
+  swap keeps its own), installs the Linux package, turns on updates (below),
+  creates the account `fermix` (home `/home/fermix`, no login shell,
+  lingering), runs `fermix home enroll` and `fermix service install` as
+  `fermix`, installs Chromium on Debian for browser tasks, and waits up to 5
+  minutes for the primary to accept the server. The engine starts in the
+  candidate role, enrolls with the primary and waits for the move. Running it again is safe: a host whose home exists is not enrolled
   again. It never prints the code; cloud-init's console log shows each step.
+- **Updates on the server.** Nobody logs in to it, so it updates itself.
+  Debian's security updates: `unattended-upgrades` every day (the first boot
+  installs it where the image lacks it and sets its two daily switches in
+  `/etc/apt/apt.conf.d/21fermix-always-on`). Fermix: the package comes from
+  release files, not an apt source, so `fermix-update.timer` (root) runs
+  `/usr/local/sbin/fermix-update` every night at 04:00 UTC: the installer
+  again, `fermix restart` as `fermix` only when the installed version changed,
+  then a reboot when `/run/reboot-required` exists. A night that fails stops
+  before the restart and the reboot, leaves the running engine as it was and
+  says why in `journalctl -u fermix-update`; the next night tries again. So a
+  server's engine can be up to a day behind the Mac's.
+- **Memory.** Out of memory the kernel stops one process. The swap file makes
+  that rarer, and on Linux the engine starts Chrome, and so every Chrome
+  process, with `oom_score_adj` 1000, so the kernel stops Chrome before the
+  engine. Both values are constants until they are measured on a real server.
 - On Ubuntu there is no Chromium package (only a snap, which Fermix does not
   use), so the first boot installs no browser there: an Ubuntu server needs
   one installed by hand (Google Chrome's own package, for example), and until

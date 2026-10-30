@@ -138,13 +138,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Debian 13 or Ubuntu 24.04 server (arm64 or x86_64),
   `curl -fsSL https://fermix.ai/always-on | sudo sh` asks for the enrollment
   code without showing it, or cloud-init user data passes it in
-  `FERMIX_ENROLL_CODE`. It blocks the cloud's instance metadata service for
-  every account but root, installs Fermix and a `fermix` account to run it,
-  enrolls the server with your primary, starts its service, installs Chromium
-  on Debian (on Ubuntu, install a browser yourself) and waits for your primary
-  to accept the server. `--snapshot-bucket` and `--snapshot-region` name where
-  the server will keep its snapshots, and `--restore` prepares a server to
-  restore your home from a snapshot instead.
+  `FERMIX_ENROLL_CODE`. It blocks the cloud's instance metadata addresses
+  for every account but root, except DNS and time, which some clouds serve
+  from the same address, gives a server with no swap 2 GB of it,
+  installs Fermix and a `fermix` account to run it, enrolls the server with
+  your primary, starts its service, installs Chromium on Debian (on Ubuntu,
+  install a browser yourself) and waits for your primary to accept the
+  server. The server then keeps itself up to date: Debian's security updates
+  install every day, and every night at 04:00 UTC Fermix's installer runs
+  again, restarts Fermix only when there is a new release, and reboots when an
+  update asks for it; a night that fails leaves Fermix running and says why in
+  the journal. `--snapshot-bucket` and `--snapshot-region` name where the
+  server will keep its snapshots, and `--restore` prepares a server to restore
+  your home from a snapshot instead.
 
 ### Changed
 

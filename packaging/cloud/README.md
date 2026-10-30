@@ -25,39 +25,76 @@ In this order, failing with one sentence and a non-zero exit at any step:
    directory 0700 and the file 0600, root's until the engine account exists,
    then its). Restore mode refuses a code.
 2. Loads the nftables table `inet fermix_metadata` (`/etc/fermix/metadata-block.nft`),
-   which drops traffic to `169.254.169.254` and `fd00:ec2::254` from every uid
-   but 0, through
+   which drops every packet to `169.254.169.254`, `100.100.100.200`,
+   `fd00:ec2::254` and `fd20:ce::254` from every uid but 0, except DNS (udp
+   and tcp 53) and time (udp 123), through
    `fermix-metadata-block.service`: before `network-pre.target` at every boot,
    again after `nftables.service` starts or reloads (which flushes the
-   ruleset). The rule sits on the `output` hook, so it covers what the host's
-   own processes send. A container's packets take the `forward` path and would
-   pass it, which is one reason the server runs no containers: Fermix's Linux
-   sandbox is Landlock, which confines commands in place. A container runtime
-   would need its own rule.
-3. Installs the Linux package through `https://fermix.ai/install --no-setup`,
+   ruleset). The server's user data, which holds the enrollment code, stays
+   readable through the metadata service for the server's life. Some clouds
+   serve DNS and time from the same address, so those two are accepted before
+   the drop and keep working for every account; anything else a cloud serves
+   there stays root's. An accept ends only this table's chain, whose policy is
+   accept anyway, so it opens nothing another firewall on the host closes. The
+   rule sits on the `output` hook, so it covers what the host's own processes
+   send. A container's packets take the `forward` path and would pass it,
+   which is one reason the server runs no containers: Fermix's Linux sandbox
+   is Landlock, which confines commands in place. A container runtime would
+   need its own rule.
+3. Swap, the memory guard's first half: a host with no swap (Hetzner's images
+   have none) gets a 2 GB swap file, `/swapfile` (0600, made with
+   `fallocate` and `mkswap`, listed in `/etc/fstab`, turned on), so memory
+   pressure slows the server before the kernel stops a process. A host with
+   swap of its own keeps it and gets none, and a run again changes nothing.
+   The guard's second half is the engine's: on Linux it starts Chromium with
+   `oom_score_adj` 1000, inherited by each of Chromium's processes, so out of
+   memory the kernel stops a Chromium process before the engine. Both values
+   are constants until a measurement on the smallest server Fermix creates
+   sets them (M75 §3).
+4. Installs the Linux package through `https://fermix.ai/install --no-setup`,
    the installer every host uses, with its checks. The package's user unit
    runs the engine with `Restart=always` and at most five starts in ten
    minutes, so a crash loop stops and the budget comes back.
-4. Creates the account `fermix` (home `/home/fermix`, `/usr/sbin/nologin`, no
+5. Updates, as nobody logs in to the server. Debian's own: `unattended-upgrades`
+   (the Debian 13 cloud image installs it and its package turns it on by
+   default; it is installed when an image lacks it), with
+   `APT::Periodic::Update-Package-Lists` and `Unattended-Upgrade` set to 1 in
+   `/etc/apt/apt.conf.d/21fermix-always-on`, and checked through
+   `apt-config`; it installs security updates every day and never reboots on
+   its own. Fermix's own: the package comes from release files, not an apt
+   source, so unattended-upgrades never sees it, and the package's postinst
+   restarts nothing. `fermix-update.timer` (root, `OnCalendar=*-*-* 04:00:00
+   UTC`, `Persistent=true`) runs `fermix-update.service`, a oneshot bounded
+   by `TimeoutStartSec=30min` that runs `/usr/local/sbin/fermix-update`: the
+   installer again (`--no-setup`, with its sha256 check and the cosign
+   signature check through the package's own cosign), then `fermix restart`
+   as `fermix` only when `dpkg-query` shows a new version (and only once a
+   home exists), then `systemctl reboot` when `/run/reboot-required` exists
+   (unattended-upgrades' kernel hook writes it). A night that fails stops
+   before the restart and the reboot, leaves the running engine as it was,
+   says why on stderr (the journal: `journalctl -u fermix-update`) and exits
+   non-zero; the next night tries again. First boot writes the script again
+   whenever it runs.
+6. Creates the account `fermix` (home `/home/fermix`, `/usr/sbin/nologin`, no
    password), lingering, with `/run/fermix` recreated for it at every boot
    (tmpfiles.d) and a `user@<uid>.service` drop-in whose `ExecStartPre` refuses
    to start the account's service manager, and so the engine, while the
    metadata table is missing. Not `/var/lib/fermix`: it holds the root-owned
    loader every packaged engine executes, and no engine account may own a
    directory above it. A normal uid also keeps `journalctl --user` working.
-5. Enroll mode, as `fermix`, with a clean environment: `fermix home enroll
+7. Enroll mode, as `fermix`, with a clean environment: `fermix home enroll
    --code-file /run/fermix/enroll.code [--snapshot-bucket B --snapshot-region
    R]`, then, with `XDG_RUNTIME_DIR=/run/user/<uid>` (systemctl reaches the user manager's
    private socket; no user D-Bus needed), `fermix service install --home
    /home/fermix/.fermix`. Enrolling is skipped, and said, when
    `/home/fermix/.fermix` exists; the service is bound and started again.
-6. A browser for the agent's tasks. Debian: the distribution's `chromium`,
+8. A browser for the agent's tasks. Debian: the distribution's `chromium`,
    which the engine's launcher finds on its `PATH` and starts headless as
    `fermix`, with Chromium's own sandbox. Ubuntu ships Chromium only as a
    snap, so nothing is installed and one sentence says to install a browser by
    hand (Google Chrome's own package, for example), or browser tasks answer
    that no Chrome or Chromium is installed.
-7. Enroll mode: waits, up to 5 minutes, for the primary to accept the server
+9. Enroll mode: waits, up to 5 minutes, for the primary to accept the server
    (`fermix home status --json` shows the candidate `enrolled`), and fails
    with the candidate's own sentence when the enrollment expired or failed.
    Restore mode: prints the restore steps instead (below).
@@ -95,17 +132,22 @@ sh packaging/cloud/test/first_boot_test.sh
 ```
 
 Needs shellcheck, Docker with `debian:trixie-slim`, and network inside the
-containers (they install `nftables`, and Chromium in its scenario). `useradd`,
-`runuser` and `nft` run for real (`--cap-add NET_ADMIN`, `/run` on a tmpfs);
-`systemctl` (which runs a unit's `ExecStart` for `start` and `restart`),
-`loginctl`, `curl` (the fake installer), `apt-get` and `fermix` are the
-stand-ins in `test/stubs/`. The scenarios: an existing host typing the code
-at a terminal, then enrolling again with the code in the environment and a
-bucket; a restore host and its printed
-steps; the failures that stop the first boot, each by its exit status and its
-one sentence on stderr; an Ubuntu host; and the distribution's Chromium
-installed with the real `apt-get` and started headless as `fermix` with its own
-sandbox (that container runs without Docker's seccomp profile, which refuses
-the user namespaces a server's kernel gives an unprivileged account). It is not
-wired into CI. What only a real server proves: the user manager starting
-behind the drop-in.
+containers (they install `nftables` and `shellcheck`, and Chromium in its
+scenario). `useradd`, `runuser`, `nft` and `apt-config` run for real
+(`--cap-add NET_ADMIN`, `/run` on a tmpfs); `systemctl` (which runs a unit's
+`ExecStart` for `start` and `restart`), `loginctl`, `curl` (the fake
+installer, which records the release it installed), `apt-get`, `dpkg-query`,
+`swapon`, `fallocate`, `mkswap` and `fermix` are the stand-ins in
+`test/stubs/`. The scenarios: an existing host typing the code at a terminal,
+then enrolling again with the code in the environment and a bucket; a
+restore host and its printed steps; the failures that stop the first boot,
+each by its exit status and its one sentence on stderr; an Ubuntu host with
+swap of its own; the nightly update, one night per case (no new release, a
+new one, a failed installer while a reboot is asked for, the reboot, a
+failed restart, no home yet); and the distribution's Chromium installed with
+the real `apt-get` and started headless as `fermix` through the engine's
+`oom_score_adj` shell, with its own sandbox (that container runs without
+Docker's seccomp profile, which refuses the user namespaces a server's kernel
+gives an unprivileged account). It is not wired into CI. What only a real
+server proves: the user manager starting behind the drop-in, the swap file
+turning on, the timer firing at 04:00 UTC and the reboot.

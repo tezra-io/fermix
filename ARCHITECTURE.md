@@ -998,13 +998,20 @@ owner's primary (M75 step 6). It runs once as root, from cloud-init user data
 `curl -fsSL https://fermix.ai/always-on | sudo sh` (the code read from the
 terminal without echo), and in order: writes the enrollment code to
 `/run/fermix/enroll.code` (tmpfs, 0600); installs an nftables table that drops
-traffic to `169.254.169.254` and `fd00:ec2::254` from every uid but 0 (the
-`output` hook: the
+every packet to the metadata addresses (`169.254.169.254`,
+`100.100.100.200`, `fd00:ec2::254`, `fd20:ce::254`) from every uid but 0,
+except DNS and time (udp and tcp 53, udp 123), accepted first because some
+clouds serve them from the same address (the `output` hook: the
 host's own processes, which is why the server runs no containers), with a root
 unit that loads it before the network at every boot and a `user@<uid>` drop-in
-that will not start the engine account's service manager without it; installs
-the Linux package through `https://fermix.ai/install --no-setup`; creates the
-engine account `fermix` (home `/home/fermix`, no login, lingering); runs
+that will not start the engine account's service manager without it; gives a
+host with no swap a 2 GB `/swapfile`; installs the Linux package through
+`https://fermix.ai/install --no-setup`; turns on Debian's daily
+unattended-upgrades and installs `fermix-update.timer`, a root timer that at
+04:00 UTC runs the installer again, `fermix restart` as the engine account
+when the package's version changed, and `systemctl reboot` when
+`/run/reboot-required` exists, stopping before both when a step fails; creates
+the engine account `fermix` (home `/home/fermix`, no login, lingering); runs
 `fermix home enroll` and `fermix service install` as `fermix`; installs the
 distribution's Chromium on Debian (Ubuntu's is a snap: it says to install a
 browser by hand); and waits up to 5 minutes for the primary to accept the
@@ -1018,8 +1025,9 @@ containers against stand-ins for systemd, curl, apt and `fermix`, and once
 with the real apt and Chromium.
 
 Architecture Invariant: no engine process reaches the instance metadata
-address. The enrollment code reaches the engine only as a file, never in an
-argument, an environment the engine inherits, or the console output.
+service. The enrollment code reaches the engine only as a file, never in an
+argument, an environment the engine inherits, or the console output. A failed
+nightly update leaves the running engine as it was.
 
 ### `apps/fermix_channels`
 

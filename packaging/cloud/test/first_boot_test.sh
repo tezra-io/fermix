@@ -3,10 +3,12 @@
 # in_container.sh in throwaway debian:trixie-slim containers, one scenario
 # each: an existing host typing the code at a terminal and then enrolling with
 # a bucket, a restore host, the failures that stop the
-# first boot, an Ubuntu host, and the distribution's Chromium installed for
-# real and started headless as the engine account.
+# first boot, an Ubuntu host with swap of its own, the nightly update's cases,
+# and the distribution's Chromium installed for real and started headless as
+# the engine account.
 # Needs shellcheck, Docker, the debian:trixie-slim image, and network inside
-# the containers (apt-get installs nftables, and Chromium in its scenario).
+# the containers (apt-get installs nftables and shellcheck, and Chromium in
+# its scenario).
 # Not wired into CI; run it by hand:
 #
 #   sh packaging/cloud/test/first_boot_test.sh
@@ -30,7 +32,7 @@ shellcheck -s sh "$cloud/first-boot.sh" "$here"/*.sh "$here"/stubs/*
 echo "ok: shellcheck finds nothing in first-boot.sh and the test scripts"
 
 status=0
-for scenario in existing-host restore failures ubuntu chromium; do
+for scenario in existing-host restore failures ubuntu updates chromium; do
   echo "--- $scenario"
   # Chromium's own sandbox needs the user namespaces a server's kernel gives
   # an unprivileged account; Docker's default seccomp profile refuses them, so

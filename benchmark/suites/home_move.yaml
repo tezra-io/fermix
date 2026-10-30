@@ -89,3 +89,46 @@ scenarios:
           3. Says the VM is now the primary, the one copy that runs the agent
              and writes long-term memory, and that a home marked moved can no
              longer start as the primary.
+
+  # How an Always On server keeps itself current, from the skill's `home`
+  # reference: Fermix's package comes from release files, so general knowledge
+  # ("apt upgrade", or `fermix upgrade`) is wrong there. The floor is the time
+  # the nightly update runs, or the reboot the owner asked about; the rubric
+  # owns the rest.
+  - id: always_on_server_keeps_itself_current
+    title: "An Always On server updates Fermix and Debian by itself"
+    severity: normal
+    risk: host_readonly
+    tags: [home, always-on, updates, self-knowledge]
+    cases:
+      - id: new_fermix_release_on_the_server
+        query: >
+          Fermix runs on my Always On server now and I never log in to it.
+          When a new Fermix release comes out, does the server pick it up on
+          its own, or do I have to update it by hand?
+        expect:
+          reply_matches: '(?i)\b0?4(:00|\s*a\.?m\b)'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says the server updates Fermix by itself every night at 04:00 UTC
+             (4 a.m. UTC) by running Fermix's installer again.
+          2. Says Fermix restarts only when a newer release was installed, so
+             the server can run a release up to a day behind the Mac.
+          3. Does not tell the owner to log in and run `apt upgrade` or
+             `fermix upgrade` on the server as the way to keep it current.
+      - id: security_patches_and_reboots_on_the_server
+        query: >
+          Who installs the Debian security patches on my Always On server, and
+          does it ever reboot itself? I don't want to babysit it.
+        expect:
+          reply_matches: '(?i)reboot'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says Debian's security updates install themselves every day
+             (unattended-upgrades), with no one logging in.
+          2. Says the server reboots by itself when an installed update asks
+             for it, during Fermix's nightly update at 04:00 UTC.
+          3. Does not tell the owner to log in to install security updates or
+             to reboot the server by hand.
