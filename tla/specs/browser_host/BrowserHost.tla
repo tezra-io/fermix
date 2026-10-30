@@ -110,7 +110,7 @@
 (* One step = one callback of the HostServer, one reducer step of the      *)
 (* host, or one thing the person, a page or the environment does.          *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser.ex#dispatch,dispatch_profile @ a36f07a4dd8b
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser.ex#dispatch,dispatch_profile @ e3d1d93a906c
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_server.ex#init,stop,handle_message,operate,ensure_task,bind,check_host,lose,lost_error,request,host_error,public_id @ d061b5027ca9
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_availability.ex @ fc61de7c765c
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_launcher.ex @ 927740e4c233
