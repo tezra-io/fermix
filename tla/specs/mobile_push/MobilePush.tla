@@ -56,7 +56,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex#schedule_push,launch_push,default_push_launcher,notify_timeline_row,push_notify,maybe_schedule_proactive_push,deliver_persisted_text,delivered_text,deliver_persisted_media,delivered_effects,build_turn_result,schedule_request_push,broadcast,emit,emit_after_commit @ 4063ad0f97f7
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/event_router.ex#after_settle,end_phone_turn,schedule_settled_push @ d42cb71bf67e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/device_registry.ex @ 1cdc9ecc07eb
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/session.ex#dispatch_event,terminate,idle_timeout_ms,@idle_grace_ms @ a0cb9f97c616
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/session.ex#dispatch_event,terminate,idle_timeout_ms,@idle_grace_ms @ 09f3ba5aee14
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/router.ex#socket_options @ c961dba4f2d3
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/iroh/bridge_connection.ex#handle_info,arm_idle,stop_session,finish,terminate @ a04ac00c19ea
 EXTENDS Naturals, FiniteSets
@@ -198,8 +198,8 @@ AckTarget(d) ==
 \* for (channels/mobile.ex:463-488), and for a request's reply its
 \* settlement: build_turn_result when it became a turn (:201-207,
 \* :837-847), Mobile.EventRouter.after_settle -> schedule_settled_push when
-\* it did not (event_router.ex:142-168), after the turn_done that ends the
-\* request's turn on the phones (end_phone_turn, :148-153; not a row). The
+\* it did not (event_router.ex:149-175), after the turn_done that ends the
+\* request's turn on the phones (end_phone_turn, :155-160; not a row). The
 \* row's Repo write, then emit_after_commit -> DeviceRegistry.broadcast
 \* (:531-536, :714-729), then schedule_push -> Task.Supervisor.start_child
 \* (:348-353, :551-566). A row nobody asked for reaches the sockets as a
@@ -346,10 +346,10 @@ Boot ==
 (* A socket, seen from the daemon *)
 
 \* Either carrier's idle timeout closes a socket nothing was read from for
-\* 150 s (Session.idle_timeout_ms, session.ex:156): the WebSocket's through
+\* 150 s (Session.idle_timeout_ms, session.ex:159): the WebSocket's through
 \* Bandit's timeout (router.ex:53-60), the iroh bridge connection's through
 \* its own timer (bridge_connection.ex:102, :199-206). Session.terminate
-\* (session.ex:380-387), which both carriers call, and the registry's :DOWN
+\* (session.ex:406-413), which both carriers call, and the registry's :DOWN
 \* (device_registry.ex:228) drop the entry. Only a frozen app leaves its
 \* socket to this timeout.
 IdleTimeout(d) ==
@@ -360,7 +360,7 @@ IdleTimeout(d) ==
     /\ UNCHANGED <<durable, daemon, pushTask, platform, app, have, unannounced,
                    noted, observers, budgets>>
 
-\* dispatch_event "ack" (session.ex:1106-1107) and, in the design, the
+\* dispatch_event "ack" (session.ex:1241-1242) and, in the design, the
 \* registry entry's acked_seq (M51 section 11.4). The app's send and the
 \* daemon's handling are one step: an ack lost on the way is an ack sent
 \* late, and the app may ack at any moment here.

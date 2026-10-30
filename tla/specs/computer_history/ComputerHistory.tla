@@ -21,7 +21,7 @@
 (*    reaches it (computer_history_sql.ex:1122-1132, :1201-1209, the      *)
 (*    mark read first in Summarizer.run_session/4 and                     *)
 (*    Rollup.maybe_run/3); migration 32, which turns a stored watermark   *)
-(*    into one interval (repo.ex:4121, computer_history_sql.ex:285-299);  *)
+(*    into one interval (repo.ex:4213, computer_history_sql.ex:285-299);  *)
 (*    pruning at the 48 h sweep (:438, far beyond MaxTime); `purge all`,  *)
 (*    whose [0, now] has the shape of a window (purge.ex:79); more than   *)
 (*    one recorded interval (the owner purges once; the insert checks     *)
@@ -35,7 +35,7 @@
 (*    and Ingest's per-event gates (allowlist, private window, scrubber), *)
 (*    which do not depend on timing;                                      *)
 (*  - the Summarizer.Scheduler child the Controller stops after the       *)
-(*    Capturer (controller.ex:86-91), the singleton lock, a 2nd daemon;   *)
+(*    Capturer (controller.ex:97-100), the singleton lock, a 2nd daemon;   *)
 (*  - the DynamicSupervisor's 5 s shutdown kill (it only loses buffered   *)
 (*    events: stop_driver and the lock release come first, which          *)
 (*    TeardownBeforeTermFlush checks), a Capturer crash in the middle of  *)
@@ -59,7 +59,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/capturer.ex @ 175128b2e817
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/wire.ex @ 35da392f4930
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/ingest.ex @ bcf44c4e67ca
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/controller.ex @ 66ba8ebde374
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/controller.ex @ a1e70e15b5f2
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/supervisor.ex @ 457bfb76bf4e
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history.ex @ a209702c717c
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex @ 2f22405f1e30
@@ -84,11 +84,11 @@ CONSTANTS
     ControllerCanCrash, \* the Controller dies alone; ComputerHistory.Supervisor restarts it
     CapturerCanCrash,   \* the Capturer raises; its DynamicSupervisor restarts it
     ReconcileCanTimeOut,\* /history off's reconcile call gives up after its 15 s timeout
-                        \* (controller.ex:45, :53-54; the timer starts at history.ex:487)
+                        \* (controller.ex:50, :58-59; the timer starts at history.ex:487)
     ReconcileCanStall,  \* the timeout can fire BEFORE the DynamicSupervisor has sent the
                         \* Capturer :shutdown. FALSE is a timing assumption: the work before
-                        \* it (app env, file stats in installed?, whereis: controller.ex:94,
-                        \* :128, sidecar_installer.ex:94-99) takes far less than the timeout
+                        \* it (app env, file stats in installed?, whereis: controller.ex:103,
+                        \* :137, sidecar_installer.ex:94-99) takes far less than the timeout
     \* Mechanism switches: what the code does about it. TRUE is the real code;
     \* each is switched off by the checks that show a property needs it.
     IngestChecksPause,  \* Ingest has a pause gate: it reads the horizon once per batch and
@@ -99,10 +99,10 @@ CONSTANTS
                         \* (ingest.ex:234-235). Off, it is the flush-time gate of 693970b7
     StopBeforeReply,    \* /history off waits for the reconcile call, which returns after the
                         \* Capturer exited (history.ex:487, computer_history.ex:70,
-                        \* controller.ex:53-54, :133)
+                        \* controller.ex:58-59, :142)
     SaveBeforeReply,    \* /history off saves config.toml before it replies (history.ex:482,
                         \* :490-493, then :426-427)
-    BootReconciles,     \* a (re)started Controller reconciles in handle_continue (controller.ex:57-74)
+    BootReconciles,     \* a (re)started Controller reconciles in handle_continue (controller.ex:62-82)
     OffConfirmsStop,    \* an exit of the reconcile call (no Controller, a crash mid-call, a
                         \* timeout) is returned as an error, and /history off then says the
                         \* stop is unconfirmed instead of "nothing new is captured"
@@ -350,7 +350,7 @@ FlushCheck ==
     /\ CapturerOthersUnchanged
 
 \* Ingest's second Repo call: computer_history_insert_events (ingest.ex:201,
-\* repo.ex:3434 -> computer_history_sql.ex:347-403), one BEGIN IMMEDIATE
+\* repo.ex:3463 -> computer_history_sql.ex:347-403), one BEGIN IMMEDIATE
 \* transaction that checks each row against the recorded purge intervals, then
 \* INSERT OR IGNOREs the rest. It does not read the pause.
 FlushInsert ==
@@ -407,7 +407,7 @@ TermStop ==
 
 \* A Capturer callback raises (for example a Repo call past its 5 s timeout,
 \* which exits a caller that passes no on_timeout: :error, and Ingest passes
-\* none, repo.ex:3936-3944). gen_server then runs terminate/2.
+\* none, repo.ex:4021-4029). gen_server then runs terminate/2.
 CapturerCrash ==
     /\ CapturerCanCrash
     /\ faultsLeft > 0
@@ -455,12 +455,12 @@ DsRestart ==
     /\ UNCHANGED <<exitQueued, dsBusy, dsFor, ctrlPc, ctrlPid, ctrlCall, offPc>>
     /\ DsUnchanged
 
-\* A terminate_child(pid) call at the head (controller.ex:133). The pid is
+\* A terminate_child(pid) call at the head (controller.ex:142). The pid is
 \* still its child (alive, or dead with its EXIT not yet handled): send
 \* :shutdown (it queues behind the Capturer's other messages) and block.
 \* Otherwise (a Capturer that exited after the Controller's whereis, whose
 \* restart declined or was replaced) reply {:error, :not_found}, which
-\* ensure_stopped logs as "already gone" (controller.ex:142-143).
+\* ensure_stopped logs as "already gone" (controller.ex:151-152).
 DsTerminate ==
     /\ dsBusy = 0
     /\ dsBox /= <<>>
@@ -505,19 +505,19 @@ CtrlUnchanged ==
                 pauseUntil, pausePc, purges, faultsLeft>>
     /\ GhostsUnchanged
 
-\* handle_continue(:reconcile) after a start (controller.ex:57-74), or
-\* handle_call(:reconcile) (:77-80) -> do_reconcile (:93-96). want? is
+\* handle_continue(:reconcile) after a start (controller.ex:62-82), or
+\* handle_call(:reconcile) (:85-88) -> do_reconcile (:102-105). want? is
 \* operative? (the app env, computer_history.ex:43) and installed?.
-\*  - want: ensure_started (controller.ex:101-125). whereis nil and no child at all:
+\*  - want: ensure_started (controller.ex:110-134). whereis nil and no child at all:
 \*    start_child starts one (the DynamicSupervisor's start is folded in,
 \*    with the Capturer's init read of the same env in this step; a disable
-\*    racing it makes start_child answer :ignore, :117-118, which ExUnit
+\*    racing it makes start_child answer :ignore, :126-127, which ExUnit
 \*    covers). whereis nil because the child is "dead" with its EXIT queued:
 \*    that EXIT is ahead of start_child in the DynamicSupervisor's mailbox,
 \*    so the restart comes first and start_child answers already_started
-\*    (:113), a no-op here.
-\*  - not want: ensure_stopped (:127-135) reads Process.whereis(Capturer)
-\*    (:128). The call to the DynamicSupervisor is the next step.
+\*    (:122), a no-op here.
+\*  - not want: ensure_stopped (:136-144) reads Process.whereis(Capturer)
+\*    (:137). The call to the DynamicSupervisor is the next step.
 CtrlLookup ==
     /\ ctrl = "up"
     /\ \/ ctrlPc = "boot"
@@ -537,7 +537,7 @@ CtrlLookup ==
     /\ UNCHANGED dsBox
     /\ CtrlUnchanged
 
-\* DynamicSupervisor.terminate_child(sup, pid) (controller.ex:133): send the
+\* DynamicSupervisor.terminate_child(sup, pid) (controller.ex:142): send the
 \* call with the pid whereis returned, then block until the reply. The
 \* DynamicSupervisor may have restarted the Capturer since the lookup.
 CtrlSend ==
@@ -549,7 +549,7 @@ CtrlSend ==
     /\ CtrlUnchanged
 
 \* The Controller dies alone, at any point (for example do_reconcile raises,
-\* controller.ex:93-96). A queued or running call dies with it: the
+\* controller.ex:102-105). A queued or running call dies with it: the
 \* caller's GenServer.call exits, and reconcile_runtime returns that as
 \* {:error, {:reconcile_failed, _}} (computer_history.ex:68-75), an
 \* unconfirmed stop. A terminate_child it already sent still runs; the
@@ -615,7 +615,7 @@ OffCall ==
     /\ UNCHANGED <<env, config, offAcked, offUnconfirmed>>
     /\ OffUnchanged
 
-\* The call's 15 s timeout (controller.ex:45) fires: an unconfirmed stop. This
+\* The call's 15 s timeout (controller.ex:50) fires: an unconfirmed stop. This
 \* is the environment's timing, not something the History process reads.
 \* Without ReconcileCanStall it fires only once the DynamicSupervisor has sent
 \* the Capturer :shutdown (dsBusy /= 0), i.e. while it waits for terminate/2,
@@ -881,7 +881,7 @@ Witness_LateRowFenced == \A e \in Events : where[e] /= "fenced"
 \* Capturer that then exited, and its restart declined because the feature
 \* is off, so the DynamicSupervisor is about to answer the terminate_child
 \* {:error, :not_found}, which the Controller logs as "already gone"
-\* (controller.ex:142-143), with no Capturer running.
+\* (controller.ex:151-152), with no Capturer running.
 Witness_StaleTerminate ==
     ~(/\ dsBox /= <<>>
       /\ Head(dsBox).kind = "term"

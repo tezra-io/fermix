@@ -78,7 +78,7 @@
 (* that lock, so it commutes with every step in between.                   *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_manager.ex @ 6d4919ab4a67
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_supervisor.ex @ 1cf9752cac11
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_supervisor.ex @ 2e6da90246af
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/store.ex @ 5f5d2943f424
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/refresh_client.ex @ 8ddbae2d81fc
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_expiry.ex @ 8373575105e9
@@ -93,9 +93,9 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/logout.ex @ 53141064392c
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/refresh.ex @ 235dc7b35088
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/registration.ex#read,signed_out,@profile @ 8a05570f216c
-\* SOURCE: apps/fermix_core/lib/fermix/cli/plugins_command.ex @ 7dce15e18d94
-\* SOURCE: apps/fermix_core/lib/fermix/cli/auth_command.ex @ abec65d2e8fc
-\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ d616f7d4901a
+\* SOURCE: apps/fermix_core/lib/fermix/cli/plugins_command.ex @ be9afb0398a5
+\* SOURCE: apps/fermix_core/lib/fermix/cli/auth_command.ex @ 248ca48a51fc
+\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ 7935fbc572e6
 \* SOURCE: apps/fermix_core/lib/fermix/cli/daemon/client.ex @ fd0cff9607dc
 EXTENDS Naturals, FiniteSets
 
@@ -119,11 +119,11 @@ CONSTANTS
     OneCallbackPerManager,  \* one process per profile, one callback at a time (see "Who refreshes")
     MergesOnWrite,          \* Store.write re-reads the file and replaces only its own entry (store.ex:469-477, :561-593)
     LogoutReachesManager,   \* logout reaches the live manager: forget, then stop (plugin logout, ChatGPT sign-out), or forget (provider sign-out) (plugins/auth.ex:73, chatgpt/logout.ex:46, management/auth.ex:521)
-    PluginLogoutForgets,    \* the plugin logout forgets before it stops (plugins/auth.ex:73 -> token_supervisor.ex:149-153)
+    PluginLogoutForgets,    \* the plugin logout forgets before it stops (plugins/auth.ex:73 -> token_supervisor.ex:161-165)
     StoreLock,              \* auth.json.lock around every Store.write and delete_provider (store.ex:179-185, :195-203)
     ProfileLock,            \* the profile's lock over one refresh, read to write, and over a delete (store.ex:220-226)
     RefusesMissingEntry,    \* a manager whose entry is gone drops its tokens (token_manager.ex:320-328, :381-405)
-    CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:391-406, plugins_command.ex:504-529, cli/daemon.ex:898-928)
+    CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:405-420, plugins_command.ex:520-545, cli/daemon.ex:1005-1035)
 
 ASSUME /\ CliProfile \in Profiles /\ LogoutProfile \in Profiles
        /\ MaxAttempts \in Nat \ {0} /\ Rounds \in Nat
@@ -141,8 +141,8 @@ Tok == Nat \cup {None}
 (* Who refreshes. <<"mgr", p, l>> is the manager of profile p;             *)
 (* <<"cli", CliProfile, 1>> is the CLI VM.                                 *)
 (* A profile has one manager process: TokenSupervisor registers children   *)
-(* in a Registry with keys: :unique (token_supervisor.ex:205) and answers  *)
-(* {:already_started, _} with the running one (:253). TokenManager has no  *)
+(* in a Registry with keys: :unique (token_supervisor.ex:217) and answers  *)
+(* {:already_started, _} with the running one (:277). TokenManager has no  *)
 (* default name, so no manager runs outside it (token_manager.ex:32-36).   *)
 (* Its mailbox runs one callback at a time, so concurrent callers of one   *)
 (* profile queue. Lane 2 is a second process refreshing the same profile   *)
@@ -307,10 +307,10 @@ MgrSignedOut(a) ==
                    slock, plock>>
 
 \* A tree-less CLI VM: TokenManager.refresh(profile) -> TokenSupervisor
-\* call_or_read finds no supervisor (token_supervisor.ex:212-218, :228-242)
+\* call_or_read finds no supervisor (token_supervisor.ex:224-230, :242-266)
 \* -> direct_refresh takes the profile lock, then Store.read and
-\* refresh_entry under it (:312-320). A tree-less get_token does the same
-\* once the entry it read is due (:279-289). A missing entry fails the read
+\* refresh_entry under it (:336-344). A tree-less get_token does the same
+\* once the entry it read is due (:303-313). A missing entry fails the read
 \* and nothing is refreshed.
 CliStart(a) ==
     /\ ~IsMgr(a)
@@ -373,8 +373,8 @@ SendLost(a) ==
 \* :348-360, :370-375; refuse/2, :431), which deletes its plugin child's
 \* token file. Every refresher goes on to mark_reauthorization_required, a
 \* Store.write of the entry read when this refresh began (token_manager.ex:
-\* 586-599; token_supervisor.ex:329-334, :348-349, :372-373, :403-404,
-\* :426-439), still under the profile lock.
+\* 586-599; token_supervisor.ex:353-358, :372-373, :396-397, :427-428,
+\* :450-463), still under the profile lock.
 SendRejected(a) ==
     /\ pc[a] = "send"
     /\ ~Valid(a)
@@ -469,8 +469,8 @@ RefreshStep(a) ==
 \* :provider_missing as done and goes on to forget (management/auth.ex:
 \* 411-420); ChatGPT's sign-out writes nothing and goes on to
 \* forget_signed_out (chatgpt/logout.ex:71-77); and both CLI logouts go on
-\* to their notice (auth_command.ex:319-321, :356-360, :418-421;
-\* plugins_command.ex:269-273). Init stores every entry, and with
+\* to their notice (auth_command.ex:333-335, :370-374, :432-435;
+\* plugins_command.ex:285-289). Init stores every entry, and with
 \* MergesOnWrite on (every check with LogoutFromCli) only the logout deletes
 \* one, so the entry is never already gone here: the LogoutFromCli disjunct
 \* records the code and changes no state space.
@@ -512,19 +512,19 @@ Kill(f, v) == [b \in Actors |-> IF Killed(b) THEN v ELSE f[b]]
 Freed(h) == IF h \in Actors /\ Killed(h) THEN None ELSE h
 
 \* Four cases:
-\*  - forget_signed_out (token_supervisor.ex:149-153): forget, as below,
+\*  - forget_signed_out (token_supervisor.ex:161-165): forget, as below,
 \*    which also deletes the plugin child's token file, then stop_profile,
 \*    which by then finds the manager idle and refusing. One step: after
 \*    the forget nothing can run in that manager but the stop. Three
 \*    logouts end in it:
 \*    - A CLI VM has no TokenSupervisor tree (plugins_command.ex:5-8), so
 \*      its own forget_signed_out or stop_profile does nothing
-\*      (token_supervisor.ex:123-129, :163-170, :172-187). After its delete
+\*      (token_supervisor.ex:135-141, :175-182, :184-199). After its delete
 \*      or its write, every CLI logout tells a running daemon to let go of
-\*      the profile (plugins_command.ex:262, :504-529; auth_command.ex:
-\*      307-340, :347-365, :391-406): an `auth_forget` request on the
+\*      the profile (plugins_command.ex:278, :520-545; auth_command.ex:
+\*      321-354, :361-379, :405-420): an `auth_forget` request on the
 \*      control socket (cli/daemon/client.ex:60-74), answered by
-\*      forget_signed_out (cli/daemon.ex:674, :898-928). Without
+\*      forget_signed_out (cli/daemon.ex:781, :1005-1035). Without
 \*      CliLogoutReachesDaemon, or when the daemon does not answer "ok"
 \*      (the CLI then exits non-zero), nothing reaches the manager.
 \*    - The in-daemon plugin logout calls it right after its delete
@@ -532,12 +532,12 @@ Freed(h) == IF h \in Actors /\ Killed(h) THEN None ELSE h
 \*    - ChatGPT's sign-out calls it once its write is done and the profile
 \*      lock released (chatgpt/logout.ex:45-48).
 \*  - stop_profile alone, the plugin logout without PluginLogoutForgets
-\*    (token_supervisor.ex:172-187): DynamicSupervisor.terminate_child sends
+\*    (token_supervisor.ex:184-199): DynamicSupervisor.terminate_child sends
 \*    :shutdown; TokenManager does not trap exits and has no terminate/2, so
 \*    it dies at once, mid-callback if one is running, and its plugin
 \*    child's token file stays on disk.
 \*  - forget, the provider sign-out of anthropic and xai (management/auth.ex:
-\*    404, :429 -> token_supervisor.ex:123-129 -> token_manager.ex:72,
+\*    404, :429 -> token_supervisor.ex:135-141 -> token_manager.ex:72,
 \*    :196-199): a GenServer.call, so it waits behind any refresh callback in
 \*    flight, then drops the tokens and sets state.refusal (drop_tokens,
 \*    :393-405).
