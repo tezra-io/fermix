@@ -15,16 +15,17 @@ defmodule FermixCore.Capabilities.AccessGate do
   call. The taint is rule 5's `:outside_sources` half alone: a shared Buzz
   channel does not hold one by itself, since a Buzz session answers through
   `shell`. Fermix cannot sandbox the call when the host's kernel does not hold
-  commands (`Sandbox.OsSandbox.enforced?/1` false: Linux today, read through
-  the context's `:os_sandbox` seam), or when the command runs unconfined even
-  where it does (`metadata.host_command_confined?` false: the `codex` and
-  `claude_code` presets, and the coding runs, whose vendor CLI acts with the
-  owner's account authority outside the sandbox), so those are decided on
-  every platform. Without the kernel, nothing but the starting folder and the
-  hardline patterns stands between a hostile page's instruction and the owner's
-  files. This is an interim rule until the kernel confines commands on Linux
-  (Landlock): a confined call on a host where `enforced?/1` holds is not
-  decided here, as `shell` is not on macOS.
+  commands (`Sandbox.OsSandbox.enforced?/1` false: a system other than macOS
+  and Linux, or a Linux host without Landlock ABI 2, where every confined
+  command refuses anyway; read through the context's `:os_sandbox` seam), or
+  when the command runs unconfined even where it does
+  (`metadata.host_command_confined?` false: the `codex` and `claude_code`
+  presets, and the coding runs, whose vendor CLI acts with the owner's account
+  authority outside the sandbox), so those are decided on every platform.
+  Without the kernel, nothing but the starting folder and the hardline patterns
+  stands between a hostile page's instruction and the owner's files. A
+  confined call on a host where `enforced?/1` holds is not decided here, as
+  `shell` is not on macOS (Seatbelt) or on Linux with Landlock.
 
   `Capability.execute/3` — the single invoke boundary for the agent loop and the
   realtime voice bridge — asks `admit/3` first, and every other capability
@@ -499,9 +500,9 @@ defmodule FermixCore.Capabilities.AccessGate do
   end
 
   # A host command is gated when the turn read outside content and Fermix cannot
-  # sandbox this call: the host has no kernel enforcement (Linux), or the call
-  # runs unconfined even where it does (the `codex`/`claude_code` presets, the
-  # coding runs). Its taint is only what the turn read, never the shared Buzz
+  # sandbox this call: the host has no kernel enforcement (Linux without
+  # Landlock), or the call runs unconfined even where it does (the
+  # `codex`/`claude_code` presets, the coding runs). Its taint is only what the turn read, never the shared Buzz
   # channel on its own (owner decision): a Buzz session answers by running the
   # `buzz` CLI through `shell`.
   defp host_command_gated?(capability, context) do

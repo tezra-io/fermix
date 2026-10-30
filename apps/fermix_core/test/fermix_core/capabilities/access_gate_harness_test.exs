@@ -32,7 +32,9 @@ defmodule FermixCore.Capabilities.AccessGateHarnessTest do
   alias FermixTestSupport.TelemetryCapture
 
   @token "TOKEN123"
-  @linux [os: {:unix, :linux}]
+  # A Linux host whose kernel cannot hold commands; `landlock:` pins the shim's
+  # answer so the kernel the suite runs on never decides.
+  @linux [os: {:unix, :linux}, landlock: {:error, {:unavailable, "fermix_landlock: no Landlock"}}]
   @darwin [os: {:unix, :darwin}]
 
   # A stub `Harness.Manager` answering the GenServer protocol `Manager.start_run/2`

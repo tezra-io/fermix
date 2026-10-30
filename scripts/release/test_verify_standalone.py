@@ -8,6 +8,7 @@
 import hashlib
 import json
 import os
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -445,6 +446,88 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertIn(f"({IROH_VERSION_LINE})", result.stdout)
         self.assertFalse(self.codesign_log.exists())
 
+    # ── the bundled Landlock shim stage (Linux) ───────────────────────────
+
+    def test_linux_artifact_checks_the_landlock_shim(self):
+        self.artifact = self.base / "fermix_linux_x86_64"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos")
+
+        result = self._run("linux_x86_64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(
+            result.stdout,
+            r"Landlock shim: .+/lib/fermix_nif-0\.9\.0/priv/fermix_landlock \(fermix_landlock: abi 6\)\n",
+        )
+
+    # A release runner whose kernel has no Landlock still proves the shim runs.
+    def test_accepts_a_shim_that_says_landlock_is_unavailable_here(self):
+        self.artifact = self.base / "fermix_linux_aarch64"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos", landlock_shim="unavailable")
+
+        result = self._run("linux_aarch64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("(fermix_landlock: Landlock is unavailable on this kernel", result.stdout)
+
+    def test_rejects_a_linux_release_without_the_landlock_shim(self):
+        self.artifact = self.base / "fermix_linux_x86_64"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos", landlock_shim="missing")
+
+        result = self._run("linux_x86_64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must carry exactly one Landlock shim", result.stderr)
+        self.assertIn("found 0", result.stderr)
+
+    def test_rejects_a_linux_release_with_two_landlock_shims(self):
+        self.artifact = self.base / "fermix_linux_x86_64"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos", landlock_shim="two")
+
+        result = self._run("linux_x86_64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("found 2", result.stderr)
+
+    def test_rejects_a_landlock_shim_that_is_not_an_executable_file(self):
+        for behaviour in ("not_executable", "symlink"):
+            with self.subTest(behaviour=behaviour):
+                self.artifact = self.base / "fermix_linux_x86_64"
+                self._write_artifact(create_disclaim=False, migrate="refused:not_macos", landlock_shim=behaviour)
+
+                result = self._run("linux_x86_64")
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Landlock shim is not an executable regular file", result.stderr)
+
+    def test_rejects_a_dynamically_linked_landlock_shim_before_running_it(self):
+        self.artifact = self.base / "fermix_linux_x86_64"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos", landlock_shim="dynamic")
+
+        result = self._run("linux_x86_64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Landlock shim is dynamically linked", result.stderr)
+
+    def test_rejects_a_landlock_shim_that_does_not_answer_its_abi(self):
+        for behaviour in ("wrong_answer", "silent_success"):
+            with self.subTest(behaviour=behaviour):
+                self.artifact = self.base / "fermix_linux_x86_64"
+                self._write_artifact(create_disclaim=False, migrate="refused:not_macos", landlock_shim=behaviour)
+
+                result = self._run("linux_x86_64")
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Landlock shim --abi must print its ABI", result.stderr)
+
+    def test_a_macos_release_needs_no_landlock_shim(self):
+        self._write_artifact(create_disclaim=True)
+
+        result = self._run("macos_aarch64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Landlock shim", result.stdout)
+
     def test_rejects_a_release_without_the_helper(self):
         self._write_artifact(create_disclaim=True, iroh_helper="missing")
 
@@ -775,9 +858,11 @@ class VerifyStandaloneTest(unittest.TestCase):
         iroh_helper="pinned",
         iroh_notices="pinned",
         maintenance="answers",
+        landlock_shim="answers",
     ):
         setup = self._disclaim_setup(create_disclaim, disclaim_executable, disclaim_exit, version)
         helper_setup = self._iroh_helper_setup(iroh_helper, iroh_notices, version)
+        helper_setup += self._landlock_shim_setup(landlock_shim, version)
         marker_line = "" if marker is None else f"touch '{marker}'\n"
         self.empty_payload.mkdir(exist_ok=True)
         self.artifact.write_text(
@@ -1129,6 +1214,50 @@ SHIM
             return [f"ln -sf '{self.notices_source}' {target}"]
         mode = "0755" if notices == "executable" else "0644"
         return [f"cp '{self.notices_source}' {target}", f"chmod {mode} {target}"]
+
+    # ── the Landlock shim stub (Linux targets) ────────────────────────────
+    # Where the NIF build puts it in the unpacked payload. The stub answers
+    # `--abi` the way the shim does; `dynamic` is an ELF header naming a
+    # program interpreter, which the stage must refuse before running it. A
+    # macOS tree carries no shim.
+    def _landlock_shim_setup(self, behaviour, version):
+        if not self._artifact_target().startswith("linux_") or behaviour == "missing":
+            return ""
+
+        answers = {
+            "answers": "printf 'fermix_landlock: abi 6\\n'\nexit 0",
+            "unavailable": "printf 'fermix_landlock: Landlock is unavailable on this kernel (Function not implemented)\\n' >&2\nexit 69",
+            "wrong_answer": "printf 'Segmentation fault\\n' >&2\nexit 139",
+            "silent_success": "exit 0",
+        }
+        source = self.base / "landlock-payload" / "fermix_landlock"
+        source.parent.mkdir(exist_ok=True)
+        if behaviour == "dynamic":
+            source.write_bytes(self._elf_naming_an_interpreter())
+        else:
+            answer = answers.get(behaviour, answers["answers"])
+            source.write_text(f'#!/bin/sh\n[ "$*" = "--abi" ] || exit 64\n{answer}\n', encoding="utf-8")
+
+        app_versions = [version, "0.8.0"] if behaviour == "two" else [version]
+        lines = []
+        for app_version in app_versions:
+            target = f'"$payload/lib/fermix_nif-{app_version}/priv/fermix_landlock"'
+            lines.append(f'mkdir -p "$payload/lib/fermix_nif-{app_version}/priv"')
+            if behaviour == "symlink":
+                lines.append(f"ln -sf '{source}' {target}")
+            else:
+                lines.append(f"cp '{source}' {target}")
+                lines.append(f"chmod {'-x' if behaviour == 'not_executable' else '+x'} {target}")
+        return "\n".join(lines) + "\n"
+
+    # A 64-bit little-endian ELF header and one program header of type
+    # PT_INTERP (3): what a shim linked against a C library carries.
+    @staticmethod
+    def _elf_naming_an_interpreter():
+        ident = b"\x7fELF" + bytes([2, 1, 1]) + bytes(9)
+        header = ident + struct.pack("<HHIQQQIHHHHHH", 2, 62, 1, 0, 64, 0, 0, 64, 56, 1, 64, 0, 0)
+        program_header = struct.pack("<IIQQQQQQ", 3, 4, 120, 0, 0, 28, 28, 1)
+        return header + program_header + b"/lib/ld-linux-x86-64.so.2\0\0\0"
 
 
 if __name__ == "__main__":

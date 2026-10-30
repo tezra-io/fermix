@@ -588,15 +588,26 @@ sets, command profiles (`bare`, `assistant`, `extended`) pick the allowed
 commands, and `Hardline` refuses catastrophic commands. `Sandbox.Env` resolves
 `[sandbox.env] allow` one name at a time, and `EnvHealth` records misses for
 readiness. The owner-gated `request_directory_access` tool plus `/confirm
-<token>` can grant a denied directory. On macOS, `Sandbox.OsSandbox` also
-wraps every command a turn runs (the shell tool, the command tool, the git
-tools) in `sandbox-exec` with a Seatbelt profile built from the same roots, so
-the kernel holds the command to the mode and keeps Fermix's home and secrets
-out of its reach; `Sandbox.confine/3` is the one entry point. Linux has no
-kernel enforcement yet, so until it does, a built-in marked `host_command?`
+<token>` can grant a denied directory. `Sandbox.OsSandbox` also wraps every
+command a turn runs (the shell tool, the command tool, the git tools) so the
+kernel holds it to the mode and keeps Fermix's home, secrets and keys out of
+its reach; `Sandbox.confine/4` is the one entry point and `OsSandbox.unreadable/1`
+the one read-deny list (every entry write-protected too; nothing on it sits in a
+temp folder, which Landlock could not close without closing it whole, so the
+Secret Service writer stages a key being saved in `secrets/.staging-N/`). On macOS that is
+`sandbox-exec` with a Seatbelt profile built from the same roots. On Linux it is
+the `fermix_landlock` exec shim (`apps/fermix_nif/c_src`, built like `disclaim`:
+strict flags in lockstep with `ci.yml`, zig per release target through the
+Burrito target's `LANDLOCK_TARGET`), which checks the Landlock ABI (below 2
+refuses), sets `no_new_privs`, adds one rule per argument and execs the
+command; `Sandbox.Landlock` carves those rules folder by folder around the
+protected paths, since Landlock only grants, and the shim refuses every command
+by name on a kernel that cannot hold them. Doctor's `os sandbox` row checks
+either kernel. Where `OsSandbox.enforced?/1` is false (another system, or Linux
+without Landlock ABI 2), a built-in marked `host_command?`
 (`shell`, `git_write`, a declared command) in a turn that read outside content
-goes through `Capabilities.AccessGate` like an access-sensitive plugin command,
-keyed on `OsSandbox.enforced?/1`. One that runs unconfined everywhere
+goes through `Capabilities.AccessGate` like an access-sensitive plugin command.
+One that runs unconfined everywhere
 (`host_command_confined?` false: the `codex`/`claude_code` presets and the
 coding runs `codex_run`/`claude_code_run`) goes through it on every platform;
 the next run a finished coding run's follow-up turn starts with the same coding

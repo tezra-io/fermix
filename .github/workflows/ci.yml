@@ -99,6 +99,16 @@ jobs:
           file "$helper"
           "$helper" --check
 
+      - name: Landlock shim proof (Linux)
+        # `mix compile` above built `fermix_landlock` through apps/fermix_nif's
+        # Makefile. The script proves every denial and allowance the sandbox
+        # relies on against this runner's kernel, and fails on a kernel that
+        # cannot hold commands (Landlock ABI below 2): every command the agent
+        # runs refuses on such a host, and the suite below would fail
+        # piecemeal for it.
+        if: runner.os == 'Linux'
+        run: bash apps/fermix_nif/test/landlock_proof.sh _build/test/lib/fermix_nif/priv/fermix_landlock
+
       # Same source, same result on every platform: one leg is enough. Each leg
       # still compiles with warnings as errors and runs the whole suite.
       - name: Check formatting
@@ -315,6 +325,16 @@ jobs:
           for target in aarch64-macos x86_64-macos; do
             zig cc -target "$target" -std=c99 -O2 -Wall -Wextra -Werror \
               apps/fermix_nif/c_src/fermix_disclaim.c -o "${RUNNER_TEMP}/disclaim_${target}"
+            echo "built ${target}"
+          done
+      # The Linux Landlock exec shim ships in every Linux payload, cross-built
+      # by zig per target the same way (LANDLOCK_CFLAGS in the Makefile).
+      - name: Cross-compile the Landlock shim for both Linux targets
+        run: |
+          set -euo pipefail
+          for target in aarch64-linux-musl x86_64-linux-musl; do
+            zig cc -target "$target" -std=c99 -O2 -Wall -Wextra -Werror \
+              apps/fermix_nif/c_src/fermix_landlock.c -o "${RUNNER_TEMP}/fermix_landlock_${target}"
             echo "built ${target}"
           done
       # erl_nif.h only; the OTP the release builds with (release.yml).

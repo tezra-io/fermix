@@ -227,6 +227,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **On Linux the kernel now holds every command Fermix runs for you to the
+  sandbox, as it does on a Mac.** The shell, git and operator commands run
+  under Landlock (Linux 5.19 or later): outside `open` they write only the
+  workspace, your grants and the temp folders, and in no mode can they write
+  Fermix's home outside its workspace and skills, its systemd unit or the
+  protected paths, or read its secrets, tokens, the phone and desktop keys,
+  `/run/fermix`, or (outside `open`) your SSH and cloud credentials. So a
+  command in a turn that read outside content no longer waits for your
+  confirmation there. A Linux kernel without Landlock runs no command and says
+  why, `fermix doctor` gains an `os sandbox` row on both systems, and tool
+  caches move into the workspace's `.cache` on Linux too. On a Mac the same
+  read rules now also cover the phone and desktop keys and `/run/fermix`.
+
 - **A CAPTCHA no longer stops a browser task by rule.** The browser guidance
   listed CAPTCHAs among the things that always end a task and report back; it
   now leaves a CAPTCHA to the assistant's judgment. Two-factor prompts,

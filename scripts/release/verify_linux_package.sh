@@ -157,6 +157,40 @@ done
 printf "fermix-iroh notices: %s\n" "$doc_notices"
 '
 
+# The Landlock shim every command a turn runs goes through on Linux: without
+# it, or with one that cannot run here, the installed engine refuses every
+# command. Checked on the installed package as the helper is, POSIX sh with
+# coreutils only: exactly one shim in the payload, an executable regular file,
+# and `--abi` answering its contract, its ABI (exit 0) or why this kernel or
+# container has no Landlock (exit 69). scripts/release/test_verify_linux_package.py
+# runs this check against fake payloads.
+# shellcheck disable=SC2016
+landlock_shim_check='
+set -eu
+fail() { printf "error: %s\n" "$1" >&2; exit 1; }
+payload="$(fermix maintenance directory)" ||
+  fail "fermix maintenance directory did not name the unpacked payload"
+[ -d "$payload" ] || fail "the unpacked payload directory does not exist: $payload"
+count=0
+shim=""
+for candidate in "$payload"/lib/fermix_nif-*/priv/fermix_landlock; do
+  [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+  count=$((count + 1))
+  shim="$candidate"
+done
+[ "$count" -eq 1 ] ||
+  fail "the unpacked payload must carry exactly one Landlock shim (lib/fermix_nif-*/priv/fermix_landlock under $payload), found $count"
+[ ! -L "$shim" ] && [ -f "$shim" ] && [ -x "$shim" ] ||
+  fail "the bundled Landlock shim is not an executable regular file: $shim"
+status=0
+answer="$("$shim" --abi < /dev/null 2>&1)" || status=$?
+case "$status:$answer" in
+  "0:fermix_landlock: abi "[0-9]*|"69:fermix_landlock: "*) ;;
+  *) fail "the bundled Landlock shim --abi must print its ABI (exit 0) or why Landlock is unavailable (exit 69), got exit $status: $answer" ;;
+esac
+printf "Landlock shim: %s (%s)\n" "$shim" "$answer"
+'
+
 if [ "$kind" = rpm ]; then
   command -v docker >/dev/null 2>&1 || fail "docker is required to verify an rpm"
 
@@ -170,11 +204,13 @@ if [ "$kind" = rpm ]; then
       -e IROH_SHA256="$iroh_sha256" \
       -e IROH_VERSION_LINE="$iroh_version_line" \
       -e IROH_NOTICES_SHA256="$iroh_notices_sha256" \
+      -e LANDLOCK_SHIM_CHECK="$landlock_shim_check" \
       fedora:41 sh -c '
       set -eu
       dnf install -y /pkg.rpm >/dev/null 2>&1
       fermix --version
       sh -c "$IROH_HELPER_CHECK" iroh-helper-check "$IROH_SHA256" "$IROH_VERSION_LINE" "$IROH_NOTICES_SHA256" >&2
+      sh -c "$LANDLOCK_SHIM_CHECK" landlock-shim-check >&2
       # The rpm family gets its own refusal, on a host whose package database
       # really does own /usr/bin/fermix.
       fermix upgrade 2>&1 | grep -F "dnf upgrade fermix" >/dev/null ||
@@ -214,6 +250,8 @@ esac
 # notices beside it and installed as the package's own document.
 sh -c "$iroh_helper_check" iroh-helper-check "$iroh_sha256" "$iroh_version_line" "$iroh_notices_sha256" ||
   fail "the deb does not carry the pinned fermix-iroh helper and its notices for $target (the reason is above)"
+sh -c "$landlock_shim_check" landlock-shim-check ||
+  fail "the deb does not carry a Landlock shim that runs for $target (the reason is above)"
 
 # The engine reads this file and reports it beside its own compiled identity;
 # a mismatch is what `service status` calls an integrity failure.

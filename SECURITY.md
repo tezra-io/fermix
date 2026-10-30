@@ -40,23 +40,24 @@ channels. Areas of particular interest:
 - inbound/outbound MCP and channel ingress authorization,
 - the signed `fermix upgrade` path.
 
-On macOS the kernel (Seatbelt) holds the commands a turn runs (the shell, git
-and operator-declared command tools; not coding agents or plugin processes) to
-the sandbox mode and keeps Fermix's own secrets out of their reach. Linux has no
-kernel confinement yet: a command is checked only for the folder it starts in
-and for catastrophic patterns, so it can read and send whatever the account can.
-Until that lands, a command (shell, git writes, operator-declared commands) in a
-turn that has read content someone else could have written — a web page, a
-plugin's or MCP server's result, a worker's report, a forwarded message, an
-attachment, the Recent Activity note — waits for the owner's own confirmation,
-and never runs from a delegated worker, a cue-woken task or another unattended
-run; a scheduled job runs one only when its allowlist names it. The `codex`
-and `claude_code` command presets and the local coding runs (`codex_run`,
-`claude_code_run`) start a vendor CLI with the owner's account authority
-outside the sandbox everywhere, so they wait the same way on macOS, and the
-owner's confirmation shows every argument the vendor CLI is handed; once
-confirmed, a coding run still meets its own authorization, consent and
-vendor-config checks.
+The kernel holds the commands a turn runs (the shell, git and
+operator-declared command tools; not coding agents or plugin processes) to the
+sandbox mode and keeps Fermix's own secrets and keys out of their reach:
+Seatbelt on macOS, Landlock on Linux. A Linux kernel without Landlock ABI 2
+(Linux 5.19) runs none of them. Landlock cannot refuse a connection to
+Fermix's local sockets, so on Linux those keep only their own peer checks.
+Where the kernel does not hold commands, a command (shell, git writes,
+operator-declared commands) in a turn that has read content someone else could
+have written — a web page, a plugin's or MCP server's result, a worker's
+report, a forwarded message, an attachment, the Recent Activity note — waits
+for the owner's own confirmation, and never runs from a delegated worker, a
+cue-woken task or another unattended run; a scheduled job runs one only when
+its allowlist names it. The `codex` and `claude_code` command presets and the
+local coding runs (`codex_run`, `claude_code_run`) start a vendor CLI with the
+owner's account authority outside the sandbox everywhere, so they wait the
+same way on macOS and Linux, and the owner's confirmation shows every argument
+the vendor CLI is handed; once confirmed, a coding run still meets its own
+authorization, consent and vendor-config checks.
 The same gate holds access-sensitive plugin commands (a car unlock) on every
 platform.
 

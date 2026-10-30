@@ -64,8 +64,19 @@ defmodule Fermix.MixProject do
               cpu: :x86_64,
               nif_env: [{"DISCLAIM_TARGET", "x86_64-macos"}]
             ],
-            linux_aarch64: [os: :linux, cpu: :aarch64],
-            linux_x86_64: [os: :linux, cpu: :x86_64]
+            # LANDLOCK_TARGET does the same for the Linux-only Landlock exec
+            # shim that runs the agent's commands (OS_SANDBOX_ENFORCEMENT
+            # stage B): a static musl executable per target.
+            linux_aarch64: [
+              os: :linux,
+              cpu: :aarch64,
+              nif_env: [{"LANDLOCK_TARGET", "aarch64-linux-musl"}]
+            ],
+            linux_x86_64: [
+              os: :linux,
+              cpu: :x86_64,
+              nif_env: [{"LANDLOCK_TARGET", "x86_64-linux-musl"}]
+            ]
           ],
           # Each target places its pinned fermix-iroh helper in its own
           # work_dir, after the NIF recompile and before packing (M62 stage 5).
@@ -98,8 +109,16 @@ defmodule Fermix.MixProject do
         steps: [&__MODULE__.validate_linux_package/1, :assemble, &Burrito.wrap/1],
         burrito: [
           targets: [
-            linux_aarch64: [os: :linux, cpu: :aarch64],
-            linux_x86_64: [os: :linux, cpu: :x86_64]
+            linux_aarch64: [
+              os: :linux,
+              cpu: :aarch64,
+              nif_env: [{"LANDLOCK_TARGET", "aarch64-linux-musl"}]
+            ],
+            linux_x86_64: [
+              os: :linux,
+              cpu: :x86_64,
+              nif_env: [{"LANDLOCK_TARGET", "x86_64-linux-musl"}]
+            ]
           ],
           extra_steps: [
             fetch: [post: [FermixCore.Release.PackagedMuslRuntime]],

@@ -182,6 +182,69 @@ iroh_notices_actual="$(sha256_of "$iroh_notices")" || fail "cannot hash the ferm
   fail "the fermix-iroh notices are not the pinned ones: expected sha256 $iroh_notices_sha256 (from $iroh_pin), found $iroh_notices_actual"
 printf 'fermix-iroh notices: %s\n' "$iroh_notices"
 
+# ── the bundled Landlock shim (Linux) ───────────────────────────────────────
+# On Linux every command a turn runs goes through `fermix_landlock`, and a
+# release without it, or with one that cannot run, refuses every command on
+# every install ("Fermix's Landlock shim is missing"). The NIF build makes it
+# per target with zig, static, so the packaged-interpreter rewrite leaves it
+# alone: exactly one shim in the payload, a regular executable file, an ELF
+# that names no program interpreter (checked before it runs), and `--abi`
+# answering its contract: its ABI (exit 0) or why this runner's kernel has no
+# Landlock (exit 69). A macOS release carries none. It runs before the
+# migrate-to-app stage because that stage ends the script on a Linux target.
+elf_interpreter() {
+  uv run --no-project python -c '
+import struct, sys
+with open(sys.argv[1], "rb") as stream:
+    head = stream.read(64)
+    if head[:4] != b"\x7fELF" or len(head) < 64:
+        print("none")
+        sys.exit(0)
+    order = "<" if head[5] == 1 else ">"
+    if head[4] == 2:
+        (offset,) = struct.unpack(order + "Q", head[32:40])
+        size, count = struct.unpack(order + "HH", head[54:58])
+    else:
+        (offset,) = struct.unpack(order + "I", head[28:32])
+        size, count = struct.unpack(order + "HH", head[42:46])
+    for index in range(count):
+        stream.seek(offset + index * size)
+        if struct.unpack(order + "I", stream.read(4))[0] == 3:
+            print("PT_INTERP")
+            sys.exit(0)
+print("none")
+' "$1"
+}
+
+case "$target" in
+  linux_x86_64|linux_aarch64)
+    landlock_shim=""
+    landlock_shim_count=0
+    for candidate in "$payload"/lib/fermix_nif-*/priv/fermix_landlock; do
+      [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+      landlock_shim="$candidate"
+      landlock_shim_count=$((landlock_shim_count + 1))
+    done
+    [ "$landlock_shim_count" -eq 1 ] ||
+      fail "the unpacked Linux release must carry exactly one Landlock shim (lib/fermix_nif-*/priv/fermix_landlock under $payload), found $landlock_shim_count"
+    [ ! -L "$landlock_shim" ] && [ -f "$landlock_shim" ] && [ -x "$landlock_shim" ] ||
+      fail "the bundled Landlock shim is not an executable regular file: $landlock_shim"
+    landlock_interpreter="$(elf_interpreter "$landlock_shim")" ||
+      fail "cannot read the bundled Landlock shim's program headers: $landlock_shim"
+    [ "$landlock_interpreter" = none ] ||
+      fail "the bundled Landlock shim is dynamically linked (it names a program interpreter); the release builds it static with zig: $landlock_shim"
+    landlock_status=0
+    landlock_answer="$("$landlock_shim" --abi < /dev/null 2>&1)" || landlock_status=$?
+    case "$landlock_status:$landlock_answer" in
+      "0:fermix_landlock: abi "[0-9]*|"69:fermix_landlock: "*) ;;
+      *)
+        fail "the bundled Landlock shim --abi must print its ABI (exit 0) or why Landlock is unavailable (exit 69), got exit $landlock_status: $landlock_answer"
+        ;;
+    esac
+    printf 'Landlock shim: %s (%s)\n' "$landlock_shim" "$landlock_answer"
+    ;;
+esac
+
 # ── plugins auth clear, run tree-less from this artifact ────────────────────
 # Every `fermix plugins` verb runs without the supervision tree, so no command
 # host exists to own a keychain helper and each helper has to run inline. Unit
