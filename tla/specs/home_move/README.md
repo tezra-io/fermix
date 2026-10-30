@@ -16,7 +16,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 **Who serves as the primary**:
 - The source serves as the primary when its engine booted as one, or when its
   next boot will: `config.toml` says primary and `moved.json` is absent
-  (`Role.resolve/2`, `role.ex:167-179`). Counting the next boot keeps the end
+  (`Role.resolve/2`, `role.ex:165-177`). Counting the next boot keeps the end
   of `undo/3` on the cautious side: the role is written there, and the restart
   comes after.
 - The candidate serves as the primary once `config.toml` is renamed into
@@ -49,7 +49,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 - `OldRequestsArrive`: a request the worker sent on a rail it has since given
   up on still reaches the candidate. Two rails are two streams, so nothing
   orders one rail's frames against another's. The worker closes a rail it
-  gives up on (`close_rail/1`, `move_worker.ex:140`, `:281`, `:294`), but
+  gives up on (`close_rail/1`, `move_worker.ex:170`, `:379`, `:392`), but
   `Rail.close/1` sends its close frame behind whatever the rail already sent
   (`rail.ex`). Whether the iroh helper still delivers what it holds once the
   socket closes ("the helper ends its stream on its own", `helper.ex`) is
@@ -57,24 +57,24 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 
 **Mechanism switches** (`TRUE` is the real code):
 - `CandidateWaitsForCommit`: the candidate activates only on `move_commit`
-  for the move it staged (`commit_move/2`, `candidate.ex:453-486`).
+  for the move it staged (`commit_move/2`, `candidate.ex:505-538`).
 - `MarkerBeforeCommit`: the worker writes `moved.json` and records
   `committing` before it sends `move_commit` (`commit/4`, then `retired/4`,
-  `move_worker.ex:275-297`).
+  `move_worker.ex:373-395`).
 - `OffersFenced`: the candidate takes an offer only when it is later than the
   move it holds, a later move id or a later attempt of the same move, and
   refuses an earlier or equal one (`move_mismatch`), leaving what it holds
-  untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:374-386`).
-  `move_offer` carries the attempt (`stream/3`, `move_worker.ex:225`), which
+  untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:402-414`).
+  `move_offer` carries the attempt (`stream/3`, `move_worker.ex:323`), which
   only grows across restarts. Move ids are ordered by when the move started
-  (`move_id/1`, `move.ex:229-238`); with one move id, the fence orders by
+  (`move_id/1`, `move.ex:463-472`); with one move id, the fence orders by
   attempt.
 - `ReadyAfterStaged`: `move_ready` goes out only after `staged` is written.
   `restored/2` records `staged`, then tells the responder
-  (`candidate.ex:431-437`), which answers `move_ready` only then
-  (`move_responder.ex:64-68`).
+  (`candidate.ex:483-489`), which answers `move_ready` only then
+  (`move_responder.ex:65-69`).
 - `AwaitPinsRail`: the worker takes an answer only from the rail it waits on
-  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:573-586`).
+  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:695-708`).
 - `EndingsAfterRestart`: the worker records `committed` (after `move_done`)
   or `undoing` (after an undo) and then restarts itself (`SelfRestart`,
   `Lifecycle.restart_self/0`); the engine that boots after it records `done`
@@ -93,7 +93,7 @@ in `abort/3` never finds a marker. Every road to `abort/3` starts before
 - a refusal or the attempt cap, in `transfer/1` and `attempt_failed/2`,
   which run only while the marker is absent;
 - `commit/4`'s error clause, after the ready epoch or the marker could not
-  be written (`move_worker.ex:280-282`);
+  be written (`move_worker.ex:378-380`);
 - a recorded `aborting`, which `run/1` reaches only when the marker is absent.
 
 The re-check matters only for a marker that exists although its write
@@ -225,7 +225,7 @@ Nothing in Fermix's own code fenced it.
   home untouched.
 
 The same change answers a second `move_commit` after activation from the
-`activated?` flag (`candidate.ex:455-459`). Before, it crashed in `put/3`,
+`activated?` flag (`candidate.ex:507-511`). Before, it crashed in `put/3`,
 because `activate/1` had removed `candidate/`. The model's `OnCommit` now
 answers it `move_done`.
 
@@ -308,8 +308,8 @@ This was noticed while reading the code. TLC does not show it.
   exclusively, then writes it (`moved.ex:45-59`). If the write or the close
   fails (a full disk), the file may be left unreadable. `commit/4` then
   aborts, and `abort/3` raises on the unreadable marker
-  (`move_worker.ex:489-495`). The worker's restart reaches `run/1`'s clause
-  for an unreadable marker (`:92`), which records a sentence asking for the
+  (`move_worker.ex:611-617`). The worker's restart reaches `run/1`'s clause
+  for an unreadable marker (`:122`), which records a sentence asking for the
   marker to be fixed and does nothing else. The source stays a device and
   the candidate stays staged: safe, never two primaries, and stopped until a
   person acts. This is by design, since whether the home retired cannot be
