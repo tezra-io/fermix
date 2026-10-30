@@ -203,7 +203,8 @@ it, never a second writer.
   capture needs about twice the home; short of it blocks, with the numbers);
   a home over one S3 upload (5 GiB) when the server keeps snapshots in S3
   (warns: it would never back up there); plugins built for another system
-  (warns, named); voice, and iMessage on a Mac, staying here; the cutover gap
+  (warns, named); voice calls and meetings, and iMessage on a Mac, stopping
+  after the move; the cutover gap
   (Telegram messages sent during the move are lost, and a recurring job more
   than an hour late is skipped); and this computer serving nothing while the
   move runs. The move does not start while anything blocks, from the apps or

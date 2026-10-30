@@ -284,7 +284,8 @@ defmodule FermixTestSupport.CliContractCases do
   end
 
   # The marker `fermix home mark-moved` writes and prints.
-  defp moved, do: %{epoch: 4, moved_at: ~U[2026-10-27 09:30:00Z], to: "aws i-0f3b1c"}
+  defp moved,
+    do: %{epoch: 4, moved_at: ~U[2026-10-27 09:30:00Z], to: "hetzner fermix-home 48151623"}
 
   defp action(past_tense), do: %{"action" => past_tense, "scope" => "user"}
 

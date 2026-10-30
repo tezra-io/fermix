@@ -16,7 +16,8 @@ defmodule Fermix.CLI.HomeMoveCommand do
     (`FermixCore.Home.Candidate.enroll/3`) with no engine running: it reads
     the code from the file (trimmed), the instance facts from
     `--instance-file` (`{provider, instance_id, region}` and an optional
-    `account_id`, shown unverified), writes `candidate/` and the candidate
+    `account_id`, shown unverified; a provisioner writes that file, and the
+    first boot passes none), writes `candidate/` and the candidate
     role, and removes the code file. A failure leaves the home as it found
     it, and the code file too. Human output only.
   - `candidates` lists the candidates the primary holds: from the engine
@@ -250,11 +251,7 @@ defmodule Fermix.CLI.HomeMoveCommand do
     do: ["No candidate is enrolled. Open a code with fermix home enroll-code."]
 
   defp candidate_lines(%{"candidates" => candidates}) do
-    Enum.flat_map(candidates, &candidate_line/1) ++
-      [
-        "The instance facts are what each server says of itself, and nobody checked them: " <>
-          "compare the instance id with the one your cloud provider shows before you move."
-      ]
+    Enum.flat_map(candidates, &candidate_line/1)
   end
 
   defp candidate_line(candidate) do

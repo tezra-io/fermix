@@ -164,7 +164,7 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
       assert out =~ record.candidate_id
 
       assert out =~ "hetzner instance 61839204 in fsn1 (unverified)"
-      assert out =~ "compare the instance id with the one your cloud provider shows"
+      refute out =~ ~r/compare/i
 
       empty = fn "home.candidates.list", %{}, _opts -> {:ok, %{"candidates" => []}} end
       {0, out, _err} = run(["candidates"], home: ctx.home, client: empty)

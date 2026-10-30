@@ -23,8 +23,10 @@ defmodule FermixCore.Home.MoveReadiness do
     * `s3_size`: a home larger than one S3 upload (5 GiB) warns where the
       server keeps its snapshots in S3: it would never back up there;
     * `plugins`: plugins installed for another OS or architecture warn,
-      named: they are installed again on the server;
-    * `stays_here`: voice, and iMessage on a Mac, stay on this computer;
+      named: the owner installs them again on the server from the app after
+      the move;
+    * `stays_here`: voice calls and meetings, and iMessage on a Mac, stop after
+      the move;
     * `cutover_gap`: Telegram messages sent during the move are lost, and a
       recurring job more than an hour late is skipped;
     * `serves_nothing`: this computer serves nothing during the move.
@@ -265,8 +267,8 @@ defmodule FermixCore.Home.MoveReadiness do
         item(
           "plugins",
           :warn,
-          "These plugins were installed for this computer and are installed again on " <>
-            "#{name}: #{Enum.join(names, ", ")}."
+          "These plugins were installed for this computer; after the move, install them " <>
+            "again on #{name} from Plugins in the app: #{Enum.join(names, ", ")}."
         )
     end
   end
@@ -276,11 +278,18 @@ defmodule FermixCore.Home.MoveReadiness do
       item(
         "stays_here",
         :warn,
-        "iMessage and voice stay on this Mac: #{name} cannot use them."
+        "iMessage, voice calls and meetings stop after the move: neither this Mac nor " <>
+          "#{name} runs them."
       )
 
   defp stays_here(_host, name),
-    do: item("stays_here", :warn, "Voice stays on this computer: #{name} cannot use it.")
+    do:
+      item(
+        "stays_here",
+        :warn,
+        "Voice calls and meetings stop after the move: neither this computer nor " <>
+          "#{name} runs them."
+      )
 
   defp cutover_sentence,
     do:

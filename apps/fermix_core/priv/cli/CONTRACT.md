@@ -200,7 +200,7 @@ the primary and runs only in the device role. It refuses while the engine runs
 from that home. It answers with the marker as written:
 
 ```json
-{"epoch": 4, "moved_at": "2026-10-27T09:30:00Z", "to": "aws i-0f3b1c"}
+{"epoch": 4, "moved_at": "2026-10-27T09:30:00Z", "to": "hetzner fermix-home 48151623"}
 ```
 
 - `epoch` — integer. The home's primary epoch when it moved.
@@ -282,7 +282,7 @@ once, and its row is never its keys:
 | `arch` | string | The host's architecture. |
 | `version` | string | The host's Fermix version. |
 | `node_id` | string | The host's endpoint id, 64 hex digits. |
-| `instance` | object, null | `provider`, `instance_id` and `region`, and `account_id` when the host gave one: what the host said of itself, which nobody verified. Compare it with what you launched before you move. Null when it gave none. |
+| `instance` | object, null | `provider`, `instance_id` and `region`, and `account_id` when the host gave one: what the host said of itself, which nobody verified. Null when it gave none. |
 | `snapshots` | object, null | `s3_bucket` and `s3_region`: the bucket the host was told to keep snapshots in. Null when it was told none. |
 | `enrolled_at` | string | When it enrolled, ISO 8601 in UTC. |
 | `expires_at` | string | When the primary stops holding it, ISO 8601 in UTC. |
@@ -311,7 +311,9 @@ not be written here, or each item of the move's readiness report
 
 `fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]
 [--instance-file PATH]` is not a machine-mode verb: it takes no `--json` and no
-running Fermix, and makes a fresh home a candidate. It exits `0` with one line
+running Fermix, and makes a fresh home a candidate. `--instance-file` is a file a
+provisioner writes with what the host reports about itself; the first boot
+passes none. It exits `0` with one line
 on stdout once the home is a candidate and the code file is removed, `1` with
 one sentence on stderr when it refused, leaving the home and the code file as
 it found them, and `2` on a usage error. A home that holds a candidate which

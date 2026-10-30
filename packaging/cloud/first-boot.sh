@@ -29,7 +29,8 @@ INSTALL_URL=https://fermix.ai/install
 CODE_PREFIX=fxenroll1.
 CODE_MIN=42
 CODE_MAX=2048
-# How long the server waits for the primary to accept it: 60 looks, 5 s apart.
+# How long the first boot waits for the primary to accept this server: 60
+# looks, 5 s apart. The engine keeps trying after that, until the code expires.
 ENROLL_WAIT_TRIES=60
 ENROLL_WAIT_SECONDS=5
 RESTORE_FILE=$ACCOUNT_HOME/restore.fxsnap
@@ -348,7 +349,7 @@ await_enrollment() {
     esac
     sleep "$ENROLL_WAIT_SECONDS"
   done
-  fail "Your primary did not accept this server within 5 minutes, so it is not enrolled; check that Fermix runs there with Remote reach on."
+  fail "Your primary has not accepted this server yet: Fermix keeps trying until the code expires, and Always On on the primary shows this server once it is accepted; check that Fermix runs there with Remote reach on."
 }
 
 # The steps that restore the newest snapshot onto this server, exactly.

@@ -3,7 +3,7 @@
   "result": {
     "epoch": 4,
     "moved_at": "2026-10-27T09:30:00Z",
-    "to": "aws i-0f3b1c"
+    "to": "hetzner fermix-home 48151623"
   },
   "schema_version": 1
 }
