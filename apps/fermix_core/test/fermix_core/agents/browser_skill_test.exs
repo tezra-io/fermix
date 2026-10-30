@@ -41,6 +41,18 @@ defmodule FermixCore.Agents.BrowserGuidanceSkillTest do
     assert definition.system_prompt =~ "`download` starts nothing"
     assert definition.system_prompt =~ "click the file's link with `act` and then call `download`"
 
+    # A sign-in types the owner's saved login after their yes: the two-step
+    # move and the refusals' next moves are named, and a password never is asked for.
+    assert definition.system_prompt =~ ~s(`kind: "sign_in"`)
+    assert definition.system_prompt =~ "`username_ref` alone"
+    assert definition.system_prompt =~ "Never ask the owner for a password"
+    assert definition.system_prompt =~ "Settings > Browser > Website logins"
+
+    for code <- ~w(sign_in_pane_only sign_in_no_login sign_in_denied sign_in_unanswered
+                   sign_in_not_delivered sign_in_wrong_site secret_on_screen) do
+      assert definition.system_prompt =~ "`#{code}`", "browser-guidance never names #{code}"
+    end
+
     # A CAPTCHA is the model's own call, not a Fermix stop; the human gates stay.
     refute definition.system_prompt =~ ~r/captcha/i
     assert definition.system_prompt =~ "Stop and report for 2FA, payment confirmation"

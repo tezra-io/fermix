@@ -49,6 +49,16 @@ Use `browser` for JavaScript-capable pages. Choose the right web tool once, read
 - The pane runs no WebMCP tools and saves no downloads (`webmcp` and `download` there only answer `unsupported_in_fermix_app`). When `backend` is `fermix_app` and the page offers WebMCP tools or you need a file from it, open the page with `profile: "fermix_chrome"`, which is always Chrome, and do it there: run `webmcp`, or click the file's link with `act` and then call `download` (below). When `backend` is `cdp`, do it where you are.
 - `fermix_chrome` keeps its own sign-ins, so a site signed in to in the pane is signed out there: tell the person when the page needs a sign-in. It is a second browser beside the pane, not a move: the pane's task stays where it is, and a pane that goes away (`host_lost`) is still reported, never redone in Chrome on your own.
 
+## Signing In
+
+- A login form is signed into with `act` `kind: "sign_in"`: the page's `site` (its host, as its address shows it) and the form's `username_ref` and `password_ref` from the latest snapshot. Fermix types the login the owner saved in the Fermix Mac app, and you never see the password. It fills and does not submit: follow it with `submit` or a click on the form's own button.
+- A call with `password_ref` waits while the owner approves the sign-in in their chat. Never ask the owner for a password, never `fill` or `type` one, never reveal a password field (its show-password control), and never capture a page to read one.
+- A site that asks for the username first takes `sign_in` with `username_ref` alone (the owner is not asked), then a submit, then `sign_in` with `password_ref` alone on the page that follows.
+- It works only in the Fermix app's pane (`backend` `fermix_app`), so `fermix_chrome`, the person's own tab and every Chrome answer `sign_in_pane_only`: with the app open, open the page with the default profile (`stop` first if this task already runs in Chrome).
+- `sign_in_no_login`: no login is saved for that exact host. Tell the owner to add one for that host in Settings > Browser > Website logins in the Fermix app on their Mac, and stop until they have.
+- `sign_in_denied`: the owner said no. Stop; do not retry or sign in another way. `sign_in_unanswered`: no answer in time; tell the owner, and ask again only once they are back. `sign_in_not_delivered`, `sign_in_not_allowed` and `sign_in_not_on_voice`: the request has to come from the owner's own chat or the Fermix app.
+- `sign_in_wrong_site`, `sign_in_page_moved` and `sign_in_field`: snapshot again, read the address's host, and use the form's own fields. `sign_in_insecure_page`: the page is not `https`, so nothing is typed. `sign_in_app_too_old` and `sign_in_store_unavailable`: tell the owner (update the app; the keychain's own words). `secret_on_screen`: a filled password shows on the page, so it is not captured.
+
 ## The Person's Own Tab
 
 - The default profile is Fermix's OWN managed browser. `profile: "selected_tab"` is instead ONE tab of the person's own browser, signed in as them, which they hand over by clicking the Fermix browser extension on it. Use it only when they ask about the tab they have open; for a new web task the managed profile is simpler and borrows nothing.

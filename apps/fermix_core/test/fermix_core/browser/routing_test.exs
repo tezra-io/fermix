@@ -31,7 +31,7 @@ defmodule FermixCore.Browser.RoutingTest do
   defp host(:usable) do
     host = host(:empty)
     :ok = HostAvailability.listening(host, endpoint())
-    :ok = HostAvailability.attached(host, endpoint(), 1)
+    :ok = HostAvailability.attached(host, endpoint(), 1, 2)
     :ok = HostAvailability.report(host, true, nil)
     host
   end
@@ -77,7 +77,7 @@ defmodule FermixCore.Browser.RoutingTest do
 
     launcher = fn _timeout_ms ->
       send(test, :opened)
-      :ok = HostAvailability.attached(pane, endpoint(), 1)
+      :ok = HostAvailability.attached(pane, endpoint(), 1, 2)
       HostAvailability.report(pane, true, nil)
     end
 
@@ -101,7 +101,7 @@ defmodule FermixCore.Browser.RoutingTest do
 
     attached = host(:empty)
     :ok = HostAvailability.listening(attached, endpoint())
-    :ok = HostAvailability.attached(attached, endpoint(), 1)
+    :ok = HostAvailability.attached(attached, endpoint(), 1, 2)
 
     for {name, profile} <- profiles do
       assert route(ctx, "owner-silent-#{name}", name, profile, attached) == {profile, :cdp}
@@ -181,7 +181,7 @@ defmodule FermixCore.Browser.RoutingTest do
 
     on_exit(fn -> Process.exit(connection, :kill) end)
     :ok = HostAvailability.listening(host, endpoint)
-    :ok = HostAvailability.attached(host, connection, 1)
+    :ok = HostAvailability.attached(host, connection, 1, 2)
     :ok = HostAvailability.report(host, true, nil)
 
     conversation = {"cli", "routing-#{System.unique_integer([:positive])}", :root}

@@ -192,6 +192,49 @@ defmodule FermixCore.Tools.BrowserTest do
         assert tag in tags, "`#{tag}` is returnable but undocumented"
       end
     end
+
+    # Every code a sign-in can answer the model with (M84 SPEC §4, less the
+    # stop, which leaves no model to tell, plus the undelivered question).
+    test "names every sign-in refusal" do
+      tags = Enum.map(Browser.failure_modes(), & &1.tag)
+
+      for tag <- ~w(sign_in_not_allowed sign_in_not_on_voice sign_in_denied sign_in_unanswered
+                    sign_in_not_delivered sign_in_pane_only sign_in_app_too_old
+                    sign_in_insecure_page sign_in_wrong_site sign_in_no_login sign_in_field
+                    sign_in_page_moved sign_in_store_unavailable secret_on_screen) do
+        assert tag in tags, "`#{tag}` is returnable but undocumented"
+      end
+
+      refute "sign_in_stopped" in tags
+
+      %{description: no_login} =
+        Enum.find(Browser.failure_modes(), &(&1.tag == "sign_in_no_login"))
+
+      assert no_login =~ "Settings > Browser > Website logins"
+    end
+  end
+
+  # A sign-in the model cannot see is a password it asks the owner for: the
+  # kind, its three arguments and the one sentence travel together.
+  describe "the sign-in surface" do
+    test "the description teaches sign_in and never asking for a password" do
+      description = Browser.description()
+
+      assert description =~ "`kind=sign_in`"
+      assert description =~ "after the owner approves"
+      assert description =~ "never ask the owner for a password, never type one"
+      assert description =~ "never reveal a password field"
+    end
+
+    test "the schema carries the kind, the site and both refs" do
+      params = Browser.parameters()
+
+      assert params.properties.kind.description =~ "sign_in"
+
+      for field <- [:site, :username_ref, :password_ref] do
+        assert params.properties[field].type == "string", "`#{field}` is not in the schema"
+      end
+    end
   end
 
   describe "progress_by_result?/1" do

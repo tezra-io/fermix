@@ -24,6 +24,16 @@ without starting anything.
     benchmark/bin/browser_host_fixture.py --fail-after 2 --fail-message "the Mac is locked"
     benchmark/bin/browser_host_fixture.py --cancel-after 1                # the person cancels the task
     benchmark/bin/browser_host_fixture.py --no-attach   # a launch that connects but never attaches
+    benchmark/bin/browser_host_fixture.py --login-page --saved-login example.com=person@example.com
+    benchmark/bin/browser_host_fixture.py --login-page  # a login page with no login saved for it
+
+`--login-page` answers every page with an https sign-in form (an email field,
+a password field, a Sign in button) at https://example.com/login, and the
+two sign-in requests of protocol 2 as the Mac app does: `page.login_for` with
+the login `--saved-login` names for the page's host (key form: lower-cased,
+one leading `www.` folded), or `sign_in_no_login` when none is saved, and
+`page.sign_in` with the fields it was given. It holds no password and types
+nothing anywhere: a fill is only the answer naming what was filled.
 
 Ctrl-C stops it; the daemon reads the closed socket as `host_stopping` never
 having arrived at all, i.e. a plain disconnect (BROWSER-4: fails every task
@@ -38,7 +48,11 @@ import os
 import socket
 import sys
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
+LOGIN_URL = "https://example.com/login"
+# The login page's element refs (`backendDOMNodeId`): what a fill may name.
+USERNAME_REF = 11
+PASSWORD_REF = 12
 DEFAULT_HOST_VERSION = "0.0.0-eval"
 DEFAULT_PROFILE_ID = "fermix-eval"
 
@@ -96,6 +110,58 @@ def example_page(url: str) -> dict:
     }
 
 
+def login_page() -> dict:
+    """The sign-in form `--login-page` answers every page with."""
+    return {
+        "url": LOGIN_URL,
+        "title": "Sign in to Example",
+        "ready_state": "complete",
+        "nodes": [
+            {
+                "nodeId": "1",
+                "role": {"value": "RootWebArea"},
+                "name": {"value": "Sign in to Example"},
+                "childIds": ["2", "3", "4", "5"],
+            },
+            {"nodeId": "2", "role": {"value": "heading"}, "name": {"value": "Sign in to Example"}},
+            {
+                "nodeId": "3",
+                "backendDOMNodeId": USERNAME_REF,
+                "role": {"value": "textbox"},
+                "name": {"value": "Email"},
+            },
+            {
+                "nodeId": "4",
+                "backendDOMNodeId": PASSWORD_REF,
+                "role": {"value": "textbox"},
+                "name": {"value": "Password"},
+                "properties": [{"name": "protected", "value": {"value": True}}],
+            },
+            {
+                "nodeId": "5",
+                "backendDOMNodeId": 13,
+                "role": {"value": "button"},
+                "name": {"value": "Sign in"},
+            },
+        ],
+    }
+
+
+def site_key(host: str) -> str:
+    """A host's key form, as the Mac app keeps a login under it."""
+    host = host.lower().rstrip(".")
+    return host[4:] if host.startswith("www.") else host
+
+
+class Refusal(Exception):
+    """A host error answer: `reason` from the protocol's vocabulary."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.message = message
+
+
 class FakeHost:
     """One connection's worth of state: the tabs it has opened, keyed by the
     task that opened them (`task.release`'s bookkeeping), the point past
@@ -112,6 +178,8 @@ class FakeHost:
         cancel_reason: str,
         host_version: str,
         profile_id: str,
+        login_page: bool = False,
+        saved_logins: dict[str, str] | None = None,
     ) -> None:
         self.fail_after = fail_after
         self.fail_reason = fail_reason
@@ -120,6 +188,8 @@ class FakeHost:
         self.cancel_reason = cancel_reason
         self.host_version = host_version
         self.profile_id = profile_id
+        self.login_page = login_page
+        self.saved_logins = {site_key(site): user for site, user in (saved_logins or {}).items()}
         self.tabs: dict[str, str] = {}
         self.next_tab = 1
         self.answered = 0
@@ -157,8 +227,15 @@ class FakeHost:
                 send(sock, {"type": "availability", "available": False, "reason": self.fail_message})
             return
 
+        try:
+            result = self.answer(request_type, frame)
+        except Refusal as refusal:
+            log(f"answering {request_type} (#{self.answered}) with {refusal.reason}")
+            send(sock, {"id": request_id, "ok": False, "error": {"reason": refusal.reason, "message": refusal.message}})
+            return
+
         log(f"answering {request_type} (#{self.answered})")
-        send(sock, {"id": request_id, "ok": True, "result": self.answer(request_type, frame)})
+        send(sock, {"id": request_id, "ok": True, "result": result})
 
         if self.cancel_after is not None and self.answered == self.cancel_after:
             task_id = self.task_for(frame)
@@ -180,7 +257,7 @@ class FakeHost:
         if request_type == "task.release":
             return self.released(frame["task_id"])
         if request_type == "page.snapshot":
-            return snapshot_result(example_page(frame_url(frame)))
+            return snapshot_result(self.page(frame_url(frame)))
         if request_type == "page.act":
             return self.acted(frame)
         if request_type in ("page.screenshot", "page.pdf"):
@@ -203,20 +280,27 @@ class FakeHost:
             }
         if request_type == "host.stop_ack":
             return {}
+        if request_type == "page.login_for":
+            return self.login_for(frame)
+        if request_type == "page.sign_in":
+            return self.signed_in(frame)
         raise SystemExit(f"browser_host_fixture: no answer scripted for {request_type}")
+
+    def page(self, url: str) -> dict:
+        return login_page() if self.login_page else example_page(url)
 
     def opened(self, frame: dict) -> dict:
         tab_id = self.next_tab_id()
         self.tabs[tab_id] = frame["task_id"]
-        page = example_page(frame["url"])
-        result = {"tab_id": tab_id, "url": frame["url"], "title": page["title"]}
+        page = self.page(frame["url"])
+        result = {"tab_id": tab_id, "url": page["url"], "title": page["title"]}
         if frame.get("observe"):
             result["page"] = page
         return result
 
     def navigated(self, frame: dict) -> dict:
-        page = example_page(frame["url"])
-        result = {"tab_id": frame["tab_id"], "url": frame["url"], "title": page["title"]}
+        page = self.page(frame["url"])
+        result = {"tab_id": frame["tab_id"], "url": page["url"], "title": page["title"]}
         if frame.get("observe"):
             result["page"] = page
         return result
@@ -238,10 +322,39 @@ class FakeHost:
         return {"released": released}
 
     def acted(self, frame: dict) -> dict:
-        page = example_page("https://example.com/")
+        page = self.page("https://example.com/")
         result = {"url": page["url"], "title": page["title"]}
         if frame.get("kind") == "get":
             result["value"] = "Example Domain"
+        if frame.get("observe"):
+            result["page"] = page
+        return result
+
+    # The page checks both sign-in requests make, in the app's order.
+    def saved_login(self, site: str) -> tuple[str, str]:
+        page_host = "example.com"
+        if site_key(site) != site_key(page_host):
+            raise Refusal("sign_in_wrong_site", f"the tab's page is not on {site}")
+        key = site_key(page_host)
+        if key not in self.saved_logins:
+            raise Refusal("sign_in_no_login", f"no login is saved for {key}")
+        return key, self.saved_logins[key]
+
+    def login_for(self, frame: dict) -> dict:
+        login_site, username = self.saved_login(frame["site"])
+        return {"login_site": login_site, "username": username}
+
+    def signed_in(self, frame: dict) -> dict:
+        login_site, _username = self.saved_login(frame["site"])
+        if frame["login_site"] != login_site:
+            raise Refusal("sign_in_page_moved", "the login for this page changed")
+        expected = {"username_ref": USERNAME_REF, "password_ref": PASSWORD_REF}
+        for field, ref in expected.items():
+            if field in frame and frame[field] != ref:
+                raise Refusal("sign_in_field", f"ref {frame[field]} is not the form's {field[:-4]} field")
+        filled = [field[:-4] for field in expected if field in frame]
+        page = login_page()
+        result = {"url": page["url"], "title": page["title"], "filled": filled}
         if frame.get("observe"):
             result["page"] = page
         return result
@@ -305,6 +418,8 @@ def run(args: argparse.Namespace) -> None:
         args.cancel_reason,
         args.host_version,
         args.profile_id,
+        login_page=args.login_page,
+        saved_logins=dict(args.saved_login),
     )
     try:
         for frame in read_frames(sock):
@@ -313,6 +428,13 @@ def run(args: argparse.Namespace) -> None:
         log("stopping")
     finally:
         sock.close()
+
+
+def saved_login_arg(value: str) -> tuple[str, str]:
+    site, sep, username = value.partition("=")
+    if not sep or not site or not username:
+        raise argparse.ArgumentTypeError("a saved login is SITE=USERNAME")
+    return site, username
 
 
 def parse_args() -> argparse.Namespace:
@@ -338,6 +460,19 @@ def parse_args() -> argparse.Namespace:
         help="right after answering the Nth request, send task.cancel for its task",
     )
     parser.add_argument("--cancel-reason", default="cancelled by the person")
+    parser.add_argument(
+        "--login-page",
+        action="store_true",
+        help="answer every page with an https sign-in form, and the two sign-in requests",
+    )
+    parser.add_argument(
+        "--saved-login",
+        type=saved_login_arg,
+        action="append",
+        default=[],
+        metavar="SITE=USERNAME",
+        help="a login the fake app keeps for SITE (repeatable); none means sign_in_no_login",
+    )
     parser.add_argument(
         "--no-attach",
         action="store_true",

@@ -25,6 +25,9 @@
 {"id":25,"ok":true,"result":{"released":["t1","t3"]}}
 {"id":26,"ok":true,"result":{}}
 {"id":27,"ok":true,"result":{"url":"https://example.com/login","title":"Sign in"}}
+{"id":28,"ok":true,"result":{"login_site":"example.com","username":"person@example.com"}}
+{"id":29,"ok":true,"result":{"url":"https://example.com/login","title":"Sign in","filled":["username","password"]}}
+{"id":30,"ok":true,"result":{"url":"https://www.example.com/login","title":"Sign in","filled":["username"],"page":{"url":"https://www.example.com/login","title":"Sign in","ready_state":"complete","nodes":[{"nodeId":1,"role":{"value":"RootWebArea"},"name":{"value":"Sign in"},"childIds":[2,3]},{"nodeId":2,"role":{"value":"textbox"},"name":{"value":"Email"},"value":{"value":"person@example.com"},"backendDOMNodeId":11,"properties":[{"name":"editable","value":{"value":"plaintext"}}]},{"nodeId":3,"role":{"value":"button"},"name":{"value":"Next"},"backendDOMNodeId":13}]}}}
 {"id":5,"ok":false,"error":{"reason":"tab_not_found","message":"no tab t9 in this host"}}
 {"id":1,"ok":false,"error":{"reason":"cap_reached","message":"task task-9f2c1a7e4b0d already owns 10 tabs"}}
 {"id":5,"ok":false,"error":{"reason":"not_owner","message":"tab t4 is the person's"}}
@@ -38,3 +41,10 @@
 {"id":20,"ok":false,"error":{"reason":"upload_failed","message":"the element is not a file input"}}
 {"id":12,"ok":false,"error":{"reason":"invalid_request","message":"fields must name inputs"}}
 {"id":10,"ok":false,"error":{"reason":"host_unavailable","message":"the Mac is locked"}}
+{"id":28,"ok":false,"error":{"reason":"sign_in_insecure_page","message":"the page is not served over https"}}
+{"id":28,"ok":false,"error":{"reason":"sign_in_wrong_site","message":"the tab's page is not on example.com"}}
+{"id":28,"ok":false,"error":{"reason":"sign_in_no_login","message":"no login is saved for example.com"}}
+{"id":29,"ok":false,"error":{"reason":"sign_in_field","message":"ref 12 is not a password field"}}
+{"id":29,"ok":false,"error":{"reason":"sign_in_page_moved","message":"the page moved to another origin"}}
+{"id":29,"ok":false,"error":{"reason":"sign_in_store_unavailable","message":"the keychain refused (OSStatus -34018)"}}
+{"id":8,"ok":false,"error":{"reason":"secret_on_screen","message":"a filled password shows as text on the page"}}

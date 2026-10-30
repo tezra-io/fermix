@@ -53,28 +53,133 @@ defmodule FermixChannels.BrowserHost.ConnectionTest do
     assert %{"type" => "error", "reason" => "handshake_required"} = recv(early)
     assert closed?(early)
 
-    {app, response} = connect_handshaken(path)
-    assert response == %{"type" => "server_hello", "min_version" => 1, "max_version" => 1}
+    {app, response} = connect_handshaken(path, 2)
+    assert response == %{"type" => "server_hello", "min_version" => 1, "max_version" => 2}
 
-    send_line(app, %{"type" => "client_hello", "protocol_version" => 1})
+    send_line(app, %{"type" => "client_hello", "protocol_version" => 2})
     assert %{"type" => "error", "reason" => "unexpected_client_hello"} = recv(app)
     assert closed?(app)
   end
 
   test "a client outside the window learns which side must update", %{socket_path: path} do
     client = connect(path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 2})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 3})
 
     assert recv(client) == %{
              "type" => "error",
              "reason" => "unsupported_protocol_version",
              "direction" => "client_too_new",
-             "client_version" => 2,
+             "client_version" => 3,
              "min_version" => 1,
-             "max_version" => 1
+             "max_version" => 2
            }
 
     assert closed?(client)
+  end
+
+  # The N/N-1 window: an app that has not updated keeps working on protocol 1.
+  test "an app on protocol 1 or 2 is answered the window 1 to 2", %{socket_path: path} do
+    for version <- [1, 2] do
+      {app, response} = connect_handshaken(path, version)
+      assert response == %{"type" => "server_hello", "min_version" => 1, "max_version" => 2}
+      :ok = :gen_tcp.close(app)
+    end
+  end
+
+  test "the version the app declared reaches HostAvailability with the attach", ctx do
+    for version <- [1, 2] do
+      app = attach(ctx.socket_path, version)
+
+      assert eventually(fn ->
+               current = HostAvailability.current(ctx.host)
+               current.attached and current.protocol_version == version
+             end),
+             "protocol #{version} did not reach HostAvailability"
+
+      :ok = :gen_tcp.close(app)
+      assert eventually(fn -> not HostAvailability.current(ctx.host).attached end)
+    end
+  end
+
+  # SPEC §2: an app on 1 never receives the two new requests. The task is
+  # answered at once, and the next request the app reads is the one after it,
+  # with the next id, so nothing of the refused one reached the wire.
+  test "a sign-in request is never written to an app on protocol 1", ctx do
+    app = attach(ctx.socket_path, 1)
+    connection = connection_pid(ctx.connections)
+
+    for {type, payload} <- [
+          {"page.login_for", %{"tab_id" => "t1", "site" => "example.com"}},
+          {"page.sign_in",
+           %{
+             "tab_id" => "t1",
+             "site" => "example.com",
+             "login_site" => "example.com",
+             "password_ref" => 12,
+             "observe" => false
+           }}
+        ] do
+      ref = Link.request(connection, "task-1", type, payload)
+
+      assert_receive {:browser_host_answer, ^ref,
+                      {:error, %{"reason" => "invalid_request", "message" => message}}}
+
+      assert message == "#{type} needs browser_host protocol 2, and the app declared 1"
+    end
+
+    ref = Link.request(connection, "task-1", "tab.list", %{"task_id" => "task-1"})
+    assert %{"id" => 1, "type" => "tab.list"} = recv(app)
+    send_line(app, %{"id" => 1, "ok" => true, "result" => %{"tabs" => []}})
+    assert_receive {:browser_host_answer, ^ref, {:ok, %{"tabs" => []}}}
+  end
+
+  test "an app on protocol 2 is written both sign-in requests with exactly their fields", ctx do
+    app = attach(ctx.socket_path, 2)
+    connection = connection_pid(ctx.connections)
+
+    ref =
+      Link.request(connection, "task-1", "page.login_for", %{
+        "tab_id" => "t1",
+        "site" => "example.com"
+      })
+
+    assert recv(app) == %{
+             "id" => 1,
+             "type" => "page.login_for",
+             "tab_id" => "t1",
+             "site" => "example.com"
+           }
+
+    send_line(app, %{
+      "id" => 1,
+      "ok" => true,
+      "result" => %{"login_site" => "example.com", "username" => "person@example.com"}
+    })
+
+    assert_receive {:browser_host_answer, ^ref,
+                    {:ok, %{"login_site" => "example.com", "username" => "person@example.com"}}}
+
+    sign_in = %{
+      "tab_id" => "t1",
+      "site" => "example.com",
+      "login_site" => "example.com",
+      "username_ref" => 11,
+      "password_ref" => 12,
+      "observe" => false
+    }
+
+    ref = Link.request(connection, "task-1", "page.sign_in", sign_in)
+    assert recv(app) == Map.merge(sign_in, %{"id" => 2, "type" => "page.sign_in"})
+
+    send_line(app, %{
+      "id" => 2,
+      "ok" => false,
+      "error" => %{"reason" => "sign_in_store_unavailable", "message" => "OSStatus -25308"}
+    })
+
+    assert_receive {:browser_host_answer, ^ref,
+                    {:error,
+                     %{"reason" => "sign_in_store_unavailable", "message" => "OSStatus -25308"}}}
   end
 
   test "attach is mandatory before anything else, and one-shot", ctx do
@@ -354,8 +459,8 @@ defmodule FermixChannels.BrowserHost.ConnectionTest do
     pid
   end
 
-  defp hello(path) do
-    {client, response} = connect_handshaken(path)
+  defp hello(path, version \\ 2) do
+    {client, response} = connect_handshaken(path, version)
     assert %{"type" => "server_hello"} = response
     client
   end
@@ -370,32 +475,32 @@ defmodule FermixChannels.BrowserHost.ConnectionTest do
   # Linux), and a passive socket's failed send closes the client side too:
   # the driver answers the next recv `{:error, :closed}` without reading the
   # refusal line still in the buffer. So that failed send is the refusal.
-  defp connect_handshaken(path, attempts \\ 40) do
+  defp connect_handshaken(path, version, attempts \\ 40) do
     client = connect(path)
-    hello = Jason.encode!(%{"type" => "client_hello", "protocol_version" => 1}) <> "\n"
+    hello = Jason.encode!(%{"type" => "client_hello", "protocol_version" => version}) <> "\n"
 
     case :gen_tcp.send(client, hello) do
       :ok ->
         case recv(client) do
           %{"type" => "error", "reason" => "host_already_attached"} when attempts > 0 ->
-            retry_handshake(path, attempts)
+            retry_handshake(path, version, attempts)
 
           response ->
             {client, response}
         end
 
       {:error, :closed} when attempts > 0 ->
-        retry_handshake(path, attempts)
+        retry_handshake(path, version, attempts)
     end
   end
 
-  defp retry_handshake(path, attempts) do
+  defp retry_handshake(path, version, attempts) do
     Process.sleep(10)
-    connect_handshaken(path, attempts - 1)
+    connect_handshaken(path, version, attempts - 1)
   end
 
-  defp attach(path) do
-    client = hello(path)
+  defp attach(path, version \\ 2) do
+    client = hello(path, version)
     send_line(client, %{"type" => "attached", "host_version" => "0.2.0", "profile_id" => "p"})
     client
   end

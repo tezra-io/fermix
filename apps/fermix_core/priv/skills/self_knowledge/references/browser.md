@@ -103,6 +103,38 @@ Limits of the managed browser:
 - Operating rules (snapshots, `act`, the `page` field, `webmcp`): the `browser`
   tool description and the `browser-guidance` skill.
 
+## Signing in to websites (the Fermix app's pane)
+
+On a Mac the owner keeps the website logins the agent may use in the Fermix
+app, under Settings > Browser > Website logins: one login per site, a site and
+a username with a password the app keeps in the Mac's keychain, in a part only
+the signed Fermix app can open. Fermix never shows a saved password, and
+neither the engine nor the agent ever holds one: the app types it into the
+page itself.
+
+To sign in, the agent snapshots the login form and calls `act` with
+`kind: "sign_in"`, the page's `site` and the form's `username_ref` and
+`password_ref`. The engine asks the app which saved login fits the page, then,
+before a password is typed, asks the owner in their chat to approve signing in
+to that site as that username, and waits up to a minute for **Approve** or
+`/confirm` while nothing else of the turn runs; `/deny`, no answer or a stopped
+turn types nothing. A call that fills only the username (a site that asks for
+it first) is not asked about. The result names the site, the username and the
+fields filled; it does not submit the form.
+
+It works only in the Fermix app's own browser pane on a Mac with the app open,
+on an `https` page whose host is exactly the saved site (a leading `www.`
+aside), and only on the owner's own attended turn from their chat or the app:
+never by voice, from a shared channel, a delegated worker, a cue or a scheduled
+run, and never in Chrome (`fermix_chrome` included), the person's own tab or on
+Linux (`sign_in_pane_only`). When no login is saved for the page's host
+(`sign_in_no_login`), the agent tells the owner to add one for exactly that
+host in Settings > Browser > Website logins in the Fermix app on their Mac,
+and never asks for the password in the chat. A development build of the app
+has no login store (`sign_in_store_unavailable`), and an app too old to sign in
+answers `sign_in_app_too_old`. After a sign-in the pane stays signed in, as
+after the owner signs in there by hand.
+
 ## Launching Chrome on macOS
 
 Chrome starts through a small `disclaim` exec shim, so it is its own macOS

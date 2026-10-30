@@ -9,6 +9,7 @@ defmodule FermixCore.Browser do
   alias FermixCore.Browser.ProfileManager
   alias FermixCore.Browser.Routing
   alias FermixCore.Browser.Scope
+  alias FermixCore.Browser.SignIn
   alias FermixCore.Browser.TurnMarker
   alias FermixCore.Temporal.Access
 
@@ -18,7 +19,7 @@ defmodule FermixCore.Browser do
   # The `act` kinds — page interactions, reachable only as `act`'s `kind`. Listed
   # here so an unknown action that IS one can say so (see `action/1`); the kinds
   # themselves are validated in `validate_act_args/2`.
-  @act_kinds ~w(click fill type submit press hover get wait click_coords fill_form)
+  @act_kinds ~w(click fill type submit press hover get wait click_coords fill_form sign_in)
   # Requests that CHANGE something — the page, the browser, or a server on the
   # far side of it. `ProfileManager` re-sends a request whose server died, which
   # for these is a second click, a second upload, a second tool call; the list
@@ -141,18 +142,30 @@ defmodule FermixCore.Browser do
   end
 
   defp dispatch_profile(action, args, context, owner, profile_name, profile, config) do
-    request = %{
-      action: action,
-      args: args,
-      context: context,
-      mutating: mutating?(action, args)
-    }
-
     {profile, backend} = Routing.for_request(owner, profile_name, profile, config, context)
+    route = &routed(owner, profile_name, profile, config, &1)
 
-    case ProfileManager.dispatch(owner, profile_name, profile, config, request) do
+    case run(action, args, context, profile.mode, route) do
       {:ok, result} -> {{:ok, encode(result)}, backend}
       {:error, %Error{} = error} -> {{:error, error}, backend}
+    end
+  end
+
+  # A sign-in is two requests with the owner's answer between them
+  # (`SignIn`); every other call is one request.
+  defp run("act", %{"kind" => "sign_in"} = args, context, mode, route),
+    do: SignIn.run(args, context, mode, route)
+
+  defp run(action, args, context, _mode, route) do
+    route.(%{action: action, args: args, context: context, mutating: mutating?(action, args)})
+  end
+
+  # The turn's lost pane answers here too, since a sign-in's second request
+  # comes after the owner's answer, and the pane may have gone meanwhile.
+  defp routed(owner, profile_name, profile, config, request) do
+    case TurnMarker.lookup(owner, self()) do
+      %Error{} = lost -> {:error, lost}
+      nil -> ProfileManager.dispatch(owner, profile_name, profile, config, request)
     end
   end
 
@@ -179,7 +192,7 @@ defmodule FermixCore.Browser do
        "invalid_action",
        "Invalid action: #{action}. Valid actions: #{Enum.join(@actions, ", ")}. " <>
          "Page interactions (click, fill, fill_form, type, submit, press, hover, wait, get, " <>
-         "click_coords) go through `act` as its `kind`."
+         "click_coords, sign_in) go through `act` as its `kind`."
      )}
   end
 
@@ -356,6 +369,10 @@ defmodule FermixCore.Browser do
     do: require_string(args, "selector", "get field=rect")
 
   defp validate_act_args("get", _args), do: :ok
+
+  # The site and the refs are checked here, before anything is asked of a
+  # browser or the owner (`SignIn.validate/1`).
+  defp validate_act_args("sign_in", args), do: SignIn.validate(args)
 
   defp validate_act_args(kind, _args),
     do: {:error, Error.new("invalid_action", "Invalid act kind: #{kind}")}

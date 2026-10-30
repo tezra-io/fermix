@@ -1,4 +1,4 @@
-{"type":"server_hello","min_version":1,"max_version":1}
+{"type":"server_hello","min_version":1,"max_version":2}
 {"id":1,"type":"tab.open","task_id":"task-9f2c1a7e4b0d","url":"https://example.com/","visible":true,"observe":true,"snapshot":{"mode":"interactive","max_chars":50000,"depth":5},"download_dir":"/Users/person/.fermix/workspace/browser/downloads/0bqP3d","task_tab_cap":10,"tab_cap":60}
 {"id":2,"type":"tab.open","task_id":"task-9f2c1a7e4b0d","url":"https://example.com/report.pdf","observe":false,"download_dir":"/Users/person/.fermix/workspace/browser/downloads/0bqP3d","task_tab_cap":10,"tab_cap":60}
 {"id":3,"type":"tab.navigate","tab_id":"t1","url":"https://example.com/login","observe":true,"snapshot":{"mode":"interactive","max_chars":50000,"depth":5}}
@@ -26,6 +26,9 @@
 {"id":25,"type":"task.release","task_id":"task-9f2c1a7e4b0d"}
 {"id":26,"type":"host.stop_ack"}
 {"id":27,"type":"page.act","tab_id":"t1","kind":"wait","wait_until":"element","ref":13,"timeout_ms":5000,"observe":false}
+{"id":28,"type":"page.login_for","tab_id":"t1","site":"example.com"}
+{"id":29,"type":"page.sign_in","tab_id":"t1","site":"example.com","login_site":"example.com","username_ref":11,"password_ref":12,"observe":false}
+{"id":30,"type":"page.sign_in","tab_id":"t1","site":"www.example.com","login_site":"example.com","username_ref":11,"observe":true,"snapshot":{"mode":"interactive","max_chars":50000,"depth":5}}
 {"type":"error","reason":"invalid_json"}
 {"type":"error","reason":"invalid_frame"}
 {"type":"error","reason":"missing_type"}
@@ -38,5 +41,5 @@
 {"type":"error","reason":"missing_field","field":"protocol_version"}
 {"type":"error","reason":"invalid_field","field":"available"}
 {"type":"error","reason":"unknown_event","event":"tab.moved"}
-{"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":2,"min_version":1,"max_version":1}
+{"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":3,"min_version":1,"max_version":2}
 {"type":"error","reason":"untrusted_host","message":"the browser host must be a process the daemon did not start: a process placed as daemon_descendant"}

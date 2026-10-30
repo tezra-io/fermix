@@ -8,6 +8,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The agent signs in to websites with logins you save in the Mac app.**
+  Save a site, a username and a password in Settings > Browser > Website
+  logins in the Fermix app, and the agent can sign in there from the app's own
+  browser: it asks Fermix to fill the sign-in form, and Fermix asks you first
+  whenever a password is about to be typed, naming the site and the account,
+  on the chat, the Mac app or your phone. Filling only the username on a
+  two-step sign-in page does not ask, so such a site takes one tap. A login
+  fills only its own site (`www.` aside), never a page on another host. The
+  password stays in the Mac app and the page: it never reaches the engine,
+  the model, a trace or a log. Only your own chat or the app can ask for a
+  sign-in, never a delegated worker, a cue, a scheduled job, a shared channel
+  or a voice call. Mac only, in the app's browser; the managed Chrome and
+  Linux come later.
 - **A link in the chat shows its site's icon.** A link preview now carries
   the site's icon beside the page's picture, read from the page's own head
   (its PNG icon nearest 64 px, else its Apple touch icon, else another icon
@@ -104,6 +117,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **Commands the agent runs can no longer read the Mac app's browser
+  data.** The cookies, storage and caches of the browser in the Fermix app
+  (under `~/Library/WebKit`, `HTTPStorages`, `Caches` and `Cookies` for the
+  app) are now refused to the agent's commands in every sandbox mode and to
+  its file tools, as the managed Chrome's profile already was, so a site you
+  are signed in to there cannot be read from disk.
+- **Denying an approval drops it.** `/deny`, a Deny button or the app's card
+  now also discards the approval Fermix was holding, where before it only
+  cleared the chat's token and the held approval lived out its minute.
 - **Pausing a watcher, or taking a source off it, no longer lets an item
   through.** A stream item whose filter call was still running when you paused
   a watcher, or took the stream off its sources, could still pass and wake the

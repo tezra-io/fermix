@@ -49,13 +49,25 @@ The protocol is versioned by a single integer, `protocol_version`. The daemon
 advertises the inclusive range `{min_version, max_version}` it accepts, an
 **N/N-1 window**: `max_version` is the current version and `min_version` the
 previous one (or the same value while only one version exists — version 1's
-window is 1 to 1).
+window was 1 to 1).
 
 | Field | Value |
 |---|---|
-| `protocol_version` (the app declares) | `1` |
+| `protocol_version` (the app declares) | `2` |
 | daemon `min_version` | `1` |
-| daemon `max_version` | `1` |
+| daemon `max_version` | `2` |
+
+Protocol 1 is unchanged inside protocol 2. Version 2 adds the two sign-in
+requests (`page.login_for`, `page.sign_in`) and seven host error reasons
+(`sign_in_insecure_page`, `sign_in_wrong_site`, `sign_in_no_login`,
+`sign_in_field`, `sign_in_page_moved`, `sign_in_store_unavailable`,
+`secret_on_screen`), and nothing else. The daemon remembers the version the
+app declared for the life of its connection and hands it to every pane task
+with the attach. **An app that declared `1` never receives either sign-in
+request:** the engine answers the model itself (`sign_in_app_too_old`) before
+anything is sent, and the connection refuses to write one to it all the same.
+Each request def in `protocol.schema.json` that needs version 2 says so in
+`x-since`.
 
 ## Handshake and attach
 
@@ -137,6 +149,8 @@ its window for it; absent for a task that runs unseen.
 | `cookies.clear` | `tab_id` | `cleared` | Count of cookies removed for the tab's page. |
 | `host.status` | — | `host_version`, `profile_id`, `available`, `task_tabs`, `person_tabs` | A snapshot of the host's own counters. |
 | `host.stop_ack` | — | `{}` | The daemon's answer to the app's `host_stopping`, sent behind every `task.release` the daemon issued for it. |
+| `page.login_for` | `tab_id`, `site` | `login_site`, `username` | Protocol 2. Which saved login fits the tab's page, by its attributes alone; no secret is read. See *Signing in*. |
+| `page.sign_in` | `tab_id`, `site`, `login_site`, `observe`; `username_ref?`, `password_ref?` (at least one), `snapshot?` | `url`, `title`, `filled`; `page?` | Protocol 2. Types the saved login into the form after the owner approved. See *Signing in*. |
 
 `page.act`'s `kind` is one of: `click`, `fill`, `fill_form`, `type`, `submit`,
 `press`, `hover`, `get`, `wait`, `click_coords`. `click`, `hover` and `submit`
@@ -151,6 +165,55 @@ A navigation or an act's result carries `page: "changed"` with a fresh
 `snapshot` when the app judges the page restructured, `page: "unchanged"`
 when an identical look was taken and found no different text, or no `page`
 key when `observe` was `false`.
+
+## Signing in (protocol 2)
+
+A sign-in is two requests on a tab the task owns, with the owner's answer
+between them, which the daemon gets in the chat while the tool call waits. No
+message on this wire ever carries a password; no `sign_in_*` error message
+carries a username either.
+
+**Sites.** `site` is the host of the page in front of the model, as the
+engine canonicalised it: lower-case, in `a-z 0-9 . - _`, at most 253
+characters, never an address literal, `localhost` or a dotless name. A site's
+*key* is that host with a trailing dot trimmed and one leading `www.` removed;
+a login is saved under its key, and `login_site` is always a key. The app
+compares `key(site)` with the key of the tab's top-level host, so `github.com`
+written on `www.github.com` is the same site. A page matches a login exactly
+when `key(page host) == login_site`: no subdomain match, one login per key.
+
+**`page.login_for {tab_id, site}`** answers in milliseconds:
+
+1. The tab's top URL is `https`, or `sign_in_insecure_page`.
+2. `key(site) == key(top host)`, or `sign_in_wrong_site`.
+3. The saved login for `key(top host)`, or `sign_in_no_login`.
+4. It answers `{login_site, username}` from the login's attributes. The
+   answer is closed: any other key is refused. `username` is 1 to 1,024
+   characters.
+
+**`page.sign_in {tab_id, site, login_site, observe, username_ref?,
+password_ref?, snapshot?}`**, after the owner's yes (a call with
+`username_ref` alone is not asked about):
+
+1. Steps 1 and 2 of `page.login_for` again.
+2. The top origin, a field's document origin, and the matching login must be
+   what they were at `page.login_for`: the login found must still be
+   `login_site`'s, or `sign_in_page_moved`.
+3. The refs resolve (`stale_ref`). `password_ref` names an
+   `<input type="password">`, `username_ref` an `<input>` of type `text`,
+   `email`, `tel` or none; both, when given, are in one document; each field
+   takes focus and keeps it. Otherwise `sign_in_field`, naming the ref, and
+   nothing is typed.
+4. Only with `password_ref` is the keychain's secret read, bounded at 5
+   seconds (`sign_in_store_unavailable`, whose message names the `OSStatus`,
+   or says this build has no store).
+5. One fill, username first. It answers `{url, title, filled}`: `filled` is
+   what it typed, in that order (`["username"]`, `["password"]` or
+   `["username", "password"]`), with `page` as `page.act` carries it when
+   `observe` is true. The answer is closed: no `value`, no username.
+
+Once a password is filled, `page.screenshot` and `page.pdf` answer
+`secret_on_screen` while it shows as text on the page.
 
 ## Events (app → daemon)
 
@@ -190,6 +253,13 @@ and never close the connection by themselves.
 | `upload_failed` | the ref is not a file input, or the OS refused the write | no |
 | `invalid_request` | the request's fields do not fit its `kind` (e.g. `fill_form` naming an unknown ref) | no |
 | `host_unavailable` | the pane cannot take work right now | **yes** — `HostServer` reaps the profile with `host_lost` |
+| `sign_in_insecure_page` | protocol 2: the tab's top URL is not `https` | no |
+| `sign_in_wrong_site` | protocol 2: `key(site)` is not the key of the tab's top host | no |
+| `sign_in_no_login` | protocol 2: no saved login for the key of the tab's top host | no |
+| `sign_in_field` | protocol 2: a ref of the wrong element or type, the two fields in different documents, or a field that will not take or keep focus | no |
+| `sign_in_page_moved` | protocol 2: between `page.login_for` and `page.sign_in`, the top origin, a field's document origin or the matching login changed | no |
+| `sign_in_store_unavailable` | protocol 2: the keychain did not answer within 5 seconds, refused (the message names the `OSStatus`), or this build has no store | no |
+| `secret_on_screen` | protocol 2: `page.screenshot` or `page.pdf` while a filled password shows as text | no |
 
 **Daemon errors** are the daemon's own `error` frame; every one closes the
 connection, which fails every task bound to it.
@@ -216,8 +286,8 @@ connection, which fails every task bound to it.
 ### A task on the host
 
 ```
-app -> daemon:  client_hello { protocol_version: 1 }
-daemon -> app:  server_hello { min_version: 1, max_version: 1 }
+app -> daemon:  client_hello { protocol_version: 2 }
+daemon -> app:  server_hello { min_version: 1, max_version: 2 }
 app -> daemon:  attached { host_version: "0.2.0", profile_id: "fermix-web-3c9a" }
 app -> daemon:  availability { available: true }
 daemon -> app:  { id: 1, type: "tab.open", task_id: "task-1", url, visible: true, observe: true, snapshot, download_dir, task_tab_cap, tab_cap }
@@ -227,6 +297,25 @@ app -> daemon:  { id: 2, ok: true, result: { url, title, page: "changed", snapsh
 daemon -> app:  { id: 3, type: "task.release", task_id: "task-1" }
 app -> daemon:  { id: 3, ok: true, result: { released: ["t1"] } }
 ```
+
+### A sign-in
+
+```
+daemon -> app:  { id: 9, type: "page.snapshot", tab_id: "t1", mode: "interactive", ... }
+app -> daemon:  { id: 9, ok: true, result: { url: "https://example.com/login", ..., nodes } }
+daemon -> app:  { id: 10, type: "page.login_for", tab_id: "t1", site: "example.com" }
+app -> daemon:  { id: 10, ok: true, result: { login_site: "example.com", username: "person@example.com" } }
+daemon:         asks the owner in the chat, "Sign in to example.com as
+                person@example.com?", and waits up to 60 seconds; no
+                request for this task is sent while it waits
+daemon -> app:  { id: 11, type: "page.sign_in", tab_id: "t1", site: "example.com",
+                  login_site: "example.com", username_ref: 11, password_ref: 12,
+                  observe: true, snapshot }
+app -> daemon:  { id: 11, ok: true, result: { url, title, filled: ["username", "password"], page } }
+```
+
+A denial, no answer in 60 seconds, or the turn stopped while it waits sends no
+`page.sign_in` at all. An app that declared protocol 1 is sent neither request.
 
 ### A lock mid-task
 
@@ -303,8 +392,8 @@ daemon:         HostLauncher.launch/1 runs `open -g -j -b <bundle id> --args --b
                 and records the deadline (HostAvailability.launching/2) before
                 the app can possibly attach
 app -> daemon:  connect socket
-app -> daemon:  client_hello { protocol_version: 1 }
-daemon -> app:  server_hello { min_version: 1, max_version: 1 }
+app -> daemon:  client_hello { protocol_version: 2 }
+daemon -> app:  server_hello { min_version: 1, max_version: 2 }
 app -> daemon:  attached { host_version, profile_id }
 app -> daemon:  availability { available: true }
 daemon:         the waiting task is decided :fermix_app

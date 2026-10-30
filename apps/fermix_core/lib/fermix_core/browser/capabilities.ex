@@ -17,6 +17,12 @@ defmodule FermixCore.Browser.Capabilities do
 
   alias FermixCore.Browser.Error
 
+  @pane_only "Signing in with a saved login works only in the Fermix app's own browser, on " <>
+               "the Mac with the app open, and this page is in another browser. With the " <>
+               "Fermix app open, open the page with the default profile (after `stop` if this " <>
+               "task already runs in Chrome), check that `backend` is `fermix_app`, and sign " <>
+               "in there. Never ask the owner for the password instead."
+
   @type capability ::
           :download_redirect
           | :target_discovery
@@ -28,12 +34,15 @@ defmodule FermixCore.Browser.Capabilities do
           | :cookies
           | :downloads
           | :webmcp
+          | :sign_in
 
   @type t :: %{capability() => boolean()}
 
   # `tab_cap` is whether Fermix owns this browser's tabs and so may close the
   # oldest of them back to `max_tabs` after an `open`: the browser it launched,
-  # never one somebody else started.
+  # never one somebody else started. `sign_in` is whether a login the owner
+  # saved can be typed here: the logins live in the Fermix Mac app and only its
+  # own pane types them, so every Chrome answers false.
   @managed %{
     download_redirect: true,
     target_discovery: true,
@@ -44,7 +53,8 @@ defmodule FermixCore.Browser.Capabilities do
     focus_tab: true,
     cookies: true,
     downloads: true,
-    webmcp: true
+    webmcp: true,
+    sign_in: false
   }
 
   @attached_browser %{@managed | tab_cap: false}
@@ -59,7 +69,8 @@ defmodule FermixCore.Browser.Capabilities do
     focus_tab: false,
     cookies: false,
     downloads: false,
-    webmcp: true
+    webmcp: true,
+    sign_in: false
   }
 
   # The Fermix app's own browser pane, driven over the app's local wire: the
@@ -70,7 +81,9 @@ defmodule FermixCore.Browser.Capabilities do
   # wire has no cancel, so a download could be vetted neither by its source nor
   # by its size as Chrome's are, and the app refuses every one. Nothing lands
   # in the workspace, so nothing is redirected there; `tab.open` still names
-  # the downloads directory only because that wire requires the field.
+  # the downloads directory only because that wire requires the field. It is
+  # the one browser that signs in: the app holds the logins and types them on
+  # host protocol 2 (`Browser.SignIn`).
   @fermix_app %{
     download_redirect: false,
     target_discovery: true,
@@ -81,7 +94,8 @@ defmodule FermixCore.Browser.Capabilities do
     focus_tab: true,
     cookies: true,
     downloads: false,
-    webmcp: false
+    webmcp: false,
+    sign_in: true
   }
 
   @doc """
@@ -109,9 +123,14 @@ defmodule FermixCore.Browser.Capabilities do
   One code per mode, because the cause is always the same — the model asked a
   granted tab to do something browser-wide, or the app's pane for something its
   wire does not carry — and one sentence per capability, because the next move
-  is not.
+  is not. A sign-in is refused alike in every mode that cannot do it, because
+  its one next move is the same everywhere: the app's own pane.
   """
   @spec refuse(atom(), capability()) :: {:error, Error.t()}
+  def refuse(mode, :sign_in) when is_atom(mode) and mode != :fermix_app do
+    {:error, Error.new("sign_in_pane_only", @pane_only)}
+  end
+
   def refuse(:attached_tab, capability) when is_atom(capability) do
     {:error, Error.new("unsupported_in_attached_tab", sentence(capability))}
   end

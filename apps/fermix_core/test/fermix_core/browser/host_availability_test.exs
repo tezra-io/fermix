@@ -33,7 +33,7 @@ defmodule FermixCore.Browser.HostAvailabilityTest do
     host = start_host()
     :ok = HostAvailability.listening(host, process())
     connection = process()
-    :ok = HostAvailability.attached(host, connection, 1)
+    :ok = HostAvailability.attached(host, connection, 1, 2)
 
     attached = HostAvailability.current(host)
     assert attached.attached
@@ -53,7 +53,7 @@ defmodule FermixCore.Browser.HostAvailabilityTest do
   test "a report that the pane is unavailable carries the host's reason" do
     host = start_host()
     :ok = HostAvailability.listening(host, process())
-    :ok = HostAvailability.attached(host, process(), 1)
+    :ok = HostAvailability.attached(host, process(), 1, 2)
     :ok = HostAvailability.report(host, false, "the pane is closed")
 
     current = HostAvailability.current(host)
@@ -65,7 +65,7 @@ defmodule FermixCore.Browser.HostAvailabilityTest do
     host = start_host()
     :ok = HostAvailability.listening(host, process())
     connection = process()
-    :ok = HostAvailability.attached(host, connection, 1)
+    :ok = HostAvailability.attached(host, connection, 1, 2)
     :ok = HostAvailability.report(host, true, nil)
 
     :ok = HostAvailability.stopping(host, connection)
@@ -89,7 +89,7 @@ defmodule FermixCore.Browser.HostAvailabilityTest do
     host = start_host()
     :ok = HostAvailability.listening(host, process())
     connection = process()
-    :ok = HostAvailability.attached(host, connection, 1)
+    :ok = HostAvailability.attached(host, connection, 1, 2)
     :ok = HostAvailability.report(host, true, nil)
 
     :ok = HostAvailability.stopping(host, process())
@@ -103,12 +103,12 @@ defmodule FermixCore.Browser.HostAvailabilityTest do
     host = start_host()
     :ok = HostAvailability.listening(host, process())
     first = process()
-    :ok = HostAvailability.attached(host, first, 1)
+    :ok = HostAvailability.attached(host, first, 1, 2)
     :ok = HostAvailability.report(host, true, nil)
     :ok = HostAvailability.stopping(host, first)
 
     second = process()
-    :ok = HostAvailability.attached(host, second, 2)
+    :ok = HostAvailability.attached(host, second, 2, 2)
 
     fresh = HostAvailability.current(host)
     refute HostAvailability.usable?(fresh)
@@ -124,7 +124,7 @@ defmodule FermixCore.Browser.HostAvailabilityTest do
     :ok = HostAvailability.listening(host, process())
     connection = process()
     ref = Process.monitor(connection)
-    :ok = HostAvailability.attached(host, connection, 1)
+    :ok = HostAvailability.attached(host, connection, 1, 2)
     :ok = HostAvailability.report(host, true, nil)
 
     Process.exit(connection, :kill)
@@ -139,7 +139,7 @@ defmodule FermixCore.Browser.HostAvailabilityTest do
     host = start_host()
     :ok = HostAvailability.listening(host, process())
     connection = process()
-    :ok = HostAvailability.attached(host, connection, 1)
+    :ok = HostAvailability.attached(host, connection, 1, 2)
     :ok = HostAvailability.report(host, true, nil)
     :ok = HostAvailability.stopping(host, connection)
 
@@ -154,7 +154,7 @@ defmodule FermixCore.Browser.HostAvailabilityTest do
     host = start_host()
     endpoint = process()
     :ok = HostAvailability.listening(host, endpoint)
-    :ok = HostAvailability.attached(host, process(), 1)
+    :ok = HostAvailability.attached(host, process(), 1, 2)
     :ok = HostAvailability.report(host, true, nil)
 
     Process.exit(endpoint, :kill)
@@ -169,14 +169,14 @@ defmodule FermixCore.Browser.HostAvailabilityTest do
 
     assert HostAvailability.current(host).launch_until == 5_000
 
-    :ok = HostAvailability.attached(host, process(), 1)
+    :ok = HostAvailability.attached(host, process(), 1, 2)
     assert is_nil(HostAvailability.current(host).launch_until)
   end
 
   test "a host's reason is bounded" do
     host = start_host()
     :ok = HostAvailability.listening(host, process())
-    :ok = HostAvailability.attached(host, process(), 1)
+    :ok = HostAvailability.attached(host, process(), 1, 2)
     :ok = HostAvailability.report(host, false, String.duplicate("x", 5_000))
 
     assert String.length(HostAvailability.unavailable_reason(HostAvailability.current(host))) ==

@@ -47,6 +47,18 @@ defmodule FermixCore.Browser.HostServer do
   releases its tabs the same way `task.release` does; the task ends exactly as
   a lost pane ends it, except the sentence is its own (`cancelled`, not
   `host_lost`), because nothing about the pane was actually lost.
+
+  ## Signing in
+
+  On host protocol 2 the task answers the two halves of a sign-in
+  (`Browser.SignIn` asks the owner between them, in the tool call's process):
+  `login_for/3` sends `page.login_for` and answers the saved login's site and
+  username, and `sign_in/3` sends `page.sign_in` with the snapshot's refs
+  turned into the app's and answers which fields were filled. The task
+  records the version its connection declared when it binds; on an app that
+  declared 1 both answer `sign_in_app_too_old` and nothing is sent. No
+  password crosses this wire: the app reads it from its keychain and types it
+  itself.
   """
 
   @behaviour FermixCore.Browser.Backend
@@ -61,6 +73,7 @@ defmodule FermixCore.Browser.HostServer do
   alias FermixCore.Browser.TurnMarker
   alias FermixCore.Browser.Upload
   alias FermixCore.BrowserHost.Link
+  alias FermixCore.BrowserHost.Protocol
   alias FermixCore.Net.Guard
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Trace
@@ -73,6 +86,10 @@ defmodule FermixCore.Browser.HostServer do
   @reason_chars 200
 
   @cancelled_sentence "The person cancelled the browser task in the Fermix app."
+
+  # The app bounds its one keychain read at five seconds (browser_host protocol
+  # 2), and `page.sign_in` waits for it on top of the fill.
+  @keychain_bound_ms 5_000
 
   @stale_ref "Element ref is stale or unknown. Refs belong to the snapshot they came from, and " <>
                "the page has changed since. Take a fresh `snapshot` and use a ref from it."
@@ -385,6 +402,43 @@ defmodule FermixCore.Browser.HostServer do
   def act(_args, _context, state),
     do: {:error, Error.new("missing_arg", "act requires kind"), state}
 
+  @impl true
+  def login_for(args, context, state) do
+    operate(context, state, fn state ->
+      with :ok <- signs_in(state),
+           {:ok, tab} <- resolve_tab(args["target"], state),
+           :ok <- undialogged(tab, state),
+           payload = %{"tab_id" => tab.wire, "site" => args["site"]},
+           {:ok, login, state} <-
+             state
+             |> request("page.login_for", payload, action_timeout(state))
+             |> no_login_names(args["site"]) do
+        {:ok, Map.put(login, "target", tab.id), state}
+      end
+    end)
+  end
+
+  @impl true
+  def sign_in(args, context, state) do
+    operate(context, state, fn state ->
+      with :ok <- signs_in(state),
+           {:ok, tab} <- resolve_tab(args["target"], state),
+           :ok <- undialogged(tab, state),
+           {:ok, refs} <- sign_in_refs(args, tab, state) do
+        mark = Map.get(state.observations, tab.id)
+
+        payload =
+          %{"tab_id" => tab.wire, "site" => args["site"], "login_site" => args["login_site"]}
+          |> Map.merge(refs)
+          |> observe_fields(not is_nil(mark), mark && mark.opts)
+
+        state
+        |> request("page.sign_in", payload, sign_in_timeout(mark, state.config))
+        |> signed_in(tab, mark)
+      end
+    end)
+  end
+
   # ── the task ───────────────────────────────────────────────────────────────
 
   # Every check and request answers with the state it was made with, so a
@@ -410,6 +464,7 @@ defmodule FermixCore.Browser.HostServer do
         agent: Map.get(context, :agent_name, "browser"),
         connection: host.connection,
         connection_id: host.connection_id,
+        protocol_version: host.protocol_version,
         connection_ref: Process.monitor(host.connection),
         caller: caller,
         caller_ref: Process.monitor(caller)
@@ -516,6 +571,38 @@ defmodule FermixCore.Browser.HostServer do
     "That tab belongs to the person, not to this task, so it is not mine to drive."
   end
 
+  defp host_sentence("sign_in_insecure_page", _message) do
+    "This page is not served over https, so Fermix does not sign in to it, and nothing " <>
+      "was typed."
+  end
+
+  defp host_sentence("sign_in_wrong_site", _message) do
+    "The page in the tab is not on the site this sign-in named, so nothing was typed. Take " <>
+      "a snapshot, read the page's address, and call `sign_in` again with that host as `site`."
+  end
+
+  defp host_sentence("sign_in_field", message) do
+    "The Fermix app would not type into those fields (#{message}), so nothing was typed. " <>
+      "`password_ref` must be the form's password input and `username_ref` its text, email " <>
+      "or phone input, both from the latest snapshot of the page."
+  end
+
+  defp host_sentence("sign_in_page_moved", _message) do
+    "The page changed between finding the login and typing it (another address, or another " <>
+      "saved login), so nothing was typed. Take a snapshot and call `sign_in` again."
+  end
+
+  defp host_sentence("sign_in_store_unavailable", message) do
+    "The Fermix app could not read the saved login from the Mac's keychain (#{message}), so " <>
+      "nothing was typed. Website logins need the released Fermix app open on the Mac; tell " <>
+      "the owner what the keychain said."
+  end
+
+  defp host_sentence("secret_on_screen", _message) do
+    "A password Fermix filled shows as text on this page, so the capture was not taken. Do " <>
+      "not reveal a password field; capture the page once the password no longer shows."
+  end
+
   defp host_sentence(_reason, message),
     do: "The Fermix app's browser could not do that: #{message}"
 
@@ -531,6 +618,13 @@ defmodule FermixCore.Browser.HostServer do
 
   defp navigation_timeout(config),
     do: config.navigation_timeout_ms + Config.act_limits().navigation_budget_ms
+
+  # The fill waits on the app's keychain read, and an observed one on the look
+  # after it, as an observed act does.
+  defp sign_in_timeout(nil, config), do: config.action_timeout_ms + @keychain_bound_ms
+
+  defp sign_in_timeout(_mark, config),
+    do: config.action_timeout_ms + @keychain_bound_ms + Config.act_limits().settle_budget_ms
 
   defp act_timeout(%{"timeout_ms" => wait_ms}, _mark, config),
     do: wait_ms + config.action_timeout_ms
@@ -966,6 +1060,64 @@ defmodule FermixCore.Browser.HostServer do
 
   defp act_receipt(_kind, _result, receipt, _tab, _mark, state),
     do: {:ok, Map.put(receipt, "page", "unobserved"), state}
+
+  # ── signing in ─────────────────────────────────────────────────────────────
+
+  # Both requests are protocol 2's; an app that declared less is never sent
+  # either, and the model is told why in the owner's terms.
+  defp signs_in(%{task: %{protocol_version: version}} = state) do
+    if version >= Protocol.request_since("page.sign_in") do
+      :ok
+    else
+      {:error,
+       Error.new(
+         "sign_in_app_too_old",
+         "The Fermix app on this Mac is too old to sign in to websites, so nothing was " <>
+           "typed. Tell the owner to update the Fermix app, then ask again."
+       ), state}
+    end
+  end
+
+  # The one sentence that names the page's host, which the app's answer does
+  # not carry and the call's own `site` does.
+  defp no_login_names({:error, %Error{code: "sign_in_no_login"} = error, state}, site) do
+    message =
+      "No login is saved in the Fermix app for #{site}, so nothing was typed. Tell the " <>
+        "owner they can add one for exactly #{site} in Settings > Browser > Website logins " <>
+        "in the Fermix app on their Mac, then ask again. Never ask the owner for the " <>
+        "password in the chat."
+
+    {:error, %{error | message: message}, state}
+  end
+
+  defp no_login_names(answer, _site), do: answer
+
+  # The snapshot's refs the call names, as the app's own element refs.
+  defp sign_in_refs(args, tab, state) do
+    ~w(username_ref password_ref)
+    |> Enum.filter(&is_binary(args[&1]))
+    |> Enum.reduce_while({:ok, %{}}, fn field, {:ok, refs} ->
+      case element_ref(tab, args[field], state) do
+        {:ok, host_ref} -> {:cont, {:ok, Map.put(refs, field, host_ref)}}
+        failure -> {:halt, failure}
+      end
+    end)
+  end
+
+  defp signed_in({:ok, result, state}, tab, mark) do
+    state = put_page(state, tab.id, result)
+
+    receipt = %{
+      "ok" => true,
+      "target" => tab.id,
+      "action" => "sign_in",
+      "filled" => result["filled"]
+    }
+
+    act_receipt("sign_in", result, receipt, tab, mark, state)
+  end
+
+  defp signed_in(failure, _tab, _mark), do: failure
 
   # ── artifacts and downloads ────────────────────────────────────────────────
 

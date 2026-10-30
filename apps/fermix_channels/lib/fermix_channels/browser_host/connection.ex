@@ -12,7 +12,8 @@ defmodule FermixChannels.BrowserHost.Connection do
   ## The wire
 
   The app says `client_hello`, is answered `server_hello`, then says
-  `attached`; only then is it the host (`HostAvailability.attached/3`). From
+  `attached`; only then is it the host (`HostAvailability.attached/4`, which
+  carries the protocol version the handshake negotiated to every pane task). From
   there the daemon asks and the app answers: a pane task's request
   (`FermixCore.BrowserHost.Link`) is written with the next `id` of this
   connection, and the answer carrying that id goes back to the task that asked.
@@ -79,6 +80,7 @@ defmodule FermixChannels.BrowserHost.Connection do
       host_availability: Keyword.get(opts, :host_availability, HostAvailability),
       buffer: "",
       version: nil,
+      withheld_requests: %{},
       attached: false,
       stopping: false,
       next_id: 1,
@@ -224,8 +226,15 @@ defmodule FermixChannels.BrowserHost.Connection do
     {min, max} = Protocol.supported_version_range()
 
     case send_frame("server_hello", %{"min_version" => min, "max_version" => max}, state) do
-      :ok -> {:cont, %{state | version: version}}
+      :ok -> {:cont, %{state | version: version, withheld_requests: withheld_requests(version)}}
       {:error, _reason} -> {:stop, state}
+    end
+  end
+
+  # The requests this app's version does not carry, fixed by its handshake.
+  defp withheld_requests(version) do
+    for type <- Protocol.requests(), Protocol.request_since(type) > version, into: %{} do
+      {type, true}
     end
   end
 
@@ -246,10 +255,17 @@ defmodule FermixChannels.BrowserHost.Connection do
 
   # From here the app is the host: its connection is what a pane task binds to.
   defp attach(payload, state) do
-    :ok = HostAvailability.attached(state.host_availability, self(), state.connection_id)
+    :ok =
+      HostAvailability.attached(
+        state.host_availability,
+        self(),
+        state.connection_id,
+        state.version
+      )
 
     trace("browser_host_attached", %{
       "connection" => state.connection_id,
+      "protocol_version" => state.version,
       "host_version" => payload["host_version"],
       "profile_id" => payload["profile_id"]
     })
@@ -340,6 +356,19 @@ defmodule FermixChannels.BrowserHost.Connection do
   defp task_request(pid, ref, _task_id, _type, _payload, state)
        when map_size(state.pending) >= @max_pending do
     Link.answer(pid, ref, {:error, unavailable("the app is not answering")})
+    {:cont, state}
+  end
+
+  # A request the app's declared version does not carry is never written: the
+  # pane task answers the model before it asks (`sign_in_app_too_old`), and
+  # this is the floor under that.
+  defp task_request(pid, ref, _task_id, type, _payload, state)
+       when is_map_key(state.withheld_requests, type) do
+    message =
+      "#{type} needs browser_host protocol #{Protocol.request_since(type)}, and the app " <>
+        "declared #{state.version}"
+
+    Link.answer(pid, ref, {:error, %{"reason" => "invalid_request", "message" => message}})
     {:cont, state}
   end
 

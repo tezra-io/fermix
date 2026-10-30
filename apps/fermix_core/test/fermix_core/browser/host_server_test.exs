@@ -61,7 +61,7 @@ defmodule FermixCore.Browser.HostServerTest do
     endpoint = spawn(fn -> Process.sleep(:infinity) end)
     on_exit(fn -> Process.exit(endpoint, :kill) end)
     :ok = HostAvailability.listening(host, endpoint)
-    :ok = HostAvailability.attached(host, connection, 1)
+    :ok = HostAvailability.attached(host, connection, 1, 2)
     :ok = HostAvailability.report(host, true, nil)
     {host, connection}
   end
@@ -417,7 +417,7 @@ defmodule FermixCore.Browser.HostServerTest do
       end)
 
     on_exit(fn -> Process.exit(connection, :kill) end)
-    :ok = HostAvailability.attached(host, connection, 1)
+    :ok = HostAvailability.attached(host, connection, 1, 2)
     :ok = HostAvailability.report(host, true, nil)
 
     pid = start_server(host_availability: host)
@@ -458,7 +458,7 @@ defmodule FermixCore.Browser.HostServerTest do
       end)
 
     on_exit(fn -> Process.exit(connection, :kill) end)
-    :ok = HostAvailability.attached(host, connection, 1)
+    :ok = HostAvailability.attached(host, connection, 1, 2)
     :ok = HostAvailability.report(host, true, nil)
 
     pid = start_server(host_availability: host)

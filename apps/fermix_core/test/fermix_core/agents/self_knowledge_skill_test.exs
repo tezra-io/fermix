@@ -631,6 +631,37 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     assert presentation =~ "iMessage"
   end
 
+  # Website sign-in (M84) is Mac-only and pane-only, and "can you log in for
+  # me?" is answered only if the agent knows where the owner adds a login and
+  # that it never asks for a password. Each string is a pane, a code, an
+  # argument or a boundary word, not a phrasing.
+  test "documents website sign-in: where logins are added, where it works, and no passwords" do
+    body = File.read!(self_knowledge_path())
+    reference = "browser" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    for required <- ["Settings > Browser > Website logins", "after the owner approves"] do
+      assert body =~ required, "the Web line does not mention #{required}"
+    end
+
+    for required <- [
+          "## Signing in to websites",
+          "Settings > Browser > Website logins",
+          ~s(`kind: "sign_in"`),
+          "`username_ref`",
+          "`password_ref`",
+          "keychain",
+          "only in the Fermix app's own browser pane",
+          "`sign_in_pane_only`",
+          "`sign_in_no_login`",
+          "exactly that host",
+          "never asks for the password in the chat",
+          "`sign_in_store_unavailable`",
+          "Linux"
+        ] do
+      assert reference =~ required, "browser reference does not mention #{required}"
+    end
+  end
+
   # Every build has cues, off until the owner turns them on, so the owner must
   # be told the switch and sent to the surfaces that really configure it:
   # settings for sources and mandates (the setup page's Cues tab, its Approve

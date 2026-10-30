@@ -331,7 +331,8 @@ defmodule FermixCore.Browser.AttachedTabTest do
     download_redirect: :not_an_action,
     target_discovery: :not_an_action,
     target_attach: :not_an_action,
-    tab_cap: :not_an_action
+    tab_cap: :not_an_action,
+    sign_in: {"login_for", %{"site" => "example.com"}}
   }
 
   test "every browser-wide capability the grant lacks refuses by name", ctx do
@@ -351,6 +352,13 @@ defmodule FermixCore.Browser.AttachedTabTest do
   end
 
   defp assert_capability_refusal(_pid, :not_an_action, _capability), do: :ok
+
+  # A sign-in's one next move is the app's own pane, in every browser that
+  # cannot do it, so its refusal is the same everywhere.
+  defp assert_capability_refusal(pid, {action, args}, :sign_in) do
+    assert {:error, %Error{code: "sign_in_pane_only", message: message}} = req(pid, action, args)
+    assert message =~ "only in the Fermix app's own browser"
+  end
 
   defp assert_capability_refusal(pid, {action, args}, capability) do
     result = req(pid, action, args)
