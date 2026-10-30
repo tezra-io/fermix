@@ -84,6 +84,10 @@ defmodule FermixChannels.Home.MoveEndToEndTest do
     opts = HomeMove.worker_opts(primary.root, candidate, connect: connect)
     :ok = Task.await(Task.async(fn -> MoveWorker.run(opts) end), 120_000)
 
+    # The worker records `committed`; the ending is the relaunched desktop's to
+    # say, at its boot.
+    assert {:ok, %{"phase" => "committed", "epoch" => 5}} = Move.read_phase(primary.root)
+    assert :ok = Move.finish_at_boot(primary.root, :device)
     assert {:ok, %{"phase" => "done", "epoch" => 5}} = Move.read_phase(primary.root)
     assert {:ok, %{to: "north-box"}} = Moved.read(primary.root)
     assert {:ok, %{role: :primary}} = Role.configured(candidate.home)
