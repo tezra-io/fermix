@@ -66,6 +66,12 @@
 (* what the host wrote before it closed is still read, then the :DOWN.     *)
 (*                                                                         *)
 (* Not modelled:                                                           *)
+(*  - page.login_for and page.sign_in (protocol 2): two requests on a      *)
+(*    tab the task owns, answered like page.act, with the owner's          *)
+(*    in-call wait (AccessGate.ask_in_call) between them in the caller,    *)
+(*    which holds no profile meanwhile; the negotiated protocol version    *)
+(*    and the two requests withheld from an app on 1 are single-call       *)
+(*    rules that ExUnit covers;                                            *)
 (*  - page.snapshot, page.screenshot, page.upload, dialog.resolve,         *)
 (*    cookies.*, host.status, tab.navigate, tab.list, tab.focus and        *)
 (*    tab.close: each is one request on a tab the task owns, answered like *)
@@ -104,18 +110,18 @@
 (* One step = one callback of the HostServer, one reducer step of the      *)
 (* host, or one thing the person, a page or the environment does.          *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser.ex#dispatch,dispatch_profile @ d5d1f1812173
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_server.ex#init,stop,handle_message,operate,ensure_task,bind,check_host,lose,lost_error,request,host_error,public_id @ 1b6599997033
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_availability.ex @ 5ea87b4f20e6
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser.ex#dispatch,dispatch_profile @ a36f07a4dd8b
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_server.ex#init,stop,handle_message,operate,ensure_task,bind,check_host,lose,lost_error,request,host_error,public_id @ d061b5027ca9
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_availability.ex @ fc61de7c765c
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_launcher.ex @ 927740e4c233
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/routing.ex @ 5d20a7d37936
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/turn_marker.ex @ 9e55937dc45a
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser_host/protocol.ex#listed_tab? @ 883cbc90b089
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser_host/link.ex @ 279273a16f24
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/connection.ex#attach,availability,host_stopping,task_request,bind_task,release_task,task_exited,write_request,cancel_task @ b174f6b006f9
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/connection.ex#attach,availability,host_stopping,task_request,bind_task,release_task,task_exited,write_request,cancel_task @ 03447d148ae1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/endpoint.ex @ 50e6a7f26529
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/supervisor.ex @ a91e3fe95333
-\* SOURCE: apps/fermix_core/priv/browser_host/PROTOCOL.md @ 7e1d5a85777e
+\* SOURCE: apps/fermix_core/priv/browser_host/PROTOCOL.md @ 2aec09784bfa
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS

@@ -278,6 +278,11 @@ more of an entity its rules are about. All still hold:
 
 ## Not modelled
 
+- `page.login_for` and `page.sign_in` (protocol 2): two requests on a tab the
+  task owns, answered like `page.act`, with the owner's in-call wait
+  (`AccessGate.ask_in_call/3`) between them in the caller, which holds no
+  profile meanwhile. The negotiated protocol version, and the two requests
+  withheld from an app on 1, are single-call rules that ExUnit covers.
 - `page.snapshot`, `page.screenshot`, `page.upload`, `dialog.resolve`,
   `cookies.*`, `host.status`, `tab.navigate`, `tab.list`, `tab.focus` and
   `tab.close`: each is one request on a tab the task owns, answered like
