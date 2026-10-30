@@ -89,7 +89,8 @@ defmodule FermixCore.Cues.Overview do
           name: String.t() | nil,
           mode: String.t(),
           approved?: boolean() | nil,
-          held: String.t() | nil
+          held: String.t() | nil,
+          paused?: boolean()
         }
 
   @type mandate_counts :: %{
@@ -277,7 +278,8 @@ defmodule FermixCore.Cues.Overview do
          name: job.name,
          mode: watcher.follow_up_mode,
          approved?: if(approval == :asks_first, do: nil, else: approval == :approved),
-         held: held_sentence(FollowUps.held(job, held_opts))
+         held: held_sentence(FollowUps.held(job, held_opts)),
+         paused?: Map.get(job, :enabled?) == false
        }}
     end
   end

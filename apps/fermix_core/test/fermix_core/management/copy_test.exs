@@ -897,7 +897,14 @@ defmodule FermixCore.Management.CopyTest do
   end
 
   defp follow_up_view(mode),
-    do: %{job_id: "job_2", name: "Codex review", mode: mode, approved?: nil, held: nil}
+    do: %{
+      job_id: "job_2",
+      name: "Codex review",
+      mode: mode,
+      approved?: nil,
+      held: nil,
+      paused?: false
+    }
 
   # Every sentence `Cues.FollowUpReadiness` and the hold can answer, walked out of
   # the check with every read a seam.

@@ -258,7 +258,7 @@ daemon onto anything else.
 | `cues.sources.disable` | `ref` | Turns a source off and answers `{source}`. Minimum version `2`. |
 | `cues.sources.token.new` | `ref` | A fresh token for a local push source, returned once, as `{ref, token}`. The old one stops working within a minute. Minimum version `2`. |
 | `cues.sources.url.get` | `ref` | A webhook source's address, `{ref, url, path}`: made on the first call and the same on every later one. Minimum version `2`. |
-| `cues.watchers.list` | none | Every watcher as a row, oldest first, at most 200, with `window_s` (86400) and `truncated`; a row carries its task and its follow-up, either of which may be null. Minimum version `2`. |
+| `cues.watchers.list` | none | Every watcher as a row, oldest first, at most 200, with `window_s` (86400) and `truncated`; a row carries its task (for a watcher with only a follow-up, that follow-up's job, so never null) and its follow-up (null when it has none). Minimum version `2`. |
 | `cues.watchers.get` | `name` | One watcher's row plus its `purpose`, its words to listen for (`listen_for`), its `instructions` and how many of its examples are marked each way. Minimum version `2`. |
 | `cues.mandates.list` | none | Every mandate as a row, at most 64, plus `can_add` and `limits` (`max_mandates`). Minimum version `2`. |
 | `cues.mandates.choices` | none | What a mandate form offers: the jobs that run on cues, each with the watcher that wakes it and the mandate that names it, and the installed, enabled `http` plugin tools. Minimum version `2`. |
@@ -1076,9 +1076,11 @@ Notes that the shapes alone do not carry:
   and `failed` are counted by the hour rather than stored. `purpose`,
   `listen_for` and `instructions` are the owner's own words and are on
   `cues.watchers.get` alone; examples are counted, never shown; reasons and
-  hints never cross. A watcher has a task, a follow-up or both: `task` is null
-  for one with only a follow-up, and `follow_up` is null for one with none,
-  else the job a passing item sets off, which Fermix hands nothing from the
+  hints never cross. A watcher has a task, a follow-up or both. `task` is the
+  job a passing item starts: its task, or for a watcher with only a follow-up,
+  that follow-up's job (then `follow_up.job_id` names the same job), so `task`
+  is never null and a client that predates follow-ups still reads every row.
+  `follow_up` is null for one with none, else the job a passing item sets off, which Fermix hands nothing from the
   item: its `job_id`, `name`, `mode` (`approve`, asking first on a card for
   each run, or `auto`, running on its own within the daily cap once approved),
   `approved` (whether an automatic one is approved for what it runs now; null
@@ -1086,8 +1088,7 @@ Notes that the shapes alone do not carry:
   "Let watchers act" is off, or a tool or the channel it needs is not set up)
   and `status_sentence`, which while it is held says what is missing and where
   to fix it. It is made and changed in chat like the rest. A daemon older than
-  follow-ups omits `follow_up`, which a client draws as no follow-up, and
-  there `task` is never null.
+  follow-ups omits `follow_up`, which a client draws as no follow-up.
 - **A mandate row carries its load and its approval.** `load` is `active`, or
   `inactive` with the check's sentence; `approval.state` is `unapproved`,
   `approved`, `changed` or `disabled`, null where memory is off. A client

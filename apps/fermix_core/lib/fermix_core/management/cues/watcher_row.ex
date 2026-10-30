@@ -13,8 +13,10 @@ defmodule FermixCore.Management.Cues.WatcherRow do
   are counted, never shown. Decision reasons and filter hints never cross: a
   model wrote them from outside text.
 
-  A watcher has a task, a follow-up or both (M60_WATCHER_CODING_RUNS.md §3.5):
-  `task` is null for one with none, and `follow_up` is null for one with no
+  A watcher has a task, a follow-up or both (M60_WATCHER_CODING_RUNS.md §3.5).
+  `task` is the job a passing item starts: its task, or for a watcher with only
+  a follow-up, that follow-up's job, so `task` is never null and an app that
+  predates follow-ups still reads every row. `follow_up` is null for one with no
   follow-up, else its job, name, `mode` (`approve` or `auto`), whether an
   automatic one is `approved` (null for one that asks first), `state` (`ready`,
   or `held` while it cannot run: the owner's switch is off, or a tool or the
@@ -129,7 +131,8 @@ defmodule FermixCore.Management.Cues.WatcherRow do
   defp sentence("on", %{filter: "none"}), do: "Passes every item to its task."
   defp sentence("on", _watcher), do: "Filtering normally."
 
-  defp task(%{task_job_id: nil}), do: nil
+  defp task(%{task_job_id: nil, follow_up: follow_up}),
+    do: %{"job_id" => follow_up.job_id, "name" => follow_up.name, "paused" => follow_up.paused?}
 
   defp task(watcher),
     do: %{

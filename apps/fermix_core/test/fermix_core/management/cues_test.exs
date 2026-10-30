@@ -1082,7 +1082,8 @@ defmodule FermixCore.Management.CuesTest do
       held = Keyword.put(opts, :follow_up_opts, plugins: fn -> {:ok, []} end)
 
       assert {:ok, %{"watchers" => [row]}} = Cues.watchers_list(held)
-      assert row["task"] == nil
+      # Never null: an app that predates follow-ups requires a task on every row.
+      assert row["task"] == %{"job_id" => job.id, "name" => "Deploy check", "paused" => false}
       assert row["status_sentence"] == "Passes every item to its follow-up."
 
       assert row["follow_up"] == %{

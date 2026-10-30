@@ -3789,35 +3789,28 @@
           }
         },
         "task": {
-          "description": "The job that runs on the cues it passes; null for a watcher with only a follow-up.",
-          "oneOf": [
-            {
-              "type": "object",
-              "required": [
-                "job_id",
-                "name",
-                "paused"
-              ],
-              "additionalProperties": false,
-              "properties": {
-                "job_id": {
-                  "type": "string"
-                },
-                "name": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "paused": {
-                  "type": "boolean"
-                }
-              }
+          "description": "The job a passing item starts: the watcher's task, or for a watcher with only a follow-up, its follow-up's job (then follow_up.job_id names the same job). Never null, so a client that predates follow-ups still reads every row.",
+          "type": "object",
+          "required": [
+            "job_id",
+            "name",
+            "paused"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "job_id": {
+              "type": "string"
             },
-            {
-              "type": "null"
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "paused": {
+              "type": "boolean"
             }
-          ]
+          }
         },
         "follow_up": {
           "description": "The job a passing item sets off, handed nothing from the item (read-only, made in chat); null for a watcher with none.",
