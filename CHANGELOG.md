@@ -194,6 +194,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   accounts form says whether you are signed in to X, and the fields read in
   plain words: Feed address, Accounts, Check every, Daily limit,
   Verification and Secret.
+- **The setup page's Cues tab shows what applies.** With nothing set up
+  it shows one card with the three steps and Add a source. Watchers appear
+  once there is a source or a watcher, and mandates once there is a watcher
+  or a mandate. Run cues, Let mandates act, the door's port, the Screen and
+  the filter model are one form with one Save, the Screen and the filter
+  model together under How watchers judge items. A value it refuses is said
+  under its field, and nothing in that Save is written.
 
 ### Removed
 

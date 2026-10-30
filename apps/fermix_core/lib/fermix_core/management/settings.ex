@@ -221,10 +221,12 @@ defmodule FermixCore.Management.Settings do
 
   # The browser writer checks the merged block before it writes and answers a
   # value it refuses in the browser's own sentence, which names the control the
-  # operator used exactly as a normalizer's raised message does.
+  # operator used exactly as a normalizer's raised message does. The cues
+  # writer names the row its refusal is about, which a multi-key write cannot.
   defp guarded_commit(writer, answers, field) do
     case commit(writer, answers) do
       {:error, {:invalid_value, sentence}} -> {:error, {:refused, field, sentence}}
+      {:error, {:invalid_value, row, sentence}} -> {:error, {:refused, row, sentence}}
       result -> result
     end
   rescue

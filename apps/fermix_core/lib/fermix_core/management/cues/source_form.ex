@@ -66,7 +66,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
     %{
       id: "local_push",
       label: "Local push",
-      sentence: "Scripts on this Mac send items with a token made when you add this source."
+      sentence: "Scripts on this computer send items with a token made when you add this source."
     }
   ]
   @kind_ids Enum.map(@kinds, & &1.id)
@@ -87,11 +87,18 @@ defmodule FermixCore.Management.Cues.SourceForm do
     "feed" => "Fermix asks this address for new items on the schedule you set.",
     "stream" => "Fermix keeps a connection open to this address and takes every item it sends.",
     "webhook" => "A service that has this source's address and its secret can send it items.",
-    "local_push" => "A program on this Mac that has the token can send this source items."
+    "local_push" => "A program on this computer that has the token can send this source items."
   }
-  @webhook_note "The door listens on this Mac only. A service outside reaches it through a " <>
+  @webhook_note "The door listens on this computer only. A service outside reaches it through a " <>
                   "tunnel you run."
-  @github_note "In GitHub's webhook form, choose `application/json` as the content type."
+  # Where a new GitHub source's secret and address go in GitHub's webhook
+  # form, after the tunnel note; plain text, since a client shows notes as is.
+  @github_steps [
+    "In your repository, open Settings → Webhooks → Add webhook.",
+    "As the Payload URL, paste your tunnel's address followed by this source's path." <>
+      " Paste the secret Fermix made as the webhook's secret.",
+    "Choose application/json as the content type."
+  ]
   @x_accounts_consent "Fermix asks X for these accounts' new posts on the schedule you set."
   @x_accounts_note "Reads with your X sign-in from the X plugin. Connect X under Plugins " <>
                      "first. X bills your X app for each post it returns."
@@ -374,6 +381,15 @@ defmodule FermixCore.Management.Cues.SourceForm do
   def handles_row, do: @handles_row
 
   @doc """
+  GitHub's three steps for a new GitHub source, in order: where the secret
+  Fermix made and the source's address go in GitHub's webhook form. The
+  GitHub form's notes carry them after the tunnel note, and the browser setup
+  page shows them beside the secret and address it hands out once.
+  """
+  @spec github_steps() :: [String.t()]
+  def github_steps, do: @github_steps
+
+  @doc """
   The note a feed preset's form carries, or nil: X accounts says it reads
   with the X plugin's sign-in and that X bills for what it returns.
   """
@@ -384,7 +400,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
   @doc """
   The sentence a preset says where its items come from in, or nil when its
   kind's says it: X accounts asks X, not an address the owner gave. The form's
-  `consent_sentence` and the browser setup page's kind line read it.
+  `consent_sentence` reads it.
   """
   @spec preset_consent(String.t() | nil) :: String.t() | nil
   def preset_consent("x_accounts"), do: @x_accounts_consent
@@ -471,6 +487,10 @@ defmodule FermixCore.Management.Cues.SourceForm do
   """
   @spec field_words(String.t()) :: %{label: String.t(), info: String.t() | nil}
   def field_words(key) when is_map_key(@field_words, key), do: Map.fetch!(@field_words, key)
+
+  @doc "Every verification method a webhook takes, as `{id, label}` in the form's order."
+  @spec verify_options() :: [{String.t(), String.t()}]
+  def verify_options, do: @verify_options
 
   @doc ~s(The address row's label: "Feed address" for a website or blog, else "Address".)
   @spec url_label(String.t() | nil) :: String.t()
@@ -677,7 +697,7 @@ defmodule FermixCore.Management.Cues.SourceForm do
     end
   end
 
-  defp notes("webhook", "github"), do: [@webhook_note, @github_note]
+  defp notes("webhook", "github"), do: [@webhook_note | @github_steps]
   defp notes("webhook", _preset), do: [@webhook_note]
   defp notes("local_push", _preset), do: [@push_note]
   defp notes("stream", nil), do: [@general_stream_note]

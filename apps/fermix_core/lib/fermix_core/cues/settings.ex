@@ -61,16 +61,26 @@ defmodule FermixCore.Cues.Settings do
   """
   @spec save_switches(keyword()) :: {:ok, %{restart?: boolean()}} | {:error, refusal() | term()}
   def save_switches(changes) when is_list(changes) do
+    with {:ok, plan} <- switches_plan(changes),
+         {:ok, _report} <- commit(plan) do
+      {:ok, %{restart?: restart?(plan.old, plan.new)}}
+    end
+  end
+
+  @doc "Checks a `save_switches/1` change as that save does, and writes nothing."
+  @spec check_switches(keyword()) :: :ok | {:error, refusal()}
+  def check_switches(changes) when is_list(changes) do
+    with {:ok, _plan} <- switches_plan(changes), do: :ok
+  end
+
+  defp switches_plan(changes) do
     unknown = Keyword.keys(changes) -- @switch_keys
 
     if unknown != [] do
       raise ArgumentError, "unknown cue switch(es): #{inspect(unknown)}"
     end
 
-    with {:ok, plan} <- plan(fn cues -> {:ok, put_switches(cues, changes), nil} end),
-         {:ok, _report} <- commit(plan) do
-      {:ok, %{restart?: restart?(plan.old, plan.new)}}
-    end
+    plan(fn cues -> {:ok, put_switches(cues, changes), nil} end)
   end
 
   @doc """
@@ -85,11 +95,24 @@ defmodule FermixCore.Cues.Settings do
   def save_screen_provider(provider) when is_binary(provider) or is_nil(provider) do
     provider = blank_to_nil(provider)
 
-    with :ok <- screen_offered(provider),
-         {:ok, plan} <- plan(&{:ok, put_or_delete(&1, :screen_provider, provider), nil}),
+    with {:ok, plan} <- screen_plan(provider),
          {:ok, _report} <- commit(plan) do
       {:ok, %{words?: is_nil(provider)}}
     end
+  end
+
+  @doc """
+  Checks a `save_screen_provider/1` value as that save does, and writes
+  nothing; that save stays the screen's one write.
+  """
+  @spec check_screen_provider(String.t() | nil) :: :ok | {:error, refusal()}
+  def check_screen_provider(provider) when is_binary(provider) or is_nil(provider) do
+    with {:ok, _plan} <- screen_plan(blank_to_nil(provider)), do: :ok
+  end
+
+  defp screen_plan(provider) do
+    with :ok <- screen_offered(provider),
+         do: plan(&{:ok, put_or_delete(&1, :screen_provider, provider), nil})
   end
 
   defp screen_offered(nil), do: :ok
@@ -111,6 +134,20 @@ defmodule FermixCore.Cues.Settings do
           {:ok, %{cleared?: boolean()}} | {:error, refusal() | term()}
   def save_filter_model(provider, model)
       when (is_binary(provider) or is_nil(provider)) and (is_binary(model) or is_nil(model)) do
+    with {:ok, snapshot} <- filter_snapshot(provider, model),
+         {:ok, _report} <- Wizard.commit_snapshot(snapshot) do
+      {:ok, %{cleared?: is_nil(blank_to_nil(provider))}}
+    end
+  end
+
+  @doc "Checks a `save_filter_model/2` pair as that save does, and writes nothing."
+  @spec check_filter_model(String.t() | nil, String.t() | nil) :: :ok | {:error, refusal()}
+  def check_filter_model(provider, model)
+      when (is_binary(provider) or is_nil(provider)) and (is_binary(model) or is_nil(model)) do
+    with {:ok, _snapshot} <- filter_snapshot(provider, model), do: :ok
+  end
+
+  defp filter_snapshot(provider, model) do
     provider = blank_to_nil(provider)
     model = blank_to_nil(model)
     snapshot = ConfigStore.current_snapshot()
@@ -123,35 +160,35 @@ defmodule FermixCore.Cues.Settings do
 
     with :ok <- both_or_neither(provider, model),
          :ok <- validate_routing(routing),
-         {:ok, _report} <- Wizard.commit_snapshot(put_core(snapshot, :routing, routing)) do
-      {:ok, %{cleared?: is_nil(provider)}}
-    end
+         do: {:ok, put_core(snapshot, :routing, routing)}
   end
 
   @doc """
-  Adds (`:create`) or replaces (`:update`) source `ref`'s section. `section`
-  holds no secret field; `secrets` holds the values the owner typed (`:key`,
-  `:secret`), and a field it leaves out keeps its stored value. A new
-  local-push source gets a token, returned once as `token`; an update never
-  makes one, so a hand-edited local push source with none keeps waiting for
-  `new_token/1`, the one call that shows it.
+  Replaces (`:update`, the one mode) source `ref`'s section; a new source is
+  added with `add_source/3`. `section` holds no secret field; `secrets` holds
+  the values the owner typed (`:key`, `:secret`), and a field it leaves out
+  keeps its stored value. An update makes no token, so a hand-edited local
+  push source with none keeps waiting for `new_token/1`, the one call that
+  shows it.
   """
-  @spec save_source(String.t(), keyword(), %{optional(atom()) => String.t()}, :create | :update) ::
-          {:ok, %{ref: String.t(), token: String.t() | nil}}
+  @spec save_source(String.t(), keyword(), %{optional(atom()) => String.t()}, :update) ::
+          {:ok, %{ref: String.t(), token: nil}}
           | {:error, refusal() | secret_failure() | term()}
-  def save_source(ref, section, secrets, mode)
-      when is_binary(ref) and is_list(section) and is_map(secrets) and mode in [:create, :update] do
+  def save_source(ref, section, secrets, :update)
+      when is_binary(ref) and is_list(section) and is_map(secrets) do
     check_typed_secrets!(section, secrets)
-    store_source(ref, section, secrets, mode, mode == :create)
+    store_source(ref, section, secrets, :update, false)
   end
 
   @doc """
-  Adds a new source as `save_source/4` does, the add both doors make. `ref`
-  nil or empty is made from `section` (`Cues.SourceName.make/2`) against the
-  names taken in the same save. A GitHub source given no `:secret` gets one
-  Fermix makes, as strong as a local push token and stored where a typed one
-  is. Answers the name in force, a local push source's first token and the
-  made secret, each for the caller to show once and keep nowhere.
+  Adds a new source, the add both doors make. `section` holds no secret
+  field; `secrets` holds the values the owner typed (`:key`, `:secret`).
+  `ref` nil or empty is made from `section` (`Cues.SourceName.make/2`)
+  against the names taken in the same save. A new local push source gets its
+  first token. A GitHub source given no `:secret` gets one Fermix makes, as
+  strong as a local push token and stored where a typed one is. Answers the
+  name in force, the token and the made secret, each for the caller to show
+  once and keep nowhere.
   """
   @spec add_source(String.t() | nil, keyword(), %{optional(atom()) => String.t()}) ::
           {:ok, %{ref: String.t(), token: String.t() | nil, secret: String.t() | nil}}

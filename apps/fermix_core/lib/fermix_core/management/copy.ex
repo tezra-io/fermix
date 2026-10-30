@@ -97,7 +97,12 @@ defmodule FermixCore.Management.Copy do
     "Google",
     "Android",
     "Node.js",
-    "Atom"
+    "Atom",
+    # GitHub's webhook form, named as GitHub labels it.
+    "Add webhook",
+    "Payload URL",
+    "Webhooks",
+    "Settings"
   ]
 
   @doc """

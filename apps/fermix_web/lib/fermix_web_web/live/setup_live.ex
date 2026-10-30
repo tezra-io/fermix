@@ -1306,11 +1306,13 @@ defmodule FermixWebWeb.SetupLive do
   # Built with every report, so a save in any tab leaves it current.
   defp build_cues(snapshot), do: CuesState.build(snapshot, cues_opts())
 
-  # Opening the tab re-reads what the daemon reports (the door, source rows).
+  # Opening the tab re-reads what the daemon reports (the door, source rows);
+  # leaving it drops a value shown once, so it is not kept off screen.
   defp refresh_cues_on(socket, "cues"),
     do: assign(socket, :cues, build_cues(socket.assigns.report.wizard.config_snapshot))
 
-  defp refresh_cues_on(socket, _tab), do: socket
+  defp refresh_cues_on(socket, _tab),
+    do: assign(socket, :cues, %{socket.assigns.cues | reveal: nil})
 
   defp apply_cues(socket, {:edit, cues}), do: assign(socket, :cues, cues)
   defp apply_cues(socket, :refresh), do: refresh_cues_on(socket, "cues")

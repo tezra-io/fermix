@@ -23,6 +23,7 @@ defmodule FermixCore.Management.CuesTest do
   alias FermixCore.Management.Router
   alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings
+  alias FermixCore.Management.Settings.Cues, as: SettingsCues
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Providers.Descriptor
@@ -1217,9 +1218,19 @@ defmodule FermixCore.Management.CuesTest do
       assert %{"value" => false, "advanced" => true} =
                Enum.find(form["rows"], &(&1["key"] == "content_hash"))
 
-      assert "In GitHub's webhook form, choose `application/json` as the content type." in form[
-               "notes"
+      # The tunnel, then GitHub's three steps, in plain text a client shows as is.
+      assert [tunnel | steps] = form["notes"]
+      assert tunnel =~ "tunnel you run"
+      assert steps == SourceForm.github_steps()
+
+      assert steps == [
+               "In your repository, open Settings → Webhooks → Add webhook.",
+               "As the Payload URL, paste your tunnel's address followed by this source's " <>
+                 "path. Paste the secret Fermix made as the webhook's secret.",
+               "Choose application/json as the content type."
              ]
+
+      refute Enum.any?(form["notes"], &String.contains?(&1, "`"))
     end
 
     # Replacing GitHub's secret later is the edit form's secret row, as before.
@@ -2023,6 +2034,41 @@ defmodule FermixCore.Management.CuesTest do
                Settings.apply("cues", %{"cues_door_port" => 80})
 
       assert sentence =~ "1024"
+    end
+
+    test "every step is checked before any is written, and a refusal names its row", %{
+      home: home
+    } do
+      Application.put_env(:fermix_core, :providers, anthropic: [api_key: "sk-ant-invented"])
+
+      # The filter pair and Run cues are fine, the door's port is not: nothing lands.
+      assert {:error, {:invalid_params, "cues_door_port", sentence}} =
+               Settings.apply("cues", %{
+                 "filter_provider" => "anthropic",
+                 "filter_model" => "claude-haiku-4-5",
+                 "cues_enabled" => true,
+                 "cues_door_port" => 80
+               })
+
+      assert sentence =~ "1024"
+      refute File.exists?(Path.join(home, "config.toml"))
+
+      # A screen no provider set up serves, refused before the filter pair is written.
+      assert SettingsCues.save(
+               filter_provider: "anthropic",
+               filter_model: "claude-haiku-4-5",
+               screen_provider: "openrouter"
+             ) ==
+               {:error,
+                {:invalid_value, "cues_screen_provider",
+                 "Pick Words, or the decision model of a provider that is set up."}}
+
+      refute File.exists?(Path.join(home, "config.toml"))
+
+      # A lone half of the filter pair names the half that was sent.
+      assert SettingsCues.save(filter_model: "claude-haiku-4-5") ==
+               {:error,
+                {:invalid_value, "filter_model", "Pick a provider and a model, or clear both."}}
     end
   end
 
