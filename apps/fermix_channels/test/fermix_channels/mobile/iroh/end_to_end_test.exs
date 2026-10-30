@@ -9,6 +9,11 @@ defmodule FermixChannels.Mobile.Iroh.EndToEndTest do
   (no relay can be trusted locally by the released helper, whose TLS roots are
   compiled in); this test speaks the mobile protocol through it.
 
+  M75's rail (§4.2) runs the same way: `Mobile.Rail` dials the listening
+  helper through a second, dial-only helper (helper protocol 3), at the
+  listener's UDP address, and carries a desktop's session to the same
+  `Session`.
+
   Opt-in, because it needs both binaries built from a `fermix-iroh` checkout
   (`cargo build --release --locked`, then `--example test_peer`):
 
@@ -29,6 +34,7 @@ defmodule FermixChannels.Mobile.Iroh.EndToEndTest do
   alias FermixChannels.Mobile.Iroh.Relays.Source
   alias FermixChannels.Mobile.Noise
   alias FermixChannels.Mobile.Protocol
+  alias FermixChannels.Mobile.Rail
   alias FermixTestSupport.SafeRm
 
   @moduletag :iroh_end_to_end
@@ -105,6 +111,94 @@ defmodule FermixChannels.Mobile.Iroh.EndToEndTest do
     assert %{state: :ready} = Helper.status(names.iroh_helper)
   end
 
+  test "the rail: a desktop's session dialed through a dial-only helper", ctx do
+    names = names()
+    registry = start_registry(names, ctx.revoked)
+    {endpoint_id, port} = start_rail(ctx, names, registry)
+    {dialer, dial_root} = start_dialer(ctx)
+
+    route = %{
+      node_id: endpoint_id,
+      relays: [@relay],
+      relays_rev: "0123456789abcdef",
+      addrs: ["127.0.0.1:#{port}"]
+    }
+
+    keys = [helper: dialer, static_keypair: ctx.device, remote_static: ctx.gateway_public_key]
+    assert {:ok, rail} = Rail.open(route, :ik, keys)
+
+    hello = %{
+      "device_id" => @device_id,
+      "app_version" => "1.0.0",
+      "last_server_seq" => 0,
+      "protocol_v" => Protocol.protocol_version()
+    }
+
+    assert :ok = Rail.send_event(rail, "hello", hello)
+    assert_receive {:rail, ^rail, {:event, %{"t" => "hello_ack", "seq" => 1}, <<>>}}, @timeout_ms
+    assert :ok = Rail.send_event(rail, "ping", %{})
+    assert_receive {:rail, ^rail, {:event, %{"t" => "pong", "seq" => 2}, <<>>}}, @timeout_ms
+
+    # The dialed stream ended with the session, and the helper said so; the
+    # dial's socket is gone.
+    rail_down = Process.monitor(rail)
+    assert :ok = Rail.close(rail)
+    assert_receive {:DOWN, ^rail_down, :process, ^rail, :normal}
+    assert_dials_drained(dialer)
+    assert [] = Path.wildcard(Path.join([dial_root, "mobile", "dial-*.sock"]))
+
+    # A second session on a fresh dial; then the device is revoked under it.
+    assert {:ok, rail} = Rail.open(route, :ik, keys)
+    assert :ok = Rail.send_event(rail, "hello", hello)
+    assert_receive {:rail, ^rail, {:event, %{"t" => "hello_ack"}, <<>>}}, @timeout_ms
+    assert :ok = DeviceRegistry.revoke(registry, @device_id)
+    assert_receive {:rail, ^rail, {:closed, {:remote, 4003, "device revoked"}}}, @timeout_ms
+    assert_dials_drained(dialer)
+
+    # The revoked key is refused in the handshake of the next session.
+    assert {:error, {:remote, 1002, "mobile protocol error"}} = Rail.open(route, :ik, keys)
+    assert %{state: :ready} = Helper.status(names.iroh_helper)
+    assert %{state: :ready} = Helper.status(dialer)
+  end
+
+  # The dial-only helper, in a home of its own (a desktop's), and that home.
+  defp start_dialer(ctx) do
+    dial_root = Path.join(System.tmp_dir!(), "fx-e2e-d-#{System.unique_integer([:positive])}")
+    SafeRm.mark!(dial_root)
+    on_exit(fn -> SafeRm.rm_rf!(dial_root) end)
+    revisions = Source.parse!(%{"revisions" => [%{"iroh" => "1.3.0", "relays" => [@relay]}]})
+
+    dialer =
+      start_supervised!(
+        {Helper,
+         name: nil,
+         mode: :dial,
+         root: dial_root,
+         binary_path: ctx.helper,
+         revisions: revisions,
+         emit: fn _status, _failures, _class -> :ok end},
+        id: :dialer
+      )
+
+    await_ready(dialer, 200)
+    {dialer, dial_root}
+  end
+
+  # The helper forgets a dial once it says the stream ended.
+  defp assert_dials_drained(dialer, attempts \\ 100) do
+    case :sys.get_state(dialer).dials do
+      dials when dials == %{} ->
+        :ok
+
+      _open when attempts > 0 ->
+        Process.sleep(50)
+        assert_dials_drained(dialer, attempts - 1)
+
+      open ->
+        flunk("dials still open: #{inspect(open)}")
+    end
+  end
+
   # -- the rail ----------------------------------------------------------------
 
   defp start_rail(ctx, names, registry) do
@@ -159,15 +253,16 @@ defmodule FermixChannels.Mobile.Iroh.EndToEndTest do
       device_store: names.device_store,
       device_registry: registry,
       iroh_helper: names.iroh_helper,
-      find_device: fn _store, ^device_public ->
-        if Agent.get(revoked, & &1),
-          do: {:error, :not_found},
-          else: {:ok, %{device_id: @device_id}}
+      find_device: fn _store, key ->
+        if key == device_public and not Agent.get(revoked, & &1),
+          do: {:ok, %{device_id: @device_id}},
+          else: {:error, :not_found}
       end,
       update_device: fn _store, @device_id, _changes -> {:ok, %{device_id: @device_id}} end,
       profile_name: "Orbit",
       history_head: fn "main" -> {:ok, 0} end,
       read_frontier: fn "main" -> {:ok, 0} end,
+      pending_approvals: fn _profile -> [] end,
       discover: fn -> {:ok, []} end
     ]
   end

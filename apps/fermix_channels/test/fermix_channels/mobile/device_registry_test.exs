@@ -90,6 +90,47 @@ defmodule FermixChannels.Mobile.DeviceRegistryTest do
 
   # The companion socket announces to every phone of a profile whether or not
   # the mobile subtree runs: with no registry, there is simply nobody to reach.
+  # M75 §3: the kind comes from the trust store's row, and the phones'
+  # audience leaves a desktop out.
+  test "a desktop attaches with its row's kind and is no phone's audience" do
+    registry =
+      start_supervised!(
+        {DeviceRegistry,
+         name: :"mobile_registry_#{System.unique_integer([:positive])}",
+         authorize_device: fn _store, device_id ->
+           kind = if device_id == "desk", do: :desktop, else: :phone
+           {:ok, %{device_id: device_id, kind: kind}}
+         end,
+         delete_device: fn _store, _device_id -> :ok end,
+         revoke_requests: fn _device_id -> :ok end},
+        id: :kinds
+      )
+
+    phone = socket_process()
+    desktop = socket_process()
+    assert :ok = DeviceRegistry.attach(registry, "phone", phone)
+    assert :ok = DeviceRegistry.attach(registry, "desk", desktop)
+
+    assert [
+             %{device_id: "desk", pid: ^desktop, kind: :desktop},
+             %{device_id: "phone", pid: ^phone, kind: :phone}
+           ] = DeviceRegistry.list(registry)
+
+    assert [{"phone", ^phone}] = DeviceRegistry.connected(registry, "main")
+
+    event = %{"t" => "pong"}
+    assert :ok = DeviceRegistry.broadcast(registry, "main", event)
+    assert_receive {:socket_message, ^phone, {:mobile_event, ^event}}
+    refute_receive {:socket_message, ^desktop, {:mobile_event, ^event}}
+
+    # A desktop is still reached by its own id, revoked and authorized.
+    assert :ok = DeviceRegistry.send_device_event(registry, "desk", event)
+    assert_receive {:socket_message, ^desktop, {:mobile_event, ^event}}
+    assert :ok = DeviceRegistry.authorized?(registry, "desk", desktop)
+    assert :ok = DeviceRegistry.revoke(registry, "desk")
+    assert_receive {:socket_message, ^desktop, {:mobile_revoked, "desk"}}
+  end
+
   test "a broadcast to a registry that is not running reaches nobody and never fails" do
     assert :ok =
              DeviceRegistry.broadcast(:"absent_registry_#{System.unique_integer()}", "main", %{})

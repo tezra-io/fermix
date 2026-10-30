@@ -10,7 +10,7 @@ vendors this directory pinned by checksum; it does not hand-copy event shapes.
 |---|---|
 | `protocol.schema.json` | every frame header, and the pairing link (`$defs/pairingLink`) |
 | `fixtures/client_events.jsonl`, `fixtures/server_events.jsonl` | one golden header per event, and more for the shapes that matter |
-| `fixtures/client_binary_frames.jsonl`, `fixtures/server_binary_frames.jsonl` | frames with a raw tail, as `{header, bytes_b64}`, including one whole `event_part` run |
+| `fixtures/client_binary_frames.jsonl`, `fixtures/server_binary_frames.jsonl` | frames with a raw tail, as `{header, bytes_b64}`, including one whole `event_part` run and whole chunked runs (see *Chunked payloads*) |
 | `fixtures/pairing_links.jsonl` | a pairing link and its decoded fields, as the daemon builds it |
 | `noise_vectors.json`, `push_vectors.json` | the Noise handshakes and the push encryption, byte for byte |
 | `attestation_roots.json`, `android_signers.json` | the Google attestation roots and the app's signing certificates a pairing is verified against (see *Attestation*); both are built into the daemon when it is compiled, so a change to either takes a new build |
@@ -51,7 +51,7 @@ message closes the connection with `1003`. What the listener bounds:
 | Handshake deadline: the prelude and Noise handshake, then `hello` or `pair_request` | 10 s from the upgrade; a fresh 10 s for the `hello` after `pair_approved` | close `1008` |
 | One WebSocket message | 65,535 payload bytes | close `1009` |
 | No inbound frame | 150 s | close `1002` |
-| One Noise session | 1 hour | close `1000` |
+| One Noise session | 1 hour (a phone's; a desktop's has no lifetime) | close `1000` |
 | Memory of a connection that has not said `hello` | 4 MiB, fragments included | the connection is dropped with no close frame |
 | Memory of a paired phone's connection | 64 MiB plus 4 × `caps.max_media_bytes` | the connection is dropped with no close frame |
 
@@ -176,9 +176,12 @@ bytes because a Noise message is at most 65,535 bytes and ChaChaPoly adds a
 16-byte tag. Therefore a maximum-size raw chunk may carry at most a 4,075-byte
 header including its four-byte length prefix.
 
-Only `attach_chunk` and `pair_request` (client to daemon), and `media_chunk`
-and `event_part` (daemon to client) carry raw bytes, and theirs is never empty.
-Every other event must have an empty raw tail. Binary golden fixtures represent the actual frame as
+Only `attach_chunk`, `pair_request` and the chunked and streamed events of
+*Desktop sessions* and *Enrollment and the move* (client to daemon), and
+`media_chunk`, `event_part` and those sections' chunked and streamed events
+(daemon to client) carry raw bytes, and theirs is never empty, except that a
+`loopback_request` or a `loopback_response` may carry an empty payload. Every
+other event must have an empty raw tail. Binary golden fixtures represent the actual frame as
 `{header, bytes_b64}` only so JSONL can store it; that wrapper is not sent on
 the wire.
 
@@ -216,18 +219,58 @@ message) is sent as one run of `event_part` frames instead of one frame:
 
 `fixtures/server_binary_frames.jsonl` carries a whole two-frame run.
 
+## Chunked payloads
+
+A payload too large for one frame (a desktop's management call, a tunneled
+companion line) travels as frames of one event, each with `index` (from 0)
+and `last` (boolean) in its header and at most 60 KiB of the payload as its
+raw tail. A chunked event's header stays within 4,075 bytes, so a full tail
+still fits one plaintext.
+
+- One payload's frames carry the same value of the event's key field and the
+  same header fields, and arrive in `index` order, the last one marked
+  `last: true`; the receiver concatenates their tails. Frames of other
+  payloads, and other events, may come between them.
+- A payload ends at its `last` frame. The key's next frame starts the next
+  payload at `index` 0: a channel's next line, say.
+- The receiver refuses with close `1002` a frame out of order (a gap), one it
+  already has (a repeat), a frame whose header fields differ from its
+  payload's first, and a payload past its bound. A second `last` for a payload
+  that ended comes at an `index` past 0, so it is a gap.
+- An empty payload is one frame, `index` 0 and `last` true, with an empty
+  tail; only `loopback_response` may carry one.
+- The primary holds at most 32 of a desktop's payloads open at once; one more
+  closes that desktop's session `1002`.
+
+| Chunked event | Key | Payload bound |
+|---|---|---|
+| `companion_line` | `channel` | 1 MiB |
+| `manage` | `call_id` | 1 MiB |
+| `manage_result` | `call_id` | 4 MiB |
+| `loopback_response` | `request_id` | 256 KiB |
+
+`snapshot_chunk` and `move_chunk` are streams, not chunked payloads: `index`
+alone, contiguous from 0, ended by `snapshot_end` or `move_end`, and bounded
+only by the disk. The binary fixtures carry a whole two-frame run each way.
+
 ## Noise modes and pairing
 
 The phone is always the Noise initiator and the daemon is the responder. The
 first handshake message starts with one fixed, clear five-byte prelude:
 
-| Prelude | Pattern | Use |
-|---|---|---|
-| `46 58 4d 31 01` (`FXM1` + `0x01`) | `IK` | already-paired device session |
-| `46 58 4d 31 02` (`FXM1` + `0x02`) | `IKpsk2` | owner-open pairing window |
+| Prelude | Pattern | Use | Responder |
+|---|---|---|---|
+| `46 58 4d 31 01` (`FXM1` + `0x01`) | `IK` | a paired phone's or desktop's session | the primary |
+| `46 58 4d 31 02` (`FXM1` + `0x02`) | `IKpsk2` | owner-open pairing window | the primary |
+| `46 58 4d 31 03` (`FXM1` + `0x03`) | `IKpsk2` | enrollment of a candidate primary (see *Enrollment and the move*) | the primary, only while an enrollment window is open |
+| `46 58 4d 31 04` (`FXM1` + `0x04`) | `IK` | the move of a home to its candidate (see *Enrollment and the move*) | the candidate engine |
 
 The responder validates this prelude before initializing cryptographic state.
 An unknown or unexpected mode is terminal; it must not try another handshake.
+The phone listener (a WebSocket or a remote stream) serves `0x01` and `0x02`
+alone: it closes a `0x03` or a `0x04` with `1002` (`mobile protocol error`)
+before any Noise state exists. Only an open enrollment window on the primary
+serves `0x03`, and only a candidate engine serves `0x04`.
 The authenticated prologue is exactly the ASCII bytes `fermix-mobile-v1`
 followed by the same five-byte prelude. The prelude appears on the wire only
 before the first Noise message.
@@ -336,13 +379,17 @@ messages, handshake hashes, SAS values, and the first transport ciphertext for
 both patterns. Private keys in that file are test material only.
 
 After a paired `IK` handshake, the daemon authorizes the authenticated initiator
-static against `devices.toml`; a key it does not hold is closed with `1002`.
+static against `devices.toml`; a key it holds no row for (a device that was
+revoked, or never paired) is closed with `4003` `device unknown` before the
+daemon answers, and a trust store it cannot read with `1002`.
 Noise transport nonces and the application sequence both restart on every new
 session. Each direction performs a deterministic Noise REKEY after exactly 2^20
 frames, replacing only that direction's key while
-preserving that direction's current transport nonce. The one-hour session
-lifetime closes and reconnects with a fresh handshake. A peer
-never performs a unilateral time-based rekey.
+preserving that direction's current transport nonce. A phone's one-hour
+session lifetime closes and reconnects with a fresh handshake; a desktop's
+session (*Desktop sessions*) has no lifetime on either side and stays up, its
+keys bounded by the same 2^20-frame rekey.
+A peer never performs a unilateral time-based rekey.
 
 ## Pairing link
 
@@ -448,6 +495,10 @@ accepts it.
 
 `profile_id` is `main`, the one profile; any other is refused with
 `unsupported_profile`.
+
+These are a phone's events. A desktop's, enrollment and the move have
+sections of their own below, and *Who may send what* says which session may
+send which.
 
 What each is answered with:
 
@@ -838,6 +889,185 @@ the shared secret, the derived key, the nonce, the exact inner plaintext, and
 the resulting payload — and is generated by an implementation independent of the
 daemon's. The extension must reproduce it before shipping.
 
+## Desktop sessions
+
+A desktop engine that handed its home to another host (the move, below)
+keeps a session to the new primary as a `desktop` device. Its row in
+`devices.toml` names `kind = "desktop"` and carries no attestation or push
+field; a row that names no kind is a phone's, as every row written before
+desktops did. A
+desktop authenticates exactly as a paired phone does: `IK` (`0x01`) with its
+own static key, then `hello`, answered with `hello_ack`. The primary reads the row's kind and admits that
+kind's events alone (see *Who may send what*). The desktop's Mac or Linux app
+speaks only its local sockets; the desktop's engine carries them over this
+session. A desktop's session is meant to stay up: it has no one-hour lifetime
+on either side (the 2^20-frame rekey still bounds its keys), and a session
+the primary ends normally (`1000`, a daemon stopping) is renewed at once
+without being shown as an outage, once in a row: a renewed session the
+primary ends normally again within a minute of opening is an outage from then
+on, redialed with the usual backoff. A desktop the primary revoked (`4003`,
+live or at the handshake) does not dial again until its engine restarts.
+
+A desktop's session takes the phone events `hello`, `ping`, `media_fetch` and
+`ack`, and these:
+
+| `t` | Required payload | Rules |
+|---|---|---|
+| `companion_open` | `channel` | a connection to the desktop's companion socket opened; `channel` is 1 to 64, at most 4 open at once; the primary runs an ordinary companion connection for it, with owner trust |
+| `companion_line` | `channel`, `index`, `last` + raw bytes | one line of that connection without its newline, chunked, at most 1 MiB; both directions |
+| `companion_close` | `channel`; `reason?` | the connection ended; both directions, `reason` (the primary's, at most 512 bytes) for logs |
+| `manage` | `call_id`, `method`, `protocol_version`, `index`, `last` + raw bytes | one management call the desktop forwards, its params JSON chunked, at most 1 MiB; at most 8 in flight; `method` as the management protocol names it |
+| `loopback_request` | `loopback_id`, `request_id`, `method`, `target`, `headers[]` + raw bytes | one request a browser made to a forwarded sign-in loopback, its body as the raw tail, at most 16 KiB and empty for none; at most 8 per loopback; `target` is the request's path and query |
+| `loopback_failed` | `loopback_id`, `port`, `reason` | the desktop would not or could not listen on `127.0.0.1` on `port` of the loopback: `port_in_use` (something listens there), `not_permitted` (the system refused, or the port is below 1024 or one of the desktop engine's own) or `failed` (anything else, or 8 loopbacks already open); the sign-in ends with that sentence |
+| `snapshot_stored` | `snapshot_id`, `sha256` | the desktop kept a snapshot, and the SHA-256 of what it wrote |
+| `snapshot_refused` | `snapshot_id`, `reason` | the desktop kept no copy: `disk_floor` (it would have left under 2 GiB free), `space_unknown`, `mismatch` (size or SHA-256 not `snapshot_begin`'s), `out_of_order`, `invalid_name` or `write_failed`; nothing partial is left |
+
+The primary sends a desktop `hello_ack`, `pong`, `error`, `event_part`,
+`media_begin`, `media_chunk` and `media_end`, `companion_line` and
+`companion_close` (above), and these:
+
+| `t` | Required payload | Rules |
+|---|---|---|
+| `manage_result` | `call_id`, `index`, `last` + raw bytes | the management response to one `manage`, as `daemon.sock` would answer it, chunked, at most 4 MiB |
+| `loopback_open` | `loopback_id`, `ports[]`, `expires_in_s` | bind `127.0.0.1` on 1 to 8 ports, for at most 900 s, and forward what arrives; a desktop binds only a port nothing else on it listens on, never one below 1024 or one of its engine's own, and holds at most 8 loopbacks open |
+| `loopback_response` | `request_id`, `status`, `headers[]`, `index`, `last` + raw bytes | the answer to one `loopback_request`, its body chunked, at most 256 KiB, and empty for none; `status` is 100 to 599 |
+| `loopback_close` | `loopback_id` | the sign-in ended or expired; close the loopback |
+| `snapshot_begin` | `snapshot_id`, `name`, `size_bytes`, `sha256` | an encrypted snapshot of the home follows, to keep |
+| `snapshot_chunk` | `snapshot_id`, `index` + raw bytes | the snapshot's next bytes, a stream |
+| `snapshot_end` | `snapshot_id` | the snapshot is complete |
+
+`headers[]` is a list of `[name, value]` pairs, in order: a name is an HTTP
+token of at most 256 bytes, a value at most 4,096 bytes with no CR, LF or NUL,
+and there are at most 64. An id (`call_id`, `loopback_id`, `request_id`,
+`snapshot_id`, and on the other sessions `candidate_id` and `move_id`) is 1
+to 128 letters, digits, `.`, `_`, `:` and `-`, starting with a letter or a
+digit. A name a person reads (`name`, `primary_name`, an enrollment's
+texts) is at most 128 bytes of UTF-8 with no control character.
+
+An event of a family the primary does not serve yet is answered
+`error{code:"unsupported_event"}`, and the session stays open. This daemon
+serves none of the four families yet (the companion tunnel, `manage`, the
+sign-in loopback and snapshot copies): each of their events is answered so. A desktop is
+sent no approval card and no phone's broadcast: its chat, approvals included,
+rides its companion tunnel. A desktop's session closes `1011` (`desktop peer
+failed`) when the primary's side of it fails or does not start. A desktop
+holds at most 32 chunked payloads open at once, as the primary does; the
+primary also holds at most 64 MiB across a desktop's open payloads. Past
+either, the session closes `1002`.
+
+### The sign-in forward and snapshot copies
+
+**Sign-in forward.** A browser sign-in the desktop started (its forwarded
+`auth.start`) listens on the primary's `127.0.0.1`, and its authorize url
+opens in the desktop's browser. While that listener is open the primary sends
+`loopback_open` with its port and the time it has left; the desktop listens on
+`127.0.0.1` on the same port, sends each request its browser makes there as
+`loopback_request`, and writes the matching `loopback_response` (by
+`request_id`) back to the browser. The primary replays each request against
+its own listener as it came, `Host` included. A request past the eighth is
+answered `429`, one for a loopback that ended `410`, both by the side that
+counts it. `loopback_close`, or the time running out, ends the desktop's
+listener. A port the desktop cannot listen on is `loopback_failed`, and the
+sign-in ends with that sentence. The desktop binds without `SO_REUSEADDR`;
+a taken port is probed with a connect to `127.0.0.1`, and only one nothing
+answers on (closed connections of an earlier sign-in) is bound again with it,
+so the primary can never take over a service the desktop runs on
+`localhost`. HTTP/1.1, one request per connection, no hop-by-hop header and
+no `Content-Length` on the wire (each end writes its own); a chunked request
+body is refused.
+
+**Snapshot copies.** The primary sends each snapshot it writes, still
+encrypted: `snapshot_begin`, `snapshot_chunk`s of at most 60 KiB from
+`index` 0, `snapshot_end`. The desktop answers `snapshot_stored` with the
+SHA-256 it computed, which verifies the copy when it is `snapshot_begin`'s,
+or `snapshot_refused`. A new `snapshot_begin` abandons a copy in progress.
+
+## Enrollment and the move
+
+Two more sessions use the prelude, the frames and the bounds above, each with
+its own responder. The phone listener serves neither, and this daemon runs
+neither responder yet.
+
+**Enrollment** (`FXM1 0x03`, `IKpsk2`). A candidate primary, a new host the
+owner made from the enrollment code, enrolls with the primary while the
+owner's enrollment window is open. The PSK is the code's secret and the
+responder's static key the code's `gateway_pk`. Only an open enrollment window
+on the primary serves it, and one enrollment burns the window. `IKpsk2` mixes
+the PSK into the responder's reply, so the candidate's first frame, which only
+decrypts under keys the PSK derived, is the proof: it uses the window up. A
+frame that does not decrypt (a wrong secret) closes the stream `1002` and the
+window stays open; the initiator of a wrong secret already fails the
+handshake. A window the primary still holds but that was used or ran out
+answers the proven frame with the refusal below. The candidate sends its
+first frame within 10 s of the handshake, or the stream closes `1008`.
+
+| `t` | Required payload | Rules |
+|---|---|---|
+| `enroll_request` | `host{name, os, arch, version}`, `candidate{node_id, relays[], recipient}`; `instance?{provider, instance_id, region, account_id?}`, `snapshots?{s3_bucket, s3_region}` | candidate to primary, the session's first event; `node_id` and `relays` (1 to 8) as a route's; `recipient` the one-time X25519 public key (32 bytes, standard base64) the move's stream will be encrypted to; each text at most 128 bytes; `instance` is what the candidate says of itself, shown unverified |
+| `enroll_accepted` | `candidate_id`, `primary_name` | primary to candidate; the session then closes `1000` |
+
+A refused enrollment is an `error` with `code` `enrollment_expired`,
+`enrollment_used` or `enrollment_limit` (4 candidates already held), then
+close `4003` with the text `enrollment expired`, `enrollment used` or
+`enrollment limit`.
+
+**The move** (`FXM1 0x04`, `IK`). The source of a move, the old primary in the
+device role, streams the home to its candidate. The initiator's static key is
+the source's gateway key, and the responder's the candidate's key from its
+enrollment. Only a candidate engine serves it, and only to the primary it
+enrolled with: an initiator whose static key is not that primary's gateway key
+is closed `1002`.
+
+The source captures the home before it dials, encrypted to the recipient the
+candidate gave in `enroll_request`, so `move_offer` names the exact stream:
+its length and SHA-256. The candidate answers `move_accept` with the same
+recipient (a source refuses to stream to any other), takes the chunks in
+order and no more bytes than offered, and checks both before it restores.
+
+A `move_id` sorts by when its move started. A candidate takes an offer only
+when it is later than the move it holds (a later `move_id`, or the same one at
+a later `attempt`) and refuses an earlier one `move_mismatch`: an offer that
+arrives late, on a session its source already gave up on, must never discard
+a staged home the source may have retired for.
+
+| `t` | Required payload | Rules |
+|---|---|---|
+| `move_offer` | `move_id`, `size_bytes`, `sha256`, `source_epoch`, `attempt`; `recovery_recipient?` | source to candidate: the home's snapshot is ready to stream; `size_bytes` and `sha256` are the encrypted stream's; `attempt` counts the source's attempts at this move (1, 2, …; it only grows across restarts); `recovery_recipient` is the snapshot recipient the new primary keeps, `fxsnap1.<salt>.<key>` |
+| `move_accept` | `move_id`, `recipient` | candidate to source: the one-time X25519 public key, 32 bytes in standard base64, the stream is encrypted to |
+| `move_chunk` | `move_id`, `index` + raw bytes | source to candidate: the encrypted stream, contiguous from 0 |
+| `move_end` | `move_id` | source to candidate: the stream is complete |
+| `move_ready` | `move_id`, `epoch` | candidate to source: the home is restored and staged, at `epoch` |
+| `move_commit` | `move_id` | source to candidate: the source wrote its moved marker; activate |
+| `move_done` | `move_id`, `epoch` | candidate to source: the staged home is in place at `epoch`, and the candidate restarts as the primary |
+| `move_resume` | `move_id` | source to candidate after a lost `move_commit` or `move_done`: answered `move_ready` (still staged) or `move_done` (activated) |
+
+A refused move step is an `error` with `code` `move_unknown`, `move_mismatch`
+or `move_failed` and a sentence, then close `4003` with the text `move <code>`.
+The candidate never activates without `move_commit`.
+
+Both sessions answer `ping` with `pong`, as a phone's does: the initiator
+(`Mobile.Rail`) pings every 60 s once it has sent its first event, and a long
+stream or restore must not idle the session out.
+
+## Who may send what
+
+A session's kind is what its handshake proved: a paired device's row
+(`phone` or `desktop`), or the prelude (`enrollment`, `move`). A client event
+the codec knows that the session's kind may not send is answered
+`error{code:"unsupported_event"}`, and the connection stays open; an unknown
+`t` is `unsupported` and closes, as before. A server event a kind may not be
+sent is never sent to it. `FermixChannels.Mobile.Peers` is this table.
+
+| Kind | Sends | Is sent |
+|---|---|---|
+| phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `ack` `read_state` `request_status` `unpair` `ping` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` |
+| desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` |
+| enrollment | `enroll_request` `ping` | `enroll_accepted` `error` `pong` |
+| move | `move_offer` `move_chunk` `move_end` `move_commit` `move_resume` `ping` | `move_accept` `move_ready` `move_done` `error` `pong` |
+
+A pairing session (`0x02`), until the owner decides, sends `pair_request` and
+`ping` alone, and is sent `pair_approved`, `pair_denied`, `pong` and `error`.
+
 ## Delivery and failure behavior
 
 `msg` and `command` are at-least-once from the phone. The daemon durably claims
@@ -883,7 +1113,9 @@ parsed.
 | `request_failed`, `client_message_conflict`, `unsupported_profile` | a request refused or failed after `accepted`, or any refusal with no word of its own | `client_msg_id` for a `msg` or `command` | open |
 | `attachment_unavailable` | a `msg` naming an `attach_id` the daemon no longer holds | `client_msg_id` | open |
 | `invalid_field`, `missing_field` | a field the daemon refuses once the frame decoded, such as a `msg`'s `attach_ids` | `client_msg_id` for a `msg` or `command` | open |
-| `unsupported_event` | a known event the paired socket does not take, such as `pair_request` | — | open |
+| `unsupported_event` | a known event this session's kind may not send (see *Who may send what*), such as `pair_request` on a paired socket, or a desktop's event of a family the primary does not serve yet | — | open |
+| `enrollment_expired`, `enrollment_used`, `enrollment_limit` | a refused enrollment (see *Enrollment and the move*) | — | closed `4003` |
+| `move_unknown`, `move_mismatch`, `move_failed` | a refused move step (see *Enrollment and the move*) | — | closed `4003` |
 | `request_backlog_full` | 32 requests already waiting | — | open |
 | `media_fetch_backlog_full` | 8 fetches already waiting | `ref` | open |
 | `media_descriptor_mismatch`, `not_found`, `media_gone` | a `media_fetch` that failed | `ref` | open |
@@ -901,13 +1133,13 @@ the device has since replaced.
 
 | Code | Why | Client |
 |---|---|---|
-| `1000` | the one-hour session lifetime ran out (`Noise session lifetime reached`), or the daemon is shutting down | reconnect with a new handshake |
+| `1000` | a phone's one-hour session lifetime ran out (`Noise session lifetime reached`; a desktop's session has none), the daemon is shutting down, or an enrollment was accepted | reconnect with a new handshake (a desktop at once, showing no outage, once in a row: then with the backoff); a candidate does not |
 | `1002` | a protocol error (`mobile protocol error`, `invalid mobile prelude`, `unsupported mobile protocol version`), no inbound frame for 150 s, or a malformed WebSocket frame | reconnect; after `unsupported_protocol_version`, update first |
 | `1003` | a text message | send binary messages |
 | `1008` | the handshake deadline (`mobile handshake deadline`); on the remote route, also a stream still in its handshake closed to make room for a newer one | reconnect |
 | `1009` | a message over 65,535 bytes (`mobile frame too large`) | never send one |
-| `1011` | the daemon's socket failed | reconnect |
+| `1011` | the daemon's socket failed, or the primary's side of a desktop's session failed or did not start (`desktop peer failed`) | reconnect |
 | `4001` | `connection replaced`: a newer connection of the same phone, or a pairing request from the same phone key | do not reconnect this connection; the newer one is live |
-| `4003` | `device revoked`, `pairing <reason>` after `pair_denied`, or `authenticated device mismatch` (the `hello` named another device) | do not reconnect with this identity until it pairs again |
+| `4003` | `device revoked`, `device unknown` (an `IK` handshake from a key no row holds), `pairing <reason>` after `pair_denied`, `authenticated device mismatch` (the `hello` named another device), `enrollment <reason>` after a refused enrollment, or `move <code>` after a refused move step | do not reconnect with this identity until it pairs again; a candidate or a move's source reads the `error` before it |
 
 A connection past its memory bound is dropped with no close frame.

@@ -26,6 +26,20 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
   The relays the helper uses are the ones every paired phone has acknowledged
   (`Iroh.Relays.acknowledged/2`); a phone that acknowledges a new revision, or
   a revoked phone, makes the rail recompute them and tell the helper.
+
+  ## Modes
+
+  - `:listen` (the default): the home's key and the bridge socket, as above.
+  - `:dial`: no key and no bridge (helper protocol 3's endpoint that only
+    dials): the helper binds with a fresh key it holds in memory, refuses every
+    incoming connection, and uses the current revision's relays. It starts as
+    soon as this process does, with no gateway identity to wait for, and offers
+    no candidate.
+
+  Either mode dials (`dial/3`), for M75's rail (`Mobile.Rail`): the caller
+  listens on a fresh socket under `<home>/mobile/` (`dial-<id>.sock`, mode
+  `0600`, device-local like every socket in a home), the helper connects the
+  dialed stream to it, and the caller gets the connected socket.
   """
 
   use GenServer
@@ -38,6 +52,7 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
   alias FermixChannels.Mobile.Iroh.Key
   alias FermixChannels.Mobile.Iroh.Relays
   alias FermixCore.ProcessGroup
+  alias FermixCore.SocketPath
 
   @hello_timeout_ms 10_000
   @ready_timeout_ms 30_000
@@ -70,6 +85,31 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
     send_window: 1_048_576
   }
   @shim_missing_message "macOS disclaim shim is not built — rebuild fermix (mix compile) or reinstall"
+  # A dial waits for the helper's answer a little past the helper's own 20 s
+  # deadline, so the helper's `timeout` arrives first; past this the helper is
+  # not answering at all. Once `dialed` came, its connection is already in the
+  # socket's backlog.
+  @dial_wait_ms HelperProtocol.dial_deadline_ms() + 5_000
+  @dial_accept_ms 5_000
+  @dial_dir_mode 0o700
+
+  @typedoc "Where to dial: a route's node id and relays (`addrs` only in a test)."
+  @type dial_target :: %{
+          required(:node_id) => String.t(),
+          required(:relays) => [map()],
+          optional(:addrs) => [String.t()]
+        }
+
+  @typedoc "The dialed connection's path when its stream opened."
+  @type dial_path :: %{kind: :relay | :direct, relay: String.t() | nil}
+
+  @typedoc "Why `dial/3` gave no socket."
+  @type dial_error ::
+          HelperProtocol.dial_failure()
+          | :not_ready
+          | :helper_failed
+          | :no_answer
+          | {:socket, term()}
 
   @typedoc "What the rail reports."
   @type status :: %{
@@ -135,6 +175,126 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
     :ok
   end
 
+  @doc """
+  Dials `target` through the helper and returns the connected socket (passive,
+  binary, owned by the caller) and the connection's path. The caller listens on
+  a fresh socket under `<home>/mobile/` before the helper is asked, and accepts
+  the helper's connection once `dialed` arrives; the listening socket and its
+  file are gone when this returns, on every path. Bounded: the helper answers
+  within its 20 s deadline, and a helper that does not answer 25 s after the op
+  is `:no_answer`. The helper's own refusals come back as its reasons
+  (`:unreachable`, `:timeout`, `:refused`, `:bridge_unreachable`, `:busy`);
+  a helper that is not ready, switched off or absent is `:not_ready`; one that
+  failed while the dial waited is `:helper_failed`.
+
+  Afterwards the helper tells the caller `{:iroh_dial, dial_id, :closed}` when
+  the stream ends; the socket's own close says the same.
+  """
+  @spec dial(GenServer.server(), dial_target(), keyword()) ::
+          {:ok, :gen_tcp.socket(), dial_path()} | {:error, dial_error()}
+  def dial(server, %{node_id: node_id, relays: [_ | _] = relays} = target, opts \\ [])
+      when is_binary(node_id) and is_list(opts) do
+    op_fields = {node_id, relays, Map.get(target, :addrs, [])}
+    wait_ms = Keyword.get(opts, :wait_ms, @dial_wait_ms)
+
+    case safe_call(server, {:reserve_dial, self()}, {:error, :not_ready}) do
+      {:ok, dial_id, path} -> listen_and_dial(server, dial_id, path, op_fields, wait_ms)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp listen_and_dial(server, dial_id, path, op_fields, wait_ms) do
+    case listen_dial_socket(path) do
+      {:ok, listen} ->
+        try do
+          start_dial(server, dial_id, path, op_fields, listen, wait_ms)
+        after
+          _ = :gen_tcp.close(listen)
+          _ = File.rm(path)
+        end
+
+      {:error, reason} ->
+        GenServer.cast(server, {:forget_dial, dial_id})
+        {:error, {:socket, reason}}
+    end
+  end
+
+  defp listen_dial_socket(path) do
+    with :ok <- dial_socket_path(path),
+         {:ok, listen} <-
+           :gen_tcp.listen(0, [
+             :binary,
+             {:active, false},
+             {:backlog, 1},
+             {:ifaddr, {:local, path}}
+           ]) do
+      case File.chmod(path, 0o600) do
+        :ok ->
+          {:ok, listen}
+
+        {:error, reason} ->
+          _ = :gen_tcp.close(listen)
+          _ = File.rm(path)
+          {:error, {:chmod, reason}}
+      end
+    end
+  end
+
+  # A stale file of a dial whose process died is removed; the id is fresh, so
+  # nothing live is there.
+  defp dial_socket_path(path) do
+    with :ok <- SocketPath.check(path) do
+      case File.rm(path) do
+        :ok -> :ok
+        {:error, :enoent} -> :ok
+        {:error, reason} -> {:error, {:stale_socket, reason}}
+      end
+    end
+  end
+
+  defp start_dial(server, dial_id, path, {node_id, relays, addrs}, listen, wait_ms) do
+    op = HelperProtocol.dial(dial_id, node_id, relays, path, addrs)
+    monitor = server |> GenServer.whereis() |> monitor_server()
+
+    try do
+      case safe_call(server, {:dial, dial_id, op}, {:error, :not_ready}) do
+        :ok -> await_dialed(server, dial_id, listen, monitor, wait_ms)
+        {:error, reason} -> {:error, reason}
+      end
+    after
+      if monitor, do: Process.demonitor(monitor, [:flush])
+    end
+  end
+
+  defp monitor_server(nil), do: nil
+  defp monitor_server(pid), do: Process.monitor(pid)
+
+  defp await_dialed(server, dial_id, listen, monitor, wait_ms) do
+    receive do
+      {:iroh_dial, ^dial_id, {:dialed, path}} -> accept_dialed(server, dial_id, listen, path)
+      {:iroh_dial, ^dial_id, {:failed, reason}} -> {:error, reason}
+      {:DOWN, ^monitor, :process, _pid, _reason} -> {:error, :helper_failed}
+    after
+      wait_ms ->
+        GenServer.cast(server, {:forget_dial, dial_id})
+        {:error, :no_answer}
+    end
+  end
+
+  # The helper connected before it said `dialed`, so the connection waits in
+  # the backlog. A failed accept closes it with the listener; the helper then
+  # ends the stream, and its `:closed` reaches no one.
+  defp accept_dialed(server, dial_id, listen, path) do
+    case :gen_tcp.accept(listen, @dial_accept_ms) do
+      {:ok, socket} ->
+        {:ok, socket, path}
+
+      {:error, reason} ->
+        GenServer.cast(server, {:forget_dial, dial_id})
+        {:error, {:socket, reason}}
+    end
+  end
+
   @doc "A phone acknowledged a relay list, or one was revoked: recompute the relays."
   @spec relays_acknowledged(GenServer.server()) :: :ok
   def relays_acknowledged(server) do
@@ -176,10 +336,15 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
   @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)
+    mode = Keyword.get(opts, :mode, :listen)
+
+    unless mode in [:listen, :dial],
+      do: raise(ArgumentError, "no such rail mode: #{inspect(mode)}")
 
     state = %{
+      mode: mode,
       root: Keyword.fetch!(opts, :root),
-      bridge_socket: Keyword.fetch!(opts, :bridge_socket),
+      bridge_socket: if(mode == :listen, do: Keyword.fetch!(opts, :bridge_socket)),
       device_store: Keyword.get(opts, :device_store, DeviceStore),
       binary_path: Keyword.get(opts, :binary_path, default_binary_path()),
       os_type: Keyword.get(opts, :os_type, :os.type()),
@@ -206,13 +371,17 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
       stage: nil,
       timer: nil,
       key: nil,
+      endpoint_id: nil,
       relays: [],
       home: %{relay: nil, connected: false, error: nil},
       paths: %{},
-      refused: %{busy: 0, alpn: 0, bridge_unreachable: 0}
+      refused: %{busy: 0, alpn: 0, bridge_unreachable: 0},
+      dials: %{}
     }
 
-    if state.identity_exists?.(), do: {:ok, state, {:continue, :start}}, else: {:ok, state}
+    if mode == :dial or state.identity_exists?.(),
+      do: {:ok, state, {:continue, :start}},
+      else: {:ok, state}
   end
 
   @impl true
@@ -222,22 +391,54 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
   def handle_cast(:activate, %{rail: :dormant} = state), do: {:noreply, start_helper(state)}
   def handle_cast(:activate, state), do: {:noreply, state}
 
-  def handle_cast(:recompute, %{rail: :ready} = state), do: {:noreply, push_relays(state)}
+  # An endpoint that only dials keeps the current revision's relays and has no
+  # accepted connection to close.
+  def handle_cast(:recompute, %{rail: :ready, mode: :listen} = state),
+    do: {:noreply, push_relays(state)}
+
   def handle_cast(:recompute, state), do: {:noreply, state}
 
-  def handle_cast({:close, op}, %{rail: :ready} = state) do
+  def handle_cast({:close, op}, %{rail: :ready, mode: :listen} = state) do
     :ok = command(state, op)
     {:noreply, state}
   end
 
   def handle_cast({:close, _op}, state), do: {:noreply, state}
 
+  def handle_cast({:forget_dial, dial_id}, state), do: {:noreply, forget_dial(state, dial_id)}
+
   @impl true
-  def handle_call(:candidate, _from, %{rail: :ready} = state),
+  def handle_call(:candidate, _from, %{rail: :ready, mode: :listen} = state),
     do: {:reply, {:ok, candidate_for(state)}, state}
 
   def handle_call(:candidate, _from, state), do: {:reply, :none, state}
   def handle_call(:status, _from, state), do: {:reply, status_of(state), state}
+
+  def handle_call({:reserve_dial, owner}, _from, %{rail: :ready} = state) when is_pid(owner) do
+    if map_size(state.dials) < HelperProtocol.max_dials() do
+      {dial_id, state} = reserve_dial(state, owner)
+      {:reply, {:ok, dial_id, dial_socket(state.root, dial_id)}, state}
+    else
+      {:reply, {:error, :busy}, state}
+    end
+  end
+
+  def handle_call({:reserve_dial, _owner}, _from, state),
+    do: {:reply, {:error, :not_ready}, state}
+
+  def handle_call({:dial, dial_id, op}, {caller, _tag}, %{rail: :ready} = state) do
+    case state.dials do
+      %{^dial_id => %{owner: ^caller, stage: :reserved} = dial} ->
+        :ok = command(state, op)
+        {:reply, :ok, put_in(state.dials[dial_id], %{dial | stage: :dialing})}
+
+      _other ->
+        {:reply, {:error, :not_ready}, state}
+    end
+  end
+
+  def handle_call({:dial, dial_id, _op}, _from, state),
+    do: {:reply, {:error, :not_ready}, forget_dial(state, dial_id)}
 
   @impl true
   def handle_info({port, {:data, {:noeol, chunk}}}, %{port: port} = state),
@@ -273,6 +474,11 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
     {:noreply, fail(%{state | port: nil, os_pid: nil}, {:port_closed, reason}, true)}
   end
 
+  # A dial's owner went away; the helper ends its stream on its own once the
+  # owner's socket closes.
+  def handle_info({:DOWN, monitor, :process, _pid, _reason}, state),
+    do: {:noreply, forget_owner(state, monitor)}
+
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
@@ -287,6 +493,7 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
     with :ok <- helper_present(state),
          :ok <- bridge_listening(state),
          {:ok, key} <- ensure_key(state),
+         :ok <- ensure_dial_dir(state.root),
          {:ok, {executable, args}} <-
            spawn_plan(state.binary_path, state.os_type, state.shim_path),
          {:ok, port, os_pid} <- open_port(executable, args) do
@@ -308,6 +515,9 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
       {:error, {:key, reason}} ->
         fail(state, {:key, reason}, false)
 
+      {:error, {:dial_dir, _dir, _reason} = reason} ->
+        fail(state, reason, false)
+
       {:error, :bridge_unavailable} ->
         fail(state, :bridge_unavailable, false)
 
@@ -324,7 +534,9 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
   end
 
   # The bridge returns `:ignore` when it cannot bind its socket; a helper
-  # started then would have nowhere to bridge a phone to.
+  # started then would have nowhere to bridge a phone to. An endpoint that only
+  # dials has no bridge.
+  defp bridge_listening(%{mode: :dial}), do: :ok
   defp bridge_listening(%{bridge: nil}), do: :ok
 
   defp bridge_listening(%{bridge: bridge}) do
@@ -333,10 +545,37 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
       else: {:error, :bridge_unavailable}
   end
 
+  defp ensure_key(%{mode: :dial}), do: {:ok, nil}
+
   defp ensure_key(state) do
     case Key.ensure(state.root) do
       {:ok, key} -> {:ok, key}
       {:error, reason} -> {:error, {:key, reason}}
+    end
+  end
+
+  # Dial sockets live beside the key, in `<home>/mobile/` (0700), which an
+  # endpoint that only dials may be the first to need.
+  defp ensure_dial_dir(root) do
+    dir = Path.join(root, "mobile")
+
+    case File.lstat(dir) do
+      {:ok, %{type: :directory, mode: mode}} -> dial_dir_mode(dir, Bitwise.band(mode, 0o777))
+      {:ok, %{type: type}} -> {:error, {:dial_dir, dir, {:type, type}}}
+      {:error, :enoent} -> make_dial_dir(dir)
+      {:error, reason} -> {:error, {:dial_dir, dir, reason}}
+    end
+  end
+
+  defp dial_dir_mode(_dir, @dial_dir_mode), do: :ok
+  defp dial_dir_mode(dir, mode), do: {:error, {:dial_dir, dir, {:mode, mode}}}
+
+  defp make_dial_dir(dir) do
+    with :ok <- File.mkdir(dir),
+         :ok <- File.chmod(dir, @dial_dir_mode) do
+      :ok
+    else
+      {:error, reason} -> {:error, {:dial_dir, dir, reason}}
     end
   end
 
@@ -387,6 +626,10 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
 
   # -- the helper's events ---------------------------------------------------
 
+  defp handle_event(%{event: event} = answer, %{stage: :running} = state)
+       when event in [:dialed, :dial_failed, :dial_closed],
+       do: answer_dial(answer, state)
+
   defp handle_event(%{event: :hello} = hello, %{stage: :hello} = state) do
     current = List.last(state.revisions)
 
@@ -402,8 +645,10 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
     end
   end
 
+  # A listening endpoint must be the home's key; one that only dials has a key
+  # only the helper holds.
   defp handle_event(%{event: :ready, endpoint_id: id}, %{stage: :ready} = state) do
-    if id == state.key.endpoint_id do
+    if state.mode == :dial or id == state.key.endpoint_id do
       Logger.info("fermix-iroh ready as #{id}")
       if state.failures > 0, do: :ok = state.emit.(:recovered, 0, :none)
 
@@ -412,6 +657,7 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
         | rail: :ready,
           stage: :running,
           failures: 0,
+          endpoint_id: id,
           ready_at: state.clock.()
       }
     else
@@ -462,6 +708,12 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
   defp handle_event(%{event: event}, state),
     do: fail(state, {:protocol_error, {:unexpected_event, event, state.stage}}, true)
 
+  defp start_endpoint(%{mode: :dial} = state) do
+    relays = List.last(state.revisions).relays
+    :ok = command(state, HelperProtocol.start_dial_only(wire(relays), @limits))
+    await(%{state | relays: relays}, :ready, state.timeouts.ready)
+  end
+
   defp start_endpoint(state) do
     case acknowledged(state) do
       {:ok, relays} ->
@@ -510,7 +762,7 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
 
     %{
       "kind" => "iroh",
-      "node_id" => state.key.endpoint_id,
+      "node_id" => state.endpoint_id,
       "relays" => wire(current.relays),
       "relays_rev" => current.id
     }
@@ -519,7 +771,7 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
   # -- failing and retrying ----------------------------------------------------
 
   defp fail(state, reason, retryable?) do
-    state = state |> cancel_stage() |> stop_port()
+    state = state |> cancel_stage() |> stop_port() |> fail_dials()
     words = describe(reason)
     Logger.warning("fermix-iroh failed: #{words}")
     failures = state.failures + 1
@@ -592,6 +844,14 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
 
   defp describe({:disclaim_shim_missing, message}), do: message
 
+  defp describe({:dial_dir, dir, {:mode, mode}}),
+    do: "#{dir} is mode #{octal(mode)}; it must be 0700"
+
+  defp describe({:dial_dir, dir, {:type, type}}), do: "#{dir} is a #{type}, not a directory"
+
+  defp describe({:dial_dir, dir, reason}),
+    do: "#{dir} cannot be used for dial sockets: #{:file.format_error(reason)}"
+
   defp key_words({:iroh_key_invalid, path, {:mode, mode}}),
     do: "the iroh key #{path} is mode #{octal(mode)}; it must be 0600"
 
@@ -640,7 +900,7 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
     case state.rail do
       :ready ->
         Map.merge(base, %{
-          endpoint_id: state.key.endpoint_id,
+          endpoint_id: state.endpoint_id,
           relay: state.home.relay,
           connected: state.home.connected,
           relay_error: state.home.error
@@ -670,6 +930,77 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
   defp power_of_ten?(1), do: true
   defp power_of_ten?(count) when rem(count, 10) == 0, do: power_of_ten?(div(count, 10))
   defp power_of_ten?(_count), do: false
+
+  # -- dials -----------------------------------------------------------------
+
+  defp reserve_dial(state, owner) do
+    dial_id = fresh_dial_id(state.dials, 3)
+    dial = %{owner: owner, monitor: Process.monitor(owner), stage: :reserved}
+    {dial_id, put_in(state.dials[dial_id], dial)}
+  end
+
+  # Ids are 8 random hex digits, fresh among the (at most 8) dials in flight:
+  # three draws that all collide would take a broken random source.
+  defp fresh_dial_id(_dials, 0), do: raise("no fresh dial id in three draws")
+
+  defp fresh_dial_id(dials, attempts) do
+    dial_id = Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)
+    if Map.has_key?(dials, dial_id), do: fresh_dial_id(dials, attempts - 1), else: dial_id
+  end
+
+  defp dial_socket(root, dial_id), do: Path.join([root, "mobile", "dial-#{dial_id}.sock"])
+
+  defp answer_dial(%{dial_id: dial_id} = answer, state) do
+    case state.dials do
+      %{^dial_id => dial} -> tell_dial(answer, dial, dial_id, state)
+      _gone -> state
+    end
+  end
+
+  defp tell_dial(%{event: :dialed, kind: kind, relay: relay}, dial, dial_id, state) do
+    send(dial.owner, {:iroh_dial, dial_id, {:dialed, %{kind: kind, relay: relay}}})
+    put_in(state.dials[dial_id], %{dial | stage: :dialed})
+  end
+
+  defp tell_dial(%{event: :dial_failed, reason: reason}, dial, dial_id, state) do
+    send(dial.owner, {:iroh_dial, dial_id, {:failed, reason}})
+    forget_dial(state, dial_id)
+  end
+
+  defp tell_dial(%{event: :dial_closed}, dial, dial_id, state) do
+    send(dial.owner, {:iroh_dial, dial_id, :closed})
+    forget_dial(state, dial_id)
+  end
+
+  defp forget_dial(state, dial_id) do
+    case Map.pop(state.dials, dial_id) do
+      {nil, _dials} ->
+        state
+
+      {dial, dials} ->
+        Process.demonitor(dial.monitor, [:flush])
+        %{state | dials: dials}
+    end
+  end
+
+  defp forget_owner(state, monitor) do
+    case Enum.find(state.dials, fn {_id, dial} -> dial.monitor == monitor end) do
+      {dial_id, _dial} -> forget_dial(state, dial_id)
+      nil -> state
+    end
+  end
+
+  # The helper is gone, and every dial with it: one still waiting is told so,
+  # one carrying a stream is told it ended (its socket closed with the helper).
+  defp fail_dials(state) do
+    Enum.each(state.dials, fn {dial_id, dial} ->
+      message = if dial.stage == :dialed, do: :closed, else: {:failed, :helper_failed}
+      send(dial.owner, {:iroh_dial, dial_id, message})
+      Process.demonitor(dial.monitor, [:flush])
+    end)
+
+    %{state | dials: %{}}
+  end
 
   # -- the port ----------------------------------------------------------------
 

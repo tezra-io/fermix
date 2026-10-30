@@ -3,10 +3,13 @@ defmodule FermixChannels.Mobile.Noise do
   Noise `IK` and `IKpsk2` for the mobile channel, implemented over OTP `:crypto`.
 
   The five-byte clear prelude selects exactly one mode before responder state is
-  initialized: `<<"FXM1", 1>>` for an already-paired `IK` session and
-  `<<"FXM1", 2>>` for the one-time-secret `IKpsk2` pairing ceremony. The
-  selected prelude is also bound into the Noise prologue, so it is authenticated
-  by the transcript. There is no alternate-handshake attempt.
+  initialized: `<<"FXM1", 1>>` for an already-paired `IK` session,
+  `<<"FXM1", 2>>` for the one-time-secret `IKpsk2` pairing ceremony,
+  `<<"FXM1", 3>>` for a candidate primary's `IKpsk2` enrollment under an
+  enrollment code's secret (`:ikpsk2_enroll`), and `<<"FXM1", 4>>` for the
+  `IK` move session a source engine opens to an enrolled candidate (`:ik_move`)
+  (M75). The selected prelude is also bound into the Noise prologue, so it is
+  authenticated by the transcript. There is no alternate-handshake attempt.
   """
 
   alias FermixChannels.Mobile.Noise.Cipher
@@ -14,6 +17,12 @@ defmodule FermixChannels.Mobile.Noise do
 
   @paired_prelude <<"FXM1", 1>>
   @pairing_prelude <<"FXM1", 2>>
+  @enroll_prelude <<"FXM1", 3>>
+  @move_prelude <<"FXM1", 4>>
+  # A mode is a handshake pattern under its own prelude: the two M75 modes run
+  # the IKpsk2 and IK patterns, told apart from pairing and paired sessions by
+  # the prelude the prologue binds.
+  @patterns [:ik, :ikpsk2, :ikpsk2_enroll, :ik_move]
   @prologue_prefix "fermix-mobile-v1"
   @sas_label "fermix-mobile-sas-v1"
   @max_noise_message_bytes 65_535
@@ -46,7 +55,7 @@ defmodule FermixChannels.Mobile.Noise do
 
     @type t :: %__MODULE__{
             role: :initiator | :responder,
-            pattern: :ik | :ikpsk2,
+            pattern: :ik | :ikpsk2 | :ikpsk2_enroll | :ik_move,
             step: 0..2,
             static_keypair: keypair() | nil,
             ephemeral_keypair: keypair() | nil,
@@ -63,7 +72,7 @@ defmodule FermixChannels.Mobile.Noise do
           }
   end
 
-  @type pattern :: :ik | :ikpsk2
+  @type pattern :: :ik | :ikpsk2 | :ikpsk2_enroll | :ik_move
   @type role :: :initiator | :responder
   @type keypair :: State.keypair()
 
@@ -75,13 +84,22 @@ defmodule FermixChannels.Mobile.Noise do
   @spec pairing_prelude() :: binary()
   def pairing_prelude, do: @pairing_prelude
 
+  @doc "The fixed outer prelude for a mode."
+  @spec prelude(pattern()) :: binary()
+  def prelude(:ik), do: @paired_prelude
+  def prelude(:ikpsk2), do: @pairing_prelude
+  def prelude(:ikpsk2_enroll), do: @enroll_prelude
+  def prelude(:ik_move), do: @move_prelude
+
   @doc "The authenticated Noise prologue for a selected mode."
   @spec prologue(pattern()) :: binary()
-  def prologue(:ik), do: @prologue_prefix <> @paired_prelude
-  def prologue(:ikpsk2), do: @prologue_prefix <> @pairing_prelude
+  def prologue(pattern) when pattern in @patterns, do: @prologue_prefix <> prelude(pattern)
 
-  @doc "Parse and validate the clear mode prelude without initializing Noise state."
-  @spec parse_prelude(binary(), pattern() | :any) ::
+  @doc """
+  Parse and validate the clear mode prelude without initializing Noise state.
+  `expected` is one mode, a list of the modes the caller serves, or `:any`.
+  """
+  @spec parse_prelude(binary(), pattern() | [pattern()] | :any) ::
           {:ok, pattern(), binary()} | {:error, term()}
   def parse_prelude(<<"FXM1", mode, rest::binary>>, expected) do
     with {:ok, pattern} <- pattern_for_mode(mode),
@@ -111,7 +129,7 @@ defmodule FermixChannels.Mobile.Noise do
   @doc "Initialize an initiator or a staged responder handshake."
   @spec initialize(role(), pattern(), keyword()) :: {:ok, State.t()} | {:error, term()}
   def initialize(role, pattern, opts)
-      when role in [:initiator, :responder] and pattern in [:ik, :ikpsk2] and is_list(opts) do
+      when role in [:initiator, :responder] and pattern in @patterns and is_list(opts) do
     with {:ok, static} <- required_keypair(opts, :static_keypair),
          {:ok, ephemeral} <- optional_ephemeral(opts),
          {:ok, psk} <- validate_psk(pattern, Keyword.get(opts, :psk)),
@@ -335,23 +353,27 @@ defmodule FermixChannels.Mobile.Noise do
   defp transport_ciphers(:responder, first, second), do: {second, first}
 
   defp initialize_symmetric(pattern, responder_static) do
-    Symmetric.initialize(protocol_name(pattern), prologue(pattern), responder_static)
+    Symmetric.initialize(protocol_name(base(pattern)), prologue(pattern), responder_static)
   end
+
+  # The Noise pattern a mode runs.
+  defp base(pattern) when pattern in [:ik, :ik_move], do: :ik
+  defp base(pattern) when pattern in [:ikpsk2, :ikpsk2_enroll], do: :ikpsk2
 
   defp protocol_name(:ik), do: "Noise_IK_25519_ChaChaPoly_SHA256"
   defp protocol_name(:ikpsk2), do: "Noise_IKpsk2_25519_ChaChaPoly_SHA256"
 
-  defp prelude(:ik), do: @paired_prelude
-  defp prelude(:ikpsk2), do: @pairing_prelude
+  defp mix_ephemeral(symmetric, public, pattern) when pattern in [:ik, :ik_move],
+    do: Symmetric.mix_hash(symmetric, public)
 
-  defp mix_ephemeral(symmetric, public, :ik), do: Symmetric.mix_hash(symmetric, public)
-
-  defp mix_ephemeral(symmetric, public, :ikpsk2) do
+  defp mix_ephemeral(symmetric, public, pattern) when pattern in [:ikpsk2, :ikpsk2_enroll] do
     symmetric |> Symmetric.mix_hash(public) |> Symmetric.mix_key(public)
   end
 
-  defp mix_psk(symmetric, :ik, nil), do: symmetric
-  defp mix_psk(symmetric, :ikpsk2, psk), do: Symmetric.mix_key_and_hash(symmetric, psk)
+  defp mix_psk(symmetric, pattern, psk), do: mix_base_psk(symmetric, base(pattern), psk)
+
+  defp mix_base_psk(symmetric, :ik, nil), do: symmetric
+  defp mix_base_psk(symmetric, :ikpsk2, psk), do: Symmetric.mix_key_and_hash(symmetric, psk)
 
   defp mix_dh(symmetric, private, public) do
     with {:ok, shared} <- dh(private, public) do
@@ -404,10 +426,12 @@ defmodule FermixChannels.Mobile.Noise do
     end
   end
 
-  defp validate_psk(:ik, nil), do: {:ok, nil}
-  defp validate_psk(:ik, _psk), do: {:error, :psk_not_allowed}
-  defp validate_psk(:ikpsk2, <<psk::binary-size(32)>>), do: {:ok, psk}
-  defp validate_psk(:ikpsk2, _psk), do: {:error, :invalid_psk}
+  defp validate_psk(pattern, psk), do: validate_base_psk(base(pattern), psk)
+
+  defp validate_base_psk(:ik, nil), do: {:ok, nil}
+  defp validate_base_psk(:ik, _psk), do: {:error, :psk_not_allowed}
+  defp validate_base_psk(:ikpsk2, <<psk::binary-size(32)>>), do: {:ok, psk}
+  defp validate_base_psk(:ikpsk2, _psk), do: {:error, :invalid_psk}
 
   defp validate_public_key(<<_key::binary-size(32)>>), do: :ok
   defp validate_public_key(_key), do: {:error, :invalid_remote_key}
@@ -435,10 +459,17 @@ defmodule FermixChannels.Mobile.Noise do
 
   defp pattern_for_mode(1), do: {:ok, :ik}
   defp pattern_for_mode(2), do: {:ok, :ikpsk2}
+  defp pattern_for_mode(3), do: {:ok, :ikpsk2_enroll}
+  defp pattern_for_mode(4), do: {:ok, :ik_move}
   defp pattern_for_mode(_mode), do: {:error, :unknown_handshake_mode}
 
   defp expected_pattern(_pattern, :any), do: :ok
   defp expected_pattern(pattern, pattern), do: :ok
+
+  defp expected_pattern(pattern, expected) when is_list(expected) do
+    if pattern in expected, do: :ok, else: {:error, :handshake_mode_mismatch}
+  end
+
   defp expected_pattern(_pattern, _expected), do: {:error, :handshake_mode_mismatch}
 
   defp secure_equal?(left, right), do: :crypto.hash_equals(left, right)

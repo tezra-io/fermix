@@ -18,7 +18,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocolContractTest do
   end
 
   test "every event fixture is one line, newline-terminated, and decodes" do
-    assert {:ok, %{event: :hello, protocol_version: 2, iroh_version: "1.3.0"}} =
+    assert {:ok, %{event: :hello, protocol_version: 3, iroh_version: "1.3.0"}} =
              HelperProtocol.decode_event(line("hello.json"))
 
     assert {:ok, %{event: :ready, endpoint_id: @endpoint_id}} =
@@ -40,6 +40,20 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocolContractTest do
 
     assert {:ok, %{event: :error, code: "key_invalid"}} =
              HelperProtocol.decode_event(line("error.json"))
+
+    assert {:ok,
+            %{
+              event: :dialed,
+              dial_id: "5f1c9a2e",
+              kind: :relay,
+              relay: "https://us1.relay.fermix.ai/"
+            }} = HelperProtocol.decode_event(line("dialed.json"))
+
+    assert {:ok, %{event: :dial_failed, dial_id: "5f1c9a2e", reason: :unreachable}} =
+             HelperProtocol.decode_event(line("dial_failed.json"))
+
+    assert {:ok, %{event: :dial_closed, dial_id: "5f1c9a2e"}} =
+             HelperProtocol.decode_event(line("dial_closed.json"))
 
     for name <- File.ls!(@fixtures), String.ends_with?(name, ".json") do
       contents = fixture(name)
@@ -70,9 +84,48 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocolContractTest do
       )
 
     assert decoded(start) == Jason.decode!(fixture("start.json"))
+
+    assert decoded(HelperProtocol.start_dial_only(relays, limits)) ==
+             Jason.decode!(fixture("start_dial_only.json"))
+
     assert decoded(HelperProtocol.set_relays(relays)) == Jason.decode!(fixture("set_relays.json"))
     assert decoded(HelperProtocol.close(@endpoint_id)) == Jason.decode!(fixture("close.json"))
+
+    socket = "/Users/owner/.fermix/mobile/dial-5f1c9a2e.sock"
+
+    assert decoded(HelperProtocol.dial("5f1c9a2e", @endpoint_id, relays, socket)) ==
+             Jason.decode!(fixture("dial.json"))
+
+    direct = [%{"url" => "https://relay.invalid/", "quic_port" => 7842}]
+    addrs = ["127.0.0.1:4100", "[::1]:4100"]
+
+    assert decoded(HelperProtocol.dial("5f1c9a2e", @endpoint_id, direct, socket, addrs)) ==
+             Jason.decode!(fixture("dial_direct.json"))
+
     assert decoded(HelperProtocol.shutdown()) == Jason.decode!(fixture("shutdown.json"))
+  end
+
+  test "a dial outside the contract fails loud, never reaches the helper" do
+    relays = [%{"url" => "https://us1.relay.fermix.ai/", "quic_port" => 7842}]
+    socket = "/home/owner/.fermix/mobile/dial-1.sock"
+
+    for {id, peer, relays, socket, addrs} <- [
+          {"UPPER", @endpoint_id, relays, socket, []},
+          {"", @endpoint_id, relays, socket, []},
+          {String.duplicate("d", 65), @endpoint_id, relays, socket, []},
+          {"d1", "79b5", relays, socket, []},
+          {"d1", @endpoint_id, [], socket, []},
+          {"d1", @endpoint_id, [%{"url" => "http://r/", "quic_port" => 1}], socket, []},
+          {"d1", @endpoint_id, [%{"url" => "https://r/", "quic_port" => 0}], socket, []},
+          {"d1", @endpoint_id, List.duplicate(hd(relays), 9), socket, []},
+          {"d1", @endpoint_id, relays, "relative.sock", []},
+          {"d1", @endpoint_id, relays, socket, List.duplicate("127.0.0.1:1", 9)}
+        ] do
+      assert_raise ArgumentError, fn -> HelperProtocol.dial(id, peer, relays, socket, addrs) end
+    end
+
+    longest = String.duplicate("d", 63) <> "_"
+    assert %{"dial_id" => ^longest} = HelperProtocol.dial(longest, @endpoint_id, relays, socket)
   end
 
   test "a close names one peer by its lowercase hex endpoint id, or fails loud" do
@@ -102,6 +155,11 @@ defmodule FermixChannels.Mobile.Iroh.HelperProtocolContractTest do
           ~s({"event":"path","endpoint_id":"#{@endpoint_id}","kind":"direct","relay":"https://x/"}),
           ~s({"event":"refused","reason":"tired","endpoint_id":null}),
           ~s({"event":"log","level":"warn","message":"#{String.duplicate("x", 513)}"}),
+          ~s({"event":"dialed","dial_id":"D1","kind":"direct","relay":null}),
+          ~s({"event":"dialed","dial_id":"d1","kind":"direct","relay":"https://x/"}),
+          ~s({"event":"dialed","dial_id":"d1","kind":"relay","relay":null}),
+          ~s({"event":"dial_failed","dial_id":"d1","reason":"tired"}),
+          ~s({"event":"dial_closed"}),
           String.duplicate("x", HelperProtocol.max_line_bytes() + 1)
         ] do
       assert {:error, _reason} = HelperProtocol.decode_event(line), line

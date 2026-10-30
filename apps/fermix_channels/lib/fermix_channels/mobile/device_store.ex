@@ -21,16 +21,23 @@ defmodule FermixChannels.Mobile.DeviceStore do
     @moduledoc """
     A paired device authenticated by its Noise static public key.
 
+    `kind` is `:phone` (a row that names none, as every row written before
+    M75 does) or `:desktop`, a desktop engine paired by the move (M75 §3). A
+    phone has its push salt (`apns_key_salt`); a desktop has no push or
+    attestation field at all.
+
     `platform`, `signer_role`, `version_code`, `boot_state` and
     `device_locked` are what the phone's key attestation proved when it was
     approved; a phone paired before attestation was verified has them `nil`.
-    `relay_list_rev` is the relay list revision the phone last acknowledged in
-    its `hello` (M62 §3.1), `nil` until it names one.
+    `relay_list_rev` is the relay list revision the device last acknowledged
+    in its `hello` (M62 §3.1), `nil` until it names one.
     """
 
-    @enforce_keys [:device_id, :name, :model, :noise_pk, :created_at, :apns_key_salt]
+    @enforce_keys [:device_id, :name, :model, :noise_pk, :created_at]
     defstruct @enforce_keys ++
                 [
+                  kind: :phone,
+                  apns_key_salt: nil,
                   push_token: nil,
                   last_seen: nil,
                   platform: nil,
@@ -46,10 +53,11 @@ defmodule FermixChannels.Mobile.DeviceStore do
             name: String.t(),
             model: String.t(),
             noise_pk: <<_::256>>,
+            kind: :phone | :desktop,
             push_token: String.t() | nil,
             created_at: DateTime.t(),
             last_seen: DateTime.t() | nil,
-            apns_key_salt: <<_::256>>,
+            apns_key_salt: <<_::256>> | nil,
             platform: String.t() | nil,
             signer_role: :development | :release | nil,
             version_code: non_neg_integer() | nil,
@@ -64,8 +72,10 @@ defmodule FermixChannels.Mobile.DeviceStore do
 
   @file_mode 0o600
   @dir_mode 0o700
-  @required_fields [:device_id, :name, :model, :noise_pk, :created_at, :apns_key_salt]
+  @required_fields [:device_id, :name, :model, :noise_pk, :created_at]
   @optional_fields [
+    :kind,
+    :apns_key_salt,
     :push_token,
     :last_seen,
     :platform,
@@ -77,6 +87,18 @@ defmodule FermixChannels.Mobile.DeviceStore do
   ]
   @platforms ~w(android ios)
   @signer_roles %{"development" => :development, "release" => :release}
+  @kinds %{"phone" => :phone, "desktop" => :desktop}
+  # What only a phone has: its push salt and token, and what its attestation
+  # proved. A desktop row carries none of them.
+  @phone_only_fields [
+    :apns_key_salt,
+    :push_token,
+    :platform,
+    :signer_role,
+    :version_code,
+    :boot_state,
+    :device_locked
+  ]
   @update_fields [:name, :model, :push_token, :last_seen, :relay_list_rev]
   @relay_list_rev_regex ~r/\A[0-9a-f]{16}\z/
   # last_seen is informational, and every hello records it: a newer value
@@ -441,10 +463,11 @@ defmodule FermixChannels.Mobile.DeviceStore do
       name: row["name"],
       model: row["model"],
       noise_pk: decode_base64(row["noise_pk"]),
+      kind: decode_kind(row["kind"]),
       push_token: row["push_token"],
       created_at: decode_datetime(row["created_at"]),
       last_seen: decode_optional_datetime(row["last_seen"]),
-      apns_key_salt: decode_base64(row["apns_key_salt"]),
+      apns_key_salt: decode_optional_base64(row["apns_key_salt"]),
       platform: row["platform"],
       signer_role: decode_signer_role(row["signer_role"]),
       version_code: row["version_code"],
@@ -473,6 +496,14 @@ defmodule FermixChannels.Mobile.DeviceStore do
   end
 
   defp decode_base64(value), do: {:decode_error, {:invalid_base64_value, value}}
+  defp decode_optional_base64(nil), do: nil
+  defp decode_optional_base64(value), do: decode_base64(value)
+
+  # A row that names no kind was written before M75, when every device was a
+  # phone.
+  defp decode_kind(nil), do: :phone
+  defp decode_kind(value) when is_map_key(@kinds, value), do: Map.fetch!(@kinds, value)
+  defp decode_kind(value), do: {:decode_error, {:invalid_kind, value}}
 
   defp decode_datetime(%DateTime{} = value), do: value
 
@@ -507,10 +538,32 @@ defmodule FermixChannels.Mobile.DeviceStore do
          :ok <- validate_optional_text(:push_token, attrs[:push_token]),
          :ok <- validate_datetime(:created_at, attrs[:created_at]),
          :ok <- validate_optional_datetime(:last_seen, attrs[:last_seen]),
-         :ok <- validate_binary32(:apns_key_salt, attrs[:apns_key_salt]),
          :ok <- validate_relay_list_rev(:relay_list_rev, attrs[:relay_list_rev]),
-         :ok <- validate_attestation_facts(attrs) do
+         :ok <- validate_kind_fields(attrs) do
       {:ok, struct!(Device, Map.take(attrs, @required_fields ++ @optional_fields))}
+    end
+  end
+
+  # Each kind's own fields: a phone has its push salt; a desktop has none of a
+  # phone's fields.
+  defp validate_kind_fields(attrs) do
+    case Map.get(attrs, :kind, :phone) do
+      :phone -> validate_phone(attrs)
+      :desktop -> validate_desktop(attrs)
+      _other -> {:error, {:invalid_device, :kind, :invalid_kind}}
+    end
+  end
+
+  defp validate_phone(attrs) do
+    with :ok <- validate_binary32(:apns_key_salt, attrs[:apns_key_salt]) do
+      validate_attestation_facts(attrs)
+    end
+  end
+
+  defp validate_desktop(attrs) do
+    case Enum.find(@phone_only_fields, &(not is_nil(attrs[&1]))) do
+      nil -> :ok
+      field -> {:error, {:invalid_device, field, :desktop_field}}
     end
   end
 
@@ -607,7 +660,8 @@ defmodule FermixChannels.Mobile.DeviceStore do
          :ok <- validate_text(:model, updated.model),
          :ok <- validate_optional_text(:push_token, updated.push_token),
          :ok <- validate_optional_datetime(:last_seen, updated.last_seen),
-         :ok <- validate_relay_list_rev(:relay_list_rev, updated.relay_list_rev) do
+         :ok <- validate_relay_list_rev(:relay_list_rev, updated.relay_list_rev),
+         :ok <- validate_kind_fields(Map.from_struct(updated)) do
       {:ok, updated}
     end
   end
@@ -711,9 +765,10 @@ defmodule FermixChannels.Mobile.DeviceStore do
       "name" => device.name,
       "model" => device.model,
       "noise_pk" => Base.encode64(device.noise_pk),
-      "created_at" => DateTime.to_iso8601(device.created_at),
-      "apns_key_salt" => Base.encode64(device.apns_key_salt)
+      "created_at" => DateTime.to_iso8601(device.created_at)
     }
+    |> maybe_put("kind", encode_kind(device.kind))
+    |> maybe_put("apns_key_salt", encode_optional_base64(device.apns_key_salt))
     |> maybe_put("push_token", device.push_token)
     |> maybe_put("last_seen", encode_datetime(device.last_seen))
     |> maybe_put("platform", device.platform)
@@ -723,6 +778,13 @@ defmodule FermixChannels.Mobile.DeviceStore do
     |> maybe_put("device_locked", device.device_locked)
     |> maybe_put("relay_list_rev", device.relay_list_rev)
   end
+
+  # A phone's row names no kind, as every row written before M75 does, so it
+  # reads and writes back byte for byte.
+  defp encode_kind(:phone), do: nil
+  defp encode_kind(:desktop), do: "desktop"
+  defp encode_optional_base64(nil), do: nil
+  defp encode_optional_base64(value), do: Base.encode64(value)
 
   defp encode_atom(nil), do: nil
   defp encode_atom(value) when is_atom(value), do: Atom.to_string(value)

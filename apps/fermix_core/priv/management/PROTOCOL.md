@@ -229,8 +229,8 @@ daemon onto anything else.
 | `mobile.pair.get` | `session_id` | The pairing session as it stands. The pane polls it until the session is terminal. Minimum version `2`. |
 | `mobile.pair.decide` | `session_id`, `approved` (boolean) | Approves or denies the phone waiting in the session and answers the terminal view. Minimum version `2`. |
 | `mobile.pair.cancel` | `session_id` | Closes the window and answers the terminal view. Cancelling a finished session is a no-op, not an error. Minimum version `2`. |
-| `mobile.devices.list` | none | Every paired phone, oldest first, at most 64, read from the paired-device file while the channel is not running. Minimum version `2`. |
-| `mobile.devices.revoke` | `device_id` | Forgets one paired phone and closes its live connection, and answers with the id and `revoked: true`. While the channel is not running it forgets the phone in the paired-device file. Minimum version `2`. |
+| `mobile.devices.list` | none | Every paired device, oldest first, at most 64, read from the paired-device file while the channel is not running. Each row names its `kind`, `phone` or `desktop` (a desktop engine a move paired). Minimum version `2`. |
+| `mobile.devices.revoke` | `device_id` | Forgets one paired device, a phone or a desktop, and closes its live connection, and answers with the id and `revoked: true`. While the channel is not running it forgets the device in the paired-device file. Minimum version `2`. |
 | `browser.install.start` | none | Downloads a browser for tasks: the meeting notetaker's helper, then the Chromium build it is pinned to, and completes with the name of the browser tasks now run in. A job. Minimum version `2`. |
 | `imessage.permissions.get` | none | The Fermix Messages helper's non-prompting state: whether it is installed, its version, Full Disk Access, the Messages database, Automation, whether Messages runs and is signed in, the user session, the confirmed recipient policy, whether that policy is exactly the saved settings, and when it was read. Minimum version `2`. |
 | `imessage.grant.start` | `service` (`automation` or `full_disk_access`) | Asks for one grant: `automation` raises the one system prompt, `full_disk_access` registers the helper, opens the Full Disk Access pane and reveals the helper for drag-in. A job that completes with the permissions view. Minimum version `2`. |
@@ -417,7 +417,7 @@ Notes that the shapes alone do not carry:
   one second doubling to a minute, and given up after a day until the next
   restart; a helper that disagrees with this daemon's protocol, iroh version
   or key is not retried.
-- **Pairing and forgetting a phone are the owner's decisions.**
+- **Pairing and forgetting a device are the owner's decisions.**
   `mobile.pair.start`, `mobile.pair.decide`, `mobile.pair.cancel` and
   `mobile.devices.revoke` answer `unavailable` {`capability`: `mobile`,
   `sentence`: "Only the owner can pair or forget a phone; run this from your

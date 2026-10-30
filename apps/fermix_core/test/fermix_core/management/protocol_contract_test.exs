@@ -1499,17 +1499,34 @@ defmodule FermixCore.Management.ProtocolContractTest do
            device_id: @device_id,
            name: "Sam's phone",
            model: "Google Pixel 9 Pro",
+           kind: :phone,
            platform: nil,
            signer_role: nil,
            boot_state: nil,
            push_registered: false,
            created_at: "2026-09-26T12:01:05Z",
            last_seen: "2026-09-26T12:04:40Z"
-         }
+         },
+         desktop()
        ]}
     end
 
     def devices_revoke(device_id, _opts), do: {:ok, %{device_id: device_id}}
+
+    defp desktop do
+      %{
+        device_id: "c41e9d27-5a8b-4f63-9e20-7d1b3c5a8f94",
+        name: "Studio Mac",
+        model: "Mac15,8",
+        kind: :desktop,
+        platform: nil,
+        signer_role: nil,
+        boot_state: nil,
+        push_registered: false,
+        created_at: "2026-10-20T07:15:00Z",
+        last_seen: "2026-10-21T08:02:11Z"
+      }
+    end
 
     defp session(state, ttl_ms, request, outcome) do
       %{

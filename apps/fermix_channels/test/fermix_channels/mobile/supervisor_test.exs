@@ -707,7 +707,10 @@ defmodule FermixChannels.Mobile.SupervisorTest do
       push_dispatcher: Module.concat(__MODULE__, "Push#{suffix}"),
       iroh_helper: Module.concat(__MODULE__, "IrohHelper#{suffix}"),
       bridge: Module.concat(__MODULE__, "Bridge#{suffix}"),
-      bridge_connections: Module.concat(__MODULE__, "BridgeConnections#{suffix}")
+      bridge_connections: Module.concat(__MODULE__, "BridgeConnections#{suffix}"),
+      desktop: Module.concat(__MODULE__, "Desktop#{suffix}"),
+      desktop_peers: Module.concat(__MODULE__, "DesktopPeers#{suffix}"),
+      desktop_peer_supervisor: Module.concat(__MODULE__, "DesktopPeerSupervisor#{suffix}")
     }
   end
 

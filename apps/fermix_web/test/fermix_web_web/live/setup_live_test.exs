@@ -3295,6 +3295,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       device_id: @phone_device,
       name: "Sam's phone",
       model: "Google Pixel 9 Pro",
+      kind: :phone,
       platform: "android",
       signer_role: :release,
       boot_state: %{verified: true, locked: true},

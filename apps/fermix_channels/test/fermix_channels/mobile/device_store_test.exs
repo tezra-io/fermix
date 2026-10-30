@@ -356,6 +356,84 @@ defmodule FermixChannels.Mobile.DeviceStoreTest do
     refute File.exists?(Path.join(root, "mobile"))
   end
 
+  # M75 §3: a desktop is a device row of its own kind, with none of a phone's
+  # push or attestation fields.
+  describe "the desktop kind" do
+    test "a desktop row persists its kind and reads it back", %{root: root} do
+      attrs = desktop_attrs()
+
+      assert {:ok, %Device{kind: :desktop} = added} = DeviceStore.add(attrs, root: root)
+
+      assert {:ok, ^added} = DeviceStore.fetch(attrs.device_id, root: root)
+      assert {:ok, ^added} = DeviceStore.find_by_noise_pk(attrs.noise_pk, root: root)
+      assert added.apns_key_salt == nil
+
+      toml = File.read!(Path.join(root, "mobile/devices.toml"))
+      assert toml =~ ~s(kind = "desktop")
+      refute toml =~ "apns_key_salt"
+    end
+
+    test "a desktop row refuses every phone field", %{root: root} do
+      for {field, value} <- [
+            apns_key_salt: :crypto.strong_rand_bytes(32),
+            push_token: "token",
+            platform: "android",
+            signer_role: :release,
+            version_code: 7,
+            boot_state: :verified,
+            device_locked: true
+          ] do
+        attrs = Map.put(desktop_attrs(), field, value)
+
+        assert {:error, {:invalid_device, ^field, :desktop_field}} =
+                 DeviceStore.add(attrs, root: root)
+      end
+
+      refute File.exists?(Path.join(root, "mobile"))
+    end
+
+    test "a phone row needs its push salt, and no other kind exists", %{root: root} do
+      assert {:error, {:invalid_device, :apns_key_salt, :invalid_length}} =
+               DeviceStore.add(Map.delete(device_attrs(), :apns_key_salt), root: root)
+
+      assert {:error, {:invalid_device, :kind, :invalid_kind}} =
+               DeviceStore.add(Map.put(device_attrs(), :kind, :tablet), root: root)
+
+      assert {:ok, %Device{kind: :phone}} =
+               DeviceStore.add(Map.put(device_attrs(), :kind, :phone), root: root)
+    end
+
+    test "an update gives a desktop no phone field", %{root: root} do
+      desktop = desktop_attrs()
+      assert {:ok, _desktop} = DeviceStore.add(desktop, root: root)
+
+      assert {:error, {:invalid_device, :push_token, :desktop_field}} =
+               DeviceStore.update(desktop.device_id, %{push_token: "token"}, root: root)
+    end
+
+    test "a row naming a kind this daemon does not know fails loudly", %{root: root} do
+      path = write_rows(root, ~s(kind = "tablet"\n))
+
+      assert {:error, {:invalid_device_row, ^path, 0, {:invalid_device, :kind, _reason}}} =
+               DeviceStore.list(root: root)
+    end
+
+    # Every row on disk before M75 names no kind: it reads as a phone and is
+    # written back as it was, so no phone is relabelled by the upgrade.
+    test "a row written before the desktop kind reads as a phone and round-trips unchanged",
+         %{root: root} do
+      path = write_rows(root, "")
+      [before] = path |> File.read!() |> TomlElixir.decode!() |> Map.fetch!("devices")
+
+      assert {:ok, [%Device{kind: :phone} = legacy]} = DeviceStore.list(root: root)
+
+      assert {:ok, _desktop} = DeviceStore.add(desktop_attrs(), root: root)
+
+      rows = path |> File.read!() |> TomlElixir.decode!() |> Map.fetch!("devices")
+      assert Enum.find(rows, &(&1["device_id"] == legacy.device_id)) == before
+    end
+  end
+
   test "delete removes only the requested record", %{root: root} do
     first = device_attrs()
     second = device_attrs()
@@ -430,6 +508,40 @@ defmodule FermixChannels.Mobile.DeviceStoreTest do
       last_seen: nil,
       apns_key_salt: :crypto.strong_rand_bytes(32)
     }
+  end
+
+  defp desktop_attrs do
+    %{
+      device_id: uuid(),
+      name: "Studio Mac",
+      model: "Mac15,8",
+      noise_pk: :crypto.strong_rand_bytes(32),
+      created_at: ~U[2026-10-20 07:15:00Z],
+      kind: :desktop
+    }
+  end
+
+  # A store holding one phone row in the shape every daemon before M75 wrote,
+  # plus `extra` lines.
+  defp write_rows(root, extra) do
+    mobile_dir = Path.join(root, "mobile")
+    path = Path.join(mobile_dir, "devices.toml")
+    File.mkdir_p!(mobile_dir)
+    File.chmod!(mobile_dir, 0o700)
+
+    File.write!(path, """
+    [[devices]]
+    apns_key_salt = "#{Base.encode64(:crypto.strong_rand_bytes(32))}"
+    created_at = "2026-09-14T06:40:00Z"
+    device_id = "#{uuid()}"
+    model = "Google Pixel 8a"
+    name = "Kitchen phone"
+    noise_pk = "#{Base.encode64(:crypto.strong_rand_bytes(32))}"
+    #{extra}\
+    """)
+
+    File.chmod!(path, 0o600)
+    path
   end
 
   defp attested do

@@ -41,3 +41,15 @@
 {"v":2,"t":"pair_approved","seq":1,"device_id":"0d6f3a52-2f4b-4bb4-9a31-6f7e1d9b8c21","candidates":[{"host":"100.101.102.103","interface":"utun4","scope":"tailnet"},{"host":"192.168.1.8","interface":"en0","scope":"lan"}],"profiles":[{"id":"main","name":"Fermix"}],"push_salt":"c3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3M=","push":["apns"]}
 {"v":2,"t":"pair_denied","seq":1,"reason":"denied"}
 {"v":2,"t":"pair_denied","seq":1,"reason":"timeout"}
+{"v":2,"t":"companion_close","seq":11,"channel":1,"reason":"closed by the primary"}
+{"v":2,"t":"companion_close","seq":12,"channel":2}
+{"v":2,"t":"loopback_open","seq":15,"loopback_id":"lb-2b90","ports":[53682],"expires_in_s":600}
+{"v":2,"t":"loopback_close","seq":19,"loopback_id":"lb-2b90"}
+{"v":2,"t":"snapshot_begin","seq":22,"snapshot_id":"snap-20261021T0600Z","name":"20261021T060000Z-e3.fxsnap","size_bytes":4194304,"sha256":"4f2a7d3c9e1b6058a2d4c7e9f1b3a5d7c9e2f4a6b8d0c1e3f5a7b9c2d4e6f8a0"}
+{"v":2,"t":"snapshot_end","seq":95,"snapshot_id":"snap-20261021T0600Z"}
+{"v":2,"t":"enroll_accepted","seq":1,"candidate_id":"cand-6c19","primary_name":"studio"}
+{"v":2,"t":"move_accept","seq":1,"move_id":"mv-8e41","recipient":"WnVzcmVjaXBpZW50S2V5Rm9yVGhlTW92ZUZpeHR1cmU="}
+{"v":2,"t":"move_ready","seq":2,"move_id":"mv-8e41","epoch":4}
+{"v":2,"t":"move_done","seq":3,"move_id":"mv-8e41","epoch":4}
+{"v":2,"t":"error","seq":3,"code":"unsupported_event","message":"{:unsupported_event, \"msg\"}"}
+{"v":2,"t":"error","seq":2,"code":"move_mismatch","message":"the stream's SHA-256 is not the offer's"}

@@ -3349,10 +3349,12 @@
     },
     "mobileDevice": {
       "type": "object",
+      "description": "A paired device: a phone, or a desktop engine (kind desktop). A desktop has no platform, signer role, boot state or push registration of its own.",
       "required": [
         "device_id",
         "name",
         "model",
+        "kind",
         "platform",
         "signer_role",
         "boot_state",
@@ -3365,6 +3367,7 @@
         "device_id": { "type": "string" },
         "name": { "type": "string" },
         "model": { "type": "string" },
+        "kind": { "enum": ["phone", "desktop"] },
         "platform": { "type": ["string", "null"] },
         "signer_role": { "enum": ["release", "development", null] },
         "boot_state": {

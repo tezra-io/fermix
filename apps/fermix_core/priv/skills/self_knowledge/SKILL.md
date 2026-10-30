@@ -146,7 +146,7 @@ Deeper detail loads on demand with `skill_view(name: "self-knowledge", file: "<n
 - `acp` — driving Fermix from Zed or Buzz: turning it on, wiring a client, remembered identities, what is absent, and failures.
 - `channel_setup` — connecting Telegram, Discord, Slack, WhatsApp, Signal and iMessage: the values and where each comes from, where they are entered (Mac app, browser setup, flags, `config.toml`), the first message, the public URL or Slack's Socket Mode, owner and allow lists, and the common failures.
 - `channel_presentation` — inbound media coalescing and empty messages, then how replies land on chat surfaces: dialect rendering, the boundary-ladder splitter, message hygiene, draft-rotation and block streaming, the ephemeral 💭 stream, and the approval-prompt buttons.
-- `mobile` — the phone channel: availability, the management surface, pairing, device revocation, reachability, remote reach, APNs push, and troubleshooting.
+- `mobile` — the phone channel: availability, the management surface, pairing, device revocation, desktops paired by a move, reachability, remote reach, APNs push, and troubleshooting.
 - `companion` — the Mac app's chat socket: trust, the shared timeline, delivery and cancel by client message id, history and search, scheduled delivery, and what it does not carry.
 - `voice` — the voice companion: turning it on, both engines, key and cost limits, which conversation a call's tasks run in, the app connection, access-sensitive commands on a call, noise and echo, and screen sharing.
 - `transcription` — speech to text: choosing a backend, keys and models, the on-device `local` backend, live streams, and failure replies.

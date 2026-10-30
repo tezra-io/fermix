@@ -936,7 +936,8 @@ Current channels:
   the device store and registry, `PairManager`, the APNs
   dispatcher when push is configured (it connects on the first push, never at
   boot, and a push waits for that connect only until its deadline), the
-  transport's `RequestCoordinator`, `Mobile.Discovery` (a cached list of the
+  transport's `RequestCoordinator`, `Desktop.Supervisor` (the connected
+  desktops' peers), `Mobile.Discovery` (a cached list of the
   addresses a phone can reach), the `Listener` and the mDNS advertiser. The
   `Listener` binds through `Mobile.TlsTransport`, ThousandIsland's TLS
   transport with a bounded handshake and with every read before the WebSocket
@@ -949,6 +950,61 @@ Current channels:
   (the supervisor's name is registered): the management verbs and a delivered
   row's push read it, so a job delivered while the channel is off is only a
   row of the shared timeline.
+- The phone wire's sessions have kinds (M75 §3, §5). A paired device's row in
+  `devices.toml` (`Mobile.DeviceStore`) names `kind`: a `phone` (a row that
+  names none, as every row before desktops) or a `desktop` engine with no
+  push or attestation field; `DeviceRegistry`
+  carries the kind and keeps the phones' audience (`broadcast/3`,
+  `connected/2`) to phones. `Mobile.Peers` is the one table of kind × event
+  (`phone`, `desktop`, and the enrollment and move sessions wave two serves):
+  the session answers a known event its kind may not send
+  `error{code:"unsupported_event"}` and stays open, and drops a server event
+  its kind may not be sent. The fields of the M75 events are
+  `Mobile.PeerEvents`' declarative table, which `Mobile.Protocol` consults
+  for them alone. `Mobile.Chunks` is pure: it cuts a payload into `index` and
+  `last` frames of at most 60 KiB and reassembles one in order within its
+  event's bound, refusing a gap, a repeat or a payload past it; both sides of
+  a desktop's session use it. When a `desktop` session completes `hello` it
+  starts its `Desktop.Peer` under `Desktop.Supervisor`'s `PeerSupervisor`
+  and hands it every desktop-family event; the peer reassembles chunked
+  payloads and dispatches each complete one to the module its family names in
+  the peer's one `@families` map (a `Desktop.Family` behaviour: `init`,
+  `handle_event`, `handle_info`, `terminate`; the map names none yet, so every
+  family's event is answered `unsupported_event`), registers in the
+  `Desktop.Peers` registry by device id with when it connected
+  (`Desktop.Peer.connected/1`), and sends through the session with
+  `Desktop.Peer.send/4`, which chunks and checks every frame in the caller.
+  The session and its peer end together (`1011` when the peer fails first or
+  does not start). A desktop's session has no one-hour lifetime on either side
+  (the 2^20-frame rekey still bounds its keys); an `IK` key with no row is
+  closed `4003 device unknown` at the handshake. The peer holds at most 32
+  open payloads and 64 MiB across them.
+- Remote reach is the iroh rail (M62), `Mobile.Iroh`, the last child of
+  `Mobile.Supervisor` (`:rest_for_one`: the bridge's connections, `Iroh.Bridge`
+  on `mobile/bridge.sock`, then `Iroh.Helper`). `Iroh.Helper` owns the
+  `fermix-iroh` port and holds it to `Iroh.HelperProtocol` (helper protocol 3,
+  `priv/iroh_helper/PROTOCOL.md`, which the helper repository vendors): it
+  refuses any other `protocol_version`, and a helper that fails is reported
+  and retried, never allowed to stop the daemon. The helper copies each
+  accepted iroh stream to one bridge connection, where
+  `Iroh.BridgeConnection` runs a `Session` as for a WebSocket. The helper runs
+  in one of two modes: `:listen` (the home's `mobile/iroh_key` and the bridge,
+  a phone's route) or `:dial` (M75: no key and no bridge, a key the helper
+  holds in memory, every incoming connection refused). Either mode dials:
+  `Iroh.Helper.dial/3` listens on a fresh `mobile/dial-<id>.sock` (0600,
+  device-local like every socket), sends `dial`, accepts the helper's
+  connection once `dialed` arrives and hands the caller that socket, with the
+  listening socket and its file gone on every path; at most 8 dials at once,
+  the helper's answer within its 20 s deadline. `Mobile.Rail` is the one
+  initiator-side session client for a session one engine opens to another
+  (nothing opens one yet): `Rail.open/3` dials a
+  route through the helper, writes the prelude and runs the Noise handshake
+  for `:ik`, `:ikpsk2_enroll` or `:ik_move` as initiator, then carries the
+  mobile wire as a phone does (carrier frames, Noise transport with its
+  2^20-frame rekey, `Mobile.Protocol`'s codec from the initiator's side,
+  `seq`, `event_part` reassembly, pings inside the 150 s idle bound, the
+  one-hour session), handing its owner each server event; consumers
+  reassemble `Mobile.Chunks` payloads themselves.
 - The timeline's media and its link previews belong to both companion
   transports, so the channels application starts them on every real boot,
   whether or not the phone channel runs: `Mobile.MediaStore` (a phone's

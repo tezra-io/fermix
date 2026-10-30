@@ -13,7 +13,8 @@ defmodule FermixChannels.Mobile.Management do
   release. The v1 provider functions (`pair_start/1`, `pair_get/2`,
   `pair_decide/3`, `pair_cancel/2`, `devices_list/1`, `devices_revoke/2`,
   `status/1`) answer atom-keyed facts; `FermixCore.Management.Mobile` turns
-  them into wire JSON and owns every sentence.
+  them into wire JSON and owns every sentence. A device row names its kind
+  (M75 §3): a phone or a desktop.
 
   The enable switch is live: once core has written it, `apply_enabled/2` starts
   or stops the subtree at once (M51 §5.5). The port, the address and the
@@ -81,6 +82,7 @@ defmodule FermixChannels.Mobile.Management do
           device_id: String.t(),
           name: String.t(),
           model: String.t(),
+          kind: :phone | :desktop,
           platform: String.t() | nil,
           signer_role: :development | :release | nil,
           boot_state: %{verified: true, locked: true} | nil,
@@ -880,12 +882,13 @@ defmodule FermixChannels.Mobile.Management do
 
   # Platform, signer role and boot state are what the phone's attestation
   # proved when it was approved; a phone paired before it was verified
-  # carries them empty.
+  # carries them empty, and a desktop never has them.
   defp device_row(device) do
     %{
       device_id: value(device, :device_id),
       name: value(device, :name),
       model: value(device, :model),
+      kind: Map.get(device, :kind, :phone),
       platform: value(device, :platform),
       signer_role: value(device, :signer_role),
       boot_state:
@@ -1023,15 +1026,19 @@ defmodule FermixChannels.Mobile.Management do
     end
   end
 
+  # The channel's phones: a desktop (M75) holds a row in the same store but is
+  # no phone, and the count is what the phone surfaces show beside their list.
   defp paired_device_count(opts) do
     store = Keyword.get(opts, :device_store, DeviceStore)
 
     case invoke(opts, :list_devices, &DeviceStore.list/1, [store]) do
-      {:ok, devices} when is_list(devices) -> {:ok, length(devices)}
+      {:ok, devices} when is_list(devices) -> {:ok, Enum.count(devices, &phone?/1)}
       {:error, reason} -> {:error, {:device_store_unavailable, reason}}
       other -> {:error, {:invalid_device_store_reply, other}}
     end
   end
+
+  defp phone?(device), do: Map.get(device, :kind, :phone) == :phone
 
   defp binary_field(map, key, bytes) do
     case value(map, key) do
