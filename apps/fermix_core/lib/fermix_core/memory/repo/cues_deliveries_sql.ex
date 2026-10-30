@@ -194,12 +194,25 @@ defmodule FermixCore.Memory.Repo.CuesDeliveriesSql do
   @spec summary_sources_sql() :: String.t()
   def summary_sources_sql, do: @summary_sources_sql <> " ORDER BY r.source_ref"
 
-  # Its `?` is `since`; a source filter adds itself to the join condition.
+  # Its `?` is `since`; a source filter adds itself to the join condition. A
+  # watcher's deliveries are read through `cue_deliveries_watcher_received`: a
+  # watcher keeps its deliveries for weeks, and searching by watcher alone would
+  # read every one it ever had to find the window's few, on every Cues read.
+  # Naming the index makes a store without it an error, never that slow read.
   @summary_groups_sql """
   SELECT w.id, w.name, w.enabled, d.state, d.outcome, d.source_ref, COUNT(d.id)
   FROM cue_watchers w
-  LEFT JOIN cue_deliveries d ON d.watcher_id = w.id AND d.received_at >= ?
+  LEFT JOIN cue_deliveries d INDEXED BY cue_deliveries_watcher_received
+    ON d.watcher_id = w.id AND d.received_at >= ?
   """
+
+  @doc false
+  # The watcher summary's SQL, for the test that holds its query plan.
+  @spec summary_groups_sql() :: String.t()
+  def summary_groups_sql do
+    @summary_groups_sql <>
+      " GROUP BY w.id, d.state, d.outcome, d.source_ref ORDER BY w.name, w.id"
+  end
 
   @watcher_ref_sql """
   SELECT w.id, w.name, w.enabled, w.task_notes, j.id, j.name, j.memory_source_id,

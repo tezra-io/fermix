@@ -20,6 +20,7 @@ defmodule FermixCore.Memory.RepoCuesTest do
              cue_proposals cue_mandate_approvals)
   @retention_indexes ~w(cues_payload_terminal_at cues_snapshot_received_at
                         cues_unrouted_terminal_at)
+  @delivery_window_index "cue_deliveries_watcher_received"
 
   setup do
     start_repo("repo")
@@ -31,9 +32,9 @@ defmodule FermixCore.Memory.RepoCuesTest do
     |> List.flatten()
   end
 
-  defp index_names(conn) do
+  defp index_names(conn, table \\ "cues") do
     conn
-    |> rows("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'cues'")
+    |> rows("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?", [table])
     |> List.flatten()
   end
 
@@ -163,6 +164,23 @@ defmodule FermixCore.Memory.RepoCuesTest do
       assert {:ok, versions} = Repo.migration_versions(server: repo)
       assert Enum.count(versions, &(&1 == 48)) == 1
       assert @retention_indexes -- index_names(conn) == []
+    end
+  end
+
+  describe "migration 55" do
+    test "adds the delivery window index to a database that has the cue tables", ctx do
+      %{repo: repo, db_path: db_path, conn: conn} = ctx
+      assert @delivery_window_index in index_names(conn, "cue_deliveries")
+
+      # The database as it stood before 55.
+      exec!(conn, "DROP INDEX #{@delivery_window_index}")
+      exec!(conn, "DELETE FROM schema_migrations WHERE version = 55")
+      :ok = stop_supervised(Repo)
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+      assert {:ok, versions} = Repo.migration_versions(server: repo)
+      assert Enum.count(versions, &(&1 == 55)) == 1
+      assert @delivery_window_index in index_names(conn, "cue_deliveries")
     end
   end
 

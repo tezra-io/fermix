@@ -241,6 +241,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now allows five starts in any ten minutes: a daemon that keeps crashing
   still stops, and its journal says why, while restarts spread over time,
   such as applying a setting, never use the budget up.
+- **Settings → Cues opens quickly again on a busy store.** To count the last
+  day's deliveries for each watcher, Fermix read every delivery the watcher
+  had ever had, which it keeps for 30 days. After a busy stream day that took
+  half a second or more per list, several times each time the pane opened or
+  the menu bar showed what was waiting. A new index finds just the day's
+  deliveries, so that count takes under a millisecond however many are kept.
 
 ### Security
 

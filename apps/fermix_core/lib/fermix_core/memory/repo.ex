@@ -81,6 +81,7 @@ defmodule FermixCore.Memory.Repo do
   @mobile_uncertain_request_migration_version 52
   @channel_event_ids_migration_version 53
   @watcher_follow_up_migration_version 54
+  @cue_delivery_window_index_migration_version 55
   @sqlite_open_intent :readwritecreate
 
   # The cue SQL modules (M60), one per lane, all served by `cues_call/3`.
@@ -5069,7 +5070,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_open_loop_curiosity_migration(conn, versions),
          :ok <- apply_mobile_uncertain_request_migration(conn, versions),
          :ok <- apply_channel_event_ids_migration(conn, versions),
-         :ok <- apply_watcher_follow_up_migration(conn, versions) do
+         :ok <- apply_watcher_follow_up_migration(conn, versions),
+         :ok <- apply_cue_delivery_window_index_migration(conn, versions) do
       :ok
     end
   end
@@ -5322,6 +5324,25 @@ defmodule FermixCore.Memory.Repo do
   defp commit_migration({:error, reason}, conn) do
     _rolled_back = Sqlite3.execute(conn, "ROLLBACK;")
     {:error, reason}
+  end
+
+  # The cue delivery window index: the Cues summary reads a watcher's deliveries
+  # in its window, never every delivery the watcher had, with its version in one
+  # transaction.
+  defp apply_cue_delivery_window_index_migration(conn, versions) do
+    if Enum.member?(versions, @cue_delivery_window_index_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{CuesSql.delivery_window_index_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@cue_delivery_window_index_migration_version});
+        COMMIT;
+        """
+      )
+    end
   end
 
   # A reply's blocks beside the timeline (M72), their table and version in one

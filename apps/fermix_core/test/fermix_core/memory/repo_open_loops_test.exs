@@ -10,7 +10,7 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
   @open_loops_version 43
   @outside_content_version 49
   # Every migration after 49 but 51 can run again on a database that has it
-  # (50 and 53 add IF NOT EXISTS objects, 52 rebuilds its table in the same
+  # (50, 53 and 55 add IF NOT EXISTS objects, 52 rebuilds its table in the same
   # shape, 54 rebuilds the cue tables only while they lack its shape and makes
   # its own tables only if missing): a database at 48 or 49 lacks their version
   # rows too, and reapplying them changes nothing.
@@ -253,6 +253,7 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
         :ok = Sqlite3.execute(conn, "DROP INDEX cues_payload_terminal_at")
         :ok = Sqlite3.execute(conn, "DROP INDEX cues_snapshot_received_at")
         :ok = Sqlite3.execute(conn, "DROP INDEX cues_unrouted_terminal_at")
+        :ok = Sqlite3.execute(conn, "DROP INDEX cue_deliveries_watcher_received")
         :ok = Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version > 42")
         assert [[42]] = query!(conn, "SELECT MAX(version) FROM schema_migrations")
       end)

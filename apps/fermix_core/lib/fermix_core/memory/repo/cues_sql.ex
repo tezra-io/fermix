@@ -521,6 +521,20 @@ defmodule FermixCore.Memory.Repo.CuesSql do
     ]
   end
 
+  @doc """
+  The DDL of migration 55: a watcher's deliveries by when they were received,
+  so the Cues summary counts a watcher's window from that window's rows alone.
+  Searching by watcher reads every delivery a watcher ever had to test
+  `received_at`, and every Cues read asks for that summary.
+  """
+  @spec delivery_window_index_schema_sql() :: String.t()
+  def delivery_window_index_schema_sql do
+    """
+    CREATE INDEX IF NOT EXISTS cue_deliveries_watcher_received
+      ON cue_deliveries (watcher_id, received_at);
+    """
+  end
+
   @doc "Delivery states that hold a delivery open (never touched by retention)."
   @spec live_states() :: [String.t()]
   def live_states, do: @live_states
