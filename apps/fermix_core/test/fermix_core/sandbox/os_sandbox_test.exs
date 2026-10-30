@@ -72,35 +72,50 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
 
   describe "rules/3" do
     test "strict writes only the workspace once the temp roots are dropped", ctx do
-      assert {:ok, rules} = OsSandbox.rules(config(ctx, :strict), nil, scratch: [])
-      assert rules.writable == [resolved(ctx.workspace)]
+      for os <- [@darwin, @linux] do
+        assert {:ok, rules} = OsSandbox.rules(config(ctx, :strict), nil, scratch: [], os: os)
+        assert rules.writable == [resolved(ctx.workspace)], inspect(os)
+      end
     end
 
     test "open writes the whole filesystem, Fermix's home aside", ctx do
-      assert {:ok, rules} = OsSandbox.rules(config(ctx, :open), nil, scratch: [])
-      assert "/" in rules.writable
-      assert rules.fermix_home == resolved(ctx.fermix_home)
-      assert resolved(ctx.workspace) in rules.fermix_writable
-      assert resolved(Path.join(ctx.fermix_home, "skills")) in rules.fermix_writable
+      for os <- [@darwin, @linux] do
+        assert {:ok, rules} = OsSandbox.rules(config(ctx, :open), nil, scratch: [], os: os)
+        assert "/" in rules.writable, inspect(os)
+        assert rules.fermix_home == resolved(ctx.fermix_home), inspect(os)
+        assert resolved(ctx.workspace) in rules.fermix_writable, inspect(os)
+
+        assert resolved(Path.join(ctx.fermix_home, "skills")) in rules.fermix_writable,
+               inspect(os)
+      end
     end
 
     test "a granted folder is writable, so the kernel is never narrower than the policy", ctx do
       granted = Path.join(ctx.base, "granted")
       File.mkdir_p!(granted)
 
-      assert {:ok, rules} =
-               OsSandbox.rules(config(ctx, :strict, allowed_roots: [granted]), nil, scratch: [])
+      config = config(ctx, :strict, allowed_roots: [granted])
 
-      assert resolved(granted) in rules.writable
+      for os <- [@darwin, @linux] do
+        assert {:ok, rules} = OsSandbox.rules(config, nil, scratch: [], os: os)
+        assert resolved(granted) in rules.writable, inspect(os)
+      end
     end
 
     test "a request folder inside Fermix's home is not writable there", ctx do
-      assert {:ok, rules} = OsSandbox.rules(config(ctx, :standard), ctx.plugins, scratch: [])
-      refute Enum.any?(rules.fermix_writable, &String.starts_with?(&1, resolved(ctx.plugins)))
+      inside = resolved(ctx.plugins)
+
+      for os <- [@darwin, @linux] do
+        assert {:ok, rules} =
+                 OsSandbox.rules(config(ctx, :standard), ctx.plugins, scratch: [], os: os)
+
+        refute Enum.any?(rules.fermix_writable, &String.starts_with?(&1, inside)), inspect(os)
+      end
     end
 
+    # On macOS; Linux's launch points have their own test below.
     test "the installed release, launch agents and the Mac app's record are protected", ctx do
-      assert {:ok, rules} = OsSandbox.rules(config(ctx, :open), nil, scratch: [])
+      assert {:ok, rules} = OsSandbox.rules(config(ctx, :open), nil, scratch: [], os: @darwin)
       assert resolved(List.to_string(:code.root_dir())) in rules.protected
       assert resolved(Path.join(ctx.os_home, "Library/LaunchAgents")) in rules.protected
       support = Path.join(ctx.os_home, "Library/Application Support/Fermix")
@@ -109,21 +124,28 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
 
     test "every folder above Fermix's home and a protected path is closed on its own name",
          ctx do
-      assert {:ok, rules} = OsSandbox.rules(config(ctx, :open), nil, scratch: [])
-      assert resolved(ctx.os_home) in rules.ancestors
-      assert rules.fermix_home in rules.ancestors
-      assert resolved(ctx.workspace) in rules.ancestors
-      refute "/" in rules.ancestors
+      for os <- [@darwin, @linux] do
+        assert {:ok, rules} = OsSandbox.rules(config(ctx, :open), nil, scratch: [], os: os)
+        assert resolved(ctx.os_home) in rules.ancestors, inspect(os)
+        assert rules.fermix_home in rules.ancestors, inspect(os)
+        assert resolved(ctx.workspace) in rules.ancestors, inspect(os)
+        refute "/" in rules.ancestors, inspect(os)
+      end
     end
 
     test "Fermix's secrets, logs and the browser profiles are read-denied", ctx do
-      assert {:ok, rules} = OsSandbox.rules(config(ctx, :open), nil, scratch: [])
+      for os <- [@darwin, @linux] do
+        assert {:ok, rules} = OsSandbox.rules(config(ctx, :open), nil, scratch: [], os: os)
 
-      for entry <- ["secrets", "logs", "traces", "browser/profiles"],
-          do: assert(resolved(Path.join(ctx.fermix_home, entry)) in rules.secret)
+        for entry <- ["secrets", "logs", "traces", "browser/profiles"],
+            do: assert(resolved(Path.join(ctx.fermix_home, entry)) in rules.secret, inspect(os))
 
-      assert ("^" <> escaped(Path.join(rules.fermix_home, "auth.json"))) in rules.secret_patterns
-      assert ("^" <> escaped(Path.join(rules.fermix_home, "memory.db"))) in rules.secret_patterns
+        assert ("^" <> escaped(Path.join(rules.fermix_home, "auth.json"))) in rules.secret_patterns,
+               inspect(os)
+
+        assert ("^" <> escaped(Path.join(rules.fermix_home, "memory.db"))) in rules.secret_patterns,
+               inspect(os)
+      end
     end
 
     # M84 §9: the Mac app's browser pane keeps its websites' cookies and storage
@@ -134,15 +156,16 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
             id <- ~w(io.tezra.FermixPet io.tezra.FermixPet.dev),
             do: resolved(Path.join([ctx.os_home, "Library", dir, id]))
 
-      for mode <- [:strict, :standard, :open] do
-        assert {:ok, rules} = OsSandbox.rules(config(ctx, mode), nil, scratch: [])
+      for os <- [@darwin, @linux], mode <- [:strict, :standard, :open] do
+        assert {:ok, rules} = OsSandbox.rules(config(ctx, mode), nil, scratch: [], os: os)
         assert {:ok, entries} = OsSandbox.unreadable(config(ctx, mode))
+        at = "#{inspect(os)} #{mode}"
 
         for path <- pane do
-          assert path in rules.secret, "#{mode}: #{path}"
-          assert ("^" <> escaped(path) <> "(\\.|-)") in rules.secret_patterns, "#{mode}: #{path}"
-          assert path in rules.protected, "#{mode}: #{path}"
-          assert {path, :named} in entries, "#{mode}: #{path}"
+          assert path in rules.secret, "#{at}: #{path}"
+          assert ("^" <> escaped(path) <> "(\\.|-)") in rules.secret_patterns, "#{at}: #{path}"
+          assert path in rules.protected, "#{at}: #{path}"
+          assert {path, :named} in entries, "#{at}: #{path}"
         end
       end
     end
@@ -155,14 +178,18 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
           &resolved(Path.join(ctx.os_home, &1))
         )
 
-      for mode <- [:strict, :standard] do
-        assert {:ok, rules} = OsSandbox.rules(config(ctx, mode), nil, scratch: [])
-        for path <- credentials, do: assert(path in rules.secret, "#{mode}: #{path}")
+      for os <- [@darwin, @linux], mode <- [:strict, :standard] do
+        assert {:ok, rules} = OsSandbox.rules(config(ctx, mode), nil, scratch: [], os: os)
+
+        for path <- credentials,
+            do: assert(path in rules.secret, "#{inspect(os)} #{mode}: #{path}")
       end
 
-      assert {:ok, rules} = OsSandbox.rules(config(ctx, :open), nil, scratch: [])
-      for path <- credentials, do: refute(path in rules.secret, "open: #{path}")
-      assert resolved(Path.join(ctx.os_home, ".config/fermix")) in rules.secret
+      for os <- [@darwin, @linux] do
+        assert {:ok, rules} = OsSandbox.rules(config(ctx, :open), nil, scratch: [], os: os)
+        for path <- credentials, do: refute(path in rules.secret, "#{inspect(os)} open: #{path}")
+        assert resolved(Path.join(ctx.os_home, ".config/fermix")) in rules.secret, inspect(os)
+      end
     end
 
     # `credentials.db-journal`, `.claude.json.backup`: the file tools count a
@@ -172,13 +199,15 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
         "^" <>
           escaped(resolved(Path.join(ctx.os_home, ".config/gcloud/credentials.db"))) <> "(\\.|-)"
 
-      assert {:ok, rules} = OsSandbox.rules(config(ctx, :standard), nil, scratch: [])
-      assert siblings in rules.secret_patterns
-      assert siblings in rules.protected_patterns
+      for os <- [@darwin, @linux] do
+        assert {:ok, rules} = OsSandbox.rules(config(ctx, :standard), nil, scratch: [], os: os)
+        assert siblings in rules.secret_patterns, inspect(os)
+        assert siblings in rules.protected_patterns, inspect(os)
 
-      assert {:ok, rules} = OsSandbox.rules(config(ctx, :open), nil, scratch: [])
-      refute siblings in rules.secret_patterns
-      assert siblings in rules.protected_patterns
+        assert {:ok, rules} = OsSandbox.rules(config(ctx, :open), nil, scratch: [], os: os)
+        refute siblings in rules.secret_patterns, inspect(os)
+        assert siblings in rules.protected_patterns, inspect(os)
+      end
     end
 
     # The secret writer stages a key being saved in `secrets/.staging-N/`, so
@@ -239,8 +268,8 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
     end
 
     test "every read-denied path is write-protected too, in every mode", ctx do
-      for mode <- [:strict, :standard, :open] do
-        assert {:ok, rules} = OsSandbox.rules(config(ctx, mode), nil, scratch: [])
+      for os <- [@darwin, @linux], mode <- [:strict, :standard, :open] do
+        assert {:ok, rules} = OsSandbox.rules(config(ctx, mode), nil, scratch: [], os: os)
         fermix_home = rules.fermix_home
 
         for {path, _reach} <- rules.unreadable do
@@ -249,7 +278,7 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
               Enum.any?(rules.protected, &(path == &1 or String.starts_with?(path, &1 <> "/"))) or
               path in rules.credentials
 
-          assert protected?, "#{mode}: #{path} is readable-denied but writable"
+          assert protected?, "#{inspect(os)} #{mode}: #{path} is readable-denied but writable"
         end
       end
     end
@@ -306,8 +335,10 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
       File.mkdir_p!(blocked)
       config = config(ctx, :open, blocked_roots: [blocked])
 
-      assert {:ok, rules} = OsSandbox.rules(config, nil, scratch: [])
-      assert resolved(blocked) in rules.protected
+      for os <- [@darwin, @linux] do
+        assert {:ok, rules} = OsSandbox.rules(config, nil, scratch: [], os: os)
+        assert resolved(blocked) in rules.protected, inspect(os)
+      end
     end
 
     test "a home path with regex metacharacters is escaped in its patterns", ctx do
@@ -315,8 +346,13 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
       File.mkdir_p!(odd)
       config = Config.normalize(mode: :strict, home: odd, os_home: ctx.os_home)
 
-      assert {:ok, %{secret_patterns: patterns}} = OsSandbox.rules(config, nil, scratch: [])
-      assert Enum.any?(patterns, &String.ends_with?(&1, "/a\\.b\\(c\\)/auth\\.json"))
+      for os <- [@darwin, @linux] do
+        assert {:ok, %{secret_patterns: patterns}} =
+                 OsSandbox.rules(config, nil, scratch: [], os: os)
+
+        assert Enum.any?(patterns, &String.ends_with?(&1, "/a\\.b\\(c\\)/auth\\.json")),
+               inspect(os)
+      end
     end
 
     # A rule given a path through a symlink matches nothing in the kernel, which
@@ -326,8 +362,10 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
       File.ln_s!(ctx.fermix_home, link)
       config = Config.normalize(mode: :open, home: link, os_home: ctx.os_home)
 
-      assert {:ok, rules} = OsSandbox.rules(config, nil, scratch: [])
-      assert rules.fermix_home == resolved(ctx.fermix_home)
+      for os <- [@darwin, @linux] do
+        assert {:ok, rules} = OsSandbox.rules(config, nil, scratch: [], os: os)
+        assert rules.fermix_home == resolved(ctx.fermix_home), inspect(os)
+      end
     end
 
     test "a path that cannot be resolved refuses rather than falling back", ctx do
@@ -335,14 +373,16 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
       File.ln_s!(loop, loop)
       config = Config.normalize(mode: :strict, home: loop, os_home: ctx.os_home)
 
-      assert {:error, {:unresolvable_path, ^loop, _reason}} =
-               OsSandbox.rules(config, nil, scratch: [])
+      for os <- [@darwin, @linux] do
+        assert {:error, {:unresolvable_path, ^loop, _reason}} =
+                 OsSandbox.rules(config, nil, scratch: [], os: os)
+      end
     end
 
     # macOS tools write the per-user `T/` and `C/` whatever `$TMPDIR` says, so they
     # are writable by pattern, never the folder above them.
     test "the temp folders are writable, the per-user ones by pattern", ctx do
-      assert {:ok, rules} = OsSandbox.rules(config(ctx, :strict), nil, [])
+      assert {:ok, rules} = OsSandbox.rules(config(ctx, :strict), nil, os: @darwin)
       assert "/private/tmp" in rules.writable
       assert resolved(System.tmp_dir!()) in rules.writable
       assert [pattern] = rules.writable_patterns
@@ -350,11 +390,23 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
       assert Regex.match?(~r/#{pattern}/, "/private/var/folders/zz/abc123/C")
       refute Regex.match?(~r/#{pattern}/, "/private/var/folders/zz/abc123/0/com.apple.dock")
     end
+
+    # Linux has no per-user temp folders: the shared ones and `/dev/shm`, by
+    # name. Each is resolved as the rules resolve it (`/tmp` is
+    # `/private/tmp` on a Mac running this suite).
+    test "on Linux the shared temp folders and /dev/shm are writable, none by pattern", ctx do
+      assert {:ok, rules} = OsSandbox.rules(config(ctx, :strict), nil, os: @linux)
+
+      for path <- ["/tmp", "/var/tmp", "/dev/shm", System.tmp_dir!()],
+          do: assert(resolved(path) in rules.writable, path)
+
+      assert rules.writable_patterns == []
+    end
   end
 
   describe "profile/1 and parameters/1" do
     test "the profile names parameters only, and every parameter is bound", ctx do
-      assert {:ok, rules} = OsSandbox.rules(config(ctx, :open), nil, scratch: [])
+      assert {:ok, rules} = OsSandbox.rules(config(ctx, :open), nil, scratch: [], os: @darwin)
       profile = OsSandbox.profile(rules)
       refute profile =~ ctx.base
 
