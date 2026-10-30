@@ -29,7 +29,8 @@ defmodule FermixCore.Auth.XAILogin do
           timeout_ms: pos_integer(),
           port_fallbacks: non_neg_integer(),
           req_options: keyword(),
-          puts: (String.t() -> any())
+          puts: (String.t() -> any()),
+          loopback_owner: FermixCore.Auth.LoopbackRegistry.owner()
         ]
 
   @spec login(opts()) :: {:ok, Store.entry()} | {:error, term()}
@@ -58,7 +59,16 @@ defmodule FermixCore.Auth.XAILogin do
   end
 
   defp flow_opts(opts) do
-    flow = Keyword.take(opts, [:port, :opener, :timeout_ms, :port_fallbacks, :req_options, :puts])
+    flow =
+      Keyword.take(opts, [
+        :port,
+        :opener,
+        :timeout_ms,
+        :port_fallbacks,
+        :req_options,
+        :puts,
+        :loopback_owner
+      ])
 
     # `--no-browser` prints the URL instead of launching a browser.
     if Keyword.get(opts, :no_browser, false) do

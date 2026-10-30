@@ -364,9 +364,18 @@ defmodule FermixCore.Management.Router do
     {:ok, %{"jobs" => jobs}}
   end
 
+  # A sign-in started by a desktop over the rail (`:actor`, M75 D17) is
+  # recorded as that desktop's, so its loopback reply is forwarded there.
   defp auth_start(params, opts) do
     with {:ok, provider} <- fetch_string(params, "provider", @provider_params) do
-      operation_result(Auth.start(provider, operation_opts(opts)))
+      operation_result(Auth.start(provider, with_actor(operation_opts(opts), opts)))
+    end
+  end
+
+  defp with_actor(operation_opts, opts) do
+    case Keyword.fetch(opts, :actor) do
+      {:ok, actor} -> Keyword.put(operation_opts, :actor, actor)
+      :error -> operation_opts
     end
   end
 

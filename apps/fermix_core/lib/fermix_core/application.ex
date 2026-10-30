@@ -176,6 +176,9 @@ defmodule FermixCore.Application do
         # add no restart intensity to the tree.
         CommandHostSupervisor,
         {Task.Supervisor, name: FermixCore.TaskSupervisor},
+        # The OAuth loopback listeners open now (M75 D17), before anything
+        # that runs a sign-in: a desktop's sign-in is forwarded from it.
+        FermixCore.Auth.LoopbackRegistry,
         finch_children(Egress.activate()),
         {Trace, trace_opts()},
         TokenSupervisor,

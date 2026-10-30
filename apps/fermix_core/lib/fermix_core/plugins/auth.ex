@@ -171,6 +171,7 @@ defmodule FermixCore.Plugins.Auth do
     |> maybe_put(:req_options, Keyword.get(opts, :req_options))
     |> maybe_put(:userinfo_req_options, Keyword.get(opts, :userinfo_req_options))
     |> maybe_put(:puts, Keyword.get(opts, :puts))
+    |> maybe_put(:loopback_owner, Keyword.get(opts, :loopback_owner))
     |> maybe_put_opener(opts)
   end
 

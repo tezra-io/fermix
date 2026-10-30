@@ -763,9 +763,11 @@ defmodule FermixCore.Browser.BrowserObserveTest do
              req(pid, "navigate", %{"url" => "https://example.com/form", "observe" => false})
 
     # The tab row, and the browser that served it (`ProfileServer` names it on
-    # every open and navigate): nothing of the page.
-    assert opened == Map.put(tab, "backend", "cdp")
-    assert navigated == Map.put(tab, "backend", "cdp")
+    # every open and navigate): nothing of the page. Only the `tabs` listing
+    # marks whose conversation a tab is.
+    row = Map.delete(tab, "this_conversation")
+    assert opened == Map.put(row, "backend", "cdp")
+    assert navigated == Map.put(row, "backend", "cdp")
 
     refute_received {:cdp, "Accessibility.getFullAXTree", _params, _timeout}
   end

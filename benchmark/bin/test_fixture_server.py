@@ -272,6 +272,113 @@ def test_nothing_a_request_sends_reaches_an_html_response(served):
     assert "alert(1)" not in body
 
 
+# --- a sign-in that holds across conversations (M75) -----------------------
+
+def _raw(port: int, method: str, path: str, body: bytes = b"",
+         headers: dict | None = None):
+    """One request with no redirect following and no cookie jar: the test is
+    the browser, and says exactly which cookie it sends."""
+    import http.client
+
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        conn.request(method, path, body=body, headers=headers or {})
+        response = conn.getresponse()
+        return response.status, dict(response.getheaders()), response.read().decode("utf-8")
+    finally:
+        conn.close()
+
+
+def _sign_in(served, token: str):
+    form = b"card=2291+5508&pin=0417"
+    return _raw(served.port, "POST", f"/s/{token}/sign-in", form,
+                {"Content-Type": "application/x-www-form-urlencoded",
+                 "Content-Length": str(len(form))})
+
+
+def _cookie_pair(set_cookie: str) -> str:
+    return set_cookie.split(";", 1)[0].strip()
+
+
+def test_signing_in_sets_a_session_cookie_scoped_to_the_attempt(served):
+    binding = served.bind("tok-sign")
+    status, headers, body = _sign_in(served, binding.token)
+    assert status == 303 and headers["Location"] == "signed_in.html" and body == ""
+    attributes = [part.strip() for part in headers["Set-Cookie"].split(";")]
+    assert attributes[0].startswith("fixture_session=") and len(attributes[0]) > 30
+    assert f"Path=/s/{binding.token}" in attributes
+    assert "HttpOnly" in attributes and "SameSite=Lax" in attributes
+    # A session cookie: no expiry, so it lives as long as the browser does and
+    # is never kept for a later run.
+    assert not any(a.lower().startswith(("expires", "max-age")) for a in attributes)
+
+
+def test_the_session_answers_signed_in_only_to_that_attempts_cookie(served):
+    first = served.bind("tok-first")
+    other = served.bind("tok-other")
+    _status, headers, _body = _sign_in(served, first.token)
+    cookie = _cookie_pair(headers["Set-Cookie"])
+
+    def signed_in(token: str, sent: str | None) -> bool:
+        status, _headers, body = _raw(served.port, "GET", f"/s/{token}/session",
+                                      headers={"Cookie": sent} if sent else {})
+        assert status == 200
+        return json.loads(body)["signed_in"]
+
+    assert signed_in(first.token, cookie) is True
+    assert signed_in(first.token, None) is False
+    assert signed_in(first.token, "fixture_session=forged") is False
+    # Another attempt's cookie never signs this one in.
+    assert signed_in(other.token, cookie) is False
+
+
+def test_signing_in_again_replaces_the_session(served):
+    binding = served.bind("tok-again")
+    old = _cookie_pair(_sign_in(served, binding.token)[1]["Set-Cookie"])
+    new = _cookie_pair(_sign_in(served, binding.token)[1]["Set-Cookie"])
+    assert old != new
+    _status, _headers, body = _raw(served.port, "GET", f"/s/{binding.token}/session",
+                                   headers={"Cookie": old})
+    assert json.loads(body)["signed_in"] is False
+
+
+def test_sign_in_and_session_answer_only_their_own_method_and_bound_tokens(served):
+    binding = served.bind("tok-methods")
+    assert _raw(served.port, "GET", f"/s/{binding.token}/sign-in")[0] == 404
+    assert _raw(served.port, "POST", f"/s/{binding.token}/session", b"",
+                {"Content-Length": "0"})[0] == 404
+    assert _raw(served.port, "POST", "/s/unbound/sign-in", b"",
+                {"Content-Length": "0"})[0] == 404
+    assert _raw(served.port, "GET", "/s/unbound/session")[0] == 404
+
+
+def test_a_sign_in_body_is_bounded_and_never_reflected(served):
+    binding = served.bind("tok-bounded")
+    big = b"card=" + b"9" * fx.MAX_BODY_BYTES
+    status, headers, _body = _raw(served.port, "POST", f"/s/{binding.token}/sign-in", big,
+                                  {"Content-Length": str(len(big))})
+    assert status == 400 and headers.get("Connection") == "close"
+    assert "Set-Cookie" not in headers
+    form = b"card=%3Cscript%3Ealert(1)%3C%2Fscript%3E"
+    status, headers, body = _raw(served.port, "POST", f"/s/{binding.token}/sign-in", form,
+                                 {"Content-Length": str(len(form))})
+    assert status == 303 and "alert" not in body and "alert" not in headers["Location"]
+
+
+def test_the_sign_in_pages_report_what_the_session_says():
+    """The pages decide nothing themselves: whether the browser is signed in is
+    the server's answer to the cookie the browser sent, reported through the one
+    helper."""
+    def page(name: str) -> str:
+        with open(os.path.join(PAGES_DIR, name), encoding="utf-8") as handle:
+            return handle.read()
+
+    assert 'method="post"' in page("sign_in.html") and 'action="sign-in"' in page("sign_in.html")
+    for name, key in (("signed_in.html", "sign_in.completed"),
+                      ("account.html", "account.signed_in")):
+        assert "fetch('session'" in page(name) and f"fixtureReport('{key}'" in page(name)
+
+
 # --- the fixture_state gate -------------------------------------------------
 
 # A page that RAN: the helper's liveness report is in every real state map.

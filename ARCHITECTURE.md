@@ -206,6 +206,14 @@ with mode 0600. Login flows are per vendor (`Auth.ChatGPT`, Sign in with ChatGPT
 for `openai_codex`, under the `chatgpt` profile; `OAuthFlow` with a loopback
 listener; `AnthropicLogin`, `XAILogin`, and plugin providers through
 `OAuthProviders`), and `TokenSupervisor` runs one `TokenManager` per profile.
+Every loopback listener a sign-in opens (the provider, plugin and MCP
+sign-ins all run `OAuthFlow`) is recorded in `Auth.LoopbackRegistry` while it
+is open, with its port, its deadline and the management caller that started
+it (M75 D17): a sign-in whose router `:actor` is `{:desktop, device_id}`,
+threaded through `Management.Auth` to the flow as `:loopback_owner`, is
+recorded as that desktop's. A subscriber is told each listener as it opens and
+closes, and `LoopbackRegistry.fail/3` ends the flow waiting on a listener with
+`{:loopback_forward_failed, failure}`.
 
 `Net.HttpClient` sends outbound HTTP on the shared `FermixCore.Finch` pool,
 retrying once on a stale socket and never on a timeout. `Net.Egress` decides how
@@ -715,7 +723,10 @@ flow, and `MainAgent` snapshots it per turn.
 
 `Browser` runs the `browser` tool: managed Chrome over the DevTools protocol,
 without compux. `Browser.Supervisor` holds a `ProfileManager`, which caps live
-Chrome instances, and one `ProfileServer` per owner and profile. The server is
+Chrome instances, and one `ProfileServer` per owner key and profile, where
+`Browser.Scope` keys every operator-trust conversation, scheduled run and
+worker to the one `owner` key and each guest conversation to its own; a
+context without a trust fact is refused. The server is
 the backend-neutral half (lazy lifetime, idle reaping, one request at a time,
 the mode's capability refusals); everything that talks to a browser sits behind
 the `Browser.Backend` behaviour, whose CDP implementation (`CDP.Backend`)

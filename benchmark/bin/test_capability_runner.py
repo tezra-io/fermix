@@ -553,6 +553,67 @@ def test_cross_session_runs_the_store_turns_in_one_session_and_recalls_in_a_fres
     assert trial.effective_success == 1.0
 
 
+_XSESSION_PAGE = """
+suite: cap_browser
+title: cross session page
+scenarios:
+  - id: s
+    title: st
+    tags: [capability, browser]
+    cases:
+      - id: still_signed_in
+        cross_session: true
+        turns:
+          - query: "sign me in at __EVAL_FIXTURE_URL__/sign_in.html"
+          - query: "what does __EVAL_FIXTURE_URL__/account.html say?"
+        expect:
+          fixture_state:
+            - { path: account.signed_in, equals: true }
+"""
+
+
+def test_cross_session_may_be_scored_by_the_page_instead_of_the_reply(tmp_path):
+    c = suites.load_all(_write(tmp_path, _XSESSION_PAGE))[0].scenarios[0].cases[0]
+    assert c.cross_session is True and c.score_spec is None
+    assert rc.fixture_clauses(c) == [{"path": "account.signed_in", "equals": True}]
+
+
+def test_cross_session_still_needs_a_scorer(tmp_path):
+    bare = _XSESSION_PAGE.replace(
+        "        expect:\n          fixture_state:\n"
+        "            - { path: account.signed_in, equals: true }\n", "")
+    with pytest.raises(suites.SuiteError) as ei:
+        suites.load_all(_write(tmp_path, bare))
+    assert any("cross_session" in p and "fixture_state" in p for p in ei.value.problems)
+
+
+def test_a_page_scored_cross_session_trial_reads_the_state_after_the_recall(monkeypatch):
+    clauses = [{"path": "account.signed_in", "equals": True}]
+    case = _xsession_case(score_spec=None, expect={"fixture_state": clauses},
+                          turns=[SimpleNamespace(query="sign in", expect={}),
+                                 SimpleNamespace(query="check the account", expect={})])
+    sessions = []
+
+    def capture(_cfg, _opik, session, _query, *_rest):
+        sessions.append(session)
+        return _captured(reply="whatever the reply says")
+
+    recorded = iter([{"page": {"ready": "account.html"}, "account": {"signed_in": True}},
+                     {"page": {"ready": "account.html"}, "account": {"signed_in": False}}])
+    monkeypatch.setattr(rc, "_capture_turn", capture)
+    monkeypatch.setattr(rc, "_page_state", lambda _binding: next(recorded))
+    monkeypatch.setattr(rc.scoring, "score_answer",
+                        lambda *_args: pytest.fail("a page-scored case never grades the reply"))
+
+    signed_in, _trace, _models = rc._cross_session_trial(
+        SimpleNamespace(), None, SimpleNamespace(name="cap_browser"), case, "run", 0)
+    signed_out, _trace, _models = rc._cross_session_trial(
+        SimpleNamespace(), None, SimpleNamespace(name="cap_browser"), case, "run", 1)
+
+    assert sessions[0] != sessions[1]
+    assert signed_in.effective_success == 1.0 and signed_out.effective_success == 0.0
+
+
 def _xsession_case(**overrides):
     case = dict(
         id="durable_codeword",

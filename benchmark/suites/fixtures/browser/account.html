@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Brackenmoor Library — my account (fixture)</title>
+<link rel="icon" href="data:,">
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 36rem; }
+  table { border-collapse: collapse; margin-top: 1rem; }
+  td, th { border: 1px solid #999; padding: 0.3rem 0.8rem; text-align: left; }
+</style>
+</head>
+<body>
+<h1>Brackenmoor Library</h1>
+<h2>My account</h2>
+<div id="account">Loading your account…</div>
+<p id="fixture-status"></p>
+<script src="fixture.js"></script>
+<script>
+  // The loans exist in the page only for a signed-in browser, and whether it
+  // is signed in is the server's answer to the cookie it sent.
+  const loans = [
+    ['The Salt Road to Varrow', '6 November 2026'],
+    ['A Field Guide to Upland Mosses', '13 November 2026'],
+  ];
+
+  function showLoans(account) {
+    account.textContent = '';
+    const intro = document.createElement('p');
+    intro.textContent = 'Books you have out:';
+    const table = document.createElement('table');
+    const head = table.insertRow();
+    ['Title', 'Due back'].forEach(function (text) {
+      const cell = document.createElement('th');
+      cell.textContent = text;
+      head.appendChild(cell);
+    });
+    loans.forEach(function (loan) {
+      const row = table.insertRow();
+      loan.forEach(function (text) { row.insertCell().textContent = text; });
+    });
+    account.append(intro, table);
+  }
+
+  fetch('session')
+    .then(function (response) { return response.json(); })
+    .then(function (answer) {
+      const account = document.getElementById('account');
+      if (answer.signed_in) {
+        showLoans(account);
+      } else {
+        account.textContent = "You're signed out. Sign in from the members' page to see your account.";
+      }
+      fixtureReport('account.signed_in', answer.signed_in === true);
+    });
+</script>
+</body>
+</html>

@@ -23,18 +23,33 @@ defmodule FermixCore.Tools.BrowserTest do
       )
     end
 
+    # `scope` names the stub in every answer, so a test can tell which profile
+    # served a call.
     @impl true
-    def init(_opts), do: {:ok, %{}}
+    def init(opts), do: {:ok, %{scope: Keyword.get(opts, :scope)}}
 
     @impl true
-    def handle_call({:request, %{args: args}}, _from, state),
-      do: {:reply, {:ok, %{"ok" => true, "served" => Map.get(args, "name")}}, state}
+    def handle_call({:request, %{args: args, context: context}}, _from, state) do
+      served = %{
+        "ok" => true,
+        "served" => Map.get(args, "name"),
+        "scope" => state.scope,
+        "affinity" => inspect(Map.get(context, :tab_affinity))
+      }
+
+      {:reply, {:ok, served}, state}
+    end
   end
 
-  # Unique chat id so the owner_key digest cannot collide with another test's
-  # registration in the shared FermixCore.Browser.Registry.
+  # A guest's call on a unique chat id, so its profile key is this module's
+  # alone: every owner call shares the one "owner" key, and a profile another
+  # test left registered under it would answer for this one.
   @chat_id "chat-#{System.unique_integer([:positive])}"
-  @context %{agent_name: "test_agent", conversation_key: {"cli", @chat_id, :root}}
+  @context %{
+    agent_name: "test_agent",
+    conversation_key: {"cli", @chat_id, :root},
+    source_trust: :guest
+  }
 
   describe "name/0" do
     test "returns browser" do
@@ -432,7 +447,7 @@ defmodule FermixCore.Tools.BrowserTest do
     test "download with only timeout_ms passes validation and is dispatched" do
       conversation = {"cli", "chat-download-#{System.unique_integer([:positive])}", :root}
       stub_profile!(conversation)
-      context = %{agent_name: "test_agent", conversation_key: conversation}
+      context = %{agent_name: "test_agent", conversation_key: conversation, source_trust: :guest}
 
       assert {:ok, %{success: true, output: output}} =
                Browser.execute(%{"action" => "download", "timeout_ms" => 500}, context)
@@ -451,8 +466,23 @@ defmodule FermixCore.Tools.BrowserTest do
       assert result.error =~ "file"
     end
 
-    test "requires conversation_key from built-in tool context" do
-      assert {:ok, result} = Browser.execute(%{"action" => "status"}, %{agent_name: "main"})
+    test "refuses a context that carries no trust, by name, before any profile" do
+      context = %{agent_name: "main", conversation_key: {"cli", @chat_id, :root}}
+      assert {:ok, result} = Browser.execute(%{"action" => "status"}, context)
+      assert result.success == false
+      assert result.error =~ "(missing_trust)"
+    end
+
+    test "requires conversation_key from an owner's tool context too: it names the call's tabs" do
+      context = %{agent_name: "main", source_trust: :operator}
+      assert {:ok, result} = Browser.execute(%{"action" => "status"}, context)
+      assert result.success == false
+      assert result.error =~ "(missing_conversation_key)"
+    end
+
+    test "requires conversation_key from a guest's tool context" do
+      context = %{agent_name: "main", source_trust: :guest}
+      assert {:ok, result} = Browser.execute(%{"action" => "status"}, context)
       assert result.success == false
       assert result.error =~ "conversation_key"
     end
@@ -467,6 +497,50 @@ defmodule FermixCore.Tools.BrowserTest do
       assert body["running"] == false
       refute Map.has_key?(body, "owner")
       refute output =~ @chat_id
+    end
+  end
+
+  # One browser profile per device for the owner, one per conversation for a
+  # guest (M75): every owner call, from any conversation or a scheduled run,
+  # is served by the one profile keyed "owner", and a guest's by its own
+  # conversation's. Stubs stand in for both, so no Chrome starts.
+  describe "which profile serves a call" do
+    test "the owner's conversations and scheduled runs share one profile; a guest keeps its own" do
+      guest_conversation = {"telegram", "guest-#{System.unique_integer([:positive])}", :root}
+      guest_key = Scope.guest_key(guest_conversation)
+
+      start_supervised!({StubProfileServer, key: {"owner", "fermix"}, scope: "owner"},
+        id: :owner_profile
+      )
+
+      start_supervised!({StubProfileServer, key: {guest_key, "fermix"}, scope: "guest"},
+        id: :guest_profile
+      )
+
+      for conversation_key <- [
+            {"telegram", "owner-chat", :root},
+            {"cli", "owner-ask", :root},
+            {:scheduled_job, "job-1", "run-1"},
+            {:scheduled_job, "job-1", "run-2"}
+          ] do
+        context = %{
+          agent_name: "test_agent",
+          conversation_key: conversation_key,
+          source_trust: :operator
+        }
+
+        assert served_by(context) == "owner", "#{inspect(conversation_key)} left the owner's"
+        # One profile, and each conversation still names its own tabs.
+        assert affinity_of(context) == inspect(conversation_key)
+      end
+
+      guest = %{
+        agent_name: "test_agent",
+        conversation_key: guest_conversation,
+        source_trust: :guest
+      }
+
+      assert served_by(guest) == "guest"
     end
   end
 
@@ -496,7 +570,13 @@ defmodule FermixCore.Tools.BrowserTest do
         stub_profile!(conversation, backend)
         handler_id = attach_telemetry(session)
 
-        context = %{agent_name: "test_agent", conversation_key: conversation, session_id: session}
+        context = %{
+          agent_name: "test_agent",
+          conversation_key: conversation,
+          session_id: session,
+          source_trust: :guest
+        }
+
         assert {:ok, %{success: true}} = Browser.execute(%{"action" => "tabs"}, context)
 
         assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
@@ -546,7 +626,12 @@ defmodule FermixCore.Tools.BrowserTest do
       stub_profile!(conversation)
       handler_id = attach_telemetry(session)
 
-      context = %{agent_name: "test_agent", conversation_key: conversation, session_id: session}
+      context = %{
+        agent_name: "test_agent",
+        conversation_key: conversation,
+        session_id: session,
+        source_trust: :guest
+      }
 
       assert {:ok, %{success: true, output: output}} =
                Browser.execute(
@@ -726,14 +811,28 @@ defmodule FermixCore.Tools.BrowserTest do
     on_exit(fn -> Application.put_env(:fermix_core, :telemetry, prev) end)
   end
 
-  # Its own conversation, so the registration cannot be the `status` test's
-  # profile — or any other module's — seen as running.
+  # A guest's profile in its own conversation, so the registration cannot be
+  # the `status` test's profile — or any other module's — seen as running.
   defp stub_profile!(conversation_key, backend \\ :cdp) do
-    {:ok, owner} = Scope.owner_key(%{conversation_key: conversation_key})
+    {:ok, owner} = Scope.owner_key(%{conversation_key: conversation_key, source_trust: :guest})
 
     start_supervised!({StubProfileServer, key: {owner, "fermix"}, backend: backend},
       id: {:stub_profile, owner}
     )
+  end
+
+  defp affinity_of(context) do
+    assert {:ok, %{success: true, output: output}} =
+             Browser.execute(%{"action" => "tabs"}, context)
+
+    Jason.decode!(output)["affinity"]
+  end
+
+  defp served_by(context) do
+    assert {:ok, %{success: true, output: output}} =
+             Browser.execute(%{"action" => "tabs"}, context)
+
+    Jason.decode!(output)["scope"]
   end
 
   defp attach_telemetry, do: attach_telemetry(nil)

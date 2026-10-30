@@ -3,9 +3,9 @@ defmodule FermixCore.Browser.ChromeLauncher do
 
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
+  alias FermixCore.Browser.Scope
   alias FermixCore.Meetings.BrowserInstall
   alias FermixCore.Net.Egress
-  alias FermixCore.Setup.ConfigStore
 
   # Every candidate carries the name a person knows it by, which is what a
   # settings row and a Doctor row show: a path never crosses the management
@@ -34,7 +34,7 @@ defmodule FermixCore.Browser.ChromeLauncher do
     with {:ok, %{path: executable}} <- resolve(config, profile),
          {:ok, headless} <- headless(profile),
          {:ok, requested_port} <- requested_port(profile),
-         {:ok, profile_dir} <- profile_dir(owner_key, profile_name),
+         profile_dir = Scope.profile_dir(owner_key, profile_name),
          :ok <- File.mkdir_p(profile_dir),
          :ok <- clear_devtools_port(profile_dir),
          {:ok, port_ref, os_pid} <- launch(executable, profile_dir, requested_port, headless) do
@@ -72,7 +72,7 @@ defmodule FermixCore.Browser.ChromeLauncher do
   """
   @spec attach(Config.t(), map(), String.t(), String.t()) :: {:ok, map()} | :none
   def attach(%Config{} = config, %{mode: :managed}, owner_key, profile_name) do
-    {:ok, profile_dir} = profile_dir(owner_key, profile_name)
+    profile_dir = Scope.profile_dir(owner_key, profile_name)
 
     with {:ok, pid} <- running_pid_for_dir(profile_dir),
          {:ok, port} <- read_devtools_port(profile_dir),
@@ -309,18 +309,6 @@ defmodule FermixCore.Browser.ChromeLauncher do
       {:error, _reason} ->
         false
     end
-  end
-
-  defp profile_dir(owner_key, profile_name) do
-    dir =
-      Path.join([
-        Map.fetch!(ConfigStore.workspace_paths(), :browser),
-        "profiles",
-        owner_key,
-        profile_name
-      ])
-
-    {:ok, dir}
   end
 
   # Find a managed Chrome already running for exactly this user-data-dir and
