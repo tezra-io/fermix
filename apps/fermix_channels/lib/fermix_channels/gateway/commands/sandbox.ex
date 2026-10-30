@@ -19,6 +19,10 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
 
   @ttl_ms 60_000
 
+  # What the owner is told when a deny found nothing waiting (it ended, expired,
+  # or is already running); the confirm's twin is core's own sentence.
+  @access_deny_not_found "That request expired or was already handled."
+
   # What the owner is told when a confirmed access-sensitive run crashed.
   @access_outcome_unknown "Confirmed, but the command failed before it reported, so whether it " <>
                             "reached the device is unknown. Check it before sending it again."
@@ -284,12 +288,29 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
     case take_pending(token, message) do
       {:ok, record} ->
         :ok = notify_approval(context, :sandbox, token, :denied)
-        reply(reply_fn, denied_text(record))
+        reply(reply_fn, deny_record(record))
 
       {:error, reason} ->
         reply(reply_fn, "Denial failed: #{inspect(reason)}")
     end
   end
+
+  # Every deny reaches the gate (M84 D3): a call waiting in its own process for
+  # the owner is answered `:denied` at once, and its turn tells the owner the
+  # outcome, so the reply says only that (the twin of confirm's "Approved.");
+  # a parked call is dropped, so nothing of it can run. Every deny surface
+  # sends `/deny`: the typed command, a chat's Deny button (`ApprovalButton`),
+  # the Mac app's and the phone's card (`Companion.Output.approval/1`'s
+  # `deny_command`) and the owner's own inbox.
+  defp deny_record(%{mutation: {:access_sensitive, intent_id}} = record) do
+    case AccessGate.deny(intent_id) do
+      {:ok, :in_call} -> "Denied."
+      {:ok, :parked} -> denied_text(record)
+      {:error, :not_found} -> @access_deny_not_found
+    end
+  end
+
+  defp deny_record(record), do: denied_text(record)
 
   defp denied_text(%{mutation: {:acknowledge_vendor_config, _run_id}}) do
     "Not acknowledged — coding runs there stay paused until you confirm the change " <>
@@ -316,11 +337,19 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
     end
   end
 
-  # An access-sensitive command the owner confirmed: core runs exactly the
-  # recorded call (`AccessGate.confirm/2`) and this chat gets its outcome once.
-  # Nothing is re-ingested — the daemon runs the call, not a new model turn.
-  defp apply_confirmed(%{mutation: {:access_sensitive, intent_id}}, _token, reply_fn, context),
-    do: spawn_access_confirm(intent_id, reply_fn, context)
+  # An access-sensitive command the owner confirmed. A call waiting in its own
+  # process for the answer (a sign-in, `AccessGate.ask_in_call/3`) is answered
+  # here, at once, and the turn reports what happened, so the owner reads only
+  # that it was approved. Otherwise core runs exactly the recorded call
+  # (`AccessGate.confirm/2`) and this chat gets its outcome once; a request that
+  # no longer waits is answered there. Nothing is re-ingested: the daemon runs
+  # the call, not a new model turn.
+  defp apply_confirmed(%{mutation: {:access_sensitive, intent_id}}, _token, reply_fn, context) do
+    case AccessGate.confirm_in_call(intent_id) do
+      :ok -> reply(reply_fn, "Approved.")
+      {:error, :not_in_call} -> spawn_access_confirm(intent_id, reply_fn, context)
+    end
+  end
 
   # A confirmed grant persists exactly like an owner-typed `/confirm`; the only
   # addition is the auto-resume branch for an agent-initiated record.

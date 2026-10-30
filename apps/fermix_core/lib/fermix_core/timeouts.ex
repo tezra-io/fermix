@@ -228,6 +228,22 @@ defmodule FermixCore.Timeouts do
   @spec repo_call() :: pos_integer()
   def repo_call, do: @repo_call_ms
 
+  # --- Website sign-in (M84) ------------------------------------------------
+  # How long a sign-in waits inside its own call for the owner's answer
+  # (`Capabilities.AccessGate.ask_in_call/3`, which routes the firing through
+  # `expired/3`). The owner's `/confirm` token and its gate record live 60 s
+  # (`AccessGate.Pending.ttl_ms/0`), so a longer wait would wait for an answer
+  # that can no longer come.
+  #
+  # INVARIANT: sign_in_approval() == AccessGate.Pending.ttl_ms(). Locked by a
+  # test in access_gate_sign_in_test.exs. The browser call's own deadline must
+  # outlast it plus the sign-in's two short requests.
+  @sign_in_approval_ms 60_000
+
+  @doc "How long a sign-in waits for the owner's answer before it is unanswered."
+  @spec sign_in_approval() :: pos_integer()
+  def sign_in_approval, do: @sign_in_approval_ms
+
   @doc """
   Record a fired failure timeout and return its firing-site error shape.
 

@@ -59,6 +59,17 @@ defmodule FermixCore.Capabilities.AccessGate do
        host command reaches these rules only after outside content, so it
        parks at 6, and its prompt names what was read, never the channel).
 
+  A third kind only refuses (M84): a `browser` call of `act` kind `sign_in`
+  (`gate_kind/2`). It runs only on the owner's own attended turn, never from a
+  delegated worker, a cue or scheduled run (a job row naming `browser` does not
+  admit it), or a shared Buzz channel (`sign_in_not_allowed`), and never on a
+  voice turn (`sign_in_not_on_voice`): the model that read the page would
+  phrase the question, and a page can play a spoken yes. An admitted sign-in is
+  never parked. Its own call asks the owner with `ask_in_call/3` and waits for
+  the answer in the turn's process, since the pane task, its refs and its tab
+  end with the turn. Every confirm and deny path answers such a record by
+  message (`confirm_in_call/2`, `deny/2`) instead of running a recorded call.
+
   Two related questions live here too: `owner_consent_turn?/1`, whether a turn
   may change what a watcher reads or what a task may do (with
   `owner_private_turn?/1`, the same less its taint condition), and
@@ -105,6 +116,8 @@ defmodule FermixCore.Capabilities.AccessGate do
   alias FermixCore.Sandbox.OsSandbox
   alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Temporal.Access
+  alias FermixCore.Timeouts
+  alias FermixCore.Tools.Browser
   alias FermixCore.Tools.RequestDirectoryAccess
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
@@ -117,6 +130,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   @max_outcome_chars 400
   @max_source_labels 5
   @after_confirm "Once you confirm, Fermix runs exactly this command."
+  @after_confirm_in_call "Fermix goes ahead only once you confirm."
 
   @affirmatives MapSet.new(
                   ~w(yes yeah yep yup confirm confirmed) ++
@@ -175,8 +189,18 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   @type surface :: :voice | :this_chat | :owner_inbox
   @type refusal ::
-          :worker | :cue_run | :unattended | :not_allowlisted | :no_surface | :voice_surface
+          :worker
+          | :cue_run
+          | :unattended
+          | :not_allowlisted
+          | :no_surface
+          | :voice_surface
+          | :sign_in_not_allowed
+          | :sign_in_not_on_voice
   @type decision :: :dispatch | :chained | {:confirm, surface()} | {:refuse, refusal()}
+  @type gate_kind :: :access_sensitive | :host_command | :sign_in | nil
+  @type in_call_result ::
+          {:ok, :confirmed} | {:error, :denied | :unanswered | {:not_delivered, term()}}
 
   @doc """
   Called by `Capability.execute/3` before the executor. `{:dispatch, context}`
@@ -215,7 +239,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   end
 
   defp admit_standard(%Capability{} = capability, args, context) do
-    if gated?(capability, context) do
+    if gated?(capability, args, context) do
       call = %{capability: capability, args: args, context: context}
 
       case Map.fetch(context, :access_confirmed) do
@@ -237,6 +261,12 @@ defmodule FermixCore.Capabilities.AccessGate do
   @spec decide(Capability.t(), map(), map()) :: decision()
   def decide(%Capability{} = capability, context, args \\ %{})
       when is_map(context) and is_map(args) do
+    if gate_kind(capability, args) == :sign_in,
+      do: sign_in_decision(context),
+      else: command_decision(capability, context, args)
+  end
+
+  defp command_decision(capability, context, args) do
     cond do
       Access.worker?(context) -> {:refuse, :worker}
       cue_run?(context) -> {:refuse, :cue_run}
@@ -328,6 +358,99 @@ defmodule FermixCore.Capabilities.AccessGate do
   end
 
   @doc """
+  Which kind of call `admit/3` decides here, from the capability and the call's
+  arguments: a plugin command flagged access-sensitive, a built-in host
+  command, the built-in `browser` tool's `act` of kind `sign_in` (matched on
+  the tool module, so no plugin tool of that name is one), or none.
+  """
+  @spec gate_kind(Capability.t(), map()) :: gate_kind()
+  def gate_kind(%Capability{metadata: %{tool_module: Browser}}, %{"kind" => "sign_in"}),
+    do: :sign_in
+
+  def gate_kind(%Capability{metadata: %{access_sensitive?: true}}, args) when is_map(args),
+    do: :access_sensitive
+
+  def gate_kind(%Capability{metadata: %{host_command?: true}}, args) when is_map(args),
+    do: :host_command
+
+  def gate_kind(%Capability{}, args) when is_map(args), do: nil
+
+  @doc """
+  Ask the owner from inside a call and wait there for the answer (M84, the
+  sign-in's approval). `prompt` is the whole question, its values already
+  through `visible/1`; it is made `visible/1` again as one line, the approval
+  line follows, and it goes out on the turn's surface as a parked call's prompt
+  does: this chat (`approval_fn`, then `reply_fn`'s `{:approval_prompt, text,
+  token}`) or the owner's own inbox (`owner_inbox_approval_fn`, the request
+  marked `in_call: true`).
+
+  The record (`Pending.park_in_call/3`, in the context's `:access_pending`
+  store) names this process, which then waits at most `timeout_ms`, no longer
+  than the confirmation window (`Pending.ttl_ms/0`; a longer bound raises), for
+  `{:access_answer, id, :confirmed | :denied}` from a confirm or deny path. The
+  deadline is `{:access_timeout, id}`, sent to this process by its own timer,
+  and its firing is routed through `Timeouts.expired/3` as `:sign_in_approval`.
+
+  A stopped turn never returns from here: `/stop` kills the turn's task, this
+  call included, and the store's monitor drops the record, so a later answer
+  finds nothing waiting. `{:error, {:not_delivered, reason}}` when the owner
+  could not be asked (`:no_surface`, `:voice`, `:too_many_pending`, the owner
+  inbox's own reason); the record is dropped first.
+  """
+  @spec ask_in_call(String.t(), map(), pos_integer()) :: in_call_result()
+  def ask_in_call(prompt, context, timeout_ms)
+      when is_binary(prompt) and prompt != "" and is_map(context) and is_integer(timeout_ms) and
+             timeout_ms > 0 do
+    if timeout_ms > Pending.ttl_ms(),
+      do: raise(ArgumentError, "ask_in_call waits at most #{Pending.ttl_ms()} ms")
+
+    with {:ok, surface} <- in_call_surface(context),
+         {:ok, id} <- park_in_call(context),
+         :ok <- deliver_in_call(surface, id, visible(prompt), context) do
+      await_answer(id, context, timeout_ms)
+    end
+  end
+
+  @doc """
+  The owner's yes to a call waiting in `ask_in_call/3`: its process is answered
+  `:confirmed` and its record ends. `{:error, :not_in_call}` when `id` names no
+  such live wait: a parked call, which `confirm/2` runs, or a wait that ended.
+  """
+  @spec confirm_in_call(String.t(), GenServer.server()) :: :ok | {:error, :not_in_call}
+  def confirm_in_call(id, pending \\ Pending) when is_binary(id) do
+    case Pending.answer_in_call(id, pending) do
+      :ok ->
+        Logger.info("access_gate: intent #{id} confirmed in its call")
+        :ok
+
+      {:error, :not_in_call} ->
+        {:error, :not_in_call}
+    end
+  end
+
+  @doc """
+  The owner's no, from any deny path, answered with the kind of request it
+  reached: a call waiting in `ask_in_call/3` is answered `:denied` at once
+  (`{:ok, :in_call}`; its turn tells the owner the outcome), and a parked call
+  still waiting is dropped (`{:ok, :parked}`), so nothing of it can run and a
+  call parked again asks afresh. `{:error, :not_found}` when nothing waits
+  under `id`.
+  """
+  @spec deny(String.t(), GenServer.server()) ::
+          {:ok, :in_call | :parked} | {:error, :not_found}
+  def deny(id, pending \\ Pending) when is_binary(id) do
+    case Pending.deny(id, pending) do
+      {:ok, kind} ->
+        Logger.info("access_gate: intent #{id} denied (#{kind})")
+        {:ok, kind}
+
+      {:error, :not_found} ->
+        Logger.info("access_gate: deny of intent #{id} found no waiting request")
+        {:error, :not_found}
+    end
+  end
+
+  @doc """
   Settle a spoken answer to a parked voice call. Only a whole-utterance yes
   confirms; anything else drops the record so nothing runs.
   """
@@ -360,13 +483,29 @@ defmodule FermixCore.Capabilities.AccessGate do
   end
 
   @doc """
-  The owner's confirm line for a parked call, shared by the in-chat prompt and
-  the owner-inbox delivery: the one token-visibility rule, and a promise that
-  matches what happens (the daemon runs the command; nothing resumes).
+  The owner's confirm line, shared by the in-chat prompt and the owner-inbox
+  delivery: the one token-visibility rule, and a promise that matches what
+  happens. For a parked call (`:parked`) the daemon runs the command and
+  nothing resumes; for a call waiting in `ask_in_call/3` (`:in_call`) that call
+  goes ahead only on a yes.
   """
-  @spec approval_line(String.t(), map()) :: String.t()
-  def approval_line(token, context) when is_binary(token) and is_map(context),
-    do: RequestDirectoryAccess.approval_line(token, context, @after_confirm)
+  @spec approval_line(String.t(), map(), :parked | :in_call) :: String.t()
+  def approval_line(token, context, kind \\ :parked)
+      when is_binary(token) and is_map(context) and kind in [:parked, :in_call],
+      do: RequestDirectoryAccess.approval_line(token, context, after_confirm(kind))
+
+  defp after_confirm(:parked), do: @after_confirm
+  defp after_confirm(:in_call), do: @after_confirm_in_call
+
+  @doc """
+  Control, format and line-separator characters (a line break, a bidi
+  override, a zero-width space) shown as escapes, so a value cannot forge a
+  line of an owner's prompt or reorder what the owner reads. Every value a
+  prompt quotes goes through it.
+  """
+  @spec visible(String.t()) :: String.t()
+  def visible(text) when is_binary(text),
+    do: String.replace(text, ~r/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u, &escaped/1)
 
   @doc """
   Whether a spoken utterance is, as a whole, a yes. Lower-cased, punctuation
@@ -434,7 +573,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp host_commands(registry) do
     registry
     |> CapabilityRegistry.list()
-    |> Enum.filter(&(gate_kind(&1) == :host_command))
+    |> Enum.filter(&(gate_kind(&1, %{}) == :host_command))
   end
 
   @doc """
@@ -487,16 +626,54 @@ defmodule FermixCore.Capabilities.AccessGate do
   # --- decision ------------------------------------------------------------
 
   # The one predicate for whether a call meets `decide/3`: a flagged command
-  # always; a host command only where the kernel does not hold it, and only in a
-  # tainted turn. Metadata first, so every other call returns without reading
-  # the context.
-  defp gated?(capability, context) do
-    case gate_kind(capability) do
+  # and a sign-in always; a host command only where the kernel does not hold
+  # it, and only in a tainted turn. Metadata first, so every other call returns
+  # without reading the context.
+  defp gated?(capability, args, context) do
+    case gate_kind(capability, args) do
       :access_sensitive -> true
+      :sign_in -> true
       :host_command -> host_command_gated?(capability, context)
       nil -> false
     end
   end
+
+  # A sign-in only refuses: it never parks, and an admitted one asks the owner
+  # from its own call. Who is refused is `sign_in_refusal/1`'s answer.
+  defp sign_in_decision(context) do
+    case sign_in_refusal(context) do
+      nil ->
+        :dispatch
+
+      :voice ->
+        {:refuse, :sign_in_not_on_voice}
+
+      cause ->
+        Logger.info("access_gate: browser sign_in refused (#{cause})")
+        {:refuse, :sign_in_not_allowed}
+    end
+  end
+
+  # In order: no owner is in a worker's, a cue run's or a scheduled run's loop
+  # (a job row naming `browser` is never read), only the owner's attended turn
+  # may sign in, and other people post in a shared Buzz channel. A voice turn is
+  # a live call's (`voice_call_id`) or one its origin marks as voice.
+  defp sign_in_refusal(context) do
+    cond do
+      Access.worker?(context) -> :worker
+      cue_run?(context) -> :cue_run
+      Authorization.scheduled?(context) -> :scheduled
+      not Access.attended_operator_turn?(context) -> :unattended
+      shared_channel?(context) -> :shared_channel
+      voice_turn?(context) -> :voice
+      true -> nil
+    end
+  end
+
+  defp voice_turn?(context),
+    do:
+      is_binary(Map.get(context, :voice_call_id)) or
+        Map.get(context, :computer_use_origin) == :voice
 
   # A host command is gated when the turn read outside content and Fermix cannot
   # sandbox this call: the host has no kernel enforcement (Linux), or the call
@@ -588,13 +765,6 @@ defmodule FermixCore.Capabilities.AccessGate do
   # The platform seam `OsSandbox` reads; tests inject `os: {:unix, :linux}` or
   # `{:unix, :darwin}` here so the host the suite runs on never decides.
   defp os_opts(context), do: Map.get(context, :os_sandbox, [])
-
-  # Which of the two kinds a capability is, if either. The flag comes from a
-  # plugin manifest and the host-command mark from the built-in tables, so no
-  # capability carries both.
-  defp gate_kind(%Capability{metadata: %{access_sensitive?: true}}), do: :access_sensitive
-  defp gate_kind(%Capability{metadata: %{host_command?: true}}), do: :host_command
-  defp gate_kind(%Capability{}), do: nil
 
   # Every job run carries its `trigger`; only a cue run's is "cue".
   defp cue_run?(context), do: Map.get(context, :trigger) == "cue"
@@ -707,7 +877,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   # plugin command keeps the surface `decide/2` chose, a spoken yes included.
   defp park_or_refuse(%{capability: capability} = call, surface) do
     cond do
-      gate_kind(capability) != :host_command ->
+      gate_kind(capability, %{}) != :host_command ->
         park(call, surface)
 
       surface == :voice ->
@@ -740,7 +910,8 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp with_sources(%{capability: capability, context: context} = call) do
     Map.merge(call, %{
       sources: outside_labels(capability, source_set(context)),
-      shared_channel?: gate_kind(capability) == :access_sensitive and shared_channel?(context)
+      shared_channel?:
+        gate_kind(capability, %{}) == :access_sensitive and shared_channel?(context)
     })
   end
 
@@ -826,10 +997,10 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   defp deliver(:voice, call, :existing), do: hold_parked(call, existing_text(), "held_voice")
 
-  defp refuse(%{capability: capability} = call, reason) do
+  defp refuse(%{capability: capability, args: args} = call, reason) do
     call = with_sources(call)
     Logger.info("access_gate: #{capability.name} refused (#{reason})")
-    hold(call, refusal_text(gate_kind(capability), reason, call), "refused_#{reason}")
+    hold(call, refusal_text(gate_kind(capability, args), reason, call), "refused_#{reason}")
   end
 
   # One model tool call, one exec event: the executor never ran, so the gate
@@ -861,6 +1032,126 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # --- asking from inside a call (M84) -------------------------------------
+
+  # The surfaces a parked call's prompt goes out on, minus a voice call's: a
+  # spoken yes cannot answer a call that waits in a turn's process.
+  defp in_call_surface(context) do
+    case surface(context) do
+      surface when surface in [:this_chat, :owner_inbox] -> {:ok, surface}
+      :voice -> {:error, {:not_delivered, :voice}}
+      :none -> {:error, {:not_delivered, :no_surface}}
+    end
+  end
+
+  defp park_in_call(context) do
+    case Pending.park_in_call(
+           %{session_id: Map.get(context, :session_id)},
+           self(),
+           pending(context)
+         ) do
+      {:ok, id} ->
+        {:ok, id}
+
+      {:error, :too_many_pending} ->
+        Logger.warning("access_gate: in-call ask refused, too many confirmations waiting")
+        {:error, {:not_delivered, :too_many_pending}}
+    end
+  end
+
+  # A fresh id has no live token, so the channel store answers `:new`; anything
+  # else, or an inbox that cannot be reached, ends the ask before it waits.
+  defp deliver_in_call(:this_chat, id, prompt, context) do
+    case context.approval_fn.(%{access_sensitive: id}) do
+      {:ok, token, :new} ->
+        text = prompt <> "\n\n" <> approval_line(token, context, :in_call)
+        context.reply_fn.({:approval_prompt, text, token})
+        :ok
+
+      {:ok, _token, :existing} ->
+        not_delivered(id, context, :existing_token)
+    end
+  end
+
+  defp deliver_in_call(:owner_inbox, id, prompt, context) do
+    case context.owner_inbox_approval_fn.(%{access_sensitive: id, prompt: prompt, in_call: true}) do
+      {:ok, _token, :new} -> :ok
+      {:ok, _token, :existing} -> not_delivered(id, context, :existing_token)
+      {:error, reason} -> not_delivered(id, context, reason)
+    end
+  end
+
+  defp not_delivered(id, context, reason) do
+    Logger.warning("access_gate: intent #{id} not delivered: #{inspect(reason)}")
+    _closed_or_gone = Pending.close_in_call(id, pending(context))
+    {:error, {:not_delivered, reason}}
+  end
+
+  # The answer comes from a confirm or deny path through the store; the
+  # deadline from this process's own timer. Both are matched on the id, and the
+  # timer is cancelled and its message flushed on every way out.
+  defp await_answer(id, context, timeout_ms) do
+    timer = Process.send_after(self(), {:access_timeout, id}, timeout_ms)
+    Logger.info("access_gate: intent #{id} waits in its call for the owner")
+
+    receive do
+      {:access_answer, ^id, answer} ->
+        cancel_deadline(timer, id)
+        answered(id, answer)
+
+      {:access_timeout, ^id} ->
+        deadline_passed(id, context, timeout_ms)
+    end
+  end
+
+  defp cancel_deadline(timer, id) do
+    _left = Process.cancel_timer(timer)
+
+    receive do
+      {:access_timeout, ^id} -> :ok
+    after
+      0 -> :ok
+    end
+  end
+
+  # The store sends an answer before it replies to any later call, so a wait
+  # whose record already ended finds that answer here; a record the window
+  # dropped has none, and the wait is unanswered.
+  defp deadline_passed(id, context, timeout_ms) do
+    case Pending.close_in_call(id, pending(context)) do
+      :ok -> unanswered(id, context, timeout_ms)
+      {:error, :not_found} -> answer_or_unanswered(id, context, timeout_ms)
+    end
+  end
+
+  defp answer_or_unanswered(id, context, timeout_ms) do
+    receive do
+      {:access_answer, ^id, answer} -> answered(id, answer)
+    after
+      0 -> unanswered(id, context, timeout_ms)
+    end
+  end
+
+  defp answered(id, :confirmed) do
+    Logger.info("access_gate: intent #{id} approved by the owner")
+    {:ok, :confirmed}
+  end
+
+  defp answered(id, :denied) do
+    Logger.info("access_gate: intent #{id} denied by the owner")
+    {:error, :denied}
+  end
+
+  defp unanswered(id, context, timeout_ms) do
+    Logger.info("access_gate: intent #{id} unanswered")
+    correlation = Map.take(context, [:session_id, :parent_session])
+
+    {:error, {:timeout, :sign_in_approval, _ms}} =
+      Timeouts.expired(:sign_in_approval, timeout_ms, correlation)
+
+    {:error, :unanswered}
+  end
 
   # --- confirmation --------------------------------------------------------
 
@@ -903,7 +1194,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   # (the built-in module, or a declared command's executable and args), so a
   # command re-declared between park and confirm never runs under the old yes.
   defp command_unchanged?(%Capability{metadata: metadata} = capability, record) do
-    case gate_kind(capability) do
+    case gate_kind(capability, %{}) do
       :access_sensitive ->
         Map.get(metadata, :plugin) == record.plugin and
           Map.get(metadata, :auth_profile) == record.auth_profile
@@ -911,7 +1202,7 @@ defmodule FermixCore.Capabilities.AccessGate do
       :host_command ->
         command_ref(capability) == record.command_ref
 
-      nil ->
+      _neither_command ->
         false
     end
   end
@@ -965,7 +1256,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   # not be set up from here either. No call's arguments: a job's run is never
   # the next run of a coding-run chain.
   defp held_for_job?(capability, context),
-    do: gated?(capability, context) and decide(capability, context) != :dispatch
+    do: gated?(capability, %{}, context) and decide(capability, context) != :dispatch
 
   # --- owner-facing text (Fermix-authored; never quotes the model or a sender)
 
@@ -1023,11 +1314,6 @@ defmodule FermixCore.Capabilities.AccessGate do
       label <> ": " <> (value |> redacted(context) |> visible())
     end)
   end
-
-  # Control, format and line-separator characters (a line break, a bidi
-  # override, a zero-width space) shown as escapes, so a value cannot forge a
-  # line of the prompt or reorder what the owner reads.
-  defp visible(text), do: String.replace(text, ~r/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u, &escaped/1)
 
   defp escaped("\n"), do: "\\n"
   defp escaped("\r"), do: "\\r"
@@ -1191,7 +1477,7 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   # Why the command needs the owner's consent at all, before why now.
   defp what(%{capability: capability}) do
-    case gate_kind(capability) do
+    case gate_kind(capability, %{}) do
       :access_sensitive -> "is an access-sensitive command"
       :host_command -> "runs a command Fermix cannot sandbox here"
     end
@@ -1256,6 +1542,18 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   defp refusal_text(:access_sensitive, reason, call),
     do: refusal_text(reason, call.capability.name)
+
+  defp refusal_text(:sign_in, :sign_in_not_allowed, _call) do
+    "Not signed in: Fermix signs in to a website only when the owner asks in their own " <>
+      "chat or the Fermix app, never from a delegated worker, a cue, a scheduled job or a " <>
+      "shared channel. Ask the owner to request the sign-in from their own chat or the " <>
+      "Fermix app. (sign_in_not_allowed)"
+  end
+
+  defp refusal_text(:sign_in, :sign_in_not_on_voice, _call) do
+    "Not signed in: a sign-in is not approved on a voice call. Tell the owner to ask for it " <>
+      "in their own chat or the Fermix app, where they approve it. (sign_in_not_on_voice)"
+  end
 
   # The host-command refusal names the same reason the park prompt would
   # (`reason_phrase/1`), so it never claims "came after content" when the only

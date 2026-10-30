@@ -19,7 +19,9 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
        its one-tap button and every other channel the tap-to-copy command.
 
   A failed delivery takes the token back, so no confirmable record exists that
-  the owner never saw.
+  the owner never saw. A request marked `in_call: true` is a call that waits in
+  its own process for the answer (`AccessGate.ask_in_call/3`), so its prompt
+  ends with that promise instead of the daemon running a command.
   """
 
   alias FermixChannels.Gateway.ChannelRegistry
@@ -31,7 +33,11 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Delivery.OwnerInbox
 
-  @type request :: %{access_sensitive: String.t(), prompt: String.t()}
+  @type request :: %{
+          required(:access_sensitive) => String.t(),
+          required(:prompt) => String.t(),
+          optional(:in_call) => true
+        }
 
   @doc """
   Store and deliver the owner's confirmation. Seams: `:jobs_config` and
@@ -40,16 +46,23 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
   """
   @spec request(request(), keyword()) ::
           {:ok, String.t(), :new | :existing} | {:error, term()}
-  def request(%{access_sensitive: intent_id, prompt: prompt}, opts \\ [])
+  def request(%{access_sensitive: intent_id, prompt: prompt} = request, opts \\ [])
       when is_binary(intent_id) and is_binary(prompt) and is_list(opts) do
     with {:ok, inbox, dm_origin} <- owner_dm(opts),
          {:ok, adapter} <- adapter(inbox.platform, opts) do
       case Sandbox.store_pending_grant(%{access_sensitive: intent_id}, origin(dm_origin)) do
         {:ok, token, :existing} -> {:ok, token, :existing}
-        {:ok, token, :new} -> deliver(adapter, inbox, prompt, token)
+        {:ok, token, :new} -> deliver(adapter, inbox, prompt_text(request, token), token)
       end
     end
   end
+
+  defp prompt_text(%{prompt: prompt} = request, token),
+    do:
+      prompt <> "\n\n" <> AccessGate.approval_line(token, %{chat_type: "private"}, kind(request))
+
+  defp kind(%{in_call: true}), do: :in_call
+  defp kind(_parked), do: :parked
 
   @doc """
   Sends a mandate proposal (M60 §10.9) to the owner DM `inbox` that core
@@ -102,9 +115,7 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
     %{channel: platform, chat_id: chat_id, thread_ts: nil, user_id: user_id, resume: nil}
   end
 
-  defp deliver(adapter, inbox, prompt, token) do
-    text = prompt <> "\n\n" <> AccessGate.approval_line(token, %{chat_type: "private"})
-
+  defp deliver(adapter, inbox, text, token) do
     context = ReplyContext.new(adapter, inbox_message(inbox))
 
     case Delivery.deliver(context, {:approval_prompt, text, token}) do
