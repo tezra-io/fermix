@@ -7,8 +7,9 @@ defmodule FermixCore.Sandbox.OsSandbox do
   module asks the kernel to hold the running command, and everything it starts,
   to the same writable roots, and to keep Fermix out of its reach in every mode:
   Fermix's home is never writable except the workspace and skills folders, its
-  secrets are never readable, its sockets never answer, its installed code and
-  plugin binaries cannot be changed or run, and nothing can be mounted over them.
+  secrets and the Mac app browser pane's website data are never readable, its
+  sockets never answer, its installed code and plugin binaries cannot be changed
+  or run, and nothing can be mounted over them.
   Outside `open`, the owner's credential folders and files are not readable
   either.
 
@@ -195,6 +196,7 @@ defmodule FermixCore.Sandbox.OsSandbox do
          {:ok, fermix_writable} <- fermix_writable(config, fermix_home),
          {:ok, own} <- resolve([config.workspace_root, Path.join(config.home, "skills")]),
          {:ok, credentials} <- resolve(PathPolicy.credential_paths(config)),
+         {:ok, pane} <- resolve(PathPolicy.pane_website_data_paths(config)),
          {:ok, unreadable} <- unreadable(config) do
       {:ok,
        %{
@@ -203,7 +205,7 @@ defmodule FermixCore.Sandbox.OsSandbox do
          writable_patterns: scratch_patterns,
          fermix_writable: fermix_writable,
          protected: protected,
-         protected_patterns: protected_patterns(os_home, credentials),
+         protected_patterns: protected_patterns(os_home, credentials ++ pane),
          ancestors: Enum.uniq(ancestors([fermix_home | protected]) ++ own),
          secret: for({path, reach} <- unreadable, reach != :prefix, do: path),
          secret_patterns: Enum.flat_map(unreadable, &read_pattern/1),
@@ -264,7 +266,9 @@ defmodule FermixCore.Sandbox.OsSandbox do
 
   @doc """
   What a command may never read under `config`, every path symlink-resolved:
-  Fermix's secrets in every mode, and outside `open` the owner's credentials.
+  Fermix's secrets and the Mac app browser pane's website data
+  (`PathPolicy.pane_website_data_paths/1`) in every mode, and outside `open` the
+  owner's credentials.
   `~/.config/fermix` is named on its own because `open` reads the rest of the
   owner's credentials. `secret_writer` stages a key being saved under
   `System.tmp_dir!()/fermix-secret-N/`, the same resolver read here.
@@ -278,8 +282,11 @@ defmodule FermixCore.Sandbox.OsSandbox do
                [Path.join(config.os_home, ".config/fermix")]
            ),
          {:ok, staging} <- resolve([Path.join(System.tmp_dir!(), "fermix-secret-")]),
-         {:ok, named} <- resolve(owner_credentials(config, PathPolicy.credential_paths(config))) do
+         {:ok, credentials} <-
+           resolve(owner_credentials(config, PathPolicy.credential_paths(config))),
+         {:ok, pane} <- resolve(PathPolicy.pane_website_data_paths(config)) do
       prefixed = Enum.map(@secret_prefixed, &Path.join(fermix_home, &1)) ++ staging
+      named = credentials ++ pane
       # A path the owner's credentials also name keeps their wider rule.
       trees = Enum.reject(trees, &(&1 in named))
 

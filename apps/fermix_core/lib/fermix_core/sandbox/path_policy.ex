@@ -20,6 +20,17 @@ defmodule FermixCore.Sandbox.PathPolicy do
   )
   @os_roots ~w(/etc /usr /bin /sbin /System /Library)
 
+  # The Mac app's browser pane keeps its websites' data under `~/Library`, by
+  # bundle id (the released app and the dev build): the pane's
+  # `WKWebsiteDataStore(forIdentifier:)` (cookies, storage, caches) under
+  # `WebKit`, the app's own URL loading under `HTTPStorages`, `Caches` and
+  # `Cookies`. A task that read it would hold the owner's signed-in sessions,
+  # and one that wrote it could plant a cookie (M84 §9), as with the managed
+  # Chrome's `browser/profiles`. Each entry also covers the files named after
+  # it (`io.tezra.FermixPet.binarycookies`).
+  @pane_library_dirs ~w(WebKit HTTPStorages Caches Cookies)
+  @pane_bundle_ids ~w(io.tezra.FermixPet io.tezra.FermixPet.dev)
+
   # The daemon's own state under FERMIX_HOME, which no agent task reads or
   # writes through file tools: configuration and credentials (the Linux file
   # secret store, setup tokens, the session-signing key, ACP and mobile
@@ -243,8 +254,24 @@ defmodule FermixCore.Sandbox.PathPolicy do
 
     (@os_roots ++
        credentials(os_home) ++
+       pane_website_data(os_home) ++
        Enum.map(@protected_fermix_entries, &Path.join(fermix_home, &1)))
     |> Enum.map(&link_resolved_path/1)
+  end
+
+  @doc """
+  The Mac app browser pane's website data folders, a subset of
+  `protected_paths/1` that a command may not read either
+  (`Sandbox.OsSandbox`), in every mode.
+  """
+  @spec pane_website_data_paths(Config.t()) :: [String.t()]
+  def pane_website_data_paths(%Config{} = config),
+    do: Enum.map(pane_website_data(config.os_home), &link_resolved_path/1)
+
+  defp pane_website_data(os_home) do
+    for dir <- @pane_library_dirs,
+        id <- @pane_bundle_ids,
+        do: Path.join([os_home, "Library", dir, id])
   end
 
   @doc "The owner's credential folders and files, a subset of `protected_paths/1`."

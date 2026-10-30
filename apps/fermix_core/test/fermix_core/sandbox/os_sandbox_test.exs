@@ -124,6 +124,27 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
       assert ("^" <> escaped(Path.join(rules.fermix_home, "memory.db"))) in rules.secret_patterns
     end
 
+    # M84 §9: the Mac app's browser pane keeps its websites' cookies and storage
+    # under ~/Library, by bundle id, for the released app and the dev build.
+    test "the browser pane's website data is read-denied and protected in every mode", ctx do
+      pane =
+        for dir <- ~w(WebKit HTTPStorages Caches Cookies),
+            id <- ~w(io.tezra.FermixPet io.tezra.FermixPet.dev),
+            do: resolved(Path.join([ctx.os_home, "Library", dir, id]))
+
+      for mode <- [:strict, :standard, :open] do
+        assert {:ok, rules} = OsSandbox.rules(config(ctx, mode), nil, scratch: [])
+        assert {:ok, entries} = OsSandbox.unreadable(config(ctx, mode))
+
+        for path <- pane do
+          assert path in rules.secret, "#{mode}: #{path}"
+          assert ("^" <> escaped(path) <> "(\\.|-)") in rules.secret_patterns, "#{mode}: #{path}"
+          assert path in rules.protected, "#{mode}: #{path}"
+          assert {path, :named} in entries, "#{mode}: #{path}"
+        end
+      end
+    end
+
     test "the owner's credentials are read-denied in strict and standard, readable in open",
          ctx do
       credentials =
@@ -342,6 +363,45 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
       assert %{success: false, error: error} = shell("cat #{key}", config(ctx, :open))
       assert error =~ "Operation not permitted"
       refute error =~ "secret-value"
+    end
+
+    # The folders the pane's `WKWebsiteDataStore(forIdentifier:)` and the app's
+    # own URL loading write on a Mac (M84 §9): a command reading them would hold
+    # the signed-in sessions, and one writing them could plant a cookie.
+    test "the browser pane's website data can be neither read nor planted, in any mode", ctx do
+      library = Path.join(ctx.os_home, "Library")
+      store = Path.join(library, "WebKit/io.tezra.FermixPet/WebsiteDataStore/probe-store")
+
+      pane = [
+        Path.join(store, "Cookies/Cookies.binarycookies"),
+        Path.join(library, "WebKit/io.tezra.FermixPet.dev/WebsiteDataStore/probe/LocalStorage/x"),
+        Path.join(library, "HTTPStorages/io.tezra.FermixPet/httpstorages.sqlite"),
+        Path.join(library, "HTTPStorages/io.tezra.FermixPet.binarycookies"),
+        Path.join(library, "Caches/io.tezra.FermixPet/Cache.db-wal")
+      ]
+
+      other = Path.join(library, "WebKit/com.example.Other/probe.txt")
+
+      for path <- [other | pane], do: File.mkdir_p!(Path.dirname(path))
+      for path <- pane, do: File.write!(path, "pane-session\n")
+      File.write!(other, "other-app\n")
+
+      for mode <- [:strict, :standard, :open], path <- pane do
+        assert %{success: false, error: error} = shell("cat #{path}", config(ctx, mode))
+        assert error =~ "Operation not permitted", "#{mode}: #{path}"
+        refute error =~ "pane-session"
+      end
+
+      assert %{success: false, error: error} = shell("ls #{store}", config(ctx, :open))
+      assert error =~ "Operation not permitted"
+
+      planted = Path.join(store, "Cookies/planted")
+      assert %{success: false} = shell("echo planted > #{planted}", config(ctx, :open))
+      refute File.exists?(planted)
+
+      # Only the pane's folders: another app's website data reads as before.
+      assert %{success: true, output: output} = shell("cat #{other}", config(ctx, :open))
+      assert output =~ "other-app"
     end
 
     test "standard: the owner's SSH key and npm token cannot be read; open can read them",
