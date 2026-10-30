@@ -868,7 +868,9 @@ the backend-neutral half (lazy lifetime, idle reaping, one request at a time,
 the mode's capability refusals); everything that talks to a browser sits behind
 the `Browser.Backend` behaviour, whose CDP implementation (`CDP.Backend`)
 launches Chrome lazily and shuts it down on every exit path. On macOS, Chrome
-launches only through the `disclaim` shim from `fermix_nif`.
+launches only through the `disclaim` shim from `fermix_nif`; on Linux, through
+`/bin/sh`, which raises its own `oom_score_adj` to 1000 and execs Chrome, so out
+of memory the kernel stops a Chrome process before the engine.
 
 Architecture Invariant: the computer-use tool is registered only when `ready?/0`
 holds, as a GUI-control capability that guests never get. Computer history

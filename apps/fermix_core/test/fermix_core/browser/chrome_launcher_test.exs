@@ -207,7 +207,7 @@ defmodule FermixCore.Browser.ChromeLauncherTest do
     end
   end
 
-  describe "spawn_plan/4 (macOS disclaim shim wrapping)" do
+  describe "spawn_plan/4 (the macOS disclaim shim, the Linux memory guard)" do
     @chrome "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     @chrome_args ["--remote-debugging-port=0", "about:blank"]
     @shim "/release/lib/fermix_nif/priv/disclaim"
@@ -224,8 +224,21 @@ defmodule FermixCore.Browser.ChromeLauncherTest do
       assert error.code == "shim_missing"
     end
 
+    # The memory guard: out of memory, the kernel stops the process with the
+    # highest score, which would otherwise be the engine, one large process
+    # holding every channel. A process may raise its own score, so the shell
+    # raises it and then becomes Chrome, whose every process inherits it.
+    test "Linux starts Chrome through a shell that first makes it the kernel's first choice out of memory" do
+      for shim <- [nil, @shim] do
+        assert {:ok, {"/bin/sh", ["-c", script, "sh", @chrome | @chrome_args]}} =
+                 ChromeLauncher.spawn_plan(@chrome, @chrome_args, {:unix, :linux}, shim)
+
+        assert script == ~S(echo 1000 >/proc/self/oom_score_adj && exec "$@")
+      end
+    end
+
     test "every other OS spawns Chrome directly, byte-identical to before" do
-      for os <- [{:unix, :linux}, {:unix, :freebsd}, {:win32, :nt}], shim <- [nil, @shim] do
+      for os <- [{:unix, :freebsd}, {:win32, :nt}], shim <- [nil, @shim] do
         assert {:ok, {@chrome, @chrome_args}} =
                  ChromeLauncher.spawn_plan(@chrome, @chrome_args, os, shim)
       end
@@ -262,6 +275,53 @@ defmodule FermixCore.Browser.ChromeLauncherTest do
         assert error.code == "disclaim_failed"
         assert error.details["exit_status"] == 72
         assert error.details["chrome_output"] =~ "disclaim:"
+      end
+    end
+  end
+
+  if match?({:unix, :linux}, :os.type()) do
+    # Each line of a fake Chrome's output arrives within this bound.
+    @arrival_ms 10_000
+
+    describe "spawn_plan/4 run on Linux" do
+      # The fake prints its pid, its child's score and its arguments, then
+      # waits for its input to close, so its pid can be read while it runs.
+      test "Chrome runs as the spawned pid, with a score of 1000 and its arguments as given",
+           %{home: home} do
+        chrome = Path.join(home, "fake chrome")
+
+        File.write!(chrome, """
+        #!/bin/sh
+        echo "$$"
+        cat /proc/self/oom_score_adj
+        printf '%s\\n' "$@"
+        read -r _closed || true
+        """)
+
+        File.chmod!(chrome, 0o700)
+        args = ["--user-data-dir=#{home}/profile with a space", "about:blank"]
+
+        {:ok, {target, spawn_args}} =
+          ChromeLauncher.spawn_plan(chrome, args, {:unix, :linux}, nil)
+
+        port = Port.open({:spawn_executable, target}, [:binary, {:args, spawn_args}])
+        {:os_pid, os_pid} = Port.info(port, :os_pid)
+
+        assert read_lines(port, 4, "") == [Integer.to_string(os_pid), "1000" | args]
+        Port.close(port)
+      end
+    end
+
+    defp read_lines(port, count, received) do
+      lines = String.split(received, "\n", trim: true)
+      if length(lines) >= count, do: lines, else: read_more(port, count, received)
+    end
+
+    defp read_more(port, count, received) do
+      receive do
+        {^port, {:data, data}} -> read_lines(port, count, received <> data)
+      after
+        @arrival_ms -> flunk("the fake Chrome printed #{inspect(received)} and then nothing")
       end
     end
   end

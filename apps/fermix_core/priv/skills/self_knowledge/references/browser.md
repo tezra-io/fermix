@@ -180,6 +180,15 @@ would reset every app's grant, so it is rarely worth running). A launch that
 cannot disclaim refuses (`shim_missing`, `disclaim_failed`) rather than start
 Chrome undisclaimed; `fermix doctor`'s `browser` row reports the shim.
 
+## Launching Chrome on Linux
+
+Chrome starts through `/bin/sh`, which raises its own `oom_score_adj` to 1000
+(the kernel's highest score) and then becomes Chrome, so every Chrome process
+starts with it. When the machine runs out of memory the kernel stops a Chrome
+process rather than the engine, which runs every channel; a task that finds
+Chrome gone starts it again. A shell that cannot raise the score stops the
+launch, and the launch error carries its sentence.
+
 ## Where a name points
 
 Both profiles judge where a page actually comes from, not only how its host is

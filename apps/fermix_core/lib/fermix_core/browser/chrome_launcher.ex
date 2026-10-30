@@ -386,6 +386,13 @@ defmodule FermixCore.Browser.ChromeLauncher do
     error -> {:error, Error.new("launch_failed", Exception.message(error))}
   end
 
+  # The score every Chrome process starts with on Linux: the highest, so out of
+  # memory the kernel stops Chrome before the engine, which runs every channel
+  # (M75's memory guard). A constant until a measurement on the smallest server
+  # Always On creates sets it.
+  @linux_oom_score_adj 1000
+  @linux_oom_guard "echo #{@linux_oom_score_adj} >/proc/self/oom_score_adj && exec \"$@\""
+
   @doc """
   Compute the spawn target and argv for launching Chrome.
 
@@ -395,7 +402,13 @@ defmodule FermixCore.Browser.ChromeLauncher do
   Management prompt keyed to the versioned install path — a new one every
   release. The shim SETEXECs Chrome in place, so the pid the Port observes IS
   Chrome's. A missing shim refuses loud: an undisclaimed fallback spawn would
-  silently resurrect the prompt churn. Exposed for tests.
+  silently resurrect the prompt churn.
+
+  On Linux Chrome is spawned through `/bin/sh`, which raises its own
+  `oom_score_adj` to the highest score and then execs Chrome in place, so the
+  pid is again Chrome's and every process Chrome starts inherits the score.
+  Any process may raise its own score; one the shell cannot write stops the
+  launch, and its sentence reaches the launch error. Exposed for tests.
   """
   @spec spawn_plan(String.t(), [String.t()], {atom(), atom()}, String.t() | nil) ::
           {:ok, {String.t(), [String.t()]}} | {:error, Error.t()}
@@ -409,6 +422,10 @@ defmodule FermixCore.Browser.ChromeLauncher do
 
   def spawn_plan(executable, args, {:unix, :darwin}, shim) when is_binary(shim) do
     {:ok, {shim, [executable | args]}}
+  end
+
+  def spawn_plan(executable, args, {:unix, :linux}, _shim) do
+    {:ok, {"/bin/sh", ["-c", @linux_oom_guard, "sh", executable | args]}}
   end
 
   def spawn_plan(executable, args, _os_type, _shim), do: {:ok, {executable, args}}

@@ -207,6 +207,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the filter model are one form with one Save, the Screen and the filter
   model together under How watchers judge items. A value it refuses is said
   under its field, and nothing in that Save is written.
+- **On Linux, when memory runs out, the kernel stops the browser Fermix
+  started rather than Fermix.** Out of memory the kernel stops one process,
+  and Fermix, which runs every channel, was the likeliest. Chrome and every
+  process it starts now begin with the kernel's highest score, so the kernel
+  stops one of them instead and Fermix keeps running; a browser task that
+  finds Chrome gone starts it again.
 
 ### Removed
 
