@@ -27,6 +27,9 @@
 {"v":2,"t":"snapshot_stored","seq":21,"snapshot_id":"snap-20261021T0600Z","sha256":"4f2a7d3c9e1b6058a2d4c7e9f1b3a5d7c9e2f4a6b8d0c1e3f5a7b9c2d4e6f8a0"}
 {"v":2,"t":"snapshot_refused","seq":22,"snapshot_id":"snap-20261021T1200Z","reason":"disk_floor"}
 {"v":2,"t":"loopback_failed","seq":23,"loopback_id":"lb-2b90","port":53682,"reason":"port_in_use"}
+{"v":2,"t":"handoff_begin","seq":30,"handoff_id":"ho-5d2e","sites":["news.example.org","mail.example.net"],"expires_at":"2026-10-28T09:00:00Z","count":14}
+{"v":2,"t":"handoff_wipe","seq":33,"handoff_id":"wp-7c41e2a9d0b35f86","sites":["news.example.org"]}
+{"v":2,"t":"handoff_wipe","seq":34,"handoff_id":"wp-0e93b5d17a6c24f8"}
 {"v":2,"t":"pair_start","seq":5}
 {"v":2,"t":"pair_decide","seq":6,"session_id":"9a3f1c2e-7b5d-4e60-8c1a-2d4f6b8e0c3a","approved":true}
 {"v":2,"t":"devices_list","seq":7}

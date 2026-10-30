@@ -40,6 +40,7 @@ defmodule FermixChannels.Mobile.PeerEvents do
   @relay {:object, [{"url", :relay_url}, {"quic_port", :port}]}
   @receipt {:object,
             [{"invocation_id", :id}, {"status", {:enum, @invoke_statuses}}, {"finished_at", :ts}]}
+  @sites {:list, :site, 1, 64}
   @device_row {:object,
                [
                  {"device_id", :id},
@@ -92,6 +93,10 @@ defmodule FermixChannels.Mobile.PeerEvents do
     "snapshot_stored" => {[{"snapshot_id", :id}, {"sha256", :sha256}], :none},
     "snapshot_refused" =>
       {[{"snapshot_id", :id}, {"reason", {:enum, @snapshot_refusals}}], :none},
+    "handoff_begin" =>
+      {[{"handoff_id", :id}, {"sites", @sites}, {"expires_at", :ts}, {"count", :positive}], :none},
+    "handoff_chunk" => {[{"handoff_id", :id}, {"index", :count}, {"last", :boolean}], :required},
+    "handoff_wipe" => {[{"handoff_id", :id}, {"sites", {:optional, @sites}}], :none},
     "pair_start" => {[], :none},
     "pair_decide" => {[{"session_id", :id}, {"approved", :boolean}], :none},
     "devices_list" => {[], :none},
@@ -163,6 +168,9 @@ defmodule FermixChannels.Mobile.PeerEvents do
        :none},
     "snapshot_chunk" => {[{"snapshot_id", :id}, {"index", :count}], :required},
     "snapshot_end" => {[{"snapshot_id", :id}], :none},
+    "handoff_stored" => {[{"handoff_id", :id}, {"cookies", :count}, {"expires_at", :ts}], :none},
+    "handoff_refused" => {[{"handoff_id", :id}, {"sentence", :text}], :none},
+    "handoff_wiped" => {[{"handoff_id", :id}, {"cookies", :count}], :none},
     "pair_window" =>
       {[{"session_id", :id}, {"link", :link}, {"expires_in_s", {:range, 1, 120}}], :none},
     "pair_pending" =>
@@ -185,13 +193,13 @@ defmodule FermixChannels.Mobile.PeerEvents do
   @client_events ~w(
     companion_open companion_line companion_close manage invoke_result invoke_blob
     invoke_receipts loopback_request loopback_failed snapshot_stored snapshot_refused
-    pair_start pair_decide devices_list device_revoke
+    handoff_begin handoff_chunk handoff_wipe pair_start pair_decide devices_list device_revoke
     enroll_request move_offer move_chunk move_end move_commit move_resume
   )
   @server_events ~w(
     companion_line companion_close manage_result invoke invoke_status loopback_open
-    loopback_response loopback_close snapshot_begin snapshot_chunk snapshot_end
-    pair_window pair_pending pair_decided devices enroll_accepted
+    loopback_response loopback_close snapshot_begin snapshot_chunk snapshot_end handoff_stored
+    handoff_refused handoff_wiped pair_window pair_pending pair_decided devices enroll_accepted
     move_accept move_ready move_done
   )
 
@@ -313,6 +321,7 @@ defmodule FermixChannels.Mobile.PeerEvents do
   defp valid?(:sas, value), do: matches?(@sas, value)
   defp valid?(:name, value), do: printable?(value, 128)
   defp valid?(:text, value), do: printable?(value, 512)
+  defp valid?(:site, value), do: printable?(value, 512) and not Regex.match?(@blank, value)
   defp valid?(:target, value), do: target?(value)
   defp valid?(:link, value), do: link?(value)
   defp valid?(:ts, value), do: timestamp?(value)

@@ -152,6 +152,11 @@ config :fermix_core, :device_actions, FermixChannels.Desktop.Invocations
 # (`FermixCore.Home.Snapshot.Scheduler.targets/0`).
 config :fermix_core, :snapshot_targets, [FermixChannels.Desktop.SnapshotTarget]
 
+# A desktop's browser hand-off and wipe, sent to its primary over the rail
+# (M75 D18): injected by module for the same reason as the dispatcher above
+# (`FermixCore.Browser.Handoff.Link`).
+config :fermix_core, :browser_handoff_link, FermixChannels.Desktop.HandoffLink
+
 config :fermix_core, :prompt_bootstrap,
   bootstrap_dir: Path.expand("~/.fermix/bootstrap"),
   accounting_enabled: true

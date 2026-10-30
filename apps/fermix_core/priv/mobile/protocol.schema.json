@@ -31,7 +31,7 @@
           "request_status", "pair_request", "unpair", "ping",
           "companion_open", "companion_line", "companion_close", "manage", "invoke_result",
           "invoke_blob", "invoke_receipts", "loopback_request", "loopback_failed", "snapshot_stored",
-          "snapshot_refused", "pair_start",
+          "snapshot_refused", "handoff_begin", "handoff_chunk", "handoff_wipe", "pair_start",
           "pair_decide", "devices_list", "device_revoke", "enroll_request",
           "move_offer", "move_chunk", "move_end", "move_commit", "move_resume"
         ]}
@@ -65,6 +65,9 @@
         {"if": {"properties": {"t": {"const": "loopback_failed"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/loopback_failed"}},
         {"if": {"properties": {"t": {"const": "snapshot_stored"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_stored"}},
         {"if": {"properties": {"t": {"const": "snapshot_refused"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_refused"}},
+        {"if": {"properties": {"t": {"const": "handoff_begin"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/handoff_begin"}},
+        {"if": {"properties": {"t": {"const": "handoff_chunk"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/handoff_chunk"}},
+        {"if": {"properties": {"t": {"const": "handoff_wipe"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/handoff_wipe"}},
         {"if": {"properties": {"t": {"const": "pair_start"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_start"}},
         {"if": {"properties": {"t": {"const": "pair_decide"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_decide"}},
         {"if": {"properties": {"t": {"const": "devices_list"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/devices_list"}},
@@ -89,7 +92,7 @@
           "pair_denied", "error", "pong", "event_part",
           "companion_line", "companion_close", "manage_result", "invoke", "invoke_status",
           "loopback_open", "loopback_response", "loopback_close", "snapshot_begin",
-          "snapshot_chunk", "snapshot_end",
+          "snapshot_chunk", "snapshot_end", "handoff_stored", "handoff_refused", "handoff_wiped",
           "pair_window", "pair_pending",
           "pair_decided", "devices", "enroll_accepted", "move_accept", "move_ready", "move_done"
         ]}
@@ -132,6 +135,9 @@
         {"if": {"properties": {"t": {"const": "snapshot_begin"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_begin"}},
         {"if": {"properties": {"t": {"const": "snapshot_chunk"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_chunk"}},
         {"if": {"properties": {"t": {"const": "snapshot_end"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_end"}},
+        {"if": {"properties": {"t": {"const": "handoff_stored"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/handoff_stored"}},
+        {"if": {"properties": {"t": {"const": "handoff_refused"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/handoff_refused"}},
+        {"if": {"properties": {"t": {"const": "handoff_wiped"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/handoff_wiped"}},
         {"if": {"properties": {"t": {"const": "pair_window"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_window"}},
         {"if": {"properties": {"t": {"const": "pair_pending"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_pending"}},
         {"if": {"properties": {"t": {"const": "pair_decided"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_decided"}},
@@ -499,6 +505,11 @@
       "description": "Headers in order, each a [name, value] pair: the name an HTTP token of at most 256 bytes, the value at most 4,096 bytes without CR, LF or NUL.",
       "items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "string", "maxLength": 4096}}
     },
+    "handoffSites": {
+      "type": "array", "minItems": 1, "maxItems": 64,
+      "description": "Sites named exactly: a host and its subdomains, or a host and a path (github.com/login); never a wildcard.",
+      "items": {"type": "string", "minLength": 1, "maxLength": 512, "x-max-bytes": 512, "pattern": "^\\S+$"}
+    },
     "invokeReceipt": {
       "type": "object", "required": ["invocation_id", "status", "finished_at"],
       "properties": {"invocation_id": {"$ref": "#/$defs/wireId"}, "status": {"enum": ["ok", "refused", "failed"]}, "finished_at": {"$ref": "#/$defs/timestamp"}}
@@ -610,6 +621,37 @@
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "snapshot_id", "reason"],
       "description": "Desktop to primary: the desktop kept no copy of the snapshot, and why: it would have left the disk under its floor, the free space could not be read, the bytes did not match snapshot_begin, a chunk came out of order, the name was not a snapshot's, or the write failed.",
       "properties": {"t": {"const": "snapshot_refused"}, "snapshot_id": {"$ref": "#/$defs/wireId"}, "reason": {"enum": ["disk_floor", "space_unknown", "mismatch", "out_of_order", "invalid_name", "write_failed"]}}
+    },
+    "handoff_begin": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "handoff_id", "sites", "expires_at", "count"],
+      "description": "Desktop to primary: an attended browser hand-off of count cookies for these sites follows as handoff_chunk.",
+      "properties": {"t": {"const": "handoff_begin"}, "handoff_id": {"$ref": "#/$defs/wireId"}, "sites": {"$ref": "#/$defs/handoffSites"}, "expires_at": {"$ref": "#/$defs/timestamp"}, "count": {"type": "integer", "minimum": 1}}
+    },
+    "handoff_chunk": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true, "x-chunked": true, "x-chunk-key": "handoff_id", "x-max-payload-bytes": 4194304,
+      "required": ["v", "t", "seq", "handoff_id", "index", "last"],
+      "description": "Desktop to primary: the hand-off's cookies JSON as the chunked payload.",
+      "properties": {"t": {"const": "handoff_chunk"}, "handoff_id": {"$ref": "#/$defs/wireId"}, "index": {"$ref": "#/$defs/chunkIndex"}, "last": {"type": "boolean"}}
+    },
+    "handoff_stored": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "handoff_id", "cookies", "expires_at"],
+      "description": "Primary to desktop: how many of the hand-off's cookies the primary stored, and when they expire.",
+      "properties": {"t": {"const": "handoff_stored"}, "handoff_id": {"$ref": "#/$defs/wireId"}, "cookies": {"type": "integer", "minimum": 0}, "expires_at": {"$ref": "#/$defs/timestamp"}}
+    },
+    "handoff_refused": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "handoff_id", "sentence"],
+      "description": "Primary to desktop: the primary stored none of the hand-off's cookies, or did not finish the wipe named by handoff_id; sentence says why, in the words the owner reads.",
+      "properties": {"t": {"const": "handoff_refused"}, "handoff_id": {"$ref": "#/$defs/wireId"}, "sentence": {"type": "string", "minLength": 1, "maxLength": 512, "x-max-bytes": 512}}
+    },
+    "handoff_wipe": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "handoff_id"],
+      "description": "Desktop to primary: delete the hand-offs of these sites, or every hand-off when sites is absent. handoff_id names this wipe; the primary answers handoff_wiped or handoff_refused with it.",
+      "properties": {"t": {"const": "handoff_wipe"}, "handoff_id": {"$ref": "#/$defs/wireId"}, "sites": {"$ref": "#/$defs/handoffSites"}}
+    },
+    "handoff_wiped": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "handoff_id", "cookies"],
+      "description": "Primary to desktop: the wipe named by handoff_id is done, and how many cookies it deleted.",
+      "properties": {"t": {"const": "handoff_wiped"}, "handoff_id": {"$ref": "#/$defs/wireId"}, "cookies": {"type": "integer", "minimum": 0}}
     },
     "pair_start": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq"],

@@ -184,6 +184,10 @@
     "mobile.devices.revoke": 2,
     "mobile.devices.set_executor": 2,
     "browser.install.start": 2,
+    "browser.signin.open": 2,
+    "browser.handoff.send": 2,
+    "browser.handoffs.list": 2,
+    "browser.handoffs.wipe": 2,
     "imessage.permissions.get": 2,
     "imessage.grant.start": 2,
     "imessage.policy.confirm": 2,
@@ -295,6 +299,10 @@
             "mobile.devices.revoke",
             "mobile.devices.set_executor",
             "browser.install.start",
+            "browser.signin.open",
+            "browser.handoff.send",
+            "browser.handoffs.list",
+            "browser.handoffs.wipe",
             "imessage.permissions.get",
             "imessage.grant.start",
             "imessage.policy.confirm",
@@ -678,6 +686,34 @@
             "properties": { "method": { "const": "browser.install.start" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/browser_install_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "browser.signin.open" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/browser_signin_open_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "browser.handoff.send" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/browser_handoff_send_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "browser.handoffs.list" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/browser_handoffs_list_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "browser.handoffs.wipe" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/browser_handoffs_wipe_params" } } }
         },
         {
           "if": {
@@ -1137,6 +1173,10 @@
         { "$ref": "#/$defs/mobile_devices_revoke_result" },
         { "$ref": "#/$defs/mobile_devices_set_executor_result" },
         { "$ref": "#/$defs/browser_install_start_result" },
+        { "$ref": "#/$defs/browser_signin_open_result" },
+        { "$ref": "#/$defs/browser_handoff_send_result" },
+        { "$ref": "#/$defs/browser_handoffs_list_result" },
+        { "$ref": "#/$defs/browser_handoffs_wipe_result" },
         { "$ref": "#/$defs/imessage_permissions_get_result" },
         { "$ref": "#/$defs/imessage_grant_start_result" },
         { "$ref": "#/$defs/imessage_policy_confirm_result" },
@@ -2742,6 +2782,107 @@
       "additionalProperties": false
     },
     "browser_install_start_result": { "$ref": "#/$defs/jobView" },
+    "browser_signin_open_params": {
+      "type": "object",
+      "required": ["url"],
+      "additionalProperties": false,
+      "properties": {
+        "url": { "type": "string", "minLength": 1, "maxLength": 2048, "description": "The http or https address to sign in on." }
+      }
+    },
+    "browser_signin_open_result": {
+      "description": "Chrome is open on the engine-owned owner profile at the address, for the owner to sign in.",
+      "type": "object",
+      "required": ["sentence"],
+      "additionalProperties": false,
+      "properties": { "sentence": { "type": "string" } }
+    },
+    "browser_handoff_send_params": {
+      "type": "object",
+      "required": ["sites"],
+      "additionalProperties": false,
+      "properties": {
+        "sites": { "$ref": "#/$defs/browserHandoffSites" },
+        "expires_s": { "type": "integer", "minimum": 1, "maximum": 2592000, "description": "How long the hand-off lasts; 604800 (7 days) when absent." },
+        "allow_identity_provider": { "type": "boolean", "description": "Moves the identity providers named in sites, which are refused without it." }
+      }
+    },
+    "browser_handoff_send_result": {
+      "type": "object",
+      "required": ["handoff_id", "sites", "cookies_sent", "cookies_stored", "expires_at", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "handoff_id": { "type": "string", "minLength": 1 },
+        "sites": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["site", "cookies"],
+            "additionalProperties": false,
+            "properties": {
+              "site": { "type": "string" },
+              "cookies": { "type": "integer", "minimum": 0 }
+            }
+          }
+        },
+        "cookies_sent": { "type": "integer", "minimum": 1 },
+        "cookies_stored": { "type": "integer", "minimum": 0 },
+        "expires_at": { "type": "string" },
+        "sentence": { "type": "string" }
+      }
+    },
+    "browser_handoffs_list_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false
+    },
+    "browser_handoffs_list_result": {
+      "type": "object",
+      "required": ["handoffs", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "handoffs": { "type": "array", "items": { "$ref": "#/$defs/browserHandoff" } },
+        "sentence": { "type": "string" }
+      }
+    },
+    "browser_handoffs_wipe_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false,
+      "properties": { "sites": { "$ref": "#/$defs/browserHandoffSites" } }
+    },
+    "browser_handoffs_wipe_result": {
+      "description": "How many cookies the primary deleted: here on the primary, or, on a desktop, the count the primary answered its handoff_wipe with. sites is null for every hand-off.",
+      "type": "object",
+      "required": ["sites", "cookies", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "sites": { "type": ["array", "null"], "items": { "type": "string" } },
+        "cookies": { "type": "integer", "minimum": 0 },
+        "sentence": { "type": "string" }
+      }
+    },
+    "browserHandoffSites": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": { "type": "string", "minLength": 1, "maxLength": 253 }
+    },
+    "browserHandoff": {
+      "description": "One hand-off the primary stores: never a cookie's name or value, only how many.",
+      "type": "object",
+      "required": ["handoff_id", "from", "sites", "cookies", "stored_at", "expires_at", "expired"],
+      "additionalProperties": false,
+      "properties": {
+        "handoff_id": { "type": "string" },
+        "from": { "type": "string" },
+        "sites": { "type": "array", "items": { "type": "string" } },
+        "cookies": { "type": "integer", "minimum": 0 },
+        "stored_at": { "type": "string" },
+        "expires_at": { "type": "string" },
+        "expired": { "type": "boolean" }
+      }
+    },
     "computer_use_grant_start_params": {
       "type": "object",
       "required": [],

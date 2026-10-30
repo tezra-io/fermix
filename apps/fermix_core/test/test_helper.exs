@@ -23,8 +23,12 @@
 # `s3_end_to_end` runs the snapshot S3 target against MinIO in Docker
 # (`Home.Snapshot.S3EndToEndTest`): opt in with `--only s3_end_to_end` on a
 # machine that has Docker and the pinned MinIO image.
+#
+# `chrome` runs the browser hand-off's DevTools round trip against a real
+# headless Chrome (`Browser.Handoff.ChromeTest`): opt in with `--only chrome`
+# on a machine with Chrome installed.
 ExUnit.start(
   capture_log: true,
   assert_receive_timeout: 2_000,
-  exclude: [:mapkit_live, :s3_end_to_end]
+  exclude: [:mapkit_live, :s3_end_to_end, :chrome]
 )

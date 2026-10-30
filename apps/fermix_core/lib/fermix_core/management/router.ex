@@ -11,6 +11,7 @@ defmodule FermixCore.Management.Router do
   alias FermixCore.Home.Role
   alias FermixCore.Introspection.Overview
   alias FermixCore.Management.Auth
+  alias FermixCore.Management.Browser
   alias FermixCore.Management.Capabilities
   alias FermixCore.Management.ComputerUse
   alias FermixCore.Management.Cues
@@ -91,6 +92,9 @@ defmodule FermixCore.Management.Router do
   @candidate_methods ~w(hello home.status)
   @candidate_sentence "This engine is a candidate primary waiting for its move; it answers " <>
                         "home.status and nothing else until the move makes it the primary."
+  @browser_signin_params ~w(url)
+  @browser_handoff_params ~w(sites expires_s allow_identity_provider)
+  @browser_wipe_params ~w(sites)
   @cue_ref_params ~w(ref)
   @cue_form_params ~w(kind preset verify)
   @cue_add_params ~w(ref kind preset values)
@@ -244,6 +248,10 @@ defmodule FermixCore.Management.Router do
     do: mobile_executor(params, opts)
 
   defp route_known("browser.install.start", %{}, opts), do: browser_install(opts)
+  defp route_known("browser.signin.open", params, opts), do: browser_signin(params, opts)
+  defp route_known("browser.handoff.send", params, opts), do: browser_handoff(params, opts)
+  defp route_known("browser.handoffs.list", params, opts), do: browser_handoffs(params, opts)
+  defp route_known("browser.handoffs.wipe", params, opts), do: browser_wipe(params, opts)
 
   defp route_known("imessage.permissions.get", %{}, opts),
     do: operation_result(IMessage.permissions(operation_opts(opts)))
@@ -607,6 +615,50 @@ defmodule FermixCore.Management.Router do
   defp browser_install(opts),
     do: operation_result(Capabilities.browser_install_start(operation_opts(opts)))
 
+  # The browser session hand-off (M75 D18): the owner's, at a terminal.
+  defp browser_signin(params, opts) do
+    with :ok <- reject_unknown_params(params, @browser_signin_params) do
+      operation_result(Browser.signin_open(Map.get(params, "url"), browser_opts(opts)))
+    end
+  end
+
+  defp browser_handoff(params, opts) do
+    with :ok <- reject_unknown_params(params, @browser_handoff_params),
+         :ok <- optional_boolean(params, "allow_identity_provider") do
+      operation_result(Browser.handoff_send(params, browser_opts(opts)))
+    end
+  end
+
+  defp browser_handoffs(params, opts) do
+    with :ok <- reject_unknown_params(params, []) do
+      operation_result(Browser.handoffs_list(browser_opts(opts)))
+    end
+  end
+
+  defp browser_wipe(params, opts) do
+    with :ok <- reject_unknown_params(params, @browser_wipe_params) do
+      operation_result(Browser.handoffs_wipe(params, browser_opts(opts)))
+    end
+  end
+
+  defp optional_boolean(params, field) do
+    case Map.get(params, field) do
+      nil -> :ok
+      value when is_boolean(value) -> :ok
+      _invalid -> invalid_params(field)
+    end
+  end
+
+  # The router's own `:engine_role` (tests) reaches the family as its seam.
+  defp browser_opts(opts) do
+    browser = opts |> operation_opts() |> Keyword.get(:browser, [])
+
+    case Keyword.fetch(opts, :engine_role) do
+      {:ok, role} -> Keyword.put_new(browser, :engine_role, role)
+      :error -> browser
+    end
+  end
+
   defp computer_use_grant(opts),
     do: operation_result(ComputerUse.grant_start(operation_opts(opts)))
 
@@ -946,6 +998,11 @@ defmodule FermixCore.Management.Router do
 
   defp operation_result({:error, {:unknown_pairing_session, session_id}}),
     do: {:error, :unknown_pairing_session, %{"session_id" => session_id}}
+
+  # A desktop's own request that needed its primary (a browser hand-off) while
+  # the rail is down: the sentence names the primary.
+  defp operation_result({:error, {:primary_unreachable, sentence}}),
+    do: {:error, :primary_unreachable, %{"sentence" => sentence}}
 
   defp fetch_section(params, allowed) do
     with :ok <- reject_unknown_params(params, allowed) do

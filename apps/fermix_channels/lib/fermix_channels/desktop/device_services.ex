@@ -1,16 +1,18 @@
 defmodule FermixChannels.Desktop.DeviceServices do
   @moduledoc """
   What a linked desktop serves for its primary beside the relay (M75 D17,
-  D19), in the device role: the sign-in loopback forward
-  (`Desktop.Loopback`) and the snapshot copies (`Desktop.SnapshotStore`).
-  The relay hands each the primary's events (`Desktop.Relay`'s `@inbound`),
-  so they start before it (`Desktop.DeviceSupervisor`).
+  D18, D19), in the device role: the sign-in loopback forward
+  (`Desktop.Loopback`), the snapshot copies (`Desktop.SnapshotStore`) and
+  the hand-off's answers (`Desktop.HandoffLink`). The relay hands each the
+  primary's events (`Desktop.Relay`'s `@inbound`), so they start before it
+  (`Desktop.DeviceSupervisor`).
 
   `:one_for_one`: each keeps its own state and none depends on another.
   """
 
   use Supervisor
 
+  alias FermixChannels.Desktop.HandoffLink
   alias FermixChannels.Desktop.Loopback
   alias FermixChannels.Desktop.SnapshotStore
 
@@ -23,7 +25,7 @@ defmodule FermixChannels.Desktop.DeviceServices do
     home = Keyword.fetch!(opts, :home)
 
     Supervisor.init(
-      [Loopback, {SnapshotStore, home: home}],
+      [Loopback, {SnapshotStore, home: home}, HandoffLink],
       strategy: :one_for_one
     )
   end

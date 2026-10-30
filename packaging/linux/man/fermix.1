@@ -79,7 +79,15 @@ remembered client identity.
 .TP
 .B fermix browser
 Install, remove, or inspect the native-messaging bridge the Fermix browser
-extension uses to hand one of your own tabs to Fermix.
+extension uses to hand one of your own tabs to Fermix
+(\fBbridge install\fR|\fBuninstall\fR|\fBstatus\fR). On a desktop whose home
+moved to a server, \fBsignin\fR \fIURL\fR opens Chrome on the Fermix profile to
+sign in, and \fBhandoff\fR \fISITE\fR... [\fB\-\-expires\fR \fIDURATION\fR]
+[\fB\-\-allow\-identity\-provider\fR] sends that profile's sessions for exactly
+those sites to the server, for 7 days unless \fB\-\-expires\fR says (\fB12h\fR,
+\fB30d\fR; at most 30 days). \fBhandoffs\fR lists what the server stores and
+\fBhandoffs wipe\fR [\fISITE\fR...] deletes it. Identity providers move only
+with \fB\-\-allow\-identity\-provider\fR.
 .TP
 .B fermix browser-bridge
 Pump one browser extension connection to the daemon. The browser starts this

@@ -57,6 +57,10 @@ never parses the sentence.
 | `fermix home enroll-code --json` | the management `home.enroll.open` result |
 | `fermix home candidates --json` | the candidates result |
 | `fermix home move --to ID [--recovery-passphrase-file PATH] [--retire] --json` | the move result |
+| `fermix browser signin URL --json` | the management `browser.signin.open` result |
+| `fermix browser handoff SITE... --json [--expires DURATION] [--allow-identity-provider]` | the management `browser.handoff.send` result |
+| `fermix browser handoffs --json` | the management `browser.handoffs.list` result |
+| `fermix browser handoffs wipe [SITE...] --json` | the management `browser.handoffs.wipe` result |
 | `fermix device grants --json` | the management `device.grants.list` result |
 | `fermix device grants remove PATH --json` | the management `device.grants.remove` result |
 
@@ -325,6 +329,18 @@ its move is refused, and so is any home while Fermix runs in it.
 
 Goldens: `home_candidates/ok.json`, `home_move/ok.json`, `home_move/retired.json`.
 
+## The browser hand-off results
+
+`fermix browser signin`, `handoff`, `handoffs` and `handoffs wipe` print the
+management result of `browser.signin.open`, `browser.handoff.send`,
+`browser.handoffs.list` and `browser.handoffs.wipe` unchanged
+(`priv/management/PROTOCOL.md`). Each needs Fermix running and refuses with
+`engine_stopped` otherwise; a refusal the engine answered is
+`browser_refused`, carrying the engine's sentence. `--expires` is a whole
+number of days, hours or minutes (`7d`, `12h`, `90m`); anything else is a
+usage error. No `browser.*` hand-off verb is reachable by the agent: the
+engine refuses them from a process it started.
+
 ## The read grant results
 
 On a desktop whose home moved to a server, `fermix device grants` and
@@ -370,6 +386,7 @@ sentence interpolates a fact, the example below is the golden's.
 - `home_status_unavailable` — Fermix could not read this home's status. It said: The requested management method is not available. (method_not_found)
 - `enrollment_refused` — Fermix did not open an enrollment code. It said: Only the primary enrolls candidates and starts a move.
 - `move_refused` — Fermix did not start the move. It said: No server waiting for the move has the id cand-0f1e2d3c4b5a6978. A server waits 24 hours after it enrolls; after that, get a new code and enroll it again.
+- `browser_refused` — Fermix did not do that in the browser. It said: The Fermix browser profile holds no cookies for these sites.
 - `grants_refused` — Fermix did not do that on this computer. It said: This computer has no read grant for that folder.
 
 A sentence ending in `It said:` carries the words of whatever refused —

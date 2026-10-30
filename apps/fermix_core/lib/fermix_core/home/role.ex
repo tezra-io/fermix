@@ -109,6 +109,8 @@ defmodule FermixCore.Home.Role do
     {FermixCore.Home.Snapshot.Scheduler,
      "writes the primary's snapshots; a device's home is a retired copy, and the move " <>
        "captures its own"},
+    {FermixCore.Browser.Handoff.Sweeper,
+     "deletes expired browser hand-offs, which only the primary stores"},
     {FermixChannels.Home.Enrollment,
      "holds the enrollment window a candidate primary enrolls through; only the primary " <>
        "can be moved"}

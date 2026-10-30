@@ -1237,6 +1237,74 @@ defmodule Fermix.CLI.DaemonTest do
     end
   end
 
+  # M75 D18: a signed-in browser session moves only when the owner says so. A
+  # command the agent ran on this desktop (an approved `device_action`
+  # included) is a process the daemon started, so it can neither sign in, hand
+  # off nor wipe. The refusal names the browser family's capability and
+  # sentence, the published golden.
+  describe "owner decisions on the browser" do
+    @browser_decisions ~w(browser.signin.open browser.handoff.send browser.handoffs.wipe)
+
+    test "a process the daemon started is refused, and so is one it cannot place" do
+      golden = browser_owner_golden()
+
+      for peer <- [[daemon_os_pid: ParentProcess.os_pid()], [os: {:win32, :nt}]] do
+        socket_path = start_peer_daemon(peer)
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            for method <- @browser_decisions do
+              assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                       Client.request_v1(method, %{}, socket_path: socket_path, timeout: 5_000),
+                     method
+            end
+          end)
+
+        assert log =~ "only the owner may"
+      end
+    end
+
+    test "a process the daemon did not start is not refused as an owner decision", %{
+      socket_path: socket_path
+    } do
+      golden = browser_owner_golden()
+
+      for method <- @browser_decisions do
+        result = Client.request_v1(method, %{}, socket_path: socket_path, timeout: 5_000)
+        refute match?({:error, {:management_error, "unavailable", _message, ^golden}}, result)
+      end
+    end
+
+    test "listing hand-offs stays open to every caller" do
+      socket_path = start_peer_daemon(daemon_os_pid: ParentProcess.os_pid())
+      golden = browser_owner_golden()
+
+      result =
+        Client.request_v1("browser.handoffs.list", %{}, socket_path: socket_path, timeout: 5_000)
+
+      refute match?({:error, {:management_error, "unavailable", _message, ^golden}}, result)
+    end
+
+    defp browser_owner_golden do
+      golden =
+        :fermix_core
+        |> Application.app_dir("priv/management/fixtures/errors.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["name"] == "unavailable_browser_owner_decision"))
+        |> get_in(["response", "error", "details"])
+
+      assert golden == %{
+               "capability" => "browser",
+               "sentence" =>
+                 "Only the owner can sign in or hand off a browser session: do it yourself, " <>
+                   "not through a task Fermix runs."
+             }
+
+      golden
+    end
+  end
+
   # M75 §11 (re-check R1): what the server may read on this desktop is the
   # owner's to change, so a command the agent ran here cannot remove a grant
   # either; listing them stays open.

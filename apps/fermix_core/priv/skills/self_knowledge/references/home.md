@@ -380,8 +380,9 @@ it, never a second writer.
   itself): after the move the server holds them. What configures this
   computer is answered here: Fermix's own status and lifecycle, its logs,
   diagnostics and Doctor, the setup page, computer use, iMessage, the browser
-  and capability installers, and the settings sections engine, sandbox,
-  computer use, computer history and iMessage.
+  and capability installers, the browser sign-in and hand-off, and the
+  settings sections engine, sandbox, computer use, computer history and
+  iMessage.
 - Two answers are put together here: the home's status is this computer's
   own (its role, its link to the primary, where the move went) with the
   primary's own picture added (its recovery, its enrollment and candidates,
@@ -578,5 +579,7 @@ it, never a second writer.
 ## Browser profiles and the move
 
 - Browser profiles belong to the device: a sign-in on one Fermix does not sign
-  another in, and export leaves them behind, so after an Always On move the
-  server's browser is signed in to no site.
+  another in, and export leaves them behind. After an Always On move the
+  owner hands the server the sessions of chosen sites from the desktop with
+  `fermix browser signin` and `fermix browser handoff`: skill_view(name:
+  "self-knowledge", file: "browser").

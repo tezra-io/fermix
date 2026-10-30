@@ -369,6 +369,9 @@ defmodule FermixCore.Application do
         # either restarts nothing but the cue tree. Its timers stay dark under
         # `mix test`; tests start their own with an injected clock and timer.
         {SnapshotScheduler, timer_enabled: @compiled_env != :test},
+        # Deletes expired browser hand-offs (M75 D18) from the owner profile;
+        # dark under `mix test`, where tests start their own.
+        {FermixCore.Browser.Handoff.Sweeper, timer_enabled: @compiled_env != :test},
         # Cue tree (M60 §5.3) LAST, and that order is load-bearing, as it is
         # for the temporal rail above: under `:rest_for_one` a crash of
         # `JobScheduler` or anything before it restarts the cue subsystem,

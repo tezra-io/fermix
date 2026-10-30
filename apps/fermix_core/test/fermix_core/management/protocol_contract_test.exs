@@ -11,6 +11,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
   use ExUnit.Case, async: true
 
   alias Fermix.CLI.Daemon.Client
+  alias FermixCore.Browser.Handoff
+  alias FermixCore.Browser.Handoff.Cookies, as: HandoffCookies
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Cues.Config, as: CuesConfig
@@ -1250,6 +1252,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       mcp_cases() ++
       cues_cases() ++
       home_cases() ++
+      browser_cases() ++
       device_cases()
   end
 
@@ -1265,6 +1268,83 @@ defmodule FermixCore.Management.ProtocolContractTest do
     [
       {"device.grants.list", %{}, opts},
       {"device.grants.remove", %{"path" => "/Users/ana/Downloads"}, opts}
+    ]
+  end
+
+  # Stands in for the rail a desktop's hand-off goes over: the primary stored
+  # every cookie, until the hand-off's expiry.
+  defmodule BrowserLinkStub do
+    @moduledoc false
+    @behaviour FermixCore.Browser.Handoff.Link
+
+    @impl true
+    def send_handoff(handoff),
+      do: {:ok, %{cookies: handoff.count, expires_at: handoff.expires_at}}
+
+    @impl true
+    def send_wipe(_sites), do: :ok
+  end
+
+  # The browser hand-off family (M75 D18) against a stand-in Chrome profile
+  # (its cookies, answered through the DevTools seam), the rail stand-in
+  # above, and a home holding the one hand-off the goldens show.
+  defp browser_cases do
+    home = SafeRm.make_tmp_dir!("contract_browser")
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+
+    cookies =
+      for name <- ~w(sid pref theme) do
+        %{
+          "name" => name,
+          "value" => "invented",
+          "domain" => ".news.example.org",
+          "path" => "/",
+          "expires" => -1,
+          "httpOnly" => true,
+          "secure" => true
+        }
+      end
+
+    devtools = fn _mode, fun, _opts ->
+      fun.(fn
+        "Storage.getCookies", %{} -> {:ok, %{"cookies" => cookies}}
+        "Storage.setCookies", %{} -> {:ok, %{}}
+      end)
+    end
+
+    now = fn -> ~U[2026-10-27 09:00:00Z] end
+
+    {:ok, _stored} =
+      Handoff.store(
+        %{
+          handoff_id: "ho-Qm8vX2b1kTz4",
+          from: "Studio Mac",
+          sites: ["news.example.org"],
+          expires_at: ~U[2026-11-03 09:00:00Z],
+          cookies: HandoffCookies.select(cookies, ["news.example.org"])
+        },
+        home: home,
+        now: now,
+        devtools: devtools
+      )
+
+    browser = [
+      home: home,
+      now: now,
+      devtools: devtools,
+      link: BrowserLinkStub,
+      open_headed: fn _url, _opts -> :ok end
+    ]
+
+    device = [engine_role: %{role: :device, primary: "vm-1"}, operation_opts: [browser: browser]]
+    primary = [engine_role: %{role: :primary, primary: nil}, operation_opts: [browser: browser]]
+
+    [
+      {"browser.signin.open", %{"url" => "https://news.example.org/login"}, device},
+      {"browser.handoff.send", %{"sites" => ["news.example.org"], "expires_s" => 604_800},
+       device},
+      {"browser.handoffs.list", %{}, primary},
+      {"browser.handoffs.wipe", %{"sites" => ["news.example.org"]}, primary}
     ]
   end
 

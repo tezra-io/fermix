@@ -2684,6 +2684,102 @@
     },
     {
       "method": "(schema)",
+      "field": "methods:browser.handoff.send",
+      "kind": "engine_only",
+      "why": "M75 D18 adds the browser hand-off after the draft was written: browser.signin.open, browser.handoff.send, browser.handoffs.list and browser.handoffs.wipe, the owner's own sign-in and hand-off of signed-in sites from a desktop to its primary. Minimum version 2 and additive: a client built against the draft never calls them."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:browser.handoffs.list",
+      "kind": "engine_only",
+      "why": "M75 D18 adds the browser hand-off after the draft was written: browser.signin.open, browser.handoff.send, browser.handoffs.list and browser.handoffs.wipe, the owner's own sign-in and hand-off of signed-in sites from a desktop to its primary. Minimum version 2 and additive: a client built against the draft never calls them."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:browser.handoffs.wipe",
+      "kind": "engine_only",
+      "why": "M75 D18 adds the browser hand-off after the draft was written: browser.signin.open, browser.handoff.send, browser.handoffs.list and browser.handoffs.wipe, the owner's own sign-in and hand-off of signed-in sites from a desktop to its primary. Minimum version 2 and additive: a client built against the draft never calls them."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:browser.signin.open",
+      "kind": "engine_only",
+      "why": "M75 D18 adds the browser hand-off after the draft was written: browser.signin.open, browser.handoff.send, browser.handoffs.list and browser.handoffs.wipe, the owner's own sign-in and hand-off of signed-in sites from a desktop to its primary. Minimum version 2 and additive: a client built against the draft never calls them."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:browser.handoff.send=2",
+      "kind": "engine_only",
+      "why": "M75 D18: every browser hand-off method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:browser.handoffs.list=2",
+      "kind": "engine_only",
+      "why": "M75 D18: every browser hand-off method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:browser.handoffs.wipe=2",
+      "kind": "engine_only",
+      "why": "M75 D18: every browser hand-off method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:browser.signin.open=2",
+      "kind": "engine_only",
+      "why": "M75 D18: every browser hand-off method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "browser.handoff.send",
+      "field": "params:expires_s",
+      "kind": "engine_only",
+      "why": "M75 D18: how long a hand-off lasts, 7 days when absent and at most 30. The draft predates the method."
+    },
+    {
+      "method": "browser.handoff.send",
+      "field": "params:sites",
+      "kind": "engine_only",
+      "why": "M75 D18: the sites a hand-off moves, each a host and its subdomains, 1 to 64. The draft predates the method."
+    },
+    {
+      "method": "browser.handoffs.wipe",
+      "field": "params:sites",
+      "kind": "engine_only",
+      "why": "M75 D18: the sites whose hand-offs a wipe deletes, every one when absent. The draft predates the method."
+    },
+    {
+      "method": "browser.signin.open",
+      "field": "params:url",
+      "kind": "engine_only",
+      "why": "M75 D18: the http or https address the owner signs in on before a hand-off. The draft predates the method."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.browser.handoff.send",
+      "kind": "engine_only",
+      "why": "M75 D18: hello publishes every method this daemon serves with its minimum version, the browser hand-off included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.browser.handoffs.list",
+      "kind": "engine_only",
+      "why": "M75 D18: hello publishes every method this daemon serves with its minimum version, the browser hand-off included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.browser.handoffs.wipe",
+      "kind": "engine_only",
+      "why": "M75 D18: hello publishes every method this daemon serves with its minimum version, the browser hand-off included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.browser.signin.open",
+      "kind": "engine_only",
+      "why": "M75 D18: hello publishes every method this daemon serves with its minimum version, the browser hand-off included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "(schema)",
       "field": "methods:mobile.devices.set_executor",
       "kind": "engine_only",
       "why": "M75 adds the switch that lets a desktop peer run actions for the primary after the draft was written, so the draft publishes no mobile.devices.set_executor. It is minimum version 2, additive, and an owner decision on the daemon socket; a client built against the draft never calls it."

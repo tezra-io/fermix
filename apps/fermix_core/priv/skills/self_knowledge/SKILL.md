@@ -146,7 +146,7 @@ Deeper detail loads on demand with `skill_view(name: "self-knowledge", file: "<n
 - `agent_loop` — the context budget inside a turn, iteration and fan-out caps, `/ultra`, and deferred tool schemas.
 - `images` — `view_image`, how inbound attachments (pictures, GIFs, videos, PDFs, text files) and images reach each model, `generate_image` backends and `delivery`, and `send_attachment`, including from a scheduled job.
 - `web` — choosing between `web_search`, `web_fetch`, `browser` and `place_search`, search backends and the degrade, and the place-search rules.
-- `browser` — the managed browser and its limits, launching Chrome on macOS, the person's own tab (`selected_tab`), and installing the extension and bridge.
+- `browser` — the managed browser and its limits, launching Chrome on macOS, the person's own tab (`selected_tab`), installing the extension and bridge, and handing a signed-in session to the server after an Always On move.
 - `skills` — skill loading and trust, and skill curation with every `/skills` subcommand.
 - `coding_harness` — consent and turning it on, posture and watched vendor config, runs and durable delivery, and the cloud rail.
 - `plugins` — what the agent sees, credential failures, the rails and auth kinds, access-sensitive commands, hosted MCP, and the operator CLI.

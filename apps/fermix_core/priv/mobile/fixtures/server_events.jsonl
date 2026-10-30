@@ -51,6 +51,9 @@
 {"v":2,"t":"loopback_close","seq":19,"loopback_id":"lb-2b90"}
 {"v":2,"t":"snapshot_begin","seq":22,"snapshot_id":"snap-20261021T0600Z","name":"20261021T060000Z-e3.fxsnap","size_bytes":4194304,"sha256":"4f2a7d3c9e1b6058a2d4c7e9f1b3a5d7c9e2f4a6b8d0c1e3f5a7b9c2d4e6f8a0"}
 {"v":2,"t":"snapshot_end","seq":95,"snapshot_id":"snap-20261021T0600Z"}
+{"v":2,"t":"handoff_stored","seq":31,"handoff_id":"ho-5d2e","cookies":14,"expires_at":"2026-10-28T09:00:00Z"}
+{"v":2,"t":"handoff_refused","seq":32,"handoff_id":"ho-5d3a","sentence":"The hand-off's expiry is not within the next 30 days, so the server stored nothing."}
+{"v":2,"t":"handoff_wiped","seq":33,"handoff_id":"wp-7c41e2a9d0b35f86","cookies":14}
 {"v":2,"t":"pair_window","seq":6,"session_id":"9a3f1c2e-7b5d-4e60-8c1a-2d4f6b8e0c3a","link":"fermix://pair?v=2&candidates=%5B%22192.168.4.21%22%5D&port=4031&tls_fp=6b0e9a3c4d2f8e1a7c5b3d9f0e2a4c6b8d1f3e5a7c9b2d4f6e8a0c3e5b7d9f1a&gateway_pk=Qm9ndXNHYXRld2F5S2V5Rm9yRml4dHVyZXNPbmx5MDA%3D&secret=Rml4dHVyZVNlY3JldE5vdEZvclVzZUFueXdoZXJlMDE%3D&name=studio&profile=general","expires_in_s":120}
 {"v":2,"t":"pair_pending","seq":7,"session_id":"9a3f1c2e-7b5d-4e60-8c1a-2d4f6b8e0c3a","device_name":"Garden Pixel","model":"Google Pixel 9","platform":"android","sas":"604918","expires_in_s":97}
 {"v":2,"t":"pair_decided","seq":8,"session_id":"9a3f1c2e-7b5d-4e60-8c1a-2d4f6b8e0c3a","outcome":"approved"}

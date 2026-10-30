@@ -166,7 +166,10 @@ defmodule FermixChannels.Desktop.Relay do
     "loopback_close" => FermixChannels.Desktop.Loopback,
     "snapshot_begin" => FermixChannels.Desktop.SnapshotStore,
     "snapshot_chunk" => FermixChannels.Desktop.SnapshotStore,
-    "snapshot_end" => FermixChannels.Desktop.SnapshotStore
+    "snapshot_end" => FermixChannels.Desktop.SnapshotStore,
+    "handoff_stored" => FermixChannels.Desktop.HandoffLink,
+    "handoff_refused" => FermixChannels.Desktop.HandoffLink,
+    "handoff_wiped" => FermixChannels.Desktop.HandoffLink
   }
 
   @typedoc "The link's state in one word (the moduledoc says what each means)."

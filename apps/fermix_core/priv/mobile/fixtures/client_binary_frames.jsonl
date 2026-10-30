@@ -7,4 +7,5 @@
 {"header":{"v":2,"t":"invoke_blob","seq":13,"invocation_id":"inv-31c9","index":0,"last":true},"bytes_b64":"cXVhcnRlcmx5IHRvdGFsczogMSwyODQK"}
 {"header":{"v":2,"t":"loopback_request","seq":17,"loopback_id":"lb-2b90","request_id":"rq-0e5c","method":"GET","target":"/callback?code=Zq81&state=pine","headers":[["host","127.0.0.1:53682"],["accept","text/html"]]},"bytes_b64":""}
 {"header":{"v":2,"t":"loopback_request","seq":18,"loopback_id":"lb-2b90","request_id":"rq-0e5d","method":"POST","target":"/token","headers":[["content-type","application/x-www-form-urlencoded"]]},"bytes_b64":"Z3JhbnRfdHlwZT1hdXRob3JpemF0aW9uX2NvZGUmY29kZT1acTgx"}
+{"header":{"v":2,"t":"handoff_chunk","seq":31,"handoff_id":"ho-5d2e","index":0,"last":true},"bytes_b64":"W3sibmFtZSI6InNpZCIsInZhbHVlIjoieDciLCJkb21haW4iOiIubmV3cy5leGFtcGxlLm9yZyIsInBhdGgiOiIvIiwiZXhwaXJlcyI6MTc5MzE3ODAwMH1d"}
 {"header":{"v":2,"t":"move_chunk","seq":2,"move_id":"mv-8e41","index":0},"bytes_b64":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="}

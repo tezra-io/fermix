@@ -26,6 +26,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Home.Snapshot.Run, as: SnapshotRun
   alias FermixCore.Home.Snapshot.S3, as: SnapshotS3
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
+  alias FermixCore.Management.Browser, as: ManagementBrowser
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Cues, as: ManagementCues
   alias FermixCore.Management.Cues.MandateRow, as: CueMandateRow
@@ -697,8 +698,8 @@ defmodule FermixCore.Management.CopyTest do
   # never prescribes a `fermix` command (AGENTS.md, "App-managed production
   # configuration"). The Always On producers are walked whole: the move's
   # phases and refusals, the readiness items, the snapshot sentences, both
-  # Always On sections in every role, the owner decisions, and the refusals a
-  # server shows while it enrolls.
+  # Always On sections in every role, the browser hand-off and the owner
+  # decisions, and the refusals a server shows while it enrolls.
   describe "the Always On copy an app or the setup page shows" do
     test "names no fermix command" do
       records = [
@@ -737,8 +738,11 @@ defmodule FermixCore.Management.CopyTest do
 
       owner = [
         {"home owner decision", ManagementHomeMove.owner_only_sentence()},
+        {"browser owner decision", ManagementBrowser.owner_only_sentence()},
         {"desktop executor owner decision", Mobile.executor_owner_only_sentence()}
       ]
+
+      browser = Enum.map(ManagementBrowser.sentences(), &{"browser", &1})
 
       # A desktop's read grants for its server, and the answer to a move's
       # start whose answer was lost.
@@ -749,14 +753,14 @@ defmodule FermixCore.Management.CopyTest do
         [{"move unconfirmed", unconfirmed}] ++
           Enum.map(DeviceGrants.sentences(), &{"read grants", &1})
 
-      for {where, text} <- section_rows ++ move ++ enrolling ++ owner ++ device,
+      for {where, text} <- section_rows ++ move ++ enrolling ++ owner ++ browser ++ device,
           do: refute_command(text, where)
     end
 
     # A gate nothing provokes is a gate nobody has seen fire.
     test "catches a command, bare or quoted, and nothing else" do
       assert command?("Run fermix home status to see where it stands.")
-      assert command?("Get a new code, then run `fermix home enroll-code` on the primary.")
+      assert command?("Sign in there, then run `fermix browser handoff` with the sites.")
       refute command?("Fermix restarts as a desktop of fermix-vm.")
       refute command?("Get a new code in Always On on the primary.")
     end

@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "browser_refused",
+    "sentence": "Fermix did not do that in the browser. It said: The Fermix browser profile holds no cookies for these sites."
+  },
+  "ok": false,
+  "schema_version": 1
+}

@@ -122,6 +122,14 @@ defmodule FermixCore.Trace.TelemetryHandler do
       agent_field: :target,
       trace_event: "home_snapshot"
     },
+    # A browser hand-off operation (M75 D18): sessionless, so the op (sent,
+    # stored, wiped, expired) is the row's agent.
+    %{
+      event: [:fermix, :browser, :handoff],
+      trace_type: :agent_event,
+      agent_field: :op,
+      trace_event: "browser_handoff"
+    },
     # A move's lifecycle bookends on each side (M75 §7.2): sessionless, so the
     # side (source or candidate) is the row's agent; the move id correlates.
     %{

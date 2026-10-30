@@ -45,7 +45,7 @@ _fermix() {
       mapfile -t COMPREPLY < <(compgen -W "forget --all" -- "$current")
       ;;
     browser)
-      mapfile -t COMPREPLY < <(compgen -W "bridge install uninstall status --browser --extension-id" -- "$current")
+      mapfile -t COMPREPLY < <(compgen -W "bridge install uninstall status --browser --extension-id signin handoff handoffs wipe --expires --allow-identity-provider --json" -- "$current")
       ;;
     browser-bridge)
       mapfile -t COMPREPLY < <(compgen -W "--manifest" -- "$current")

@@ -1,6 +1,8 @@
 defmodule Fermix.CLI.BrowserCommand do
   @moduledoc """
   `fermix browser bridge install|uninstall|status` — the browser-bridge plumbing.
+  `fermix browser signin|handoff|handoffs` are the browser hand-off's
+  (`Fermix.CLI.BrowserHandoffCommand`).
 
   `install` writes two files and prints both: a wrapper script under
   `<FERMIX_HOME>/bin/` (Chrome starts a native-messaging host with no shell
@@ -15,6 +17,7 @@ defmodule Fermix.CLI.BrowserCommand do
   usage error.
   """
 
+  alias Fermix.CLI.BrowserHandoffCommand
   alias FermixCore.Browser.Bridge.Endpoint
   alias FermixCore.Browser.Bridge.HostManifest
 
@@ -27,6 +30,9 @@ defmodule Fermix.CLI.BrowserCommand do
   def run(argv, opts \\ []) when is_list(argv) and is_list(opts) do
     case argv do
       ["bridge" | rest] -> bridge(rest, opts)
+      ["signin" | rest] -> BrowserHandoffCommand.signin(rest, opts)
+      ["handoff" | rest] -> BrowserHandoffCommand.handoff(rest, opts)
+      ["handoffs" | rest] -> BrowserHandoffCommand.handoffs(rest, opts)
       _other -> usage(2)
     end
   end
@@ -233,7 +239,10 @@ defmodule Fermix.CLI.BrowserCommand do
     IO.puts(:stderr, """
     usage: fermix browser bridge install --browser <chrome|chromium|brave|edge> --extension-id <id>
            fermix browser bridge uninstall --browser <chrome|chromium|brave|edge>
-           fermix browser bridge status [--browser <chrome|chromium|brave|edge>]\
+           fermix browser bridge status [--browser <chrome|chromium|brave|edge>]
+           fermix browser signin URL [--json]
+           fermix browser handoff SITE... [--expires DURATION] [--allow-identity-provider] [--json]
+           fermix browser handoffs [wipe [SITE...]] [--json]\
     """)
 
     status

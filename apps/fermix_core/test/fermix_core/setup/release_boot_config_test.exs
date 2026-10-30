@@ -100,6 +100,7 @@ defmodule FermixCore.Setup.ReleaseBootConfigTest do
   # restores what was already there; they need no restatement.
   defp unhydrated_pins do
     [
+      :browser_handoff_link,
       :context_window_limit,
       :device_actions,
       :harness_continuation_dispatcher,

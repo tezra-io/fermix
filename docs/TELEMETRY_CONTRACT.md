@@ -1137,6 +1137,22 @@ phase files (`.move/phase.json`, `candidate/state.json`) hold the sentence
 `agent_event` row keyed on the side; the Opik exporter does not subscribe
 (no session to nest under), as for snapshots and the channel points below.
 
+## Browser hand-offs (a sessionless point per operation)
+
+A browser hand-off (M75 D18) runs no agent session: the owner starts one at a
+terminal on a desktop, and the primary stores, wipes and expires its cookies
+on its own. Each operation is one point event, `[:fermix, :browser, :handoff]`,
+through `FermixCore.Browser.Handoff.Telemetry.emit/4`, never hand-rolled:
+`sent` (the desktop, once the primary answered), `stored`, `wiped` and
+`expired` (the primary). Measurements: `duration_ms` and `cookies` (how many
+the operation moved, stored or deleted). Metadata, a fixed allowlist: `op`,
+`result` (`ok` or `failed`), `sites` (a count) and a derived `error_class`
+(the reason's atom, or a tagged tuple's atom head, else `unclassified`; nil
+when ok). Never a site's name, a cookie's name or its value: a hand-off moves
+signed-in sessions. `Trace.TelemetryHandler` records it as a `browser_handoff`
+`agent_event` row keyed on the op; the Opik exporter does not subscribe (no
+session to nest under).
+
 The sign-in loopback forward (M75 D17) adds no event: the sign-in it serves is
 the `auth` management job it always was, and a port the desktop could not open
 is that job's failure sentence.

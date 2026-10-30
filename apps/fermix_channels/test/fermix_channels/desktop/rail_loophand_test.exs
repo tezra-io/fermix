@@ -1,12 +1,14 @@
 defmodule FermixChannels.Desktop.RailLoophandTest do
-  # The sign-in forward and the snapshot copy over a real desktop session (M75
-  # D17, D19): the primary's own `Mobile.Session` and peer with Noise behind the
-  # iroh bridge, the desktop's own relay, and the desktop's two servers under
-  # the names the relay's `@inbound` reaches.
+  # The sign-in forward, the snapshot copy and the hand-off over a real desktop
+  # session (M75 D17, D18, D19): the primary's own `Mobile.Session` and peer
+  # with Noise behind the iroh bridge, the desktop's own relay, and the
+  # desktop's three servers under the names the relay's `@inbound` reaches.
   #
   # Sync: those servers are registered under their own (global) names.
   use ExUnit.Case, async: false
 
+  alias FermixChannels.Desktop.HandoffLink
+  alias FermixChannels.Desktop.Handoffs
   alias FermixChannels.Desktop.Loopback
   alias FermixChannels.Desktop.LoopbackForward
   alias FermixChannels.Desktop.Relay
@@ -16,6 +18,7 @@ defmodule FermixChannels.Desktop.RailLoophandTest do
   alias FermixChannels.Test.DesktopRail
   alias FermixCore.Auth.OAuthFlow
   alias FermixCore.Auth.OAuthProvider
+  alias FermixCore.Browser.Handoff.Cookies
 
   @wait 10_000
   @plenty 100 * 1_024 * 1_024 * 1_024
@@ -107,6 +110,45 @@ defmodule FermixChannels.Desktop.RailLoophandTest do
 
     assert "HTTP/1.1 200 OK" <> _rest = response
     assert {:ok, %{code: "c1"}} = Task.await(flow, @wait)
+  end
+
+  test "a hand-off reaches the primary's family over the session and its answer comes back" do
+    test = self()
+
+    store = fn stored, _opts ->
+      send(test, {:stored, stored})
+      {:ok, %{cookies: length(stored.cookies), expires_at: stored.expires_at}}
+    end
+
+    ctx = connect(%{handoff: {Handoffs, device_name: "Studio Mac", store: store}})
+    start_supervised!(HandoffLink)
+    DesktopRail.await_connected(ctx.relay)
+
+    cookies = [
+      %{
+        "site" => "news.example.org",
+        "name" => "sid",
+        "value" => "invented",
+        "domain" => ".news.example.org",
+        "path" => "/",
+        "expires" => -1,
+        "httpOnly" => true,
+        "secure" => true
+      }
+    ]
+
+    handoff = %{
+      handoff_id: "ho-rail",
+      sites: ["news.example.org"],
+      expires_at: ~U[2026-11-03 09:00:00Z],
+      count: 1,
+      payload: Cookies.encode(cookies)
+    }
+
+    assert {:ok, %{cookies: 1, expires_at: ~U[2026-11-03 09:00:00Z]}} =
+             HandoffLink.send_handoff(HandoffLink, handoff, send: ctx.send)
+
+    assert_received {:stored, %{from: "Studio Mac", handoff_id: "ho-rail"}}
   end
 
   defp provider do

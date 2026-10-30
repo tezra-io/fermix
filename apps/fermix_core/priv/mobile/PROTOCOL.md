@@ -222,7 +222,7 @@ message) is sent as one run of `event_part` frames instead of one frame:
 ## Chunked payloads
 
 A payload too large for one frame (a desktop's management call, a tunneled
-companion line, an action's result, a file's bytes)
+companion line, an action's result, a file's bytes, a browser hand-off)
 travels as frames of one event, each with `index` (from 0) and `last`
 (boolean) in its header and at most 60 KiB of the payload as its raw tail. A
 chunked event's header stays within 4,075 bytes, so a full tail still fits one
@@ -251,6 +251,7 @@ plaintext.
 | `invoke` | `invocation_id` | 64 KiB |
 | `invoke_result` | `invocation_id` | 1 MiB |
 | `invoke_blob` | `invocation_id` | `caps.max_media_bytes` |
+| `handoff_chunk` | `handoff_id` | 4 MiB |
 | `loopback_response` | `request_id` | 256 KiB |
 
 `snapshot_chunk` and `move_chunk` are streams, not chunked payloads: `index`
@@ -967,6 +968,9 @@ A desktop's session takes the phone events `hello`, `ping`, `media_fetch` and
 | `loopback_failed` | `loopback_id`, `port`, `reason` | the desktop would not or could not listen on `127.0.0.1` on `port` of the loopback: `port_in_use` (something listens there), `not_permitted` (the system refused, or the port is below 1024 or one of the desktop engine's own) or `failed` (anything else, or 8 loopbacks already open); the sign-in ends with that sentence |
 | `snapshot_stored` | `snapshot_id`, `sha256` | the desktop kept a snapshot, and the SHA-256 of what it wrote |
 | `snapshot_refused` | `snapshot_id`, `reason` | the desktop kept no copy: `disk_floor` (it would have left under 2 GiB free), `space_unknown`, `mismatch` (size or SHA-256 not `snapshot_begin`'s), `out_of_order`, `invalid_name` or `write_failed`; nothing partial is left |
+| `handoff_begin` | `handoff_id`, `sites[]`, `expires_at`, `count` | an attended browser hand-off of `count` cookies for 1 to 64 sites follows |
+| `handoff_chunk` | `handoff_id`, `index`, `last` + raw bytes | the hand-off's cookies JSON, chunked, at most 4 MiB |
+| `handoff_wipe` | `handoff_id`, `sites[]?` | delete the hand-offs of these sites, or every one when `sites` is absent; `handoff_id` names this wipe, and the answer carries it |
 
 The primary sends a desktop `hello_ack`, `pong`, `error`, `event_part`,
 `media_begin`, `media_chunk` and `media_end`, `companion_line` and
@@ -983,14 +987,17 @@ The primary sends a desktop `hello_ack`, `pong`, `error`, `event_part`,
 | `snapshot_begin` | `snapshot_id`, `name`, `size_bytes`, `sha256` | an encrypted snapshot of the home follows, to keep |
 | `snapshot_chunk` | `snapshot_id`, `index` + raw bytes | the snapshot's next bytes, a stream |
 | `snapshot_end` | `snapshot_id` | the snapshot is complete |
+| `handoff_stored` | `handoff_id`, `cookies`, `expires_at` | how many of the hand-off's cookies the primary stored, and when they expire |
+| `handoff_refused` | `handoff_id`, `sentence` | the primary stored none of the hand-off's cookies, or did not finish the wipe of that `handoff_id`; `sentence` (at most 512 bytes) says why, in the words the owner reads |
+| `handoff_wiped` | `handoff_id`, `cookies` | the wipe of that `handoff_id` is done, and how many cookies it deleted |
 
 `headers[]` is a list of `[name, value]` pairs, in order: a name is an HTTP
 token of at most 256 bytes, a value at most 4,096 bytes with no CR, LF or NUL,
 and there are at most 64. An id (`call_id`, `invocation_id`, `loopback_id`,
-`request_id`, `snapshot_id`, `status_id`, and on the other
+`request_id`, `snapshot_id`, `handoff_id`, `status_id`, and on the other
 sessions `session_id`, `candidate_id`, `move_id` and `device_id`) is 1 to 128
 letters, digits, `.`, `_`, `:` and `-`, starting with a letter or a digit. A
-time (`finished_at`, `created_at`, `last_seen`) is RFC 3339 in
+time (`expires_at`, `finished_at`, `created_at`, `last_seen`) is RFC 3339 in
 UTC (`Z`, or an offset of zero); one with any other offset is refused as an
 invalid field. A name a person reads (`name`,
 `device_name`, `model`, `primary_name`, an enrollment's texts) is at most 128
@@ -1007,7 +1014,7 @@ primary also holds at most 64 MiB across a desktop's open payloads (or one
 blob's bound, when `caps.max_media_bytes` is larger). Past either, the session
 closes `1002`.
 
-### The sign-in forward and snapshot copies
+### The sign-in forward, snapshot copies and hand-offs
 
 **Sign-in forward.** A browser sign-in the desktop started (its forwarded
 `auth.start`) listens on the primary's `127.0.0.1`, and its authorize url
@@ -1033,6 +1040,16 @@ encrypted: `snapshot_begin`, `snapshot_chunk`s of at most 60 KiB from
 `index` 0, `snapshot_end`. The desktop answers `snapshot_stored` with the
 SHA-256 it computed, which verifies the copy when it is `snapshot_begin`'s,
 or `snapshot_refused`. A new `snapshot_begin` abandons a copy in progress.
+
+**Hand-offs.** The owner starts one on the desktop: `handoff_begin`, then the
+cookies JSON as `handoff_chunk`s, `{"cookies": [...]}` with each cookie's
+`site`, `name`, `value`, `domain`, `path`, `expires` (seconds since the
+epoch, `-1` for a session cookie), `httpOnly`, `secure` and, when present,
+`sameSite`, `priority`, `sourceScheme` and `sourcePort`, exactly `count` of
+them and each for one of `sites`. The primary answers `handoff_stored` or
+`handoff_refused`. A `handoff_wipe` is answered the same way, under its own
+`handoff_id`: `handoff_wiped` with how many cookies the primary deleted, or
+`handoff_refused` with why it did not finish.
 
 ### Actions (the executor)
 
@@ -1199,7 +1216,7 @@ sent is never sent to it. `FermixChannels.Mobile.Peers` is this table.
 | Kind | Sends | Is sent |
 |---|---|---|
 | phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `ack` `read_state` `request_status` `unpair` `ping` `pair_start` `pair_decide` `devices_list` `device_revoke` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` `pair_window` `pair_pending` `pair_decided` `devices` |
-| desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `invoke_result` `invoke_blob` `invoke_receipts` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `invoke` `invoke_status` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` |
+| desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `invoke_result` `invoke_blob` `invoke_receipts` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` `handoff_begin` `handoff_chunk` `handoff_wipe` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `invoke` `invoke_status` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` `handoff_stored` `handoff_refused` `handoff_wiped` |
 | enrollment | `enroll_request` `ping` | `enroll_accepted` `error` `pong` |
 | move | `move_offer` `move_chunk` `move_end` `move_commit` `move_resume` `ping` | `move_accept` `move_ready` `move_done` `error` `pong` |
 

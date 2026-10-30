@@ -50,7 +50,8 @@ _fermix() {
           _values 'subcommand' 'forget' '--all'
           ;;
         browser)
-          _values 'subcommand' 'bridge' 'install' 'uninstall' 'status' '--browser' '--extension-id'
+          _values 'subcommand' 'bridge' 'install' 'uninstall' 'status' '--browser' '--extension-id' \
+            'signin' 'handoff' 'handoffs' 'wipe' '--expires' '--allow-identity-provider' '--json'
           ;;
         browser-bridge)
           _values 'option' '--manifest'

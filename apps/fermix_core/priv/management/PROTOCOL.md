@@ -136,6 +136,8 @@ primary's, exactly as its own socket would give it.
 - **Answered on this computer** (device-class): `hello`, `lifecycle.*`,
   `diagnostics.build`, `logs.query`, `doctor.*`, `setup.session.create`,
   `setup.detect`, `computer_use.*`, `imessage.*`, `browser.install.start`,
+  the browser sign-in and hand-off (`browser.signin.open`,
+  `browser.handoff.send`, `browser.handoffs.wipe`),
   `capabilities.install.start`, the folders this computer lets the server
   read (`device.grants.list`, `device.grants.remove`), and `settings.get` and
   `settings.apply` for a section that configures only this computer:
@@ -319,6 +321,10 @@ daemon onto anything else.
 | `mobile.devices.revoke` | `device_id` | Forgets one paired device, a phone or a desktop, and closes its live connection, and answers with the id and `revoked: true`. While the channel is not running it forgets the device in the paired-device file. Minimum version `2`. |
 | `mobile.devices.set_executor` | `device_id`, `executor` (boolean) | Turns a desktop's executor switch on or off, whether this primary lets it run actions (a desktop also runs one only while its own `[fermix_core.engine] executor` allows), and answers the desktop's row. A phone, or an id no device has, is `invalid_params` on `device_id` with its sentence. Written in the paired-device file while the channel is not running. Minimum version `2`. |
 | `browser.install.start` | none | Downloads a browser for tasks: the meeting notetaker's helper, then the Chromium build it is pinned to, and completes with the name of the browser tasks now run in. A job. Minimum version `2`. |
+| `browser.signin.open` | `url` | Opens `url` (http or https) in Chrome, headed, on the engine-owned owner profile, for the owner to sign in before a hand-off: a new tab of the Chrome already running on it, or a Chrome started for it and kept at most an hour. Answers `{sentence}`. A host with no screen (a Linux server with neither `DISPLAY` nor `WAYLAND_DISPLAY`) refuses it `unavailable` {`capability`: `browser`} with the sentence that a sign-in starts on the desktop and is handed over. Device-class. Minimum version `2`. |
+| `browser.handoff.send` | `sites` (1 to 64 hosts), `expires_s?` (1 to 2,592,000; 604,800 when absent), `allow_identity_provider?` (boolean) | On a desktop in the device role only: reads the owner profile's cookies for exactly `sites` (each a host and its subdomains), sends them to the primary over the rail, and answers once the primary stored them: `{handoff_id, sites[{site, cookies}], cookies_sent, cookies_stored, expires_at, sentence}`. An identity provider's site is `invalid_params` on `sites` unless `allow_identity_provider` is true. `unavailable` {`capability`: `browser`} with a sentence on the primary, with no cookies to send, or when the primary refused them; `primary_unreachable` while the rail is down. Device-class. Minimum version `2`. |
+| `browser.handoffs.list` | none | The hand-offs this primary stores: `{handoffs[{handoff_id, from, sites, cookies, stored_at, expires_at, expired}], sentence}`, `cookies` a count. Never a cookie's name or value. A linked desktop forwards it. Minimum version `2`. |
+| `browser.handoffs.wipe` | `sites?` | On the primary: deletes the cookies of those sites' hand-offs, or of every one, from the owner profile now and answers `{sites, cookies, sentence}`. On a desktop: asks its primary to (`handoff_wipe`), waits up to 60 s for its answer, and answers the same `{sites, cookies, sentence}` with the count the primary deleted; a primary that does not answer in time is `unavailable` {`capability`: `browser`, `sentence`: "The server did not confirm the wipe in time. Its list of hand-offs shows what it still holds."}. Device-class. Minimum version `2`. |
 | `imessage.permissions.get` | none | The Fermix Messages helper's non-prompting state: whether it is installed, its version, Full Disk Access, the Messages database, Automation, whether Messages runs and is signed in, the user session, the confirmed recipient policy, whether that policy is exactly the saved settings, and when it was read. Minimum version `2`. |
 | `imessage.grant.start` | `service` (`automation` or `full_disk_access`) | Asks for one grant: `automation` raises the one system prompt, `full_disk_access` registers the helper, opens the Full Disk Access pane and reveals the helper for drag-in. A job that completes with the permissions view. Minimum version `2`. |
 | `imessage.policy.confirm` | none | Asks the helper to confirm the saved recipients; when they differ from the ones it holds, the helper shows its own dialog naming every handle. A job that completes with the permissions view plus `outcome`. Minimum version `2`. |
@@ -541,6 +547,14 @@ Notes that the shapes alone do not carry:
   and authenticates nobody: it stops a model's own command from approving a
   mandate, answering a proposal or switching mandates back on. Every cue read
   stays open, and so does every other secret and settings section.
+- **A browser sign-in, a hand-off and a wipe are the owner's decisions as
+  well (M75 D18).** `browser.signin.open`, `browser.handoff.send` and
+  `browser.handoffs.wipe` answer `unavailable` {`capability`: `browser`,
+  `sentence`: "Only the owner can sign in or hand off a browser session: do it
+  yourself, not through a task Fermix runs."} to the same callers, so a
+  command the agent ran (a desktop action included) can never move a
+  signed-in session.
+  `browser.handoffs.list` stays open.
 - **Opening an enrollment code, reviewing and starting a move, and setting
   the recovery passphrase are the owner's decisions (M75).**
   `home.enroll.open`, `home.move.readiness` (it reads every keychain secret
@@ -613,6 +627,19 @@ Notes that the shapes alone do not carry:
   step that fails, and a download the launcher still cannot find each fail the
   job with the daemon's sentence. One download runs at a time (`busy`
   {`operation`: `browser_install`}).
+- **A browser hand-off is the owner's alone** (M75 D18). The owner signs in
+  on a desktop (`browser.signin.open`) and sends the signed-in sites to the
+  primary (`browser.handoff.send`); no agent tool reaches any `browser.*`
+  hand-off method. Cookies move through Chrome's DevTools protocol, for
+  exactly the hosts named and their subdomains, never by wildcard; a public
+  suffix (`co.uk`) is refused as a site. `accounts.google.com`,
+  `login.microsoftonline.com`, `appleid.apple.com`, `login.live.com`,
+  `github.com` and the Okta and Auth0 hosts, and any site covering one or
+  covered by one, move only with `allow_identity_provider`. The primary caps
+  each cookie at the hand-off's expiry, records each one's domain, name and
+  path (never its value), and deletes them when the hand-off expires: within
+  60 s while its Chrome runs, else as its Chrome next starts.
+  `browser.handoffs.wipe` deletes them sooner.
 - **A live model listing never degrades to the catalog.** The two answer
   different questions, so a live fetch that fails answers `unavailable`
   {`capability`: `model_listing`} and `source` always names where the rows on
@@ -1400,12 +1427,13 @@ one, is `details.sentence`. Six codes carry one:
   from your own terminal.", the executor switch's, "Only the owner can let a
   desktop run actions for the primary: use the Fermix app or your own
   terminal.", the cues', "Only the owner can change cues: use the Fermix app
-  or your own terminal.", the home's, "Only the owner can move Fermix or set
-  its recovery passphrase: use the Fermix app or your own terminal.", and the
-  device's, "Only the owner can change what the server may read on this
-  computer: use the Fermix app or your own terminal." And when the cues cannot
-  reach their records, with the cues' sentence for why: memory is off, or the
-  records could not be read.
+  or your own terminal.", the browser's, "Only the owner can sign in or hand
+  off a browser session: do it yourself, not through a task Fermix runs.", the
+  home's, "Only the owner can move Fermix or set its recovery passphrase: use
+  the Fermix app or your own terminal.", and the device's, "Only the owner can
+  change what the server may read on this computer: use the Fermix app or your
+  own terminal." And when the cues cannot reach their records, with the cues'
+  sentence for why: memory is off, or the records could not be read.
 - `primary_unreachable` — "The server <name> is unreachable. Fermix keeps your
   message until it is back.", or why this computer does not reach it.
 - `device_class_method` — "This request configures the computer it came

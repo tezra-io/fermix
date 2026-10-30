@@ -28,6 +28,7 @@ defmodule FermixChannels.Mobile.Chunks do
     "companion_line" => @mib,
     "manage" => @mib,
     "invoke_result" => @mib,
+    "handoff_chunk" => 4 * @mib,
     "manage_result" => 4 * @mib,
     "invoke" => 64 * 1_024,
     "loopback_response" => 256 * 1_024
@@ -40,6 +41,7 @@ defmodule FermixChannels.Mobile.Chunks do
     "invoke" => "invocation_id",
     "invoke_result" => "invocation_id",
     "invoke_blob" => "invocation_id",
+    "handoff_chunk" => "handoff_id",
     "loopback_response" => "request_id"
   }
 

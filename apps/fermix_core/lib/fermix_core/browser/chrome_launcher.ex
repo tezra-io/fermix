@@ -273,6 +273,14 @@ defmodule FermixCore.Browser.ChromeLauncher do
     end
   end
 
+  @doc """
+  Whether this host has a screen a headed Chrome can open on: always on macOS;
+  on Linux, a `DISPLAY` or `WAYLAND_DISPLAY` in this engine's environment, which
+  a headless server's has neither of.
+  """
+  @spec display?() :: boolean()
+  def display?, do: not linux_without_display?()
+
   defp linux_without_display? do
     match?({:unix, :linux}, :os.type()) and is_nil(System.get_env("DISPLAY")) and
       is_nil(System.get_env("WAYLAND_DISPLAY"))

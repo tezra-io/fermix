@@ -9,7 +9,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     push_register push_unregister ack read_state request_status pair_request unpair ping
     companion_open companion_line companion_close manage invoke_result invoke_blob
     invoke_receipts loopback_request loopback_failed snapshot_stored snapshot_refused
-    pair_start pair_decide devices_list device_revoke
+    handoff_begin handoff_chunk handoff_wipe pair_start pair_decide devices_list device_revoke
     enroll_request move_offer move_chunk move_end move_commit move_resume
   )
   @server_events ~w(
@@ -18,8 +18,8 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     link_preview read_state history_page request_status_page notice pair_approved pair_denied
     error pong event_part
     companion_line companion_close manage_result invoke invoke_status loopback_open
-    loopback_response loopback_close snapshot_begin snapshot_chunk snapshot_end
-    pair_window pair_pending pair_decided devices enroll_accepted
+    loopback_response loopback_close snapshot_begin snapshot_chunk snapshot_end handoff_stored
+    handoff_refused handoff_wiped pair_window pair_pending pair_decided devices enroll_accepted
     move_accept move_ready move_done
   )
 

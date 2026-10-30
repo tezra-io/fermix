@@ -42,6 +42,7 @@ defmodule FermixCore.Browser.CDP.Backend do
   alias FermixCore.Browser.ChromeLauncher
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
+  alias FermixCore.Browser.Handoff
   alias FermixCore.Browser.Policy
   alias FermixCore.Browser.Snapshot
   alias FermixCore.Browser.Upload
@@ -437,7 +438,7 @@ defmodule FermixCore.Browser.CDP.Backend do
 
   defp start_runtime(%{profile: %{mode: :managed}} = state) do
     case state.launcher.start(state.config, state.profile, state.owner_key, state.profile_name) do
-      {:ok, runtime} -> finish_runtime(runtime, state)
+      {:ok, runtime} -> runtime |> finish_runtime(state) |> purge_expired_handoffs()
       {:error, %Error{} = error} -> {:error, error}
     end
   end
@@ -449,6 +450,26 @@ defmodule FermixCore.Browser.CDP.Backend do
   defp start_runtime(_state) do
     {:error, Error.new("profile_unavailable", "Profile requires a configured CDP URL")}
   end
+
+  # A Chrome that starts on the owner's hand-off profile deletes the cookies of
+  # the browser hand-offs that expired while no Chrome ran (M75 D18) before it
+  # serves anything. A purge that fails is logged; the sweeper tries again.
+  defp purge_expired_handoffs({:ok, %{owner_key: "owner"} = state} = ready) do
+    if state.profile_name == state.config.default_profile do
+      case Handoff.purge_on_launch(&command(state, &1, &2)) do
+        {:ok, _deleted} ->
+          ready
+
+        {:error, reason} ->
+          Logger.error("browser: expired hand-off cookies were not deleted: #{inspect(reason)}")
+          ready
+      end
+    else
+      ready
+    end
+  end
+
+  defp purge_expired_handoffs(started), do: started
 
   # The grants table lives in the daemon's browser tree and nowhere else, so a
   # tree without it — a source boot, a test tree, any process that is not the

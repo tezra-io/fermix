@@ -270,3 +270,57 @@ is not run by hand. The channel is a `0600` socket at
 `$FERMIX_HOME/browser_bridge.sock`: same user, same machine, no network port, no
 pairing code. The host manifest's `allowed_origins` decides which extension may
 connect, enforced by the browser and again by the pump.
+
+## Handing a signed-in session to the server (Always On)
+
+After an Always On move the server runs the tasks, in its own browser
+profile, which no site has signed in to. The owner can hand it the sessions
+of chosen sites from the desktop the home left, without typing a password on
+the server and without the agent ever asking for one:
+
+1. On the desktop, `fermix browser signin URL` opens Chrome, in a window, on
+   the desktop's own Fermix profile (the default managed profile, never the
+   person's everyday Chrome). Sign in there. Keep that window open until the
+   hand-off is sent: a cookie the site set only for the session ends when
+   Chrome closes. The window closes on its own after an hour.
+2. `fermix browser handoff SITE... [--expires DURATION]
+   [--allow-identity-provider]` reads that profile's cookies for exactly the
+   named sites and sends them to the server over the encrypted session, which
+   stores them in its own Fermix profile and says how many it stored and
+   until when. `--json` prints the result for scripts.
+
+- **A site** is a host and its subdomains (`github.com` covers
+  `gist.github.com`), named exactly: no wildcard, scheme, port or path, and
+  not a public suffix such as `co.uk`. At most 64 per hand-off.
+- **Identity providers** sign the owner in to everything else, so their
+  sessions move only when named with `--allow-identity-provider`:
+  `accounts.google.com`, `login.microsoftonline.com`, `appleid.apple.com`,
+  `login.live.com`, `github.com` (its sign-in is `github.com/login`), Okta
+  and Auth0 hosts, and any site that covers one (`google.com`) or lies under
+  one.
+- **Expiry**: 7 days unless `--expires` says (`12h`, `3d`, `90m`), at most 30
+  days. The server stores each cookie to expire by then at the latest, deletes
+  the hand-off's cookies when it expires (within a minute while its Chrome
+  runs, else as its Chrome next starts), and deletes again at the next start
+  what it deleted from a Chrome that was already running, in case that Chrome
+  stopped before writing the deletion.
+- **What never moves**: passwords (none are read), the cookies of any site
+  not named, cookies a site set inside another site's frame (partitioned
+  cookies), and anything but cookies: a site that keeps its session in local
+  storage needs signing in on the server. Nothing else of the desktop's
+  profile (history, extensions, saved passwords) leaves it.
+- **Listing and wiping**: `fermix browser handoffs` lists what the server
+  stores (from either machine: on the desktop it asks the server), each with
+  its sites, how many cookies, where it came from and until when; never a
+  cookie's name or value, which the server's record
+  (`<home>/browser/handoffs.json`, kept on the server) never holds.
+  `fermix browser handoffs wipe [SITE...]` deletes those sites' hand-offs, or
+  every one, now: on the server directly, from the desktop by asking the
+  server, which answers how many cookies it deleted (the desktop waits up to
+  a minute for that answer).
+- **Only the owner** starts, lists or wipes a hand-off, at a terminal on the
+  desktop: no tool does, and Fermix refuses these commands from any process
+  it started itself. When a task on the server needs a site it is not signed
+  in to, the agent asks the owner to hand that site off; it never asks for a
+  password.
+

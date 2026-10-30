@@ -69,7 +69,7 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
                decode("loopback_request", %{request | "target" => "http://x/"})
     end
 
-    test "receipts are bounded lists" do
+    test "receipts and hand-off sites are bounded lists" do
       receipt = %{
         "invocation_id" => "inv-1",
         "status" => "ok",
@@ -92,14 +92,33 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
                  | "receipts" => [%{receipt | "status" => "running"}]
                })
 
+      begin = %{
+        "handoff_id" => "ho-1",
+        "sites" => ["news.example.org"],
+        "expires_at" => "2026-10-28T08:00:00Z",
+        "count" => 12
+      }
+
+      assert {:ok, _event} = decode("handoff_begin", begin)
+
       # RFC 3339 in UTC: an offset is refused here, never mistaken further on.
-      for at <- ["2026-10-21T10:14:03+02:00", "2026-10-21T03:14:03-05:00", "next week"] do
-        assert {:error, {:invalid_field, "receipts"}} =
-                 decode("invoke_receipts", %{
-                   answer
-                   | "receipts" => [%{receipt | "finished_at" => at}]
-                 })
+      for at <- ["2026-10-28T10:00:00+02:00", "2026-10-28T03:00:00-05:00", "next week"] do
+        assert {:error, {:invalid_field, "expires_at"}} =
+                 decode("handoff_begin", %{begin | "expires_at" => at})
       end
+
+      assert {:error, {:invalid_field, "sites"}} =
+               decode("handoff_begin", %{begin | "sites" => List.duplicate("a.example.org", 65)})
+
+      assert {:error, {:invalid_field, "sites"}} =
+               decode("handoff_begin", %{begin | "sites" => ["has space.example.org"]})
+
+      # A wipe names itself, so the primary's answer finds the owner waiting.
+      assert {:ok, _event} = decode("handoff_wipe", %{"handoff_id" => "wp-1"})
+      assert {:error, {:missing_field, "handoff_id"}} = decode("handoff_wipe", %{})
+
+      assert {:error, {:invalid_field, "sites"}} =
+               decode("handoff_wipe", %{"handoff_id" => "wp-1", "sites" => []})
     end
   end
 
@@ -144,6 +163,16 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
 
       assert {:error, {:invalid_field, "expires_in_s"}} =
                encode("loopback_open", %{open | "expires_in_s" => 901})
+    end
+
+    test "a wipe is answered with how many cookies it deleted, under its own id" do
+      assert {:ok, _frame} = encode("handoff_wiped", %{"handoff_id" => "wp-1", "cookies" => 0})
+
+      assert {:error, {:missing_field, "cookies"}} =
+               encode("handoff_wiped", %{"handoff_id" => "wp-1"})
+
+      assert {:error, {:invalid_field, "cookies"}} =
+               encode("handoff_wiped", %{"handoff_id" => "wp-1", "cookies" => -1})
     end
 
     test "an optional field is absent, never null" do
@@ -328,7 +357,7 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
     for type <- PeerEvents.server_events(), do: assert(type in Protocol.server_events())
 
     assert Enum.sort(PeerEvents.raw_events(:client)) ==
-             ~w(companion_line invoke_blob invoke_result loopback_request manage move_chunk)
+             ~w(companion_line handoff_chunk invoke_blob invoke_result loopback_request manage move_chunk)
 
     assert Enum.sort(PeerEvents.raw_events(:server)) ==
              ~w(companion_line invoke loopback_response manage_result snapshot_chunk)

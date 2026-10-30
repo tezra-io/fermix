@@ -885,6 +885,29 @@ the `Browser.Backend` behaviour, whose CDP implementation (`CDP.Backend`)
 launches Chrome lazily and shuts it down on every exit path. On macOS, Chrome
 launches only through the `disclaim` shim from `fermix_nif`.
 
+`Browser.Handoff` is the browser session hand-off (M75 D18, B10): an owner
+on a desktop signs in on the engine-owned owner profile
+(`Handoff.DevTools.open_headed/2`) and `Management.Browser`'s
+`browser.handoff.send` reads that profile's cookies for exactly the named
+sites (`Handoff.Sites`, `Handoff.Cookies`, `Storage.getCookies` over
+DevTools) and sends them through `Handoff.Link`, which
+`config :fermix_core, :browser_handoff_link` injects
+(`FermixChannels.Desktop.HandoffLink`). On the primary `Handoff.store/2`
+sets them into the owner profile (`Storage.setCookies`, each capped at the
+hand-off's expiry) and records each cookie's key, never its value, in
+`Handoff.Ledger` (`browser/handoffs.json`, device-local);
+`Handoff.Sweeper` (primary only) deletes expired hand-offs from a running
+Chrome every 60 s, and `CDP.Backend` runs `Handoff.purge_on_launch/2` as the
+owner profile's Chrome starts, for the ones expired while none ran and,
+once more, for what was deleted from a Chrome that may have been killed
+before writing it. `Handoff.DevTools.run/3` attaches to a running Chrome or
+starts one headless for the session in a task that traps exits, and closes a
+Chrome it started with `Browser.close`, which writes every change to the
+profile. Every operation is one `[:fermix, :browser, :handoff]` point.
+
+Architecture Invariant: no tool and no model-reachable path starts, lists or
+wipes a hand-off; the ledger never holds a cookie's value.
+
 Architecture Invariant: the computer-use tool is registered only when `ready?/0`
 holds, as a GUI-control capability that guests never get. Computer history
 reaches a model only when every hop in the provider chain is local or granted.
@@ -1283,17 +1306,24 @@ Current channels:
   `Desktop.SnapshotTarget` (a `Snapshot.Target`) streams the encrypted file to
   each connected desktop in 60 KiB `snapshot_chunk`s, waiting every 16 for the
   session to have written them (`{:mobile_sync, from, ref}`), and counts the
-  copy verified when the desktop answers the same SHA-256.
+  copy verified when the desktop answers the same SHA-256. `Desktop.Handoffs`
+  (the `handoff` family) checks each hand-off's cookies against its sites and
+  count and stores them through `FermixCore.Browser.Handoff` in a task,
+  answering `handoff_stored` or `handoff_refused`, and runs `handoff_wipe`,
+  answering `handoff_wiped` (the cookies it deleted) or `handoff_refused`
+  under the wipe's own `handoff_id`.
   On the desktop, `Desktop.DeviceServices` (a line of
-  `Desktop.DeviceSupervisor`, before the relay) runs the two the relay's
+  `Desktop.DeviceSupervisor`, before the relay) runs the three the relay's
   `@inbound` hands the primary's events to: `Desktop.Loopback` (listens on
   `127.0.0.1` on each port for as long as the primary says, only a port
   nothing else listens on (no `SO_REUSEADDR` but for a port only closed
   connections hold), never below 1024 or one of the engine's own, at most 8
   loopbacks, forwards each browser request, reports a port it cannot open),
-  and `Desktop.SnapshotStore`
+  `Desktop.SnapshotStore`
   (`snapshots/<name>.partial` at 0600, verified and renamed, the newest 3
-  kept, refused under a 2 GiB free-space floor). Each answers the primary from its own process or a
+  kept, refused under a 2 GiB free-space floor) and `Desktop.HandoffLink`
+  (`FermixCore.Browser.Handoff.Link`: sends a hand-off and waits for its
+  answer, sends a wipe and waits for its count). Each answers the primary from its own process or a
   task, never from inside the relay's call.
 - Enrollment and the move (M75 §7, B4, B5): `FermixChannels.Home`. The phone
   session's prelude parse is the one branch to M75's own preludes

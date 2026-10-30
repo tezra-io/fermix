@@ -381,6 +381,9 @@ defmodule FermixTestSupport.CliContractCases do
   def error_details(:snapshots_refused),
     do: [output: "Snapshots are off: set a recovery passphrase to turn them on."]
 
+  def error_details(:browser_refused),
+    do: [output: "The Fermix browser profile holds no cookies for these sites."]
+
   def error_details(:grants_refused),
     do: [output: "This computer has no read grant for that folder."]
 

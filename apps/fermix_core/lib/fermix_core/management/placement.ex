@@ -46,6 +46,7 @@ defmodule FermixCore.Management.Placement do
   @device_methods ~w(
     hello diagnostics.build logs.query setup.session.create setup.detect
     browser.install.start capabilities.install.start
+    browser.signin.open browser.handoff.send browser.handoffs.wipe
     home.status settings.sections
   )
   @device_families ~w(lifecycle. doctor. computer_use. imessage. device.)

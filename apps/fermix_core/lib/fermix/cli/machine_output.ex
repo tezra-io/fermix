@@ -48,6 +48,7 @@ defmodule Fermix.CLI.MachineOutput do
     home_status_unavailable
     enrollment_refused
     move_refused
+    browser_refused
     grants_refused
   )a
 
@@ -194,6 +195,9 @@ defmodule Fermix.CLI.MachineOutput do
 
   def sentence(:move_refused, details),
     do: "Fermix did not start the move." <> said(details)
+
+  def sentence(:browser_refused, details),
+    do: "Fermix did not do that in the browser." <> said(details)
 
   def sentence(:grants_refused, details),
     do: "Fermix did not do that on this computer." <> said(details)

@@ -81,6 +81,7 @@ defmodule FermixChannels.Mobile.ChunksTest do
     assert Chunks.bound("invoke_blob", 123) == {:ok, 123}
     assert Chunks.bound("manage", 1) == {:ok, 1_048_576}
     assert Chunks.bound("manage_result", 1) == {:ok, 4_194_304}
+    assert Chunks.bound("handoff_chunk", 1) == {:ok, 4_194_304}
     assert Chunks.bound("invoke", 1) == {:ok, 65_536}
     assert Chunks.bound("loopback_response", 1) == {:ok, 262_144}
     assert Chunks.key_field("companion_line") == {:ok, "channel"}
