@@ -123,15 +123,18 @@ it first) is not asked about. The result names the site, the username and the
 fields filled; it does not submit the form.
 
 It works only in the Fermix app's own browser pane on a Mac with the app open,
-on an `https` page whose host is exactly the saved site (a leading `www.`
-aside), and only on the owner's own attended turn from their chat or the app:
-never by voice, from a shared channel, a delegated worker, a cue or a scheduled
-run, and never in Chrome (`fermix_chrome` included), the person's own tab or on
-Linux (`sign_in_pane_only`). When no login is saved for the page's host
-(`sign_in_no_login`), the agent tells the owner to add one for exactly that
-host in Settings > Browser > Website logins in the Fermix app on their Mac,
-and never asks for the password in the chat. A development build of the app
-has no login store (`sign_in_store_unavailable`), and an app too old to sign in
+on an `https` page whose host is the saved site (a leading `www.` aside) or,
+when no login is saved for that host itself, a subdomain of it: a login saved
+for `example.com` also signs in on `accounts.example.com`, and the approval
+names both. Never a look-alike such as `evilexample.com`. And only on the
+owner's own attended turn from their chat or the app: never by voice, from a
+shared channel, a delegated worker, a cue or a scheduled run, and never in
+Chrome (`fermix_chrome` included), the person's own tab or on Linux
+(`sign_in_pane_only`). When no login fits the page's host (`sign_in_no_login`),
+the agent tells the owner to add one in Settings > Browser > Website logins in
+the Fermix app on their Mac, and never asks for the password in the chat. A
+build of the app that cannot open its keychain group has no login store
+(`sign_in_store_unavailable`), and an app too old to sign in
 answers `sign_in_app_too_old`. After a sign-in the pane stays signed in, as
 after the owner signs in there by hand.
 

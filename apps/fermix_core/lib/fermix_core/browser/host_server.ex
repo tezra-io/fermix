@@ -1082,10 +1082,10 @@ defmodule FermixCore.Browser.HostServer do
   # not carry and the call's own `site` does.
   defp no_login_names({:error, %Error{code: "sign_in_no_login"} = error, state}, site) do
     message =
-      "No login is saved in the Fermix app for #{site}, so nothing was typed. Tell the " <>
-        "owner they can add one for exactly #{site} in Settings > Browser > Website logins " <>
-        "in the Fermix app on their Mac, then ask again. Never ask the owner for the " <>
-        "password in the chat."
+      "No login is saved in the Fermix app for #{site} or a site it is part of, so nothing " <>
+        "was typed. Tell the owner they can add one for #{site}, or for the site it is part " <>
+        "of, in Settings > Browser > Website logins in the Fermix app on their Mac, then ask " <>
+        "again. Never ask the owner for the password in the chat."
 
     {:error, %{error | message: message}, state}
   end

@@ -13,8 +13,9 @@ defmodule FermixCore.Browser.SignIn do
        call (`AccessGate.ask_in_call/3`): "Sign in to github.com as alice?".
        The call waits for the answer, at most `Timeouts.sign_in_approval/0`. A
        call with `username_ref` alone is not asked about: it types only the
-       saved username, only into the saved site's own page, and tells the
-       model nothing it did not have.
+       saved username, only into a page of the saved site (its own host, or
+       a subdomain of it the app found no login of its own for), and tells
+       the model nothing it did not have.
     3. `sign_in` on the same profile, task and tab (`page.sign_in`): the app
        checks the page again, reads the password from its keychain and types
        it.
@@ -145,8 +146,9 @@ defmodule FermixCore.Browser.SignIn do
   defp approved(_username_only, _site, _login, _context), do: :ok
 
   # The login that will be used, as the app named it. The second form appears
-  # only when the page's host and the site the login is saved for differ, which
-  # is the `www.` fold.
+  # only when the page's host and the site the login is saved for differ: the
+  # `www.` fold, or a login saved for a parent domain of the page's host
+  # (`identity.example.com` signing in with `example.com`'s).
   defp prompt(site, %{"login_site" => site, "username" => username}),
     do: "Sign in to #{AccessGate.visible(site)} as #{AccessGate.visible(username)}?"
 

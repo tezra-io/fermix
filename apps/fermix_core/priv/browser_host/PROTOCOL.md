@@ -179,14 +179,20 @@ characters, never an address literal, `localhost` or a dotless name. A site's
 *key* is that host with a trailing dot trimmed and one leading `www.` removed;
 a login is saved under its key, and `login_site` is always a key. The app
 compares `key(site)` with the key of the tab's top-level host, so `github.com`
-written on `www.github.com` is the same site. A page matches a login exactly
-when `key(page host) == login_site`: no subdomain match, one login per key.
+written on `www.github.com` is the same site. A page uses the login saved for
+`key(page host)`; when none is, the login whose key is the longest one that
+`key(page host)` ends with after a `.`, so `identity.example.com` uses
+`example.com`'s and `a.b.example.com` uses `b.example.com`'s over
+`example.com`'s. A look-alike (`evilexample.com`) or a suffix trick
+(`example.com.evil.example`) uses none, and a domain never uses its
+subdomain's. One login per key. `login_site` differs from `key(site)` exactly
+when a parent domain's login is used, and the engine's approval names both.
 
 **`page.login_for {tab_id, site}`** answers in milliseconds:
 
 1. The tab's top URL is `https`, or `sign_in_insecure_page`.
 2. `key(site) == key(top host)`, or `sign_in_wrong_site`.
-3. The saved login for `key(top host)`, or `sign_in_no_login`.
+3. The saved login `key(top host)` uses, as above, or `sign_in_no_login`.
 4. It answers `{login_site, username}` from the login's attributes. The
    answer is closed: any other key is refused. `username` is 1 to 1,024
    characters.

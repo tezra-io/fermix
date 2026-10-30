@@ -653,7 +653,8 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "only in the Fermix app's own browser pane",
           "`sign_in_pane_only`",
           "`sign_in_no_login`",
-          "exactly that host",
+          "a subdomain of it",
+          "the approval names both",
           "never asks for the password in the chat",
           "`sign_in_store_unavailable`",
           "Linux"
