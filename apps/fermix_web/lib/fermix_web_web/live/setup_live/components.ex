@@ -4741,6 +4741,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   end
 
   defp doctor_error({:error, {:misconfigured, reason}}), do: reason
+  defp doctor_error({:error, {:device_role, sentence}}), do: sentence
 
   defp doctor_error({:error, {:auth_scope_mismatch, surface, hint}}) do
     "#{surface} rejected the credentials. #{hint}"

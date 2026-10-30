@@ -31,7 +31,12 @@ defmodule FermixChannels.Desktop.Peer do
 
   # Family => the module implementing `Desktop.Family` for it. Each family's
   # module is added here, one line each, as it is built.
-  @families %{}
+  @families %{
+    companion: FermixChannels.Desktop.Companion,
+    manage: FermixChannels.Desktop.Manage,
+    loopback: FermixChannels.Desktop.LoopbackForward,
+    snapshots: FermixChannels.Desktop.SnapshotCopies
+  }
 
   @event_families %{
     "companion_open" => :companion,

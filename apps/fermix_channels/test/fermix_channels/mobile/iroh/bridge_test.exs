@@ -103,6 +103,7 @@ defmodule FermixChannels.Mobile.Iroh.BridgeTest do
       device_store: :store,
       pair_manager: :pair,
       gateway_keypair: %{private: <<1::256>>, public: <<2::256>>},
+      primary_epoch: 1,
       schedule_handshake_deadline: fn _message, _delay_ms -> make_ref() end,
       cancel_handshake_deadline: fn _ref -> false end,
       current_pair: fn :pair, _peer ->

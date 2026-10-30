@@ -7,6 +7,7 @@ defmodule Fermix.CLI.DaemonTest do
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Management.Lifecycle
+  alias FermixCore.Management.Router
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.SocketPath
   alias FermixTestSupport.ParentProcess
@@ -1118,6 +1119,36 @@ defmodule Fermix.CLI.DaemonTest do
         end)
 
       assert log =~ "only the owner may"
+    end
+  end
+
+  # M75 §2: a candidate primary runs no agent, phone channel or plugins until
+  # its move, so of the unversioned methods it answers `shutdown` alone and
+  # refuses the rest with the router's own sentence.
+  describe "a candidate primary's unversioned methods" do
+    @candidate %{role: :candidate, primary: nil}
+
+    test "every method but shutdown is refused by name, and the connection stays usable" do
+      socket_path =
+        start_peer_daemon(management_opts: management_opts() ++ [engine_role: @candidate])
+
+      sentence = Router.candidate_sentence()
+
+      for method <- ~w(health agents skills_list mobile_status mobile_pair_begin agent_message) do
+        assert {:ok, %{"status" => "error", "reason" => "candidate", "error" => ^sentence}} =
+                 Client.request(method, socket_path: socket_path, timeout: @reply_ms),
+               method
+      end
+    end
+
+    test "a primary is served as before" do
+      socket_path =
+        start_peer_daemon(
+          management_opts: management_opts() ++ [engine_role: %{role: :primary, primary: nil}]
+        )
+
+      assert {:ok, %{"status" => "ok"}} =
+               Client.request("health", socket_path: socket_path, timeout: @reply_ms)
     end
   end
 

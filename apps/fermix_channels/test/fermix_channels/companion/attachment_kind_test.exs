@@ -43,6 +43,7 @@ defmodule FermixChannels.Companion.AttachmentKindTest do
   end
 
   defmodule CoordinatorStub do
+    def epoch(_server), do: "boot-attachment"
     def acquire(_server, _profile, _id, _opts), do: {:ok, {:started, %{attempt: 1}}}
     def handoff(_server, _profile, _id, _attempt, _owner), do: :ok
   end

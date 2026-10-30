@@ -89,6 +89,37 @@ defmodule FermixCore.Companion.ProtocolTest do
              decode(%{"type" => "client_hello", "protocol_version" => "1"})
   end
 
+  # M75 D14: the hellos carry the primary epoch, each optional: a client that
+  # has seen none sends none, and a home that has none announces none.
+  test "the hellos carry an optional positive primary epoch" do
+    assert {:ok, %{payload: %{"primary_epoch" => 3}}} =
+             decode(%{"type" => "client_hello", "protocol_version" => 4, "primary_epoch" => 3})
+
+    for bad <- [0, -1, "3", 3.5] do
+      assert {:error, {:invalid_field, "primary_epoch"}} =
+               decode(%{
+                 "type" => "client_hello",
+                 "protocol_version" => 4,
+                 "primary_epoch" => bad
+               }),
+             inspect(bad)
+    end
+
+    hello = %{"min_version" => 3, "max_version" => 4, "role" => "primary"}
+
+    assert {:ok, line} =
+             Protocol.encode_server_event("server_hello", Map.put(hello, "primary_epoch", 2))
+
+    assert %{"primary_epoch" => 2} = Jason.decode!(line)
+    assert {:ok, _line} = Protocol.encode_server_event("server_hello", hello)
+
+    for bad <- [0, "2", 2.5] do
+      assert {:error, {:invalid_field, "primary_epoch"}} =
+               Protocol.encode_server_event("server_hello", Map.put(hello, "primary_epoch", bad)),
+             inspect(bad)
+    end
+  end
+
   test "a message keeps the mobile shape and carries no attachments on this wire" do
     msg = %{
       "type" => "msg",
@@ -188,18 +219,49 @@ defmodule FermixCore.Companion.ProtocolTest do
 
   test "the encoder writes one newline-terminated object with its type" do
     assert {:ok, line} =
-             Protocol.encode_server_event("server_hello", %{min_version: 3, max_version: 4})
+             Protocol.encode_server_event("server_hello", %{
+               min_version: 3,
+               max_version: 4,
+               role: "primary"
+             })
 
     assert String.ends_with?(line, "\n")
 
     assert Jason.decode!(line) == %{
              "type" => "server_hello",
              "min_version" => 3,
-             "max_version" => 4
+             "max_version" => 4,
+             "role" => "primary"
            }
 
     assert {:error, {:invalid_field, "version_range"}} =
-             Protocol.encode_server_event("server_hello", %{min_version: 2, max_version: 4})
+             Protocol.encode_server_event("server_hello", %{
+               min_version: 2,
+               max_version: 4,
+               role: "primary"
+             })
+  end
+
+  # M75: the engine names its role on every hello, so a desktop app never
+  # compares a device-role engine's epoch against the primary's.
+  test "server_hello names the engine's role, primary or device" do
+    hello = %{"min_version" => 3, "max_version" => 4}
+
+    for role <- ~w(primary device) do
+      assert {:ok, line} =
+               Protocol.encode_server_event("server_hello", Map.put(hello, "role", role))
+
+      assert %{"role" => ^role} = Jason.decode!(line)
+    end
+
+    assert {:error, {:missing_field, "role"}} =
+             Protocol.encode_server_event("server_hello", hello)
+
+    for bad <- ["owner", "", :primary, 1] do
+      assert {:error, {:invalid_field, "role"}} =
+               Protocol.encode_server_event("server_hello", Map.put(hello, "role", bad)),
+             inspect(bad)
+    end
   end
 
   test "the encoder refuses explicit nulls, a written type and unknown events" do

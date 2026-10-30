@@ -364,7 +364,8 @@ defmodule FermixChannels.Channels.Slack.SocketModeTest do
         transport_health: fn
           :slack_socket_health_provider -> SocketMode.poll_health(name)
           _other -> nil
-        end
+        end,
+        engine_role: :primary
       )
 
     slack = Enum.find(report.channels, &(&1.name == "slack"))

@@ -533,7 +533,12 @@ defmodule FermixChannels.Companion.TurnsTest do
       assert_receive {:enqueued, _turn}
 
       waiting = unique()
-      claim = [transport: "mobile", authenticated_device_id: ctx.device_id]
+
+      claim = [
+        transport: "mobile",
+        authenticated_device_id: ctx.device_id,
+        runner_epoch: "boot-a"
+      ]
 
       assert {:ok, {:claimed, _request}} =
                RepoTimeline.claim_client_request(
@@ -570,7 +575,7 @@ defmodule FermixChannels.Companion.TurnsTest do
       {:ok, _device} = DeviceStore.add(device_attrs(device_id), root: root)
 
       waiting = unique()
-      claim = [transport: "mobile", authenticated_device_id: device_id]
+      claim = [transport: "mobile", authenticated_device_id: device_id, runner_epoch: "boot-a"]
 
       assert {:ok, {:claimed, _request}} =
                RepoTimeline.claim_client_request(

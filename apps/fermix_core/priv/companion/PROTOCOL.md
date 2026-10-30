@@ -45,6 +45,9 @@ next version.
   the outbox*).
 - **Clients:** at most **4** connections at once. A fifth is answered with
   `error: max_clients_reached` and closed.
+- **After a move:** a desktop whose home moved to another host keeps this
+  socket; its engine carries each connection to the primary (see *After a
+  move: the desktop's tunnel*). Everything in this document holds there.
 - **Direction:** *client events* flow companion → daemon; *server events* flow
   daemon → companion.
 - **Absent is absent:** an optional field the daemon has no value for is an
@@ -153,11 +156,13 @@ Realtime voice socket's. No other event is serviced until it completes.
 
 ```
 companion: connect socket
-companion -> daemon:  client_hello { protocol_version: P }
+companion -> daemon:  client_hello { protocol_version: P, primary_epoch?: E }
                       daemon negotiates P against {min, max}:
-                        P in [min, max] -> daemon -> companion: server_hello { min_version, max_version }
+                        P in [min, max] -> daemon -> companion: server_hello { min_version, max_version, primary_epoch?, role }
                         P < min         -> error(unsupported_protocol_version, client_too_old); close
                         P > max         -> error(unsupported_protocol_version, client_too_new); close
+                      then, on the primary, E against the home's primary epoch M:
+                        E > M           -> error(stale_primary); close
 companion: on server_hello, validate its own version V in [min_version, max_version]:
              in range     -> connected
              out of range -> refuse; report which side must update
@@ -184,6 +189,47 @@ Rules the companion enforces:
 update the app; `client_too_new`: update Fermix), `client_version`,
 `min_version`, and `max_version`.
 
+### Primary epoch
+
+`server_hello` carries `primary_epoch`, a positive integer: how many times this
+home has become the primary engine. It is 1 from the home's first boot as the
+primary and goes up by one each time the home moves to another host or is
+restored from a snapshot; it never goes down. It is also the generation id of
+the home's store: rows a client cached under one epoch belong to another store
+than rows served under a different one. The field is absent only from a home
+that has never booted as the primary, which an engine in the device role can
+be, and from a daemon older than the epoch. Both hellos' fields are additive
+and optional, so neither needs a version bump.
+
+`server_hello` also carries `role`, the engine's role: `primary` or `device`.
+This daemon sends it on every hello; a `server_hello` without it comes from an
+older daemon and is treated as `primary`. An engine in the device role runs on
+a home that is a retired copy of the primary, or never was one, so its epoch
+can be lower than the primary's without anything being wrong. Since that copy
+is retired, it refuses every event that would write it (`msg`, `command`,
+`cancel`, `read_state`, `proposal_answer`) with `error: request_failed` and
+the `message` `This engine runs in the device role; the primary is <host>.`,
+writing nothing, and serves the reads (`history_pull`, `history_search`,
+`media_fetch`) as before.
+
+A client keeps the highest `primary_epoch` it has seen from a `primary` only,
+and sends it as `client_hello.primary_epoch`. A `device` engine's epoch is
+never compared and never raises the highest-seen value. A `server_hello` from
+a `primary` with a lower epoch, or with none once the client has seen one, is a
+stale primary: the client refuses it by that name, sends nothing more, and
+tells the owner that this Fermix is an older copy of the one that moved.
+
+The primary refuses a `client_hello` whose `primary_epoch` is greater than its
+own with `error: stale_primary`, `message` `This engine is at epoch <mine>; you
+have seen epoch <theirs>: the primary moved, reconnect to the current one`, and
+closes the connection; it joins nothing and sends no `server_hello`. A lower or
+absent `primary_epoch` is served, and a home with no epoch compares none. An
+engine in the device role announces its home's epoch and refuses no client for
+having seen a higher one: its home is a retired copy of the primary, and
+refusing a lower primary is the client's rule. An epoch file the daemon cannot
+read refuses the hello with `error: primary_epoch_unavailable`, its `message`
+naming why, and closes.
+
 ## Rollout / rollback order
 
 The daemon and the app ship from separate repositories, so a version bump lands
@@ -199,7 +245,7 @@ in a fixed order:
 
 | `type` | Fields | Notes |
 |---|---|---|
-| `client_hello` | `protocol_version` (int > 0) | First frame. Opens the handshake. |
+| `client_hello` | `protocol_version` (int > 0); `primary_epoch?` (int > 0) | First frame. Opens the handshake. `primary_epoch` is the highest primary epoch the client has seen, absent when it has seen none; see *Primary epoch*. |
 | `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | A message to the agent. `text` must not be blank. `attach_ids` is **empty** on this wire in version 1; a non-empty list is refused with `error: attachments_unsupported`. |
 | `command` | `client_msg_id`, `profile_id`, `name`; `args?` | A slash command, `/name args`. An approval's routes are sent this way. |
 | `cancel` | `profile_id`, `client_msg_id`; `task_ref?` | Stops the turn of that request, running or waiting, and no other, whichever client sent the request (the Mac or a phone). Never answered itself; see *Streaming a turn*. Version 2: with `task_ref { call_uuid, task_id, revision }` it stops instead the GPT-Live task those ids name, one that outlived its call, and `client_msg_id` names the cancel itself; see *A Live call's rows*. |
@@ -217,13 +263,13 @@ in a fixed order:
 
 | `type` | Fields | Notes |
 |---|---|---|
-| `server_hello` | `min_version`, `max_version` | Handshake reply. |
+| `server_hello` | `min_version`, `max_version`; `primary_epoch?`, `role?` | Handshake reply. `primary_epoch` is the home's primary epoch, absent only from a home that has never booted as the primary; `role` is the engine's, `primary` or `device`, which this daemon always sends and an older daemon leaves out; see *Primary epoch*. |
 | `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | Durable receipt for a `msg` or `command`; clears the outbox item. `server_seq` is present only on a duplicate whose request already has a reply row: that reply's seq. A first `accepted` never carries it; the request's own row arrives as a `row`. |
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | A turn began answering `in_reply_to`. |
 | `text_delta` | `turn_id`, `text` | Text to append to the turn's draft, exactly as sent. |
 | `tool_event` | `turn_id`, `tool`, `phase`; `detail?` | `phase` is `start` or `stop`. `detail` is at most 512 bytes. |
 | `text_done` | `turn_id`, `server_seq`, `text`; `blocks[]?` | A reply's canonical text at its timeline row, sent once the turn has completed; replaces the draft. A turn may send more than one. `blocks` are the row's, present only when it has one; see *Blocks under a reply*. |
-| `turn_error` | `turn_id`, `code`, `message` | The turn's terminal failure: `code` is `cancelled` after a `cancel`, `interrupted` when the daemon lost the turn. `message` is at most 512 bytes. |
+| `turn_error` | `turn_id`, `code`, `message` | The turn's terminal failure: `code` is `cancelled` after a `cancel`, `interrupted` when the daemon lost the turn, `uncertain_after_restart` when the request may have run before the daemon restarted (see *Delivery and the outbox*). `message` is at most 512 bytes. |
 | `turn_done` | `turn_id` | Version 2. The turn completed and wrote no reply: it ends the turn, and nothing of its draft is kept. Sent only to a connection on version 2; see *Version 2*. |
 | `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`, `media_refs[]`; `client_msg_id?`, `kind?`, `metadata?`, `link_previews[]?`, `blocks[]?` | A timeline row this socket did not stream, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, and a Live call's row. `kind`, `metadata`, `media_refs`, `link_previews` and `blocks` are the history message's, as a `history_page` carries them (see *Timeline shapes*); a Live call's row carries `metadata.call` (see *A Live call's rows*). |
 | `row_updated` | `profile_id`, `server_seq` | Version 3. A row already written changed: its text, its media refs or its link previews. Carries no content; see *When a row changes*. Sent only to a connection on version 3. |
@@ -434,6 +480,49 @@ same `blocks`, and have the key only when the reply has one. The rules:
 The phones' `row` carries the history message whole, so it carries `blocks`
 too, and a phone app may ignore them.
 
+## After a move: the desktop's tunnel
+
+When a desktop's home moves to another host (M75), the desktop's engine keeps
+running in the device role and keeps serving this socket at the same path, so
+the app changes nothing. Each connection is carried over the engine's one
+encrypted session to the primary as one channel of the mobile wire
+(`priv/mobile/PROTOCOL.md`, *Desktop sessions*: `companion_open`,
+`companion_line`, `companion_close`), and the primary serves it with an
+ordinary connection of its own companion socket and the owner's trust. So
+the hello, history, search, requests, streams, approvals and proposals are
+the primary's, exactly as described here: `server_hello` comes from the
+primary, with its `role` (`primary`) and `primary_epoch`, and the primary
+refuses a client that has seen a later primary.
+
+- **Who may connect.** Before it reads a line, the desktop's engine places the
+  process that connected, as above, and carries only the owner's app: a
+  client the engine itself started, or a detached one, is answered with
+  `error: unattended_client` and its sentence, and one it cannot identify with
+  `error: unidentified_client`; either is closed, and nothing reaches the
+  primary. The 4-client bound holds on this socket.
+- **Media stays local.** `media_fetch` asks for a file on this machine, so the
+  desktop's engine answers it: it fetches the blob from the primary, checks
+  it against its ref and grants the managed file under its own home, as
+  *Managed media files* says, once the connection's `client_hello` declared a
+  version that has it. `media_release` is answered by nothing, as always.
+- **The primary unreachable.** A connection made while the engine cannot reach
+  the primary is answered with
+  `error: primary_unreachable` and closed, its `message` naming the primary:
+  `The server <name> is unreachable. Fermix keeps your message until it is
+  back.` Every open connection is ended the same way when the session to the
+  primary drops. The app keeps its outbox (see *Delivery and the outbox*) and
+  reconnects; the engine reconnects on its own, after 1 s and doubling to
+  60 s.
+- **This desktop revoked.** Once the primary no longer knows this computer
+  (it was removed from the server's devices, or the server was restored from
+  a snapshot taken before this computer joined it), the engine stops trying
+  until it restarts, and every open connection, and every one made after, is
+  answered with `error: desktop_revoked` and closed, its `message` saying so:
+  `The server <name> does not know this computer: it was removed from the
+  server's devices, or the server was restored from a snapshot taken before
+  this computer joined it. Fermix stopped reaching it.` Nothing waiting in the
+  outbox can be sent: the app says so rather than keeping it for later.
+
 ## One timeline with the phone
 
 The profile's timeline is the one the phone's mobile channel reads and writes:
@@ -484,9 +573,23 @@ same row. So a client keeps a cursor, the last `server_seq` it shows, and:
 claims `client_msg_id` before it answers `accepted`; a resend of the same
 request is answered `accepted` with `duplicate: true` and never runs the turn
 twice. The same `client_msg_id` with different content is refused with
-`error: client_message_conflict`. A request the daemon accepted but could not
-finish because it stopped is run again when it next starts, so `accepted` is
-the point after which the companion stops resending. Claims last 24 hours.
+`error: client_message_conflict`. `accepted` is the point after which the
+companion stops resending. Claims last 24 hours.
+
+After a restart the daemon never runs again a request that may already have
+run. One it accepted but never started runs when it comes back; one whose
+turn had started does not; and when its home moved to another host or was
+restored from a snapshot (its primary epoch changed), none it had not
+finished runs. A request still accepted from before the daemon recorded
+which boot claimed it (one waiting when the daemon was upgraded to this rule)
+counts as started: it is settled once, not run. Each that does not run ends,
+once, whether recovery or a resend reaches it first, with a `turn_error` of
+code `uncertain_after_restart` (`cancelled` when it carried a cancel) to every
+connection attached then. Its `client_msg_id` stays claimed: a resend under it
+is a `duplicate: true` that never runs, since a resend the user meant looks
+like a blind outbox retry, and after that `accepted` the connection that
+resent it alone is sent the same `turn_error` again. To run it again the
+companion sends it under a new `client_msg_id`, only when the user asks.
 
 History is recovered exactly: `history_pull(after_seq)` returns the rows after
 a cursor, oldest first, with `next_after_seq` (the last row returned, or the
@@ -539,6 +642,8 @@ daemon's turn queue:
   code), and nothing of its draft is kept;
 - the daemon lost the turn (its queue restarted under it): one `turn_error`
   with code `interrupted`;
+- the request may have run before the daemon restarted: one `turn_error`
+  with code `uncertain_after_restart` (see *Delivery and the outbox*);
 - the request could not be handed to the turn queue: one `turn_error` with
   code `turn_failed`.
 
@@ -649,15 +754,25 @@ it survives a restart.
 | `handshake_required`, `unexpected_client_hello` | — | closed |
 | `missing_protocol_version`, `invalid_protocol_version` | — | closed |
 | `unsupported_protocol_version` | `direction`, `client_version`, `min_version`, `max_version` | closed |
+| `stale_primary`, `primary_epoch_unavailable` | `message` | closed |
 | `max_clients_reached` | — | closed |
 | `unidentified_client` | `message` | closed |
+| `unattended_client` | `message` | closed |
+| `primary_unreachable` | `message` | closed |
+| `desktop_revoked` | `message` | closed |
 | `client_message_conflict` | `client_msg_id` | open |
 | `unsupported_profile` | `client_msg_id?` | open |
 | `request_backlog_full` | — | open |
 | `request_failed` | `message` (at most 512 bytes), `client_msg_id?`, `ref?` | open |
 
 `unknown_event` also refuses an event newer than the version the connection's
-`client_hello` declared. `ref` is set only on the `request_failed` that answers
+`client_hello` declared. `unattended_client`, `primary_unreachable` and
+`desktop_revoked` come only from a desktop whose home moved (see *After a
+move: the desktop's tunnel*), and `primary_unreachable` also from an engine whose home is moving
+away: while the move runs, a `msg`, `command`, `cancel` or `read_state` there
+is answered `primary_unreachable` with `Fermix is moving this home to <name>;
+your message is kept until it is done.` and the connection is closed; the app
+keeps its outbox and sends again once the engine is back. `ref` is set only on the `request_failed` that answers
 a `media_fetch`. A refused `proposal_answer` is a `request_failed` whose
 `message` is the daemon's sentence, with the answer's `client_msg_id`.
 

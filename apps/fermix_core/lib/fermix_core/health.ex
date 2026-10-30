@@ -6,6 +6,7 @@ defmodule FermixCore.Health do
 
   alias FermixCore.BuildInfo
   alias FermixCore.Config
+  alias FermixCore.Home.Role
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Store
   alias FermixCore.Providers.Descriptor
@@ -106,15 +107,22 @@ defmodule FermixCore.Health do
     # leave an out-of-process `config.toml` write invisible to `/health` and to
     # `overview.get` until the operator happened to save something.
     restart = Keyword.get_lazy(opts, :restart, &RestartState.restart/0)
+    # The engine role boot recorded (M75 D13): `:primary` or `:device`.
+    role = Keyword.get_lazy(opts, :engine_role, &Role.current/0)
 
-    channels = channel_statuses(boot_report.failures, process_resolver, transport_health)
+    channels =
+      boot_report.failures
+      |> channel_statuses(process_resolver, transport_health)
+      |> expected_on(role)
+
     memory = memory_status(process_resolver)
-    realtime = realtime_status(boot_report.failures, process_resolver)
+    realtime = boot_report.failures |> realtime_status(process_resolver) |> expected_on(role)
 
     %{
       status: overall_status(boot_report.status, channels, memory, realtime),
       app: "fermix",
       version: BuildInfo.product_version(),
+      role: role,
       timestamp: timestamp,
       failures: Map.get(boot_report, :failures, []),
       config_path: boot_report.config_path,
@@ -230,6 +238,15 @@ defmodule FermixCore.Health do
       provider when is_atom(provider) -> provider.poll_health()
     end
   end
+
+  # A device-role engine starts no channel transport and no realtime subtree
+  # (`FermixCore.Home.Role`), so an enabled one is expected to be absent there:
+  # reported as `:not_started`, which never makes the report degraded.
+  defp expected_on(channels, :device) when is_list(channels),
+    do: Enum.map(channels, &expected_on(&1, :device))
+
+  defp expected_on(%{enabled: true} = entry, :device), do: %{entry | status: :not_started}
+  defp expected_on(entries_or_entry, _role), do: entries_or_entry
 
   defp memory_status(process_resolver) do
     %{

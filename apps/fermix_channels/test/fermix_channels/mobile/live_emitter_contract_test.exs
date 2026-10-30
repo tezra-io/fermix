@@ -25,6 +25,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
   alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.SocketHandler
+  alias FermixCore.Home.Epoch
   alias FermixCore.Memory.Repo
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.WireSchema
@@ -61,6 +62,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
   end
 
   defmodule SettledCoordinator do
+    def epoch(_server), do: "boot-contract"
     def acquire(_server, _profile, _client_id, _opts), do: {:ok, {:completed, %{}}}
   end
 
@@ -542,6 +544,9 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
       identity_noise()
       |> Map.merge(%{
         phase: :await_hello,
+        # The widest epoch the daemon holds, so the hello_ack size cases below
+        # measure the largest hello_ack.
+        primary_epoch: Epoch.max_epoch(),
         authenticated_device: %{device_id: @device},
         device_registry: :registry,
         update_device: fn _store, @device, %{last_seen: %DateTime{}} ->
@@ -585,6 +590,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
       identity_noise()
       |> Map.merge(%{
         phase: :await_pair_decision,
+        primary_epoch: 1,
         pairing_session_id: "pair-session",
         client_seq: 1,
         negotiated_version: 2,

@@ -519,7 +519,64 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   test "the golden server_hello advertises the module's live window" do
     {min, max} = Protocol.supported_version_range()
     hello = @server_fixtures |> jsonl() |> Enum.find(&(&1["type"] == "server_hello"))
-    assert hello == %{"type" => "server_hello", "min_version" => min, "max_version" => max}
+
+    assert Map.drop(hello, ~w(primary_epoch role)) ==
+             %{"type" => "server_hello", "min_version" => min, "max_version" => max}
+  end
+
+  # M75 D14: both hellos carry the primary epoch, optional on each, with a
+  # golden of each and of the refusal of a client that has seen a higher one.
+  test "the schema and the goldens carry the primary epoch on both hellos", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    defs = schema["$defs"]
+    epoch = %{"type" => "integer", "minimum" => 1, "maximum" => 18_446_744_073_709_551_615}
+
+    for def <- ~w(client_hello server_hello) do
+      assert Map.take(defs[def]["properties"]["primary_epoch"], ~w(type minimum maximum)) ==
+               epoch,
+             def
+
+      refute "primary_epoch" in defs[def]["required"], def
+    end
+
+    client = jsonl(@client_fixtures)
+    server = jsonl(@server_fixtures)
+    assert Enum.any?(client, &(&1["type"] == "client_hello" and &1["primary_epoch"] > 0))
+    assert Enum.any?(server, &(&1["type"] == "server_hello" and &1["primary_epoch"] > 0))
+
+    stale = Enum.find(server, &(&1["reason"] == "stale_primary"))
+    assert stale["message"] =~ ~r/^This engine is at epoch \d+; you have seen epoch \d+: /
+
+    [_before, versioning] = String.split(protocol, "## Handshake state machine", parts: 2)
+    [handshake, _after] = String.split(versioning, "## Rollout", parts: 2)
+    assert handshake =~ "### Primary epoch"
+    assert handshake =~ "keeps the highest"
+    assert handshake =~ "`error: stale_primary`"
+  end
+
+  # M75: `server_hello.role` tells a desktop app whether the engine is the
+  # primary, whose epoch it compares, or a device-role engine, whose it never
+  # does; optional in the schema, since an older daemon sends none.
+  test "server_hello names the engine's role, and the documentation the client rule", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    server_hello = schema["$defs"]["server_hello"]
+    assert server_hello["properties"]["role"]["enum"] == ~w(primary device)
+    refute "role" in server_hello["required"]
+
+    hello = @server_fixtures |> jsonl() |> Enum.find(&(&1["type"] == "server_hello"))
+    assert hello["role"] in ~w(primary device)
+    assert schema_errors(Map.delete(hello, "role"), ref("serverEvent"), schema) == []
+    refute schema_errors(Map.put(hello, "role", "owner"), ref("serverEvent"), schema) == []
+
+    [_before, epoch] = String.split(protocol, "### Primary epoch", parts: 2)
+    [epoch, _after] = String.split(epoch, "## Rollout", parts: 2)
+    assert epoch =~ "`role`"
+    assert epoch =~ "from a `primary` only"
+    assert epoch =~ "treated as `primary`"
   end
 
   test "every golden client frame decodes against the live protocol" do

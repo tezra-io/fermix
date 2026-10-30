@@ -29,6 +29,11 @@ defmodule FermixCore.Application do
   alias FermixCore.Cues
   alias FermixCore.Cues.Supervisor, as: CuesSupervisor
   alias FermixCore.Harness.Supervisor, as: HarnessSupervisor
+  alias FermixCore.Home.Candidate
+  alias FermixCore.Home.Epoch
+  alias FermixCore.Home.Move
+  alias FermixCore.Home.Role
+  alias FermixCore.Home.Snapshot.Scheduler, as: SnapshotScheduler
   alias FermixCore.HostFacts
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
   alias FermixCore.Jobs.Scheduler, as: JobScheduler
@@ -157,18 +162,98 @@ defmodule FermixCore.Application do
   end
 
   defp start_supervision_tree do
+    # First, before anything writes to the home or opens `memory.db`: a home
+    # that moved refuses to open as the primary here, by name, and the boot
+    # fails (M75 step 1). Every later child list is filtered by this role.
+    :ok =
+      Role.remember!(ConfigStore.fermix_home(), Application.get_env(:fermix_core, :engine, []))
+
     :ok = HostFacts.remember()
     remember_launch_cwd()
-    :ok = ConfigStore.ensure_workspace()
-    :ok = BootstrapRename.run()
-    :ok = IdentityName.reconcile()
-    :ok = AuthStore.validate_permissions!()
+    :ok = prepare_home(ConfigStore.fermix_home(), Role.current())
     setup_file_logger()
     redact_default_logger()
     Trace.TelemetryHandler.attach()
     DecisionTelemetry.attach()
-    maybe_ensure_sidecar()
+    maybe_ensure_sidecar(Role.current())
 
+    opts = [strategy: :rest_for_one, name: FermixCore.Supervisor]
+
+    Supervisor.start_link(supervision_children(Egress.activate(), Role.current()), opts)
+  end
+
+  # What a boot writes into its home before any child starts. A candidate
+  # (M75 §2) writes nothing there: its home is where a move will rename a
+  # restored one into place, so it gets no workspace, no epoch, no prompt
+  # files and no token-file check. A primary first finishes a candidate's
+  # activation that a crash cut short after the restored settings were in place
+  # (`Candidate.finish_activation/1`), before anything reads the home. Then
+  # either role says the ending of a move the engine before this restart
+  # left half-said (`Move.finish_at_boot/2`): only the engine that came back
+  # publishes `done` or `aborted`.
+  defp prepare_home(_root, :candidate), do: :ok
+
+  defp prepare_home(root, role) do
+    :ok = finish_activation(root, role)
+    :ok = finish_move(root, role)
+    :ok = ConfigStore.ensure_workspace()
+    :ok = initialise_primary_epoch(root, role)
+    :ok = BootstrapRename.run()
+    :ok = IdentityName.reconcile()
+    AuthStore.validate_permissions!()
+  end
+
+  defp finish_activation(_root, :device), do: :ok
+
+  defp finish_activation(root, :primary) do
+    case Candidate.finish_activation(root) do
+      :ok -> :ok
+      {:error, reason} -> raise Candidate.error_sentence(reason)
+    end
+  end
+
+  # A failure here does not stop the boot, and is not dropped: the boot
+  # records that it left the ending unrecorded, and `home.status` tries the
+  # write again at each read and says the ending and why until it is written
+  # (`Move.view/3`); an unreadable phase file is named by the move worker
+  # (device) or the next `home.move.start` (primary). The log says so now.
+  defp finish_move(root, role) do
+    case Move.finish_at_boot(root, role) do
+      :ok -> :ok
+      {:error, reason} -> left_to_status(reason)
+    end
+  end
+
+  defp left_to_status(reason) do
+    Logger.error(
+      "move: the ending of a move could not be recorded at boot (#{inspect(reason)}); " <>
+        "home.status tries again at each read and says why until it is recorded"
+    )
+
+    Move.remember_unrecorded_ending()
+  end
+
+  # A primary home carries its epoch from its first boot (M75 D14): 1 when it
+  # has none, kept when it has one, refused by name when the file is invalid.
+  # It lands here, before the channels application starts the mobile subtree,
+  # so the phone identity's own epoch write never races it. A device-role boot
+  # mints nothing: its home is a retired copy or was never the primary.
+  defp initialise_primary_epoch(_root, :device), do: :ok
+
+  defp initialise_primary_epoch(root, :primary) do
+    case Epoch.initialise(root) do
+      {:ok, _state, _epoch} -> :ok
+      {:error, reason} -> raise Epoch.error_sentence(reason)
+    end
+  end
+
+  # The children this boot starts, in order, for the engine `role`:
+  # `Role.children/2` leaves a device's primary-only ones out. Public (@doc
+  # false) so tests read the real list for a role without booting a second tree.
+  @doc false
+  @spec supervision_children(Egress.t(), Role.role()) :: [Role.child()]
+  def supervision_children(%Egress{} = egress, role)
+      when role in [:primary, :device, :candidate] do
     children =
       [
         # First child (`:rest_for_one`): every process that can run an external
@@ -179,7 +264,7 @@ defmodule FermixCore.Application do
         # The OAuth loopback listeners open now (M75 D17), before anything
         # that runs a sign-in: a desktop's sign-in is forwarded from it.
         FermixCore.Auth.LoopbackRegistry,
-        finch_children(Egress.activate()),
+        finch_children(egress),
         {Trace, trace_opts()},
         TokenSupervisor,
         # The browser bridge listens on a socket the browser extension's pump
@@ -280,6 +365,10 @@ defmodule FermixCore.Application do
         maybe_computer_use_supervisor(),
         maybe_computer_history_supervisor(),
         maybe_skill_curation_scheduler(),
+        # The primary's snapshots (M75 §8), before the cue tree so a crash of
+        # either restarts nothing but the cue tree. Its timers stay dark under
+        # `mix test`; tests start their own with an injected clock and timer.
+        {SnapshotScheduler, timer_enabled: @compiled_env != :test},
         # Cue tree (M60 §5.3) LAST, and that order is load-bearing, as it is
         # for the temporal rail above: under `:rest_for_one` a crash of
         # `JobScheduler` or anything before it restarts the cue subsystem,
@@ -289,9 +378,7 @@ defmodule FermixCore.Application do
       ]
       |> List.flatten()
 
-    opts = [strategy: :rest_for_one, name: FermixCore.Supervisor]
-
-    Supervisor.start_link(children, opts)
+    Role.children(children, role)
   end
 
   # Shared outbound HTTP pool for `FermixCore.Net.HttpClient`. Finch's
@@ -540,7 +627,10 @@ defmodule FermixCore.Application do
   # upgrade transparently keeps those features working. The one binary is shared,
   # so EITHER computer-use or computer-history wanting it triggers the download.
   # Fail-soft and bounded; see `ComputerUse.ensure_sidecar_installed/1`.
-  defp maybe_ensure_sidecar do
+  # A candidate installs nothing: it is a fresh host waiting for a move.
+  defp maybe_ensure_sidecar(:candidate), do: :ok
+
+  defp maybe_ensure_sidecar(_role) do
     if daemon_boot?() do
       ComputerUse.ensure_sidecar_installed(
         wanted?: ComputerUse.enabled?() or ComputerHistory.operative?()

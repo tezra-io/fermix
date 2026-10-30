@@ -35,6 +35,7 @@ defmodule FermixChannels.Mobile.Iroh.EndToEndTest do
   alias FermixChannels.Mobile.Noise
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Rail
+  alias FermixTestSupport.PrimaryHome
   alias FermixTestSupport.SafeRm
 
   @moduletag :iroh_end_to_end
@@ -58,6 +59,7 @@ defmodule FermixChannels.Mobile.Iroh.EndToEndTest do
     SafeRm.mark!(root)
     on_exit(fn -> SafeRm.rm_rf!(root) end)
 
+    PrimaryHome.booted!(root)
     {:ok, identity} = Identity.ensure(root: root)
     revoked = start_supervised!({Agent, fn -> false end})
 
@@ -260,6 +262,7 @@ defmodule FermixChannels.Mobile.Iroh.EndToEndTest do
       end,
       update_device: fn _store, @device_id, _changes -> {:ok, %{device_id: @device_id}} end,
       profile_name: "Orbit",
+      primary_epoch: 1,
       history_head: fn "main" -> {:ok, 0} end,
       read_frontier: fn "main" -> {:ok, 0} end,
       pending_approvals: fn _profile -> [] end,

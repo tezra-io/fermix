@@ -2429,6 +2429,48 @@
       "field": "rows:filter_provider",
       "kind": "engine_only",
       "why": "M60 app surface gives cues their own settings section, cues, published on every build: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "(errors)",
+      "field": "primary_unreachable:primary,sentence",
+      "kind": "engine_only",
+      "why": "M75: after a move, a desktop's engine forwards every primary-class request to the primary, and answers one it cannot deliver with the error code primary_unreachable, details {primary, sentence}, primary omitted while its name is unknown. The draft predates the move, so its error catalog has no such code; the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(errors)",
+      "field": "device_class_method:method,sentence",
+      "kind": "engine_only",
+      "why": "M75: the primary refuses a device-class request a desktop forwarded (one that configures the desktop itself) with the error code device_class_method, details {method, sentence}. Only a desktop's engine ever receives it. The draft predates the move, so its error catalog has no such code."
+    },
+    {
+      "method": "(schema)",
+      "field": "error_codes:primary_unreachable",
+      "kind": "engine_only",
+      "why": "M75: after a move, a desktop's engine forwards every primary-class request to the primary, and answers one it cannot deliver with the error code primary_unreachable, details {primary, sentence}, primary omitted while its name is unknown. The draft predates the move, so its error catalog has no such code; the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "error_codes:device_class_method",
+      "kind": "engine_only",
+      "why": "M75: the primary refuses a device-class request a desktop forwarded (one that configures the desktop itself) with the error code device_class_method, details {method, sentence}. Only a desktop's engine ever receives it. The draft predates the move, so its error catalog has no such code."
+    },
+    {
+      "method": "settings.sections",
+      "field": "primary_missing",
+      "kind": "engine_only",
+      "why": "M75: on a linked desktop the section list composes this computer's own sections with the primary's, and this sentence says why the primary's part is missing while it cannot be reached; null on every other engine, so a client built against the draft reads the same list."
+    },
+    {
+      "method": "(errors)",
+      "field": "unconfirmed:method,primary,sentence",
+      "kind": "engine_only",
+      "why": "M75: a desktop that forwarded home.move.start and lost the primary's answer (its 60 s deadline passed, or the session ended as the primary restarted into the move) answers the error code unconfirmed, details {method, primary, sentence}, primary omitted while its name is unknown: the move may have started, so it is no failure and the client reads home.status. The draft predates the move, so its error catalog has no such code."
+    },
+    {
+      "method": "(schema)",
+      "field": "error_codes:unconfirmed",
+      "kind": "engine_only",
+      "why": "M75: the error code a desktop answers for a forwarded move start whose answer was lost, so it is never reported as a failure. The draft predates the move."
     }
   ]
 }

@@ -335,6 +335,150 @@ defmodule FermixWebWeb.SetupLiveTest do
     %{conn: authorize_setup(conn), tmp_home: tmp_home}
   end
 
+  # M75 D5: on a device-role engine the token file is a retired copy of the
+  # primary's, so every action on this page that reaches a provider, its session
+  # or its token is refused with the device sentence, where that action's result
+  # is shown, and writes nothing.
+  describe "on a device-role engine" do
+    @device_sentence "This engine runs in the device role; the primary is aws i-0f3b1c."
+
+    # Any provider listing reached past the gate fails the case.
+    defmodule UnreachableListing do
+      def live?(_provider), do: true
+      def live_models(_provider, _opts), do: raise("a device lists no provider's models")
+    end
+
+    setup do
+      test_pid = self()
+      engine_role = Application.fetch_env(:fermix_web, :engine_role)
+      on_exit(fn -> restore_env(:fermix_web, :engine_role, engine_role) end)
+
+      Application.put_env(:fermix_web, :engine_role, fn ->
+        %{role: :device, primary: "aws i-0f3b1c"}
+      end)
+
+      reached = fn name ->
+        fn _args -> send(test_pid, {:reached, name}) && {:error, :reached} end
+      end
+
+      Application.put_env(:fermix_web, :xai_login_runner, reached.(:xai_login))
+      Application.put_env(:fermix_web, :chatgpt_login_runner, reached.(:chatgpt_login))
+      Application.put_env(:fermix_web, :chatgpt_logout_runner, reached.(:chatgpt_logout))
+
+      Application.put_env(:fermix_web, :plugin_auth_runner, fn name, _opts ->
+        send(test_pid, {:reached, {:plugin_auth, name}})
+        {:error, :reached}
+      end)
+
+      Application.put_env(:fermix_web, :meetbot_signin_runner, fn ->
+        send(test_pid, {:reached, :meetbot_signin})
+        {:error, :cancelled}
+      end)
+
+      :ok
+    end
+
+    defp auth_file, do: Path.join(System.get_env("FERMIX_HOME"), "auth.json")
+
+    for event <- ~w(xai_login chatgpt_login chatgpt_logout) do
+      @event event
+
+      test "#{event} is refused with the device sentence and reaches nothing", %{conn: conn} do
+        {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+        assert render_click(view, @event, %{}) =~ escaped(@device_sentence)
+        refute_received {:reached, _what}
+        refute File.exists?(auth_file())
+      end
+    end
+
+    # The Anthropic pane offers its sign-in once Anthropic is configured.
+    defp configure_anthropic do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant", primary: true, default_model: "claude-opus-4-8"]
+      )
+
+      :ok = ConfigStore.save_snapshot(ConfigStore.current_snapshot())
+    end
+
+    test "a Claude Code import is refused and stores nothing", %{conn: conn} do
+      configure_anthropic()
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      assert render_click(view, "anthropic_import", %{}) =~ escaped(@device_sentence)
+      refute File.exists?(auth_file())
+    end
+
+    test "a pasted Anthropic setup token is refused before it is stored", %{conn: conn} do
+      configure_anthropic()
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      html =
+        render_submit(view, "save_provider", %{
+          "provider_form" => %{
+            "provider" => "anthropic",
+            "auth_mode" => "oauth",
+            "anthropic_setup_token" => "sk-ant-oat01-invented"
+          }
+        })
+
+      assert html =~ escaped(@device_sentence)
+      refute File.exists?(auth_file())
+    end
+
+    test "a plugin's sign-in is refused and its runner never starts", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?tab=plugins")
+
+      assert render_click(view, "plugin_connect", %{"name" => "google_calendar"}) =~
+               escaped(@device_sentence)
+
+      refute_received {:reached, _what}
+    end
+
+    test "a plugin's sign-out is refused and its grant stays", %{conn: conn} do
+      Application.put_env(:fermix_core, :plugins, enabled: ["google_calendar"])
+      :ok = write_plugin_grant("google_calendar", "ready")
+      before = File.read!(auth_file())
+      {:ok, view, _html} = live(conn, "/setup?tab=plugins")
+
+      assert render_click(view, "plugin_disconnect", %{"name" => "google_calendar"}) =~
+               escaped(@device_sentence)
+
+      assert File.read!(auth_file()) == before
+    end
+
+    test "the notetaker's sign-in is refused and its browser never opens", %{conn: conn} do
+      install_dev_local_meetbot(System.get_env("FERMIX_HOME"))
+      {:ok, view, _html} = live(conn, "/setup?tab=plugins")
+      render_click(view, "open_meetings_config", %{})
+
+      assert render_click(view, "meetbot_signin", %{}) =~ escaped(@device_sentence)
+
+      refute_received {:reached, _what}
+    end
+
+    test "the doctor's provider probe shows the refusal in its own row", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?tab=doctor")
+
+      render_click(view, "run_doctor", %{})
+      assert render_until(view, escaped(@device_sentence)) =~ "Provider probe"
+    end
+
+    # The listing would raise if it were reached; the provider pane shows the
+    # refusal where the list would be.
+    test "a provider's live model list is never called", %{conn: conn} do
+      Application.put_env(:fermix_web, :model_listing_impl, UnreachableListing)
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      html =
+        render_change(view, "provider_changed", %{
+          "provider_form" => %{"provider" => "openrouter"}
+        })
+
+      assert html =~ escaped(@device_sentence)
+    end
+  end
+
   describe "/setup embed presentation" do
     # `?embed=1` is the macOS app's in-app dress: same LiveView, native read.
     # The rail is label-only (the app chrome owns identity, theme, and origin),

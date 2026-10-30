@@ -821,6 +821,11 @@ defmodule FermixChannels.Gateway.Queue do
   defp checkout_error_reply({:checkout_unavailable, _reason}),
     do: {"I'm restarting — please send your message again in a moment.", true}
 
+  # A device-role engine refuses every turn by name (`FermixCore.Home.Role`),
+  # and its sentence is what the channel tells the person.
+  defp checkout_error_reply({:device_role, sentence}) when is_binary(sentence),
+    do: {sentence, false}
+
   defp checkout_error_reply(_reason),
     do: {"Sorry, I encountered an error processing your message.", false}
 

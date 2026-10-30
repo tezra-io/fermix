@@ -19,6 +19,12 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.ProposalView
+  alias FermixCore.Home.Move, as: HomeMove
+  alias FermixCore.Home.MoveReadiness
+  alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
+  alias FermixCore.Home.Snapshot.Run, as: SnapshotRun
+  alias FermixCore.Home.Snapshot.S3, as: SnapshotS3
+  alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Cues, as: ManagementCues
   alias FermixCore.Management.Cues.MandateRow, as: CueMandateRow
@@ -498,6 +504,158 @@ defmodule FermixCore.Management.CopyTest do
       for row <- cue_proposal_rows() do
         record = ProposalView.record(row)
         assert_clean(record.status_sentence, :prose, [row.tool], "proposal #{row.state}")
+      end
+    end
+  end
+
+  # The snapshot sentences `home.status` and `home.snapshots.*` publish are
+  # written in `Home.Snapshot`, outside the management tree the sweep below
+  # reads, so each producer is walked here with every state it can answer.
+  describe "the snapshot copy" do
+    test "every status sentence obeys the rules" do
+      recipient = SnapshotRecipient.encode(SnapshotRecipient.generate())
+      on = [recipient: recipient, s3_bucket: "invented-bucket"]
+
+      verified = %{
+        at: ~U[2026-10-27 09:30:00Z],
+        result: :verified,
+        name: "n",
+        epoch: 4,
+        size: 1,
+        sha256: "s",
+        location: "s3://invented-bucket/n",
+        error: nil
+      }
+
+      failed = %{
+        verified
+        | result: :failed,
+          error: SnapshotS3.sentence({:unreachable, "timeout"})
+      }
+
+      stored = SnapshotStatus.record(SnapshotStatus.empty(), "s3", verified)
+
+      for {status, config, running} <- [
+            {SnapshotStatus.empty(), [], false},
+            {SnapshotStatus.empty(), [recipient: recipient], false},
+            {SnapshotStatus.empty(), on, false},
+            {%{SnapshotStatus.empty() | next_run_at: ~U[2026-10-27 09:35:00Z]}, on, false},
+            {stored, on, false},
+            {SnapshotStatus.record(stored, "s3", failed), on, false},
+            {stored, on, true}
+          ] do
+        view =
+          SnapshotStatus.view(status, %{
+            config: config,
+            targets: [SnapshotS3],
+            running: running,
+            profile: "general"
+          })
+
+        assert_clean(view["sentence"], :prose, [], "snapshot status")
+        refute_command(view["sentence"], "snapshot status")
+      end
+    end
+
+    test "every target and capture failure sentence obeys the rules" do
+      target_reasons = [
+        {:too_large, 6_000_000_000, 5_368_709_120},
+        {:refused, 403, "AccessDenied", "Access Denied"},
+        {:unreachable, "connection refused"},
+        {:checksum_mismatch, "x"},
+        {:keys_missing, :snapshot_s3_access_key_id},
+        {:secret_unreadable, :snapshot_s3_secret_access_key, :missing_secret}
+      ]
+
+      capture_reasons = [
+        {:home_moved, %{to: "invented host"}},
+        :epoch_absent,
+        {:changed_during_capture, "journals/today.md"},
+        {:vacuum, "database is locked"},
+        {:too_many_files, 100_001, 100_000},
+        {:insufficient_space, 21_474_836_480, 1_073_741_824},
+        {:free_space_unknown, :df_unavailable}
+      ]
+
+      # S3's own code and message are its words, declared as data.
+      vendor = ["AccessDenied", "Access Denied"]
+
+      for reason <- target_reasons,
+          do: assert_clean(SnapshotS3.sentence(reason), :prose, vendor, "S3 failure")
+
+      for reason <- capture_reasons do
+        assert_clean(SnapshotRun.capture_sentence(reason), :prose, [], "capture failure")
+        refute_command(SnapshotRun.capture_sentence(reason), "capture failure")
+      end
+    end
+  end
+
+  # The move sentences `home.status` and `home.move.start` publish are written
+  # in `Home.Move`, outside the management tree the sweep below reads, so each
+  # phase and each refusal that reaches the wire is walked here.
+  describe "the move copy" do
+    test "every phase sentence and every move refusal obeys the rules" do
+      for phase <- HomeMove.phases() do
+        assert_clean(HomeMove.sentence(phase, "north-box"), :prose, [], "move #{phase}")
+      end
+
+      refusals = [
+        {:not_primary, :device},
+        {:not_primary, :candidate},
+        {:move_pending, "streaming"},
+        :epoch_absent,
+        {:unknown_candidate, "cand-5e2a9c1f7b3d4086"},
+        :passphrase_too_short,
+        {:not_ready, ["This home is about 4 GiB; the move needs about 9 GiB free."]}
+      ]
+
+      for reason <- refusals,
+          do: assert_clean(HomeMove.error_sentence(reason), :prose, [], "move refusal")
+    end
+
+    # The readiness report's every item, in each status it can take: an
+    # unreadable keychain value, an older server, a full disk, a home over
+    # one S3 upload, plugins built for this Mac, and the warnings always said.
+    test "every readiness sentence obeys the rules" do
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("copy_readiness")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      profile = "copy-#{System.unique_integer([:positive])}"
+
+      File.write!(Path.join(home, "config.toml"), """
+      [fermix_core]
+      profile = "#{profile}"
+
+      [fermix_core.providers.anthropic]
+      api_key = "@keyring"
+      """)
+
+      File.mkdir_p!(Path.join(home, "plugins"))
+      File.write!(Path.join(home, "plugins/installed.json"), ~s({"invented-notes": {}}))
+
+      candidate = %{
+        name: "north-box",
+        os: "linux",
+        arch: "aarch64",
+        version: "0.9.0",
+        snapshots: %{"s3_bucket" => "invented-bucket", "s3_region" => "eu-central-1"}
+      }
+
+      for {free, version, bytes} <- [
+            {1_000, "0.16.0", 6_442_450_944},
+            {1_099_511_627_776, "0.9.0", 10}
+          ] do
+        report =
+          MoveReadiness.report(home, candidate,
+            free_bytes: fn _dir -> {:ok, free} end,
+            version: version,
+            host: "macos-aarch64",
+            home_bytes: bytes
+          )
+
+        for item <- report.items do
+          assert_clean(item.sentence, :prose, ["anthropic_api_key", "invented-notes"], item.id)
+          refute_command(item.sentence, item.id)
+        end
       end
     end
   end

@@ -6,6 +6,13 @@ defmodule FermixWebWeb.WebhookController do
   alias FermixChannels.Channels.Slack
   alias FermixChannels.Channels.WhatsApp
   alias FermixChannels.Gateway.WebhookIngress
+  alias FermixCore.Home.Role
+
+  # Every webhook route, before any verification or hand-off: a device-role
+  # engine (`FermixCore.Home.Role`) takes no channel message, so it answers 503
+  # and hands nothing to a channel, where a refusal reply would be posted into
+  # the conversation (M75 D13).
+  plug :admit_engine_role
 
   @auth_errors [
     :invalid_signature,
@@ -54,6 +61,25 @@ defmodule FermixWebWeb.WebhookController do
     else
       {:error, reason} ->
         webhook_error_response(conn, "Slack webhook", reason)
+    end
+  end
+
+  # `:fermix_engine_role` in the conn's private map stands in for the role this
+  # boot recorded (tests).
+  defp admit_engine_role(conn, _opts) do
+    record = Map.get_lazy(conn.private, :fermix_engine_role, &Role.recorded/0)
+
+    case Role.admit(record) do
+      :ok ->
+        conn
+
+      {:error, {:device_role, sentence}} ->
+        Logger.warning("#{conn.method} #{conn.request_path} refused: #{sentence}")
+
+        conn
+        |> put_status(503)
+        |> json(%{error: "This engine runs in the device role"})
+        |> halt()
     end
   end
 

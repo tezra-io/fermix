@@ -114,6 +114,22 @@ defmodule FermixCore.Trace.TelemetryHandler do
       agent_field: :op,
       trace_event: "plugin_dist"
     },
+    # A home snapshot run's outcome per target (M75 §8): sessionless, like a
+    # plugin distribution op, so the target is the row's agent.
+    %{
+      event: [:fermix, :home, :snapshot],
+      trace_type: :agent_event,
+      agent_field: :target,
+      trace_event: "home_snapshot"
+    },
+    # A move's lifecycle bookends on each side (M75 §7.2): sessionless, so the
+    # side (source or candidate) is the row's agent; the move id correlates.
+    %{
+      event: [:fermix, :home, :move],
+      trace_type: :agent_event,
+      agent_field: :side,
+      trace_event: "home_move"
+    },
     # Tool-search bridge queries (M10): the search-miss rate (match_count == 0)
     # is the primary soak-health metric for tool-schema deferral.
     %{

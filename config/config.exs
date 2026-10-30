@@ -134,6 +134,18 @@ config :fermix_core,
        :harness_continuation_dispatcher,
        FermixChannels.Harness.ContinuationDispatcher
 
+# The rail-side half of the home (M75): forwarding a desktop's management calls
+# to its primary, the rail's facts for `home.status`, the enrollment window.
+# Injected by module for the same reason as the dispatcher above
+# (`FermixCore.Home.Link`).
+config :fermix_core, :home_link, FermixChannels.Home.Link
+
+# Where the primary keeps snapshots beyond S3 (M75 §8, D19): its connected
+# desktops, over the rail. Injected by module for the same reason as the
+# dispatcher above; the scheduler writes to `Snapshot.S3` and then these
+# (`FermixCore.Home.Snapshot.Scheduler.targets/0`).
+config :fermix_core, :snapshot_targets, [FermixChannels.Desktop.SnapshotTarget]
+
 config :fermix_core, :prompt_bootstrap,
   bootstrap_dir: Path.expand("~/.fermix/bootstrap"),
   accounting_enabled: true

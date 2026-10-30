@@ -10,7 +10,10 @@ defmodule FermixChannels.Mobile.TlsTransportTest do
   alias FermixChannels.Mobile.TlsTransport
 
   setup do
-    root = FermixTestSupport.SafeRm.make_tmp_dir!("mobile-tls-transport")
+    root =
+      FermixTestSupport.SafeRm.make_tmp_dir!("mobile-tls-transport")
+      |> FermixTestSupport.PrimaryHome.booted!()
+
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
     assert {:ok, identity} = Identity.ensure(root: root)
 

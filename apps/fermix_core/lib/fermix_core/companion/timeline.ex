@@ -209,6 +209,12 @@ defmodule FermixCore.Companion.Timeline do
     Repo.get_mobile_read_frontier(profile_selector(profile_id, opts), repo_opts(opts))
   end
 
+  @doc """
+  Claim `client_msg_id` for 24 hours before anything runs. The claim records
+  the boot that holds it, `:runner_epoch` (required): only that boot ever
+  starts it (`start_client_request/4`). A resend of the same request is a
+  `:duplicate` and changes nothing, the boot that holds it included.
+  """
   @spec claim_client_request(String.t(), String.t(), String.t(), term(), keyword()) ::
           {:ok, {:claimed | :duplicate | :conflict, Repo.mobile_client_request_row()}}
           | {:error, term()}
@@ -217,6 +223,7 @@ defmodule FermixCore.Companion.Timeline do
     claimed_at = now(opts)
 
     with {:ok, claimant} <- claimant(opts),
+         {:ok, runner_epoch} <- required_option(opts, :runner_epoch),
          {:ok, payload_digest} <- CanonicalJson.digest(payload) do
       Repo.claim_mobile_client_request(
         profile_selector(profile_id, opts),
@@ -225,6 +232,7 @@ defmodule FermixCore.Companion.Timeline do
           request_type: request_type,
           payload: payload,
           payload_digest: payload_digest,
+          runner_epoch: runner_epoch,
           claimed_at: claimed_at,
           expires_at: DateTime.add(claimed_at, @request_ttl_seconds, :second)
         }),
@@ -279,8 +287,31 @@ defmodule FermixCore.Companion.Timeline do
     )
   end
 
+  @doc """
+  Start the next attempt of a request under this boot's `runner_epoch`.
+
+  A request that never started a turn has had no effect, so it starts
+  whichever boot of this engine claimed it, and one this boot ran whose runner
+  died (`abandon_client_request/4`) starts again. A turn another boot started
+  (a request running there, or released after its turn began), and a request
+  that names no boot of this engine (written before claims recorded one, or
+  released by a move or a restore, `record_boot_primary_epoch/2`), may have
+  run in part or in full, so it is never started: it is settled once,
+  `:settled_cancelled` (status `failed`) when it carried a cancel and
+  `:settled_uncertain` otherwise, recording the word `uncertain_after_restart`;
+  every start after that answers its status. Its claim stays, so a resend of
+  its id is a duplicate that never runs. `:active` is a request already
+  running under this boot; a `:completed` or `:failed` one ended.
+  """
   @spec start_client_request(String.t(), String.t(), String.t(), keyword()) ::
-          {:ok, {:started | :active | :completed | :failed, Repo.mobile_client_request_row()}}
+          {:ok,
+           {:started
+            | :active
+            | :completed
+            | :failed
+            | :uncertain
+            | :settled_uncertain
+            | :settled_cancelled, Repo.mobile_client_request_row()}}
           | {:error, term()}
   def start_client_request(profile_id, client_msg_id, runner_epoch, opts \\ [])
       when is_binary(profile_id) and is_binary(client_msg_id) and is_binary(runner_epoch) do
@@ -295,7 +326,12 @@ defmodule FermixCore.Companion.Timeline do
     end
   end
 
-  @doc "Requests the named `:transport` claimed that a boot must recover."
+  @doc """
+  Requests the named `:transport` claimed that a boot must recover: every one
+  still accepted, and every one running under another boot. Recovery starts
+  each (`start_client_request/4`), which runs the ones that may not have run
+  and settles the rest.
+  """
   @spec recoverable_client_requests(String.t(), keyword()) ::
           {:ok, [Repo.mobile_client_request_row()]} | {:error, term()}
   def recoverable_client_requests(runner_epoch, opts \\ []) when is_binary(runner_epoch) do
@@ -308,6 +344,30 @@ defmodule FermixCore.Companion.Timeline do
         Map.put(owner_selector(opts), :transport, transport),
         runner_epoch,
         limit,
+        now(opts),
+        repo_opts(opts)
+      )
+    end
+  end
+
+  @doc """
+  Record the primary epoch the named `:transport`'s requests boot at, against
+  the one its last boot recorded (M75). The epoch counts the engines this home
+  has been: it rises on a move to another host and on a restore from a
+  snapshot. A different one is another engine, so every request of the
+  transport still accepted or running is released from its boot in the same
+  transaction (`{:moved, previous, released}`), and its next start settles it.
+  The first epoch recorded releases nothing (`:recorded`).
+  """
+  @spec record_boot_primary_epoch(pos_integer(), keyword()) ::
+          {:ok, :recorded | :unchanged | {:moved, pos_integer(), non_neg_integer()}}
+          | {:error, term()}
+  def record_boot_primary_epoch(primary_epoch, opts \\ []) when is_list(opts) do
+    with :ok <- validate_primary_epoch(primary_epoch),
+         {:ok, transport} <- transport_option(opts) do
+      Repo.record_mobile_boot_primary_epoch(
+        Map.put(owner_selector(opts), :transport, transport),
+        primary_epoch,
         now(opts),
         repo_opts(opts)
       )
@@ -390,9 +450,10 @@ defmodule FermixCore.Companion.Timeline do
   @doc """
   Release a running attempt whose runner died without settling it.
 
-  Returns the claim to `accepted` so a resend or the next boot's recovery scan
-  starts the next attempt, instead of a wedged `running` row that answers every
-  resend as an already-running duplicate.
+  Returns the claim to `accepted`, still held by this boot, so a resend or
+  this boot's recovery scan starts the next attempt, instead of a wedged
+  `running` row that answers every resend as an already-running duplicate.
+  Another boot settles it `uncertain` instead.
   """
   @spec abandon_client_request(String.t(), String.t(), non_neg_integer(), keyword()) ::
           {:ok, Repo.mobile_client_request_row()} | {:error, term()}
@@ -572,6 +633,9 @@ defmodule FermixCore.Companion.Timeline do
        do: :ok
 
   defp validate_recovery_limit(value), do: {:error, {:invalid_recovery_limit, value}}
+
+  defp validate_primary_epoch(value) when is_integer(value) and value > 0, do: :ok
+  defp validate_primary_epoch(value), do: {:error, {:invalid_field, :primary_epoch, value}}
 
   defp validate_attempt(value) when is_integer(value) and value >= 0, do: :ok
   defp validate_attempt(value), do: {:error, {:invalid_attempt, value}}

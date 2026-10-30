@@ -1077,6 +1077,54 @@ bookends. The call's row written after the gist, and the boot pass that
 writes a row a dead daemon left owed (failing its pending gist), emit nothing
 of their own: the row is a companion write, logged on failure.
 
+## Home snapshots (a sessionless point per target)
+
+A snapshot run (M75 §8) is not a run kind: it calls no model and starts no
+agent session. Its outcome is one point event per target,
+`[:fermix, :home, :snapshot]`, through
+`FermixCore.Home.Snapshot.Telemetry.emit/4` — never hand-rolled.
+Measurements: `duration_ms` (the whole run, capture included) and `bytes`
+(the encrypted snapshot, 0 when the capture failed). Metadata, a fixed
+allowlist: `target` (`s3`, `desktop`), `result` (`verified`, `failed`, or
+`waiting` for a target that takes it at a later run, such as a sleeping
+desktop), `epoch` (nil when the capture failed) and a derived `error_class`
+(the reason's atom, or a tagged tuple's atom head, else `unclassified`; nil
+when verified). The reason
+never rides: a storage service's answer can carry anything, and the
+snapshot status file (`snapshots/status.json`) holds the sentence, with the
+service's own words, that the owner reads. `Trace.TelemetryHandler` records
+it as a `home_snapshot` `agent_event` row keyed on the target; the Opik
+exporter does not subscribe (no session to nest under), as for the channel
+points below.
+
+## Home moves (sessionless lifecycle bookends per side)
+
+A move of a home to a candidate primary (M75 §7.2) is not a run kind either:
+the owner starts it, no model is called and no agent session exists. Each
+side brackets its own part with `[:fermix, :home, :move]`, through
+`FermixCore.Home.MoveTelemetry.started/3` and `finished/5` — never
+hand-rolled. The source (`FermixChannels.Home.MoveWorker`) emits `:started`
+when its worker first runs a move (phase `requested`) and `:finished` when
+the move is `done` or aborted; the candidate (`FermixChannels.Home.Candidate`)
+emits `:started` at the move's offer and `:finished` when it activates, or
+when the stream it received could not be restored. Measurements:
+`duration_ms` (0 on `:started`; on `:finished`, since that side's own start in
+this boot). Metadata, a fixed allowlist: `phase` (`:started`, `:finished`),
+`side` (`:source`, `:candidate`), `move_id` (the id both sides share, which
+correlates them), `epoch` (the epoch the source left on `:started`, the epoch
+the move reached on a `:done` finish, else nil), `result` (`:done`,
+`:aborted`, `:failed` on `:finished`, nil on `:started`) and a derived
+`error_class` (the reason's atom or a tagged tuple's atom head, else
+`:unclassified`; nil unless aborted or failed). The reason never rides: the
+phase files (`.move/phase.json`, `candidate/state.json`) hold the sentence
+that says why. `Trace.TelemetryHandler` records each as a `home_move`
+`agent_event` row keyed on the side; the Opik exporter does not subscribe
+(no session to nest under), as for snapshots and the channel points below.
+
+The sign-in loopback forward (M75 D17) adds no event: the sign-in it serves is
+the `auth` management job it always was, and a port the desktop could not open
+is that job's failure sentence.
+
 ## Sessionless channel points (pairing, push, render, transport posture)
 
 Pairing decisions and push deliveries are **point events with no agent
@@ -1160,6 +1208,22 @@ per retry and never for Slack's routine refresh of a healthy connection.
 `error_class` is `auth` (Slack's own code, such as `invalid_auth`, is in the
 posture `/health` and Doctor show, never in the event), `http_status`,
 `network`, `socket`, `remote_closed`, `timeout` or `not_configured`.
+A moved desktop's link to its primary (M75 §6) is another:
+`emit_transport(:desktop_relay, :degraded | :recovered, …)` fires when the
+relay's session first fails (the dial, the handshake, a stale primary, or the
+session ending) and when a `hello_ack` arrives after that, never per retry;
+`consecutive_failures` counts the attempts since the last session. A session
+the primary ends normally (`1000`) is renewed without either event: it is no
+outage. Only once in a row: a renewed session the primary ends normally again
+within a minute of opening is `degraded` with `renewed_again`, redialed with
+the backoff, and `recovered` at the next `hello_ack`. A revocation (`4003`)
+is `degraded` with `revoked`, and no
+`recovered` follows until the engine restarts, since the relay stops dialing.
+`error_class` is `timeout`, `unreachable`, `refused`, `busy`, `helper`,
+`revoked`, `remote_closed`, `remote_ended`, `idle`, `lifetime`,
+`stale_primary`, `renewed_again`, `handshake`, `protocol` or `socket`. The calls and lines it
+carries emit nothing of their own on the desktop: the primary's management
+and companion paths emit as for a local request.
 
 ## Inbound attachments (a pre-turn point per attachment)
 

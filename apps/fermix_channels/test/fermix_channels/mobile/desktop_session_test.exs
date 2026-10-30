@@ -292,6 +292,7 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
     [
       peer: {127, 0, 0, 1},
       gateway_keypair: ctx.gateway,
+      primary_epoch: 4,
       device_store: :store,
       device_registry: ctx.registry,
       desktop_peers: ctx.peers,
@@ -325,6 +326,7 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
         [
           peer: {127, 0, 0, 1},
           gateway_keypair: ctx.gateway,
+          primary_epoch: 4,
           device_store: :store,
           device_registry: ctx.registry,
           desktop_peers: ctx.peers,
@@ -386,7 +388,8 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
       "candidates" => [],
       "history_head_seq" => 0,
       "read_up_to_seq" => 0,
-      "caps" => %{"commands" => [], "max_media_bytes" => 20_971_520}
+      "caps" => %{"commands" => [], "max_media_bytes" => 20_971_520},
+      "primary_epoch" => 4
     }
   end
 end

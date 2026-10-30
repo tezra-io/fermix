@@ -478,6 +478,49 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     end
   end
 
+  # M75 D14: the daemon announces its primary epoch on hello_ack and
+  # pair_approved, and a phone names the highest it has seen on hello. Each is
+  # optional in the schema, since a daemon or a phone older than the epoch
+  # sends none, while this daemon's own codec requires its two.
+  test "the schema publishes the primary epoch on both handshakes", %{schema: schema} do
+    defs = schema["$defs"]
+    epoch = %{"type" => "integer", "minimum" => 1, "maximum" => 18_446_744_073_709_551_615}
+
+    for def <- ~w(hello hello_ack pair_approved) do
+      assert Map.take(defs[def]["properties"]["primary_epoch"], ~w(type minimum maximum)) ==
+               epoch,
+             def
+
+      refute "primary_epoch" in defs[def]["required"], def
+    end
+
+    for type <- ~w(hello_ack pair_approved) do
+      goldens = Enum.filter(server_headers(), &(&1["t"] == type))
+      assert goldens != [] and Enum.all?(goldens, &is_integer(&1["primary_epoch"])), type
+      [golden | _rest] = goldens
+      assert server_errors(Map.delete(golden, "primary_epoch"), schema) == []
+      refute server_errors(Map.put(golden, "primary_epoch", 0), schema) == []
+    end
+
+    assert Enum.any?(client_headers(), &(&1["t"] == "hello" and &1["primary_epoch"] > 0))
+
+    stale = Enum.find(server_headers(), &(&1["t"] == "error" and &1["code"] == "stale_primary"))
+    assert stale["message"] =~ ~r/^This engine is at epoch \d+; you have seen epoch \d+: /
+  end
+
+  test "documentation tells a phone what to do with the primary epoch", %{protocol: protocol} do
+    [_before, negotiation] = String.split(protocol, "## Envelope, ordering", parts: 2)
+    [negotiation, _after] = String.split(negotiation, "## Client events", parts: 2)
+    assert negotiation =~ "### Primary epoch"
+    assert negotiation =~ "keeps the highest"
+    assert negotiation =~ "stale primary"
+    assert negotiation =~ "re-pair"
+
+    [_before, errors] = String.split(protocol, "## Errors", parts: 2)
+    [table, _after] = String.split(errors, "## Close codes", parts: 2)
+    assert table =~ "| `stale_primary` |"
+  end
+
   test "the schema refuses a relay list revision that is not 16 hex digits", %{schema: schema} do
     [hello] = Enum.filter(client_headers(), &Map.has_key?(&1, "relay_list_rev"))
 

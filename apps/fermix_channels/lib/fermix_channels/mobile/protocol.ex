@@ -86,7 +86,8 @@ defmodule FermixChannels.Mobile.Protocol do
 
   @server_required %{
     "hello_ack" =>
-      ~w(session_id min_version max_version profiles candidates history_head_seq read_up_to_seq caps),
+      ~w(session_id min_version max_version profiles candidates history_head_seq read_up_to_seq caps
+         primary_epoch),
     "attach_status" => ~w(attach_id status),
     "turn_done" => ~w(turn_id),
     "media_begin" => ~w(ref server_seq kind mime size_bytes sha256),
@@ -97,7 +98,7 @@ defmodule FermixChannels.Mobile.Protocol do
     "history_page" => ~w(profile_id messages next_after_seq history_head_seq),
     "request_status_page" => ~w(requests),
     "notice" => ~w(kind text),
-    "pair_approved" => ~w(device_id candidates profiles push_salt),
+    "pair_approved" => ~w(device_id candidates profiles push_salt primary_epoch),
     "pair_denied" => ~w(reason),
     "error" => ~w(code message),
     "pong" => [],
@@ -589,7 +590,8 @@ defmodule FermixChannels.Mobile.Protocol do
     with :ok <- nonempty(payload, "device_id"),
          :ok <- nonempty(payload, "app_version"),
          :ok <- nonnegative_u64(payload, "last_server_seq"),
-         :ok <- positive_integer(payload, "protocol_v") do
+         :ok <- positive_integer(payload, "protocol_v"),
+         :ok <- optional_positive_u64(payload, "primary_epoch") do
       optional_relay_list_rev(payload)
     end
   end
@@ -756,7 +758,8 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- list_field(payload, "candidates"),
          :ok <- nonnegative_u64(payload, "history_head_seq"),
          :ok <- nonnegative_u64(payload, "read_up_to_seq"),
-         :ok <- map_field(payload, "caps") do
+         :ok <- map_field(payload, "caps"),
+         :ok <- positive_u64(payload, "primary_epoch") do
       optional_push_services(payload["caps"], "caps.push")
     end
   end
@@ -858,7 +861,8 @@ defmodule FermixChannels.Mobile.Protocol do
     with :ok <- nonempty(payload, "device_id"),
          :ok <- list_field(payload, "candidates"),
          :ok <- list_field(payload, "profiles"),
-         :ok <- base64_bytes(payload, "push_salt", 32) do
+         :ok <- base64_bytes(payload, "push_salt", 32),
+         :ok <- positive_u64(payload, "primary_epoch") do
       optional_push_services(payload, "push")
     end
   end

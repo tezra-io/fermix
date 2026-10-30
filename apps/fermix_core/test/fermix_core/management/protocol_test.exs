@@ -168,7 +168,10 @@ defmodule FermixCore.Management.ProtocolTest do
              "unknown_job",
              "external_change",
              "config_unreadable",
-             "unknown_pairing_session"
+             "unknown_pairing_session",
+             "primary_unreachable",
+             "device_class_method",
+             "unconfirmed"
            ]
   end
 

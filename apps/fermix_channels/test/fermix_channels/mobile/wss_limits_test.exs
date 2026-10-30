@@ -61,7 +61,10 @@ defmodule FermixChannels.Mobile.WssLimitsTest do
   end
 
   setup do
-    root = FermixTestSupport.SafeRm.make_tmp_dir!("mobile-wss-limits")
+    root =
+      FermixTestSupport.SafeRm.make_tmp_dir!("mobile-wss-limits")
+      |> FermixTestSupport.PrimaryHome.booted!()
+
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
     assert {:ok, _identity} = Identity.ensure(root: root)
 

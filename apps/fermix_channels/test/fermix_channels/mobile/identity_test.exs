@@ -2,11 +2,13 @@ defmodule FermixChannels.Mobile.IdentityTest do
   use ExUnit.Case, async: true
 
   alias FermixChannels.Mobile.Identity
+  alias FermixCore.Home.Epoch
+  alias FermixTestSupport.PrimaryHome
 
   setup do
     root = Path.join(System.tmp_dir!(), "fermix-mobile-identity-#{unique_id()}")
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
-    %{root: root}
+    %{root: PrimaryHome.booted!(root)}
   end
 
   test "ensure creates one stable X25519 and P-256 TLS identity", %{root: root} do
@@ -95,7 +97,127 @@ defmodule FermixChannels.Mobile.IdentityTest do
     refute File.exists?(paths.tls_key)
     refute File.exists?(paths.tls_cert)
     refute File.exists?(paths.transaction)
+    assert File.read!(paths.epoch) == "1\n"
     assert {:ok, _identity} = Identity.ensure(root: root)
+  end
+
+  # M75 D14: the primary boot writes a home's first epoch, before the phone
+  # subtree starts (the setup's `PrimaryHome.booted!/1`); the identity carries
+  # it and never writes it.
+  test "a new identity carries the epoch the home booted with", %{root: root} do
+    {:ok, paths} = Identity.paths(root: root)
+    assert paths.epoch == Epoch.path(root)
+    before = File.stat!(paths.epoch, time: :posix)
+
+    assert {:ok, %Identity{primary_epoch: 1}} = Identity.ensure(root: root)
+    assert {:ok, %Identity{primary_epoch: 1}} = Identity.load(root: root)
+    assert Identity.primary_epoch(root: root) == {:ok, 1}
+    assert File.stat!(paths.epoch, time: :posix) == before
+  end
+
+  # A restored home may be past 1 before any phone pairs; a move raises it
+  # under an existing identity. Either way the identity reads what is there.
+  test "an identity keeps the epoch a move or a restore raised", %{root: root} do
+    :ok = Epoch.write(root, 3)
+    assert {:ok, %Identity{primary_epoch: 3}} = Identity.ensure(root: root)
+    assert {:ok, 4} = Epoch.bump(root)
+
+    assert {:ok, %Identity{primary_epoch: 4}} = Identity.ensure(root: root)
+    assert {:ok, %Identity{primary_epoch: 4}} = Identity.load(root: root)
+  end
+
+  # Only a home that never booted as the primary has no epoch, and a phone
+  # subtree never runs on one: every entry refuses it and none writes it.
+  test "an absent epoch is refused everywhere and written nowhere", %{root: root} do
+    {:ok, paths} = Identity.paths(root: root)
+    epoch_path = paths.epoch
+    absent = {:error, {:epoch, {:absent, epoch_path}}}
+    FermixTestSupport.SafeRm.rm!(epoch_path)
+
+    assert Identity.ensure(root: root) == absent
+    assert Identity.admissible(root: root) == absent
+    refute File.exists?(paths.gateway_key)
+    refute File.exists?(paths.transaction)
+
+    PrimaryHome.booted!(root)
+    assert {:ok, _identity} = Identity.ensure(root: root)
+    FermixTestSupport.SafeRm.rm!(epoch_path)
+
+    assert Identity.ensure(root: root) == absent
+    assert Identity.load(root: root) == absent
+    assert Identity.admissible(root: root) == absent
+    assert Identity.primary_epoch(root: root) == :absent
+    refute File.exists?(epoch_path)
+  end
+
+  test "an invalid epoch is refused like any other invalid artifact", %{root: root} do
+    {:ok, paths} = Identity.paths(root: root)
+    epoch_path = paths.epoch
+
+    faults = [
+      {"zero", fn -> File.write!(epoch_path, "0\n") end, :invalid_epoch},
+      {"not a number", fn -> File.write!(epoch_path, "two\n") end, :invalid_epoch},
+      {"world-readable", fn -> File.chmod!(epoch_path, 0o644) end, :unsafe_permissions},
+      {"a symlink",
+       fn ->
+         real = epoch_path <> ".real"
+         File.rename!(epoch_path, real)
+         File.ln_s!(real, epoch_path)
+       end, :unsafe_file_type}
+    ]
+
+    for {label, break, kind} <- faults, keys? <- [false, true] do
+      FermixTestSupport.SafeRm.rm_rf!(paths.dir)
+      PrimaryHome.booted!(root)
+      if keys?, do: assert({:ok, _identity} = Identity.ensure(root: root))
+      break.()
+
+      # With no keys, `load/1` refuses the missing keys first.
+      loaded = if keys?, do: [Identity.load(root: root)], else: []
+
+      for verdict <-
+            [
+              Identity.ensure(root: root),
+              Identity.admissible(root: root),
+              Identity.primary_epoch(root: root)
+            ] ++ loaded do
+        assert {:error, {:epoch, reason}} = verdict, "#{label}: #{inspect(verdict)}"
+        assert elem(reason, 0) == kind, "#{label}: #{inspect(reason)}"
+        assert elem(reason, 1) == epoch_path
+      end
+
+      assert File.exists?(paths.gateway_key) == keys?, label
+    end
+  end
+
+  # A rollback and the recovery of an interrupted generation remove what the
+  # generation made, and the epoch is never that.
+  test "a failed or interrupted generation leaves the epoch as it was", %{root: root} do
+    {:ok, paths} = Identity.paths(root: root)
+    :ok = Epoch.write(root, 3)
+
+    # The keys publish, then the gateway key is spoiled, so the generation
+    # fails at the load that closes it.
+    spoil = fn source, target ->
+      :ok = File.rename(source, target)
+      if Path.basename(target) == "gateway_key", do: File.write!(target, "short")
+      :ok
+    end
+
+    assert {:error, {:invalid_gateway_key, _path, :invalid_length}} =
+             Identity.ensure(root: root, rename: spoil)
+
+    refute File.exists?(paths.gateway_key)
+    refute File.exists?(paths.transaction)
+    assert File.read!(paths.epoch) == "3\n"
+
+    assert {:ok, _identity} = Identity.ensure(root: root)
+    File.write!(paths.transaction, "v1\n")
+    File.chmod!(paths.transaction, 0o600)
+
+    assert {:ok, %Identity{primary_epoch: 3}} = Identity.ensure(root: root)
+    refute File.exists?(paths.transaction)
+    assert File.read!(paths.epoch) == "3\n"
   end
 
   # Boot admission: every state ensure/1 can start from is admissible; only
@@ -151,6 +273,7 @@ defmodule FermixChannels.Mobile.IdentityTest do
 
     for {label, break} <- faults do
       FermixTestSupport.SafeRm.rm_rf!(paths.dir)
+      PrimaryHome.booted!(root)
       assert {:ok, _identity} = Identity.ensure(root: root)
       break.()
 

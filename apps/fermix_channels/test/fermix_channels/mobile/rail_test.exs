@@ -14,6 +14,7 @@ defmodule FermixChannels.Mobile.RailTest do
   alias FermixChannels.Mobile.Noise
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Rail
+  alias FermixTestSupport.PrimaryHome
   alias FermixTestSupport.SafeRm
 
   @device_id "5d0f2c7e-3b8a-4c1d-9e6f-0a7b8c9d1e2f"
@@ -31,6 +32,7 @@ defmodule FermixChannels.Mobile.RailTest do
     root = Path.join(System.tmp_dir!(), "fx-rail-#{System.unique_integer([:positive])}")
     SafeRm.mark!(root)
     on_exit(fn -> SafeRm.rm_rf!(root) end)
+    PrimaryHome.booted!(root)
     {:ok, identity} = Identity.ensure(root: root)
     revoked = start_supervised!({Agent, fn -> false end}, id: :revoked)
 
@@ -89,6 +91,7 @@ defmodule FermixChannels.Mobile.RailTest do
       device_store: :rail_test_store,
       device_registry: registry,
       iroh_helper: :rail_test_no_helper,
+      primary_epoch: 1,
       find_device: fn _store, key ->
         if key == device_public and not Agent.get(revoked, & &1),
           do: {:ok, %{device_id: @device_id}},
@@ -127,7 +130,8 @@ defmodule FermixChannels.Mobile.RailTest do
       "device_id" => @device_id,
       "app_version" => "1.0.0",
       "last_server_seq" => 0,
-      "protocol_v" => Protocol.protocol_version()
+      "protocol_v" => Protocol.protocol_version(),
+      "primary_epoch" => 1
     }
 
     assert :ok = Rail.send_event(rail, "hello", payload)
@@ -159,7 +163,7 @@ defmodule FermixChannels.Mobile.RailTest do
     assert {:ok, rail} = open(ctx)
 
     ack = hello(rail)
-    assert %{"v" => 2, "seq" => 1, "profiles" => [%{"id" => "main"}]} = ack
+    assert %{"v" => 2, "seq" => 1, "primary_epoch" => 1, "profiles" => [%{"id" => "main"}]} = ack
 
     assert :ok = Rail.send_event(rail, "ping", %{})
     assert_receive {:rail, ^rail, {:event, %{"t" => "pong", "seq" => 2, "v" => 2}, <<>>}}

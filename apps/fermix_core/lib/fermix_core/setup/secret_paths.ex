@@ -153,6 +153,24 @@ defmodule FermixCore.Setup.SecretPaths do
       # [sandbox.env] — the meetbot sidecar never sees the Zoom credentials.
       sandbox_env: false
     },
+    # The S3 target of the home's snapshots (M75 §8). BEAM-internal HTTP (no
+    # subprocess), so not in [sandbox.env].
+    %{
+      key: :snapshot_s3_access_key_id,
+      env: "SNAPSHOT_S3_ACCESS_KEY_ID",
+      path: [:fermix_core, :snapshots, :s3_access_key_id],
+      functionality: "Snapshots to S3 with access keys",
+      optional?: true,
+      sandbox_env: false
+    },
+    %{
+      key: :snapshot_s3_secret_access_key,
+      env: "SNAPSHOT_S3_SECRET_ACCESS_KEY",
+      path: [:fermix_core, :snapshots, :s3_secret_access_key],
+      functionality: "Snapshots to S3 with access keys",
+      optional?: true,
+      sandbox_env: false
+    },
     %{
       key: :google_oauth_client_secret,
       env: "GOOGLE_OAUTH_CLIENT_SECRET",

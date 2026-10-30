@@ -19,6 +19,11 @@ defmodule Fermix.CLI.AuthCommand do
   After `login`, restart the daemon so its token manager reloads the new token
   state.
 
+  `login` and `logout` refuse by name on a home configured as a device or
+  carrying the moved marker (`FermixCore.Home.Role.admit_configured/1`, M75
+  D5): its token file is a retired copy of the primary's. `status` still reads
+  what is stored.
+
   `run/2` takes test seams: `:login`, `:read_line` and `:browser` for the
   ChatGPT sign-in (`TerminalLogin.run/1`), `:logout` for its sign-out,
   `:restart_route` (default `RestartCommand.route/0`) for how a restart hint
@@ -34,6 +39,8 @@ defmodule Fermix.CLI.AuthCommand do
   alias FermixCore.Auth.ChatGPT.TerminalLogin
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.XAILogin
+  alias FermixCore.Home.Role
+  alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.LiveModel
   alias FermixCore.Setup.Wizard
 
@@ -61,10 +68,17 @@ defmodule Fermix.CLI.AuthCommand do
 
     case argv do
       [] -> usage()
-      ["login" | rest] -> login(rest, seams)
+      ["login" | rest] -> admitted(fn -> login(rest, seams) end)
       ["status" | rest] -> status(rest)
-      ["logout" | rest] -> logout(rest, seams)
+      ["logout" | rest] -> admitted(fn -> logout(rest, seams) end)
       [unknown | _] -> unknown_subcommand(unknown)
+    end
+  end
+
+  defp admitted(verb) do
+    case Role.admit_configured(ConfigStore.fermix_home()) do
+      :ok -> verb.()
+      {:error, reason} -> error(Role.refusal_sentence(reason))
     end
   end
 

@@ -194,7 +194,13 @@
       "required": ["type", "protocol_version"],
       "properties": {
         "type": { "const": "client_hello" },
-        "protocol_version": { "type": "integer", "minimum": 1 }
+        "protocol_version": { "type": "integer", "minimum": 1 },
+        "primary_epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615,
+          "description": "The highest primary epoch this client has seen (M75); absent when it has seen none. A daemon at a lower epoch refuses the hello with stale_primary."
+        }
       }
     },
     "msg": {
@@ -321,7 +327,17 @@
       "properties": {
         "type": { "const": "server_hello" },
         "min_version": { "type": "integer", "minimum": 1 },
-        "max_version": { "type": "integer", "minimum": 1 }
+        "max_version": { "type": "integer", "minimum": 1 },
+        "primary_epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615,
+          "description": "The home's primary epoch (M75): how many times the home has become the primary engine, 1 from its first boot as the primary. Absent only from a home that has never booted as the primary and from a daemon older than the epoch."
+        },
+        "role": {
+          "enum": ["primary", "device"],
+          "description": "The engine's role (M75). A client keeps the highest primary_epoch seen from a primary only; a device engine's epoch is never compared and never raises it. Absent from a daemon older than the field, which a client treats as primary."
+        }
       }
     },
     "accepted": {
@@ -557,7 +573,7 @@
     },
     "error": {
       "type": "object",
-      "description": "A refusal. reason is the code; the other fields are context. Protocol violations close the connection; request failures do not. ref is set only on the request_failed answering a media_fetch the daemon could not serve.",
+      "description": "A refusal. reason is the code; the other fields are context. Protocol violations close the connection; request failures do not. ref is set only on the request_failed answering a media_fetch the daemon could not serve. A desktop whose home moved also sends primary_unreachable (its message names the primary; the app keeps its outbox), desktop_revoked (the primary no longer knows this computer, so nothing waiting can be sent) and unattended_client, each before it closes.",
       "required": ["type", "reason"],
       "properties": {
         "type": { "const": "error" },

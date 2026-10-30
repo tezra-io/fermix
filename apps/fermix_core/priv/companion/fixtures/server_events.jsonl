@@ -1,4 +1,4 @@
-{"type":"server_hello","min_version":3,"max_version":4}
+{"type":"server_hello","min_version":3,"max_version":4,"primary_epoch":2,"role":"primary"}
 {"type":"accepted","client_msg_id":"mac-1","duplicate":false}
 {"type":"row","profile_id":"main","server_seq":12,"role":"user","text":"What is on my calendar today?","ts":"2026-09-25T09:00:00Z","client_msg_id":"mac-1","media_refs":[]}
 {"type":"accepted","client_msg_id":"mac-1","duplicate":true,"server_seq":13}
@@ -10,6 +10,7 @@
 {"type":"text_done","turn_id":"turn-mac-6","server_seq":24,"text":"Two quiet ones near you: [Example Coffee](https://example.coffee/) has long tables and no music, and [Quiet Grounds](https://provider.example/place/2) is the calmest before ten.","blocks":[{"type":"places","places":[{"name":"Example Coffee","canonical_url":"https://example.coffee/","source_url":"https://provider.example/place/1","location":{"latitude":40.7233,"longitude":-74.003},"address":"12 Example St, New York","rating":{"value":4.6,"best":5,"count":321},"price_range":"$$","categories":["coffee_shop"],"opening_hours":{"current_day":"Thursday 07:00-19:00"},"distance":{"value":0.4,"units":"km"}},{"name":"Quiet Grounds","source_url":"https://provider.example/place/2","location":{"latitude":40.7251,"longitude":-74.0012},"categories":["cafe"]}]}]}
 {"type":"text_done","turn_id":"turn-mac-7","server_seq":26,"text":"Two in Suwanee: [Example Taqueria](https://maps.apple.com/place?place-id=I8F2C5A1B3D4E6F70) for the patio, and [Second Cantina](https://maps.apple.com/place?place-id=I1A2B3C4D5E6F7081) for a late table.","blocks":[{"type":"places","places":[{"name":"Example Taqueria","canonical_url":"https://taqueria.example/","source_url":"https://maps.apple.com/place?place-id=I8F2C5A1B3D4E6F70","apple_place_id":"I8F2C5A1B3D4E6F70","location":{"latitude":34.0555,"longitude":-84.0647},"address":"100 Example Ave, Suwanee, GA 30024, United States","categories":["restaurant"]},{"name":"Second Cantina","source_url":"https://maps.apple.com/place?place-id=I1A2B3C4D5E6F7081","apple_place_id":"I1A2B3C4D5E6F7081","location":{"latitude":34.0652,"longitude":-84.0755},"address":"200 Example Rd, Suwanee, GA 30024, United States","categories":["nightlife"]}]}]}
 {"type":"turn_error","turn_id":"turn-mac-3","code":"cancelled","message":"cancelled"}
+{"type":"turn_error","turn_id":"turn-mac-8","code":"uncertain_after_restart","message":"uncertain_after_restart"}
 {"type":"turn_done","turn_id":"turn-mac-5"}
 {"type":"row","profile_id":"main","server_seq":15,"role":"assistant","text":"Your 9am summary: two meetings and a dentist reminder.","ts":"2026-09-25T09:00:30Z","media_refs":[]}
 {"type":"row","profile_id":"main","server_seq":16,"role":"assistant","text":"The form is at https://x.test/form. It asks for your name, city and a dietary note.","ts":"2026-09-25T09:01:10Z","kind":"text","metadata":{"call":{"uuid":"3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b","event":"shared","task_id":"dg_01H9","revision":1}},"media_refs":[]}
@@ -41,6 +42,7 @@
 {"type":"proposal_resolved","profile_id":"main","proposal_id":"cpr_7b6a5f4e3d2c1b0a9f8e7d6c","state":"expired","sentence":"That proposal expired; nothing ran."}
 {"type":"error","reason":"handshake_required"}
 {"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":5,"min_version":3,"max_version":4}
+{"type":"error","reason":"stale_primary","message":"This engine is at epoch 2; you have seen epoch 3: the primary moved, reconnect to the current one"}
 {"type":"error","reason":"client_message_conflict","client_msg_id":"mac-2"}
 {"type":"error","reason":"invalid_field","field":"limit"}
 {"type":"error","reason":"request_failed","message":":timeout","client_msg_id":"mac-4"}
@@ -48,3 +50,6 @@
 {"type":"error","reason":"request_failed","message":"{:media_copy_failed, :enospc}","ref":"586f997a42496291b5d9295745b229ab0754319579aaa610e689d5b25060646c"}
 {"type":"error","reason":"request_failed","message":"That call was already confirmed; it runs at most once.","client_msg_id":"mac-10"}
 {"type":"error","reason":"request_failed","message":"Only the owner can answer a proposal, from the Fermix app or a paired phone.","client_msg_id":"mac-11"}
+{"type":"error","reason":"primary_unreachable","message":"The server fermix-vm is unreachable. Fermix keeps your message until it is back."}
+{"type":"error","reason":"desktop_revoked","message":"The server fermix-vm does not know this computer: it was removed from the server's devices, or the server was restored from a snapshot taken before this computer joined it. Fermix stopped reaching it."}
+{"type":"error","reason":"unattended_client","message":"Only the Fermix app chats with the server from this computer, and this process was started by Fermix or runs detached."}

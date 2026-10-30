@@ -77,6 +77,7 @@ defmodule FermixCore.Memory.Repo do
   @mobile_icon_index_migration_version 50
   @open_loop_curiosity_migration_version 51
   # M75 takes 52 (uncertain requests) and 53 (channel event ids).
+  @mobile_uncertain_request_migration_version 52
   @channel_event_ids_migration_version 53
   @sqlite_open_intent :readwritecreate
 
@@ -1519,7 +1520,14 @@ defmodule FermixCore.Memory.Repo do
           DateTime.t(),
           keyword()
         ) ::
-          {:ok, {:started | :active | :completed | :failed, mobile_client_request_row()}}
+          {:ok,
+           {:started
+            | :active
+            | :completed
+            | :failed
+            | :uncertain
+            | :settled_uncertain
+            | :settled_cancelled, mobile_client_request_row()}}
           | {:error, term()}
   def start_mobile_client_request(
         selector,
@@ -1549,6 +1557,24 @@ defmodule FermixCore.Memory.Repo do
       when is_map(selector) and is_binary(runner_epoch) and is_integer(limit) and limit > 0 and
              limit <= 200 do
     call({:get_recoverable_mobile_client_requests, selector, runner_epoch, limit, now}, opts)
+  end
+
+  @doc """
+  Record the primary epoch one transport's requests boot at
+  (`MobileSql.record_boot_primary_epoch/4`): `{:moved, previous, released}`
+  when it differs from the last boot's, every unfinished request released.
+  """
+  @spec record_mobile_boot_primary_epoch(
+          mobile_transport_selector(),
+          pos_integer(),
+          DateTime.t(),
+          keyword()
+        ) ::
+          {:ok, :recorded | :unchanged | {:moved, pos_integer(), non_neg_integer()}}
+          | {:error, term()}
+  def record_mobile_boot_primary_epoch(selector, primary_epoch, %DateTime{} = now, opts \\ [])
+      when is_map(selector) and is_integer(primary_epoch) and primary_epoch > 0 do
+    call({:record_mobile_boot_primary_epoch, selector, primary_epoch, now}, opts)
   end
 
   @spec settle_mobile_client_request(
@@ -4115,6 +4141,13 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:record_mobile_boot_primary_epoch, selector, epoch, now}, _from, state) do
+    reply =
+      with_connection(state, &MobileSql.record_boot_primary_epoch(&1, selector, epoch, now))
+
+    {:reply, reply, state}
+  end
+
   def handle_call(
         {:settle_mobile_client_request, selector, client_msg_id, status, fields, now},
         _from,
@@ -5006,6 +5039,7 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_open_loop_outside_content_migration(conn, versions),
          :ok <- apply_mobile_icon_index_migration(conn, versions),
          :ok <- apply_open_loop_curiosity_migration(conn, versions),
+         :ok <- apply_mobile_uncertain_request_migration(conn, versions),
          :ok <- apply_channel_event_ids_migration(conn, versions) do
       :ok
     end
@@ -5248,6 +5282,27 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{MobileSql.media_index_schema_sql()}
         INSERT INTO schema_migrations(version) VALUES (#{@mobile_media_index_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # A request that may have run before a restart is settled `uncertain`
+  # (M75): the request table is rebuilt with that status, its rows and indexes
+  # kept, beside the table of each transport's last primary epoch, with its
+  # version in one transaction. No foreign key names the request table.
+  defp apply_mobile_uncertain_request_migration(conn, versions) do
+    if Enum.member?(versions, @mobile_uncertain_request_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MobileSql.uncertain_schema_sql()}
+        INSERT INTO schema_migrations(version)
+          VALUES (#{@mobile_uncertain_request_migration_version});
         COMMIT;
         """
       )

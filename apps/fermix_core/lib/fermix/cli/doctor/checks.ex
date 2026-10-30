@@ -34,6 +34,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Harness.Identity
   alias FermixCore.Harness.Ledger, as: HarnessLedger
   alias FermixCore.Harness.Vendors, as: HarnessVendors
+  alias FermixCore.Home.Epoch
   alias FermixCore.IMessage
   alias FermixCore.IMessage.Control, as: IMessageControl
   alias FermixCore.IMessage.HelperInstaller, as: IMessageHelper
@@ -1158,7 +1159,7 @@ defmodule Fermix.CLI.Doctor.Checks do
 
     cond do
       length(missing) == length(reports) ->
-        :never_paired
+        with :ok <- mobile_epoch(mobile_dir), do: :never_paired
 
       missing != [] ->
         {:error,
@@ -1172,7 +1173,37 @@ defmodule Fermix.CLI.Doctor.Checks do
         {:error, "could not inspect mobile identity files: #{Enum.join(errors, ", ")}"}
 
       true ->
+        mobile_epoch(mobile_dir)
+    end
+  end
+
+  # M75 D14: the primary epoch sits beside the identity files in a home's
+  # `mobile/`, and `Home.Epoch`, the one owner of its format, reads it from the
+  # home. Absent passes: a home before its first primary boot has none, and the
+  # daemon writes 1 at start for an identity from before the epoch. Present, it
+  # is held to the identity files' rules, keys or no keys, because Fermix
+  # refuses an invalid epoch rather than reset it.
+  defp mobile_epoch(mobile_dir) do
+    case mobile_identity_file(mobile_dir, "primary_epoch") do
+      :ok -> mobile_epoch_contents(Path.dirname(mobile_dir))
+      {:missing, _name} -> :ok
+      {:insecure, name, mode} -> {:error, "mobile identity files must be 0600: #{name}=#{mode}"}
+      {:error, name, reason} -> {:error, "could not inspect #{name}: #{inspect(reason)}"}
+    end
+  end
+
+  defp mobile_epoch_contents(home) do
+    case Epoch.read(home) do
+      {:ok, _epoch} ->
         :ok
+
+      :absent ->
+        :ok
+
+      {:error, reason} ->
+        {:error,
+         "the mobile primary epoch is invalid (#{inspect(reason)}); Fermix refuses it " <>
+           "rather than reset it"}
     end
   end
 

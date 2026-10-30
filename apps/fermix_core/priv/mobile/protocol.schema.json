@@ -134,7 +134,8 @@
         "app_version": {"type": "string", "minLength": 1},
         "last_server_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
         "protocol_v": {"type": "integer", "minimum": 1},
-        "relay_list_rev": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The revision of the relay list this phone has stored (M62); absent means none."}
+        "relay_list_rev": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The revision of the relay list this phone has stored (M62); absent means none."},
+        "primary_epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615, "description": "The highest primary epoch this phone has seen from this pairing (M75); absent when it has seen none. A daemon at a lower epoch refuses the hello with stale_primary."}
       }
     },
     "msg": {
@@ -233,7 +234,8 @@
         "profiles": {"type": "array", "items": {"$ref": "#/$defs/profile"}},
         "candidates": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/candidate"}},
         "history_head_seq": {"type": "integer", "minimum": 0}, "read_up_to_seq": {"type": "integer", "minimum": 0},
-        "caps": {"$ref": "#/$defs/caps"}
+        "caps": {"$ref": "#/$defs/caps"},
+        "primary_epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615, "description": "The daemon's primary epoch (M75): how many times its home has become the primary engine, 1 from its first boot as the primary. This daemon always sends it; a daemon older than the epoch leaves it out."}
       }
     },
     "profile": {
@@ -426,7 +428,7 @@
     },
     "requestOutcome": {
       "type": "object", "required": ["client_msg_id", "status"],
-      "description": "error is the word of a failed request: cancelled when it was stopped, request_failed otherwise.",
+      "description": "error is the word of a failed request: cancelled when it was stopped, uncertain_after_restart when it may have run before the daemon restarted, request_failed otherwise.",
       "properties": {
         "client_msg_id": {"type": "string", "minLength": 1},
         "status": {"enum": ["accepted", "running", "completed", "failed"]},
@@ -442,8 +444,8 @@
     },
     "pair_approved": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "device_id", "candidates", "profiles", "push_salt"],
-      "description": "push_salt is the device's 32-byte push salt (apns_key_salt), standard base64 with padding; push lists the push services this daemon sends through, and is absent from a daemon older than the list.",
-      "properties": {"t": {"const": "pair_approved"}, "device_id": {"type": "string", "minLength": 1}, "candidates": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/candidate"}}, "profiles": {"type": "array", "items": {"$ref": "#/$defs/profile"}}, "push_salt": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"}, "push": {"$ref": "#/$defs/pushServices"}}
+      "description": "push_salt is the device's 32-byte push salt (apns_key_salt), standard base64 with padding; push lists the push services this daemon sends through, and is absent from a daemon older than the list. primary_epoch is the daemon's primary epoch (M75), the value a newly paired phone starts its highest-seen epoch from; this daemon always sends it, a daemon older than the epoch leaves it out.",
+      "properties": {"t": {"const": "pair_approved"}, "device_id": {"type": "string", "minLength": 1}, "candidates": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/candidate"}}, "profiles": {"type": "array", "items": {"$ref": "#/$defs/profile"}}, "push_salt": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"}, "push": {"$ref": "#/$defs/pushServices"}, "primary_epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}}
     },
     "pair_denied": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "reason"],

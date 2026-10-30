@@ -54,6 +54,28 @@ defmodule FermixChannels.Companion.Connection do
   otherwise it is refused, and nothing runs. `:proposal_opts` are core's
   `Cues.Proposals` options (a test's repo and seams).
 
+  ## The primary epoch (M75 D14)
+
+  The hello carries the home's primary epoch, read through
+  `Mobile.Identity.primary_epoch/1` when the hello arrives (`:primary_epoch`, a
+  test's stand-in), since no process holds the identity for this socket. Only
+  a home that never booted as the primary has none, which a device-role
+  desktop can be, and announces none. The primary refuses a client that has
+  seen a higher one (`stale_primary`) and joins nothing. A device-role engine
+  (`FermixCore.Home.Role`, `:engine_role` in `:request_opts` its stand-in, as
+  for `Companion.Requests`) refuses no client for it: its home is a retired
+  copy, and refusing a lower primary is the client's rule. Every hello names
+  the engine's role (`server_hello.role`), so a client compares a primary's
+  epoch only.
+
+  While this home moves away (`FermixCore.Home.Move.moving_to/1`,
+  `:move_in_progress` a test's stand-in), a device-role refusal is
+  `primary_unreachable` with the sentence that the message is kept until the
+  move is done, and the connection is closed, as a desktop's is while its
+  server is unreachable: the app keeps the message and sends it again once
+  the engine is back. A device with no move under way keeps `request_failed`. An epoch that cannot be read refuses the hello
+  (`primary_epoch_unavailable`).
+
   ## Who is on the other end (SIDE-V1)
 
   When the socket is handed over, before any line is read, the connection
@@ -78,8 +100,12 @@ defmodule FermixChannels.Companion.Connection do
   alias FermixChannels.Companion.Proposals
   alias FermixChannels.Companion.Requests
   alias FermixChannels.Companion.Turns
+  alias FermixChannels.Mobile.Identity
   alias FermixCore.Companion.Protocol
   alias FermixCore.Companion.Timeline
+  alias FermixCore.Home.Move
+  alias FermixCore.Home.Role
+  alias FermixCore.Setup.ConfigStore
   alias FermixCore.SocketPeer
 
   @profile "main"
@@ -98,7 +124,8 @@ defmodule FermixChannels.Companion.Connection do
   @named_reasons ~w(
     invalid_json invalid_event missing_type attachments_unsupported missing_protocol_version
     invalid_protocol_version line_too_large handshake_required unexpected_client_hello
-    client_message_conflict unsupported_profile request_backlog_full
+    client_message_conflict unsupported_profile request_backlog_full stale_primary
+    primary_epoch_unavailable primary_unreachable
   )a
 
   @type state :: map()
@@ -151,6 +178,9 @@ defmodule FermixChannels.Companion.Connection do
       # daemon's process and platform are seams a test stands in for.
       daemon_os_pid: Keyword.get(opts, :daemon_os_pid, String.to_integer(System.pid())),
       os: Keyword.get(opts, :os, :os.type()),
+      primary_epoch: Keyword.get(opts, :primary_epoch, fn -> Identity.primary_epoch() end),
+      move_in_progress:
+        Keyword.get(opts, :move_in_progress, fn -> Move.moving_to(ConfigStore.fermix_home()) end),
       caller: nil
     }
 
@@ -192,7 +222,7 @@ defmodule FermixChannels.Companion.Connection do
     do: write_stream(turn_id, update, state)
 
   def handle_info({:companion_request_failed, client_msg_id, reason}, state),
-    do: write_request_error(reason, client_msg_id, state)
+    do: write_request_error(while_moving(reason, state), client_msg_id, state)
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{worker: {ref, client_msg_id}} = state) do
     state = %{state | worker: nil}
@@ -268,9 +298,60 @@ defmodule FermixChannels.Companion.Connection do
   # whose hello declared an older one.
   defp dispatch(%{type: type} = event, state) do
     if Protocol.client_event_version(type) <= state.version,
-      do: serve(event, state),
+      do: serve_admitted(event, state),
       else: refuse({:unknown_event, type}, state)
   end
+
+  # The events that write the home's store, besides a `msg` or `command`, which
+  # `Requests.request/3` refuses itself before it claims anything.
+  @writing_events ~w(cancel read_state proposal_answer)
+
+  # A device-role engine runs a retired copy of a moved home (M75): every event
+  # that would write it is refused by name, before any write, with the
+  # sentence `Requests.request/3` gives a `msg`. Reads are served.
+  defp serve_admitted(%{type: type} = event, state) when type in @writing_events do
+    role = Keyword.get_lazy(state.request_opts, :engine_role, &Role.recorded/0)
+
+    case Role.admit(role) do
+      :ok -> serve(event, state)
+      {:error, refusal} -> refuse_write(event, refusal, state)
+    end
+  end
+
+  defp serve_admitted(event, state), do: serve(event, state)
+
+  # A proposal answer names itself, so its refusal carries its id; a cancel's
+  # id names the request it would stop, which has not failed.
+  defp refuse_write(%{type: "proposal_answer", payload: payload}, refusal, state) do
+    refusal = while_moving(refusal, state)
+
+    case send_event("error", error_payload(refusal, payload["client_msg_id"]), state) do
+      :ok -> {:cont, state}
+      {:error, _reason} -> {:stop, state}
+    end
+  end
+
+  defp refuse_write(_event, refusal, state) do
+    case while_moving(refusal, state) do
+      {:primary_unreachable, _sentence} = moving -> refuse(moving, state)
+      refusal -> answer({:error, refusal}, state)
+    end
+  end
+
+  # A device-role refusal while this home moves away: the message waits, as
+  # for an unreachable server.
+  defp while_moving({:device_role, _sentence} = refusal, state) do
+    case state.move_in_progress.() do
+      {:ok, name} ->
+        {:primary_unreachable,
+         "Fermix is moving this home to #{name}; your message is kept until it is done."}
+
+      :none ->
+        refusal
+    end
+  end
+
+  defp while_moving(reason, _state), do: reason
 
   defp serve(%{type: type} = event, state) when type in ["msg", "command"],
     do: queue_request(event, state)
@@ -297,18 +378,44 @@ defmodule FermixChannels.Companion.Connection do
   defp hello(_payload, %{version: version} = state) when is_integer(version),
     do: refuse(:unexpected_client_hello, state)
 
-  defp hello(%{"protocol_version" => version}, state) do
+  defp hello(%{"protocol_version" => version} = payload, state) do
     case Protocol.negotiate(version) do
-      :ok -> join(version, state)
+      :ok -> primary_hello(version, payload["primary_epoch"], state)
       {:error, direction} -> refuse_version(direction, version, state)
     end
   end
 
-  defp join(version, state) do
+  # The client's highest-seen epoch against the home's (moduledoc). The hello
+  # names the engine's role, so a client compares a primary's epoch only.
+  defp primary_hello(version, theirs, state) do
+    role = engine_role(state)
+    named = %{"role" => Atom.to_string(role)}
+
+    case state.primary_epoch.() do
+      {:ok, mine} -> epoch_hello(version, {role, mine}, theirs, state)
+      :absent -> join(version, named, state)
+      {:error, reason} -> refuse_unread_epoch(reason, state)
+    end
+  end
+
+  # Only the primary refuses a client that has met a later primary.
+  defp epoch_hello(version, {role, mine}, theirs, state) do
+    if role == :primary and is_integer(theirs) and theirs > mine,
+      do: refuse_stale_primary(mine, theirs, state),
+      else: join(version, %{"primary_epoch" => mine, "role" => Atom.to_string(role)}, state)
+  end
+
+  defp engine_role(state) do
+    %{role: role} = Keyword.get_lazy(state.request_opts, :engine_role, &Role.recorded/0)
+    role
+  end
+
+  defp join(version, epoch, state) do
     {min, max} = Protocol.supported_version_range()
+    server_hello = Map.merge(%{"min_version" => min, "max_version" => max}, epoch)
 
     with {:ok, _owner} <- Registry.register(state.registry, @profile, version),
-         :ok <- send_event("server_hello", %{"min_version" => min, "max_version" => max}, state),
+         :ok <- send_event("server_hello", server_hello, state),
          :ok <- send_pending_approvals(state),
          state = %{state | version: version},
          :ok <- send_waiting_proposals(state) do
@@ -369,6 +476,35 @@ defmodule FermixChannels.Companion.Connection do
         Logger.error("companion connection dropped a waiting approval: #{inspect(reason)}")
         :ok
     end
+  end
+
+  defp refuse_stale_primary(mine, theirs, state) do
+    Logger.warning(
+      "companion hello refused as a stale primary: this engine is at epoch #{mine}, " <>
+        "the client has seen epoch #{theirs}"
+    )
+
+    payload = %{
+      "reason" => "stale_primary",
+      "message" =>
+        "This engine is at epoch #{mine}; you have seen epoch #{theirs}: " <>
+          "the primary moved, reconnect to the current one"
+    }
+
+    _ = send_event("error", payload, state)
+    {:stop, state}
+  end
+
+  defp refuse_unread_epoch(reason, state) do
+    Logger.error("companion hello refused: the primary epoch cannot be read: #{inspect(reason)}")
+
+    payload = %{
+      "reason" => "primary_epoch_unavailable",
+      "message" => Output.error_message({:primary_epoch_unavailable, reason})
+    }
+
+    _ = send_event("error", payload, state)
+    {:stop, state}
   end
 
   defp refuse_version(direction, client_version, state) do
@@ -528,9 +664,10 @@ defmodule FermixChannels.Companion.Connection do
     do: write_request_error({:request_failed, reason}, client_msg_id, state)
 
   defp write_request_error(reason, client_msg_id, state) do
-    case send_event("error", error_payload(reason, client_msg_id), state) do
-      :ok -> {:noreply, state}
-      {:error, _reason} -> {:stop, :normal, state}
+    case {send_event("error", error_payload(reason, client_msg_id), state), reason} do
+      {:ok, {:primary_unreachable, _sentence}} -> {:stop, :normal, state}
+      {:ok, _reason} -> {:noreply, state}
+      {{:error, _reason}, _refusal} -> {:stop, :normal, state}
     end
   end
 
@@ -640,6 +777,14 @@ defmodule FermixChannels.Companion.Connection do
   defp error_fields(:task_not_running),
     do: %{"reason" => "request_failed", "message" => @task_not_running_message}
 
+  # A device-role engine's refusal (`FermixCore.Home.Role`) is a sentence for
+  # the person, written as it is.
+  defp error_fields({:device_role, sentence}) when is_binary(sentence),
+    do: %{"reason" => "request_failed", "message" => sentence}
+
+  defp error_fields({:primary_unreachable, sentence}) when is_binary(sentence),
+    do: %{"reason" => "primary_unreachable", "message" => sentence}
+
   # A failure reason can carry an exception and its stacktrace: the message is
   # bounded so the error that reports it can always be written.
   defp error_fields({:request_failed, cause}),
@@ -709,6 +854,10 @@ defmodule FermixChannels.Companion.Connection do
 
   defp sink(registry, {:profile, profile_id}, event),
     do: Fanout.announce(profile_id, event, companion_registry: registry)
+
+  # A turn's ending, for every connection of this socket and no phone.
+  defp sink(registry, {:companion, profile_id}, event),
+    do: Fanout.announce(profile_id, event, audience: :companion, companion_registry: registry)
 
   defp sink(_registry, nil, _event), do: :ok
 

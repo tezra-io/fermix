@@ -153,7 +153,11 @@ defmodule FermixCore.Management.Protocol do
     unknown_job: "The job is not retained by this daemon.",
     external_change: "The settings file changed outside Fermix.",
     config_unreadable: "The settings file could not be read.",
-    unknown_pairing_session: "The pairing session is not retained by this daemon."
+    unknown_pairing_session: "The pairing session is not retained by this daemon.",
+    primary_unreachable: "The primary engine cannot be reached.",
+    device_class_method: "This method belongs to the device that sent it.",
+    unconfirmed:
+      "The request was sent, but its answer did not arrive, so its outcome is not known yet."
   ]
   @error_messages Map.new(@errors)
 

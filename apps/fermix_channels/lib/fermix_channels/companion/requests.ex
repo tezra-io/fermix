@@ -4,14 +4,25 @@ defmodule FermixChannels.Companion.Requests do
   (`Mobile.EventRouter`, behind Noise) and the Mac's (`Companion.Connection`,
   behind `companion.sock`).
 
-  A `msg` or `command` is claimed durably under its `client_msg_id` before
-  anything runs, answered `accepted` (a resend is answered `duplicate` and never
-  runs twice), fenced to one attempt per boot by the request coordinator,
-  written to the timeline as the user's row, and ingested through the Gateway.
+  A `msg` or `command` is claimed durably under its `client_msg_id`, held by
+  this boot's epoch (the request coordinator's), before anything runs,
+  answered `accepted` (a resend is answered `duplicate` and never runs twice),
+  fenced to one attempt per boot by the request coordinator, written to the
+  timeline as the user's row, and ingested through the Gateway.
   History, search and read state are reads and one monotonic write over the
   same timeline, and a `cancel` stops one request's turn, or, with a
   `task_ref` (companion protocol 2), the one GPT-Live task that outlived its
   call those ids name (M56 §4.6).
+
+  A request that may already have run is never run again (M75). The store's
+  start decides, whether boot recovery or a resend reaches the request first:
+  one that never started a turn runs, unless the home moved or was restored
+  since (another engine); a turn another boot started, or any unfinished
+  request of another engine, is settled instead, and its turn ends, once, for
+  the clients of the transport that sent it, with `turn_error` code
+  `uncertain_after_restart` (or `cancelled` when it carried a cancel). Its
+  claim stays: a resend of the same id is a duplicate that never runs and is
+  told its ending again, and running it again takes a new `client_msg_id`.
 
   `Companion.Turns` is the Gateway's agent for both transports, so a request
   that becomes a turn is handed to the queue through it and settled by it from
@@ -35,8 +46,10 @@ defmodule FermixChannels.Companion.Requests do
 
   Events are logical maps (`%{"t" => type, ...}`) handed to the caller's
   `:event_sink`, a 2-arity function of a target and an event: the transport's
-  own `reply_to` for this client, or `{:profile, profile_id}` for everyone
-  watching the profile on either transport (`Companion.Fanout`).
+  own `reply_to` for this client, `{:profile, profile_id}` for everyone
+  watching the profile on either transport (`Companion.Fanout`), or
+  `{:companion, profile_id}` or `{:phones, profile_id}` for everyone on one
+  transport, the audience of a turn's ending.
 
   Once ingest returns, the request coordinator's liveness fence moves to the
   settlement owner (`:settlement_owner`, `Companion.Turns` unless a caller
@@ -57,9 +70,13 @@ defmodule FermixChannels.Companion.Requests do
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixChannels.Voice.Detached
   alias FermixCore.Companion.Timeline
+  alias FermixCore.Home.Role
   alias FermixCore.Telemetry
 
   @profile "main"
+  # The word that ends the turn of a request that may have run before a
+  # restart (M75).
+  @uncertain_reason :uncertain_after_restart
 
   @typedoc """
   What one transport hands the shared path.
@@ -99,18 +116,36 @@ defmodule FermixChannels.Companion.Requests do
           required(:after_settle) => (String.t(), map(), keyword() -> :ok) | nil
         }
 
-  @doc "Claim, acknowledge and run one decoded `msg` or `command`."
+  @doc """
+  Claim, acknowledge and run one decoded `msg` or `command`. A device-role
+  engine (`FermixCore.Home.Role`) refuses either by name first, before anything
+  is claimed, written or ingested: `{:error, {:device_role, sentence}}`.
+  `:engine_role` stands in for the role this boot recorded.
+  """
   @spec request(map(), transport(), keyword()) :: :ok | {:error, term()}
   def request(%{type: type, payload: payload} = event, transport, opts)
       when type in ["msg", "command"] and is_map(payload) and is_map(transport) and
              is_list(opts) do
-    with {:ok, profile} <- profile(payload),
+    with :ok <- opts |> Keyword.get_lazy(:engine_role, &Role.recorded/0) |> Role.admit(),
+         {:ok, profile} <- profile(payload),
          {:ok, client_id} <- required(payload, "client_msg_id") do
       claim_and_run(event, type, profile, client_id, transport, opts)
     end
   end
 
-  @doc "Recover one stored request without re-claiming its client id."
+  @doc """
+  The word that ends the turn of a request that may have run before a
+  restart, on both wires: its `turn_error` code, and a phone's
+  `request_status` error.
+  """
+  @spec uncertain_reason() :: String.t()
+  def uncertain_reason, do: Atom.to_string(@uncertain_reason)
+
+  @doc """
+  Recover one stored request without re-claiming its client id: one that may
+  not have run runs, and one that may have is settled and its turn ended,
+  never run (`Timeline.start_client_request/4`).
+  """
   @spec recover(map(), transport(), keyword()) :: :ok | {:error, term()}
   def recover(row, transport, opts) when is_map(row) and is_map(transport) and is_list(opts) do
     with {:ok, event, type, profile, client_id} <- recovered_event(row) do
@@ -208,8 +243,9 @@ defmodule FermixChannels.Companion.Requests do
   end
 
   defp claim_and_run(event, type, profile, client_id, transport, opts) do
-    claim_opts =
-      store_opts(opts, [transport: Atom.to_string(transport.name)] ++ transport.claimant)
+    epoch = coordinator(opts).epoch(coordinator_server(opts))
+    claimant = [transport: Atom.to_string(transport.name), runner_epoch: epoch]
+    claim_opts = store_opts(opts, claimant ++ transport.claimant)
 
     case store(opts).claim_client_request(profile, client_id, type, event.payload, claim_opts) do
       {:ok, {:claimed, request}} ->
@@ -218,6 +254,7 @@ defmodule FermixChannels.Companion.Requests do
 
       {:ok, {:duplicate, request}} ->
         _ = best_effort_emit(opts, transport.reply_to, accepted_event(client_id, true, request))
+        _ = repeat_unrun_ending(request, client_id, transport, opts)
         acquire_and_run(event, type, profile, client_id, transport, opts)
 
       {:ok, {:conflict, _request}} ->
@@ -238,7 +275,13 @@ defmodule FermixChannels.Companion.Requests do
       {:ok, {:started, %{attempt: attempt}}} when is_integer(attempt) and attempt > 0 ->
         run_started(event, type, profile, client_id, attempt, transport, opts)
 
-      {:ok, {state, _row}} when state in [:active, :completed, :failed] ->
+      {:ok, {:settled_uncertain, _row}} ->
+        end_unrun(@uncertain_reason, profile, client_id, transport, opts)
+
+      {:ok, {:settled_cancelled, _row}} ->
+        end_unrun(:cancelled, profile, client_id, transport, opts)
+
+      {:ok, {state, _row}} when state in [:active, :completed, :failed, :uncertain] ->
         :ok
 
       {:error, reason} ->
@@ -358,6 +401,47 @@ defmodule FermixChannels.Companion.Requests do
         )
     end
   end
+
+  # This start settled a request that may have run before the restart, and
+  # ran nothing: its turn ends here, once, for the clients of the transport
+  # that sent it, as a turn's ending always does (`Companion.Fanout`), with
+  # `word`. The settlement is durable either way, so a failed announcement
+  # fails nothing.
+  defp end_unrun(word, profile, client_id, transport, opts) do
+    Logger.warning(
+      "companion request #{client_id} may have run before the restart; " <>
+        "settled #{word}, not run again"
+    )
+
+    event = Output.turn_error(request_turn_id(client_id), word)
+    best_effort_emit(opts, turn_audience(transport.name, profile), event)
+  end
+
+  # A resend of a request a restart settled unrun is told its ending again,
+  # after its duplicate `accepted`, the client that resent it alone: that
+  # client missed the ending (the Mac's wire has no `request_status` to read
+  # it from), and the row stays as it is.
+  defp repeat_unrun_ending(request, client_id, transport, opts) do
+    case unrun_word(request) do
+      nil ->
+        :ok
+
+      word ->
+        event = Output.turn_error(request_turn_id(client_id), word)
+        best_effort_emit(opts, transport.reply_to, event)
+    end
+  end
+
+  defp unrun_word(%{status: "uncertain"}), do: @uncertain_reason
+  defp unrun_word(%{status: "failed", error: %{"reason" => "cancelled"}}), do: :cancelled
+  defp unrun_word(_request), do: nil
+
+  # Both transports name a request's turn after its id (`Channels.Companion`,
+  # `Channels.Mobile.request_turn_id/1`).
+  defp request_turn_id(client_id), do: "turn-" <> client_id
+
+  defp turn_audience(:companion, profile), do: {:companion, profile}
+  defp turn_audience(:mobile, profile), do: {:phones, profile}
 
   # One client event that becomes a gateway message is one inbound message for
   # its channel, counted here — the single ingress every `msg` and `command`

@@ -44,6 +44,8 @@ Reads and changes the same sections the Mac panes show, through the running serv
 |---|---|
 | `[fermix_core]` | `profile` (keyring namespace), `secret_store` (`keyring` or `file`) |
 | `[fermix_core.agent]` | `name` (the assistant's name); legacy `provider` |
+| `[fermix_core.engine]` | `role` (`primary`, the default when the section is absent; `device` serves the desktop app only; `candidate` waits for an Always On move), never changed from settings |
+| `[fermix_core.snapshots]` | `recipient` (the recovery key, derived from a recovery passphrase, which this Fermix cannot set yet), `interval_hours` (1 to 168, default 6), `s3_bucket`, `s3_region`, `s3_prefix` (default `fermix`), `s3_endpoint` (an S3-compatible host only), and the `@keyring`/`@file` references of the secrets `snapshot_s3_access_key_id` and `snapshot_s3_secret_access_key`; snapshots run when `recipient` and `s3_bucket` are both set |
 | `[fermix_core.personalization]` | `user_name`, `timezone`, `communication_style` |
 | `[fermix_core.providers.<name>]` | see the `providers` reference |
 | `[fermix_core.routing]` | `subagent_*`, `cron_*`, `meeting_*` (`model`, `provider`, `reasoning_effort`) |

@@ -123,6 +123,54 @@ scalars. No `inspect(reason)` output, internal term, filesystem path, or Setup
 token ever crosses this boundary. `request_id` is `null` only when the request
 was so malformed that no valid id could be recovered from it.
 
+## After a move: requests the primary answers
+
+When the owner moves Fermix to another host (M75), the computer it moved from
+keeps its engine in the device role and keeps this socket, so the app changes
+nothing. That engine answers a request about this computer itself and sends
+every other one to the primary over its encrypted session, after this
+socket's own placement of the caller (an owner decision from a process the
+engine started is refused here, as above, and never sent). The answer is the
+primary's, exactly as its own socket would give it. This daemon cannot start
+a move yet; what follows is how an engine linked to its primary answers.
+
+- **Answered on this computer** (device-class): `hello`, `lifecycle.*`,
+  `diagnostics.build`, `logs.query`, `doctor.*`, `setup.session.create`,
+  `setup.detect`, `computer_use.*`, `imessage.*`, `browser.install.start`,
+  `capabilities.install.start`, and `settings.get` and `settings.apply` for a
+  section that configures only this computer: `sandbox`, `computer_use`,
+  `computer_history` and `channels.imessage`.
+- **Composed** (answered here, with the primary's own part):
+  `settings.sections` lists this computer's own sections and the primary's
+  others. The primary's part is asked within 5 s; while it is
+  missing (unreachable, or no answer in time) this computer's part is still
+  answered and `primary_missing` holds the sentence that says why. The primary
+  answers a composed request a desktop forwards as its own.
+- **Answered by the primary** (primary-class): every other method.
+- While the primary cannot be reached, a primary-class request is answered
+  `primary_unreachable`, `details.primary` naming it and `details.sentence`
+  saying so: `The server <name> is unreachable. Fermix keeps your message until
+  it is back.` One the primary did not answer within its forward deadline
+  (below; work longer than that is a job on the primary, answered at once) is
+  answered the same way, with the sentence that it did not answer in time. A
+  desktop the primary revoked says so instead, and one whose session the
+  primary ended normally (a daemon stopping) says the link was renewed; a
+  primary that ends the renewed session normally again within a minute is an
+  outage from then on, redialed with the backoff.
+- **Forward deadline.** The computer waits 8 s for the primary's answer to a
+  forwarded request, inside a client's usual 10 s.
+- The primary refuses a device-class request that reaches it anyway with
+  `device_class_method`, `details.method` naming it.
+
+A computer that runs in the device role without having moved this way (no
+link to a primary) forwards nothing, and refuses as before.
+
+An engine in the **candidate role** (a fresh host waiting for the move that
+makes it the primary) answers `hello` and nothing else. Every other method is
+`unavailable`, with `details.capability` `candidate` and `details.sentence`
+`This engine is a candidate primary waiting for its move; it serves nothing
+until the move makes it the primary.`
+
 ## v0 compatibility window
 
 The daemon also serves the historical **unversioned** control protocol as v0 for
@@ -194,7 +242,7 @@ daemon onto anything else.
 | `lifecycle.cancel` | `lease_id` | Releases the window with the daemon untouched. |
 | `diagnostics.build` | none | A bounded, field-allowlisted, scrubbed diagnostic object for user-selected export. |
 | `setup.state.get` | none | Everything a setup surface reads before it renders: readiness with its gating split, restart state with the daemon's own reason sentences, one row per provider and per channel, the personalization presence summary, feature switches, the profile, and the coexistence facts. Minimum version `2`. |
-| `settings.sections` | none | The ordered inventory of every section this daemon can serve, each with the pane it renders under. The one enumerator: a section reachable through `settings.get` and absent here fails the daemon's own contract test. Minimum version `2`. |
+| `settings.sections` | none | The ordered inventory of every section this daemon can serve, each with the pane it renders under, as `{sections, primary_missing}`. The one enumerator: a section reachable through `settings.get` and absent here fails the daemon's own contract test. On a linked desktop it is composed (see *After a move*): this computer's own sections (`sandbox`, `computer_use`, `computer_history`, `channels.imessage`) and the primary's others, and `primary_missing` the sentence while the primary's are missing; null everywhere else. Minimum version `2`. |
 | `settings.get` | `section` | One section's rows. Exactly one section per call, which is what keeps every result inside the published depth budget. Minimum version `2`. |
 | `settings.apply` | `section`, `values` | Applies the changed keys of one section and answers with what landed, the restart state, a readiness summary, and the changes the operator did not type. Minimum version `2`. |
 | `settings.reload` | none | Re-reads the settings file, pushes it into the running configuration, and re-records the baseline. The one action behind `Reload settings from disk`. Minimum version `2`. |
@@ -1180,6 +1228,9 @@ Notes that the shapes alone do not carry:
 | `external_change` | The settings file was changed outside Fermix. `details.section` names the section the refused write targeted; `settings.reload` clears the state. |
 | `config_unreadable` | The settings file could not be read or parsed. `details.sentence` is the parser's own message, and no reload is offered for it. |
 | `unknown_pairing_session` | The pairing session is not retained by this daemon. `details.session_id` names it. |
+| `primary_unreachable` | After a move, the primary this computer forwards to cannot be reached, or did not answer in time. `details.sentence` says so, and `details.primary` names it when it is known (see *After a move*). |
+| `device_class_method` | The primary refused a request that configures the computer that forwarded it. `details.method` names it and `details.sentence` says why. |
+| `unconfirmed` | After a move, the primary had a forwarded request whose effect may stand though its answer did not arrive. `details.method` names it, `details.primary` names the primary when known, and `details.sentence` says where its outcome shows. Not a failure. No method this daemon serves is answered so yet. |
 
 `lease_expired` and `unknown_lease` are deliberately distinct: the first lets
 the app tell the operator the transaction timed out, the second says the id was
@@ -1190,7 +1241,7 @@ degrades to `unknown_lease`.
 
 `message` is a fixed per-code string and never varies with the request; it names
 the CLASS of failure. The daemon's own sentence about THIS request, when it has
-one, is `details.sentence`. Three codes carry one:
+one, is `details.sentence`. Six codes carry one:
 
 - `invalid_params` — every request-path refusal that has something to say to the
   operator. `details.field` names the parameter and `details.sentence` says why:
@@ -1207,6 +1258,13 @@ one, is `details.sentence`. Three codes carry one:
   use the Fermix app or your own terminal." And when the cues cannot reach
   their records, with the cues' sentence for why: memory is off, or the
   records could not be read.
+- `primary_unreachable` — "The server <name> is unreachable. Fermix keeps your
+  message until it is back.", or why this computer does not reach it.
+- `device_class_method` — "This request configures the computer it came
+  from, so the server does not answer it."
+- `unconfirmed` — "The server <name> did not confirm in time whether the move
+  started. Its state shows once the server answers again, and starting it
+  again never starts a second move."
 
 **A client that renders `message` alone renders "Request parameters are
 invalid." for that whole family**, which is the one sentence in the catalog that

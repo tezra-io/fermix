@@ -7,12 +7,18 @@ defmodule FermixChannels.Application do
   alias FermixChannels.Channels.Telegram
   alias FermixChannels.Channels.WhatsApp
   alias FermixChannels.Companion
+  alias FermixChannels.Desktop.DeviceSupervisor
+  alias FermixChannels.Desktop.Relay
+  alias FermixChannels.Desktop.Relay.Media, as: RelayMedia
   alias FermixChannels.Gateway.AlbumBuffer
   alias FermixChannels.Gateway.ChannelRegistry
   alias FermixChannels.LinkPreviews
   alias FermixChannels.Mobile.MediaStore
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
+  alias FermixCore.Home.DesktopLink
+  alias FermixCore.Home.Role
   alias FermixCore.Readiness
+  alias FermixCore.Setup.ConfigStore
 
   require Logger
 
@@ -90,40 +96,83 @@ defmodule FermixChannels.Application do
     # for the same reason, so it is present iff this application runs.
     Application.put_env(:fermix_core, :transport_restart_provider, __MODULE__)
 
-    request_boot_epoch = request_boot_epoch()
+    plan = boot_plan(readiness, request_boot_epoch(), Role.current())
 
     # What this boot holds is decided here, once, and read from this record
     # rather than from the supervisor, which a read must never wait on.
-    :persistent_term.put(@held_key, held_by(readiness, request_boot_epoch))
-
-    children =
-      [
-        # The Queue and the Task.Supervisor its turns run under, :one_for_all.
-        FermixChannels.Gateway.QueueSupervisor,
-        # After the queue, deliberately: the bridge ingests through it, so a
-        # delegation accepted before the queue is up has nowhere to run.
-        FermixChannels.Voice.Supervisor
-      ] ++
-        timeline_media() ++
-        [
-          # The companion chat socket, after the queue for the same reason. Its
-          # registry is always present, its turns' settlement runs on every real
-          # boot (the phone's requests settle there too), and the socket runs
-          # whenever the daemon does.
-          {Companion.Supervisor,
-           serve?: daemon_boot?(), settle?: settles?(), boot_epoch: request_boot_epoch},
-          # The Fermix app's browser host socket; it runs whenever the daemon does.
-          {BrowserHost.Supervisor, serve?: daemon_boot?()},
-          FermixChannels.Gateway.BackgroundSupervisor,
-          FermixChannels.Gateway.Commands.Sandbox.Confirmations,
-          FermixChannels.Gateway.Commands.Soul.Confirmations,
-          FermixChannels.Gateway.Idempotency
-        ] ++
-        album_buffers() ++
-        transport_children(readiness, request_boot_epoch) ++ call_row_sweep(settles?())
+    :persistent_term.put(@held_key, plan.held)
 
     opts = [strategy: :one_for_one, name: FermixChannels.Supervisor]
-    Supervisor.start_link(children, opts)
+    Supervisor.start_link(plan.children, opts)
+  end
+
+  @doc """
+  What a boot with this readiness starts and holds in the engine `role`, under
+  one request epoch: its children, and the transports it holds for setup
+  (`held_by/2`). A device leaves out every primary-only child
+  (`FermixCore.Home.Role.children/2`), so it starts no transport and holds
+  none: no restart would start one. A device whose home holds its desktop
+  link (`FermixCore.Home.DesktopLink.linked?/2`) carries its companion socket
+  to the primary (M75 §6).
+  """
+  @spec boot_plan(Readiness.report(), String.t(), Role.role()) :: %{
+          held: [module()],
+          children: [Role.child()]
+        }
+  def boot_plan(readiness, request_boot_epoch, role)
+      when is_map(readiness) and is_binary(request_boot_epoch) and
+             role in [:primary, :device, :candidate] do
+    tunnel = tunnel(role, ConfigStore.fermix_home())
+
+    %{
+      held: Role.children(held_by(readiness, request_boot_epoch), role),
+      children: Role.children(children(readiness, request_boot_epoch, tunnel), role)
+    }
+  end
+
+  # Decided once per boot, as the daemon decides its management forwarding.
+  defp tunnel(role, home) do
+    if DesktopLink.linked?(%{role: role, primary: nil}, home),
+      do: [relay: Relay, staging: RelayMedia.staging_dir(home)],
+      else: nil
+  end
+
+  defp children(readiness, request_boot_epoch, tunnel) do
+    [
+      # The Queue and the Task.Supervisor its turns run under, :one_for_all.
+      FermixChannels.Gateway.QueueSupervisor,
+      # After the queue, deliberately: the bridge ingests through it, so a
+      # delegation accepted before the queue is up has nowhere to run.
+      FermixChannels.Voice.Supervisor
+    ] ++
+      timeline_media() ++
+      [
+        # The companion chat socket, after the queue for the same reason. Its
+        # registry is always present, its turns' settlement runs on every real
+        # boot (the phone's requests settle there too), and the socket runs
+        # whenever the daemon does.
+        # A device's link to its primary (M75 §6; the primary starts none),
+        # before the companion socket that tunnels through it.
+        DeviceSupervisor,
+        # A candidate's enrollment and the move it waits for (M75 §7; only a
+        # candidate starts it, and it starts little else), and the primary's
+        # enrollment window (only the primary starts it).
+        FermixChannels.Home.CandidateSupervisor,
+        FermixChannels.Home.Enrollment,
+        {Companion.Supervisor,
+         serve?: daemon_boot?(),
+         settle?: settles?(),
+         boot_epoch: request_boot_epoch,
+         tunnel: tunnel},
+        # The Fermix app's browser host socket; it runs whenever the daemon does.
+        {BrowserHost.Supervisor, serve?: daemon_boot?()},
+        FermixChannels.Gateway.BackgroundSupervisor,
+        FermixChannels.Gateway.Commands.Sandbox.Confirmations,
+        FermixChannels.Gateway.Commands.Soul.Confirmations,
+        FermixChannels.Gateway.Idempotency
+      ] ++
+      album_buffers() ++
+      transport_children(readiness, request_boot_epoch) ++ call_row_sweep(settles?())
   end
 
   # The timeline's media store and the bounded supervisor its rows' link

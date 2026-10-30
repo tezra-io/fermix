@@ -259,6 +259,10 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     xai_api_key = "transcription-xai-old"
     deepgram_api_key = "deepgram-old"
 
+    [fermix_core.snapshots]
+    s3_access_key_id = "snapshot-key-id-old"
+    s3_secret_access_key = "snapshot-secret-old"
+
     [fermix_core.meetings]
     enabled = true
     zoom_account_id = "zoom-account"
@@ -349,6 +353,8 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       transcription_xai_api_key: "transcription-xai-old",
       deepgram_api_key: "deepgram-old",
       meetings_zoom_client_secret: "zoom-secret-old",
+      snapshot_s3_access_key_id: "snapshot-key-id-old",
+      snapshot_s3_secret_access_key: "snapshot-secret-old",
       google_oauth_client_secret: "google-oauth-old",
       github_oauth_client_secret: "github-oauth-old",
       notion_oauth_client_secret: "notion-oauth-old",

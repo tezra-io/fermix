@@ -296,9 +296,11 @@ A pairing session runs in this order:
    keepalive never has to stop; an idle disconnect while a decision is pending
    is not a failed pairing handshake.
 3. Approved: `pair_approved{device_id, candidates[], profiles[], push_salt,
-   push[]?}`, where `push_salt` is the device's 32-byte push salt in standard
+   push[]?, primary_epoch?}`, where `push_salt` is the device's 32-byte push salt in standard
    base64 and `push[]` the push services this daemon sends through, which a
-   daemon older than the list leaves out (see *Push notifications*). The phone then sends `hello` on the same session (its
+   daemon older than the list leaves out (see *Push notifications*), and
+   `primary_epoch` the daemon's primary epoch, the value the newly paired phone
+   starts its highest-seen epoch from (see *Primary epoch*). The phone then sends `hello` on the same session (its
    next `seq`) within a fresh 10 s, and the session goes on as a paired one.
 4. Not approved: `pair_denied{reason}`, then close `4003` with the text
    `pairing <reason>`. `reason` is one word, the one the management protocol
@@ -471,11 +473,37 @@ Rollout order is daemon first (add N+1 while retaining N), then app. Rollback is
 the reverse. The app must never ship a required version before a released daemon
 accepts it.
 
+### Primary epoch
+
+`hello_ack` and `pair_approved` carry `primary_epoch`, a positive integer: how
+many times this daemon's home has become the primary engine. It is 1 from the
+home's first boot as the primary and goes up by one each time the home moves to
+another host or is restored from a snapshot; it never goes down. The gateway key moves
+with the home, so a retired copy of it presents the same key, and the epoch is
+what tells the two apart. This daemon always sends it; a daemon older than the
+epoch leaves it out, as it leaves out every field added after protocol 2
+shipped, so neither event needs a version bump.
+
+A phone keeps the highest `primary_epoch` it has seen, across sessions,
+starting from the one `pair_approved` gave it, and sends it as
+`hello.primary_epoch`. A `hello_ack` with a lower one, or with none once the
+phone has seen one, is a stale primary: the phone refuses it by that name,
+closes the session without showing that daemon's timeline or sending it
+anything, and tells the owner that this Fermix is an older copy of the one that
+moved. The phone resets the value only when it re-pairs.
+
+The daemon refuses a `hello` whose `primary_epoch` is greater than its own with
+the `error` code `stale_primary`, `message` `This engine is at epoch <mine>; you
+have seen epoch <theirs>: the primary moved, reconnect to the current one`,
+then closes `1002` with the text `stale primary`. It serves nothing of that
+session and records nothing of the phone. A lower or absent `primary_epoch` is
+served.
+
 ## Client events
 
 | `t` | Required payload | Rules |
 |---|---|---|
-| `hello` | `device_id`, `app_version`, `last_server_seq`, `protocol_v`; `relay_list_rev?` | first paired-session event; `relay_list_rev` is the revision of the relay list the phone holds (see *Remote reach*), 16 lowercase hex digits |
+| `hello` | `device_id`, `app_version`, `last_server_seq`, `protocol_v`; `relay_list_rev?`, `primary_epoch?` | first paired-session event; `relay_list_rev` is the revision of the relay list the phone holds (see *Remote reach*), 16 lowercase hex digits; `primary_epoch` is the highest primary epoch the phone has seen, absent when it has seen none (see *Primary epoch*) |
 | `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | text or at least one attachment is required |
 | `attach_begin` | `attach_id`, `kind`, `mime`, `size_bytes`, `sha256`; `name?`, `poster_of?` | SHA-256 is announced before transfer so the host can deduplicate. `kind` is one of `image`, `animation`, `video`, `audio`, `voice`, `document`, `file`; the daemon names the kind from the bytes itself and reads `kind` as a hint. `voice` is a recording the owner made in the app: the daemon treats it as the owner's own words, while `audio` (an audio file attached or forwarded) is treated as content someone else could have written. The row's `media_refs` and every media event name a `voice` upload `audio`. A daemon older than `voice` reads it as no hint and handles the recording as an audio file, so a phone sends `voice` without checking the daemon's version. A still sent with `poster_of` set to a video's `attach_id` is that video's poster frame, not an attachment of its own |
 | `attach_chunk` | `attach_id`, `index` + raw bytes | contiguous zero-based indexes; raw bytes ≤60 KiB |
@@ -523,7 +551,7 @@ A client must not upload chunks after `present`.
 
 | `t` | Required payload | Rules |
 |---|---|---|
-| `hello_ack` | `session_id`, `min_version`, `max_version`, `profiles[]`, `candidates[]`, `history_head_seq`, `read_up_to_seq`, `caps{}` | completes hello negotiation |
+| `hello_ack` | `session_id`, `min_version`, `max_version`, `profiles[]`, `candidates[]`, `history_head_seq`, `read_up_to_seq`, `caps{}`; `primary_epoch?` | completes hello negotiation; `primary_epoch` is the daemon's primary epoch, which this daemon always sends and a daemon older than the epoch leaves out (see *Primary epoch*) |
 | `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | durable receipt for a `msg` or `command`; clears the outbox item |
 | `attach_status` | `attach_id`, `status` | status is `upload` or `present` |
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | begins streamed draft |
@@ -534,7 +562,7 @@ A client must not upload chunks after `present`.
 | `media_begin` | `ref`, `server_seq`, `kind`, `mime`, `size_bytes`, `sha256`; `filename?`, `caption?` | starts outbound media |
 | `media_chunk` | `ref`, `index` + raw bytes | contiguous zero-based indexes; raw bytes ≤60 KiB |
 | `media_end` | `ref`, `sha256` | completes outbound media |
-| `turn_error` | `turn_id`, `code`, `message` | terminal turn failure; message ≤512 bytes |
+| `turn_error` | `turn_id`, `code`, `message` | terminal turn failure; message ≤512 bytes; `code` `uncertain_after_restart` ends a request the daemon will not run again after a restart (see *Delivery and failure behavior*) |
 | `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`, `media_refs[]`; `kind?`, `client_msg_id?`, `in_reply_to?`, `metadata?`, `link_previews[]?`, `blocks[]?`, `truncated?` | a timeline row this client did not stream |
 | `reaction` | `in_reply_to`, `emoji` | reacts to a client message id |
 | `approval` | `approval_id`, `kind`, `text`, `token`, `ttl_s`, `approve_command`, `deny_command`; `detail?` | command routes are nonempty and at most 1,024 characters; token is submitted but never rendered |
@@ -544,7 +572,7 @@ A client must not upload chunks after `present`.
 | `history_page` | `profile_id`, `messages[]`, `next_after_seq`, `history_head_seq`; `prev_before_seq?` | exact server-sequence cursor page; see *History pages* |
 | `request_status_page` | `requests[]` | how each request `request_status` named stands |
 | `notice` | `kind`, `text` | reserved: in the catalog, never sent yet |
-| `pair_approved` | `device_id`, `candidates[]`, `profiles[]`, `push_salt`; `push[]?` | completes pairing; `push_salt` is the device's push salt, 32 bytes in standard base64; `push[]` as `caps.push`, which this daemon always sends and a daemon older than the list leaves out |
+| `pair_approved` | `device_id`, `candidates[]`, `profiles[]`, `push_salt`; `push[]?`, `primary_epoch?` | completes pairing; `push_salt` is the device's push salt, 32 bytes in standard base64; `push[]` as `caps.push`, which this daemon always sends and a daemon older than the list leaves out; `primary_epoch` as `hello_ack`'s, the phone's first highest-seen epoch |
 | `pair_denied` | `reason` | terminal pairing refusal |
 | `error` | `code`, `message`; `client_msg_id?`, `ref?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | a refusal; message ≤512 bytes; see *Errors* |
 | `pong` | — | keepalive response |
@@ -683,7 +711,9 @@ in the order asked; an id it does not hold (never claimed, or cleared once its
 24-hour claim ran out) is left out. An entry is `{client_msg_id, status}`, `status` one of
 `accepted`, `running`, `completed` or `failed`, with `turn_id?`,
 `result_server_seq?` (the request's reply row) and, on a failed one, `error`:
-`cancelled` when it was stopped, `request_failed` otherwise. A completed or
+`cancelled` when it was stopped, `uncertain_after_restart` when it may have
+run before the daemon restarted (see *Delivery and failure behavior*),
+`request_failed` otherwise. A completed or
 failed request ended while the phone was away, so it ends the turn the phone
 shows for it; an accepted or running one goes on, and its stream and ending
 arrive as usual.
@@ -711,6 +741,8 @@ exactly once:
 - it was cancelled or failed: one `turn_error` whose `code` is `cancelled`,
   `interrupted` (the daemon lost the turn), a failure's own word, or
   `turn_failed`, and whose message is at most 512 bytes;
+- it may have run before the daemon restarted: one `turn_error` whose `code`
+  is `uncertain_after_restart` (see *Delivery and failure behavior*);
 - a request whose hand-off to the turn queue failed also ends in
   `turn_error`, not `error`.
 
@@ -897,7 +929,8 @@ keeps a session to the new primary as a `desktop` device. Its row in
 field; a row that names no kind is a phone's, as every row written before
 desktops did. A
 desktop authenticates exactly as a paired phone does: `IK` (`0x01`) with its
-own static key, then `hello`, answered with `hello_ack`. The primary reads the row's kind and admits that
+own static key, then `hello` with the highest `primary_epoch` it has seen,
+answered with `hello_ack`. The primary reads the row's kind and admits that
 kind's events alone (see *Who may send what*). The desktop's Mac or Linux app
 speaks only its local sockets; the desktop's engine carries them over this
 session. A desktop's session is meant to stay up: it has no one-hour lifetime
@@ -945,9 +978,7 @@ digit. A name a person reads (`name`, `primary_name`, an enrollment's
 texts) is at most 128 bytes of UTF-8 with no control character.
 
 An event of a family the primary does not serve yet is answered
-`error{code:"unsupported_event"}`, and the session stays open. This daemon
-serves none of the four families yet (the companion tunnel, `manage`, the
-sign-in loopback and snapshot copies): each of their events is answered so. A desktop is
+`error{code:"unsupported_event"}`, and the session stays open. A desktop is
 sent no approval card and no phone's broadcast: its chat, approvals included,
 rides its companion tunnel. A desktop's session closes `1011` (`desktop peer
 failed`) when the primary's side of it fails or does not start. A desktop
@@ -985,8 +1016,7 @@ or `snapshot_refused`. A new `snapshot_begin` abandons a copy in progress.
 ## Enrollment and the move
 
 Two more sessions use the prelude, the frames and the bounds above, each with
-its own responder. The phone listener serves neither, and this daemon runs
-neither responder yet.
+its own responder. The phone listener serves neither.
 
 **Enrollment** (`FXM1 0x03`, `IKpsk2`). A candidate primary, a new host the
 owner made from the enrollment code, enrolls with the primary while the
@@ -1073,9 +1103,24 @@ A pairing session (`0x02`), until the owner decides, sends `pair_request` and
 `msg` and `command` are at-least-once from the phone. The daemon durably claims
 `client_msg_id` before replying `accepted`; resends return `accepted` with
 `duplicate:true` and never run the turn twice. The same `client_msg_id` with
-different content is refused with `client_message_conflict`. A request the
-daemon accepted but could not finish because it stopped is run again when it
-next starts; claims last 24 hours. A request that failed stays failed: its
+different content is refused with `client_message_conflict`. Claims last 24
+hours.
+
+After a restart the daemon never runs again a request that may already have
+run. One it accepted but never started runs when it comes back; one whose
+turn had started does not; and when its home moved to another host or was
+restored from a snapshot (its primary epoch changed), none it had not
+finished runs. A request still accepted from before the daemon recorded which
+boot claimed it (one waiting when the daemon was upgraded to this rule) counts
+as started: it is settled once, not run. Each that does not run ends, once,
+whether recovery or a resend reaches it first, with
+`turn_error{code:"uncertain_after_restart"}` (`cancelled` when it carried a
+cancel) on every phone connected then, and `request_status` answers it
+`failed` with that word. Its `client_msg_id` stays claimed: a resend under it
+is a `duplicate:true` that never runs, since a resend the user meant looks
+like a blind outbox retry, and after that `accepted` the phone that resent it
+alone is sent the same `turn_error` again. To run it again the phone sends it
+under a new `client_msg_id`, only when the user asks. A request that failed stays failed: its
 resend is a duplicate and never runs again. `ack.server_seq` is a separate,
 cumulative acknowledgement of daemon output and must not be used as the outbox
 receipt. History is recovered exactly with `history_pull(after_seq)`.
@@ -1110,6 +1155,7 @@ parsed.
 | `unsupported` | an unknown `t` once paired, `event_part` from a client included | — | closed `1002` |
 | `repeated_hello` | a second `hello` | — | closed `1002` |
 | `unsupported_protocol_version` | a `hello` or `pair_request` outside the version window | `direction`, `client_version`, `min_version`, `max_version` | closed `1002` |
+| `stale_primary` | a `hello` whose `primary_epoch` is greater than this daemon's (see *Primary epoch*) | — | closed `1002` |
 | `request_failed`, `client_message_conflict`, `unsupported_profile` | a request refused or failed after `accepted`, or any refusal with no word of its own | `client_msg_id` for a `msg` or `command` | open |
 | `attachment_unavailable` | a `msg` naming an `attach_id` the daemon no longer holds | `client_msg_id` | open |
 | `invalid_field`, `missing_field` | a field the daemon refuses once the frame decoded, such as a `msg`'s `attach_ids` | `client_msg_id` for a `msg` or `command` | open |
@@ -1134,7 +1180,7 @@ the device has since replaced.
 | Code | Why | Client |
 |---|---|---|
 | `1000` | a phone's one-hour session lifetime ran out (`Noise session lifetime reached`; a desktop's session has none), the daemon is shutting down, or an enrollment was accepted | reconnect with a new handshake (a desktop at once, showing no outage, once in a row: then with the backoff); a candidate does not |
-| `1002` | a protocol error (`mobile protocol error`, `invalid mobile prelude`, `unsupported mobile protocol version`), no inbound frame for 150 s, or a malformed WebSocket frame | reconnect; after `unsupported_protocol_version`, update first |
+| `1002` | a protocol error (`mobile protocol error`, `invalid mobile prelude`, `unsupported mobile protocol version`, `stale primary`), no inbound frame for 150 s, or a malformed WebSocket frame | reconnect; after `unsupported_protocol_version`, update first; after `stale_primary`, tell the owner and keep the highest epoch it has seen |
 | `1003` | a text message | send binary messages |
 | `1008` | the handshake deadline (`mobile handshake deadline`); on the remote route, also a stream still in its handshake closed to make room for a newer one | reconnect |
 | `1009` | a message over 65,535 bytes (`mobile frame too large`) | never send one |
