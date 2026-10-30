@@ -363,7 +363,7 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
   end
 
   defp row(@desktop_id),
-    do: %{device_id: @desktop_id, name: "Studio Mac", kind: :desktop}
+    do: %{device_id: @desktop_id, name: "Studio Mac", kind: :desktop, executor: true}
 
   defp row(id), do: %{device_id: id, name: "Garden phone", kind: :phone}
 

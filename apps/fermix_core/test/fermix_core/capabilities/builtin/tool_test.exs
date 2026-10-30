@@ -36,6 +36,21 @@ defmodule FermixCore.Capabilities.Builtin.ToolTest do
         Tool.success_with_images("x", [%{type: :image, mime_type: "", data: "x"}])
       end
     end
+
+    test "carries a named PDF as a document part, and nothing else as a document" do
+      pdf = %{type: :document, mime_type: "application/pdf", data: "%PDF-1.7", name: "lease.pdf"}
+      assert %{images: [^pdf]} = Tool.success_with_images("read", [pdf])
+
+      for bad <- [
+            Map.delete(pdf, :name),
+            %{pdf | name: ""},
+            %{pdf | mime_type: "application/msword"}
+          ] do
+        assert_raise ArgumentError, ~r/invalid image part/, fn ->
+          Tool.success_with_images("read", [bad])
+        end
+      end
+    end
   end
 
   describe "error/1" do

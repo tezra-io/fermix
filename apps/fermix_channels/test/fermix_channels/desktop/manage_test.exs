@@ -171,6 +171,7 @@ defmodule FermixChannels.Desktop.ManageTest do
           device_id: DesktopRail.device_id(),
           session: test,
           registry: registry,
+          max_media_bytes: 20_971_520,
           families: %{manage: {Manage, serve: serve, task_supervisor: task_supervisor}}
         )
 

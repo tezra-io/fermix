@@ -11,8 +11,10 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
 
   - While a move this home started is pending (`FermixCore.Home.Move.pending?/1`):
     the move worker (`FermixChannels.Home.MoveWorker`), its source.
-  - When `device/desktop.json` exists: the desktop's services
-    (`Desktop.DeviceServices`), then the desktop relay (`Desktop.Relay`).
+  - When `device/desktop.json` exists: the receipts of the actions this
+    desktop runs for its primary (`Desktop.Receipts`, which the executor
+    reads), the desktop's services (`Desktop.DeviceServices`), then the
+    desktop relay (`Desktop.Relay`).
 
   `:rest_for_one`: the users dial through the helper, so its restart takes
   them down with it, and the relay reconnects on its own backoff.
@@ -20,6 +22,7 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
 
   use Supervisor
 
+  alias FermixChannels.Desktop.Receipts
   alias FermixChannels.Desktop.Relay
   alias FermixChannels.Mobile.Iroh.Helper
   alias FermixCore.Home.DesktopLink
@@ -54,6 +57,7 @@ defmodule FermixChannels.Desktop.DeviceSupervisor do
       for {start?, child} <- [
             # One line per child, in start order; the relay comes last.
             {Move.pending?(root), {FermixChannels.Home.MoveWorker, home: root, helper: @helper}},
+            {linked?, {Receipts, home: root}},
             {linked?, {FermixChannels.Desktop.DeviceServices, home: root}},
             {linked?, {Relay, root: root, helper: @helper}}
           ],

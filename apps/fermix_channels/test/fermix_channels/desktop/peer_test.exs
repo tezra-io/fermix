@@ -41,6 +41,7 @@ defmodule FermixChannels.Desktop.PeerTest do
   @families %{
     companion: RecordingFamily,
     manage: RecordingFamily,
+    executor: RecordingFamily,
     loopback: RecordingFamily
   }
 
@@ -122,40 +123,49 @@ defmodule FermixChannels.Desktop.PeerTest do
     assert {:close, {:chunk_header_changed, "manage"}} =
              Peer.deliver(peer, event("manage", changed, "}"))
 
-    # A manage payload is at most 1 MiB: the frame that takes it past is refused.
-    frame = :binary.copy("a", 60 * 1_024)
+    blob = %{"invocation_id" => "inv-1", "index" => 0, "last" => false}
+    assert :ok = Peer.deliver(peer, event("invoke_blob", blob, :binary.copy("a", 60)))
 
-    for index <- 0..16 do
-      assert :ok =
-               Peer.deliver(peer, event("manage", manage_fields(index, false, "call-2"), frame))
-    end
-
-    assert {:close, {:chunk_payload_too_large, 1_105_920, 1_048_576}} =
-             Peer.deliver(peer, event("manage", manage_fields(17, false, "call-2"), frame))
+    assert {:close, {:chunk_payload_too_large, 120, 100}} =
+             Peer.deliver(
+               peer,
+               event("invoke_blob", %{blob | "index" => 1}, :binary.copy("a", 60))
+             )
   end
 
   test "more than 32 payloads open at once closes the session", ctx do
     peer = start_peer!(ctx, forwarder())
 
     for n <- 1..32 do
-      assert :ok = Peer.deliver(peer, event("manage", manage_fields(0, false, "call-#{n}"), "{"))
+      fields = %{"invocation_id" => "inv-#{n}", "index" => 0, "last" => false}
+
+      assert :ok =
+               Peer.deliver(peer, event("invoke_result", Map.put(fields, "status", "ok"), "{"))
     end
+
+    fields = %{"invocation_id" => "inv-33", "status" => "ok", "index" => 0, "last" => false}
 
     assert {:close, {:too_many_open_payloads, 32}} =
-             Peer.deliver(peer, event("manage", manage_fields(0, false, "call-33"), "{"))
+             Peer.deliver(peer, event("invoke_result", fields, "{"))
   end
 
-  test "the bytes held across open payloads are bounded by the budget", ctx do
+  test "the bytes held across open payloads are bounded, by the budget or one blob's bound",
+       ctx do
     peer = start_peer!(ctx, forwarder(), open_bytes_budget: 200)
-    line = :binary.copy("a", 60)
+    blob = fn n -> %{"invocation_id" => "inv-#{n}", "index" => 0, "last" => false} end
 
-    for channel <- 1..3 do
-      assert :ok =
-               Peer.deliver(peer, event("companion_line", line_fields(channel, 0, false), line))
-    end
+    for n <- 1..3,
+        do:
+          assert(:ok = Peer.deliver(peer, event("invoke_blob", blob.(n), :binary.copy("a", 60))))
 
     assert {:close, {:open_payload_bytes, 200}} =
-             Peer.deliver(peer, event("companion_line", line_fields(4, 0, false), line))
+             Peer.deliver(peer, event("invoke_blob", blob.(4), :binary.copy("a", 60)))
+
+    # A session whose blob bound is larger holds one such blob whole.
+    wide = start_peer!(ctx, forwarder(), open_bytes_budget: 100, max_media_bytes: 150)
+
+    assert :ok = Peer.deliver(wide, event("invoke_blob", blob.(1), :binary.copy("a", 60)))
+    assert :ok = Peer.deliver(wide, event("invoke_blob", %{blob.(1) | "index" => 1}, "b"))
   end
 
   test "an event that is not chunked reaches its family as it came, and a refusal is answered",
@@ -204,8 +214,8 @@ defmodule FermixChannels.Desktop.PeerTest do
     assert {:error, {:not_for_desktop, "text_done"}} =
              Peer.send(@device, %{"t" => "text_done"}, <<>>, opts)
 
-    assert {:error, {:payload_too_large, "manage_result", 4_194_305, 4_194_304}} =
-             Peer.send(@device, manage_result_header(), :binary.copy("a", 4_194_305), opts)
+    assert {:error, {:payload_too_large, "invoke", 65_537, 65_536}} =
+             Peer.send(@device, invoke_header(), :binary.copy("a", 65_537), opts)
 
     assert {:error, {:invalid_event, "manage_result", {:invalid_field, "call_id"}}} =
              Peer.send(@device, %{"t" => "manage_result", "call_id" => ""}, "{}", opts)
@@ -219,15 +229,15 @@ defmodule FermixChannels.Desktop.PeerTest do
              )
 
     assert {:error, :not_connected} =
-             Peer.send("0d8f7e6a-5b4c-4d3e-8f2a-1b0c9d8e7f6a", manage_result_header(), "{}", opts)
+             Peer.send("0d8f7e6a-5b4c-4d3e-8f2a-1b0c9d8e7f6a", invoke_header(), "{}", opts)
 
     refute_received {:mobile_event, _frame}
   end
 
   test "tell/4 reaches a family's own messages", ctx do
     start_peer!(ctx, forwarder())
-    assert :ok = Peer.tell(@device, :loopback, {:await, "rq-1"}, registry: ctx.registry)
-    assert_receive {:family_info, {:await, "rq-1"}}
+    assert :ok = Peer.tell(@device, :executor, {:await, "inv-1"}, registry: ctx.registry)
+    assert_receive {:family_info, {:await, "inv-1"}}
   end
 
   test "a newer session of the same desktop replaces the older peer", ctx do
@@ -261,6 +271,7 @@ defmodule FermixChannels.Desktop.PeerTest do
           device_id: @device,
           session: session,
           registry: ctx.registry,
+          max_media_bytes: 100,
           connected_since: @since,
           families: @families
         ],
@@ -290,9 +301,9 @@ defmodule FermixChannels.Desktop.PeerTest do
   defp line_fields(channel, index, last),
     do: %{"channel" => channel, "index" => index, "last" => last}
 
-  defp manage_fields(index, last, call_id \\ "call-1") do
+  defp manage_fields(index, last) do
     %{
-      "call_id" => call_id,
+      "call_id" => "call-1",
       "method" => "settings.get",
       "protocol_version" => 2,
       "index" => index,
@@ -300,5 +311,7 @@ defmodule FermixChannels.Desktop.PeerTest do
     }
   end
 
-  defp manage_result_header, do: %{"t" => "manage_result", "call_id" => "call-1"}
+  defp invoke_header do
+    %{"t" => "invoke", "invocation_id" => "inv-1", "action" => "notify", "deadline_s" => 30}
+  end
 end

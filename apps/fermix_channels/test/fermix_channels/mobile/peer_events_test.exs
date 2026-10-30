@@ -45,7 +45,10 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
                decode("companion_open", %{"channel" => 2}, "x")
     end
 
-    test "a loopback request's body may be empty" do
+    test "an empty file is an empty blob, and a body may be empty" do
+      blob = %{"invocation_id" => "inv-1", "index" => 0, "last" => true}
+      assert {:ok, %{bytes: <<>>}} = decode("invoke_blob", blob)
+
       request = %{
         "loopback_id" => "lb-1",
         "request_id" => "rq-1",
@@ -65,10 +68,74 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
       assert {:error, {:invalid_field, "target"}} =
                decode("loopback_request", %{request | "target" => "http://x/"})
     end
+
+    test "receipts are bounded lists" do
+      receipt = %{
+        "invocation_id" => "inv-1",
+        "status" => "ok",
+        "finished_at" => "2026-10-21T08:14:03Z"
+      }
+
+      answer = %{"status_id" => "st-1", "receipts" => [receipt]}
+      assert {:ok, _event} = decode("invoke_receipts", answer)
+      assert {:ok, _event} = decode("invoke_receipts", %{answer | "receipts" => []})
+
+      assert {:error, {:missing_field, "status_id"}} =
+               decode("invoke_receipts", Map.delete(answer, "status_id"))
+
+      assert {:error, {:invalid_field, "receipts"}} =
+               decode("invoke_receipts", %{answer | "receipts" => List.duplicate(receipt, 33)})
+
+      assert {:error, {:invalid_field, "receipts"}} =
+               decode("invoke_receipts", %{
+                 answer
+                 | "receipts" => [%{receipt | "status" => "running"}]
+               })
+
+      # RFC 3339 in UTC: an offset is refused here, never mistaken further on.
+      for at <- ["2026-10-21T10:14:03+02:00", "2026-10-21T03:14:03-05:00", "next week"] do
+        assert {:error, {:invalid_field, "receipts"}} =
+                 decode("invoke_receipts", %{
+                   answer
+                   | "receipts" => [%{receipt | "finished_at" => at}]
+                 })
+      end
+    end
   end
 
   describe "what the primary sends a desktop" do
-    test "a loopback opens 1 to 8 ports" do
+    test "an invoke runs within its deadline and names a snake_case action" do
+      invoke = %{
+        "invocation_id" => "inv-1",
+        "action" => "run_command",
+        "deadline_s" => 60,
+        "index" => 0,
+        "last" => true
+      }
+
+      assert {:ok, _frame} = encode("invoke", invoke, ~s({"command":"ls"}))
+
+      for deadline <- [0, 601] do
+        assert {:error, {:invalid_field, "deadline_s"}} =
+                 encode("invoke", %{invoke | "deadline_s" => deadline}, "{}")
+      end
+
+      assert {:error, {:invalid_field, "action"}} =
+               encode("invoke", %{invoke | "action" => "Run Command"}, "{}")
+    end
+
+    test "status asks after 1 to 32 invocations and a loopback opens 1 to 8 ports" do
+      status = %{"status_id" => "st-1", "invocation_ids" => ["inv-1"]}
+      assert {:ok, _frame} = encode("invoke_status", status)
+
+      assert {:error, {:missing_field, "status_id"}} =
+               encode("invoke_status", Map.delete(status, "status_id"))
+
+      for ids <- [[], List.duplicate("inv-1", 33)] do
+        assert {:error, {:invalid_field, "invocation_ids"}} =
+                 encode("invoke_status", %{status | "invocation_ids" => ids})
+      end
+
       open = %{"loopback_id" => "lb-1", "ports" => [53_682], "expires_in_s" => 900}
       assert {:ok, _frame} = encode("loopback_open", open)
 
@@ -190,10 +257,10 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
     for type <- PeerEvents.server_events(), do: assert(type in Protocol.server_events())
 
     assert Enum.sort(PeerEvents.raw_events(:client)) ==
-             ~w(companion_line loopback_request manage move_chunk)
+             ~w(companion_line invoke_blob invoke_result loopback_request manage move_chunk)
 
     assert Enum.sort(PeerEvents.raw_events(:server)) ==
-             ~w(companion_line loopback_response manage_result snapshot_chunk)
+             ~w(companion_line invoke loopback_response manage_result snapshot_chunk)
   end
 
   defp decode(type, fields, bytes \\ <<>>) do

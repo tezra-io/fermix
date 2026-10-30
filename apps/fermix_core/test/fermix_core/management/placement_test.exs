@@ -11,7 +11,8 @@ defmodule FermixCore.Management.PlacementTest do
     doctor.start doctor.get doctor.cancel setup.session.create setup.detect
     computer_use.grant.start computer_use.permissions.get imessage.permissions.get
     imessage.grant.start imessage.policy.confirm browser.install.start
-    capabilities.install.start home.status settings.sections
+    capabilities.install.start home.status settings.sections device.grants.list
+    device.grants.remove
   )
 
   test "the device-class methods are this machine's, whatever their parameters" do
@@ -41,7 +42,7 @@ defmodule FermixCore.Management.PlacementTest do
   end
 
   test "settings are placed by section: this machine's own, else the primary's" do
-    for section <- ~w(sandbox computer_use computer_history channels.imessage) do
+    for section <- ~w(sandbox computer_use computer_history channels.imessage engine) do
       assert Placement.place("settings.get", %{"section" => section}) == :device
 
       assert Placement.place("settings.apply", %{"section" => section, "values" => %{}}) ==

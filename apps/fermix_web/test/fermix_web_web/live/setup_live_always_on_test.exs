@@ -31,6 +31,30 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
   @desktop_id "6d2b3c1e-1f7a-4c55-9a3e-2b8f6e0c4d71"
   @server_candidate_id "cand-7a1c2e3f4b5d6e70"
 
+  # The rail's facts and the one desktop switch, scripted per case.
+  defmodule MobileStub do
+    @moduledoc false
+
+    def devices_set_executor(device_id, executor, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:set_executor, device_id, executor})
+
+      {:ok,
+       %{
+         device_id: device_id,
+         name: "Studio Mac",
+         model: "Mac",
+         kind: :desktop,
+         executor: executor,
+         platform: nil,
+         signer_role: nil,
+         boot_state: nil,
+         push_registered: false,
+         created_at: "2026-10-27T11:00:00Z",
+         last_seen: nil
+       }}
+    end
+  end
+
   setup %{conn: conn} do
     saved = %{
       core:
@@ -132,8 +156,9 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       {:ok, _view, html} = live(conn, "/setup?tab=always_on")
 
       assert html =~ ~s(id="always-on-pane")
-      assert text(html, "#always-on-role") == "primary"
+      assert text(html, "#always-on-role") == "The primary"
       assert text(html, "#always-on-epoch") == "Epoch 3"
+      assert html =~ "chats, memory and channels live on this computer."
       assert text(html, "#always-on-passphrase-state") == "No recovery passphrase is set."
 
       assert text(html, "#always-on-snapshots-sentence") ==
@@ -145,6 +170,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       refute html =~ ~s(id="always-on-desktops")
       refute html =~ ~s(id="always-on-move")
       refute html =~ ~s(id="device-role-notice")
+      refute html =~ ~s(id="always-on-engine-executor")
     end
 
     test "the route to a server: the command for a Linux server you have", %{conn: conn} do
@@ -382,7 +408,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       Agent.update(link, &%{&1 | primary: primary})
       {:ok, _view, html} = live(conn, "/setup")
 
-      assert text(html, "#always-on-role") == "device"
+      assert text(html, "#always-on-role") == "A desktop of the primary"
       assert text(html, "#always-on-primary") =~ "invented-vm"
       assert text(html, "#always-on-primary") =~ "Connected since 2026-10-27 11:30 UTC"
       assert text(html, "#always-on-primary") =~ "Connected to invented-vm."
@@ -452,6 +478,25 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       assert text(html, "#always-on-primary") =~
                "This computer runs in the device role with no link to a primary."
     end
+
+    test "the executor switch is this computer's, saved and applied here", %{
+      conn: conn,
+      home: home
+    } do
+      Application.put_env(:fermix_core, :engine, role: :device)
+      {:ok, view, html} = live(conn, "/setup")
+
+      assert html =~ "Run actions for the primary"
+      assert checked?(html, "#always-on-engine-executor")
+
+      html = view |> element("#always-on-engine-executor") |> render_click()
+
+      refute checked?(html, "#always-on-engine-executor")
+      assert Application.get_env(:fermix_core, :engine) == [role: :device, executor: false]
+
+      assert File.read!(Path.join(home, "config.toml")) =~
+               ~s([fermix_core.engine]\nrole = "device"\nexecutor = false)
+    end
   end
 
   describe "a primary with desktops" do
@@ -460,19 +505,56 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
         device_id: @desktop_id,
         name: "Studio Mac",
         connected: true,
-        since: ~U[2026-10-27 11:45:00Z]
+        since: ~U[2026-10-27 11:45:00Z],
+        executor: true
       }
 
       Agent.update(link, &%{&1 | desktops: [desktop]})
       :ok
     end
 
-    test "lists each desktop, connected or not", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/setup?tab=always_on")
+    test "lists each desktop with its executor switch, and the switch reaches the primary's row",
+         %{conn: conn} do
+      {:ok, view, html} = live(conn, "/setup?tab=always_on")
 
       row = "#always-on-desktop-#{@desktop_id}"
       assert text(html, row) =~ "Studio Mac"
       assert text(html, row) =~ "Connected since 2026-10-27 11:45 UTC"
+
+      view |> element("#{row} input[type=checkbox]") |> render_click()
+      assert_received {:set_executor, @desktop_id, false}
+    end
+
+    test "a switch for a desktop that is not this primary's is refused and reaches nothing", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/setup?tab=always_on")
+
+      html =
+        render_click(view, "always_on_desktop_executor", %{
+          "device" => "not-a-desktop",
+          "value" => "false"
+        })
+
+      assert text(html, "#always-on-notice-desktops") ==
+               "That desktop is not one of this primary's."
+
+      refute_received {:set_executor, _id, _executor}
+    end
+
+    test "a malformed event changes nothing", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?tab=always_on")
+
+      log =
+        capture_log(fn ->
+          render_click(view, "always_on_desktop_executor", %{
+            "device" => @desktop_id,
+            "value" => "maybe"
+          })
+        end)
+
+      assert log =~ "ignored a malformed always_on_desktop_executor event"
+      refute_received {:set_executor, _id, _executor}
     end
   end
 
@@ -1070,6 +1152,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
 
     Application.put_env(:fermix_web, :always_on,
       home: home,
+      mobile: [provider: MobileStub, test_pid: test_pid],
       schedule: fn message, wait_ms -> send(test_pid, {:scheduled, message, wait_ms}) end
     )
   end
@@ -1232,6 +1315,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
     |> List.first()
   end
 
+  defp checked?(html, selector), do: attribute(html, selector, "checked") != nil
   defp input_type(html, selector), do: attribute(html, selector, "type")
   defp input_value(html, selector), do: attribute(html, selector, "value")
   defp placeholder(html, selector), do: attribute(html, selector, "placeholder")

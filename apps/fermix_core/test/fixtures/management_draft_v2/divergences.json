@@ -2647,6 +2647,18 @@
       "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
     },
     {
+      "method": "settings.get:engine",
+      "field": "rows:engine_executor",
+      "kind": "engine_only",
+      "why": "M75: the engine section (pane always_on) publishes the role this engine booted in, read-only, and, in the device role only, the desktop's own switch for the actions its primary asks of it. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:engine",
+      "field": "rows:engine_role",
+      "kind": "engine_only",
+      "why": "M75: the engine section (pane always_on) publishes the role this engine booted in, read-only, and, in the device role only, the desktop's own switch for the actions its primary asks of it. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
       "method": "(errors)",
       "field": "primary_unreachable:primary,sentence",
       "kind": "engine_only",
@@ -2671,6 +2683,36 @@
       "why": "M75: the primary refuses a device-class request a desktop forwarded (one that configures the desktop itself) with the error code device_class_method, details {method, sentence}. Only a desktop's engine ever receives it. The draft predates the move, so its error catalog has no such code."
     },
     {
+      "method": "(schema)",
+      "field": "methods:mobile.devices.set_executor",
+      "kind": "engine_only",
+      "why": "M75 adds the switch that lets a desktop peer run actions for the primary after the draft was written, so the draft publishes no mobile.devices.set_executor. It is minimum version 2, additive, and an owner decision on the daemon socket; a client built against the draft never calls it."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mobile.devices.set_executor=2",
+      "kind": "engine_only",
+      "why": "M75 adds the switch that lets a desktop peer run actions for the primary after the draft was written, so the draft publishes no mobile.devices.set_executor. It is minimum version 2, additive, and an owner decision on the daemon socket; a client built against the draft never calls it."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mobile.devices.set_executor",
+      "kind": "engine_only",
+      "why": "M75 adds the switch that lets a desktop peer run actions for the primary after the draft was written, so the draft publishes no mobile.devices.set_executor. It is minimum version 2, additive, and an owner decision on the daemon socket; a client built against the draft never calls it."
+    },
+    {
+      "method": "mobile.devices.set_executor",
+      "field": "params:device_id",
+      "kind": "engine_only",
+      "why": "The desktop whose executor switch is set, a device id as mobile.devices.revoke takes; engine-only with the method."
+    },
+    {
+      "method": "mobile.devices.set_executor",
+      "field": "params:executor",
+      "kind": "engine_only",
+      "why": "The switch itself, a boolean; engine-only with the method."
+    },
+    {
       "method": "home.move.start",
       "field": "params:keep_as_desktop",
       "kind": "engine_only",
@@ -2693,6 +2735,48 @@
       "field": "error_codes:unconfirmed",
       "kind": "engine_only",
       "why": "M75: the error code a desktop answers for a forwarded move start whose answer was lost, so it is never reported as a failure. The draft predates the move."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:device.grants.list",
+      "kind": "engine_only",
+      "why": "M75 (re-check R1): a desktop lists and removes the folders its primary may read there, each one the owner approved on a device card and announced on the desktop as it was recorded. Device-class and minimum version 2, additive: a client built against the draft never calls it."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:device.grants.remove",
+      "kind": "engine_only",
+      "why": "M75 (re-check R1): a desktop lists and removes the folders its primary may read there, each one the owner approved on a device card and announced on the desktop as it was recorded. Device-class and minimum version 2, additive: a client built against the draft never calls it."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:device.grants.list=2",
+      "kind": "engine_only",
+      "why": "M75 (re-check R1): a desktop lists and removes the folders its primary may read there, each one the owner approved on a device card and announced on the desktop as it was recorded. Device-class and minimum version 2, additive: a client built against the draft never calls it."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:device.grants.remove=2",
+      "kind": "engine_only",
+      "why": "M75 (re-check R1): a desktop lists and removes the folders its primary may read there, each one the owner approved on a device card and announced on the desktop as it was recorded. Device-class and minimum version 2, additive: a client built against the draft never calls it."
+    },
+    {
+      "method": "device.grants.remove",
+      "field": "params:path",
+      "kind": "engine_only",
+      "why": "M75 (re-check R1): device.grants.remove names the folder whose read grant it removes, as device.grants.list answers it. The draft predates the family."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.device.grants.list",
+      "kind": "engine_only",
+      "why": "M75 (re-check R1): a desktop lists and removes the folders its primary may read there, each one the owner approved on a device card and announced on the desktop as it was recorded. Device-class and minimum version 2, additive: a client built against the draft never calls it."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.device.grants.remove",
+      "kind": "engine_only",
+      "why": "M75 (re-check R1): a desktop lists and removes the folders its primary may read there, each one the owner approved on a device card and announced on the desktop as it was recorded. Device-class and minimum version 2, additive: a client built against the draft never calls it."
     }
   ]
 }

@@ -63,10 +63,20 @@ defmodule FermixChannels.Desktop.Relay do
   `@inbound` is the one map of who serves each event the primary sends a
   desktop: the session itself (`hello_ack`, `pong`, `error`), the companion
   channels, the forwarded calls, the media fetches, or a module's
-  `handle/3`. Chunked payloads (`companion_line`, `manage_result`, …) are put
-  back together first (`Mobile.Chunks`); a gap, a repeat or a payload past
-  its bound ends the session as a protocol error. An event no line names is
-  logged and dropped.
+  `handle/3`. The executor's `invoke` and `invoke_status` go to
+  `Desktop.Executor` (B11), each in a task of its own under
+  `:task_supervisor`, since an action may run until its deadline: the
+  executor decides, keeps its receipt (`Desktop.Receipts`, `:receipts`), and
+  its answer goes back to the primary as `invoke_blob` then `invoke_result`,
+  or one `invoke_receipts` per `invoke_status` naming the question's
+  `status_id`. A `read_file`'s bytes are a copy the executor staged in
+  `<home>/device/media-send`, streamed from disk in frames and deleted once
+  sent. An `invoke` whose id still
+  runs here (sent again after a reconnect) is not run twice; one that
+  finished is answered from its receipt by the executor itself. Chunked payloads (`companion_line`, `manage_result`,
+  `invoke`, …) are put back together first (`Mobile.Chunks`); a gap, a repeat
+  or a payload past its bound ends the session as a protocol error. An event
+  no line names is logged and dropped.
 
   ## Bounds
 
@@ -88,7 +98,10 @@ defmodule FermixChannels.Desktop.Relay do
   payloads open at once, as the primary holds its own side; a 33rd ends the
   session as a protocol error.
 
-  Test seams: `:connect` (handed to `Rail.open/3` in place of dialing),
+  Test seams: `:executor` and `:executor_context` (a stand-in for
+  `Desktop.Executor` and what its context carries besides the relay's own),
+  `:send_staging` (where a file to send is staged),
+  `:connect` (handed to `Rail.open/3` in place of dialing),
   `:addrs` (a route's direct addresses, a test's), `:rail_opts`, `:schedule`
   and `:cancel_timer` (this process's timers, delivered by hand in a test),
   `:clock` and `:emit`.
@@ -98,6 +111,8 @@ defmodule FermixChannels.Desktop.Relay do
 
   require Logger
 
+  alias FermixChannels.Desktop.Executor
+  alias FermixChannels.Desktop.Receipts
   alias FermixChannels.Desktop.Relay.Media
   alias FermixChannels.Mobile.Chunks
   alias FermixChannels.Mobile.Peers
@@ -144,6 +159,8 @@ defmodule FermixChannels.Desktop.Relay do
     "media_begin" => :media,
     "media_chunk" => :media,
     "media_end" => :media,
+    "invoke" => :executor,
+    "invoke_status" => :executor,
     "loopback_open" => FermixChannels.Desktop.Loopback,
     "loopback_response" => FermixChannels.Desktop.Loopback,
     "loopback_close" => FermixChannels.Desktop.Loopback,
@@ -289,10 +306,11 @@ defmodule FermixChannels.Desktop.Relay do
   fields), `payload` the raw bytes, cut into chunks when the event is
   chunked.
   """
-  @spec send_event(GenServer.server(), map(), binary()) ::
+  @spec send_event(GenServer.server(), map(), binary() | Executor.blob()) ::
           :ok | {:error, {:unreachable, String.t()} | {:not_for_desktop, String.t()} | term()}
   def send_event(server \\ __MODULE__, %{"t" => type} = event, payload \\ <<>>)
-      when is_binary(type) and is_binary(payload) do
+      when is_binary(type) and
+             (is_binary(payload) or (is_tuple(payload) and elem(payload, 0) == :file)) do
     if Peers.client_event?(:desktop, type),
       do: GenServer.call(server, {:send, type, Map.delete(event, "t"), payload}, @send_wait_ms),
       else: {:error, {:not_for_desktop, type}}
@@ -307,6 +325,8 @@ defmodule FermixChannels.Desktop.Relay do
     Process.flag(:trap_exit, true)
     root = Keyword.get_lazy(opts, :root, &ConfigStore.fermix_home/0)
     state = base_state(root, opts)
+
+    :ok = prepare_staging(state.send_staging)
 
     case load(root, state.staging) do
       {:ok, link, keypair} ->
@@ -323,6 +343,8 @@ defmodule FermixChannels.Desktop.Relay do
     %{
       root: root,
       staging: Keyword.get_lazy(opts, :staging, fn -> Media.staging_dir(root) end),
+      send_staging:
+        Keyword.get_lazy(opts, :send_staging, fn -> Path.join([root, "device", "media-send"]) end),
       helper: Keyword.get(opts, :helper),
       connect: Keyword.get(opts, :connect),
       addrs: Keyword.get(opts, :addrs, []),
@@ -332,6 +354,10 @@ defmodule FermixChannels.Desktop.Relay do
       clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
       emit:
         Keyword.get(opts, :emit, &ChannelTelemetry.emit_transport(:desktop_relay, &1, &2, &3)),
+      receipts: Keyword.get(opts, :receipts, Receipts),
+      executor: Keyword.get(opts, :executor, Executor),
+      executor_context: Keyword.get(opts, :executor_context, %{}),
+      task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
       link: nil,
       keypair: nil,
       phase: :connecting,
@@ -352,7 +378,8 @@ defmodule FermixChannels.Desktop.Relay do
       waiting: :queue.new(),
       call_seq: 0,
       fetches: %{},
-      transfer: nil
+      transfer: nil,
+      running_invokes: %{}
     }
   end
 
@@ -418,8 +445,12 @@ defmodule FermixChannels.Desktop.Relay do
 
   def handle_info({:relay_timer, kind, token}, state), do: timer(kind, token, state)
 
-  def handle_info({:DOWN, _monitor, :process, pid, _reason}, state),
-    do: {:noreply, tunnel_down(pid, state)}
+  def handle_info({:DOWN, _monitor, :process, pid, _reason}, state) do
+    case invoke_ended(pid, state) do
+      {:ok, state} -> {:noreply, state}
+      :not_an_invoke -> {:noreply, tunnel_down(pid, state)}
+    end
+  end
 
   def handle_info({:EXIT, connector, reason}, %{connector: connector} = state),
     do: {:noreply, link_down({:connector_exit, reason}, %{state | connector: nil, rail: nil})}
@@ -566,7 +597,7 @@ defmodule FermixChannels.Desktop.Relay do
   defp take(:session, "pong", _fields, _tail, state), do: state
   defp take(:session, "error", fields, _tail, state), do: primary_error(fields, state)
 
-  defp take(family, type, fields, tail, state) when family in [:channels, :calls] do
+  defp take(family, type, fields, tail, state) when family in [:channels, :calls, :executor] do
     if Chunks.chunked?(type),
       do: take_chunk(family, type, fields, tail, state),
       else: complete(family, type, fields, tail, state)
@@ -694,12 +725,12 @@ defmodule FermixChannels.Desktop.Relay do
         {:error, {:too_many_open_payloads, @max_open_payloads}}
 
       :error ->
-        {:ok, new_acc(type)}
+        {:ok, new_acc(type, state)}
     end
   end
 
-  defp new_acc(type) do
-    {:ok, bound} = Chunks.bound(type)
+  defp new_acc(type, state) do
+    {:ok, bound} = Chunks.bound(type, state.max_media_bytes)
     Chunks.new(bound)
   end
 
@@ -708,6 +739,9 @@ defmodule FermixChannels.Desktop.Relay do
 
   defp complete(:channels, type, fields, payload, state),
     do: channel_event(type, fields, payload, state)
+
+  defp complete(:executor, type, fields, payload, state),
+    do: executor(type, fields, payload, state)
 
   defp complete(:calls, "manage_result", fields, payload, state),
     do: call_answered(fields, payload, state)
@@ -727,11 +761,115 @@ defmodule FermixChannels.Desktop.Relay do
     state
   end
 
+  # -- the executor ----------------------------------------------------------------
+
+  # An action may run until its deadline, so it runs in a task; its answer
+  # goes back through this process, the session's one writer.
+  # An `invoke` the primary sends again while it still runs here (its result
+  # lost in a reconnect) is not run twice: the running task answers it, and a
+  # finished one is answered from its receipt.
+  defp executor("invoke", %{"invocation_id" => id}, _payload, state)
+       when is_map_key(state.running_invokes, id) do
+    Logger.info("desktop relay: invoke #{id} is still running here; not run twice")
+    state
+  end
+
+  defp executor(type, fields, payload, state) do
+    relay = self()
+
+    module = state.executor
+
+    context =
+      Map.merge(state.executor_context, %{
+        receipts: state.receipts,
+        received_at_ms: System.monotonic_time(:millisecond),
+        max_media_bytes: state.max_media_bytes,
+        send_staging: state.send_staging,
+        primary_name: state.link.primary.name
+      })
+
+    job = fn ->
+      answer_primary(relay, executor_answer(module, type, fields, payload, context))
+    end
+
+    case Task.Supervisor.start_child(state.task_supervisor, job) do
+      {:ok, pid} ->
+        running(type, fields, pid, state)
+
+      {:error, reason} ->
+        Logger.error("desktop relay: #{type} could not start: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp running("invoke", %{"invocation_id" => id}, pid, state) do
+    Process.monitor(pid)
+    %{state | running_invokes: Map.put(state.running_invokes, id, pid)}
+  end
+
+  defp running(_status, _fields, _pid, state), do: state
+
+  defp invoke_ended(pid, state) do
+    case Enum.find(state.running_invokes, fn {_id, task} -> task == pid end) do
+      {id, _task} -> {:ok, %{state | running_invokes: Map.delete(state.running_invokes, id)}}
+      nil -> :not_an_invoke
+    end
+  end
+
+  defp executor_answer(module, "invoke", %{"invocation_id" => id} = fields, payload, context),
+    do: module.answer(id, module.handle(fields, payload, context))
+
+  # The answer names the question it answers, so a late answer to a question a
+  # previous session asked is never taken for the answer to a newer one.
+  defp executor_answer(
+         module,
+         "invoke_status",
+         %{"status_id" => status_id, "invocation_ids" => ids},
+         _payload,
+         context
+       ) do
+    receipts = module.receipts(context.receipts, ids)
+    [{"invoke_receipts", %{"status_id" => status_id, "receipts" => receipts}, <<>>}]
+  end
+
+  # A staged file goes once it was sent, or failed to be.
+  defp answer_primary(relay, events) do
+    Enum.each(events, fn {type, fields, payload} ->
+      case answer_event(relay, Map.put(fields, "t", type), payload) do
+        :ok -> :ok
+        {:error, reason} -> Logger.warning("desktop relay: #{type} not sent: #{inspect(reason)}")
+      end
+
+      discard_staged(payload)
+    end)
+  end
+
+  # The relay may have stopped while the action ran (the engine stopping, or
+  # the relay restarted): its answer has nowhere to go, which is said like any
+  # other answer that was not sent.
+  defp answer_event(relay, event, payload) do
+    send_event(relay, event, payload)
+  catch
+    :exit, {reason, _call} -> {:error, {:relay_gone, reason}}
+  end
+
+  defp discard_staged({:file, path, _size}), do: _ = File.rm(path)
+  defp discard_staged(_bytes), do: :ok
+
   # -- sending -------------------------------------------------------------------
 
   @doc false
-  @spec send_frames(pid() | nil, String.t(), map(), binary()) :: :ok | {:error, term()}
+  @spec send_frames(pid() | nil, String.t(), map(), binary() | Executor.blob()) ::
+          :ok | {:error, term()}
   def send_frames(nil, _type, _fields, _payload), do: {:error, :not_connected}
+
+  # A staged file is read and sent one frame at a time, never held whole.
+  def send_frames(rail, type, fields, {:file, path, size}) do
+    case File.open(path, [:read, :binary], &send_file_frames(rail, type, fields, &1, size)) do
+      {:ok, result} -> result
+      {:error, reason} -> {:error, {:file, path, reason}}
+    end
+  end
 
   def send_frames(rail, type, fields, payload) do
     pieces =
@@ -749,6 +887,30 @@ defmodule FermixChannels.Desktop.Relay do
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  defp send_file_frames(rail, type, fields, io, size) do
+    chunk = Chunks.max_chunk_bytes()
+    count = max(div(size + chunk - 1, chunk), 1)
+
+    Enum.reduce_while(0..(count - 1), :ok, fn index, :ok ->
+      with {:ok, bytes} <- read_piece(io, min(chunk, size - index * chunk)),
+           fields = Map.merge(fields, %{"index" => index, "last" => index == count - 1}),
+           :ok <- rail_send(rail, type, fields, bytes) do
+        {:cont, :ok}
+      else
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp read_piece(_io, 0), do: {:ok, <<>>}
+
+  defp read_piece(io, wanted) do
+    case IO.binread(io, wanted) do
+      bytes when is_binary(bytes) and byte_size(bytes) == wanted -> {:ok, bytes}
+      _short_or_failed -> {:error, :staged_file_short}
+    end
   end
 
   # A session that ended under the send answers its own ending to the owner.
@@ -894,7 +1056,7 @@ defmodule FermixChannels.Desktop.Relay do
 
   defp manage_frames(call_id, request, state) do
     params = Jason.encode!(request.params)
-    {:ok, bound} = Chunks.bound("manage")
+    {:ok, bound} = Chunks.bound("manage", 1)
 
     fields = %{
       "call_id" => call_id,

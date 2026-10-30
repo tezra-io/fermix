@@ -7,7 +7,8 @@ defmodule FermixCore.Management.Placement do
   machine is **device-class** and answered here: the daemon's own handshake,
   its lifecycle, logs, diagnostics and Doctor, the setup page's session and
   detection, computer use, iMessage, the browser and capability installers,
-  and `settings.get` or `settings.apply` for a section that configures only
+  the folders this machine lets its primary read (`device.grants.*`), and
+  `settings.get` or `settings.apply` for a section that configures only
   this machine. Everything else is **primary-class**: it configures or reads
   the Fermix that lives on the primary, so a linked device
   (`FermixCore.Home.DesktopLink.linked?/2`) forwards it over the rail
@@ -47,7 +48,7 @@ defmodule FermixCore.Management.Placement do
     browser.install.start capabilities.install.start
     home.status settings.sections
   )
-  @device_families ~w(lifecycle. doctor. computer_use. imessage.)
+  @device_families ~w(lifecycle. doctor. computer_use. imessage. device.)
   # Answered on this machine with the primary's own answer added (M75: a
   # desktop draws its own facts beside the server's).
   @composed_methods ~w(home.status settings.sections)
@@ -56,10 +57,11 @@ defmodule FermixCore.Management.Placement do
   # arrives.
   @composed_deadline_ms 5_000
 
-  # The settings sections that configure only this machine: the sandbox its
+  # The settings sections that configure only this machine: the engine's own
+  # section (its role and the desktop's executor switch), the sandbox its
   # commands run in, computer use of this screen, this screen's history, and
   # this Mac's Messages.
-  @device_sections ~w(sandbox computer_use computer_history channels.imessage)
+  @device_sections ~w(engine sandbox computer_use computer_history channels.imessage)
   @section_methods ~w(settings.get settings.apply)
 
   @device_class_sentence "This request configures the computer it came from, so the " <>

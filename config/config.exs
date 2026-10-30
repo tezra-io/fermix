@@ -140,6 +140,12 @@ config :fermix_core,
 # (`FermixCore.Home.Link`).
 config :fermix_core, :home_link, FermixChannels.Home.Link
 
+# The primary's desktops that run actions for `device_action` (M75 §11): their
+# rows, their sessions and the invocations in flight live on the channels side,
+# injected by module for the same reason as the dispatcher above
+# (`FermixCore.DeviceActions`).
+config :fermix_core, :device_actions, FermixChannels.Desktop.Invocations
+
 # Where the primary keeps snapshots beyond S3 (M75 §8, D19): its connected
 # desktops, over the rail. Injected by module for the same reason as the
 # dispatcher above; the scheduler writes to `Snapshot.S3` and then these

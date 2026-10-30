@@ -6,7 +6,7 @@ defmodule FermixChannels.Mobile.Chunks do
   `index` (from 0) and `last` (boolean) in its header and at most 60 KiB of it
   as the raw tail. `split/2` cuts a payload into those pieces; the accumulator
   (`new/1`, `add/4`) puts one payload back together, in order and within the
-  byte bound its event allows (`bound/1`), and refuses a gap, a repeat or a
+  byte bound its event allows (`bound/2`), and refuses a gap, a repeat or a
   payload past its bound. An accumulator ends at its `last` frame: a later
   frame of the same payload is a gap, while a frame at `index` 0 begins the
   next payload under the same key.
@@ -22,11 +22,14 @@ defmodule FermixChannels.Mobile.Chunks do
   @max_chunk_bytes 60 * 1_024
   @mib 1_024 * 1_024
 
-  # The bound of each chunked event's whole payload.
+  # The bound of each chunked event's whole payload; `invoke_blob`'s is the
+  # session's `caps.max_media_bytes`, so it is the caller's to give.
   @bounds %{
     "companion_line" => @mib,
     "manage" => @mib,
+    "invoke_result" => @mib,
     "manage_result" => 4 * @mib,
+    "invoke" => 64 * 1_024,
     "loopback_response" => 256 * 1_024
   }
 
@@ -34,6 +37,9 @@ defmodule FermixChannels.Mobile.Chunks do
     "companion_line" => "channel",
     "manage" => "call_id",
     "manage_result" => "call_id",
+    "invoke" => "invocation_id",
+    "invoke_result" => "invocation_id",
+    "invoke_blob" => "invocation_id",
     "loopback_response" => "request_id"
   }
 
@@ -53,6 +59,10 @@ defmodule FermixChannels.Mobile.Chunks do
           | {:chunk_repeat, non_neg_integer(), non_neg_integer()}
           | {:chunk_payload_too_large, non_neg_integer(), non_neg_integer()}
 
+  @doc "The largest raw tail of one chunked frame (60 KiB)."
+  @spec max_chunk_bytes() :: pos_integer()
+  def max_chunk_bytes, do: @max_chunk_bytes
+
   @doc "Every chunked event, in either direction."
   @spec chunked_events() :: [String.t()]
   def chunked_events, do: @key_fields |> Map.keys() |> Enum.sort()
@@ -65,9 +75,18 @@ defmodule FermixChannels.Mobile.Chunks do
   @spec key_field(String.t()) :: {:ok, String.t()} | :error
   def key_field(type) when is_binary(type), do: Map.fetch(@key_fields, type)
 
-  @doc "The largest whole payload one `type` event may carry."
-  @spec bound(String.t()) :: {:ok, pos_integer()} | :error
-  def bound(type) when is_binary(type), do: Map.fetch(@bounds, type)
+  @doc """
+  The largest whole payload one `type` event may carry: `invoke_blob`'s is the
+  session's `max_media_bytes` (`caps.max_media_bytes`), every other's is fixed.
+  """
+  @spec bound(String.t(), pos_integer()) :: {:ok, pos_integer()} | :error
+  def bound("invoke_blob", max_media_bytes)
+      when is_integer(max_media_bytes) and max_media_bytes > 0,
+      do: {:ok, max_media_bytes}
+
+  def bound(type, max_media_bytes)
+      when is_binary(type) and is_integer(max_media_bytes) and max_media_bytes > 0,
+      do: Map.fetch(@bounds, type)
 
   @doc """
   Cuts `payload` into pieces of at most `chunk_bytes`, in order, the last one

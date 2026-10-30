@@ -3,6 +3,8 @@
 {"header":{"v":2,"t":"companion_line","seq":3,"channel":1,"index":0,"last":false},"bytes_b64":"eyJ0IjoiY2hhdCIsImNsaWVudF9tc2dfaWQiOiJjLTc3IiwicHJvZmlsZV9pZCI6Im1haW4iLCJ0ZXh0IjoiRGlkIHRoZSBiYWNrdXAgcnVu"}
 {"header":{"v":2,"t":"companion_line","seq":4,"channel":1,"index":1,"last":true},"bytes_b64":"IGxhc3QgbmlnaHQ/In0K"}
 {"header":{"v":2,"t":"manage","seq":7,"call_id":"call-4f1a","method":"settings.get","protocol_version":2,"index":0,"last":true},"bytes_b64":"eyJzZWN0aW9uIjoiYWdlbnQifQ=="}
+{"header":{"v":2,"t":"invoke_result","seq":12,"invocation_id":"inv-31c7","status":"ok","index":0,"last":true},"bytes_b64":"eyJleGl0X3N0YXR1cyI6MCwib3V0cHV0IjoiYmFja3VwLmxvZ1xuIn0="}
+{"header":{"v":2,"t":"invoke_blob","seq":13,"invocation_id":"inv-31c9","index":0,"last":true},"bytes_b64":"cXVhcnRlcmx5IHRvdGFsczogMSwyODQK"}
 {"header":{"v":2,"t":"loopback_request","seq":17,"loopback_id":"lb-2b90","request_id":"rq-0e5c","method":"GET","target":"/callback?code=Zq81&state=pine","headers":[["host","127.0.0.1:53682"],["accept","text/html"]]},"bytes_b64":""}
 {"header":{"v":2,"t":"loopback_request","seq":18,"loopback_id":"lb-2b90","request_id":"rq-0e5d","method":"POST","target":"/token","headers":[["content-type","application/x-www-form-urlencoded"]]},"bytes_b64":"Z3JhbnRfdHlwZT1hdXRob3JpemF0aW9uX2NvZGUmY29kZT1acTgx"}
 {"header":{"v":2,"t":"move_chunk","seq":2,"move_id":"mv-8e41","index":0},"bytes_b64":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="}

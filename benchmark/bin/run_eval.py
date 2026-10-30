@@ -36,7 +36,7 @@ SKILL_DIR = os.path.dirname(HERE)
 REPO_ROOT = os.path.dirname(SKILL_DIR)
 sys.path.insert(0, HERE)
 
-from evallib import companion, cue_drive, voice
+from evallib import companion, cue_drive, desktop_fixture, voice
 from evallib import config as cfgmod
 from evallib import driver, grade, judge, report
 from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, FixtureServer,
@@ -242,18 +242,28 @@ def voice_cases_left_out(suites, args, profiles) -> int:
                if scenario.risk in profiles for case in scenario.cases if case.needs_voice)
 
 
+# Why an eval home cannot run a suite that requires each seeding, or None.
+_HOME_PROBLEMS = {"cues": cue_drive.home_problem, "desktop": desktop_fixture.home_problem}
+
+
 def hold_out_unseeded(cfg, chosen) -> tuple[list, list]:
-    """Suites that `requires: [cues]` on an eval home seeded without --cues. They are
-    NOT EVALUATED, named and left out of the run, never driven and never failures:
-    the capability runner's rule for an unmet precondition, so a sweep over a home
-    without cues reports the gap instead of a suite of zeros."""
-    needing = [(suite, scns) for suite, scns in chosen if "cues" in suite.requires]
-    problem = cue_drive.home_problem(cfg.daemon.fermix_home) if needing else None
-    if problem is None:
+    """Suites whose `requires:` the eval home was not seeded with (`--cues`,
+    `--desktop`). They are NOT EVALUATED, named and left out of the run, never driven
+    and never failures: the capability runner's rule for an unmet precondition, so a
+    sweep over a home without them reports the gap instead of a suite of zeros."""
+    asked = {req for suite, _scns in chosen for req in suite.requires}
+    unmet = {req: problem for req in sorted(asked)
+             if (problem := _HOME_PROBLEMS[req](cfg.daemon.fermix_home)) is not None}
+    if not unmet:
         return chosen, []
-    held = [(suite.name, case.id, problem)
-            for suite, scns in needing for scenario in scns for case in scenario.cases]
-    kept = [(suite, scns) for suite, scns in chosen if "cues" not in suite.requires]
+    kept, held = [], []
+    for suite, scns in chosen:
+        problems = [unmet[req] for req in suite.requires if req in unmet]
+        if problems:
+            held += [(suite.name, case.id, problems[0])
+                     for scenario in scns for case in scenario.cases]
+        else:
+            kept.append((suite, scns))
     return kept, held
 
 

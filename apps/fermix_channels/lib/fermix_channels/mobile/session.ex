@@ -1002,6 +1002,7 @@ defmodule FermixChannels.Mobile.Session do
       device_id: state.device_id,
       session: self(),
       registry: state.desktop_peers,
+      max_media_bytes: state.max_media_bytes,
       connected_since: state.wall_clock.()
     ]
 

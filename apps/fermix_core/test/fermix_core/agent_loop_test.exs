@@ -188,6 +188,26 @@ defmodule FermixCore.AgentLoopTest do
     end
   end
 
+  # Returns a PDF as a document part, as a desktop's `read_file` does (M75 §11).
+  defmodule PdfTool do
+    @behaviour Tool
+
+    @impl true
+    def name, do: "pdf_tool"
+    @impl true
+    def description, do: "Returns a PDF document content part"
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}}
+
+    @impl true
+    def execute(_args, _ctx) do
+      {:ok,
+       Tool.success_with_images("read", [
+         %{type: :document, mime_type: "application/pdf", data: "%PDF-1.7", name: "lease.pdf"}
+       ])}
+    end
+  end
+
   # Returns a result well above the digest target (12,000 bytes of numbered
   # rows), so it is a compaction candidate once it ages out of the raw window.
   defmodule BigTool do
@@ -451,6 +471,39 @@ defmodule FermixCore.AgentLoopTest do
 
       # The gate fires BEFORE the continuation — the model is never asked.
       assert mock_continues() == []
+    end
+
+    # M75 §11: a PDF a tool returns needs what an inbound one does, a vision
+    # model on a provider that reads PDFs inline; anything else fails loud
+    # before the continuation, and a route that reads PDFs gets it.
+    test "a PDF tool result needs a route that reads PDFs", %{registry: registry} do
+      register_caps(registry, [PdfTool])
+      set_mock_responses([turn("", tool_calls: [tool_call("c1", "pdf_tool", %{})])])
+
+      no_pdfs = %{provider: :xai, model: "grok-5", auth_mode: :api_key, base_url: "mock://"}
+
+      assert {:error, {:attachment_unsupported, :document, :xai, "grok-5"}} =
+               run_loop(capability_registry: registry, route_key: no_pdfs)
+
+      assert mock_continues() == []
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("c2", "pdf_tool", %{})]),
+        turn("done")
+      ])
+
+      reads_pdfs = %{
+        provider: :anthropic,
+        model: "claude-opus-5-5",
+        auth_mode: :api_key,
+        base_url: "mock://"
+      }
+
+      assert {:ok, %{response: "done"}} =
+               run_loop(capability_registry: registry, route_key: reads_pdfs)
+
+      assert [{_state, [%{images: [%{type: :document, name: "lease.pdf"}]}], _opts}] =
+               mock_continues()
     end
 
     # V06 (M46 §13): the same gate must hold for LOCAL images, not just

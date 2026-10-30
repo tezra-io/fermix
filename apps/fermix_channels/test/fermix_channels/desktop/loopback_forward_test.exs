@@ -36,7 +36,7 @@ defmodule FermixChannels.Desktop.LoopbackForwardTest do
     host =
       DesktopFamilyHost.start(
         LoopbackForward,
-        %{device_id: @desktop, session: test},
+        %{device_id: @desktop, session: test, max_media_bytes: 1},
         options: [loopback_registry: registry, device_name: "Studio Mac", send: to_desktop]
       )
 

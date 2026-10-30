@@ -356,13 +356,14 @@ defmodule FermixChannels.Mobile.DeviceStoreTest do
     refute File.exists?(Path.join(root, "mobile"))
   end
 
-  # M75 §3: a desktop is a device row of its own kind, with none of a phone's
-  # push or attestation fields.
+  # M75 §3: a desktop is a device row of its own kind, with the executor
+  # switch and none of a phone's push or attestation fields.
   describe "the desktop kind" do
-    test "a desktop row persists its kind and reads it back", %{root: root} do
+    test "a desktop row persists its kind and executor and reads them back", %{root: root} do
       attrs = desktop_attrs()
 
-      assert {:ok, %Device{kind: :desktop} = added} = DeviceStore.add(attrs, root: root)
+      assert {:ok, %Device{kind: :desktop, executor: true} = added} =
+               DeviceStore.add(attrs, root: root)
 
       assert {:ok, ^added} = DeviceStore.fetch(attrs.device_id, root: root)
       assert {:ok, ^added} = DeviceStore.find_by_noise_pk(attrs.noise_pk, root: root)
@@ -370,10 +371,11 @@ defmodule FermixChannels.Mobile.DeviceStoreTest do
 
       toml = File.read!(Path.join(root, "mobile/devices.toml"))
       assert toml =~ ~s(kind = "desktop")
+      assert toml =~ "executor = true"
       refute toml =~ "apns_key_salt"
     end
 
-    test "a desktop row refuses every phone field", %{root: root} do
+    test "a desktop row refuses every phone field and needs its switch", %{root: root} do
       for {field, value} <- [
             apns_key_salt: :crypto.strong_rand_bytes(32),
             push_token: "token",
@@ -389,23 +391,47 @@ defmodule FermixChannels.Mobile.DeviceStoreTest do
                  DeviceStore.add(attrs, root: root)
       end
 
+      for executor <- [nil, "true", 1] do
+        attrs = Map.put(desktop_attrs(), :executor, executor)
+
+        assert {:error, {:invalid_device, :executor, :invalid_executor}} =
+                 DeviceStore.add(attrs, root: root)
+      end
+
       refute File.exists?(Path.join(root, "mobile"))
     end
 
-    test "a phone row needs its push salt, and no other kind exists", %{root: root} do
+    test "a phone row needs its push salt, takes no executor, and no other kind exists",
+         %{root: root} do
       assert {:error, {:invalid_device, :apns_key_salt, :invalid_length}} =
                DeviceStore.add(Map.delete(device_attrs(), :apns_key_salt), root: root)
+
+      assert {:error, {:invalid_device, :executor, :phone_field}} =
+               DeviceStore.add(Map.put(device_attrs(), :executor, true), root: root)
 
       assert {:error, {:invalid_device, :kind, :invalid_kind}} =
                DeviceStore.add(Map.put(device_attrs(), :kind, :tablet), root: root)
 
-      assert {:ok, %Device{kind: :phone}} =
+      assert {:ok, %Device{kind: :phone, executor: nil}} =
                DeviceStore.add(Map.put(device_attrs(), :kind, :phone), root: root)
     end
 
-    test "an update gives a desktop no phone field", %{root: root} do
+    test "the executor switch is updated on a desktop only", %{root: root} do
       desktop = desktop_attrs()
+      phone = device_attrs()
       assert {:ok, _desktop} = DeviceStore.add(desktop, root: root)
+      assert {:ok, _phone} = DeviceStore.add(phone, root: root)
+
+      assert {:ok, %Device{executor: false}} =
+               DeviceStore.update(desktop.device_id, %{executor: false}, root: root)
+
+      assert {:ok, %Device{executor: false}} = DeviceStore.fetch(desktop.device_id, root: root)
+
+      assert {:error, {:invalid_device, :executor, :invalid_executor}} =
+               DeviceStore.update(desktop.device_id, %{executor: nil}, root: root)
+
+      assert {:error, {:invalid_device, :executor, :phone_field}} =
+               DeviceStore.update(phone.device_id, %{executor: true}, root: root)
 
       assert {:error, {:invalid_device, :push_token, :desktop_field}} =
                DeviceStore.update(desktop.device_id, %{push_token: "token"}, root: root)
@@ -425,7 +451,8 @@ defmodule FermixChannels.Mobile.DeviceStoreTest do
       path = write_rows(root, "")
       [before] = path |> File.read!() |> TomlElixir.decode!() |> Map.fetch!("devices")
 
-      assert {:ok, [%Device{kind: :phone} = legacy]} = DeviceStore.list(root: root)
+      assert {:ok, [%Device{kind: :phone, executor: nil} = legacy]} =
+               DeviceStore.list(root: root)
 
       assert {:ok, _desktop} = DeviceStore.add(desktop_attrs(), root: root)
 
@@ -517,7 +544,8 @@ defmodule FermixChannels.Mobile.DeviceStoreTest do
       model: "Mac15,8",
       noise_pk: :crypto.strong_rand_bytes(32),
       created_at: ~U[2026-10-20 07:15:00Z],
-      kind: :desktop
+      kind: :desktop,
+      executor: true
     }
   end
 

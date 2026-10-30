@@ -12,9 +12,10 @@ defmodule FermixChannels.Mobile.Management do
   `revoke_device/2`, `health/1`) serve the legacy control socket for one more
   release. The v1 provider functions (`pair_start/1`, `pair_get/2`,
   `pair_decide/3`, `pair_cancel/2`, `devices_list/1`, `devices_revoke/2`,
-  `status/1`) answer atom-keyed facts; `FermixCore.Management.Mobile` turns
-  them into wire JSON and owns every sentence. A device row names its kind
-  (M75 §3): a phone or a desktop.
+  `devices_set_executor/3`, `status/1`) answer atom-keyed facts;
+  `FermixCore.Management.Mobile` turns them into wire JSON and owns every
+  sentence. A device row names its kind (M75 §3): a phone, or a desktop with
+  its executor switch.
 
   The enable switch is live: once core has written it, `apply_enabled/2` starts
   or stops the subtree at once (M51 §5.5). The port, the address and the
@@ -83,6 +84,7 @@ defmodule FermixChannels.Mobile.Management do
           name: String.t(),
           model: String.t(),
           kind: :phone | :desktop,
+          executor: boolean() | nil,
           platform: String.t() | nil,
           signer_role: :development | :release | nil,
           boot_state: %{verified: true, locked: true} | nil,
@@ -360,6 +362,29 @@ defmodule FermixChannels.Mobile.Management do
   def devices_revoke(device_id, opts)
       when is_binary(device_id) and device_id != "" and is_list(opts),
       do: revoke(device_id, opts)
+
+  @doc """
+  Turns a desktop's executor switch on or off (M75 §3): whether the primary
+  lets it run actions. A desktop also runs one only while its own config
+  allows it. Answers the device's row; from the file while not running.
+  """
+  @spec devices_set_executor(String.t(), boolean()) ::
+          {:ok, device_row()} | {:error, :device_not_found | :not_a_desktop | term()}
+  def devices_set_executor(device_id, executor),
+    do: devices_set_executor(device_id, executor, [])
+
+  @doc false
+  @spec devices_set_executor(String.t(), boolean(), keyword()) ::
+          {:ok, device_row()} | {:error, :device_not_found | :not_a_desktop | term()}
+  def devices_set_executor(device_id, executor, opts)
+      when is_binary(device_id) and device_id != "" and is_boolean(executor) and is_list(opts) do
+    case set_executor(device_id, executor, opts) do
+      {:ok, device} -> {:ok, device_row(device)}
+      {:error, {:device_not_found, _id}} -> {:error, :device_not_found}
+      {:error, {:invalid_device, :executor, :phone_field}} -> {:error, :not_a_desktop}
+      {:error, _reason} = error -> error
+    end
+  end
 
   @doc """
   The mobile channel's facts. With the channel off, the surface refused this
@@ -707,6 +732,22 @@ defmodule FermixChannels.Mobile.Management do
     end
   end
 
+  # The running store serializes every write; with nothing running, nothing
+  # else writes the file, and it is written where it lies.
+  defp set_executor(device_id, executor, opts) do
+    if subtree_started?(opts) do
+      store = Keyword.get(opts, :device_store, DeviceStore)
+
+      invoke(opts, :update_device, &DeviceStore.update/3, [
+        store,
+        device_id,
+        %{executor: executor}
+      ])
+    else
+      DeviceStore.update(device_id, %{executor: executor}, Keyword.take(opts, [:root]))
+    end
+  end
+
   # The device is already gone from the file; what it asked for stops by the
   # registry's own revocation (`Companion.Turns.revoke_device/2`).
   defp revoke_requests(device_id, opts) do
@@ -882,13 +923,15 @@ defmodule FermixChannels.Mobile.Management do
 
   # Platform, signer role and boot state are what the phone's attestation
   # proved when it was approved; a phone paired before it was verified
-  # carries them empty, and a desktop never has them.
+  # carries them empty, and a desktop never has them. A desktop has its
+  # executor switch; a phone has none.
   defp device_row(device) do
     %{
       device_id: value(device, :device_id),
       name: value(device, :name),
       model: value(device, :model),
       kind: Map.get(device, :kind, :phone),
+      executor: Map.get(device, :executor),
       platform: value(device, :platform),
       signer_role: value(device, :signer_role),
       boot_state:

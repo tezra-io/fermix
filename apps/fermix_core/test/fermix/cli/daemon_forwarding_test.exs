@@ -23,7 +23,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
   @device %{role: :device, primary: "fermix-vm"}
   @this_machines_sections [
     %{id: "sandbox", pane: "safety", title: "Sandbox"},
-    %{id: "computer_use", pane: "computer", title: "Computer use"},
+    %{id: "engine", pane: "general", title: "This computer"},
     %{id: "routing", pane: "agent", title: "Routing"}
   ]
 
@@ -206,7 +206,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
                  timeout: @reply_ms
                )
 
-      assert Enum.map(sections, & &1["id"]) == ["sandbox", "computer_use"]
+      assert Enum.map(sections, & &1["id"]) == ["sandbox", "engine"]
       assert missing =~ "The server fermix-vm is unreachable."
     end
 
@@ -223,7 +223,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
                "providers.openai",
                "routing",
                "sandbox",
-               "computer_use"
+               "engine"
              ]
 
       assert %{"title" => "Sandbox"} = Enum.find(sections, &(&1["id"] == "sandbox"))

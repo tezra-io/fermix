@@ -84,7 +84,7 @@ defmodule FermixChannels.Home.MoveTest do
     # The identity bundle moved; the desktop's row travelled, its key did not.
     assert File.read!(Key.path(home)) == File.read!(Key.path(source))
     assert {:ok, devices} = DeviceStore.list(root: home)
-    assert [%{kind: :desktop, device_id: id, noise_pk: pk}] = devices
+    assert [%{kind: :desktop, executor: true, device_id: id, noise_pk: pk}] = devices
     assert id == link.device_id
     assert pk == desktop_key.public
     refute File.exists?(DesktopLink.key_path(home))
@@ -467,7 +467,8 @@ defmodule FermixChannels.Home.MoveTest do
           model: "macOS desktop",
           noise_pk: keypair.public,
           created_at: HomeMove.now(),
-          kind: :desktop
+          kind: :desktop,
+          executor: true
         },
         root: source
       )

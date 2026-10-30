@@ -36,7 +36,7 @@ defmodule FermixChannels.Desktop.SnapshotTargetTest do
     host =
       DesktopFamilyHost.start(
         SnapshotCopies,
-        %{device_id: @desktop, session: me},
+        %{device_id: @desktop, session: me, max_media_bytes: 1},
         registry: ctx.registry
       )
 
@@ -140,7 +140,7 @@ defmodule FermixChannels.Desktop.SnapshotTargetTest do
     host =
       DesktopFamilyHost.start(
         SnapshotCopies,
-        %{device_id: @desktop, session: me},
+        %{device_id: @desktop, session: me, max_media_bytes: 1},
         registry: ctx.registry
       )
 

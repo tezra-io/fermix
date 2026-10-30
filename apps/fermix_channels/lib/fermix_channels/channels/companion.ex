@@ -250,7 +250,7 @@ defmodule FermixChannels.Channels.Companion do
   @impl true
   @spec send_approval(Message.t(), map()) :: :ok | {:error, term()}
   def send_approval(%Message{} = message, %{kind: kind, text: text, token: token} = spec)
-      when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) do
+      when kind in [:sandbox, :soul, :device] and is_binary(text) and is_binary(token) do
     Approvals.announce(Approvals.server(), message.chat_id, Output.approval(spec), :companion)
   end
 

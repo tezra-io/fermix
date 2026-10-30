@@ -181,7 +181,7 @@ defmodule FermixChannels.Desktop.RelayIrohEndToEndTest do
     names.device_registry
   end
 
-  defp row, do: %{device_id: @device_id, name: "Studio Mac", kind: :desktop}
+  defp row, do: %{device_id: @device_id, name: "Studio Mac", kind: :desktop, executor: true}
 
   # -- the desktop's dial-only helper --------------------------------------------------
 

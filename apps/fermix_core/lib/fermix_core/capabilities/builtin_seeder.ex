@@ -102,6 +102,9 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     # Seeded unconditionally; `advertise?/1` offers it only while a delivery
     # channel has an inbox of the owner's (M56 §4.7).
     FermixCore.Tools.SendToChannel,
+    # Seeded unconditionally; `advertise?/1` offers it only on the primary while
+    # a desktop row lets actions run (M75 §11), and `execute/2` repeats it.
+    FermixCore.Tools.DeviceAction,
     FermixCore.Tools.GenerateImage,
     FermixCore.Tools.RequestDirectoryAccess,
     # The temporal-event family; keep `@event_tool_modules` in step.

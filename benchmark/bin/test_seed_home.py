@@ -464,6 +464,47 @@ def test_cue_options_need_cues(tmp_path, monkeypatch, flags):
         _seed_main(monkeypatch, tmp_path / "x-eval", *flags)
 
 
+# --- the offline desktop (M75) ------------------------------------------------------
+
+def test_desktop_seeds_one_private_desktop_row_with_actions_on(tmp_path, monkeypatch):
+    home = tmp_path / "x-eval"
+    _seed_main(monkeypatch, home, "--desktop")
+    devices = home / "mobile" / "devices.toml"
+    assert devices.stat().st_mode & 0o777 == 0o600
+    assert devices.parent.stat().st_mode & 0o777 == 0o700
+    [row] = tomllib.loads(devices.read_text())["devices"]
+    assert row["kind"] == "desktop" and row["executor"] is True
+    assert row["name"] == "Studio Mac" and row["device_id"] == seed.desktop_fixture.DESKTOP["device_id"]
+    # A Noise key nothing can authenticate with: fresh on every seed.
+    assert len(__import__("base64").b64decode(row["noise_pk"])) == 32
+    assert not set(row) & {"apns_key_salt", "push_token", "platform"}
+    manifest = json.loads((home / seed.desktop_fixture.MANIFEST).read_text())
+    assert manifest["desktop"]["name"] == "Studio Mac"
+    assert seed.desktop_fixture.home_problem(str(home)) is None
+
+
+def test_a_seed_without_desktop_removes_the_row_and_the_manifest(tmp_path, monkeypatch):
+    home = tmp_path / "x-eval"
+    _seed_main(monkeypatch, home, "--desktop")
+    _seed_main(monkeypatch, home)
+    assert not (home / "mobile" / "devices.toml").exists()
+    assert not (home / seed.desktop_fixture.MANIFEST).exists()
+    assert "--desktop" in seed.desktop_fixture.home_problem(str(home))
+
+
+def test_desktop_never_replaces_a_trust_store_it_did_not_write(tmp_path, monkeypatch):
+    home = tmp_path / "x-eval"
+    (home / "mobile").mkdir(parents=True)
+    paired = home / "mobile" / "devices.toml"
+    paired.write_text("[[devices]]\nname = \"Garden phone\"\n")
+    with pytest.raises(SystemExit):
+        _seed_main(monkeypatch, home, "--desktop")
+    assert "Garden phone" in paired.read_text()
+    # And a seed without --desktop leaves it alone too.
+    _seed_main(monkeypatch, home)
+    assert "Garden phone" in paired.read_text()
+
+
 def test_the_door_port_is_free_and_not_the_default():
     port = seed.free_door_port()
     assert 1024 < port < 65536 and port != 4032

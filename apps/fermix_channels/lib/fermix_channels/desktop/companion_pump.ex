@@ -58,7 +58,7 @@ defmodule FermixChannels.Desktop.CompanionPump do
   def init(opts) do
     # `terminate/2` tells the family the channel ended, however the pump ends.
     Process.flag(:trap_exit, true)
-    {:ok, line_bound} = Chunks.bound("companion_line")
+    {:ok, line_bound} = Chunks.bound("companion_line", 1)
 
     state = %{
       device_id: Keyword.fetch!(opts, :device_id),

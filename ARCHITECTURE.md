@@ -271,7 +271,19 @@ once its turn read outside content. While a parked call waits, the turn (or
 Realtime call) that parked it runs nothing else: the loop stamps
 `:access_waiting` from the held result itself (the rest of that step included),
 the Realtime session from `AccessGate.waiting?/1`, and the gate refuses every
-call under it. Every other capability returns on its metadata.
+call under it. A built-in marked `owner_approval?` (`device_action`, M75 §11)
+names through its own module which calls the owner approves every time (a
+command or a read grant for a connected desktop): the gate holds each on any
+attended owner turn, on a card of the kind the module names (`device`, carried
+through the sandbox confirmations record so its resolution reaches the same
+card) for as long as the module says (the action's deadline, `Pending`'s
+per-record `ttl_s`), and refuses it on a voice call, in a worker, a cue run and
+any unattended run. Its confirmed run keeps the call's own tool result in
+`Pending`'s tombstone, and the channel resumes the request that parked it
+through the confirmed grant's one resume path (`Commands.Sandbox`'s
+re-ingest of the parked request), so the same call in the re-run turn is
+answered with that result (`already_confirmed`) instead of running twice.
+Every other capability returns on its metadata.
 
 `Capabilities.Registry` is a GenServer over a protected ETS table. Trust decides
 what a caller sees: an operator gets every capability; a guest, or a caller with
@@ -291,7 +303,16 @@ and `view_image`; git read/write; web (`web_search`, `web_fetch`,
 dated events and
 reminders (`event_*`, `reminder_snooze`); messaging (`send_attachment`,
 `react`, and `send_to_channel` to the owner's own inbox on a channel they name);
-`generate_image`, `request_directory_access`, and `tool_help`.
+`generate_image`, `request_directory_access`, and `tool_help`; and
+`device_action`, one bounded action on the owner's own desktop (M75 §11),
+offered only on the primary while a desktop row allows actions. Core reaches
+the desktops through `FermixCore.DeviceActions`, a behaviour the channels side
+implements (`FermixChannels.Desktop.Invocations`), injected by module through
+`config :fermix_core, :device_actions` as `:jobs` `delivery_channels` and
+`:harness_continuation_dispatcher` are; a `read_file`'s bytes come back as an
+`Attachments` struct the gateway pipeline rendered, and reach the model as the
+manifest and its content parts (a PDF tool result is admitted only on a route
+that reads PDFs, as an inbound one is).
 `computer_use`, the coding-harness tools, and the meeting tools are registered
 only when their feature is ready.
 
@@ -432,7 +453,12 @@ name. `Role.children/2` filters both supervision trees from one named list
 (`Role.primary_only_reasons/0`), and `Role.admit/1` is the one refusal for
 turns, provider calls, token refresh and memory writes in the device role,
 with `Role.admit_configured/1` answering the same question tree-less for the
-sign-in verbs. `Home.DesktopLink` is a moved desktop's link to its primary
+sign-in verbs. The same section's `executor` (default true, read with
+`Role.executor?/1`) is a desktop's own switch for the actions its primary asks
+of it. The settings section `engine` (`Management.Settings.Engine`, pane
+`always_on`, device-class) projects both: the booted role read-only in every
+role, and the executor switch in the device role only, written through the
+ordinary settings tail and read live. `Home.DesktopLink` is a moved desktop's link to its primary
 (`device/desktop.json`, `device/desktop_key`): the move worker writes it, the
 desktop relay reads it, and `DesktopLink.linked?/2` decides once per boot
 whether the daemon forwards primary-class management requests
@@ -447,7 +473,11 @@ as its own. `Placement.forward_deadline_ms/1` is the one table of how long a
 desktop waits for a forwarded answer (8 s; 60 s for `home.move.readiness` and
 `home.move.start`, which walk the whole home first), and a forwarded
 `home.move.start` the primary had whose answer was lost is `unconfirmed`
-(`Placement.unconfirmed/2`), never a failure.
+(`Placement.unconfirmed/2`), never a failure. The `device.*` family is a
+desktop's own: `Management.DeviceGrants` lists and removes the folders it lets
+its primary read (`Home.ReadGrants`, `device/read_grants.json`, device-local),
+answered there and never forwarded; removing is an owner decision on
+`daemon.sock`, and `fermix device grants` drives both.
 `Epoch.initialise/1` runs after `ConfigStore.ensure_workspace`
 on a primary boot and is the only writer of the first epoch. `Home.Archive`
 seals a stopped home (manifest, PBKDF2 key, AES-256-GCM) minus
@@ -1090,7 +1120,8 @@ Current channels:
   the device store and registry, `PairManager`, the APNs
   dispatcher when push is configured (it connects on the first push, never at
   boot, and a push waits for that connect only until its deadline), the
-  transport's `RequestCoordinator`, `Desktop.Supervisor` (the connected
+  transport's `RequestCoordinator`, `Desktop.InvocationRegistry` (the
+  desktops' actions in flight), `Desktop.Supervisor` (the connected
   desktops' peers), `Mobile.Discovery` (a cached list of the
   addresses a phone can reach), the `Listener` and the mDNS advertiser. The
   `Listener` binds through `Mobile.TlsTransport`, ThousandIsland's TLS
@@ -1106,8 +1137,8 @@ Current channels:
   row of the shared timeline.
 - The phone wire's sessions have kinds (M75 §3, §5). A paired device's row in
   `devices.toml` (`Mobile.DeviceStore`) names `kind`: a `phone` (a row that
-  names none, as every row before desktops) or a `desktop` engine with no
-  push or attestation field; `DeviceRegistry`
+  names none, as every row before desktops) or a `desktop` engine with its
+  `executor` switch and no push or attestation field; `DeviceRegistry`
   carries the kind and keeps the phones' audience (`broadcast/3`,
   `connected/2`) to phones. `Mobile.Peers` is the one table of kind × event
   (`phone`, `desktop`, and the enrollment and move sessions wave two serves):
@@ -1131,7 +1162,31 @@ Current channels:
   does not start). A desktop's session has no one-hour lifetime on either side
   (the 2^20-frame rekey still bounds its keys); an `IK` key with no row is
   closed `4003 device unknown` at the handshake. The peer holds at most 32
-  open payloads and 64 MiB across them.
+  open payloads and 64 MiB across them (or one blob's bound).
+  The `executor` family is `Desktop.Invocations` (M75 §11): it hands every
+  `invoke_blob`, `invoke_result` and `invoke_receipts` to
+  `Desktop.InvocationRegistry`, a child of `Mobile.Supervisor` started before
+  `Desktop.Supervisor`, which holds the invocations in flight outside any one
+  session so they outlive a reconnect: it sends each `invoke`, blocks its
+  caller until the result, sends `invoke_status` for every invocation still in
+  flight when the desktop's session starts again, each batch under its own
+  `status_id` that the `invoke_receipts` answer names (a receipt settles one
+  as reconciled; an answer to an earlier session's question settles
+  nothing), and at the deadline asks a connected desktop once more and
+  otherwise settles it uncertain; nothing is ever re-sent. On the desktop,
+  `Desktop.Executor.handle/3` decides each `invoke` under the desktop's own
+  policy (its `[fermix_core.engine] executor` switch, the deadline, its
+  sandbox read scope plus `Home.ReadGrants` (`device/read_grants.json`, the
+  folders an approved `grant_read` recorded, read anew by every file read and
+  by nothing else, listed and removed by the owner through `device.grants.*`)
+  and confined shell, a notification on its own screen for every command it
+  runs for the primary and for every read grant it records, http(s) only
+  through the platform opener and the
+  `disclaim` shim, its own notifications); a `read_file` is copied into
+  `device/media-send` as it is hashed and the relay streams that copy from
+  disk and deletes it; `Desktop.Receipts`, the one writer of
+  `<home>/device/receipts.jsonl` (newest 1,000, hashes only), records every
+  decision; the relay answers `invoke_status` from it.
 - Remote reach is the iroh rail (M62), `Mobile.Iroh`, the last child of
   `Mobile.Supervisor` (`:rest_for_one`: the bridge's connections, `Iroh.Bridge`
   on `mobile/bridge.sock`, then `Iroh.Helper`). `Iroh.Helper` owns the
@@ -1161,8 +1216,8 @@ Current channels:
 - After a move (M75 §6, B1, B12) the desktop's device-role engine reaches its
   primary through `Desktop.DeviceSupervisor`, the one device-only child
   (`Role`'s device-only list; its children are one list with each start
-  condition: the dial-only `Iroh.Helper`, then `Desktop.Relay`, both when
-  `device/desktop.json` exists). The relay reads
+  condition: the dial-only `Iroh.Helper`, `Desktop.Receipts`, then
+  `Desktop.Relay`, all when `device/desktop.json` exists). The relay reads
   `FermixCore.Home.DesktopLink` (`device/desktop.json` and the 0600
   `device/desktop_key`, refused by name otherwise), opens one `IK` session
   through `Mobile.Rail` from a linked connector process (the rail's owner, so
@@ -1181,13 +1236,15 @@ Current channels:
   companion channels are refused `desktop_revoked`, not `primary_unreachable`.
   A forwarded call is answered within its method's deadline
   (`Placement.forward_deadline_ms/1`, or its caller's shorter one), and a move
-  start the primary had and never answered is `unconfirmed`. It clamps
+  start the primary had and never answered is `unconfirmed`; an executor
+  answer whose relay is gone is logged and its staged copy deleted. It clamps
   the primary's `caps.max_media_bytes` to 64 MiB and holds at most 32 open
   payloads. It is
   the session's one writer, and `@inbound` is its one map of who serves each
   event the primary sends: the companion channels, the forwarded calls'
-  `manage_result`, and the media fetches. In tunnel mode (the application
-  decides at boot, `DesktopLink.linked?/2`) `Companion.Endpoint` hands each accepted
+  `manage_result`, the media fetches, and `Desktop.Executor` for `invoke` and
+  `invoke_status` (in tasks). In tunnel mode (the application decides at
+  boot, `DesktopLink.linked?/2`) `Companion.Endpoint` hands each accepted
   `companion.sock` connection to a `Desktop.Tunnel` instead of a
   `Connection`: it places the client with `SocketPeer` and carries only the
   owner's app (`unattended_client` otherwise), sends each line as one
@@ -1400,9 +1457,10 @@ back, and a device-role engine answers every webhook route 503. `HealthControlle
 `SetupLive` drives `Setup.Wizard` and the core setup modules. Its Always On tab
 (`SetupLive.AlwaysOn`, M75 B14) calls what the `home.*` methods call
 (`Management.Home.status/1` is the one picture; `Management.HomeMove`,
-`Management.Settings` for the `snapshots` section, `Management.Secrets`) in
-the page's own process and derives nothing; on the primary the move is shown
-as its CLI command once its review (`home.move.readiness`) has nothing that blocks,
+`Management.Settings` for the `engine` and `snapshots` sections,
+`Management.Secrets`, `Management.Mobile` for a desktop's switch) in the page's
+own process and derives nothing; on the primary the move is shown as its CLI
+command once its review (`home.move.readiness`) has nothing that blocks,
 because starting it restarts the engine serving the page, with when to add
 `--retire` (`keep_as_desktop` false: a server primary being replaced keeps no
 desktop). On a linked desktop

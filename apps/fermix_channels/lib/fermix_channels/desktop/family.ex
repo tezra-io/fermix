@@ -1,8 +1,8 @@
 defmodule FermixChannels.Desktop.Family do
   @moduledoc """
   One family of what a desktop engine sends the primary over its session
-  (M75 §6 to §9): the companion tunnel, forwarded management, the loopback
-  forward, the desktop snapshot target.
+  (M75 §6 to §11): the companion tunnel, forwarded management, the
+  executor's results, the loopback forward, the desktop snapshot target.
 
   `Desktop.Peer` keeps one state per family for each connected desktop, puts
   every chunked payload back together, and hands each complete event to its

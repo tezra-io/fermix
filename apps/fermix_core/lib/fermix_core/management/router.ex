@@ -15,6 +15,7 @@ defmodule FermixCore.Management.Router do
   alias FermixCore.Management.ComputerUse
   alias FermixCore.Management.Cues
   alias FermixCore.Management.Detect
+  alias FermixCore.Management.DeviceGrants
   alias FermixCore.Management.Diagnostics
   alias FermixCore.Management.Doctor
   alias FermixCore.Management.Home
@@ -45,7 +46,7 @@ defmodule FermixCore.Management.Router do
     mobile.devices.list browser.install.start imessage.permissions.get imessage.policy.confirm
     mcp.servers.list mcp.servers.import.scan cues.status cues.sources.list cues.watchers.list
     cues.mandates.list cues.mandates.choices home.status home.snapshots.status home.snapshots.run
-    home.enroll.open home.candidates.list
+    home.enroll.open home.candidates.list device.grants.list
   )
   @lease_params ~w(lease_id)
   @doctor_session_params ~w(session_id)
@@ -68,6 +69,7 @@ defmodule FermixCore.Management.Router do
   @mobile_session_params ~w(session_id)
   @mobile_decide_params ~w(session_id approved)
   @mobile_device_params ~w(device_id)
+  @mobile_executor_params ~w(device_id executor)
   @imessage_grant_params ~w(service)
   @mcp_name_params ~w(name)
   @mcp_server_params ~w(
@@ -80,6 +82,10 @@ defmodule FermixCore.Management.Router do
   @home_passphrase_params ~w(recovery_passphrase)
   @home_readiness_params ~w(candidate_id)
   @home_move_params ~w(candidate_id recovery_passphrase keep_as_desktop)
+  @device_grant_params ~w(path)
+  # A granted folder is a path as the system names it, so its bound is the
+  # longest path a system takes (Linux's 4,096 bytes), not the 256-byte name.
+  @max_path_bytes 4_096
   # A candidate (M75 §2) answers the protocol's hello and home.status, and
   # refuses every other method by name.
   @candidate_methods ~w(hello home.status)
@@ -233,6 +239,10 @@ defmodule FermixCore.Management.Router do
   defp route_known("mobile.pair.cancel", params, opts), do: mobile_session(:cancel, params, opts)
   defp route_known("mobile.devices.list", %{}, opts), do: mobile(&Mobile.devices_list/1, opts)
   defp route_known("mobile.devices.revoke", params, opts), do: mobile_revoke(params, opts)
+
+  defp route_known("mobile.devices.set_executor", params, opts),
+    do: mobile_executor(params, opts)
+
   defp route_known("browser.install.start", %{}, opts), do: browser_install(opts)
 
   defp route_known("imessage.permissions.get", %{}, opts),
@@ -279,6 +289,12 @@ defmodule FermixCore.Management.Router do
   defp route_known("cues." <> _rest = method, params, opts), do: route_cues(method, params, opts)
   defp route_known("home." <> _rest = method, params, opts), do: route_home(method, params, opts)
 
+  # This computer's read grants for its primary (M75 §11): device-class.
+  defp route_known("device.grants.list", %{}, opts),
+    do: operation_result(DeviceGrants.list(device_opts(opts)))
+
+  defp route_known("device.grants.remove", params, opts), do: device_grant_remove(params, opts)
+
   # Answered locally in every role (M75 §14): a device reads its own home.
   defp route_home("home.status", %{}, opts), do: operation_result(Home.status(home_opts(opts)))
 
@@ -320,6 +336,25 @@ defmodule FermixCore.Management.Router do
           Keyword.put(home_opts(opts), :keep_as_desktop, keep?)
         )
       )
+    end
+  end
+
+  defp device_grant_remove(params, opts) do
+    with :ok <- reject_unknown_params(params, @device_grant_params),
+         {:ok, path} <- fetch_absolute_path(params, "path") do
+      operation_result(DeviceGrants.remove(path, device_opts(opts)))
+    end
+  end
+
+  defp fetch_absolute_path(params, field) do
+    case Map.get(params, field) do
+      "/" <> _rest = path when byte_size(path) <= @max_path_bytes ->
+        if String.valid?(path) and not String.contains?(path, <<0>>),
+          do: {:ok, path},
+          else: invalid_params(field)
+
+      _invalid ->
+        invalid_params(field)
     end
   end
 
@@ -612,6 +647,13 @@ defmodule FermixCore.Management.Router do
     end
   end
 
+  defp mobile_executor(params, opts) do
+    with {:ok, device_id} <- fetch_string(params, "device_id", @mobile_executor_params),
+         {:ok, executor} <- fetch_boolean(params, "executor") do
+      operation_result(Mobile.devices_set_executor(device_id, executor, mobile_opts(opts)))
+    end
+  end
+
   # Five methods take one server name and nothing else, so the parameter check
   # is written once and the method chooses only which verb runs.
   defp mcp_by_name(verb, params, opts) when is_function(verb, 2) do
@@ -773,6 +815,7 @@ defmodule FermixCore.Management.Router do
   defp jobs_opts(opts), do: opts |> operation_opts() |> Keyword.get(:jobs, [])
   defp mobile_opts(opts), do: opts |> operation_opts() |> Keyword.get(:mobile, [])
   defp cues_opts(opts), do: opts |> operation_opts() |> Keyword.get(:cues, [])
+  defp device_opts(opts), do: opts |> operation_opts() |> Keyword.get(:device, [])
 
   # The router's own `:engine_role` (tests) reaches the family as its seam, and
   # a linked device's way to its primary (`:primary_forward`, from the daemon)
@@ -934,8 +977,9 @@ defmodule FermixCore.Management.Router do
     end
   end
 
+  # The router's own `:engine_role` (tests) reaches the engine section's rows.
   defp settings_opts(opts),
-    do: Keyword.take(opts, [:snapshot, :supervised, :macos?])
+    do: Keyword.take(opts, [:snapshot, :supervised, :macos?, :engine_role])
 
   defp invalid_params(field), do: {:error, :invalid_params, %{"field" => field}}
 

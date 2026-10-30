@@ -11,13 +11,17 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
 
   One GenServer serializes every lookup and write, so two identical parks can
   never both be new and one record can never be taken twice. A record lives for
-  the `/confirm` family's 60 seconds; parking the same call again while it waits
-  answers `:existing` and restarts that window, because the gate may then have
-  sent the owner a fresh token for it (the last one was denied or expired).
-  Taking a record marks it running (`:running` to a re-park, never a second
-  prompt); finishing it leaves a tombstone with the outcome for another window,
-  so a model that calls the same command again learns it already ran instead of
-  asking the owner twice. At most 64 records are live; expired rows are dropped
+  the `/confirm` family's 60 seconds, or the window its park names (`ttl_ms`: a
+  command for the owner's other computer waits as long as its invocation's
+  deadline); parking the same call again while it waits answers `:existing`
+  and restarts that window, because the gate may then have sent the owner a
+  fresh token for it (the last one was denied or expired). Taking a record
+  marks it running (`:running` to a re-park, never a second prompt); finishing
+  it leaves a tombstone with the outcome for another window, so a model that
+  calls the same command again learns it already ran instead of asking the
+  owner twice. The outcome is the owner's sentence, or the call's own tool
+  result (`{:result, success?, text}`), which a resumed turn's same call gets
+  back as its result. At most 64 records are live; expired rows are dropped
   on every call, and a restart forgets everything, which fails closed (the owner
   is asked again).
   """
@@ -28,7 +32,8 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
   @max_live 64
 
   @type binding :: {:conversation, term()} | {:voice_call, String.t()}
-  @type status :: :pending | :running | {:done, String.t()}
+  @type outcome :: String.t() | {:result, boolean(), String.t()}
+  @type status :: :pending | :running | {:done, outcome()}
 
   @type record :: %{
           id: String.t(),
@@ -42,13 +47,14 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
           sources: [String.t()],
           snapshot: map(),
           seq: non_neg_integer(),
+          ttl_ms: pos_integer(),
           expires_at_ms: integer(),
           status: status()
         }
 
   @type park_result ::
           {:ok, String.t(), :new | :existing | :running}
-          | {:ok, String.t(), {:done, String.t()}}
+          | {:ok, String.t(), {:done, outcome()}}
           | {:error, :too_many_pending}
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -68,7 +74,8 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
   @doc """
   Park a call, or find the live record for the same binding and arguments.
   `attrs` carries every `record()` field except `:id`, `:seq`, `:expires_at_ms`
-  and `:status`, which the store assigns.
+  and `:status`, which the store assigns, and `:ttl_ms`, which defaults to the
+  family's 60 seconds.
   """
   @spec park(map(), GenServer.server()) :: park_result()
   def park(%{binding: _binding, digest: digest} = attrs, server \\ __MODULE__)
@@ -85,9 +92,11 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
   record `take/2` returned is accepted, so a malformed one fails at the caller
   and never inside the store.
   """
-  @spec finish(record(), String.t(), GenServer.server()) :: :ok
+  @spec finish(record(), outcome(), GenServer.server()) :: :ok
   def finish(%{id: id, status: :running} = record, outcome, server \\ __MODULE__)
-      when is_binary(id) and is_binary(outcome) do
+      when is_binary(id) and
+             (is_binary(outcome) or
+                (is_tuple(outcome) and tuple_size(outcome) == 3 and elem(outcome, 0) == :result)) do
     GenServer.call(server, {:finish, record, outcome})
   end
 
@@ -162,7 +171,7 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
   defp handle({:take, id}, state) do
     case Map.fetch(state.records, id) do
       {:ok, %{status: :pending} = record} ->
-        running = %{record | status: :running, expires_at_ms: expiry(state)}
+        running = %{record | status: :running, expires_at_ms: expiry(state, record)}
         {{:ok, running}, put_record(state, running)}
 
       _missing_or_used ->
@@ -171,7 +180,7 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
   end
 
   defp handle({:finish, record, outcome}, state) do
-    tombstone = %{record | status: {:done, outcome}, expires_at_ms: expiry(state)}
+    tombstone = %{record | status: {:done, outcome}, expires_at_ms: expiry(state, record)}
     {:ok, put_record(state, tombstone)}
   end
 
@@ -210,7 +219,7 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
   end
 
   defp refresh(record, state) do
-    refreshed = %{record | expires_at_ms: expiry(state)}
+    refreshed = %{record | expires_at_ms: expiry(state, record)}
     {{:ok, record.id, :existing}, put_record(state, refreshed)}
   end
 
@@ -236,7 +245,9 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
           :sources,
           :snapshot
         ])
-        |> Map.merge(%{id: id, seq: state.seq, expires_at_ms: expiry(state), status: :pending})
+        |> Map.put(:ttl_ms, ttl_ms(attrs))
+        |> then(&Map.merge(&1, %{id: id, seq: state.seq, expires_at_ms: expiry(state, &1)}))
+        |> Map.put(:status, :pending)
 
       {{:ok, id, :new}, put_record(%{state | seq: state.seq + 1}, record)}
     end
@@ -251,7 +262,10 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
     %{state | records: live}
   end
 
-  defp expiry(state), do: state.clock.() + @ttl_ms
+  defp expiry(state, record), do: state.clock.() + record.ttl_ms
+
+  defp ttl_ms(%{ttl_ms: ttl}) when is_integer(ttl) and ttl > 0, do: ttl
+  defp ttl_ms(attrs) when not is_map_key(attrs, :ttl_ms), do: @ttl_ms
 
   defp new_id, do: 8 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
 end

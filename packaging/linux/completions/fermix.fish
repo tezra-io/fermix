@@ -1,7 +1,7 @@
 # fish completion for fermix, installed by the fermix package.
 # The verb list is the one `fermix help` prints; a test keeps them in step.
 
-set -l fermix_verbs setup auth ask chat run sandbox grant revoke service start stop restart status health voice acp browser browser-bridge agents capabilities skills plugins pair devices settings memory home logs upgrade uninstall migrate-to-app doctor diagnostics version help
+set -l fermix_verbs setup auth ask chat run sandbox grant revoke service start stop restart status health voice acp browser browser-bridge agents capabilities skills plugins pair devices device settings memory home logs upgrade uninstall migrate-to-app doctor diagnostics version help
 
 complete -c fermix -f
 
@@ -29,6 +29,7 @@ complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a skills 
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a plugins -d "Manage plugins"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a pair -d "Pair a mobile device"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a devices -d "List and revoke paired devices"
+complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a device -d "Folders the server may read on this computer"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a settings -d "Show and change settings"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a memory -d "Review and restore memory"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a home -d "Move, restore and snapshot this home"
@@ -46,6 +47,9 @@ complete -c fermix -n "__fish_seen_subcommand_from auth" -a "login status logout
 complete -c fermix -n "__fish_seen_subcommand_from skills" -a "list view reload"
 complete -c fermix -n "__fish_seen_subcommand_from plugins" -a "list catalog install enable disable auth"
 complete -c fermix -n "__fish_seen_subcommand_from devices" -a "list revoke"
+complete -c fermix -n "__fish_seen_subcommand_from device; and not __fish_seen_subcommand_from grants" -a grants -d "List the server's read grants here"
+complete -c fermix -n "__fish_seen_subcommand_from device; and __fish_seen_subcommand_from grants; and not __fish_seen_subcommand_from remove" -a remove -d "Stop the server reading a folder here"
+complete -c fermix -n "__fish_seen_subcommand_from device" -l json -d "Print the result as JSON"
 complete -c fermix -n "__fish_seen_subcommand_from settings; and not __fish_seen_subcommand_from list show set secret primary reload" -a "list show set secret primary reload"
 complete -c fermix -n "__fish_seen_subcommand_from settings; and __fish_seen_subcommand_from secret; and not __fish_seen_subcommand_from set clear" -a "set clear"
 complete -c fermix -n "__fish_seen_subcommand_from settings; and __fish_seen_subcommand_from secret" -l stdin -d "Read the secret from standard input"

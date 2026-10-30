@@ -123,6 +123,12 @@ config :fermix_core, :open_loops, enabled: false
 # Manager's `:continuation_dispatcher` seam.
 config :fermix_core, :harness_continuation_dispatcher, nil
 
+# The desktops `device_action` reaches (config.exs wires the channels-side
+# invocations): a double that answers from the calling process's own script
+# (`FermixTestSupport.DeviceActionsDouble.install/2`), so no test reaches a real
+# desktop session and a test that installs nothing sees no desktop at all.
+config :fermix_core, :device_actions, FermixTestSupport.DeviceActionsDouble
+
 # Hermetic default: the browser's address checks resolve names, and a suite
 # that reached a real nameserver would be host-dependent and stall on a DNS-less
 # runner. Every lookup answers nothing — a failed lookup, which the policy

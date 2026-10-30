@@ -2,7 +2,8 @@ defmodule FermixCore.Management.Mobile do
   @moduledoc """
   The `mobile.*` methods: pairing a phone, the paired devices, and the phone
   channel's status (M51 management pairing). A paired device is a phone or,
-  since M75, a desktop engine.
+  since M75, a desktop engine, whose executor switch
+  `mobile.devices.set_executor` turns on and off.
 
   A stateless adapter. The pairing state has one owner, the phone channel's
   pairing manager, and it lives in the channels app, which this app does not
@@ -84,7 +85,11 @@ defmodule FermixCore.Management.Mobile do
   @unavailable_attestation_sentence "Google's attestation service could not be reached."
   @no_request_sentence "No phone is waiting for a decision."
   @unknown_device_sentence "No paired phone has that id."
+  @unknown_desktop_sentence "No paired desktop has that id."
+  @not_desktop_sentence "That device is a phone; only a desktop runs actions."
   @owner_only_sentence "Only the owner can pair or forget a phone; run this from your own terminal."
+  @executor_owner_only_sentence "Only the owner can let a desktop run actions for the primary: " <>
+                                  "use the Fermix app or your own terminal."
   # What a settings write says when the channel did not follow its switch.
   @switch_not_started_sentence "The phone channel is on but could not start. See the daemon log."
   @switch_not_ready_sentence "The phone channel starts the next time Fermix starts."
@@ -119,7 +124,10 @@ defmodule FermixCore.Management.Mobile do
         @unavailable_attestation_sentence,
         @no_request_sentence,
         @unknown_device_sentence,
+        @unknown_desktop_sentence,
+        @not_desktop_sentence,
         @owner_only_sentence,
+        @executor_owner_only_sentence,
         @switch_not_started_sentence,
         @switch_not_ready_sentence,
         @switch_failed_sentence,
@@ -141,6 +149,14 @@ defmodule FermixCore.Management.Mobile do
   """
   @spec owner_only_sentence() :: String.t()
   def owner_only_sentence, do: @owner_only_sentence
+
+  @doc """
+  The sentence the daemon socket's refusal of `mobile.devices.set_executor`
+  carries for a caller that is not the owner: the switch is a desktop's, so
+  the phone's pairing sentence would name the wrong decision.
+  """
+  @spec executor_owner_only_sentence() :: String.t()
+  def executor_owner_only_sentence, do: @executor_owner_only_sentence
 
   @doc """
   Starts or stops the phone channel while the daemon runs, once settings have
@@ -236,6 +252,17 @@ defmodule FermixCore.Management.Mobile do
   @spec devices_revoke(String.t(), keyword()) :: result()
   def devices_revoke(device_id, opts \\ []) when is_binary(device_id) and is_list(opts) do
     with {:ok, reply} <- call(opts, :devices_revoke, [device_id]), do: revoke_reply(reply)
+  end
+
+  @doc """
+  Turns one desktop's executor switch on or off: whether this primary lets it
+  run actions. Answers the desktop's row.
+  """
+  @spec devices_set_executor(String.t(), boolean(), keyword()) :: result()
+  def devices_set_executor(device_id, executor, opts \\ [])
+      when is_binary(device_id) and is_boolean(executor) and is_list(opts) do
+    with {:ok, reply} <- call(opts, :devices_set_executor, [device_id, executor]),
+         do: executor_reply(reply)
   end
 
   # One call to the provider, by name, with the remaining options as the
@@ -338,6 +365,19 @@ defmodule FermixCore.Management.Mobile do
     do: {:error, {:unavailable, @capability}}
 
   defp revoke_reply(reply), do: unexpected(:devices_revoke, reply)
+
+  defp executor_reply({:ok, %{kind: :desktop} = device}), do: {:ok, device_view(device)}
+
+  defp executor_reply({:error, :device_not_found}),
+    do: {:error, {:invalid_params, "device_id", @unknown_desktop_sentence}}
+
+  defp executor_reply({:error, :not_a_desktop}),
+    do: {:error, {:invalid_params, "device_id", @not_desktop_sentence}}
+
+  defp executor_reply({:error, reason}) when reason in @channel_down,
+    do: {:error, {:unavailable, @capability}}
+
+  defp executor_reply(reply), do: unexpected(:devices_set_executor, reply)
 
   # A refusal the contract does not name is a defect between the two apps. The
   # reason is logged; a reply that is not a refusal can carry a device name or
@@ -515,6 +555,7 @@ defmodule FermixCore.Management.Mobile do
       "name" => device.name,
       "model" => device.model,
       "kind" => kind_word(device.kind),
+      "executor" => executor_switch(device.kind, device.executor),
       "platform" => optional_string(device.platform),
       "signer_role" => build_role(device.signer_role),
       "boot_state" => boot_state(device.boot_state),
@@ -525,6 +566,10 @@ defmodule FermixCore.Management.Mobile do
   end
 
   defp kind_word(kind) when kind in @kinds, do: Atom.to_string(kind)
+
+  # A desktop's switch is on or off; a phone has none.
+  defp executor_switch(:desktop, executor) when is_boolean(executor), do: executor
+  defp executor_switch(:phone, nil), do: nil
 
   defp optional_string(nil), do: nil
   defp optional_string(value) when is_binary(value), do: value

@@ -380,8 +380,8 @@ it, never a second writer.
   itself): after the move the server holds them. What configures this
   computer is answered here: Fermix's own status and lifecycle, its logs,
   diagnostics and Doctor, the setup page, computer use, iMessage, the browser
-  and capability installers, and the settings sections sandbox, computer
-  use, computer history and iMessage.
+  and capability installers, and the settings sections engine, sandbox,
+  computer use, computer history and iMessage.
 - Two answers are put together here: the home's status is this computer's
   own (its role, its link to the primary, where the move went) with the
   primary's own picture added (its recovery, its enrollment and candidates,
@@ -449,7 +449,72 @@ it, never a second writer.
 - The engine's `home.status` (what the apps draw, and `fermix home status
   --json`) shows the link: the primary's name, whether it is connected and
   since when, the epoch, and the sentence. On the primary the same picture
-  lists its desktops, each with whether it is connected.
+  lists its desktops, each with whether it is connected and whether it may run
+  actions.
+
+## What the desktop does for the primary
+
+- Once the home lives on an always-on machine, the Mac (or Linux desktop) it
+  left is a paired `desktop` of the primary. The agent on the primary can ask
+  it for one bounded thing at a time with the `device_action` tool: show a
+  notification on its screen (`notify`), open a web page in its browser
+  (`open_url`, http and https only), read a file (`read_file`; the file reaches
+  the model as an attachment would, a PDF as a document, a picture as an
+  image, a text file inlined), list a folder (`list_directory`, at most 500
+  entries), run a command (`run_command`, its output cut at 64 KB) or ask for
+  read access to a folder there (`grant_read`).
+- Every command and every read grant waits for the owner first: a card of
+  kind `device` in the chat that asked (the Fermix app, the phone, or Approve
+  and Deny buttons on Telegram) names the desktop and the exact command or
+  folder, and only that one on that desktop runs once approved; a different
+  one asks again. The card waits as long as the action may take there (two
+  minutes). Once approved, the action runs and the request that asked is
+  asked again: its same call then gets the command's output (or the grant's
+  answer) back, so the agent goes on with the result, and nothing runs twice.
+  A voice call, a scheduled job, a task a cue woke and a delegated worker
+  never get a command run or a grant made there.
+- The desktop shows a notification on its own screen each time it runs a
+  command for the server, and the moment it records a read grant ("Fermix on
+  <server> can now read a folder here", naming the folder), so neither is
+  ever silent.
+- A file outside what the desktop's sandbox lets Fermix read is refused there
+  with that reason; the agent then asks for read access to its folder
+  (`grant_read`). An approved grant is kept in that desktop's own read grants
+  (`<home>/device/read_grants.json` there, never moved), which only reading a
+  file and listing a folder use: Fermix's private files stay closed inside a
+  granted folder, no command runs there for it, and the whole disk, the home
+  folder itself or Fermix's own folder are never granted.
+- The owner sees and removes a desktop's read grants on that desktop: in its
+  Fermix app, or at its terminal with `fermix device grants` and `fermix
+  device grants remove PATH` (management `device.grants.list` and
+  `device.grants.remove`, answered by the desktop's own Fermix and never by
+  the server). Removing one is the owner's decision, refused to a command
+  Fermix runs, and holds for the server's very next read there.
+- The desktop decides for itself whatever the primary asked: it reads only
+  what its own sandbox lets a file tool read and the folders it was granted
+  (never Fermix's token file, secrets, phone identity or `device/` folder),
+  takes at most 64 MB in one file whatever the server asks, runs commands in its own
+  confined shell with its own grants, refuses anything that reached it past
+  its deadline, and runs nothing while its `[fermix_core.engine] executor` is
+  `false` (default `true`; the desktop's own switch). The primary's own switch
+  for it is `mobile.devices.set_executor`; an action runs only when both allow
+  it, and `device_action` is offered only while some desktop allows actions.
+  Turning the primary's switch is the owner's decision: a command Fermix
+  started is refused with "Only the owner can let a desktop run actions for
+  the primary: use the Fermix app or your own terminal."
+- A desktop that is asleep, offline or not running Fermix answers "Your
+  <name> is unavailable; nothing was run." Nothing is queued for later: the
+  owner asks again once it is back. With more than one desktop the agent
+  names which (`device`), and asks when it is unclear; a path such as
+  `~/Documents` means the primary's own machine unless the owner names the
+  desktop.
+- The desktop keeps a receipt of every action it decided in
+  `<home>/device/receipts.jsonl` (the newest 1,000; the action, how it ended,
+  when, and hashes of the arguments and result, never the arguments or the
+  output). When a result is lost in a reconnect, the primary asks again and
+  the receipt says how it ended; it is never run twice. An action with no
+  result and no receipt is reported as uncertain: whether it ran is unknown,
+  and it is not sent again.
 
 ## Where each Always On fact and action lives
 
@@ -464,7 +529,8 @@ it, never a second writer.
 |---|---|---|
 | The role and the epoch | This computer | `fermix home status` |
 | On a desktop: the primary (connected or not, since when, its sentence), or where the home moved | The primary | `fermix home status` |
-| On the primary: its desktops, each connected or not | Desktops | `fermix home status --json` |
+| On a desktop: whether the primary's actions run here (`[fermix_core.engine] executor`) | This computer: **Run actions for the primary**, applied at once | `fermix settings set engine engine_executor=false` |
+| On the primary: its desktops, each connected or not, and its switch for them (`mobile.devices.set_executor`) | Desktops: **Run actions** | none |
 | Whether a recovery passphrase is set; each place snapshots go, its last verified snapshot (and the recovery key it opens with), a desktop copy that is waiting, and its last error | Recovery | `fermix home snapshots status` |
 | Set the recovery passphrase | Recovery: typed twice, never shown; a change says which snapshots open with which passphrase | `fermix home snapshots passphrase` |
 | On the primary: the secrets that did not resolve on this host (`secrets_missing`), by id | Secrets to enter again | `fermix home status` |
@@ -490,6 +556,10 @@ it, never a second writer.
   voice, channels, voice notes, plugins, search, images, coding agents,
   memory, personalization and cues show that sentence instead of their forms;
   its Sandbox, Doctor and Always On tabs set up this computer.
+- The settings section `engine` (**This computer**) is this computer's own
+  in every role: the role, read-only (only the move and `fermix home enroll`
+  change it), and, on a desktop, the executor switch. A desktop answers it
+  itself instead of asking its primary.
 
 ## What a restart or a move does to a message in flight
 

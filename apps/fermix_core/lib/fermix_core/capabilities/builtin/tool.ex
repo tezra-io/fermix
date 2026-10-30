@@ -13,11 +13,18 @@ defmodule FermixCore.Capabilities.Builtin.Tool do
   regardless of `kind`.
   """
 
-  @type image_part :: %{
-          required(:type) => :image,
-          required(:mime_type) => String.t(),
-          required(:data) => binary()
-        }
+  @type image_part ::
+          %{
+            required(:type) => :image,
+            required(:mime_type) => String.t(),
+            required(:data) => binary()
+          }
+          | %{
+              required(:type) => :document,
+              required(:mime_type) => String.t(),
+              required(:data) => binary(),
+              required(:name) => String.t()
+            }
 
   @type tool_result :: %{
           required(:success) => boolean(),
@@ -60,8 +67,11 @@ defmodule FermixCore.Capabilities.Builtin.Tool do
   screenshot). `output` is the model-visible text summary; the images ride a
   dedicated `:images` field so they reach the provider as image content parts and
   never leak into text logs or telemetry — `Tools.Telemetry`/`Providers.Telemetry`
-  preview `:output`/`:result`, never `:images`. Use `success/1` when there are no
-  images; an empty image list here is a caller bug and fails loud.
+  preview `:output`/`:result`, never `:images`. A PDF rides the same field as a
+  `:document` part with its file name (`FermixCore.Attachments.parts/1`'s shape,
+  a desktop's `read_file`), which the agent loop admits only on a route that
+  reads PDFs. Use `success/1` when there are no images; an empty image list here
+  is a caller bug and fails loud.
   """
   @spec success_with_images(String.t(), [image_part()]) :: tool_result()
   def success_with_images(_output, []) do
@@ -83,9 +93,21 @@ defmodule FermixCore.Capabilities.Builtin.Tool do
        when is_binary(mime) and mime != "" and is_binary(data),
        do: :ok
 
-  defp validate_image_part!(part) do
+  defp validate_image_part!(%{type: :document, mime_type: "application/pdf", data: data} = part)
+       when is_binary(data) do
+    case Map.get(part, :name) do
+      name when is_binary(name) and name != "" -> :ok
+      _missing -> invalid_part!(part)
+    end
+  end
+
+  defp validate_image_part!(part), do: invalid_part!(part)
+
+  defp invalid_part!(part) do
     raise ArgumentError,
           "invalid image part for success_with_images/2: expected " <>
-            "%{type: :image, mime_type: binary, data: binary}, got #{inspect(part)}"
+            "%{type: :image, mime_type: binary, data: binary} or a PDF " <>
+            "%{type: :document, mime_type: \"application/pdf\", data: binary, name: binary}, " <>
+            "got #{inspect(part)}"
   end
 end

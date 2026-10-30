@@ -143,6 +143,36 @@ defmodule FermixChannels.Gateway.DeliveryTest do
       refute match?({:error, {:invalid_reply_part, _}}, deliver.({:approval_prompt, "x", "TOK"}))
     end
 
+    # M75 §11: a command for the owner's other computer is a `device` card on
+    # the Mac app and the phone, and its `/confirm` token keeps Telegram's
+    # one-tap buttons; a channel with neither gets the text.
+    test "a device approval is a card where cards are rendered, buttons or text elsewhere" do
+      spec = %{kind: :device, text: "Run this command on your Studio Mac?", token: "DEV12345"}
+
+      rich = Delivery.build_deliver(ReplyContext.new(RichApprovalChannel, message()))
+      assert :ok = rich.({:approval_prompt, spec})
+      assert_received {:rich_approval_sent, "42", ^spec}
+
+      buttons = Delivery.build_deliver(ReplyContext.new(ApprovingChannel, message()))
+      assert :ok = buttons.({:approval_prompt, spec})
+      assert_received {:approval_sent, "42", "Run this command on your Studio Mac?", "DEV12345"}
+
+      text = Delivery.build_deliver(ReplyContext.new(TextOnlyChannel, message()))
+      assert :ok = text.({:approval_prompt, spec})
+      assert_received {:text_sent, "Run this command on your Studio Mac?"}
+
+      captured =
+        Delivery.build_deliver(
+          ReplyContext.new(TextOnlyChannel, message()),
+          capturing_override(self())
+        )
+
+      assert :ok = captured.({:approval_prompt, spec})
+
+      assert_received {:override_part,
+                       {:approval_prompt, "Run this command on your Studio Mac?", "DEV12345"}}
+    end
+
     test "routes a structured approval without inferring its kind from text" do
       deliver = Delivery.build_deliver(ReplyContext.new(RichApprovalChannel, message()))
       spec = %{kind: :soul, text: "Apply persona update?", token: "SOUL", ttl_s: 300}

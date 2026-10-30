@@ -127,7 +127,7 @@ defmodule FermixChannels.Test.DesktopRail do
     name
   end
 
-  def row, do: %{device_id: @device_id, name: "Studio Mac", kind: :desktop}
+  def row, do: %{device_id: @device_id, name: "Studio Mac", kind: :desktop, executor: true}
 
   defp session_opts(primary, opts) do
     desktop_public = primary.desktop.public

@@ -68,6 +68,7 @@ defmodule FermixChannels.Home.Link do
     %{
       device_id: device.device_id,
       name: device.name,
+      executor: device.executor,
       connected: false
     }
   end
@@ -76,6 +77,7 @@ defmodule FermixChannels.Home.Link do
     %{
       device_id: device.device_id,
       name: device.name,
+      executor: device.executor,
       connected: true,
       since: since
     }

@@ -23,6 +23,7 @@
 {"v":2,"t":"attach_begin","seq":19,"attach_id":"attach-4","kind":"voice","mime":"audio/ogg","size_bytes":4,"name":"recording.ogg","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
 {"v":2,"t":"companion_open","seq":2,"channel":1}
 {"v":2,"t":"companion_close","seq":9,"channel":1}
+{"v":2,"t":"invoke_receipts","seq":14,"status_id":"st-5k2Qe8Vw1x","receipts":[{"invocation_id":"inv-31c7","status":"ok","finished_at":"2026-10-21T08:14:03Z"},{"invocation_id":"inv-31c8","status":"refused","finished_at":"2026-10-21T08:15:40Z"}]}
 {"v":2,"t":"snapshot_stored","seq":21,"snapshot_id":"snap-20261021T0600Z","sha256":"4f2a7d3c9e1b6058a2d4c7e9f1b3a5d7c9e2f4a6b8d0c1e3f5a7b9c2d4e6f8a0"}
 {"v":2,"t":"snapshot_refused","seq":22,"snapshot_id":"snap-20261021T1200Z","reason":"disk_floor"}
 {"v":2,"t":"loopback_failed","seq":23,"loopback_id":"lb-2b90","port":53682,"reason":"port_in_use"}

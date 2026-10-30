@@ -35,6 +35,28 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
     end
   end
 
+  # An action on the owner's other computer (`device_action`'s shape): the gate
+  # holds every call on a `device` card that waits 120 s, and the run reports
+  # to the test.
+  defmodule DeviceStandIn do
+    @moduledoc false
+    def approval_required?(_args, _context), do: true
+
+    def approval_request(args, _context) do
+      %{
+        card: :device,
+        head: "Run this command on your Studio Mac?",
+        lines: [{"Computer", "Studio Mac"}, {"Command", args["command"]}],
+        ttl_s: 120
+      }
+    end
+
+    def run(args, _context, test_pid) do
+      send(test_pid, {:ran_on_desktop, args})
+      {:ok, %{success: true, output: "Ran on your Studio Mac (exit 0):\n4.0G", error: nil}}
+    end
+  end
+
   setup do
     home = FermixTestSupport.SafeRm.make_tmp_dir!("channel-request-grant")
     root = Path.join(home, "project")
@@ -97,6 +119,39 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
 
       refute Map.has_key?(record, :ingress_context)
       assert record.expires_at > System.monotonic_time(:millisecond)
+    end
+
+    # M75 §11: a command for the owner's other computer is shown as a `device`
+    # card, so its resolution names that kind and reaches the same card.
+    test "a device card's token resolves as a device card, approved or denied" do
+      test_pid = self()
+
+      context =
+        Map.put(agent_ctx(), :approval_resolution_fn, fn resolution ->
+          send(test_pid, {:approval_resolution, resolution})
+          :ok
+        end)
+
+      for {verb, outcome} <- [{"/deny", :denied}, {"/confirm", :approved}] do
+        request = %{
+          access_sensitive: "intent-#{System.unique_integer([:positive])}",
+          card: :device
+        }
+
+        origin = chat_origin("owner-1", resume: nil)
+        assert {:ok, token, :new} = SandboxCommand.store_pending_grant(request, origin)
+        assert {:ok, %{card: :device}} = Confirmations.peek(token)
+
+        assert :ok = dispatch(telegram_message("#{verb} #{token}", "owner-1"), context)
+
+        assert_receive {:approval_resolution, %{kind: :device, token: ^token, outcome: ^outcome}}
+      end
+    end
+
+    test "every other token resolves as the sandbox family's card", %{root: root} do
+      origin = chat_origin("owner-1", resume: nil)
+      assert {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), origin)
+      assert {:ok, %{card: :sandbox}} = Confirmations.peek(token)
     end
 
     test "a CLI-origin record carries no resume intent", %{root: root} do
@@ -432,6 +487,40 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
       refute_receive {:unlocked, _}, 200
     end
 
+    test "a confirmed device card runs its action, then resumes the request that parked it", %{
+      registry: registry
+    } do
+      :ok = CapabilityRegistry.register(registry, device_capability(self()))
+      resume = %{content: "how full is my Mac's disk", reply_target: "chat-1", sender: "alice"}
+      origin = chat_origin("owner-1", resume: Map.put(resume, :provenance, @clean))
+      token = park_device_call(registry, origin, unique_key())
+
+      assert {:ok, %{card: :device, expires_at: expires_at}} = Confirmations.peek(token)
+      assert expires_at - System.monotonic_time(:millisecond) > 60_000
+
+      assert :ok = confirm(token, "owner-1", agent_ctx())
+      assert_receive {:ran_on_desktop, %{"command" => "df -h"}}, 2_000
+      assert_receive {:sandbox_reply, reply}, 2_000
+      assert reply =~ "Confirmed. device_action ran: Ran on your Studio Mac"
+      assert_receive {:resumed, resumed}, 2_000
+      assert resumed.content == "how full is my Mac's disk"
+      assert resumed.metadata.resumed_from_grant == token
+      refute_received {:ran_on_desktop, _args}
+    end
+
+    test "a plugin command's request is not resumed, whatever its origin says", %{
+      registry: registry
+    } do
+      resume = %{content: "unlock the car", reply_target: "chat-1", sender: "alice"}
+      origin = chat_origin("owner-1", resume: Map.put(resume, :provenance, @clean))
+      token = park_access_call(registry, origin, unique_key())
+
+      assert :ok = confirm(token, "owner-1", agent_ctx())
+      assert_receive {:unlocked, _args}, 2_000
+      assert_receive {:sandbox_reply, _reply}, 2_000
+      refute_receive {:resumed, _message}, 200
+    end
+
     test "/deny says nothing was sent and drops the parked call", %{registry: registry} do
       origin = chat_origin("owner-1", resume: nil)
       key = unique_key()
@@ -597,6 +686,41 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
     end
 
     Map.put(agent_ctx(), :defer_command_fn, defer)
+  end
+
+  defp device_capability(test_pid) do
+    Capability.new(%{
+      name: "device_action",
+      description: "Do one thing on the owner's desktop.",
+      parameters: %{"type" => "object"},
+      kind: :builtin,
+      executor: {DeviceStandIn, :run, [test_pid]},
+      policy_class: :exec,
+      metadata: %{owner_approval?: true, tool_module: DeviceStandIn}
+    })
+  end
+
+  # A clean owner turn on the owner's chat: the device card is raised anyway.
+  defp park_device_call(registry, origin, conversation_key) do
+    test_pid = self()
+
+    context = %{
+      source_trust: :operator,
+      computer_use_origin: :interactive,
+      session_id: "grant-device-#{System.unique_integer([:positive])}",
+      conversation_key: conversation_key,
+      chat_type: "private",
+      capability_registry: registry,
+      outside_sources: MapSet.new(),
+      reply_fn: fn part -> send(test_pid, {:owner_prompt, part}) end,
+      approval_fn: fn request -> SandboxCommand.store_pending_grant(request, origin) end
+    }
+
+    {:ok, capability} = CapabilityRegistry.find(registry, "device_action")
+    args = %{"action" => "run_command", "command" => "df -h"}
+    assert {:ok, %{success: false}} = Capability.execute(capability, args, context)
+    assert_received {:owner_prompt, {:approval_prompt, %{kind: :device, token: token}}}
+    token
   end
 
   # Parks a call the way a real tainted chat turn does: the gate calls the

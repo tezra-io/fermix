@@ -910,6 +910,22 @@ said aloud, reaches no field. The output preview is the result's sentence,
 which names channels and never the text. The send itself is a channel delivery
 and counts as the channel's own outbound message point.
 
+`device_action` (M75 §11) asks one of the owner's desktops to do one thing.
+Its one exec event carries `action`, `device_id`, `invocation_id` (the id the
+desktop records its receipt under) and `outcome`: `ok`, `refused` or `failed`
+as the desktop answered, `reconciled` (its result was lost in a reconnect and
+its receipt said how it ended), `uncertain` (no result and no receipt), or a
+refusal before anything was sent (`unavailable`, `turned_off`, `busy`,
+`ambiguous_device`, `unknown_device`, `invalid_param`, `not_owner_turn`,
+`needs_approval`, …). A `read_file`'s bytes and content parts reach no field.
+No event is added for the desktop: the invocation carries the turn's
+`session_id` to it as `correlation_id` in its arguments, the desktop echoes it
+in its result and logs it beside the invocation id, and its receipt
+(`<home>/device/receipts.jsonl`, hashes only) names the same invocation id, so
+the primary's span and the desktop's record join on the invocation id. A
+command the owner must approve first is held by `Capabilities.AccessGate`,
+whose held and confirmed events are this tool's like any gated call's.
+
 A coding run a task of a call in the chat launches (M56 §4.7) is a harness run
 like any other, and so a **root** of its own (`harness_<id>`, never nested:
 it outlives the turn that launched it, and the call's run closed at

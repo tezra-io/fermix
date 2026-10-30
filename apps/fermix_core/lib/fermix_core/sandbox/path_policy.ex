@@ -25,8 +25,8 @@ defmodule FermixCore.Sandbox.PathPolicy do
   # The daemon's own state under FERMIX_HOME, which no agent task reads or
   # writes through file tools: configuration and credentials (the Linux file
   # secret store, setup tokens, the session-signing key, ACP and mobile
-  # identities, a desktop's key, the Sign in with ChatGPT install id, plugin
-  # token projections, browser profiles), the persona files
+  # identities, a desktop's key and receipts, the Sign in with ChatGPT install
+  # id, plugin token projections, browser profiles), the persona files
   # `/soul` curates, memory, grants, logs, traces and sockets. A new file of that
   # kind joins this list in the same change. Each entry also covers the files
   # named after it (see `protected?/2`).

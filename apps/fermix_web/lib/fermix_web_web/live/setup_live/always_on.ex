@@ -10,8 +10,11 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   `snapshots_passphrase/2` back up now and set the recovery passphrase;
   `Management.HomeMove.enroll_open/1` opens an enrollment code and
   `move_readiness/2` reviews a move before anything starts it;
-  `Management.Settings` serves the `snapshots` section; and
-  `Management.Secrets.set/2` stores the two S3 keys.
+  `Management.Settings` serves the `engine` section (the role and, in the
+  device role, this computer's executor switch) and the `snapshots` section;
+  `Management.Secrets.set/2` stores the two S3 keys; and
+  `Management.Mobile.devices_set_executor/3` is a desktop's switch on the
+  primary.
 
   On the primary the move is offered as its command, shown once its review
   has nothing that blocks, not as a button: starting it restarts the engine
@@ -50,7 +53,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
 
   Seams, under `config :fermix_web, :always_on`: `home` (options for every
   `Management.Home` and `HomeMove` call), `settings` (for `Settings`),
-  `schedule` (how a later read is scheduled),
+  `mobile` (for `Mobile`), `schedule` (how a later read is scheduled),
   `linked?` (whether this computer is a linked desktop, in place of
   `DesktopLink.linked?/2`) and `forward` (the way to the primary, in place of
   `FermixCore.Home.Link.impl().forward/2`).
@@ -63,6 +66,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   alias FermixCore.Home.Role
   alias FermixCore.Management.Home
   alias FermixCore.Management.HomeMove
+  alias FermixCore.Management.Mobile
   alias FermixCore.Management.Placement
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Secrets
@@ -197,6 +201,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
       linked?: linked?(record),
       zone: zone,
       status: nil,
+      engine: nil,
       storage: nil,
       code: nil,
       review: nil,
@@ -251,17 +256,18 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
     %{
       state
       | status: Home.status(home_opts(state)),
+        engine: read_rows("engine", state.record),
         storage: storage_rows(state.record)
     }
   end
 
   # The snapshot section is the primary's: a device forwards it, so this page,
   # which sets up this computer, draws it only on the primary.
-  defp storage_rows(%{role: :primary}), do: read_rows("snapshots")
+  defp storage_rows(%{role: :primary} = record), do: read_rows("snapshots", record)
   defp storage_rows(_record), do: nil
 
-  defp read_rows(section) do
-    case ManagementSettings.get(section, settings_opts()) do
+  defp read_rows(section, record) do
+    case ManagementSettings.get(section, settings_opts(record)) do
       {:ok, %{"rows" => rows}} -> {:ok, rows}
       {:error, refusal} -> {:error, refusal(refusal)}
     end
@@ -313,6 +319,14 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
 
   def handle_event("always_on_keys", %{"secret" => keys}, socket) when is_map(keys),
     do: keys(socket, keys)
+
+  def handle_event("always_on_desktop_executor", %{"device" => id, "value" => value}, socket)
+      when is_binary(id) and value in ["true", "false"],
+      do: desktop_executor(socket, id, value == "true")
+
+  def handle_event("always_on_engine_executor", %{"value" => value}, socket)
+      when value in ["true", "false"],
+      do: engine_executor(socket, value == "true")
 
   # Anything else is not an event this tab draws: it changes nothing, and only
   # its name reaches the log, never its parameters.
@@ -453,7 +467,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   defp storage(socket, fields) do
     with {:ok, rows} <- current(socket.assigns.always_on.storage),
          {:ok, changes} <- changes(rows, fields),
-         {:ok, written} <- apply_storage(changes) do
+         {:ok, written} <- apply_storage(changes, record(socket)) do
       {socket |> load() |> put_notice(:storage, {:info, written_sentence(written)}), written}
     else
       {:error, sentence} -> {put_notice(socket, :storage, {:error, sentence}), nil}
@@ -463,10 +477,10 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   defp written_sentence(:written), do: "Saved."
   defp written_sentence(nil), do: "Nothing changed."
 
-  defp apply_storage(changes) when map_size(changes) == 0, do: {:ok, nil}
+  defp apply_storage(changes, _record) when map_size(changes) == 0, do: {:ok, nil}
 
-  defp apply_storage(changes) do
-    case ManagementSettings.apply("snapshots", changes, settings_opts()) do
+  defp apply_storage(changes, record) do
+    case ManagementSettings.apply("snapshots", changes, settings_opts(record)) do
       {:ok, _result} -> {:ok, :written}
       {:error, refusal} -> {:error, refusal(refusal)}
     end
@@ -502,6 +516,26 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
     case Secrets.set(key, value) do
       {:ok, _presence} -> nil
       {:error, refusal} -> refusal(refusal)
+    end
+  end
+
+  defp desktop_executor(socket, id, executor?) do
+    if Enum.any?(desktop_rows(socket.assigns.always_on.status), &(&1["device_id"] == id)) do
+      case Mobile.devices_set_executor(id, executor?, mobile_opts()) do
+        {:ok, _device} -> {socket |> load() |> put_notice(:desktops, nil), nil}
+        {:error, refusal} -> {put_notice(socket, :desktops, {:error, refusal(refusal)}), nil}
+      end
+    else
+      {put_notice(socket, :desktops, {:error, "That desktop is not one of this primary's."}), nil}
+    end
+  end
+
+  defp engine_executor(socket, executor?) do
+    values = %{"engine_executor" => executor?}
+
+    case ManagementSettings.apply("engine", values, settings_opts(record(socket))) do
+      {:ok, _result} -> {socket |> load() |> put_notice(:engine, nil), :written}
+      {:error, refusal} -> {put_notice(socket, :engine, {:error, refusal(refusal)}), nil}
     end
   end
 
@@ -645,6 +679,8 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
 
   # -- state and seams -----------------------------------------------------------
 
+  defp record(socket), do: socket.assigns.always_on.record
+
   defp clear_forms(socket), do: update(socket, &%{&1 | form_gen: &1.form_gen + 1})
 
   defp put_notice(socket, area, nil),
@@ -664,7 +700,10 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
     if linked?, do: Keyword.put_new(opts, :primary_forward, forward()), else: opts
   end
 
-  defp settings_opts, do: Keyword.get(seams(), :settings, [])
+  defp settings_opts(record),
+    do: seams() |> Keyword.get(:settings, []) |> Keyword.put_new(:engine_role, record)
+
+  defp mobile_opts, do: Keyword.get(seams(), :mobile, [])
 
   defp linked?(record) do
     case Keyword.fetch(seams(), :linked?) do
@@ -687,8 +726,23 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
 
   # -- reads, for drawing --------------------------------------------------------
 
+  defp desktop_rows({:ok, %{"desktops" => desktops}}) when is_list(desktops), do: desktops
+  defp desktop_rows(_status), do: []
+
   defp rows({:ok, rows}), do: rows
   defp rows(_rows), do: []
+
+  defp row(rows, key), do: Enum.find(rows(rows), &(&1["key"] == key))
+
+  defp role_label(engine, role) do
+    case row(engine, "engine_role") do
+      %{"options" => options} ->
+        Enum.find_value(options, role, &(&1["value"] == role && &1["label"]))
+
+      nil ->
+        role
+    end
+  end
 
   # A time the daemon gave, as the viewer reads it: the whole minute in their
   # zone (checked when the page connected), named; UTC without one.
@@ -774,7 +828,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
       ids={@secrets}
       sentence={@secrets_here}
     />
-    <.this_computer picture={@picture} />
+    <.this_computer state={@state} picture={@picture} />
     <.link_card :if={@role == "device"} picture={@picture} zone={@state.zone} />
     <.move_card :if={@picture["move"]} id="always-on-move" title="The move" move={@picture["move"]} />
     <%= if @role == "primary" do %>
@@ -809,22 +863,47 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
     """
   end
 
+  attr :state, :map, required: true
   attr :picture, :map, required: true
 
   defp this_computer(assigns) do
-    assigns = assign(assigns, card: @card)
+    assigns =
+      assign(assigns,
+        card: @card,
+        role_row: row(assigns.state.engine, "engine_role"),
+        executor: row(assigns.state.engine, "engine_executor"),
+        label: role_label(assigns.state.engine, assigns.picture["role"])
+      )
 
     ~H"""
     <section id="always-on-engine" class={@card}>
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div class="min-w-0">
           <h3 class="text-sm font-semibold">This computer</h3>
-          <p id="always-on-role" class="mt-0.5 text-sm">{@picture["role"]}</p>
+          <p id="always-on-role" class="mt-0.5 text-sm">{@label}</p>
+          <p :if={@role_row} class="text-xs text-base-content/60">{@role_row["footer"]}</p>
         </div>
         <span id="always-on-epoch" class="badge badge-ghost badge-sm shrink-0">
           {if @picture["epoch"], do: "Epoch #{@picture["epoch"]}", else: "No epoch yet"}
         </span>
       </div>
+      <div :if={@executor} class="mt-4 flex items-start justify-between gap-4">
+        <div class="min-w-0">
+          <p class="text-sm">{@executor["label"]}</p>
+          <p class="text-xs text-base-content/60">{@executor["footer"]}</p>
+          <p class="mt-1 text-xs text-base-content/50">{@executor["info"]}</p>
+        </div>
+        <input
+          id="always-on-engine-executor"
+          type="checkbox"
+          class="toggle toggle-sm toggle-primary mt-0.5"
+          checked={@executor["value"] == true}
+          aria-label={@executor["label"]}
+          phx-click="always_on_engine_executor"
+          phx-value-value={to_string(@executor["value"] != true)}
+        />
+      </div>
+      <.notice notices={@state.notices} area={:engine} />
     </section>
     """
   end
@@ -1539,6 +1618,9 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
     ~H"""
     <section :if={@desktops != []} id="always-on-desktops" class={[@card, "space-y-3"]}>
       <h3 class="text-sm font-semibold">Desktops</h3>
+      <p class="text-xs text-base-content/60">
+        Each runs what Fermix asks of it only while its switch here and its own switch both allow it.
+      </p>
       <div
         :for={desktop <- @desktops}
         id={"always-on-desktop-#{desktop["device_id"]}"}
@@ -1553,7 +1635,20 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
           />
           <.dot :if={!desktop["connected"]} tone="bg-base-content/30" text="Not connected" />
         </div>
+        <label class="flex items-center gap-2 text-xs">
+          Run actions
+          <input
+            type="checkbox"
+            class="toggle toggle-sm toggle-primary"
+            checked={desktop["executor"] == true}
+            aria-label={"Run actions on #{desktop["name"]}"}
+            phx-click="always_on_desktop_executor"
+            phx-value-device={desktop["device_id"]}
+            phx-value-value={to_string(desktop["executor"] != true)}
+          />
+        </label>
       </div>
+      <.notice notices={@state.notices} area={:desktops} />
     </section>
     """
   end

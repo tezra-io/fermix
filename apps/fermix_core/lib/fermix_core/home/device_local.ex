@@ -14,7 +14,8 @@ defmodule FermixCore.Home.DeviceLocal do
      "a token file this machine quarantined as unreadable, kept here for recovery"},
     {"config.toml.pre-m5", "a backup taken by a secret migration on this machine"},
     {"moved.json", "the marker that retires this copy; a restored home is the new primary"},
-    {"device", "a desktop's own key and its link to the primary"},
+    {"device",
+     "a desktop's own key, its link to the primary and the receipts of the actions it ran"},
     {"snapshots",
      "this machine's snapshot status and capture staging, and a desktop's copies of the " <>
        "primary's snapshots"},

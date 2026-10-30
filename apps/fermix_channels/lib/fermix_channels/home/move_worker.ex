@@ -7,7 +7,7 @@ defmodule FermixChannels.Home.MoveWorker do
   **Before `move_ready`** (phases `requested`, `streaming`):
 
     1. the desktop's X25519 key goes to `device/desktop_key` and its row
-       (`kind: :desktop`) into `mobile/devices.toml`, before
+       (`kind: :desktop, executor: true`) into `mobile/devices.toml`, before
        anything is captured, so the row travels and the key never does;
     2. the value of every `@keyring` reference in `config.toml` is read from
        the keychain (`FermixCore.Home.MoveSecrets`), and the home is captured
@@ -235,7 +235,8 @@ defmodule FermixChannels.Home.MoveWorker do
       model: "#{os()} desktop",
       noise_pk: keypair.public,
       created_at: DateTime.truncate(ctx.clock.(), :second),
-      kind: :desktop
+      kind: :desktop,
+      executor: true
     }
 
     case DeviceStore.add(attrs, root: ctx.home) do

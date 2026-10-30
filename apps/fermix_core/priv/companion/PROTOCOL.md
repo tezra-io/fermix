@@ -664,8 +664,12 @@ daemon is not running under exactly those ids is refused with
 
 ## Approvals
 
-When a tool needs the owner's approval, the daemon sends `approval`. The
-companion answers by sending one of the routes as a `command`: drop the
+When a tool needs the owner's approval, the daemon sends `approval`. Its
+`kind` is `sandbox`, `soul` or `device` (a command the agent would run on the
+owner's own desktop, or a folder it would be allowed to read there, naming
+that desktop and the exact command or folder, answered like `sandbox`; its
+`ttl_s` is the action's own deadline, 120 s, rather than the 60 s of a
+`sandbox` card, and once it ran the request that raised it is asked again). The companion answers by sending one of the routes as a `command`: drop the
 leading `/`, the first word is `name` and the rest is `args`. `/confirm TOKEN`
 is `command{name: "confirm", args: "TOKEN"}`, and `/soul apply TOKEN` is
 `command{name: "soul", args: "apply TOKEN"}`.

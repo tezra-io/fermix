@@ -1104,6 +1104,42 @@ defmodule FermixCore.Management.RouterTest do
                )
     end
 
+    test "set_executor takes a device id and a boolean, and refuses a phone in its words" do
+      desktop = %{
+        device_id: "d1",
+        name: "Studio Mac",
+        model: "Mac15,8",
+        kind: :desktop,
+        executor: false,
+        platform: nil,
+        signer_role: nil,
+        boot_state: nil,
+        push_registered: false,
+        created_at: "2026-10-20T07:15:00Z",
+        last_seen: nil
+      }
+
+      params = %{"device_id" => "d1", "executor" => false}
+
+      assert {:ok, %{"kind" => "desktop", "executor" => false}} =
+               Router.route(v2("mobile.devices.set_executor", params), mobile({:ok, desktop}))
+
+      for bad <- [%{"device_id" => "d1"}, %{params | "executor" => "no"}, Map.put(params, "x", 1)] do
+        assert {:error, :invalid_params, _details} =
+                 Router.route(v2("mobile.devices.set_executor", bad), mobile({:ok, desktop}))
+      end
+
+      assert {:error, :invalid_params,
+              %{
+                "field" => "device_id",
+                "sentence" => "That device is a phone; only a desktop runs actions."
+              }} =
+               Router.route(
+                 v2("mobile.devices.set_executor", params),
+                 mobile({:error, :not_a_desktop})
+               )
+    end
+
     # Each is a view with a sentence and no session, because nothing was opened.
     test "a start the operator can act on is a failed view, not an envelope" do
       refusals = [
@@ -1138,7 +1174,8 @@ defmodule FermixCore.Management.RouterTest do
 
     test "every mobile method is refused on a v1 session with the version it requires" do
       for method <- ~w(mobile.status mobile.pair.start mobile.pair.get mobile.pair.decide
-                       mobile.pair.cancel mobile.devices.list mobile.devices.revoke) do
+                       mobile.pair.cancel mobile.devices.list mobile.devices.revoke
+                       mobile.devices.set_executor) do
         assert {:error, :method_not_found, %{"method" => ^method, "requires" => 2}} =
                  Router.route(request(method), mobile({:ok, []}))
       end
@@ -1155,6 +1192,7 @@ defmodule FermixCore.Management.RouterTest do
     def pair_cancel(_session_id, opts), do: answer(opts)
     def devices_list(opts), do: answer(opts)
     def devices_revoke(_device_id, opts), do: answer(opts)
+    def devices_set_executor(_device_id, _executor, opts), do: answer(opts)
 
     defp answer(opts) do
       case Keyword.fetch!(opts, :reply) do

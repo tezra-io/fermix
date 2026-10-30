@@ -179,9 +179,9 @@ header including its four-byte length prefix.
 Only `attach_chunk`, `pair_request` and the chunked and streamed events of
 *Desktop sessions* and *Enrollment and the move* (client to daemon), and
 `media_chunk`, `event_part` and those sections' chunked and streamed events
-(daemon to client) carry raw bytes, and theirs is never empty, except that a
-`loopback_request` or a `loopback_response` may carry an empty payload. Every
-other event must have an empty raw tail. Binary golden fixtures represent the actual frame as
+(daemon to client) carry raw bytes, and theirs is never empty, except that an
+`invoke_blob`, a `loopback_request` or a `loopback_response` may carry an
+empty payload. Every other event must have an empty raw tail. Binary golden fixtures represent the actual frame as
 `{header, bytes_b64}` only so JSONL can store it; that wrapper is not sent on
 the wire.
 
@@ -222,10 +222,11 @@ message) is sent as one run of `event_part` frames instead of one frame:
 ## Chunked payloads
 
 A payload too large for one frame (a desktop's management call, a tunneled
-companion line) travels as frames of one event, each with `index` (from 0)
-and `last` (boolean) in its header and at most 60 KiB of the payload as its
-raw tail. A chunked event's header stays within 4,075 bytes, so a full tail
-still fits one plaintext.
+companion line, an action's result, a file's bytes)
+travels as frames of one event, each with `index` (from 0) and `last`
+(boolean) in its header and at most 60 KiB of the payload as its raw tail. A
+chunked event's header stays within 4,075 bytes, so a full tail still fits one
+plaintext.
 
 - One payload's frames carry the same value of the event's key field and the
   same header fields, and arrive in `index` order, the last one marked
@@ -238,7 +239,7 @@ still fits one plaintext.
   payload's first, and a payload past its bound. A second `last` for a payload
   that ended comes at an `index` past 0, so it is a gap.
 - An empty payload is one frame, `index` 0 and `last` true, with an empty
-  tail; only `loopback_response` may carry one.
+  tail; only `invoke_blob` and `loopback_response` may carry one.
 - The primary holds at most 32 of a desktop's payloads open at once; one more
   closes that desktop's session `1002`.
 
@@ -247,6 +248,9 @@ still fits one plaintext.
 | `companion_line` | `channel` | 1 MiB |
 | `manage` | `call_id` | 1 MiB |
 | `manage_result` | `call_id` | 4 MiB |
+| `invoke` | `invocation_id` | 64 KiB |
+| `invoke_result` | `invocation_id` | 1 MiB |
+| `invoke_blob` | `invocation_id` | `caps.max_media_bytes` |
 | `loopback_response` | `request_id` | 256 KiB |
 
 `snapshot_chunk` and `move_chunk` are streams, not chunked payloads: `index`
@@ -761,7 +765,9 @@ that already ended changes nothing.
 ## Approvals
 
 When a tool needs the owner's approval, the daemon sends `approval`. Its
-`kind` is `sandbox` or `soul`. The client answers by sending one of the routes
+`kind` is `sandbox`, `soul` or `device` (a command the agent would run on the
+owner's own desktop, naming that desktop and the exact command, answered like
+`sandbox` with `/confirm` and `/deny`). The client answers by sending one of the routes
 as a `command`: drop the leading `/`, the first word is `name` and the rest is
 `args`. `/confirm TOKEN` is `command{name:"confirm", args:"TOKEN"}`, and
 `/soul apply TOKEN` is `command{name:"soul", args:"apply TOKEN"}`. The token is
@@ -925,9 +931,9 @@ daemon's. The extension must reproduce it before shipping.
 
 A desktop engine that handed its home to another host (the move, below)
 keeps a session to the new primary as a `desktop` device. Its row in
-`devices.toml` names `kind = "desktop"` and carries no attestation or push
-field; a row that names no kind is a phone's, as every row written before
-desktops did. A
+`devices.toml` names `kind = "desktop"` and an `executor` switch (whether the
+primary lets it run actions) and carries no attestation or push field; a row
+that names no kind is a phone's, as every row written before desktops did. A
 desktop authenticates exactly as a paired phone does: `IK` (`0x01`) with its
 own static key, then `hello` with the highest `primary_epoch` it has seen,
 answered with `hello_ack`. The primary reads the row's kind and admits that
@@ -950,6 +956,9 @@ A desktop's session takes the phone events `hello`, `ping`, `media_fetch` and
 | `companion_line` | `channel`, `index`, `last` + raw bytes | one line of that connection without its newline, chunked, at most 1 MiB; both directions |
 | `companion_close` | `channel`; `reason?` | the connection ended; both directions, `reason` (the primary's, at most 512 bytes) for logs |
 | `manage` | `call_id`, `method`, `protocol_version`, `index`, `last` + raw bytes | one management call the desktop forwards, its params JSON chunked, at most 1 MiB; at most 8 in flight; `method` as the management protocol names it |
+| `invoke_result` | `invocation_id`, `status`, `index`, `last` + raw bytes | how an `invoke` ended (`ok`, `refused` or `failed`), its result JSON chunked, at most 1 MiB |
+| `invoke_blob` | `invocation_id`, `index`, `last` + raw bytes | a `read_file`'s bytes, chunked, at most `caps.max_media_bytes` as the desktop takes it (at most 64 MiB, whatever the primary says); an empty file is one empty frame |
+| `invoke_receipts` | `status_id`, `receipts[]` | answers the `invoke_status` of that `status_id`: `{invocation_id, status, finished_at}` for each invocation it named that the desktop holds a receipt for, at most 32; an answer naming a `status_id` the primary does not wait on settles nothing (`error` `receipts_not_asked`) |
 | `loopback_request` | `loopback_id`, `request_id`, `method`, `target`, `headers[]` + raw bytes | one request a browser made to a forwarded sign-in loopback, its body as the raw tail, at most 16 KiB and empty for none; at most 8 per loopback; `target` is the request's path and query |
 | `loopback_failed` | `loopback_id`, `port`, `reason` | the desktop would not or could not listen on `127.0.0.1` on `port` of the loopback: `port_in_use` (something listens there), `not_permitted` (the system refused, or the port is below 1024 or one of the desktop engine's own) or `failed` (anything else, or 8 loopbacks already open); the sign-in ends with that sentence |
 | `snapshot_stored` | `snapshot_id`, `sha256` | the desktop kept a snapshot, and the SHA-256 of what it wrote |
@@ -962,6 +971,8 @@ The primary sends a desktop `hello_ack`, `pong`, `error`, `event_part`,
 | `t` | Required payload | Rules |
 |---|---|---|
 | `manage_result` | `call_id`, `index`, `last` + raw bytes | the management response to one `manage`, as `daemon.sock` would answer it, chunked, at most 4 MiB |
+| `invoke` | `invocation_id`, `action`, `deadline_s`, `index`, `last` + raw bytes | run one action (`notify`, `open_url`, `read_file`, `list_directory`, `run_command` or `grant_read`), its arguments JSON chunked, at most 64 KiB; `deadline_s` is 1 to 600; `action` is a snake_case name, and a desktop refuses one it does not know |
+| `invoke_status` | `status_id`, `invocation_ids[]` | 1 to 32 invocations to report on, after a reconnect or past a deadline, under a `status_id` the answer names |
 | `loopback_open` | `loopback_id`, `ports[]`, `expires_in_s` | bind `127.0.0.1` on 1 to 8 ports, for at most 900 s, and forward what arrives; a desktop binds only a port nothing else on it listens on, never one below 1024 or one of its engine's own, and holds at most 8 loopbacks open |
 | `loopback_response` | `request_id`, `status`, `headers[]`, `index`, `last` + raw bytes | the answer to one `loopback_request`, its body chunked, at most 256 KiB, and empty for none; `status` is 100 to 599 |
 | `loopback_close` | `loopback_id` | the sign-in ended or expired; close the loopback |
@@ -971,10 +982,12 @@ The primary sends a desktop `hello_ack`, `pong`, `error`, `event_part`,
 
 `headers[]` is a list of `[name, value]` pairs, in order: a name is an HTTP
 token of at most 256 bytes, a value at most 4,096 bytes with no CR, LF or NUL,
-and there are at most 64. An id (`call_id`, `loopback_id`, `request_id`,
-`snapshot_id`, and on the other sessions `candidate_id` and `move_id`) is 1
-to 128 letters, digits, `.`, `_`, `:` and `-`, starting with a letter or a
-digit. A name a person reads (`name`, `primary_name`, an enrollment's
+and there are at most 64. An id (`call_id`, `invocation_id`, `loopback_id`,
+`request_id`, `snapshot_id`, `status_id`, and on the other sessions
+`candidate_id` and `move_id`) is 1 to 128 letters, digits, `.`, `_`, `:` and
+`-`, starting with a letter or a digit. A time (`finished_at`) is RFC 3339 in
+UTC (`Z`, or an offset of zero); one with any other offset is refused as an
+invalid field. A name a person reads (`name`, `primary_name`, an enrollment's
 texts) is at most 128 bytes of UTF-8 with no control character.
 
 A desktop's event outside the families the primary serves is answered
@@ -984,8 +997,9 @@ sent no approval card and no phone's broadcast: its chat, approvals included,
 rides its companion tunnel. A desktop's session closes `1011` (`desktop peer
 failed`) when the primary's side of it fails or does not start. A desktop
 holds at most 32 chunked payloads open at once, as the primary does; the
-primary also holds at most 64 MiB across a desktop's open payloads. Past
-either, the session closes `1002`.
+primary also holds at most 64 MiB across a desktop's open payloads (or one
+blob's bound, when `caps.max_media_bytes` is larger). Past either, the session
+closes `1002`.
 
 ### The sign-in forward and snapshot copies
 
@@ -1013,6 +1027,58 @@ encrypted: `snapshot_begin`, `snapshot_chunk`s of at most 60 KiB from
 `index` 0, `snapshot_end`. The desktop answers `snapshot_stored` with the
 SHA-256 it computed, which verifies the copy when it is `snapshot_begin`'s,
 or `snapshot_refused`. A new `snapshot_begin` abandons a copy in progress.
+
+### Actions (the executor)
+
+An `invoke`'s raw bytes are one JSON object: the action's arguments and
+`correlation_id`, the asking turn's session id, which the desktop echoes in its
+result and logs beside the invocation id. The desktop decides each one under its
+own policy (its `[fermix_core.engine] executor` switch, its own sandbox and
+confined shell), whatever the primary asked:
+
+| `action` | Arguments | `ok` result | Bytes |
+|---|---|---|---|
+| `notify` | `title` (≤ 256 bytes), `body` (≤ 4,096 bytes) | `{}` | — |
+| `open_url` | `url`, `http` or `https` only (≤ 2,048 bytes) | `{url}` | — |
+| `read_file` | `path` (`~` is the desktop's home) | `{path, name, size_bytes, sha256}` | the file, as `invoke_blob`, before the result: a private copy the desktop staged as it hashed it, streamed from disk |
+| `list_directory` | `path` | `{path, entries[], total, truncated}`; each entry `{name, type}` (`file` with `size_bytes`, `directory`, `link`, `other`), at most 500, sorted | — |
+| `run_command` | `command`, `cwd?` | `{exit_code, output, truncated}`, output at most 64 KiB; the desktop shows a notification as it starts one | — |
+| `grant_read` | `path`, a folder | `{path}`, the folder as recorded; the desktop shows a notification naming the folder and the primary as it records it | — |
+
+`run_command` and `grant_read` are sent only after the owner approved that
+exact call on a `device` card on the primary. A `grant_read` folder is kept in
+the desktop's own read grants (device-local, never moved), which only
+`read_file` and `list_directory` read: inside it the desktop's protected paths
+stay closed, and no command runs there for it. `/`, the home folder itself,
+Fermix's home and a protected path are never granted (`unsafe_root`). The
+owner sees and removes the desktop's grants on the desktop itself (its
+management `device.grants.list` and `device.grants.remove`, never
+forwarded); each `read_file` and `list_directory` reads the grants anew, so a
+removed one holds for the next.
+
+A `refused` or `failed` result is `{reason, message}`: `message` is one
+sentence the primary relays, `reason` one of `executor_off`,
+`deadline_passed`, `already_handled`, `unknown_action`, `invalid_arguments`,
+`protected_path`, `outside_sandbox`, `blocked_path`, `hardline`,
+`os_sandbox`, `not_a_file`, `not_a_folder`, `too_large`, `not_a_web_url`,
+`no_opener`, `not_offered` (refused, nothing ran) or `not_found`,
+`unsafe_root`, `too_many_grants` (64 held) (refused, nothing ran) or
+`not_found`, `unreadable`, `not_staged`, `read_grants`, `not_recorded`,
+`not_shown`, `opener_failed`, `exit_nonzero` (with
+`exit_code` and `output`), `output_too_long` (with the first 64 KiB of
+`output`), `timeout`, `not_run` (failed). An invocation past its `deadline_s`
+when the desktop gets to it is refused without running, and one the desktop
+already holds a receipt for is never run twice.
+
+The desktop records a receipt for every invocation it decides
+(`{invocation_id, action, status, finished_at, args_sha256, result_sha256}`,
+the newest 1,000, never the arguments or the output), and answers
+`invoke_status` from them. When a desktop's session starts while invocations
+are in flight, the primary sends `invoke_status` for them (each batch under a
+`status_id` of its own); a receipt in the answer naming that `status_id`
+settles one as having ended as it says, and none is ever sent again. An invocation
+with no result and no receipt by its deadline is reported to the asker as
+uncertain.
 
 ## Enrollment and the move
 
@@ -1092,7 +1158,7 @@ sent is never sent to it. `FermixChannels.Mobile.Peers` is this table.
 | Kind | Sends | Is sent |
 |---|---|---|
 | phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `ack` `read_state` `request_status` `unpair` `ping` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` |
-| desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` |
+| desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `invoke_result` `invoke_blob` `invoke_receipts` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `invoke` `invoke_status` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` |
 | enrollment | `enroll_request` `ping` | `enroll_accepted` `error` `pong` |
 | move | `move_offer` `move_chunk` `move_end` `move_commit` `move_resume` `ping` | `move_accept` `move_ready` `move_done` `error` `pong` |
 
@@ -1161,6 +1227,7 @@ parsed.
 | `attachment_unavailable` | a `msg` naming an `attach_id` the daemon no longer holds | `client_msg_id` | open |
 | `invalid_field`, `missing_field` | a field the daemon refuses once the frame decoded, such as a `msg`'s `attach_ids` | `client_msg_id` for a `msg` or `command` | open |
 | `unsupported_event` | a known event this session's kind may not send (see *Who may send what*), such as `pair_request` on a paired socket, or a desktop's event outside the families the primary serves | — | open |
+| `receipts_not_asked` | a desktop's `invoke_receipts` naming a `status_id` the primary does not wait on (an earlier session's question, answered late) | — | open |
 | `enrollment_expired`, `enrollment_used`, `enrollment_limit` | a refused enrollment (see *Enrollment and the move*) | — | closed `4003` |
 | `move_unknown`, `move_mismatch`, `move_failed` | a refused move step (see *Enrollment and the move*) | — | closed `4003` |
 | `request_backlog_full` | 32 requests already waiting | — | open |

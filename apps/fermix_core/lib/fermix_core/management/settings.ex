@@ -26,6 +26,7 @@ defmodule FermixCore.Management.Settings do
   alias FermixCore.Management.Settings.Browser
   alias FermixCore.Management.Settings.Channels
   alias FermixCore.Management.Settings.Cues, as: CuesSection
+  alias FermixCore.Management.Settings.Engine, as: EngineSection
   alias FermixCore.Management.Settings.Mobile
   alias FermixCore.Management.Settings.Providers
   alias FermixCore.Management.Settings.Row
@@ -53,6 +54,7 @@ defmodule FermixCore.Management.Settings do
     Tools,
     Browser,
     Secrets,
+    EngineSection,
     Snapshots
   ]
 
@@ -247,6 +249,7 @@ defmodule FermixCore.Management.Settings do
   defp commit(:cues, answers), do: CuesSection.save(answers)
   defp commit(:browser, answers), do: BrowserConfig.save(answers)
   defp commit(:snapshots, answers), do: SnapshotSettings.save(answers)
+  defp commit(:engine, answers), do: EngineSection.save(answers)
 
   defp commit(:sandbox, answers) do
     Wizard.set_sandbox_overrides(
@@ -493,6 +496,11 @@ defmodule FermixCore.Management.Settings do
   # them, so Tools is also handed the build's host value when a caller names it.
   defp family_rows(Tools, section, snapshot, opts),
     do: Tools.rows(section, snapshot, Keyword.take(opts, [:host]))
+
+  # The engine section describes the role this engine booted in, so it is
+  # handed the record a caller names (`:engine_role`) in place of the boot's.
+  defp family_rows(EngineSection, section, snapshot, opts),
+    do: EngineSection.rows(section, snapshot, Keyword.take(opts, [:engine_role]))
 
   defp family_rows(module, section, snapshot, _opts), do: module.rows(section, snapshot)
 end

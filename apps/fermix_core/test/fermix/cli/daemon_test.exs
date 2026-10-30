@@ -118,6 +118,9 @@ defmodule Fermix.CLI.DaemonTest do
     def pair_cancel(session_id, _opts), do: call(:pair_cancel, [session_id])
     def devices_revoke(device_id, _opts), do: call(:devices_revoke, [device_id])
 
+    def devices_set_executor(device_id, executor, _opts),
+      do: call(:devices_set_executor, [device_id, executor])
+
     defp call(operation, args) do
       test_pid = Application.fetch_env!(:fermix_core, :daemon_test_pid)
       send(test_pid, {:mobile_provider_call, operation, args})
@@ -175,6 +178,7 @@ defmodule Fermix.CLI.DaemonTest do
       pair_decide: {:error, :unknown_pairing_session},
       pair_cancel: {:error, :unknown_pairing_session},
       devices_revoke: {:error, :device_not_found},
+      devices_set_executor: {:error, :device_not_found},
       list_devices: {:ok, %{devices: []}},
       revoke_device: {:ok, %{device_id: "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"}},
       status: {:ok, %{enabled: true, listener: :ready, paired_devices: 1}}
@@ -850,7 +854,10 @@ defmodule Fermix.CLI.DaemonTest do
       {"mobile.pair.decide", %{"session_id" => "pair-1", "approved" => true}, :pair_decide},
       {"mobile.pair.cancel", %{"session_id" => "pair-1"}, :pair_cancel},
       {"mobile.devices.revoke", %{"device_id" => "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"},
-       :devices_revoke}
+       :devices_revoke},
+      {"mobile.devices.set_executor",
+       %{"device_id" => "c41e9d27-5a8b-4f63-9e20-7d1b3c5a8f94", "executor" => true},
+       :devices_set_executor}
     ]
     @owner_v0 [
       {"mobile_pair_begin", %{}, :begin_pairing},
@@ -896,15 +903,24 @@ defmodule Fermix.CLI.DaemonTest do
     # R2-2: the refusal carries its own sentence, which `fermix pair` and
     # `fermix devices` print instead of "the phone channel is not running",
     # and it is the published golden refusal.
+    # A desktop's switch is about a desktop, not a phone, so its refusal
+    # carries a sentence of its own, the published golden too.
     defp assert_owner_decisions_refused(socket_path) do
       sentence = "Only the owner can pair or forget a phone; run this from your own terminal."
       golden = golden_error_details("unavailable_owner_decision")
       assert golden == %{"capability" => "mobile", "sentence" => sentence}
+      executor = executor_owner_golden()
+
+      expectations =
+        for {method, params, _operation} <- @owner_v1,
+            do:
+              {method, params,
+               if(method == "mobile.devices.set_executor", do: executor, else: golden)}
 
       log =
         ExUnit.CaptureLog.capture_log(fn ->
-          for {method, params, _operation} <- @owner_v1 do
-            assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+          for {method, params, expected} <- expectations do
+            assert {:error, {:management_error, "unavailable", _message, ^expected}} =
                      Client.request_v1(method, params, socket_path: socket_path, timeout: 5_000)
           end
 
@@ -929,6 +945,19 @@ defmodule Fermix.CLI.DaemonTest do
       |> Enum.map(&Jason.decode!/1)
       |> Enum.find(&(&1["name"] == name))
       |> get_in(["response", "error", "details"])
+    end
+
+    defp executor_owner_golden do
+      golden = golden_error_details("unavailable_executor_owner_decision")
+
+      assert golden == %{
+               "capability" => "mobile",
+               "sentence" =>
+                 "Only the owner can let a desktop run actions for the primary: use the " <>
+                   "Fermix app or your own terminal."
+             }
+
+      golden
     end
   end
 
@@ -1205,6 +1234,64 @@ defmodule Fermix.CLI.DaemonTest do
 
       assert {:ok, %{"status" => "ok"}} =
                Client.request("health", socket_path: socket_path, timeout: @reply_ms)
+    end
+  end
+
+  # M75 §11 (re-check R1): what the server may read on this desktop is the
+  # owner's to change, so a command the agent ran here cannot remove a grant
+  # either; listing them stays open.
+  describe "owner decisions on this computer's read grants" do
+    test "a process the daemon started is refused, and so is one it cannot place" do
+      golden = device_owner_golden()
+
+      for peer <- [[daemon_os_pid: ParentProcess.os_pid()], [os: {:win32, :nt}]] do
+        socket_path = start_peer_daemon(peer)
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                     Client.request_v1("device.grants.remove", %{"path" => "/Users/ana/Taxes"},
+                       socket_path: socket_path,
+                       timeout: 5_000
+                     )
+          end)
+
+        assert log =~ "only the owner may"
+      end
+    end
+
+    test "a process the daemon did not start is not refused, and listing stays open to every caller",
+         %{socket_path: socket_path} do
+      golden = device_owner_golden()
+
+      result =
+        Client.request_v1("device.grants.remove", %{}, socket_path: socket_path, timeout: 5_000)
+
+      assert {:error, {:management_error, "invalid_params", _message, %{"field" => "path"}}} =
+               result
+
+      placed = start_peer_daemon(daemon_os_pid: ParentProcess.os_pid())
+      listed = Client.request_v1("device.grants.list", %{}, socket_path: placed, timeout: 5_000)
+      refute match?({:error, {:management_error, "unavailable", _message, ^golden}}, listed)
+    end
+
+    defp device_owner_golden do
+      golden =
+        :fermix_core
+        |> Application.app_dir("priv/management/fixtures/errors.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["name"] == "unavailable_device_owner_decision"))
+        |> get_in(["response", "error", "details"])
+
+      assert golden == %{
+               "capability" => "device",
+               "sentence" =>
+                 "Only the owner can change what the server may read on this computer: use " <>
+                   "the Fermix app or your own terminal."
+             }
+
+      golden
     end
   end
 

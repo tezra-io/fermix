@@ -101,6 +101,7 @@ defmodule FermixCore.Setup.ReleaseBootConfigTest do
   defp unhydrated_pins do
     [
       :context_window_limit,
+      :device_actions,
       :harness_continuation_dispatcher,
       :home_link,
       :iteration_limits,

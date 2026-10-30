@@ -21,7 +21,9 @@ defmodule FermixCore.Home.Role do
   boundary and refuses anything else by name, and `to_keyword/1` is the inverse
   the persist path writes (the "Config round-trips" rule). An absent section is
   the primary, so a fresh install and an upgraded one run as the primary with
-  no new configuration.
+  no new configuration. The same section's `executor = true | false` is a
+  desktop's own switch for the actions its primary asks of it (M75 §11): read
+  with `executor?/1`, true when absent, and meaningful only in the device role.
 
   **The moved marker.** A home that carries `FermixCore.Home.Moved`'s marker
   has moved to another host and refuses to boot as the primary (`resolve/2`):
@@ -65,7 +67,7 @@ defmodule FermixCore.Home.Role do
 
   @record_key {__MODULE__, :boot}
   @section "[fermix_core.engine]"
-  @config_keys ["role"]
+  @config_keys ["role", "executor"]
 
   # Every child a device-role engine leaves out, with the reason. Everything
   # else in both trees is kept: management and the daemon socket, the
@@ -392,8 +394,8 @@ defmodule FermixCore.Home.Role do
 
   @doc """
   The `[fermix_core.engine]` section in the shape application environment
-  holds: `[]` when it says nothing, else the keys it sets:
-  `role: :primary | :device | :candidate`. Accepts the parsed file
+  holds: `[]` when it says nothing, else the keys it sets, in this order:
+  `role: :primary | :device | :candidate` and `executor: boolean()`. Accepts the parsed file
   (string keys and values), its own output and `to_keyword/1`'s. Raises naming
   the key on any other key or value.
   """
@@ -407,6 +409,7 @@ defmodule FermixCore.Home.Role do
       case List.keyfind(entries, key, 0) do
         nil -> []
         {"role", value} -> [role: role!(value)]
+        {"executor", value} -> [executor: executor!(value)]
       end
     end)
   end
@@ -416,8 +419,22 @@ defmodule FermixCore.Home.Role do
   def to_keyword(config) when is_list(config) or is_map(config) or is_nil(config) do
     config
     |> normalize()
-    |> Enum.map(fn {:role, role} -> {:role, Atom.to_string(role)} end)
+    |> Enum.map(fn
+      {:role, role} -> {:role, Atom.to_string(role)}
+      {:executor, executor} -> {:executor, executor}
+    end)
   end
+
+  @doc """
+  Whether this machine lets the actions its primary asks of it run here
+  (`[fermix_core.engine] executor`, M75 §11), from the section in any of
+  `normalize/1`'s shapes: true unless it says false. The primary's own switch
+  for the desktop (its `devices.toml` row) is the other half; an action runs
+  only when both allow it.
+  """
+  @spec executor?(keyword() | map() | nil) :: boolean()
+  def executor?(config) when is_list(config) or is_map(config) or is_nil(config),
+    do: config |> normalize() |> Keyword.get(:executor, true)
 
   defp entries!(config) do
     entries = Enum.map(config, &entry!/1)
@@ -447,5 +464,13 @@ defmodule FermixCore.Home.Role do
     raise ArgumentError,
           ~s(config.toml #{@section} role must be "primary", "device" or "candidate", and ) <>
             "#{inspect(other)} is not. Fix it; the daemon will not boot until this is fixed."
+  end
+
+  defp executor!(executor) when is_boolean(executor), do: executor
+
+  defp executor!(other) do
+    raise ArgumentError,
+          "config.toml #{@section} executor must be true or false, and #{inspect(other)} " <>
+            "is not. Fix it; the daemon will not boot until this is fixed."
   end
 end

@@ -24,6 +24,7 @@ defmodule FermixCore.Management.MobileTest do
     def pair_cancel(_session_id, opts), do: answer(opts)
     def devices_list(opts), do: answer(opts)
     def devices_revoke(_device_id, opts), do: answer(opts)
+    def devices_set_executor(_device_id, _executor, opts), do: answer(opts)
     def apply_enabled(_enabled?, opts), do: answer(opts)
 
     defp answer(opts) do
@@ -39,7 +40,7 @@ defmodule FermixCore.Management.MobileTest do
   @device_id "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"
   @session_keys ~w(failure outcome request session_id state ttl_ms)
   @request_keys ~w(app_version attestation boot_state build_role device_name model platform sas)
-  @device_keys ~w(boot_state created_at device_id kind last_seen model name platform
+  @device_keys ~w(boot_state created_at device_id executor kind last_seen model name platform
                   push_registered signer_role)
   @unavailable {:error, {:unavailable, "mobile"}}
 
@@ -360,6 +361,7 @@ defmodule FermixCore.Management.MobileTest do
                "name" => "Sam's phone",
                "model" => "Google Pixel 9 Pro",
                "kind" => "phone",
+               "executor" => nil,
                "platform" => nil,
                "signer_role" => nil,
                "boot_state" => nil,
@@ -369,12 +371,38 @@ defmodule FermixCore.Management.MobileTest do
              }
     end
 
-    # M75 §3: a desktop engine is a device row of its own kind.
-    test "a desktop's row names its kind" do
-      desktop = %{device() | kind: :desktop, name: "Studio Mac"}
+    # M75 §3: a desktop engine is a device row of its own kind, with the
+    # switch the owner turns from here.
+    test "a desktop's row names its kind and executor switch, which the owner turns" do
+      desktop = %{device() | kind: :desktop, executor: true, name: "Studio Mac"}
 
       assert {:ok, %{"devices" => [row]}} = Mobile.devices_list(fake({:ok, [desktop]}))
-      assert {row["kind"], row["name"]} == {"desktop", "Studio Mac"}
+      assert {row["kind"], row["executor"]} == {"desktop", true}
+
+      assert {:ok, view} =
+               Mobile.devices_set_executor(
+                 @device_id,
+                 false,
+                 fake({:ok, %{desktop | executor: false}})
+               )
+
+      assert {view["kind"], view["executor"], view["name"]} == {"desktop", false, "Studio Mac"}
+
+      assert Mobile.devices_set_executor(@device_id, true, fake({:error, :not_a_desktop})) ==
+               {:error,
+                {:invalid_params, "device_id",
+                 "That device is a phone; only a desktop runs actions."}}
+
+      assert Mobile.devices_set_executor(@device_id, true, fake({:error, :device_not_found})) ==
+               {:error, {:invalid_params, "device_id", "No paired desktop has that id."}}
+
+      assert Mobile.devices_set_executor(@device_id, true, fake({:error, :mobile_not_started})) ==
+               @unavailable
+
+      capture_log(fn ->
+        assert Mobile.devices_set_executor(@device_id, true, fake({:ok, device()})) ==
+                 @unavailable
+      end)
     end
 
     test "no paired phone is an empty list, not a refusal" do
@@ -607,7 +635,11 @@ defmodule FermixCore.Management.MobileTest do
              "Google's attestation service could not be reached.",
              "No phone is waiting for a decision.",
              "No paired phone has that id.",
+             "No paired desktop has that id.",
+             "That device is a phone; only a desktop runs actions.",
              "Only the owner can pair or forget a phone; run this from your own terminal.",
+             "Only the owner can let a desktop run actions for the primary: use the Fermix app " <>
+               "or your own terminal.",
              "The phone channel is on but could not start. See the daemon log.",
              "The phone channel starts the next time Fermix starts.",
              "The phone channel's switch could not be applied. See the daemon log.",
@@ -663,6 +695,7 @@ defmodule FermixCore.Management.MobileTest do
       name: "Sam's phone",
       model: "Google Pixel 9 Pro",
       kind: :phone,
+      executor: nil,
       platform: nil,
       signer_role: nil,
       boot_state: nil,

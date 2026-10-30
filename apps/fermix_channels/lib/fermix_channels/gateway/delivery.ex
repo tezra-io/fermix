@@ -39,6 +39,10 @@ defmodule FermixChannels.Gateway.Delivery do
       {:approval_prompt, text, token} when is_binary(text) and is_binary(token) ->
         deliver_approval(channel, message, text_reply, text, token)
 
+      {:approval_prompt, %{kind: :device, text: text, token: token} = spec}
+      when is_binary(text) and is_binary(token) ->
+        deliver_device_approval(channel, message, text_reply, spec)
+
       {:approval_prompt, %{kind: kind, text: text, token: token} = spec}
       when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) ->
         deliver_structured_approval(channel, message, text_reply, spec)
@@ -63,6 +67,28 @@ defmodule FermixChannels.Gateway.Delivery do
 
       true ->
         observe_reply(fn -> text_reply.(text) end, :text, nil, message)
+    end
+  end
+
+  # A command for the owner's other computer (M75 §11): the Mac app and the
+  # phone show it as a `device` card; its token answers to `/confirm`, so a
+  # channel with only the sandbox family's one-tap buttons (Telegram) renders
+  # those, and every other channel the text with its tap-to-copy command.
+  defp deliver_device_approval(channel, message, text_reply, spec) do
+    cond do
+      function_exported?(channel, :send_approval, 2) ->
+        observe_reply(fn -> channel.send_approval(message, spec) end, :text, nil, message)
+
+      function_exported?(channel, :send_approval, 3) ->
+        observe_reply(
+          fn -> channel.send_approval(message, spec.text, spec.token) end,
+          :text,
+          nil,
+          message
+        )
+
+      true ->
+        observe_reply(fn -> text_reply.(spec.text) end, :text, nil, message)
     end
   end
 
@@ -106,7 +132,7 @@ defmodule FermixChannels.Gateway.Delivery do
   # instead of each override growing its own second clause. An unknown `kind`
   # passes through untouched and the override rejects it as an invalid part.
   defp for_override({:approval_prompt, %{kind: kind, text: text, token: token}})
-       when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) do
+       when kind in [:sandbox, :soul, :device] and is_binary(text) and is_binary(token) do
     {:approval_prompt, text, token}
   end
 

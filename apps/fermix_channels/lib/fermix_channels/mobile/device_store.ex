@@ -23,8 +23,9 @@ defmodule FermixChannels.Mobile.DeviceStore do
 
     `kind` is `:phone` (a row that names none, as every row written before
     M75 does) or `:desktop`, a desktop engine paired by the move (M75 §3). A
-    phone has its push salt (`apns_key_salt`); a desktop has no push or
-    attestation field at all.
+    phone has its push salt (`apns_key_salt`) and never an `executor`; a
+    desktop has an `executor` switch (whether the primary lets it run
+    actions) and no push or attestation field at all.
 
     `platform`, `signer_role`, `version_code`, `boot_state` and
     `device_locked` are what the phone's key attestation proved when it was
@@ -37,6 +38,7 @@ defmodule FermixChannels.Mobile.DeviceStore do
     defstruct @enforce_keys ++
                 [
                   kind: :phone,
+                  executor: nil,
                   apns_key_salt: nil,
                   push_token: nil,
                   last_seen: nil,
@@ -54,6 +56,7 @@ defmodule FermixChannels.Mobile.DeviceStore do
             model: String.t(),
             noise_pk: <<_::256>>,
             kind: :phone | :desktop,
+            executor: boolean() | nil,
             push_token: String.t() | nil,
             created_at: DateTime.t(),
             last_seen: DateTime.t() | nil,
@@ -75,6 +78,7 @@ defmodule FermixChannels.Mobile.DeviceStore do
   @required_fields [:device_id, :name, :model, :noise_pk, :created_at]
   @optional_fields [
     :kind,
+    :executor,
     :apns_key_salt,
     :push_token,
     :last_seen,
@@ -99,7 +103,7 @@ defmodule FermixChannels.Mobile.DeviceStore do
     :boot_state,
     :device_locked
   ]
-  @update_fields [:name, :model, :push_token, :last_seen, :relay_list_rev]
+  @update_fields [:name, :model, :push_token, :last_seen, :relay_list_rev, :executor]
   @relay_list_rev_regex ~r/\A[0-9a-f]{16}\z/
   # last_seen is informational, and every hello records it: a newer value
   # inside this window is not worth a durable, fsync'd rewrite of the store.
@@ -464,6 +468,7 @@ defmodule FermixChannels.Mobile.DeviceStore do
       model: row["model"],
       noise_pk: decode_base64(row["noise_pk"]),
       kind: decode_kind(row["kind"]),
+      executor: row["executor"],
       push_token: row["push_token"],
       created_at: decode_datetime(row["created_at"]),
       last_seen: decode_optional_datetime(row["last_seen"]),
@@ -544,8 +549,8 @@ defmodule FermixChannels.Mobile.DeviceStore do
     end
   end
 
-  # Each kind's own fields: a phone has its push salt; a desktop has none of a
-  # phone's fields.
+  # Each kind's own fields, both ways: a phone has its push salt and no
+  # executor switch; a desktop has the switch and none of a phone's fields.
   defp validate_kind_fields(attrs) do
     case Map.get(attrs, :kind, :phone) do
       :phone -> validate_phone(attrs)
@@ -555,12 +560,22 @@ defmodule FermixChannels.Mobile.DeviceStore do
   end
 
   defp validate_phone(attrs) do
-    with :ok <- validate_binary32(:apns_key_salt, attrs[:apns_key_salt]) do
+    with :ok <- validate_binary32(:apns_key_salt, attrs[:apns_key_salt]),
+         :ok <- validate_no_executor(attrs[:executor]) do
       validate_attestation_facts(attrs)
     end
   end
 
+  defp validate_no_executor(nil), do: :ok
+  defp validate_no_executor(_executor), do: {:error, {:invalid_device, :executor, :phone_field}}
+
   defp validate_desktop(attrs) do
+    if is_boolean(attrs[:executor]),
+      do: validate_no_phone_fields(attrs),
+      else: {:error, {:invalid_device, :executor, :invalid_executor}}
+  end
+
+  defp validate_no_phone_fields(attrs) do
     case Enum.find(@phone_only_fields, &(not is_nil(attrs[&1]))) do
       nil -> :ok
       field -> {:error, {:invalid_device, field, :desktop_field}}
@@ -594,10 +609,14 @@ defmodule FermixChannels.Mobile.DeviceStore do
          :ok <- validate_present(attrs, :model, &validate_text/2),
          :ok <- validate_present(attrs, :push_token, &validate_optional_text/2),
          :ok <- validate_present(attrs, :last_seen, &validate_optional_datetime/2),
-         :ok <- validate_present(attrs, :relay_list_rev, &validate_relay_list_rev/2) do
+         :ok <- validate_present(attrs, :relay_list_rev, &validate_relay_list_rev/2),
+         :ok <- validate_present(attrs, :executor, &validate_executor/2) do
       {:ok, attrs}
     end
   end
+
+  defp validate_executor(_field, value) when is_boolean(value), do: :ok
+  defp validate_executor(field, _value), do: {:error, {:invalid_device, field, :invalid_executor}}
 
   defp validate_present(attrs, key, validator) do
     if Map.has_key?(attrs, key), do: validator.(key, attrs[key]), else: :ok
@@ -768,6 +787,7 @@ defmodule FermixChannels.Mobile.DeviceStore do
       "created_at" => DateTime.to_iso8601(device.created_at)
     }
     |> maybe_put("kind", encode_kind(device.kind))
+    |> maybe_put("executor", device.executor)
     |> maybe_put("apns_key_salt", encode_optional_base64(device.apns_key_salt))
     |> maybe_put("push_token", device.push_token)
     |> maybe_put("last_seen", encode_datetime(device.last_seen))

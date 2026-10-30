@@ -10,6 +10,7 @@ defmodule FermixChannels.Desktop.RelayTest do
   use ExUnit.Case, async: true
 
   alias FermixChannels.Desktop.Peer
+  alias FermixChannels.Desktop.Receipts
   alias FermixChannels.Desktop.Relay
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.Protocol
@@ -18,7 +19,7 @@ defmodule FermixChannels.Desktop.RelayTest do
 
   @unreachable "The server fermix-vm is unreachable. Fermix keeps your message until it is back."
 
-  # A family of the primary, reporting each event the desktop sends it.
+  # The primary's executor family, reporting each event the desktop sends it.
   defmodule CaptureFamily do
     @moduledoc false
     @behaviour FermixChannels.Desktop.Family
@@ -37,6 +38,63 @@ defmodule FermixChannels.Desktop.RelayTest do
 
     @impl true
     def terminate(_reason, _test), do: :ok
+  end
+
+  # `Desktop.Executor` with an action that runs until the test lets it end;
+  # its answer and its receipts are the executor's own.
+  defmodule HeldExecutor do
+    @moduledoc false
+    def handle(%{"invocation_id" => id}, _payload, context) do
+      send(context.test, {:running, id, self()})
+
+      receive do
+        :finish -> {:ok, %{"done" => id}, nil}
+      end
+    end
+
+    defdelegate answer(id, outcome), to: FermixChannels.Desktop.Executor
+    defdelegate receipts(server, ids), to: FermixChannels.Desktop.Executor
+  end
+
+  # `Desktop.Executor` answering at once: it reports the context it ran with,
+  # and a `read_file` answers with the file its context names, staged.
+  defmodule StagingExecutor do
+    @moduledoc false
+    def handle(%{"invocation_id" => id}, _payload, context) do
+      send(context.test, {:context, context})
+
+      case context do
+        %{source: source} ->
+          staged = Path.join(context.send_staging, id)
+          File.cp!(source, staged)
+          size = File.stat!(staged).size
+          {:ok, %{"size_bytes" => size}, {:file, staged, size}}
+
+        _no_file ->
+          {:ok, %{"done" => id}, nil}
+      end
+    end
+
+    defdelegate answer(id, outcome), to: FermixChannels.Desktop.Executor
+    defdelegate receipts(server, ids), to: FermixChannels.Desktop.Executor
+  end
+
+  # `Desktop.Executor` staging a `read_file`'s copy, then holding its answer
+  # until the test lets it go.
+  defmodule HeldStagingExecutor do
+    @moduledoc false
+    def handle(%{"invocation_id" => id}, _payload, context) do
+      staged = Path.join(context.send_staging, id)
+      File.write!(staged, "staged bytes")
+      send(context.test, {:running, id, self(), staged})
+
+      receive do
+        :finish -> {:ok, %{"size_bytes" => 12}, {:file, staged, 12}}
+      end
+    end
+
+    defdelegate answer(id, outcome), to: FermixChannels.Desktop.Executor
+    defdelegate receipts(server, ids), to: FermixChannels.Desktop.Executor
   end
 
   test "hello carries the desktop's id, its relay revision and the highest epoch seen; a higher epoch is kept" do
@@ -370,13 +428,131 @@ defmodule FermixChannels.Desktop.RelayTest do
 
     primary =
       DesktopRail.primary!(
+        families: %{executor: {CaptureFamily, test: self()}},
         hello_ack_builder: fn _state -> {:ok, Map.put(ack(3), "caps", huge)} end
       )
 
     root = DesktopRail.desktop_home!(primary)
-    relay = DesktopRail.start_relay!(root, primary)
+
+    relay =
+      DesktopRail.start_relay!(root, primary,
+        executor: StagingExecutor,
+        executor_context: %{test: self()}
+      )
+
     DesktopRail.await_connected(relay)
-    assert :sys.get_state(relay).max_media_bytes == 67_108_864
+    :ok = invoke(%{primary: primary}, "inv-1")
+    assert_receive {:context, %{max_media_bytes: 67_108_864}}, 10_000
+  end
+
+  describe "the executor's events" do
+    setup do
+      primary = DesktopRail.primary!(families: %{executor: {CaptureFamily, test: self()}})
+      root = DesktopRail.desktop_home!(primary)
+      receipts = :"relay_test_receipts_#{System.unique_integer([:positive])}"
+      start_supervised!({Receipts, name: receipts, home: root})
+
+      relay =
+        DesktopRail.start_relay!(root, primary,
+          receipts: receipts,
+          executor: HeldExecutor,
+          executor_context: %{test: self()}
+        )
+
+      DesktopRail.await_connected(relay)
+      %{primary: primary, receipts: receipts}
+    end
+
+    test "an invoke runs here and its result reaches the primary; one sent again while it runs is not run twice",
+         ctx do
+      :ok = invoke(ctx, "inv-1")
+      assert_receive {:running, "inv-1", task}, 10_000
+
+      # The primary asks again (its result lost in a reconnect, say), then
+      # for another one: only the other one runs.
+      :ok = invoke(ctx, "inv-1")
+      :ok = invoke(ctx, "inv-2")
+      assert_receive {:running, "inv-2", other}, 10_000
+      refute_received {:running, "inv-1", _again}
+
+      send(task, :finish)
+      send(other, :finish)
+
+      assert_receive {:primary_got, "invoke_result",
+                      %{"invocation_id" => "inv-1", "status" => "ok"}, result},
+                     10_000
+
+      assert Jason.decode!(result) == %{"done" => "inv-1"}
+
+      assert_receive {:primary_got, "invoke_result", %{"invocation_id" => "inv-2"}, _result},
+                     10_000
+
+      refute_received {:primary_got, "invoke_result", %{"invocation_id" => "inv-1"}, _again}
+    end
+
+    test "an invoke_status is answered with one invoke_receipts from the receipts kept here",
+         ctx do
+      receipt = %{
+        "invocation_id" => "inv-9",
+        "action" => "notify",
+        "status" => "refused",
+        "finished_at" => "2026-10-27T09:00:00Z",
+        "args_sha256" => String.duplicate("a", 64),
+        "result_sha256" => String.duplicate("b", 64)
+      }
+
+      :ok = Receipts.record(ctx.receipts, receipt)
+
+      event = %{
+        "t" => "invoke_status",
+        "status_id" => "st-7",
+        "invocation_ids" => ["inv-9", "inv-unknown"]
+      }
+
+      :ok = Peer.send(DesktopRail.device_id(), event, <<>>, registry: ctx.primary.peers)
+
+      assert_receive {:primary_got, "invoke_receipts",
+                      %{"status_id" => "st-7", "receipts" => receipts}, <<>>},
+                     10_000
+
+      assert receipts == [
+               %{
+                 "invocation_id" => "inv-9",
+                 "status" => "refused",
+                 "finished_at" => "2026-10-27T09:00:00Z"
+               }
+             ]
+    end
+  end
+
+  describe "a file the executor staged" do
+    test "is streamed from disk in frames, reaches the primary whole, and is gone after" do
+      primary = DesktopRail.primary!(families: %{executor: {CaptureFamily, test: self()}})
+      root = DesktopRail.desktop_home!(primary)
+      source = Path.join(root, "photo.bin")
+      bytes = :crypto.strong_rand_bytes(150 * 1_024)
+      File.write!(source, bytes)
+
+      relay =
+        DesktopRail.start_relay!(root, primary,
+          executor: StagingExecutor,
+          executor_context: %{test: self(), source: source}
+        )
+
+      DesktopRail.await_connected(relay)
+      :ok = invoke(%{primary: primary}, "inv-5")
+
+      assert_receive {:context, %{send_staging: staging}}, 10_000
+      assert staging == Path.join([root, "device", "media-send"])
+
+      assert_receive {:primary_got, "invoke_blob", %{"invocation_id" => "inv-5"}, ^bytes},
+                     10_000
+
+      assert_receive {:primary_got, "invoke_result", %{"invocation_id" => "inv-5"}, _json},
+                     10_000
+
+      refute File.exists?(Path.join(staging, "inv-5"))
+    end
   end
 
   describe "the move's forwarded calls" do
@@ -490,6 +666,31 @@ defmodule FermixChannels.Desktop.RelayTest do
     end
   end
 
+  describe "an answer the relay is gone for" do
+    test "ends its task quietly and deletes the staged copy" do
+      primary = DesktopRail.primary!(families: %{executor: {CaptureFamily, test: self()}})
+      root = DesktopRail.desktop_home!(primary)
+
+      relay =
+        DesktopRail.start_relay!(root, primary,
+          executor: HeldStagingExecutor,
+          executor_context: %{test: self()}
+        )
+
+      DesktopRail.await_connected(relay)
+      :ok = invoke(%{primary: primary}, "inv-6")
+      assert_receive {:running, "inv-6", task, staged}, 10_000
+      assert File.exists?(staged)
+      monitor = Process.monitor(task)
+
+      :ok = stop_supervised!(relay)
+      send(task, :finish)
+
+      assert_receive {:DOWN, ^monitor, :process, ^task, :normal}, 10_000
+      refute File.exists?(staged)
+    end
+  end
+
   # The primary's side of every bridge connection stops, as a stopping daemon's
   # does: each session hears `1000` and ends.
   defp drop_sessions(primary) do
@@ -498,6 +699,14 @@ defmodule FermixChannels.Desktop.RelayTest do
         do: :ok = DynamicSupervisor.terminate_child(primary.connections, pid)
 
     :ok
+  end
+
+  defp invoke(ctx, id) do
+    event = %{"t" => "invoke", "invocation_id" => id, "action" => "notify", "deadline_s" => 30}
+
+    Peer.send(DesktopRail.device_id(), event, ~s({"title":"Hi","body":"There"}),
+      registry: ctx.primary.peers
+    )
   end
 
   defp ack(epoch) do

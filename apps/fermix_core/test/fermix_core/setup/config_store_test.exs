@@ -406,6 +406,38 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.fetch!(reloaded.fermix_core, :engine) == [role: :device]
   end
 
+  # `[fermix_core.engine] executor` (M75 §11): a desktop's own switch for the
+  # actions its primary asks of it, a boolean beside the role. Seeded with the
+  # app-env shape, as setup persists the live snapshot.
+  test "save/load round-trips the engine's executor switch beside the role" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    off = %{
+      fermix_core: [engine: [role: :device, executor: false]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(off)
+
+    assert File.read!(Path.join(tmp_home, "config.toml")) =~
+             ~s([fermix_core.engine]\nrole = "device"\nexecutor = false)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    assert Keyword.fetch!(loaded.fermix_core, :engine) == [role: :device, executor: false]
+    assert :ok = ConfigStore.apply_snapshot(loaded)
+    assert Application.get_env(:fermix_core, :engine) == [role: :device, executor: false]
+
+    # A second save from the live snapshot, as setup makes it, is a fixed point.
+    assert :ok = ConfigStore.save_snapshot(ConfigStore.current_snapshot())
+    assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+    assert Keyword.fetch!(reloaded.fermix_core, :engine) == [role: :device, executor: false]
+  end
+
   # `[fermix_channels.slack] mode` (M75): the webhook or Socket Mode, an atom in
   # app env and a string in the file. Seeded with the app-env shape a save
   # reads (the config round-trip pitfall), and saved twice from the live

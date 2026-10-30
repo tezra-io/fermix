@@ -18,6 +18,9 @@ defmodule FermixCore.Capabilities.Builtin do
   reach the capability's metadata, where `Capabilities.AccessGate` reads them: a
   host command in a turn that read outside content waits for the owner where
   the call is not confined or the host has no kernel enforcement.
+  `owner_approval?: true` (`device_action`) reaches the metadata the same way:
+  its module names which calls the owner approves every time, and the gate
+  holds each of them for the owner's yes.
   """
 
   alias FermixCore.Capabilities.Capability
@@ -125,6 +128,16 @@ defmodule FermixCore.Capabilities.Builtin do
       policy_class: :read_write,
       hidden_from_agent?: false,
       owner_only?: true
+    },
+    # One action on the owner's own desktop (M75 §11): it reads their files and
+    # runs commands there, so `:exec` (never a guest's or a delegated worker's)
+    # and the owner's alone. `owner_approval?` sends its commands to
+    # `Capabilities.AccessGate`, which holds each for the owner's yes.
+    "device_action" => %{
+      policy_class: :exec,
+      hidden_from_agent?: false,
+      owner_only?: true,
+      owner_approval?: true
     },
     "generate_image" => %{
       policy_class: :external_api,
@@ -286,7 +299,12 @@ defmodule FermixCore.Capabilities.Builtin do
       metadata:
         Map.merge(
           metadata(tool_module),
-          Map.take(defaults, [:host_command?, :host_command_confined?, :coding_run?])
+          Map.take(defaults, [
+            :host_command?,
+            :host_command_confined?,
+            :coding_run?,
+            :owner_approval?
+          ])
         )
     })
   end

@@ -29,8 +29,9 @@
           "hello", "msg", "attach_begin", "attach_chunk", "attach_end", "command", "cancel",
           "history_pull", "media_fetch", "push_register", "push_unregister", "ack", "read_state",
           "request_status", "pair_request", "unpair", "ping",
-          "companion_open", "companion_line", "companion_close", "manage", "loopback_request",
-          "loopback_failed", "snapshot_stored", "snapshot_refused", "enroll_request",
+          "companion_open", "companion_line", "companion_close", "manage", "invoke_result",
+          "invoke_blob", "invoke_receipts", "loopback_request", "loopback_failed", "snapshot_stored",
+          "snapshot_refused", "enroll_request",
           "move_offer", "move_chunk", "move_end", "move_commit", "move_resume"
         ]}
       },
@@ -56,6 +57,9 @@
         {"if": {"properties": {"t": {"const": "companion_line"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/companion_line"}},
         {"if": {"properties": {"t": {"const": "companion_close"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/companion_close"}},
         {"if": {"properties": {"t": {"const": "manage"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/manage"}},
+        {"if": {"properties": {"t": {"const": "invoke_result"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_result"}},
+        {"if": {"properties": {"t": {"const": "invoke_blob"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_blob"}},
+        {"if": {"properties": {"t": {"const": "invoke_receipts"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_receipts"}},
         {"if": {"properties": {"t": {"const": "loopback_request"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/loopback_request"}},
         {"if": {"properties": {"t": {"const": "loopback_failed"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/loopback_failed"}},
         {"if": {"properties": {"t": {"const": "snapshot_stored"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_stored"}},
@@ -78,9 +82,9 @@
           "turn_error", "row", "reaction", "approval", "approval_resolved", "link_preview",
           "read_state", "history_page", "request_status_page", "notice", "pair_approved",
           "pair_denied", "error", "pong", "event_part",
-          "companion_line", "companion_close", "manage_result", "loopback_open",
-          "loopback_response", "loopback_close", "snapshot_begin", "snapshot_chunk",
-          "snapshot_end",
+          "companion_line", "companion_close", "manage_result", "invoke", "invoke_status",
+          "loopback_open", "loopback_response", "loopback_close", "snapshot_begin",
+          "snapshot_chunk", "snapshot_end",
           "enroll_accepted", "move_accept", "move_ready", "move_done"
         ]}
       },
@@ -114,6 +118,8 @@
         {"if": {"properties": {"t": {"const": "companion_line"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/companion_line"}},
         {"if": {"properties": {"t": {"const": "companion_close"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/companion_close"}},
         {"if": {"properties": {"t": {"const": "manage_result"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/manage_result"}},
+        {"if": {"properties": {"t": {"const": "invoke"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke"}},
+        {"if": {"properties": {"t": {"const": "invoke_status"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/invoke_status"}},
         {"if": {"properties": {"t": {"const": "loopback_open"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/loopback_open"}},
         {"if": {"properties": {"t": {"const": "loopback_response"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/loopback_response"}},
         {"if": {"properties": {"t": {"const": "loopback_close"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/loopback_close"}},
@@ -472,15 +478,20 @@
       "required": ["v", "t", "seq", "index", "count"],
       "properties": {"t": {"const": "event_part"}, "index": {"type": "integer", "minimum": 0, "maximum": 17}, "count": {"type": "integer", "minimum": 2, "maximum": 18}}
     },
-    "wireId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", "description": "An id one side mints for a call, a request, a stream or a session: 1 to 128 of letters, digits, '.', '_', ':' and '-', starting with a letter or digit."},
+    "wireId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", "description": "An id one side mints for a call, an invocation, a request, a stream or a session: 1 to 128 of letters, digits, '.', '_', ':' and '-', starting with a letter or digit."},
     "chunkIndex": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
     "companionChannel": {"type": "integer", "minimum": 1, "maximum": 64, "description": "One tunneled connection to the desktop's companion socket; at most 4 open at once."},
     "peerName": {"type": "string", "minLength": 1, "maxLength": 128, "x-max-bytes": 128, "description": "Text a person reads: valid UTF-8 without control characters."},
+    "timestamp": {"type": "string", "description": "RFC 3339 in UTC (Z, or an offset of zero); any other offset is refused.", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-]00:00)$", "maxLength": 64},
     "sha256Hex": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
     "httpHeaders": {
       "type": "array", "maxItems": 64,
       "description": "Headers in order, each a [name, value] pair: the name an HTTP token of at most 256 bytes, the value at most 4,096 bytes without CR, LF or NUL.",
       "items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "string", "maxLength": 4096}}
+    },
+    "invokeReceipt": {
+      "type": "object", "required": ["invocation_id", "status", "finished_at"],
+      "properties": {"invocation_id": {"$ref": "#/$defs/wireId"}, "status": {"enum": ["ok", "refused", "failed"]}, "finished_at": {"$ref": "#/$defs/timestamp"}}
     },
     "companion_open": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "channel"],
@@ -509,6 +520,34 @@
       "required": ["v", "t", "seq", "call_id", "index", "last"],
       "description": "Primary to desktop: the management response to one manage call, as daemon.sock would answer it, chunked.",
       "properties": {"t": {"const": "manage_result"}, "call_id": {"$ref": "#/$defs/wireId"}, "index": {"$ref": "#/$defs/chunkIndex"}, "last": {"type": "boolean"}}
+    },
+    "invoke": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true, "x-chunked": true, "x-chunk-key": "invocation_id", "x-max-payload-bytes": 65536,
+      "required": ["v", "t", "seq", "invocation_id", "action", "deadline_s", "index", "last"],
+      "description": "Primary to desktop: run one action, its arguments JSON as the chunked payload. action is a snake_case name: notify, open_url, read_file, list_directory or run_command; a desktop refuses one it does not know.",
+      "properties": {"t": {"const": "invoke"}, "invocation_id": {"$ref": "#/$defs/wireId"}, "action": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}, "deadline_s": {"type": "integer", "minimum": 1, "maximum": 600}, "index": {"$ref": "#/$defs/chunkIndex"}, "last": {"type": "boolean"}}
+    },
+    "invoke_result": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true, "x-chunked": true, "x-chunk-key": "invocation_id", "x-max-payload-bytes": 1048576,
+      "required": ["v", "t", "seq", "invocation_id", "status", "index", "last"],
+      "description": "Desktop to primary: how one invocation ended, its result JSON as the chunked payload.",
+      "properties": {"t": {"const": "invoke_result"}, "invocation_id": {"$ref": "#/$defs/wireId"}, "status": {"enum": ["ok", "refused", "failed"]}, "index": {"$ref": "#/$defs/chunkIndex"}, "last": {"type": "boolean"}}
+    },
+    "invoke_blob": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true, "x-raw-bytes-may-be-empty": true, "x-chunked": true, "x-chunk-key": "invocation_id",
+      "required": ["v", "t", "seq", "invocation_id", "index", "last"],
+      "description": "Desktop to primary: a read_file's bytes, chunked, at most hello_ack's caps.max_media_bytes in all; an empty file is one empty frame.",
+      "properties": {"t": {"const": "invoke_blob"}, "invocation_id": {"$ref": "#/$defs/wireId"}, "index": {"$ref": "#/$defs/chunkIndex"}, "last": {"type": "boolean"}}
+    },
+    "invoke_status": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "status_id", "invocation_ids"],
+      "description": "Primary to desktop: how these invocations stand, asked after a reconnect or past a deadline, under a status_id of its own; answered with one invoke_receipts naming the same status_id.",
+      "properties": {"t": {"const": "invoke_status"}, "status_id": {"$ref": "#/$defs/wireId"}, "invocation_ids": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/wireId"}}}
+    },
+    "invoke_receipts": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "status_id", "receipts"],
+      "description": "Desktop to primary: the receipt of each invocation the invoke_status of this status_id named that the desktop holds; one it holds none for is left out. An answer naming a status_id the primary is not waiting on settles nothing (error receipts_not_asked).",
+      "properties": {"t": {"const": "invoke_receipts"}, "status_id": {"$ref": "#/$defs/wireId"}, "receipts": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/invokeReceipt"}}}
     },
     "loopback_open": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "loopback_id", "ports", "expires_in_s"],

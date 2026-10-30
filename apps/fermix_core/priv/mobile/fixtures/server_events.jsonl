@@ -46,6 +46,7 @@
 {"v":2,"t":"pair_denied","seq":1,"reason":"timeout"}
 {"v":2,"t":"companion_close","seq":11,"channel":1,"reason":"closed by the primary"}
 {"v":2,"t":"companion_close","seq":12,"channel":2}
+{"v":2,"t":"invoke_status","seq":8,"status_id":"st-5k2Qe8Vw1x","invocation_ids":["inv-31c7","inv-31c8"]}
 {"v":2,"t":"loopback_open","seq":15,"loopback_id":"lb-2b90","ports":[53682],"expires_in_s":600}
 {"v":2,"t":"loopback_close","seq":19,"loopback_id":"lb-2b90"}
 {"v":2,"t":"snapshot_begin","seq":22,"snapshot_id":"snap-20261021T0600Z","name":"20261021T060000Z-e3.fxsnap","size_bytes":4194304,"sha256":"4f2a7d3c9e1b6058a2d4c7e9f1b3a5d7c9e2f4a6b8d0c1e3f5a7b9c2d4e6f8a0"}

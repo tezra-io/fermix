@@ -24,7 +24,8 @@ defmodule FermixChannels.Mobile.Peers do
   )
   @desktop_client ~w(
     hello ping media_fetch ack companion_open companion_line companion_close manage
-    loopback_request loopback_failed snapshot_stored snapshot_refused
+    invoke_result invoke_blob invoke_receipts loopback_request loopback_failed snapshot_stored
+    snapshot_refused
   )
   @phone_server ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
@@ -33,8 +34,8 @@ defmodule FermixChannels.Mobile.Peers do
   )
   @desktop_server ~w(
     hello_ack error pong event_part media_begin media_chunk media_end companion_line
-    companion_close manage_result loopback_open loopback_response loopback_close
-    snapshot_begin snapshot_chunk snapshot_end
+    companion_close manage_result invoke invoke_status loopback_open loopback_response
+    loopback_close snapshot_begin snapshot_chunk snapshot_end
   )
 
   @client %{

@@ -248,6 +248,39 @@ defmodule FermixCore.Home.RoleTest do
     end
   end
 
+  # M75 §11: a desktop's own switch for the actions its primary asks of it.
+  describe "[fermix_core.engine] executor" do
+    test "a boolean in every shape, spelled back as itself, after the role" do
+      assert Role.normalize(%{"executor" => false, "role" => "device"}) ==
+               [role: :device, executor: false]
+
+      assert Role.normalize(executor: true) == [executor: true]
+      assert Role.to_keyword(role: :device, executor: false) == [role: "device", executor: false]
+
+      for shape <- [[executor: false], [role: :device, executor: true], [role: "device"]] do
+        normalized = Role.normalize(shape)
+        assert Role.normalize(normalized) == normalized
+        assert normalized |> Role.to_keyword() |> Role.normalize() == normalized
+      end
+    end
+
+    test "on unless it says false" do
+      assert Role.executor?(nil)
+      assert Role.executor?([])
+      assert Role.executor?(role: :device)
+      assert Role.executor?(%{"executor" => true})
+      refute Role.executor?(%{"executor" => false})
+      refute Role.executor?(role: :device, executor: false)
+    end
+
+    test "anything but a boolean is refused with the key named" do
+      for value <- ["false", 0, nil] do
+        error = assert_raise ArgumentError, fn -> Role.normalize(%{"executor" => value}) end
+        assert error.message =~ "[fermix_core.engine] executor must be true or false"
+      end
+    end
+  end
+
   describe "children/2 and primary_only/0" do
     test "the primary keeps every child as it was declared" do
       children = [FermixCore.Jobs.Scheduler, {FermixCore.Agents.MainAgent, []}]

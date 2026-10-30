@@ -17,6 +17,7 @@ defmodule FermixChannels.Mobile.PeerEvents do
   @max_raw 60 * 1_024
   @id ~r/\A[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\z/
   @method ~r/\A[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*\z/
+  @action ~r/\A[a-z][a-z0-9_]{0,63}\z/
   @http_method ~r/\A[A-Z]{1,16}\z/
   @header_name ~r/\A[!#$%&'*+.^_`|~0-9A-Za-z-]{1,256}\z/
   @header_value_forbidden ~r/[\r\n\x00]/
@@ -27,10 +28,13 @@ defmodule FermixChannels.Mobile.PeerEvents do
   @controls ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
   @blank ~r/\s/u
 
+  @invoke_statuses ~w(ok refused failed)
   @loopback_failures ~w(port_in_use not_permitted failed)
   @snapshot_refusals ~w(disk_floor space_unknown mismatch out_of_order invalid_name write_failed)
 
   @relay {:object, [{"url", :relay_url}, {"quic_port", :port}]}
+  @receipt {:object,
+            [{"invocation_id", :id}, {"status", {:enum, @invoke_statuses}}, {"finished_at", :ts}]}
 
   @client %{
     "companion_open" => {[{"channel", :channel}], :none},
@@ -45,6 +49,16 @@ defmodule FermixChannels.Mobile.PeerEvents do
          {"index", :count},
          {"last", :boolean}
        ], :required},
+    "invoke_result" =>
+      {[
+         {"invocation_id", :id},
+         {"status", {:enum, @invoke_statuses}},
+         {"index", :count},
+         {"last", :boolean}
+       ], :required},
+    "invoke_blob" =>
+      {[{"invocation_id", :id}, {"index", :count}, {"last", :boolean}], {:optional, @max_raw}},
+    "invoke_receipts" => {[{"status_id", :id}, {"receipts", {:list, @receipt, 0, 32}}], :none},
     "loopback_request" =>
       {[
          {"loopback_id", :id},
@@ -100,6 +114,15 @@ defmodule FermixChannels.Mobile.PeerEvents do
       {[{"channel", :channel}, {"index", :count}, {"last", :boolean}], :required},
     "companion_close" => {[{"channel", :channel}, {"reason", {:optional, :text}}], :none},
     "manage_result" => {[{"call_id", :id}, {"index", :count}, {"last", :boolean}], :required},
+    "invoke" =>
+      {[
+         {"invocation_id", :id},
+         {"action", :action},
+         {"deadline_s", {:range, 1, 600}},
+         {"index", :count},
+         {"last", :boolean}
+       ], :required},
+    "invoke_status" => {[{"status_id", :id}, {"invocation_ids", {:list, :id, 1, 32}}], :none},
     "loopback_open" =>
       {[
          {"loopback_id", :id},
@@ -127,14 +150,14 @@ defmodule FermixChannels.Mobile.PeerEvents do
   }
 
   @client_events ~w(
-    companion_open companion_line companion_close manage loopback_request loopback_failed
-    snapshot_stored snapshot_refused enroll_request move_offer move_chunk move_end move_commit
-    move_resume
+    companion_open companion_line companion_close manage invoke_result invoke_blob
+    invoke_receipts loopback_request loopback_failed snapshot_stored snapshot_refused
+    enroll_request move_offer move_chunk move_end move_commit move_resume
   )
   @server_events ~w(
-    companion_line companion_close manage_result loopback_open loopback_response
-    loopback_close snapshot_begin snapshot_chunk snapshot_end enroll_accepted move_accept
-    move_ready move_done
+    companion_line companion_close manage_result invoke invoke_status loopback_open
+    loopback_response loopback_close snapshot_begin snapshot_chunk snapshot_end
+    enroll_accepted move_accept move_ready move_done
   )
 
   if Enum.sort(@client_events) != Enum.sort(Map.keys(@client)) or
@@ -246,6 +269,7 @@ defmodule FermixChannels.Mobile.PeerEvents do
   defp valid?(:boolean, value), do: is_boolean(value)
   defp valid?(:id, value), do: matches?(@id, value)
   defp valid?(:method, value), do: matches?(@method, value) and byte_size(value) <= 128
+  defp valid?(:action, value), do: matches?(@action, value)
   defp valid?(:http_method, value), do: matches?(@http_method, value)
   defp valid?(:node_id, value), do: matches?(@node_id, value)
   defp valid?(:relay_url, value), do: matches?(@relay_url, value) and byte_size(value) <= 261
@@ -254,6 +278,7 @@ defmodule FermixChannels.Mobile.PeerEvents do
   defp valid?(:name, value), do: printable?(value, 128)
   defp valid?(:text, value), do: printable?(value, 512)
   defp valid?(:target, value), do: target?(value)
+  defp valid?(:ts, value), do: timestamp?(value)
   defp valid?(:x25519, value), do: x25519?(value)
   defp valid?(:headers, value), do: headers?(value)
   defp valid?(_rule, _value), do: false
@@ -272,6 +297,14 @@ defmodule FermixChannels.Mobile.PeerEvents do
     do: printable?(value, 2_048) and not Regex.match?(@blank, value)
 
   defp target?(_value), do: false
+
+  # RFC 3339 in UTC: every reader takes the instant as it is, so an offset is
+  # refused here rather than mistaken there.
+  defp timestamp?(value) when is_binary(value) and byte_size(value) <= 64 do
+    match?({:ok, _datetime, 0}, DateTime.from_iso8601(value))
+  end
+
+  defp timestamp?(_value), do: false
 
   defp x25519?(value) when is_binary(value) do
     match?({:ok, <<_key::binary-size(32)>>}, Base.decode64(value))

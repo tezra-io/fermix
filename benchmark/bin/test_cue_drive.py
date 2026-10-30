@@ -549,6 +549,21 @@ def test_a_home_seeded_with_cues_runs_them(tmp_path, monkeypatch):
     assert len(kept) == 10
 
 
+def test_the_device_actions_suite_runs_only_on_a_home_seeded_with_its_desktop(
+        tmp_path, monkeypatch, capsys):
+    behavioral = [(s, s.scenarios) for s in suites.load_all(os.path.join(BENCH, "suites"))
+                  if s.name in ("device_actions", "memory")]
+    bare = _default_seeded_home(tmp_path, monkeypatch)
+    kept, held = run_eval.hold_out_unseeded(_cfg(bare), behavioral)
+    assert [suite.name for suite, _scns in kept] == ["memory"]
+    assert {suite for suite, _case, _reason in held} == {"device_actions"} and len(held) == 6
+    assert all("--desktop" in reason for _s, _c, reason in held)
+
+    seeded = _default_seeded_home(tmp_path, monkeypatch, "--desktop")
+    kept, held = run_eval.hold_out_unseeded(_cfg(seeded), behavioral)
+    assert held == [] and kept == behavioral
+
+
 # --- the behavioral suite's reply gates against Fermix's own echoes -------------------
 
 # The echoes `Cues.Watchers` writes (cues/watchers.ex), broken case first.

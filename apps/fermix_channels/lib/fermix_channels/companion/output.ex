@@ -32,9 +32,12 @@ defmodule FermixChannels.Companion.Output do
   @typedoc """
   The approval card a gateway approval becomes. `approval_id`, `detail` and
   `ttl_s` are optional; the kind picks the command routes and the default ttl.
+  A `device` card (M75 §11) is a command for the owner's other computer, held
+  by the access gate, and is answered with the sandbox family's routes.
   """
+  @type approval_kind :: :sandbox | :soul | :device
   @type approval_spec :: %{
-          required(:kind) => :sandbox | :soul,
+          required(:kind) => approval_kind(),
           required(:text) => String.t(),
           required(:token) => String.t(),
           optional(:approval_id) => String.t(),
@@ -43,9 +46,9 @@ defmodule FermixChannels.Companion.Output do
         }
 
   @doc "Stable opaque identifier shared by an approval and its resolution."
-  @spec approval_id(:sandbox | :soul, String.t()) :: String.t()
+  @spec approval_id(approval_kind(), String.t()) :: String.t()
   def approval_id(kind, token)
-      when kind in [:sandbox, :soul] and is_binary(token) and token != "" do
+      when kind in [:sandbox, :soul, :device] and is_binary(token) and token != "" do
     digest = :crypto.hash(:sha256, "#{kind}:#{token}")
     "#{kind}-" <> Base.url_encode64(digest, padding: false)
   end
@@ -196,7 +199,7 @@ defmodule FermixChannels.Companion.Output do
   """
   @spec approval(approval_spec()) :: event()
   def approval(%{kind: kind, text: text, token: token} = spec)
-      when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) do
+      when kind in [:sandbox, :soul, :device] and is_binary(text) and is_binary(token) do
     {approve, deny, ttl} = approval_routes(kind, token)
     clean_text = text |> scrub_command(approve) |> scrub_command(deny) |> String.trim()
 
@@ -214,7 +217,7 @@ defmodule FermixChannels.Companion.Output do
   end
 
   @doc "How an approval ended."
-  @spec approval_resolved(:sandbox | :soul, String.t(), atom()) :: event()
+  @spec approval_resolved(approval_kind(), String.t(), atom()) :: event()
   def approval_resolved(kind, token, outcome) when is_atom(outcome) do
     %{
       "t" => "approval_resolved",
@@ -356,6 +359,11 @@ defmodule FermixChannels.Companion.Output do
 
   defp approval_routes(:soul, token),
     do: {"/soul apply #{token}", "/soul deny #{token}", @soul_ttl_s}
+
+  # Its token is the sandbox confirmations store's, as an access-sensitive
+  # command's is, so it answers to the same routes and lives as long.
+  defp approval_routes(:device, token),
+    do: {"/confirm #{token}", "/deny #{token}", @sandbox_ttl_s}
 
   defp scrub_command(text, command), do: String.replace(text, command, "", global: true)
 

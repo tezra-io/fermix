@@ -109,6 +109,7 @@ defmodule FermixCore.Management.ProtocolTest do
              "mobile.pair.cancel",
              "mobile.devices.list",
              "mobile.devices.revoke",
+             "mobile.devices.set_executor",
              "browser.install.start",
              "imessage.permissions.get",
              "imessage.grant.start",
@@ -156,7 +157,9 @@ defmodule FermixCore.Management.ProtocolTest do
              "home.enroll.open",
              "home.candidates.list",
              "home.move.readiness",
-             "home.move.start"
+             "home.move.start",
+             "device.grants.list",
+             "device.grants.remove"
            ]
 
     assert Protocol.error_codes() == [

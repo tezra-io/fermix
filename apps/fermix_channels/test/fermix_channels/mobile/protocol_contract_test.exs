@@ -792,8 +792,10 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
       assert definition["x-raw-bytes"] == true, type
       assert section =~ "| `#{type}` | `#{key}` |", type
 
-      {:ok, bound} = Chunks.bound(type)
-      assert definition["x-max-payload-bytes"] == bound, type
+      case Chunks.bound(type, 1) do
+        {:ok, 1} -> refute Map.has_key?(definition, "x-max-payload-bytes")
+        {:ok, bound} -> assert definition["x-max-payload-bytes"] == bound, type
+      end
     end
   end
 
@@ -822,7 +824,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     end
 
     for {{_direction, type, _key}, run} <- grouped do
-      {:ok, bound} = Chunks.bound(type)
+      {:ok, bound} = Chunks.bound(type, 20_971_520)
 
       result =
         Enum.reduce_while(run, {:more, Chunks.new(bound)}, fn {_dir, header, bytes},

@@ -165,10 +165,12 @@ defmodule FermixCore.Capabilities.BuiltinTest do
       # every row is the owner's own calendar. So is the meetings family
       # (MILESTONE_21 C2 §14.1): every row is a meeting the owner sat in. So are
       # the owner's watchers (M60 §8), what they received (`list_cues`) and a cue
-      # run's own watcher's history (`cue_history`).
+      # run's own watcher's history (`cue_history`). So is what the owner's own
+      # desktop holds (`device_action`, M75 §11).
       assert flagged == [
                "content_search",
                "cue_history",
+               "device_action",
                "event_list",
                "event_remove",
                "event_store",

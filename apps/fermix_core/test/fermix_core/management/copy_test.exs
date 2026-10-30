@@ -32,6 +32,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Cues.SourceForm, as: CueSourceForm
   alias FermixCore.Management.Cues.SourceRow, as: CueSourceRow
   alias FermixCore.Management.Cues.WatcherRow, as: CueWatcherRow
+  alias FermixCore.Management.DeviceGrants
   alias FermixCore.Management.Doctor.Remediation
   alias FermixCore.Management.HomeMove, as: ManagementHomeMove
   alias FermixCore.Management.McpServers.Row, as: McpRow
@@ -168,6 +169,34 @@ defmodule FermixCore.Management.CopyTest do
         for option <- row["options"] do
           assert_clean(option["label"], :name, [], "option label #{where}")
           assert_clean(option["hint"], :prose, [], "option hint #{where}")
+        end
+      end
+    end
+
+    # The engine section's rows depend on the role this engine booted in, and
+    # the suite boots the primary, so every role is walked here; a primary's
+    # name is the owner's data, declared as such.
+    test "every engine section row obeys the rules in every role" do
+      records = [
+        %{role: :primary, primary: nil},
+        %{role: :device, primary: "invented-vm"},
+        %{role: :device, primary: nil},
+        %{role: :candidate, primary: nil}
+      ]
+
+      for record <- records do
+        {:ok, view} = Settings.get("engine", engine_role: record)
+
+        for row <- view["rows"] do
+          where = "engine.#{row["key"]} (#{record.role})"
+          names = Enum.reject([record.primary], &is_nil/1)
+
+          assert_clean(row["label"], :prose, [], "row label #{where}")
+          assert_clean(row["footer"], :prose, names, "row footer #{where}")
+          assert_clean(row["info"], :prose, [], "row info #{where}")
+
+          for option <- row["options"],
+              do: assert_clean(option["label"], :name, [], "option label #{where}")
         end
       end
     end
@@ -667,18 +696,25 @@ defmodule FermixCore.Management.CopyTest do
   # sentence they can show says what to do there, or names the server, and
   # never prescribes a `fermix` command (AGENTS.md, "App-managed production
   # configuration"). The Always On producers are walked whole: the move's
-  # phases and refusals, the readiness items, the snapshot sentences, the
-  # snapshots section, the owner decisions, and the refusals a server shows
-  # while it enrolls.
+  # phases and refusals, the readiness items, the snapshot sentences, both
+  # Always On sections in every role, the owner decisions, and the refusals a
+  # server shows while it enrolls.
   describe "the Always On copy an app or the setup page shows" do
     test "names no fermix command" do
-      {:ok, view} = Settings.get("snapshots")
+      records = [
+        %{role: :primary, primary: nil},
+        %{role: :device, primary: "invented-vm"},
+        %{role: :candidate, primary: nil}
+      ]
 
       section_rows =
-        for row <- view["rows"],
+        for record <- records,
+            section <- ~w(engine snapshots),
+            {:ok, view} = Settings.get(section, engine_role: record),
+            row <- view["rows"],
             text <- [row["label"], row["footer"], row["info"]],
             is_binary(text),
-            do: {"snapshots.#{row["key"]}", text}
+            do: {"#{section}.#{row["key"]} (#{record.role})", text}
 
       move =
         Enum.map(HomeMove.phases(), &{"move #{&1}", HomeMove.sentence(&1, "north-box")}) ++
@@ -700,14 +736,18 @@ defmodule FermixCore.Management.CopyTest do
             do: {"candidate refusal", HomeCandidate.error_sentence(reason)}
 
       owner = [
-        {"home owner decision", ManagementHomeMove.owner_only_sentence()}
+        {"home owner decision", ManagementHomeMove.owner_only_sentence()},
+        {"desktop executor owner decision", Mobile.executor_owner_only_sentence()}
       ]
 
-      # The answer to a move's start whose answer was lost.
+      # A desktop's read grants for its server, and the answer to a move's
+      # start whose answer was lost.
       {:error, :unconfirmed, %{"sentence" => unconfirmed}} =
         Placement.unconfirmed("north-box", "home.move.start")
 
-      device = [{"move unconfirmed", unconfirmed}]
+      device =
+        [{"move unconfirmed", unconfirmed}] ++
+          Enum.map(DeviceGrants.sentences(), &{"read grants", &1})
 
       for {where, text} <- section_rows ++ move ++ enrolling ++ owner ++ device,
           do: refute_command(text, where)

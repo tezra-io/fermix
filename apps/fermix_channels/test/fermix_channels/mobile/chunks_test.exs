@@ -73,17 +73,19 @@ defmodule FermixChannels.Mobile.ChunksTest do
     for type <- Chunks.chunked_events() do
       assert {:ok, field} = Chunks.key_field(type)
       assert is_binary(field)
-      assert {:ok, bound} = Chunks.bound(type)
+      assert {:ok, bound} = Chunks.bound(type, 123)
       assert bound > 0
       assert Chunks.chunked?(type)
     end
 
-    assert Chunks.bound("manage") == {:ok, 1_048_576}
-    assert Chunks.bound("manage_result") == {:ok, 4_194_304}
-    assert Chunks.bound("loopback_response") == {:ok, 262_144}
+    assert Chunks.bound("invoke_blob", 123) == {:ok, 123}
+    assert Chunks.bound("manage", 1) == {:ok, 1_048_576}
+    assert Chunks.bound("manage_result", 1) == {:ok, 4_194_304}
+    assert Chunks.bound("invoke", 1) == {:ok, 65_536}
+    assert Chunks.bound("loopback_response", 1) == {:ok, 262_144}
     assert Chunks.key_field("companion_line") == {:ok, "channel"}
     refute Chunks.chunked?("snapshot_chunk")
-    assert Chunks.bound("snapshot_chunk") == :error
+    assert Chunks.bound("snapshot_chunk", 1) == :error
   end
 
   defp reassemble(pieces, bound) do

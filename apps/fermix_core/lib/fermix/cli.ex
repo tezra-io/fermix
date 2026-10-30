@@ -16,6 +16,7 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.BrowserCommand
   alias Fermix.CLI.CapabilitiesCommand
   alias Fermix.CLI.ChatCommand
+  alias Fermix.CLI.DeviceCommand
   alias Fermix.CLI.DevicesCommand
   alias Fermix.CLI.DiagnosticsCommand
   alias Fermix.CLI.Doctor
@@ -86,6 +87,7 @@ defmodule Fermix.CLI do
   defp dispatch("plugins", rest), do: PluginsCommand.run(rest)
   defp dispatch("pair", rest), do: PairCommand.run(rest)
   defp dispatch("devices", rest), do: DevicesCommand.run(rest)
+  defp dispatch("device", rest), do: DeviceCommand.run(rest)
   defp dispatch("settings", rest), do: SettingsCommand.run(rest)
   defp dispatch("logs", rest), do: LogsCommand.run(rest)
   defp dispatch("memory", rest), do: MemoryCommand.run(rest)
@@ -144,6 +146,8 @@ defmodule Fermix.CLI do
       fermix pair                                  Pair a phone companion device
       fermix devices list                          List paired phones
       fermix devices revoke DEVICE_ID              Revoke a paired phone
+      fermix device grants [--json]                List the folders the server may read on this computer
+      fermix device grants remove PATH [--json]    Stop the server reading a folder on this computer
       fermix settings [list] [--json]              List the running daemon's settings sections
       fermix settings show SECTION [--info] [--json]  Show one section's rows and values
       fermix settings set SECTION KEY=VALUE... [--json]  Change keys in one section

@@ -684,19 +684,30 @@ defmodule FermixCore.AgentLoop do
   # content (e.g. a screenshot) must not be sent back to a non-vision route — no
   # silent drop, no degrade-to-text (Rule #12). Same `{:attachment_unsupported,
   # :image, ...}` shape so it rides the existing error flow and reaches the user
-  # verbatim. The route is fixed for the tool loop, so this checks the bound
-  # provider/model.
+  # verbatim. A PDF a tool returns (a desktop's `read_file`, M75) needs what an
+  # inbound one does (`part_refusal/3`). The route is fixed for the tool loop, so
+  # this checks the bound provider/model.
   defp ensure_tool_results_image_capable(tool_results, state) do
     if Enum.any?(tool_results, &tool_result_has_images?/1) do
       %{provider: provider, model: model} = state.route_key
 
-      if ModelCatalog.vision?(provider, model),
-        do: :ok,
-        else: {:error, {:attachment_unsupported, :image, provider, model}}
+      cond do
+        not ModelCatalog.vision?(provider, model) ->
+          {:error, {:attachment_unsupported, :image, provider, model}}
+
+        document = Enum.find(tool_result_parts(tool_results), &match?(%{type: :document}, &1)) ->
+          part_refusal(document, provider, model) || :ok
+
+        true ->
+          :ok
+      end
     else
       :ok
     end
   end
+
+  defp tool_result_parts(tool_results),
+    do: Enum.flat_map(tool_results, &Map.get(&1, :images, []))
 
   defp tool_result_has_images?(%{images: [_ | _]}), do: true
   defp tool_result_has_images?(_), do: false

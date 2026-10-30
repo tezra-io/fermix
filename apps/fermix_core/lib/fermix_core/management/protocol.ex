@@ -86,6 +86,7 @@ defmodule FermixCore.Management.Protocol do
     {"mobile.pair.cancel", 2},
     {"mobile.devices.list", 2},
     {"mobile.devices.revoke", 2},
+    {"mobile.devices.set_executor", 2},
     {"browser.install.start", 2},
     {"imessage.permissions.get", 2},
     {"imessage.grant.start", 2},
@@ -133,7 +134,9 @@ defmodule FermixCore.Management.Protocol do
     {"home.enroll.open", 2},
     {"home.candidates.list", 2},
     {"home.move.readiness", 2},
-    {"home.move.start", 2}
+    {"home.move.start", 2},
+    {"device.grants.list", 2},
+    {"device.grants.remove", 2}
   ]
   @methods Enum.map(@method_minimums, fn {method, _minimum} -> method end)
   @method_minimum_versions Map.new(@method_minimums)

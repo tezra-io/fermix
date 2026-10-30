@@ -182,6 +182,7 @@
     "mobile.pair.cancel": 2,
     "mobile.devices.list": 2,
     "mobile.devices.revoke": 2,
+    "mobile.devices.set_executor": 2,
     "browser.install.start": 2,
     "imessage.permissions.get": 2,
     "imessage.grant.start": 2,
@@ -229,7 +230,9 @@
     "home.enroll.open": 2,
     "home.candidates.list": 2,
     "home.move.readiness": 2,
-    "home.move.start": 2
+    "home.move.start": 2,
+    "device.grants.list": 2,
+    "device.grants.remove": 2
   },
   "$defs": {
     "request": {
@@ -290,6 +293,7 @@
             "mobile.pair.cancel",
             "mobile.devices.list",
             "mobile.devices.revoke",
+            "mobile.devices.set_executor",
             "browser.install.start",
             "imessage.permissions.get",
             "imessage.grant.start",
@@ -337,7 +341,9 @@
             "home.enroll.open",
             "home.candidates.list",
             "home.move.readiness",
-            "home.move.start"
+            "home.move.start",
+            "device.grants.list",
+            "device.grants.remove"
           ]
         },
         "params": { "type": "object" }
@@ -658,6 +664,13 @@
             "properties": { "method": { "const": "mobile.devices.revoke" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/mobile_devices_revoke_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mobile.devices.set_executor" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mobile_devices_set_executor_params" } } }
         },
         {
           "if": {
@@ -994,6 +1007,20 @@
             "properties": { "method": { "const": "home.move.start" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/home_move_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "device.grants.list" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/device_grants_list_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "device.grants.remove" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/device_grants_remove_params" } } }
         }
       ]
     },
@@ -1108,6 +1135,7 @@
         { "$ref": "#/$defs/mobile_pair_cancel_result" },
         { "$ref": "#/$defs/mobile_devices_list_result" },
         { "$ref": "#/$defs/mobile_devices_revoke_result" },
+        { "$ref": "#/$defs/mobile_devices_set_executor_result" },
         { "$ref": "#/$defs/browser_install_start_result" },
         { "$ref": "#/$defs/imessage_permissions_get_result" },
         { "$ref": "#/$defs/imessage_grant_start_result" },
@@ -1155,7 +1183,9 @@
         { "$ref": "#/$defs/home_enroll_open_result" },
         { "$ref": "#/$defs/home_candidates_list_result" },
         { "$ref": "#/$defs/home_move_readiness_result" },
-        { "$ref": "#/$defs/home_move_start_result" }
+        { "$ref": "#/$defs/home_move_start_result" },
+        { "$ref": "#/$defs/device_grants_list_result" },
+        { "$ref": "#/$defs/device_grants_remove_result" }
       ]
     },
     "hello_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -2054,7 +2084,7 @@
       "additionalProperties": false,
       "properties": {
         "sections": {
-          "description": "On a linked desktop, the sections that configure this computer (sandbox, computer_use, computer_history, channels.imessage) and the primary's others; on any other engine, its own.",
+          "description": "On a linked desktop, the sections that configure this computer (engine, sandbox, computer_use, computer_history, channels.imessage) and the primary's others; on any other engine, its own.",
           "type": "array",
           "maxItems": 30,
           "items": { "$ref": "#/$defs/settingsSection" }
@@ -3438,12 +3468,13 @@
     },
     "mobileDevice": {
       "type": "object",
-      "description": "A paired device: a phone, or a desktop engine (kind desktop). A desktop has no platform, signer role, boot state or push registration of its own.",
+      "description": "A paired device: a phone, or a desktop engine (kind desktop) with its executor switch, which is null on a phone. A desktop has no platform, signer role, boot state or push registration of its own.",
       "required": [
         "device_id",
         "name",
         "model",
         "kind",
+        "executor",
         "platform",
         "signer_role",
         "boot_state",
@@ -3457,6 +3488,7 @@
         "name": { "type": "string" },
         "model": { "type": "string" },
         "kind": { "enum": ["phone", "desktop"] },
+        "executor": { "type": ["boolean", "null"] },
         "platform": { "type": ["string", "null"] },
         "signer_role": { "enum": ["release", "development", null] },
         "boot_state": {
@@ -3552,6 +3584,19 @@
         "device_id": { "type": "string" },
         "revoked": { "const": true }
       }
+    },
+    "mobile_devices_set_executor_params": {
+      "type": "object",
+      "required": ["device_id", "executor"],
+      "additionalProperties": false,
+      "properties": {
+        "device_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "executor": { "type": "boolean" }
+      }
+    },
+    "mobile_devices_set_executor_result": {
+      "description": "The desktop's row after the switch: kind is desktop and executor the switch as it now stands.",
+      "$ref": "#/$defs/mobileDevice"
     },
     "cueName": {
       "description": "A source ref or a mandate name: lowercase letters, digits and hyphens, starting with a letter or digit.",
@@ -5628,14 +5673,15 @@
     },
     "homeDesktop": {
       "type": "object",
-      "description": "A desktop of the primary: its device id and name, and whether its session is up and since when (null while not).",
-      "required": ["device_id", "name", "connected", "since"],
+      "description": "A desktop of the primary: its device id and name, whether its session is up and since when (null while not), and whether the primary lets it run actions.",
+      "required": ["device_id", "name", "connected", "since", "executor"],
       "additionalProperties": false,
       "properties": {
         "device_id": { "type": "string", "minLength": 1 },
         "name": { "type": "string" },
         "connected": { "type": "boolean" },
-        "since": { "type": ["string", "null"] }
+        "since": { "type": ["string", "null"] },
+        "executor": { "type": ["boolean", "null"] }
       }
     },
     "home_snapshots_status_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -5802,6 +5848,52 @@
         "key_id": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
         "keep_as_desktop": { "type": "boolean" },
         "sentence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "device_grants_list_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "device_grants_list_result": {
+      "description": "The folders this computer lets its primary read beyond its sandbox, oldest first. Answered by this computer's engine, never forwarded; empty on an engine that never moved.",
+      "type": "object",
+      "required": ["grants", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "grants": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/deviceGrant" } },
+        "sentence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "device_grants_remove_params": {
+      "type": "object",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "The folder, as listed or by another name for it (a link to it).",
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4096,
+          "pattern": "^/"
+        }
+      }
+    },
+    "device_grants_remove_result": {
+      "description": "The grant is gone: the next read the primary asks for in that folder is refused. grants are the ones left.",
+      "type": "object",
+      "required": ["removed", "grants", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "removed": { "type": "string" },
+        "grants": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/deviceGrant" } },
+        "sentence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "deviceGrant": {
+      "description": "One folder the owner let the primary read on this computer, and when.",
+      "type": "object",
+      "required": ["path", "granted_at"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "pattern": "^/" },
+        "granted_at": { "type": "string", "format": "date-time" }
       }
     },
     "homeCandidate": {

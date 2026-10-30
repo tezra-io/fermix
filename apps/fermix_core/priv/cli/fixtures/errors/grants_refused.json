@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "grants_refused",
+    "sentence": "Fermix did not do that on this computer. It said: This computer has no read grant for that folder."
+  },
+  "ok": false,
+  "schema_version": 1
+}

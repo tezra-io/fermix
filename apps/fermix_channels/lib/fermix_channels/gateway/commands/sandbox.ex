@@ -51,13 +51,22 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   `request_directory_access` tool, a coding run's vendor-config change for the
   owner to acknowledge before the next harness launch (GAP3-1), or an
   access-sensitive plugin command parked by `Capabilities.AccessGate` (its
-  intent id; the call itself stays in core). The two that re-run a request
-  hand what their turn had read (`provenance`).
+  intent id; the call itself stays in core), with the kind of card it is shown
+  as when that is not the sandbox family's own (`card: :device`, an action on
+  the owner's other computer, with how long it waits, `ttl_s`). The ones that
+  re-run a request hand what their turn had read (`provenance`): a grant, an
+  acknowledgment, and a `device` card, whose request resumes once its action
+  ran.
   """
   @type grant_request ::
           %{path: String.t(), reason: String.t(), diff: String.t(), provenance: map()}
           | %{acknowledge_vendor_config: String.t(), provenance: map()}
-          | %{access_sensitive: String.t()}
+          | %{
+              required(:access_sensitive) => String.t(),
+              optional(:card) => :device,
+              optional(:ttl_s) => pos_integer(),
+              optional(:provenance) => map()
+            }
 
   @impl true
   def name, do: "sandbox"
@@ -225,10 +234,22 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
 
       :error ->
         token = token()
-        :ok = Confirmations.store(token, grant_pending_record(mutation, origin))
+        record = grant_pending_record(mutation, origin, card(request), ttl_ms(request))
+        :ok = Confirmations.store(token, record)
         {:ok, token, :new}
     end
   end
+
+  # The card a token's prompt was shown as, so its resolution reaches that card.
+  defp card(%{card: :device}), do: :device
+  defp card(_request), do: :sandbox
+
+  # A `device` card lives as long as its action may take; every other token
+  # the family's 60 seconds.
+  defp ttl_ms(%{card: :device, ttl_s: ttl_s}) when is_integer(ttl_s) and ttl_s in 1..600,
+    do: ttl_s * 1_000
+
+  defp ttl_ms(_request), do: @ttl_ms
 
   defp grant_mutation(%{path: path}) when is_binary(path), do: {:add_allowed_root, path}
 
@@ -256,15 +277,16 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
       Map.get(record, :ingress_context) == Map.get(origin, :ingress_context)
   end
 
-  defp grant_pending_record(mutation, origin) do
+  defp grant_pending_record(mutation, origin, card, ttl_ms) do
     %{
       mutation: mutation,
+      card: card,
       channel: origin.channel,
       chat_id: origin.chat_id,
       thread_ts: origin.thread_ts,
       user_id: origin.user_id,
       resume: Map.get(origin, :resume),
-      expires_at: now_ms() + @ttl_ms
+      expires_at: now_ms() + ttl_ms
     }
     |> maybe_put(:ingress_context, Map.get(origin, :ingress_context))
   end
@@ -272,7 +294,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp confirm(token, message, reply_fn, context) do
     case take_pending(token, message) do
       {:ok, record} ->
-        :ok = notify_approval(context, :sandbox, token, :approved)
+        :ok = notify_approval(context, record.card, token, :approved)
         apply_confirmed(record, token, reply_fn, context)
 
       {:error, reason} ->
@@ -283,7 +305,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp deny(token, message, reply_fn, context) do
     case take_pending(token, message) do
       {:ok, record} ->
-        :ok = notify_approval(context, :sandbox, token, :denied)
+        :ok = notify_approval(context, record.card, token, :denied)
         reply(reply_fn, denied_text(record))
 
       {:error, reason} ->
@@ -318,9 +340,18 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
 
   # An access-sensitive command the owner confirmed: core runs exactly the
   # recorded call (`AccessGate.confirm/2`) and this chat gets its outcome once.
-  # Nothing is re-ingested — the daemon runs the call, not a new model turn.
-  defp apply_confirmed(%{mutation: {:access_sensitive, intent_id}}, _token, reply_fn, context),
-    do: spawn_access_confirm(intent_id, reply_fn, context)
+  # A plugin command ends there: the daemon runs the call, not a new model turn.
+  # An action on the owner's other computer (`card: :device`) then resumes the
+  # request that parked it, the way a confirmed grant resumes its request: the
+  # re-run turn's same call reads the kept result instead of running again.
+  defp apply_confirmed(
+         %{mutation: {:access_sensitive, intent_id}} = record,
+         token,
+         reply_fn,
+         context
+       ),
+       do:
+         spawn_access_confirm(intent_id, reply_fn, context, resume_after(record, token, context))
 
   # A confirmed grant persists exactly like an owner-typed `/confirm`; the only
   # addition is the auto-resume branch for an agent-initiated record.
@@ -443,20 +474,28 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   # app and the phone the `/confirm` is a client request, deferred here (in the
   # ingest process, as the seam requires) and settled only after that reply, or
   # the reply would land on a request already closed and be dropped.
-  defp spawn_access_confirm(intent_id, reply_fn, context) do
+  defp spawn_access_confirm(intent_id, reply_fn, context, resume) do
     finish = defer_command(context)
 
     {:ok, _pid} =
       Task.Supervisor.start_child(FermixCore.TaskSupervisor, fn ->
-        run_access_confirm(intent_id, reply_fn, finish)
+        run_access_confirm(intent_id, reply_fn, finish, resume)
       end)
 
     :ok
   end
 
+  # A `device` card's request, resumed once its action ran; a chat that cannot
+  # be re-ingested (a one-shot origin) and every other card resume nothing.
+  defp resume_after(%{card: :device, resume: %{content: _content} = resume} = record, token, ctx),
+    do: fn -> resume_request(record, resume, token, ctx) end
+
+  defp resume_after(_record, _token, _context), do: nil
+
   # A crashed run may or may not have reached the device, so the owner is told
-  # that before the crash goes on to the task supervisor's log.
-  defp run_access_confirm(intent_id, reply_fn, finish) do
+  # that before the crash goes on to the task supervisor's log, and nothing
+  # resumes on it.
+  defp run_access_confirm(intent_id, reply_fn, finish, resume) do
     case confirm_access(intent_id) do
       {:crashed, kind, reason, stacktrace} ->
         reply(reply_fn, @access_outcome_unknown)
@@ -466,8 +505,12 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
       result ->
         reply(reply_fn, access_outcome_text(result))
         settle_command(finish, result)
+        resume_confirmed(resume)
     end
   end
+
+  defp resume_confirmed(nil), do: :ok
+  defp resume_confirmed(resume) when is_function(resume, 0), do: resume.()
 
   defp confirm_access(intent_id) do
     AccessGate.confirm(intent_id)
@@ -613,6 +656,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp pending_record(mutation, message) do
     %{
       mutation: mutation,
+      card: :sandbox,
       channel: message.channel,
       chat_id: message.chat_id,
       thread_ts: message.thread_ts,

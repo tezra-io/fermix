@@ -16,7 +16,8 @@ defmodule FermixCore.Management.Home do
       while not connected), `epoch` (the highest primary epoch seen) and
       `sentence`; null otherwise.
     * `desktops`: on the primary, its desktop peers: `device_id`, `name`,
-      `connected` and `since` (null while not connected); empty otherwise.
+      `connected`, `since` (null while not connected) and `executor`; empty
+      otherwise.
     * `primary_home`: on a linked desktop, the primary's own `home.status`
       (its recovery, enrollment, candidates and move), asked within
       `Management.Placement.composed_deadline_ms/0`; null on any other engine
@@ -200,7 +201,8 @@ defmodule FermixCore.Management.Home do
       "device_id" => id,
       "name" => name,
       "connected" => connected,
-      "since" => iso8601(Map.get(desktop, :since))
+      "since" => iso8601(Map.get(desktop, :since)),
+      "executor" => Map.get(desktop, :executor)
     }
   end
 

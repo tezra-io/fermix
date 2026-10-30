@@ -57,6 +57,8 @@ never parses the sentence.
 | `fermix home enroll-code --json` | the management `home.enroll.open` result |
 | `fermix home candidates --json` | the candidates result |
 | `fermix home move --to ID [--recovery-passphrase-file PATH] [--retire] --json` | the move result |
+| `fermix device grants --json` | the management `device.grants.list` result |
+| `fermix device grants remove PATH --json` | the management `device.grants.remove` result |
 
 `fermix service run` is the systemd vendor unit's launch entry point. It is not
 a machine-mode verb: it becomes the daemon and never returns an envelope.
@@ -226,7 +228,7 @@ its enrollment stands).
 | `epoch` | integer, null | The home's primary epoch. Null before its first start as the primary. |
 | `moved` | object, null | `to`, `moved_at`, `epoch`: the moved marker, or null. |
 | `primary` | object, null | In the device role after a move, the primary this desktop reaches: `name` (string, null), `connected` (boolean), `since` (string, null while not connected), `epoch` (integer, null; the highest primary epoch this desktop has seen) and `sentence` (string). Null on any other engine, and while Fermix is stopped. |
-| `desktops` | array | On the primary, each desktop that holds a session to it: `device_id`, `name`, `connected` (boolean) and `since` (string, null while not connected). Empty on any other engine, and while Fermix is stopped. |
+| `desktops` | array | On the primary, each desktop that holds a session to it: `device_id`, `name`, `connected` (boolean), `since` (string, null while not connected) and `executor` (boolean). Empty on any other engine, and while Fermix is stopped. |
 | `snapshots` | object | The snapshots result below. |
 | `enrollment` | object, null | On the primary, the enrollment window opened since Fermix started: `state` (`open`, `used` or `expired`) and `expires_at`, never the code. Null when none was opened, in every other role, and while Fermix is stopped. |
 | `candidates` | array | On the primary, the candidate primaries it holds, each as the candidates result below draws it. Empty in every other role. |
@@ -323,6 +325,18 @@ its move is refused, and so is any home while Fermix runs in it.
 
 Goldens: `home_candidates/ok.json`, `home_move/ok.json`, `home_move/retired.json`.
 
+## The read grant results
+
+On a desktop whose home moved to a server, `fermix device grants` and
+`fermix device grants remove PATH` print the management result of
+`device.grants.list` and `device.grants.remove` unchanged
+(`priv/management/PROTOCOL.md`): the folders the server may read on this
+computer, and the ones left after one is removed. PATH is expanded against
+`~` and the current directory before it is sent. Each needs Fermix running
+and refuses with `engine_stopped` otherwise; a refusal the engine answered
+is `grants_refused`, carrying the engine's sentence. Removing is the owner's
+decision: the engine refuses it to a process it started.
+
 ## Error codes
 
 Every refusal a `--json` verb can print, with the sentence it carries. Where a
@@ -356,6 +370,7 @@ sentence interpolates a fact, the example below is the golden's.
 - `home_status_unavailable` — Fermix could not read this home's status. It said: The requested management method is not available. (method_not_found)
 - `enrollment_refused` — Fermix did not open an enrollment code. It said: Only the primary enrolls candidates and starts a move.
 - `move_refused` — Fermix did not start the move. It said: No server waiting for the move has the id cand-0f1e2d3c4b5a6978. A server waits 24 hours after it enrolls; after that, get a new code and enroll it again.
+- `grants_refused` — Fermix did not do that on this computer. It said: This computer has no read grant for that folder.
 
 A sentence ending in `It said:` carries the words of whatever refused —
 the service manager, the login manager, the filesystem. A client shows them and

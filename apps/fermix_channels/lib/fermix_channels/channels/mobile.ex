@@ -233,7 +233,7 @@ defmodule FermixChannels.Channels.Mobile do
   @impl true
   @spec send_approval(Message.t(), map()) :: :ok | {:error, term()}
   def send_approval(%Message{} = message, %{kind: kind, text: text, token: token} = spec)
-      when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) do
+      when kind in [:sandbox, :soul, :device] and is_binary(text) and is_binary(token) do
     :ok = Approvals.announce(Approvals.server(), message.chat_id, Output.approval(spec), :mobile)
     launch_push(fn -> notify_approval(message.chat_id) end, [])
   end

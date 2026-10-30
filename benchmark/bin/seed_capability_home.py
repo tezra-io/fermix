@@ -52,6 +52,13 @@ watchers' manifest, so the cue suites are held out as NOT EVALUATED, never score
 `--cue-mandates` (needs `--cues`) adds the stub `http` plugin and the two
 auto-mode mandates the mandate cases need; without it those cases are held out.
 
+`--desktop` (M75 §11) pairs one desktop whose machine is offline, for the
+device_actions suite: a `desktop` row with actions on in the home's trust store
+(`mobile/devices.toml`) and `eval-fixtures/desktop.json` beside it. No desktop engine
+ever connects to an eval home, so `device_action` is offered and meets a desktop that
+is not connected. Off by default, like cues: the tool would join every owner turn of
+every suite. A seed without it removes both files, so the runner holds the suite out.
+
 `--voice` turns Grok voice on for the `drive: voice` suite (grok_voice.yaml):
 `[fermix_core.realtime]` enabled, engine `xai_realtime`, model `grok-voice-3.0`.
 The voice key is the xAI provider's api_key slot, filled at daemon boot from
@@ -75,7 +82,7 @@ import tomllib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from evallib import safe_rm  # noqa: E402
+from evallib import desktop_fixture, safe_rm  # noqa: E402
 
 DEV_HOME = os.path.expanduser("~/.fermix-dev")
 # Homes this script must never touch, compared as REALPATHS so a symlink cannot dress
@@ -428,6 +435,35 @@ def clear_cue_fixtures(home: str) -> None:
             os.remove(safe_rm.check(path, home, min_below=1))
 
 
+def write_desktop_fixtures(home: str) -> str:
+    """The offline desktop (M75 §11): its row in the trust store (directory 0700, file
+    0600, as `Mobile.DeviceStore` holds them) and the manifest the runner reads. A trust
+    store this seeder did not write is never replaced: an eval home is disposable, but a
+    row a person paired is not this script's to drop."""
+    devices = os.path.join(home, desktop_fixture.DEVICES)
+    manifest = os.path.join(home, desktop_fixture.MANIFEST)
+    if os.path.exists(devices) and not os.path.isfile(manifest):
+        die(f"refusing to replace {devices}: this seeder did not write it")
+    os.makedirs(os.path.dirname(devices), exist_ok=True)
+    os.chmod(os.path.dirname(devices), 0o700)
+    write_private(devices, desktop_fixture.devices_toml(secrets.token_bytes(32)))
+    write_private(manifest, desktop_fixture.manifest())
+    return devices
+
+
+def clear_desktop_fixtures(home: str) -> None:
+    """A seed without --desktop: remove the row and manifest a previous --desktop seed
+    wrote, so no other suite is offered device_action and the runner holds the
+    device_actions suite out."""
+    manifest = os.path.join(home, desktop_fixture.MANIFEST)
+    if not os.path.isfile(manifest):
+        return
+    devices = os.path.join(home, desktop_fixture.DEVICES)
+    if os.path.isfile(devices):
+        os.remove(safe_rm.check(devices, home, min_below=1))
+    os.remove(safe_rm.check(manifest, home, min_below=1))
+
+
 def write_private(path: str, text: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
@@ -702,6 +738,9 @@ def parse_args() -> argparse.Namespace:
                              "(its model, effort and auth) instead of the dev primary")
     parser.add_argument("--allow-root", dest="allow_roots", action="append", default=[],
                         help="absolute path appended to sandbox allowed_roots (repeatable)")
+    parser.add_argument("--desktop", action="store_true",
+                        help="pair one desktop whose machine is offline, for the "
+                             "device_actions suite (M75); off by default")
     parser.add_argument("--voice", action="store_true",
                         help="turn Grok voice on for the drive: voice suite (the daemon needs "
                              f"{VOICE_KEY_ENV} in its environment and realtime on)")
@@ -783,6 +822,10 @@ def main() -> None:
         write_cue_fixtures(home, cues)
     else:
         clear_cue_fixtures(home)
+    if args.desktop:
+        write_desktop_fixtures(home)
+    else:
+        clear_desktop_fixtures(home)
     config = render_config(home, pid, blk, profile, allowed_roots,
                            explicit=bool(args.provider), voice=args.voice, cues=cues)
     if args.extra_config:
@@ -803,6 +846,9 @@ def main() -> None:
         print(f"cues: door on 127.0.0.1:{cues['door_port']}, filter "
               f"{'/'.join(cues['filter'])}, mandates {'on' if cues['mandates'] else 'off'}; "
               "run seed_cues.exs next, daemon still down")
+    if args.desktop:
+        print(f"desktop: {desktop_fixture.DESKTOP['name']} paired with actions on, never "
+              "connected (device_actions suite)")
     if args.voice:
         print(f"voice: {VOICE_MODEL} on; {VOICE_KEY_ENV} must be set on the daemon process, "
               "started with realtime on (mix fermix.dev, not --no-realtime)")

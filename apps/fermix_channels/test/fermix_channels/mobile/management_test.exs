@@ -865,6 +865,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
                name: "Pixel",
                model: "Google Pixel 9 Pro",
                kind: :phone,
+               executor: nil,
                platform: nil,
                signer_role: nil,
                boot_state: nil,
@@ -993,6 +994,61 @@ defmodule FermixChannels.Mobile.ManagementTest do
       assert {:error, :device_not_found} = Management.devices_revoke(revoked, opts)
       refute_received {:requests_revoked, _id}
       assert {:ok, [%{device_id: ^kept}]} = DeviceStore.list(root: root)
+    end
+  end
+
+  # M75 §3: a desktop engine is a device row of its own kind, with the switch
+  # that lets it run actions.
+  describe "devices_set_executor/3" do
+    @desktop_id "c41e9d27-5a8b-4f63-9e20-7d1b3c5a8f94"
+    @phone_id "11111111-1111-4111-8111-111111111111"
+
+    test "a desktop's switch is turned through the running store, and its row answers" do
+      test_pid = self()
+
+      update = fn :store, id, attrs ->
+        send(test_pid, {:updated, id, attrs})
+
+        case id do
+          @desktop_id -> {:ok, Map.merge(desktop_attrs(), attrs)}
+          @phone_id -> {:error, {:invalid_device, :executor, :phone_field}}
+          other -> {:error, {:device_not_found, other}}
+        end
+      end
+
+      opts = serving_opts(update_device: update)
+
+      assert {:ok, row} = Management.devices_set_executor(@desktop_id, false, opts)
+      assert_received {:updated, @desktop_id, %{executor: false}}
+
+      assert {row.kind, row.executor, row.platform, row.push_registered} ==
+               {:desktop, false, nil, false}
+
+      assert {:error, :not_a_desktop} = Management.devices_set_executor(@phone_id, true, opts)
+      assert {:error, :device_not_found} = Management.devices_set_executor("unknown", true, opts)
+    end
+
+    test "a channel that is not running turns the switch in the stored devices" do
+      root = stored_root([desktop_attrs(), device_attrs(@phone_id)])
+
+      opts =
+        serving_opts(
+          config: [enabled: false],
+          root: root,
+          whereis: fn MobileSupervisor -> nil end,
+          update_device: fn _store, _id, _attrs -> flunk("the device store is not running") end
+        )
+
+      assert {:ok, %{kind: :desktop, executor: false}} =
+               Management.devices_set_executor(@desktop_id, false, opts)
+
+      assert {:ok, %{executor: false}} = DeviceStore.fetch(@desktop_id, root: root)
+      assert {:error, :not_a_desktop} = Management.devices_set_executor(@phone_id, true, opts)
+
+      assert {:ok, rows} = Management.devices_list(opts)
+
+      assert Enum.map(rows, &{&1.kind, &1.executor}) |> Enum.sort() ==
+               [{:desktop, false}, {:phone, nil}]
     end
   end
 
@@ -1580,6 +1636,18 @@ defmodule FermixChannels.Mobile.ManagementTest do
       created_at: ~U[2026-09-01 12:00:00Z],
       last_seen: nil,
       apns_key_salt: :crypto.strong_rand_bytes(32)
+    }
+  end
+
+  defp desktop_attrs do
+    %{
+      device_id: "c41e9d27-5a8b-4f63-9e20-7d1b3c5a8f94",
+      name: "Studio Mac",
+      model: "Mac15,8",
+      noise_pk: :crypto.strong_rand_bytes(32),
+      created_at: ~U[2026-10-20 07:15:00Z],
+      kind: :desktop,
+      executor: true
     }
   end
 

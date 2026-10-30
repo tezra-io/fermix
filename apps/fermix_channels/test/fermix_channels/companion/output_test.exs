@@ -122,4 +122,35 @@ defmodule FermixChannels.Companion.OutputTest do
 
     assert_received {:append, "main", %{metadata: %{"turn_id" => "turn-1"}}}
   end
+
+  # M75 §11: a command for the owner's other computer, held by the access gate.
+  describe "approval/1, a device card" do
+    test "is its own kind, answered with the sandbox family's routes and ttl" do
+      card =
+        Output.approval(%{
+          kind: :device,
+          text:
+            "Run this command on your Studio Mac?\nCommand: df -h\n\nApprove with `/confirm DEV12345`",
+          token: "DEV12345"
+        })
+
+      assert card["kind"] == "device"
+      assert card["approve_command"] == "/confirm DEV12345"
+      assert card["deny_command"] == "/deny DEV12345"
+      assert card["ttl_s"] == 60
+
+      assert card["approval_id"] ==
+               Output.approval_id(:device, "DEV12345")
+
+      assert card["text"] =~ "Command: df -h"
+      refute card["text"] =~ "/confirm DEV12345"
+
+      assert Output.approval_resolved(:device, "DEV12345", :approved) ==
+               %{
+                 "t" => "approval_resolved",
+                 "approval_id" => card["approval_id"],
+                 "outcome" => "approved"
+               }
+    end
+  end
 end

@@ -44,7 +44,7 @@ defmodule FermixCore.Sandbox.OsSandbox do
 
   # Fermix-home entries a command may never read: credentials (the file secret
   # store, the phone gateway's identity bundle under `mobile/`: `gateway_key`,
-  # `tls.key`, `iroh_key`, and a desktop's key under `device/`),
+  # `tls.key`, `iroh_key`, and a desktop's key and receipts under `device/`),
   # the agent's browser cookies, and the logs and traces a token can survive
   # redaction in. `auth.json` and `memory.db` are matched with the files named
   # after them (`.tmp.N`, `-wal`) by the read-deny patterns instead.

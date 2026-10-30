@@ -17,6 +17,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Home.Candidates, as: HomeCandidates
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move, as: HomeMove
+  alias FermixCore.Home.ReadGrants
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
   alias FermixCore.Home.Snapshot.Scheduler, as: SnapshotScheduler
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
@@ -1248,7 +1249,23 @@ defmodule FermixCore.Management.ProtocolContractTest do
       mobile_cases() ++
       mcp_cases() ++
       cues_cases() ++
-      home_cases()
+      home_cases() ++
+      device_cases()
+  end
+
+  # This computer's read grants for its primary (M75 §11), in a home of their
+  # own: the listing sees both, and the removal leaves the second.
+  defp device_cases do
+    home = SafeRm.make_tmp_dir!("contract_device")
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+    :ok = ReadGrants.add(home, "/Users/ana/Downloads", ~U[2026-10-27 09:30:00Z])
+    :ok = ReadGrants.add(home, "/Users/ana/Taxes", ~U[2026-10-27 10:00:00Z])
+    opts = [operation_opts: [device: [home: home]]]
+
+    [
+      {"device.grants.list", %{}, opts},
+      {"device.grants.remove", %{"path" => "/Users/ana/Downloads"}, opts}
+    ]
   end
 
   # Stands in for `Cues.Proposals` with the record and the card in the shape
@@ -1687,6 +1704,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
            name: "Sam's phone",
            model: "Google Pixel 9 Pro",
            kind: :phone,
+           executor: nil,
            platform: nil,
            signer_role: nil,
            boot_state: nil,
@@ -1694,18 +1712,21 @@ defmodule FermixCore.Management.ProtocolContractTest do
            created_at: "2026-09-26T12:01:05Z",
            last_seen: "2026-09-26T12:04:40Z"
          },
-         desktop()
+         desktop(true)
        ]}
     end
 
     def devices_revoke(device_id, _opts), do: {:ok, %{device_id: device_id}}
 
-    defp desktop do
+    def devices_set_executor(_device_id, executor, _opts), do: {:ok, desktop(executor)}
+
+    defp desktop(executor) do
       %{
         device_id: "c41e9d27-5a8b-4f63-9e20-7d1b3c5a8f94",
         name: "Studio Mac",
         model: "Mac15,8",
         kind: :desktop,
+        executor: executor,
         platform: nil,
         signer_role: nil,
         boot_state: nil,
@@ -1740,7 +1761,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
     end
   end
 
-  # The seven phone methods against the fake above: what is compared is the view
+  # The eight phone methods against the fake above: what is compared is the view
   # the adapter builds from the provider's facts, which is the daemon's own.
   defp mobile_cases do
     opts = [operation_opts: [mobile: [provider: FakeMobileProvider]]]
@@ -1753,7 +1774,9 @@ defmodule FermixCore.Management.ProtocolContractTest do
       {"mobile.pair.decide", Map.put(session, "approved", true), opts},
       {"mobile.pair.cancel", session, opts},
       {"mobile.devices.list", %{}, opts},
-      {"mobile.devices.revoke", %{"device_id" => "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"}, opts}
+      {"mobile.devices.revoke", %{"device_id" => "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"}, opts},
+      {"mobile.devices.set_executor",
+       %{"device_id" => "c41e9d27-5a8b-4f63-9e20-7d1b3c5a8f94", "executor" => false}, opts}
     ]
   end
 

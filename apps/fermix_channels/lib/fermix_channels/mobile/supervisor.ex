@@ -22,6 +22,7 @@ defmodule FermixChannels.Mobile.Supervisor do
 
   require Logger
 
+  alias FermixChannels.Desktop.InvocationRegistry
   alias FermixChannels.Desktop.Supervisor, as: DesktopSupervisor
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.DeviceStore
@@ -324,6 +325,9 @@ defmodule FermixChannels.Mobile.Supervisor do
              device_store: names.device_store},
             id: names.request_coordinator
           ),
+          # Before the desktops' peers: their executor family hands it every
+          # invocation's answer, and it outlives each desktop's session.
+          {InvocationRegistry, name: names.desktop_invocations, peers: names.desktop_peers},
           # Before the carriers: a desktop's session starts its peer here.
           {DesktopSupervisor,
            name: names.desktop,
@@ -377,7 +381,8 @@ defmodule FermixChannels.Mobile.Supervisor do
       bridge_connections: FermixChannels.Mobile.Iroh.Connections,
       desktop: DesktopSupervisor,
       desktop_peers: FermixChannels.Desktop.Peers,
-      desktop_peer_supervisor: FermixChannels.Desktop.PeerSupervisor
+      desktop_peer_supervisor: FermixChannels.Desktop.PeerSupervisor,
+      desktop_invocations: InvocationRegistry
     }
 
     Map.merge(defaults, Keyword.get(opts, :names, %{}))

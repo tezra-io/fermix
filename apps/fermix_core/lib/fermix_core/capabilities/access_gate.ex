@@ -3,10 +3,24 @@ defmodule FermixCore.Capabilities.AccessGate do
   The one decision about whether a command that needs the owner's consent may
   run now.
 
-  Two kinds of capability are decided here. A plugin manifest marks a changing
+  Three kinds of capability are decided here. A plugin manifest marks a changing
   tool `"access_sensitive": true` (a car unlock); the flag reaches the capability
   as `metadata.access_sensitive?` on both plugin rails, and every call of it is
   decided.
+
+  A built-in marked `metadata.owner_approval?` (`device_action`, M75 §11) asks
+  its own module which calls the owner approves every time
+  (`approval_required?/2`: a command for a connected desktop): such a call is
+  never dispatched without the owner's yes, however clean the turn. It is held
+  on the turn's own chat with a card whose kind, head and exact lines the
+  module names (`approval_request/2`), for as long as the module says (the
+  action's own deadline), refused on a voice call, in a delegated worker, a cue
+  run and every turn the owner is not present for (a scheduled run included),
+  and the confirmed call runs exactly as parked, as every parked call does.
+  Its tool result is kept with the record (`Pending`), and the request that
+  parked it is asked again (the channel resumes it as a confirmed grant
+  resumes its request), so the same call in that turn gets the result back
+  instead of running twice: the model reads what the command printed.
 
   A built-in that starts a host process the model steers
   (`metadata.host_command?`: `shell`, `git_write`, a command the owner
@@ -216,7 +230,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   end
 
   defp admit_standard(%Capability{} = capability, args, context) do
-    if gated?(capability, context) do
+    if gated?(capability, args, context) do
       call = %{capability: capability, args: args, context: context}
 
       case Map.fetch(context, :access_confirmed) do
@@ -229,11 +243,13 @@ defmodule FermixCore.Capabilities.AccessGate do
   end
 
   @doc """
-  Whether a call `admit/3` decides here (the moduledoc's two kinds) may run now
-  in `context`, must wait for the owner on a surface, or is refused. `args` are
-  the call's arguments; without them (a job's tools, checked before any call) a
-  call is never the next run of a chain. Pure apart from the job-row read a
-  scheduled run makes and the link resolution a chained run's folder takes.
+  Whether a call `admit/3` decides here (the moduledoc's three kinds) may run
+  now in `context`, must wait for the owner on a surface, or is refused. `args`
+  are the call's arguments; without them (a job's tools, checked before any
+  call) a call is never the next run of a chain. A call the owner approves
+  every time (`owner_approval?`) waits for them on any attended owner turn and
+  is refused on every other. Pure apart from the job-row read a scheduled run
+  makes and the link resolution a chained run's folder takes.
   """
   @spec decide(Capability.t(), map(), map()) :: decision()
   def decide(%Capability{} = capability, context, args \\ %{})
@@ -241,6 +257,13 @@ defmodule FermixCore.Capabilities.AccessGate do
     cond do
       Access.worker?(context) -> {:refuse, :worker}
       cue_run?(context) -> {:refuse, :cue_run}
+      gate_kind(capability) == :owner_approval -> owner_approval_decision(context)
+      true -> standard_decision(capability, context, args)
+    end
+  end
+
+  defp standard_decision(capability, context, args) do
+    cond do
       scheduled_operator?(context) -> scheduled_decision(capability.name, context)
       chained_run?(capability, args, context) -> :chained
       not Access.attended_operator_turn?(context) -> {:refuse, :unattended}
@@ -489,14 +512,34 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   # The one predicate for whether a call meets `decide/3`: a flagged command
   # always; a host command only where the kernel does not hold it, and only in a
-  # tainted turn. Metadata first, so every other call returns without reading
-  # the context.
-  defp gated?(capability, context) do
+  # tainted turn; an owner-approval built-in when its module says this call
+  # needs the owner (`args` is `nil` for a job's tools, checked before any call,
+  # which never needs one). Metadata first, so every other call returns without
+  # reading the context.
+  defp gated?(capability, args, context) do
     case gate_kind(capability) do
       :access_sensitive -> true
       :host_command -> host_command_gated?(capability, context)
+      :owner_approval -> is_map(args) and approval_required?(capability, args, context)
       nil -> false
     end
+  end
+
+  defp approval_required?(%Capability{metadata: %{tool_module: module}}, args, context),
+    do: module.approval_required?(args, context)
+
+  # What the owner is asked about a call of an owner-approval built-in: the
+  # card's kind, its head and the exact lines that will run.
+  defp approval_request(%{capability: %Capability{metadata: %{tool_module: module}}} = call),
+    do: module.approval_request(call.args, call.context)
+
+  # An owner-approval call waits for the owner on any attended owner turn and
+  # is refused on every other (a scheduled run is not attended: no owner reads
+  # the card there).
+  defp owner_approval_decision(context) do
+    if Access.attended_operator_turn?(context),
+      do: confirm_on(surface(context)),
+      else: {:refuse, :unattended}
   end
 
   # A host command is gated when the turn read outside content and Fermix cannot
@@ -590,11 +633,12 @@ defmodule FermixCore.Capabilities.AccessGate do
   # `{:unix, :darwin}` here so the host the suite runs on never decides.
   defp os_opts(context), do: Map.get(context, :os_sandbox, [])
 
-  # Which of the two kinds a capability is, if either. The flag comes from a
-  # plugin manifest and the host-command mark from the built-in tables, so no
-  # capability carries both.
+  # Which of the three kinds a capability is, if any. The flag comes from a
+  # plugin manifest and the host-command and owner-approval marks from the
+  # built-in tables, so no capability carries two.
   defp gate_kind(%Capability{metadata: %{access_sensitive?: true}}), do: :access_sensitive
   defp gate_kind(%Capability{metadata: %{host_command?: true}}), do: :host_command
+  defp gate_kind(%Capability{metadata: %{owner_approval?: true}}), do: :owner_approval
   defp gate_kind(%Capability{}), do: nil
 
   # Every job run carries its `trigger`; only a cue run's is "cue".
@@ -702,13 +746,14 @@ defmodule FermixCore.Capabilities.AccessGate do
     end
   end
 
-  # A host command is parked only where the owner reads it whole. Never on a
-  # voice call, where the model that read the hostile content would phrase the
-  # question; never when it is too long to show. Both are refused instead, and a
-  # plugin command keeps the surface `decide/2` chose, a spoken yes included.
+  # A host command, and a command for the owner's other computer, is parked
+  # only where the owner reads it whole. Never on a voice call, where the model
+  # would phrase the question; never when it is too long to show. Both are
+  # refused instead, and a plugin command keeps the surface `decide/2` chose, a
+  # spoken yes included.
   defp park_or_refuse(%{capability: capability} = call, surface) do
     cond do
-      gate_kind(capability) != :host_command ->
+      gate_kind(capability) == :access_sensitive ->
         park(call, surface)
 
       surface == :voice ->
@@ -745,7 +790,22 @@ defmodule FermixCore.Capabilities.AccessGate do
     })
   end
 
-  defp pending_attrs(%{capability: capability, args: args, context: context} = call, surface) do
+  defp pending_attrs(call, surface) do
+    call
+    |> standard_attrs(surface)
+    |> Map.merge(owner_approval_attrs(call))
+  end
+
+  # A command for the owner's other computer waits as long as its action may
+  # take there, so the card outlives a glance away.
+  defp owner_approval_attrs(%{capability: capability} = call) do
+    case gate_kind(capability) do
+      :owner_approval -> %{ttl_ms: approval_request(call).ttl_s * 1_000}
+      _other -> %{}
+    end
+  end
+
+  defp standard_attrs(%{capability: capability, args: args, context: context} = call, surface) do
     %{
       tool: capability.name,
       args: args,
@@ -779,6 +839,11 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp parked({:ok, id, :running}, call, surface),
     do: hold(call, existing_text(), "held_#{surface}", id)
 
+  # The confirmed call's own result, kept for the request it resumes: the same
+  # call there reads what ran instead of running twice.
+  defp parked({:ok, id, {:done, {:result, success?, text}}}, call, _surface),
+    do: replay(call, success?, text, id)
+
   defp parked({:ok, id, {:done, outcome}}, call, _surface),
     do: hold(call, done_text(call.capability.name, outcome), "already_confirmed", id)
 
@@ -791,9 +856,9 @@ defmodule FermixCore.Capabilities.AccessGate do
   # means the owner has no live token for this call (first ask, or the last one
   # was denied or expired), so the prompt goes out; `:existing` sends nothing.
   defp deliver(:this_chat, call, _fresh) do
-    case call.context.approval_fn.(%{access_sensitive: call.id}) do
+    case call.context.approval_fn.(approval_ask(call)) do
       {:ok, token, :new} ->
-        call.context.reply_fn.({:approval_prompt, chat_prompt(call, token), token})
+        call.context.reply_fn.(approval_prompt(call, token))
         hold_parked(call, chat_text(call), "held_this_chat")
 
       {:ok, _token, :existing} ->
@@ -827,6 +892,42 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   defp deliver(:voice, call, :existing), do: hold_parked(call, existing_text(), "held_voice")
 
+  # What the channel stores the token for, and the prompt it renders. An
+  # owner-approval call's card has the kind its module names (`device`), so the
+  # Mac app and the phone show it as that kind and its resolution reaches the
+  # same card, for as long as the module says; it carries what the turn had
+  # read, so the request it resumes once confirmed is the same request. Every
+  # other call's is the `/confirm` family's plain prompt.
+  defp approval_ask(%{capability: capability, id: id} = call) do
+    case gate_kind(capability) do
+      :owner_approval ->
+        request = approval_request(call)
+
+        %{
+          access_sensitive: id,
+          card: request.card,
+          ttl_s: request.ttl_s,
+          provenance: UntrustedContent.resume_provenance(call.context)
+        }
+
+      _other ->
+        %{access_sensitive: id}
+    end
+  end
+
+  defp approval_prompt(%{capability: capability} = call, token) do
+    case gate_kind(capability) do
+      :owner_approval ->
+        request = approval_request(call)
+
+        {:approval_prompt,
+         %{kind: request.card, text: chat_prompt(call, token), token: token, ttl_s: request.ttl_s}}
+
+      _other ->
+        {:approval_prompt, chat_prompt(call, token), token}
+    end
+  end
+
   defp refuse(%{capability: capability} = call, reason) do
     call = with_sources(call)
     Logger.info("access_gate: #{capability.name} refused (#{reason})")
@@ -849,6 +950,22 @@ defmodule FermixCore.Capabilities.AccessGate do
     {:held, Tool.error(text)}
   end
 
+  # A confirmed call's result, given again to the same call: still one model
+  # tool call, one exec event, and the executor did not run for it.
+  defp replay(call, success?, text, intent_id) do
+    metadata =
+      "already_confirmed"
+      |> held_metadata(marker_decision("already_confirmed"))
+      |> Map.put(:access_intent, intent_id)
+
+    ToolTelemetry.exec(call.capability.name, call.context, success?, 0,
+      metadata: metadata,
+      input: call.args
+    )
+
+    {:held, if(success?, do: Tool.success(text), else: Tool.error(text))}
+  end
+
   # The call now waits on the owner under its parked record (a new one, or one
   # this or another turn of the chat parked earlier): the result says so, so the
   # caller runs nothing else of this turn.
@@ -866,13 +983,16 @@ defmodule FermixCore.Capabilities.AccessGate do
   # --- confirmation --------------------------------------------------------
 
   defp run_confirmed(record, pending) do
-    {status, text} =
+    {status, text, kept} =
       case current_capability(record) do
-        {:ok, capability} -> dispatch_confirmed(capability, record)
-        {:error, :plugin_changed} -> {:error, changed_text(record.tool)}
+        {:ok, capability} ->
+          dispatch_confirmed(capability, record)
+
+        {:error, :plugin_changed} ->
+          {:error, changed_text(record.tool), changed_text(record.tool)}
       end
 
-    :ok = Pending.finish(record, text, pending)
+    :ok = Pending.finish(record, kept, pending)
     Logger.info("access_gate: intent #{record.id} confirmed and run: #{status}")
     {status, text}
   end
@@ -912,6 +1032,9 @@ defmodule FermixCore.Capabilities.AccessGate do
       :host_command ->
         command_ref(capability) == record.command_ref
 
+      :owner_approval ->
+        command_ref(capability) == record.command_ref
+
       nil ->
         false
     end
@@ -925,14 +1048,27 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp command_ref(%Capability{metadata: %{tool_module: module}}), do: {:module, module}
   defp command_ref(%Capability{}), do: nil
 
+  # The owner reads a bounded sentence; the record keeps that sentence, or, for
+  # an owner-approval call, the call's whole tool result, which the request it
+  # resumes reads in place of a second run.
   defp dispatch_confirmed(capability, record) do
     context =
       Map.merge(record.snapshot, %{access_confirmed: record.digest, access_intent: record.id})
 
-    capability
-    |> Capability.execute(record.args, context)
-    |> confirmed_outcome(capability, record)
+    result = Capability.execute(capability, record.args, context)
+    {status, text} = confirmed_outcome(result, capability, record)
+    {status, text, kept_outcome(gate_kind(capability), result, text)}
   end
+
+  defp kept_outcome(:owner_approval, {:ok, %{success: true, output: output}}, _text)
+       when is_binary(output),
+       do: {:result, true, output}
+
+  defp kept_outcome(:owner_approval, {:ok, %{success: false, error: error}}, _text)
+       when is_binary(error),
+       do: {:result, false, error}
+
+  defp kept_outcome(_kind, _result, text), do: text
 
   # What the owner reads in their chat once a confirmed call ran, redacted and
   # made `visible/1` as the prompt was, since a command's output or error can
@@ -964,14 +1100,20 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   # Whether this turn could not run `capability` itself, so a job naming it may
   # not be set up from here either. No call's arguments: a job's run is never
-  # the next run of a coding-run chain.
+  # the next run of a coding-run chain, and an owner-approval built-in is
+  # decided call by call when the job runs (a scheduled run is refused there).
   defp held_for_job?(capability, context),
-    do: gated?(capability, context) and decide(capability, context) != :dispatch
+    do: gated?(capability, nil, context) and decide(capability, context) != :dispatch
 
   # --- owner-facing text (Fermix-authored; never quotes the model or a sender)
 
   # A plugin command shows its description and JSON arguments; a host command
   # shows everything that will run, verbatim (`shown_command/1`).
+  # An owner-approval call shows its module's head and exact lines, and needs
+  # no reason: every such call asks.
+  defp owner_prompt(%{capability: %{metadata: %{owner_approval?: true}}} = call),
+    do: Enum.join([approval_request(call).head, shown_command(call)], "\n")
+
   defp owner_prompt(%{capability: %{metadata: %{host_command?: true}} = capability} = call) do
     [
       "Confirm #{capability.name}? " <> prompt_head(capability),
@@ -1015,12 +1157,20 @@ defmodule FermixCore.Capabilities.AccessGate do
   # session secret the command echoes is never posted to the chat, as a plugin
   # command's JSON arguments are not) and made `visible/1`, so no value can
   # start a line of its own. Unbounded here; `park_or_refuse/2` refuses past
-  # `@max_command_chars`, measured on this whole text.
+  # `@max_command_chars`, measured on this whole text. An owner-approval call's
+  # lines are its module's (`approval_request/2`), shown the same way.
+  defp shown_command(%{capability: %{metadata: %{owner_approval?: true}}} = call),
+    do: shown_lines(approval_request(call).lines, call.context)
+
   defp shown_command(%{capability: capability, args: args, context: context}) do
     [{command_label(capability), command_text(capability, args)}]
     |> Kernel.++(argument_lines(capability, args))
     |> Kernel.++(folder_line(command_folder(capability, args, context)))
-    |> Enum.map_join("\n", fn {label, value} ->
+    |> shown_lines(context)
+  end
+
+  defp shown_lines(lines, context) do
+    Enum.map_join(lines, "\n", fn {label, value} ->
       label <> ": " <> (value |> redacted(context) |> visible())
     end)
   end
@@ -1139,6 +1289,10 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp join_words(parts), do: parts |> Enum.filter(&is_binary/1) |> Enum.join(" ")
 
   # Why the owner is asked: the shared channel, what the turn read, or both.
+  # An owner-approval call asks whatever the turn read.
+  defp reason_phrase(%{capability: %{metadata: %{owner_approval?: true}}}),
+    do: "every such action waits for the owner's approval"
+
   defp reason_phrase(%{shared_channel?: true, sources: []}), do: shared_channel_reason()
 
   defp reason_phrase(%{shared_channel?: true, sources: sources}),
@@ -1195,7 +1349,18 @@ defmodule FermixCore.Capabilities.AccessGate do
     case gate_kind(capability) do
       :access_sensitive -> "is an access-sensitive command"
       :host_command -> "runs a command Fermix cannot sandbox here"
+      :owner_approval -> "acts on the owner's other computer"
     end
+  end
+
+  # An owner-approval call runs on the owner's yes and its result is kept for
+  # the request it resumes, so the same call there is not a second run.
+  defp chat_text(%{capability: %{name: tool, metadata: %{owner_approval?: true}}} = call) do
+    "Not run yet. #{tool} #{what(call)} and #{reason_phrase(call)}: an approval card is now " <>
+      "in this chat for #{approval_request(call).ttl_s} seconds. Tell the owner and stop. " <>
+      "Fermix runs it the moment they approve; when this request comes to you again after " <>
+      "that, call #{tool} with the same arguments and its result comes back, without a " <>
+      "second run."
   end
 
   defp chat_text(%{capability: %{name: tool}} = call) do
@@ -1264,6 +1429,34 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp refusal_text(:host_command, reason, %{capability: %{name: tool}} = call) do
     "#{tool} was not run: Fermix cannot sandbox commands here, and #{reason_phrase(call)}. " <>
       host_rule(reason, tool) <> chain_note(call)
+  end
+
+  defp refusal_text(:owner_approval, reason, %{capability: %{name: tool}}) do
+    "#{tool} was not run: a command or a read grant on the owner's other computer runs only " <>
+      "once the owner approves it. " <> approval_rule(reason)
+  end
+
+  defp approval_rule(:worker),
+    do: "A delegated worker cannot ask them. Report that the owner must ask for it directly."
+
+  defp approval_rule(:cue_run) do
+    "A task woken by a cue never runs one. Report what you found; the owner can ask from " <>
+      "their own chat."
+  end
+
+  defp approval_rule(:unattended) do
+    "Only a turn the owner is present for can ask them (their chat, the Fermix app or the " <>
+      "phone); a scheduled or background run cannot. Report that the owner must ask directly."
+  end
+
+  defp approval_rule(:no_surface) do
+    "Fermix has no chat to ask them on here. Ask from the Fermix app, the phone or your own " <>
+      "chat."
+  end
+
+  defp approval_rule(:voice_surface) do
+    "A voice call cannot show the owner the exact command, so it is not asked aloud. Tell " <>
+      "the owner to ask for it from their own chat or the Fermix app."
   end
 
   # A follow-up turn's coding run is refused when it left the chain's folder or

@@ -29,15 +29,24 @@ scenarios:                     # required, >= 1
 ### `requires`
 
 What the suite needs the eval home to have been seeded with, beyond the defaults.
-One value today: `cues` — the home was seeded with `seed_capability_home.py
---cues` and `seed_cues.exs` (`FERMIX_CAP_SEED_ARGS=--cues capability-daemon.sh up`
-does both), which turns cues on, writes the door, the local-push sources and the
-default filter model, and makes the watchers. It is opt-in because cues add
-`manage_watcher` and `list_cues` to every owner turn of every suite. On a home
-seeded without it both runners hold the suite's cases out as **NOT EVALUATED**:
-named, never driven, never scored and never a failure (`run_eval.py` and
-`run_capability.py` read `eval-fixtures/cues.json` and `cue_watchers.json` in the
-home before driving). A `drive: cue` suite must declare it.
+Two values:
+
+- `cues` — the home was seeded with `seed_capability_home.py --cues` and
+  `seed_cues.exs` (`FERMIX_CAP_SEED_ARGS=--cues capability-daemon.sh up` does both),
+  which turns cues on, writes the door, the local-push sources and the default
+  filter model, and makes the watchers. It is opt-in because cues add
+  `manage_watcher` and `list_cues` to every owner turn of every suite. On a home
+  seeded without it both runners hold the suite's cases out as **NOT EVALUATED**:
+  named, never driven, never scored and never a failure (`run_eval.py` and
+  `run_capability.py` read `eval-fixtures/cues.json` and `cue_watchers.json` in the
+  home before driving). A `drive: cue` suite must declare it.
+- `desktop` — the home was seeded with `seed_capability_home.py --desktop`
+  (`FERMIX_CAP_SEED_ARGS=--desktop capability-daemon.sh up`): one paired desktop,
+  "Studio Mac", with actions on and its machine offline (M75), so `device_action`
+  is offered and every call meets an unavailable desktop. Opt-in for the same
+  reason as cues. `run_eval.py` reads `eval-fixtures/desktop.json` and holds the
+  suite out as NOT EVALUATED on a home seeded without it; it is a behavioral
+  suite's requirement only.
 
 ### `abort_on_tool_error`
 

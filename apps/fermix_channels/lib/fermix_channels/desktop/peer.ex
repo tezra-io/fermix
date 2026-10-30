@@ -5,14 +5,16 @@ defmodule FermixChannels.Desktop.Peer do
   When a session whose device row is a `desktop` completes `hello`, it starts
   one peer under `FermixChannels.Desktop.PeerSupervisor` and hands it every
   desktop-family event the desktop sends (`deliver/2`): the companion tunnel,
-  `manage`, `loopback_request` and `snapshot_stored`. The peer puts each
-  chunked payload back together (`Mobile.Chunks`, within each event's bound)
-  and hands every complete event to the module its family names in
-  `@families`, the one map of families. An event whose family has no module
-  there is answered `error{code:"unsupported_event"}`, and the session stays
-  open. A gap, a repeat, a payload past its bound, a frame whose header
-  differs from its payload's first, more than 32 payloads open at once, or
-  more than 64 MiB held across them closes the session with `1002`.
+  `manage`, the executor's `invoke_*`, `loopback_request` and
+  `snapshot_stored`. The peer puts each chunked payload back
+  together (`Mobile.Chunks`, within each event's bound) and hands every
+  complete event to the module its family names in `@families`, the one map
+  of families. An event whose family has no module there is answered
+  `error{code:"unsupported_event"}`, and the session stays open. A gap, a
+  repeat, a payload past its bound, a frame whose header differs from its
+  payload's first, more than 32 payloads open at once, or more than 64 MiB
+  held across them (or one blob's bound, when the session's is larger)
+  closes the session with `1002`.
 
   The peer registers in `FermixChannels.Desktop.Peers` under the desktop's
   device id, with the session it serves and when it connected, so the primary
@@ -32,6 +34,7 @@ defmodule FermixChannels.Desktop.Peer do
   # Family => the module implementing `Desktop.Family` for it. Each family's
   # module is added here, one line each, as it is built.
   @families %{
+    executor: FermixChannels.Desktop.Invocations,
     companion: FermixChannels.Desktop.Companion,
     manage: FermixChannels.Desktop.Manage,
     loopback: FermixChannels.Desktop.LoopbackForward,
@@ -43,12 +46,15 @@ defmodule FermixChannels.Desktop.Peer do
     "companion_line" => :companion,
     "companion_close" => :companion,
     "manage" => :manage,
+    "invoke_result" => :executor,
+    "invoke_blob" => :executor,
+    "invoke_receipts" => :executor,
     "loopback_request" => :loopback,
     "loopback_failed" => :loopback,
     "snapshot_stored" => :snapshots,
     "snapshot_refused" => :snapshots
   }
-  @family_names [:companion, :manage, :loopback, :snapshots]
+  @family_names [:companion, :manage, :executor, :loopback, :snapshots]
   @registry FermixChannels.Desktop.Peers
   @supervisor FermixChannels.Desktop.PeerSupervisor
   @max_open_payloads 32
@@ -64,6 +70,7 @@ defmodule FermixChannels.Desktop.Peer do
           session: pid(),
           peer: pid(),
           registry: GenServer.server(),
+          max_media_bytes: pos_integer(),
           options: keyword()
         }
 
@@ -88,10 +95,10 @@ defmodule FermixChannels.Desktop.Peer do
 
   @doc """
   Starts the peer of a desktop session under `supervisor`. `opts`:
-  `:device_id`, `:session` (the session's process), and optionally
-  `:registry` and `:families` (a test's own map of families, each a module or
-  `{module, options}`, the options reaching the family's `init/1` as the
-  context's `options`).
+  `:device_id`, `:session` (the session's process), `:max_media_bytes`, and
+  optionally `:registry` and `:families` (a test's own map of families, each
+  a module or `{module, options}`, the options reaching the family's `init/1`
+  as the context's `options`).
   """
   @spec start(GenServer.server(), keyword()) :: DynamicSupervisor.on_start_child()
   def start(supervisor \\ @supervisor, opts) when is_list(opts),
@@ -230,6 +237,7 @@ defmodule FermixChannels.Desktop.Peer do
       device_id: Keyword.fetch!(opts, :device_id),
       session: Keyword.fetch!(opts, :session),
       registry: Keyword.get(opts, :registry, @registry),
+      max_media_bytes: Keyword.fetch!(opts, :max_media_bytes),
       open_bytes_budget: Keyword.get(opts, :open_bytes_budget, @open_bytes_budget),
       families: %{},
       open: %{}
@@ -266,7 +274,8 @@ defmodule FermixChannels.Desktop.Peer do
       device_id: state.device_id,
       session: state.session,
       peer: self(),
-      registry: state.registry
+      registry: state.registry,
+      max_media_bytes: state.max_media_bytes
     }
 
     Enum.reduce_while(families, {:ok, %{}}, fn {family, entry}, {:ok, acc} ->
@@ -334,18 +343,20 @@ defmodule FermixChannels.Desktop.Peer do
         {:error, {:too_many_open_payloads, @max_open_payloads}}
 
       :error ->
-        {:ok, bound} = Chunks.bound(type)
+        {:ok, bound} = Chunks.bound(type, state.max_media_bytes)
         {:ok, %{header: header, acc: Chunks.new(bound)}}
     end
   end
 
-  # The bytes every open payload holds, and this frame's: within the budget.
+  # The bytes every open payload holds, and this frame's: within the budget, or
+  # one blob's bound where the session allows a larger one.
   defp within_budget(bytes, state) do
+    budget = max(state.open_bytes_budget, state.max_media_bytes)
     held = Enum.reduce(state.open, 0, fn {_key, open}, sum -> sum + open.acc.size end)
 
-    if held + byte_size(bytes) <= state.open_bytes_budget,
+    if held + byte_size(bytes) <= budget,
       do: :ok,
-      else: {:error, {:open_payload_bytes, state.open_bytes_budget}}
+      else: {:error, {:open_payload_bytes, budget}}
   end
 
   defp same_header(header, header, _type), do: :ok
@@ -394,8 +405,10 @@ defmodule FermixChannels.Desktop.Peer do
     end
   end
 
+  # A server event's bound never depends on the media cap: only the
+  # desktop's `invoke_blob` does, and the primary never sends one.
   defp chunked_pieces(type, fields, payload) do
-    {:ok, bound} = Chunks.bound(type)
+    {:ok, bound} = Chunks.bound(type, 1)
 
     if byte_size(payload) <= bound do
       {:ok,
