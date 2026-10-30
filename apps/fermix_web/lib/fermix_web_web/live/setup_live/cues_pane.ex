@@ -515,30 +515,66 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
     assigns = assign(assigns, card: @card)
 
     ~H"""
-    <div id="cues-screen" class={[@card, "flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3"]}>
+    <div id="cues-screen" class={[@card, "space-y-2 px-4 py-3"]}>
       <span class="flex items-center gap-1.5 text-sm font-medium">
         Screen <.info text={@screen.info} />
       </span>
-      <select
-        name="cues_settings[screen]"
-        aria-label="Screen"
-        class="select select-bordered select-sm w-full bg-base-100 sm:ml-auto sm:w-auto"
-      >
-        <option value="" selected={@screen.value == ""}>{@screen.keyword.label}</option>
-        <option value="decision_model" selected={@screen.value == "decision_model"}>
-          {@screen.decision_model.label}
-        </option>
-      </select>
-      <p
-        :if={@screen.value == "decision_model"}
-        class={["w-full text-sm", @screen.decision_model.disabled? && "text-warning"]}
-      >
-        {@screen.decision_model.hint}
-      </p>
+      <div role="radiogroup" aria-label="Screen" class="grid gap-2 sm:grid-cols-2">
+        <.screen_option value="" choice={@screen.keyword} checked={@screen.value == ""} />
+        <.screen_option
+          value="decision_model"
+          choice={@screen.decision_model}
+          checked={@screen.value == "decision_model"}
+        />
+      </div>
       <.settings_refusal refusal={@refusal} rows={["cues_screen"]} />
     </div>
     """
   end
+
+  attr :value, :string, required: true
+  attr :choice, :map, required: true
+  attr :checked, :boolean, required: true
+
+  # One of the Screen's two options. Its hint shows while the option is in use,
+  # and always while it cannot be used, saying what to set up. The input is
+  # never disabled, so a saved choice still submits and the save refuses it.
+  defp screen_option(assigns) do
+    hint? = assigns.choice.hint != nil and (assigns.checked or assigns.choice.disabled?)
+    assigns = assign(assigns, hint?: hint?)
+
+    ~H"""
+    <label class={screen_option_class(@checked)}>
+      <input
+        type="radio"
+        name="cues_settings[screen]"
+        value={@value}
+        checked={@checked}
+        class="radio radio-primary radio-sm mt-0.5"
+      />
+      <span class="min-w-0">
+        <span class="cues-screen-label block font-medium">{@choice.label}</span>
+        <span
+          :if={@hint?}
+          class={[
+            "cues-screen-hint block text-xs leading-5",
+            if(@choice.disabled?, do: "text-warning", else: "text-base-content/60")
+          ]}
+        >
+          {@choice.hint}
+        </span>
+      </span>
+    </label>
+    """
+  end
+
+  defp screen_option_class(true),
+    do:
+      "flex min-w-0 cursor-pointer gap-3 rounded-field border border-primary bg-primary/10 p-3 text-sm"
+
+  defp screen_option_class(false),
+    do:
+      "flex min-w-0 cursor-pointer gap-3 rounded-field border border-base-300 bg-base-100 p-3 text-sm hover:border-base-content/30"
 
   # --- filter model ----------------------------------------------------------
 

@@ -451,8 +451,12 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
       html = open_cues(view)
 
       assert html =~ "How items are checked before the filter model reads them."
-      assert html =~ ~r/<option value="" selected[^>]*>\s*Keyword match/
-      assert html =~ ~r/<option value="decision_model"[^>]*>\s*Decision model/
+
+      assert screen_options(html) == [
+               {"", "Keyword match", true},
+               {"decision_model", "Decision model", false}
+             ]
+
       refute html =~ "Uses OpenAI · gpt-6-luna"
 
       html =
@@ -460,8 +464,24 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
         |> form("#cues-settings-form", cues_settings: %{screen: "decision_model"})
         |> render_submit()
 
-      assert html =~ ~r/<option value="decision_model" selected[^>]*>\s*Decision model/
-      assert html =~ "Uses OpenAI · gpt-6-luna"
+      assert screen_options(html) == [
+               {"", "Keyword match", false},
+               {"decision_model", "Decision model", true}
+             ]
+
+      assert screen_hint(html) == "Uses OpenAI · gpt-6-luna"
+    end
+
+    test "the Screen is two options side by side, with no menu, and says why the decision model is not ready",
+         %{conn: conn} do
+      Application.put_env(:fermix_core, :providers, anthropic: [api_key: "invented-key-2207"])
+      {:ok, view, _html} = live(conn, "/setup")
+      html = open_cues(view)
+
+      page = LazyHTML.from_fragment(html)
+      assert page |> LazyHTML.query("#cues-screen select") |> Enum.count() == 0
+      assert page |> LazyHTML.query(~s(#cues-screen input[type="radio"])) |> Enum.count() == 2
+      assert screen_hint(html) == "Set up OpenAI, OpenRouter or Venice first."
     end
 
     test "the decision model is refused under the Screen while none is set up, and nothing is written",
@@ -1898,6 +1918,30 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
     persisted_cues() |> Keyword.fetch!(:mandates) |> Map.fetch!(name)
   end
 
+  # The Screen's options as `{value, label, checked?}`, in order.
+  defp screen_options(html) do
+    html
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query("#cues-screen label")
+    |> Enum.map(fn option ->
+      input = LazyHTML.query(option, ~s(input[type="radio"]))
+      [value] = LazyHTML.attribute(input, "value")
+      label = option |> LazyHTML.query(".cues-screen-label") |> LazyHTML.text() |> squish()
+      {value, label, LazyHTML.attribute(input, "checked") != []}
+    end)
+  end
+
+  # The one hint the Screen shows, or nil.
+  defp screen_hint(html) do
+    case html
+         |> LazyHTML.from_fragment()
+         |> LazyHTML.query("#cues-screen .cues-screen-hint")
+         |> Enum.to_list() do
+      [] -> nil
+      [hint] -> hint |> LazyHTML.text() |> squish()
+    end
+  end
+
   defp open_cues(view) do
     view |> element(~s(button[phx-value-tab="cues"])) |> render_click()
   end
@@ -1929,6 +1973,8 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
     |> Enum.reject(&(LazyHTML.attribute(&1, "type") == ["hidden"]))
     |> Enum.flat_map(&LazyHTML.attribute(&1, "name"))
     |> Enum.map(&String.replace(&1, ~r/\Acues_settings\[(.+)\]\z/, "\\1"))
+    # A radio group is one field, however many options it has.
+    |> Enum.uniq()
   end
 
   # The refusal said under the settings field a row key names, or nil.
