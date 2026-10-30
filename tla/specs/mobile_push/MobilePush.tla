@@ -55,7 +55,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/push.ex @ 7909c61eeee1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex#schedule_push,launch_push,default_push_launcher,notify_timeline_row,push_notify,maybe_schedule_proactive_push,deliver_persisted_text,delivered_text,deliver_persisted_media,delivered_effects,build_turn_result,schedule_request_push,broadcast,emit,emit_after_commit @ 4063ad0f97f7
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/event_router.ex#after_settle,end_phone_turn,schedule_settled_push @ d42cb71bf67e
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/device_registry.ex @ ff8b2c95d156
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/device_registry.ex @ 1cdc9ecc07eb
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/session.ex#dispatch_event,terminate,idle_timeout_ms,@idle_grace_ms @ a0cb9f97c616
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/router.ex#socket_options @ c961dba4f2d3
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/iroh/bridge_connection.ex#handle_info,arm_idle,stop_session,finish,terminate @ a04ac00c19ea
@@ -346,11 +346,11 @@ Boot ==
 (* A socket, seen from the daemon *)
 
 \* Either carrier's idle timeout closes a socket nothing was read from for
-\* 150 s (Session.idle_timeout_ms, session.ex:139): the WebSocket's through
+\* 150 s (Session.idle_timeout_ms, session.ex:156): the WebSocket's through
 \* Bandit's timeout (router.ex:53-60), the iroh bridge connection's through
 \* its own timer (bridge_connection.ex:102, :199-206). Session.terminate
-\* (session.ex:354-361), which both carriers call, and the registry's :DOWN
-\* (device_registry.ex:219) drop the entry. Only a frozen app leaves its
+\* (session.ex:380-387), which both carriers call, and the registry's :DOWN
+\* (device_registry.ex:228) drop the entry. Only a frozen app leaves its
 \* socket to this timeout.
 IdleTimeout(d) ==
     /\ daemon = "up" /\ reg[d] = "open" /\ app[d] = "frozen"
@@ -360,7 +360,7 @@ IdleTimeout(d) ==
     /\ UNCHANGED <<durable, daemon, pushTask, platform, app, have, unannounced,
                    noted, observers, budgets>>
 
-\* dispatch_event "ack" (session.ex:959-960) and, in the design, the
+\* dispatch_event "ack" (session.ex:1106-1107) and, in the design, the
 \* registry entry's acked_seq (M51 section 11.4). The app's send and the
 \* daemon's handling are one step: an ack lost on the way is an ack sent
 \* late, and the app may ack at any moment here.
@@ -375,7 +375,7 @@ AckArrives(d) ==
 (* The phone's app (another repository; M51 sections 8.2, 10 and 12.5) *)
 
 \* The app's reconnect loop: hello, hello_ack, then the rows it lacks.
-\* Attaching replaces any older entry (device_registry.ex:119-130, :222-236).
+\* Attaching replaces any older entry (device_registry.ex:134-144, :296-308).
 Connect(d) ==
     /\ Running(d) /\ reg[d] = "none" /\ daemon = "up"
     /\ reg' = [reg EXCEPT ![d] = "open"]
