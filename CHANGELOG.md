@@ -135,6 +135,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A long task on Claude no longer stops after Fermix shortens its
+  context.** Claude Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1 tie their
+  reasoning to the exact conversation that produced it, and Anthropic enforces
+  that for accounts created from August 31, 2026. When a task grew past its
+  context budget and Fermix condensed an earlier tool result, or dropped an old
+  screenshot, the next request was refused with "Invalid `signature` in
+  `thinking` block … bound to a different conversation", and the turn or
+  scheduled job ended in an error. Fermix now leaves out the reasoning recorded
+  after the point it changed, keeps the reasoning before it, and the task
+  carries on.
 - **The Mac app lists Anthropic's models when you pick it for the Cues
   filter.** Choosing Anthropic, OpenAI, SpaceXAI or Mistral as the filter
   model's provider in Settings → Cues opened an empty list that said "The
