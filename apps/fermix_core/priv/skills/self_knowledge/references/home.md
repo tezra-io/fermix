@@ -128,7 +128,7 @@ it, never a second writer.
   code the primary opens (one use, 30 minutes), on an existing Debian 12,
   Debian 13 or Ubuntu 24.04 host (arm64 or x86_64):
   `curl -fsSL https://fermix.ai/always-on | sudo sh`, which asks for the code
-  without echoing it. After `sh -s --`:
+  without echoing it. After `sh -s --`: `--webhook-domain NAME`,
   `--snapshot-bucket NAME --snapshot-region REGION`, `--restore`.
 - The first boot, as root: writes the code to `/run/fermix/enroll.code`
   (memory only, the engine account's), blocks the instance metadata address
@@ -146,6 +146,12 @@ it, never a second writer.
   one installed by hand (Google Chrome's own package, for example), and until
   then browser tasks on it answer that no Chrome or Chromium is installed. A
   Debian server gets Chromium at its first boot.
+- With a webhook domain, Caddy serves only `POST /webhook/slack` and `GET` and
+  `POST /webhook/whatsapp` on 443 (its own certificate), on to the port the
+  server's home sets (`[fermix_web] port`, 4030 by default) when the first
+  boot runs, and answers anything else 404. A home moved there keeps its own
+  port, so a Mac that set another one needs it set back to 4030 for webhooks
+  to reach it. Slack over Socket Mode needs no domain.
 - **A restore host.** When the primary is gone, `--restore` on a host
   prepares the same server without enrolling it and prints the exact steps:
   copy the newest snapshot onto it (downloaded from the bucket by hand, when

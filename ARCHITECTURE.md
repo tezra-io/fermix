@@ -1043,8 +1043,10 @@ the Linux package through `https://fermix.ai/install --no-setup`; creates the
 engine account `fermix` (home `/home/fermix`, no login, lingering); runs
 `fermix home enroll` and `fermix service install` as `fermix`; installs the
 distribution's Chromium on Debian (Ubuntu's is a snap: it says to install a
-browser by hand); and waits up to 5 minutes for the primary to accept the
-candidate, ending with one sentence on
+browser by hand); with a webhook domain, puts Caddy on 443 in front of exactly
+the Slack and WhatsApp webhook routes, proxying to the port
+`fermix service status --json` reads for the bound home; and waits up to 5
+minutes for the primary to accept the candidate, ending with one sentence on
 stderr and a non-zero exit at any step that fails. `--restore` takes no code
 and enrolls nothing: the same server, then the exact steps that import a
 snapshot and start the service. Everything networked after that (dialling the
@@ -1486,8 +1488,10 @@ The router exposes:
 - `/health` and `/health/ready` for the readiness status alone, and
   `/health/live` for a static liveness payload; the full report stays with
   `fermix health --json`
-- `GET`/`POST /webhook/whatsapp` and `POST /webhook/slack`; Slack over Socket
-  Mode needs none of them
+- `GET`/`POST /webhook/whatsapp` and `POST /webhook/slack`: the only routes a
+  reverse proxy in front of a server forwards (M75's optional `WebhookDomain`
+  proxies exactly these three to `127.0.0.1:4030`); Slack over Socket Mode
+  needs none of them
 
 `WebhookController` verifies the request and hands the payload to
 `Gateway.WebhookIngress`, which parses it, drops duplicates and dispatches it

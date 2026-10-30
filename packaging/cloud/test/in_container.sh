@@ -3,12 +3,13 @@
 # first_boot_test.sh, with packaging/cloud mounted read-only at /cloud, the
 # package's systemd units at /linux-systemd, /run on a tmpfs and NET_ADMIN, so
 # nft loads the real ruleset. useradd, runuser and nft are real; systemctl,
-# loginctl, curl, apt-get and fermix are the stand-ins in stubs/ (in the
-# chromium scenario apt-get is the real one). One scenario per container:
+# loginctl, curl, apt-get, caddy and fermix are the stand-ins in stubs/ (in
+# the chromium scenario apt-get is the real one). One scenario per container:
 #
 #   existing-host  refusals, then the code typed at a terminal, the wait for
 #                  the primary, then a re-run; then the code in the
-#                  environment with a bucket
+#                  environment with a bucket and a webhook domain on the
+#                  home's own port, then a re-run
 #   restore        --restore: no code, no enrollment, the steps printed, a
 #                  re-run once a home exists
 #   failures       each failure that stops the first boot: its exit status
@@ -70,7 +71,7 @@ code_absent_everywhere() {
 }
 
 install_stubs() {
-  for stub in systemctl loginctl curl; do install -m 0755 "/cloud/test/stubs/$stub" "/usr/local/bin/$stub"; done
+  for stub in systemctl loginctl curl caddy; do install -m 0755 "/cloud/test/stubs/$stub" "/usr/local/bin/$stub"; done
   reset_log
 }
 
@@ -150,10 +151,12 @@ check_refusals() {
     env FERMIX_ENROLL_CODE="fxenroll1.abc" sh "$FIRST_BOOT"
   refuses "a code that is too long" "The enrollment code is not between 42 and 2048 characters long." \
     env FERMIX_ENROLL_CODE="${CODE}$(printf '%2048s' '' | tr ' ' A)" sh "$FIRST_BOOT"
-  refuses "an unknown option, without echoing it (here the code itself)" "An option was not recognised. This script takes --restore, --snapshot-bucket and --snapshot-region." \
+  refuses "an unknown option, without echoing it (here the code itself)" "An option was not recognised." \
     env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT" "$CODE"
   refuses "a bucket without a region" "--snapshot-region is not a region name, or is missing beside --snapshot-bucket." \
     env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT" --snapshot-bucket fermix-snapshots-invented
+  refuses "a webhook domain that is not a host name" "--webhook-domain is not a lower-case host name" \
+    env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT" --webhook-domain 'Hooks.Example.NET'
   refuses "a restore given an enrollment code, without echoing it" \
     "--restore takes no enrollment code: the home comes from a snapshot." \
     env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT" --restore
@@ -260,7 +263,7 @@ check_package_unit() {
 }
 
 snapshot_files() {
-  find /etc/fermix /etc/systemd/system /etc/tmpfiles.d/fermix-always-on.conf /run/fermix \
+  find /etc/fermix /etc/systemd/system /etc/tmpfiles.d/fermix-always-on.conf /run/fermix /etc/caddy \
     -type f 2>/dev/null | sort | xargs sha256sum >"$1"
   nft list table inet fermix_metadata >>"$1"
   stat -c '%n %a %U:%G' /run/fermix /home/fermix >>"$1"
@@ -335,11 +338,12 @@ EOF
   check "[ \"\$(getent passwd | grep -c '^fermix:')\" -eq 1 ]" "a re-run creates no second account"
 
   # The same host enrolled again, the code in the environment as cloud-init
-  # passes it, with a bucket.
+  # passes it, with a bucket and a webhook domain on the home's own port.
   fresh_host
+  printf '4044\n' >"$FIXTURES/web-port"
   run_first_boot env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT" \
-    --snapshot-bucket fermix-snapshots-invented --snapshot-region eu-west-1
-  check "[ $STATUS -eq 0 ]" "a host enrolls with the code in its environment and a bucket (exit $STATUS)"
+    --snapshot-bucket fermix-snapshots-invented --snapshot-region eu-west-1 --webhook-domain hooks.example.net
+  check "[ $STATUS -eq 0 ]" "a host enrolls with the code in its environment, a bucket and a webhook domain (exit $STATUS)"
   [ "$STATUS" -eq 0 ] || sed 's/^/    /' "$OUT"
   code_absent_everywhere
   cat >/tmp/calls.expected <<EOF
@@ -357,11 +361,40 @@ systemctl start user@$ENGINE_UID.service
 fermix home enroll --code-file /run/fermix/enroll.code --snapshot-bucket fermix-snapshots-invented --snapshot-region eu-west-1 [as fermix]
 fermix service install --home /home/fermix/.fermix [as fermix]
 apt-get -qq -y install --no-install-recommends chromium
+fermix service status --json [as fermix]
+apt-get -qq -y install --no-install-recommends caddy
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+systemctl enable caddy.service
+systemctl restart caddy.service
 fermix home status --json [as fermix]
 EOF
   check "cmp -s $LOG/calls.log /tmp/calls.expected" \
-    "the steps run in order, with the bucket, Chromium and the wait"
+    "the steps run in order, with the bucket, Chromium, the proxy and the wait"
   cmp -s "$LOG/calls.log" /tmp/calls.expected || diff /tmp/calls.expected "$LOG/calls.log" | sed 's/^/    /' || true
+  check_caddy
+
+  snapshot_files /tmp/state.first
+  run_first_boot sh "$FIRST_BOOT" --webhook-domain hooks.example.net
+  check "[ $STATUS -eq 0 ] && ! grep -q 'home enroll' $LOG/calls.log" \
+    "a re-run with the webhook domain succeeds and does not enroll again (exit $STATUS)"
+  snapshot_files /tmp/state.second
+  check "cmp -s /tmp/state.first /tmp/state.second" \
+    "that re-run leaves every file, mode and rule as it was, the Caddyfile among them"
+  cmp -s /tmp/state.first /tmp/state.second || diff /tmp/state.first /tmp/state.second | sed 's/^/    /' || true
+}
+
+check_caddy() {
+  file=/etc/caddy/Caddyfile
+  check "[ \"\$(mode_owner $file)\" = '644 root:root' ] && [ \"\$(mode_owner /etc/caddy)\" = '755 root:root' ]" \
+    "the Caddyfile is root's and Caddy's own account can read it"
+  for line in 'admin off' 'auto_https disable_redirects' 'https://hooks.example.net {' 'disable_http_challenge' \
+    'method POST' 'method GET POST' 'path /webhook/slack' 'path /webhook/whatsapp' 'respond 404'; do
+    check "contains $file '$line'" "the Caddyfile has $line"
+  done
+  check "[ \"\$(grep -c 'reverse_proxy 127.0.0.1:4044\$' $file)\" -eq 2 ] && [ \"\$(grep -c reverse_proxy $file)\" -eq 2 ]" \
+    "only the Slack and WhatsApp webhook routes reach the port the home sets, 127.0.0.1:4044"
+  check "[ \"\$(grep -c '^[[:space:]]@' $file)\" -eq 2 ] && [ \"\$(grep -c '^[[:space:]]handle' $file)\" -eq 3 ]" \
+    "the Caddyfile names two routes and answers everything else itself"
 }
 
 expected_restore_steps() {
@@ -421,7 +454,8 @@ restore() {
 
 # A fresh host in the same container: no home, no code, no fixtures left.
 fresh_host() {
-  rm -rf /home/fermix/.fermix /run/fermix/* "$FIXTURES/phases" "$FIXTURES/systemctl-fails"
+  rm -rf /home/fermix/.fermix /run/fermix/* /etc/caddy "$FIXTURES/phases" "$FIXTURES/web-port" \
+    "$FIXTURES/systemctl-fails"
 }
 
 # Each failure that stops the first boot: a non-zero exit, and the one
@@ -439,6 +473,13 @@ failures() {
   printf 'restart fermix-metadata-block.service\n' >"$FIXTURES/systemctl-fails"
   run_apart env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
   check "[ $STATUS -eq 1 ] && ! grep -q 'fermix home enroll' $LOG/calls.log" "a step that stops unexpectedly ends the first boot there"
+
+  fresh_host
+  printf 'null\n' >"$FIXTURES/web-port"
+  run_apart env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT" --webhook-domain hooks.example.net
+  check "[ ! -e /etc/caddy/Caddyfile ]" "a home with no web port gets no Caddyfile"
+  stopped_with "fermix service status names no web port, so Caddy has nothing to proxy the webhooks to." \
+    "a failure inside a command substitution ends the first boot with its sentence"
 }
 
 ubuntu() {

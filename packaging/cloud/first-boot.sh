@@ -6,12 +6,13 @@
 # on the terminal, without echo:
 #
 #   curl -fsSL https://fermix.ai/always-on | sudo sh
+#   curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --webhook-domain hooks.example.net
 #
 # With --restore it takes no code and enrolls nothing: it prepares the same
 # server and prints the steps that restore a snapshot onto it.
 #
 # Options: --restore, --snapshot-bucket NAME --snapshot-region REGION
-# (together). It never prints the code, never logs it
+# (together), --webhook-domain NAME. It never prints the code, never logs it
 # and never puts it on a command line. Run again, it converges on the same
 # state; a host whose Fermix home exists is not enrolled again.
 set -eu
@@ -42,6 +43,7 @@ CODE=""
 RESTORE=0
 SNAPSHOT_BUCKET=""
 SNAPSHOT_REGION=""
+WEBHOOK_DOMAIN=""
 HOME_EXISTS=0
 ENGINE_UID=""
 APT_UPDATED=0
@@ -76,15 +78,16 @@ parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --restore) RESTORE=1; shift ;;
-      --snapshot-bucket | --snapshot-region)
+      --snapshot-bucket | --snapshot-region | --webhook-domain)
         [ $# -ge 2 ] || fail "$1 needs a value."
         case "$1" in
           --snapshot-bucket) SNAPSHOT_BUCKET=$2 ;;
           --snapshot-region) SNAPSHOT_REGION=$2 ;;
+          --webhook-domain) WEBHOOK_DOMAIN=$2 ;;
         esac
         shift 2
         ;;
-      *) fail "An option was not recognised. This script takes --restore, --snapshot-bucket and --snapshot-region." ;;
+      *) fail "An option was not recognised. This script takes --restore, --snapshot-bucket, --snapshot-region and --webhook-domain." ;;
     esac
   done
 
@@ -93,6 +96,10 @@ parse_args() {
       fail "--snapshot-bucket is not an S3 bucket name, or is missing beside --snapshot-region."
     matches "$SNAPSHOT_REGION" '^[a-z0-9][a-z0-9-]{0,31}$' ||
       fail "--snapshot-region is not a region name, or is missing beside --snapshot-bucket."
+  fi
+  if [ -n "$WEBHOOK_DOMAIN" ]; then
+    matches "$WEBHOOK_DOMAIN" '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$' ||
+      fail "--webhook-domain is not a lower-case host name such as hooks.example.net."
   fi
 }
 
@@ -328,13 +335,75 @@ install_browser() {
   esac
 }
 
+# The port the engine's web listener takes, from the home bound to the
+# service, its own setting or the default, as `fermix service status` reads it.
+web_port() {
+  as_engine service status --json >"$WORK/service-status.json" ||
+    fail "fermix service status stopped, so the port Caddy proxies to is unknown; its message above says why."
+  port=$(tr -d '\n' <"$WORK/service-status.json" |
+    sed -n 's/.*"listener": *{[^}]*"port": *\([0-9][0-9]*\).*/\1/p')
+  if [ -z "$port" ] || [ "$port" -lt 1024 ] || [ "$port" -gt 65535 ]; then
+    fail "fermix service status names no web port, so Caddy has nothing to proxy the webhooks to."
+  fi
+  printf '%s' "$port"
+}
+
+# 8. With a webhook domain, Caddy serves the three webhook routes on 443 and
+# answers everything else itself, proxying to the engine's own port. Its
+# admin API is off, so no local account can reconfigure it; restart it after
+# editing the file.
+setup_webhook_proxy() {
+  [ -n "$WEBHOOK_DOMAIN" ] || return 0
+  port=$(web_port)
+  say "Serving the Slack and WhatsApp webhooks of $WEBHOOK_DOMAIN on port 443 through Caddy, to Fermix on port $port"
+  apt_install caddy
+  install -d -m 0755 /etc/caddy
+  write_file /etc/caddy/Caddyfile 0644 <<EOF
+# Fermix Always On: only the webhook routes reach the engine, on the port its
+# home sets ([fermix_web] port) when this file was written.
+{
+	admin off
+	auto_https disable_redirects
+}
+
+https://$WEBHOOK_DOMAIN {
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+	@slack {
+		method POST
+		path /webhook/slack
+	}
+	@whatsapp {
+		method GET POST
+		path /webhook/whatsapp
+	}
+	handle @slack {
+		reverse_proxy 127.0.0.1:$port
+	}
+	handle @whatsapp {
+		reverse_proxy 127.0.0.1:$port
+	}
+	handle {
+		respond 404
+	}
+}
+EOF
+  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null ||
+    fail "Caddy refused /etc/caddy/Caddyfile; caddy validate --config /etc/caddy/Caddyfile says why."
+  systemctl enable caddy.service
+  systemctl restart caddy.service
+}
+
 # One field of the candidate's `move` in `fermix home status --json`.
 move_field() {
   tr -d '\n' <"$1" | sed -n 's/.*"move": *{\([^}]*\)}.*/\1/p' |
     sed -n 's/.*"'"$2"'": *"\(\([^"\\]\|\\.\)*\)".*/\1/p' | sed 's/\\"/"/g; s/\\\\/\\/g'
 }
 
-# 8. The engine dials the primary from the code; the first boot ends once
+# 9. The engine dials the primary from the code; the first boot ends once
 # the primary accepted this server, refused it, or did not answer.
 await_enrollment() {
   say "Waiting for your primary to accept this server"
@@ -383,6 +452,7 @@ finish_enrollment() {
   enroll
   start_service
   install_browser
+  setup_webhook_proxy
   if [ "$HOME_EXISTS" -eq 1 ]; then
     say "Done. Fermix runs from the home it already had."
     return 0
@@ -393,6 +463,7 @@ finish_enrollment() {
 
 finish_restore() {
   install_browser
+  setup_webhook_proxy
   print_restore_steps
 }
 

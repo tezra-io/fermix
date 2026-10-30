@@ -1,0 +1,5 @@
+#!/bin/sh
+# Test stand-in for caddy: logs the call; validate needs the named file.
+set -eu
+printf 'caddy %s\n' "$*" >>/var/log/fermix-test/calls.log
+if [ "$1" = validate ]; then [ -f "$3" ]; fi

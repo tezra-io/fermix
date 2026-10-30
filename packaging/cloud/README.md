@@ -57,7 +57,16 @@ In this order, failing with one sentence and a non-zero exit at any step:
    snap, so nothing is installed and one sentence says to install a browser by
    hand (Google Chrome's own package, for example), or browser tasks answer
    that no Chrome or Chromium is installed.
-7. Enroll mode: waits, up to 5 minutes, for the primary to accept the server
+7. With `--webhook-domain`: Caddy from the distribution on 443 only (TLS-ALPN
+   challenge, no port 80, admin API off, so restart it rather than reload it),
+   proxying exactly `POST /webhook/slack`, `GET /webhook/whatsapp` and
+   `POST /webhook/whatsapp` to `127.0.0.1:<port>` and answering anything else
+   404. The port is the one the bound home sets, as `fermix service status
+   --json` reads it (`listener.port`: the home's `[fermix_web] port`, else
+   4030). A home that arrives in a move keeps its own `[fermix_web] port`; if
+   it differs from the one first boot saw, edit `/etc/caddy/Caddyfile` and
+   restart Caddy, or set the port back.
+8. Enroll mode: waits, up to 5 minutes, for the primary to accept the server
    (`fermix home status --json` shows the candidate `enrolled`), and fails
    with the candidate's own sentence when the enrollment expired or failed.
    Restore mode: prints the restore steps instead (below).
@@ -98,14 +107,14 @@ Needs shellcheck, Docker with `debian:trixie-slim`, and network inside the
 containers (they install `nftables`, and Chromium in its scenario). `useradd`,
 `runuser` and `nft` run for real (`--cap-add NET_ADMIN`, `/run` on a tmpfs);
 `systemctl` (which runs a unit's `ExecStart` for `start` and `restart`),
-`loginctl`, `curl` (the fake installer), `apt-get` and `fermix` are the
-stand-ins in `test/stubs/`. The scenarios: an existing host typing the code
-at a terminal, then enrolling again with the code in the environment and a
-bucket; a restore host and its printed
+`loginctl`, `curl` (the fake installer), `apt-get`, `caddy` and `fermix` are
+the stand-ins in `test/stubs/`. The scenarios: an existing host typing the code
+at a terminal, then enrolling again with the code in the environment, a bucket
+and a webhook domain on the home's own port; a restore host and its printed
 steps; the failures that stop the first boot, each by its exit status and its
 one sentence on stderr; an Ubuntu host; and the distribution's Chromium
 installed with the real `apt-get` and started headless as `fermix` with its own
 sandbox (that container runs without Docker's seccomp profile, which refuses
 the user namespaces a server's kernel gives an unprivileged account). It is not
 wired into CI. What only a real server proves: the user manager starting
-behind the drop-in.
+behind the drop-in, and Caddy obtaining its certificate over TLS-ALPN.

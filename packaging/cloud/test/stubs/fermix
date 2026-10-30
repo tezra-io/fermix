@@ -2,9 +2,11 @@
 # Test stand-in for the packaged fermix, installed by the fake installer.
 # Records its arguments, its account and the names (never the values) of its
 # environment; `home enroll` records the SHA-256 of the code file it can read
-# and writes a candidate home the way the real verb does. `home status --json`
-# answers the candidate's phases from /etc/fermix-test/phases, one line per
-# call ("phase|sentence"), the last repeated (enrolled without the file).
+# and writes a candidate home the way the real verb does. `service status
+# --json` answers the web port in /etc/fermix-test/web-port (4030 without it);
+# `home status --json` answers the candidate's phases from
+# /etc/fermix-test/phases, one line per call ("phase|sentence"), the last
+# repeated (enrolled without the file).
 set -eu
 log=/var/log/fermix-test
 fixtures=/etc/fermix-test
@@ -20,6 +22,11 @@ case "$verb" in
     ;;
   "service install")
     printf '%s\n' "$XDG_RUNTIME_DIR" >"$log/service-runtime-dir"
+    ;;
+  "service status")
+    port=4030
+    if [ -f "$fixtures/web-port" ]; then port=$(cat "$fixtures/web-port"); fi
+    printf '{\n  "ok": true,\n  "result": {\n    "listener": {\n      "origin": "http://127.0.0.1:%s",\n      "port": %s,\n      "source": "config"\n    },\n    "pid": null\n  },\n  "schema_version": 1\n}\n' "$port" "$port"
     ;;
   "home status")
     calls=$(grep -c 'fermix home status' "$log/calls.log")

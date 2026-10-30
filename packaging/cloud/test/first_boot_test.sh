@@ -2,7 +2,7 @@
 # Proves packaging/cloud/first-boot.sh: shellcheck on every script here, then
 # in_container.sh in throwaway debian:trixie-slim containers, one scenario
 # each: an existing host typing the code at a terminal and then enrolling with
-# a bucket, a restore host, the failures that stop the
+# a bucket and a webhook domain, a restore host, the failures that stop the
 # first boot, an Ubuntu host, and the distribution's Chromium installed for
 # real and started headless as the engine account.
 # Needs shellcheck, Docker, the debian:trixie-slim image, and network inside
