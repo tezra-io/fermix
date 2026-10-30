@@ -25,7 +25,7 @@ mechanism check.
 **Environment switches** (set per check):
 - `PlatformDedupes`: the platform drops a second message with the same
   `proactive_key`. Only the companion timeline does, for the mobile and
-  companion channels (`output.ex:257-259` → `mobile_sql.ex:434-444`), and
+  companion channels (`output.ex:260-262` → `mobile_sql.ex:434-444`), and
   neither is a reminder platform (see the plan hypotheses).
 - `PlatformCanBeSlow`: the platform can answer after the watchdog fired, and can
   still show a message Fermix gave up on.
@@ -212,7 +212,7 @@ still holds.
   reminder runs in that configuration. Reminder targets are limited to
   `telegram slack discord signal whatsapp` (`registry.ex:48`, enforced at
   `:1442` and `:1487`). The only adapters that read `proactive_key` are mobile
-  and companion, both through `output.ex:257-259`. The `temporal:<id>` key that
+  and companion, both through `output.ex:260-262`. The `temporal:<id>` key that
   `delivery.ex:53` attaches to every send is ignored by every platform a
   reminder can reach.
 - **Never attempt six, never two workers:** both hold (check 01), each covered
@@ -386,7 +386,7 @@ Re-read on 2026-10-17 after every row's links became previewed (5e9ec545):
 `mobile.ex` moved its preview code to `LinkPreviews` and previews a delivered
 row whether or not the phone subtree runs, `mobile_sql.ex` keeps a preview's
 optional `link`, and `output.ex` carries it. The proactive dedupe the spec
-cites (`output.ex:257-259`, `mobile_sql.ex:377-387`) is unchanged, and no
+cites (`output.ex:260-262`, `mobile_sql.ex:377-387`) is unchanged, and no
 reminder platform is either channel, so nothing the spec models changed.
 
 Re-read on 2026-10-17 against M60 (cues and watchers, not yet committed on

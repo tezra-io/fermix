@@ -223,7 +223,7 @@ the checks that show a rule needs it):
 - `AnnouncesEveryRow`: every row written outside a turn's completion is
   announced as a `row` as it is written: the user's row (`announce_user_row`,
   `connection.ex:832-833`) and a delivery (`announce_written`,
-  `channels/companion.ex:338-339`), both built by `Companion.Output.row` and
+  `channels/companion.ex:371-372`), both built by `Companion.Output.row` and
   sent through `Companion.Fanout.announce`. `FALSE` announces no user row.
 - `SingleAnswer`: `Confirmations.take` is an `:ets.take`, the sole consumer of
   a token (`confirmations.ex:21-31`).
