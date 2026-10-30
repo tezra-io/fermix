@@ -4,8 +4,8 @@ defmodule FermixCore.Companion.ProtocolTest do
   alias FermixCore.Companion.Protocol
 
   test "publishes the version window, the line cap and the ordered catalogs" do
-    assert Protocol.protocol_version() == 4
-    assert Protocol.supported_version_range() == {3, 4}
+    assert Protocol.protocol_version() == 5
+    assert Protocol.supported_version_range() == {4, 5}
     assert Protocol.max_line_bytes() == 65_536
 
     assert Protocol.client_events() ==
@@ -72,11 +72,11 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert "row" in Protocol.shared_server_events()
   end
 
-  test "negotiates directionally, version 3 and version 4 both accepted, version 2 too old" do
-    assert :ok = Protocol.negotiate(3)
+  test "negotiates directionally, version 4 and version 5 both accepted, version 3 too old" do
     assert :ok = Protocol.negotiate(4)
-    assert {:error, :client_too_old} = Protocol.negotiate(2)
-    assert {:error, :client_too_new} = Protocol.negotiate(5)
+    assert :ok = Protocol.negotiate(5)
+    assert {:error, :client_too_old} = Protocol.negotiate(3)
+    assert {:error, :client_too_new} = Protocol.negotiate(6)
   end
 
   test "client_hello refuses a missing or malformed version with the Realtime reasons" do
@@ -188,18 +188,18 @@ defmodule FermixCore.Companion.ProtocolTest do
 
   test "the encoder writes one newline-terminated object with its type" do
     assert {:ok, line} =
-             Protocol.encode_server_event("server_hello", %{min_version: 3, max_version: 4})
+             Protocol.encode_server_event("server_hello", %{min_version: 4, max_version: 5})
 
     assert String.ends_with?(line, "\n")
 
     assert Jason.decode!(line) == %{
              "type" => "server_hello",
-             "min_version" => 3,
-             "max_version" => 4
+             "min_version" => 4,
+             "max_version" => 5
            }
 
     assert {:error, {:invalid_field, "version_range"}} =
-             Protocol.encode_server_event("server_hello", %{min_version: 2, max_version: 4})
+             Protocol.encode_server_event("server_hello", %{min_version: 3, max_version: 5})
   end
 
   test "the encoder refuses explicit nulls, a written type and unknown events" do
@@ -448,6 +448,50 @@ defmodule FermixCore.Companion.ProtocolTest do
       end
     end
 
+    # M60_WATCHER_CODING_RUNS.md §6.3: the compact card's lines, additive.
+    test "a mandate's card may carry each argument and the filter's reason" do
+      compact =
+        proposal_card()
+        |> put_in(["outside", "args"], [%{"name" => "title", "value" => "Phoenix 2.0"}])
+        |> put_in(["outside", "reason"], "a release")
+
+      assert :ok = validate_card(compact)
+      assert Protocol.server_payload_version("proposal", %{"proposal" => compact}) == 4
+
+      for drift <- [
+            put_in(compact, ["outside", "args"], [%{"name" => "", "value" => "x"}]),
+            put_in(compact, ["outside", "args"], [%{"name" => "title", "value" => 2}]),
+            put_in(compact, ["outside", "reason"], "")
+          ] do
+        assert {:error, {:invalid_field, "proposal"}} = validate_card(drift)
+      end
+    end
+
+    # M60_WATCHER_CODING_RUNS.md §6.2: version 5's follow-up card names the
+    # follow-up in place of a mandate's call, and never carries arguments.
+    test "a follow-up's card is version 5's, names the follow-up and carries no call" do
+      assert :ok = validate_card(follow_up_card())
+      assert :ok = validate_card(approval_card())
+
+      assert Protocol.server_payload_version("proposal", %{"proposal" => follow_up_card()}) == 5
+      assert Protocol.server_payload_version("proposal_resolved", %{}) == 4
+
+      for drift <- [
+            Map.put(follow_up_card(), "mandate", "release-issues"),
+            Map.put(follow_up_card(), "tool", "shell"),
+            put_in(follow_up_card(), ["outside", "args_text"], "{}"),
+            put_in(follow_up_card(), ["follow_up", "asks"], "maybe"),
+            put_in(follow_up_card(), ["follow_up", "tools"], [""]),
+            put_in(follow_up_card(), ["follow_up", "daily_cap"], 5),
+            Map.update!(follow_up_card(), "follow_up", &Map.delete(&1, "instructions")),
+            Map.update!(approval_card(), "follow_up", &Map.delete(&1, "daily_cap")),
+            put_in(approval_card(), ["follow_up", "daily_cap"], 0)
+          ] do
+        assert {:error, {:invalid_field, "proposal"}} = validate_card(drift),
+               "accepted #{inspect(drift)}"
+      end
+    end
+
     test "proposal_resolved names the proposal, its state and Fermix's sentence" do
       resolved = %{
         "profile_id" => "main",
@@ -613,6 +657,47 @@ defmodule FermixCore.Companion.ProtocolTest do
       }
     }
   end
+
+  defp follow_up_card do
+    %{
+      "proposal_id" => "cft_1",
+      "state" => "waiting",
+      "task" => %{"job_id" => "codex_review", "name" => "Codex review"},
+      "watcher" => "codex-limits",
+      "source_ref" => "x-feed",
+      "created_at" => "2026-10-30T12:00:00Z",
+      "expires_at" => "2026-10-30T12:30:00Z",
+      "status_sentence" => "Waiting for your answer; it runs only if you confirm.",
+      "summary" => "Watcher codex-limits wants to run its follow-up \"Codex review\".",
+      "outside" => %{
+        "reason" => "the post says usage limits reset",
+        "cue" => %{"subject" => "@limits", "text" => "Usage limits have been reset."}
+      },
+      "follow_up" => %{
+        "asks" => "run",
+        "name" => "Codex review",
+        "instructions" => "Review the last day's commits on dev.",
+        "tools" => ["codex_run"],
+        "reports_to" => "Telegram (owner-1)"
+      }
+    }
+  end
+
+  defp approval_card do
+    follow_up_card()
+    |> Map.merge(%{"proposal_id" => "cfa_1", "outside" => %{}})
+    |> Map.update!("follow_up", fn follow_up ->
+      Map.merge(follow_up, %{
+        "asks" => "automatic",
+        "daily_cap" => 5,
+        "set_off_by" => "x-feed; listens for reset"
+      })
+    end)
+  end
+
+  defp validate_card(card),
+    do:
+      Protocol.validate_server_payload("proposal", %{"profile_id" => "main", "proposal" => card})
 
   defp decode(map), do: map |> Jason.encode!() |> Protocol.decode_client_event()
 

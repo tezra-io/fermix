@@ -54,13 +54,25 @@ defmodule FermixCore.Companion.Protocol do
   placed as the owner's (`FermixCore.SocketPeer`, `:independent`), and only on
   version 4. The window is now {3, 4}, so a version 2 client is refused as too
   old.
+
+  Version 5 brings a watcher's follow-ups to the same card
+  (M60_WATCHER_CODING_RUNS.md §6.2): a `proposal` whose card is a follow-up's
+  waiting to run, or an automatic follow-up's approval prompt, carries
+  `follow_up` (its name, the owner's instructions, its tools, where it reports
+  and what the card asks) in place of `mandate`, `tool` and the call's
+  arguments, which a version 4 client requires, so such a card reaches a
+  version 5 connection only (`server_payload_version/2`). It is answered with
+  the same `proposal_answer`, and its end is the same `proposal_resolved`. A
+  mandate's card gains `outside.args` (each argument as `name` and `value`)
+  and `outside.reason` (the filter's reason) for the compact card (§6.3),
+  additive, so on every version. The window is now {4, 5}.
   """
 
   alias FermixCore.ReplyBlocks
 
   # Bumped in lockstep with any wire-shape change. The supported range is an
   # N/N-1 window derived from this single constant.
-  @protocol_version 4
+  @protocol_version 5
   @min_supported_version max(1, @protocol_version - 1)
 
   # The inbound line cap, the same as the Realtime socket's.
@@ -87,8 +99,14 @@ defmodule FermixCore.Companion.Protocol do
   @proposal_end_states ~w(confirmed denied expired refused)
   @proposal_result_statuses ~w(ok error unknown)
   @proposal_surfaces ~w(telegram signal whatsapp imessage companion mobile management)
-  @proposal_card_strings ~w(proposal_id mandate tool created_at expires_at status_sentence summary)
+  @proposal_card_strings ~w(proposal_id created_at expires_at status_sentence summary)
   @proposal_card_optional ~w(watcher source_ref received_at decided_at)
+  # A mandate's card names its call; a follow-up's card (version 5) names the
+  # follow-up instead.
+  @mandate_card_strings ~w(mandate tool)
+  @follow_up_asks ~w(run automatic)
+  @follow_up_strings ~w(name instructions reports_to)
+  @follow_up_card_version 5
 
   @client_events ~w(
     client_hello msg command cancel history_pull history_search read_state media_fetch
@@ -219,6 +237,18 @@ defmodule FermixCore.Companion.Protocol do
   """
   @spec owner_server_events() :: [String.t()]
   def owner_server_events, do: @owner_server_events
+
+  @doc """
+  The protocol version server event `type` needs with `payload` (string keys):
+  its type's (`server_event_version/1`), or 5 for a `proposal` whose card is a
+  watcher's follow-up, which a version 4 client could not read.
+  """
+  @spec server_payload_version(String.t(), map()) :: pos_integer()
+  def server_payload_version("proposal", %{"proposal" => %{"follow_up" => _follow_up}}),
+    do: @follow_up_card_version
+
+  def server_payload_version(type, payload) when is_binary(type) and is_map(payload),
+    do: server_event_version(type)
 
   @doc "The longest `outside.args_text` of a proposal's card, in characters."
   @spec max_proposal_args_chars() :: pos_integer()
@@ -629,7 +659,7 @@ defmodule FermixCore.Companion.Protocol do
     Enum.all?(@proposal_card_strings, &(nonempty(card, &1) == :ok)) and
       card["state"] in @proposal_states and
       proposal_task?(card["task"]) and
-      proposal_outside?(card["outside"]) and
+      card_call?(card) and
       Enum.all?(@proposal_card_optional, &(optional_nonempty(card, &1) == :ok)) and
       optional_enum(card, "decided_from", @proposal_surfaces) == :ok and
       optional_enum(card, "result_status", @proposal_result_statuses) == :ok and
@@ -638,6 +668,46 @@ defmodule FermixCore.Companion.Protocol do
 
   defp proposal_card?(_card), do: false
 
+  # What the card asks to run: a mandate's call, or a watcher's follow-up,
+  # never both.
+  defp card_call?(%{"follow_up" => follow_up} = card) do
+    not Enum.any?(@mandate_card_strings, &Map.has_key?(card, &1)) and
+      follow_up?(follow_up) and follow_up_outside?(card["outside"])
+  end
+
+  defp card_call?(card) do
+    Enum.all?(@mandate_card_strings, &(nonempty(card, &1) == :ok)) and
+      proposal_outside?(card["outside"])
+  end
+
+  defp follow_up?(%{"asks" => asks, "tools" => tools} = follow_up)
+       when asks in @follow_up_asks and is_list(tools) do
+    Enum.all?(@follow_up_strings, &(nonempty(follow_up, &1) == :ok)) and
+      Enum.all?(tools, &(is_binary(&1) and &1 != "")) and
+      follow_up_automatic?(asks, follow_up)
+  end
+
+  defp follow_up?(_follow_up), do: false
+
+  defp follow_up_automatic?("run", follow_up),
+    do: not Map.has_key?(follow_up, "daily_cap") and not Map.has_key?(follow_up, "set_off_by")
+
+  defp follow_up_automatic?("automatic", %{"daily_cap" => cap} = follow_up)
+       when is_integer(cap) and cap > 0,
+       do: nonempty(follow_up, "set_off_by") == :ok
+
+  defp follow_up_automatic?(_asks, _follow_up), do: false
+
+  # A follow-up is handed nothing of the item, so its card carries no call's
+  # arguments: only the item and the filter's reason.
+  defp follow_up_outside?(%{} = outside) do
+    not Map.has_key?(outside, "args_text") and not Map.has_key?(outside, "args") and
+      optional_nonempty(outside, "reason") == :ok and
+      proposal_cue?(Map.get(outside, "cue", %{}))
+  end
+
+  defp follow_up_outside?(_outside), do: false
+
   defp proposal_task?(%{} = task),
     do: nonempty(task, "job_id") == :ok and optional_nonempty(task, "name") == :ok
 
@@ -645,10 +715,24 @@ defmodule FermixCore.Companion.Protocol do
 
   defp proposal_outside?(%{"args_text" => args} = outside) when is_binary(args) do
     String.length(args) <= @max_proposal_args_chars and
+      proposal_args?(Map.get(outside, "args", [])) and
+      optional_nonempty(outside, "reason") == :ok and
       proposal_cue?(Map.get(outside, "cue", %{}))
   end
 
   defp proposal_outside?(_outside), do: false
+
+  defp proposal_args?(args) when is_list(args) do
+    Enum.all?(args, fn
+      %{"name" => name, "value" => value} = arg when map_size(arg) == 2 ->
+        is_binary(name) and name != "" and is_binary(value)
+
+      _other ->
+        false
+    end)
+  end
+
+  defp proposal_args?(_args), do: false
 
   defp proposal_cue?(%{} = cue),
     do:

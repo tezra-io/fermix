@@ -95,13 +95,18 @@ defmodule FermixCore.Cues.ProposalsTest do
 
       assert String.starts_with?(token, "cp_")
       assert byte_size(token) == 35
-      # The token is in the owner's message, never in the model's result or a row.
-      assert message =~ "/confirm #{token}"
-      assert message =~ "/deny #{token}"
-      assert message =~ "release issues"
-      assert message =~ "release-watch"
+      # The compact card (M60_WATCHER_CODING_RUNS.md §6.3): the tool and the
+      # watcher, every argument, the item, the mandate and the task, no JSON
+      # and no model frame. The token rides the buttons, never the model's
+      # result or a row.
+      assert message =~ "Run github_create_issue for release-watch?"
+      assert message =~ "title: Phoenix 2.0"
       assert message =~ "Phoenix 2.0 is out."
-      assert message =~ "Saturday, October 10, 2026 at 12:30 PM UTC"
+      assert message =~ "Expires 12:30 PM UTC"
+      assert message =~ "Mandate: #{@name} · task: release issues"
+      assert message =~ "Reply /confirm to run or /deny to skip."
+      refute message =~ "untrusted_tool_result"
+      refute message =~ token
 
       assert [] =
                rows(fixture.conn, "SELECT 1 FROM cue_proposals WHERE token_digest = ?", [token])
@@ -150,7 +155,7 @@ defmodule FermixCore.Cues.ProposalsTest do
 
     test "a DM that cannot be reached refuses the proposal, and the run's record says so (C50)" do
       {fixture, context} = proposing!("prop_unreachable")
-      down = fn _inbox, _text, _token -> {:error, :channel_down} end
+      down = fn _inbox, _spec -> {:error, :channel_down} end
       context = %{context | cue_mandate_opts: Keyword.put(seams(context), :proposal_sender, down)}
 
       assert {:ok, %{success: false, error: text}} =
@@ -168,7 +173,7 @@ defmodule FermixCore.Cues.ProposalsTest do
 
     test "a sender that crashes refuses the proposal: no waiting proposal nobody saw" do
       {fixture, context} = proposing!("prop_sender_crash")
-      crash = fn _inbox, _text, _token -> raise "the adapter fell over" end
+      crash = fn _inbox, _spec -> raise "the adapter fell over" end
 
       context = %{
         context

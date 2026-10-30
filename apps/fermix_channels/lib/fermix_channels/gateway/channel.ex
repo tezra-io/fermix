@@ -258,18 +258,35 @@ defmodule FermixChannels.Gateway.Channel do
   @callback send_approval(message(), text :: String.t(), token :: String.t()) ::
               :ok | {:error, term()}
 
-  @typedoc "A rich approval card with an explicit kind, expiry, and command routes."
+  @typedoc """
+  A rich approval card with an explicit kind, expiry, and command routes. A
+  watcher's card (`:follow_up`, and a mandate's proposal, `:mandate`;
+  `FermixCore.Cues.Card`) also carries its visible `lines`, its expandable
+  `detail` and its two `actions`' words.
+  """
   @type approval_spec :: %{
-          required(:kind) => :sandbox | :soul,
+          required(:kind) => :sandbox | :soul | :follow_up | :mandate,
           required(:text) => String.t(),
           required(:token) => String.t(),
           optional(:approval_id) => String.t(),
           optional(:detail) => String.t(),
-          optional(:ttl_s) => pos_integer()
+          optional(:ttl_s) => pos_integer(),
+          optional(:lines) => [String.t()],
+          optional(:actions) => %{confirm: String.t(), deny: String.t()}
         }
 
   @doc "Deliver a structured approval card when the caller knows its approval kind."
   @callback send_approval(message(), approval_spec()) :: :ok | {:error, term()}
+
+  @doc """
+  Replace the watcher's card a tap came from (`message_id`, the platform's id
+  of that message) with `text`, and take its buttons away
+  (M60_WATCHER_CODING_RUNS.md §6.2): the one line the card becomes once
+  answered. Only a channel whose taps carry the card's id implements it;
+  `Delivery` sends `text` as a reply on every other.
+  """
+  @callback edit_approval(message(), message_id :: String.t(), text :: String.t()) ::
+              :ok | {:error, term()}
 
   @doc """
   Deliver a skill-curation proposal with two-tap approve/deny affordances
@@ -345,6 +362,7 @@ defmodule FermixChannels.Gateway.Channel do
     reaction_capability: 0,
     send_approval: 3,
     send_approval: 2,
+    edit_approval: 3,
     send_proposal: 3,
     send_ephemeral: 2,
     delete_message: 2

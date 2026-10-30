@@ -1,13 +1,13 @@
 defmodule FermixChannels.Companion.ConnectionProposalsTest do
   @moduledoc """
-  M60 app surface §3.7 (D28), companion protocol 4, end to end over a real
-  0600 Unix socket: a mandate's proposal (stored by the real gate on a
-  throwaway repo) reaches the owner's connection as a card, is answered from
-  it by id and runs the recorded call exactly once; a second answer from any
+  M60 app surface §3.7 (D28), companion protocols 4 and 5, end to end over a
+  real 0600 Unix socket: a mandate's proposal (stored by the real gate on a
+  throwaway repo) reaches the owner's connection as its compact card
+  (M60_WATCHER_CODING_RUNS.md §6.3), on either version, is answered from it
+  by id and runs the recorded call exactly once; a second answer from any
   surface, an answer after expiry or after the chat's confirm, and one from a
   connection the daemon started run nothing; a waiting proposal survives a
-  restart and follows the `server_hello`; a version 3 connection is never sent
-  one.
+  restart and follows the `server_hello`.
   """
   use ExUnit.Case, async: true
 
@@ -19,6 +19,7 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
   alias FermixCore.Companion.Protocol
   alias FermixCore.Cues.Pins
   alias FermixCore.Cues.Proposals, as: CueProposals
+  alias FermixCore.Cues.ProposalView
   alias FermixCore.Memory.Repo
   alias FermixTestSupport.MandateFixtures, as: F
   alias FermixTestSupport.ParentProcess
@@ -103,10 +104,10 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
 
   # --- reaching the owner -------------------------------------------------------------
 
-  test "a stored proposal reaches the owner's version 4 connection as its card; version 3 never",
+  test "a stored proposal reaches the owner's connection as its compact card, on either version",
        ctx do
-    owner = hello(ctx.socket_path, 4)
-    old = hello(ctx.socket_path, 3)
+    owner = hello(ctx.socket_path, 5)
+    old = hello(ctx.socket_path, 4)
     id = propose!(ctx)
 
     assert %{"type" => "proposal", "profile_id" => "main", "proposal" => card} = recv(owner)
@@ -114,6 +115,8 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
     assert card["state"] == "waiting"
     assert card["task"] == %{"job_id" => ctx.fixture.job.id, "name" => "release issues"}
     assert card["outside"]["args_text"] == Jason.encode!(@recorded, pretty: true)
+    assert %{"name" => "title", "value" => "Phoenix 2.0"} in card["outside"]["args"]
+    refute Map.has_key?(card, "follow_up")
 
     assert card["outside"]["cue"] == %{
              "type" => "release",
@@ -129,18 +132,53 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
                "proposal" => card
              })
 
-    assert_quiet(old)
+    assert %{"type" => "proposal", "proposal" => ^card} = recv(old)
   end
 
   test "a waiting proposal survives a restart and follows the server_hello, oldest first", ctx do
     id = propose!(ctx)
     restart_repo!(ctx.fixture)
 
-    owner = hello(ctx.socket_path, 4)
+    owner = hello(ctx.socket_path, 5)
     assert %{"type" => "proposal", "proposal" => %{"proposal_id" => ^id}} = recv(owner)
 
-    old = hello(ctx.socket_path, 3)
+    old = hello(ctx.socket_path, 4)
+    assert %{"type" => "proposal", "proposal" => %{"proposal_id" => ^id}} = recv(old)
+  end
+
+  # M60_WATCHER_CODING_RUNS.md §6.2: a follow-up's card names no mandate,
+  # tool or arguments, which a version 4 client requires, so only version 5
+  # reads it; its end reaches both, and the version 4 client has nothing to
+  # show for it.
+  test "a follow-up's card reaches the owner's version 5 connection only", ctx do
+    owner = hello(ctx.socket_path, 5)
+    old = hello(ctx.socket_path, 4)
+    registry = ctx.endpoint_opts[:connection_opts][:registry]
+    card = ProposalView.follow_up_card(follow_up_card(), [])
+
+    assert :ok = Proposals.announce({:offered, card}, registry)
+
+    assert %{"type" => "proposal", "proposal" => wire} = recv(owner)
+    assert wire["proposal_id"] == "cft_1"
+    assert wire["follow_up"]["asks"] == "run"
+    assert wire["follow_up"]["tools"] == ["shell"]
+    refute Map.has_key?(wire, "mandate")
+    refute Map.has_key?(wire["outside"], "args_text")
     assert_quiet(old)
+
+    resolved = %{
+      proposal_id: "cft_1",
+      state: "confirmed",
+      result_status: nil,
+      sentence: "Confirmed; the follow-up is starting.",
+      result_text: nil
+    }
+
+    assert :ok = Proposals.announce({:resolved, resolved}, registry)
+
+    for client <- [owner, old] do
+      assert %{"type" => "proposal_resolved", "proposal_id" => "cft_1"} = recv(client)
+    end
   end
 
   test "a connection the daemon started is never sent a proposal, and its answer runs nothing",
@@ -161,21 +199,6 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
 
     refute_receive {:executed, _tool, _args, _context}, 100
     assert [{^id, "waiting"}] = F.proposals(ctx.fixture.conn)
-  end
-
-  test "a version 3 connection that answers a proposal is refused and closed", ctx do
-    id = propose!(ctx)
-    old = hello(ctx.socket_path, 3)
-    send_line(old, answer("old-1", id, "confirm"))
-
-    assert recv(old) == %{
-             "type" => "error",
-             "reason" => "unknown_event",
-             "event" => "proposal_answer"
-           }
-
-    assert closed?(old)
-    refute_receive {:executed, _tool, _args, _context}, 100
   end
 
   # --- answering ------------------------------------------------------------------------
@@ -358,6 +381,37 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
     assert recv(client) == %{"type" => "error", "reason" => "unsupported_profile"}
   end
 
+  defp follow_up_card do
+    %{
+      trigger_id: "cft_1",
+      state: "waiting",
+      mode: "approve",
+      reason: nil,
+      created_at: ~U[2026-10-30 12:00:00Z],
+      expires_at: ~U[2026-10-30 12:30:00Z],
+      decided_at: nil,
+      decided_from: nil,
+      run_id: nil,
+      watcher: %{id: "cwt_1", name: "codex-limits"},
+      follow_up: %{
+        job_id: "job_1",
+        name: "Deploy check",
+        instructions: "Run the deploy check script and report.",
+        tools: ["shell"],
+        delivery: %{mode: "origin", target: %{"platform" => "telegram", "chat_id" => "owner-1"}}
+      },
+      outside: %{
+        source_ref: "releases",
+        received_at: ~U[2026-10-30 11:59:00Z],
+        occurred_at: nil,
+        type: "release",
+        subject: "kestrel",
+        text: "Kestrel 2.4 is out.",
+        reason: "a release"
+      }
+    }
+  end
+
   defp hello(path, version) do
     client = connect(path)
     send_line(client, %{"type" => "client_hello", "protocol_version" => version})
@@ -383,6 +437,4 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
     {:ok, line} = :gen_tcp.recv(socket, 0, @arrival_ms)
     Jason.decode!(line)
   end
-
-  defp closed?(socket), do: :gen_tcp.recv(socket, 0, @arrival_ms) == {:error, :closed}
 end

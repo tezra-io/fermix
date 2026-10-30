@@ -258,6 +258,7 @@ defmodule FermixCore.Jobs.CueRun do
         watcher_id: watcher.id,
         watcher_name: watcher.name,
         source_ref: delivery.source_ref,
+        decision_reason: delivery.decision_reason,
         subject: cue.subject,
         occurred_at: cue.occurred_at,
         received_at: cue.received_at,

@@ -6,11 +6,13 @@ defmodule FermixCore.Cues.Proposals do
   the same Repo call that records the decision (`Cues.MandateGate`), with the
   digest of a fresh random token (`cp_` and 32 url-safe characters; only the
   digest is stored, and the model never sees the token). Fermix then sends it to
-  the owner's DM through the gateway's approval delivery (a one-tap button on
-  Telegram, the tap-to-copy command elsewhere) and records where it went. A
-  message that would be over 3,500 characters is refused before anything is
-  stored, never cut; a send that fails marks the proposal `refused` ("could not
-  reach you").
+  the owner's DM through the gateway's approval delivery as a compact card
+  (`Cues.Card.mandate/2`, M60_WATCHER_CODING_RUNS.md §6.3: the tool, the item,
+  every argument as `name: value`, all of it whole behind Details; Run and
+  Skip on Telegram, `/confirm` and `/deny` elsewhere) and records where it
+  went. A card that would be over 3,500 characters is refused before anything
+  is stored, never cut; a send that fails marks the proposal `refused` ("could
+  not reach you").
 
   `confirm/3` accepts a token only from the chat it was sent to: one Repo call
   moves the proposal `waiting → confirmed`, fenced on the token, that chat and
@@ -24,9 +26,22 @@ defmodule FermixCore.Cues.Proposals do
 
   The gateway reaches this module from `/confirm` and `/deny`, and the proposal
   goes out through the sender the channels application registers as
-  `:cue_proposal_sender` (`send_cue_proposal(inbox, text, token)`); core never
-  depends on channels code. No sender registered means the proposal cannot
-  reach the owner's chat.
+  `:cue_proposal_sender` (`send_cue_proposal(inbox, spec)`, `spec` the card's
+  `Cues.Card.spec/2`); core never depends on channels code. No sender
+  registered means the proposal cannot reach the owner's chat.
+
+  ## One place every answer goes (M60_WATCHER_CODING_RUNS.md §4.5)
+
+  A `cp_` token answers a mandate's proposal, a watcher's follow-up card
+  (`Cues.FollowUps`) or an automatic follow-up's approval prompt
+  (`Cues.FollowUpApprovals`): `confirm/3` and `deny/3` look the token's digest
+  up and hand it to the one that holds it. They take a card's id too
+  (`cpr_`, `cft_`, `cfa_`), but only from the chat the card went to and while
+  it waits there (`waiting_in_chat/2`), which is how a bare `/confirm` and a
+  listed card are answered. `decide/4` dispatches an app's answer by id the
+  same way. `owner_chat/1`, `new_token/0` and `digest/1` are the reach rule,
+  the token and its digest every card is sent with, and `announce/2` the one
+  way any card reaches the app surfaces.
 
   ## The owner's devices (M60 app surface §3.7, D28)
 
@@ -62,8 +77,8 @@ defmodule FermixCore.Cues.Proposals do
   unknown-outcome report goes the one way a cue's messages go,
   `Jobs.CueRun.deliver/3`, to the task's delivery target.
 
-  Seams (opts): `:repo`, `:now`, `:proposal_sender` (`fn inbox, text, token ->
-  :ok | {:error, reason} end`), `:proposal_listener` (`fn event -> any end`),
+  Seams (opts): `:repo`, `:now`, `:proposal_sender` (`fn inbox, spec -> :ok |
+  {:error, reason} end`), `:proposal_listener` (`fn event -> any end`),
   `:task_supervisor` (where a device's confirm runs its call),
   `:app_surface?`, `:capability_registry`, `:jobs_config` and
   `:configured_owners` (the owner inbox), `:adapter` and `:channels` (the
@@ -77,7 +92,9 @@ defmodule FermixCore.Cues.Proposals do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Capabilities.UntrustedContent
-  alias FermixCore.Clock
+  alias FermixCore.Cues.Card
+  alias FermixCore.Cues.FollowUpApprovals
+  alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Pins
   alias FermixCore.Cues.ProposalView
@@ -87,9 +104,13 @@ defmodule FermixCore.Cues.Proposals do
   alias FermixCore.Jobs.CueRun
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Memory.Repo.CuesMandateSql
 
   @token_prefix "cp_"
+  # A card's id names what it asks: a mandate's proposal, a follow-up's card
+  # or an automatic follow-up's approval prompt.
+  @id_kinds %{"cpr_" => :mandate, "cft_" => :follow_up, "cfa_" => :approval}
   @max_message_chars 3_500
   @max_result_chars 2_000
   @max_reply_chars 1_500
@@ -130,16 +151,19 @@ defmodule FermixCore.Cues.Proposals do
         }
 
   @typedoc """
-  A proposal ready to store: its row, its token, the owner's message and the
+  A proposal ready to store: its row, its token, the owner's card (`spec`) and the
   owner's chat (`inbox` nil when only an app can show it).
   """
   @type prepared :: %{
           row: map(),
           token: String.t(),
-          text: String.t(),
+          spec: FermixCore.Reply.approval_spec(),
           inbox: map() | nil,
           session_id: String.t()
         }
+
+  @typedoc "One thing waiting in a chat for its owner's answer."
+  @type waiting :: %{kind: :mandate | :follow_up | :approval, id: String.t(), title: String.t()}
 
   @typedoc "Where a `/confirm` or `/deny` came from."
   @type origin :: %{platform: String.t(), chat_id: String.t(), user_id: String.t() | nil}
@@ -167,13 +191,43 @@ defmodule FermixCore.Cues.Proposals do
   def token?(@token_prefix <> rest) when byte_size(rest) > 0, do: true
   def token?(_other), do: false
 
+  @doc """
+  Whether `arg` is something `confirm/3` and `deny/3` answer: a `cp_` token or
+  a card's id (the gateway's router).
+  """
+  @spec answerable?(term()) :: boolean()
+  def answerable?(arg), do: token?(arg) or id_kind(arg) != nil
+
   @doc "The longest message a proposal may be, in characters."
   @spec max_message_chars() :: pos_integer()
   def max_message_chars, do: @max_message_chars
 
+  @doc "A fresh confirmation token: `cp_` and 32 url-safe characters."
+  @spec new_token() :: String.t()
+  def new_token,
+    do: @token_prefix <> Base.url_encode64(:crypto.strong_rand_bytes(24), padding: false)
+
+  @doc "A token's digest, the only form of it Fermix stores."
+  @spec digest(String.t()) :: String.t()
+  def digest(token) when is_binary(token),
+    do: :sha256 |> :crypto.hash(token) |> Base.encode16(case: :lower)
+
+  @doc """
+  Where Fermix asks the owner (the reach rule, C55): the owner's DM and the
+  origin an answer from it carries, else nil while an app can show the card,
+  else `{:refuse, sentence}`.
+  """
+  @spec owner_chat(keyword()) :: {:ok, {map(), origin()} | nil} | {:refuse, String.t()}
+  def owner_chat(opts \\ []) when is_list(opts) do
+    case owner_dm(opts) do
+      {:ok, inbox, origin} -> {:ok, {inbox, origin}}
+      :none -> if Mandates.app_surface?(opts), do: {:ok, nil}, else: no_reach()
+    end
+  end
+
   @doc """
   Builds the proposal of `call` at `now`: the owner's chat (nil when only an
-  app can show it), a fresh token, the expiry and the chat's message.
+  app can show it), a fresh token, the expiry and the chat's compact card.
   `{:refuse, sentence}` when Fermix can ask the owner nowhere, or when the
   message would be over #{@max_message_chars} characters (the cap holds
   whether or not a chat gets it, so every surface shows the call whole).
@@ -181,14 +235,14 @@ defmodule FermixCore.Cues.Proposals do
   @spec prepare(call(), DateTime.t(), keyword()) :: {:ok, prepared()} | {:refuse, String.t()}
   def prepare(%{mandate: %Mandates{} = mandate} = call, %DateTime{} = now, opts)
       when is_list(opts) do
-    with {:ok, chat} <- reach(opts) do
-      token = @token_prefix <> Base.url_encode64(:crypto.strong_rand_bytes(24), padding: false)
+    with {:ok, chat} <- owner_chat(opts) do
+      token = new_token()
       expires_at = DateTime.add(now, mandate.approve_within_s, :second)
-      text = message(call, token, expires_at)
+      spec = call |> card(expires_at, chat, now, opts) |> Card.spec(token)
 
-      if String.length(text) > @max_message_chars,
+      if String.length(spec.text) > @max_message_chars,
         do: {:refuse, @too_long},
-        else: {:ok, prepared(call, chat, token, expires_at, text)}
+        else: {:ok, prepared(call, chat, token, expires_at, spec)}
     end
   end
 
@@ -214,31 +268,169 @@ defmodule FermixCore.Cues.Proposals do
   end
 
   @doc """
-  The owner's `/confirm <token>` from `origin`. Returns the reply for the owner.
+  The owner's `/confirm` from `origin`, with a `cp_` token or a card's id
+  (moduledoc): handed to what holds it. Returns the reply for the owner.
   """
   @spec confirm(String.t(), origin(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
-  def confirm(token, origin, opts \\ []) when is_binary(token) and is_list(opts) do
+  def confirm(token, origin, opts \\ []) when is_binary(token) and is_list(opts),
+    do: answer(token, :confirm, origin, opts)
+
+  @doc "The owner's `/deny` from `origin`, as `confirm/3`. Returns the reply for the owner."
+  @spec deny(String.t(), origin(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
+  def deny(token, origin, opts \\ []) when is_binary(token) and is_list(opts),
+    do: answer(token, :deny, origin, opts)
+
+  @doc """
+  Everything waiting for an answer in chat `origin`, oldest first within each
+  kind: mandate proposals, follow-up cards and approval prompts that went
+  there. What a bare `/confirm` resolves to.
+  """
+  @spec waiting_in_chat(origin(), keyword()) :: {:ok, [waiting()]} | {:error, String.t()}
+  def waiting_in_chat(origin, opts \\ []) when is_list(opts) do
+    with {:ok, origin} <- checked_origin(origin),
+         {:ok, proposals} <- read({:proposal_cards, {:chat, origin}, now(opts)}, opts),
+         {:ok, triggers} <- FollowUps.waiting_in_chat(origin, opts),
+         {:ok, approvals} <- FollowUpApprovals.waiting_in_chat(origin, opts) do
+      {:ok,
+       Enum.map(proposals, &waiting_proposal/1) ++
+         Enum.map(triggers, &waiting_follow_up(&1, opts)) ++
+         Enum.map(approvals, &waiting_approval/1)}
+    else
+      {:error, why} -> {:error, refusal_reply(why)}
+    end
+  end
+
+  defp waiting_proposal(row),
+    do: %{kind: :mandate, id: row.id, title: "Run #{row.tool} for #{row.watcher || "a watcher"}?"}
+
+  defp waiting_follow_up(trigger, opts) do
+    title =
+      case FollowUps.card(trigger.id, opts) do
+        {:ok, card} ->
+          ~s(Run "#{card.follow_up.name || card.follow_up.job_id}"?)
+
+        {:error, reason} ->
+          Logger.warning("Follow-up card #{trigger.id} not read for a list: #{inspect(reason)}")
+          "A follow-up's card"
+      end
+
+    %{kind: :follow_up, id: trigger.id, title: title}
+  end
+
+  defp waiting_approval(approval) do
+    %{
+      kind: :approval,
+      id: approval.id,
+      title: "Let watcher #{approval.watcher_name || "(removed)"}'s follow-up run on its own?"
+    }
+  end
+
+  defp answer(arg, decision, origin, opts) do
+    with {:ok, origin} <- checked_origin(origin),
+         {:ok, target} <- answer_target(arg, origin, opts) do
+      dispatch(target, arg, decision, origin, opts)
+    else
+      {:error, why} -> {:error, refusal_reply(why)}
+    end
+  end
+
+  # What a token or an id answers. An id is answered only while its card waits
+  # in this chat, the fence a token's chat gives.
+  defp answer_target(@token_prefix <> _rest = token, _origin, opts) do
+    case Repo.cues_call(CuesFollowUpSql, {:token_kind, digest(token)}, repo_opts(opts)) do
+      {:ok, nil} -> {:error, :unknown}
+      {:ok, kind} -> {:ok, {:token, kind}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp answer_target(id, origin, opts) do
+    with kind when kind != nil <- id_kind(id),
+         {:ok, waiting} <- waiting_in_chat(origin, opts),
+         true <- Enum.any?(waiting, &(&1.id == id)) do
+      {:ok, {:id, kind}}
+    else
+      nil -> {:error, :unknown}
+      false -> {:error, :not_in_chat}
+      {:error, sentence} -> {:error, {:sentence, sentence}}
+    end
+  end
+
+  defp dispatch({:token, :mandate}, token, :confirm, origin, opts),
+    do: confirm_mandate(token, origin, opts)
+
+  defp dispatch({:token, :mandate}, token, :deny, origin, opts),
+    do: deny_mandate(token, origin, opts)
+
+  defp dispatch({:token, :follow_up}, token, :confirm, origin, opts),
+    do: FollowUps.confirm(token, origin, opts)
+
+  defp dispatch({:token, :follow_up}, token, :deny, origin, opts),
+    do: FollowUps.deny(token, origin, opts)
+
+  defp dispatch({:token, :approval}, token, :confirm, origin, opts),
+    do: FollowUpApprovals.confirm(token, origin, opts)
+
+  defp dispatch({:token, :approval}, token, :deny, origin, opts),
+    do: FollowUpApprovals.deny(token, origin, opts)
+
+  defp dispatch({:id, :mandate}, id, decision, origin, opts),
+    do: decide_mandate_in_chat(id, decision, origin, opts)
+
+  defp dispatch({:id, :follow_up}, id, decision, origin, opts) do
+    with {:ok, trigger} <- FollowUps.decide(id, decision, chat_label(origin), opts),
+         do: FollowUps.answered(trigger, opts)
+  end
+
+  defp dispatch({:id, :approval}, id, decision, origin, opts),
+    do: FollowUpApprovals.decide(id, decision, chat_label(origin), opts)
+
+  defp confirm_mandate(token, origin, opts) do
     now = now(opts)
 
-    with {:ok, origin} <- checked_origin(origin),
-         {:ok, proposal} <- repo_call({:confirm_proposal, digest(token), origin, now}, opts) do
-      lifecycle(:confirmed, proposal, %{state: "confirmed", kind: origin.platform})
-      run_confirmed(proposal, now, opts)
-    else
+    case repo_call({:confirm_proposal, digest(token), origin, now}, opts) do
+      {:ok, proposal} ->
+        lifecycle(:confirmed, proposal, %{state: "confirmed", kind: origin.platform})
+        run_confirmed(proposal, now, opts)
+
+      {:error, why} ->
+        {:error, refusal_reply(why)}
+    end
+  end
+
+  defp deny_mandate(token, origin, opts) do
+    case repo_call({:deny_proposal, digest(token), origin, now(opts)}, opts) do
+      {:ok, proposal} -> {:ok, denied(proposal, origin.platform, opts)}
       {:error, why} -> {:error, refusal_reply(why)}
     end
   end
 
-  @doc "The owner's `/deny <token>` from `origin`. Returns the reply for the owner."
-  @spec deny(String.t(), origin(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
-  def deny(token, origin, opts \\ []) when is_binary(token) and is_list(opts) do
-    with {:ok, origin} <- checked_origin(origin),
-         {:ok, proposal} <- repo_call({:deny_proposal, digest(token), origin, now(opts)}, opts) do
-      {:ok, denied(proposal, origin.platform, opts)}
-    else
-      {:error, why} -> {:error, refusal_reply(why)}
+  # A chat's answer by id is the token's answer: the same reply, the call run
+  # here, so the chat hears its outcome.
+  defp decide_mandate_in_chat(id, decision, origin, opts) do
+    now = now(opts)
+    request = {:decide_proposal, id, to_state(decision), chat_label(origin), now}
+
+    case {decision, repo_call(request, opts)} do
+      {:confirm, {:ok, proposal}} ->
+        lifecycle(:confirmed, proposal, %{state: "confirmed", kind: origin.platform})
+        run_confirmed(proposal, now, opts)
+
+      {:deny, {:ok, proposal}} ->
+        {:ok, denied(proposal, origin.platform, opts)}
+
+      {_decision, {:error, why}} ->
+        {:error, refusal_reply(why)}
     end
   end
+
+  # A chat's answer is recorded as `<platform>:<chat>:<user>`, as a token's.
+  defp chat_label(origin), do: Enum.join([origin.platform, origin.chat_id, origin.user_id], ":")
+
+  defp id_kind(id) when is_binary(id) and byte_size(id) > 4,
+    do: Map.get(@id_kinds, binary_part(id, 0, 4))
+
+  defp id_kind(_other), do: nil
 
   @doc """
   What an app surface lists: Fermix's record of every proposal still waiting
@@ -270,12 +462,22 @@ defmodule FermixCore.Cues.Proposals do
 
   @doc """
   The card of every proposal still waiting, oldest first (at most
-  #{@max_waiting}): what an app that connects is shown.
+  #{@max_waiting}), then every follow-up card and approval prompt still
+  waiting: what an app that connects is shown.
   """
   @spec waiting_cards(keyword()) :: {:ok, [ProposalView.card()]} | {:error, :memory_off | term()}
   def waiting_cards(opts \\ []) when is_list(opts) do
-    with {:ok, rows} <- read(list_request(:waiting, now(opts)), opts) do
-      {:ok, Enum.map(rows, &ProposalView.card/1)}
+    with {:ok, rows} <- read(list_request(:waiting, now(opts)), opts),
+         {:ok, follow_ups} <- memory_read(&FollowUps.waiting_cards(@max_waiting, &1), opts),
+         {:ok, approvals} <- memory_read(&FollowUpApprovals.waiting_cards(@max_waiting, &1), opts) do
+      {:ok, Enum.map(rows, &ProposalView.compact_card/1) ++ follow_ups ++ approvals}
+    end
+  end
+
+  defp memory_read(fun, opts) do
+    case fun.(opts) do
+      {:error, :disabled} -> {:error, :memory_off}
+      result -> result
     end
   end
 
@@ -288,13 +490,44 @@ defmodule FermixCore.Cues.Proposals do
   its own. Answers Fermix's record as soon as the decision is recorded:
   `denied`, or `confirmed` with no `result_status` while its call runs; every
   app surface hears the outcome (`{:resolved, …}`). A refusal is the owner's
-  sentence, and nothing ran.
+  sentence, and nothing ran. A follow-up's card (`cft_`) or an approval's
+  prompt (`cfa_`) goes to `Cues.FollowUps.decide/4` or
+  `Cues.FollowUpApprovals.decide/4`, answering its card as it now stands.
   """
   @spec decide(String.t(), :confirm | :deny, app_origin(), keyword()) ::
-          {:ok, ProposalView.record()} | {:error, String.t()}
+          {:ok, ProposalView.record() | map()} | {:error, String.t()}
   def decide(proposal_id, decision, %{surface: surface} = origin, opts \\ [])
       when is_binary(proposal_id) and decision in [:confirm, :deny] and
              surface in @app_surfaces and is_list(opts) do
+    case id_kind(proposal_id) do
+      :follow_up -> decide_follow_up(proposal_id, decision, origin, opts)
+      :approval -> decide_approval(proposal_id, decision, origin, opts)
+      _mandate_or_unknown -> decide_mandate(proposal_id, decision, origin, opts)
+    end
+  end
+
+  # A follow-up's card or an approval's prompt, answered from a device: its
+  # record is the card as it now stands.
+  defp decide_follow_up(id, decision, origin, opts) do
+    with {:ok, _trigger} <- FollowUps.decide(id, decision, decided_from(origin), opts) do
+      case FollowUps.card(id, opts) do
+        {:ok, card} -> {:ok, Map.drop(ProposalView.follow_up_card(card, opts), [:outside])}
+        other -> decided_record(other, id)
+      end
+    end
+  end
+
+  defp decide_approval(id, decision, origin, opts) do
+    with {:ok, _line} <- FollowUpApprovals.decide(id, decision, decided_from(origin), opts) do
+      case FollowUpApprovals.card(id, opts) do
+        {:ok, card} -> {:ok, ProposalView.approval_card(card, opts)}
+        other -> decided_record(other, id)
+      end
+    end
+  end
+
+  defp decide_mandate(proposal_id, decision, origin, opts) do
+    surface = origin.surface
     now = now(opts)
     request = {:decide_proposal, proposal_id, to_state(decision), decided_from(origin), now}
 
@@ -353,15 +586,6 @@ defmodule FermixCore.Cues.Proposals do
 
   # --- proposing -----------------------------------------------------------------------
 
-  # Where Fermix can ask the owner (the reach rule, C55): the owner's chat when
-  # there is one, else nil while an app can show the proposal, else nowhere.
-  defp reach(opts) do
-    case owner_dm(opts) do
-      {:ok, inbox, origin} -> {:ok, {inbox, origin}}
-      :none -> if Mandates.app_surface?(opts), do: {:ok, nil}, else: no_reach()
-    end
-  end
-
   defp no_reach, do: {:refuse, Mandates.approve_inbox_sentence()}
 
   # The owner's DM and the origin a confirm from it carries
@@ -376,13 +600,13 @@ defmodule FermixCore.Cues.Proposals do
     end
   end
 
-  defp prepared(call, chat, token, expires_at, text) do
+  defp prepared(call, chat, token, expires_at, spec) do
     {inbox, origin} = chat || {nil, @no_chat}
 
     %{
       row: row(call, origin, token, expires_at),
       token: token,
-      text: text,
+      spec: spec,
       inbox: inbox,
       session_id: call.session_id
     }
@@ -428,9 +652,9 @@ defmodule FermixCore.Cues.Proposals do
     sent = Map.merge(prepared.row, %{session_id: prepared.session_id, mandate_call_id: call_id})
     lifecycle(:proposed, sent, %{state: "waiting"})
 
-    case card(id, opts) do
-      {:ok, card} -> announce({:offered, card}, opts)
-      {:error, reason} -> Logger.error("Proposal #{id} not offered: #{inspect(reason)}")
+    case read({:proposal_card, id}, opts) do
+      {:ok, %{} = row} -> announce({:offered, ProposalView.compact_card(row)}, opts)
+      other -> Logger.error("Proposal #{id} not offered: #{inspect(other)}")
     end
 
     {:proposed, id}
@@ -450,18 +674,18 @@ defmodule FermixCore.Cues.Proposals do
   # No chat with the owner: only an app shows it (`reach/1` let it through).
   defp deliver(%{inbox: nil}, _opts), do: :ok
 
-  defp deliver(%{inbox: inbox, text: text, token: token}, opts) do
+  defp deliver(%{inbox: inbox, spec: spec}, opts) do
     case Keyword.get_lazy(opts, :proposal_sender, &registered_sender/0) do
       nil -> {:error, :no_proposal_sender}
-      send_fun when is_function(send_fun, 3) -> guarded_send(send_fun, inbox, text, token)
+      send_fun when is_function(send_fun, 2) -> guarded_send(send_fun, inbox, spec)
     end
   end
 
   # A sender that raises after the proposal was stored is a send that failed:
   # the proposal is refused, so no waiting proposal is left that nobody saw.
   # The raise is logged with its stacktrace, the token taken out of it.
-  defp guarded_send(send_fun, inbox, text, token) do
-    send_fun.(inbox, text, token)
+  defp guarded_send(send_fun, inbox, %{token: token} = spec) do
+    send_fun.(inbox, spec)
   catch
     kind, reason ->
       formatted =
@@ -479,51 +703,29 @@ defmodule FermixCore.Cues.Proposals do
   defp registered_sender do
     case Application.get_env(:fermix_core, :cue_proposal_sender) do
       nil -> nil
-      module when is_atom(module) -> &module.send_cue_proposal/3
+      module when is_atom(module) -> &module.send_cue_proposal/2
     end
   end
 
-  # --- the owner's message ---------------------------------------------------------------
+  # --- the owner's card ------------------------------------------------------------------
 
-  defp message(call, token, expires_at) do
-    """
-    Fermix: a task wants to act under your mandate #{call.mandate.name}, and runs it only if \
-    you confirm.
+  # The compact card (§6.3); `chat` is where it goes, nil when only an app shows it.
+  defp card(call, expires_at, chat, now, opts) do
+    card_opts = [now: now, chat: chat && elem(chat, 1)] ++ Keyword.take(opts, [:personalization])
 
-    Task: #{call.mandate.job_name || call.job_id} (job #{call.job_id})
-    Watcher: #{Map.get(call.cue, :watcher_name) || "unknown"}
-    Call: #{call.tool}, with the arguments the task wrote from outside text:
-    #{UntrustedContent.frame(call.tool, pretty(call.args))}
-
-    The cue it acted on, from #{Map.get(call.cue, :source_ref)}:
-    #{UntrustedContent.frame("cue:" <> to_string(Map.get(call.cue, :source_ref)), snapshot_text(call.snapshot))}
-
-    It waits until #{time_text(expires_at)}. Confirm with `/confirm #{token}` or deny with \
-    `/deny #{token}`.\
-    """
+    Card.mandate(
+      %{
+        tool: call.tool,
+        args: call.args,
+        mandate: call.mandate.name,
+        task: call.mandate.job_name || call.job_id,
+        cue: call.cue,
+        snapshot: call.snapshot,
+        expires_at: expires_at
+      },
+      card_opts
+    )
   end
-
-  defp pretty(args), do: Jason.encode!(args, pretty: true)
-
-  defp snapshot_text(nil), do: "(Fermix no longer keeps this cue's snapshot.)"
-
-  defp snapshot_text(snapshot) when is_binary(snapshot) do
-    case Jason.decode(snapshot) do
-      {:ok, %{} = fields} -> snapshot_lines(fields)
-      _not_json -> snapshot
-    end
-  end
-
-  defp snapshot_lines(fields) do
-    [
-      "Type: #{Map.get(fields, "type") || "not given"}",
-      "Subject: #{Map.get(fields, "subject") || "none"}",
-      to_string(Map.get(fields, "text") || "")
-    ]
-    |> Enum.join("\n")
-  end
-
-  defp time_text(%DateTime{} = at), do: Clock.stated_instant(at)
 
   # --- confirming ----------------------------------------------------------------------
 
@@ -867,6 +1069,9 @@ defmodule FermixCore.Cues.Proposals do
     do: UntrustedContent.frame(tool, bounded(summary, @max_reply_chars))
 
   defp refusal_reply(:unknown), do: "That confirmation is not known to Fermix."
+  defp refusal_reply(:not_in_chat), do: "That card is not waiting in this chat; nothing ran."
+  defp refusal_reply({:sentence, sentence}), do: sentence
+  defp refusal_reply(:memory_off), do: "Cues keep their records in memory, which is off."
   defp refusal_reply(:unknown_id), do: "Fermix has no proposal with that id; nothing ran."
   defp refusal_reply(:disabled), do: "Cues keep their records in memory, which is off."
 
@@ -981,11 +1186,15 @@ defmodule FermixCore.Cues.Proposals do
     end
   end
 
-  # Every app surface hears it through the listener the channels application
-  # registered (none in core alone). A listener that raises is logged: the
-  # decision it reports is already recorded, and an app reads it again at its
-  # next connect.
-  defp announce(event, opts) do
+  @doc """
+  Tells every app surface of a card offered or ended (`event`), through the
+  listener the channels application registered (none in core alone): a
+  mandate's proposal, a follow-up's card or an approval's prompt. A listener
+  that raises is logged: the decision it reports is already recorded, and an
+  app reads it again at its next connect.
+  """
+  @spec announce(event(), keyword()) :: :ok
+  def announce(event, opts) when is_list(opts) do
     case Keyword.get_lazy(opts, :proposal_listener, &registered_listener/0) do
       nil -> :ok
       listener when is_function(listener, 1) -> guarded_announce(listener, event)
@@ -1020,14 +1229,13 @@ defmodule FermixCore.Cues.Proposals do
     end
   end
 
-  defp digest(token), do: :sha256 |> :crypto.hash(token) |> Base.encode16(case: :lower)
-
   defp bounded(text, max) do
     if String.length(text) > max, do: String.slice(text, 0, max) <> "…", else: text
   end
 
   defp now(opts), do: Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
 
-  defp repo_call(request, opts),
-    do: Repo.cues_call(CuesMandateSql, request, server: Keyword.get(opts, :repo, Repo))
+  defp repo_call(request, opts), do: Repo.cues_call(CuesMandateSql, request, repo_opts(opts))
+
+  defp repo_opts(opts), do: [server: Keyword.get(opts, :repo, Repo)]
 end

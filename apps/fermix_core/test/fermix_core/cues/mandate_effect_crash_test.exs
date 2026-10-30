@@ -154,8 +154,8 @@ defmodule FermixCore.Cues.MandateEffectCrashTest do
     test "a run killed right after the proposal went out: the owner has it, and the report says so once" do
       {fixture, context} = run!("crash_propose", %{"mode" => "approve"})
 
-      sender = fn inbox, text, token ->
-        send(F.pid_of(inbox.destination), {:proposal, text, token})
+      sender = fn inbox, spec ->
+        send(F.pid_of(inbox.destination), {:proposal, spec.text, spec.token})
         Process.exit(self(), :kill)
       end
 

@@ -267,7 +267,9 @@ defmodule FermixCore.Cues.FollowUpsTest do
       refute inspect(Map.drop(card, [:outside])) =~ "Limits reset"
       assert_received {:notice, _watcher, :follow_up_recovered, %{}}
 
-      assert {:ok, "Starting the follow-up."} = FollowUps.confirm(@token, @owner, wake_opts(ctx))
+      # The card becomes one line naming the item (§3.3).
+      assert {:ok, line} = FollowUps.confirm(@token, @owner, wake_opts(ctx))
+      assert line =~ ~s(Running "Codex review" for the item from post-1 · )
       assert_received :woken
 
       assert [%{state: "starting", decided_from: "telegram:chat-1:owner-1"}] =
@@ -307,7 +309,7 @@ defmodule FermixCore.Cues.FollowUpsTest do
       assert {:error, "Fermix does not know where that answer came from; nothing changed."} =
                FollowUps.decide(trigger.id, :confirm, "somewhere", opts(ctx))
 
-      assert {:ok, "Skipped; the follow-up did not run."} =
+      assert {:ok, ~s(Skipped "Codex review"; it did not run.)} =
                FollowUps.deny(@token, @owner, opts(ctx))
 
       assert [%{state: "skipped", reason: "You skipped it."}] = triggers(ctx, watcher)

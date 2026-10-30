@@ -22,20 +22,39 @@ defmodule FermixCore.Reply do
   token); every other channel delivers the text alone — the text already carries
   the tap-to-copy `/confirm <token>` command, so no button is a full fallback,
   not a degraded state.
+
+  A watcher's card (`:follow_up`, and a mandate's proposal, `:mandate`;
+  `FermixCore.Cues.Card`) also carries its visible `lines`, its expandable
+  `detail` and its two `actions`' words, so a channel with buttons draws it
+  compactly; `text` is the whole card for every other chat.
   """
   @type approval_spec :: %{
-          required(:kind) => :sandbox | :soul,
+          required(:kind) => :sandbox | :soul | :follow_up | :mandate,
           required(:text) => String.t(),
           required(:token) => String.t(),
           optional(:detail) => String.t() | nil,
-          optional(:ttl_s) => pos_integer()
+          optional(:ttl_s) => pos_integer(),
+          optional(:lines) => [String.t()],
+          optional(:actions) => %{confirm: String.t(), deny: String.t()}
         }
   @type approval_prompt ::
           {:approval_prompt, text :: String.t(), token :: String.t()}
           | {:approval_prompt, approval_spec()}
 
+  @typedoc """
+  The answer to a tap on a watcher's card: `text` replaces the card the tap
+  came from (`message_id`, the platform's id of that message), and its buttons
+  go (M60_WATCHER_CODING_RUNS.md §6.2). A channel that cannot edit a message
+  sends `text` as a reply.
+  """
+  @type approval_answer :: {:approval_answer, message_id :: String.t(), text :: String.t()}
+
   @type outbound ::
-          {:text, String.t()} | {:media, media_part()} | {:react, String.t()} | approval_prompt()
+          {:text, String.t()}
+          | {:media, media_part()}
+          | {:react, String.t()}
+          | approval_prompt()
+          | approval_answer()
   @type reply_fn :: (outbound() -> :ok | {:error, term()})
 
   @doc """

@@ -497,6 +497,25 @@ defmodule FermixCore.Management.CopyTest do
         assert_clean(record.status_sentence, :prose, [row.tool], "proposal #{row.state}")
       end
     end
+
+    # M60_WATCHER_CODING_RUNS.md §6.2: a watcher's follow-up card and an
+    # automatic follow-up's approval prompt reach the Mac's chat as cards,
+    # their summary and status sentence drawn verbatim.
+    test "every follow-up card and approval prompt sentence obeys the rules" do
+      names = ["codex-limits", "Codex review"]
+
+      for state <- ~w(waiting starting started skipped expired refused) do
+        card = ProposalView.follow_up_card(follow_up_card(state), [])
+        assert_clean(card.summary, :prose, names, "follow-up summary")
+        assert_clean(card.status_sentence, :prose, names, "follow-up #{state}")
+      end
+
+      for state <- ~w(waiting approved denied expired) do
+        card = ProposalView.approval_card(approval_card(state), [])
+        assert_clean(card.summary, :prose, names, "approval summary")
+        assert_clean(card.status_sentence, :prose, names, "approval #{state}")
+      end
+    end
   end
 
   describe "the sentences the management modules write" do
@@ -918,6 +937,60 @@ defmodule FermixCore.Management.CopyTest do
       Map.put(base, :state, "refused"),
       Map.merge(base, %{state: "refused", decided_from: "companion"})
     ]
+  end
+
+  defp follow_up_card(state) do
+    %{
+      trigger_id: "cft_1",
+      state: state,
+      mode: "approve",
+      reason: if(state == "refused", do: "Not started: it is already running."),
+      created_at: ~U[2026-10-30 12:00:00Z],
+      expires_at: ~U[2026-10-30 12:30:00Z],
+      decided_at: nil,
+      decided_from: nil,
+      run_id: nil,
+      watcher: %{id: "cwt_1", name: "codex-limits"},
+      follow_up: %{
+        job_id: "job_1",
+        name: "Codex review",
+        instructions: "Review the last day's commits on dev.",
+        tools: ["codex_run"],
+        delivery: %{mode: "origin", target: %{"platform" => "telegram", "chat_id" => "1"}}
+      },
+      outside: %{
+        source_ref: "x-feed",
+        received_at: ~U[2026-10-30 11:59:00Z],
+        occurred_at: nil,
+        type: "x.post",
+        subject: "limits",
+        text: "Limits reset.",
+        reason: "a reset"
+      }
+    }
+  end
+
+  defp approval_card(state) do
+    %{
+      id: "cfa_1",
+      watcher_id: "cwt_1",
+      watcher_name: "codex-limits",
+      shown_digest: "d",
+      state: state,
+      created_at: ~U[2026-10-30 12:00:00Z],
+      expires_at: ~U[2026-10-30 12:30:00Z],
+      decided_at: nil,
+      decided_from: nil,
+      daily_cap: 5,
+      sources: ["x-feed"],
+      listen_for: ["reset"],
+      job_id: "job_1",
+      job_name: "Codex review",
+      task_prompt: "Review the last day's commits on dev.",
+      allowed_tools: ["codex_run"],
+      delivery_mode: "origin",
+      delivery_target: %{"platform" => "telegram", "chat_id" => "1"}
+    }
   end
 
   defp mcp_presence(server, stored?) do

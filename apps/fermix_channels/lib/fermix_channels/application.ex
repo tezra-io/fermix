@@ -68,6 +68,15 @@ defmodule FermixChannels.Application do
       FermixChannels.Gateway.OwnerInboxApproval
     )
 
+    # A watcher's card (a follow-up waiting to run, or an automatic
+    # follow-up's approval prompt) goes the way a proposal goes, through this
+    # sender beside it, registered here for the same reason.
+    Application.put_env(
+      :fermix_core,
+      :cue_follow_up_sender,
+      FermixChannels.Gateway.OwnerInboxApproval
+    )
+
     # Every waiting proposal is offered to the Mac app's chat, and its end told
     # there (M60 app surface §3.7): core announces through this listener, which
     # registers itself here for the same reason.

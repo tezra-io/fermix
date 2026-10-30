@@ -30,6 +30,8 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   # The events version 4 brought (M60 app surface §3.7): a mandate's proposals.
   @version_4_client_events ~w(proposal_answer)
   @version_4_server_events ~w(proposal proposal_resolved)
+  # The follow-up's fields of a card version 5 brought (M60_WATCHER_CODING_RUNS.md §6.2).
+  @follow_up_fields ~w(asks name instructions tools reports_to daily_cap set_off_by)
 
   setup_all do
     %{
@@ -102,9 +104,6 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     schema: schema,
     protocol: protocol
   } do
-    assert Protocol.protocol_version() == 4
-    assert Protocol.supported_version_range() == {3, 4}
-
     for type <- @version_4_client_events do
       assert Protocol.client_event_version(type) == 4, "#{type} is not a version 4 event"
       assert schema["$defs"][type]["x-since-version"] == 4
@@ -125,13 +124,37 @@ defmodule FermixCore.Companion.ProtocolContractTest do
              "Only the owner can answer a proposal, from the Fermix app or a paired phone."
   end
 
+  # M60_WATCHER_CODING_RUNS.md §6.2: a watcher's follow-up card needs version
+  # 5, since a version 4 client requires a mandate's call on every card; it is
+  # answered and ended as a proposal is.
+  test "a follow-up's card is version 5's, and only such a card needs it", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    assert Protocol.protocol_version() == 5
+    assert Protocol.supported_version_range() == {4, 5}
+    assert schema["$defs"]["followUpCard"]["x-since-version"] == 5
+
+    assert schema["$defs"]["followUpCard"]["properties"] |> Map.keys() |> Enum.sort() ==
+             Enum.sort(@follow_up_fields)
+
+    goldens = @server_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "proposal"))
+    {follow_ups, mandates} = Enum.split_with(goldens, &Map.has_key?(&1["proposal"], "follow_up"))
+
+    assert Enum.map(follow_ups, & &1["proposal"]["follow_up"]["asks"]) == ["run", "automatic"]
+    assert Enum.all?(follow_ups, &(Protocol.server_payload_version("proposal", &1) == 5))
+    assert Enum.all?(mandates, &(Protocol.server_payload_version("proposal", &1) == 4))
+    assert protocol =~ "### Version 5: a watcher's follow-ups on the owner's devices"
+    assert protocol =~ "Every version 4 event, field and rule holds unchanged on version 5."
+  end
+
   # The schema names every field of the card the engine builds, and bounds the
   # outside text as the codec does; the golden cards are the engine's shape.
   test "the proposal card's schema is the card Cues.ProposalView builds", %{schema: schema} do
     card_def = schema["$defs"]["proposalCard"]
 
     built =
-      ProposalView.card(%{
+      ProposalView.compact_card(%{
         id: "cpr_1",
         state: "confirmed",
         mandate: "release-issues",
@@ -148,11 +171,17 @@ defmodule FermixCore.Companion.ProtocolContractTest do
         args_json: ~s({"title":"Phoenix 2.0"}),
         received_at: ~U[2026-10-10 11:59:00Z],
         occurred_at: ~U[2026-10-10 11:58:30Z],
-        snapshot: ~s({"type":"release","subject":"phoenix","text":"Phoenix 2.0 is out."})
+        snapshot: ~s({"type":"release","subject":"phoenix","text":"Phoenix 2.0 is out."}),
+        decision_reason: "a Phoenix release"
       })
 
     assert built |> Map.keys() |> Enum.map(&Atom.to_string/1) |> Enum.sort() ==
              card_def["properties"] |> Map.keys() |> Enum.sort()
+
+    assert built.outside |> Map.keys() |> Enum.map(&Atom.to_string/1) |> Enum.sort() ==
+             card_def["properties"]["outside"]["properties"] |> Map.keys() |> Enum.sort()
+
+    assert [%{name: "title", value: "Phoenix 2.0"}] = built.outside.args
 
     assert built.task |> Map.keys() |> Enum.map(&Atom.to_string/1) |> Enum.sort() ==
              card_def["properties"]["task"]["properties"] |> Map.keys() |> Enum.sort()

@@ -52,6 +52,9 @@ defmodule FermixCore.Cues.Sweeper do
     # A follow-up's card nobody answered within 30 minutes becomes `expired`;
     # nothing runs (M60_WATCHER_CODING_RUNS.md §4.5).
     {:follow_up_expiry, &FermixCore.Cues.FollowUps.expire/3},
+    # An automatic follow-up's approval prompt nobody answered within 30
+    # minutes becomes `expired`; the follow-up keeps asking first (§5).
+    {:follow_up_approval_expiry, &FermixCore.Cues.FollowUpApprovals.expire/3},
     {:proposal_unknown_outcomes, &FermixCore.Cues.Proposals.report_unknown/3},
     # An allowed call in auto mode that never reported, once its run ended, is
     # finished `unknown` and never run again; the run's report already told

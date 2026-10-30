@@ -2914,7 +2914,8 @@ defmodule FermixOpik.AggregationTest do
                  passed dropped filter_retry filter_held filter_failed claimed settled retry
                  exhausted proposed confirmed denied proposal_expired proposal_refused
                  follow_up_triggered follow_up_decided follow_up_expired follow_up_refused
-                 follow_up_started)a
+                 follow_up_started follow_up_approval_asked follow_up_approval_decided
+                 follow_up_approval_expired)a
   @cue_run_session "cron_job-8_20261017_120000_a1b2c3"
 
   # The emitter's own metadata shape (FermixCore.Cues.Telemetry): ids, labels

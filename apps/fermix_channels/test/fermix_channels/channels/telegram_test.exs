@@ -213,6 +213,9 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert msg.reply_target == "123"
       assert msg.thread_ts == 9
       assert msg.metadata.user_id == "111"
+      # The tapped message rides along, so a watcher's card can become its
+      # answer (M60_WATCHER_CODING_RUNS.md §6.2).
+      assert msg.metadata.approval_message_id == "55"
     end
 
     test "synthesizes a /deny message from a denial tap" do
@@ -1139,6 +1142,99 @@ defmodule FermixChannels.Channels.TelegramTest do
 
       assert_received {:telegram_request, _path, body}
       assert body["message_thread_id"] == 77
+    end
+  end
+
+  # -- send_approval/2 (kind-aware) and edit_approval/3 --
+
+  describe "send_approval/2" do
+    defp card_message do
+      Message.new!(%{
+        id: "1",
+        content: "x",
+        sender: "fermix",
+        channel: "telegram",
+        chat_id: "123",
+        reply_target: "123",
+        thread_ts: nil
+      })
+    end
+
+    defp card_spec(kind) do
+      %{
+        kind: kind,
+        text: "the whole card",
+        token: "cp_TOKEN",
+        lines: [~s(Run "Deploy <check>"?), ~s(❝ ops, 2 min ago: "a & b"), "Expires 2:32 PM UTC"],
+        detail: "Details\nThe item, whole: <b>not markup</b>",
+        actions: %{confirm: "▶ Run", deny: "Skip"}
+      }
+    end
+
+    # M60_WATCHER_CODING_RUNS.md §6.2: raw HTML, the detail behind an
+    # expandable quote, outside text never markup, Run and Skip.
+    test "a watcher's card goes as raw HTML with its detail expandable and Run and Skip" do
+      for kind <- [:follow_up, :mandate] do
+        stub_telegram(self(), 200, %{"ok" => true})
+        assert :ok = Telegram.send_approval(card_message(), card_spec(kind))
+
+        assert_received {:telegram_request, "/bottest-bot-token/sendMessage", body}
+        assert body["parse_mode"] == "HTML"
+
+        assert body["text"] ==
+                 "<b>Run \"Deploy &lt;check&gt;\"?</b>\n" <>
+                   "❝ ops, 2 min ago: \"a &amp; b\"\nExpires 2:32 PM UTC\n" <>
+                   "<blockquote expandable>Details\nThe item, whole: " <>
+                   "&lt;b&gt;not markup&lt;/b&gt;</blockquote>"
+
+        assert body["reply_markup"]["inline_keyboard"] == [
+                 [
+                   %{"text" => "▶ Run", "callback_data" => "grant:cp_TOKEN"},
+                   %{"text" => "Skip", "callback_data" => "deny:cp_TOKEN"}
+                 ]
+               ]
+      end
+    end
+
+    test "a sandbox approval gets the one-tap buttons; a SOUL.md change its text alone" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      assert :ok =
+               Telegram.send_approval(card_message(), %{
+                 kind: :sandbox,
+                 text: "Approve with `/confirm TOK12345`",
+                 token: "TOK12345",
+                 ttl_s: 60
+               })
+
+      assert_received {:telegram_request, _path, sandbox}
+
+      assert [[%{"text" => "✅ Approve"}, %{"text" => "❌ Deny"}]] =
+               sandbox["reply_markup"]["inline_keyboard"]
+
+      assert :ok =
+               Telegram.send_approval(card_message(), %{
+                 kind: :soul,
+                 text: "Send /soul apply SOUL-T",
+                 token: "SOUL-T"
+               })
+
+      assert_received {:telegram_request, _path, soul}
+      refute Map.has_key?(soul, "reply_markup")
+      assert soul["text"] =~ "/soul apply SOUL-T"
+    end
+
+    test "a tapped card is edited to its answer's line, its buttons gone" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      assert :ok =
+               Telegram.edit_approval(card_message(), "55", ~s(Skipped "a <b>"; it did not run.))
+
+      assert_received {:telegram_request, "/bottest-bot-token/editMessageText", body}
+      assert body["chat_id"] == "123"
+      assert body["message_id"] == 55
+      assert body["text"] == ~s(Skipped "a &lt;b&gt;"; it did not run.)
+      refute Map.has_key?(body, "reply_markup")
     end
   end
 

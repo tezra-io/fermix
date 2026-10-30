@@ -31,7 +31,15 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.ReplyContext
   alias FermixCore.Capabilities.AccessGate
+  alias FermixCore.Cues.Card, as: CueCard
+  alias FermixCore.Cues.Mandates
+  alias FermixCore.Cues.Proposals, as: CueProposals
   alias FermixCore.Delivery.OwnerInbox
+
+  require Logger
+
+  # Where a card went when only an app can show it: no token and no chat.
+  @app_only %{token_digest: nil, platform: nil, chat_id: nil, user_id: nil}
 
   @type request :: %{
           required(:access_sensitive) => String.t(),
@@ -66,28 +74,84 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
 
   @doc """
   Sends a mandate proposal (M60 §10.9) to the owner DM `inbox` that core
-  resolved and recorded on the proposal, through `Gateway.Delivery` as an
-  approval prompt: Telegram shows its one-tap buttons, whose taps send the
-  same `/confirm <token>` and `/deny <token>` the text carries for every other
-  channel. Nothing is stored here: the proposal and its token's digest are
-  durable in core, which checks the answer's origin. Core reaches this through
-  `config :fermix_core, :cue_proposal_sender`, registered by
-  `FermixChannels.Application`. Seam: `:adapter`.
+  resolved and recorded on the proposal, through `Gateway.Delivery` as its
+  compact card (`spec`, `Cues.Card.spec/2`): Telegram draws it with Run and
+  Skip, whose taps send the same `/confirm <token>` and `/deny <token>` the
+  card's text answers for every other channel. Nothing is stored here: the
+  proposal and its token's digest are durable in core, which checks the
+  answer's origin. Core reaches this through `config :fermix_core,
+  :cue_proposal_sender`, registered by `FermixChannels.Application`. Seam:
+  `:adapter`.
   """
   @spec send_cue_proposal(
           %{required(:platform) => String.t(), required(:destination) => String.t()},
-          String.t(),
-          String.t(),
+          FermixCore.Reply.approval_spec(),
           keyword()
         ) :: :ok | {:error, term()}
-  def send_cue_proposal(%{platform: platform} = inbox, text, token, opts \\ [])
-      when is_binary(platform) and is_binary(text) and is_binary(token) and is_list(opts) do
+  def send_cue_proposal(%{platform: platform} = inbox, %{token: token} = spec, opts \\ [])
+      when is_binary(platform) and is_binary(token) and is_list(opts) do
     with {:ok, _origin} <- dm_inbox(inbox),
          {:ok, adapter} <- adapter(platform, opts) do
-      adapter
-      |> ReplyContext.new(inbox_message(inbox))
-      |> Delivery.deliver({:approval_prompt, text, token})
+      deliver_card(adapter, inbox, spec)
     end
+  end
+
+  @doc """
+  Sends a watcher's card (M60_WATCHER_CODING_RUNS.md §6): a follow-up waiting
+  to run, or an automatic follow-up's approval prompt, as core read it
+  (`Cues.FollowUps.card/2`, `Cues.FollowUpApprovals.card/2`). The way a
+  proposal goes, beside it: the reach rule (`Cues.Proposals.owner_chat/1`), a
+  fresh `cp_` token, the compact card (`Cues.Card.of/2`) delivered to the
+  owner's DM, and where it went answered for core to record: the token's
+  digest and the DM's origin. With no DM, or a send that failed, while an
+  app can show it, it is answered with no chat, and only the apps show it;
+  with neither, it is refused. Core reaches this through `config
+  :fermix_core, :cue_follow_up_sender`, registered by
+  `FermixChannels.Application`. Seams: `:adapter`, `:now`, and
+  `Cues.Proposals.owner_chat/1`'s.
+  """
+  @spec send_follow_up(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def send_follow_up(card, opts \\ []) when is_map(card) and is_list(opts) do
+    case CueProposals.owner_chat(opts) do
+      {:ok, {inbox, origin}} -> send_follow_up_card(card, inbox, origin, opts)
+      {:ok, nil} -> {:ok, @app_only}
+      {:refuse, sentence} -> {:error, {:unreachable, sentence}}
+    end
+  end
+
+  defp send_follow_up_card(card, inbox, origin, opts) do
+    token = CueProposals.new_token()
+    card_opts = [now: Keyword.get_lazy(opts, :now, &DateTime.utc_now/0), chat: origin]
+    spec = card |> CueCard.of(card_opts) |> CueCard.spec(token)
+
+    with {:ok, adapter} <- adapter(inbox.platform, opts),
+         :ok <- deliver_card(adapter, inbox, spec) do
+      {:ok,
+       Map.put(
+         Map.take(origin, [:platform, :chat_id, :user_id]),
+         :token_digest,
+         CueProposals.digest(token)
+       )}
+    else
+      {:error, reason} -> app_only_or_refused(reason, opts)
+    end
+  end
+
+  # A chat that could not be reached refuses the card only where no app can
+  # show it (the reach rule).
+  defp app_only_or_refused(reason, opts) do
+    if Mandates.app_surface?(opts) do
+      Logger.warning("A watcher's card did not reach the owner's chat: #{inspect(reason)}")
+      {:ok, @app_only}
+    else
+      {:error, reason}
+    end
+  end
+
+  defp deliver_card(adapter, inbox, spec) do
+    adapter
+    |> ReplyContext.new(inbox_message(inbox))
+    |> Delivery.deliver({:approval_prompt, spec})
   end
 
   defp owner_dm(opts) do

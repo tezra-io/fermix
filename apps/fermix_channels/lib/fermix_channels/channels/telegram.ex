@@ -134,13 +134,20 @@ defmodule FermixChannels.Channels.Telegram do
     end
   end
 
+  # The tapped message's id rides along, so the answer to a watcher's card
+  # replaces the card (`edit_approval/3`).
   defp synthesize_approval_action(callback, action, token) do
     ApprovalButton.action_message(
       callback
       |> callback_origin()
-      |> Map.merge(%{action: action, token: token})
+      |> Map.merge(%{action: action, token: token, message_id: tapped_message_id(callback)})
     )
   end
+
+  defp tapped_message_id(%{"message" => %{"message_id" => id}}) when is_integer(id),
+    do: Integer.to_string(id)
+
+  defp tapped_message_id(_callback), do: nil
 
   defp synthesize_skills_action(callback, action, token) do
     ProposalButton.action_message(
@@ -244,6 +251,77 @@ defmodule FermixChannels.Channels.Telegram do
     send_message(reply_target, text, opts)
   end
 
+  @doc """
+  Deliver a kind-aware approval. A sandbox approval gets the one-tap buttons
+  `send_approval/3` draws. A SOUL.md change is answered with its own `/soul`
+  commands, never `/confirm`, so it goes as its text alone. A watcher's card
+  (`:follow_up`, `:mandate`; M60_WATCHER_CODING_RUNS.md §6.2) goes as raw
+  HTML: its lines, the first in bold, its detail as an expandable quote (Bot
+  API 7.3), which a phone shows as one line until it is tapped, and its two
+  answers as buttons whose taps send the same `/confirm` and `/deny`.
+  """
+  @impl true
+  @spec send_approval(Message.t(), map()) :: :ok | {:error, term()}
+  def send_approval(%Message{} = message, %{kind: :sandbox, text: text, token: token}),
+    do: send_approval(message, text, token)
+
+  def send_approval(%Message{} = message, %{kind: :soul, text: text}) when is_binary(text),
+    do: build_text_reply(message).(text)
+
+  def send_approval(
+        %Message{reply_target: reply_target, thread_ts: thread_ts},
+        %{kind: kind, token: token, lines: [_title | _rest] = lines, detail: detail} = spec
+      )
+      when kind in [:follow_up, :mandate] and is_binary(token) and is_binary(detail) do
+    markup = %{
+      inline_keyboard: [
+        [
+          %{text: spec.actions.confirm, callback_data: ApprovalButton.approve_payload(token)},
+          %{text: spec.actions.deny, callback_data: ApprovalButton.deny_payload(token)}
+        ]
+      ]
+    }
+
+    opts = [parse_mode: "HTML", reply_markup: markup]
+    opts = if thread_ts, do: Keyword.put(opts, :message_thread_id, thread_ts), else: opts
+    send_message(reply_target, card_html(lines, detail), opts)
+  end
+
+  @doc """
+  Replace a watcher's card with `text`, the one line it becomes once
+  answered, and take its buttons away (`editMessageText` with no keyboard).
+  `message_id` is the card's, carried by the tap (`synthesize_approval_action/3`).
+  """
+  @impl true
+  @spec edit_approval(Message.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def edit_approval(%Message{reply_target: chat_id}, message_id, text)
+      when is_binary(message_id) and is_binary(text) do
+    with {:ok, id} <- parse_message_id(message_id),
+         {:ok, token} <- get_bot_token() do
+      case post_edit_message_text(token, chat_id, id, card_escape(text), req_options([])) do
+        {:ok, %{status: 200}} -> :ok
+        {:ok, api_response} -> telegram_api_error(api_response)
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  # Raw HTML: every line escaped, so outside text is never markup; the detail
+  # behind an expandable quote.
+  defp card_html([title | rest], detail) do
+    visible =
+      Enum.join(["<b>" <> card_escape(title) <> "</b>" | Enum.map(rest, &card_escape/1)], "\n")
+
+    visible <> "\n<blockquote expandable>" <> card_escape(detail) <> "</blockquote>"
+  end
+
+  defp card_escape(text) do
+    text
+    |> String.replace("&", "&amp;")
+    |> String.replace("<", "&lt;")
+    |> String.replace(">", "&gt;")
+  end
+
   # -- Skill-curation proposal buttons (MILESTONE_26_SKILL_CURATION §6.6) --
 
   @impl true
@@ -270,8 +348,9 @@ defmodule FermixChannels.Channels.Telegram do
   (`answerCallbackQuery`) and strip the used button (`editMessageReplyMarkup`) so
   it can't be re-tapped. Best-effort UI cleanup fired by the poller on every tap —
   the confirmation token is single-use regardless, and the confirm outcome reaches
-  the owner through the normal `/confirm` text reply. Failures are logged, not
-  raised, so a spinner/edit hiccup never crashes the poll loop.
+  the owner through the normal `/confirm` reply (on a watcher's card, the card
+  edited to that line, `edit_approval/3`). Failures are logged, not raised, so a
+  spinner/edit hiccup never crashes the poll loop.
   """
   @spec acknowledge_callback(map(), keyword()) :: :ok | {:error, :not_configured}
   def acknowledge_callback(callback, opts \\ []) when is_map(callback) do

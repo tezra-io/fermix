@@ -12,6 +12,7 @@ defmodule FermixChannels.Gateway.OwnerInboxApprovalTest do
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.OwnerInboxApproval
   alias FermixChannels.Gateway.Source
+  alias FermixCore.Cues.Proposals, as: CueProposals
 
   # A Telegram-shaped adapter that reports every send to the test.
   defmodule StubAdapter do
@@ -30,6 +31,18 @@ defmodule FermixChannels.Gateway.OwnerInboxApprovalTest do
     defp report(event) do
       send(Process.get(:stub_adapter_test_pid) || self(), {:stub_adapter, event})
       :ok
+    end
+  end
+
+  # A channel that draws a kind-aware card (Telegram's spec form): reports the
+  # spec it was handed.
+  defmodule CardAdapter do
+    def build_text_reply(_message), do: fn _text -> :ok end
+    def build_media_reply(_message), do: fn _part -> :ok end
+
+    def send_approval(message, spec) do
+      send(Process.get(:stub_adapter_test_pid) || self(), {:card_adapter, message, spec})
+      Process.get(:stub_adapter_result, :ok)
     end
   end
 
@@ -188,5 +201,130 @@ defmodule FermixChannels.Gateway.OwnerInboxApprovalTest do
 
     assert {:error, {:owner_inbox_unreachable, :telegram_down}} =
              OwnerInboxApproval.request(request(), telegram_owner())
+  end
+
+  # --- a watcher's card (M60_WATCHER_CODING_RUNS.md §4.5, §6) --------------------------
+
+  describe "send_follow_up/2" do
+    test "sends the compact card with a fresh token to the owner's DM, and says where it went" do
+      opts = telegram_owner(adapter: CardAdapter, now: ~U[2026-10-30 12:01:00Z])
+
+      assert {:ok, binding} = OwnerInboxApproval.send_follow_up(follow_up_card(), opts)
+
+      assert_received {:card_adapter, message, spec}
+      assert message.reply_target == "owner-1"
+      assert spec.kind == :follow_up
+      assert "cp_" <> _rest = spec.token
+      assert hd(spec.lines) == ~s(Run "Deploy check"?)
+      assert List.last(spec.lines) =~ "· reports here"
+      assert spec.actions == %{confirm: "▶ Run", deny: "Skip"}
+      assert spec.text =~ "Reply /confirm to run or /deny to skip."
+
+      assert binding == %{
+               token_digest: CueProposals.digest(spec.token),
+               platform: "telegram",
+               chat_id: "owner-1",
+               user_id: "owner-1"
+             }
+    end
+
+    test "an automatic follow-up's prompt asks to approve or keep asking" do
+      opts = telegram_owner(adapter: CardAdapter)
+
+      assert {:ok, %{token_digest: digest}} =
+               OwnerInboxApproval.send_follow_up(approval_card(), opts)
+
+      assert_received {:card_adapter, _message, spec}
+      assert spec.actions == %{confirm: "✅ Approve", deny: "❌ Keep asking"}
+      assert spec.text =~ "at most 5 a day"
+      assert digest == CueProposals.digest(spec.token)
+    end
+
+    test "with no DM it goes to the apps alone when one can show it, else nowhere" do
+      local = [default_delivery_target: %{channel: "cli", chat_id: "cli"}]
+      opts = telegram_owner(adapter: CardAdapter, jobs_config: local, configured_owners: %{})
+
+      assert {:ok, %{token_digest: nil, platform: nil, chat_id: nil, user_id: nil}} =
+               OwnerInboxApproval.send_follow_up(follow_up_card(), [app_surface?: true] ++ opts)
+
+      assert {:error, {:unreachable, _sentence}} =
+               OwnerInboxApproval.send_follow_up(follow_up_card(), [app_surface?: false] ++ opts)
+
+      refute_received {:card_adapter, _message, _spec}
+    end
+
+    test "a send that fails leaves it to the apps when one can show it, else refuses it" do
+      Process.put(:stub_adapter_result, {:error, :telegram_down})
+      opts = telegram_owner(adapter: CardAdapter)
+
+      assert {:ok, %{token_digest: nil}} =
+               OwnerInboxApproval.send_follow_up(follow_up_card(), [app_surface?: true] ++ opts)
+
+      assert {:error, :telegram_down} =
+               OwnerInboxApproval.send_follow_up(follow_up_card(), [app_surface?: false] ++ opts)
+    end
+  end
+
+  test "a mandate's proposal goes as its compact card" do
+    spec = %{
+      kind: :mandate,
+      text: "card",
+      token: "cp_X",
+      lines: ["Run x?"],
+      detail: "D",
+      actions: %{confirm: "▶ Run", deny: "Skip"}
+    }
+
+    assert :ok =
+             OwnerInboxApproval.send_cue_proposal(
+               %{platform: "telegram", destination: "owner-1"},
+               spec,
+               adapter: CardAdapter
+             )
+
+    assert_received {:card_adapter, %{reply_target: "owner-1"}, ^spec}
+  end
+
+  defp follow_up_card do
+    %{
+      trigger_id: "cft_1",
+      state: "waiting",
+      expires_at: ~U[2026-10-30 12:30:00Z],
+      watcher: %{id: "cwt_1", name: "release-watch"},
+      follow_up: %{
+        job_id: "job_1",
+        name: "Deploy check",
+        instructions: "Run the deploy check script and report what failed.",
+        tools: ["shell"],
+        delivery: %{mode: "origin", target: %{"platform" => "telegram", "chat_id" => "owner-1"}}
+      },
+      outside: %{
+        source_ref: "releases",
+        received_at: ~U[2026-10-30 11:59:00Z],
+        occurred_at: nil,
+        type: "release",
+        subject: "kestrel",
+        text: "Kestrel 2.4 is out.",
+        reason: nil
+      }
+    }
+  end
+
+  defp approval_card do
+    %{
+      id: "cfa_1",
+      shown_digest: "digest",
+      watcher_name: "release-watch",
+      expires_at: ~U[2026-10-30 12:30:00Z],
+      daily_cap: 5,
+      sources: ["releases"],
+      listen_for: [],
+      job_id: "job_1",
+      job_name: "Deploy check",
+      task_prompt: "Run the deploy check script and report what failed.",
+      allowed_tools: ["shell"],
+      delivery_mode: "origin",
+      delivery_target: %{"platform" => "telegram", "chat_id" => "owner-1"}
+    }
   end
 end

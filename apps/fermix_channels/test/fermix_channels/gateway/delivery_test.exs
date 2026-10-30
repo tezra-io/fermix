@@ -58,6 +58,17 @@ defmodule FermixChannels.Gateway.DeliveryTest do
     end
   end
 
+  # A channel whose taps carry the card's id: it edits the tapped card.
+  defmodule EditingChannel do
+    def build_text_reply(_message), do: fn _text -> :ok end
+    def build_media_reply(_message), do: fn _media -> :ok end
+
+    def edit_approval(%Message{id: id}, message_id, text) do
+      send(self(), {:card_edited, id, message_id, text})
+      :ok
+    end
+  end
+
   # Stands in for the CLI sync-capture / bench override: it handles exactly the
   # `Reply.outbound()` shapes an override is expected to, and fails loud on the rest.
   defp capturing_override(test_pid) do
@@ -149,6 +160,53 @@ defmodule FermixChannels.Gateway.DeliveryTest do
 
       assert :ok = deliver.({:approval_prompt, spec})
       assert_received {:rich_approval_sent, "42", ^spec}
+    end
+  end
+
+  # M60_WATCHER_CODING_RUNS.md §6.2: a watcher's card and the answer to a tap on it.
+  describe "build_deliver/1 — a watcher's card" do
+    test "a channel with the spec form draws the card; every other one sends its text" do
+      spec = %{
+        kind: :follow_up,
+        text: "the whole card\n\nReply /confirm to run or /deny to skip.",
+        token: "cp_T",
+        lines: [~s(Run "Codex review"?)],
+        detail: "Details",
+        actions: %{confirm: "▶ Run", deny: "Skip"}
+      }
+
+      rich = Delivery.build_deliver(ReplyContext.new(RichApprovalChannel, message()))
+      assert :ok = rich.({:approval_prompt, spec})
+      assert_received {:rich_approval_sent, "42", ^spec}
+
+      plain = Delivery.build_deliver(ReplyContext.new(TextOnlyChannel, message()))
+      assert :ok = plain.({:approval_prompt, %{spec | kind: :mandate}})
+      assert_received {:text_sent, "the whole card\n\nReply /confirm to run or /deny to skip."}
+    end
+
+    test "the answer to a tap replaces the card where the channel can edit it, else is a reply" do
+      editing = Delivery.build_deliver(ReplyContext.new(EditingChannel, message()))
+      assert :ok = editing.({:approval_answer, "55", "Skipped; it did not run."})
+      assert_received {:card_edited, "42", "55", "Skipped; it did not run."}
+
+      plain = Delivery.build_deliver(ReplyContext.new(TextOnlyChannel, message()))
+      assert :ok = plain.({:approval_answer, "55", "Skipped; it did not run."})
+      assert_received {:text_sent, "Skipped; it did not run."}
+    end
+
+    test "an override gets the card's text and the answer as text" do
+      deliver =
+        Delivery.build_deliver(
+          ReplyContext.new(TextOnlyChannel, message()),
+          capturing_override(self())
+        )
+
+      spec = %{kind: :follow_up, text: "the whole card", token: "cp_T", lines: [], detail: ""}
+      assert :ok = deliver.({:approval_prompt, spec})
+      assert_received {:override_part, {:approval_prompt, "the whole card", "cp_T"}}
+
+      assert :ok = deliver.({:approval_answer, "55", "Running."})
+      assert_received {:override_part, {:text, "Running."}}
     end
   end
 

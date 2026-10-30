@@ -183,6 +183,7 @@ defmodule FermixCore.Jobs.CueRunTest do
                watcher_id: "cwt_1",
                watcher_name: "release-watch",
                source_ref: "eng-blogs",
+               decision_reason: "a Phoenix release",
                subject: "phoenix",
                occurred_at: ~U[2026-10-10 11:50:00Z],
                received_at: ~U[2026-10-10 11:59:00Z],

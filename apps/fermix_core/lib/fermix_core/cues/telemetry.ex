@@ -34,7 +34,10 @@ defmodule FermixCore.Cues.Telemetry do
   at the owner's answer, `follow_up_expired`, `follow_up_refused` (held, or not
   runnable when its turn came), all sessionless since no run exists yet, and
   `follow_up_started` with the run's `session_id`, so it nests in the run's
-  trace.
+  trace. An automatic follow-up's approval prompt traces by its id
+  (`proposal_id`) under the watcher, sessionless too:
+  `follow_up_approval_asked`, `follow_up_approval_decided` (with the surface
+  that answered as `kind`) and `follow_up_approval_expired`.
 
   `ingest_error` and `sweep_error` are beyond design §14: every `{:error, reason}`
   from ingest or a retention sweep is traced before it is returned (the
@@ -78,7 +81,10 @@ defmodule FermixCore.Cues.Telemetry do
     :follow_up_triggered,
     :follow_up_decided,
     :follow_up_expired,
-    :follow_up_refused
+    :follow_up_refused,
+    :follow_up_approval_asked,
+    :follow_up_approval_decided,
+    :follow_up_approval_expired
   ]
   @filter_phases [:passed, :dropped, :filter_retry, :filter_held, :filter_failed]
   @run_phases [:claimed, :settled, :retry, :exhausted]

@@ -21,8 +21,8 @@ history message. This wire's `row` carries the message's `kind`, `metadata`,
 `media_fetch` (version 3) is not the phone's: the phone's streams the bytes in
 chunks inside its envelope, and this one grants a managed file on the same
 machine, so neither it nor its answers are shared. The proposal events
-(version 4) are this wire's alone for now: the phone's wire carries them at its
-next version.
+(version 4, and the follow-up's card of version 5) are this wire's alone for
+now: the phone's wire carries them at its next version.
 
 ## Transport
 
@@ -60,9 +60,9 @@ previous one (or the same value while only one version exists).
 
 | Field | Value |
 |---|---|
-| `protocol_version` (companion declares) | `4` |
-| daemon `min_version` | `3` |
-| daemon `max_version` | `4` |
+| `protocol_version` (companion declares) | `5` |
+| daemon `min_version` | `4` |
+| daemon `max_version` | `5` |
 
 ### Version 2: a turn that ends with no reply
 
@@ -144,6 +144,32 @@ and closed, as for any event its version does not have.
 
 Every version 3 event, field and rule holds unchanged on version 4. Since
 version 4 the window is {3, 4}, so a version 2 client is refused with
+`error: unsupported_protocol_version` (`client_too_old`).
+
+### Version 5: a watcher's follow-ups on the owner's devices
+
+Version 5 lets the owner answer a watcher's follow-up in the Mac's chat. A
+watcher may have a follow-up, a job of the owner's own words that an item
+passing the watcher sets off; asked first, it waits for the owner on a card,
+and an automatic one waits once for the owner's approval before it runs on
+its own. Both are cards of the `proposal` event, keyed by their own
+`proposal_id` (`cft_…` for a follow-up's card, `cfa_…` for an approval's
+prompt), and both are answered with `proposal_answer` and ended with
+`proposal_resolved`, as a mandate's proposal is. It adds no event:
+
+- one card field, `follow_up`, in place of `mandate`, `tool` and
+  `outside.args_text`, which a follow-up's card does not carry (see
+  *Proposals*). A version 4 client requires those three, so a card that
+  carries `follow_up` is sent only to a version 5 connection; its
+  `proposal_resolved` goes to every owner connection, and a client that never
+  held the card has nothing to show for it.
+
+A mandate's card gains `outside.args` and `outside.reason`, the compact card's
+lines. They are additive, so they are sent on every version and an older
+client ignores them.
+
+Every version 4 event, field and rule holds unchanged on version 5. Since
+version 5 the window is {4, 5}, so a version 3 client is refused with
 `error: unsupported_protocol_version` (`client_too_old`).
 
 ## Handshake state machine
@@ -608,9 +634,21 @@ it survives a restart.
   kept apart by structure: `args_text`, the recorded call's arguments as pretty
   JSON (at most 3,500 characters), and `cue? { type?, subject?, text?,
   occurred_at? }`, the cue's snapshot, absent when Fermix no longer keeps it
-  (`occurred_at` is the producer's claim, so it is outside text too). A client
-  draws `outside` as outside text, never as Fermix's words. Times are RFC 3339
-  UTC.
+  (`occurred_at` is the producer's claim, so it is outside text too). Beside
+  them, for the compact card's lines: `args?`, each argument as `{ name,
+  value }` (a string value as itself, any other as JSON), and `reason?`, the
+  filter's one-sentence reason for passing the item. A client draws `outside`
+  as outside text, never as Fermix's words. Times are RFC 3339 UTC.
+- **A follow-up's card** (version 5). In place of `mandate`, `tool` and the
+  call's arguments it carries `follow_up { asks, name, instructions, tools,
+  reports_to, daily_cap?, set_off_by? }`, the follow-up in Fermix's and the
+  owner's words: `asks` is `run` (once, now) or `automatic` (on every item that
+  passes, with no card, at most `daily_cap` a day, set off by `set_off_by`,
+  the watcher's sources and words). `task` is the follow-up's job; `outside`
+  holds only the item (`cue?`) and the filter's `reason?`, since the
+  follow-up is handed nothing of the item; an approval's prompt has an empty
+  `outside`. Its states read as a proposal's: a confirmed card is starting
+  its run, and a denied one was skipped.
 - **When.** A card is sent when the proposal is stored. Right after
   `server_hello`, the daemon sends the card of every proposal still waiting,
   oldest first (at most 100). A client keys cards by `proposal_id`, so a card
@@ -664,8 +702,8 @@ a `media_fetch`. A refused `proposal_answer` is a `request_failed` whose
 ## Chat sequence
 
 ```
-companion -> daemon:  client_hello { protocol_version: 4 }
-daemon -> companion:  server_hello { min_version: 3, max_version: 4 }
+companion -> daemon:  client_hello { protocol_version: 5 }
+daemon -> companion:  server_hello { min_version: 4, max_version: 5 }
 companion -> daemon:  history_pull { profile_id: "main", after_seq: 12, limit: 200 }
 daemon -> companion:  history_page { messages: [...], next_after_seq: 12, history_head_seq: 12 }
 companion -> daemon:  msg { client_msg_id: "mac-1", profile_id: "main", text, attach_ids: [] }
@@ -693,6 +731,15 @@ daemon -> companion:  history_page { messages: [{ server_seq: 21, content: "Pick
 companion -> daemon:  media_fetch { profile_id: "main", ref: "<64 hex>" }          (the person pressed play)
 daemon -> companion:  media_path { ref, path: "/Users/me/.fermix/companion/media/<ref>.ogg", kind: "audio", mime: "audio/ogg", size_bytes: 48213, sha256: "<same>" }
 companion -> daemon:  media_release { profile_id: "main", ref: "<64 hex>" }        (the player let it go)
+```
+
+A follow-up's card, on version 5:
+
+```
+daemon -> companion:  proposal { profile_id: "main", proposal: { proposal_id: "cft_…", state: "waiting", task, watcher: "codex-limits", summary, outside: { reason, cue }, follow_up: { asks: "run", name: "Codex review", instructions, tools: ["codex_run"], reports_to }, … } }
+companion -> daemon:  proposal_answer { client_msg_id: "mac-12", profile_id: "main", proposal_id: "cft_…", decision: "confirm" }
+daemon -> companion:  accepted { client_msg_id: "mac-12", duplicate: false }
+daemon -> companion:  proposal_resolved { profile_id: "main", proposal_id: "cft_…", state: "confirmed", sentence: "Confirmed; the follow-up is starting." }
 ```
 
 A proposal, on version 4:

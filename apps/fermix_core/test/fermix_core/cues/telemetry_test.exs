@@ -22,7 +22,22 @@ defmodule FermixCore.Cues.TelemetryTest do
                           filter_retry filter_held filter_failed claimed settled retry exhausted
                           proposed confirmed denied proposal_expired proposal_refused
                           ingest_error sweep_error follow_up_triggered follow_up_decided
-                          follow_up_expired follow_up_refused follow_up_started)a)
+                          follow_up_expired follow_up_refused follow_up_started
+                          follow_up_approval_asked follow_up_approval_decided
+                          follow_up_approval_expired)a)
+  end
+
+  test "an automatic follow-up's approval prompt traces sessionless, by its id" do
+    ids = %{proposal_id: "cfa_a", watcher_id: "cwt_a", state: "waiting"}
+
+    for phase <- ~w(follow_up_approval_asked follow_up_approval_decided
+                    follow_up_approval_expired)a do
+      assert :ok = Telemetry.lifecycle(phase, %{}, ids)
+
+      assert_raise ArgumentError, ~r/sessionless/, fn ->
+        Telemetry.lifecycle(phase, %{}, Map.put(ids, :session_id, "cron_j_1"))
+      end
+    end
   end
 
   test "a follow-up's trigger phases are sessionless and its start needs the run's session" do

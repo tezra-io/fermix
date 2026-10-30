@@ -24,19 +24,28 @@ defmodule FermixCore.Cues.FollowUps do
   follow-up and its instructions, tools and delivery, the item apart as
   outside text, the expiry) to the sender the channels application registers
   as `:cue_follow_up_sender` (`send_follow_up(card)`), which writes the message
-  and the token and answers where it went (`CuesFollowUpSql.binding()`): the
-  token's digest and the chat that may answer it. A sender that fails, or no
-  sender, refuses the trigger ("could not reach you"). The owner answers by
-  token from that chat (`confirm/3`, `deny/3`), by id from an app
-  (`decide/4`), or with a bare `/confirm` resolved through
-  `waiting_in_chat/2`. A yes moves the trigger to `starting` and wakes the
-  scheduler; a card nobody answers expires after 30 minutes (`expire/3`, a
-  `Cues.Sweeper` step).
+  (`Cues.Card.follow_up/2`) and the token (`Cues.Proposals.new_token/0`) and
+  answers where it went (`CuesFollowUpSql.binding()`): the token's digest and
+  the chat that may answer it, or no chat when only an app can show it. A
+  sender that fails, or no sender, refuses the trigger ("could not reach
+  you"). A card that went out is offered to every app surface through
+  `Cues.Proposals.announce/2` (`Cues.ProposalView.follow_up_card/2`), and its
+  end is told there too.
+
+  The owner answers by token from that chat (`confirm/3`, `deny/3`, which
+  `Cues.Proposals` dispatches to), by id from an app (`decide/4`), or with a
+  bare `/confirm` resolved through `waiting_in_chat/2`. A yes moves the
+  trigger to `starting` and wakes the scheduler, unless the follow-up is
+  running already: then it is refused at once, so the card says so (§4.2). A
+  chat's answer is the one line the card becomes (`Cues.Card.running/2`); a
+  card nobody answers expires after 30 minutes (`expire/3`, a `Cues.Sweeper`
+  step).
 
   Seams (opts): `:repo`, `:now`, `:cues_config`, `:capability_registry`,
   `:follow_up_sender` (`fn card -> {:ok, binding} | {:error, reason} end`),
-  `:notice` (`fn watcher_id, kind, data -> term end`), `:wake_scheduler`, and
-  the `Cues.Notices` channel seams.
+  `:notice` (`fn watcher_id, kind, data -> term end`), `:wake_scheduler`,
+  `:proposal_listener` (`Cues.Proposals.announce/2`), and the `Cues.Notices`
+  channel seams.
   """
 
   require Logger
@@ -44,8 +53,11 @@ defmodule FermixCore.Cues.FollowUps do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Clock
   alias FermixCore.Cues
+  alias FermixCore.Cues.Card
   alias FermixCore.Cues.Config
   alias FermixCore.Cues.Notices
+  alias FermixCore.Cues.Proposals
+  alias FermixCore.Cues.ProposalView
   alias FermixCore.Cues.Telemetry
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
@@ -54,6 +66,8 @@ defmodule FermixCore.Cues.FollowUps do
   @switch_off "Watchers may not act: \"Let watchers act\" is off in settings."
   @unreachable "Fermix could not reach you, so the card was not sent."
   @job_gone "Not started: the follow-up's job is gone."
+  @running "Not started: it is already running."
+  @unread "Fermix recorded your answer but could not read the card back."
   @app_origins ["companion", "management"]
   @max_device_id_bytes 128
 
@@ -199,7 +213,7 @@ defmodule FermixCore.Cues.FollowUps do
     with {:ok, card} <- card(trigger.id, opts) do
       case guarded_send(sender(opts), card) do
         {:ok, binding} when is_map(binding) ->
-          record_offer(trigger, binding, opts)
+          record_offer(trigger, card, binding, opts)
 
         {:error, reason} ->
           Logger.warning("Follow-up card #{trigger.id} was not sent: #{inspect(reason)}")
@@ -208,10 +222,15 @@ defmodule FermixCore.Cues.FollowUps do
     end
   end
 
-  defp record_offer(trigger, binding, opts) do
+  # Recorded, then offered to every app surface, which hears its end too.
+  defp record_offer(trigger, card, binding, opts) do
     case repo_call({:record_offer, trigger.id, binding, now(opts)}, opts) do
-      {:ok, _offered} -> :offered
-      {:error, reason} -> {:error, reason}
+      {:ok, _offered} ->
+        Proposals.announce({:offered, ProposalView.follow_up_card(card, opts)}, opts)
+        :offered
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -319,30 +338,22 @@ defmodule FermixCore.Cues.FollowUps do
   The owner's yes by token from `origin` (`%{platform, chat_id, user_id}`):
   one Repo call fenced on the token's digest, `waiting`, the chat it went to
   and the expiry moves the trigger to `starting`, and the scheduler is woken
-  to start it. Returns the reply for the owner.
+  to start it. Returns the one line the card becomes.
   """
   @spec confirm(String.t(), map(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
   def confirm(token, origin, opts \\ []) when is_binary(token) and is_map(origin) do
-    case repo_call({:confirm, digest(token), origin, now(opts)}, opts) do
-      {:ok, trigger} ->
-        decided(trigger, :confirm, origin.platform, opts)
-        {:ok, "Starting the follow-up."}
-
-      {:error, why} ->
-        {:error, refusal_reply(why)}
+    case repo_call({:confirm, Proposals.digest(token), origin, now(opts)}, opts) do
+      {:ok, trigger} -> trigger |> decided(:confirm, origin.platform, opts) |> answered(opts)
+      {:error, why} -> {:error, refusal_reply(why)}
     end
   end
 
-  @doc "The owner's no by token from `origin`: `waiting → skipped`. Returns the reply."
+  @doc "The owner's no by token from `origin`: `waiting → skipped`. Returns the card's line."
   @spec deny(String.t(), map(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
   def deny(token, origin, opts \\ []) when is_binary(token) and is_map(origin) do
-    case repo_call({:deny, digest(token), origin, now(opts)}, opts) do
-      {:ok, trigger} ->
-        decided(trigger, :deny, origin.platform, opts)
-        {:ok, "Skipped; the follow-up did not run."}
-
-      {:error, why} ->
-        {:error, refusal_reply(why)}
+    case repo_call({:deny, Proposals.digest(token), origin, now(opts)}, opts) do
+      {:ok, trigger} -> trigger |> decided(:deny, origin.platform, opts) |> answered(opts)
+      {:error, why} -> {:error, refusal_reply(why)}
     end
   end
 
@@ -361,14 +372,31 @@ defmodule FermixCore.Cues.FollowUps do
       request = {:decide, trigger_id, to_state(decision), origin_label, now(opts)}
 
       case repo_call(request, opts) do
-        {:ok, trigger} ->
-          decided(trigger, decision, origin_kind(origin_label), opts)
-          {:ok, trigger}
-
-        {:error, why} ->
-          {:error, refusal_reply(why)}
+        {:ok, trigger} -> {:ok, decided(trigger, decision, origin_kind(origin_label), opts)}
+        {:error, why} -> {:error, refusal_reply(why)}
       end
     end
+  end
+
+  @doc """
+  The one line a decided card becomes (§3.3): running, skipped, or Fermix's
+  sentence for a trigger refused at the owner's yes.
+  """
+  @spec answered(trigger(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
+  def answered(%{state: "refused", reason: reason}, _opts) when is_binary(reason),
+    do: {:ok, reason}
+
+  def answered(%{id: id, state: state}, opts) when is_list(opts) do
+    case card(id, opts) do
+      {:ok, card} when state == "skipped" -> {:ok, Card.skipped(card)}
+      {:ok, card} -> {:ok, Card.running(card, opts)}
+      {:error, reason} -> unread(id, reason)
+    end
+  end
+
+  defp unread(id, reason) do
+    Logger.error("Follow-up #{id} decided, then not read back: #{inspect(reason)}")
+    {:error, @unread}
   end
 
   @doc """
@@ -379,6 +407,32 @@ defmodule FermixCore.Cues.FollowUps do
   def waiting_in_chat(origin, opts \\ []) when is_map(origin) and is_list(opts),
     do: repo_call({:waiting_in_chat, origin, now(opts)}, opts)
 
+  @doc """
+  The card of every follow-up still waiting that went out, oldest first, as an
+  app shows it: what an app that connects is offered.
+  """
+  @spec waiting_cards(pos_integer(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def waiting_cards(limit, opts \\ []) when is_integer(limit) and limit > 0 and is_list(opts) do
+    with {:ok, rows} <- repo_call({:waiting_cards, now(opts), limit}, opts),
+         do: collect(rows, &app_card(&1, opts))
+  end
+
+  defp app_card(row, opts) do
+    with {:ok, card} <- card_of(row), do: {:ok, ProposalView.follow_up_card(card, opts)}
+  end
+
+  defp collect(rows, fun) do
+    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, done} ->
+      case fun.(row) do
+        {:ok, value} -> {:cont, {:ok, done ++ [value]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  # Traced; a yes starts the follow-up unless it runs already (then it is
+  # refused here, so the owner's card says so); every app surface hears the
+  # end. Returns the trigger as it now is.
   defp decided(trigger, decision, kind, opts) do
     Telemetry.lifecycle(:follow_up_decided, %{}, %{
       trigger_id: trigger.id,
@@ -391,8 +445,55 @@ defmodule FermixCore.Cues.FollowUps do
       kind: kind
     })
 
-    if decision == :confirm, do: Keyword.get(opts, :wake_scheduler, &Cues.wake_scheduler/0).()
+    trigger = if decision == :confirm, do: start(trigger, opts), else: trigger
+    announce_end(trigger, opts)
+    trigger
   end
+
+  defp start(trigger, opts) do
+    case JobsRegistry.get_job(trigger.job_id, registry_opts(opts)) do
+      {:ok, %{state: "running"}} -> refuse_running(trigger, opts)
+      _idle_or_gone -> wake(trigger, opts)
+    end
+  end
+
+  # The scheduler may have taken it meanwhile (`:stale`): it starts or is
+  # refused there, as any starting trigger is.
+  defp refuse_running(trigger, opts) do
+    case repo_call({:refuse, trigger.id, ["starting"], @running}, opts) do
+      {:ok, refused} ->
+        emit_refused(refused, "already_running")
+        refused
+
+      {:error, reason} ->
+        Logger.info("Follow-up #{trigger.id} left to the scheduler: #{inspect(reason)}")
+        trigger
+    end
+  end
+
+  defp wake(trigger, opts) do
+    Keyword.get(opts, :wake_scheduler, &Cues.wake_scheduler/0).()
+    trigger
+  end
+
+  defp announce_end(trigger, opts) do
+    resolved = %{
+      proposal_id: trigger.id,
+      state: ProposalView.follow_up_state(trigger.state),
+      result_status: nil,
+      sentence: end_sentence(trigger),
+      result_text: nil
+    }
+
+    Proposals.announce({:resolved, resolved}, opts)
+  end
+
+  defp end_sentence(%{state: state}) when state in ["starting", "started"],
+    do: "Confirmed; the follow-up is starting."
+
+  defp end_sentence(%{state: "skipped"}), do: "Skipped; the follow-up did not run."
+  defp end_sentence(%{state: "expired"}), do: "That card expired; nothing ran."
+  defp end_sentence(%{reason: reason}) when is_binary(reason), do: reason
 
   defp to_state(:confirm), do: "starting"
   defp to_state(:deny), do: "skipped"
@@ -454,7 +555,11 @@ defmodule FermixCore.Cues.FollowUps do
   def expire(repo_opts, %DateTime{} = now, limit)
       when is_list(repo_opts) and is_integer(limit) and limit > 0 do
     with {:ok, expired} <- Repo.cues_call(CuesFollowUpSql, {:expire, now, limit}, repo_opts) do
-      Enum.each(expired, &emit(:follow_up_expired, &1, %{}))
+      Enum.each(expired, fn trigger ->
+        emit(:follow_up_expired, trigger, %{})
+        announce_end(trigger, repo_opts)
+      end)
+
       {:ok, length(expired)}
     end
   end
@@ -522,10 +627,6 @@ defmodule FermixCore.Cues.FollowUps do
   end
 
   # --- plumbing -----------------------------------------------------------------------
-
-  # The token's digest, as `Cues.Proposals` digests its tokens: the card's
-  # token is issued in the proposals' `cp_` form by the sender.
-  defp digest(token), do: :sha256 |> :crypto.hash(token) |> Base.encode16(case: :lower)
 
   defp repo_call(request, opts) do
     repo_opts =

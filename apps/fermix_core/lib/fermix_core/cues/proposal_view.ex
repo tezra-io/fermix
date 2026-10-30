@@ -13,14 +13,32 @@ defmodule FermixCore.Cues.ProposalView do
   or a stranger wrote, kept apart by structure, never by markup. `args_text` is
   the recorded call's arguments as pretty JSON, never cut: a call over the
   3,500-character cap was refused before it was stored (`Cues.Proposals`), and
-  the companion wire refuses a card over it; `cue` is the cue's
-  snapshot (`type`, `subject`, `text`) with the producer's `occurred_at`, or nil
-  when Fermix no longer keeps it. The engine's `UntrustedContent.frame/2`
-  preamble is for models and never crosses to an app.
+  the companion wire refuses a card over it; `cue` is the cue's snapshot
+  (`type`, `subject`, `text`) with the producer's `occurred_at`, or nil when
+  Fermix no longer keeps it. The engine's `UntrustedContent.frame/2` preamble
+  is for models and never crosses to an app. The Mac's chat draws the compact
+  card (`compact_card/1`, M60_WATCHER_CODING_RUNS.md §6.3), which adds
+  `outside.args`, each argument as `name` and `value` (a string as itself,
+  anything else as JSON), and `outside.reason`, the filter's reason for
+  passing the item.
+
+  ## A watcher's follow-up (M60_WATCHER_CODING_RUNS.md §6.2)
+
+  A follow-up's card (`follow_up_card/2`, from `Cues.FollowUps.card/2`) and an
+  automatic approval's prompt (`approval_card/2`, from
+  `Cues.FollowUpApprovals.card/2`) are cards of the same shape, keyed by the
+  trigger's or the prompt's id, with `follow_up` in place of `mandate`,
+  `tool` and the call's arguments: the follow-up's `name`, the owner's
+  `instructions`, its `tools`, where it `reports_to`, and what the card
+  `asks` (`run`, once now, or `automatic`, with the watcher's `daily_cap` and
+  what sets it off, `set_off_by`). Their states read as a proposal's:
+  `starting` and `started` are `confirmed`, `skipped` is `denied`.
 
   Times are RFC 3339 UTC strings to the second; every field is present, nil
   where it does not apply.
   """
+
+  alias FermixCore.Cues.Card
 
   @max_args_chars 3_500
 
@@ -49,12 +67,15 @@ defmodule FermixCore.Cues.ProposalView do
           occurred_at: String.t() | nil
         }
 
-  @typedoc "The card (app surface §3.7): the record, `received_at`, `summary` and `outside`."
+  @typedoc """
+  The card (app surface §3.7): the record, `received_at`, `summary` and
+  `outside`; a follow-up's card carries `follow_up` too.
+  """
   @type card :: %{
           required(:proposal_id) => String.t(),
           required(:received_at) => String.t() | nil,
           required(:summary) => String.t(),
-          required(:outside) => %{args_text: String.t(), cue: cue() | nil},
+          required(:outside) => map(),
           optional(atom()) => term()
         }
 
@@ -97,6 +118,120 @@ defmodule FermixCore.Cues.ProposalView do
   end
 
   @doc """
+  The card of the proposal `row` as the Mac's chat draws it (the companion
+  wire): `card/1`, with `outside.args` and `outside.reason` for the compact
+  card's lines (M60_WATCHER_CODING_RUNS.md §6.3), and no `follow_up`.
+  """
+  @spec compact_card(map()) :: card()
+  def compact_card(%{id: id} = row) when is_binary(id) do
+    card = card(row)
+
+    outside =
+      Map.merge(card.outside, %{
+        args: args(row.args_json),
+        reason: Map.get(row, :decision_reason)
+      })
+
+    Map.merge(card, %{outside: outside, follow_up: nil})
+  end
+
+  @doc """
+  The card of a follow-up's trigger (`Cues.FollowUps.card/2`): Fermix's
+  record, the follow-up, and the item and the filter's reason apart.
+  """
+  @spec follow_up_card(map(), keyword()) :: card()
+  def follow_up_card(%{trigger_id: id, follow_up: follow_up, outside: outside} = card, opts)
+      when is_binary(id) and is_list(opts) do
+    state = follow_up_state(card.state)
+
+    %{
+      proposal_id: id,
+      state: state,
+      mandate: nil,
+      tool: nil,
+      task: %{job_id: follow_up.job_id, name: follow_up.name},
+      watcher: card.watcher.name,
+      source_ref: outside.source_ref,
+      created_at: time(card.created_at),
+      expires_at: time(card.expires_at),
+      decided_at: time(card.decided_at),
+      decided_from: surface(card.decided_from),
+      result_status: nil,
+      status_sentence: follow_up_sentence(state, card),
+      received_at: time(outside.received_at),
+      summary:
+        "Watcher #{card.watcher.name || "(removed)"} wants to run its follow-up " <>
+          "#{quoted(follow_up.name)}. It runs only if you confirm.",
+      outside: %{
+        reason: outside.reason,
+        cue: follow_up_cue(outside)
+      },
+      follow_up: %{
+        asks: "run",
+        name: follow_up.name || follow_up.job_id,
+        instructions: follow_up.instructions,
+        tools: follow_up.tools,
+        reports_to: Card.reports_to(follow_up.delivery, opts)
+      }
+    }
+  end
+
+  @doc """
+  The card of an automatic approval's prompt (`Cues.FollowUpApprovals.card/2`):
+  what the follow-up runs and what sets it off, all Fermix's and the owner's
+  words, so nothing is outside text.
+  """
+  @spec approval_card(map(), keyword()) :: card()
+  def approval_card(%{id: id} = card, opts) when is_binary(id) and is_list(opts) do
+    state = approval_state(card.state)
+    name = card.job_name || card.job_id
+
+    %{
+      proposal_id: id,
+      state: state,
+      mandate: nil,
+      tool: nil,
+      task: %{job_id: card.job_id || "", name: card.job_name},
+      watcher: card.watcher_name,
+      source_ref: nil,
+      created_at: time(card.created_at),
+      expires_at: time(card.expires_at),
+      decided_at: time(card.decided_at),
+      decided_from: surface(card.decided_from),
+      result_status: nil,
+      status_sentence: approval_sentence(state),
+      received_at: nil,
+      summary:
+        "Watcher #{card.watcher_name || "(removed)"} asks to run its follow-up #{quoted(name)} " <>
+          "on its own, with no card, at most #{card.daily_cap} a day. It does so only if you " <>
+          "approve.",
+      outside: %{},
+      follow_up: %{
+        asks: "automatic",
+        name: name,
+        instructions: card.task_prompt,
+        tools: card.allowed_tools,
+        reports_to:
+          Card.reports_to(%{mode: card.delivery_mode, target: card.delivery_target}, opts),
+        daily_cap: card.daily_cap,
+        set_off_by: Card.set_off_by(card)
+      }
+    }
+  end
+
+  @doc "The state a follow-up's trigger shows as a card's (`starting` is `confirmed`)."
+  @spec follow_up_state(String.t()) :: String.t()
+  def follow_up_state("waiting"), do: "waiting"
+  def follow_up_state(state) when state in ["starting", "started"], do: "confirmed"
+  def follow_up_state("skipped"), do: "denied"
+  def follow_up_state(state) when state in ["expired", "refused"], do: state
+
+  @doc "The state an approval's prompt shows as a card's (`approved` is `confirmed`)."
+  @spec approval_state(String.t()) :: String.t()
+  def approval_state("approved"), do: "confirmed"
+  def approval_state(state) when state in ["waiting", "denied", "expired"], do: state
+
+  @doc """
   `text` cut to at most `max` characters, its last one an ellipsis when cut;
   nil stays nil.
   """
@@ -135,6 +270,54 @@ defmodule FermixCore.Cues.ProposalView do
 
   defp status_sentence(%{state: "refused"}),
     do: "Not run: Fermix's checks refused it when you confirmed."
+
+  defp follow_up_sentence("waiting", _card),
+    do: "Waiting for your answer; it runs only if you confirm."
+
+  defp follow_up_sentence("confirmed", _card), do: "Confirmed; the follow-up is starting."
+  defp follow_up_sentence("denied", _card), do: "Skipped; the follow-up did not run."
+  defp follow_up_sentence("expired", _card), do: "Expired with no answer; nothing ran."
+  defp follow_up_sentence("refused", %{reason: reason}) when is_binary(reason), do: reason
+  defp follow_up_sentence("refused", _card), do: "Not run: Fermix refused it."
+
+  defp approval_sentence("waiting"),
+    do: "Waiting for your answer; it runs on its own only if you approve."
+
+  defp approval_sentence("confirmed"), do: "Approved; it runs on its own."
+  defp approval_sentence("denied"), do: "Kept asking; each run waits for your tap."
+
+  defp approval_sentence("expired"),
+    do: "Expired with no answer; each run still waits for your tap."
+
+  defp follow_up_cue(%{type: nil, subject: nil, text: nil}), do: nil
+
+  defp follow_up_cue(outside) do
+    %{
+      type: outside.type,
+      subject: outside.subject,
+      text: outside.text,
+      occurred_at: time(outside.occurred_at)
+    }
+  end
+
+  defp quoted(name), do: ~s("#{name}")
+
+  # Each argument as `name` and `value`, in name order: a string as itself,
+  # anything else as JSON.
+  defp args(args_json) do
+    case Jason.decode(args_json) do
+      {:ok, %{} = args} ->
+        args
+        |> Enum.map(fn {name, value} -> %{name: name, value: arg_value(value)} end)
+        |> Enum.sort_by(& &1.name)
+
+      _not_an_object ->
+        []
+    end
+  end
+
+  defp arg_value(value) when is_binary(value), do: value
+  defp arg_value(value), do: Jason.encode!(value)
 
   # The arguments as `Cues.Proposals` shows them in a chat: pretty JSON, whole.
   defp args_text(args_json) do

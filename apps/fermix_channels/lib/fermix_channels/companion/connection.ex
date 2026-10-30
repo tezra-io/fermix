@@ -44,7 +44,8 @@ defmodule FermixChannels.Companion.Connection do
   A mandate's proposals reach only a connection on version 4 that was placed
   as the owner's (`:independent`): `proposal` and `proposal_resolved`
   (`Protocol.owner_server_events/0`) are written to no other, as an event a
-  later version brought is not, and the card of every proposal still waiting
+  later version brought is not (a watcher's follow-up card needs version 5,
+  `Protocol.server_payload_version/2`), and the card of every proposal still waiting
   follows the `server_hello` in the step that joined the registry, read from
   `cue_proposals` (`Companion.Proposals.waiting/1`), so it survives a restart.
   A `proposal_answer` is served in the step that read it (one or two Repo
@@ -322,9 +323,10 @@ defmodule FermixChannels.Companion.Connection do
   # the owner's connection on version 4 alone (moduledoc); one that arrives
   # meanwhile may come twice, and the client keys cards by `proposal_id`.
   defp send_waiting_proposals(state) do
-    if owner_reads?("proposal", state),
-      do: state.proposal_opts |> Proposals.waiting() |> write_all(state),
-      else: :ok
+    state.proposal_opts
+    |> Proposals.waiting()
+    |> Enum.filter(fn %{"t" => type} = event -> owner_reads?(type, event, state) end)
+    |> write_all(state)
   end
 
   defp write_all(events, state) do
@@ -336,10 +338,11 @@ defmodule FermixChannels.Companion.Connection do
     end)
   end
 
-  # A proposal event is written to a connection on its version, placed as the
-  # owner's; every other event only needs the version.
-  defp owner_reads?(type, state) do
-    Protocol.server_event_version(type) <= state.version and
+  # A proposal event is written to a connection on its version (a follow-up's
+  # card, on version 5), placed as the owner's; every other event only needs
+  # the version.
+  defp owner_reads?(type, event, state) do
+    Protocol.server_payload_version(type, event) <= state.version and
       (type not in Protocol.owner_server_events() or state.caller == :independent)
   end
 
@@ -536,7 +539,7 @@ defmodule FermixChannels.Companion.Connection do
 
   defp write_event(%{"t" => type} = event, state) do
     case Protocol.encode_server_event(type, Map.delete(event, "t")) do
-      {:ok, line} -> write_in_version(type, line, state)
+      {:ok, line} -> write_in_version(type, event, line, state)
       {:error, reason} -> drop_event(type, reason, state)
     end
   end
@@ -544,8 +547,8 @@ defmodule FermixChannels.Companion.Connection do
   # An event a later version brought is not this client's to read, nor a
   # proposal event a connection not placed as the owner's: it is not sent, and
   # is no error.
-  defp write_in_version(type, line, state) do
-    if owner_reads?(type, state),
+  defp write_in_version(type, event, line, state) do
+    if owner_reads?(type, event, state),
       do: write_line(line, state),
       else: {:noreply, state}
   end

@@ -40,6 +40,7 @@ defmodule FermixCore.Memory.RepoFollowUpMigrationTest do
   DROP TABLE cue_watchers;
   ALTER TABLE cue_watchers_53 RENAME TO cue_watchers;
   DROP TABLE cue_follow_up_triggers;
+  DROP TABLE cue_follow_up_approvals;
   """
 
   setup do
@@ -67,6 +68,15 @@ defmodule FermixCore.Memory.RepoFollowUpMigrationTest do
     assert Map.has_key?(columns, "follow_up_approved_at")
     assert Map.has_key?(columns, "follow_up_approval_digest")
     assert "cue_follow_up_triggers_state" in index_names(ctx.db_path, "cue_follow_up_triggers")
+
+    # The automatic approval's prompts (§3.4, §5), in the same migration.
+    approvals = columns(ctx.db_path, "cue_follow_up_approvals")
+
+    assert Enum.sort(Map.keys(approvals)) ==
+             Enum.sort(~w(id watcher_id shown_digest token_digest chat_platform chat_id
+                          chat_user_id expires_at state decided_from decided_at created_at))
+
+    assert "cue_follow_up_approvals_state" in index_names(ctx.db_path, "cue_follow_up_approvals")
   end
 
   test "an upgraded store keeps every row, child row, index and id, and takes follow_up", ctx do

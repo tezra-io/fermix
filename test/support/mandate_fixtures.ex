@@ -226,8 +226,8 @@ defmodule FermixTestSupport.MandateFixtures do
       resolve: fn path -> {:ok, path} end,
       daemon_uid: 501,
       home: "/Users/someone",
-      proposal_sender: fn inbox, text, token ->
-        send(pid_of(inbox.destination), {:proposal, inbox, text, token})
+      proposal_sender: fn inbox, spec ->
+        send(pid_of(inbox.destination), {:proposal, inbox, spec.text, spec.token})
         :ok
       end,
       # A proposal's announcements to the app surfaces (M60 app surface §3.7)

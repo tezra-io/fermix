@@ -83,7 +83,12 @@ defmodule FermixChannels.Gateway.ApprovalButton do
           token: token
         })
 
-  @doc "Build the synthesized command message for an approval action."
+  @doc """
+  Build the synthesized command message for an approval action. A tap that
+  knows the message it rode on (`message_id`, the platform's id) carries it as
+  `approval_message_id`, so the answer to a watcher's card can replace that
+  card (`Channel.edit_approval/3`).
+  """
   @spec action_message(%{
           required(:id) => String.t(),
           required(:sender) => String.t(),
@@ -92,18 +97,21 @@ defmodule FermixChannels.Gateway.ApprovalButton do
           required(:thread_ts) => term(),
           required(:user_id) => term(),
           required(:action) => :approve | :deny,
-          required(:token) => String.t()
+          required(:token) => String.t(),
+          optional(:message_id) => String.t() | nil
         }) :: Message.t()
-  def action_message(%{
-        id: id,
-        sender: sender,
-        channel: channel,
-        chat_id: chat_id,
-        thread_ts: thread_ts,
-        user_id: user_id,
-        action: action,
-        token: token
-      })
+  def action_message(
+        %{
+          id: id,
+          sender: sender,
+          channel: channel,
+          chat_id: chat_id,
+          thread_ts: thread_ts,
+          user_id: user_id,
+          action: action,
+          token: token
+        } = tap
+      )
       when is_binary(id) and is_binary(sender) and is_binary(channel) and is_binary(chat_id) and
              action in [:approve, :deny] and is_binary(token) and token != "" do
     Message.new!(%{
@@ -114,9 +122,14 @@ defmodule FermixChannels.Gateway.ApprovalButton do
       chat_id: chat_id,
       reply_target: chat_id,
       thread_ts: thread_ts,
-      metadata: %{user_id: to_string(user_id)}
+      metadata: tap_metadata(user_id, Map.get(tap, :message_id))
     })
   end
+
+  defp tap_metadata(user_id, nil), do: %{user_id: to_string(user_id)}
+
+  defp tap_metadata(user_id, message_id) when is_binary(message_id),
+    do: %{user_id: to_string(user_id), approval_message_id: message_id}
 
   defp action_command(:approve), do: "confirm"
   defp action_command(:deny), do: "deny"

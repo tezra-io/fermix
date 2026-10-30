@@ -34,6 +34,20 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
   when its turn came, with Fermix's sentence in `reason`) and
   `starting → started` with the run's id. A watcher with no task settles the
   delivery `acked` with outcome `follow_up` in the pass's transaction.
+
+  ## The automatic approval's prompt (§3.4, §5)
+
+  `cue_follow_up_approvals` holds each prompt that asks the owner to let an
+  automatic follow-up run on its own: the digest it showed (what the follow-up
+  runs and what sets it off), where it went, its expiry and the owner's
+  answer (`waiting → approved | denied | expired`). One waits per watcher: a
+  new prompt expires the one before it. An answer only records itself here;
+  `Cues.Watchers.approve_follow_up/3` then applies it, and only while the
+  digest it showed is still the follow-up's.
+
+  A `cp_` token answers a mandate's proposal, a follow-up's card or an
+  approval's prompt: `{:token_kind, digest}` says which table holds it, so
+  `Cues.Proposals` dispatches each answer from one place.
   """
 
   alias FermixCore.Cues
@@ -80,6 +94,23 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
   CREATE INDEX cue_follow_up_triggers_state ON cue_follow_up_triggers (state, created_at);
   CREATE INDEX cue_follow_up_triggers_watcher ON cue_follow_up_triggers (watcher_id, created_at);
   CREATE INDEX cue_follow_up_triggers_job ON cue_follow_up_triggers (job_id, state);
+  CREATE TABLE cue_follow_up_approvals (
+    id TEXT PRIMARY KEY,
+    watcher_id TEXT NOT NULL,
+    shown_digest TEXT NOT NULL,
+    token_digest TEXT UNIQUE,
+    chat_platform TEXT,
+    chat_id TEXT,
+    chat_user_id TEXT,
+    expires_at TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('waiting','approved','denied','expired')),
+    decided_from TEXT,
+    decided_at TEXT,
+    created_at TEXT NOT NULL,
+    CHECK ((state IN ('approved','denied')) = (decided_at IS NOT NULL))
+  );
+  CREATE INDEX cue_follow_up_approvals_state ON cue_follow_up_approvals (state, expires_at);
+  CREATE INDEX cue_follow_up_approvals_watcher ON cue_follow_up_approvals (watcher_id, state);
   """
 
   # A trigger counts toward its watcher's daily cap once its follow-up was
@@ -114,8 +145,29 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
   LEFT JOIN scheduled_jobs j ON j.id = t.job_id
   LEFT JOIN cue_deliveries d ON d.id = t.delivery_id
   LEFT JOIN cues c ON c.id = t.cue_id
-  WHERE t.id = ?
   """
+
+  @approval_columns """
+  a.id, a.watcher_id, w.name, a.shown_digest, a.state, a.token_digest IS NOT NULL,
+  a.chat_platform, a.chat_id, a.chat_user_id, a.expires_at, a.decided_from, a.decided_at,
+  a.created_at
+  """
+
+  # What an approval's prompt shows: what the follow-up runs and what sets it
+  # off, as stored now.
+  @approval_card_sql """
+  SELECT #{@approval_columns}, w.daily_cap, w.filter, w.purpose, w.listen_for,
+         (SELECT json_group_array(source_ref) FROM
+            (SELECT source_ref FROM cue_watcher_sources s WHERE s.watcher_id = a.watcher_id
+             ORDER BY source_ref)),
+         j.id, j.name, j.task_prompt, j.allowed_tools_json, j.delivery_mode,
+         j.delivery_target_json
+  FROM cue_follow_up_approvals a
+  LEFT JOIN cue_watchers w ON w.id = a.watcher_id
+  LEFT JOIN scheduled_jobs j ON j.id = w.follow_up_job_id
+  """
+
+  @approval_states ~w(waiting approved denied expired)
 
   @type conn :: term()
   @type trigger :: %{
@@ -145,6 +197,20 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
         }
   @typedoc "A chat that answers a card: `platform`, `chat_id` and `user_id`."
   @type origin :: %{platform: String.t(), chat_id: String.t(), user_id: String.t()}
+  @typedoc "An automatic approval's prompt as this module reads it."
+  @type approval :: %{
+          id: String.t(),
+          watcher_id: String.t(),
+          watcher_name: String.t() | nil,
+          shown_digest: String.t(),
+          state: String.t(),
+          offered?: boolean(),
+          chat: %{platform: String.t(), chat_id: String.t(), user_id: String.t() | nil} | nil,
+          expires_at: DateTime.t(),
+          decided_from: String.t() | nil,
+          decided_at: DateTime.t() | nil,
+          created_at: DateTime.t()
+        }
 
   @doc "The DDL of the trigger table and its indexes (migration 54)."
   @spec schema_sql() :: String.t()
@@ -180,6 +246,24 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
   - `{:waiting_in_chat, origin, now}` → `{:ok, [trigger]}`: the cards waiting
     in that chat.
   - `{:card, id}` → `{:ok, card_row | nil}`: what the card shows.
+  - `{:waiting_cards, now, limit}` → `{:ok, [card_row]}`: every card still
+    waiting that went out, oldest first, for an app that connects.
+  - `{:token_kind, digest}` → `{:ok, :mandate | :follow_up | :approval | nil}`:
+    which table holds a `cp_` token's digest.
+  - `{:ask_approval, %{id, watcher_id, shown_digest, expires_at}, now}` →
+    `{:ok, approval}`: a new prompt, `waiting`; the watcher's prompt still
+    waiting before it is expired.
+  - `{:record_approval_offer, id, binding}` → `{:ok, approval}`: where the
+    prompt went, on a waiting prompt with no token yet.
+  - `{:answer_approval, digest, origin, "approved" | "denied", now}`: the
+    owner's answer by token, fenced on the digest, `waiting`, the chat it went
+    to and the expiry; `{:decide_approval, id, to_state, decided_from, now}`
+    by id, fenced on `waiting` and the expiry.
+  - `{:approvals_waiting_in_chat, origin, now}` → `{:ok, [approval]}`.
+  - `{:approval_card, id}` → `{:ok, approval_card_row | nil}`;
+    `{:waiting_approval_cards, now, limit}` → `{:ok, [approval_card_row]}`.
+  - `{:expire_approvals, now, limit}` → `{:ok, [approval]}`: waiting past the
+    expiry → `expired`.
   - `{:expire, now, limit}` → `{:ok, [trigger]}`: waiting past the expiry →
     `expired`.
   - `{:run_trigger, run_id}` → `{:ok, %{trigger: trigger, watcher_name:
@@ -241,11 +325,109 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
   end
 
   def handle(conn, {:card, id}) when is_binary(id) do
-    case CuesSql.query_all(conn, @card_sql, [id]) do
+    case CuesSql.query_all(conn, @card_sql <> "WHERE t.id = ?", [id]) do
       {:ok, [row]} -> {:ok, card_row(row)}
       {:ok, []} -> {:ok, nil}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  def handle(conn, {:waiting_cards, %DateTime{} = now, limit})
+      when is_integer(limit) and limit > 0 do
+    where =
+      "WHERE t.state = 'waiting' AND t.offered_at IS NOT NULL AND t.expires_at > ? " <>
+        "ORDER BY t.created_at, t.rowid LIMIT ?"
+
+    with {:ok, rows} <- CuesSql.query_all(conn, @card_sql <> where, [CuesSql.stamp(now), limit]),
+         do: {:ok, Enum.map(rows, &card_row/1)}
+  end
+
+  def handle(conn, {:token_kind, digest}) when is_binary(digest) do
+    sql = """
+    SELECT 'mandate' FROM cue_proposals WHERE token_digest = ?
+    UNION ALL SELECT 'follow_up' FROM cue_follow_up_triggers WHERE token_digest = ?
+    UNION ALL SELECT 'approval' FROM cue_follow_up_approvals WHERE token_digest = ?
+    LIMIT 1
+    """
+
+    case CuesSql.query_all(conn, sql, [digest, digest, digest]) do
+      {:ok, []} -> {:ok, nil}
+      {:ok, [[kind]]} -> {:ok, token_kind(kind)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def handle(conn, {:ask_approval, %{id: id, watcher_id: watcher_id} = row, %DateTime{} = now})
+      when is_binary(id) and is_binary(watcher_id) do
+    CuesSql.with_immediate_transaction(conn, fn -> ask_approval(conn, row, now) end)
+  end
+
+  def handle(conn, {:record_approval_offer, id, binding})
+      when is_binary(id) and is_map(binding) do
+    CuesSql.with_immediate_transaction(conn, fn -> record_approval_offer(conn, id, binding) end)
+  end
+
+  def handle(conn, {:answer_approval, digest, origin, to_state, %DateTime{} = now})
+      when is_binary(digest) and to_state in ["approved", "denied"] do
+    case checked_origin(origin) do
+      {:ok, origin} ->
+        CuesSql.with_immediate_transaction(conn, fn ->
+          answer_approval(conn, digest, origin, to_state, now)
+        end)
+
+      :error ->
+        {:error, :wrong_origin}
+    end
+  end
+
+  def handle(conn, {:decide_approval, id, to_state, decided_from, %DateTime{} = now})
+      when is_binary(id) and to_state in ["approved", "denied"] and is_binary(decided_from) do
+    CuesSql.with_immediate_transaction(conn, fn ->
+      decide_approval(conn, id, to_state, decided_from, now)
+    end)
+  end
+
+  def handle(conn, {:approvals_waiting_in_chat, origin, %DateTime{} = now}) do
+    where =
+      "a.state = 'waiting' AND a.expires_at > ? AND a.chat_platform = ? AND a.chat_id = ? " <>
+        "AND a.chat_user_id = ? ORDER BY a.created_at, a.rowid"
+
+    case checked_origin(origin) do
+      {:ok, chat} ->
+        list_approvals(conn, where, [
+          CuesSql.stamp(now),
+          chat.platform,
+          chat.chat_id,
+          chat.user_id
+        ])
+
+      :error ->
+        {:error, :wrong_origin}
+    end
+  end
+
+  def handle(conn, {:approval_card, id}) when is_binary(id) do
+    case CuesSql.query_all(conn, @approval_card_sql <> "WHERE a.id = ?", [id]) do
+      {:ok, [row]} -> approval_card_row(row)
+      {:ok, []} -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def handle(conn, {:waiting_approval_cards, %DateTime{} = now, limit})
+      when is_integer(limit) and limit > 0 do
+    where =
+      "WHERE a.state = 'waiting' AND a.expires_at > ? ORDER BY a.created_at, a.rowid LIMIT ?"
+
+    with {:ok, rows} <-
+           CuesSql.query_all(conn, @approval_card_sql <> where, [CuesSql.stamp(now), limit]) do
+      collect_ok(rows, &approval_card_row/1)
+    end
+  end
+
+  def handle(conn, {:expire_approvals, %DateTime{} = now, limit})
+      when is_integer(limit) and limit > 0 do
+    CuesSql.with_immediate_transaction(conn, fn -> expire_approvals(conn, now, limit) end)
   end
 
   def handle(conn, {:expire, %DateTime{} = now, limit}) when is_integer(limit) and limit > 0 do
@@ -722,6 +904,208 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
       {:ok, value} -> {:ok, value}
       {:error, _reason} -> {:error, {:corrupt, column}}
     end
+  end
+
+  # --- the automatic approval's prompt ------------------------------------------------
+
+  defp token_kind("mandate"), do: :mandate
+  defp token_kind("follow_up"), do: :follow_up
+  defp token_kind("approval"), do: :approval
+
+  # One prompt waits per watcher: the one before a new prompt expires with the
+  # new one's insert, and is answered with it, so an app can drop its card.
+  defp ask_approval(conn, row, now) do
+    where = "a.watcher_id = ? AND a.state = 'waiting'"
+    supersede = "UPDATE cue_follow_up_approvals SET state = 'expired' WHERE id = ?"
+
+    insert = """
+    INSERT INTO cue_follow_up_approvals (id, watcher_id, shown_digest, expires_at, state,
+      created_at)
+    VALUES (?, ?, ?, ?, 'waiting', ?)
+    """
+
+    params = [row.id, row.watcher_id, row.shown_digest, CuesSql.stamp(row.expires_at)]
+
+    with {:ok, waiting} <- list_approvals(conn, where, [row.watcher_id]),
+         {:ok, superseded} <- update_each(conn, supersede, waiting, "expired"),
+         :ok <- CuesSql.execute(conn, insert, params ++ [CuesSql.stamp(now)]),
+         {:ok, approval} <- fetch_approval(conn, row.id) do
+      {:ok, {approval, superseded}}
+    end
+  end
+
+  defp record_approval_offer(conn, id, binding) do
+    sql = """
+    UPDATE cue_follow_up_approvals
+    SET token_digest = ?, chat_platform = ?, chat_id = ?, chat_user_id = ?
+    WHERE id = ? AND state = 'waiting' AND token_digest IS NULL
+    """
+
+    params = [
+      Map.get(binding, :token_digest),
+      Map.get(binding, :platform),
+      Map.get(binding, :chat_id),
+      Map.get(binding, :user_id),
+      id
+    ]
+
+    with :ok <- CuesSql.execute(conn, sql, params),
+         {:ok, changed} <- CuesSql.changes(conn) do
+      if changed == 1, do: fetch_approval(conn, id), else: {:error, :not_waiting}
+    end
+  end
+
+  defp answer_approval(conn, digest, origin, to_state, now) do
+    stamp = CuesSql.stamp(now)
+
+    sql = """
+    UPDATE cue_follow_up_approvals SET state = ?, decided_at = ?, decided_from = ?
+    WHERE token_digest = ? AND state = 'waiting' AND chat_platform = ? AND chat_id = ?
+      AND chat_user_id = ? AND expires_at > ?
+    """
+
+    params = [to_state, stamp, origin_text(origin), digest]
+    params = params ++ [origin.platform, origin.chat_id, origin.user_id, stamp]
+
+    with :ok <- CuesSql.execute(conn, sql, params),
+         {:ok, changed} <- CuesSql.changes(conn) do
+      approval_answered_or_why(conn, "a.token_digest = ?", [digest], changed, now)
+    end
+  end
+
+  defp decide_approval(conn, id, to_state, decided_from, now) do
+    stamp = CuesSql.stamp(now)
+
+    sql =
+      "UPDATE cue_follow_up_approvals SET state = ?, decided_at = ?, decided_from = ? " <>
+        "WHERE id = ? AND state = 'waiting' AND expires_at > ?"
+
+    with :ok <- CuesSql.execute(conn, sql, [to_state, stamp, decided_from, id, stamp]),
+         {:ok, changed} <- CuesSql.changes(conn) do
+      approval_answered_or_why(conn, "a.id = ?", [id], changed, now)
+    end
+  end
+
+  defp approval_answered_or_why(conn, where, params, 1, _now),
+    do: fetch_one_approval(conn, where, params)
+
+  defp approval_answered_or_why(conn, where, params, 0, now) do
+    case list_approvals(conn, where, params) do
+      {:ok, []} -> {:error, :unknown}
+      {:ok, [%{state: "waiting"} = approval]} -> {:error, waiting_why(approval, now)}
+      {:ok, [%{state: state}]} -> {:error, {:not_waiting, state}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp expire_approvals(conn, now, limit) do
+    where = "a.state = 'waiting' AND a.expires_at <= ? ORDER BY a.expires_at, a.rowid LIMIT ?"
+    sql = "UPDATE cue_follow_up_approvals SET state = 'expired' WHERE id = ?"
+
+    with {:ok, approvals} <- list_approvals(conn, where, [CuesSql.stamp(now), limit]),
+         do: update_each(conn, sql, approvals, "expired")
+  end
+
+  # Runs `sql` with each row's id, answering the rows in their new state.
+  defp update_each(conn, sql, rows, state) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, done} ->
+      case CuesSql.execute(conn, sql, [row.id]) do
+        :ok -> {:cont, {:ok, [%{row | state: state} | done]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> then(fn
+      {:ok, done} -> {:ok, Enum.reverse(done)}
+      {:error, reason} -> {:error, reason}
+    end)
+  end
+
+  defp list_approvals(conn, where, params) do
+    sql =
+      "SELECT #{@approval_columns} FROM cue_follow_up_approvals a " <>
+        "LEFT JOIN cue_watchers w ON w.id = a.watcher_id WHERE " <> where
+
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, params),
+         do: {:ok, Enum.map(rows, &approval_row/1)}
+  end
+
+  defp fetch_approval(conn, id), do: fetch_one_approval(conn, "a.id = ?", [id])
+
+  defp fetch_one_approval(conn, where, params) do
+    with {:ok, rows} <- list_approvals(conn, where, params), do: one(rows, :not_found)
+  end
+
+  defp approval_row([
+         id,
+         watcher_id,
+         watcher_name,
+         shown_digest,
+         state,
+         offered,
+         platform,
+         chat_id,
+         user_id,
+         expires_at,
+         decided_from,
+         decided_at,
+         created_at
+       ])
+       when state in @approval_states do
+    %{
+      id: id,
+      watcher_id: watcher_id,
+      watcher_name: watcher_name,
+      shown_digest: shown_digest,
+      state: state,
+      offered?: offered == 1,
+      chat: chat(platform, chat_id, user_id),
+      expires_at: CuesSql.parse_stamp(expires_at),
+      decided_from: decided_from,
+      decided_at: CuesSql.parse_stamp(decided_at),
+      created_at: CuesSql.parse_stamp(created_at)
+    }
+  end
+
+  defp approval_card_row(row) do
+    {approval, [cap, filter, purpose, words, sources, job_id, job_name, prompt | rest]} =
+      Enum.split(row, 13)
+
+    [tools, delivery_mode, target] = rest
+
+    with {:ok, words} <- decode(words, :listen_for),
+         {:ok, sources} <- decode(sources, :sources),
+         {:ok, tools} <- decode(tools, :allowed_tools),
+         {:ok, target} <- decode(target, :delivery_target) do
+      {:ok,
+       Map.merge(approval_row(approval), %{
+         daily_cap: cap,
+         filter: filter,
+         purpose: purpose,
+         listen_for: words || [],
+         sources: sources || [],
+         job_id: job_id,
+         job_name: job_name,
+         task_prompt: prompt,
+         allowed_tools: tools || [],
+         delivery_mode: delivery_mode,
+         delivery_target: target
+       })}
+    end
+  end
+
+  defp collect_ok(rows, fun) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, done} ->
+      case fun.(row) do
+        {:ok, value} -> {:cont, {:ok, [value | done]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> then(fn
+      {:ok, done} -> {:ok, Enum.reverse(done)}
+      {:error, reason} -> {:error, reason}
+    end)
   end
 
   # --- reads -----------------------------------------------------------------------

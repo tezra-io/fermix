@@ -146,20 +146,24 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp dispatch("revoke", ["path", path], _message, reply_fn, _context),
     do: apply_now({:remove_allowed_root, path}, reply_fn)
 
-  # A mandate proposal's token (M60 §10.9) is core's: the proposal is durable in
-  # `memory.db` and core checks the message's origin against the chat it was
-  # sent to. Every other token is this store's.
+  # A watcher's card (a mandate's proposal, M60 §10.9, a follow-up's card or
+  # an automatic follow-up's approval prompt) is core's, by its `cp_` token or
+  # its id: durable in `memory.db`, and core checks the message's origin
+  # against the chat it was sent to. Every other token is this store's.
   defp dispatch("confirm", [token], message, reply_fn, context) do
-    if Proposals.token?(token),
+    if Proposals.answerable?(token),
       do: confirm_proposal(token, message, reply_fn, context),
       else: confirm(token, message, reply_fn, context)
   end
 
   defp dispatch("deny", [token], message, reply_fn, context) do
-    if Proposals.token?(token),
+    if Proposals.answerable?(token),
       do: deny_proposal(token, message, reply_fn, context),
       else: deny(token, message, reply_fn, context)
   end
+
+  defp dispatch(command, [], message, reply_fn, context) when command in ["confirm", "deny"],
+    do: answer_bare(command, message, reply_fn, context)
 
   defp dispatch(_name, _args, _message, reply_fn, _context),
     do:
@@ -169,7 +173,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
           "/sandbox env allow NAME, /sandbox env deny NAME, /sandbox env set NAME -- CMD [ARGS...], " <>
           "/sandbox env unset NAME, /sandbox commands enable PRESET, " <>
           "/sandbox commands disable PRESET, /grant path PATH, /revoke path PATH, " <>
-          "/confirm TOKEN, /deny TOKEN"
+          "/confirm [TOKEN], /deny [TOKEN]"
       )
 
   defp propose(mutation, message, reply_fn) do
@@ -516,7 +520,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
     {:ok, _pid} =
       Task.Supervisor.start_child(FermixCore.TaskSupervisor, fn ->
         result = Proposals.confirm(token, origin, proposal_opts(context))
-        reply(reply_fn, proposal_text(result))
+        answer_card(reply_fn, message, proposal_text(result))
         settle_command(finish, result)
       end)
 
@@ -525,8 +529,78 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
 
   defp deny_proposal(token, message, reply_fn, context) do
     result = Proposals.deny(token, proposal_origin(message), proposal_opts(context))
-    reply(reply_fn, proposal_text(result))
+    answer_card(reply_fn, message, proposal_text(result))
   end
+
+  # A tap on a watcher's card is answered on the card: it becomes the answer's
+  # line, and its buttons go (M60_WATCHER_CODING_RUNS.md §6.2). A typed answer
+  # is a reply.
+  defp answer_card(reply_fn, message, text) do
+    case Map.get(message.metadata || %{}, :approval_message_id) do
+      nil -> reply(reply_fn, text)
+      message_id -> reply_fn.({:approval_answer, message_id, text})
+    end
+
+    :ok
+  end
+
+  # A bare `/confirm` or `/deny` answers the one thing waiting in this chat: a
+  # watcher's card held in core, or a parked command or sandbox change held
+  # here. With more than one it answers none, and lists each with the command
+  # that answers it (M60_WATCHER_CODING_RUNS.md §6.2).
+  defp answer_bare(command, message, reply_fn, context) do
+    case Proposals.waiting_in_chat(proposal_origin(message), proposal_opts(context)) do
+      {:ok, cards} ->
+        answer_one(command, cards, waiting_here(message), message, reply_fn, context)
+
+      {:error, sentence} ->
+        reply(reply_fn, sentence)
+    end
+  end
+
+  defp answer_one("confirm", [card], [], message, reply_fn, context),
+    do: confirm_proposal(card.id, message, reply_fn, context)
+
+  defp answer_one("deny", [card], [], message, reply_fn, context),
+    do: deny_proposal(card.id, message, reply_fn, context)
+
+  defp answer_one(command, [], [{token, _record}], message, reply_fn, context),
+    do: dispatch(command, [token], message, reply_fn, context)
+
+  defp answer_one(_command, [], [], _message, reply_fn, _context),
+    do: reply(reply_fn, "Nothing is waiting for your answer here.")
+
+  defp answer_one(command, cards, held, _message, reply_fn, _context) do
+    lines =
+      Enum.map(cards, &"- #{&1.title} /#{command} #{&1.id}") ++
+        Enum.map(held, fn {token, record} -> "- #{held_title(record)} /#{command} #{token}" end)
+
+    reply(
+      reply_fn,
+      Enum.join(["Several things are waiting for your answer here:" | lines], "\n") <>
+        "\nSend the one you mean."
+    )
+  end
+
+  # This store's live records from this chat and this person.
+  defp waiting_here(message) do
+    now = now_ms()
+
+    Confirmations.list()
+    |> Enum.filter(fn {_token, record} ->
+      record.expires_at >= now and same_origin?(record, message)
+    end)
+    |> Enum.sort_by(fn {_token, record} -> record.expires_at end)
+  end
+
+  defp held_title(%{mutation: {:access_sensitive, _intent_id}}),
+    do: "A command waiting to be sent"
+
+  defp held_title(%{mutation: {:acknowledge_vendor_config, _run_id}}),
+    do: "A coding agent's config change"
+
+  defp held_title(%{mutation: {:add_allowed_root, path}}), do: "Access to #{path}"
+  defp held_title(_record), do: "A sandbox change"
 
   # Who answered, and where: core accepts the answer only from the owner's DM
   # the proposal was sent to (platform, chat and user), so a group chat or

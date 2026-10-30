@@ -3,8 +3,8 @@
   "$id": "https://fermix.sh/companion/protocol.schema.json",
   "title": "Fermix companion chat socket protocol",
   "description": "Newline-delimited JSON wire contract between the Fermix daemon and a native companion's chat. Source of truth: FermixCore.Companion.Protocol. See PROTOCOL.md.",
-  "x-protocol-version": 4,
-  "x-supported-version-range": { "min": 3, "max": 4 },
+  "x-protocol-version": 5,
+  "x-supported-version-range": { "min": 4, "max": 5 },
   "x-max-line-bytes": 65536,
   "x-media-budget-bytes": 536870912,
   "x-media-release-grace-s": 60,
@@ -575,18 +575,23 @@
     },
     "proposalCard": {
       "type": "object",
-      "description": "A proposal as the owner decides it. Fermix's record (ids, the owner's own names, times, where an answer came from, status_sentence) and summary carry no outside text; outside holds everything a model or a stranger wrote, kept apart by structure. Times are RFC 3339 UTC. An optional field is absent when it does not apply, never null.",
+      "description": "A proposal as the owner decides it. Fermix's record (ids, the owner's own names, times, where an answer came from, status_sentence) and summary carry no outside text; outside holds everything a model or a stranger wrote, kept apart by structure. A mandate's card names its call (mandate, tool, outside.args_text); since version 5 a watcher's follow-up card names the follow-up instead (follow_up) and carries no call, and only a version 5 connection is sent one. Times are RFC 3339 UTC. An optional field is absent when it does not apply, never null.",
       "required": [
         "proposal_id",
         "state",
-        "mandate",
-        "tool",
         "task",
         "created_at",
         "expires_at",
         "status_sentence",
         "summary",
         "outside"
+      ],
+      "oneOf": [
+        {
+          "required": ["mandate", "tool"],
+          "properties": { "outside": { "required": ["args_text"] } }
+        },
+        { "required": ["follow_up"] }
       ],
       "properties": {
         "proposal_id": { "type": "string", "minLength": 1 },
@@ -623,13 +628,39 @@
         "summary": { "type": "string", "minLength": 1 },
         "outside": {
           "type": "object",
-          "description": "Outside text. args_text is the recorded call's arguments as pretty JSON; cue is absent when Fermix no longer keeps the cue's snapshot.",
-          "required": ["args_text"],
+          "description": "Outside text. args_text is the recorded call's arguments as pretty JSON, and args each of them as name and value, for the compact card's lines (a mandate's card only); reason is the filter's reason for passing the item; cue is absent when Fermix no longer keeps the cue's snapshot.",
           "properties": {
             "args_text": { "type": "string", "maxLength": 3500 },
+            "args": { "type": "array", "items": { "$ref": "#/$defs/proposalArg" } },
+            "reason": { "type": "string", "minLength": 1 },
             "cue": { "$ref": "#/$defs/proposalCue" }
           }
-        }
+        },
+        "follow_up": { "$ref": "#/$defs/followUpCard" }
+      }
+    },
+    "proposalArg": {
+      "type": "object",
+      "description": "One argument of a mandate's call, outside text: a string value as itself, any other as JSON.",
+      "required": ["name", "value"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "value": { "type": "string" }
+      }
+    },
+    "followUpCard": {
+      "type": "object",
+      "description": "Version 5. A watcher's follow-up, all Fermix's and the owner's words: asks run (once, now) or automatic (on every passing item, with no card, within the watcher's daily_cap; set_off_by names its sources and words). The follow-up is handed nothing of the item.",
+      "x-since-version": 5,
+      "required": ["asks", "name", "instructions", "tools", "reports_to"],
+      "properties": {
+        "asks": { "enum": ["run", "automatic"] },
+        "name": { "type": "string", "minLength": 1 },
+        "instructions": { "type": "string", "minLength": 1 },
+        "tools": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "reports_to": { "type": "string", "minLength": 1 },
+        "daily_cap": { "type": "integer", "minimum": 1 },
+        "set_off_by": { "type": "string", "minLength": 1 }
       }
     },
     "proposalCue": {
