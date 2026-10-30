@@ -161,6 +161,16 @@ if it was sent, is already in the Repo's mailbox ahead of the reset.
   `filtering → expired` leaves that call's settle the modelled stale branch
   (`SettleFenced`). Sources are not modelled, so no step moved. A live pass
   for a paused watcher, or one that lost the item's source, writes no row.
+- **A decision model as the screen (2026-10-29).** With
+  `[fermix_core.cues] screen_provider` set, the accept transaction writes a
+  delivery for every `llm` watcher that has words instead of only those whose
+  words matched: which deliveries exist is again what `Topology` fixes. The
+  filter call's task asks `Cues.Filter.decide/2`, which asks the decision model
+  first and the filter model only for an item it lets through; both model
+  calls are invisible here, and their outcomes are the pass, drop, provider
+  failure and content failure `TaskSettle` already takes. The claim also reads
+  the watcher's words for the screen; a list it cannot read fails the claim as
+  any other corrupt row does, which is not modelled. No step moved.
 
 ## Switches
 
