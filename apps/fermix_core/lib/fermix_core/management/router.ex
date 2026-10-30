@@ -687,10 +687,11 @@ defmodule FermixCore.Management.Router do
   end
 
   # A value's type is the form's to refuse, under the field it names; this
-  # closes the set and checks only that `values` is an object.
+  # closes the set and checks only that `values` is an object. The name is
+  # optional: absent or empty, Fermix makes one.
   defp cue_add(params, opts) do
     with :ok <- reject_unknown_params(params, @cue_add_params),
-         {:ok, ref} <- fetch_text(params, "ref", 1),
+         {:ok, ref} <- fetch_optional_name(params, "ref"),
          {:ok, kind} <- fetch_optional_text(params, "kind"),
          {:ok, preset} <- fetch_optional_text(params, "preset"),
          :ok <- kind_or_preset(kind, preset),
@@ -737,6 +738,13 @@ defmodule FermixCore.Management.Router do
     case Map.get(params, field) do
       nil -> {:ok, nil}
       _present -> fetch_text(params, field, 1)
+    end
+  end
+
+  defp fetch_optional_name(params, field) do
+    case Map.get(params, field) do
+      nil -> {:ok, nil}
+      _present -> fetch_text(params, field, 0)
     end
   end
 

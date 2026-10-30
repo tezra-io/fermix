@@ -181,6 +181,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   why, `fermix doctor` gains an `os sandbox` row on both systems, and tool
   caches move into the workspace's `.cache` on Linux too. On a Mac the same
   read rules now also cover the phone and desktop keys and `/run/fermix`.
+- **Adding a cue source starts from what you want watched.** The add form
+  now opens on a list: Website or blog, X accounts, GitHub and Your scripts,
+  with Any feed address, Live stream and Any webhook under Something else.
+  Each asks only for what it needs (a feed address, the X accounts, or
+  nothing at all for GitHub and scripts) and keeps the rest under More
+  options. The name is optional: left empty, Fermix names the source from
+  what it reads, such as `ycombinator` for a Hacker News feed, `x-nasa` for
+  X accounts or `github`, adding `-2` when that name is taken. Fermix also
+  makes a GitHub source's secret and shows it once, as it does a script's
+  token, so there is no secret to invent and paste in two places. The X
+  accounts form says whether you are signed in to X, and the fields read in
+  plain words: Feed address, Accounts, Check every, Daily limit,
+  Verification and Secret.
 
 ### Removed
 

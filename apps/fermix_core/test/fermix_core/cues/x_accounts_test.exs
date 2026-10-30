@@ -329,5 +329,54 @@ defmodule FermixCore.Cues.XAccountsTest do
       assert XAccounts.sign_in_token(find: fn "x" -> {:ok, plugin} end, get_token: none) ==
                {:error, :not_found}
     end
+
+    # What the add form says about the sign-in: the same plugin, switch and
+    # profile a poll reads with, asked for the sign-in's state, never its token.
+    test "its state is ready when the X plugin's profile holds a token X has not refused", %{
+      plugin: plugin
+    } do
+      test = self()
+      seams = [find: fn "x" -> {:ok, plugin} end, enabled: fn -> ["x"] end]
+
+      status = fn profile ->
+        send(test, {:status, profile})
+        {:ok, %{loaded?: true, invalidated?: false}}
+      end
+
+      assert XAccounts.sign_in_state([status: status] ++ seams) == :ready
+      assert_received {:status, "x:primary"}
+
+      # A tree-less read of the store says only that a token is loaded.
+      assert XAccounts.sign_in_state([status: fn _ -> {:ok, %{loaded?: true}} end] ++ seams) ==
+               :ready
+    end
+
+    test "its state names what is missing, and asking never exits", %{plugin: plugin} do
+      seams = [find: fn "x" -> {:ok, plugin} end, enabled: fn -> ["x"] end]
+      unasked = fn _profile -> flunk("no status is asked for") end
+
+      assert XAccounts.sign_in_state(find: fn "x" -> :error end, status: unasked) ==
+               {:error, :x_plugin_not_installed}
+
+      assert XAccounts.sign_in_state(
+               find: fn "x" -> {:ok, plugin} end,
+               enabled: fn -> [] end,
+               status: unasked
+             ) == {:error, :x_plugin_off}
+
+      not_loaded = fn _ -> {:ok, %{loaded?: false, invalidated?: false}} end
+      assert XAccounts.sign_in_state([status: not_loaded] ++ seams) == {:error, :no_token}
+
+      refused = fn _ -> {:ok, %{loaded?: true, invalidated?: true}} end
+      assert XAccounts.sign_in_state([status: refused] ++ seams) == {:error, :sign_in_refused}
+
+      unstored = fn _ -> {:error, :not_found} end
+      assert XAccounts.sign_in_state([status: unstored] ++ seams) == {:error, :not_found}
+
+      wedged = fn _ -> exit({:timeout, {GenServer, :call, [:x_tokens, :status, 5_000]}}) end
+
+      assert XAccounts.sign_in_state([status: wedged] ++ seams) ==
+               {:error, {:token_server_unavailable, :timeout}}
+    end
   end
 end

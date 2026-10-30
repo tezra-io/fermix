@@ -96,7 +96,8 @@ defmodule FermixCore.Management.Copy do
     "Chrome",
     "Google",
     "Android",
-    "Node.js"
+    "Node.js",
+    "Atom"
   ]
 
   @doc """

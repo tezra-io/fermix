@@ -19,7 +19,12 @@ defmodule FermixCore.Cues.Settings do
   before the config that names it, so a refused save leaves the old config
   whole; a secret this call created is taken back out when its config is not
   saved. The config holds only the sentinel. No secret value is ever returned,
-  except a local-push token this call made, which the caller shows once.
+  except a local-push token or a GitHub source's secret this call made, which
+  the caller shows once.
+
+  A new source is added with `add_source/3` (M60 simpler setup §7): its name
+  is optional, and one left out is made by `Cues.SourceName.make/2` in the
+  same save, against the names the save sees.
 
   Sections arrive in the persisted shape (enumerations as strings, durations
   as written), the shape `ConfigStore.current_snapshot/0` holds.
@@ -31,6 +36,7 @@ defmodule FermixCore.Cues.Settings do
   alias FermixCore.Cues.FilterChoices
   alias FermixCore.Cues.Pins
   alias FermixCore.Cues.Presets
+  alias FermixCore.Cues.SourceName
   alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
@@ -131,21 +137,52 @@ defmodule FermixCore.Cues.Settings do
   `new_token/1`, the one call that shows it.
   """
   @spec save_source(String.t(), keyword(), %{optional(atom()) => String.t()}, :create | :update) ::
-          {:ok, %{token: String.t() | nil}} | {:error, refusal() | secret_failure() | term()}
+          {:ok, %{ref: String.t(), token: String.t() | nil}}
+          | {:error, refusal() | secret_failure() | term()}
   def save_source(ref, section, secrets, mode)
       when is_binary(ref) and is_list(section) and is_map(secrets) and mode in [:create, :update] do
     check_typed_secrets!(section, secrets)
     store_source(ref, section, secrets, mode, mode == :create)
   end
 
+  @doc """
+  Adds a new source as `save_source/4` does, the add both doors make. `ref`
+  nil or empty is made from `section` (`Cues.SourceName.make/2`) against the
+  names taken in the same save. A GitHub source given no `:secret` gets one
+  Fermix makes, as strong as a local push token and stored where a typed one
+  is. Answers the name in force, a local push source's first token and the
+  made secret, each for the caller to show once and keep nowhere.
+  """
+  @spec add_source(String.t() | nil, keyword(), %{optional(atom()) => String.t()}) ::
+          {:ok, %{ref: String.t(), token: String.t() | nil, secret: String.t() | nil}}
+          | {:error, refusal() | secret_failure() | term()}
+  def add_source(ref, section, secrets)
+      when (is_binary(ref) or is_nil(ref)) and is_list(section) and is_map(secrets) do
+    check_typed_secrets!(section, secrets)
+    made = made_secret(section, secrets)
+    typed = if made, do: Map.put(secrets, :secret, made), else: secrets
+
+    with {:ok, saved} <- store_source(blank_to_nil(ref), section, typed, :create, true) do
+      {:ok, Map.put(saved, :secret, made)}
+    end
+  end
+
+  # GitHub signs each delivery with the secret pasted into its webhook form,
+  # so Fermix makes one unless the owner typed their own.
+  defp made_secret(section, secrets) do
+    if Keyword.get(section, :preset) == "github" and not Map.has_key?(secrets, :secret),
+      do: generate_token()
+  end
+
   # `mint?` makes a local push source's first token where it has none: a new
-  # source, or `new_token/1` on one that waits for it.
+  # source, or `new_token/1` on one that waits for it. A nil `ref` is made in
+  # the plan, so the name and the names it is checked against are one read.
   defp store_source(ref, section, secrets, mode, mint?) do
-    with :ok <- check_name(ref, "source"),
-         {:ok, plan} <- plan(&put_source(&1, ref, section, secrets, mode, mint?)),
+    with {:ok, plan} <- plan(&put_source(&1, ref, section, secrets, mode, mint?)),
+         ref = plan.extra.ref,
          {:ok, created} <- write_secrets(ref, plan.extra.writes),
          {:ok, _report} <- commit_or_take_back(plan, ref, created) do
-      {:ok, %{token: plan.extra.token}}
+      {:ok, %{ref: ref, token: plan.extra.token}}
     end
   end
 
@@ -376,7 +413,8 @@ defmodule FermixCore.Cues.Settings do
   defp put_source(cues, ref, section, secrets, mode, mint?) do
     sources = Keyword.get(cues, :sources, %{})
 
-    with {:ok, existing} <- fetch_for(sources, ref, mode, "source"),
+    with {:ok, ref} <- source_ref(ref, section, sources),
+         {:ok, existing} <- fetch_for(sources, ref, mode, "source"),
          :ok <- room(sources, mode, CuesConfig.max_sources(), "sources") do
       kept = Keyword.take(existing, SecretWriter.cue_secret_fields())
       typed = Enum.map(secrets, fn {field, value} -> {field, value, store_for(kept, field)} end)
@@ -390,8 +428,19 @@ defmodule FermixCore.Cues.Settings do
         end)
 
       {:ok, put_key(cues, :sources, Map.put(sources, ref, new_section)),
-       %{token: token, writes: writes}}
+       %{ref: ref, token: token, writes: writes}}
     end
+  end
+
+  defp source_ref(nil, section, sources) do
+    case SourceName.make(section, Map.keys(sources)) do
+      {:ok, ref} -> {:ok, ref}
+      {:error, sentence} -> {:error, {:invalid, sentence}}
+    end
+  end
+
+  defp source_ref(ref, _section, _sources) do
+    with :ok <- check_name(ref, "source"), do: {:ok, ref}
   end
 
   # A new local-push source gets its first token here, and so does one that

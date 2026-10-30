@@ -455,7 +455,7 @@ defmodule FermixCore.Management.CopyTest do
               {nil, "rss", nil},
               {nil, "x_accounts", nil}
             ] do
-          {:ok, form} = CueSourceForm.form(kind, preset, verify)
+          {:ok, form} = CueSourceForm.form(kind, preset, verify, x_sign_in: fn -> :ready end)
           form
         end
 
@@ -470,6 +470,11 @@ defmodule FermixCore.Management.CopyTest do
 
         Enum.each(form["presets"], &assert_clean(&1["label"], :name, [], "cue preset label"))
 
+        for choice <- form["choices"] do
+          assert_clean(choice["label"], :name, [], "cue choice label")
+          assert_clean(choice["sentence"], :prose, [], "cue choice sentence")
+        end
+
         for row <- form["rows"] do
           assert_clean(row["label"], :name, [], "cue form row #{row["key"]}")
           # A cue row explains itself behind an info control, never in a footer.
@@ -482,6 +487,11 @@ defmodule FermixCore.Management.CopyTest do
         # the row that only reads like its own.
         labels = Enum.map(form["rows"], & &1["label"])
         assert labels == Enum.uniq(labels), "cue form labels repeat: #{inspect(labels)}"
+      end
+
+      for sign_in <- [fn -> :ready end, fn -> {:error, :no_token} end] do
+        %{"sentence" => sentence} = CueSourceForm.requirement("x_accounts", x_sign_in: sign_in)
+        assert_clean(sentence, :prose, [], "cue requirement")
       end
     end
 

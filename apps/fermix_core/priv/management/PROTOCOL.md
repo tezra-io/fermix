@@ -334,8 +334,8 @@ daemon onto anything else.
 | `cues.status` | none | The cue subsystem as it stands: `available` (always `true`: every build has cues), the switches (`enabled`, `mandates_enabled`), whether the cue tree is `running`, `memory_enabled`, a `state` (`off`, `needs_memory`, `needs_restart`, `running`) with its `status_sentence`, the `door` (`state` `listening`, `unavailable` or `not_running`, `port`, `reason`, `sentence`), and `counts` (`sources`, `sources_attention`, `watchers`, `watchers_held`, `mandates`, `mandates_attention`, `proposals_waiting`). Answers on every build. Minimum version `2`. |
 | `cues.sources.list` | none | Every source as a row, at most 64, plus `can_add` and `limits` (`max_sources`). Minimum version `2`. |
 | `cues.sources.get` | `ref` | One source's row, its editable fields as settings rows (`values`), its open gaps (at most 20, each with the daemon's sentence) and its refused requests by reason (`rejected`). Minimum version `2`. |
-| `cues.sources.form` | `kind`, `preset`, `verify` (each optional) | The add form for that choice, and writes nothing: `kinds`, `presets`, `rows` (the name first, then the fields of that kind, preset and verification method, a secret field as a `secret` row with `present: false`), `consent_sentence` and `notes`. A stream has no preset; it is the general WebSocket source: each of its field rows but the name and the daily budget carries an `info` and an `example` (no row of the form carries a `footer`), and two `secret` rows, `key` (API key) and `secret` (API secret), follow its address. Minimum version `2`. |
-| `cues.sources.add` | `ref`, `kind` or `preset`, `values` | Saves a new source and answers `{source, token}`: its row, and for a new local push source its first token, returned once; null otherwise. Minimum version `2`. |
+| `cues.sources.form` | `kind`, `preset`, `verify` (each optional) | The add form for that choice, and writes nothing: `choices`, `requirement`, `kinds`, `presets`, `rows` (the name first, then the fields of that kind, preset and verification method, a secret field as a `secret` row with `present: false`), `consent_sentence` and `notes`. `choices` is the same on every answer: what the owner can watch, in the order a client lists them, each `{id, label, sentence, kind, preset, featured}` (`preset` null where the choice has none); a client draws the featured ones first and the rest under "Something else", and asks for a choice's form by its `kind` and `preset`. `requirement` is null except for X accounts: `{state, sentence, plugin: "x"}`, `state` `ready` ("Signed in to X.") or `needs_sign_in` ("Connect X to read these accounts."), read from the X plugin's sign-in the source reads with; it never stops the add. Only the rows a choice needs are open; the rest, the name first among them, are `advanced`. The name row is empty, with an `example` of the name Fermix would make. GitHub's form has no secret row: Fermix makes that secret when the source is added. A stream has no preset; it is the general WebSocket source: each of its field rows but the name and the daily budget carries an `info` and an `example` (no row of the form carries a `footer`), and two `secret` rows, `key` (API key) and `secret` (API secret), follow its address. `kinds` and `presets` are as they were, for the edit form and older apps. Minimum version `2`. |
+| `cues.sources.add` | `ref` (optional), `kind` or `preset`, `values` | Saves a new source and answers `{source, token, secret}`: its row, under the name given or, with `ref` absent or empty, one Fermix makes (a feed's or stream's site, such as `ycombinator` for `news.ycombinator.com`; `x-` and the first handle; `github`; `scripts` for a local push; `webhook`), with `-2`, `-3` and so on when the name is taken. `source.ref` is the name in force, and a client stores typed secrets under it. `token` is a new local push source's first token and `secret` the secret Fermix makes for a new GitHub source, each returned once and null otherwise. Minimum version `2`. |
 | `cues.sources.update` | `ref`, `values` | Changes the fields `values` names and answers `{source}`. The name, kind and preset cannot change. Minimum version `2`. |
 | `cues.sources.remove` | `ref` | Removes a source and its stored secrets, and answers `{ref, removed: true, left, watchers}`: any secret that could not be deleted, as sentences, and the watchers that listened to it. Minimum version `2`. |
 | `cues.sources.enable` | `ref` | Turns a source on and answers `{source}`. Minimum version `2`. |
@@ -1141,7 +1141,8 @@ Notes that the shapes alone do not carry:
   as a hand edit would hold it, with no secret value in it. At most 64 sources
   and 64 mandates are added; past that the add is refused with a sentence.
   A form's refusal is `invalid_params` with `field` (the value's key, or `ref`
-  or `name`) and the daemon's sentence.
+  or `name`) and the daemon's sentence; a name that breaks the rule is
+  refused under `ref` with the rule in its sentence.
 - **A source row is the daemon's.** `state` is `off`, `needs_secret`,
   `not_running` (cues off, or on and not yet restarted), then the status the
   source last wrote: `idle`, `polling`, `connected`, `reconnecting`,
@@ -1159,13 +1160,17 @@ Notes that the shapes alone do not carry:
   hand-edited file as much as for a socket write: the door refuses its
   requests and no worker runs until each is stored. So `cues.sources.add`
   saves a webhook or a stream first and the client stores its secrets with
-  `secret.set` after, one per secret row; `secrets` lists each field the
-  source needs with its own presence.
-- **Two values are handed out.** A new local push source's first token
-  (`cues.sources.add`) and a fresh one (`cues.sources.token.new`) are returned
-  once: never logged, never traced, never retained, and no later read repeats
-  them. A webhook's address is returned by `cues.sources.url.get` alone, on
-  every ask, and is never on a list.
+  `secret.set` after, one per secret row, under the `source.ref` the add
+  answered; `secrets` lists each field the source needs with its own
+  presence. A GitHub source never waits: `cues.sources.add` stores the secret
+  Fermix makes for it, and `secret.set` replaces it later.
+- **Three values are handed out.** A new local push source's first token
+  (`cues.sources.add`) and a fresh one (`cues.sources.token.new`), and the
+  secret Fermix makes for a new GitHub source (`cues.sources.add`, as
+  strong as a token and stored as a typed secret is), are returned once:
+  never logged, never traced, never retained, and no later read repeats them.
+  A webhook's address is returned by `cues.sources.url.get` alone, on every
+  ask, and is never on a list.
 - **A watcher row is read-only**: watchers are made and changed in a chat with
   Fermix, and every `llm` watcher filters with the one Cues filter model.
   `state` is `on`, `paused`, `needs_update` or `held` (its filter cannot reach

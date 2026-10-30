@@ -51,7 +51,8 @@ defmodule FermixCore.Cues.Config do
   @max_approve_within_s 86_400
   @default_max_cue_age_s 900
 
-  @name_pattern ~r/\A[a-z0-9][a-z0-9-]{0,63}\z/
+  @max_name_length 64
+  @name_pattern ~r/\A[a-z0-9][a-z0-9-]{0,#{@max_name_length - 1}}\z/
   @pin_key_pattern ~r/\A[A-Za-z_][A-Za-z0-9_]{0,63}\z/
   @duration_pattern ~r/\A([1-9][0-9]{0,6})([smh])\z/
   # A float the config parser reads back as the same float.
@@ -283,6 +284,10 @@ defmodule FermixCore.Cues.Config do
 
   defp preset_needs(:stream, nil), do: [:id_path]
   defp preset_needs(_kind, _preset), do: []
+
+  @doc "The most characters a source ref or a mandate name has."
+  @spec max_name_length() :: pos_integer()
+  def max_name_length, do: @max_name_length
 
   @doc "Whether `name` is a valid source ref or mandate name."
   @spec valid_name?(term()) :: boolean()

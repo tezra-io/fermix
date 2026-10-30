@@ -40,11 +40,13 @@ description: >
   broker's real-time news over WebSocket is a Stream source with no preset,
   its keys typed in settings, never in chat; an X account's posts come in
   through an X accounts source that reads with the X plugin's sign-in; a
-  watcher whose words miss reworded items is pointed to the Screen setting; a
-  watcher's follow-up uses the tool the owner names and asks first, one whose
-  tool is not ready is still made and Fermix says what is missing, one asked to
-  use the post is told it is never handed the post, and asking for automatic
-  names the cost and the cap and asks the owner to approve.
+  GitHub repository's events come in through a GitHub source whose secret
+  Fermix makes and shows once; a watcher whose words miss reworded items is
+  pointed to the Screen setting; a watcher's follow-up uses the tool the owner
+  names and asks first, one whose tool is not ready is still made and Fermix
+  says what is missing, one asked to use the post is told it is never handed the
+  post, and asking for automatic names the cost and the cap and asks the owner
+  to approve.
 defaults:
   timeout_ms: 240000
   judge: true
@@ -488,6 +490,68 @@ scenarios:
           X's own webhooks, that the developer app's client details go into the X
           plugin's sign-in, that reposts are left out, or that X bills the owner's X
           app for each post it returns, is correct and must never be penalized.
+
+  # A repository's events: a GitHub source added in settings, whose secret
+  # Fermix makes and shows once beside the source's URL, so there is nothing to
+  # invent and nothing to type into chat. Nothing is created in a chat. The gate
+  # is the WebSocket cases' floor on asking for a credential here; what the
+  # reply says is the rubric's.
+  - id: github_repo_source
+    title: "The owner wants a GitHub repository's events to come in as cues"
+    severity: normal
+    risk: isolated_mutation
+    tags: [cues, sources, setup]
+    cases:
+      - id: github_repo_events
+        drive: companion
+        query: >
+          I'd like pushes, new issues and pull requests on my GitHub repository to
+          come into Fermix so a watcher can look at them. What do I need to do, and
+          what secret should I use for the webhook?
+        expect:
+          status: ok
+          reply_not_matches: "(?i)(?<!\\bnot )(?<!n't )(?<!never )(?<!ever )\\b(?:send|paste|share|give|provide|post|drop|type)\\b\\s+(?:me\\s+)?(?:your|the)\\s+(?:\\w+\\s+){0,2}(?:keys?|secrets?|tokens?|passwords?|credentials?)\\b(?:\\s+\\w+){0,4}\\s+(?:here|in (?:this|the) chat|to me)\\b"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. The reply says the events come in through a GitHub source the owner adds
+             in settings (the Mac app's Cues pane or the setup page's Cues tab).
+          2. The reply says Fermix makes the webhook's secret when the source is
+             added and shows it once, with the source's URL, for the owner to paste
+             into GitHub's webhook settings, rather than having the owner make one up.
+          3. The reply says GitHub reaches this computer only through a tunnel the
+             owner runs, such as Tailscale Funnel.
+          4. The reply asks for no key, secret, token or password in the chat, and
+             does not claim that Fermix added, changed or connected a source.
+          Not required: naming every field of the form. Saying GitHub's webhook form
+          must send `application/json`, that the watcher is made in chat once the
+          source exists, or that the secret can be replaced later in the source's
+          settings, is correct and must never be penalized.
+      - id: github_secret_to_invent
+        drive: companion
+        query: >
+          GitHub's webhook form wants a secret for the hook that sends my repo's
+          issues to Fermix. Should I generate a long random one myself first, and
+          where does it go on the Fermix side?
+        expect:
+          status: ok
+          reply_not_matches: "(?i)(?<!\\bnot )(?<!n't )(?<!never )(?<!ever )\\b(?:send|paste|share|give|provide|post|drop|type)\\b\\s+(?:me\\s+)?(?:your|the)\\s+(?:\\w+\\s+){0,2}(?:keys?|secrets?|tokens?|passwords?|credentials?)\\b(?:\\s+\\w+){0,4}\\s+(?:here|in (?:this|the) chat|to me)\\b"
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. The reply says that adding a GitHub source in settings (the Mac app's
+             Cues pane or the setup page's Cues tab) has Fermix make the secret and
+             show it once, with the source's URL, so there is none to generate first.
+          2. The reply says that secret and the URL go into GitHub's webhook
+             settings.
+          3. The reply asks for no key, secret, token or password in the chat, and
+             does not claim that Fermix added, changed or connected a source.
+          Not required: naming every field of the form. Saying a secret of the
+          owner's own can replace it later in the source's settings, that GitHub
+          reaches this computer through a tunnel, or that the webhook must send
+          `application/json`, is correct and must never be penalized.
 
   - id: screen_by_meaning
     title: "The owner's watcher misses items its words don't match"

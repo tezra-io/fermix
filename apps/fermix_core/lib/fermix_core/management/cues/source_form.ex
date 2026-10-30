@@ -28,6 +28,16 @@ defmodule FermixCore.Management.Cues.SourceForm do
   one field is its handles (`handles_row/0`), kept as `Cues.XAccounts.handles/1`
   keeps them, and its note says it reads with the X plugin's sign-in
   (`preset_note/1`).
+
+  The add form starts from what the owner wants watched (M60 simpler setup
+  §3, §7): every answer carries the same `choices` (`choices/0`), each a kind
+  and a preset, the featured ones first. A choice's form opens only what it
+  needs (`add_open_keys/3`) and folds the rest under More options, the name
+  first among them: left empty, Fermix names the source (`name_row/1`,
+  `Cues.SourceName`). GitHub's add form has no secret row, since Fermix makes
+  that secret, and X accounts carries a `requirement` saying whether the X
+  sign-in is there (`requirement/2`). The edit form keeps its rows and folds.
+  Every word is here, so the browser setup page reads the same ones.
   """
 
   alias FermixCore.Cues.Config, as: CuesConfig
@@ -86,9 +96,122 @@ defmodule FermixCore.Management.Cues.SourceForm do
   @x_accounts_note "Reads with your X sign-in from the X plugin. Connect X under Plugins " <>
                      "first. X bills your X app for each post it returns."
   @handles_row %{
-    label: "Handles",
+    label: "Accounts",
     info: "X usernames, with or without @. Up to 20.",
     example: "nasa"
+  }
+
+  # What the owner wants watched, in the order a client lists them: the
+  # featured ones first, the rest under "Something else".
+  @choices [
+    %{
+      id: "rss",
+      label: "Website or blog",
+      sentence: "New posts from a site's RSS, Atom or JSON feed.",
+      kind: "feed",
+      preset: "rss",
+      featured: true
+    },
+    %{
+      id: "x_accounts",
+      label: "X accounts",
+      sentence: "New posts from accounts you choose. Uses your X sign-in.",
+      kind: "feed",
+      preset: "x_accounts",
+      featured: true
+    },
+    %{
+      id: "github",
+      label: "GitHub",
+      sentence: "Pushes, issues and pull requests. Needs a tunnel to this computer.",
+      kind: "webhook",
+      preset: "github",
+      featured: true
+    },
+    %{
+      id: "local_push",
+      label: "Your scripts",
+      sentence: "Programs on this computer send items with a token.",
+      kind: "local_push",
+      preset: nil,
+      featured: true
+    },
+    %{
+      id: "feed",
+      label: "Any feed address",
+      sentence: "Fermix checks an address on a schedule.",
+      kind: "feed",
+      preset: nil,
+      featured: false
+    },
+    %{
+      id: "stream",
+      label: "Live stream",
+      sentence: "Fermix keeps a WebSocket connection open and takes items as they arrive.",
+      kind: "stream",
+      preset: nil,
+      featured: false
+    },
+    %{
+      id: "webhook",
+      label: "Any webhook",
+      sentence: "A service sends items to an address Fermix makes.",
+      kind: "webhook",
+      preset: nil,
+      featured: false
+    }
+  ]
+  @choice_ids Enum.map(@choices, & &1.id)
+
+  # The rows a choice's add form opens beside the fields its kind needs and
+  # no preset fills (`Cues.Config.required_fields/3`) and the identity a
+  # signed webhook needs; every other row is under More options.
+  @add_open %{
+    "rss" => ~w(url),
+    "x_accounts" => ~w(handles),
+    "github" => [],
+    "local_push" => [],
+    "feed" => ~w(url interval_minutes),
+    "stream" => ~w(url key secret subscribe_message id_path),
+    "webhook" => ~w(verify secret)
+  }
+
+  @name_label "Name"
+  @name_info "How you and Fermix refer to it in chat. Left empty, Fermix names it from " <>
+               "what you enter."
+  # What `Cues.SourceName` makes for each choice, shown in the empty field.
+  @name_examples %{
+    "rss" => "ycombinator",
+    "x_accounts" => "x-nasa",
+    "github" => "github",
+    "local_push" => "scripts",
+    "feed" => "weatherdesk",
+    "stream" => "marketwire",
+    "webhook" => "webhook"
+  }
+
+  @x_signed_in "Signed in to X."
+  @x_needs_sign_in "Connect X to read these accounts."
+
+  @feed_address_label "Feed address"
+  @address_label "Address"
+  @secret_label "Secret"
+  @shared_secret_label "Shared secret"
+  # The words of every row a feed, a webhook or a local push draws, but its
+  # address, handles and secret.
+  @field_words %{
+    "interval_minutes" => %{label: "Check every", info: nil},
+    "daily_budget" => %{label: "Daily limit", info: "The most items a day. 0 means no limit."},
+    "verify" => %{label: "Verification", info: nil},
+    "header" => %{label: "Signature header", info: nil},
+    "algorithm" => %{label: "Algorithm", info: nil},
+    "prefix" => %{label: "Signature prefix", info: nil},
+    "id_header" => %{label: "Delivery id header", info: nil},
+    "content_hash" => %{
+      label: "Identify items by their content",
+      info: "For a service that sends no delivery id: an exact repeat is a duplicate."
+    },
+    "type_header" => %{label: "Event type header", info: nil}
   }
   @push_note "Send each item as a CloudEvent, with the token as a bearer token."
   @general_stream_note "Any WebSocket service. Fermix signs in with your API key and secret, " <>
@@ -213,8 +336,9 @@ defmodule FermixCore.Management.Cues.SourceForm do
   @doc """
   The rows of a stream with no preset before its daily budget, in form order:
   each field's config key, row kind (`:text` or `:list`), label, info, example
-  and whether it sits under More options. The browser setup page draws its
-  form from these, so both surfaces say the same thing.
+  and whether it sits under More options on the edit form (an add form opens
+  `add_open_keys/3`). The browser setup page draws its form from these, so
+  both surfaces say the same thing.
   """
   @spec general_stream_rows() :: [
           %{
@@ -271,31 +395,134 @@ defmodule FermixCore.Management.Cues.SourceForm do
   def preset_label(name) when is_binary(name), do: Map.get(@preset_labels, name, name)
 
   @doc """
+  What the owner can ask Fermix to watch, in the order a client lists them:
+  each with its `id`, `label`, `sentence`, the `kind` and `preset` (or nil)
+  its form takes, and whether it is `featured` (drawn first; the rest under
+  "Something else"). The same on every form.
+  """
+  @spec choices() :: [map()]
+  def choices do
+    for choice <- @choices do
+      %{
+        "id" => choice.id,
+        "label" => choice.label,
+        "sentence" => choice.sentence,
+        "kind" => choice.kind,
+        "preset" => choice.preset,
+        "featured" => choice.featured
+      }
+    end
+  end
+
+  @doc """
+  What choice `id` needs set up first, or nil. Only X accounts has one: the
+  X plugin's sign-in, read as the source reads it
+  (`Cues.XAccounts.sign_in_state/1`), `ready` or `needs_sign_in`. It never
+  stops the add. `opts`: `:x_sign_in`, a zero-arity function answering in the
+  sign-in's place.
+  """
+  @spec requirement(String.t(), keyword()) :: %{String.t() => String.t()} | nil
+  def requirement("x_accounts", opts) when is_list(opts) do
+    sign_in = Keyword.get(opts, :x_sign_in, &XAccounts.sign_in_state/0)
+
+    # Every reason the sign-in is not ready is a sign-in for the owner to make.
+    case sign_in.() do
+      :ready -> x_requirement("ready", @x_signed_in)
+      {:error, _reason} -> x_requirement("needs_sign_in", @x_needs_sign_in)
+    end
+  end
+
+  def requirement(id, opts) when id in @choice_ids and is_list(opts), do: nil
+
+  defp x_requirement(state, sentence),
+    do: %{"state" => state, "sentence" => sentence, "plugin" => "x"}
+
+  @doc """
+  The name row of choice `id`'s add form: its label, its info, and the name
+  Fermix would make for it, which the empty field shows.
+  """
+  @spec name_row(String.t()) :: %{label: String.t(), info: String.t(), example: String.t()}
+  def name_row(id) when id in @choice_ids,
+    do: %{label: @name_label, info: @name_info, example: Map.fetch!(@name_examples, id)}
+
+  @doc """
+  The row keys choice `kind` and `preset` opens on the add form with
+  verification `method` (nil for none): its own, the fields it needs that no
+  preset fills, and a signed webhook's identity. Every other row of the form
+  is under More options.
+  """
+  @spec add_open_keys(String.t(), String.t() | nil, String.t() | nil) :: [String.t()]
+  def add_open_keys(kind, preset, method) when kind in @kind_ids do
+    atom = String.to_existing_atom(kind)
+    needed = atom |> CuesConfig.required_fields(preset, method) |> Enum.map(&row_key/1)
+
+    identity =
+      if CuesConfig.missing_identity?(atom, preset, method, []),
+        do: ~w(id_header content_hash),
+        else: []
+
+    Enum.uniq(Map.fetch!(@add_open, preset || kind) ++ needed ++ identity)
+  end
+
+  @doc """
+  The label and info of a feed's, webhook's or local push's row `key`: one
+  of `interval_minutes`, `daily_budget`, `verify`, `header`, `algorithm`,
+  `prefix`, `id_header`, `content_hash` and `type_header`.
+  """
+  @spec field_words(String.t()) :: %{label: String.t(), info: String.t() | nil}
+  def field_words(key) when is_map_key(@field_words, key), do: Map.fetch!(@field_words, key)
+
+  @doc ~s(The address row's label: "Feed address" for a website or blog, else "Address".)
+  @spec url_label(String.t() | nil) :: String.t()
+  def url_label("rss"), do: @feed_address_label
+  def url_label(_preset), do: @address_label
+
+  @doc "A webhook's secret row's label for verification `method`."
+  @spec webhook_secret_label(String.t() | nil) :: String.t()
+  def webhook_secret_label("shared_secret"), do: @shared_secret_label
+  def webhook_secret_label(_method), do: @secret_label
+
+  @doc """
   The add form for a choice of kind, preset and verification method, each
   optional. A preset decides the kind; one that contradicts the kind sent is
-  refused, as is a kind, preset or method this daemon does not know.
+  refused, as is a kind, preset or method this daemon does not know. `opts`
+  are `requirement/2`'s.
   """
-  @spec form(String.t() | nil, String.t() | nil, String.t() | nil) ::
+  @spec form(String.t() | nil, String.t() | nil, String.t() | nil, keyword()) ::
           {:ok, map()} | {:error, refusal()}
-  def form(kind, preset, verify) do
+  def form(kind, preset, verify, opts \\ []) when is_list(opts) do
     with {:ok, kind} <- resolve_kind(kind, preset),
          :ok <- known_verify(verify) do
-      defaults = preset_defaults(preset)
-      method = verify || defaults |> Map.get(:verify) |> text()
-      chosen = if verify, do: [verify: verify], else: []
-      fields = [name_row() | field_rows(kind, preset, method, defaults, chosen)]
-      rows = with_secrets(fields, secret_rows(kind, preset, method, %{}), kind, preset)
-
       {:ok,
        %{
+         "choices" => choices(),
+         "requirement" => requirement(preset || kind, opts),
          "kinds" => kinds(),
          "presets" => presets(),
-         "rows" => rows,
+         "rows" => add_rows(kind, preset, verify),
          "consent_sentence" => preset_consent(preset) || Map.fetch!(@consent, kind),
          "notes" => notes(kind, preset)
        }}
     end
   end
+
+  # The name first, then the fields, then the secrets the owner types; the
+  # choice's own rows open and the rest under More options.
+  defp add_rows(kind, preset, verify) do
+    defaults = preset_defaults(preset)
+    method = verify || defaults |> Map.get(:verify) |> text()
+    chosen = if verify, do: [verify: verify], else: []
+    fields = [name_field(preset || kind) | field_rows(kind, preset, method, defaults, chosen)]
+    open = add_open_keys(kind, preset, method)
+
+    fields
+    |> with_secrets(add_secret_rows(kind, preset, method), kind, preset)
+    |> Enum.map(&Map.put(&1, "advanced", &1["key"] not in open))
+  end
+
+  # Fermix makes GitHub's secret when the source is added.
+  defp add_secret_rows("webhook", "github", _method), do: []
+  defp add_secret_rows(kind, preset, method), do: secret_rows(kind, preset, method, %{})
 
   @doc """
   The editable fields of a saved source as settings rows, filled from its
@@ -459,16 +686,23 @@ defmodule FermixCore.Management.Cues.SourceForm do
 
   # --- rows --------------------------------------------------------------------
 
-  defp name_row do
-    Row.new("ref", :text, "Name",
-      info: "Lowercase letters, digits and hyphens.",
+  defp name_field(choice) do
+    words = name_row(choice)
+
+    Row.new("ref", :text, words.label,
+      info: words.info,
+      example: words.example,
       value: "",
+      advanced: true,
       restart: restart()
     )
   end
 
   defp field_rows(kind, preset, method, defaults, section) do
-    build = if general_stream?(kind, preset), do: &general_row/3, else: &field_row/3
+    build =
+      if general_stream?(kind, preset),
+        do: &general_row/3,
+        else: &field_row(&1, &2, &3, preset)
 
     for field <- shown(kind, preset, method),
         do: build.(field, field_value(field, section, defaults), advanced?(field, defaults))
@@ -507,10 +741,15 @@ defmodule FermixCore.Management.Cues.SourceForm do
   defp wire_value(_field, value) when is_atom(value) and not is_nil(value), do: to_string(value)
   defp wire_value(_field, value), do: value
 
-  defp field_row(%{key: "url"}, value, advanced),
-    do: Row.new("url", :text, "URL", value: value, advanced: advanced, restart: restart())
+  defp field_row(%{key: "url"}, value, advanced, preset) do
+    Row.new("url", :text, url_label(preset),
+      value: value,
+      advanced: advanced,
+      restart: restart()
+    )
+  end
 
-  defp field_row(%{key: "handles"}, value, advanced) do
+  defp field_row(%{key: "handles"}, value, advanced, _preset) do
     Row.new("handles", :list, @handles_row.label,
       info: @handles_row.info,
       example: @handles_row.example,
@@ -520,8 +759,8 @@ defmodule FermixCore.Management.Cues.SourceForm do
     )
   end
 
-  defp field_row(%{key: "interval_minutes"}, value, advanced) do
-    Row.new("interval_minutes", :number, "Poll every",
+  defp field_row(%{key: "interval_minutes"}, value, advanced, _preset) do
+    Row.new("interval_minutes", :number, field_words("interval_minutes").label,
       value: value,
       min: 1,
       step: 1,
@@ -532,8 +771,8 @@ defmodule FermixCore.Management.Cues.SourceForm do
     )
   end
 
-  defp field_row(%{key: "verify"}, value, advanced) do
-    Row.new("verify", :choice, "Checked by",
+  defp field_row(%{key: "verify"}, value, advanced, _preset) do
+    Row.new("verify", :choice, field_words("verify").label,
       value: value,
       options: Enum.map(@verify_options, fn {id, label} -> Row.option(id, label) end),
       advanced: advanced,
@@ -541,8 +780,8 @@ defmodule FermixCore.Management.Cues.SourceForm do
     )
   end
 
-  defp field_row(%{key: "algorithm"}, value, advanced) do
-    Row.new("algorithm", :choice, "Algorithm",
+  defp field_row(%{key: "algorithm"}, value, advanced, _preset) do
+    Row.new("algorithm", :choice, field_words("algorithm").label,
       value: value,
       options: Enum.map(@algorithms, &Row.option(&1, String.upcase(&1))),
       advanced: advanced,
@@ -550,18 +789,22 @@ defmodule FermixCore.Management.Cues.SourceForm do
     )
   end
 
-  defp field_row(%{key: "content_hash"}, value, advanced) do
-    Row.new("content_hash", :toggle, "Identify items by their content",
-      info: "For a service that sends no delivery id: an exact repeat is a duplicate.",
+  defp field_row(%{key: "content_hash"}, value, advanced, _preset) do
+    words = field_words("content_hash")
+
+    Row.new("content_hash", :toggle, words.label,
+      info: words.info,
       value: value,
       advanced: advanced,
       restart: restart()
     )
   end
 
-  defp field_row(%{key: "daily_budget"}, value, advanced) do
-    Row.new("daily_budget", :number, "Items a day",
-      info: "0 is no limit.",
+  defp field_row(%{key: "daily_budget"}, value, advanced, _preset) do
+    words = field_words("daily_budget")
+
+    Row.new("daily_budget", :number, words.label,
+      info: words.info,
       value: value,
       min: 0,
       step: 1,
@@ -571,13 +814,18 @@ defmodule FermixCore.Management.Cues.SourceForm do
     )
   end
 
-  defp field_row(%{key: key}, value, advanced),
-    do: Row.new(key, :text, text_label(key), value: value, advanced: advanced, restart: restart())
+  defp field_row(%{key: key}, value, advanced, _preset) do
+    Row.new(key, :text, field_words(key).label,
+      value: value,
+      advanced: advanced,
+      restart: restart()
+    )
+  end
 
   # A stream with no preset: every row but the budget with its label and an
   # info saying what it is for.
   defp general_row(%{key: "daily_budget"} = field, value, advanced),
-    do: field_row(field, value, advanced)
+    do: field_row(field, value, advanced, nil)
 
   defp general_row(%{key: key, kind: kind}, value, advanced) do
     {label, info, example} = Map.fetch!(@general_row_words, key)
@@ -591,11 +839,6 @@ defmodule FermixCore.Management.Cues.SourceForm do
     )
   end
 
-  defp text_label("header"), do: "Signature header"
-  defp text_label("prefix"), do: "Signature prefix"
-  defp text_label("id_header"), do: "Delivery id header"
-  defp text_label("type_header"), do: "Event type header"
-
   # The secrets a form takes, each row with its own field's presence in
   # `secrets` (a source's sentinels by field): a webhook's signing or shared
   # secret, and the key and secret a stream with no preset signs in with. A
@@ -607,9 +850,6 @@ defmodule FermixCore.Management.Cues.SourceForm do
     do: [secret_row(:key, "API key", secrets), secret_row(:secret, "API secret", secrets)]
 
   defp secret_rows(_kind, _preset, _method, _secrets), do: []
-
-  defp webhook_secret_label("shared_secret"), do: "Shared secret"
-  defp webhook_secret_label(_method), do: "Signing secret"
 
   # A stream with no preset asks for its API key and secret straight after its
   # address, ahead of the fields that say how they are sent, so a value is not

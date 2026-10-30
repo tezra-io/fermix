@@ -16,10 +16,11 @@ defmodule FermixCore.Management.Cues do
   and `Cues.SourceManager.reconcile/0` apply identically from either door.
   Nothing here writes `config.toml`.
 
-  **Two values handed out.** A new local push source's first token
-  (`cues.sources.add`) and a fresh one (`cues.sources.token.new`) are returned
-  once and never logged, traced or kept; a webhook's address is returned by
-  `cues.sources.url.get` alone, on every ask. Neither is on a list.
+  **Three values handed out.** A new local push source's first token
+  (`cues.sources.add`) and a fresh one (`cues.sources.token.new`), and the
+  secret Fermix makes for a new GitHub source (`cues.sources.add`), are
+  returned once and never logged, traced or kept; a webhook's address is
+  returned by `cues.sources.url.get` alone, on every ask. None is on a list.
 
   Watchers are read-only here: changing what a watcher reads is a consent
   turn in chat. Which callers may write is the daemon socket's owner check
@@ -31,10 +32,11 @@ defmodule FermixCore.Management.Cues do
   `:repo`, `:door`, `:now` (zero-arity, a
   `DateTime`), `:mandate_opts` (the `Cues.Mandates` and `Cues.Pins` seams),
   `:plugins` and `:enabled_plugins` (zero-arity: the plugin list and the
-  enabled names the mandate choices read), `:proposals` (the module that
-  answers `records/2`, `card/2` and `decide/4`, default `Cues.Proposals`), and
-  `:follow_up_opts` (the `Cues.FollowUpReadiness` seams a watcher's follow-up
-  reads).
+  enabled names the mandate choices read), `:x_sign_in` (zero-arity: the X
+  sign-in the X accounts form reads, `SourceForm.requirement/2`), `:proposals`
+  (the module that answers `records/2`, `card/2` and `decide/4`, default
+  `Cues.Proposals`), and `:follow_up_opts` (the `Cues.FollowUpReadiness` seams a
+  watcher's follow-up reads).
   """
 
   require Logger
@@ -222,26 +224,32 @@ defmodule FermixCore.Management.Cues do
     end
   end
 
-  @doc "`cues.sources.form`: the add form for a kind, preset and verification method."
+  @doc """
+  `cues.sources.form`: the add form for a kind, preset and verification
+  method. `:x_sign_in` (opts) answers the X accounts requirement in place of
+  the X plugin's sign-in (`SourceForm.requirement/2`).
+  """
   @spec sources_form(String.t() | nil, String.t() | nil, String.t() | nil, keyword()) ::
           {:ok, map()} | {:error, error()}
   def sources_form(kind, preset, verify, opts \\ []) when is_list(opts) do
-    kind |> SourceForm.form(preset, verify) |> refused_field()
+    kind |> SourceForm.form(preset, verify, Keyword.take(opts, [:x_sign_in])) |> refused_field()
   end
 
   @doc """
   `cues.sources.add`: saves a new source from its form values and answers its
-  row, plus the first token of a new local push source, returned once.
+  row, under the name given or, nil or empty, the one Fermix makes; plus the
+  first token of a new local push source and the secret Fermix makes for a
+  new GitHub source, each returned once.
   """
-  @spec sources_add(String.t(), String.t() | nil, String.t() | nil, map(), keyword()) ::
+  @spec sources_add(String.t() | nil, String.t() | nil, String.t() | nil, map(), keyword()) ::
           {:ok, map()} | {:error, error()}
   def sources_add(ref, kind, preset, values, opts \\ [])
-      when is_binary(ref) and is_map(values) and is_list(opts) do
+      when (is_binary(ref) or is_nil(ref)) and is_map(values) and is_list(opts) do
     with {:ok, section} <- kind |> SourceForm.new_section(preset, values) |> refused_field(),
-         {:ok, %{token: token}} <-
-           save(CueSettings.save_source(ref, section, %{}, :create), "ref"),
-         {:ok, source} <- fetch_source(ref, opts) do
-      {:ok, %{"source" => source_row(source, opts), "token" => token}}
+         {:ok, %{ref: named, token: token, secret: secret}} <-
+           save(CueSettings.add_source(ref, section, %{}), "ref"),
+         {:ok, source} <- fetch_source(named, opts) do
+      {:ok, %{"source" => source_row(source, opts), "token" => token, "secret" => secret}}
     end
   end
 

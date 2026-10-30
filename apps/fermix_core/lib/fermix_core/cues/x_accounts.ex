@@ -29,8 +29,8 @@ defmodule FermixCore.Cues.XAccounts do
   `note_tweet.text` when X sends one, which replaces the cut `text` and is not
   kept beside it.
 
-  Pure but `sign_in_token/1` and `sign_in_refresh/1`, which read the plugin
-  registry and ask `Auth.TokenManager`.
+  Pure but `sign_in_token/1`, `sign_in_refresh/1` and `sign_in_state/1`,
+  which read the plugin registry and ask `Auth.TokenManager`.
   """
 
   alias FermixCore.Auth.TokenManager
@@ -322,13 +322,37 @@ defmodule FermixCore.Cues.XAccounts do
   def sign_in_refresh(opts \\ []) when is_list(opts),
     do: profile_call(opts, Keyword.get(opts, :refresh, &TokenManager.refresh/1))
 
+  @doc """
+  Whether the X plugin's sign-in is there for this source to read with, as
+  the add form says it: `sign_in_token/1`'s plugin, switch and auth profile,
+  asking `Auth.TokenManager.status/1` instead of for the token, so asking
+  never refreshes it. `:ready` when a token is loaded and X has not refused
+  it; else the reason, which is always a sign-in to make (`:no_token`,
+  `:sign_in_refused`, or one `sign_in_token/1` names). Seams: `:find`,
+  `:enabled` and `:status` (default `Auth.TokenManager.status/1`).
+  """
+  @spec sign_in_state(keyword()) :: :ready | {:error, term()}
+  def sign_in_state(opts \\ []) when is_list(opts) do
+    status = Keyword.get(opts, :status, &TokenManager.status/1)
+
+    with {:ok, profile} <- sign_in_profile(opts) do
+      status_call(fn -> status.(profile) end)
+    end
+  end
+
   defp profile_call(opts, call) do
+    with {:ok, profile} <- sign_in_profile(opts) do
+      token_call(fn -> call.(profile) end)
+    end
+  end
+
+  defp sign_in_profile(opts) do
     find = Keyword.get(opts, :find, &Registry.find/1)
     enabled = Keyword.get(opts, :enabled, &PluginConfig.enabled_plugins/0)
 
     with {:ok, plugin} <- installed(find.(@plugin)),
          :ok <- switched_on(plugin, enabled.()) do
-      token_call(fn -> call.(PluginConfig.auth_profile(plugin)) end)
+      {:ok, PluginConfig.auth_profile(plugin)}
     end
   end
 
@@ -351,6 +375,17 @@ defmodule FermixCore.Cues.XAccounts do
   catch
     :exit, reason -> {:error, {:token_server_unavailable, exit_kind(reason)}}
   end
+
+  defp status_call(call) do
+    loaded(call.())
+  catch
+    :exit, reason -> {:error, {:token_server_unavailable, exit_kind(reason)}}
+  end
+
+  defp loaded({:ok, %{loaded?: true, invalidated?: true}}), do: {:error, :sign_in_refused}
+  defp loaded({:ok, %{loaded?: true}}), do: :ready
+  defp loaded({:ok, %{loaded?: false}}), do: {:error, :no_token}
+  defp loaded({:error, reason}), do: {:error, reason}
 
   defp exit_kind({kind, _call}) when is_atom(kind), do: kind
   defp exit_kind(reason) when is_atom(reason), do: reason

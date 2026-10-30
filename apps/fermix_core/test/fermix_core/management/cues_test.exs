@@ -10,11 +10,15 @@ defmodule FermixCore.Management.CuesTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Cues.Settings, as: CueSettings
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Management.Cues
+  alias FermixCore.Management.Cues.SourceForm
   alias FermixCore.Management.Cues.WatcherRow
   alias FermixCore.Management.Router
   alias FermixCore.Management.Secrets
@@ -203,7 +207,9 @@ defmodule FermixCore.Management.CuesTest do
       conn: conn
     } do
       add_feed(opts)
-      {:ok, _} = Cues.sources_add("gh-hooks", nil, "github", %{}, opts)
+      # A webhook waiting for its secret needs the owner's attention.
+      standard = %{"verify" => "standard_webhooks"}
+      {:ok, _} = Cues.sources_add("shop-hooks", "webhook", nil, standard, opts)
 
       for name <- ["release-watch", "quiet-watch"] do
         id = CueFixtures.insert_watcher(conn, %{name: name, filter: "llm", sources: ["x"]})
@@ -336,11 +342,135 @@ defmodule FermixCore.Management.CuesTest do
       refute inspect(list) =~ token
     end
 
+    # M60 simpler setup D2: the name is optional, and the answer's row carries
+    # the one in force, which a client stores typed secrets under.
+    test "a source left unnamed is named from what it reads, and a typed name is kept", %{
+      opts: opts,
+      home: home
+    } do
+      hn = %{"url" => "https://news.ycombinator.com/rss"}
+
+      assert {:ok, %{"source" => %{"ref" => "ycombinator"}, "token" => nil, "secret" => nil}} =
+               Cues.sources_add(nil, nil, "rss", hn, opts)
+
+      assert {:ok, %{"source" => %{"ref" => "ycombinator-2"}}} =
+               Cues.sources_add("", nil, "rss", hn, opts)
+
+      # Adding X accounts never waits on the X sign-in.
+      unasked = Keyword.put(opts, :x_sign_in, fn -> flunk("an add asks for no sign-in") end)
+
+      assert {:ok, %{"source" => %{"ref" => "x-nasa"}}} =
+               Cues.sources_add(nil, nil, "x_accounts", %{"handles" => ["@NASA"]}, unasked)
+
+      assert {:ok, %{"source" => %{"ref" => "scripts"}, "token" => token}} =
+               Cues.sources_add(nil, "local_push", nil, %{}, opts)
+
+      assert SecretWriterStub.get({:cue_source, "scripts", :token}, store: :keyring) ==
+               {:ok, token}
+
+      assert {:ok, %{"source" => %{"ref" => "hn-front"}}} =
+               Cues.sources_add("hn-front", nil, "rss", hn, opts)
+
+      # The socket takes an add with no name at all.
+      standard = %{"verify" => "standard_webhooks"}
+
+      assert {:ok, %{"source" => %{"ref" => "webhook"}, "secret" => nil}} =
+               route("cues.sources.add", %{"kind" => "webhook", "values" => standard}, opts)
+
+      text = config_text(home)
+
+      for ref <- ~w(ycombinator ycombinator-2 x-nasa scripts hn-front webhook),
+          do: assert(text =~ "[fermix_core.cues.sources.#{ref}]", ref)
+    end
+
+    # M60 simpler setup D3: GitHub's secret is Fermix's to make, as a local
+    # push token is, and is handed out once, beside the token.
+    test "a GitHub source gets a secret Fermix makes, handed out once and stored as a typed one",
+         %{opts: opts, home: home} do
+      log =
+        capture_log(fn ->
+          send(self(), {:added, Cues.sources_add(nil, nil, "github", %{}, opts)})
+        end)
+
+      assert_received {:added, {:ok, %{"source" => row, "token" => nil, "secret" => secret}}}
+      assert is_binary(secret) and byte_size(secret) >= 40
+
+      # Its next step is the address to paste into GitHub beside the secret.
+      assert %{
+               "ref" => "github",
+               "missing_secret" => nil,
+               "primary_action" => "get_url",
+               "secrets" => [
+                 %{"field" => "secret", "present" => true},
+                 %{"field" => "path_secret", "present" => false}
+               ]
+             } = row
+
+      # Where a typed GitHub secret is stored: the keychain item the sentinel names.
+      assert SecretWriterStub.get({:cue_source, "github", :secret}, store: :keyring) ==
+               {:ok, secret}
+
+      assert config_text(home) =~ ~s(secret = "@keyring")
+      refute config_text(home) =~ secret
+      refute log =~ secret
+
+      # No later read repeats it.
+      {:ok, list} = Cues.sources_list(opts)
+      {:ok, got} = Cues.sources_get("github", opts)
+      {:ok, form} = Cues.sources_form(nil, "github", nil)
+      for answer <- [list, got, form], do: refute(inspect(answer) =~ secret)
+
+      assert {:ok, %{"source" => %{"ref" => "github-2"}, "secret" => other}} =
+               Cues.sources_add(nil, nil, "github", %{}, opts)
+
+      assert is_binary(other) and other != secret
+
+      # Every other add answers a null secret.
+      assert {:ok, %{"secret" => nil, "token" => token}} =
+               Cues.sources_add(nil, "local_push", nil, %{}, opts)
+
+      assert is_binary(token)
+    end
+
+    test "a GitHub secret that cannot be stored leaves no source behind", %{
+      opts: opts,
+      home: home
+    } do
+      SecretWriterStub.set_verdict(%{store: :keyring, state: :locked, sentence: "locked"})
+      on_exit(fn -> SecretWriterStub.clear_verdict(:keyring) end)
+
+      log =
+        capture_log(fn ->
+          send(self(), {:added, Cues.sources_add(nil, nil, "github", %{}, opts)})
+        end)
+
+      assert_received {:added,
+                       {:error, {:secret_store_failed, "cue_source:github:secret", "unavailable"}}}
+
+      config = Path.join(home, "config.toml")
+      refute File.exists?(config) and File.read!(config) =~ "[fermix_core.cues.sources.github]"
+      assert CuesConfig.source("github") == :error
+      assert log =~ "cue source github"
+    end
+
+    # The setup page's door: a secret the owner typed is kept, not replaced.
+    test "a GitHub source given its secret keeps it" do
+      assert CueSettings.add_source("repo-events", [preset: "github"], %{
+               secret: "whsec-invented-4410"
+             }) == {:ok, %{ref: "repo-events", token: nil, secret: nil}}
+
+      assert SecretWriterStub.get({:cue_source, "repo-events", :secret}, store: :keyring) ==
+               {:ok, "whsec-invented-4410"}
+    end
+
     test "a webhook added before its secret waits for it, and storing it starts it", %{
       opts: opts,
       home: home
     } do
-      assert {:ok, %{"source" => row}} = Cues.sources_add("gh-hooks", nil, "github", %{}, opts)
+      standard = %{"verify" => "standard_webhooks"}
+
+      assert {:ok, %{"source" => row, "secret" => nil}} =
+               Cues.sources_add("shop-hooks", "webhook", nil, standard, opts)
 
       assert %{
                "state" => "needs_secret",
@@ -355,17 +485,17 @@ defmodule FermixCore.Management.CuesTest do
                ]
              } = row
 
-      assert {:ok, %{"id" => "cue_source:gh-hooks:secret", "present" => true}} =
-               Secrets.set("cue_source:gh-hooks:secret", "whsec-invented-7781")
+      assert {:ok, %{"id" => "cue_source:shop-hooks:secret", "present" => true}} =
+               Secrets.set("cue_source:shop-hooks:secret", "whsec-invented-7781")
 
-      assert {:ok, %{"source" => stored}} = Cues.sources_get("gh-hooks", opts)
+      assert {:ok, %{"source" => stored}} = Cues.sources_get("shop-hooks", opts)
       assert %{"state" => "not_running", "missing_secret" => nil} = stored
-      assert {:ok, %{missing_secret: nil}} = CuesConfig.source("gh-hooks")
+      assert {:ok, %{missing_secret: nil}} = CuesConfig.source("shop-hooks")
       refute config_text(home) =~ "whsec-invented-7781"
       assert config_text(home) =~ ~s(secret = "@keyring")
 
-      assert {:ok, %{"present" => false}} = Secrets.clear("cue_source:gh-hooks:secret")
-      assert {:ok, %{missing_secret: :secret}} = CuesConfig.source("gh-hooks")
+      assert {:ok, %{"present" => false}} = Secrets.clear("cue_source:shop-hooks:secret")
+      assert {:ok, %{missing_secret: :secret}} = CuesConfig.source("shop-hooks")
     end
 
     # The general WebSocket source signs in with a key and a secret, each its
@@ -523,8 +653,11 @@ defmodule FermixCore.Management.CuesTest do
       assert Cues.sources_get("nowhere", opts) ==
                {:error, {:invalid_params, "ref", "There is no source named nowhere."}}
 
-      assert {:error, {:invalid_params, "ref", _name_rule}} =
+      # The name's rule is said where a name breaks it, not on the row.
+      assert {:error, {:invalid_params, "ref", name_rule}} =
                Cues.sources_add("Bad Name", "local_push", nil, %{}, opts)
+
+      assert name_rule =~ "lowercase letters, digits and hyphens"
     end
 
     test "at most 64 sources are added", %{opts: opts} do
@@ -836,6 +969,77 @@ defmodule FermixCore.Management.CuesTest do
   end
 
   describe "the source form" do
+    @choices [
+      %{
+        "id" => "rss",
+        "label" => "Website or blog",
+        "sentence" => "New posts from a site's RSS, Atom or JSON feed.",
+        "kind" => "feed",
+        "preset" => "rss",
+        "featured" => true
+      },
+      %{
+        "id" => "x_accounts",
+        "label" => "X accounts",
+        "sentence" => "New posts from accounts you choose. Uses your X sign-in.",
+        "kind" => "feed",
+        "preset" => "x_accounts",
+        "featured" => true
+      },
+      %{
+        "id" => "github",
+        "label" => "GitHub",
+        "sentence" => "Pushes, issues and pull requests. Needs a tunnel to this computer.",
+        "kind" => "webhook",
+        "preset" => "github",
+        "featured" => true
+      },
+      %{
+        "id" => "local_push",
+        "label" => "Your scripts",
+        "sentence" => "Programs on this computer send items with a token.",
+        "kind" => "local_push",
+        "preset" => nil,
+        "featured" => true
+      },
+      %{
+        "id" => "feed",
+        "label" => "Any feed address",
+        "sentence" => "Fermix checks an address on a schedule.",
+        "kind" => "feed",
+        "preset" => nil,
+        "featured" => false
+      },
+      %{
+        "id" => "stream",
+        "label" => "Live stream",
+        "sentence" => "Fermix keeps a WebSocket connection open and takes items as they arrive.",
+        "kind" => "stream",
+        "preset" => nil,
+        "featured" => false
+      },
+      %{
+        "id" => "webhook",
+        "label" => "Any webhook",
+        "sentence" => "A service sends items to an address Fermix makes.",
+        "kind" => "webhook",
+        "preset" => nil,
+        "featured" => false
+      }
+    ]
+
+    defp form!(kind, preset, verify \\ nil) do
+      {:ok, form} = Cues.sources_form(kind, preset, verify, signed_in())
+      form
+    end
+
+    # Every form test that reaches X accounts answers its sign-in from here,
+    # never from the plugin store or a token server.
+    defp signed_in, do: [x_sign_in: fn -> :ready end]
+
+    defp open_keys(form), do: for(row <- form["rows"], not row["advanced"], do: row["key"])
+    defp labels(form), do: Map.new(form["rows"], &{&1["key"], &1["label"]})
+
     test "with nothing chosen it is a feed's" do
       assert {:ok, form} = Cues.sources_form(nil, nil, nil)
 
@@ -844,6 +1048,7 @@ defmodule FermixCore.Management.CuesTest do
       assert Enum.map(form["rows"], & &1["key"]) == ~w(ref url interval_minutes daily_budget)
       assert form["consent_sentence"] =~ "new items"
       assert form["notes"] == []
+      assert form["requirement"] == nil
     end
 
     # A webhook has no URL to type and a local push no token to paste: the
@@ -856,12 +1061,153 @@ defmodule FermixCore.Management.CuesTest do
       assert sentences["local_push"] =~ "token made when you add this source"
     end
 
+    # M60 simpler setup D1: the first question is what to watch, in the
+    # daemon's words, and every answer carries the same list.
+    test "every answer carries the same seven choices, featured first" do
+      assert SourceForm.choices() == @choices
+
+      for choice <- @choices do
+        assert {:ok, %{"choices" => @choices}} =
+                 Cues.sources_form(choice["kind"], choice["preset"], nil, signed_in()),
+               choice["id"]
+      end
+
+      # The kinds and presets an older app draws are as they were.
+      form = form!(nil, "rss")
+      assert Enum.map(form["kinds"], & &1["label"]) == ["Feed", "Stream", "Webhook", "Local push"]
+
+      assert Enum.map(form["presets"], & &1["label"]) ==
+               ["GitHub", "RSS, Atom or JSON Feed", "X accounts"]
+    end
+
+    test "X accounts says whether the X sign-in is there; no other choice needs one" do
+      requirement = fn sign_in ->
+        {:ok, form} = Cues.sources_form(nil, "x_accounts", nil, x_sign_in: sign_in)
+        form["requirement"]
+      end
+
+      assert requirement.(fn -> :ready end) ==
+               %{"state" => "ready", "sentence" => "Signed in to X.", "plugin" => "x"}
+
+      for reason <- [:x_plugin_not_installed, :x_plugin_off, :no_token, :sign_in_refused] do
+        assert requirement.(fn -> {:error, reason} end) == %{
+                 "state" => "needs_sign_in",
+                 "sentence" => "Connect X to read these accounts.",
+                 "plugin" => "x"
+               }
+      end
+
+      unasked = [x_sign_in: fn -> flunk("only X accounts asks for the X sign-in") end]
+
+      for choice <- @choices, choice["id"] != "x_accounts" do
+        assert {:ok, %{"requirement" => nil}} =
+                 Cues.sources_form(choice["kind"], choice["preset"], nil, unasked)
+      end
+    end
+
+    # M60 simpler setup D2: the name comes last in importance, so it is folded,
+    # empty, with what Fermix would call that choice as its example.
+    test "the name is folded under More options, empty, with an example per choice" do
+      examples = %{
+        "rss" => "ycombinator",
+        "x_accounts" => "x-nasa",
+        "github" => "github",
+        "local_push" => "scripts",
+        "feed" => "weatherdesk",
+        "stream" => "marketwire",
+        "webhook" => "webhook"
+      }
+
+      for choice <- @choices do
+        [name | _rest] = form!(choice["kind"], choice["preset"])["rows"]
+        example = Map.fetch!(examples, choice["id"])
+
+        assert %{
+                 "key" => "ref",
+                 "kind" => "text",
+                 "label" => "Name",
+                 "value" => "",
+                 "advanced" => true,
+                 "example" => ^example,
+                 "info" =>
+                   "How you and Fermix refer to it in chat. Left empty, Fermix names it " <>
+                     "from what you enter."
+               } = name
+
+        assert SourceForm.name_row(choice["id"]) ==
+                 %{label: name["label"], info: name["info"], example: example}
+      end
+    end
+
+    # M60 simpler setup §3: each choice opens only what it needs; everything
+    # else waits under More options with its current default.
+    test "each choice opens only what it needs" do
+      assert open_keys(form!(nil, "rss")) == ~w(url)
+      assert open_keys(form!(nil, "x_accounts")) == ~w(handles)
+      assert open_keys(form!(nil, "github")) == []
+      assert open_keys(form!("local_push", nil)) == []
+      assert open_keys(form!("feed", nil)) == ~w(url interval_minutes)
+      assert open_keys(form!("stream", nil)) == ~w(url key secret subscribe_message id_path)
+      assert open_keys(form!("webhook", nil)) == ~w(verify secret)
+      assert open_keys(form!("webhook", nil, "standard_webhooks")) == ~w(verify secret)
+
+      # A signed or shared-secret webhook names its header and how one delivery
+      # is told from another, so those stay open too.
+      for method <- ~w(hmac shared_secret) do
+        assert open_keys(form!("webhook", nil, method)) ==
+                 ~w(verify header id_header content_hash secret)
+      end
+
+      # The rule is published for the setup page, which draws its own fields.
+      for {kind, preset, verify} <- [
+            {"stream", nil, nil},
+            {"webhook", nil, "hmac"},
+            {nil, "rss", nil}
+          ] do
+        form = form!(kind, preset, verify)
+        resolved = kind || "feed"
+        method = verify || (preset == "github" && "hmac") || nil
+
+        assert Enum.sort(SourceForm.add_open_keys(resolved, preset, method)) ==
+                 Enum.sort(open_keys(form))
+      end
+    end
+
+    # M60 simpler setup D5: the labels say what a field is in plain words.
+    test "the labels are plain words, on the add form and the edit form alike", %{opts: opts} do
+      rss = labels(form!(nil, "rss"))
+      assert rss["url"] == "Feed address"
+      assert rss["interval_minutes"] == "Check every"
+      assert rss["daily_budget"] == "Daily limit"
+      assert labels(form!("feed", nil))["url"] == "Address"
+      assert labels(form!("stream", nil))["url"] == "Address"
+      assert labels(form!(nil, "x_accounts"))["handles"] == "Accounts"
+
+      hmac = labels(form!("webhook", nil, "hmac"))
+      assert hmac["verify"] == "Verification"
+      assert hmac["secret"] == "Secret"
+      assert labels(form!("webhook", nil, "shared_secret"))["secret"] == "Shared secret"
+
+      budget = Enum.find(form!("local_push", nil)["rows"], &(&1["key"] == "daily_budget"))
+      assert budget["info"] == "The most items a day. 0 means no limit."
+
+      assert {:ok, _added} = Cues.sources_add(nil, nil, "github", %{}, opts)
+      {:ok, %{"values" => values}} = Cues.sources_get("github", opts)
+      edit = Map.new(values, &{&1["key"], &1["label"]})
+      assert edit["verify"] == "Verification"
+      assert edit["daily_budget"] == "Daily limit"
+      assert edit["secret"] == "Secret"
+    end
+
     test "a preset decides the kind and fills its fields under More options" do
       assert {:ok, form} = Cues.sources_form(nil, "github", nil)
 
+      # Fermix makes GitHub's secret, so its add form has no secret row.
       keys = Enum.map(form["rows"], & &1["key"])
       assert keys == ~w(ref verify header algorithm prefix id_header content_hash type_header
-                        daily_budget secret)
+                        daily_budget)
+
+      assert Enum.all?(form["rows"], & &1["advanced"])
 
       assert %{"value" => "hmac", "advanced" => true} =
                Enum.find(form["rows"], &(&1["key"] == "verify"))
@@ -871,35 +1217,39 @@ defmodule FermixCore.Management.CuesTest do
       assert %{"value" => false, "advanced" => true} =
                Enum.find(form["rows"], &(&1["key"] == "content_hash"))
 
-      assert %{"kind" => "secret", "present" => false, "label" => "Signing secret"} =
-               List.last(form["rows"])
-
       assert "In GitHub's webhook form, choose `application/json` as the content type." in form[
                "notes"
              ]
     end
 
+    # Replacing GitHub's secret later is the edit form's secret row, as before.
+    test "a GitHub source's edit form keeps its secret row", %{opts: opts} do
+      assert {:ok, _added} = Cues.sources_add("gh-hooks", nil, "github", %{}, opts)
+      {:ok, %{"values" => values}} = Cues.sources_get("gh-hooks", opts)
+
+      assert %{"key" => "secret", "kind" => "secret", "present" => true} = List.last(values)
+    end
+
     # M60_X_ACCOUNTS_SOURCE.md §4: the handles are the only field to type; the
     # X plugin's sign-in reads, so there is no URL and no secret.
-    test "the X accounts preset asks for a name and the handles, signed in through the X plugin" do
-      assert {:ok, form} = Cues.sources_form(nil, "x_accounts", nil)
+    test "the X accounts preset asks only for the handles, signed in through the X plugin" do
+      form = form!(nil, "x_accounts")
       rows = Map.new(form["rows"], &{&1["key"], &1})
 
       assert Enum.find(form["presets"], &(&1["id"] == "x_accounts")) ==
                %{"id" => "x_accounts", "label" => "X accounts", "kind" => "feed"}
 
       assert Enum.map(form["rows"], & &1["key"]) == ~w(ref handles interval_minutes daily_budget)
-      assert for(row <- form["rows"], not row["advanced"], do: row["key"]) == ~w(ref handles)
 
       assert %{
                "kind" => "list",
-               "label" => "Handles",
+               "label" => "Accounts",
                "value" => [],
                "example" => "nasa",
                "info" => "X usernames, with or without @. Up to 20."
              } = rows["handles"]
 
-      assert %{"label" => "Poll every", "value" => 5} = rows["interval_minutes"]
+      assert %{"label" => "Check every", "value" => 5} = rows["interval_minutes"]
 
       # It asks X, not an address the owner gave.
       assert form["consent_sentence"] ==
@@ -913,14 +1263,17 @@ defmodule FermixCore.Management.CuesTest do
 
     test "every row keeps its explanation behind info, with no footer" do
       rows =
-        for {kind, preset} <- [{"feed", nil}, {"stream", nil}, {nil, "github"}],
-            {:ok, form} = Cues.sources_form(kind, preset, nil),
-            row <- form["rows"],
+        for {kind, preset, verify} <- [
+              {"feed", nil, nil},
+              {"stream", nil, nil},
+              {"webhook", nil, "hmac"}
+            ],
+            row <- form!(kind, preset, verify)["rows"],
             do: row
 
       assert Enum.all?(rows, &is_nil(&1["footer"]))
 
-      assert %{"info" => "Lowercase letters, digits and hyphens."} =
+      assert %{"info" => "How you and Fermix refer to it in chat." <> _rest} =
                Enum.find(rows, &(&1["key"] == "ref"))
 
       assert %{"info" => "Stored in your keychain and never shown again."} =
@@ -949,7 +1302,10 @@ defmodule FermixCore.Management.CuesTest do
       assert %{"label" => "Header name for the API key", "example" => "X-Api-Key"} =
                rows["key_header"]
 
-      for key <- ~w(items_path revision_path time_path subject_path daily_budget),
+      # How it signs in by header or message, and the message's shape, wait
+      # under More options with the rest.
+      for key <- ~w(key_header secret_header auth_message type_path item_types error_types
+                    items_path revision_path time_path subject_path daily_budget),
           do: assert(rows[key]["advanced"], key)
 
       fields =
@@ -1724,7 +2080,8 @@ defmodule FermixCore.Management.CuesTest do
         {"cues.sources.add", %{"ref" => "a", "values" => %{}}, %{"field" => "kind"}},
         {"cues.sources.add", %{"ref" => "a", "kind" => "feed", "values" => []},
          %{"field" => "values"}},
-        {"cues.sources.add", %{"kind" => "feed", "values" => %{}}, %{"field" => "ref"}},
+        {"cues.sources.add", %{"ref" => 7, "kind" => "feed", "values" => %{}},
+         %{"field" => "ref"}},
         {"cues.sources.update", %{"ref" => "a"}, %{"field" => "values"}},
         {"cues.watchers.get", %{"name" => ""}, %{"field" => "name"}},
         {"cues.mandates.add", %{"name" => "m"}, %{"field" => "values"}},
@@ -1782,8 +2139,8 @@ defmodule FermixCore.Management.CuesTest do
         {"cues_sources_add_local_push", "cues.sources.add",
          %{"ref" => "home-alerts", "kind" => "local_push", "values" => %{"daily_budget" => 500}}},
         {"cues_sources_add_webhook", "cues.sources.add",
-         %{"ref" => "gh-hooks", "preset" => "github", "values" => %{}}},
-        {"cues_sources_url_get", "cues.sources.url.get", %{"ref" => "gh-hooks"}},
+         %{"preset" => "github", "values" => %{}}},
+        {"cues_sources_url_get", "cues.sources.url.get", %{"ref" => "github"}},
         {"cues_sources_update", "cues.sources.update",
          %{"ref" => "eng-blogs", "values" => %{"daily_budget" => 200}}},
         {"cues_sources_disable", "cues.sources.disable", %{"ref" => "home-alerts"}},
@@ -1811,14 +2168,19 @@ defmodule FermixCore.Management.CuesTest do
       end
     end
 
-    # The two forms are the daemon's words, so their goldens are held to the
-    # very rows and sentences the form answers, not only their shape.
+    # The forms are the daemon's words, so their goldens are held to the very
+    # rows and sentences the form answers, not only their shape.
     test "the golden forms are the ones the daemon answers" do
       assert Cues.sources_form(nil, "github", nil) ==
                {:ok, named_result("cues_sources_form")}
 
       assert Cues.sources_form("stream", nil, nil) ==
                {:ok, named_result("cues_sources_form_stream")}
+
+      signed_out = [x_sign_in: fn -> {:error, :x_plugin_not_installed} end]
+
+      assert Cues.sources_form(nil, "x_accounts", nil, signed_out) ==
+               {:ok, named_result("cues_sources_form_x_accounts")}
     end
 
     test "the cue refusals are the golden ones", %{opts: opts} do
