@@ -643,7 +643,7 @@ the Codex CLI's session and then Fermix's, closed when that import was retired
   `forget_signed_out` stops a `TokenSupervisor` child, the `chatgpt`,
   `anthropic_oauth` and `xai_oauth` profiles included. `TokenManager` does not
   trap exits, so a `get_token` call queued on that manager at that moment exits
-  in its caller (a provider request, `providers/anthropic/messages.ex:621`,
+  in its caller (a provider request, `providers/anthropic/messages.ex:663`,
   `providers/xai/responses.ex:246`) instead of answering
   `{:error, :reauthorization_required}`; the OpenAI Codex route catches that
   exit and answers an error (`providers/openai/chatgpt_plan.ex:295-305`). The
