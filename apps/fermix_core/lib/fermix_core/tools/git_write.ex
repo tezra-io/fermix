@@ -8,6 +8,7 @@ defmodule FermixCore.Tools.GitWrite do
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.CommandRunner
   alias FermixCore.Sandbox
+  alias FermixCore.Sandbox.OsSandbox
   alias FermixCore.Tools.GitCommand
   alias FermixCore.Tools.Support
 
@@ -116,7 +117,10 @@ defmodule FermixCore.Tools.GitWrite do
   defp translate_root({:ok, %{exit: 0, stdout: root}}), do: {:ok, String.trim(root)}
 
   defp translate_root({:ok, %{exit: code, stdout: output}}) do
-    {:error, "git_failed: rev-parse exited #{code}: #{output}"}
+    case OsSandbox.refusal(code, output) do
+      nil -> {:error, "git_failed: rev-parse exited #{code}: #{output}"}
+      sentence -> {:error, sentence}
+    end
   end
 
   defp translate_root({:error, {:timeout, _ms}}) do

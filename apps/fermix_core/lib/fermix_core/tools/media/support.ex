@@ -81,7 +81,7 @@ defmodule FermixCore.Tools.Media.Support do
       when is_list(opts) and is_atom(key) and is_binary(label) do
     case Keyword.get(opts, key) do
       value when is_binary(value) and value not in ["", "@keyring", "@file"] -> {:ok, value}
-      _ -> {:error, "auth_failed: #{label} is not set. Run `fermix setup` to add it."}
+      _ -> {:error, "auth_failed: #{label} is not set. Add it in Fermix's Images settings."}
     end
   end
 
@@ -91,7 +91,7 @@ defmodule FermixCore.Tools.Media.Support do
         {:ok, key}
 
       {:error, _reason} ->
-        {:error, "auth_failed: #{label} is not set. Run `fermix setup` to add it."}
+        {:error, "auth_failed: #{label} is not set. Add it in Fermix's Providers settings."}
     end
   end
 

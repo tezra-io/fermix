@@ -18,6 +18,7 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Memory.Repo.CuesWatchersSql
   alias FermixCore.Memory.Repo.FtsMatch
+  alias FermixCore.Memory.Repo.InboundEventsSql
   alias FermixCore.Memory.Repo.MeetingsSql
   alias FermixCore.Memory.Repo.MobileSql
   alias FermixCore.Memory.Repo.OpenLoopReactionsSql
@@ -77,7 +78,8 @@ defmodule FermixCore.Memory.Repo do
   @open_loop_outside_content_migration_version 49
   @mobile_icon_index_migration_version 50
   @open_loop_curiosity_migration_version 51
-  # 52 and 53 are claimed by other changes; this one stands on its own.
+  @mobile_uncertain_request_migration_version 52
+  @channel_event_ids_migration_version 53
   @watcher_follow_up_migration_version 54
   @sqlite_open_intent :readwritecreate
 
@@ -1522,7 +1524,14 @@ defmodule FermixCore.Memory.Repo do
           DateTime.t(),
           keyword()
         ) ::
-          {:ok, {:started | :active | :completed | :failed, mobile_client_request_row()}}
+          {:ok,
+           {:started
+            | :active
+            | :completed
+            | :failed
+            | :uncertain
+            | :settled_uncertain
+            | :settled_cancelled, mobile_client_request_row()}}
           | {:error, term()}
   def start_mobile_client_request(
         selector,
@@ -1552,6 +1561,24 @@ defmodule FermixCore.Memory.Repo do
       when is_map(selector) and is_binary(runner_epoch) and is_integer(limit) and limit > 0 and
              limit <= 200 do
     call({:get_recoverable_mobile_client_requests, selector, runner_epoch, limit, now}, opts)
+  end
+
+  @doc """
+  Record the primary epoch one transport's requests boot at
+  (`MobileSql.record_boot_primary_epoch/4`): `{:moved, previous, released}`
+  when it differs from the last boot's, every unfinished request released.
+  """
+  @spec record_mobile_boot_primary_epoch(
+          mobile_transport_selector(),
+          pos_integer(),
+          DateTime.t(),
+          keyword()
+        ) ::
+          {:ok, :recorded | :unchanged | {:moved, pos_integer(), non_neg_integer()}}
+          | {:error, term()}
+  def record_mobile_boot_primary_epoch(selector, primary_epoch, %DateTime{} = now, opts \\ [])
+      when is_map(selector) and is_integer(primary_epoch) and primary_epoch > 0 do
+    call({:record_mobile_boot_primary_epoch, selector, primary_epoch, now}, opts)
   end
 
   @spec settle_mobile_client_request(
@@ -3648,6 +3675,44 @@ defmodule FermixCore.Memory.Repo do
     end)
   end
 
+  @doc """
+  Records a channel's inbound event id until `now_ms + ttl_ms` (Unix
+  milliseconds) unless a live row holds it (M75 B15): `{:ok, :fresh}` when it
+  was absent or expired, `{:ok, {:duplicate, expires_at_ms}}` otherwise. Only
+  `FermixChannels.Gateway.Idempotency` calls it, behind its in-memory cache.
+  """
+  @spec claim_inbound_event(atom() | String.t(), String.t(), integer(), pos_integer(), keyword()) ::
+          {:ok, :fresh | {:duplicate, integer()}} | {:error, term()}
+  def claim_inbound_event(channel, event_id, now_ms, ttl_ms, opts \\ [])
+      when is_binary(event_id) and is_integer(now_ms) and is_integer(ttl_ms) and ttl_ms > 0 do
+    with {:ok, {channel, event_id}} <- InboundEventsSql.normalize_key(channel, event_id) do
+      call({:claim_inbound_event, channel, event_id, now_ms, now_ms + ttl_ms}, opts)
+    end
+  end
+
+  @doc "Deletes a channel's inbound event id, so its next arrival is fresh."
+  @spec forget_inbound_event(atom() | String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def forget_inbound_event(channel, event_id, opts \\ []) when is_binary(event_id) do
+    with {:ok, {channel, event_id}} <- InboundEventsSql.normalize_key(channel, event_id) do
+      call({:forget_inbound_event, channel, event_id}, opts)
+    end
+  end
+
+  @doc """
+  Deletes at most `limit` inbound event ids that expired at or before `now_ms`,
+  and answers how many it deleted.
+  """
+  @spec prune_inbound_events(integer(), pos_integer(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def prune_inbound_events(now_ms, limit, opts \\ [])
+      when is_integer(now_ms) and is_integer(limit) and limit > 0 do
+    if limit > InboundEventsSql.prune_limit_max(),
+      do:
+        raise(ArgumentError, "a prune deletes at most #{InboundEventsSql.prune_limit_max()} rows")
+
+    call({:prune_inbound_events, now_ms, limit}, opts)
+  end
+
   @spec migrate(keyword()) :: :ok | {:error, term()}
   def migrate(opts \\ []) do
     call(:migrate, opts)
@@ -3832,6 +3897,24 @@ defmodule FermixCore.Memory.Repo do
   def handle_call({:list_temporal_reminders, filter}, _from, state) do
     reply = with_connection(state, &TemporalSql.list_reminders(&1, filter))
     {:reply, reply, state}
+  end
+
+  def handle_call({:claim_inbound_event, channel, event_id, now_ms, expires_at_ms}, _from, state) do
+    reply =
+      with_connection(
+        state,
+        &InboundEventsSql.claim(&1, channel, event_id, now_ms, expires_at_ms)
+      )
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:forget_inbound_event, channel, event_id}, _from, state) do
+    {:reply, with_connection(state, &InboundEventsSql.forget(&1, channel, event_id)), state}
+  end
+
+  def handle_call({:prune_inbound_events, now_ms, limit}, _from, state) do
+    {:reply, with_connection(state, &InboundEventsSql.prune(&1, now_ms, limit)), state}
   end
 
   def handle_call({:create_open_loop, row}, _from, state) do
@@ -4077,6 +4160,13 @@ defmodule FermixCore.Memory.Repo do
       ) do
     reply =
       with_connection(state, &MobileSql.recoverable_requests(&1, selector, epoch, limit, now))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:record_mobile_boot_primary_epoch, selector, epoch, now}, _from, state) do
+    reply =
+      with_connection(state, &MobileSql.record_boot_primary_epoch(&1, selector, epoch, now))
 
     {:reply, reply, state}
   end
@@ -4977,6 +5067,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_open_loop_outside_content_migration(conn, versions),
          :ok <- apply_mobile_icon_index_migration(conn, versions),
          :ok <- apply_open_loop_curiosity_migration(conn, versions),
+         :ok <- apply_mobile_uncertain_request_migration(conn, versions),
+         :ok <- apply_channel_event_ids_migration(conn, versions),
          :ok <- apply_watcher_follow_up_migration(conn, versions) do
       :ok
     end
@@ -5336,6 +5428,46 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{MobileSql.media_index_schema_sql()}
         INSERT INTO schema_migrations(version) VALUES (#{@mobile_media_index_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # A request that may have run before a restart is settled `uncertain`
+  # (M75): the request table is rebuilt with that status, its rows and indexes
+  # kept, beside the table of each transport's last primary epoch, with its
+  # version in one transaction. No foreign key names the request table.
+  defp apply_mobile_uncertain_request_migration(conn, versions) do
+    if Enum.member?(versions, @mobile_uncertain_request_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MobileSql.uncertain_schema_sql()}
+        INSERT INTO schema_migrations(version)
+          VALUES (#{@mobile_uncertain_request_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # The channel event ids `Gateway.Idempotency` keeps for their window (M75
+  # B15), so they move with the home: the table, its expiry index and the
+  # version in one transaction.
+  defp apply_channel_event_ids_migration(conn, versions) do
+    if Enum.member?(versions, @channel_event_ids_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{InboundEventsSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@channel_event_ids_migration_version});
         COMMIT;
         """
       )

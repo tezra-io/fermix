@@ -1,8 +1,12 @@
 defmodule Fermix.CLI.MemoryCommand do
   @moduledoc """
   `fermix memory` — review and restore durable memory rows.
+
+  Both write long-term memory, and a review calls a provider, so a device-role
+  engine (`FermixCore.Home.Role`) refuses both by name before either runs.
   """
 
+  alias FermixCore.Home.Role
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.PromptFiles
   alias FermixCore.Memory.Repo
@@ -18,7 +22,18 @@ defmodule Fermix.CLI.MemoryCommand do
   @json_switches [json: :boolean]
 
   @spec run([String.t()]) :: non_neg_integer()
-  def run(argv) when is_list(argv) do
+  def run(argv) when is_list(argv), do: run(argv, [])
+
+  @doc "Runs the verb with `:engine_role` standing in for the role this boot recorded."
+  @spec run([String.t()], keyword()) :: non_neg_integer()
+  def run(argv, deps) when is_list(argv) and is_list(deps) do
+    case deps |> Keyword.get_lazy(:engine_role, &Role.recorded/0) |> Role.admit() do
+      :ok -> dispatch(argv)
+      {:error, reason} -> error(reason)
+    end
+  end
+
+  defp dispatch(argv) do
     case argv do
       ["review" | rest] -> review(rest)
       ["restore", id | rest] -> restore(id, rest)
@@ -114,6 +129,11 @@ defmodule Fermix.CLI.MemoryCommand do
   defp invalid_options(context) do
     IO.puts(:stderr, "invalid memory #{context} options")
     usage()
+  end
+
+  defp error({:device_role, sentence}) when is_binary(sentence) do
+    IO.puts(:stderr, "fermix memory: " <> sentence)
+    1
   end
 
   defp error(reason) do

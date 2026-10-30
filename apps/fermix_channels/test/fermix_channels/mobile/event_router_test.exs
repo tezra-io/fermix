@@ -10,6 +10,9 @@ defmodule FermixChannels.Mobile.EventRouterTest do
   alias FermixCore.Companion.Timeline
   alias FermixCore.Memory.Repo
 
+  # An arrival across processes and the SQLite store, on a loaded runner.
+  @arrival_ms 10_000
+
   defmodule StoreStub do
     def claim_client_request(_profile, "duplicate", _type, _payload, _opts) do
       {:ok, {:duplicate, %{status: "completed", result_server_seq: 44}}}
@@ -127,6 +130,8 @@ defmodule FermixChannels.Mobile.EventRouterTest do
   end
 
   defmodule CoordinatorStub do
+    def epoch(:coordinator), do: "boot-router"
+
     def acquire(_server, _profile, "duplicate", _opts) do
       {:ok, {:completed, %{attempt: 1, result_server_seq: 44}}}
     end
@@ -592,6 +597,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
   test "cancel marks the named request, then stops its turn", ctx do
     store_opts = [repo: start_mobile_repo(), agent_id: "agent-a", owner_id: "owner-a"]
     claim = store_opts ++ [transport: "mobile", authenticated_device_id: "device-1"]
+    claim = claim ++ [runner_epoch: "boot-1"]
     payload = %{"client_msg_id" => "phone-cancel", "profile_id" => "main"}
 
     assert {:ok, {:claimed, _request}} =
@@ -678,19 +684,26 @@ defmodule FermixChannels.Mobile.EventRouterTest do
   # ends the turns of those that ended while it was away (mobile protocol 2).
   test "request_status answers each held request from its durable claim, in order", ctx do
     store_opts = [repo: start_mobile_repo(), agent_id: "agent-a", owner_id: "owner-a"]
-    claim = store_opts ++ [transport: "mobile", authenticated_device_id: "device-1"]
 
-    for id <- ~w(waiting running done failed stopped) do
+    claim =
+      store_opts ++
+        [transport: "mobile", authenticated_device_id: "device-1", runner_epoch: "boot-1"]
+
+    for id <- ~w(waiting running done failed stopped unsure) do
       payload = %{"client_msg_id" => id, "profile_id" => "main"}
 
       assert {:ok, {:claimed, _request}} =
                Timeline.claim_client_request("main", id, "msg", payload, claim)
     end
 
-    for id <- ~w(running done failed stopped) do
+    for id <- ~w(running done failed stopped unsure) do
       assert {:ok, {:started, %{attempt: 1}}} =
                Timeline.start_client_request("main", id, "boot-1", store_opts)
     end
+
+    # Another boot ran it: a later boot settles it uncertain (M75).
+    assert {:ok, {:settled_uncertain, _unsure}} =
+             Timeline.start_client_request("main", "unsure", "boot-2", store_opts)
 
     done = %{result_server_seq: 7, turn_id: "turn-done"}
     assert {:ok, _done} = Timeline.complete_client_request("main", "done", 1, done, store_opts)
@@ -704,7 +717,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
              Timeline.fail_client_request("main", "stopped", 1, failure, store_opts)
 
     opts = Keyword.merge(ctx.opts, store: Timeline, store_opts: store_opts)
-    ids = ~w(done never waiting running failed stopped)
+    ids = ~w(done never waiting running failed stopped unsure)
     status = decoded("request_status", %{"client_msg_ids" => ids})
     assert :ok = EventRouter.route(status, ctx.context, opts)
 
@@ -720,7 +733,12 @@ defmodule FermixChannels.Mobile.EventRouterTest do
              %{"client_msg_id" => "waiting", "status" => "accepted"},
              %{"client_msg_id" => "running", "status" => "running"},
              %{"client_msg_id" => "failed", "status" => "failed", "error" => "request_failed"},
-             %{"client_msg_id" => "stopped", "status" => "failed", "error" => "cancelled"}
+             %{"client_msg_id" => "stopped", "status" => "failed", "error" => "cancelled"},
+             %{
+               "client_msg_id" => "unsure",
+               "status" => "failed",
+               "error" => "uncertain_after_restart"
+             }
            ]
 
     assert {:ok, _frames} =
@@ -1090,7 +1108,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
 
     kill_and_settle(coordinator, killed)
 
-    assert {:ok, %{status: "accepted", attempt: 1, runner_epoch: nil}} =
+    assert {:ok, %{status: "accepted", attempt: 1, runner_epoch: "boot-router-kill"}} =
              Timeline.get_client_request("main", "killed-runner", store_opts)
 
     resend = spawn(fn -> EventRouter.route(event, context, opts) end)
@@ -1103,6 +1121,230 @@ defmodule FermixChannels.Mobile.EventRouterTest do
 
     assert {:ok, %{status: "running", attempt: 2, runner_epoch: "boot-router-kill"}} =
              Timeline.get_client_request("main", "killed-runner", store_opts)
+  end
+
+  # M75: after a restart a request that may already have run is never run
+  # again. One that never started a turn runs, unless the home moved or was
+  # restored since (another engine, a new primary epoch); a turn another boot
+  # started is settled, and its turn ends on every phone with the word that
+  # says so. A phone that was away reads the same word from `request_status`.
+  describe "a request another boot held" do
+    test "at the same primary epoch, one never started runs; one another boot ran is settled",
+         ctx do
+      %{store_opts: store_opts} = held = held_store()
+      record_primary_epoch(held, 2)
+
+      for id <- ["phone-waiting", "phone-running", "phone-stopped"] do
+        assert {:ok, {:claimed, _request}} = claim_held(held, id, "boot-earlier")
+      end
+
+      for id <- ["phone-running", "phone-stopped"] do
+        assert {:ok, {:started, %{attempt: 1}}} =
+                 Timeline.start_client_request("main", id, "boot-earlier", store_opts)
+      end
+
+      assert {:ok, {:marked, _request}} =
+               Timeline.cancel_client_request("main", "phone-stopped", store_opts)
+
+      start_recovering_coordinator(held, "boot-later", {:ok, 2}, :later_boot, ctx)
+
+      assert_receive {:gateway_ingest, [%{id: "phone-waiting"} = message], _opts}, @arrival_ms
+      assert message.metadata.mobile_attempt == 1
+
+      assert_receive {:event, {:phones, "main"},
+                      %{
+                        "t" => "turn_error",
+                        "turn_id" => "turn-phone-running",
+                        "code" => "uncertain_after_restart"
+                      }},
+                     @arrival_ms
+
+      assert_receive {:event, {:phones, "main"},
+                      %{
+                        "t" => "turn_error",
+                        "turn_id" => "turn-phone-stopped",
+                        "code" => "cancelled"
+                      }},
+                     @arrival_ms
+
+      refute_receive {:gateway_ingest, [%{id: "phone-running"}], _opts}, 200
+      refute_received {:gateway_ingest, [%{id: "phone-stopped"}], _opts}
+
+      assert {:ok, %{status: "uncertain", attempt: 1, runner_epoch: "boot-earlier"}} =
+               Timeline.get_client_request("main", "phone-running", store_opts)
+
+      assert {:ok, %{status: "failed", cancelled_at: %DateTime{}}} =
+               Timeline.get_client_request("main", "phone-stopped", store_opts)
+    end
+
+    test "after a move from epoch 2 to 3 every unfinished one is settled; the next boot is normal",
+         ctx do
+      %{store_opts: store_opts} = held = held_store()
+      record_primary_epoch(held, 2)
+
+      for id <- ["phone-waiting", "phone-running"] do
+        assert {:ok, {:claimed, _request}} = claim_held(held, id, "boot-earlier")
+      end
+
+      assert {:ok, {:started, %{attempt: 1}}} =
+               Timeline.start_client_request("main", "phone-running", "boot-earlier", store_opts)
+
+      start_recovering_coordinator(held, "boot-moved", {:ok, 3}, :moved_boot, ctx)
+
+      for id <- ["phone-waiting", "phone-running"] do
+        turn_id = "turn-" <> id
+
+        assert_receive {:event, {:phones, "main"},
+                        %{
+                          "t" => "turn_error",
+                          "turn_id" => ^turn_id,
+                          "code" => "uncertain_after_restart"
+                        }},
+                       @arrival_ms
+
+        assert {:ok, %{status: "uncertain"}} = Timeline.get_client_request("main", id, store_opts)
+      end
+
+      refute_receive {:gateway_ingest, _messages, _opts}, 200
+      assert {:ok, :unchanged} = record_primary_epoch(held, 3)
+
+      # The next boot at 3 is the same engine: what it never started runs.
+      assert {:ok, {:claimed, _request}} = claim_held(held, "phone-after", "boot-moved")
+      start_recovering_coordinator(held, "boot-next", {:ok, 3}, :next_boot, ctx)
+
+      assert_receive {:gateway_ingest, [%{id: "phone-after"}], _opts}, @arrival_ms
+
+      assert {:ok, %{status: "running", runner_epoch: "boot-next"}} =
+               Timeline.get_client_request("main", "phone-after", store_opts)
+    end
+
+    test "boot recovery runs again a request this boot holds", ctx do
+      %{store_opts: store_opts} = held = held_store()
+      assert {:ok, {:claimed, _request}} = claim_held(held, "phone-mine", "boot-now")
+
+      assert {:ok, {:started, %{attempt: 1}}} =
+               Timeline.start_client_request("main", "phone-mine", "boot-now", store_opts)
+
+      # Its runner died under this boot, and this boot's coordinator restarted.
+      assert {:ok, %{status: "accepted", runner_epoch: "boot-now"}} =
+               Timeline.abandon_client_request("main", "phone-mine", 1, store_opts)
+
+      start_recovering_coordinator(held, "boot-now", {:ok, 1}, :same_boot, ctx)
+
+      assert_receive {:gateway_ingest, [message], _opts}, @arrival_ms
+      assert message.content == "held"
+      assert message.metadata.mobile_attempt == 2
+
+      assert {:ok, %{status: "running", attempt: 2, runner_epoch: "boot-now"}} =
+               Timeline.get_client_request("main", "phone-mine", store_opts)
+    end
+
+    # A cancel the owner made ends as the cancel, and a resend is told so again.
+    test "a resend of one a restart settled cancelled is told cancelled again", ctx do
+      %{store_opts: store_opts} = held = held_store()
+      assert {:ok, {:claimed, _request}} = claim_held(held, "phone-stopped", "boot-earlier")
+
+      assert {:ok, {:started, %{attempt: 1}}} =
+               Timeline.start_client_request("main", "phone-stopped", "boot-earlier", store_opts)
+
+      assert {:ok, {:marked, _request}} =
+               Timeline.cancel_client_request("main", "phone-stopped", store_opts)
+
+      assert {:ok, {:settled_cancelled, _request}} =
+               Timeline.start_client_request("main", "phone-stopped", "boot-later", store_opts)
+
+      coordinator =
+        start_supervised!(
+          {RequestCoordinator,
+           store: Timeline,
+           store_opts: store_opts,
+           recover?: false,
+           boot_epoch: "boot-later",
+           name: nil},
+          id: :cancelled_resend_coordinator
+        )
+
+      opts = held_router_opts(store_opts, coordinator, ctx, self())
+      assert :ok = EventRouter.route(held_event("phone-stopped"), ctx.context, opts)
+
+      assert_received {:event, {:device, "device-1"},
+                       %{
+                         "t" => "accepted",
+                         "client_msg_id" => "phone-stopped",
+                         "duplicate" => true
+                       }}
+
+      assert_received {:event, {:device, "device-1"},
+                       %{
+                         "t" => "turn_error",
+                         "turn_id" => "turn-phone-stopped",
+                         "code" => "cancelled"
+                       }}
+
+      refute_received {:gateway_ingest, _messages, _opts}
+    end
+
+    test "a resend of its id is a duplicate that never runs; a new id runs", ctx do
+      %{store_opts: store_opts} = held = held_store()
+      assert {:ok, {:claimed, _request}} = claim_held(held, "phone-again", "boot-earlier")
+
+      assert {:ok, {:started, %{attempt: 1}}} =
+               Timeline.start_client_request("main", "phone-again", "boot-earlier", store_opts)
+
+      coordinator =
+        start_supervised!(
+          {RequestCoordinator,
+           store: Timeline,
+           store_opts: store_opts,
+           recover?: false,
+           boot_epoch: "boot-later",
+           name: nil},
+          id: :resend_coordinator
+        )
+
+      opts = held_router_opts(store_opts, coordinator, ctx, self())
+
+      # The phone resends what it never saw end, under the same id. It reaches
+      # the request before recovery does, and still never runs it.
+      assert :ok = EventRouter.route(held_event("phone-again"), ctx.context, opts)
+
+      assert_received {:event, {:device, "device-1"},
+                       %{"t" => "accepted", "client_msg_id" => "phone-again", "duplicate" => true}}
+
+      assert_received {:event, {:phones, "main"},
+                       %{"t" => "turn_error", "turn_id" => "turn-phone-again"} = ending}
+
+      assert ending["code"] == "uncertain_after_restart"
+
+      # Settled once: a second resend (an outbox that missed the ending) is a
+      # duplicate that never runs, and that phone alone is told the ending again.
+      assert :ok = EventRouter.route(held_event("phone-again"), ctx.context, opts)
+
+      assert_received {:event, {:device, "device-1"},
+                       %{"t" => "accepted", "client_msg_id" => "phone-again", "duplicate" => true}}
+
+      assert_received {:event, {:device, "device-1"}, ^ending}
+      refute_received {:event, {:phones, "main"}, %{"t" => "turn_error"}}
+      refute_received {:gateway_ingest, _messages, _opts}
+
+      # Sending it again is a new request, under a new id.
+      assert :ok = EventRouter.route(held_event("phone-again-2"), ctx.context, opts)
+
+      assert_received {:event, {:device, "device-1"},
+                       %{
+                         "t" => "accepted",
+                         "client_msg_id" => "phone-again-2",
+                         "duplicate" => false
+                       }}
+
+      assert_receive {:gateway_ingest, [%{content: "held"}], _opts}
+
+      assert {:ok, %{status: "uncertain"}} =
+               Timeline.get_client_request("main", "phone-again", store_opts)
+
+      assert {:ok, %{status: "running", runner_epoch: "boot-later"}} =
+               Timeline.get_client_request("main", "phone-again-2", store_opts)
+    end
   end
 
   test "an ingested client event counts one inbound message for the mobile channel", ctx do
@@ -1139,6 +1381,76 @@ defmodule FermixChannels.Mobile.EventRouterTest do
       )
 
     handler_id
+  end
+
+  defp held_store do
+    %{store_opts: [repo: start_mobile_repo(), agent_id: "agent-a", owner_id: "owner-a"]}
+  end
+
+  defp claim_held(%{store_opts: store_opts}, client_msg_id, epoch) do
+    claim =
+      store_opts ++
+        [transport: "mobile", authenticated_device_id: "device-1", runner_epoch: epoch]
+
+    Timeline.claim_client_request(
+      "main",
+      client_msg_id,
+      "msg",
+      held_event(client_msg_id).payload,
+      claim
+    )
+  end
+
+  defp held_event(client_msg_id) do
+    decoded("msg", %{
+      "client_msg_id" => client_msg_id,
+      "profile_id" => "main",
+      "text" => "held",
+      "attach_ids" => []
+    })
+  end
+
+  # The router's options over the real store and coordinator, the turn queue
+  # and the settlement owner stood in for.
+  defp held_router_opts(store_opts, coordinator, ctx, test_pid) do
+    Keyword.merge(ctx.opts,
+      store: Timeline,
+      store_opts: store_opts,
+      coordinator: RequestCoordinator,
+      request_coordinator: coordinator,
+      gateway: ForwardingGatewayStub,
+      agent_server: test_pid
+    )
+  end
+
+  # What an earlier boot of the phone's requests recorded.
+  defp record_primary_epoch(%{store_opts: store_opts}, primary_epoch) do
+    Timeline.record_boot_primary_epoch(primary_epoch, [transport: "mobile"] ++ store_opts)
+  end
+
+  # A coordinator for `epoch`, its home at `primary_epoch`, whose boot recovery
+  # runs at once through the phone's router, every device it names still
+  # paired.
+  defp start_recovering_coordinator(%{store_opts: store_opts}, epoch, primary_epoch, id, ctx) do
+    test_pid = self()
+
+    recover = fn row, context, opts ->
+      router = held_router_opts(store_opts, opts[:request_coordinator], ctx, test_pid)
+      EventRouter.recover_request(row, context, Keyword.merge(router, opts))
+    end
+
+    start_supervised!(
+      {RequestCoordinator,
+       store: Timeline,
+       store_opts: [transport: "mobile"] ++ store_opts,
+       boot_epoch: epoch,
+       name: nil,
+       recover_request: recover,
+       authorize_device: fn _store, "device-1" -> {:ok, %{device_id: "device-1"}} end,
+       primary_epoch: fn -> primary_epoch end,
+       recovery_launcher: fn task -> {:ok, spawn(fn -> task.() end)} end},
+      id: id
+    )
   end
 
   defp start_mobile_repo do

@@ -322,10 +322,15 @@ defmodule FermixCore.Plugins.Http.Interpreter do
     case Keyword.get(opts, :auth_type, :none) do
       :oauth2 ->
         name = plugin(opts)
-        Tool.error("#{name} needs reconnection. Run `fermix plugins auth reauthorize #{name}`.")
+
+        Tool.error(
+          "#{name} needs reconnection. Sign in to #{name} again in Fermix's Plugins settings."
+        )
 
       :api_key ->
-        Tool.error("API key rejected — update it with `fermix plugins auth set #{plugin(opts)}`")
+        Tool.error(
+          "API key rejected — replace the token for #{plugin(opts)} in Fermix's Plugins settings."
+        )
 
       _ ->
         Tool.error("401 unauthorized")

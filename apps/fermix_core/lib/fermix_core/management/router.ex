@@ -8,6 +8,7 @@ defmodule FermixCore.Management.Router do
 
   alias FermixCore.BuildInfo
   alias FermixCore.Health
+  alias FermixCore.Home.Role
   alias FermixCore.Introspection.Overview
   alias FermixCore.Management.Auth
   alias FermixCore.Management.Capabilities
@@ -16,6 +17,8 @@ defmodule FermixCore.Management.Router do
   alias FermixCore.Management.Detect
   alias FermixCore.Management.Diagnostics
   alias FermixCore.Management.Doctor
+  alias FermixCore.Management.Home
+  alias FermixCore.Management.HomeMove
   alias FermixCore.Management.IMessage
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Lifecycle
@@ -23,6 +26,7 @@ defmodule FermixCore.Management.Router do
   alias FermixCore.Management.McpServers
   alias FermixCore.Management.Meetings
   alias FermixCore.Management.Mobile
+  alias FermixCore.Management.Placement
   alias FermixCore.Management.Plugins
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Providers
@@ -40,7 +44,8 @@ defmodule FermixCore.Management.Router do
     computer_use.grant.start computer_use.permissions.get mobile.status mobile.pair.start
     mobile.devices.list browser.install.start imessage.permissions.get imessage.policy.confirm
     mcp.servers.list mcp.servers.import.scan cues.status cues.sources.list cues.watchers.list
-    cues.mandates.list cues.mandates.choices
+    cues.mandates.list cues.mandates.choices home.status home.snapshots.status home.snapshots.run
+    home.enroll.open home.candidates.list
   )
   @lease_params ~w(lease_id)
   @doctor_session_params ~w(session_id)
@@ -72,6 +77,14 @@ defmodule FermixCore.Management.Router do
   @mcp_draft_params ~w(text)
   @mcp_import_params ~w(servers)
   @mcp_tool_params ~w(name tool enabled)
+  @home_passphrase_params ~w(recovery_passphrase)
+  @home_readiness_params ~w(candidate_id)
+  @home_move_params ~w(candidate_id recovery_passphrase keep_as_desktop)
+  # A candidate (M75 §2) answers the protocol's hello and home.status, and
+  # refuses every other method by name.
+  @candidate_methods ~w(hello home.status)
+  @candidate_sentence "This engine is a candidate primary waiting for its move; it answers " <>
+                        "home.status and nothing else until the move makes it the primary."
   @cue_ref_params ~w(ref)
   @cue_form_params ~w(kind preset verify)
   @cue_add_params ~w(ref kind preset values)
@@ -83,9 +96,27 @@ defmodule FermixCore.Management.Router do
   @cue_decide_params ~w(proposal_id decision)
   @cue_proposal_states %{"waiting" => :waiting, "recent" => :recent}
   @cue_decisions %{"confirm" => :confirm, "deny" => :deny}
+  @primary_sections_unread "The server listed its settings in a form this computer does " <>
+                             "not read."
   # A published name, an opaque workspace id and a display label are all bounded
   # strings; the widest of them is the workspace id's own 256-byte bound.
   @max_text_bytes 256
+  # The methods that call a provider or touch a provider session (a sign-in, an
+  # import, a sign-out's revocation, a probe, a live listing, the network
+  # doctor, the notetaker's sign-in), each with the capability its refusal
+  # names. A device-role engine
+  # refuses them by name: the token file on its host is a retired copy and a
+  # rotating refresh token has one live owner, the primary (M75 D5).
+  @provider_methods %{
+    "providers.probe.start" => "providers",
+    "providers.models.list" => "providers",
+    "auth.start" => "auth",
+    "auth.import.start" => "auth",
+    "auth.logout" => "auth",
+    "plugins.disconnect" => "plugins",
+    "meetings.signin.start" => "meetings",
+    "doctor.start" => "doctor"
+  }
   # The detection catalog is closed and small, so the ceiling is the catalog
   # rather than a round number: a longer list can only repeat targets.
   @max_detect_targets 6
@@ -108,7 +139,7 @@ defmodule FermixCore.Management.Router do
       when is_integer(version) and version > 0 and is_map(params) and is_list(opts) do
     case Protocol.minimum_version(method) do
       {:ok, minimum} when minimum <= version ->
-        route_known(method, params, opts)
+        with :ok <- admit(method, params, opts), do: route_known(method, params, opts)
 
       {:ok, minimum} ->
         {:error, :method_not_found, %{"method" => method, "requires" => minimum}}
@@ -246,6 +277,58 @@ defmodule FermixCore.Management.Router do
     do: mcp_by_name(&McpServers.check_start/2, params, opts)
 
   defp route_known("cues." <> _rest = method, params, opts), do: route_cues(method, params, opts)
+  defp route_known("home." <> _rest = method, params, opts), do: route_home(method, params, opts)
+
+  # Answered locally in every role (M75 §14): a device reads its own home.
+  defp route_home("home.status", %{}, opts), do: operation_result(Home.status(home_opts(opts)))
+
+  defp route_home("home.snapshots.status", %{}, opts),
+    do: operation_result(Home.snapshots_status(home_opts(opts)))
+
+  defp route_home("home.snapshots.run", %{}, opts),
+    do: operation_result(Home.snapshots_run(home_opts(opts)))
+
+  defp route_home("home.snapshots.passphrase", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_passphrase_params) do
+      operation_result(
+        Home.snapshots_passphrase(Map.get(params, "recovery_passphrase"), home_opts(opts))
+      )
+    end
+  end
+
+  defp route_home("home.enroll.open", %{}, opts),
+    do: operation_result(HomeMove.enroll_open(home_opts(opts)))
+
+  defp route_home("home.candidates.list", %{}, opts),
+    do: operation_result(HomeMove.candidates_list(home_opts(opts)))
+
+  defp route_home("home.move.readiness", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_readiness_params) do
+      operation_result(HomeMove.move_readiness(Map.get(params, "candidate_id"), home_opts(opts)))
+    end
+  end
+
+  # `keep_as_desktop` (default true): false when the source is a server being
+  # replaced, which then becomes no desktop of the new primary (M75).
+  defp route_home("home.move.start", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_move_params),
+         {:ok, keep?} <- keep_as_desktop(params) do
+      operation_result(
+        HomeMove.move_start(
+          Map.get(params, "candidate_id"),
+          Map.get(params, "recovery_passphrase"),
+          Keyword.put(home_opts(opts), :keep_as_desktop, keep?)
+        )
+      )
+    end
+  end
+
+  defp keep_as_desktop(params) do
+    case Map.get(params, "keep_as_desktop", true) do
+      keep? when is_boolean(keep?) -> {:ok, keep?}
+      _other -> invalid_params("keep_as_desktop")
+    end
+  end
 
   defp route_cues("cues.status", %{}, opts), do: operation_result(Cues.status(cues_opts(opts)))
 
@@ -364,9 +447,18 @@ defmodule FermixCore.Management.Router do
     {:ok, %{"jobs" => jobs}}
   end
 
+  # A sign-in started by a desktop over the rail (`:actor`, M75 D17) is
+  # recorded as that desktop's, so its loopback reply is forwarded there.
   defp auth_start(params, opts) do
     with {:ok, provider} <- fetch_string(params, "provider", @provider_params) do
-      operation_result(Auth.start(provider, operation_opts(opts)))
+      operation_result(Auth.start(provider, with_actor(operation_opts(opts), opts)))
+    end
+  end
+
+  defp with_actor(operation_opts, opts) do
+    case Keyword.fetch(opts, :actor) do
+      {:ok, actor} -> Keyword.put(operation_opts, :actor, actor)
+      :error -> operation_opts
     end
   end
 
@@ -682,16 +774,57 @@ defmodule FermixCore.Management.Router do
   defp mobile_opts(opts), do: opts |> operation_opts() |> Keyword.get(:mobile, [])
   defp cues_opts(opts), do: opts |> operation_opts() |> Keyword.get(:cues, [])
 
+  # The router's own `:engine_role` (tests) reaches the family as its seam, and
+  # a linked device's way to its primary (`:primary_forward`, from the daemon)
+  # lets `home.status` add the primary's own.
+  defp home_opts(opts) do
+    home = opts |> operation_opts() |> Keyword.get(:home, [])
+
+    home =
+      case Keyword.fetch(opts, :engine_role) do
+        {:ok, role} -> Keyword.put_new(home, :engine_role, role)
+        :error -> home
+      end
+
+    case Keyword.fetch(opts, :primary_forward) do
+      {:ok, forward} -> Keyword.put(home, :primary_forward, forward)
+      :error -> home
+    end
+  end
+
+  # Composed on a linked device (M75): this machine's own sections, which
+  # configure it alone, and the primary's others, asked within the composed
+  # deadline; while the primary's part is missing, `primary_missing` says why.
+  # Every other engine lists its own and nothing is missing.
   defp settings_sections(opts) do
     inventory =
       Keyword.get(opts, :settings_sections, fn -> Settings.sections(settings_opts(opts)) end)
 
-    sections =
-      Enum.map(inventory.(), fn section ->
-        %{"id" => section.id, "pane" => section.pane, "title" => section.title}
-      end)
+    sections = Enum.map(inventory.(), &section_row/1)
 
-    {:ok, %{"sections" => sections}}
+    case Keyword.fetch(opts, :primary_forward) do
+      {:ok, forward} -> composed_sections(sections, forward)
+      :error -> {:ok, %{"sections" => sections, "primary_missing" => nil}}
+    end
+  end
+
+  defp section_row(section),
+    do: %{"id" => section.id, "pane" => section.pane, "title" => section.title}
+
+  defp composed_sections(sections, forward) do
+    own = Enum.filter(sections, &(&1["id"] in Placement.device_sections()))
+
+    case Placement.primary_part(forward, "settings.sections") do
+      {:ok, %{"sections" => primary}} when is_list(primary) ->
+        theirs = Enum.reject(primary, &(&1["id"] in Placement.device_sections()))
+        {:ok, %{"sections" => theirs ++ own, "primary_missing" => nil}}
+
+      {:ok, _malformed} ->
+        {:ok, %{"sections" => own, "primary_missing" => @primary_sections_unread}}
+
+      {:missing, sentence} ->
+        {:ok, %{"sections" => own, "primary_missing" => sentence}}
+    end
   end
 
   defp settings_get(params, opts) do
@@ -1219,4 +1352,46 @@ defmodule FermixCore.Management.Router do
   defp public_method(method) when is_binary(method), do: method
   defp public_method(_method), do: "invalid"
   defp unavailable(capability), do: {:error, :unavailable, %{"capability" => capability}}
+
+  # `:engine_role` stands in for the role this boot recorded (tests).
+  defp admit(method, params, opts) do
+    record = Keyword.get_lazy(opts, :engine_role, &Role.recorded/0)
+
+    with :ok <- candidate_answers(method, record),
+         {:ok, capability} <- provider_call(method, params),
+         {:error, {:device_role, sentence}} <- Role.admit(record) do
+      {:error, :unavailable, %{"capability" => capability, "sentence" => sentence}}
+    else
+      :no_provider_call -> :ok
+      :ok -> :ok
+      {:error, :unavailable, _details} = refusal -> refusal
+    end
+  end
+
+  defp candidate_answers(method, %{role: :candidate}) when method not in @candidate_methods,
+    do: {:error, :unavailable, %{"capability" => "candidate", "sentence" => @candidate_sentence}}
+
+  defp candidate_answers(_method, _record), do: :ok
+
+  @doc "The sentence a candidate primary (M75 §2) refuses everything else with."
+  @spec candidate_sentence() :: String.t()
+  def candidate_sentence, do: @candidate_sentence
+
+  # A catalog listing and the local doctor read only this host. The Anthropic
+  # setup token is a sign-in: storing it starts the token, and clearing it
+  # signs out (`Management.Secrets`), so it is refused before either.
+  defp provider_call("providers.models.list", %{"live" => false}), do: :no_provider_call
+
+  defp provider_call(method, %{"id" => "anthropic_setup_token"})
+       when method in ["secret.set", "secret.clear"],
+       do: {:ok, "secrets"}
+
+  defp provider_call("doctor.start", %{"scope" => "local"}), do: :no_provider_call
+
+  defp provider_call(method, _params) do
+    case Map.fetch(@provider_methods, method) do
+      {:ok, capability} -> {:ok, capability}
+      :error -> :no_provider_call
+    end
+  end
 end

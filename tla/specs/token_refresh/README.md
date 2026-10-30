@@ -3,8 +3,8 @@
 Models how Fermix rotates OAuth refresh tokens and stores them in
 `~/.fermix/auth.json`. The daemon runs one `TokenManager` GenServer per auth
 profile, a child of `TokenSupervisor` started on the profile's first use
-(`token_supervisor.ex:228-256`). A tree-less CLI VM refreshes a profile
-directly, with no manager (`token_supervisor.ex:212-218`, `:303-320`). Every
+(`token_supervisor.ex:242-280`). A tree-less CLI VM refreshes a profile
+directly, with no manager (`token_supervisor.ex:224-230`, `:327-344`). Every
 refresher persists through `Store.write`, which reads the whole file and then
 renames a new one over it (`store.ex:179-185`, `:469-477`, `:671-685`). The
 model therefore keeps the file as one map: a write is never torn, and the last
@@ -12,11 +12,11 @@ rename wins. After a 4xx, every refresher writes back the entry it read when
 its refresh began (`mark_reauthorization_required`). Logout deletes the entry,
 then has the profile's manager forget its tokens and stops it (plugin logout,
 `plugins/auth.ex:66-89` → `TokenSupervisor.forget_signed_out`,
-`token_supervisor.ex:131-153`) or only forgets them (the provider sign-out of
-anthropic and xai, `management/auth.ex:214-221`, `:504-508`). A logout from a
+`token_supervisor.ex:143-165`) or only forgets them (the provider sign-out of
+anthropic and xai, `management/auth.ex:219-226`, `:519-523`). A logout from a
 tree-less CLI VM deletes the entry the same way, then has a running daemon let
 go of the profile over the control socket (`auth_forget`,
-`cli/daemon.ex:898-928` → `TokenSupervisor.forget_signed_out`).
+`cli/daemon.ex:1021-1051` → `TokenSupervisor.forget_signed_out`).
 
 OpenAI Codex signs in with ChatGPT, under the `chatgpt` profile
 (`store.ex:259-269`). That registration outlives a sign-out, so the sign-out
@@ -24,7 +24,7 @@ writes instead of deleting: under the profile lock it revokes the session
 upstream and writes the entry back with no token, then calls
 `TokenSupervisor.forget_signed_out` (`auth/chatgpt/logout.ex:35-49`, `:71-86`).
 It is reached through `ChatGPT.logout` from the app's `auth.logout`
-(`management/auth.ex:495-502`), `fermix auth logout` (`auth_command.ex:314-340`)
+(`management/auth.ex:510-517`), `fermix auth logout` (`auth_command.ex:328-354`)
 and the web setup. Every reader treats an entry with no token as gone:
 `Store.read` refuses it as `:missing_access_token` (`store.ex:382-391`), and a
 manager maps that to signed out exactly as it maps a deleted entry
@@ -44,10 +44,10 @@ Two cross-VM lockfiles (`FermixCore.Plugins.Dist.Lock`) order those writers
   `Store.delete_provider` (`store.ex:179-185`, `:195-203`);
 - one profile lock per profile, `auth.json.<base64 profile>.lock`, around one
   refresh from its read of the entry to its write (`token_manager.ex:285-288`,
-  `token_supervisor.ex:314-319`), around a delete (`store.ex:195-203`) and
+  `token_supervisor.ex:338-343`), around a delete (`store.ex:195-203`) and
   ChatGPT's sign-out (`chatgpt/logout.ex:40-43`), and around a sign-in or
   import from before it spends anything to its write (`store.ex:205-226`;
-  `chatgpt/login.ex:73-90`, `xai_login.ex:46-58`, `plugins/auth.ex:190-207`,
+  `chatgpt/login.ex:73-90`, `xai_login.ex:47-59`, `plugins/auth.ex:191-208`,
   `anthropic_login.ex:182-202`). Every taker waits the same 10 s, and a lock
   still busy after it is `{:error, :profile_busy}` with nothing spent.
 
@@ -96,12 +96,12 @@ Each refresher may start two refreshes. Tokens are written R0, R1, … below.
   (delete, then `forget`), not the plugin logout (delete, then
   `forget_signed_out`: forget, then `stop_profile`), which ChatGPT's sign-out
   also ends in. The provider sign-out goes on to `forget` even when the entry
-  is already gone (`management/auth.ex:513-522`). The in-daemon plugin logout
+  is already gone (`management/auth.ex:528-537`). The in-daemon plugin logout
   stops at the failed delete (`plugins/auth.ex:70-72`, `:84-88`). ChatGPT's
   sign-out writes nothing when it finds no registration and goes on to
   `forget_signed_out` (`chatgpt/logout.ex:71-77`). Both CLI logouts go on to
-  their notice (`auth_command.ex:319-321`, `:356-360`, `:418-421`;
-  `plugins_command.ex:269-273`). Every entry starts stored, and with
+  their notice (`auth_command.ex:333-335`, `:370-374`, `:432-435`;
+  `plugins_command.ex:285-289`). Every entry starts stored, and with
   `MergesOnWrite` on (as in every check with `LogoutFromCli`) only the logout
   deletes one, so a CLI logout never finds its entry already gone.
 
@@ -111,8 +111,8 @@ least one check):
   refresh (`token_manager.ex:501-505`).
 - `OneCallbackPerManager`: a profile has one manager process, and it runs one
   callback at a time. `TokenSupervisor` registers children in a Registry with
-  `keys: :unique` (`token_supervisor.ex:205`) and answers `{:already_started, _}`
-  with the running one (`:253`). A `TokenManager` takes the name its
+  `keys: :unique` (`token_supervisor.ex:217`) and answers `{:already_started, _}`
+  with the running one (`:277`). A `TokenManager` takes the name its
   supervisor gives it and has no default one (`token_manager.ex:32-36`). The
   BEAM mailbox then queues concurrent callers. Switching it off models a second
   process refreshing the same profile beside the manager. That process stands
@@ -124,15 +124,15 @@ least one check):
 - `LogoutReachesManager`: logout reaches the profile's live manager: the plugin
   logout and ChatGPT's sign-out have it forget its tokens and stop it
   (`plugins/auth.ex:73`, `chatgpt/logout.ex:46` →
-  `token_supervisor.ex:149-153`), the provider sign-out of anthropic and xai
-  has it forget them (`management/auth.ex:506`, `:531` →
-  `token_supervisor.ex:123-129` → `token_manager.ex:196-199`).
+  `token_supervisor.ex:161-165`), the provider sign-out of anthropic and xai
+  has it forget them (`management/auth.ex:521`, `:546` →
+  `token_supervisor.ex:135-141` → `token_manager.ex:196-199`).
 - `PluginLogoutForgets`: the in-daemon plugin logout calls
   `forget_signed_out`, the same call as a CLI logout's notice, so the manager
   forgets its tokens, which deletes its plugin child's access-token file,
-  before it is stopped (`plugins/auth.ex:73` → `token_supervisor.ex:149-153`;
+  before it is stopped (`plugins/auth.ex:73` → `token_supervisor.ex:161-165`;
   `drop_tokens`, `token_manager.ex:393-405`). Off, it calls `stop_profile`
-  alone (`token_supervisor.ex:172-187`), as it did until this switch was
+  alone (`token_supervisor.ex:184-199`), as it did until this switch was
   added (ea1a12b5): the manager dies without a
   `terminate/2`, mid-callback if one is running, and the token file stays on
   disk until the next boot sweep.
@@ -141,7 +141,7 @@ least one check):
   `:603-623`).
 - `ProfileLock`: a refresh holds its profile's lock from its read of the entry
   to its write, in the manager (`token_manager.ex:285-288`) and the tree-less
-  direct refresh (`token_supervisor.ex:314-319`); `Store.delete_provider` takes
+  direct refresh (`token_supervisor.ex:338-343`); `Store.delete_provider` takes
   it before its store lock (`store.ex:195-203`), and ChatGPT's sign-out holds
   it from its read of the entry through its write (`chatgpt/logout.ex:40-43`).
   A sign-in holds it from before its code exchange to its write; that is folded
@@ -152,11 +152,11 @@ least one check):
   `:377-405`). Off, it refreshes the in-memory copy, which is what
   `entry_from_state` did before the fix.
 - `CliLogoutReachesDaemon`: after its delete, or ChatGPT's write, a CLI logout
-  sends a running daemon `auth_forget` for the profile (`plugins_command.ex:262`,
-  `:504-529`; `auth_command.ex:314-340`, `:347-365`, `:391-406`;
+  sends a running daemon `auth_forget` for the profile (`plugins_command.ex:278`,
+  `:520-545`; `auth_command.ex:328-354`, `:361-379`, `:405-420`;
   `cli/daemon/client.ex:60-74`). The daemon has the profile's manager forget
   its tokens, which also deletes its plugin child's token file, then stops it
-  (`cli/daemon.ex:674`, `:898-928`; `token_supervisor.ex:131-153`). Off, the
+  (`cli/daemon.ex:797`, `:1021-1051`; `token_supervisor.ex:143-165`). Off, the
   CLI logout reaches no manager. That is also the state a daemon leaves when
   it answers the notice with an error, which the CLI reports by exiting
   non-zero; checks 14 and 26 model that case.
@@ -368,7 +368,7 @@ describes, and the **Fix** bullets cite the code as it is now.
   file's directory): 100 attempts 100 ms apart, broken as stale after 120 s.
   It is taken around `TokenManager.do_refresh` (read, refresh, status write;
   `token_manager.ex:284-309`) and `TokenSupervisor.direct_refresh`
-  (`token_supervisor.ex:312-320`), the only two refreshers. The manager's own
+  (`token_supervisor.ex:336-344`), the only two refreshers. The manager's own
   state and token file change after the lock is released. A busy lock is a
   transient, logged error, never a refresh from memory. `RefreshClient` states
   its per-attempt bounds (pool 5 s, connect 10 s, receive 15 s;
@@ -441,8 +441,8 @@ describes, and the **Fix** bullets cite the code as it is now.
   fails the logout loudly with nothing deleted (`{:error, :profile_busy}`).
   Every sign-in and import takes the same lock, with the same wait, before it
   spends anything, and holds it through its write: the code exchange of the
-  ChatGPT, xAI and plugin flows (`chatgpt/login.ex:73-90`; `xai_login.ex:46-58`
-  and `plugins/auth.ex:190-207`, through `OAuthFlow`'s `:redeem`,
+  ChatGPT, xAI and plugin flows (`chatgpt/login.ex:73-90`; `xai_login.ex:47-59`
+  and `plugins/auth.ex:191-208`, through `OAuthFlow`'s `:redeem`,
   `oauth_flow.ex:7-13`), and the write alone for the Claude Code import and a
   setup token (`anthropic_login.ex:182-202`). So an in-flight refresh cannot
   undo a fresh sign-in either, and a busy profile refuses the sign-in with the
@@ -509,16 +509,16 @@ describes, and the **Fix** bullets cite the code as it is now.
     its next refresh (`token_manager.ex:323-340`).
 - **Fix:** both CLI logouts keep their local logout unchanged, then tell a
   running daemon to let go of the profile. This is the shape of
-  `apply_to_daemon` (`plugins_command.ex:484-502`): the CLI makes the change on
+  `apply_to_daemon` (`plugins_command.ex:500-518`): the CLI makes the change on
   disk itself every time, then notifies the daemon, and "no daemon" is the
   authoritative `:not_running` answer.
   - **The CLI side.** After the delete, `fermix plugins auth logout` and
     `fermix auth logout` send `auth_forget` with the profile
-    (`plugins_command.ex:262`, `:504-529`; `auth_command.ex:347-365`,
-    `:391-406`; `cli/daemon/client.ex:60-74`); `fermix auth logout` for codex
-    sends it after ChatGPT's sign-out (`auth_command.ex:314-340`). Both also
-    send it when the entry was already gone (`auth_command.ex:319-321`,
-    `:356-360`, `:418-421`; `plugins_command.ex:269-273`), so rerunning the
+    (`plugins_command.ex:278`, `:520-545`; `auth_command.ex:361-379`,
+    `:405-420`; `cli/daemon/client.ex:60-74`); `fermix auth logout` for codex
+    sends it after ChatGPT's sign-out (`auth_command.ex:328-354`). Both also
+    send it when the entry was already gone (`auth_command.ex:333-335`,
+    `:370-374`, `:432-435`; `plugins_command.ex:285-289`), so rerunning the
     logout after a failed notice reaches the daemon.
   - **No daemon.** The output is exactly the local logout's.
   - **The daemon answers ok.** One more stderr line.
@@ -527,8 +527,8 @@ describes, and the **Fix** bullets cite the code as it is now.
     restart of the daemon (from the Fermix app, or `fermix restart` for a
     daemon the operator runs).
   - **The daemon side.** The daemon validates the profile, then runs
-    `TokenSupervisor.forget_signed_out/1` (`cli/daemon.ex:674`, `:898-928`;
-    `token_supervisor.ex:131-153`).
+    `TokenSupervisor.forget_signed_out/1` (`cli/daemon.ex:797`, `:1021-1051`;
+    `token_supervisor.ex:143-165`).
     - It reuses `forget` (`drop_tokens`: tokens cleared, refusal set, and the
       plugin child's token file deleted), then `stop_profile`. The next use of
       that profile then starts a fresh manager from `auth.json`, so a later
@@ -536,7 +536,7 @@ describes, and the **Fix** bullets cite the code as it is now.
     - A forget that exits (for example, a manager waiting on the profile lock
       past the call's 5 s) is logged and answered as an error, never "ok".
       A manager that stopped between the lookup and the call (`:noproc`)
-      held nothing, so that is answered "ok" (`token_supervisor.ex:155-161`).
+      held nothing, so that is answered "ok" (`token_supervisor.ex:167-173`).
   - **Why a notice rather than the management methods.** `plugins.disconnect`
     and `auth.logout` are whole logouts, not notices, and neither works in
     either role:
@@ -569,7 +569,7 @@ describes, and the **Fix** bullets cite the code as it is now.
 None open. The one this spec raised, whether importing a Codex CLI sign-in ends
 the Codex CLI's session and then Fermix's, closed when that import was retired
 (9336d149): `auth.import.start` now refuses `codex_cli`
-(`management/auth.ex:183-184`).
+(`management/auth.ex:188-189`).
 
 ## Outside this model
 
@@ -588,8 +588,8 @@ the Codex CLI's session and then Fermix's, closed when that import was retired
   refresh in flight, so `forget` normally finds the manager idle. It can still
   meet a manager that is itself waiting up to 10 s for the profile lock (held
   by a CLI refresh, say); the management caller then exits first, the socket
-  turns that into `internal_error` (`cli/daemon.ex:410-420`), and
-  `revert_route` (`management/auth.ex:218`) never runs. The in-daemon plugin
+  turns that into `internal_error` (`cli/daemon.ex:511-524`), and
+  `revert_route` (`management/auth.ex:223`) never runs. The in-daemon plugin
   logout's forget (`forget_signed_out`, `plugins/auth.ex:73`) and ChatGPT's
   sign-out's (`chatgpt/logout.ex:46`) are the same call and can meet the same
   wait. Their caller then exits after the delete or the write: the forget still
@@ -617,11 +617,11 @@ the Codex CLI's session and then Fermix's, closed when that import was retired
   slow enough that one try or the release outlasts them exits the caller
   instead of returning a tuple; inside a token manager that crashes it
   mid-refresh, and its supervisor restarts it from `auth.json`
-  (`token_supervisor.ex:244-256`). `Store` does not catch the exit (Rule 7).
+  (`token_supervisor.ex:268-280`). `Store` does not catch the exit (Rule 7).
 - **A refresher that waited for the profile lock refreshes again.** No
   refresher re-checks under the lock that the entry is still due. A manager
   (`token_manager.ex:284-309`) or a tree-less refresh
-  (`token_supervisor.ex:312-320`) that waited out another refresher's
+  (`token_supervisor.ex:336-344`) that waited out another refresher's
   rotation, or a sign-in's write, rotates the fresh token once more, unless the
   entry is ChatGPT's and the fresh set's `earliest_refresh_at` has not passed
   (`chatgpt/refresh.ex:39-48`). It reads under the lock, so it never presents a
@@ -657,7 +657,7 @@ the Codex CLI's session and then Fermix's, closed when that import was retired
   for a restart onto the new engine.
 - **A provider sign-out the settings file refuses.** The sign-out of anthropic
   and xai first asks the settings file's write guard (`route_writable`,
-  `management/auth.ex:216`, `:544-547`), because reverting the route writes
+  `management/auth.ex:221`, `:559-562`), because reverting the route writes
   `config.toml`. Refused for an outside edit, it returns before the delete and
   the forget, so it changes nothing the model tracks: it is a logout that
   never ran.

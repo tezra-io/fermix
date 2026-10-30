@@ -14,6 +14,12 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Home.Candidates, as: HomeCandidates
+  alias FermixCore.Home.Epoch
+  alias FermixCore.Home.Move, as: HomeMove
+  alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
+  alias FermixCore.Home.Snapshot.Scheduler, as: SnapshotScheduler
+  alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Management.Cues.MandateRow, as: CueMandateRow
   alias FermixCore.Management.Cues.SourceRow, as: CueSourceRow
@@ -22,6 +28,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Management.Doctor
   alias FermixCore.Management.Doctor.Descriptor
   alias FermixCore.Management.Doctor.Remediation
+  alias FermixCore.Management.Home, as: ManagementHome
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Logs
@@ -586,6 +593,18 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
     assert Map.has_key?(realtime["properties"], "engine")
     assert "engine" in realtime["required"]
+  end
+
+  # A desktop's link to its primary names its state in one closed word, so an
+  # app draws a quiet renewal apart from an outage.
+  test "the schema's primary status vocabulary is the one home.status answers", %{
+    schema: schema
+  } do
+    primary = schema["$defs"]["homePrimary"]
+
+    assert "status" in primary["required"]
+
+    assert primary["properties"]["status"]["enum"] == ManagementHome.primary_statuses()
   end
 
   test "the schema's row vocabulary matches the settings module", %{schema: schema} do
@@ -1225,7 +1244,12 @@ defmodule FermixCore.Management.ProtocolContractTest do
       {"plugins.list", %{}, []}
     ] ++
       settings_cases() ++
-      job_view_cases() ++ flow_cases() ++ mobile_cases() ++ mcp_cases() ++ cues_cases()
+      job_view_cases() ++
+      flow_cases() ++
+      mobile_cases() ++
+      mcp_cases() ++
+      cues_cases() ++
+      home_cases()
   end
 
   # Stands in for `Cues.Proposals` with the record and the card in the shape
@@ -1275,6 +1299,169 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # The cue reads against settings of this case's own (`:config`), a temp Repo
   # of its own and the proposal stand-in above; every write answers from a home
   # and is pinned to its golden in `CuesTest`.
+  # The home family against a home holding what the goldens show: epoch 4, no
+  # marker, one verified S3 snapshot, a recipient and a bucket, and a scheduler
+  # whose run starts and finishes at once; and, for enrollment and the move, a
+  # window a candidate used, that candidate, and a move to it that was undone.
+  defp home_cases do
+    home = SafeRm.make_tmp_dir!("contract_home")
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+    :ok = Epoch.write(home, 4)
+    :ok = seed_move(home)
+
+    attempt = %{
+      at: ~U[2026-10-27 09:30:00Z],
+      result: :verified,
+      name: "20261027T093000Z-e4.fxsnap",
+      epoch: 4,
+      size: 48_211,
+      sha256: String.duplicate("9", 64),
+      location: "s3://invented-fermix-snapshots/fermix/general/20261027T093000Z-e4.fxsnap",
+      key_id: "08c15ca36dd935c4",
+      error: nil
+    }
+
+    status = SnapshotStatus.record(SnapshotStatus.empty(), "s3", attempt)
+
+    :ok = SnapshotStatus.write(home, status)
+
+    recipient = SnapshotRecipient.generate()
+
+    config = [
+      recipient: SnapshotRecipient.encode(recipient),
+      s3_bucket: "invented-fermix-snapshots"
+    ]
+
+    scheduler = :"contract_snapshot_scheduler_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {SnapshotScheduler,
+       name: scheduler,
+       home: home,
+       config: fn -> config end,
+       now: fn -> ~U[2026-10-27 09:30:00Z] end,
+       timer: fn _message, _delay -> make_ref() end,
+       run: fn _home, _config, _targets, _opts -> :not_configured end}
+    )
+
+    opts = [
+      operation_opts: [
+        home: [
+          home: home,
+          engine_role: %{role: :primary, primary: nil},
+          config: config,
+          scheduler: scheduler,
+          profile: "general",
+          save_recipient: fn _recipient -> {:ok, %{}} end,
+          now: ~U[2026-10-27 09:30:00Z],
+          link_status: fn ->
+            %{
+              primary: nil,
+              desktops: [],
+              enrollment: %{state: :used, expires_at: ~U[2026-10-27 09:22:00Z]}
+            }
+          end,
+          open_enrollment: fn ->
+            {:ok, %{code: "fxenroll1.aW52ZW50ZWQ", expires_at: ~U[2026-10-27 09:40:00Z]}}
+          end,
+          # A keychain reference this host could not resolve, as a home a
+          # restore carried here without its values shows it.
+          settings_snapshot: fn ->
+            %{fermix_core: [providers: [anthropic: [api_key: "@keyring"]]]}
+          end
+        ]
+      ]
+    ]
+
+    [
+      {"home.status", %{}, opts},
+      {"home.snapshots.status", %{}, opts},
+      {"home.snapshots.run", %{}, opts},
+      {"home.snapshots.passphrase", %{"recovery_passphrase" => "invented-lighthouse-meridian"},
+       opts},
+      {"home.enroll.open", %{}, opts},
+      {"home.candidates.list", %{}, opts},
+      move_readiness_case(),
+      move_start_case()
+    ]
+  end
+
+  # Enrollment and the move as the `home.status` golden shows them: the
+  # candidate the used window enrolled, and a move to it undone before the
+  # candidate was ready, which leaves the home the primary.
+  defp seed_move(home) do
+    {:ok, _held} = HomeCandidates.add(home, contract_candidate(), ~U[2026-10-27 09:12:00Z])
+    File.mkdir_p!(HomeMove.dir(home))
+    HomeMove.put_phase(home, "aborted", %{"candidate" => "north-box"}, ~U[2026-10-27 09:25:00Z])
+  end
+
+  # The readiness report reads a home of its own holding one candidate, with
+  # the free space, this engine's version and host as seams.
+  defp move_readiness_case do
+    home = SafeRm.make_tmp_dir!("contract_readiness")
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+    :ok = Epoch.write(home, 4)
+    {:ok, held} = HomeCandidates.add(home, contract_candidate(), ~U[2026-10-27 09:12:00Z])
+
+    seams = [
+      home: home,
+      engine_role: %{role: :primary, primary: nil},
+      now: ~U[2026-10-27 09:30:00Z]
+    ]
+
+    {"home.move.readiness", %{"candidate_id" => held.candidate_id},
+     [operation_opts: [home: seams ++ readiness_seams()]]}
+  end
+
+  defp readiness_seams,
+    do: [
+      free_bytes: fn _dir -> {:ok, 1_099_511_627_776} end,
+      version: "0.9.0",
+      host: "macos-aarch64"
+    ]
+
+  # `home.move.start` writes the move and the device role into its home, so it
+  # runs against a home of its own holding epoch 4 and one candidate, and the
+  # restart that follows it is a stand-in.
+  defp move_start_case do
+    home = SafeRm.make_tmp_dir!("contract_move")
+    on_exit(fn -> SafeRm.rm_rf!(home) end)
+    :ok = Epoch.write(home, 4)
+    {:ok, held} = HomeCandidates.add(home, contract_candidate(), ~U[2026-10-27 09:12:00Z])
+
+    seams =
+      [
+        home: home,
+        engine_role: %{role: :primary, primary: nil},
+        now: ~U[2026-10-27 09:30:00Z],
+        restart: fn -> :ok end
+      ] ++ readiness_seams()
+
+    params = %{
+      "candidate_id" => held.candidate_id,
+      "recovery_passphrase" => "invented-harbor-juniper-lantern"
+    }
+
+    {"home.move.start", params, [operation_opts: [home: seams]]}
+  end
+
+  # A candidate as the primary holds it after enrollment: invented facts, and
+  # the instance and bucket a host reports, so the goldens draw both.
+  defp contract_candidate do
+    %{
+      name: "north-box",
+      os: "linux",
+      arch: "aarch64",
+      version: "0.9.0",
+      node_id: String.duplicate("b7", 32),
+      relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+      noise_pk: :binary.copy(<<1>>, 32),
+      recipient: :binary.copy(<<2>>, 32),
+      instance: %{"provider" => "hetzner", "instance_id" => "61839204", "region" => "fsn1"},
+      snapshots: %{"s3_bucket" => "invented-fermix-snapshots", "s3_region" => "eu-central-1"}
+    }
+  end
+
   defp cues_cases do
     %{repo: repo, conn: conn} = CueFixtures.start_repo("contract")
     now = ~U[2026-10-17 12:00:00.000000Z]
@@ -1522,17 +1709,34 @@ defmodule FermixCore.Management.ProtocolContractTest do
            device_id: @device_id,
            name: "Sam's phone",
            model: "Google Pixel 9 Pro",
+           kind: :phone,
            platform: nil,
            signer_role: nil,
            boot_state: nil,
            push_registered: false,
            created_at: "2026-09-26T12:01:05Z",
            last_seen: "2026-09-26T12:04:40Z"
-         }
+         },
+         desktop()
        ]}
     end
 
     def devices_revoke(device_id, _opts), do: {:ok, %{device_id: device_id}}
+
+    defp desktop do
+      %{
+        device_id: "c41e9d27-5a8b-4f63-9e20-7d1b3c5a8f94",
+        name: "Studio Mac",
+        model: "Mac15,8",
+        kind: :desktop,
+        platform: nil,
+        signer_role: nil,
+        boot_state: nil,
+        push_registered: false,
+        created_at: "2026-10-20T07:15:00Z",
+        last_seen: "2026-10-21T08:02:11Z"
+      }
+    end
 
     defp session(state, ttl_ms, request, outcome) do
       %{

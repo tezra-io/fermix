@@ -3,15 +3,22 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
   alias FermixChannels.Mobile.Protocol
 
+  # Protocol 2 as it shipped, then what M75 added to it (additive, still 2).
   @client_events ~w(
     hello msg attach_begin attach_chunk attach_end command cancel history_pull media_fetch
     push_register push_unregister ack read_state request_status pair_request unpair ping
+    companion_open companion_line companion_close manage loopback_request loopback_failed
+    snapshot_stored snapshot_refused enroll_request move_offer move_chunk move_end
+    move_commit move_resume
   )
   @server_events ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
     media_begin media_chunk media_end turn_error row reaction approval approval_resolved
     link_preview read_state history_page request_status_page notice pair_approved pair_denied
     error pong event_part
+    companion_line companion_close manage_result loopback_open loopback_response
+    loopback_close snapshot_begin snapshot_chunk snapshot_end enroll_accepted move_accept
+    move_ready move_done
   )
 
   # Protocol 1 never had a client, so the window is protocol 2 alone (M51 D1).
@@ -198,6 +205,76 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     for bad <- ["0123456789ABCDEF", "0123", 42] do
       assert {:error, {:invalid_field, "relay_list_rev"}} =
                Protocol.decode_client_frame(hello.(bad))
+    end
+  end
+
+  # M75 D14: a phone tells the daemon the highest primary epoch it has seen,
+  # and a phone that has seen none sends none.
+  test "a hello may carry the highest primary epoch the phone has seen" do
+    hello = fn fields ->
+      client_frame(
+        "hello",
+        1,
+        Map.merge(
+          %{
+            "device_id" => "device-1",
+            "app_version" => "1.0.0",
+            "last_server_seq" => 0,
+            "protocol_v" => 2
+          },
+          fields
+        )
+      )
+    end
+
+    assert {:ok, %{payload: %{"primary_epoch" => 4}}} =
+             Protocol.decode_client_frame(hello.(%{"primary_epoch" => 4}))
+
+    assert {:ok, %{payload: payload}} = Protocol.decode_client_frame(hello.(%{}))
+    refute Map.has_key?(payload, "primary_epoch")
+
+    for bad <- [0, -1, "4", 4.0, 18_446_744_073_709_551_616] do
+      assert {:error, {:invalid_field, "primary_epoch"}} =
+               Protocol.decode_client_frame(hello.(%{"primary_epoch" => bad})),
+             inspect(bad)
+    end
+  end
+
+  # The daemon announces its own epoch on every hello_ack and pair_approved;
+  # it never sends either without one.
+  test "hello_ack and pair_approved carry the primary epoch the daemon is at" do
+    ack = %{
+      "session_id" => "s",
+      "min_version" => 2,
+      "max_version" => 2,
+      "profiles" => [],
+      "candidates" => [],
+      "history_head_seq" => 0,
+      "read_up_to_seq" => 0,
+      "caps" => %{"commands" => [], "max_media_bytes" => 1},
+      "primary_epoch" => 2
+    }
+
+    approved = %{
+      "device_id" => "device-1",
+      "candidates" => [],
+      "profiles" => [%{"id" => "main", "name" => "Fermix"}],
+      "push_salt" => Base.encode64(:binary.copy(<<7>>, 32)),
+      "primary_epoch" => 2
+    }
+
+    for {type, payload} <- [{"hello_ack", ack}, {"pair_approved", approved}] do
+      assert {:ok, frame} = Protocol.encode_server_frame(type, payload, 1)
+      assert {:ok, %{header: %{"primary_epoch" => 2}}} = decode_frame(frame)
+
+      assert {:error, {:missing_field, "primary_epoch"}} =
+               Protocol.encode_server_frame(type, Map.delete(payload, "primary_epoch"), 1)
+
+      for bad <- [0, -3, "2", 2.5] do
+        assert {:error, {:invalid_field, "primary_epoch"}} =
+                 Protocol.encode_server_frame(type, %{payload | "primary_epoch" => bad}, 1),
+               "#{type} #{inspect(bad)}"
+      end
     end
   end
 
@@ -442,7 +519,8 @@ defmodule FermixChannels.Mobile.ProtocolTest do
       "candidates" => [],
       "profiles" => [%{"id" => "main", "name" => "Fermix"}],
       "push_salt" => Base.encode64(:binary.copy(<<7>>, 32)),
-      "push" => ["apns"]
+      "push" => ["apns"],
+      "primary_epoch" => 3
     }
 
     assert {:ok, _frame} = Protocol.encode_server_frame("pair_approved", approved, 1)
@@ -464,7 +542,8 @@ defmodule FermixChannels.Mobile.ProtocolTest do
       "candidates" => [],
       "profiles" => [%{"id" => "main", "name" => "Fermix"}],
       "push_salt" => Base.encode64(:binary.copy(<<7>>, 32)),
-      "push" => ["apns"]
+      "push" => ["apns"],
+      "primary_epoch" => 3
     }
 
     for push <- [[], ["apns"]] do
@@ -490,7 +569,8 @@ defmodule FermixChannels.Mobile.ProtocolTest do
       "candidates" => [],
       "history_head_seq" => 0,
       "read_up_to_seq" => 0,
-      "caps" => %{"commands" => [], "max_media_bytes" => 1, "push" => ["apns"]}
+      "caps" => %{"commands" => [], "max_media_bytes" => 1, "push" => ["apns"]},
+      "primary_epoch" => 3
     }
 
     assert {:ok, _frame} = Protocol.encode_server_frame("hello_ack", ack, 1)
@@ -556,7 +636,8 @@ defmodule FermixChannels.Mobile.ProtocolTest do
                  "candidates" => [],
                  "history_head_seq" => 9,
                  "read_up_to_seq" => 8,
-                 "caps" => %{"max_media_bytes" => 20_971_520, "commands" => []}
+                 "caps" => %{"max_media_bytes" => 20_971_520, "commands" => []},
+                 "primary_epoch" => 1
                },
                1
              )
@@ -564,6 +645,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     assert {:ok, decoded} = decode_frame(hello)
     assert decoded.header["min_version"] == 2
     assert decoded.header["max_version"] == 2
+    assert decoded.header["primary_epoch"] == 1
 
     assert {:ok, _accepted} =
              Protocol.encode_server_frame(

@@ -17,7 +17,10 @@ defmodule FermixChannels.Mobile.Protocol do
   vocabulary's one owner; this module validates the mobile transport's own
   events (hello, pairing, attachments and media, push, ack, keepalive) and the
   `history_pull`/`history_page` pair, whose mobile page always carries
-  `next_after_seq` and names its backward cursor `prev_before_seq`.
+  `next_after_seq` and names its backward cursor `prev_before_seq`. The fields
+  of the events M75 added (a desktop's session, enrollment and the move) are
+  `Mobile.PeerEvents`' table; which session may send which event is
+  `Mobile.Peers`'.
 
   A logical server event whose header would exceed the 4 KiB cap travels as one
   contiguous run of `event_part` frames: each raw tail is a slice of the
@@ -25,6 +28,7 @@ defmodule FermixChannels.Mobile.Protocol do
   concatenates them in index order. `event_part` is server-only.
   """
 
+  alias FermixChannels.Mobile.PeerEvents
   alias FermixCore.Companion.Protocol, as: ChatProtocol
   alias FermixCore.Text
 
@@ -48,16 +52,19 @@ defmodule FermixChannels.Mobile.Protocol do
   @max_status_requests 32
   @request_states ~w(accepted running completed failed)
 
-  @client_events ~w(
+  # The events protocol 2 shipped with; M75's follow from `Mobile.PeerEvents`.
+  @shipped_client_events ~w(
     hello msg attach_begin attach_chunk attach_end command cancel history_pull media_fetch
     push_register push_unregister ack read_state request_status pair_request unpair ping
   )
-  @server_events ~w(
+  @shipped_server_events ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
     media_begin media_chunk media_end turn_error row reaction approval approval_resolved
     link_preview read_state history_page request_status_page notice pair_approved pair_denied
     error pong event_part
   )
+  @client_events @shipped_client_events ++ PeerEvents.client_events()
+  @server_events @shipped_server_events ++ PeerEvents.server_events()
   @raw_client_events ~w(attach_chunk pair_request)
   @raw_server_events ~w(media_chunk event_part)
 
@@ -79,7 +86,8 @@ defmodule FermixChannels.Mobile.Protocol do
 
   @server_required %{
     "hello_ack" =>
-      ~w(session_id min_version max_version profiles candidates history_head_seq read_up_to_seq caps),
+      ~w(session_id min_version max_version profiles candidates history_head_seq read_up_to_seq caps
+         primary_epoch),
     "attach_status" => ~w(attach_id status),
     "turn_done" => ~w(turn_id),
     "media_begin" => ~w(ref server_seq kind mime size_bytes sha256),
@@ -90,7 +98,7 @@ defmodule FermixChannels.Mobile.Protocol do
     "history_page" => ~w(profile_id messages next_after_seq history_head_seq),
     "request_status_page" => ~w(requests),
     "notice" => ~w(kind text),
-    "pair_approved" => ~w(device_id candidates profiles push_salt),
+    "pair_approved" => ~w(device_id candidates profiles push_salt primary_epoch),
     "pair_denied" => ~w(reason),
     "error" => ~w(code message),
     "pong" => [],
@@ -162,9 +170,79 @@ defmodule FermixChannels.Mobile.Protocol do
          {:ok, header, bytes} <- split_frame(frame),
          {:ok, envelope} <- decode_envelope(header, @client_events),
          :ok <- validate_client_event(envelope, max_media_bytes),
-         :ok <- validate_binary(envelope.type, bytes, @raw_client_events),
+         :ok <- validate_binary(:client, envelope.type, bytes, @raw_client_events),
          :ok <- validate_attestation_chain(envelope, bytes) do
       {:ok, Map.put(envelope, :bytes, bytes)}
+    end
+  end
+
+  # -- the initiator's side (M75 `Mobile.Rail`): the same rules, from the
+  # other end of the wire.
+
+  @doc """
+  Encode and validate one client plaintext frame, holding it to the rules
+  `decode_client_frame/2` holds a client to: the initiator's side of the wire
+  (`Mobile.Rail`).
+  """
+  @spec encode_client_frame(String.t(), map(), pos_integer(), binary(), keyword()) ::
+          {:ok, binary()} | {:error, term()}
+  def encode_client_frame(type, payload, seq, bytes, opts)
+      when is_binary(type) and is_map(payload) and is_integer(seq) and is_binary(bytes) and
+             is_list(opts) do
+    version = Keyword.get(opts, :version, @protocol_version)
+    max_media_bytes = Keyword.get(opts, :max_media_bytes, @default_max_media_bytes)
+
+    with :ok <- known_type(type, @client_events),
+         :ok <- negotiate(version),
+         :ok <- valid_seq(seq),
+         {:ok, payload} <- stringify_top_level(payload),
+         :ok <- reject_reserved(payload),
+         envelope = %{version: version, type: type, seq: seq, payload: payload},
+         :ok <- validate_client_event(envelope, max_media_bytes),
+         :ok <- validate_binary(:client, type, bytes, @raw_client_events),
+         :ok <- validate_attestation_chain(envelope, bytes) do
+      encode_frame(type, payload, seq, bytes, version)
+    end
+  end
+
+  @doc """
+  Decode and validate one server plaintext frame, holding it to the rules the
+  daemon's encoder holds a server event to: the initiator's side of the wire
+  (`Mobile.Rail`). An `event_part` frame decodes as itself;
+  `decode_server_event/3` reads the event its run carries.
+  """
+  @spec decode_server_frame(binary()) :: {:ok, decoded_event()} | {:error, term()}
+  def decode_server_frame(frame) when is_binary(frame) do
+    with {:ok, header, bytes} <- split_frame(frame),
+         {:ok, envelope} <- decode_envelope(header, @server_events),
+         :ok <- validate_server_event(envelope.type, envelope.payload),
+         :ok <- validate_binary(:server, envelope.type, bytes, @raw_server_events) do
+      {:ok, Map.put(envelope, :bytes, bytes)}
+    end
+  end
+
+  @doc """
+  Decode the logical server event an `event_part` run carries: its tails joined
+  in `index` order, a JSON object with `t` and without `v` or `seq`, handled as
+  the event `t` names, with the run's `v` and its first frame's `seq`. Neither
+  `event_part` nor an event with a raw tail travels this way.
+  """
+  @spec decode_server_event(binary(), pos_integer(), pos_integer()) ::
+          {:ok, decoded_event()} | {:error, term()}
+  def decode_server_event(json, version, seq)
+      when is_binary(json) and is_integer(version) and is_integer(seq) do
+    with {:ok, json} <- within_event_cap(json),
+         {:ok, decoded} <- decode_json_object(json),
+         {:ok, type} <- fetch_nonempty(decoded, "t"),
+         :ok <- known_type(type, @server_events),
+         :ok <- logical_type(type),
+         :ok <- negotiate(version),
+         :ok <- valid_seq(seq),
+         payload = Map.delete(decoded, "t"),
+         :ok <- reject_reserved(payload),
+         :ok <- validate_server_event(type, payload),
+         :ok <- validate_binary(:server, type, <<>>, @raw_server_events) do
+      {:ok, %{version: version, type: type, seq: seq, payload: payload, bytes: <<>>}}
     end
   end
 
@@ -217,7 +295,7 @@ defmodule FermixChannels.Mobile.Protocol do
          {:ok, payload} <- stringify_top_level(payload),
          :ok <- reject_reserved(payload),
          :ok <- validate_server_event(type, payload),
-         :ok <- validate_binary(type, bytes, @raw_server_events) do
+         :ok <- validate_binary(:server, type, bytes, @raw_server_events) do
       {:ok, payload}
     end
   end
@@ -226,23 +304,33 @@ defmodule FermixChannels.Mobile.Protocol do
   defp logical_type(_type), do: :ok
 
   defp validate_client_event(%{type: type, payload: payload, version: version}, max_media_bytes) do
-    if type in ChatProtocol.shared_client_events() do
-      ChatProtocol.validate_client_payload(type, payload)
-    else
-      with :ok <- require_fields(type, payload, @client_required),
-           :ok <- validate_envelope_payload(type, payload, version) do
-        validate_client_payload(type, payload, max_media_bytes)
-      end
+    cond do
+      type in ChatProtocol.shared_client_events() ->
+        ChatProtocol.validate_client_payload(type, payload)
+
+      PeerEvents.event?(:client, type) ->
+        PeerEvents.validate(:client, type, payload)
+
+      true ->
+        with :ok <- require_fields(type, payload, @client_required),
+             :ok <- validate_envelope_payload(type, payload, version) do
+          validate_client_payload(type, payload, max_media_bytes)
+        end
     end
   end
 
   defp validate_server_event(type, payload) do
-    if type in ChatProtocol.shared_server_events() do
-      ChatProtocol.validate_server_payload(type, payload)
-    else
-      with :ok <- require_fields(type, payload, @server_required) do
-        validate_server_payload(type, payload)
-      end
+    cond do
+      type in ChatProtocol.shared_server_events() ->
+        ChatProtocol.validate_server_payload(type, payload)
+
+      PeerEvents.event?(:server, type) ->
+        PeerEvents.validate(:server, type, payload)
+
+      true ->
+        with :ok <- require_fields(type, payload, @server_required) do
+          validate_server_payload(type, payload)
+        end
     end
   end
 
@@ -502,7 +590,8 @@ defmodule FermixChannels.Mobile.Protocol do
     with :ok <- nonempty(payload, "device_id"),
          :ok <- nonempty(payload, "app_version"),
          :ok <- nonnegative_u64(payload, "last_server_seq"),
-         :ok <- positive_integer(payload, "protocol_v") do
+         :ok <- positive_integer(payload, "protocol_v"),
+         :ok <- optional_positive_u64(payload, "primary_epoch") do
       optional_relay_list_rev(payload)
     end
   end
@@ -669,7 +758,8 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- list_field(payload, "candidates"),
          :ok <- nonnegative_u64(payload, "history_head_seq"),
          :ok <- nonnegative_u64(payload, "read_up_to_seq"),
-         :ok <- map_field(payload, "caps") do
+         :ok <- map_field(payload, "caps"),
+         :ok <- positive_u64(payload, "primary_epoch") do
       optional_push_services(payload["caps"], "caps.push")
     end
   end
@@ -771,7 +861,8 @@ defmodule FermixChannels.Mobile.Protocol do
     with :ok <- nonempty(payload, "device_id"),
          :ok <- list_field(payload, "candidates"),
          :ok <- list_field(payload, "profiles"),
-         :ok <- base64_bytes(payload, "push_salt", 32) do
+         :ok <- base64_bytes(payload, "push_salt", 32),
+         :ok <- positive_u64(payload, "primary_epoch") do
       optional_push_services(payload, "push")
     end
   end
@@ -782,8 +873,12 @@ defmodule FermixChannels.Mobile.Protocol do
     end
   end
 
-  defp validate_binary(type, bytes, raw_types) do
-    if type in raw_types, do: validate_raw_tail(bytes), else: validate_no_tail(type, bytes)
+  defp validate_binary(direction, type, bytes, raw_types) do
+    cond do
+      PeerEvents.event?(direction, type) -> PeerEvents.validate_raw(direction, type, bytes)
+      type in raw_types -> validate_raw_tail(bytes)
+      true -> validate_no_tail(type, bytes)
+    end
   end
 
   defp validate_raw_tail(bytes) do

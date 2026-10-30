@@ -88,6 +88,9 @@ defmodule FermixCore.Readiness do
   ]
   @imessage_helper_action "Fermix Messages, the helper iMessage needs, is not installed. " <>
                             "Turn iMessage on in Channels settings to install it."
+  # Slack over Socket Mode (M75) needs the app-level token where the webhook
+  # needs the signing secret, so it has a sentence of its own.
+  @slack_socket_action "Add the Slack bot token and app-level token in Channels settings."
 
   @spec report() :: report()
   def report do
@@ -146,7 +149,8 @@ defmodule FermixCore.Readiness do
           unknown_provider_action(:not_a_provider),
           multiple_primary_action(),
           invalid_auth_mode_action("provider:anthropic", "subscription"),
-          imessage_helper_row()
+          imessage_helper_row(),
+          slack_socket_row()
         ] ++ Enum.map(realtime_providers(), &realtime_key_row/1),
       &{&1.detail_key, &1.action}
     )
@@ -202,16 +206,17 @@ defmodule FermixCore.Readiness do
   @spec channel_configured?(atom()) :: boolean()
   def channel_configured?(channel) when is_atom(channel) do
     block = channel_block(channel)
-    Enum.all?(required_keys(channel), &present?(Keyword.get(block, &1)))
+    Enum.all?(required_keys(channel, block), &present?(Keyword.get(block, &1)))
   end
 
   # Unlike the token channels, iMessage needs its owner to be configured: the
   # recipient policy the helper confirms is built from it (M54 §5.2), so without
-  # one nothing can be confirmed and the channel cannot start.
-  defp required_keys(:imessage),
-    do: Keyword.fetch!(@channel_credentials, :imessage) ++ [:owner_user_id]
+  # one nothing can be confirmed and the channel cannot start. A channel whose
+  # credentials depend on its mode (Slack) is read under the mode it is set to.
+  defp required_keys(:imessage, block),
+    do: Inventory.credential_keys(:imessage, block) ++ [:owner_user_id]
 
-  defp required_keys(channel), do: Keyword.fetch!(@channel_credentials, channel)
+  defp required_keys(channel, block), do: Inventory.credential_keys(channel, block)
 
   @spec personalization_failure() :: failure() | nil
   def personalization_failure do
@@ -231,9 +236,7 @@ defmodule FermixCore.Readiness do
     advisory(
       %{
         component: "personalization",
-        action:
-          "Add your name, time zone, and communication style in Personality settings, " <>
-            "or run `fermix setup`."
+        action: "Add your name, time zone, and communication style in Personality settings."
       },
       "personality",
       "personalization"
@@ -346,7 +349,7 @@ defmodule FermixCore.Readiness do
     if oauth_mode?(block) do
       missing_credentials(
         :anthropic,
-        "Connect the Claude subscription: `fermix auth login --provider anthropic`."
+        "Sign in with the Claude subscription in Providers settings."
       )
     else
       missing_credentials(:anthropic, "Add the Anthropic API key in Providers settings.")
@@ -355,7 +358,10 @@ defmodule FermixCore.Readiness do
 
   defp missing_credentials_action(:xai, block) do
     if oauth_mode?(block) do
-      missing_credentials(:xai, "Connect SpaceXAI Grok: `fermix auth login --provider xai`.")
+      missing_credentials(
+        :xai,
+        "Sign in with the SpaceXAI Grok subscription in Providers settings."
+      )
     else
       missing_credentials(:xai, "Add the SpaceXAI API key in Providers settings.")
     end
@@ -431,7 +437,24 @@ defmodule FermixCore.Readiness do
   defp telegram_failure, do: channel_credentials_failure(:telegram)
   defp whatsapp_failure, do: channel_credentials_failure(:whatsapp)
   defp discord_failure, do: channel_credentials_failure(:discord)
-  defp slack_failure, do: channel_credentials_failure(:slack)
+
+  defp slack_failure do
+    cond do
+      not channel_enabled?(:slack) -> nil
+      channel_configured?(:slack) -> nil
+      Keyword.get(channel_block(:slack), :mode) == :socket -> slack_socket_row()
+      true -> channel_failure(:slack, Keyword.fetch!(@channel_actions, :slack))
+    end
+  end
+
+  defp slack_socket_row do
+    advisory(
+      %{component: "channel:slack", action: @slack_socket_action},
+      "channels",
+      "channel:slack:socket"
+    )
+  end
+
   defp signal_failure, do: channel_credentials_failure(:signal)
 
   # iMessage (M54 §14) reads presence only: the saved section, then whether the
@@ -570,8 +593,8 @@ defmodule FermixCore.Readiness do
 
   defp sandbox_env_helper_action(names) do
     "A configured helper failed for: #{backticked(names)}. Sandboxed commands run without " <>
-      "these until the helper works: run it by hand to verify it, or reconfigure it with " <>
-      "`fermix sandbox env set NAME -- <helper> [args...]`."
+      "these until the helper works: run it by hand to verify it, or change the command " <>
+      "the settings file sets for it."
   end
 
   defp backticked(names), do: Enum.map_join(names, ", ", &"`#{&1}`")

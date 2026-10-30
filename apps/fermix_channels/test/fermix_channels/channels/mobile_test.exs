@@ -908,6 +908,7 @@ defmodule FermixChannels.Channels.MobileTest do
     Map.merge(
       %{
         phase: :await_hello,
+        primary_epoch: 1,
         authenticated_device: %{device_id: "paired-device"},
         device_registry: :registry,
         noise: :noise,

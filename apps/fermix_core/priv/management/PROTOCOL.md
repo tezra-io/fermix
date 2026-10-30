@@ -123,6 +123,90 @@ scalars. No `inspect(reason)` output, internal term, filesystem path, or Setup
 token ever crosses this boundary. `request_id` is `null` only when the request
 was so malformed that no valid id could be recovered from it.
 
+## After a move: requests the primary answers
+
+When the owner moves Fermix to another host (M75), the computer it moved from
+keeps its engine in the device role and keeps this socket, so the app changes
+nothing. That engine answers a request about this computer itself and sends
+every other one to the primary over its encrypted session, after this
+socket's own placement of the caller (an owner decision from a process the
+engine started is refused here, as above, and never sent). The answer is the
+primary's, exactly as its own socket would give it.
+
+- **Answered on this computer** (device-class): `hello`, `lifecycle.*`,
+  `diagnostics.build`, `logs.query`, `doctor.*`, `setup.session.create`,
+  `setup.detect`, `computer_use.*`, `imessage.*`, `browser.install.start`,
+  `capabilities.install.start`, and `settings.get` and `settings.apply` for a
+  section that configures only this computer: `sandbox`, `computer_use`,
+  `computer_history` and `channels.imessage`.
+- **Composed** (answered here, with the primary's own part): `home.status`
+  answers this computer's facts and adds `primary_home`, the primary's own
+  `home.status`; `settings.sections` lists this computer's own sections and
+  the primary's others. The primary's part is asked within 5 s; while it is
+  missing (unreachable, or no answer in time) this computer's part is still
+  answered and `primary_missing` holds the sentence that says why. The primary
+  answers a composed request a desktop forwards as its own.
+- **Answered by the primary** (primary-class): every other method, the
+  home's recovery, enrollment and move included (`home.snapshots.*`,
+  `home.enroll.open`, `home.candidates.list`, `home.move.readiness`,
+  `home.move.start`): after a move the server holds them.
+- While the primary cannot be reached, a primary-class request is answered
+  `primary_unreachable`, `details.primary` naming it and `details.sentence`
+  saying so: `The server <name> is unreachable. Fermix keeps your message until
+  it is back.` One the primary did not answer within its forward deadline
+  (below; work longer than that is a job on the primary, answered at once) is
+  answered the same way, with the sentence that it did not answer in time. A
+  desktop the primary revoked says so instead, and one whose session the
+  primary ended normally (a daemon stopping) says the link was renewed; a
+  primary that ends the renewed session normally again within a minute is an
+  outage from then on, redialed with the backoff.
+- **The link's state in one word.** `home.status`'s `primary.status` is one
+  of `connected` (a session is up), `renewing` (a session opening with
+  nothing known to be wrong: the first since the engine started, or the quiet
+  renewal above; draw it quietly, not as an outage), `unreachable` (an
+  outage, the renewal loop included, retried with the backoff; also a link
+  this engine refused to use), `revoked` (the primary no longer knows this
+  computer; not retried until the engine restarts) and `stale` (the primary
+  answered as an older copy; retried). A redial during an outage keeps the
+  outage's word until a session is up; `sentence` says the rest.
+- **Forward deadlines.** How long the computer waits for the primary's answer
+  to a forwarded request:
+
+  | Method | Deadline | A client's own timeout for it |
+  |---|---|---|
+  | `home.move.readiness` | 60 s | at least 65 s |
+  | `home.move.start` | 60 s | at least 65 s |
+  | every other forwarded method | 8 s | the usual 10 s |
+
+  The two move calls walk the whole home on the primary before they answer
+  (60 s holds a home at the archive's 100,000-file bound walked at the slowest
+  rate measured). A client gives them at least 65 s on every engine, a primary
+  included, where the same walk runs in the call itself.
+- **A move's start whose answer was lost is `unconfirmed`, never a failure.**
+  When the primary had a forwarded `home.move.start` and its answer did not
+  arrive (the deadline passed, or the session ended under it, as it does when
+  the primary restarts into the move right after answering), the computer
+  answers `unconfirmed`, `details.method` `home.move.start`, `details.primary`
+  naming the server and `details.sentence` `The server <name> did not confirm
+  in time whether the move started. Its state shows once the server answers
+  again, and starting it again never starts a second move.` The client then
+  reads what happened from `home.status` (`primary_home`, missing while the
+  server restarts into the move); a second start is refused while one runs.
+- The primary refuses a device-class request that reaches it anyway with
+  `device_class_method`, `details.method` naming it.
+
+A computer that runs in the device role without having moved this way (no
+link to a primary) forwards nothing, and refuses as before.
+
+An engine in the **candidate role** (a fresh host enrolled with `fermix home
+enroll`, waiting for the move that makes it the primary) answers `hello` and
+`home.status` and nothing else. Every other method is `unavailable`, with
+`details.capability` `candidate` and `details.sentence` `This engine is a
+candidate primary waiting for its move; it answers home.status and nothing
+else until the move makes it the primary.` Its `home.status` reports `role`
+`candidate`, `move` with `candidate` null, and `snapshots` that say they are
+the primary's.
+
 ## v0 compatibility window
 
 The daemon also serves the historical **unversioned** control protocol as v0 for
@@ -194,7 +278,7 @@ daemon onto anything else.
 | `lifecycle.cancel` | `lease_id` | Releases the window with the daemon untouched. |
 | `diagnostics.build` | none | A bounded, field-allowlisted, scrubbed diagnostic object for user-selected export. |
 | `setup.state.get` | none | Everything a setup surface reads before it renders: readiness with its gating split, restart state with the daemon's own reason sentences, one row per provider and per channel, the personalization presence summary, feature switches, the profile, and the coexistence facts. Minimum version `2`. |
-| `settings.sections` | none | The ordered inventory of every section this daemon can serve, each with the pane it renders under. The one enumerator: a section reachable through `settings.get` and absent here fails the daemon's own contract test. Minimum version `2`. |
+| `settings.sections` | none | The ordered inventory of every section this daemon can serve, each with the pane it renders under, as `{sections, primary_missing}`. The one enumerator: a section reachable through `settings.get` and absent here fails the daemon's own contract test. On a linked desktop it is composed (see *After a move*): this computer's own sections (`sandbox`, `computer_use`, `computer_history`, `channels.imessage`) and the primary's others, and `primary_missing` the sentence while the primary's are missing; null everywhere else. Minimum version `2`. |
 | `settings.get` | `section` | One section's rows. Exactly one section per call, which is what keeps every result inside the published depth budget. Minimum version `2`. |
 | `settings.apply` | `section`, `values` | Applies the changed keys of one section and answers with what landed, the restart state, a readiness summary, and the changes the operator did not type. Minimum version `2`. |
 | `settings.reload` | none | Re-reads the settings file, pushes it into the running configuration, and re-records the baseline. The one action behind `Reload settings from disk`. Minimum version `2`. |
@@ -229,8 +313,8 @@ daemon onto anything else.
 | `mobile.pair.get` | `session_id` | The pairing session as it stands. The pane polls it until the session is terminal. Minimum version `2`. |
 | `mobile.pair.decide` | `session_id`, `approved` (boolean) | Approves or denies the phone waiting in the session and answers the terminal view. Minimum version `2`. |
 | `mobile.pair.cancel` | `session_id` | Closes the window and answers the terminal view. Cancelling a finished session is a no-op, not an error. Minimum version `2`. |
-| `mobile.devices.list` | none | Every paired phone, oldest first, at most 64, read from the paired-device file while the channel is not running. Minimum version `2`. |
-| `mobile.devices.revoke` | `device_id` | Forgets one paired phone and closes its live connection, and answers with the id and `revoked: true`. While the channel is not running it forgets the phone in the paired-device file. Minimum version `2`. |
+| `mobile.devices.list` | none | Every paired device, oldest first, at most 64, read from the paired-device file while the channel is not running. Each row names its `kind`, `phone` or `desktop` (a desktop engine a move paired). Minimum version `2`. |
+| `mobile.devices.revoke` | `device_id` | Forgets one paired device, a phone or a desktop, and closes its live connection, and answers with the id and `revoked: true`. While the channel is not running it forgets the device in the paired-device file. Minimum version `2`. |
 | `browser.install.start` | none | Downloads a browser for tasks: the meeting notetaker's helper, then the Chromium build it is pinned to, and completes with the name of the browser tasks now run in. A job. Minimum version `2`. |
 | `imessage.permissions.get` | none | The Fermix Messages helper's non-prompting state: whether it is installed, its version, Full Disk Access, the Messages database, Automation, whether Messages runs and is signed in, the user session, the confirmed recipient policy, whether that policy is exactly the saved settings, and when it was read. Minimum version `2`. |
 | `imessage.grant.start` | `service` (`automation` or `full_disk_access`) | Asks for one grant: `automation` raises the one system prompt, `full_disk_access` registers the helper, opens the Full Disk Access pane and reveals the helper for drag-in. A job that completes with the permissions view. Minimum version `2`. |
@@ -271,6 +355,14 @@ daemon onto anything else.
 | `cues.proposals.list` | `state` (`waiting`, the default, or `recent`) | Fermix's record of each waiting proposal (oldest first, at most 100) or of the last 7 days (at most 50), and `waiting`. No arguments and no cue text. Minimum version `2`. |
 | `cues.proposals.get` | `proposal_id` | `{proposal}`: the record plus the card, the outside text apart. Minimum version `2`. |
 | `cues.proposals.decide` | `proposal_id`, `decision` (`confirm` or `deny`) | Answers a waiting proposal and returns `{proposal}` once the decision is recorded: `denied`, or `confirmed` with a null `result_status` while the call runs. Minimum version `2`. |
+| `home.status` | none | The one picture of this home every surface draws: `role` (`primary`, `device` or `candidate`), `epoch` (null before the home's first boot as the primary), `moved` (`{to, moved_at, epoch}` or null), `snapshots` (as `home.snapshots.status`), `primary` (in the device role after a move, the primary this desktop reaches: `{name, connected, status, since, epoch, sentence}`, `status` one of `connected`, `renewing`, `unreachable`, `revoked` or `stale` (see *After a move*), `since` null while not connected and `epoch` the highest primary epoch this desktop has seen; null otherwise), `desktops` (on the primary, each desktop that holds a session to it: `{device_id, name, connected, since}`, `since` null while not connected; empty otherwise), `enrollment` (on the primary, the enrollment window opened since the engine started: `{state, expires_at}`, `state` `open`, `used` or `expired`, never the code; null otherwise), `candidates` (on the primary, the candidate primaries it holds, as `home.candidates.list` answers them; empty otherwise), `move` (the move this home started or, on a candidate, the one it waits for: `{phase, candidate, sentence}`; null when there is none), `secrets_missing` (on the primary, the ids `secret.set` takes of the secret references in its settings that did not resolve on this host, each one to enter again; empty otherwise), `primary_home` (on a linked desktop, the primary's own `home.status`, asked within 5 s; null otherwise) and `primary_missing` (on a linked desktop, the sentence while `primary_home` is missing; null otherwise). Answered locally in every role; composed on a linked desktop (see *After a move*), whose own `snapshots` list no target, its status file being a retired copy. Minimum version `2`. |
+| `home.snapshots.status` | none | The snapshots view: `configured`, `recipient_set`, `interval_hours`, `running`, `next_run_at`, one row per target (`id`, `label`, `configured`, `destination`, `last_attempt_at`, `last_result` (`verified`, `failed`, `waiting` or null), `last_verified` `{at, name, epoch, size, sha256, location, key_id}` or null, `last_error`, `waiting`) and one `sentence`. Minimum version `2`. |
+| `home.snapshots.run` | none | Starts a snapshot now and answers `{started: true, snapshots}`. `busy` while one runs; `unavailable` {`capability`: `snapshots`} with the daemon's sentence when nothing is configured, in the device role, or with no scheduler. Minimum version `2`. |
+| `home.snapshots.passphrase` | `recovery_passphrase` (12 to 1024 bytes) | Derives the recovery key from the passphrase and keeps only its public half as `[fermix_core.snapshots] recipient`; answers `{recipient, key_id, snapshots, sentence}`, the sentence saying that snapshots written before now open only with the earlier passphrase. The passphrase is never stored, logged or answered. A shorter one is `invalid_params` with a sentence; the device role answers `unavailable`. Minimum version `2`. |
+| `home.enroll.open` | none | On the primary only: opens the one enrollment window, for thirty minutes and replacing an open one, kept across an engine restart, and answers `{code, expires_at}`. The code (`fxenroll1.` and base64url, at most 2,048 characters) is single use and answered once: it is never logged, and `home.status` shows the window's `state` and `expires_at` and never the code. `unavailable` {`capability`: `home`} with the daemon's sentence in any other role, or while the rail cannot open a window. Minimum version `2`. |
+| `home.candidates.list` | none | The candidate primaries this home holds, oldest first: `{candidates}`, each `{candidate_id, name, os, arch, version, node_id, instance, snapshots, enrolled_at, expires_at}` and never its keys. A candidate is held for 24 hours after it enrolled, at most four at once. `instance` (`{provider, instance_id, region}`, with `account_id` when the host gave one) is what the host said of itself, which nobody verified, and `snapshots` (`{s3_bucket, s3_region}`) the bucket it was told to keep snapshots in; either is null when the host gave none. `unavailable` {`capability`: `home`} with the daemon's sentence when the list cannot be read. Minimum version `2`. |
+| `home.move.readiness` | `candidate_id` | On the primary only: what the owner reviews before moving this home to a held candidate, answered `{ready, items}`, each item `{id, status, sentence}` with `status` `ok`, `warn` or `block` and `ready` false while any item blocks. The items, in order: `keychain_secrets` (the secrets this computer keeps in its keychain move with the home, into the server's secret files; one the keychain will not give blocks, named by its id, never its value; checking reads each value, which opens the keychain and can raise its prompt, and the sentence says so), `engine_version` (a server that runs an older Fermix blocks), `disk` (the capture needs about twice the home free here; short of it blocks, with the numbers), `s3_size` (a home over one S3 upload, 5 GiB, warns where the server keeps snapshots in S3), `plugins` (plugins installed for another OS or architecture warn, named), `stays_here` (voice calls and meetings, and iMessage on a Mac, stop after the move), `cutover_gap` (Telegram messages sent during the move are lost; a recurring job more than an hour late is skipped) and `serves_nothing` (this computer serves nothing during the move). A client that does not know an id shows its sentence as it is. The engine keeps the review for the start that follows it; one it cannot keep is `unavailable` {`capability`: `home`}. A candidate this home does not hold is `invalid_params` on `candidate_id`; another role is `unavailable` {`capability`: `home`}. It walks the whole home first: a client gives it at least 65 s, and a desktop forwarding it waits 60 s (*Forward deadlines*). Minimum version `2`. |
+| `home.move.start` | `candidate_id`, `recovery_passphrase` (12 to 1024 bytes), `keep_as_desktop?` (boolean, true unless said) | On the primary only, and only while `home.move.readiness` has no item that blocks (otherwise `unavailable` {`capability`: `home`} with the sentence of each block). A ready review of the same candidate at most 15 minutes old is taken as it was shown, so the keychain is not read again before the move's capture reads it; with none, the engine checks now. It writes the move to a held candidate, hands this home to the device role, answers `{move_id, candidate, recovery_recipient, key_id, keep_as_desktop, sentence}`, and then restarts the engine through the daemon's one stop path; the service manager brings it back in the device role, which carries the move out. The recovery passphrase derives the key a restore of this home needs; the passphrase is never stored, logged or answered. A candidate this home does not hold is `invalid_params` on `candidate_id` and a passphrase under 12 bytes `invalid_params` on `recovery_passphrase`, each with a sentence; another role, a move already under way, or a home that never started as the primary is `unavailable` {`capability`: `home`} with the daemon's sentence. It may walk the whole home first: a client gives it at least 65 s, and a desktop forwarding it waits 60 s, answering `unconfirmed` when the primary had it and its answer was lost (*After a move*). Minimum version `2`. |
 
 Notes that the shapes alone do not carry:
 
@@ -417,7 +509,7 @@ Notes that the shapes alone do not carry:
   one second doubling to a minute, and given up after a day until the next
   restart; a helper that disagrees with this daemon's protocol, iroh version
   or key is not retried.
-- **Pairing and forgetting a phone are the owner's decisions.**
+- **Pairing and forgetting a device are the owner's decisions.**
   `mobile.pair.start`, `mobile.pair.decide`, `mobile.pair.cancel` and
   `mobile.devices.revoke` answer `unavailable` {`capability`: `mobile`,
   `sentence`: "Only the owner can pair or forget a phone; run this from your
@@ -440,6 +532,17 @@ Notes that the shapes alone do not carry:
   and authenticates nobody: it stops a model's own command from approving a
   mandate, answering a proposal or switching mandates back on. Every cue read
   stays open, and so does every other secret and settings section.
+- **Opening an enrollment code, reviewing and starting a move, and setting
+  the recovery passphrase are the owner's decisions (M75).**
+  `home.enroll.open`, `home.move.readiness` (it reads every keychain secret
+  the move would carry), `home.move.start` and `home.snapshots.passphrase`
+  answer `unavailable`
+  {`capability`: `home`, `sentence`: "Only the owner can move Fermix or set
+  its recovery passphrase: use the Fermix app or your own terminal."} to the
+  same callers, so a command the agent ran can neither hand this home to a
+  server nor replace the key its snapshots are encrypted to. `home.status`,
+  `home.candidates.list`, `home.snapshots.status` and `home.snapshots.run`
+  stay open.
 - **`channels.mobile` is the phone channel's settings section**: the enable
   switch and the remote-reach switch `mobile_iroh` (on by default), each
   applied the moment it is written (their rows' `restart` is false), and the
@@ -1170,6 +1273,66 @@ Notes that the shapes alone do not carry:
 - **`subsystem`** matches a leading `[tag]` the log message itself wrote; the
   engine's on-disk log format carries no module or subsystem field, so a line
   without such a tag is excluded whenever a subsystem filter is supplied.
+- **The home family is answered locally in every role** (M75). `home.status`
+  is one fixed record from its first release: the places the desktop relay,
+  the desktop peers, enrollment and the move fill are present in every role,
+  as `null` or `[]` where they hold nothing, so a client decodes the same keys
+  in every role. A candidate answers `home.status` alone of the family. A device
+  reports its own role, epoch and marker; its `snapshots` say they are the
+  primary's (`configured` false, `recipient_set` false, `next_run_at` null, no
+  target, the sentence saying so). A linked desktop adds the primary's own
+  picture as `primary_home`, or says in `primary_missing` why it is missing;
+  the rest of the family is the primary's there (see *After a move*).
+- **Replacing the server runs through the same move** (M75). A desktop
+  forwards `home.enroll.open` and `home.move.start` to the server; with
+  `keep_as_desktop` false the server being replaced keeps no desktop key, row
+  or link and serves nothing once the move commits. Moving Fermix back to a
+  desktop is not part of this release: to bring it back to a computer, restore
+  the newest snapshot into a fresh home there.
+- **Enrollment and the move are the primary's** (M75). `home.enroll.open`
+  opens one window at a time; a host that enrolls with its code becomes a
+  candidate the primary holds for 24 hours. `home.move.start` answers before
+  the engine restarts, so the same socket then answers from the device role;
+  the move runs on its own from there, and `home.status`'s `move` follows it:
+  `requested`, `streaming`, `committing`, `committed` (restarting as a
+  desktop) and `done`, or `aborting`, `undoing` (restarting as the primary)
+  and `aborted` when it was undone before the candidate was ready, which
+  leaves this home the primary. `done` and `aborted` are written only by the
+  engine that came back after the restart, so a client that reads either
+  reads it from the engine that stays, with a desktop's `primary` already
+  beside it; `committed` and `undoing` mean the engine is about to restart.
+  An engine that came back but could not write its ending keeps answering
+  `committed` or `undoing`, with a `sentence` that says the ending and why it
+  is not recorded; each read tries the write again, and the ending follows
+  once it is written.
+  A move session has no one-hour lifetime, and its attempts send one capture. On a candidate, `phase` is `enrolling`, `enrolled`,
+  `receiving`, `staged`, `activating`, `expired` or `failed`, and `candidate`
+  is null. A candidate's `instance` is what the host said of itself: a client
+  shows it as unverified.
+- **A snapshot target row is the daemon's.** There are two targets, in
+  order: `s3` (label `S3`) and `desktop` (label `your desktop`: every desktop
+  connected to this primary over the rail, on while it has a desktop row).
+  `last_verified` is the newest snapshot the target proved it holds (S3
+  accepted its SHA-256 checksum; a desktop answered the same SHA-256) and
+  outlives later failures; `last_error` is the newest failure's sentence,
+  carrying the storage service's own words, and clears at the next verified
+  or waiting run. A desktop asleep or offline is no failure: `last_result` is
+  `waiting` and `waiting` holds the sentence
+  (`Your <name> is not connected; the snapshot waits for the next run.`),
+  null otherwise. Each point names the recovery key it was written for
+  (`key_id`, as `home.snapshots.passphrase` answers it). The first boot of a
+  primary a move activated runs its first snapshot at once. `destination` is where the target puts
+  snapshots (`s3://<bucket>/<prefix>/<profile>/`, or `snapshots/ on <names>`
+  for the desktops), null while it is off.
+- **`snapshots` is the snapshot section**, under pane `always_on`:
+  `snapshots_recipient` (read-only: it changes only through
+  `home.snapshots.passphrase`), `snapshots_interval_hours` (1 to 168, format
+  `hours`), `snapshots_s3_bucket`, `snapshots_s3_region`, the two secret rows
+  `snapshot_s3_access_key_id` and `snapshot_s3_secret_access_key` (stored with
+  `secret.set` under those ids), and, `advanced`, `snapshots_s3_prefix` and
+  `snapshots_s3_endpoint` (an S3-compatible host, addressed path-style). None
+  needs a restart: the scheduler reads the section at every run and plans
+  again when it is saved.
 
 ## Error codes
 
@@ -1192,6 +1355,9 @@ Notes that the shapes alone do not carry:
 | `external_change` | The settings file was changed outside Fermix. `details.section` names the section the refused write targeted; `settings.reload` clears the state. |
 | `config_unreadable` | The settings file could not be read or parsed. `details.sentence` is the parser's own message, and no reload is offered for it. |
 | `unknown_pairing_session` | The pairing session is not retained by this daemon. `details.session_id` names it. |
+| `primary_unreachable` | After a move, the primary this computer forwards to cannot be reached, or did not answer in time. `details.sentence` says so, and `details.primary` names it when it is known (see *After a move*). |
+| `device_class_method` | The primary refused a request that configures the computer that forwarded it. `details.method` names it and `details.sentence` says why. |
+| `unconfirmed` | After a move, the primary had a forwarded request whose effect may stand though its answer did not arrive (`home.move.start`). `details.method` names it, `details.primary` names the primary when known, and `details.sentence` says where its outcome shows (see *After a move*). Not a failure: read `home.status`. |
 
 `lease_expired` and `unknown_lease` are deliberately distinct: the first lets
 the app tell the operator the transaction timed out, the second says the id was
@@ -1202,7 +1368,7 @@ degrades to `unknown_lease`.
 
 `message` is a fixed per-code string and never varies with the request; it names
 the CLASS of failure. The daemon's own sentence about THIS request, when it has
-one, is `details.sentence`. Three codes carry one:
+one, is `details.sentence`. Six codes carry one:
 
 - `invalid_params` — every request-path refusal that has something to say to the
   operator. `details.field` names the parameter and `details.sentence` says why:
@@ -1215,10 +1381,18 @@ one, is `details.sentence`. Three codes carry one:
 - `config_unreadable` — `details.sentence` is the parser's own message.
 - `unavailable` — when a caller that is not the owner asks for an owner's
   decision: the phone's, "Only the owner can pair or forget a phone; run this
-  from your own terminal.", and the cues', "Only the owner can change cues:
-  use the Fermix app or your own terminal." And when the cues cannot reach
-  their records, with the cues' sentence for why: memory is off, or the
-  records could not be read.
+  from your own terminal.", the cues', "Only the owner can change cues: use
+  the Fermix app or your own terminal.", and the home's, "Only the owner can
+  move Fermix or set its recovery passphrase: use the Fermix app or your own
+  terminal." And when the cues cannot reach their records, with the cues'
+  sentence for why: memory is off, or the records could not be read.
+- `primary_unreachable` — "The server <name> is unreachable. Fermix keeps your
+  message until it is back.", or why this computer does not reach it.
+- `device_class_method` — "This request configures the computer it came
+  from, so the server does not answer it."
+- `unconfirmed` — "The server <name> did not confirm in time whether the move
+  started. Its state shows once the server answers again, and starting it
+  again never starts a second move."
 
 **A client that renders `message` alone renders "Request parameters are
 invalid." for that whole family**, which is the one sentence in the catalog that

@@ -19,4 +19,12 @@
 # `mapkit_live` runs the real `fermix-maps` helper against Apple Maps over the
 # network: opt in on a Mac with `--only mapkit_live` (see
 # `Tools.PlaceSearch.HelperTest`).
-ExUnit.start(capture_log: true, assert_receive_timeout: 2_000, exclude: [:mapkit_live])
+#
+# `s3_end_to_end` runs the snapshot S3 target against MinIO in Docker
+# (`Home.Snapshot.S3EndToEndTest`): opt in with `--only s3_end_to_end` on a
+# machine that has Docker and the pinned MinIO image.
+ExUnit.start(
+  capture_log: true,
+  assert_receive_timeout: 2_000,
+  exclude: [:mapkit_live, :s3_end_to_end]
+)

@@ -17,6 +17,9 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.SourceManager
   alias FermixCore.Harness.Config, as: HarnessConfig
+  alias FermixCore.Home.Archive.ConfigText
+  alias FermixCore.Home.Role
+  alias FermixCore.Home.Snapshot.Config, as: SnapshotConfig
   alias FermixCore.IMessage
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Net.Egress
@@ -153,7 +156,9 @@ defmodule FermixCore.Setup.ConfigStore do
         oauth: Application.get_env(:fermix_core, :oauth, %{}),
         plugin_secrets: Application.get_env(:fermix_core, :plugin_secrets, %{}),
         profile: Application.get_env(:fermix_core, :profile, "general"),
-        secret_store: Application.get_env(:fermix_core, :secret_store, :keyring)
+        secret_store: Application.get_env(:fermix_core, :secret_store, :keyring),
+        engine: Application.get_env(:fermix_core, :engine, []),
+        snapshots: Application.get_env(:fermix_core, :snapshots, [])
       ],
       sandbox: Application.get_env(:fermix_core, :sandbox, SandboxConfig.default()),
       fermix_channels: [
@@ -187,6 +192,54 @@ defmodule FermixCore.Setup.ConfigStore do
       {:error, :enoent} -> {:ok, empty_runtime_config()}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  @doc """
+  The `[fermix_core.engine]` section of the settings file under `home`, decoded
+  with the file's own decoder and normalised alone (`Role.normalize/1`), so a
+  bad value in any other section does not stop a caller that needs only the
+  role: `[]` when the file does not exist, `{:config, path, reason}` when it
+  cannot be read or its engine section cannot be decoded. For a caller that
+  boots no engine (`FermixCore.Home.Role.admit_configured/1`).
+  """
+  @spec engine_config(Path.t()) :: {:ok, keyword()} | {:error, {:config, Path.t(), term()}}
+  def engine_config(home) when is_binary(home) and home != "" do
+    file = Path.join(home, "config.toml")
+
+    case File.read(file) do
+      {:ok, contents} -> decode_engine(contents, file)
+      {:error, :enoent} -> {:ok, []}
+      {:error, reason} -> {:error, {:config, file, reason}}
+    end
+  end
+
+  # The decoder raises `BadMapError` for a key under a path that already holds a
+  # value, and `Role.normalize/1` raises `ArgumentError` for an engine section it
+  # refuses. Both are this file's fault, so both are named, never raised here.
+  defp decode_engine(contents, file),
+    do: decode_section(contents, file, "engine", &Role.normalize/1)
+
+  @doc """
+  The `[fermix_core.snapshots]` section of the settings file under `home`,
+  decoded and normalised alone (`Snapshot.Config.normalize/1`), as
+  `engine_config/1` reads the engine section: for `fermix home status` when no
+  engine runs.
+  """
+  @spec snapshots_config(Path.t()) :: {:ok, keyword()} | {:error, {:config, Path.t(), term()}}
+  def snapshots_config(home) when is_binary(home) and home != "" do
+    file = Path.join(home, "config.toml")
+
+    case File.read(file) do
+      {:ok, contents} -> decode_section(contents, file, "snapshots", &SnapshotConfig.normalize/1)
+      {:error, :enoent} -> {:ok, []}
+      {:error, reason} -> {:error, {:config, file, reason}}
+    end
+  end
+
+  defp decode_section(contents, file, section, normalize) do
+    {:ok, contents |> decode_document() |> get_in(["fermix_core", section]) |> normalize.()}
+  rescue
+    error in [ArgumentError, BadMapError] -> {:error, {:config, file, Exception.message(error)}}
   end
 
   @doc """
@@ -296,6 +349,8 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_plugin_secrets_config(Keyword.get(persisted.fermix_core, :plugin_secrets, %{}))
     apply_profile_config(Keyword.get(persisted.fermix_core, :profile, "general"))
     apply_secret_store_config(Keyword.get(persisted.fermix_core, :secret_store, :keyring))
+    apply_engine_config(Keyword.get(persisted.fermix_core, :engine, []))
+    apply_snapshots_config(Keyword.get(persisted.fermix_core, :snapshots, []))
     apply_sandbox_config(Map.get(persisted, :sandbox, SandboxConfig.default()))
 
     apply_channel_config(:telegram, Keyword.get(persisted.fermix_channels, :telegram, []))
@@ -701,7 +756,17 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:secret_store, :keyring)
-          |> normalize_secret_store()
+          |> normalize_secret_store(),
+        engine:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:engine, [])
+          |> Role.to_keyword(),
+        snapshots:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:snapshots, [])
+          |> SnapshotConfig.to_keyword()
       ],
       sandbox:
         snapshot
@@ -854,7 +919,9 @@ defmodule FermixCore.Setup.ConfigStore do
         oauth: %{},
         plugin_secrets: %{},
         profile: "general",
-        secret_store: :keyring
+        secret_store: :keyring,
+        engine: [],
+        snapshots: []
       ],
       sandbox: SandboxConfig.default(),
       fermix_channels: [
@@ -886,6 +953,55 @@ defmodule FermixCore.Setup.ConfigStore do
       {:ok, contents} -> {:ok, contents |> parse_document() |> get_in([:fermix_web, :port])}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  @doc """
+  Sets `[fermix_core.engine] role` in one home's settings file (M75 §7.2: the
+  move hands a primary to the device role; `FermixCore.Home.Move`).
+
+  Unlike a settings save it rewrites only that one line
+  (`Home.Archive.ConfigText.put/4`): every other byte, comments and sections
+  this module does not render included, stays as it was, so a file any engine
+  role can boot from is never re-rendered on the way. A file that does not
+  exist is created with the one section. Under the config lock, like every
+  writer of the file; written to a temporary file and renamed, mode `0600`.
+  """
+  @spec put_engine_role(Path.t(), Role.role()) :: :ok | {:error, term()}
+  def put_engine_role(home, role)
+      when is_binary(home) and home != "" and role in [:primary, :device, :candidate] do
+    with_config_lock(home, fn -> write_engine_role(home, role) end)
+  end
+
+  defp write_engine_role(home, role) do
+    file = home_document_path(home)
+    tmp = file <> ".role.tmp"
+
+    contents =
+      case File.read(file) do
+        {:ok, text} -> {:ok, text}
+        {:error, :enoent} -> {:ok, ""}
+        {:error, reason} -> {:error, {:config_unreadable, file, reason}}
+      end
+
+    with {:ok, text} <- contents,
+         text = ConfigText.put(text, "fermix_core.engine", "role", ~s("#{role}")),
+         :ok <- File.write(tmp, text),
+         :ok <- File.chmod(tmp, 0o600),
+         :ok <- File.rename(tmp, file) do
+      persisted_baseline(home)
+    else
+      {:error, _reason} = error ->
+        _ = File.rm(tmp)
+        error
+    end
+  end
+
+  # This VM's own write to the home it runs is the new baseline (`save_snapshot/2`);
+  # a write to another home changes nothing this VM compares.
+  defp persisted_baseline(home) do
+    if Path.expand(home) == Path.expand(fermix_home()),
+      do: RestartState.record_persisted_baseline(),
+      else: :ok
   end
 
   @doc """
@@ -1068,6 +1184,24 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp apply_secret_store_config(store) do
     Application.put_env(:fermix_core, :secret_store, normalize_secret_store(store))
+    :ok
+  end
+
+  # Replace (not merge): the section has no compile-time baseline. Re-normalized
+  # on the way in, because the persisted snapshot holds `Role.to_keyword/1`'s
+  # strings and application environment holds `Role.normalize/1`'s atoms. The
+  # role a running engine has is the one `Role.remember!/2` read at boot; a
+  # change here takes effect at the next start.
+  defp apply_engine_config(engine_config) do
+    Application.put_env(:fermix_core, :engine, Role.normalize(engine_config))
+    :ok
+  end
+
+  # Replace (not merge), re-normalized on the way in like the engine section:
+  # the persisted snapshot holds `SnapshotConfig.to_keyword/1`'s strings. The
+  # snapshot scheduler reads it at every run, so a change applies at the next.
+  defp apply_snapshots_config(snapshots_config) do
+    Application.put_env(:fermix_core, :snapshots, SnapshotConfig.normalize(snapshots_config))
     :ok
   end
 
@@ -1317,6 +1451,8 @@ defmodule FermixCore.Setup.ConfigStore do
     plugin_secrets = Keyword.get(fermix_core, :plugin_secrets, %{})
     profile = Keyword.get(fermix_core, :profile, "general")
     secret_store = fermix_core |> Keyword.get(:secret_store, :keyring) |> normalize_secret_store()
+    engine = Keyword.get(fermix_core, :engine, [])
+    snapshots = Keyword.get(fermix_core, :snapshots, [])
     sandbox = Map.get(snapshot, :sandbox, [])
     channels = Map.get(snapshot, :fermix_channels, [])
     web = snapshot |> Map.get(:fermix_web, []) |> normalize_web() |> web_to_keyword()
@@ -1329,6 +1465,8 @@ defmodule FermixCore.Setup.ConfigStore do
         ["fermix_core"],
         profile_render(profile) ++ secret_store_render(secret_store)
       ),
+      render_section(["fermix_core", "engine"], engine),
+      render_section(["fermix_core", "snapshots"], snapshots),
       render_section(["fermix_core", "agent"], agent),
       Enum.map(Descriptor.ids(), fn id ->
         render_section(
@@ -1641,35 +1779,44 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   defp parse_document(contents) do
-    document =
-      contents
-      |> String.split("\n")
-      |> Enum.reduce({[], %{}}, fn raw_line, {section, acc} ->
-        line = String.trim(raw_line)
+    document = decode_document(contents)
+    normalize_document(document)
+  end
 
-        cond do
-          line == "" or String.starts_with?(line, "#") ->
-            {section, acc}
+  # The settings file's decoder: one assignment per line under the last
+  # `[section]` header, as nested string-keyed maps. Normalisation is separate,
+  # so a caller can normalise one section alone (`engine_config/1`).
+  defp decode_document(contents) do
+    contents
+    |> String.split("\n")
+    |> Enum.reduce({[], %{}}, fn raw_line, {section, acc} ->
+      line = String.trim(raw_line)
 
-          String.starts_with?(line, "[") and String.ends_with?(line, "]") ->
-            path =
-              line
-              |> String.trim_leading("[")
-              |> String.trim_trailing("]")
-              |> String.split(".")
+      cond do
+        line == "" or String.starts_with?(line, "#") ->
+          {section, acc}
 
-            {path, acc}
+        String.starts_with?(line, "[") and String.ends_with?(line, "]") ->
+          path =
+            line
+            |> String.trim_leading("[")
+            |> String.trim_trailing("]")
+            |> String.split(".")
 
-          String.contains?(line, "=") ->
-            [key, value] = String.split(line, "=", parts: 2)
-            {section, put_value(acc, section, String.trim(key), parse_value(String.trim(value)))}
+          {path, acc}
 
-          true ->
-            {section, acc}
-        end
-      end)
-      |> elem(1)
+        String.contains?(line, "=") ->
+          [key, value] = String.split(line, "=", parts: 2)
+          {section, put_value(acc, section, String.trim(key), parse_value(String.trim(value)))}
 
+        true ->
+          {section, acc}
+      end
+    end)
+    |> elem(1)
+  end
+
+  defp normalize_document(document) do
     %{
       fermix_core: [
         providers:
@@ -1706,7 +1853,9 @@ defmodule FermixCore.Setup.ConfigStore do
         plugin_secrets:
           normalize_plugin_secrets(get_in(document, ["fermix_core", "plugin_secrets"])),
         profile: normalize_profile(get_in(document, ["fermix_core", "profile"])),
-        secret_store: normalize_secret_store(get_in(document, ["fermix_core", "secret_store"]))
+        secret_store: normalize_secret_store(get_in(document, ["fermix_core", "secret_store"])),
+        engine: Role.normalize(get_in(document, ["fermix_core", "engine"])),
+        snapshots: SnapshotConfig.normalize(get_in(document, ["fermix_core", "snapshots"]))
       ],
       sandbox: SandboxConfig.normalize(Map.get(document, "sandbox")),
       fermix_channels: [
@@ -2955,18 +3104,33 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_slack(config) do
     []
     |> put_if_present(:enabled, lookup(config, "enabled", :enabled))
-    |> put_if_present(:mode, normalize_mode(lookup(config, "mode", :mode)))
+    |> put_if_present(:mode, normalize_slack_mode(lookup(config, "mode", :mode)))
     |> put_streaming(config)
     |> put_if_present(:bot_token, normalize_string(lookup(config, "bot_token", :bot_token)))
     |> put_if_present(
       :signing_secret,
       normalize_string(lookup(config, "signing_secret", :signing_secret))
     )
+    |> put_if_present(:app_token, normalize_string(lookup(config, "app_token", :app_token)))
     |> put_command_auth(config)
     |> put_ids_if_present(
       :allowed_user_ids,
       lookup(config, "allowed_user_ids", :allowed_user_ids)
     )
+  end
+
+  # How Slack events arrive (M75): the Events API webhook, or Socket Mode.
+  # Accepts the file's strings and the atoms this returns, so a save of the
+  # live snapshot renders the same spelling back; refuses anything else by name.
+  defp normalize_slack_mode(nil), do: nil
+  defp normalize_slack_mode(mode) when mode in [:webhook, :socket], do: mode
+  defp normalize_slack_mode("webhook"), do: :webhook
+  defp normalize_slack_mode("socket"), do: :socket
+
+  defp normalize_slack_mode(other) do
+    raise ArgumentError,
+          ~s(config.toml [fermix_channels.slack] mode must be "webhook" or "socket", and ) <>
+            "#{inspect(other)} is not. Fix it; the daemon will not boot until this is fixed."
   end
 
   defp normalize_signal(nil), do: []

@@ -34,6 +34,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Harness.Identity
   alias FermixCore.Harness.Ledger, as: HarnessLedger
   alias FermixCore.Harness.Vendors, as: HarnessVendors
+  alias FermixCore.Home.Epoch
   alias FermixCore.IMessage
   alias FermixCore.IMessage.Control, as: IMessageControl
   alias FermixCore.IMessage.HelperInstaller, as: IMessageHelper
@@ -52,6 +53,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Providers.Selection
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Sandbox.Landlock
   alias FermixCore.Sandbox.Mode, as: SandboxMode
   alias FermixCore.Setup.Coexistence
   alias FermixCore.Setup.ConfigStore
@@ -1157,7 +1159,7 @@ defmodule Fermix.CLI.Doctor.Checks do
 
     cond do
       length(missing) == length(reports) ->
-        :never_paired
+        with :ok <- mobile_epoch(mobile_dir), do: :never_paired
 
       missing != [] ->
         {:error,
@@ -1171,7 +1173,37 @@ defmodule Fermix.CLI.Doctor.Checks do
         {:error, "could not inspect mobile identity files: #{Enum.join(errors, ", ")}"}
 
       true ->
+        mobile_epoch(mobile_dir)
+    end
+  end
+
+  # M75 D14: the primary epoch sits beside the identity files in a home's
+  # `mobile/`, and `Home.Epoch`, the one owner of its format, reads it from the
+  # home. Absent passes: a home before its first primary boot has none, and the
+  # daemon writes 1 at start for an identity from before the epoch. Present, it
+  # is held to the identity files' rules, keys or no keys, because Fermix
+  # refuses an invalid epoch rather than reset it.
+  defp mobile_epoch(mobile_dir) do
+    case mobile_identity_file(mobile_dir, "primary_epoch") do
+      :ok -> mobile_epoch_contents(Path.dirname(mobile_dir))
+      {:missing, _name} -> :ok
+      {:insecure, name, mode} -> {:error, "mobile identity files must be 0600: #{name}=#{mode}"}
+      {:error, name, reason} -> {:error, "could not inspect #{name}: #{inspect(reason)}"}
+    end
+  end
+
+  defp mobile_epoch_contents(home) do
+    case Epoch.read(home) do
+      {:ok, _epoch} ->
         :ok
+
+      :absent ->
+        :ok
+
+      {:error, reason} ->
+        {:error,
+         "the mobile primary epoch is invalid (#{inspect(reason)}); Fermix refuses it " <>
+           "rather than reset it"}
     end
   end
 
@@ -2792,6 +2824,69 @@ defmodule Fermix.CLI.Doctor.Checks do
     )
   rescue
     error in ArgumentError -> fail("sandbox", Exception.message(error))
+  end
+
+  @doc """
+  Whether the kernel holds the commands Fermix runs for the agent
+  (OS_SANDBOX_ENFORCEMENT): on macOS `sandbox-exec` must apply a profile; on
+  Linux the Landlock shim must report ABI 2 or later (Linux 5.19), asked of
+  the shim the commands run through. Where it cannot, every confined command
+  refuses, so the row fails with the sentence those commands get. ABI 2 holds
+  commands but cannot refuse `truncate(2)` (ABI 3, Linux 6.2), which the row
+  warns. `:seatbelt` and `:landlock` inject the probe's answer.
+  """
+  @spec os_sandbox({atom(), atom()}, keyword()) :: result()
+  def os_sandbox(os_type \\ :os.type(), opts \\ [])
+
+  def os_sandbox({:unix, :darwin}, opts) do
+    case Keyword.get_lazy(opts, :seatbelt, &seatbelt_probe/0) do
+      :ok ->
+        ok("os sandbox", "commands are held by the kernel (Seatbelt)")
+
+      {:error, detail} ->
+        fail(
+          "os sandbox",
+          "sandbox-exec cannot apply a profile here (#{detail}); every command the agent " <>
+            "runs fails until it can"
+        )
+    end
+  end
+
+  def os_sandbox({:unix, :linux}, opts) do
+    case Keyword.get_lazy(opts, :landlock, fn -> Landlock.probe(Landlock.shim_path()) end) do
+      {:ok, 2} ->
+        warn(
+          "os sandbox",
+          "commands are held by the kernel (Landlock ABI 2), but before Linux 6.2 a " <>
+            "command can still truncate a protected file"
+        )
+
+      {:ok, abi} ->
+        ok("os sandbox", "commands are held by the kernel (Landlock ABI #{abi})")
+
+      {:error, reason} ->
+        fail(
+          "os sandbox",
+          Landlock.describe(reason) <>
+            " Fermix needs Linux 5.19 or later with Landlock enabled (in the kernel's lsm= list)."
+        )
+    end
+  end
+
+  def os_sandbox(_os_type, _opts),
+    do: not_applicable("os sandbox", "the kernel holds commands only on macOS and Linux")
+
+  # The smallest profile, applied to a program that does nothing: what fails
+  # here (a sandbox already around this process) fails every command.
+  defp seatbelt_probe do
+    probe = ["-p", "(version 1)(allow default)", "/usr/bin/true"]
+
+    case System.cmd("/usr/bin/sandbox-exec", probe, stderr_to_stdout: true) do
+      {_output, 0} -> :ok
+      {output, status} -> {:error, "exit #{status}: #{brief(output)}"}
+    end
+  rescue
+    error in ErlangError -> {:error, "could not run sandbox-exec: #{inspect(error.original)}"}
   end
 
   @spec sandbox_trace_suggestions() :: result()

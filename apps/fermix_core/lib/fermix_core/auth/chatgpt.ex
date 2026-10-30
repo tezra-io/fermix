@@ -43,7 +43,8 @@ defmodule FermixCore.Auth.ChatGPT do
   Runs the browser sign-in in the calling process and stores the result.
 
   Options: `:fermix_path`, `:opener` (`nil` prints the url only), `:puts`,
-  `:port`, `:timeout_ms`, `:req_options`. While it waits, the calling process
+  `:port`, `:timeout_ms`, `:req_options`, `:loopback_owner` (the desktop that
+  started it, `Auth.OAuthFlow`). While it waits, the calling process
   also accepts a pasted callback address sent with `paste_callback/2`.
   """
   @spec login(keyword()) ::

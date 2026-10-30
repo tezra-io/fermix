@@ -13,6 +13,7 @@ defmodule FermixCore.Setup.Runtime do
   alias Fermix.CLI.SecretInput
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.ChatGPT.TerminalLogin
+  alias FermixCore.Home.Role
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.PrimaryConfig
@@ -187,11 +188,7 @@ defmodule FermixCore.Setup.Runtime do
     case Wizard.save_answers(report.wizard, answers) do
       {:ok, updated_report} ->
         puts.("Saved setup snapshot to #{updated_report.config_path}")
-
-        with {:ok, authed_report} <- ensure_codex_auth(updated_report, opts, puts) do
-          print_report(authed_report, puts)
-          run_finalize_probe(authed_report, opts, puts, prompt)
-        end
+        provider_steps(updated_report, opts, puts, prompt)
 
       # A save that could not store a credential already carries the daemon's
       # own sentence (design §7.4); the operator sees that rather than an
@@ -202,6 +199,25 @@ defmodule FermixCore.Setup.Runtime do
 
       {:error, reason} ->
         {:error, "failed to save setup snapshot: #{inspect(reason)}"}
+    end
+  end
+
+  # The steps that reach a provider: the ChatGPT sign-in, with its model check,
+  # and the probe. A home configured as a device or carrying the moved marker
+  # takes neither (`Role.admit_configured/1`, M75 D5): its token file is a
+  # retired copy of the primary's. The local steps before them stand.
+  defp provider_steps(report, opts, puts, prompt) do
+    case Role.admit_configured(ConfigStore.fermix_home()) do
+      :ok ->
+        with {:ok, authed_report} <- ensure_codex_auth(report, opts, puts) do
+          print_report(authed_report, puts)
+          run_finalize_probe(authed_report, opts, puts, prompt)
+        end
+
+      {:error, reason} ->
+        print_report(report, puts)
+        puts.("Not signing in or checking the provider: " <> Role.refusal_sentence(reason))
+        :ok
     end
   end
 

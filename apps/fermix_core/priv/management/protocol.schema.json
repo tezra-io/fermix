@@ -225,7 +225,15 @@
     "cues.mandates.approve": 2,
     "cues.proposals.list": 2,
     "cues.proposals.get": 2,
-    "cues.proposals.decide": 2
+    "cues.proposals.decide": 2,
+    "home.status": 2,
+    "home.snapshots.status": 2,
+    "home.snapshots.run": 2,
+    "home.snapshots.passphrase": 2,
+    "home.enroll.open": 2,
+    "home.candidates.list": 2,
+    "home.move.readiness": 2,
+    "home.move.start": 2
   },
   "$defs": {
     "request": {
@@ -325,7 +333,15 @@
             "cues.mandates.approve",
             "cues.proposals.list",
             "cues.proposals.get",
-            "cues.proposals.decide"
+            "cues.proposals.decide",
+            "home.status",
+            "home.snapshots.status",
+            "home.snapshots.run",
+            "home.snapshots.passphrase",
+            "home.enroll.open",
+            "home.candidates.list",
+            "home.move.readiness",
+            "home.move.start"
           ]
         },
         "params": { "type": "object" }
@@ -926,6 +942,62 @@
             "properties": { "method": { "const": "cues.proposals.decide" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/cues_proposals_decide_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "home.status" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_status_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "home.snapshots.status" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_snapshots_status_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "home.snapshots.run" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_snapshots_run_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "home.snapshots.passphrase" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_snapshots_passphrase_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "home.enroll.open" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_enroll_open_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "home.candidates.list" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_candidates_list_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "home.move.readiness" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_move_readiness_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "home.move.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_move_start_params" } } }
         }
       ]
     },
@@ -969,7 +1041,10 @@
                 "unknown_job",
                 "external_change",
                 "config_unreadable",
-                "unknown_pairing_session"
+                "unknown_pairing_session",
+                "primary_unreachable",
+                "device_class_method",
+                "unconfirmed"
               ]
             },
             "message": { "type": "string", "minLength": 1 },
@@ -1076,7 +1151,15 @@
         { "$ref": "#/$defs/cues_mandates_approve_result" },
         { "$ref": "#/$defs/cues_proposals_list_result" },
         { "$ref": "#/$defs/cues_proposals_get_result" },
-        { "$ref": "#/$defs/cues_proposals_decide_result" }
+        { "$ref": "#/$defs/cues_proposals_decide_result" },
+        { "$ref": "#/$defs/home_status_result" },
+        { "$ref": "#/$defs/home_snapshots_status_result" },
+        { "$ref": "#/$defs/home_snapshots_run_result" },
+        { "$ref": "#/$defs/home_snapshots_passphrase_result" },
+        { "$ref": "#/$defs/home_enroll_open_result" },
+        { "$ref": "#/$defs/home_candidates_list_result" },
+        { "$ref": "#/$defs/home_move_readiness_result" },
+        { "$ref": "#/$defs/home_move_start_result" }
       ]
     },
     "hello_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -1656,7 +1739,8 @@
         "images",
         "sandbox",
         "secrets",
-        "permissions"
+        "permissions",
+        "always_on"
       ]
     },
     "readinessFailure": {
@@ -1970,13 +2054,18 @@
     },
     "settings_sections_result": {
       "type": "object",
-      "required": ["sections"],
+      "required": ["sections", "primary_missing"],
       "additionalProperties": false,
       "properties": {
         "sections": {
+          "description": "On a linked desktop, the sections that configure this computer (sandbox, computer_use, computer_history, channels.imessage) and the primary's others; on any other engine, its own.",
           "type": "array",
           "maxItems": 30,
           "items": { "$ref": "#/$defs/settingsSection" }
+        },
+        "primary_missing": {
+          "description": "On a linked desktop whose primary did not answer within 5 s, the sentence a person is shown for why the primary's sections are missing (this computer's own are still listed); null otherwise.",
+          "type": ["string", "null"]
         }
       }
     },
@@ -3353,10 +3442,12 @@
     },
     "mobileDevice": {
       "type": "object",
+      "description": "A paired device: a phone, or a desktop engine (kind desktop). A desktop has no platform, signer role, boot state or push registration of its own.",
       "required": [
         "device_id",
         "name",
         "model",
+        "kind",
         "platform",
         "signer_role",
         "boot_state",
@@ -3369,6 +3460,7 @@
         "device_id": { "type": "string" },
         "name": { "type": "string" },
         "model": { "type": "string" },
+        "kind": { "enum": ["phone", "desktop"] },
         "platform": { "type": ["string", "null"] },
         "signer_role": { "enum": ["release", "development", null] },
         "boot_state": {
@@ -5520,6 +5612,345 @@
         "proposal": {
           "$ref": "#/$defs/cueProposalRecord"
         }
+      }
+    },
+    "home_status_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "home_status_result": {
+      "type": "object",
+      "required": ["role", "epoch", "moved", "primary", "desktops", "snapshots", "enrollment", "candidates", "move", "secrets_missing", "primary_home", "primary_missing"],
+      "additionalProperties": false,
+      "properties": {
+        "role": { "enum": ["primary", "device", "candidate"] },
+        "epoch": { "type": ["integer", "null"], "minimum": 1 },
+        "moved": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["to", "moved_at", "epoch"],
+              "additionalProperties": false,
+              "properties": {
+                "to": { "type": "string" },
+                "moved_at": { "type": "string" },
+                "epoch": { "type": "integer", "minimum": 1 }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "primary": {
+          "description": "In the device role after a move, the primary this desktop reaches; null on any other engine.",
+          "oneOf": [{ "$ref": "#/$defs/homePrimary" }, { "type": "null" }]
+        },
+        "desktops": {
+          "description": "On the primary, each desktop that holds a session to it; empty on any other engine.",
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/homeDesktop" }
+        },
+        "snapshots": { "$ref": "#/$defs/homeSnapshots" },
+        "enrollment": {
+          "description": "On the primary, the enrollment window opened since the engine started: its state and when it expires, never its code. Null when none was opened, while Fermix is stopped, and in every other role.",
+          "oneOf": [{ "$ref": "#/$defs/homeEnrollment" }, { "type": "null" }]
+        },
+        "candidates": {
+          "description": "On the primary, the candidate primaries it holds; empty in any other role.",
+          "type": "array",
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/homeCandidate" }
+        },
+        "move": {
+          "description": "The move this home started or, on a candidate, the one it waits for; null when there is none.",
+          "oneOf": [{ "$ref": "#/$defs/homeMove" }, { "type": "null" }]
+        },
+        "secrets_missing": {
+          "description": "On the primary, the ids (as secret.set takes them) of the secret references in its settings that did not resolve on this host: a keychain reference a restore carried without its value, a locked keychain, a file the store lacks. Each needs entering again. Empty in any other role.",
+          "type": "array",
+          "maxItems": 256,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "primary_home": {
+          "description": "On a linked desktop, the primary's own home.status (its recovery, enrollment, candidates and move), asked within 5 s; null on any other engine and while it is missing. A desktop's own snapshots lists no target: its status file is a retired copy.",
+          "oneOf": [{ "$ref": "#/$defs/home_status_result" }, { "type": "null" }]
+        },
+        "primary_missing": {
+          "description": "On a linked desktop whose primary is unreachable or did not answer within 5 s, the sentence a person is shown for why primary_home is missing; null otherwise.",
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "homePrimary": {
+      "type": "object",
+      "description": "The primary a desktop reaches: its name, whether the session is up, the link's state in one closed word, since when the session is up (null while not), the highest primary epoch this desktop has seen, and one sentence. status: connected (a session is up); renewing (a session opening with nothing known to be wrong: the first since the engine started, or a quiet renewal after the primary ended one normally; draw it quietly); unreachable (an outage, retried with a backoff, or a link this engine refused to use); revoked (the primary no longer knows this computer; never retried until the engine restarts); stale (the primary answered as an older copy; retried).",
+      "required": ["name", "connected", "status", "since", "epoch", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": ["string", "null"] },
+        "connected": { "type": "boolean" },
+        "status": { "enum": ["connected", "renewing", "unreachable", "revoked", "stale"] },
+        "since": { "type": ["string", "null"] },
+        "epoch": { "type": ["integer", "null"], "minimum": 1 },
+        "sentence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "homeDesktop": {
+      "type": "object",
+      "description": "A desktop of the primary: its device id and name, and whether its session is up and since when (null while not).",
+      "required": ["device_id", "name", "connected", "since"],
+      "additionalProperties": false,
+      "properties": {
+        "device_id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "connected": { "type": "boolean" },
+        "since": { "type": ["string", "null"] }
+      }
+    },
+    "home_snapshots_status_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "home_snapshots_status_result": { "$ref": "#/$defs/homeSnapshots" },
+    "home_snapshots_run_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "home_snapshots_run_result": {
+      "type": "object",
+      "required": ["started", "snapshots"],
+      "additionalProperties": false,
+      "properties": {
+        "started": { "const": true },
+        "snapshots": { "$ref": "#/$defs/homeSnapshots" }
+      }
+    },
+    "home_snapshots_passphrase_params": {
+      "type": "object",
+      "required": ["recovery_passphrase"],
+      "additionalProperties": false,
+      "properties": {
+        "recovery_passphrase": { "type": "string", "minLength": 12, "maxLength": 1024 }
+      }
+    },
+    "home_snapshots_passphrase_result": {
+      "type": "object",
+      "required": ["recipient", "key_id", "snapshots", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "recipient": { "type": "string", "pattern": "^fxsnap1\\.[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43}$" },
+        "key_id": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "snapshots": { "$ref": "#/$defs/homeSnapshots" },
+        "sentence": {
+          "description": "That snapshots from now on open with this passphrase, naming its key id, and those written before only with the earlier one.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "homeSnapshots": {
+      "type": "object",
+      "required": ["configured", "recipient_set", "interval_hours", "running", "next_run_at", "targets", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "configured": { "type": "boolean" },
+        "recipient_set": { "type": "boolean" },
+        "interval_hours": { "type": "integer", "minimum": 1, "maximum": 168 },
+        "running": { "type": "boolean" },
+        "next_run_at": { "type": ["string", "null"] },
+        "targets": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/homeSnapshotTarget" } },
+        "sentence": { "type": "string" }
+      }
+    },
+    "homeSnapshotTarget": {
+      "type": "object",
+      "required": ["id", "label", "configured", "destination", "last_attempt_at", "last_result", "last_verified", "last_error", "waiting"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" },
+        "configured": { "type": "boolean" },
+        "destination": { "type": ["string", "null"] },
+        "last_attempt_at": { "type": ["string", "null"] },
+        "last_result": {
+          "description": "waiting is a target that could not take the last snapshot and takes one at a later run (a desktop asleep or offline): no failure.",
+          "enum": ["verified", "failed", "waiting", null]
+        },
+        "last_verified": {
+          "oneOf": [{ "$ref": "#/$defs/homeSnapshotPoint" }, { "type": "null" }]
+        },
+        "last_error": { "type": ["string", "null"] },
+        "waiting": {
+          "description": "When the last run left this target waiting, the sentence that says why; null otherwise.",
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "homeSnapshotPoint": {
+      "type": "object",
+      "required": ["at", "name", "epoch", "size", "sha256", "location", "key_id"],
+      "additionalProperties": false,
+      "properties": {
+        "at": { "type": "string" },
+        "name": { "type": ["string", "null"] },
+        "epoch": { "type": ["integer", "null"] },
+        "size": { "type": ["integer", "null"] },
+        "sha256": { "type": ["string", "null"] },
+        "location": { "type": ["string", "null"] },
+        "key_id": {
+          "description": "The recovery key this snapshot was written for, as home.snapshots.passphrase answers it; null for one recorded before keys were named.",
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "home_enroll_open_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "home_enroll_open_result": {
+      "description": "The enrollment code, shown once: single use, valid until expires_at, never logged and never answered again.",
+      "type": "object",
+      "required": ["code", "expires_at"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "string", "maxLength": 2048, "pattern": "^fxenroll1\\.[A-Za-z0-9_-]+$" },
+        "expires_at": { "type": "string" }
+      }
+    },
+    "home_candidates_list_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "home_candidates_list_result": {
+      "type": "object",
+      "required": ["candidates"],
+      "additionalProperties": false,
+      "properties": {
+        "candidates": { "type": "array", "maxItems": 4, "items": { "$ref": "#/$defs/homeCandidate" } }
+      }
+    },
+    "home_move_readiness_params": {
+      "type": "object",
+      "required": ["candidate_id"],
+      "additionalProperties": false,
+      "properties": {
+        "candidate_id": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "home_move_readiness_result": {
+      "description": "What the owner reviews before moving this home to the candidate. ready is false while any item blocks, and home.move.start refuses then.",
+      "type": "object",
+      "required": ["ready", "items"],
+      "additionalProperties": false,
+      "properties": {
+        "ready": { "type": "boolean" },
+        "items": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/homeReadinessItem" } }
+      }
+    },
+    "homeReadinessItem": {
+      "type": "object",
+      "description": "One fact about the move. id is keychain_secrets, engine_version, disk, s3_size, plugins, stays_here, cutover_gap or serves_nothing; a client that does not know an id shows its sentence as it is.",
+      "required": ["id", "status", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["ok", "warn", "block"] },
+        "sentence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "home_move_start_params": {
+      "type": "object",
+      "required": ["candidate_id", "recovery_passphrase"],
+      "additionalProperties": false,
+      "properties": {
+        "candidate_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "recovery_passphrase": { "type": "string", "minLength": 12, "maxLength": 1024 },
+        "keep_as_desktop": {
+          "description": "Whether this computer becomes a desktop of the new primary; true unless said. False when the source is a server being replaced: it then serves nothing.",
+          "type": "boolean"
+        }
+      }
+    },
+    "home_move_start_result": {
+      "description": "The move as it was written. The engine then restarts in the device role and carries it out; home.status follows it.",
+      "type": "object",
+      "required": ["move_id", "candidate", "recovery_recipient", "key_id", "keep_as_desktop", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "move_id": { "type": "string", "pattern": "^mv-[0-9a-f]{20}$" },
+        "candidate": { "$ref": "#/$defs/homeCandidate" },
+        "recovery_recipient": { "type": "string", "pattern": "^fxsnap1\\.[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43}$" },
+        "key_id": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "keep_as_desktop": { "type": "boolean" },
+        "sentence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "homeCandidate": {
+      "type": "object",
+      "description": "A candidate primary the primary holds, for 24 hours after it enrolled, never its keys. instance is what the host reported about itself, which nobody verified, and snapshots the bucket it was told to keep snapshots in; either is null when the host gave none.",
+      "required": ["candidate_id", "name", "os", "arch", "version", "node_id", "instance", "snapshots", "enrolled_at", "expires_at"],
+      "additionalProperties": false,
+      "properties": {
+        "candidate_id": { "type": "string", "pattern": "^cand-[0-9a-f]{16}$" },
+        "name": { "type": "string" },
+        "os": { "type": "string" },
+        "arch": { "type": "string" },
+        "version": { "type": "string" },
+        "node_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "instance": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["provider", "instance_id", "region"],
+              "properties": {
+                "provider": { "type": "string" },
+                "instance_id": { "type": "string" },
+                "region": { "type": "string" },
+                "account_id": { "type": "string" }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "snapshots": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["s3_bucket", "s3_region"],
+              "properties": {
+                "s3_bucket": { "type": "string" },
+                "s3_region": { "type": "string" }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "enrolled_at": { "type": "string" },
+        "expires_at": { "type": "string" }
+      }
+    },
+    "homeEnrollment": {
+      "type": "object",
+      "description": "The primary's enrollment window: open until expires_at, used once a candidate enrolled with it, or expired.",
+      "required": ["state", "expires_at"],
+      "additionalProperties": false,
+      "properties": {
+        "state": { "enum": ["open", "used", "expired"] },
+        "expires_at": { "type": "string" }
+      }
+    },
+    "homeMove": {
+      "type": "object",
+      "description": "Where a move stands. On the home that moves, phase is requested, streaming, committing, committed (restarting as a desktop), done, aborting, undoing (restarting as the primary) or aborted, and candidate the name of the host it moves to; done and aborted are written only by the engine that came back after the restart. On a candidate, phase is enrolling, enrolled, receiving, staged, activating, expired or failed and candidate is null. sentence is the daemon's.",
+      "required": ["phase", "candidate", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "phase": {
+          "enum": [
+            "requested",
+            "streaming",
+            "committing",
+            "committed",
+            "done",
+            "aborting",
+            "undoing",
+            "aborted",
+            "enrolling",
+            "enrolled",
+            "receiving",
+            "staged",
+            "activating",
+            "expired",
+            "failed"
+          ]
+        },
+        "candidate": { "type": ["string", "null"] },
+        "sentence": { "type": "string", "minLength": 1 }
       }
     },
     "logEntry": {

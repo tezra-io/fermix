@@ -3,6 +3,7 @@ defmodule FermixCore.Tools.GitCommand do
 
   alias FermixCore.CommandRunner
   alias FermixCore.Sandbox
+  alias FermixCore.Sandbox.OsSandbox
 
   # Audit F-01 follow-up (shared boundary): even when the resolved repo path
   # is sandbox-checked, git accepts flags that escape the `cd: repo` boundary.
@@ -117,8 +118,13 @@ defmodule FermixCore.Tools.GitCommand do
 
   defp translate({:ok, %{exit: 0, stdout: output}}, _command), do: {:ok, output}
 
+  # The kernel sandbox refusing to start git (no Landlock here, a rule it could
+  # not add) is not git failing, and says so in its own sentence.
   defp translate({:ok, %{exit: exit_code, stdout: output}}, command) do
-    {:error, "git #{command} failed (exit #{exit_code}):\n#{output}"}
+    case OsSandbox.refusal(exit_code, output) do
+      nil -> {:error, "git #{command} failed (exit #{exit_code}):\n#{output}"}
+      sentence -> {:error, sentence}
+    end
   end
 
   defp translate({:error, {:timeout, _ms}}, command) do

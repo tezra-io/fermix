@@ -32,6 +32,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     mcp_servers = Application.get_env(:fermix_core, :mcp_servers, [])
     secret_writer = Application.get_env(:fermix_core, :secret_writer)
     mobile = Application.get_env(:fermix_channels, :mobile, [])
+    engine = Application.fetch_env(:fermix_core, :engine)
+    snapshots = Application.fetch_env(:fermix_core, :snapshots)
 
     FermixTestSupport.SecretWriterStub.reset()
     Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub)
@@ -57,6 +59,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       Application.put_env(:fermix_core, :mcp_servers, mcp_servers)
       restore_secret_writer(secret_writer)
       Application.put_env(:fermix_channels, :mobile, mobile)
+      restore_engine(engine)
+      restore_snapshots(snapshots)
       FermixTestSupport.SecretWriterStub.reset()
 
       case fermix_home do
@@ -72,6 +76,10 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   defp restore_sandbox(value), do: Application.put_env(:fermix_core, :sandbox, value)
   defp restore_secret_writer(nil), do: Application.delete_env(:fermix_core, :secret_writer)
   defp restore_secret_writer(value), do: Application.put_env(:fermix_core, :secret_writer, value)
+  defp restore_engine({:ok, value}), do: Application.put_env(:fermix_core, :engine, value)
+  defp restore_engine(:error), do: Application.delete_env(:fermix_core, :engine)
+  defp restore_snapshots({:ok, value}), do: Application.put_env(:fermix_core, :snapshots, value)
+  defp restore_snapshots(:error), do: Application.delete_env(:fermix_core, :snapshots)
 
   # Captures the opts each keyring read receives so the apply_snapshot/2 →
   # SecretStore → SecretWriter → CommandRunner threading is observable.
@@ -361,6 +369,126 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(loaded.fermix_core, :secret_store) == :file
     assert :ok = ConfigStore.apply_snapshot(loaded)
     assert Application.get_env(:fermix_core, :secret_store) == :file
+  end
+
+  # `[fermix_core.engine]` (M75 D13): the role normalizes to an atom, so the
+  # persist path writes `Role.to_keyword/1`'s string back. Seeded with the
+  # app-env shape setup persists, never with the file's string (the config
+  # round-trip pitfall), and with the default left out of a file that never
+  # chose a role, so an upgraded home stays the primary with no new key.
+  test "save/load round-trips the engine role, applies it, and omits an unset one" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    unset = %{fermix_core: [agent: [name: "aira"]], fermix_channels: [], fermix_web: []}
+    assert :ok = ConfigStore.save_snapshot(unset)
+    refute File.read!(Path.join(tmp_home, "config.toml")) =~ "fermix_core.engine"
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    assert Keyword.fetch!(loaded.fermix_core, :engine) == []
+
+    device = %{fermix_core: [engine: [role: :device]], fermix_channels: [], fermix_web: []}
+    assert :ok = ConfigStore.save_snapshot(device)
+
+    assert File.read!(Path.join(tmp_home, "config.toml")) =~
+             ~s([fermix_core.engine]\nrole = "device")
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    assert Keyword.fetch!(loaded.fermix_core, :engine) == [role: :device]
+    assert :ok = ConfigStore.apply_snapshot(loaded)
+    assert Application.get_env(:fermix_core, :engine) == [role: :device]
+
+    # A second save from the live snapshot, as setup makes it, is a fixed point.
+    assert :ok = ConfigStore.save_snapshot(ConfigStore.current_snapshot())
+    assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+    assert Keyword.fetch!(reloaded.fermix_core, :engine) == [role: :device]
+  end
+
+  # `[fermix_channels.slack] mode` (M75): the webhook or Socket Mode, an atom in
+  # app env and a string in the file. Seeded with the app-env shape a save
+  # reads (the config round-trip pitfall), and saved twice from the live
+  # snapshot so the second save is shown to be a fixed point.
+  test "save/load round-trips the Slack mode and its app-level token reference" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    previous = Application.fetch_env(:fermix_channels, :slack)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:fermix_channels, :slack, value)
+        :error -> Application.delete_env(:fermix_channels, :slack)
+      end
+
+      FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+    end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [],
+      fermix_channels: [slack: [enabled: true, mode: :socket, app_token: "@keyring"]],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~s(mode = "socket")
+    assert contents =~ ~s(app_token = "@keyring")
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    slack = Keyword.fetch!(loaded.fermix_channels, :slack)
+    assert slack[:mode] == :socket
+    assert slack[:app_token] == "@keyring"
+
+    assert :ok = ConfigStore.save_snapshot(loaded)
+    assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+    assert Keyword.fetch!(reloaded.fermix_channels, :slack)[:mode] == :socket
+  end
+
+  test "a Slack mode that is neither the webhook nor Socket Mode is refused by name" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+    File.write!(Path.join(tmp_home, "config.toml"), ~s([fermix_channels.slack]\nmode = "rtm"\n))
+
+    assert_raise ArgumentError,
+                 ~r/\[fermix_channels.slack\] mode must be "webhook" or "socket"/,
+                 fn -> ConfigStore.load_runtime_config() end
+  end
+
+  test "an engine role that is not primary, device or candidate is refused when the file is loaded" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+    File.write!(Path.join(tmp_home, "config.toml"), ~s([fermix_core.engine]\nrole = "mirror"\n))
+
+    assert_raise ArgumentError,
+                 ~r/\[fermix_core.engine\] role must be "primary", "device" or "candidate"/,
+                 fn ->
+                   ConfigStore.load_runtime_config()
+                 end
+  end
+
+  # The default lives in `Role`, never in a compiled config: a base pin would
+  # be what every environment and every save sees (the env-gate pitfall).
+  test "no compiled environment pins the engine role" do
+    for env <- [:dev, :prod] do
+      compiled =
+        "../../../../../config/config.exs"
+        |> Path.expand(__DIR__)
+        |> Config.Reader.read!(env: env, target: :host)
+
+      refute Keyword.has_key?(Keyword.get(compiled, :fermix_core, []), :engine), inspect(env)
+    end
   end
 
   test "an unknown secret store is refused by name when the file is loaded" do
@@ -809,6 +937,19 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   @roundtrip_toml """
   [fermix_core]
   profile = "general"
+
+  [fermix_core.engine]
+  role = "device"
+
+  [fermix_core.snapshots]
+  recipient = "fxsnap1.AQEBAQEBAQEBAQEBAQEBAQ.AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI"
+  interval_hours = 12
+  s3_bucket = "invented-snapshots"
+  s3_region = "eu-west-1"
+  s3_prefix = "fermix/home"
+  s3_endpoint = "https://s3.invented.test"
+  s3_access_key_id = "@keyring"
+  s3_secret_access_key = "@file"
 
   [fermix_core.providers.openai_codex]
   primary = true

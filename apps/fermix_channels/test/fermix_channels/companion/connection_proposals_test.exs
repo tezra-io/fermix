@@ -201,6 +201,27 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
     assert [{^id, "waiting"}] = F.proposals(ctx.fixture.conn)
   end
 
+  # M75: a device-role engine runs a retired copy of a moved home, so an owner's
+  # answer from it is refused by name and the proposal stays as it was.
+  test "a device-role engine refuses an answer by name and decides nothing", ctx do
+    id = propose!(ctx)
+    role = %{role: :device, primary: "vm.example.test"}
+    restart_endpoint(ctx, request_opts: [engine_role: role])
+
+    owner = hello(ctx.socket_path, 4)
+    send_line(owner, answer("mac-device-1", id, "confirm"))
+
+    assert next_after_cards(owner, 3) == %{
+             "type" => "error",
+             "reason" => "request_failed",
+             "message" => "This engine runs in the device role; the primary is vm.example.test.",
+             "client_msg_id" => "mac-device-1"
+           }
+
+    refute_receive {:executed, _tool, _args, _context}, 100
+    assert [{^id, "waiting"}] = F.proposals(ctx.fixture.conn)
+  end
+
   # --- answering ------------------------------------------------------------------------
 
   test "the owner's confirm runs the recorded call exactly once; a second answer runs nothing",
@@ -362,6 +383,15 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
         id: {:restarted, fixture.repo}
       )
     )
+  end
+
+  # The next line that is not a waiting proposal's card, which follows the
+  # hello, reading at most `left` lines.
+  defp next_after_cards(client, left) when left > 0 do
+    case recv(client) do
+      %{"type" => "proposal"} -> next_after_cards(client, left - 1)
+      line -> line
+    end
   end
 
   defp restart_endpoint(ctx, connection_opts) do

@@ -1,0 +1,9 @@
+#!/bin/sh
+# Test stand-in for apt-get: logs the call and installs nothing, except that
+# installing chromium leaves an executable /usr/bin/chromium, as the package
+# does, for the first boot's check.
+set -eu
+printf 'apt-get %s\n' "$*" >>/var/log/fermix-test/calls.log
+case " $* " in
+  *" install "*" chromium "*) printf '#!/bin/sh\nexit 0\n' >/usr/bin/chromium && chmod 0755 /usr/bin/chromium ;;
+esac

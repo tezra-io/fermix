@@ -14,9 +14,23 @@ defmodule FermixCore.Browser.CDP.Backend do
 
   Tabs are bounded: each `open` spawns a new CDP target, so without a cap a
   long session would accumulate tabs (they outlive any single action) and grow
-  Chrome's memory unbounded. `enforce_tab_cap/1` closes the oldest non-active
-  tabs back to `max_tabs` after each `open`, where the tabs are Fermix's
-  (`tab_cap`) — a user-attached Chrome's own tabs are never closed.
+  Chrome's memory unbounded. `enforce_tab_cap/1` closes the oldest tabs other
+  than the caller's current one back to `max_tabs` after each `open`, counting
+  every conversation's tabs, where the tabs are Fermix's (`tab_cap`) — a
+  user-attached Chrome's own tabs are never closed.
+
+  Tabs are per conversation inside a shared browser. One profile serves every
+  conversation of its scope (all the owner's), so the tab a call without
+  `target` acts on is its own conversation's (`Scope.tab_affinity/1`, the
+  context's `:tab_affinity`): the last tab it opened or focused that is still
+  open. A conversation with none is handed no other conversation's tab: its
+  `navigate` opens a tab of its own, and anything else is told to `open` one
+  (`no_tab`). The one exception is a browser holding a single tab nobody
+  opened (Chrome's first blank tab, the one page of a browser it attached to),
+  which the first conversation to need a tab takes. `target` still names any
+  tab in the browser, `tabs` lists them all and marks the caller's
+  (`this_conversation`), and a granted tab is the whole tab set, so every call
+  acts in it.
   """
 
   @behaviour FermixCore.Browser.Backend
@@ -80,7 +94,13 @@ defmodule FermixCore.Browser.CDP.Backend do
       now_fn: Keyword.get(opts, :now_fn, fn -> System.monotonic_time(:millisecond) end),
       runtime: nil,
       targets: %{},
-      active_target: nil,
+      # Which tabs are whose (see the moduledoc): per conversation, its tabs, the
+      # last opened or focused first; per tab, the conversation that opened it.
+      # `affinity` is the conversation of the request being served, set as each
+      # one starts: `ProfileServer` serves one request at a time.
+      recent: %{},
+      tab_owner: %{},
+      affinity: nil,
       tab_order: [],
       ref_maps: %{},
       # Per tab, what the model was last shown: the options that snapshot was
@@ -254,6 +274,8 @@ defmodule FermixCore.Browser.CDP.Backend do
   end
 
   defp with_running(state, context, fun) do
+    state = %{state | affinity: Map.get(context, :tab_affinity)}
+
     case ensure_running(state, context) do
       {:ok, state} -> fun.(state)
       {:error, error, state} -> {:error, error, state}
@@ -486,7 +508,7 @@ defmodule FermixCore.Browser.CDP.Backend do
       type: "page"
     }
 
-    %{state | targets: %{id => tab}, active_target: id, tab_order: [id], detached: nil}
+    %{state | targets: %{id => tab}, tab_order: [id], detached: nil}
   end
 
   defp no_grant_error do
@@ -574,8 +596,8 @@ defmodule FermixCore.Browser.CDP.Backend do
     with {:ok, %{"targetId" => target_id}} <- command(state, "Target.createTarget", params) do
       tab = new_tab(target_id)
 
-      case load_new_tab(tab, uri, mark, %{state | active_target: tab.id}) do
-        {:ok, result, state} -> capped(result, state)
+      case load_new_tab(tab, uri, mark, state) do
+        {:ok, result, state} -> capped(result, claim(state, tab.id))
         failed -> abandon_new_tab(tab, state, failed)
       end
     end
@@ -632,9 +654,12 @@ defmodule FermixCore.Browser.CDP.Backend do
   end
 
   # Keep a managed Chrome from accumulating tabs across a session: after an
-  # `open` pushes the live count past `max_tabs`, close the oldest non-active
-  # tabs back to the cap. Only a browser whose tabs are Fermix's (`tab_cap`) —
-  # a user-attached Chrome (cdp_url profile) keeps all of its own tabs.
+  # `open` pushes the live count past `max_tabs`, close the oldest tabs back to
+  # the cap, every conversation's counted, sparing only the caller's current
+  # one (the tab it just opened). Sparing every conversation's would let each
+  # finished job run keep a tab for the life of the browser. Only a browser
+  # whose tabs are Fermix's (`tab_cap`) — a user-attached Chrome (cdp_url
+  # profile) keeps all of its own tabs.
   defp enforce_tab_cap(state) do
     cap = state.config.max_tabs
     excess = map_size(state.targets) - cap
@@ -647,9 +672,11 @@ defmodule FermixCore.Browser.CDP.Backend do
   end
 
   defp evict_oldest_tabs(state, excess) do
+    current = current_id(state)
+
     victims =
       state.tab_order
-      |> Enum.reject(&(&1 == state.active_target))
+      |> Enum.reject(&(&1 == current))
       |> Enum.take(excess)
 
     state = Enum.reduce(victims, state, &close_evicted_tab/2)
@@ -678,12 +705,30 @@ defmodule FermixCore.Browser.CDP.Backend do
     end
   end
 
+  # A conversation with no tab of its own opens one, as `open` would, rather
+  # than navigating a tab another conversation is working in.
   defp navigate_chain(uri, args, mark, state) do
-    with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
-         {:ok, result, state} <- navigate_tab(tab, uri, mark, state) do
-      {:ok, result, state}
+    case Map.get(args, "target") do
+      nil -> navigate_current(uri, mark, state)
+      target -> navigate_named(target, uri, mark, state)
     end
   end
+
+  defp navigate_named(target, uri, mark, state) do
+    with {:ok, tab, state} <- resolve_tab(target, state) do
+      navigate_tab(tab, uri, mark, state)
+    end
+  end
+
+  defp navigate_current(uri, mark, state) do
+    case current_tab(state) do
+      {:ok, tab, state} -> navigate_tab(tab, uri, mark, state)
+      :none -> create_tab(uri, leaving_mark(mark, uri), state)
+    end
+  end
+
+  defp leaving_mark(:none, _uri), do: :none
+  defp leaving_mark(mark, uri), do: %{mark | leaving: leaving_document(uri)}
 
   defp navigate_tab(tab, uri, mark, state) do
     requested = URI.to_string(uri)
@@ -956,14 +1001,14 @@ defmodule FermixCore.Browser.CDP.Backend do
   defp run_advanced("focus", args, state) do
     with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
          {:ok, _} <- command(state, "Target.activateTarget", %{targetId: tab.target_id}) do
-      {:ok, tab_result(tab), %{state | active_target: tab.id}}
+      {:ok, tab_result(tab), put_current(state, tab.id)}
     end
   end
 
   defp run_advanced("close", args, state) do
     with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
          {:ok, _} <- command(state, "Target.closeTarget", %{targetId: tab.target_id}),
-         {:ok, state} <- refresh_targets(%{state | active_target: nil}) do
+         {:ok, state} <- refresh_targets(state) do
       {:ok, %{"ok" => true, "closed" => tab.id}, state}
     end
   end
@@ -2502,7 +2547,6 @@ defmodule FermixCore.Browser.CDP.Backend do
   defp refresh_targets(state) do
     with {:ok, %{"targetInfos" => infos}} <- command(state, "Target.getTargets", %{}) do
       targets = infos |> selectable_targets() |> Map.new(&target_entry/1)
-      active = active_target(state.active_target, targets)
       order = reconcile_order(state.tab_order, targets)
       # A gone tab's refs can never be clicked again; keeping its map only grows
       # state for the life of the profile (closes, evictions, crashes all funnel
@@ -2518,7 +2562,8 @@ defmodule FermixCore.Browser.CDP.Backend do
        %{
          state
          | targets: targets,
-           active_target: active,
+           recent: live_recent(state.recent, targets),
+           tab_owner: Map.take(state.tab_owner, live),
            tab_order: order,
            ref_maps: ref_maps,
            observations: observations,
@@ -2548,22 +2593,29 @@ defmodule FermixCore.Browser.CDP.Backend do
     end
   end
 
-  defp active_target(current, targets) when is_binary(current) do
-    if Map.has_key?(targets, current), do: current, else: first_target_id(targets)
+  # Each conversation's tabs, pruned to the ones still open; a conversation
+  # left with none drops out, so the map is bounded by the open tabs.
+  defp live_recent(recent, targets) do
+    recent
+    |> Enum.map(fn {affinity, ids} ->
+      {affinity, Enum.filter(ids, &Map.has_key?(targets, &1))}
+    end)
+    |> Enum.reject(fn {_affinity, ids} -> ids == [] end)
+    |> Map.new()
   end
 
-  defp active_target(_current, targets), do: first_target_id(targets)
-
-  defp resolve_tab(nil, %{targets: targets, active_target: nil} = state)
+  # The granted tab is the whole tab set, and every call the grant serves acts
+  # in it.
+  defp resolve_tab(nil, %{caps: %{target_discovery: false}, targets: targets} = state)
        when map_size(targets) == 1 do
     resolve_tab(first_target_id(targets), state)
   end
 
-  defp resolve_tab(nil, %{active_target: id} = state) when is_binary(id),
-    do: resolve_tab(id, state)
-
-  defp resolve_tab(nil, _state) do
-    {:error, Error.new("target_required", "target is required when more than one tab exists")}
+  defp resolve_tab(nil, state) do
+    case current_tab(state) do
+      {:ok, tab, state} -> {:ok, tab, state}
+      :none -> {:error, no_tab_error()}
+    end
   end
 
   defp resolve_tab(id, state) when is_binary(id) do
@@ -2571,6 +2623,48 @@ defmodule FermixCore.Browser.CDP.Backend do
       {:ok, tab} -> {:ok, tab, state}
       :error -> {:error, Error.new("target_not_found", "Browser target not found: #{id}")}
     end
+  end
+
+  # The caller's current tab: the last it opened or focused that is still open,
+  # or the browser's one tab when nobody has opened any (see the moduledoc).
+  defp current_tab(state) do
+    case current_id(state) do
+      nil -> unclaimed_tab(state)
+      id -> {:ok, Map.fetch!(state.targets, id), state}
+    end
+  end
+
+  defp current_id(state) do
+    state.recent
+    |> Map.get(state.affinity, [])
+    |> Enum.find(&Map.has_key?(state.targets, &1))
+  end
+
+  defp unclaimed_tab(%{targets: targets} = state) when map_size(targets) == 1 do
+    [{id, tab}] = Map.to_list(targets)
+
+    if Map.has_key?(state.tab_owner, id),
+      do: :none,
+      else: {:ok, tab, claim(state, id)}
+  end
+
+  defp unclaimed_tab(_state), do: :none
+
+  # The caller opened (or took) this tab: it is theirs, and their current one.
+  defp claim(state, id),
+    do: put_current(%{state | tab_owner: Map.put(state.tab_owner, id, state.affinity)}, id)
+
+  defp put_current(state, id) do
+    ids = [id | List.delete(Map.get(state.recent, state.affinity, []), id)]
+    %{state | recent: Map.put(state.recent, state.affinity, ids)}
+  end
+
+  defp no_tab_error do
+    Error.new(
+      "no_tab",
+      "This conversation has no tab open in this browser yet: `open` the page first. " <>
+        "`tabs` lists every tab the browser has, and `target` names any of them."
+    )
   end
 
   defp attach(%{attached: true} = tab, state), do: {:ok, tab, state}
@@ -2788,11 +2882,16 @@ defmodule FermixCore.Browser.CDP.Backend do
 
   defp refused_row(tab, code), do: %{"id" => tab.id, "target" => tab.id, "page" => code}
 
+  # Every tab, each marked with whether the caller's conversation opened it.
   defp tab_values(state) do
     state.targets
     |> Map.values()
     |> Enum.sort_by(& &1.id)
-    |> Enum.map(&tab_result/1)
+    |> Enum.map(fn tab ->
+      tab
+      |> tab_result()
+      |> Map.put("this_conversation", Map.fetch(state.tab_owner, tab.id) == {:ok, state.affinity})
+    end)
   end
 
   defp tab_result(tab) do
@@ -3042,7 +3141,8 @@ defmodule FermixCore.Browser.CDP.Backend do
       state
       | runtime: nil,
         targets: %{},
-        active_target: nil,
+        recent: %{},
+        tab_owner: %{},
         tab_order: [],
         ref_maps: %{},
         observations: %{},

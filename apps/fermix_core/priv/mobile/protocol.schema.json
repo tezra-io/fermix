@@ -28,7 +28,10 @@
         "t": {"enum": [
           "hello", "msg", "attach_begin", "attach_chunk", "attach_end", "command", "cancel",
           "history_pull", "media_fetch", "push_register", "push_unregister", "ack", "read_state",
-          "request_status", "pair_request", "unpair", "ping"
+          "request_status", "pair_request", "unpair", "ping",
+          "companion_open", "companion_line", "companion_close", "manage", "loopback_request",
+          "loopback_failed", "snapshot_stored", "snapshot_refused", "enroll_request",
+          "move_offer", "move_chunk", "move_end", "move_commit", "move_resume"
         ]}
       },
       "allOf": [
@@ -48,7 +51,21 @@
         {"if": {"properties": {"t": {"const": "request_status"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/request_status"}},
         {"if": {"properties": {"t": {"const": "pair_request"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_request"}},
         {"if": {"properties": {"t": {"const": "unpair"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/unpair"}},
-        {"if": {"properties": {"t": {"const": "ping"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/ping"}}
+        {"if": {"properties": {"t": {"const": "ping"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/ping"}},
+        {"if": {"properties": {"t": {"const": "companion_open"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/companion_open"}},
+        {"if": {"properties": {"t": {"const": "companion_line"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/companion_line"}},
+        {"if": {"properties": {"t": {"const": "companion_close"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/companion_close"}},
+        {"if": {"properties": {"t": {"const": "manage"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/manage"}},
+        {"if": {"properties": {"t": {"const": "loopback_request"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/loopback_request"}},
+        {"if": {"properties": {"t": {"const": "loopback_failed"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/loopback_failed"}},
+        {"if": {"properties": {"t": {"const": "snapshot_stored"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_stored"}},
+        {"if": {"properties": {"t": {"const": "snapshot_refused"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_refused"}},
+        {"if": {"properties": {"t": {"const": "enroll_request"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/enroll_request"}},
+        {"if": {"properties": {"t": {"const": "move_offer"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_offer"}},
+        {"if": {"properties": {"t": {"const": "move_chunk"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_chunk"}},
+        {"if": {"properties": {"t": {"const": "move_end"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_end"}},
+        {"if": {"properties": {"t": {"const": "move_commit"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_commit"}},
+        {"if": {"properties": {"t": {"const": "move_resume"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_resume"}}
       ]
     },
     "serverEvent": {
@@ -60,7 +77,11 @@
           "tool_event", "text_done", "turn_done", "media_begin", "media_chunk", "media_end",
           "turn_error", "row", "reaction", "approval", "approval_resolved", "link_preview",
           "read_state", "history_page", "request_status_page", "notice", "pair_approved",
-          "pair_denied", "error", "pong", "event_part"
+          "pair_denied", "error", "pong", "event_part",
+          "companion_line", "companion_close", "manage_result", "loopback_open",
+          "loopback_response", "loopback_close", "snapshot_begin", "snapshot_chunk",
+          "snapshot_end",
+          "enroll_accepted", "move_accept", "move_ready", "move_done"
         ]}
       },
       "allOf": [
@@ -89,7 +110,20 @@
         {"if": {"properties": {"t": {"const": "pair_denied"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_denied"}},
         {"if": {"properties": {"t": {"const": "error"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/error"}},
         {"if": {"properties": {"t": {"const": "pong"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pong"}},
-        {"if": {"properties": {"t": {"const": "event_part"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/event_part"}}
+        {"if": {"properties": {"t": {"const": "event_part"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/event_part"}},
+        {"if": {"properties": {"t": {"const": "companion_line"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/companion_line"}},
+        {"if": {"properties": {"t": {"const": "companion_close"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/companion_close"}},
+        {"if": {"properties": {"t": {"const": "manage_result"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/manage_result"}},
+        {"if": {"properties": {"t": {"const": "loopback_open"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/loopback_open"}},
+        {"if": {"properties": {"t": {"const": "loopback_response"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/loopback_response"}},
+        {"if": {"properties": {"t": {"const": "loopback_close"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/loopback_close"}},
+        {"if": {"properties": {"t": {"const": "snapshot_begin"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_begin"}},
+        {"if": {"properties": {"t": {"const": "snapshot_chunk"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_chunk"}},
+        {"if": {"properties": {"t": {"const": "snapshot_end"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_end"}},
+        {"if": {"properties": {"t": {"const": "enroll_accepted"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/enroll_accepted"}},
+        {"if": {"properties": {"t": {"const": "move_accept"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_accept"}},
+        {"if": {"properties": {"t": {"const": "move_ready"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_ready"}},
+        {"if": {"properties": {"t": {"const": "move_done"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_done"}}
       ]
     },
     "hello": {
@@ -100,7 +134,8 @@
         "app_version": {"type": "string", "minLength": 1},
         "last_server_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
         "protocol_v": {"type": "integer", "minimum": 1},
-        "relay_list_rev": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The revision of the relay list this phone has stored (M62); absent means none."}
+        "relay_list_rev": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The revision of the relay list this phone has stored (M62); absent means none."},
+        "primary_epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615, "description": "The highest primary epoch this phone has seen from this pairing (M75); absent when it has seen none. A daemon at a lower epoch refuses the hello with stale_primary."}
       }
     },
     "msg": {
@@ -199,7 +234,8 @@
         "profiles": {"type": "array", "items": {"$ref": "#/$defs/profile"}},
         "candidates": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/candidate"}},
         "history_head_seq": {"type": "integer", "minimum": 0}, "read_up_to_seq": {"type": "integer", "minimum": 0},
-        "caps": {"$ref": "#/$defs/caps"}
+        "caps": {"$ref": "#/$defs/caps"},
+        "primary_epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615, "description": "The daemon's primary epoch (M75): how many times its home has become the primary engine, 1 from its first boot as the primary. This daemon always sends it; a daemon older than the epoch leaves it out."}
       }
     },
     "profile": {
@@ -392,7 +428,7 @@
     },
     "requestOutcome": {
       "type": "object", "required": ["client_msg_id", "status"],
-      "description": "error is the word of a failed request: cancelled when it was stopped, request_failed otherwise.",
+      "description": "error is the word of a failed request: cancelled when it was stopped, uncertain_after_restart when it may have run before the daemon restarted, request_failed otherwise.",
       "properties": {
         "client_msg_id": {"type": "string", "minLength": 1},
         "status": {"enum": ["accepted", "running", "completed", "failed"]},
@@ -408,8 +444,8 @@
     },
     "pair_approved": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "device_id", "candidates", "profiles", "push_salt"],
-      "description": "push_salt is the device's 32-byte push salt (apns_key_salt), standard base64 with padding; push lists the push services this daemon sends through, and is absent from a daemon older than the list.",
-      "properties": {"t": {"const": "pair_approved"}, "device_id": {"type": "string", "minLength": 1}, "candidates": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/candidate"}}, "profiles": {"type": "array", "items": {"$ref": "#/$defs/profile"}}, "push_salt": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"}, "push": {"$ref": "#/$defs/pushServices"}}
+      "description": "push_salt is the device's 32-byte push salt (apns_key_salt), standard base64 with padding; push lists the push services this daemon sends through, and is absent from a daemon older than the list. primary_epoch is the daemon's primary epoch (M75), the value a newly paired phone starts its highest-seen epoch from; this daemon always sends it, a daemon older than the epoch leaves it out.",
+      "properties": {"t": {"const": "pair_approved"}, "device_id": {"type": "string", "minLength": 1}, "candidates": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/candidate"}}, "profiles": {"type": "array", "items": {"$ref": "#/$defs/profile"}}, "push_salt": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"}, "push": {"$ref": "#/$defs/pushServices"}, "primary_epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}}
     },
     "pair_denied": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "reason"],
@@ -436,6 +472,133 @@
       "required": ["v", "t", "seq", "index", "count"],
       "properties": {"t": {"const": "event_part"}, "index": {"type": "integer", "minimum": 0, "maximum": 17}, "count": {"type": "integer", "minimum": 2, "maximum": 18}}
     },
+    "wireId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$", "description": "An id one side mints for a call, a request, a stream or a session: 1 to 128 of letters, digits, '.', '_', ':' and '-', starting with a letter or digit."},
+    "chunkIndex": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+    "companionChannel": {"type": "integer", "minimum": 1, "maximum": 64, "description": "One tunneled connection to the desktop's companion socket; at most 4 open at once."},
+    "peerName": {"type": "string", "minLength": 1, "maxLength": 128, "x-max-bytes": 128, "description": "Text a person reads: valid UTF-8 without control characters."},
+    "sha256Hex": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+    "httpHeaders": {
+      "type": "array", "maxItems": 64,
+      "description": "Headers in order, each a [name, value] pair: the name an HTTP token of at most 256 bytes, the value at most 4,096 bytes without CR, LF or NUL.",
+      "items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "string", "maxLength": 4096}}
+    },
+    "companion_open": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "channel"],
+      "description": "Desktop to primary: the desktop's companion socket took a connection; the primary runs an ordinary companion connection for it, with owner trust.",
+      "properties": {"t": {"const": "companion_open"}, "channel": {"$ref": "#/$defs/companionChannel"}}
+    },
+    "companion_line": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true, "x-chunked": true, "x-chunk-key": "channel", "x-max-payload-bytes": 1048576,
+      "required": ["v", "t", "seq", "channel", "index", "last"],
+      "description": "Both directions: one line of a tunneled companion connection, chunked: the raw tails of one channel's frames from index 0 to the one marked last are the line.",
+      "properties": {"t": {"const": "companion_line"}, "channel": {"$ref": "#/$defs/companionChannel"}, "index": {"$ref": "#/$defs/chunkIndex"}, "last": {"type": "boolean"}}
+    },
+    "companion_close": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "channel"],
+      "description": "Both directions: the tunneled connection ended. reason is the primary's, for logs.",
+      "properties": {"t": {"const": "companion_close"}, "channel": {"$ref": "#/$defs/companionChannel"}, "reason": {"type": "string", "minLength": 1, "maxLength": 512, "x-max-bytes": 512}}
+    },
+    "manage": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true, "x-chunked": true, "x-chunk-key": "call_id", "x-max-payload-bytes": 1048576,
+      "required": ["v", "t", "seq", "call_id", "method", "protocol_version", "index", "last"],
+      "description": "Desktop to primary: one management call the desktop forwards, its params JSON as the chunked payload; at most 8 in flight.",
+      "properties": {"t": {"const": "manage"}, "call_id": {"$ref": "#/$defs/wireId"}, "method": {"type": "string", "maxLength": 128, "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$"}, "protocol_version": {"type": "integer", "minimum": 1}, "index": {"$ref": "#/$defs/chunkIndex"}, "last": {"type": "boolean"}}
+    },
+    "manage_result": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true, "x-chunked": true, "x-chunk-key": "call_id", "x-max-payload-bytes": 4194304,
+      "required": ["v", "t", "seq", "call_id", "index", "last"],
+      "description": "Primary to desktop: the management response to one manage call, as daemon.sock would answer it, chunked.",
+      "properties": {"t": {"const": "manage_result"}, "call_id": {"$ref": "#/$defs/wireId"}, "index": {"$ref": "#/$defs/chunkIndex"}, "last": {"type": "boolean"}}
+    },
+    "loopback_open": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "loopback_id", "ports", "expires_in_s"],
+      "description": "Primary to desktop: bind 127.0.0.1 on these ports for a sign-in a forwarded management call started, and forward what the browser sends.",
+      "properties": {"t": {"const": "loopback_open"}, "loopback_id": {"$ref": "#/$defs/wireId"}, "ports": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "integer", "minimum": 1, "maximum": 65535}}, "expires_in_s": {"type": "integer", "minimum": 1, "maximum": 900}}
+    },
+    "loopback_request": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true, "x-raw-bytes-may-be-empty": true, "x-max-raw-bytes": 16384,
+      "required": ["v", "t", "seq", "loopback_id", "request_id", "method", "target", "headers"],
+      "description": "Desktop to primary: one request the browser made to a forwarded loopback, its body as the raw tail (at most 16 KiB, empty for none); at most 8 per loopback.",
+      "properties": {"t": {"const": "loopback_request"}, "loopback_id": {"$ref": "#/$defs/wireId"}, "request_id": {"$ref": "#/$defs/wireId"}, "method": {"type": "string", "pattern": "^[A-Z]{1,16}$"}, "target": {"type": "string", "pattern": "^/\\S*$", "maxLength": 2048, "x-max-bytes": 2048}, "headers": {"$ref": "#/$defs/httpHeaders"}}
+    },
+    "loopback_failed": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "loopback_id", "port", "reason"],
+      "description": "Desktop to primary: the desktop could not listen on 127.0.0.1 on this port of the loopback: another program has it, the system did not allow it, or it failed otherwise. The sign-in ends with that sentence.",
+      "properties": {"t": {"const": "loopback_failed"}, "loopback_id": {"$ref": "#/$defs/wireId"}, "port": {"type": "integer", "minimum": 1, "maximum": 65535}, "reason": {"enum": ["port_in_use", "not_permitted", "failed"]}}
+    },
+    "loopback_response": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true, "x-raw-bytes-may-be-empty": true, "x-chunked": true, "x-chunk-key": "request_id", "x-max-payload-bytes": 262144,
+      "required": ["v", "t", "seq", "request_id", "status", "headers", "index", "last"],
+      "description": "Primary to desktop: the answer to one loopback_request, its body as the chunked payload.",
+      "properties": {"t": {"const": "loopback_response"}, "request_id": {"$ref": "#/$defs/wireId"}, "status": {"type": "integer", "minimum": 100, "maximum": 599}, "headers": {"$ref": "#/$defs/httpHeaders"}, "index": {"$ref": "#/$defs/chunkIndex"}, "last": {"type": "boolean"}}
+    },
+    "loopback_close": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "loopback_id"],
+      "description": "Primary to desktop: the sign-in ended or expired; close the loopback's listeners.",
+      "properties": {"t": {"const": "loopback_close"}, "loopback_id": {"$ref": "#/$defs/wireId"}}
+    },
+    "snapshot_begin": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "snapshot_id", "name", "size_bytes", "sha256"],
+      "description": "Primary to desktop: an encrypted snapshot of the home follows as snapshot_chunk frames, to keep under the desktop's snapshots directory.",
+      "properties": {"t": {"const": "snapshot_begin"}, "snapshot_id": {"$ref": "#/$defs/wireId"}, "name": {"$ref": "#/$defs/peerName"}, "size_bytes": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/sha256Hex"}}
+    },
+    "snapshot_chunk": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true,
+      "required": ["v", "t", "seq", "snapshot_id", "index"],
+      "description": "Primary to desktop: the next bytes of a snapshot, index from 0 and contiguous; snapshot_end ends the stream, which has no bound but the disk.",
+      "properties": {"t": {"const": "snapshot_chunk"}, "snapshot_id": {"$ref": "#/$defs/wireId"}, "index": {"$ref": "#/$defs/chunkIndex"}}
+    },
+    "snapshot_end": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "snapshot_id"],
+      "properties": {"t": {"const": "snapshot_end"}, "snapshot_id": {"$ref": "#/$defs/wireId"}}
+    },
+    "snapshot_stored": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "snapshot_id", "sha256"],
+      "description": "Desktop to primary: the snapshot is kept, with the SHA-256 of what was written; it is verified when that is snapshot_begin's.",
+      "properties": {"t": {"const": "snapshot_stored"}, "snapshot_id": {"$ref": "#/$defs/wireId"}, "sha256": {"$ref": "#/$defs/sha256Hex"}}
+    },
+    "snapshot_refused": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "snapshot_id", "reason"],
+      "description": "Desktop to primary: the desktop kept no copy of the snapshot, and why: it would have left the disk under its floor, the free space could not be read, the bytes did not match snapshot_begin, a chunk came out of order, the name was not a snapshot's, or the write failed.",
+      "properties": {"t": {"const": "snapshot_refused"}, "snapshot_id": {"$ref": "#/$defs/wireId"}, "reason": {"enum": ["disk_floor", "space_unknown", "mismatch", "out_of_order", "invalid_name", "write_failed"]}}
+    },
+    "enroll_request": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "host", "candidate"],
+      "description": "Candidate to primary, on an enrollment session (FXM1 0x03): the candidate's host, its route and one-time snapshot recipient, and what it says of its instance and its snapshot target, unverified.",
+      "properties": {
+        "t": {"const": "enroll_request"},
+        "host": {"type": "object", "required": ["name", "os", "arch", "version"], "properties": {"name": {"$ref": "#/$defs/peerName"}, "os": {"$ref": "#/$defs/peerName"}, "arch": {"$ref": "#/$defs/peerName"}, "version": {"$ref": "#/$defs/peerName"}}},
+        "candidate": {"type": "object", "required": ["node_id", "relays", "recipient"], "properties": {"node_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "relays": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"$ref": "#/$defs/relay"}}, "recipient": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$", "description": "The one-time X25519 public key (standard base64) the move's stream will be encrypted to; move_accept names it again."}}},
+        "instance": {"type": "object", "required": ["provider", "instance_id", "region"], "properties": {"provider": {"$ref": "#/$defs/peerName"}, "instance_id": {"$ref": "#/$defs/peerName"}, "region": {"$ref": "#/$defs/peerName"}, "account_id": {"$ref": "#/$defs/peerName"}}},
+        "snapshots": {"type": "object", "required": ["s3_bucket", "s3_region"], "properties": {"s3_bucket": {"$ref": "#/$defs/peerName"}, "s3_region": {"$ref": "#/$defs/peerName"}}}
+      }
+    },
+    "enroll_accepted": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "candidate_id", "primary_name"],
+      "description": "Primary to candidate: the candidate is recorded; the session then closes 1000.",
+      "properties": {"t": {"const": "enroll_accepted"}, "candidate_id": {"$ref": "#/$defs/wireId"}, "primary_name": {"$ref": "#/$defs/peerName"}}
+    },
+    "move_offer": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "move_id", "size_bytes", "sha256", "source_epoch", "attempt"],
+      "description": "Source to candidate, on a move session (FXM1 0x04): the home's snapshot is captured, encrypted to the recipient the candidate gave at enrollment, and ready to stream; size_bytes and sha256 are that encrypted stream's. recovery_recipient is the snapshot recipient the new primary keeps (fxsnap1.<salt>.<key>).",
+      "properties": {"t": {"const": "move_offer"}, "move_id": {"$ref": "#/$defs/wireId"}, "size_bytes": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/sha256Hex"}, "source_epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}, "recovery_recipient": {"type": "string", "pattern": "^fxsnap1\\.[A-Za-z0-9_-]{1,128}\\.[A-Za-z0-9_-]{43}$"}, "attempt": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615, "description": "Which attempt of this move the offer is (it only grows across the source's restarts). A candidate takes an offer only when it is later than the move it holds: a later move_id, or a later attempt of the same one."}}
+    },
+    "move_accept": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "move_id", "recipient"],
+      "description": "Candidate to source: the one-time X25519 public key (standard base64) the stream is encrypted to.",
+      "properties": {"t": {"const": "move_accept"}, "move_id": {"$ref": "#/$defs/wireId"}, "recipient": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"}}
+    },
+    "move_chunk": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true,
+      "required": ["v", "t", "seq", "move_id", "index"],
+      "description": "Source to candidate: the next bytes of the encrypted stream, index from 0 and contiguous; move_end ends it.",
+      "properties": {"t": {"const": "move_chunk"}, "move_id": {"$ref": "#/$defs/wireId"}, "index": {"$ref": "#/$defs/chunkIndex"}}
+    },
+    "move_end": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "move_id"], "properties": {"t": {"const": "move_end"}, "move_id": {"$ref": "#/$defs/wireId"}}},
+    "move_commit": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "move_id"], "description": "Source to candidate: the source wrote its moved marker; activate.", "properties": {"t": {"const": "move_commit"}, "move_id": {"$ref": "#/$defs/wireId"}}},
+    "move_resume": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "move_id"], "description": "Source to candidate, after a lost move_commit or move_done: answered move_ready (staged) or move_done (activated).", "properties": {"t": {"const": "move_resume"}, "move_id": {"$ref": "#/$defs/wireId"}}},
+    "move_ready": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "move_id", "epoch"], "description": "Candidate to source: the home is restored and staged at epoch.", "properties": {"t": {"const": "move_ready"}, "move_id": {"$ref": "#/$defs/wireId"}, "epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}}},
+    "move_done": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "move_id", "epoch"], "description": "Candidate to source: the staged home is in place; the candidate restarts as the primary at epoch.", "properties": {"t": {"const": "move_done"}, "move_id": {"$ref": "#/$defs/wireId"}, "epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}}},
     "pairingLink": {
       "type": "object",
       "x-uri-prefix": "fermix://pair?",

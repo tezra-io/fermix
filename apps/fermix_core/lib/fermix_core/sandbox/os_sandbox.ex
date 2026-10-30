@@ -25,42 +25,65 @@ defmodule FermixCore.Sandbox.OsSandbox do
   several filtered rules that match. Every carve-out therefore lives inside the
   one filtered write allowance, as a `require-not`.
 
-  Linux is a later stage (Landlock); until it lands, commands there run as they
-  did before this module existed, and `Capabilities.AccessGate` asks the owner
-  before one runs in a turn that read outside content (`enforced?/1`).
+  On Linux the command runs under the `fermix_landlock` exec shim with Landlock
+  rules carved from the same path sets (`Sandbox.Landlock`). A kernel that
+  cannot hold them (no Landlock, or ABI below 2: Linux before 5.19) refuses
+  every command by name; nothing runs unconfined. On any other system commands
+  run as before, and `Capabilities.AccessGate` asks the owner before one runs
+  in a turn that read outside content (`enforced?/1`).
   """
 
   alias FermixCore.Browser.Bridge.HostManifest
   alias FermixCore.Sandbox.Config
+  alias FermixCore.Sandbox.Landlock
   alias FermixCore.Sandbox.Mode
   alias FermixCore.Sandbox.PathPolicy
 
   @sandbox_exec "/usr/bin/sandbox-exec"
   @darwin {:unix, :darwin}
+  @linux {:unix, :linux}
 
-  # Fermix-home entries a command may never read: credentials, the agent's
-  # browser cookies, and the logs and traces a token can survive redaction in.
-  # `auth.json` and `memory.db` are matched with the files named after them
-  # (`.tmp.N`, `-wal`) by the read-deny patterns instead.
+  # Fermix-home entries a command may never read: credentials (the file secret
+  # store, the phone gateway's identity bundle under `mobile/`: `gateway_key`,
+  # `tls.key`, `iroh_key`, and a desktop's key under `device/`),
+  # the agent's browser cookies, and the logs and traces a token can survive
+  # redaction in. `auth.json` and `memory.db` are matched with the files named
+  # after them (`.tmp.N`, `-wal`) by the read-deny patterns instead.
   @secret_entries ~w(
     secrets secret_key_base setup-token setup-launch-token.json acp_identities
-    mobile plugins/run chatgpt_host.json browser/profiles logs traces
+    mobile device plugins/run chatgpt_host.json browser/profiles logs traces
   )
   @secret_prefixed ~w(auth.json memory.db)
 
-  # Outside Fermix's home, what a command may never write in any mode: the
-  # bootstrap record the Mac app keeps, every launch agent (a plist there runs
-  # outside any sandbox at the next login), and the scheduler and system
-  # databases setuid helpers write.
-  @home_protected ["Library/Application Support/Fermix", "Library/LaunchAgents"]
-  @system_protected ~w(/private/var/at /private/var/db)
+  # Outside Fermix's home, what a command may never read in any mode: an
+  # Always-On host's enrollment code (M75). `PathPolicy` protects it from
+  # writes as well.
+  @system_secret ~w(/run/fermix)
+
+  # Outside Fermix's home, what a command may never write in any mode: on macOS
+  # the bootstrap record the Mac app keeps, every launch agent (a plist there
+  # runs outside any sandbox at the next login), and the scheduler and system
+  # databases setuid helpers write; on Linux the systemd user units (Fermix's
+  # own among them) and the login autostart entries, which run outside any
+  # sandbox the same way, and the browser host manifests (`host_manifests/2`).
+  @home_protected %{
+    @darwin => ["Library/Application Support/Fermix", "Library/LaunchAgents"],
+    @linux => [".config/systemd/user", ".config/autostart"]
+  }
+  @system_protected %{@darwin => ~w(/private/var/at /private/var/db)}
 
   # Ordinary scratch space, writable in every mode: the shared temp folders, the
   # daemon's own temp folder, and every per-user `T/` and `C/` folder macOS tools
   # write whatever `$TMPDIR` says (`mktemp`, compilers' module caches). Another
-  # account's are closed to this one by their own permissions.
+  # account's are closed to this one by their own permissions. On Linux the
+  # shared temp folders and `/dev/shm` (POSIX shared memory and semaphores).
   @system_writable ~w(/private/tmp /private/var/tmp)
   @user_temp_pattern "^/private/var/folders/[^/]+/[^/]+/(T|C)(/|$)"
+  @linux_writable ~w(/tmp /var/tmp /dev/shm)
+
+  # The device files a command writes on Linux (Seatbelt names its own in the
+  # profile): the null sinks, its terminal, and pseudo-terminals it opens.
+  @linux_devices ~w(/dev/null /dev/zero /dev/full /dev/tty /dev/ptmx /dev/pts)
 
   # Tool caches redirected into the workspace: the owner's own caches hold code
   # the daemon or the owner later runs (the browser tool's Chromium lives under
@@ -86,7 +109,12 @@ defmodule FermixCore.Sandbox.OsSandbox do
   """
   @type unreadable :: {String.t(), :tree | :prefix | :named}
 
-  @typedoc "The path sets a profile is built from, every one symlink-resolved."
+  @typedoc """
+  The path sets a profile or the Landlock rules are built from, every one
+  symlink-resolved. `credentials` and `unreadable` are the owner's credentials
+  and the read rules in their structured form, which Landlock carves from; the
+  patterns are Seatbelt's.
+  """
   @type rules :: %{
           fermix_home: String.t(),
           writable: [String.t()],
@@ -94,7 +122,9 @@ defmodule FermixCore.Sandbox.OsSandbox do
           fermix_writable: [String.t()],
           protected: [String.t()],
           protected_patterns: [String.t()],
+          credentials: [String.t()],
           ancestors: [String.t()],
+          unreadable: [unreadable()],
           secret: [String.t()],
           secret_patterns: [String.t()],
           no_exec: [String.t()]
@@ -106,19 +136,52 @@ defmodule FermixCore.Sandbox.OsSandbox do
   admits as a root (see `Mode.effective_roots/2`); `:roots` passes those roots
   when the caller already resolved them. `:os` is the platform seam; `:scratch`
   replaces the temp roots and pattern (tests, whose homes live in the temp
-  folder, pass `[]`).
+  folder, pass `[]`); `:landlock_shim` and `:fs` replace the shim and the
+  filesystem the Linux rules are carved from.
   """
   @spec wrap(String.t(), [String.t()], Config.t(), String.t() | nil, keyword()) ::
           {:ok, spawn()} | {:error, term()}
   def wrap(executable, args, %Config{} = config, request_cwd, opts \\ [])
       when is_binary(executable) and is_list(args) and is_list(opts) do
-    if enforced?(opts) do
-      with {:ok, rules} <- rules(config, request_cwd, opts) do
-        {:ok, {@sandbox_exec, ["-p", profile(rules)] ++ parameters(rules) ++ [executable | args]}}
-      end
-    else
-      {:ok, {executable, args}}
+    case platform(opts) do
+      @darwin -> seatbelt(executable, args, config, request_cwd, opts)
+      @linux -> landlock(executable, args, config, request_cwd, opts)
+      _other -> {:ok, {executable, args}}
     end
+  end
+
+  defp seatbelt(executable, args, config, request_cwd, opts) do
+    with {:ok, rules} <- rules(config, request_cwd, opts) do
+      {:ok, {@sandbox_exec, ["-p", profile(rules)] ++ parameters(rules) ++ [executable | args]}}
+    end
+  end
+
+  # The shim checks the kernel itself before every command, so a host without
+  # Landlock refuses at the command, by name, with no probe here.
+  defp landlock(executable, args, config, request_cwd, opts) do
+    shim = landlock_shim(opts)
+    fs = Keyword.get_lazy(opts, :fs, &Landlock.disk/0)
+
+    with :ok <- shim_present(shim),
+         {:ok, rules} <- rules(config, request_cwd, opts),
+         {:ok, grants} <- Landlock.grants(landlock_input(rules), fs) do
+      {:ok, {shim, Landlock.args(grants) ++ ["--", executable | args]}}
+    end
+  end
+
+  defp shim_present(shim) do
+    if File.regular?(shim), do: :ok, else: {:error, {:shim_missing, shim}}
+  end
+
+  defp landlock_input(rules) do
+    rules
+    |> Map.take([:writable, :fermix_home, :fermix_writable, :protected])
+    |> Map.merge(%{
+      credentials: rules.credentials,
+      unreadable: rules.unreadable,
+      no_exec: rules.no_exec,
+      devices: @linux_devices
+    })
   end
 
   @doc """
@@ -128,7 +191,7 @@ defmodule FermixCore.Sandbox.OsSandbox do
   @spec with_cache_env([{String.t(), String.t()}], Config.t(), keyword()) ::
           [{String.t(), String.t()}]
   def with_cache_env(env, %Config{} = config, opts \\ []) when is_list(env) and is_list(opts) do
-    if enforced?(opts) do
+    if platform(opts) in [@darwin, @linux] do
       root = Path.join(config.workspace_root, ".cache")
 
       @cache_env
@@ -141,10 +204,13 @@ defmodule FermixCore.Sandbox.OsSandbox do
   end
 
   @doc """
-  The sentence for a profile `sandbox-exec` itself refused (exit 64 or 65 with
-  its own line), or nil when the exit is the command's. Exit 71, a sandbox that
-  could not be applied, is left to the command: a command that starts a sandbox
-  of its own (`codex`, `claude`) fails the same way inside Fermix's.
+  The sentence for a command the sandbox itself refused, or nil when the exit
+  is the command's: a profile `sandbox-exec` refused (exit 64 or 65 with its
+  own line), or the Landlock shim's own refusal (`Landlock.refusal/2`: a kernel
+  that cannot hold commands, or a rule it could not add). `sandbox-exec`'s exit
+  71, a sandbox that could not be applied, is left to the command: a command
+  that starts a sandbox of its own (`codex`, `claude`) fails the same way
+  inside Fermix's.
   """
   @spec refusal(integer(), String.t()) :: String.t() | nil
   def refusal(exit_code, "sandbox-exec: " <> _rest = output) when exit_code in [64, 65] do
@@ -152,7 +218,8 @@ defmodule FermixCore.Sandbox.OsSandbox do
     "The command could not start inside Fermix's sandbox: #{line}"
   end
 
-  def refusal(exit_code, output) when is_integer(exit_code) and is_binary(output), do: nil
+  def refusal(exit_code, output) when is_integer(exit_code) and is_binary(output),
+    do: Landlock.refusal(exit_code, output)
 
   @doc "The sentence for a `rules/3` error: why no command can run."
   @spec describe(term()) :: String.t()
@@ -165,22 +232,57 @@ defmodule FermixCore.Sandbox.OsSandbox do
   def describe(:no_writable_root),
     do: "Commands can't run: the sandbox mode leaves no folder a command may write."
 
-  @doc "Whether the kernel holds commands to the sandbox here, as `fermix sandbox explain` says it."
+  def describe({:shim_missing, _shim} = reason), do: Landlock.describe(reason)
+
+  def describe({:unlistable, path, reason}),
+    do: "Commands can't run: Fermix's sandbox could not list #{path} (#{inspect(reason)})."
+
+  def describe({:too_many_rules, count, max}),
+    do:
+      "Commands can't run: Fermix's sandbox would need #{count} rules here, more than #{max}; " <>
+        "a folder with that many entries holds a protected path (is Fermix's home inside a " <>
+        "busy temp folder?)."
+
+  @doc """
+  Whether the kernel holds commands to the sandbox here, as `fermix sandbox
+  explain` says it. On Linux it asks the shim (`Landlock.probe/1`).
+  """
   @spec enforcement(keyword()) :: String.t()
   def enforcement(opts \\ []) when is_list(opts) do
-    if enforced?(opts),
-      do: "held by the kernel (Seatbelt)",
-      else: "not held by the kernel on this system"
+    case platform(opts) do
+      @darwin -> "held by the kernel (Seatbelt)"
+      @linux -> landlock_enforcement(landlock_probe(opts))
+      _other -> "not held by the kernel on this system"
+    end
   end
+
+  defp landlock_enforcement({:ok, abi}), do: "held by the kernel (Landlock ABI #{abi})"
+  defp landlock_enforcement({:error, reason}), do: "refused: " <> Landlock.describe(reason)
 
   @doc """
   Whether the kernel holds commands to the sandbox on this host: macOS
-  (Seatbelt) today. `:os` is the platform seam, as in `wrap/5`. The one source
-  of this fact: `Capabilities.AccessGate` reads it too, to ask the owner before
-  a host command runs after outside content where it is false.
+  (Seatbelt), and Linux where the Landlock shim is installed and the kernel's
+  ABI is 2 or later, which asks the shim (one short process; `:landlock` pins
+  its answer in tests). `:os` is the platform seam, as in `wrap/5`. The one
+  source of this fact: `Capabilities.AccessGate` reads it too, to ask the owner
+  before a host command runs after outside content where it is false. A Linux
+  host where it is false refuses every confined command anyway.
   """
   @spec enforced?(keyword()) :: boolean()
-  def enforced?(opts \\ []) when is_list(opts), do: Keyword.get(opts, :os, :os.type()) == @darwin
+  def enforced?(opts \\ []) when is_list(opts) do
+    case platform(opts) do
+      @darwin -> true
+      @linux -> match?({:ok, _abi}, landlock_probe(opts))
+      _other -> false
+    end
+  end
+
+  defp landlock_probe(opts),
+    do: Keyword.get_lazy(opts, :landlock, fn -> Landlock.probe(landlock_shim(opts)) end)
+
+  defp landlock_shim(opts), do: Keyword.get_lazy(opts, :landlock_shim, &Landlock.shim_path/0)
+
+  defp platform(opts), do: Keyword.get(opts, :os, :os.type())
 
   @doc "The path sets for `config`. Options as `wrap/5`."
   @spec rules(Config.t(), String.t() | nil, keyword()) :: {:ok, rules()} | {:error, term()}
@@ -191,8 +293,9 @@ defmodule FermixCore.Sandbox.OsSandbox do
 
     with {:ok, fermix_home} <- resolve_one(config.home),
          {:ok, os_home} <- resolve_one(config.os_home),
+         {:ok, scratch} <- resolve(scratch),
          {:ok, writable} <- writable(config, roots, scratch),
-         {:ok, protected} <- protected(config),
+         {:ok, protected} <- protected(config, platform(opts)),
          {:ok, fermix_writable} <- fermix_writable(config, fermix_home),
          {:ok, own} <- resolve([config.workspace_root, Path.join(config.home, "skills")]),
          {:ok, credentials} <- resolve(PathPolicy.credential_paths(config)),
@@ -206,7 +309,9 @@ defmodule FermixCore.Sandbox.OsSandbox do
          fermix_writable: fermix_writable,
          protected: protected,
          protected_patterns: protected_patterns(os_home, credentials ++ pane),
+         credentials: credentials,
          ancestors: Enum.uniq(ancestors([fermix_home | protected]) ++ own),
+         unreadable: unreadable,
          secret: for({path, reach} <- unreadable, reach != :prefix, do: path),
          secret_patterns: Enum.flat_map(unreadable, &read_pattern/1),
          no_exec: [Path.join(fermix_home, "plugins")]
@@ -220,30 +325,50 @@ defmodule FermixCore.Sandbox.OsSandbox do
   defp writable(config, roots, scratch) do
     mode_roots = if config.mode == :open, do: ["/"], else: []
 
-    case resolve(mode_roots ++ roots ++ scratch) do
-      {:ok, []} -> {:error, :no_writable_root}
-      result -> result
+    case resolve(mode_roots ++ roots) do
+      {:ok, resolved} when resolved == [] and scratch == [] -> {:error, :no_writable_root}
+      {:ok, resolved} -> {:ok, Enum.uniq(resolved ++ scratch)}
+      error -> error
     end
   end
 
   defp scratch(opts) do
     case Keyword.fetch(opts, :scratch) do
       {:ok, roots} when is_list(roots) -> {roots, []}
-      :error -> {@system_writable ++ [System.tmp_dir!()], [@user_temp_pattern]}
+      :error -> default_scratch(platform(opts))
     end
   end
 
+  defp default_scratch(@darwin),
+    do: {@system_writable ++ [System.tmp_dir!()], [@user_temp_pattern]}
+
+  defp default_scratch(_linux_or_other), do: {@linux_writable ++ [System.tmp_dir!()], []}
+
   # A blocked root stays closed to commands as it is to the file tools, even in
   # `open`, where every other folder is writable.
-  defp protected(config) do
+  defp protected(config, os) do
     code_root = List.to_string(:code.root_dir())
-    home = Enum.map(@home_protected, &Path.join(config.os_home, &1))
+    home = Enum.map(Map.get(@home_protected, os, []), &Path.join(config.os_home, &1))
 
     resolve(
       PathPolicy.protected_paths(config) ++
-        [code_root | home] ++ @system_protected ++ config.blocked_roots
+        [code_root | home] ++
+        Map.get(@system_protected, os, []) ++
+        host_manifests(config, os) ++ @system_secret ++ config.blocked_roots
     )
   end
+
+  # Seatbelt closes every browser's host manifest by one pattern
+  # (`protected_patterns/2`); Landlock names each file.
+  defp host_manifests(config, @linux) do
+    base = Path.join(config.os_home, ".config")
+
+    for browser <- HostManifest.browsers(),
+        {:ok, path} <- [HostManifest.manifest_path(browser, os: :linux, base: base)],
+        do: path
+  end
+
+  defp host_manifests(_config, _os), do: []
 
   defp protected_patterns(os_home, credentials) do
     support = Path.join(os_home, "Library/Application Support")
@@ -266,12 +391,13 @@ defmodule FermixCore.Sandbox.OsSandbox do
 
   @doc """
   What a command may never read under `config`, every path symlink-resolved:
-  Fermix's secrets and the Mac app browser pane's website data
-  (`PathPolicy.pane_website_data_paths/1`) in every mode, and outside `open` the
-  owner's credentials.
-  `~/.config/fermix` is named on its own because `open` reads the rest of the
-  owner's credentials. `secret_writer` stages a key being saved under
-  `System.tmp_dir!()/fermix-secret-N/`, the same resolver read here.
+  Fermix's secrets (`/run/fermix` among them) and the Mac app browser pane's
+  website data (`PathPolicy.pane_website_data_paths/1`) in every mode, and
+  outside `open` the owner's credentials. `~/.config/fermix` is named on its own
+  because `open` reads the rest of the owner's credentials. `secret_writer`
+  stages a key being saved under the home's `secrets/.staging-N/`, inside the
+  `secrets` tree. The one list both kernels' read rules and `fermix sandbox
+  explain` derive from; every entry is write-protected too.
   """
   @spec unreadable(Config.t()) :: {:ok, [unreadable()]} | {:error, term()}
   def unreadable(%Config{} = config) do
@@ -279,13 +405,12 @@ defmodule FermixCore.Sandbox.OsSandbox do
          {:ok, trees} <-
            resolve(
              Enum.map(@secret_entries, &Path.join(fermix_home, &1)) ++
-               [Path.join(config.os_home, ".config/fermix")]
+               [Path.join(config.os_home, ".config/fermix") | @system_secret]
            ),
-         {:ok, staging} <- resolve([Path.join(System.tmp_dir!(), "fermix-secret-")]),
          {:ok, credentials} <-
            resolve(owner_credentials(config, PathPolicy.credential_paths(config))),
          {:ok, pane} <- resolve(PathPolicy.pane_website_data_paths(config)) do
-      prefixed = Enum.map(@secret_prefixed, &Path.join(fermix_home, &1)) ++ staging
+      prefixed = Enum.map(@secret_prefixed, &Path.join(fermix_home, &1))
       named = credentials ++ pane
       # A path the owner's credentials also name keeps their wider rule.
       trees = Enum.reject(trees, &(&1 in named))

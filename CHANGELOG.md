@@ -106,6 +106,42 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   what you wrote in that chat over the last few days, your own words only, and
   can decide to wait until the next day instead of asking now or dropping the
   question; asking about the hard thing itself is never held back.
+- **Slack works on a host with no public address.** Slack can now reach
+  Fermix over Socket Mode instead of a webhook: Fermix opens the connection
+  itself with an app-level token, so there is no public URL, tunnel or open
+  port to set up, which is how Slack runs on a server. Choose Socket Mode in
+  the Channels settings or the setup page's Slack card, save the bot token and
+  the app-level token, and restart. `/health` and Doctor say whether it is
+  connected, Fermix reconnects on its own when Slack refreshes or drops the
+  connection, and an event it could not take in is left for Slack to send
+  again. The webhook stays the default.
+- **Always On: Fermix can move to a server you control.** Your home (its
+  settings, memory, secrets, skills and workspace) can now move from your
+  computer to a Linux server, so Fermix keeps working with your Mac closed.
+  With Reach from anywhere on, Always On on your primary gives an enrollment
+  code, good once for thirty minutes; a server enrolled with it waits for the
+  move, and you review the move (the secrets that travel, the server's
+  Fermix, free disk, plugins and what stops) and start it from the app with a
+  recovery passphrase. The computer the home left stays a desktop of the
+  server: the app's chat and Fermix-wide settings go to the server through
+  it, and paired phones see a reconnect. iMessage, voice calls and meetings
+  stop after a move. Once a recovery passphrase is set, a primary keeps
+  encrypted snapshots of itself in an S3 bucket, every six hours by default,
+  and after a move on your desktop too, and a lost server is restored from
+  the newest one. The setup page's Always On tab says where Fermix runs, and
+  `fermix home` does all of this at a terminal, with `export`, `import` and
+  `mark-moved` for moving a home by hand.
+- **A server gets ready for Always On from one command.** On a Debian 12,
+  Debian 13 or Ubuntu 24.04 server (arm64 or x86_64),
+  `curl -fsSL https://fermix.ai/always-on | sudo sh` asks for the enrollment
+  code without showing it, or cloud-init user data passes it in
+  `FERMIX_ENROLL_CODE`. It blocks the cloud's instance metadata service for
+  every account but root, installs Fermix and a `fermix` account to run it,
+  enrolls the server with your primary, starts its service, installs Chromium
+  on Debian (on Ubuntu, install a browser yourself) and waits for your primary
+  to accept the server. `--snapshot-bucket` and `--snapshot-region` name where
+  the server will keep its snapshots, and `--restore` prepares a server to
+  restore your home from a snapshot instead.
 
 ### Changed
 
@@ -122,6 +158,26 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A GitHub cue source's form is shorter.** Its content toggle now sits
   under More options with the rest of what the GitHub preset settles, so only
   the name and the signing secret are left to fill in.
+- **One browser sign-in now serves all your conversations.** Every
+  conversation you run on a Fermix (a chat on any channel, a scheduled job's
+  runs, a cue run) shares one browser profile, so a site you sign in to once
+  stays signed in for all of them and a scheduled job no longer starts signed
+  out on every run. Each conversation still works in its own tab. A guest's
+  conversation keeps a profile of its own, and signing in on one Fermix does
+  not sign another in. Profiles were kept per conversation before and are not
+  carried over, so sign in to each site once more.
+- **On Linux the kernel now holds every command Fermix runs for you to the
+  sandbox, as it does on a Mac.** The shell, git and operator commands run
+  under Landlock (Linux 5.19 or later): outside `open` they write only the
+  workspace, your grants and the temp folders, and in no mode can they write
+  Fermix's home outside its workspace and skills, its systemd unit or the
+  protected paths, or read its secrets, tokens, the phone and desktop keys,
+  `/run/fermix`, or (outside `open`) your SSH and cloud credentials. So a
+  command in a turn that read outside content no longer waits for your
+  confirmation there. A Linux kernel without Landlock runs no command and says
+  why, `fermix doctor` gains an `os sandbox` row on both systems, and tool
+  caches move into the workspace's `.cache` on Linux too. On a Mac the same
+  read rules now also cover the phone and desktop keys and `/run/fermix`.
 
 ### Removed
 
@@ -158,6 +214,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   offers X 1.0.2 with the new instructions: a new install gets it, an
   installed copy moves with `fermix plugins upgrade x`, and the Mac app has no
   plugin update yet.
+- **A message is answered once even when its retry comes after a restart.**
+  Fermix kept the ids of incoming Slack, WhatsApp and iMessage events in
+  memory only, so a provider's retry that arrived after a restart could start
+  a second reply. It now keeps each id for 24 hours in its memory database, so
+  the retry is recognised as a duplicate after a restart, and after your home
+  moves to another host too. With memory turned off the ids are kept until the
+  next restart, as before, and an event whose id Fermix cannot record is
+  refused, so Slack or WhatsApp sends it again.
+- **Fermix's Linux service no longer stays down after its fifth start.** The
+  systemd service allowed five starts with no time window, so restarts added
+  up over the life of the service until one more stop left Fermix down. It
+  now allows five starts in any ten minutes: a daemon that keeps crashing
+  still stops, and its journal says why, while restarts spread over time,
+  such as applying a setting, never use the budget up.
 
 ### Security
 

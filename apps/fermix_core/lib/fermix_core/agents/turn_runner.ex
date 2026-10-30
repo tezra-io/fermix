@@ -1146,36 +1146,41 @@ defmodule FermixCore.Agents.TurnRunner do
   defp auth_error?(_other), do: false
 
   # The hint keys on how the route authenticates: subscription OAuth gets a
-  # reconnect verb, API-key modes get key advice, and Codex-shaped reasons
-  # (token errors, refresh failures, bare strings) keep `fermix auth login`.
+  # sign-in, API-key modes get key advice, and Codex-shaped reasons (token
+  # errors, refresh failures, bare strings) a sign-in again. Each names the
+  # Providers settings every app and the setup page show, never a command
+  # (AGENTS.md, app-managed production configuration).
   defp auth_reply({:provider_error, %{provider: :anthropic, auth_mode: :oauth}}, _get_env) do
-    "Claude subscription authentication failed — reconnect with " <>
-      "`fermix auth login --provider anthropic` and retry."
+    "Claude subscription authentication failed — sign in with the Claude subscription " <>
+      "again in Fermix's Providers settings and retry."
   end
 
   # xAI 403 in OAuth mode is tier/entitlement denial, not a stale token —
   # re-login won't fix it (design doc §6.5).
   defp auth_reply({:provider_error, %{provider: :xai, auth_mode: :oauth, status: 403}}, _get_env) do
     "SpaceXAI subscription access denied — the Grok plan may not include API access. " <>
-      "Switch to an API key in `fermix setup`, or check the plan tier."
+      "Switch to an API key in Fermix's Providers settings, or check the plan tier."
   end
 
   defp auth_reply({:provider_error, %{provider: :xai, auth_mode: :oauth}}, _get_env) do
-    "SpaceXAI subscription authentication failed — reconnect with " <>
-      "`fermix auth login --provider xai` and retry."
+    "SpaceXAI subscription authentication failed — sign in with the SpaceXAI Grok " <>
+      "subscription again in Fermix's Providers settings and retry."
   end
 
   # Codex is OAuth-only — "check the API key" advice would mislead.
   defp auth_reply({:provider_error, %{provider: :openai_codex}}, _get_env) do
-    "Authentication failed — run `fermix auth login` from the host and try again."
+    "Authentication failed — sign in with ChatGPT again in Fermix's Providers settings " <>
+      "and try again."
   end
 
   # Any other OAuth-tagged auth failure gets reconnect advice, never API-key
   # advice (provider design §13 note 11 — dispatch on auth_mode, not a
   # per-provider allowlist).
   defp auth_reply({:provider_error, %{provider: provider, auth_mode: :oauth}}, _get_env) do
-    "#{ProviderError.provider_label(provider)} authentication failed — reconnect with " <>
-      "`fermix auth login --provider #{provider}` and retry."
+    label = ProviderError.provider_label(provider)
+
+    "#{label} authentication failed — sign in to #{label} again in Fermix's Providers " <>
+      "settings and retry."
   end
 
   # config/runtime.exs layers a nonblank `<PROVIDER>_API_KEY` over the stored
@@ -1186,7 +1191,8 @@ defmodule FermixCore.Agents.TurnRunner do
 
     case provider_key_override(provider, get_env) do
       nil ->
-        "#{label} authentication failed — check the #{label} API key in `fermix setup` and retry."
+        "#{label} authentication failed — check the #{label} API key in Fermix's Providers " <>
+          "settings and retry."
 
       env ->
         "#{label} authentication failed with the API key from #{env} in the daemon's " <>
@@ -1196,7 +1202,7 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp auth_reply(_reason, _get_env) do
-    "Authentication failed — run `fermix auth login` from the host and try again."
+    "Authentication failed — sign in again in Fermix's Providers settings and try again."
   end
 
   defp provider_key_override(provider, get_env) do

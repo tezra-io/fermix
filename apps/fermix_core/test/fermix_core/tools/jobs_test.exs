@@ -1727,11 +1727,11 @@ defmodule FermixCore.Tools.JobsTest do
 
     # The gate runs after the scoping, on the list the job will hold: a run
     # with `schedule_job` hands a job a way to every host command, so a tainted
-    # Linux turn is held, while a run with only `web_search` is not, though the
-    # gate refuses the `[]` it was asked for.
+    # turn on a Linux host without Landlock is held, while a run with only
+    # `web_search` is not, though the gate refuses the `[]` it was asked for.
     test "the access gate still judges the inherited list", %{open: open, registry: registry} do
       tainted_linux = %{
-        os_sandbox: [os: {:unix, :linux}],
+        os_sandbox: [os: {:unix, :linux}, landlock: {:error, {:unavailable, "no Landlock"}}],
         outside_sources: MapSet.new([{:tool, "web_fetch"}])
       }
 

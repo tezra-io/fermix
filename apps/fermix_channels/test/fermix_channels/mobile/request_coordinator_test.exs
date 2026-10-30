@@ -4,6 +4,11 @@ defmodule FermixChannels.Mobile.RequestCoordinatorTest do
   alias FermixChannels.Mobile.RequestCoordinator
 
   defmodule StoreStub do
+    def record_boot_primary_epoch(primary_epoch, opts) do
+      send(opts[:test_pid], {:recorded_primary_epoch, primary_epoch})
+      opts[:recorded] || {:ok, :unchanged}
+    end
+
     def recoverable_client_requests(epoch, opts) do
       send(opts[:test_pid], {:recoverable, epoch, opts[:limit]})
       {:ok, opts[:recoverable] || []}
@@ -81,10 +86,14 @@ defmodule FermixChannels.Mobile.RequestCoordinatorTest do
          recovery_launcher: fn task -> task.() end,
          recover_request: recover,
          device_store: :store,
-         authorize_device: fn :store, "device-a" -> {:ok, %{device_id: "device-a"}} end}
+         authorize_device: fn :store, "device-a" -> {:ok, %{device_id: "device-a"}} end,
+         primary_epoch: fn -> {:ok, 3} end}
       )
 
     epoch = RequestCoordinator.epoch(server)
+
+    # The home's primary epoch is recorded before anything is recovered (M75).
+    assert_received {:recorded_primary_epoch, 3}
     assert_received {:recoverable, ^epoch, 2}
 
     assert_received {:recovered, "offline",
@@ -118,7 +127,8 @@ defmodule FermixChannels.Mobile.RequestCoordinatorTest do
          recovery_launcher: fn task -> task.() end,
          recover_request: recover,
          device_store: :store,
-         authorize_device: fn :store, id -> {:error, {:device_not_found, id}} end}
+         authorize_device: fn :store, id -> {:error, {:device_not_found, id}} end,
+         primary_epoch: fn -> :absent end}
       )
 
     assert is_binary(RequestCoordinator.epoch(server))
@@ -152,12 +162,69 @@ defmodule FermixChannels.Mobile.RequestCoordinatorTest do
          store_opts: [test_pid: self(), recoverable: [row]],
          recovery_limit: 2,
          recovery_launcher: fn task -> task.() end,
-         recover_request: recover}
+         recover_request: recover,
+         primary_epoch: fn -> :absent end}
       )
 
     assert is_binary(RequestCoordinator.epoch(server))
     refute_received :unexpected_recovery
     assert_received {:recovery_failed, "main", "legacy", 1, _fields}
+  end
+
+  # M75: without the home's primary epoch recorded, a move or a restore cannot
+  # be told from a restart, so nothing is recovered and every start is refused
+  # by that reason, never run blind.
+  test "a primary epoch that cannot be read or recorded refuses every start" do
+    for {primary_epoch, recorded, reason} <- [
+          {{:error, :eacces}, {:ok, :unchanged}, {:primary_epoch_unavailable, :eacces}},
+          {{:ok, 2}, {:error, :busy}, {:primary_epoch_unrecorded, :busy}}
+        ] do
+      server =
+        start_supervised!(
+          {RequestCoordinator,
+           name: nil,
+           store: StoreStub,
+           boot_epoch: random_epoch(),
+           store_opts: [test_pid: self(), recorded: recorded],
+           recovery_launcher: fn task -> task.() end,
+           recover_request: fn _row, _context, _opts -> :ok end,
+           primary_epoch: fn -> primary_epoch end},
+          id: {:refusing, reason}
+        )
+
+      assert {:error, ^reason} = RequestCoordinator.acquire(server, "main", "any")
+      refute_received {:recoverable, _epoch, _limit}
+      refute_received {:started, "main", "any", _epoch}
+    end
+  end
+
+  # M75: a device-role engine runs a retired copy of a moved home, so it
+  # records no primary epoch and recovers nothing from that timeline.
+  test "a device-role engine records nothing and recovers nothing" do
+    test_pid = self()
+
+    server =
+      start_supervised!(
+        {RequestCoordinator,
+         name: nil,
+         store: StoreStub,
+         boot_epoch: random_epoch(),
+         store_opts: [test_pid: test_pid, recoverable: [%{client_msg_id: "retired"}]],
+         recovery_launcher: fn task ->
+           send(test_pid, :recovery_launched)
+           task.()
+         end,
+         recover_request: fn _row, _context, _opts -> send(test_pid, :recovered) end,
+         primary_epoch: fn -> {:ok, 2} end,
+         engine_role: %{role: :device, primary: "vm.example.test"}}
+      )
+
+    # Recovery is decided in `handle_continue`, before this call is served.
+    assert is_binary(RequestCoordinator.epoch(server))
+    refute_received {:recorded_primary_epoch, _epoch}
+    refute_received :recovery_launched
+    refute_received {:recoverable, _epoch, _limit}
+    refute_received :recovered
   end
 
   test "standalone startup generates a fresh cryptographic boot epoch" do

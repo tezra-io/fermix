@@ -224,35 +224,35 @@ the checks that show a rule needs it):
 - `AcceptedDedupe`: a known `client_msg_id` is claimed as a duplicate
   (`claim_request_in_tx`, `classify_claim`). The coordinator starts no second
   attempt of a request running, completed or failed
-  (`request_coordinator.ex:125-132`).
+  (`request_coordinator.ex:166-173`).
 - `SeqCursor`: the client's cursor rules (`PROTOCOL.md`).
 - `SubscribeBeforePull`: the Connection joins the registry before
-  `server_hello` (`join`, `connection.ex:259-269`).
+  `server_hello` (`join`, `connection.ex:414-427`).
 - `PageWrittenInReadStep`: the Connection writes `history_page` to the socket
-  in the step that read it (`read_opts`, `connection.ex:537-541`). `FALSE`
+  in the step that read it (`read_opts`, `connection.ex:847-851`). `FALSE`
   sends it through its own mailbox, where a live row sent after the read can
   overtake it.
 - `AnnouncesEveryRow`: every row written outside a turn's completion is
   announced as a `row` as it is written: the user's row (`announce_user_row`,
-  `connection.ex:525-526`) and a delivery (`announce_written`,
+  `connection.ex:835-836`) and a delivery (`announce_written`,
   `channels/companion.ex:338-339`), both built by `Companion.Output.row` and
   sent through `Companion.Fanout.announce`. `FALSE` announces no user row.
 - `SingleAnswer`: `Confirmations.take` is an `:ets.take`, the sole consumer of
   a token (`confirmations.ex:21-31`).
 - `ResendsPendingApprovals`: the Connection writes every card still waiting
   right after `server_hello`, in the step that joined the registry
-  (`send_pending_approvals`, `connection.ex:275-284`, from
+  (`send_pending_approvals`, `connection.ex:460-469`, from
   `Approvals.pending`). `FALSE`: a card goes out once, live.
 - `DropsCardsAtHello`: when `server_hello` arrives the client drops every card
   it shows and keeps only those sent after it (`PROTOCOL.md` "Approvals").
   `FALSE` keeps a card across a drop until an `approval_resolved` reaches it.
 - `OneTurnAtATime`: `maybe_start_next_request` (`queue.ex:317-325`).
 - `StopTurnNamesTurn`: a stop ends the named message's turn only
-  (`Queue.stop_turn`, `stop_named_in`, `queue.ex:185`, `:1035-1072`). `FALSE`
+  (`Queue.stop_turn`, `stop_named_in`, `queue.ex:185`, `:1048-1085`). `FALSE`
   is the conversation stop.
 - `CancelMarksRequest`: a cancel is recorded on its request first
-  (`Requests.cancel`, `requests.ex:157-173`; `cancel_request`,
-  `mobile_sql.ex:567-586`). `Turns` reads the mark and enqueues in one step
+  (`Requests.cancel`, `requests.ex:192-208`; `cancel_request`,
+  `mobile_sql.ex:705-724`). `Turns` reads the mark and enqueues in one step
   (`hand_off`, `turns.ex:335-350`), and sends every stop of a turn it handed
   off itself, after the enqueue (`turns.ex:249-253`, `stop_in_queue`,
   `:449-460`). `FALSE` is the code before 431d5663: the Connection called
@@ -261,7 +261,7 @@ the checks that show a rule needs it):
   `Turns`; the cancel writes nothing.
 - `SettleAfterIngest`: once ingest returned, the request worker casts the
   request's settlement to `Turns` (`settle_after_ingest`,
-  `requests.ex:303-307`). `FALSE` is the code before: a message the gateway
+  `requests.ex:346-350`). `FALSE` is the code before: a message the gateway
   answered without a turn stayed `running`, and the next boot ran it again.
 - `SettleUnlessHandedOff`: `Turns` settles that request only if no turn was
   handed off for it (`handle_cast({:settle_unless_handed_off, ...})`,
@@ -271,13 +271,13 @@ the checks that show a rule needs it):
 - `FailsUnsettled`: a settlement that fails is followed by one failure write
   for the attempt and by `error{request_failed, client_msg_id}` to the client
   that sent the request (`settle_inline`, `run_settle`, `turns.ex:368-403`;
-  `fail_attempt`, `report_failure`, `requests.ex:340-360`), through the
+  `fail_attempt`, `report_failure`, `requests.ex:383-403`), through the
   transport's `report_failure`, which the connection writes as a failed
-  worker's error (`connection.ex:513-520`, `:160-161`). `FALSE` only logs the
+  worker's error (`connection.ex:823-830`, `:225-226`). `FALSE` only logs the
   failure: the request stays `running`, and the next boot runs the command
   again.
 - `SeqAssignedOnInsert`: the seq comes from the counter inside the inserting
-  transaction (`append_in_tx`, `mobile_sql.ex:758-765`). `FALSE`: a writer
+  transaction (`append_in_tx`, `mobile_sql.ex:940-947`). `FALSE`: a writer
   reads the counter, then inserts in a second call.
 - `SilenceGate`: a turn may end with no reply only if every client joined
   when it started declared version 2 (`MainAgent.live_call`,
@@ -521,7 +521,7 @@ of an entity its rules are about. All still hold:
   card's `outside.args` and `outside.reason` are additive and ride every
   version. They are proposal events, left out as above.
 - The peer check at the hand-over (`handle_info(:socket_handover)`,
-  `connection.ex:127-134`). A client the daemon cannot place is sent
+  `connection.ex:192-199`). A client the daemon cannot place is sent
   `error: unidentified_client` and closed before a line is read, which the
   client sees as a drop before `server_hello`. The caller it places rides on
   each turn (`metadata.caller`) and decides only what the turn's tools may do.
@@ -571,7 +571,7 @@ off; open `tla/out/companion_session/<check>.txt` after a run to see the path.
 
 ### COMPANION-2: a connection must join the fan-out before its history is read
 - **Status:** holds in the code (b9248004): `join` registers the Connection
-  before it writes `server_hello` (`connection.ex:258-268`).
+  before it writes `server_hello` (`connection.ex:414-427`).
 - **Checks:** 01 holds; 03 breaks `TimelineConverges` with the join after the
   first page.
 

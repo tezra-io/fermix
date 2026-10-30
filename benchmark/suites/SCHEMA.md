@@ -752,7 +752,7 @@ They are validated here so a malformed capability case fails `--dry-run` too.
 |---|---|---|
 | `requires_tools` | [str] | provenance, **any-of**: the trial scores 0 unless ≥1 of these tool spans fired, so an answer reached from parametric recall cannot score |
 | `requires_tools_all` | [str] | provenance, **all-of**: every listed tool span must have fired. Use it when completion genuinely takes more than one step — `[skill_create, skill_reload]` as `requires_tools` means *either*, which lets half the work score full credit |
-| `cross_session` | bool | every turn but the last runs in one session and the last (the recall) in a fresh session for the same owner, so only durable memory or message-history search can answer it. Needs 2+ turns and a `score` block, which grades the recall reply. `{token}` and `{subject}` are replaced per trial in every turn |
+| `cross_session` | bool | every turn but the last runs in one session and the last (the recall) in a fresh session for the same owner, so only what outlives a conversation can answer it: durable memory, message-history search, or the owner's one browser profile. Needs 2+ turns and a scorer for the recall: a `score` block, which grades its reply, or a case-level `fixture_state`, which grades what the pages recorded once it settled (a sign-in the fresh conversation must find still holding). `{token}` and `{subject}` are replaced per trial in every turn |
 
 Both keys may appear on one case (a mandatory pair plus an either-or research
 step). **A span carrying `error_info` satisfies neither key**: the tool has to

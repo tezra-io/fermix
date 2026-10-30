@@ -278,6 +278,26 @@ defmodule FermixCore.Cues.Source.Stream.SocketTest do
     end
   end
 
+  # Slack's Socket Mode client acknowledges each envelope with a text frame.
+  describe "writing" do
+    test "send_text/2 writes text frames in order with the other writes", ctx do
+      %{socket: socket, peer: peer} = connect(ctx)
+
+      :ok = Socket.send_text(socket, ~s({"envelope_id":"env-1"}))
+      :ok = Socket.ping(socket)
+      :ok = Socket.send_text(socket, ~s({"envelope_id":"env-2"}))
+
+      for expected <- [
+            {:text, ~s({"envelope_id":"env-1"})},
+            {:ping, ""},
+            {:text, ~s({"envelope_id":"env-2"})}
+          ] do
+        assert_receive {:ws_peer, ^peer, {:frame, opcode, payload}}, @wait_ms
+        assert {opcode, payload} == expected
+      end
+    end
+  end
+
   describe "closing" do
     test "close/1 sends a close frame and exits :normal once the peer answers", ctx do
       %{socket: socket, monitor: monitor, peer: peer} = connect(ctx)

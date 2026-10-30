@@ -16,7 +16,10 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
   Transport modes:
   - `:polling` (Telegram), `:gateway` (Discord), `:subprocess` (Signal) run a
     supervised child started by `FermixChannels.Application`.
-  - `:webhook` (WhatsApp, Slack) is web-triggered — no child.
+  - `:webhook` (WhatsApp) is web-triggered — no child.
+  - `:socket` (Slack) runs its Socket Mode child (`Channels.Slack.SocketMode`)
+    only when `mode = "socket"`; under the default `mode = "webhook"` Slack is
+    web-triggered like WhatsApp and runs no child.
   - `:loopback` (CLI, daemon) is local/operator — no child, no config key.
 
   Four optional entry keys:
@@ -47,7 +50,8 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
           :config_key => atom() | nil,
           :adapter => module() | nil,
           :remote? => boolean(),
-          :transport => :polling | :gateway | :subprocess | :webhook | :loopback | :listener,
+          :transport =>
+            :polling | :gateway | :subprocess | :webhook | :socket | :loopback | :listener,
           :child => module() | nil,
           optional(:trust) => trust(),
           optional(:ingress_auth) => ingress_auth(),
@@ -79,8 +83,8 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
       config_key: :slack,
       adapter: FermixChannels.Channels.Slack,
       remote?: true,
-      transport: :webhook,
-      child: nil
+      transport: :socket,
+      child: FermixChannels.Channels.Slack.SocketMode
     },
     %{
       name: "discord",
@@ -382,6 +386,10 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
   defp mode_ok?(:telegram, config, :polling) do
     Keyword.get(config, :mode) in [nil, :polling, :webhook]
   end
+
+  # Slack's default is the webhook, which runs no child: only an explicit
+  # `mode = "socket"` starts the Socket Mode connection.
+  defp mode_ok?(:slack, config, :socket), do: Keyword.get(config, :mode) == :socket
 
   # Discord/Signal must match their transport. An unset mode is accepted as
   # "this transport" for hand-written minimal configs.

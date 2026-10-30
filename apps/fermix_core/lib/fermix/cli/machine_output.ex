@@ -39,6 +39,15 @@ defmodule Fermix.CLI.MachineOutput do
     config_write_failed
     systemctl_failed
     binding_write_failed
+    daemon_running
+    epoch_absent
+    already_moved
+    mark_moved_failed
+    engine_stopped
+    snapshots_refused
+    home_status_unavailable
+    enrollment_refused
+    move_refused
   )a
 
   @doc "Every error code this CLI can print, for the caller that renders them."
@@ -154,6 +163,36 @@ defmodule Fermix.CLI.MachineOutput do
   def sentence(:binding_write_failed, details) do
     "Fermix could not record which home the background service runs from." <> said(details)
   end
+
+  def sentence(:daemon_running, _details),
+    do: "Fermix is running from this home. Stop it, then try again."
+
+  def sentence(:epoch_absent, _details),
+    do: "The home has no primary epoch: it has never started as the primary."
+
+  def sentence(:already_moved, details) do
+    "This home already moved to #{Keyword.fetch!(details, :to)} on " <>
+      "#{Keyword.fetch!(details, :date)} at epoch #{Keyword.fetch!(details, :epoch)}, and the " <>
+      "first move stands."
+  end
+
+  def sentence(:mark_moved_failed, details),
+    do: "Fermix could not mark this home moved." <> said(details)
+
+  def sentence(:engine_stopped, _details),
+    do: "Fermix is not running from this home, and this needs it. Start it, then try again."
+
+  def sentence(:snapshots_refused, details),
+    do: "Fermix did not do that." <> said(details)
+
+  def sentence(:home_status_unavailable, details),
+    do: "Fermix could not read this home's status." <> said(details)
+
+  def sentence(:enrollment_refused, details),
+    do: "Fermix did not open an enrollment code." <> said(details)
+
+  def sentence(:move_refused, details),
+    do: "Fermix did not start the move." <> said(details)
 
   defp said(details) do
     case Keyword.get(details, :output) do

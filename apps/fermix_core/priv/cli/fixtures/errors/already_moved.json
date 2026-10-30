@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "already_moved",
+    "sentence": "This home already moved to hetzner cx22 on 2026-10-20 at epoch 3, and the first move stands."
+  },
+  "ok": false,
+  "schema_version": 1
+}

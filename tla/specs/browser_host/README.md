@@ -310,7 +310,7 @@ more of an entity its rules are about. All still hold:
   design spec. A turn (the process that made the first browser call — a
   conversation's turn, a scheduled run, a subagent — not the task itself) that
   loses its pane is marked, and `dispatch` reads that mark before `Routing`
-  ever runs (`browser.ex:120-126`), so every later browser call of *that
+  ever runs (`browser.ex:154-160`), so every later browser call of *that
   turn* answers the same sentence instead of being routed — a turn whose
   first task failed on the host never starts a second task that `Routing`
   could send to Chrome. This is a strictly stronger version of
@@ -345,8 +345,8 @@ spec run by hand.
   one process every request and release of a task pass through: both
   `:browser_host_request` and `:browser_host_release` are handled off the same
   mailbox, in the order they arrived (`task_request`, `release_task`,
-  `connection.ex:335-372`), and both are written to the socket by the same
-  `write_request` (`:411-428`). Holds in the design (check 07) and in the
+  `connection.ex:351-401`), and both are written to the socket by the same
+  `write_request` (`:440-457`). Holds in the design (check 07) and in the
   code.
 - **Counterexample (explored, 12 states):** a variant in which the host may
   take a `task.release` ahead of requests queued before it.
@@ -376,10 +376,10 @@ spec run by hand.
 - **Status:** fixed (7cc024ee, 32297ead). `Connection.release_task` pops the
   task id out of `state.tasks` on its first release and writes `task.release`
   only then; a second release for the same task id finds nothing and writes
-  nothing (`connection.ex:363-372`, matching `PROTOCOL.md`'s "Idempotent: a
+  nothing (`connection.ex:392-401`, matching `PROTOCOL.md`'s "Idempotent: a
   second release for the same task answers `released: []`"). On the daemon
   side, `HostServer.stop/1` is a no-op once `task` is already `nil`
-  (`host_server.ex:107-108`), so ending an already-ended task never sends a
+  (`host_server.ex:124-125`), so ending an already-ended task never sends a
   second `Link.release`. The design asks both sides to release: the host on
   `host_stopping` and on losing the daemon, and HostServer with
   `task.release` for every task it ends.
@@ -439,11 +439,11 @@ spec run by hand.
   reuses a tab id, the step lands on another tab, possibly the person's.
 - **Status:** fixed (32297ead). `HostServer.bind/2` records the connection and
   a monitor on it with the task at its first browser call
-  (`host_server.ex:387-413`); `check_host/1` refuses the task on any other
-  connection (`:417-430`), and its `handle_message` clause on that
+  (`host_server.ex:404-468`); `check_host/1` refuses the task on any other
+  connection (`:472-485`), and its `handle_message` clause on that
   connection's `:DOWN` fails the task with a sentence whether or not a
-  request is out (`:140-144`, `lose`, `:434-438`). Tabs are named
-  `h<connection_id>:<wire_id>` (`public_id/2`, `:698`), so a tab id can never
+  request is out (`:157-161`, `lose`, `:489-493`). Tabs are named
+  `h<connection_id>:<wire_id>` (`public_id/2`, `:792`), so a tab id can never
   reach another connection's tab even if the app reused a wire id across
   connections. Holds in the design (check 01) and in the code.
 - **Checks:** check 04 (15 states) breaks `NoTaskWithoutHost` when the task
@@ -466,11 +466,11 @@ spec run by hand.
 - **Severity:** low. A new task is routed to an app that is quitting, and it
   fails where Chrome would have run it.
 - **Status:** fixed (01ed959f). `HostAvailability.handle_call({:report, ...})`
-  is a no-op once `host.stopping` is `true` (`host_availability.ex:163-164`);
+  is a no-op once `host.stopping` is `true` (`host_availability.ex:168-169`);
   `{:stopping, connection}` sets it only when `connection` matches the one it
-  is currently attached on (`:171-172`), so a stale connection cannot mark a
+  is currently attached on (`:176-177`), so a stale connection cannot mark a
   fresh one stopping; and it is cleared only by the next `attached/3`, which
-  replaces the whole report (`attach/3`, `:206-217`). Holds in the design:
+  replaces the whole report (`attach/3`, `:211-223`). Holds in the design:
   stopping is final for its connection. **Explored:** with a report allowed
   after `host_stopping`, "no task is routed to a host HostServer knows is
   stopping" breaks in 10 states. The design holds it (70,446 states).
@@ -491,7 +491,7 @@ spec run by hand.
 - **Status:** fixed with a bounded answer, not a definitive one (01ed959f).
   The daemon still has no `daemon.sock` signal for "the person quit before
   attaching" — `HostAvailability`'s `quit` field is set only by `stopping/2`
-  (`host_availability.ex:171-173`), which needs an attached connection to say
+  (`host_availability.ex:176-178`), which needs an attached connection to say
   `host_stopping` on, exactly the case this finding is about. What the code
   adds instead is `host_launch_cooldown_ms`: `HostLauncher` records each
   launch's deadline (`launching/2`) and, once it passes with no attach,
@@ -525,7 +525,7 @@ spec run by hand.
   are the app's own, unpinned. `Connection.host_stopping` releases every task
   still bound to it (`Enum.reduce` over `state.tasks`, calling
   `release_task`) before it answers `host.stop_ack` behind them
-  (`connection.ex:279-291`), matching `PROTOCOL.md`'s "Quit mid-task": the
+  (`connection.ex:295-307`), matching `PROTOCOL.md`'s "Quit mid-task": the
   daemon never answers before every release it owes is on the wire. Holding
   the quit for that answer, or ending the hold on its own bound if the answer
   is lost, is `BrowserHostReducer`'s job in `tezra-io/fermix-macos`, still

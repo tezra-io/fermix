@@ -123,6 +123,43 @@ service bound to another home, name it:
 .B fermix memory
 Review and restore what the assistant remembers.
 .TP
+.B fermix home
+.RI "export " FILE " [--passphrase-file " PATH "] [--mark-moved --to " TEXT "] | import " FILE " --into " ROOT " [--passphrase-file " PATH "] | mark-moved --to " TEXT " [--json] | status [--json] | snapshots status|run [--json] | snapshots passphrase --passphrase-file " PATH " [--json] | enroll-code [--json] | enroll --code-file " PATH " [--snapshot-bucket " BUCKET " --snapshot-region " REGION "] [--instance-file " PATH "] | candidates [--json] | move --to " ID " [--recovery-passphrase-file " PATH "] [--retire] [--json]"
+Carry this home to another host. \fBexport\fR seals everything that makes
+the home the primary engine into one file under a passphrase you hold, and
+refuses while the engine that owns the home is running. \fBimport\fR
+restores an archive into an empty directory as the next primary, one epoch
+above the archived home. The passphrase is read from the file or asked for
+without echo; whoever holds it can stand up the primary. The old home must be
+marked moved before it runs again: \fBmark-moved\fR records where it went, and
+from then on it refuses to start as the primary. \fBexport --mark-moved\fR
+writes that marker right after the archive is sealed, so a service that
+relaunches the engine between two commands cannot start the old home as the
+primary. \fBstatus\fR shows the home's role, primary epoch, moved marker and
+snapshots, from the running engine or, when it is stopped, from the home's own
+files. A primary writes encrypted snapshots of itself to S3 on a cadence once
+a recovery passphrase is set with \fBsnapshots passphrase\fR; Fermix keeps
+only the key derived from it, never the passphrase. \fBsnapshots run\fR takes
+one now, and \fBsnapshots status\fR shows the last stored one. \fBimport\fR
+restores a snapshot downloaded from the bucket with the recovery passphrase,
+as it restores an archive.
+To move the primary to a new server instead, \fBenroll-code\fR opens a
+code on the primary, valid once for thirty minutes, and \fBenroll\fR
+\fB\-\-code\-file\fR \fIPATH\fR makes a fresh home on the new server a
+candidate, with no engine running, and removes the code file.
+\fB\-\-snapshot\-bucket\fR and \fB\-\-snapshot\-region\fR name the bucket
+the new server keeps its snapshots in, and \fB\-\-instance\-file\fR what it
+reports about itself, in a file a provisioner writes (the first boot passes
+none). The primary holds the candidate for 24 hours:
+\fBcandidates\fR lists it, its instance facts unverified, and
+\fBmove \-\-to\fR \fIID\fR moves this home to it under a recovery passphrase
+read from \fB\-\-recovery\-passphrase\-file\fR or asked twice without echo.
+The engine then restarts in the device role and carries the move out, and
+\fBstatus\fR shows where it stands. \fB\-\-retire\fR is for a server that is
+itself the primary, being replaced by another server and then destroyed: it
+hands the home over and then serves nothing, instead of staying a desktop of
+the new one.
+.TP
 .B fermix logs
 Show the daemon's own log file.
 .TP

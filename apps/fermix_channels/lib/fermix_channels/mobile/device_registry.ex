@@ -15,6 +15,13 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
   process, whose restart would drop every phone's socket. A revocation also
   asks the remote-reach rail to recompute the relays it uses (M62 §5), a cast
   that never waits on the rail.
+
+  Each entry carries its device's kind, read from the trust store when the
+  socket attaches (M75 §3): `:phone`, or `:desktop` for a desktop engine's
+  session. The phones' audience (`broadcast/3`, `connected/2`) is phones
+  only: a desktop's chat rides its companion tunnel, and a connected desktop
+  is not a phone that makes a push unnecessary. A desktop is found through
+  `FermixChannels.Desktop.Peer`.
   """
 
   use GenServer
@@ -25,7 +32,8 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
 
   @type device_id :: String.t()
   @type profile_id :: String.t()
-  @type entry :: %{device_id: device_id(), pid: pid(), profile_id: profile_id()}
+  @type kind :: :phone | :desktop
+  @type entry :: %{device_id: device_id(), pid: pid(), profile_id: profile_id(), kind: kind()}
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts) do
@@ -55,6 +63,7 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
   @spec list(GenServer.server()) :: [entry()]
   def list(server \\ __MODULE__), do: GenServer.call(server, :list)
 
+  @doc "The phones connected under `profile_id`, by device id; never a desktop."
   @spec connected(GenServer.server(), profile_id()) :: [{device_id(), pid()}]
   def connected(server \\ __MODULE__, profile_id \\ "main")
       when is_binary(profile_id) and profile_id != "" do
@@ -94,9 +103,10 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
   end
 
   @doc """
-  Fan a logical event out to every socket of a profile for per-session
+  Fan a logical event out to every phone of a profile for per-session
   encryption, without waiting: a registry that is not running (the mobile
-  subtree is off) has no socket to reach.
+  subtree is off) has no socket to reach. A desktop's session is never sent
+  one.
   """
   @spec broadcast(GenServer.server(), profile_id(), map()) :: :ok
   def broadcast(server, profile_id, event)
@@ -125,9 +135,8 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
     profile_id = option(opts, :profile_id, "main")
 
     {reply, state} =
-      with :ok <- authorize_device(state, device_id) do
-        attach_socket(state, device_id, pid, profile_id)
-      else
+      case authorized_device(state, device_id) do
+        {:ok, device} -> attach_socket(state, device_id, pid, {profile_id, kind(device)})
         {:error, reason} -> {{:error, reason}, state}
       end
 
@@ -153,7 +162,7 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
     connected =
       state.by_device
       |> Map.values()
-      |> Enum.filter(&(&1.profile_id == profile_id))
+      |> Enum.filter(&phone_of?(&1, profile_id))
       |> Enum.map(&{&1.device_id, &1.pid})
       |> Enum.sort_by(&elem(&1, 0))
 
@@ -209,7 +218,7 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
   def handle_cast({:broadcast, profile_id, event}, state) do
     state.by_device
     |> Map.values()
-    |> Enum.filter(&(&1.profile_id == profile_id))
+    |> Enum.filter(&phone_of?(&1, profile_id))
     |> Enum.each(&send(&1.pid, {:mobile_event, event}))
 
     {:noreply, state}
@@ -222,10 +231,10 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
 
   def handle_info(_message, state), do: {:noreply, state}
 
-  defp attach_socket(state, _device_id, pid, _profile_id) when not is_pid(pid),
+  defp attach_socket(state, _device_id, pid, _placement) when not is_pid(pid),
     do: {{:error, :invalid_socket}, state}
 
-  defp attach_socket(state, device_id, pid, profile_id) do
+  defp attach_socket(state, device_id, pid, {profile_id, _kind} = placement) do
     cond do
       not valid_profile?(profile_id) ->
         {{:error, :invalid_profile_id}, state}
@@ -237,17 +246,31 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
         {{:error, {:socket_already_attached, state.by_pid[pid]}}, state}
 
       true ->
-        {:ok, put_socket(state, device_id, pid, profile_id)}
+        {:ok, put_socket(state, device_id, pid, placement)}
     end
   end
 
-  defp authorize_device(state, device_id) do
+  defp authorized_device(state, device_id) do
     case state.authorize_device.(state.device_store, device_id) do
-      {:ok, _device} -> :ok
+      {:ok, device} when is_map(device) -> {:ok, device}
       {:error, reason} -> {:error, {:device_not_authorized, reason}}
       other -> {:error, {:invalid_device_authorization_reply, other}}
     end
   end
+
+  defp authorize_device(state, device_id) do
+    with {:ok, _device} <- authorized_device(state, device_id), do: :ok
+  end
+
+  # A row that names no kind is a phone's (`DeviceStore.Device`).
+  defp kind(device) do
+    case Map.get(device, :kind, :phone) do
+      kind when kind in [:phone, :desktop] -> kind
+      nil -> :phone
+    end
+  end
+
+  defp phone_of?(entry, profile_id), do: entry.kind == :phone and entry.profile_id == profile_id
 
   defp reply_authorization(state, device_id) do
     case authorize_device(state, device_id) do
@@ -270,14 +293,14 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
     end
   end
 
-  defp put_socket(state, device_id, pid, profile_id) do
+  defp put_socket(state, device_id, pid, {profile_id, kind}) do
     case Map.get(state.by_device, device_id) do
       %{pid: ^pid} = entry ->
-        put_in(state, [:by_device, device_id], %{entry | profile_id: profile_id})
+        put_in(state, [:by_device, device_id], %{entry | profile_id: profile_id, kind: kind})
 
       old_entry ->
         ref = Process.monitor(pid)
-        entry = %{device_id: device_id, pid: pid, profile_id: profile_id, ref: ref}
+        entry = %{device_id: device_id, pid: pid, profile_id: profile_id, kind: kind, ref: ref}
         state = replace_entry(state, entry, old_entry)
         if old_entry, do: send(old_entry.pid, {:mobile_replaced, pid})
         state
@@ -326,7 +349,7 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
   defp option(opts, key, default) when is_list(opts), do: Keyword.get(opts, key, default)
   defp option(opts, key, default) when is_map(opts), do: Map.get(opts, key, default)
 
-  defp public_entry(entry), do: Map.take(entry, [:device_id, :pid, :profile_id])
+  defp public_entry(entry), do: Map.take(entry, [:device_id, :pid, :profile_id, :kind])
   defp sort_entries(entries), do: Enum.sort_by(entries, & &1.device_id)
   defp valid_profile?(profile_id), do: is_binary(profile_id) and profile_id != ""
 end

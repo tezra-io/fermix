@@ -153,10 +153,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
   defp ensure_enabled(plugin) do
     if Status.status(plugin) == :not_configured do
       {:disabled,
-       Tool.error(
-         "#{plugin.name} is disabled — enable it on the setup page or run " <>
-           "`fermix plugins enable #{plugin.name}`."
-       )}
+       Tool.error("#{plugin.name} is turned off — turn it on in Fermix's Plugins settings.")}
     else
       :ok
     end
@@ -249,7 +246,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
   # prose) which the interpreter's generic 403 message can't reproduce. 401 is
   # deliberately NOT classified here — every oauth2 plugin's 401 (Google
   # included) flows through the interpreter's auth-type 401 branch into the same
-  # `fermix plugins auth reauthorize <plugin>` guidance, so there is one path.
+  # sign-in-again guidance, so there is one path.
   defp google_error_classifier(%{auth: %{provider: "google"}}, plugin_name, tool) do
     fn
       403, _headers, body -> format_forbidden(plugin_name, tool, decode_body_or_empty(body))
@@ -371,7 +368,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
       cred.type == :api_key ->
         # A static api_key has no refresh — a 401 is a rejected key, not an
         # expired token. Hand the 401 to the interpreter, which classifies it
-        # with `fermix plugins auth set` guidance (its :api_key 401 branch).
+        # with replace-the-token guidance (its :api_key 401 branch).
         {:ok, %{status: 401, headers: [], body: ""}}
 
       Map.get(tool, "read_only") == true ->
@@ -972,8 +969,8 @@ defmodule FermixCore.Plugins.ToolExecutor do
 
   defp format_region_error(plugin_name, :region_unknown) do
     "#{plugin_name} has no account region recorded, so there is no endpoint to call. " <>
-      "Run `fermix plugins auth reauthorize #{plugin_name}` and sign in again so Fermix " <>
-      "records the account region."
+      "Sign in to #{plugin_name} again in Fermix's Plugins settings so Fermix records the " <>
+      "account region."
   end
 
   defp format_region_error(plugin_name, {:region_not_supported, region, supported}) do
@@ -986,11 +983,12 @@ defmodule FermixCore.Plugins.ToolExecutor do
     scopes = tool |> Map.get("requires_scopes", []) |> Enum.join(", ")
 
     "#{plugin_name} is missing a required scope (#{scopes}). " <>
-      "Run `fermix plugins auth reauthorize #{plugin_name}` and grant it at sign-in."
+      "Sign in to #{plugin_name} again in Fermix's Plugins settings and grant it at sign-in."
   end
 
   defp format_auth_error(plugin_name, :reauthorization_required) do
-    "#{plugin_name} needs reconnection. Run `fermix plugins auth reauthorize #{plugin_name}`."
+    "#{plugin_name} needs reconnection. Sign in to #{plugin_name} again in Fermix's Plugins " <>
+      "settings."
   end
 
   # No token is served for a grant minted in the wrong region, so this is what
@@ -1003,7 +1001,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
   end
 
   defp format_auth_error(plugin_name, :no_secret) do
-    "#{plugin_name} is missing its API key. Run `fermix plugins auth set #{plugin_name}`."
+    "#{plugin_name} is missing its API key. Add its token in Fermix's Plugins settings."
   end
 
   defp format_auth_error(plugin_name, :no_auth_file) do
@@ -1015,7 +1013,8 @@ defmodule FermixCore.Plugins.ToolExecutor do
   end
 
   defp format_auth_error(plugin_name, :no_auth_profile) do
-    "#{plugin_name} is enabled but not connected. Run `fermix plugins auth login #{plugin_name}`."
+    "#{plugin_name} is enabled but not connected. Sign in to #{plugin_name} in Fermix's " <>
+      "Plugins settings."
   end
 
   defp format_auth_error(plugin_name, {:provider_missing, _profile}) do

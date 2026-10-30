@@ -4,6 +4,9 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   alias Exqlite.Sqlite3
 
   @request_sweep_limit 200
+  # The word a request settled uncertain records: another boot held it, so it
+  # may have run there before this engine started (M75).
+  @uncertain_reason "uncertain_after_restart"
   @max_link_previews 4
   @sha256 ~r/\A[0-9a-f]{64}\z/
   @transports ~w(mobile companion)
@@ -338,6 +341,60 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   authenticated_device_id, runner_epoch, attempt, transport, cancelled_at
   """
 
+  # Migration 52, the uncertain request (M75). A request that may have run
+  # before a restart is settled `uncertain` rather than run again. SQLite
+  # cannot widen a CHECK in place, so the table is rebuilt: the same nineteen
+  # columns in the same order (an engine that reads a request row by position
+  # still reads it), every row copied, both indexes made again. Beside it, the
+  # primary epoch each transport's requests last booted at, which tells a move
+  # or a restore (another engine) from a restart of this one.
+  @uncertain_schema_sql """
+  CREATE TABLE IF NOT EXISTS mobile_request_primary_epochs (
+    agent_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    transport TEXT NOT NULL CHECK (transport IN ('mobile', 'companion')),
+    primary_epoch INTEGER NOT NULL CHECK (primary_epoch > 0),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, owner_id, transport)
+  ) WITHOUT ROWID;
+
+  CREATE TABLE mobile_client_requests_uncertain (
+    agent_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    client_msg_id TEXT NOT NULL,
+    request_type TEXT NOT NULL,
+    status TEXT NOT NULL
+      CHECK (status IN ('accepted', 'running', 'completed', 'failed', 'uncertain')),
+    payload_digest TEXT NOT NULL CHECK (length(payload_digest) = 64),
+    payload_json TEXT NOT NULL,
+    turn_id TEXT,
+    result_server_seq INTEGER CHECK (result_server_seq IS NULL OR result_server_seq > 0),
+    error_json TEXT,
+    claimed_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    authenticated_device_id TEXT,
+    runner_epoch TEXT,
+    attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+    transport TEXT NOT NULL DEFAULT 'mobile' CHECK (transport IN ('mobile', 'companion')),
+    cancelled_at TEXT,
+    PRIMARY KEY (agent_id, owner_id, profile_id, client_msg_id)
+  );
+
+  INSERT INTO mobile_client_requests_uncertain (#{@request_columns})
+  SELECT #{@request_columns} FROM mobile_client_requests;
+
+  DROP TABLE mobile_client_requests;
+  ALTER TABLE mobile_client_requests_uncertain RENAME TO mobile_client_requests;
+
+  CREATE INDEX idx_mobile_client_requests_expiry
+    ON mobile_client_requests(expires_at);
+
+  CREATE INDEX idx_mobile_client_requests_recovery
+    ON mobile_client_requests(agent_id, owner_id, status, claimed_at, profile_id, client_msg_id);
+  """
+
   # The newest row naming the ref wins, and within it an attachment before a
   # preview image, first position first.
   @media_descriptor_sql """
@@ -396,6 +453,9 @@ defmodule FermixCore.Memory.Repo.MobileSql do
 
   @spec cancel_schema_sql() :: String.t()
   def cancel_schema_sql, do: @cancel_schema_sql
+
+  @spec uncertain_schema_sql() :: String.t()
+  def uncertain_schema_sql, do: @uncertain_schema_sql
 
   @spec media_index_schema_sql() :: String.t()
   def media_index_schema_sql, do: @media_index_schema_sql
@@ -697,8 +757,25 @@ defmodule FermixCore.Memory.Repo.MobileSql do
          do: {:ok, {:settled, request}}
   end
 
+  @doc """
+  Start the next attempt of a request under this boot (`runner_epoch`): one
+  that never started a turn, whichever boot of this engine claimed it, or one
+  this boot ran whose runner died. A turn another boot started, and a request
+  that names no boot of this engine, may have run, so the request is settled
+  once instead and never started: `:settled_cancelled` when it carried a
+  cancel, `:settled_uncertain` otherwise. A settled request answers its
+  status, and one running under this boot answers `:active`.
+  """
   @spec start_request(term(), map(), String.t(), String.t(), DateTime.t()) ::
-          {:ok, {:started | :active | :completed | :failed, map()}} | {:error, term()}
+          {:ok,
+           {:started
+            | :active
+            | :completed
+            | :failed
+            | :uncertain
+            | :settled_uncertain
+            | :settled_cancelled, map()}}
+          | {:error, term()}
   def start_request(conn, selector, client_msg_id, runner_epoch, now) do
     profile = normalize_profile(selector)
     epoch = nonempty_string!(runner_epoch, :runner_epoch)
@@ -731,6 +808,31 @@ defmodule FermixCore.Memory.Repo.MobileSql do
     end
   end
 
+  @doc """
+  Record the primary epoch one transport's requests boot at, against the one
+  its last boot recorded. A different epoch is another engine (the home moved
+  to another host, or was restored from a snapshot): in the same transaction
+  every request of the transport still accepted or running is released from
+  its boot, so its next start settles it (`start_request/5`). The first epoch
+  recorded releases nothing.
+  """
+  @spec record_boot_primary_epoch(term(), map(), pos_integer(), DateTime.t()) ::
+          {:ok, :recorded | :unchanged | {:moved, pos_integer(), non_neg_integer()}}
+          | {:error, term()}
+  def record_boot_primary_epoch(conn, selector, primary_epoch, now)
+      when is_integer(primary_epoch) and primary_epoch > 0 do
+    owner = normalize_owner(selector)
+    transport = transport!(selector)
+
+    transaction(conn, fn ->
+      with {:ok, stored} <- stored_primary_epoch(conn, owner, transport),
+           {:ok, outcome} <- release_if_moved(conn, owner, transport, stored, primary_epoch, now),
+           :ok <- put_primary_epoch(conn, owner, transport, primary_epoch, now) do
+        {:ok, outcome}
+      end
+    end)
+  end
+
   @spec settle_request(term(), map(), String.t(), String.t(), map(), DateTime.t()) ::
           {:ok, map()} | {:error, term()}
   def settle_request(conn, selector, client_msg_id, status, fields, now) do
@@ -745,10 +847,12 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   @doc """
   Release a running attempt whose runner died without settling it.
 
-  The claim returns to `accepted` with its attempt counter intact, so the next
-  start — a client resend or the next boot's recovery scan — runs as a new
-  attempt. Fenced on the exact attempt, so a settled or superseded request is
-  never dragged back into flight.
+  The claim returns to `accepted` with its attempt counter intact and still
+  held by the boot that ran it, so that boot's next start (a client resend, or
+  its coordinator's recovery scan after a restart) runs it as a new attempt,
+  and any other boot settles it uncertain (`start_request/5`). Fenced on the
+  exact attempt, so a settled or superseded request is never dragged back
+  into flight.
   """
   @spec abandon_request(term(), map(), String.t(), non_neg_integer(), DateTime.t()) ::
           {:ok, map()} | {:error, term()}
@@ -760,7 +864,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
              conn,
              """
              UPDATE mobile_client_requests
-             SET status = 'accepted', runner_epoch = NULL, updated_at = ?
+             SET status = 'accepted', updated_at = ?
              WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND client_msg_id = ?
                AND status = 'running' AND attempt = ?
              RETURNING #{@request_columns}
@@ -1106,9 +1210,9 @@ defmodule FermixCore.Memory.Repo.MobileSql do
                payload_digest, payload_json, turn_id, result_server_seq, error_json,
                claimed_at, expires_at, updated_at, authenticated_device_id,
                runner_epoch, attempt, transport
-             ) VALUES (?, ?, ?, ?, ?, 'accepted', ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, ?, ?)
+             ) VALUES (?, ?, ?, ?, ?, 'accepted', ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)
              """,
-             request_insert_params(request) ++ [attempt, request.transport]
+             request_insert_params(request) ++ [request.runner_epoch, attempt, request.transport]
            ),
          {:ok, row} <- get_request(conn, request, request.client_msg_id) do
       {:ok, {:claimed, row}}
@@ -1186,12 +1290,28 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   defp start_request_by_status(_conn, _profile, %{status: "failed"} = row, _epoch, _now),
     do: {:ok, {:failed, row}}
 
+  defp start_request_by_status(_conn, _profile, %{status: "uncertain"} = row, _epoch, _now),
+    do: {:ok, {:uncertain, row}}
+
   defp start_request_by_status(_conn, _profile, %{status: "running"} = row, epoch, _now)
        when row.runner_epoch == epoch,
        do: {:ok, {:active, row}}
 
+  # A turn another boot started (a request running there, or one released
+  # after its turn began) may have run, and a request that names no boot of
+  # this engine (written before claims recorded one, or released by a move or
+  # a restore, `record_boot_primary_epoch/4`) may have run anywhere: neither is
+  # started here.
   defp start_request_by_status(conn, profile, request, epoch, now)
-       when request.status in ["accepted", "running"] do
+       when request.runner_epoch != epoch and
+              (request.status == "running" or request.attempt > 0 or
+                 is_nil(request.runner_epoch)),
+       do: settle_unrun(conn, profile, request, now)
+
+  # An accepted request that never started a turn has had no effect, so this
+  # engine runs it whichever of its boots claimed it.
+  defp start_request_by_status(conn, profile, request, epoch, now)
+       when request.status == "accepted" do
     with {:ok, rows} <-
            query_all(
              conn,
@@ -1218,13 +1338,99 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   defp started_request_result(_conn, _profile, _client_msg_id, _epoch, []),
     do: {:error, :start_conflict}
 
+  # A request that carried a cancel ends as the cancel the owner asked for;
+  # any other ends `uncertain`. Fenced on the status and attempt it was read
+  # with, inside the start's own transaction. Its boot, turn and reply row stay
+  # as they were.
+  defp settle_unrun(conn, profile, %{cancelled_at: %DateTime{}} = request, now),
+    do: settle_unrun(conn, profile, request, {"failed", "cancelled", :settled_cancelled}, now)
+
+  defp settle_unrun(conn, profile, request, now),
+    do:
+      settle_unrun(
+        conn,
+        profile,
+        request,
+        {"uncertain", @uncertain_reason, :settled_uncertain},
+        now
+      )
+
+  defp settle_unrun(conn, profile, request, {status, reason, settled}, now) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             UPDATE mobile_client_requests
+             SET status = ?, error_json = ?, updated_at = ?
+             WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND client_msg_id = ?
+               AND status = ? AND attempt = ?
+             RETURNING #{@request_columns}
+             """,
+             [status, Jason.encode!(%{"reason" => reason}), timestamp(now)] ++
+               profile_params(profile) ++
+               [request.client_msg_id, request.status, request.attempt]
+           ) do
+      unrun_result(rows, settled)
+    end
+  end
+
+  defp unrun_result([row], settled), do: {:ok, {settled, request_row(row)}}
+  defp unrun_result([], _settled), do: {:error, :start_conflict}
+
+  defp stored_primary_epoch(conn, owner, transport) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT primary_epoch FROM mobile_request_primary_epochs
+             WHERE agent_id = ? AND owner_id = ? AND transport = ?
+             """,
+             [owner.agent_id, owner.owner_id, transport]
+           ) do
+      {:ok, rows |> List.flatten() |> List.first()}
+    end
+  end
+
+  defp release_if_moved(_conn, _owner, _transport, nil, _epoch, _now), do: {:ok, :recorded}
+  defp release_if_moved(_conn, _owner, _transport, epoch, epoch, _now), do: {:ok, :unchanged}
+
+  defp release_if_moved(conn, owner, transport, stored, _epoch, now) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             UPDATE mobile_client_requests SET runner_epoch = NULL, updated_at = ?
+             WHERE agent_id = ? AND owner_id = ? AND transport = ?
+               AND status IN ('accepted', 'running')
+             RETURNING client_msg_id
+             """,
+             [timestamp(now), owner.agent_id, owner.owner_id, transport]
+           ) do
+      {:ok, {:moved, stored, length(rows)}}
+    end
+  end
+
+  defp put_primary_epoch(conn, owner, transport, epoch, now) do
+    execute(
+      conn,
+      """
+      INSERT INTO mobile_request_primary_epochs (
+        agent_id, owner_id, transport, primary_epoch, updated_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT (agent_id, owner_id, transport)
+      DO UPDATE SET primary_epoch = excluded.primary_epoch, updated_at = excluded.updated_at
+      """,
+      [owner.agent_id, owner.owner_id, transport, epoch, timestamp(now)]
+    )
+  end
+
   defp matching_attempt(%{attempt: attempt}, attempt), do: :ok
   defp matching_attempt(_request, _attempt), do: {:error, :stale_attempt}
 
   defp request_transition("running", _next), do: :update
   defp request_transition(status, status) when status in ["completed", "failed"], do: :unchanged
 
-  defp request_transition(status, _next) when status in ["completed", "failed"] do
+  defp request_transition(status, _next) when status in ["completed", "failed", "uncertain"] do
     {:error, :already_settled}
   end
 
@@ -1486,6 +1692,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
       payload_digest: digest!(attrs, :payload_digest),
       transport: transport,
       authenticated_device_id: claimant_device!(attrs, transport),
+      runner_epoch: nonempty_string!(Map.get(attrs, :runner_epoch), :runner_epoch),
       claimed_at: datetime!(attrs, :claimed_at),
       expires_at: datetime!(attrs, :expires_at)
     })

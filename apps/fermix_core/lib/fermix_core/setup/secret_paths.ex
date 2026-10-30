@@ -153,6 +153,24 @@ defmodule FermixCore.Setup.SecretPaths do
       # [sandbox.env] — the meetbot sidecar never sees the Zoom credentials.
       sandbox_env: false
     },
+    # The S3 target of the home's snapshots (M75 §8). BEAM-internal HTTP (no
+    # subprocess), so not in [sandbox.env].
+    %{
+      key: :snapshot_s3_access_key_id,
+      env: "SNAPSHOT_S3_ACCESS_KEY_ID",
+      path: [:fermix_core, :snapshots, :s3_access_key_id],
+      functionality: "Snapshots to S3 with access keys",
+      optional?: true,
+      sandbox_env: false
+    },
+    %{
+      key: :snapshot_s3_secret_access_key,
+      env: "SNAPSHOT_S3_SECRET_ACCESS_KEY",
+      path: [:fermix_core, :snapshots, :s3_secret_access_key],
+      functionality: "Snapshots to S3 with access keys",
+      optional?: true,
+      sandbox_env: false
+    },
     %{
       key: :google_oauth_client_secret,
       env: "GOOGLE_OAUTH_CLIENT_SECRET",
@@ -223,6 +241,13 @@ defmodule FermixCore.Setup.SecretPaths do
       env: "SLACK_SIGNING_SECRET",
       env_overlay: true,
       path: [:fermix_channels, :slack, :signing_secret]
+    },
+    # The app-level token (`xapp-…`) Slack's Socket Mode connects with (M75).
+    %{
+      key: :slack_app_token,
+      env: "SLACK_APP_TOKEN",
+      env_overlay: true,
+      path: [:fermix_channels, :slack, :app_token]
     },
     %{
       key: :mobile_apns_key,

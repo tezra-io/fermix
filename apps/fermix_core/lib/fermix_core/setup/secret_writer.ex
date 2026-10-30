@@ -455,9 +455,16 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
 
     with {:ok, binary} <- fetch_secret_tool_binary(opts),
          {:ok, shell} <- fetch_shell_binary() do
-      with_temp_secret(value, fn secret_file ->
-        run_with_stdin(shell, secret_file, binary, put_args(key, opts), write_opts)
-      end)
+      with_staged_secret(value, opts, &store(&1, shell, binary, put_args(key, opts), write_opts))
+    end
+  end
+
+  # `put/3` answers `:ok` like every writer; `secret-tool store` prints nothing
+  # it would add.
+  defp store(secret_file, shell, binary, args, opts) do
+    case run_with_stdin(shell, secret_file, binary, args, opts) do
+      {:ok, _output} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -542,13 +549,18 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
 
   defp timeout(opts), do: Keyword.get(opts, :timeout_ms, @default_timeout_ms)
 
-  defp with_temp_secret(value, fun) do
-    case write_temp_secret(value) do
+  # The value is staged where no sandboxed command can read it, on macOS or on
+  # Linux: under the home's `secrets/`, which both kernels' read rules close
+  # (`OsSandbox.unreadable/1`). A folder in the system temp folder could not be
+  # closed on Linux without closing the temp folder to every new file. The
+  # folder is created closed, so the file is never open to another reader.
+  defp with_staged_secret(value, opts, fun) do
+    case write_staged_secret(value, opts) do
       {:ok, path} ->
         try do
           fun.(path)
         after
-          cleanup_temp_secret(path)
+          cleanup_staged_secret(path)
         end
 
       {:error, reason} ->
@@ -556,21 +568,26 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
     end
   end
 
-  defp write_temp_secret(value) do
-    dir = Path.join(System.tmp_dir!(), "fermix-secret-#{System.unique_integer([:positive])}")
+  defp write_staged_secret(value, opts) do
+    secrets = SecretWriter.File.directory(opts)
+    dir = Path.join(secrets, ".staging-#{System.unique_integer([:positive])}")
     path = Path.join(dir, "secret")
 
-    with :ok <- File.mkdir(dir),
+    with :ok <- File.mkdir_p(secrets),
+         :ok <- File.chmod(secrets, 0o700),
+         :ok <- File.mkdir(dir),
          :ok <- File.chmod(dir, 0o700),
-         :ok <- File.write(path, value, [:binary]),
+         :ok <- File.write(path, value, [:binary, :exclusive]),
          :ok <- File.chmod(path, 0o600) do
       {:ok, path}
     else
-      {:error, reason} -> {:error, {:temp_secret_failed, reason}}
+      {:error, reason} ->
+        cleanup_staged_secret(path)
+        {:error, {:staged_secret_failed, reason}}
     end
   end
 
-  defp cleanup_temp_secret(path) do
+  defp cleanup_staged_secret(path) do
     _ = File.rm(path)
     _ = File.rmdir(Path.dirname(path))
     :ok

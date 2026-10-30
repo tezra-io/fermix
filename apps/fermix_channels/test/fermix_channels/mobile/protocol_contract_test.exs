@@ -2,9 +2,11 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   use ExUnit.Case, async: true
 
   alias FermixChannels.Mobile.Attestation
+  alias FermixChannels.Mobile.Chunks
   alias FermixChannels.Mobile.Iroh.Relays
   alias FermixChannels.Mobile.Management
   alias FermixChannels.Mobile.PairManager
+  alias FermixChannels.Mobile.Peers
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Router
   alias FermixChannels.Mobile.Session
@@ -476,6 +478,49 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     end
   end
 
+  # M75 D14: the daemon announces its primary epoch on hello_ack and
+  # pair_approved, and a phone names the highest it has seen on hello. Each is
+  # optional in the schema, since a daemon or a phone older than the epoch
+  # sends none, while this daemon's own codec requires its two.
+  test "the schema publishes the primary epoch on both handshakes", %{schema: schema} do
+    defs = schema["$defs"]
+    epoch = %{"type" => "integer", "minimum" => 1, "maximum" => 18_446_744_073_709_551_615}
+
+    for def <- ~w(hello hello_ack pair_approved) do
+      assert Map.take(defs[def]["properties"]["primary_epoch"], ~w(type minimum maximum)) ==
+               epoch,
+             def
+
+      refute "primary_epoch" in defs[def]["required"], def
+    end
+
+    for type <- ~w(hello_ack pair_approved) do
+      goldens = Enum.filter(server_headers(), &(&1["t"] == type))
+      assert goldens != [] and Enum.all?(goldens, &is_integer(&1["primary_epoch"])), type
+      [golden | _rest] = goldens
+      assert server_errors(Map.delete(golden, "primary_epoch"), schema) == []
+      refute server_errors(Map.put(golden, "primary_epoch", 0), schema) == []
+    end
+
+    assert Enum.any?(client_headers(), &(&1["t"] == "hello" and &1["primary_epoch"] > 0))
+
+    stale = Enum.find(server_headers(), &(&1["t"] == "error" and &1["code"] == "stale_primary"))
+    assert stale["message"] =~ ~r/^This engine is at epoch \d+; you have seen epoch \d+: /
+  end
+
+  test "documentation tells a phone what to do with the primary epoch", %{protocol: protocol} do
+    [_before, negotiation] = String.split(protocol, "## Envelope, ordering", parts: 2)
+    [negotiation, _after] = String.split(negotiation, "## Client events", parts: 2)
+    assert negotiation =~ "### Primary epoch"
+    assert negotiation =~ "keeps the highest"
+    assert negotiation =~ "stale primary"
+    assert negotiation =~ "re-pair"
+
+    [_before, errors] = String.split(protocol, "## Errors", parts: 2)
+    [table, _after] = String.split(errors, "## Close codes", parts: 2)
+    assert table =~ "| `stale_primary` |"
+  end
+
   test "the schema refuses a relay list revision that is not 16 hex digits", %{schema: schema} do
     [hello] = Enum.filter(client_headers(), &Map.has_key?(&1, "relay_list_rev"))
 
@@ -692,6 +737,108 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     assert protocol =~ "push_vectors.json"
     assert File.exists?(Path.join(@priv_dir, "push_vectors.json"))
   end
+
+  # M75 §5.3: the table a phone, a desktop and wave-two responders read is the
+  # one the session enforces.
+  test "documentation's table of who may send what is Mobile.Peers'", %{protocol: protocol} do
+    [_before, section] = String.split(protocol, "## Who may send what", parts: 2)
+    [section, _after] = String.split(section, "\n## ", parts: 2)
+
+    rows =
+      for line <- String.split(section, "\n"),
+          [_all, kind, sends, sent] <- [Regex.run(~r/^\| (\w+) \| (.+) \| (.+) \|$/, line)],
+          kind in Enum.map(Peers.kinds(), &Atom.to_string/1),
+          into: %{} do
+        {String.to_existing_atom(kind), {backticked(sends), backticked(sent)}}
+      end
+
+    assert Map.keys(rows) |> Enum.sort() == Enum.sort(Peers.kinds())
+
+    for {kind, {sends, sent}} <- rows do
+      assert sends == Peers.client_events(kind), "#{kind} sends"
+      assert sent == Peers.server_events(kind), "#{kind} is sent"
+    end
+  end
+
+  test "documentation names the four preludes and who serves each", %{protocol: protocol} do
+    for {mode, use} <- [{"01", "paired phone's or desktop's"}, {"02", "pairing window"}] do
+      assert protocol =~ "`46 58 4d 31 #{mode}`"
+      assert protocol =~ use
+    end
+
+    for mode <- ~w(03 04), do: assert(protocol =~ "`46 58 4d 31 #{mode}`")
+    assert protocol =~ ~r/Only an open enrollment window on the primary\s+serves `0x03`/
+    assert protocol =~ ~r/only a candidate engine\s+serves `0x04`/
+  end
+
+  # M75 §5.2: each chunked event publishes the field its payloads are told
+  # apart by and its bound, in the schema and the table, as `Mobile.Chunks`
+  # reassembles them.
+  test "every chunked event publishes its key and bound, and they are Chunks'",
+       %{schema: schema, protocol: protocol} do
+    chunked =
+      for {name, definition} <- schema["$defs"], definition["x-chunked"] == true, do: name
+
+    assert Enum.sort(chunked) == Chunks.chunked_events()
+
+    [_before, section] = String.split(protocol, "## Chunked payloads", parts: 2)
+    [section, _after] = String.split(section, "\n## ", parts: 2)
+
+    for type <- chunked do
+      definition = schema["$defs"][type]
+      {:ok, key} = Chunks.key_field(type)
+      assert definition["x-chunk-key"] == key, type
+      assert ~w(index last) -- definition["required"] == [], type
+      assert definition["x-raw-bytes"] == true, type
+      assert section =~ "| `#{type}` | `#{key}` |", type
+
+      {:ok, bound} = Chunks.bound(type)
+      assert definition["x-max-payload-bytes"] == bound, type
+    end
+  end
+
+  test "every chunked run in the binary fixtures reassembles within its bound" do
+    runs =
+      for {path, decode} <- [
+            {@client_binary_fixtures, :client},
+            {@server_binary_fixtures, :server}
+          ],
+          fixture <- jsonl(path),
+          Chunks.chunked?(fixture["header"]["t"]) do
+        {decode, fixture["header"], Base.decode64!(fixture["bytes_b64"])}
+      end
+
+    grouped =
+      Enum.group_by(runs, fn {direction, header, _bytes} ->
+        {:ok, key} = Chunks.key_field(header["t"])
+        {direction, header["t"], header[key]}
+      end)
+
+    for direction <- [:client, :server] do
+      assert Enum.any?(grouped, fn {{dir, _t, _key}, run} ->
+               dir == direction and length(run) > 1
+             end),
+             "no whole #{direction} chunked run of two or more frames"
+    end
+
+    for {{_direction, type, _key}, run} <- grouped do
+      {:ok, bound} = Chunks.bound(type)
+
+      result =
+        Enum.reduce_while(run, {:more, Chunks.new(bound)}, fn {_dir, header, bytes},
+                                                              {:more, acc} ->
+          case Chunks.add(acc, header["index"], header["last"], bytes) do
+            {:more, acc} -> {:cont, {:more, acc}}
+            done -> {:halt, done}
+          end
+        end)
+
+      assert {:done, _payload} = result, "#{type} run does not end at its last frame"
+    end
+  end
+
+  defp backticked(text),
+    do: Regex.scan(~r/`([a-z_]+)`/, text, capture: :all_but_first) |> List.flatten()
 
   defp sha256_file(path), do: path |> File.read!() |> sha256()
   defp sha256(bytes), do: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)

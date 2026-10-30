@@ -57,7 +57,13 @@ defmodule FermixCore.Management.Settings.Channels do
   # says everything carry none.
   @footers %{
     imessage_owner_user_id: "The address your iPhone sends iMessages from.",
-    imessage_allowed_sender_ids: "Others who may message Fermix here."
+    imessage_allowed_sender_ids: "Others who may message Fermix here.",
+    slack_mode:
+      "Socket Mode needs no public address: Fermix connects to Slack, so it suits a " <>
+        "server with no open port.",
+    slack_signing_secret: "Used by the webhook.",
+    slack_app_token:
+      "Used by Socket Mode. Create one in your Slack app with the `connections:write` scope."
   }
 
   @doc "The rows of one owned section."
@@ -80,19 +86,32 @@ defmodule FermixCore.Management.Settings.Channels do
   defp channel_rows(channel, block, snapshot) do
     restart = Row.restart?(:channels)
 
-    credential_rows = Enum.map(Inventory.rows(channel), &row(&1, block, snapshot, restart))
+    credential_rows =
+      Enum.map(Inventory.rows(channel), &row(channel, &1, block, snapshot, restart))
 
     credential_rows ++ [enabled_row(channel, block, restart)]
   end
 
-  defp row({key, _config_key, :secret, label}, _block, snapshot, restart) do
+  defp row(_channel, {key, _config_key, :secret, label}, _block, snapshot, restart) do
     Row.new(Atom.to_string(key), :secret, label,
       present: Source.secret_present?(snapshot, key),
+      footer: footer(key),
       restart: restart
     )
   end
 
-  defp row({key, config_key, :text, label}, block, _snapshot, restart) do
+  defp row(channel, {key, config_key, :choice, label}, block, _snapshot, restart) do
+    %{default: default, options: options} = Inventory.choice(channel, key)
+
+    Row.new(Atom.to_string(key), :choice, label,
+      value: Source.string(block, config_key, default),
+      options: Enum.map(options, fn {value, text} -> Row.option(value, text) end),
+      footer: footer(key),
+      restart: restart
+    )
+  end
+
+  defp row(_channel, {key, config_key, :text, label}, block, _snapshot, restart) do
     Row.new(Atom.to_string(key), :text, label,
       value: Source.string(block, config_key),
       footer: footer(key),
@@ -100,7 +119,7 @@ defmodule FermixCore.Management.Settings.Channels do
     )
   end
 
-  defp row({key, config_key, :list, label}, block, _snapshot, restart) do
+  defp row(_channel, {key, config_key, :list, label}, block, _snapshot, restart) do
     Row.new(Atom.to_string(key), :list, label,
       value: Source.strings(block, config_key),
       footer: footer(key),

@@ -39,8 +39,8 @@ defmodule FermixCore.Management.MobileTest do
   @device_id "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"
   @session_keys ~w(failure outcome request session_id state ttl_ms)
   @request_keys ~w(app_version attestation boot_state build_role device_name model platform sas)
-  @device_keys ~w(boot_state created_at device_id last_seen model name platform push_registered
-                  signer_role)
+  @device_keys ~w(boot_state created_at device_id kind last_seen model name platform
+                  push_registered signer_role)
   @unavailable {:error, {:unavailable, "mobile"}}
 
   # The switch is live (M51 §5.5): settings call this once the switch is
@@ -359,6 +359,7 @@ defmodule FermixCore.Management.MobileTest do
                "device_id" => @device_id,
                "name" => "Sam's phone",
                "model" => "Google Pixel 9 Pro",
+               "kind" => "phone",
                "platform" => nil,
                "signer_role" => nil,
                "boot_state" => nil,
@@ -366,6 +367,14 @@ defmodule FermixCore.Management.MobileTest do
                "created_at" => "2026-09-26T12:01:05Z",
                "last_seen" => nil
              }
+    end
+
+    # M75 §3: a desktop engine is a device row of its own kind.
+    test "a desktop's row names its kind" do
+      desktop = %{device() | kind: :desktop, name: "Studio Mac"}
+
+      assert {:ok, %{"devices" => [row]}} = Mobile.devices_list(fake({:ok, [desktop]}))
+      assert {row["kind"], row["name"]} == {"desktop", "Studio Mac"}
     end
 
     test "no paired phone is an empty list, not a refusal" do
@@ -653,6 +662,7 @@ defmodule FermixCore.Management.MobileTest do
       device_id: @device_id,
       name: "Sam's phone",
       model: "Google Pixel 9 Pro",
+      kind: :phone,
       platform: nil,
       signer_role: nil,
       boot_state: nil,

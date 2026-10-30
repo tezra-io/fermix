@@ -1,7 +1,8 @@
 defmodule FermixCore.Management.Mobile do
   @moduledoc """
   The `mobile.*` methods: pairing a phone, the paired devices, and the phone
-  channel's status (M51 management pairing).
+  channel's status (M51 management pairing). A paired device is a phone or,
+  since M75, a desktop engine.
 
   A stateless adapter. The pairing state has one owner, the phone channel's
   pairing manager, and it lives in the channels app, which this app does not
@@ -32,6 +33,7 @@ defmodule FermixCore.Management.Mobile do
   @states ~w(awaiting_scan awaiting_decision approved denied expired cancelled failed)a
   @outcome_reasons ~w(denied timeout cancelled)a
   @build_roles ~w(release development)a
+  @kinds ~w(phone desktop)a
   @listener_states ~w(ready down unavailable)a
   @remote_states [:off, :dormant, :helper_missing, :starting, :ready, :failed]
   @listener_reasons ~w(address_unavailable address_in_use permission_denied listen_failed)a
@@ -512,6 +514,7 @@ defmodule FermixCore.Management.Mobile do
       "device_id" => device.device_id,
       "name" => device.name,
       "model" => device.model,
+      "kind" => kind_word(device.kind),
       "platform" => optional_string(device.platform),
       "signer_role" => build_role(device.signer_role),
       "boot_state" => boot_state(device.boot_state),
@@ -520,6 +523,8 @@ defmodule FermixCore.Management.Mobile do
       "last_seen" => device.last_seen
     }
   end
+
+  defp kind_word(kind) when kind in @kinds, do: Atom.to_string(kind)
 
   defp optional_string(nil), do: nil
   defp optional_string(value) when is_binary(value), do: value

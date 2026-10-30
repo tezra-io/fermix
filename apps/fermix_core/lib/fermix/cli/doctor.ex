@@ -113,6 +113,7 @@ defmodule Fermix.CLI.Doctor do
       Checks.command_owner_config(),
       Checks.streaming_config(),
       Checks.sandbox_config(),
+      Checks.os_sandbox(),
       Checks.sandbox_trace_suggestions(),
       Checks.auth_file_permissions(),
       Checks.home_permissions(),

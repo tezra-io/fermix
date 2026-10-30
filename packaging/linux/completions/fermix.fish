@@ -1,7 +1,7 @@
 # fish completion for fermix, installed by the fermix package.
 # The verb list is the one `fermix help` prints; a test keeps them in step.
 
-set -l fermix_verbs setup auth ask chat run sandbox grant revoke service start stop restart status health voice acp browser browser-bridge agents capabilities skills plugins pair devices settings memory logs upgrade uninstall migrate-to-app doctor diagnostics version help
+set -l fermix_verbs setup auth ask chat run sandbox grant revoke service start stop restart status health voice acp browser browser-bridge agents capabilities skills plugins pair devices settings memory home logs upgrade uninstall migrate-to-app doctor diagnostics version help
 
 complete -c fermix -f
 
@@ -31,6 +31,7 @@ complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a pair -d
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a devices -d "List and revoke paired devices"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a settings -d "Show and change settings"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a memory -d "Review and restore memory"
+complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a home -d "Move, restore and snapshot this home"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a logs -d "Show the daemon log file"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a upgrade -d "Update the engine"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a uninstall -d "Remove an app-managed install"
@@ -50,6 +51,19 @@ complete -c fermix -n "__fish_seen_subcommand_from settings; and __fish_seen_sub
 complete -c fermix -n "__fish_seen_subcommand_from settings; and __fish_seen_subcommand_from secret" -l stdin -d "Read the secret from standard input"
 complete -c fermix -n "__fish_seen_subcommand_from settings; and __fish_seen_subcommand_from show" -l info -d "Show each setting's explanation"
 complete -c fermix -n "__fish_seen_subcommand_from memory" -a "review restore"
+complete -c fermix -n "__fish_seen_subcommand_from home" -a "export import mark-moved status snapshots enroll-code enroll candidates move"
+complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from snapshots" -a "status run passphrase"
+complete -c fermix -n "__fish_seen_subcommand_from home" -l json -d "Print the result as JSON"
+complete -c fermix -n "__fish_seen_subcommand_from home" -l into -r -d "Restore into this empty directory"
+complete -c fermix -n "__fish_seen_subcommand_from home" -l passphrase-file -r -d "Read the passphrase from this file"
+complete -c fermix -n "__fish_seen_subcommand_from home" -l to -r -d "Name the host the home moved to"
+complete -c fermix -n "__fish_seen_subcommand_from home" -l mark-moved -d "Mark this home moved once the archive is sealed"
+complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from enroll" -l code-file -r -d "Read the enrollment code from this file"
+complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from enroll" -l snapshot-bucket -r -d "The bucket this server keeps its snapshots in"
+complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from enroll" -l snapshot-region -r -d "The region of that bucket"
+complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from enroll" -l instance-file -r -d "Read what this server reports about itself from a provisioner's file"
+complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from move" -l recovery-passphrase-file -r -d "Read the recovery passphrase from this file"
+complete -c fermix -n "__fish_seen_subcommand_from home; and __fish_seen_subcommand_from move" -l retire -d "Keep no desktop here: a server being replaced"
 complete -c fermix -n "__fish_seen_subcommand_from browser" -a "bridge install uninstall status" -d "Browser bridge subcommand"
 complete -c fermix -n "__fish_seen_subcommand_from acp" -a "forget"
 complete -c fermix -n "__fish_seen_subcommand_from diagnostics" -a "export"

@@ -1116,7 +1116,7 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       assert_receive {:reply, error_msg}, 5_000
       assert error_msg =~ "Authentication failed"
-      assert error_msg =~ "fermix auth login"
+      assert error_msg =~ "sign in again in Fermix's Providers settings"
     end
 
     test "sends an auth-specific reply when the provider returns an HTTP 401 string", %{
@@ -1129,7 +1129,7 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       assert_receive {:reply, error_msg}, 5_000
       assert error_msg =~ "Authentication failed"
-      assert error_msg =~ "fermix auth login"
+      assert error_msg =~ "sign in again in Fermix's Providers settings"
     end
 
     test "sends a sign-in reply when the OpenAI Codex refresh chain fails", %{agent: agent} do

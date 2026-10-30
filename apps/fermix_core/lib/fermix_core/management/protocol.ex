@@ -125,7 +125,15 @@ defmodule FermixCore.Management.Protocol do
     {"cues.mandates.approve", 2},
     {"cues.proposals.list", 2},
     {"cues.proposals.get", 2},
-    {"cues.proposals.decide", 2}
+    {"cues.proposals.decide", 2},
+    {"home.status", 2},
+    {"home.snapshots.status", 2},
+    {"home.snapshots.run", 2},
+    {"home.snapshots.passphrase", 2},
+    {"home.enroll.open", 2},
+    {"home.candidates.list", 2},
+    {"home.move.readiness", 2},
+    {"home.move.start", 2}
   ]
   @methods Enum.map(@method_minimums, fn {method, _minimum} -> method end)
   @method_minimum_versions Map.new(@method_minimums)
@@ -153,7 +161,11 @@ defmodule FermixCore.Management.Protocol do
     unknown_job: "The job is not retained by this daemon.",
     external_change: "The settings file changed outside Fermix.",
     config_unreadable: "The settings file could not be read.",
-    unknown_pairing_session: "The pairing session is not retained by this daemon."
+    unknown_pairing_session: "The pairing session is not retained by this daemon.",
+    primary_unreachable: "The primary engine cannot be reached.",
+    device_class_method: "This method belongs to the device that sent it.",
+    unconfirmed:
+      "The request was sent, but its answer did not arrive, so its outcome is not known yet."
   ]
   @error_messages Map.new(@errors)
 

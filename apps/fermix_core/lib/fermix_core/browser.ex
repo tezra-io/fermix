@@ -52,19 +52,21 @@ defmodule FermixCore.Browser do
   end
 
   @doc """
-  Tear down the managed browser for a finished conversation (its owner scope),
-  so a one-shot turn does not leave a Chrome window alive until the idle TTL.
+  Tear down the browser a finished conversation kept for itself, so a one-shot
+  turn does not leave a Chrome window alive until the idle TTL.
 
-  The gateway calls this at turn end for one-shot (loopback) channels; remote
-  interactive channels keep their browser warm for the next message. A no-op
-  when the conversation never started a browser.
+  A conversation keeps a browser of its own only for its guest-trust calls
+  (`Scope.guest_key/1`). The owner's profile is one per device, in use by every
+  owner conversation and scheduled job at once, so no conversation's end stops
+  it; the idle sweep does. The gateway calls this at turn end for one-shot
+  (loopback) channels; remote interactive channels keep their browser warm for
+  the next message. A no-op when the conversation never started a browser.
   """
   @spec reap_conversation(FermixCore.Agents.ConversationKey.t(), keyword()) :: :ok
-  def reap_conversation(conversation_key, opts \\ []) do
-    case Scope.owner_key(%{conversation_key: conversation_key}) do
-      {:ok, owner} -> ProfileManager.stop_owner(owner, opts)
-      {:error, _error} -> :ok
-    end
+  def reap_conversation(conversation_key, opts \\ []) when is_list(opts) do
+    conversation_key
+    |> Scope.guest_key()
+    |> ProfileManager.stop_owner(opts)
   end
 
   @doc """
@@ -79,10 +81,16 @@ defmodule FermixCore.Browser do
     with {:ok, action} <- action(args),
          {:ok, config} <- Config.current(),
          {:ok, owner_key} <- Scope.owner_key(context),
+         {:ok, affinity} <- Scope.tab_affinity(context),
          {:ok, profile, profile_name} <- Config.profile(config, Map.get(args, "profile")),
          :ok <- allowed_turn(profile, context),
          :ok <- validate_args(action, args) do
-      dispatch(action, args, context, owner_key, profile_name, profile, config)
+      # The profile is shared; the tab a call without `target` acts on is its
+      # conversation's own (`Scope.tab_affinity/1`, read by the backend), and
+      # so is its pane profile (`Scope.pane_key/2`, read by `Routing`).
+      context = Map.put(context, :tab_affinity, affinity)
+      keys = %{owner: owner_key, pane: Scope.pane_key(owner_key, affinity)}
+      dispatch(action, args, context, keys, profile_name, profile, config)
     else
       {:error, %Error{} = error} -> {{:error, error}, nil}
     end
@@ -122,28 +130,38 @@ defmodule FermixCore.Browser do
 
   defp allowed_turn(_profile, _context), do: :ok
 
-  defp dispatch("doctor", _args, _context, _owner, _profile_name, _profile, config) do
+  defp dispatch("doctor", _args, _context, _keys, _profile_name, _profile, config) do
     {{:ok, encode(%{"ok" => true, "chrome" => chrome_diagnostics(config)})}, nil}
   end
 
-  defp dispatch("status", _args, _context, owner, profile_name, _profile, _config) do
-    {{:ok, encode(ProfileManager.status(owner, profile_name))}, nil}
+  # The profile this conversation is pinned to (its own pane, else the scope's
+  # shared one), read without deciding anything.
+  defp dispatch("status", _args, _context, keys, profile_name, _profile, _config) do
+    key =
+      case Routing.live(keys, profile_name) do
+        {live_key, _backend} -> live_key
+        nil -> keys.owner
+      end
+
+    {{:ok, encode(ProfileManager.status(key, profile_name))}, nil}
   end
 
   # A turn whose pane task lost the Fermix app's browser answers every later
   # browser call with that same sentence (`TurnMarker`), before anything is
   # routed: the task is never redone in Chrome, and the next turn decides fresh.
-  defp dispatch(action, args, context, owner, profile_name, profile, config)
+  # Only a pane task marks, and a pane task runs under its conversation's own
+  # pane key.
+  defp dispatch(action, args, context, keys, profile_name, profile, config)
        when action in @profile_actions do
-    case TurnMarker.lookup(owner, self()) do
+    case TurnMarker.lookup(keys.pane, self()) do
       %Error{} = lost -> {{:error, lost}, :fermix_app}
-      nil -> dispatch_profile(action, args, context, owner, profile_name, profile, config)
+      nil -> dispatch_profile(action, args, context, keys, profile_name, profile, config)
     end
   end
 
-  defp dispatch_profile(action, args, context, owner, profile_name, profile, config) do
-    {profile, backend} = Routing.for_request(owner, profile_name, profile, config, context)
-    route = &routed(owner, profile_name, profile, config, &1)
+  defp dispatch_profile(action, args, context, keys, profile_name, profile, config) do
+    {profile, backend, key} = Routing.for_request(keys, profile_name, profile, config, context)
+    route = &routed(keys.pane, key, profile_name, profile, config, &1)
 
     case run(action, args, context, profile.mode, route) do
       {:ok, result} -> {{:ok, encode(result)}, backend}
@@ -161,11 +179,13 @@ defmodule FermixCore.Browser do
   end
 
   # The turn's lost pane answers here too, since a sign-in's second request
-  # comes after the owner's answer, and the pane may have gone meanwhile.
-  defp routed(owner, profile_name, profile, config, request) do
-    case TurnMarker.lookup(owner, self()) do
+  # comes after the owner's answer, and the pane may have gone meanwhile. A
+  # pane task marks under its conversation's pane key; the request goes to the
+  # profile `Routing` pinned it to.
+  defp routed(pane, key, profile_name, profile, config, request) do
+    case TurnMarker.lookup(pane, self()) do
       %Error{} = lost -> {:error, lost}
-      nil -> ProfileManager.dispatch(owner, profile_name, profile, config, request)
+      nil -> ProfileManager.dispatch(key, profile_name, profile, config, request)
     end
   end
 

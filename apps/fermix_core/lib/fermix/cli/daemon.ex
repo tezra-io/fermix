@@ -24,6 +24,18 @@ defmodule Fermix.CLI.Daemon do
   channels-side provider so this core application never compile-depends on
   `fermix_channels`.
 
+  After a move (M75 §6, B12) a desktop's engine runs in the device role and
+  its app keeps speaking this socket. When the boot found the desktop link
+  (`FermixCore.Home.DesktopLink.linked?/2`, decided once), a request that
+  passed this socket's own owner placement is answered here when it is
+  device-class (`FermixCore.Management.Placement`) and sent to the primary
+  through `FermixCore.Home.Link` when it is primary-class; no request takes
+  both paths. A composed request (`home.status`, `settings.sections`) is
+  answered here, and the router asks the primary for its part through the
+  same link (`:primary_forward`). On the primary, `serve_forwarded/3` answers a
+  request a desktop forwarded exactly as this socket would, with the router's
+  options and the actor `{:desktop, device_id}`, refusing a device-class one.
+
   Started only inside `fermix run` (the supervision tree branches on
   `:fermix_core, :daemon_socket_enabled`). Stale sockets from prior
   crashes are removed on boot; double-binding fails fast on
@@ -38,12 +50,17 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.BuildInfo
   alias FermixCore.Capabilities.MCP.RuntimeStatus, as: McpRuntimeStatus
   alias FermixCore.Health
+  alias FermixCore.Home.DesktopLink
+  alias FermixCore.Home.Link, as: HomeLink
+  alias FermixCore.Home.Role
   alias FermixCore.Introspection.Agents
   alias FermixCore.Introspection.Capabilities
   alias FermixCore.Introspection.Wire
   alias FermixCore.Management.Cues, as: ManagementCues
+  alias FermixCore.Management.HomeMove, as: ManagementHomeMove
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Mobile, as: ManagementMobile
+  alias FermixCore.Management.Placement
   alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Management.Router, as: ManagementRouter
   alias FermixCore.Management.Secrets, as: ManagementSecrets
@@ -51,6 +68,7 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Management.Text
   alias FermixCore.Observability
   alias FermixCore.Plugins.Runtime, as: PluginsRuntime
+  alias FermixCore.Setup.ConfigStore
   alias FermixCore.SocketPath
   alias FermixCore.SocketPeer
   alias FermixCore.Trace
@@ -76,9 +94,14 @@ defmodule Fermix.CLI.Daemon do
   @max_profile_bytes 256
   # The owner's decisions on the phone channel, in both protocol versions:
   # opening a pairing window (its link carries the pairing secret), deciding
-  # on the phone that asked, closing the window, and forgetting a phone.
+  # on the phone that asked, closing the window, and forgetting a device.
   @mobile_decisions_v1 ~w(mobile.pair.start mobile.pair.decide mobile.pair.cancel
                           mobile.devices.revoke)
+  # Opening a code that lets a server take this home, reviewing a move (the
+  # review reads every keychain secret the move would carry) and starting it,
+  # and replacing the recovery key (M75).
+  @home_decisions_v1 ~w(home.enroll.open home.move.readiness home.move.start
+                        home.snapshots.passphrase)
   @owner_decisions_v0 ~w(mobile_pair_begin mobile_pair_decide mobile_pair_cancel
                          mobile_device_revoke)
   # The cue writes that widen what reaches a task or what a task may do, the
@@ -108,6 +131,41 @@ defmodule Fermix.CLI.Daemon do
   """
   @spec default_stopper() :: (-> :ok)
   def default_stopper, do: Lifecycle.default_stopper()
+
+  @doc """
+  Answers one management request a desktop forwarded over the rail (M75 §6),
+  on the primary: `frame` is the request as this socket would read it, and the
+  answer is the response this socket would send. It runs in the caller with
+  the options this daemon passes its router, and the actor
+  `{:desktop, device_id}`. The desktop's engine placed its own caller before
+  forwarding, so an owner decision is served; a device-class request is
+  refused with `device_class_method`.
+  """
+  @spec serve_forwarded(binary(), String.t(), GenServer.server()) :: map()
+  def serve_forwarded(frame, device_id, server \\ __MODULE__)
+      when is_binary(frame) and is_binary(device_id) and device_id != "" do
+    opts = GenServer.call(server, :management_opts)
+
+    case ManagementProtocol.decode_request(frame) do
+      {:ok, {:v1, request}} ->
+        management_response(request.request_id, forwarded_result(request, device_id, opts))
+
+      {:error, {:v1, response}} ->
+        response
+
+      {:ok, {:v0, _request}} ->
+        management_response(nil, {:error, :invalid_request, %{"field" => "protocol_version"}})
+
+      {:error, :invalid_v0_request} ->
+        management_response(nil, {:error, :invalid_request, %{"field" => "request"}})
+    end
+  end
+
+  defp forwarded_result(request, device_id, opts) do
+    if Placement.served_forwarded?(request.method, request.params),
+      do: route_management_request(request, Keyword.put(opts, :actor, {:desktop, device_id})),
+      else: Placement.device_class_refusal(request.method)
+  end
 
   @impl true
   def init(opts) do
@@ -179,7 +237,13 @@ defmodule Fermix.CLI.Daemon do
            daemon_os_pid: Keyword.get(opts, :daemon_os_pid, String.to_integer(System.pid())),
            os: Keyword.get(opts, :os, :os.type()),
            stopper: Keyword.get(opts, :stopper, default_stopper()),
-           started_at_ms: System.monotonic_time(:millisecond)
+           started_at_ms: System.monotonic_time(:millisecond),
+           # M75 §6: decided once, at boot. A device-role engine holding its
+           # desktop link forwards primary-class requests (`forward`, the
+           # rail's `Home.Link`, given the request and its options); any other
+           # engine answers every one here.
+           linked?: Keyword.get_lazy(opts, :desktop_link?, &linked_at_boot?/0),
+           forward: Keyword.get(opts, :forward, &forward_to_primary/2)
          }}
 
       {:error, reason} ->
@@ -222,6 +286,15 @@ defmodule Fermix.CLI.Daemon do
       {:error, reason} -> {:error, {:stale_socket_unlink_failed, reason, socket_path}}
     end
   end
+
+  defp linked_at_boot?, do: DesktopLink.linked?(Role.recorded(), ConfigStore.fermix_home())
+
+  defp forward_to_primary(request, opts), do: HomeLink.impl().forward(request, opts)
+
+  # The options this daemon passes its router, for a request a desktop
+  # forwarded (`serve_forwarded/3`).
+  @impl true
+  def handle_call(:management_opts, _from, state), do: {:reply, management_opts(state), state}
 
   @impl true
   def handle_info(:accept, state) do
@@ -340,7 +413,7 @@ defmodule Fermix.CLI.Daemon do
 
     result =
       case owner_caller(family, request.method, conn, state) do
-        :ok -> route_management_request(request, state)
+        :ok -> dispatch_management_request(request, state)
         {:error, _verdict} -> owner_decision_refusal(family)
       end
 
@@ -354,6 +427,7 @@ defmodule Fermix.CLI.Daemon do
   # `cues_mandates_enabled` back on undoes the owner's stop of every mandate.
   # Every other secret and section stays open, as it was.
   defp owner_family(method, _params) when method in @mobile_decisions_v1, do: :mobile
+  defp owner_family(method, _params) when method in @home_decisions_v1, do: :home
   defp owner_family(method, _params) when method in @cue_decisions_v1, do: :cues
 
   defp owner_family(method, %{"id" => @cue_secret_prefix <> _ref}) when method in @secret_writes,
@@ -382,7 +456,16 @@ defmodule Fermix.CLI.Daemon do
   # channel is fine and doctor says so, so "not running" would send the
   # operator after the wrong fault. The capability and the sentence are the
   # request's family's: the phone's own pair for its pairing methods, the
-  # cues' for theirs and for a cue write that rides a generic method.
+  # cues' for theirs and for a cue write that rides a generic method, and for
+  # M75's the home move's.
+  defp owner_decision_refusal(:home) do
+    {:error, :unavailable,
+     %{
+       "capability" => ManagementHomeMove.capability(),
+       "sentence" => ManagementHomeMove.owner_only_sentence()
+     }}
+  end
+
   defp owner_decision_refusal(:cues) do
     {:error, :unavailable,
      %{
@@ -407,15 +490,36 @@ defmodule Fermix.CLI.Daemon do
     {:error, verdict}
   end
 
-  defp route_management_request(request, state) do
-    ManagementRouter.route(request, management_opts(state))
+  # M75 §6, B12: a linked device answers a device-class request here and sends
+  # a primary-class one to the primary, never both; any other engine routes
+  # every request here. A composed request is answered here, and the router
+  # asks the primary for its part through the same link.
+  defp dispatch_management_request(request, %{linked?: true} = state) do
+    case Placement.place(request.method, request.params) do
+      :device ->
+        opts = Keyword.put(management_opts(state), :primary_forward, state.forward)
+        route_management_request(request, opts)
+
+      :primary ->
+        guarded(request.method, fn -> state.forward.(request, []) end)
+    end
+  end
+
+  defp dispatch_management_request(request, state),
+    do: route_management_request(request, management_opts(state))
+
+  defp route_management_request(request, opts),
+    do: guarded(request.method, fn -> ManagementRouter.route(request, opts) end)
+
+  defp guarded(method, answer) do
+    answer.()
   rescue
     exception ->
-      log_management_route_failure(request.method, :exception, exception, __STACKTRACE__)
+      log_management_route_failure(method, :exception, exception, __STACKTRACE__)
       {:error, :internal_error, %{}}
   catch
     kind, reason ->
-      log_management_route_failure(request.method, kind, reason, __STACKTRACE__)
+      log_management_route_failure(method, kind, reason, __STACKTRACE__)
       {:error, :internal_error, %{}}
   end
 
@@ -469,17 +573,36 @@ defmodule Fermix.CLI.Daemon do
     Keyword.put(state.management_opts, :overview_opts, overview_opts)
   end
 
+  # A candidate primary (M75 §2) runs no agent, no phone channel and no
+  # plugins until its move: of the unversioned methods it answers `shutdown`
+  # alone and refuses the rest by name, as the router refuses its v1 methods,
+  # rather than calling a process it never started.
+  defp dispatch_initial_request(%{"method" => method} = request, conn, state) do
+    if method != "shutdown" and candidate?(state),
+      do: %{status: "error", reason: "candidate", error: ManagementRouter.candidate_sentence()},
+      else: dispatch_served_request(request, conn, state)
+  end
+
+  # `:engine_role` stands in for the role this boot recorded (tests), as the
+  # router's own seam; an engine that recorded none is served as before.
+  defp candidate?(state) do
+    case Keyword.get_lazy(state.management_opts, :engine_role, &Role.booted/0) do
+      %{role: :candidate} -> true
+      _primary_device_or_unrecorded -> false
+    end
+  end
+
   # `agent_message` is the one method whose answer depends on the connection: a
   # prompt is attended only when a person sent it, and the kernel, not the
   # request, says which process did (SIDE-V1).
-  defp dispatch_initial_request(%{"method" => "agent_message"} = request, conn, state) do
+  defp dispatch_served_request(%{"method" => "agent_message"} = request, conn, state) do
     case SocketPeer.classify(conn, state.daemon_os_pid, state.os) do
       {:ok, caller} -> agent_message_reply(request, caller)
       {:error, reason} -> unidentified_caller_reply(request, reason)
     end
   end
 
-  defp dispatch_initial_request(%{"method" => method} = request, conn, state) do
+  defp dispatch_served_request(%{"method" => method} = request, conn, state) do
     case owner_caller(owner_family_v0(method), method, conn, state) do
       :ok -> dispatch_request(request, state)
       {:error, _verdict} -> error_reply(:owner_decision_refused)

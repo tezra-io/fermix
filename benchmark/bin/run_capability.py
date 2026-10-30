@@ -1168,10 +1168,23 @@ def _cross_session_trial(cfg, opik, s, case, run_id, i, fixtures=None):
     ep.expects.append(_case_expect(case, len(queries) - 1))
     if cap.status != "graded" or cap.view is None:
         return _fail_trial(case, ep, label)
-    spec = {**case.score_spec, "expected": str(case.score_spec["expected"]).replace("{token}", token)}
-    succ = scoring.score_answer(cap.view.reply, spec).score
+    succ = _recall_score(case, cap.view.reply, token, binding, label)
     succ = _provenance_gate(case, ep, succ, label)
     return _finish_trial(case, ep, succ, label)
+
+
+def _recall_score(case, reply: str, token: str, binding, label: str) -> float:
+    """The recall's grade: what its page recorded once the recall turn settled
+    (a `fixture_state` case, such as a sign-in a fresh conversation must find
+    still holding), or else its reply against the `score` block."""
+    clauses = fixture_clauses(case)
+    if clauses:
+        verdict = check_state(_page_state(binding), clauses)
+        if not verdict.passed:
+            print(f"    · {label}: fixture_state: {verdict.detail}", file=sys.stderr)
+        return 1.0 if verdict.passed else 0.0
+    spec = {**case.score_spec, "expected": str(case.score_spec["expected"]).replace("{token}", token)}
+    return scoring.score_answer(reply, spec).score
 
 
 # --- drive: cue ---------------------------------------------------------------------

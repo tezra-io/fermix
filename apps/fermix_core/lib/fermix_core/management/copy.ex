@@ -58,6 +58,7 @@ defmodule FermixCore.Management.Copy do
   @proper_nouns [
     "Fermix Computer Use",
     "Fermix Messages",
+    "Always On",
     "Apple ID",
     "Apple",
     "Full Disk Access",
@@ -82,6 +83,7 @@ defmodule FermixCore.Management.Copy do
     "WhatsApp",
     "Discord",
     "Slack",
+    "Socket Mode",
     "Signal",
     "Google Meet",
     "Zoom",

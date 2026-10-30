@@ -20,6 +20,10 @@ defmodule FermixCore.ComputerHistory.Controller do
   binary being installed — capture cannot run without the compux sidecar, so a
   missing binary keeps the children absent (fail-closed) rather than crash-looping
   a `Capturer` that can never resolve its Port.
+
+  A device-role engine (`FermixCore.Home.Role`) runs capture only: the
+  summarizer calls a provider, which a device never does (M75 D5), and the
+  48-hour purge is the `Supervisor`'s `Retention`, which runs either way.
   """
 
   use GenServer
@@ -31,6 +35,7 @@ defmodule FermixCore.ComputerHistory.Controller do
   alias FermixCore.ComputerHistory.Summarizer.Scheduler
   alias FermixCore.ComputerHistory.Supervisor, as: CHSupervisor
   alias FermixCore.ComputerUse.SidecarInstaller
+  alias FermixCore.Home.Role
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -60,7 +65,10 @@ defmodule FermixCore.ComputerHistory.Controller do
         Keyword.get(opts, :dynamic_supervisor, CHSupervisor.dynamic_supervisor()),
       operative_fun: Keyword.get(opts, :operative_fun, &ComputerHistory.operative?/0),
       installed_fun: Keyword.get(opts, :installed_fun, &SidecarInstaller.installed?/0),
-      children: Keyword.get(opts, :children, default_children())
+      children:
+        Keyword.get_lazy(opts, :children, fn ->
+          opts |> Keyword.get_lazy(:engine_role, &Role.current/0) |> default_children()
+        end)
     }
 
     # Reconcile off `init` so boot never blocks on starting a Port-owning child.
@@ -83,11 +91,12 @@ defmodule FermixCore.ComputerHistory.Controller do
 
   # Production children: the module IS the registered name (each `start_link`
   # defaults `name` to its module), which is how "already running?" is checked.
-  defp default_children do
-    [
-      %{name: Capturer, spec: Capturer},
-      %{name: Scheduler, spec: Scheduler}
-    ]
+  # Public (@doc false) so the role's filter is pinned without a running capture.
+  @doc false
+  @spec default_children(Role.role()) :: [%{name: module(), spec: module()}]
+  def default_children(role) when role in [:primary, :device] do
+    [%{name: Capturer, spec: Capturer}, %{name: Scheduler, spec: Scheduler}]
+    |> Enum.filter(&(Role.children([&1.spec], role) != []))
   end
 
   defp do_reconcile(state) do

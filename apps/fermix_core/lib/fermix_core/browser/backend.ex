@@ -27,7 +27,11 @@ defmodule FermixCore.Browser.Backend do
   Arguments arrive validated for shape by `FermixCore.Browser`; a backend
   keeps its own floor under a direct call. The context carries `:caller`, the
   process that made the call (`ProfileServer` stamps it), which a backend may
-  bind its runtime's life to.
+  bind its runtime's life to, and `:tab_affinity`, the conversation the call
+  is made in (`FermixCore.Browser.execute/2` stamps it from
+  `Scope.tab_affinity/1`), whose own current tab a call without `target` acts
+  on. A caller that names none, such as a test driving a server directly, is
+  one conversation of its own.
   """
 
   alias FermixCore.Browser.CDP

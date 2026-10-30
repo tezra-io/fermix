@@ -120,10 +120,12 @@ defmodule FermixChannels.BrowserHost.SignInEndToEndTest do
     start_supervised!({CapabilityRegistry, name: registry})
     turns = start_supervised!({Task.Supervisor, name: nil}, id: make_ref())
     conversation = {"telegram", "sign-in-e2e-#{System.unique_integer([:positive])}", :root}
-    {:ok, owner} = Scope.owner_key(%{conversation_key: conversation})
-    on_exit(fn -> ProfileManager.stop_owner(owner) end)
+    # The pane task runs in the conversation's own pane profile.
+    {:ok, scope} = Scope.owner_key(%{source_trust: :operator, conversation_key: conversation})
+    pane = Scope.pane_key(scope, conversation)
+    on_exit(fn -> ProfileManager.stop_owner(pane) end)
 
-    %{registry: registry, turns: turns, conversation: conversation, owner: owner}
+    %{registry: registry, turns: turns, conversation: conversation, pane: pane}
   end
 
   test "the owner's /confirm in the chat lets the turn type the login on the same task and tab",
@@ -227,7 +229,7 @@ defmodule FermixChannels.BrowserHost.SignInEndToEndTest do
     turn = start_turn(ctx, session(), [[open()], [{"browser", @sign_in}]])
 
     assert_receive {:prompt, {:approval_prompt, _prompt, token}}
-    [{profile, _value}] = Registry.lookup(FermixCore.Browser.Registry, {ctx.owner, "fermix"})
+    [{profile, _value}] = Registry.lookup(FermixCore.Browser.Registry, {ctx.pane, "fermix"})
     watched = Process.monitor(profile)
 
     :ok = Task.Supervisor.terminate_child(ctx.turns, turn.pid)

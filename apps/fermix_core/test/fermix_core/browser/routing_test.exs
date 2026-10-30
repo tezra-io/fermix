@@ -50,18 +50,27 @@ defmodule FermixCore.Browser.RoutingTest do
     :ok
   end
 
-  defp route(ctx, owner, profile_name, profile, host) do
-    Routing.for_request(owner, profile_name, profile, ctx.config, @context,
+  # The keys a conversation's browser can live under: the scope's shared
+  # profile, and the conversation's own pane profile.
+  defp keys(owner, pane \\ nil), do: %{owner: owner, pane: pane || owner <> "-pane"}
+
+  defp route(ctx, keys, profile_name, profile, host) when is_map(keys) do
+    Routing.for_request(keys, profile_name, profile, ctx.config, @context,
       registry: ctx.registry,
       host_availability: host
     )
   end
 
+  defp route(ctx, owner, profile_name, profile, host),
+    do: route(ctx, keys(owner), profile_name, profile, host)
+
   test "fermix and fermix_visible both run on the app's pane when its host is usable", ctx do
     profiles = %{"fermix" => @managed, "fermix_visible" => %{@managed | headless: false}}
 
     for {name, profile} <- profiles do
-      assert {%{mode: :fermix_app} = routed, :fermix_app} =
+      pane = "owner-new-#{name}-pane"
+
+      assert {%{mode: :fermix_app} = routed, :fermix_app, ^pane} =
                route(ctx, "owner-new-#{name}", name, profile, host(:usable))
 
       assert Map.take(routed, [:headless, :cdp_port]) == Map.take(profile, [:headless, :cdp_port]),
@@ -81,8 +90,8 @@ defmodule FermixCore.Browser.RoutingTest do
       HostAvailability.report(pane, true, nil)
     end
 
-    assert {%{mode: :fermix_app}, :fermix_app} =
-             Routing.for_request("owner-open", "fermix", @managed, config, @context,
+    assert {%{mode: :fermix_app}, :fermix_app, "owner-open-pane"} =
+             Routing.for_request(keys("owner-open"), "fermix", @managed, config, @context,
                registry: ctx.registry,
                host_availability: pane,
                launcher: launcher
@@ -96,7 +105,8 @@ defmodule FermixCore.Browser.RoutingTest do
     profiles = %{"fermix" => @managed, "fermix_visible" => %{@managed | headless: false}}
 
     for {name, profile} <- profiles do
-      assert route(ctx, "owner-none-#{name}", name, profile, host(:empty)) == {profile, :cdp}
+      assert route(ctx, "owner-none-#{name}", name, profile, host(:empty)) ==
+               {profile, :cdp, "owner-none-#{name}"}
     end
 
     attached = host(:empty)
@@ -104,13 +114,15 @@ defmodule FermixCore.Browser.RoutingTest do
     :ok = HostAvailability.attached(attached, endpoint(), 1, 2)
 
     for {name, profile} <- profiles do
-      assert route(ctx, "owner-silent-#{name}", name, profile, attached) == {profile, :cdp}
+      assert route(ctx, "owner-silent-#{name}", name, profile, attached) ==
+               {profile, :cdp, "owner-silent-#{name}"}
     end
 
     :ok = HostAvailability.report(attached, false, "the pane is closed")
 
     for {name, profile} <- profiles do
-      assert route(ctx, "owner-busy-#{name}", name, profile, attached) == {profile, :cdp}
+      assert route(ctx, "owner-busy-#{name}", name, profile, attached) ==
+               {profile, :cdp, "owner-busy-#{name}"}
     end
   end
 
@@ -124,7 +136,7 @@ defmodule FermixCore.Browser.RoutingTest do
     }
 
     for {name, profile} <- profiles do
-      assert route(ctx, "owner-other", name, profile, usable) == {profile, :cdp},
+      assert route(ctx, "owner-other", name, profile, usable) == {profile, :cdp, "owner-other"},
              "`#{name}` was routed"
     end
   end
@@ -142,11 +154,11 @@ defmodule FermixCore.Browser.RoutingTest do
     :ok = HostAvailability.listening(listening, endpoint())
 
     for host <- [host(:usable), listening] do
-      assert Routing.for_request("owner-chrome", "fermix_chrome", profile, config, @context,
+      assert Routing.for_request(keys("owner-chrome"), "fermix_chrome", profile, config, @context,
                registry: ctx.registry,
                host_availability: host,
                launcher: launcher
-             ) == {profile, :cdp}
+             ) == {profile, :cdp, "owner-chrome"}
     end
 
     refute_received :opened
@@ -156,13 +168,75 @@ defmodule FermixCore.Browser.RoutingTest do
   # whose host has since gone is still a pane task (and fails there), and a
   # Chrome task stays in Chrome when a pane appears.
   test "a live profile pins every request to the backend it started on", ctx do
-    :ok = live!(ctx.registry, "owner-pane", "fermix", :fermix_app)
+    :ok = live!(ctx.registry, "owner-pane-pane", "fermix", :fermix_app)
     :ok = live!(ctx.registry, "owner-chrome", "fermix", :cdp)
 
-    assert {%{mode: :fermix_app}, :fermix_app} =
+    assert {%{mode: :fermix_app}, :fermix_app, "owner-pane-pane"} =
              route(ctx, "owner-pane", "fermix", @managed, host(:empty))
 
-    assert route(ctx, "owner-chrome", "fermix", @managed, host(:usable)) == {@managed, :cdp}
+    assert route(ctx, "owner-chrome", "fermix", @managed, host(:usable)) ==
+             {@managed, :cdp, "owner-chrome"}
+  end
+
+  # A pane task belongs to the conversation that started it and ends with its
+  # turn, so the pane is the conversation's own; Chrome is the owner's one
+  # browser. A conversation is pinned to its own live pane profile first, then
+  # to the owner's live Chrome, and only then decided fresh.
+  test "a conversation's own live pane comes first, then the owner's live Chrome, then a fresh decision",
+       ctx do
+    chat_a = keys("owner-shared", "pane-a")
+    chat_b = keys("owner-shared", "pane-b")
+    :ok = live!(ctx.registry, "pane-a", "fermix", :fermix_app)
+
+    # A keeps its pane even with no usable host (and fails there, not in Chrome).
+    assert {%{mode: :fermix_app}, :fermix_app, "pane-a"} =
+             route(ctx, chat_a, "fermix", @managed, host(:empty))
+
+    # B has no pane of its own: decided fresh, onto its own pane, never A's.
+    assert {%{mode: :fermix_app}, :fermix_app, "pane-b"} =
+             route(ctx, chat_b, "fermix", @managed, host(:usable))
+
+    # Once the owner's Chrome is live, a conversation without a pane joins it.
+    :ok = live!(ctx.registry, "owner-shared", "fermix", :cdp)
+
+    assert route(ctx, chat_b, "fermix", @managed, host(:usable)) ==
+             {@managed, :cdp, "owner-shared"}
+
+    assert {%{mode: :fermix_app}, :fermix_app, "pane-a"} =
+             route(ctx, chat_a, "fermix", @managed, host(:usable))
+  end
+
+  test "two owner conversations decided onto Chrome both run in the owner's one profile", ctx do
+    for pane <- ["pane-c", "pane-d"] do
+      assert route(ctx, keys("owner-one", pane), "fermix", @managed, host(:empty)) ==
+               {@managed, :cdp, "owner-one"}
+    end
+  end
+
+  # A guest's pane and Chrome are both its conversation's one profile, as they
+  # always were.
+  test "a guest's conversation has one key for both backends", ctx do
+    guest = keys("guest-x", "guest-x")
+    :ok = live!(ctx.registry, "guest-x", "fermix", :cdp)
+    assert route(ctx, guest, "fermix", @managed, host(:usable)) == {@managed, :cdp, "guest-x"}
+
+    pane_guest = keys("guest-y", "guest-y")
+    :ok = live!(ctx.registry, "guest-y", "fermix", :fermix_app)
+
+    assert {%{mode: :fermix_app}, :fermix_app, "guest-y"} =
+             route(ctx, pane_guest, "fermix", @managed, host(:empty))
+  end
+
+  test "live/3 names the profile a conversation is pinned to, deciding nothing", ctx do
+    :ok = live!(ctx.registry, "pane-live", "fermix", :fermix_app)
+    :ok = live!(ctx.registry, "owner-live", "fermix", :cdp)
+    opts = [registry: ctx.registry]
+
+    assert Routing.live(keys("owner-live", "pane-live"), "fermix", opts) ==
+             {"pane-live", :fermix_app}
+
+    assert Routing.live(keys("owner-live", "pane-other"), "fermix", opts) == {"owner-live", :cdp}
+    assert Routing.live(keys("owner-none", "pane-none"), "fermix", opts) == nil
   end
 
   # End to end through the tool's own entry point and the browser tree's own
@@ -184,8 +258,10 @@ defmodule FermixCore.Browser.RoutingTest do
     :ok = HostAvailability.attached(host, connection, 1, 2)
     :ok = HostAvailability.report(host, true, nil)
 
+    # A guest's call, so its profile is this conversation's own: every owner
+    # call shares the one "owner" profile, which another test may have running.
     conversation = {"cli", "routing-#{System.unique_integer([:positive])}", :root}
-    context = %{agent_name: "t", conversation_key: conversation}
+    context = %{agent_name: "t", conversation_key: conversation, source_trust: :guest}
     {:ok, owner} = Scope.owner_key(context)
     on_exit(fn -> ProfileManager.stop_owner(owner) end)
 

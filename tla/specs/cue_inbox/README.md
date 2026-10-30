@@ -357,21 +357,21 @@ counterexample below.
 Proposed rule (design §17): no undecided delivery is stranded while its watcher
 is enabled; a held watcher retries until a call succeeds or the lifetime ends.
 
-`Cues.Filters.claim/2` (`filters.ex:233-247`) calls the Repo with periodic
-options (`repo_opts/1`, `:488`: `on_timeout: :error`). When the claim times out
-it traces `sweep_error` (`filter_claim`) and starts no task (`:243-245`), but the
-request still runs: `claim_one/3` (`cues_filter_sql.ex:211`) moves the delivery
+`Cues.Filters.claim/2` (`filters.ex:234-248`) calls the Repo with periodic
+options (`repo_opts/1`, `:490`: `on_timeout: :error`). When the claim times out
+it traces `sweep_error` (`filter_claim`) and starts no task (`:244-246`), but the
+request still runs: `claim_one/3` (`cues_filter_sql.ex:213`) moves the delivery
 `pending → filtering` with a new `filter_call_id` and an open call row. No task
 holds that call and the dispatcher's `in_flight` does not know it. A task's
 settle (or the dispatcher's own, after a crash or a deadline) that returns an
 error other than a timeout or `:stale` (its transaction rolled back) leaves the
 same thing: `filtering`, call open, the task reported, the slot freed
-(`finish/5`, `filters.ex:380`). A timeout is harmless there: the settle still
+(`finish/5`, `filters.ex:381`). A timeout is harmless there: the settle still
 runs, ahead of the dispatcher's next claim.
 
 Nothing then moves the row. The claim query skips a watcher that has a
-`filtering` delivery (`cues_filter_sql.ex:179`), so the watcher takes no more
-calls at all; the lifetime sweep never touches `filtering` (`cues_sql.ex:1091`,
+`filtering` delivery (`cues_filter_sql.ex:181`), so the watcher takes no more
+calls at all; the lifetime sweep never touches `filtering` (`cues_sql.ex:1232`,
 `sweeper.ex` moduledoc); the dispatcher's 60 s sweep only dispatches; the only
 reset is the boot reset in `Filters.init`. The delivery and every later delivery
 of that watcher wait until the daemon (or the filtering group) restarts. The
@@ -385,11 +385,11 @@ delivery 1.
 R1 re-walk (2026-10-17): still open, unchanged. None of the R1 changes gives
 the row a way out:
 - a stale settle now closes its open call `aborted` (`abort_stale_call/3`,
-  `cues_filter_sql.ex:421`), but only a call that receives a result; the
+  `cues_filter_sql.ex:423`), but only a call that receives a result; the
   stranded call has no task, so no result ever comes;
-- the first-timer rule (`filters.ex:111`, `:129`, `:135`) only delays the
+- the first-timer rule (`filters.ex:112`, `:130`, `:136`) only delays the
   dispatcher's first claim after a start;
-- `prune_filter_calls` now deletes unfinished calls too (`cues_sql.ex:1177`),
+- `prune_filter_calls` now deletes unfinished calls too (`cues_sql.ex:1318`),
   but only after 30 days, and it leaves the delivery `filtering`: the claim
   query still skips the watcher, and only the boot reset (which fences on the
   delivery's own `filter_call_id`, not the call row) moves it;
@@ -400,16 +400,16 @@ The `jobs` side recovers the same fault: a cue claim that times out leaves a run
 with no runner, and reconciliation reaps it on its next tick (check 19 holds with
 `SchedulerRepoCanFail` on).
 
-Fix (R3): every sweep (`handle_info(:sweep)`, `filters.ex:133`) first runs
-`reclaim_orphans/1` (`:192-215`), skipped while the boot reset is pending: one
-`{:reclaim_orphans, held, cutoff, now}` Repo call (`cues_filter_sql.ex:130`,
-`reclaim_in_tx/4` `:670`) with the call ids the dispatcher holds and a cutoff of
-the 60 s call deadline plus a 30 s margin (`@orphan_margin_ms`, `filters.ex:70`).
+Fix (R3): every sweep (`handle_info(:sweep)`, `filters.ex:134`) first runs
+`reclaim_orphans/1` (`:193-216`), skipped while the boot reset is pending: one
+`{:reclaim_orphans, held, cutoff, now}` Repo call (`cues_filter_sql.ex:132`,
+`reclaim_in_tx/4` `:675`) with the call ids the dispatcher holds and a cutoff of
+the 60 s call deadline plus a 30 s margin (`@orphan_margin_ms`, `filters.ex:71`).
 In one transaction, every `filtering` row whose `filter_call_id` is not held and
 whose call started before the cutoff (or whose call row is gone) goes back to
-`pending` through the boot reset's fenced move (`reset_each/2`, `:655`), attempts
+`pending` through the boot reset's fenced move (`reset_each/2`, `:657`), attempts
 unchanged, and its open call is finished `aborted` with "no task held this call
-past its deadline" (`abort_orphan_calls/3`, `:705`). A failure is traced as
+past its deadline" (`abort_orphan_calls/3`, `:707`). A failure is traced as
 `sweep_error` (`filter_reclaim`) and tried by the next sweep. ExUnit:
 `cues/filters_test.exs` "orphaned filter calls" (a claim that commits while the
 dispatcher sees `:repo_timeout` is left alone before the cutoff and freed after
@@ -430,13 +430,13 @@ run slots, counted from the `trigger` each `run_monitors` entry carries, so a cr
 run always keeps one"; design §17: "cue runs never take the last slot".
 
 `Jobs.Scheduler` restarts alone and its runners survive (`RunnerSupervisor`
-starts before it). `init/1` reconciles first (`scheduler.ex:210`): the scan
+starts before it). `init/1` reconciles first (`scheduler.ex:228`): the scan
 `Repo.unsettled_job_runs` runs with periodic options, and when it errors or times
-out it is logged and init goes on with no monitors (`:370-384`). Init then asks
-for an admission pass (`:213`). `admit_cue_runs/2` (`:293`) computes
+out it is logged and init goes on with no monitors (`:488-502`). Init then asks
+for an admission pass (`:231`). `admit_cue_runs/2` (`:311`) computes
 `free_slots(active, run_monitors, max)`: `active` is the runner supervisor's
 count, which includes the surviving cue runners, but `active_cue` counts monitors,
-which are empty, so the cue room is the whole share again (`cue_admission.ex:57`).
+which are empty, so the cue room is the whole share again (`cue_admission.ex:83`).
 With three cue runners alive and four slots, one more cue run starts and the four
 slots are all cue runs; the next reconcile tick adopts all four. A due cron run
 then finds the scheduler at capacity until a cue run ends (at most 30 minutes
@@ -448,18 +448,18 @@ accept both, `Admit(a)`, `SchedRestart`, `SchedBoot` with a failed scan,
 `Admit(b)`: two live cue runners.
 
 R1 re-walk (2026-10-17): still open, unchanged. The admission gate is now
-`cues_running?` (`scheduler.ex:202`, `:283`, `:294`), true while the cue tree
-lives, so it does not hold the pass back; `admit_cue_runs/2` (`:293-305`) still
-passes `state.run_monitors` to `free_slots/3` (`cue_admission.ex:57-63`);
-`reconcile_active_runs/1` (`:370-384`) still leaves the monitors empty on a
-failed scan; `claim/4` (`cue_admission.ex:82`) traces a failed scan as
+`cues_running?` (`scheduler.ex:213`, `:301`, `:312`), true while the cue tree
+lives, so it does not hold the pass back; `admit_cue_runs/2` (`:311-321`) still
+passes `state.run_monitors` to `free_slots/3` (`cue_admission.ex:83-89`);
+`reconcile_active_runs/1` (`:528-542`) still leaves the monitors empty on a
+failed scan; `claim/4` (`cue_admission.ex:109`) traces a failed scan as
 `sweep_error` but changes no count.
 
 Fix (R3, the lead's choice of the two): the scheduler keeps `runs_known?`
-(`scheduler.ex:200`), set by every reconcile scan, at init and on each tick:
-true when the scan succeeded (`:374`), false when it failed (`:382`, logged
-"no cue run starts until a scan succeeds"). `admit_cue_runs/2` (`:293`) takes
-its free slots from `free_cue_slots/1` (`:312`): none while the run set is
+(`scheduler.ex:211`), set by every reconcile scan, at init and on each tick:
+true when the scan succeeded (`:492`), false when it failed (`:500`, logged
+"no cue run starts until a scan succeeds"). `admit_cue_runs/2` (`:311`) takes
+its free slots from `free_cue_slots/1` (`:363`): none while the run set is
 unknown, else `CueAdmission.free_slots/3` as before. Cron runs keep their own
 rule (the ceiling on `active`). ExUnit: `jobs/scheduler_cues_test.exs` "after a
 restart whose adoption scan fails, no cue run starts until a reconcile

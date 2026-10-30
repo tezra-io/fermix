@@ -19,6 +19,7 @@ defmodule FermixCore.Management.Settings do
 
   alias FermixCore.Auth.Redaction
   alias FermixCore.Browser.Config, as: BrowserConfig
+  alias FermixCore.Home.Snapshot.Settings, as: SnapshotSettings
   alias FermixCore.Management.Mobile, as: PhoneChannel
   alias FermixCore.Management.Settings.AnswerMap
   alias FermixCore.Management.Settings.Assistant
@@ -29,6 +30,7 @@ defmodule FermixCore.Management.Settings do
   alias FermixCore.Management.Settings.Providers
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Management.Settings.Secrets
+  alias FermixCore.Management.Settings.Snapshots
   alias FermixCore.Management.Settings.Source
   alias FermixCore.Management.Settings.Tools
   alias FermixCore.Management.Settings.Voice
@@ -41,7 +43,18 @@ defmodule FermixCore.Management.Settings do
 
   require Logger
 
-  @families [Providers, Assistant, Channels, Mobile, CuesSection, Voice, Tools, Browser, Secrets]
+  @families [
+    Providers,
+    Assistant,
+    Channels,
+    Mobile,
+    CuesSection,
+    Voice,
+    Tools,
+    Browser,
+    Secrets,
+    Snapshots
+  ]
 
   @type section :: %{id: String.t(), pane: String.t(), title: String.t()}
   @type write_error ::
@@ -233,6 +246,7 @@ defmodule FermixCore.Management.Settings do
   defp commit(:meetings, answers), do: MeetingsConfig.save(answers)
   defp commit(:cues, answers), do: CuesSection.save(answers)
   defp commit(:browser, answers), do: BrowserConfig.save(answers)
+  defp commit(:snapshots, answers), do: SnapshotSettings.save(answers)
 
   defp commit(:sandbox, answers) do
     Wizard.set_sandbox_overrides(

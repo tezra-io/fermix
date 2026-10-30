@@ -19,6 +19,8 @@ defmodule FermixCore.Sandbox.PathPolicy do
     .config/gcloud/application_default_credentials.json
   )
   @os_roots ~w(/etc /usr /bin /sbin /System /Library)
+  # An Always-On host's enrollment code (M75), which its first boot writes.
+  @fermix_run_dir "/run/fermix"
 
   # The Mac app's browser pane keeps its websites' data under `~/Library`, by
   # bundle id (the released app and the dev build): the pane's
@@ -34,15 +36,15 @@ defmodule FermixCore.Sandbox.PathPolicy do
   # The daemon's own state under FERMIX_HOME, which no agent task reads or
   # writes through file tools: configuration and credentials (the Linux file
   # secret store, setup tokens, the session-signing key, ACP and mobile
-  # identities, the Sign in with ChatGPT install id, plugin token projections,
-  # browser profiles), the persona files
+  # identities, a desktop's key, the Sign in with ChatGPT install id, plugin
+  # token projections, browser profiles), the persona files
   # `/soul` curates, memory, grants, logs, traces and sockets. A new file of that
   # kind joins this list in the same change. Each entry also covers the files
   # named after it (see `protected?/2`).
   @protected_fermix_entries ~w(
     config.toml auth.json grants logs traces memory.db daemon.sock
     secrets secret_key_base setup-token setup-launch-token.json acp_identities
-    mobile plugins/run browser/profiles bootstrap acp.sock realtime.sock
+    mobile device plugins/run browser/profiles bootstrap acp.sock realtime.sock
     browser_bridge.sock companion.sock browser_host.sock native_host.sock chatgpt_host.json
   )
 
@@ -253,7 +255,7 @@ defmodule FermixCore.Sandbox.PathPolicy do
     fermix_home = fermix_home()
 
     (@os_roots ++
-       credentials(os_home) ++
+       [@fermix_run_dir | credentials(os_home)] ++
        pane_website_data(os_home) ++
        Enum.map(@protected_fermix_entries, &Path.join(fermix_home, &1)))
     |> Enum.map(&link_resolved_path/1)

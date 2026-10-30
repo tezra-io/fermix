@@ -27,6 +27,15 @@ Two things are derived from that stream and nothing else is:
     assertions. The server owns it: a page trying to report that key is refused,
     so the one ordering record cannot be forged by the page it describes.
 
+A SIGN-IN THAT HOLDS. `POST /s/<token>/sign-in` (a form post) signs the
+browser in to that one attempt: it sets a session cookie, HttpOnly, no expiry,
+scoped to `/s/<token>`, and redirects to `signed_in.html`; `GET
+/s/<token>/session` answers `{"signed_in": true}` only to a request carrying that
+attempt's current cookie. The pages report what the session answered, so a case
+can prove a later conversation reached the page in the same signed-in browser.
+The secret behind the cookie is the server's, never a state key, and the form's
+fields are read only to bound them: nothing a sign-in sends is kept or echoed.
+
 BOUNDS AND REFLECTION. Body size, events per token and live tokens are all
 capped; the page documents are read once at startup from a fixed allowlist (no
 directory serving, no filesystem read per request, no path traversal), and
@@ -37,12 +46,15 @@ runner reads the same state in process.
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import re
+import secrets
 import threading
 import time
 from dataclasses import dataclass
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -83,6 +95,10 @@ _SETTLE_MAX_POLLS = -(-SETTLE_CAP_MS // SETTLE_POLL_MS) + 1
 _CONTENT_TYPES = {".html": "text/html; charset=utf-8",
                   ".js": "text/javascript; charset=utf-8"}
 
+# The sign-in's cookie, and where the sign-in form lands (a page of the corpus).
+SESSION_COOKIE = "fixture_session"
+SIGNED_IN_PAGE = "signed_in.html"
+
 _TOKEN_RE = re.compile(r"\A[A-Za-z0-9_-]{1,120}\Z")
 _STATE_KEY_RE = re.compile(r"\A[a-z0-9_]+(\.[a-z0-9_]+)*\Z")
 _DOCUMENT_RE = re.compile(r"\A[A-Za-z0-9_-]+\.[a-z]+\Z")
@@ -116,6 +132,8 @@ class FixtureBinding:
 class _TokenState:
     events: list[dict]
     state: dict
+    # The current sign-in's secret, or None before the first sign-in.
+    session: str | None = None
 
 
 class FixtureServer:
@@ -252,6 +270,26 @@ class FixtureServer:
             assign_path(entry.state, key, value)
             entry.state[EVENT_KEYS_PATH] = [event["key"] for event in entry.events]
         return None
+
+    def sign_in(self, token: str) -> str | None:
+        """A fresh session secret for this token, replacing any earlier one, or
+        None for a token that is not bound."""
+        session = secrets.token_urlsafe(24)
+        with self._lock:
+            entry = self._tokens.get(token)
+            if entry is None:
+                return None
+            entry.session = session
+        return session
+
+    def signed_in(self, token: str, presented: str | None) -> bool:
+        """Whether `presented` is this token's current session secret."""
+        with self._lock:
+            entry = self._tokens.get(token)
+            session = entry.session if entry is not None else None
+        if session is None or not isinstance(presented, str):
+            return False
+        return hmac.compare_digest(session.encode("utf-8"), presented.encode("utf-8"))
 
     # --- request bodies (the handler's half, kept out of the HTTP class) ---
 
@@ -486,6 +524,11 @@ def _make_handler(fixtures: FixtureServer):
                                   ensure_ascii=False).encode("utf-8")
                 self._send(200, "application/json; charset=utf-8", body)
                 return
+            if tail == "session":
+                signed_in = fixtures.signed_in(token, self._session_cookie())
+                self._send(200, "application/json; charset=utf-8",
+                           json.dumps({"signed_in": signed_in}).encode("utf-8"))
+                return
             document = fixtures.document(tail)
             if document is None:
                 self._refuse(404, b"")
@@ -495,8 +538,12 @@ def _make_handler(fixtures: FixtureServer):
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib callback name
             token, tail = _route(self.path)
-            if token is None or tail != "event" or not fixtures.token_exists(token):
+            if token is None or tail not in ("event", "sign-in") \
+                    or not fixtures.token_exists(token):
                 self._refuse(404, b"")
+                return
+            if tail == "sign-in":
+                self._sign_in(token)
                 return
             problem = self._record(token)
             if problem:
@@ -518,6 +565,44 @@ def _make_handler(fixtures: FixtureServer):
             if not isinstance(event, dict):
                 return "event body must be a JSON object"
             return fixtures.record(token, event.get("key"), event.get("value"))
+
+        def _sign_in(self, token: str) -> None:
+            """Read the form only to bound it, start a session, and send the
+            browser on to the signed-in page with the session's cookie."""
+            problem = self._discard_body()
+            if problem:
+                self._refuse(400, json.dumps({"ok": False, "error": problem}).encode("utf-8"))
+                return
+            session = fixtures.sign_in(token)
+            if session is None:
+                self._refuse(404, b"")
+                return
+            self.send_response(303)
+            self.send_header("Location", SIGNED_IN_PAGE)
+            self.send_header("Set-Cookie", f"{SESSION_COOKIE}={session}; Path=/s/{token}; "
+                                           "HttpOnly; SameSite=Lax")
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+
+        def _discard_body(self) -> str | None:
+            length = self.headers.get("Content-Length")
+            if length is None or not length.isdigit():
+                return "a Content-Length is required"
+            if int(length) > MAX_BODY_BYTES:
+                return f"sign-in body exceeds {MAX_BODY_BYTES} bytes"
+            self.rfile.read(int(length))
+            return None
+
+        def _session_cookie(self) -> str | None:
+            """The session secret the browser sent, or None. A malformed Cookie
+            header signs nobody in."""
+            try:
+                cookies = SimpleCookie(self.headers.get("Cookie") or "")
+            except CookieError:
+                return None
+            morsel = cookies.get(SESSION_COOKIE)
+            return morsel.value if morsel is not None else None
 
         def _refuse(self, status: int, body: bytes) -> None:
             """Answer a request this server will not serve, and END the
@@ -552,7 +637,8 @@ def _make_handler(fixtures: FixtureServer):
 
 
 def _route(raw_path: str) -> tuple[str | None, str]:
-    """The whole routing table: `/s/<token>/<tail>` and nothing else. Returns
+    """The whole routing table: `/s/<token>/<tail>` and nothing else (a tail is a
+    document, `state`, `event`, `sign-in` or `session`). Returns
     (None, "") for every other shape, which the handler answers 404."""
     parts = urlparse(raw_path).path.split("/")
     if len(parts) != 4 or parts[0] != "" or parts[1] != "s":
@@ -560,6 +646,6 @@ def _route(raw_path: str) -> tuple[str | None, str]:
     token, tail = parts[2], parts[3]
     if not _TOKEN_RE.match(token):
         return None, ""
-    if tail in ("state", "event") or _DOCUMENT_RE.match(tail):
+    if tail in ("state", "event", "sign-in", "session") or _DOCUMENT_RE.match(tail):
         return token, tail
     return None, ""

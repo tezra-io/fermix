@@ -13,6 +13,7 @@ defmodule FermixCore.Browser.AttachedTabTest do
   alias FermixCore.Browser.CDP.ExtensionTransport
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
+  alias FermixCore.Browser.ProfileManager
   alias FermixCore.Browser.ProfileServer
   alias FermixTestSupport.SafeRm
 
@@ -586,8 +587,7 @@ defmodule FermixCore.Browser.AttachedTabTest do
     {"a detached background run",
      Map.merge(@base, %{source_trust: :operator, computer_use_origin: :unattended})},
     {"a delegated subagent", Map.put(@attended, :subagent_depth, 1)},
-    {"a coding continuation", Map.put(@attended, :harness_continuation_depth, 1)},
-    {"a context with no trust at all", Map.put(@base, :computer_use_origin, :interactive)}
+    {"a coding continuation", Map.put(@attended, :harness_continuation_depth, 1)}
   ]
 
   test "the person's own tab is refused to every turn they are not present for" do
@@ -598,6 +598,15 @@ defmodule FermixCore.Browser.AttachedTabTest do
       assert match?({:error, %Error{code: "attached_tab_not_allowed"}}, result),
              "#{label} reached the granted tab: #{inspect(result)}"
     end
+  end
+
+  # With no trust the call is refused before any profile is chosen, the
+  # person's own tab included.
+  test "a context with no trust at all is refused by name before the tab is considered" do
+    context = Map.put(@base, :computer_use_origin, :interactive)
+
+    assert {{:error, %Error{code: "missing_trust"}}, nil} =
+             Browser.execute(%{"action" => "status", "profile" => "selected_tab"}, context)
   end
 
   test "an attended owner turn reaches it, and the managed profile is untouched" do
@@ -628,7 +637,9 @@ defmodule FermixCore.Browser.AttachedTabTest do
   defp daemon_grant!(href) do
     start_supervised!(Supervisor.child_spec({Grants, []}, id: :daemon_grants))
     grant!(Grants, href)
-    on_exit(fn -> Browser.reap_conversation(@base.conversation_key) end)
+    # The owner's profiles are one per device and no conversation's end stops
+    # them, so the grant's holder is stopped by its key.
+    on_exit(fn -> ProfileManager.stop_owner("owner") end)
   end
 
   test "a Buzz channel is refused the person's own tab before the bridge is asked" do

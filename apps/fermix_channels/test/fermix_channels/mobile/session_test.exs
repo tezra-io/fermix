@@ -4,9 +4,14 @@ defmodule FermixChannels.Mobile.SessionTest do
   # pin only what any carrier relies on.
   use ExUnit.Case, async: true
 
+  alias FermixChannels.Mobile.Identity
   alias FermixChannels.Mobile.Session
+  alias FermixCore.Home.Epoch
+  alias FermixTestSupport.SafeRm
 
   @peer {10, 0, 0, 7}
+  @stale_sentence "This engine is at epoch 3; you have seen epoch 4: " <>
+                    "the primary moved, reconnect to the current one"
 
   test "a session that ends before hello or a pair request closes its iroh peer, and only then" do
     test_pid = self()
@@ -121,6 +126,156 @@ defmodule FermixChannels.Mobile.SessionTest do
     assert_receive {:current_pair, @peer}
     assert_receive {:failure_recorded, @peer}
   end
+
+  # M75 D14: the epoch a session announces is the one in the identity bundle
+  # whose gateway key the handshake used, read once with that key.
+  test "the handshake takes the primary epoch from the identity it loaded" do
+    root = SafeRm.make_tmp_dir!("mobile_session_epoch") |> FermixTestSupport.PrimaryHome.booted!()
+    on_exit(fn -> SafeRm.rm_rf!(root) end)
+    {:ok, identity} = Identity.ensure(root: root)
+    {:ok, 2} = Epoch.bump(root)
+    keypair = %{private: identity.gateway_private_key, public: identity.gateway_public_key}
+
+    stubs =
+      handshake_stubs()
+      |> Map.delete(:gateway_keypair)
+      |> Map.merge(%{
+        identity_root: root,
+        noise_initialize: fn :responder, :ik, static_keypair: ^keypair -> {:ok, {:ik, 0}} end
+      })
+
+    {:ok, fresh} = Session.init(stubs)
+    assert fresh.primary_epoch == nil
+
+    assert {:push, ["response"], paired} = Session.handle_frame(<<"FXM1", 1, "hs">>, fresh)
+    assert paired.primary_epoch == 2
+    refute Map.has_key?(paired, :load_gateway_keypair)
+  end
+
+  test "hello_ack announces the session's primary epoch; a lower or absent one is served" do
+    for seen <- [nil, 1, 3] do
+      fields = if seen, do: %{"primary_epoch" => seen}, else: %{}
+
+      assert {:push, [ack], ready} =
+               Session.handle_frame(hello_frame(fields), hello_state(primary_epoch: 3))
+
+      assert %{"t" => "hello_ack", "primary_epoch" => 3} = header(ack)
+      assert ready.phase == :ready
+      assert_received {:device_updated, _attrs}
+      assert_received :socket_attached
+    end
+  end
+
+  test "a hello that has seen a higher epoch is refused stale_primary and served nothing" do
+    state = hello_state(primary_epoch: 3)
+
+    assert {:stop, :stale_primary, {1002, "stale primary"}, [refusal], stopped} =
+             Session.handle_frame(hello_frame(%{"primary_epoch" => 4}), state)
+
+    assert header(refusal) == %{
+             "v" => 2,
+             "t" => "error",
+             "seq" => 1,
+             "code" => "stale_primary",
+             "message" => @stale_sentence
+           }
+
+    assert stopped.phase == :await_hello
+    assert stopped.device_id == nil
+    refute_received {:device_updated, _attrs}
+    refute_received :socket_attached
+  end
+
+  test "a session without a primary epoch fails loud at hello and serves nothing" do
+    for fields <- [%{}, %{"primary_epoch" => 1}] do
+      assert {:stop, {:primary_epoch_unavailable, nil}, {1002, "mobile protocol error"}, _state} =
+               Session.handle_frame(hello_frame(fields), hello_state(primary_epoch: nil))
+    end
+
+    refute_received {:device_updated, _attrs}
+    refute_received :socket_attached
+  end
+
+  test "pair_approved gives a newly paired phone the daemon's primary epoch" do
+    {:ok, state} =
+      Session.init(%{
+        peer: @peer,
+        phase: :await_pair_decision,
+        pairing_session_id: "pair-session",
+        primary_epoch: 5,
+        negotiated_version: 2,
+        noise: :noise,
+        encrypt: fn :noise, plaintext -> {:ok, plaintext, :noise} end,
+        discover: fn -> {:ok, []} end,
+        iroh_candidate: fn -> :none end,
+        profile_name: "Fermix",
+        schedule_handshake_deadline: fn _message, _delay_ms -> make_ref() end,
+        cancel_handshake_deadline: fn _ref -> false end
+      })
+
+    device = %{device_id: "new-device", apns_key_salt: <<3::256>>}
+    decision = {:mobile_pair_decision, "pair-session", {:ok, device}}
+
+    assert {:push, [approved], _state} = Session.handle_info(decision, state)
+    assert %{"t" => "pair_approved", "primary_epoch" => 5} = header(approved)
+  end
+
+  # A paired phone's session at `hello`, with stubbed crypto that passes
+  # plaintext through, and its device-store and registry calls reported.
+  defp hello_state(overrides) do
+    test_pid = self()
+
+    {:ok, state} =
+      %{
+        peer: @peer,
+        phase: :await_hello,
+        authenticated_device: %{device_id: "paired-device"},
+        device_registry: :registry,
+        device_store: :store,
+        profile_name: "Fermix",
+        noise: :noise,
+        decrypt: fn :noise, frame -> {:ok, frame, :noise} end,
+        encrypt: fn :noise, plaintext -> {:ok, plaintext, :noise} end,
+        update_device: fn :store, "paired-device", attrs ->
+          send(test_pid, {:device_updated, attrs})
+          {:ok, %{device_id: "paired-device"}}
+        end,
+        attach_socket: fn :registry, "paired-device", _pid, profile_id: "main" ->
+          send(test_pid, :socket_attached)
+          :ok
+        end,
+        history_head: fn "main" -> {:ok, 0} end,
+        read_frontier: fn "main" -> {:ok, 0} end,
+        discover: fn -> {:ok, []} end,
+        iroh_candidate: fn -> :none end,
+        pending_approvals: fn "main" -> [] end,
+        schedule_handshake_deadline: fn _message, _delay_ms -> make_ref() end,
+        cancel_handshake_deadline: fn _ref -> false end
+      }
+      |> Map.merge(Map.new(overrides))
+      |> Session.init()
+
+    state
+  end
+
+  defp hello_frame(fields) do
+    json =
+      %{
+        "v" => 2,
+        "t" => "hello",
+        "seq" => 1,
+        "device_id" => "paired-device",
+        "app_version" => "1.0.0",
+        "last_server_seq" => 0,
+        "protocol_v" => 2
+      }
+      |> Map.merge(fields)
+      |> Jason.encode!()
+
+    <<byte_size(json)::32, json::binary>>
+  end
+
+  defp header(<<size::32, json::binary-size(size), _bytes::binary>>), do: Jason.decode!(json)
 
   # Both Noise modes with stubbed crypto, no timer left running.
   defp handshake_stubs do

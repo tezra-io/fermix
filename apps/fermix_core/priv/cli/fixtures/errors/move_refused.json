@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "move_refused",
+    "sentence": "Fermix did not start the move. It said: No server waiting for the move has the id cand-0f1e2d3c4b5a6978. A server waits 24 hours after it enrolls; after that, get a new code and enroll it again."
+  },
+  "ok": false,
+  "schema_version": 1
+}

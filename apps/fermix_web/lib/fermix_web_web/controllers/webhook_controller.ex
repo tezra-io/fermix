@@ -5,10 +5,14 @@ defmodule FermixWebWeb.WebhookController do
 
   alias FermixChannels.Channels.Slack
   alias FermixChannels.Channels.WhatsApp
-  alias FermixChannels.Gateway
-  alias FermixChannels.Gateway.AlbumBuffer
-  alias FermixChannels.Gateway.Idempotency
-  alias FermixChannels.Gateway.Queue
+  alias FermixChannels.Gateway.WebhookIngress
+  alias FermixCore.Home.Role
+
+  # Every webhook route, before any verification or hand-off: a device-role
+  # engine (`FermixCore.Home.Role`) takes no channel message, so it answers 503
+  # and hands nothing to a channel, where a refusal reply would be posted into
+  # the conversation (M75 D13).
+  plug :admit_engine_role
 
   @auth_errors [
     :invalid_signature,
@@ -35,12 +39,9 @@ defmodule FermixWebWeb.WebhookController do
 
   @spec whatsapp(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def whatsapp(conn, params) do
-    with :ok <- WhatsApp.verify_webhook(conn),
-         {:ok, messages} <- WhatsApp.parse_webhook(params) do
-      ack_after_handoff(conn, :whatsapp, messages, WhatsApp)
-    else
-      {:error, reason} ->
-        webhook_error_response(conn, "WhatsApp webhook", reason)
+    case WhatsApp.verify_webhook(conn) do
+      :ok -> ingest(conn, :whatsapp, WhatsApp, params, "WhatsApp webhook")
+      {:error, reason} -> webhook_error_response(conn, "WhatsApp webhook", reason)
     end
   end
 
@@ -52,7 +53,7 @@ defmodule FermixWebWeb.WebhookController do
           json(conn, %{challenge: challenge})
 
         :ignore ->
-          dispatch_slack_webhook(conn, params)
+          ingest(conn, :slack, Slack, params, "Slack webhook")
 
         {:error, reason} ->
           webhook_error_response(conn, "Slack webhook", reason)
@@ -60,6 +61,25 @@ defmodule FermixWebWeb.WebhookController do
     else
       {:error, reason} ->
         webhook_error_response(conn, "Slack webhook", reason)
+    end
+  end
+
+  # `:fermix_engine_role` in the conn's private map stands in for the role this
+  # boot recorded (tests).
+  defp admit_engine_role(conn, _opts) do
+    record = Map.get_lazy(conn.private, :fermix_engine_role, &Role.recorded/0)
+
+    case Role.admit(record) do
+      :ok ->
+        conn
+
+      {:error, {:device_role, sentence}} ->
+        Logger.warning("#{conn.method} #{conn.request_path} refused: #{sentence}")
+
+        conn
+        |> put_status(503)
+        |> json(%{error: "This engine runs in the device role"})
+        |> halt()
     end
   end
 
@@ -98,102 +118,21 @@ defmodule FermixWebWeb.WebhookController do
     end
   end
 
-  defp dispatch_slack_webhook(conn, params) do
-    case Slack.parse_webhook(params) do
-      {:ok, messages} ->
-        ack_after_handoff(conn, :slack, messages, Slack)
-
-      {:error, reason} ->
-        webhook_error_response(conn, "Slack webhook", reason)
-    end
-  end
-
-  defp ack_after_handoff(conn, channel_key, messages, channel_module) do
-    fresh = filter_fresh(messages, channel_key)
-
-    case dispatch_async(fresh,
-           channel: channel_module,
-           agent: Queue,
-           agent_server: Queue
-         ) do
+  # A verified payload takes the one path every transport of the channel
+  # shares (`Gateway.WebhookIngress`); the provider is acknowledged once its
+  # fresh messages are handed off, and told to retry when nothing could be.
+  defp ingest(conn, channel_key, channel_module, params, label) do
+    case WebhookIngress.ingest(channel_key, channel_module, params) do
       :ok ->
-        :telemetry.execute(
-          [:fermix, :channel, :webhook],
-          %{count: length(fresh), duplicates: length(messages) - length(fresh)},
-          %{channel: channel_key}
-        )
-
         json(conn, %{ok: true})
 
-      {:error, reason} ->
-        # Audit F-06 follow-up: if start_child failed, the idempotency
-        # records have already been recorded for these messages. Roll
-        # them back so the provider's retry re-runs through the fresh
-        # path instead of being silently absorbed as duplicates.
-        Enum.each(fresh, &Idempotency.forget(channel_key, &1.id))
+      {:error, {:parse, reason}} ->
+        webhook_error_response(conn, label, reason)
 
-        Logger.error(
-          "#{channel_key} webhook handoff failed; idempotency rolled back: #{inspect(reason)}"
-        )
-
+      {:error, {:handoff, _reason}} ->
         conn
         |> put_status(503)
         |> json(%{error: "Webhook handoff unavailable"})
-    end
-  end
-
-  defp filter_fresh(messages, channel) do
-    Enum.filter(messages, fn message ->
-      case Idempotency.check_and_record(channel, message.id) do
-        :fresh ->
-          true
-
-        :duplicate ->
-          Logger.info(
-            "#{channel} webhook dropped duplicate message #{inspect(message.id)} (idempotency)"
-          )
-
-          false
-      end
-    end)
-  end
-
-  defp dispatch_async([], _opts), do: :ok
-
-  defp dispatch_async(messages, opts) do
-    work = fn -> run_dispatch(messages, opts) end
-
-    case Task.Supervisor.start_child(FermixCore.TaskSupervisor, work) do
-      {:ok, _pid} -> :ok
-      {:ok, _pid, _info} -> :ok
-      :ignore -> :ok
-      {:error, _reason} = err -> err
-    end
-  end
-
-  # WhatsApp routes through the album buffer (multi-image albums arrive as
-  # separate webhook messages with no media_group_id — coalesced into one turn).
-  # Idempotency is already recorded per message id before this point, so the
-  # buffer never sees duplicates. Other webhook channels dispatch directly.
-  defp run_dispatch(messages, opts) do
-    if Keyword.get(opts, :channel) == WhatsApp do
-      buffer = AlbumBuffer.name_for(WhatsApp)
-      Enum.each(messages, &AlbumBuffer.ingest(&1, buffer))
-    else
-      gateway_dispatch(messages, opts)
-    end
-  end
-
-  defp gateway_dispatch(messages, opts) do
-    case Gateway.ingest(messages, opts) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        Logger.error(
-          "Async webhook dispatch failed for #{inspect(Keyword.get(opts, :channel))}: " <>
-            inspect(reason)
-        )
     end
   end
 

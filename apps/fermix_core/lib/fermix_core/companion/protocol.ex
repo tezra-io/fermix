@@ -66,9 +66,20 @@ defmodule FermixCore.Companion.Protocol do
   mandate's card gains `outside.args` (each argument as `name` and `value`)
   and `outside.reason` (the filter's reason) for the compact card (§6.3),
   additive, so on every version. The window is now {4, 5}.
+
+  Both hellos carry the primary epoch (M75 D14), additive and optional on
+  every version: `server_hello.primary_epoch` is the home's, absent only from a
+  home that has never booted as the primary, and `client_hello.primary_epoch`
+  the highest the client has seen, which the primary refuses when it is greater
+  than its own (`stale_primary`). `server_hello.role` names the engine's role,
+  `primary` or `device`, on every hello from this daemon on, so a client
+  compares the epoch of a primary only.
   """
 
   alias FermixCore.ReplyBlocks
+
+  # The engine roles a `server_hello` names (`FermixCore.Home.Role`).
+  @engine_roles ~w(primary device)
 
   # Bumped in lockstep with any wire-shape change. The supported range is an
   # N/N-1 window derived from this single constant.
@@ -169,7 +180,7 @@ defmodule FermixCore.Companion.Protocol do
   }
 
   @server_required %{
-    "server_hello" => ~w(min_version max_version),
+    "server_hello" => ~w(min_version max_version role),
     "accepted" => ~w(client_msg_id duplicate),
     "turn_started" => ~w(profile_id turn_id in_reply_to),
     "text_delta" => ~w(turn_id text),
@@ -425,12 +436,18 @@ defmodule FermixCore.Companion.Protocol do
   end
 
   # `client_hello` is transport, not chat: it has no payload rules beyond the
-  # version, and its two errors are the Realtime socket's, verbatim.
+  # version, whose two errors are the Realtime socket's, verbatim, and the
+  # optional highest primary epoch the client has seen (M75 D14).
   defp validate_client_event("client_hello", payload) do
     case Map.get(payload, "protocol_version") do
-      version when is_integer(version) and version > 0 -> :ok
-      nil -> {:error, :missing_protocol_version}
-      _other -> {:error, :invalid_protocol_version}
+      version when is_integer(version) and version > 0 ->
+        optional_positive_u64(payload, "primary_epoch")
+
+      nil ->
+        {:error, :missing_protocol_version}
+
+      _other ->
+        {:error, :invalid_protocol_version}
     end
   end
 
@@ -529,9 +546,13 @@ defmodule FermixCore.Companion.Protocol do
 
   defp history_cursor(_payload), do: {:error, {:missing_field, "after_seq"}}
 
+  # `primary_epoch` is absent only from a home that has never booted as the
+  # primary (M75 D14); `role` is the engine's, which this daemon always names.
   defp validate_server("server_hello", payload) do
     with :ok <- positive_u64(payload, "min_version"),
-         :ok <- positive_u64(payload, "max_version") do
+         :ok <- positive_u64(payload, "max_version"),
+         :ok <- optional_positive_u64(payload, "primary_epoch"),
+         :ok <- enum(payload, "role", @engine_roles) do
       valid_version_range(payload)
     end
   end

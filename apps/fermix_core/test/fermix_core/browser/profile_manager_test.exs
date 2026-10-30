@@ -204,21 +204,28 @@ defmodule FermixCore.Browser.ProfileManagerTest do
     assert live_keys(ctx.registry) == [{"owner-b", "fermix"}]
   end
 
-  test "reap_conversation stops the browser for that conversation's owner only", ctx do
+  # The owner's profile is one per device, in use by every owner conversation
+  # and scheduled job at once, so one conversation ending must never stop it.
+  test "reap_conversation stops that conversation's own browser, never the owner's", ctx do
     keep = {"telegram", "chat-keep", :root}
     reap = {"cli", "sess-reap", :root}
-    {:ok, keep_owner} = Scope.owner_key(%{conversation_key: keep})
-    {:ok, reap_owner} = Scope.owner_key(%{conversation_key: reap})
+    {:ok, keep_guest} = Scope.owner_key(%{conversation_key: keep, source_trust: :guest})
+    {:ok, reap_guest} = Scope.owner_key(%{conversation_key: reap, source_trust: :guest})
+    {:ok, owner} = Scope.owner_key(%{conversation_key: reap, source_trust: :operator})
 
-    assert {:ok, keep_pid} = start(ctx.manager, keep_owner, "fermix", ctx.config)
-    assert {:ok, reap_pid} = start(ctx.manager, reap_owner, "fermix", ctx.config)
+    assert {:ok, keep_pid} = start(ctx.manager, keep_guest, "fermix", ctx.config)
+    assert {:ok, owner_pid} = start(ctx.manager, owner, "fermix", ctx.config)
+    assert {:ok, reap_pid} = start(ctx.manager, reap_guest, "fermix", ctx.config)
     ref = Process.monitor(reap_pid)
 
     assert :ok = FermixCore.Browser.reap_conversation(reap, server: ctx.manager)
 
     assert_receive {:DOWN, ^ref, :process, ^reap_pid, _reason}, 2_000
     assert Process.alive?(keep_pid)
-    assert live_keys(ctx.registry) == [{keep_owner, "fermix"}]
+    assert Process.alive?(owner_pid)
+
+    assert Enum.sort(live_keys(ctx.registry)) ==
+             Enum.sort([{keep_guest, "fermix"}, {owner, "fermix"}])
   end
 
   test "dispatch reaches the profile server directly and reuses it", ctx do

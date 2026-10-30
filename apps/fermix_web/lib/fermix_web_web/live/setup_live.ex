@@ -21,6 +21,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Harness.Vendors, as: HarnessVendors
+  alias FermixCore.Home.Role
   alias FermixCore.IMessage
   alias FermixCore.IMessage.Control, as: IMessageControl
   alias FermixCore.Management.Protocol, as: ManagementProtocol
@@ -62,6 +63,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Transcription.Local.ModelStore, as: LocalModelStore
   alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
+  alias FermixWebWeb.SetupLive.AlwaysOn
   alias FermixWebWeb.SetupLive.Components
   alias FermixWebWeb.SetupLive.CuesState
   alias FermixWebWeb.SetupLive.Phone
@@ -106,6 +108,7 @@ defmodule FermixWebWeb.SetupLive do
       description: "User profile"
     },
     %{id: "cues", label: "Cues", component: nil, description: "Outside input"},
+    %{id: "always_on", label: "Always On", component: nil, description: "Where Fermix runs"},
     %{id: "doctor", label: "Doctor", component: nil, description: "Final checks"}
   ]
 
@@ -156,8 +159,10 @@ defmodule FermixWebWeb.SetupLive do
     :discord_bot_token,
     :discord_bot_user_id,
     :discord_owner_user_id,
+    :slack_mode,
     :slack_bot_token,
     :slack_signing_secret,
+    :slack_app_token,
     :slack_owner_user_id,
     :signal_account,
     :signal_owner_user_id,
@@ -208,12 +213,16 @@ defmodule FermixWebWeb.SetupLive do
   # re-states it in the url so the post-restart reload stays native.
   defp mount_authorized(socket, requested_tab, embed?) do
     report = Wizard.report()
+    record = engine_record()
+    active_tab = requested_tab || first_tab(record, report)
 
     socket =
       socket
       |> assign(:page_title, "Fermix setup")
       |> assign(:embed?, embed?)
-      |> assign(:active_tab, requested_tab || next_action_tab(report))
+      |> assign(:engine_record, record)
+      |> assign(:always_on, AlwaysOn.initial(record))
+      |> assign(:active_tab, active_tab)
       |> assign(:saved_flash, nil)
       |> assign(:doctor_result, nil)
       |> assign(:doctor_probe_pending, MapSet.new())
@@ -239,9 +248,15 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:meetings_config_open?, false)
       |> assign(:phone, Phone.initial())
       |> assign_report(report)
+      |> AlwaysOn.on_tab(active_tab)
 
     {:ok, socket}
   end
+
+  # A device-role page opens on Always On, which says whether this computer
+  # reaches the server (M75 B14): the rest of the setup is the primary's.
+  defp first_tab(%{role: :device}, _report), do: "always_on"
+  defp first_tab(_record, report), do: next_action_tab(report)
 
   # A pairing window this page still shows is cancelled when the page goes away
   # (the tab closed or the socket dropped).
@@ -260,7 +275,8 @@ defmodule FermixWebWeb.SetupLive do
      socket
      |> assign(:active_tab, active_tab)
      |> assign(:saved_flash, nil)
-     |> refresh_cues_on(active_tab)}
+     |> refresh_cues_on(active_tab)
+     |> AlwaysOn.on_tab(active_tab)}
   end
 
   def handle_event("next_step", _params, socket) do
@@ -342,7 +358,7 @@ defmodule FermixWebWeb.SetupLive do
     if xai_auth_running?(socket.assigns.xai_auth_tasks) do
       {:noreply, flash_info(socket, "Grok sign-in is already open.")}
     else
-      {:noreply, start_xai_auth(socket)}
+      {:noreply, with_provider_access(socket, fn -> start_xai_auth(socket) end)}
     end
   end
 
@@ -350,7 +366,7 @@ defmodule FermixWebWeb.SetupLive do
     if socket.assigns.chatgpt_auth_task do
       {:noreply, flash_info(socket, "ChatGPT sign-in is already open.")}
     else
-      {:noreply, start_chatgpt_auth(socket)}
+      {:noreply, with_provider_access(socket, fn -> start_chatgpt_auth(socket) end)}
     end
   end
 
@@ -366,7 +382,7 @@ defmodule FermixWebWeb.SetupLive do
     if socket.assigns.chatgpt_signing_out? do
       {:noreply, socket}
     else
-      {:noreply, start_chatgpt_logout(socket)}
+      {:noreply, with_provider_access(socket, fn -> start_chatgpt_logout(socket) end)}
     end
   end
 
@@ -375,7 +391,7 @@ defmodule FermixWebWeb.SetupLive do
     if socket.assigns.anthropic_importing? do
       {:noreply, socket}
     else
-      {:noreply, start_anthropic_import(socket)}
+      {:noreply, with_provider_access(socket, fn -> start_anthropic_import(socket) end)}
     end
   end
 
@@ -416,8 +432,10 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:discord_bot_token, params["discord_bot_token"])
       |> maybe_put_string(:discord_bot_user_id, params["discord_bot_user_id"])
       |> maybe_put_string(:discord_owner_user_id, params["discord_owner_user_id"])
+      |> maybe_put_string(:slack_mode, params["slack_mode"])
       |> maybe_put_string(:slack_bot_token, params["slack_bot_token"])
       |> maybe_put_string(:slack_signing_secret, params["slack_signing_secret"])
+      |> maybe_put_string(:slack_app_token, params["slack_app_token"])
       |> maybe_put_string(:slack_owner_user_id, params["slack_owner_user_id"])
       |> maybe_put_string(:signal_account, params["signal_account"])
       |> maybe_put_string(:signal_owner_user_id, params["signal_owner_user_id"])
@@ -713,12 +731,7 @@ defmodule FermixWebWeb.SetupLive do
         {:noreply, socket}
 
       true ->
-        runner = meetbot_signin_runner()
-
-        {:noreply,
-         socket
-         |> assign(:meetbot_signin, installing(@meetbot_signin_running_message))
-         |> start_async(:meetbot_signin, runner)}
+        {:noreply, with_provider_access(socket, fn -> start_meetbot_signin(socket) end)}
     end
   end
 
@@ -761,12 +774,10 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
+  # Connect is a plugin's OAuth sign-in (an api_key plugin's secret form posts
+  # `set_plugin_secret`), so it passes the role gate first.
   def handle_event("plugin_connect", %{"name" => name}, socket) do
-    case PluginRegistry.find(name) do
-      {:ok, plugin} -> {:noreply, start_plugin_auth_or_explain(socket, plugin)}
-      :error -> {:noreply, flash_error(socket, "Plugin not found: #{name}")}
-      {:error, reason} -> {:noreply, flash_error(socket, Redaction.format(reason))}
-    end
+    {:noreply, with_provider_access(socket, fn -> connect_plugin(socket, name) end)}
   end
 
   # api_key plugins (M16): the card's secret form posts the keychained credential
@@ -789,6 +800,9 @@ defmodule FermixWebWeb.SetupLive do
     case disconnect_plugin(name) do
       :ok ->
         {:noreply, refresh_report(socket, "Plugin disconnected.")}
+
+      {:error, {:device_role, sentence}} ->
+        {:noreply, flash_error(socket, sentence)}
 
       {:error, reason} ->
         {:noreply, flash_error(socket, "Disconnect failed: #{Redaction.format(reason)}")}
@@ -896,6 +910,10 @@ defmodule FermixWebWeb.SetupLive do
        restart_required?: runtime_restart_answers?(answers)
      )}
   end
+
+  # The Always On tab (M75 B14).
+  def handle_event("always_on_" <> _rest = event, params, socket),
+    do: {:noreply, AlwaysOn.handle_event(event, params, socket)}
 
   # The Cues tab (M60 §15): `CuesState` turns each `cues_*` event into a
   # change and says what follows.
@@ -1213,9 +1231,16 @@ defmodule FermixWebWeb.SetupLive do
       tabs={@tabs}
       tool_summary={@tool_summary}
       cues={@cues}
+      always_on={@always_on}
+      device_notice={AlwaysOn.device_notice(@engine_record)}
+      unavailable_tabs={AlwaysOn.primary_tabs(@engine_record, @tabs)}
+      unavailable_sentence={unavailable_sentence(@engine_record)}
     />
     """
   end
+
+  defp unavailable_sentence(%{role: :device} = record), do: AlwaysOn.unavailable_sentence(record)
+  defp unavailable_sentence(_record), do: nil
 
   # One banner, one action (M34 native setup §15.1). The state is the daemon's
   # and is re-read here rather than remembered: this is the render every save
@@ -1504,6 +1529,23 @@ defmodule FermixWebWeb.SetupLive do
   defp flash_error(socket, message),
     do: assign(socket, :saved_flash, %{kind: :error, message: message})
 
+  # The one role gate (`FermixCore.Home.Role.admit/1`) every action that reaches
+  # a provider, its session or its token passes first: a device-role engine's
+  # token file is a retired copy of the primary's (M75 D5).
+  defp admit_provider_action, do: Role.admit(engine_record())
+
+  # The role this engine booted in, as every role decision on the page reads
+  # it. `:engine_role` in this app's environment is a 0-arity reader of the
+  # record; a test stands in.
+  defp engine_record, do: Application.get_env(:fermix_web, :engine_role, &Role.recorded/0).()
+
+  defp with_provider_access(socket, action) when is_function(action, 0) do
+    case admit_provider_action() do
+      :ok -> action.()
+      {:error, {:device_role, sentence}} -> flash_error(socket, sentence)
+    end
+  end
+
   defp runtime_restart_answers?(answers) do
     restart_keys =
       @provider_restart_keys ++
@@ -1525,8 +1567,17 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:doctor_result, running_doctor_result(channels))
     |> assign(:doctor_probe_pending, pending)
     |> assign(:doctor_probe_running?, true)
-    |> start_async(:doctor_provider_probe, fn -> Doctor.probe_active(opts) end)
+    |> start_provider_probe(opts)
     |> start_channel_probes(channels, opts)
+  end
+
+  # The probe calls the provider, so a device-role engine answers it with the
+  # refusal in the probe's own result row.
+  defp start_provider_probe(socket, opts) do
+    case admit_provider_action() do
+      :ok -> start_async(socket, :doctor_provider_probe, fn -> Doctor.probe_active(opts) end)
+      {:error, refusal} -> finish_doctor_provider_probe(socket, {:error, refusal})
+    end
   end
 
   defp doctor_probe_opts do
@@ -1937,8 +1988,10 @@ defmodule FermixWebWeb.SetupLive do
 
     %{
       enabled: channel_enabled?(config, false),
+      mode: safe_string(Keyword.get(config, :mode, :webhook)),
       bot_token_set: secret_set?(config, :bot_token),
       signing_secret_set: secret_set?(config, :signing_secret),
+      app_token_set: secret_set?(config, :app_token),
       owner_user_id: safe_string(Keyword.get(config, :owner_user_id))
     }
   end
@@ -2285,6 +2338,12 @@ defmodule FermixWebWeb.SetupLive do
 
   defp meetbot_browser_error(reason),
     do: "The notetaker's browser install failed: #{Redaction.format(reason)}"
+
+  defp start_meetbot_signin(socket) do
+    socket
+    |> assign(:meetbot_signin, installing(@meetbot_signin_running_message))
+    |> start_async(:meetbot_signin, meetbot_signin_runner())
+  end
 
   # Injectable so a LiveView test never launches a real browser (mirrors the
   # `:meetbot_installer` seam). Defaults to the real headed sign-in flow.
@@ -2912,7 +2971,8 @@ defmodule FermixWebWeb.SetupLive do
   defp disconnect_plugin(name) do
     case PluginRegistry.find(name) do
       {:ok, %{auth: %{type: :api_key}}} -> forget_plugin_secret(name)
-      _other -> PluginAuth.logout(name)
+      # An OAuth sign-out reaches the provider's session.
+      _other -> with :ok <- admit_provider_action(), do: PluginAuth.logout(name)
     end
   end
 
@@ -3495,6 +3555,14 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
+  defp connect_plugin(socket, name) do
+    case PluginRegistry.find(name) do
+      {:ok, plugin} -> start_plugin_auth_or_explain(socket, plugin)
+      :error -> flash_error(socket, "Plugin not found: #{name}")
+      {:error, reason} -> flash_error(socket, Redaction.format(reason))
+    end
+  end
+
   defp start_plugin_auth_or_explain(socket, plugin) do
     cond do
       missing_plugin_client_config?(plugin) ->
@@ -3579,6 +3647,7 @@ defmodule FermixWebWeb.SetupLive do
   # Another Fermix process held the account's profile lock past the wait, and
   # nothing was spent: the flash says to retry rather than naming the reason.
   defp sign_in_failure(_label, :profile_busy), do: Store.busy_sentence()
+  defp sign_in_failure(_label, {:device_role, sentence}), do: sentence
 
   # A Claude Code import's own failure, in the words every surface uses.
   defp sign_in_failure("Anthropic", reason) when AnthropicLogin.is_import_failure(reason),
@@ -3739,10 +3808,10 @@ defmodule FermixWebWeb.SetupLive do
   defp install_error({:verification_failed, _reason}), do: "signature invalid; refusing."
 
   defp install_error({:incompatible, {:needs_newer_core, :min_core_version, floor}}),
-    do: "needs Fermix ≥ #{floor}; run `fermix upgrade` first."
+    do: "needs Fermix ≥ #{floor}; update Fermix first."
 
   defp install_error({:incompatible, {:needs_newer_core, :plugin_api, api}}),
-    do: "needs a newer Fermix (plugin API #{api}); run `fermix upgrade` first."
+    do: "needs a newer Fermix (plugin API #{api}); update Fermix first."
 
   defp install_error({:incompatible, {:plugin_too_old, :plugin_api, _api}}),
     do: "built for an older Fermix; awaiting a plugin update."
@@ -3751,7 +3820,7 @@ defmodule FermixWebWeb.SetupLive do
     do: "#{name} #{version} was yanked; not installing."
 
   defp install_error({:unknown_plugin, _name}),
-    do: "not in the plugin catalog; run `fermix upgrade` to get the latest catalog."
+    do: "not in the plugin catalog; update Fermix to get the latest catalog."
 
   defp install_error({:no_build_for_target, target}), do: "no build for this machine (#{target})."
 
@@ -4076,7 +4145,11 @@ defmodule FermixWebWeb.SetupLive do
   # The web's listing seam feeds the one model check every sign-in door runs.
   defp ensure_codex_model(wizard) do
     impl = model_listing_impl()
-    LiveModel.ensure(:openai_codex, listing: &impl.live_models/2, wizard: wizard)
+
+    case admit_provider_action() do
+      :ok -> LiveModel.ensure(:openai_codex, listing: &impl.live_models/2, wizard: wizard)
+      {:error, {:device_role, sentence}} -> {:error, sentence}
+    end
   end
 
   defp codex_connected_message({:ok, %{changed?: true, model: slug}}),
@@ -4230,8 +4303,13 @@ defmodule FermixWebWeb.SetupLive do
          "anthropic_setup_token" => token
        }) do
     case String.trim(token || "") do
-      "" -> :ok
-      trimmed -> store_result(anthropic_login_impl().store_setup_token(trimmed))
+      "" ->
+        :ok
+
+      # Storing the token is a sign-in, refused on a device before anything is stored.
+      trimmed ->
+        with :ok <- admit_provider_action(),
+             do: store_result(anthropic_login_impl().store_setup_token(trimmed))
     end
   end
 
@@ -4395,13 +4473,17 @@ defmodule FermixWebWeb.SetupLive do
     impl = model_listing_impl()
 
     if impl.live?(provider) do
-      assign(
-        socket,
-        :live_models,
-        impl.live_models(provider, listing_opts(provider, provider_form))
-      )
+      assign(socket, :live_models, live_listing(impl, provider, provider_form))
     else
       assign(socket, :live_models, nil)
+    end
+  end
+
+  # A live listing calls the provider; a device shows why it has none.
+  defp live_listing(impl, provider, provider_form) do
+    case admit_provider_action() do
+      :ok -> impl.live_models(provider, listing_opts(provider, provider_form))
+      {:error, {:device_role, sentence}} -> {:error, sentence}
     end
   end
 

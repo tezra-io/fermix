@@ -182,6 +182,65 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  # The row a broken sandbox is explained by (OS_SANDBOX_ENFORCEMENT stage B):
+  # each answer the probe can give is injected, so every row runs on any OS.
+  describe "os_sandbox/2" do
+    test "macOS: Seatbelt applies, or every command fails and the row says why" do
+      assert %{name: "os sandbox", status: :ok, detail: detail} =
+               Checks.os_sandbox({:unix, :darwin}, seatbelt: :ok)
+
+      assert detail =~ "held by the kernel (Seatbelt)"
+
+      refused = {:error, "exit 71: sandbox_apply: Operation not permitted"}
+      result = Checks.os_sandbox({:unix, :darwin}, seatbelt: refused)
+      assert result.status == :fail
+      assert result.detail =~ "sandbox-exec cannot apply a profile here"
+      assert result.detail =~ "sandbox_apply: Operation not permitted"
+    end
+
+    test "Linux: the Landlock ABI, a warning at ABI 2, and the refusal below it" do
+      assert %{status: :ok, detail: detail} =
+               Checks.os_sandbox({:unix, :linux}, landlock: {:ok, 6})
+
+      assert detail == "commands are held by the kernel (Landlock ABI 6)"
+
+      assert %{status: :warn, detail: detail} =
+               Checks.os_sandbox({:unix, :linux}, landlock: {:ok, 2})
+
+      assert detail =~ "truncate"
+
+      below = {:unavailable, "fermix_landlock: Landlock ABI 1 is below 2 (Linux before 5.19)"}
+
+      assert %{status: :fail, detail: detail} =
+               Checks.os_sandbox({:unix, :linux}, landlock: {:error, below})
+
+      assert detail =~
+               "This computer can't sandbox commands (Landlock is unavailable), so Fermix won't run them"
+
+      assert detail =~ "Landlock ABI 1 is below 2 (Linux before 5.19)"
+      assert detail =~ "Linux 5.19 or later"
+
+      missing = {:shim_missing, "/opt/fermix/priv/fermix_landlock"}
+
+      assert %{status: :fail, detail: detail} =
+               Checks.os_sandbox({:unix, :linux}, landlock: {:error, missing})
+
+      assert detail =~ "Landlock shim is missing at /opt/fermix/priv/fermix_landlock"
+    end
+
+    test "not applicable on any other system" do
+      assert %{status: :not_applicable} = Checks.os_sandbox({:unix, :freebsd})
+    end
+
+    # Fails rather than skips on a Mac that cannot apply a profile (an already
+    # sandboxed session): the row is the authoritative check there.
+    if match?({:unix, :darwin}, :os.type()) do
+      test "this Mac's kernel holds commands" do
+        assert %{status: :ok} = Checks.os_sandbox()
+      end
+    end
+  end
+
   describe "computer_use_permissions/1" do
     test "disabled is a quiet ok" do
       result = Checks.computer_use_permissions({:ok, %{state: :disabled}})

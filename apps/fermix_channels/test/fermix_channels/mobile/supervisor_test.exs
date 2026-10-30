@@ -93,6 +93,7 @@ defmodule FermixChannels.Mobile.SupervisorTest do
       )
 
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
+    FermixTestSupport.PrimaryHome.booted!(root)
 
     instance_names = names()
 
@@ -462,7 +463,10 @@ defmodule FermixChannels.Mobile.SupervisorTest do
   end
 
   test "a repaired trust store clears the refusal on the next boot" do
-    root = SafeRm.make_tmp_dir!("mobile-repaired-trust-store")
+    root =
+      SafeRm.make_tmp_dir!("mobile-repaired-trust-store")
+      |> FermixTestSupport.PrimaryHome.booted!()
+
     on_exit(fn -> SafeRm.rm_rf!(root) end)
 
     path = DeviceStore.store_path(root)
@@ -503,7 +507,9 @@ defmodule FermixChannels.Mobile.SupervisorTest do
   # to do exactly that (Listener.init via Identity.ensure; MediaStore.init via
   # its manifest check); each must instead refuse only the mobile surface.
   test "partial identity material refuses the subtree instead of crashing the daemon" do
-    root = SafeRm.make_tmp_dir!("mobile-partial-identity")
+    root =
+      SafeRm.make_tmp_dir!("mobile-partial-identity") |> FermixTestSupport.PrimaryHome.booted!()
+
     on_exit(fn -> SafeRm.rm_rf!(root) end)
 
     dir = Path.join(root, "mobile")
@@ -539,7 +545,9 @@ defmodule FermixChannels.Mobile.SupervisorTest do
   end
 
   test "an insecure attachment manifest refuses the subtree instead of crashing the daemon" do
-    root = SafeRm.make_tmp_dir!("mobile-insecure-manifest")
+    root =
+      SafeRm.make_tmp_dir!("mobile-insecure-manifest") |> FermixTestSupport.PrimaryHome.booted!()
+
     on_exit(fn -> SafeRm.rm_rf!(root) end)
 
     dir = Path.join(root, "mobile")
@@ -576,7 +584,9 @@ defmodule FermixChannels.Mobile.SupervisorTest do
   # `{:error, :disabled}` to everything with memory off. A subtree started then
   # fails every hello while health reports ready; refuse it, named, instead.
   test "memory turned off refuses the subtree with a named reason" do
-    root = SafeRm.make_tmp_dir!("mobile-memory-disabled")
+    root =
+      SafeRm.make_tmp_dir!("mobile-memory-disabled") |> FermixTestSupport.PrimaryHome.booted!()
+
     on_exit(fn -> SafeRm.rm_rf!(root) end)
 
     instance_names = names()
@@ -599,7 +609,8 @@ defmodule FermixChannels.Mobile.SupervisorTest do
     assert {:error, :memory_disabled} = MobileSupervisor.refusal(store)
     assert log =~ "memory is turned off"
     refute Process.whereis(store)
-    refute File.exists?(Path.join(root, "mobile"))
+    # The refused subtree wrote nothing: `mobile/` holds only the boot's epoch.
+    assert File.ls!(Path.join(root, "mobile")) == ["primary_epoch"]
 
     assert {:ok, %{refused: true, refusal: :memory_disabled}} =
              Management.status(config: [enabled: true], device_store: store, root: root)
@@ -668,6 +679,7 @@ defmodule FermixChannels.Mobile.SupervisorTest do
       )
 
     on_exit(fn -> SafeRm.rm_rf!(root) end)
+    FermixTestSupport.PrimaryHome.booted!(root)
 
     [
       name: nil,
@@ -707,7 +719,10 @@ defmodule FermixChannels.Mobile.SupervisorTest do
       push_dispatcher: Module.concat(__MODULE__, "Push#{suffix}"),
       iroh_helper: Module.concat(__MODULE__, "IrohHelper#{suffix}"),
       bridge: Module.concat(__MODULE__, "Bridge#{suffix}"),
-      bridge_connections: Module.concat(__MODULE__, "BridgeConnections#{suffix}")
+      bridge_connections: Module.concat(__MODULE__, "BridgeConnections#{suffix}"),
+      desktop: Module.concat(__MODULE__, "Desktop#{suffix}"),
+      desktop_peers: Module.concat(__MODULE__, "DesktopPeers#{suffix}"),
+      desktop_peer_supervisor: Module.concat(__MODULE__, "DesktopPeerSupervisor#{suffix}")
     }
   end
 

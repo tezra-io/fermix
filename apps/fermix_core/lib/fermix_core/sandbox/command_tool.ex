@@ -78,7 +78,7 @@ defmodule FermixCore.Sandbox.CommandTool do
           {:ok, ToolTelemetry.redact(output, secrets)}
 
         {:ok, %{exit: code, stdout: output}} ->
-          {:error, {:command_failed, code, ToolTelemetry.redact(output, secrets)}}
+          failed(code, ToolTelemetry.redact(output, secrets))
 
         {:error, {:timeout, ms}} ->
           {:error, {:command_timeout, ms}}
@@ -86,6 +86,14 @@ defmodule FermixCore.Sandbox.CommandTool do
         {:error, reason} ->
           {:error, reason}
       end
+    end
+  end
+
+  # The kernel sandbox refusing to start the command is not the command failing.
+  defp failed(code, output) do
+    case OsSandbox.refusal(code, output) do
+      nil -> {:error, {:command_failed, code, output}}
+      sentence -> {:error, {:os_sandbox_unavailable, sentence}}
     end
   end
 

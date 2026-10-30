@@ -4,6 +4,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   alias FermixCore.Auth.Redaction
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
+  alias FermixWebWeb.SetupLive.AlwaysOn
   alias FermixWebWeb.SetupLive.CuesPane
   alias FermixWebWeb.SetupLive.Phone
 
@@ -66,6 +67,13 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :provider_statuses, :list, required: true
   # The Cues tab's state (M60 §15).
   attr :cues, :map, required: true
+  # The Always On tab's state, and the device role's word on the page (M75
+  # B14): the notice the page leads with, the tabs the primary serves, and the
+  # sentence those tabs show instead of their forms.
+  attr :always_on, :map, required: true
+  attr :device_notice, :string, default: nil
+  attr :unavailable_tabs, :list, default: []
+  attr :unavailable_sentence, :string, default: nil
 
   def page(assigns) do
     ~H"""
@@ -109,6 +117,15 @@ defmodule FermixWebWeb.SetupLive.Components do
               columns by the width they actually get, not the viewport's, so the
               narrow in-app pane and the browser page share one rule. --%>
         <section class={if @embed?, do: "@container min-w-0", else: "@container mt-6 min-w-0 lg:mt-0"}>
+          <div
+            :if={@device_notice}
+            id="device-role-notice"
+            class="mb-4 flex items-start gap-2 rounded-box border border-info/30 bg-info/5 px-4 py-3 text-sm"
+            role="note"
+          >
+            <.icon name="hero-computer-desktop" class="mt-0.5 size-4 shrink-0 text-info" />
+            <span>{@device_notice}</span>
+          </div>
           <div :if={@saved_flash} class="mb-4">
             <.flash_banner flash={@saved_flash} />
           </div>
@@ -176,6 +193,9 @@ defmodule FermixWebWeb.SetupLive.Components do
               tabs={@tabs}
               tool_summary={@tool_summary}
               cues={@cues}
+              always_on={@always_on}
+              unavailable_tabs={@unavailable_tabs}
+              unavailable_sentence={@unavailable_sentence}
             />
           </div>
         </section>
@@ -332,8 +352,35 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :tool_summary, :map, required: true
   attr :provider_statuses, :list, required: true
   attr :cues, :map, default: nil
+  attr :always_on, :map, default: nil
+  attr :unavailable_tabs, :list, default: []
+  attr :unavailable_sentence, :string, default: nil
 
-  defp active_pane(assigns), do: render_active_pane(assigns.active_tab, assigns)
+  # A tab the primary serves is drawn as unavailable on a device-role page
+  # (M75 B14), before the owner tries one of its controls.
+  defp active_pane(assigns) do
+    if assigns.active_tab in assigns.unavailable_tabs,
+      do: primary_only_pane(assigns),
+      else: render_active_pane(assigns.active_tab, assigns)
+  end
+
+  defp primary_only_pane(assigns) do
+    assigns =
+      assign(
+        assigns,
+        :label,
+        Enum.find_value(assigns.tabs, &(&1.id == assigns.active_tab && &1.label))
+      )
+
+    ~H"""
+    <div id="primary-only-pane" class="space-y-4">
+      <h2 class="text-2xl font-semibold tracking-normal">{@label}</h2>
+      <p class="rounded-box border border-base-300 bg-base-200/60 p-4 text-sm leading-6">
+        {@unavailable_sentence}
+      </p>
+    </div>
+    """
+  end
 
   defp render_active_pane("provider", assigns), do: provider_pane(assigns)
   defp render_active_pane("realtime", assigns), do: realtime_pane(assigns)
@@ -348,6 +395,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp render_active_pane("personalization", assigns), do: personalization_pane(assigns)
   defp render_active_pane("doctor", assigns), do: doctor_pane(assigns)
   defp render_active_pane("cues", assigns), do: CuesPane.pane(assigns)
+  defp render_active_pane("always_on", assigns), do: AlwaysOn.pane(assigns)
 
   defp provider_pane(assigns) do
     ~H"""
@@ -3805,6 +3853,18 @@ defmodule FermixWebWeb.SetupLive.Components do
       checked={@field.checked}
       hint={@field.hint}
     />
+    <label :if={@field.kind == :choice} class="form-control w-full">
+      <span class="label-text text-sm font-medium">{@field.label}</span>
+      <select name={@field.name} class="select select-bordered w-full bg-base-100">
+        <option
+          :for={{value, text} <- @field.options}
+          value={value}
+          selected={value == @field.value}
+        >
+          {text}
+        </option>
+      </select>
+    </label>
     <button
       :if={@field.kind == :action}
       type="button"
@@ -4240,10 +4300,17 @@ defmodule FermixWebWeb.SetupLive.Components do
     ]
   end
 
+  # The webhook needs the signing secret and a public address; Socket Mode
+  # needs the app-level token and no address at all (M75).
   defp channel_fields(:slack, form) do
     [
+      choice_field("Receive events through", "slack_mode", form.mode, [
+        {"webhook", "A webhook at a public address"},
+        {"socket", "Socket Mode, with no public address"}
+      ]),
       secret_field("Bot token", "slack_bot_token", form.bot_token_set),
-      secret_field("Signing secret", "slack_signing_secret", form.signing_secret_set),
+      secret_field("Signing secret (webhook)", "slack_signing_secret", form.signing_secret_set),
+      secret_field("App-level token (Socket Mode)", "slack_app_token", form.app_token_set),
       text_field("Owner user ID", "slack_owner_user_id", form.owner_user_id)
     ]
   end
@@ -4293,6 +4360,10 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp text_field(label, key, value) do
     %{kind: :text, label: label, name: "channels_form[#{key}]", value: value}
+  end
+
+  defp choice_field(label, key, value, options) do
+    %{kind: :choice, label: label, name: "channels_form[#{key}]", value: value, options: options}
   end
 
   defp toggle_field(label, key, checked, hint) do
@@ -4581,10 +4652,10 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp catalog_blocked_reason(_entry), do: nil
 
   defp compat_message({:needs_newer_core, :min_core_version, floor}),
-    do: "needs Fermix ≥ #{floor}; run `fermix upgrade`."
+    do: "needs Fermix ≥ #{floor}; update Fermix."
 
   defp compat_message({:needs_newer_core, :plugin_api, api}),
-    do: "needs a newer Fermix (plugin API #{api}); run `fermix upgrade`."
+    do: "needs a newer Fermix (plugin API #{api}); update Fermix."
 
   defp compat_message({:plugin_too_old, :plugin_api, _api}),
     do: "built for an older Fermix; awaiting a plugin update."
@@ -4718,6 +4789,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   end
 
   defp doctor_error({:error, {:misconfigured, reason}}), do: reason
+  defp doctor_error({:error, {:device_role, sentence}}), do: sentence
 
   defp doctor_error({:error, {:auth_scope_mismatch, surface, hint}}) do
     "#{surface} rejected the credentials. #{hint}"

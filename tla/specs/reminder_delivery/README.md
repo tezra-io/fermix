@@ -25,7 +25,7 @@ mechanism check.
 **Environment switches** (set per check):
 - `PlatformDedupes`: the platform drops a second message with the same
   `proactive_key`. Only the companion timeline does, for the mobile and
-  companion channels (`output.ex:257-259` → `mobile_sql.ex:377-387`), and
+  companion channels (`output.ex:257-259` → `mobile_sql.ex:434-444`), and
   neither is a reminder platform (see the plan hypotheses).
 - `PlatformCanBeSlow`: the platform can answer after the watchdog fired, and can
   still show a message Fermix gave up on.
@@ -42,7 +42,7 @@ attempt like every platform's, so nothing here models it separately.
   (`delivery_worker.ex:197-200`, `:66`).
 - `SchedulerCanRestart`: the scheduler crashes while the BEAM stays up. Any
   earlier child of the flat `:rest_for_one` list (`Repo`, `MainAgent`,
-  `JobScheduler`, …; `application.ex:173-265`) restarts it too. A scheduler
+  `JobScheduler`, …; `application.ex:258-353`) restarts it too. A scheduler
   Repo call that times out no longer does: it returns an error (see
   `RepoCanFail`).
 - `DaemonCanCrash`: the whole daemon dies and boots again.
@@ -67,10 +67,10 @@ least one check):
 - `ClaimRequiresPending`: the claim takes only pending rows. The load-bearing
   filter is the due scan's `status = 'pending'` (`temporal_sql.ex:1573`). The
   per-row re-read (`:1593`) and the UPDATE's `WHERE status = 'pending'`
-  (`:1033`) repeat it inside the same Repo callback (`repo.ex:3029-3032`), where
+  (`:1033`) repeat it inside the same Repo callback (`repo.ex:3055-3058`), where
   no other writer can interleave, so removing only them would change nothing.
 - `WorkersDieWithScheduler`: `DeliverySupervisor` starts after the scheduler
-  under `:rest_for_one` (`application.ex:266-267`, `:297`).
+  under `:rest_for_one` (`application.ex:347-348`, `:180`).
 - `SendsDieWithWorker`: a worker's send process is spawned linked to it
   (`Process.spawn(fun, [:link, :monitor])`, `channel_send.ex:219-224`), so a
   worker killed mid-send takes its send with it. Off, it is the code before the
@@ -96,7 +96,7 @@ least one check):
   - No sixth attempt (`scheduler.ex:326-329`). This rests on `AttemptCap`
     (check 02).
   - Never two workers for the row (`delivery_supervisor.ex:5-10`,
-    `application.ex:253-265`). This rests on `ClaimRequiresPending` (check 03),
+    `application.ex:341-353`). This rests on `ClaimRequiresPending` (check 03),
     `WorkersDieWithScheduler` (check 04) and `ResetSkipsMonitored` (check 05),
     and on the timing fact `DownHandledBeforeRetryDue` (check 20).
   - Never two sends for the row either (the premise of M30 §19.10's no-lease
@@ -304,7 +304,7 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
   - `ChannelSend.with_timeout` ran the adapter call in a `spawn_monitor`ed
     process. It was not linked to the worker, and no supervisor owns it.
   - The worker does not trap exits, so the `DeliverySupervisor` shutdown under
-    `:rest_for_one` (`application.ex:266-267`, `:297`) kills it at once, inside
+    `:rest_for_one` (`application.ex:269-270`, `:300`) kills it at once, inside
     the watchdog's `receive`.
   - The watchdog is the worker's own `receive … after`, so the orphan was
     bounded only by the HTTP client's own timeouts (for example the 15 s pool
@@ -458,7 +458,7 @@ push an id and expiry. No delivery path the spec models changed.
   business. With `PlatformCanBeSlow = FALSE` the platform always answers inside
   the watchdog, so the watchdog can only catch a send that never reached it.
 - **Repo call timeouts.** `Memory.Repo` serves every request in order, and a
-  call gives up after 5 s (`repo.ex:3934-3957`). Every call the scheduler
+  call gives up after 5 s (`repo.ex:3960-3983`). Every call the scheduler
   process makes passes `Repo.periodic_opts/2` (`scheduler.ex:175-183`), so a
   timeout returns `{:error, :repo_timeout}`: the scheduler takes that site's
   error branch and keeps running, monitors intact. The request is not

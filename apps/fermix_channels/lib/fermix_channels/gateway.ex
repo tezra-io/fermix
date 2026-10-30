@@ -297,7 +297,7 @@ defmodule FermixChannels.Gateway do
   # Built only after authorization (an unauthorized sender is dropped first and
   # never sees these) and NO turn is scheduled.
   @not_configured_reply "I couldn't transcribe your voice note — no transcription " <>
-                          "backend is configured. Run `fermix setup` to add one."
+                          "backend is configured. Choose one in Fermix's Voice notes settings."
   @transcription_failed_reply "I couldn't transcribe your voice note — the " <>
                                 "transcription failed. Please try again."
   # The provider heard the recording and found no speech: retrying the same
@@ -309,10 +309,10 @@ defmodule FermixChannels.Gateway do
   # names the install that fixes it (the doctor wording, D14).
   @sidecar_not_installed_reply "I couldn't transcribe your voice note — on-device " <>
                                  "transcription is selected but its speech sidecar is not " <>
-                                 "installed. Install it from `fermix setup` → Transcription."
+                                 "installed. Install it in Fermix's Voice notes settings."
   @model_not_installed_reply "I couldn't transcribe your voice note — on-device " <>
                                "transcription is selected but its speech model is not " <>
-                               "installed. Install it from `fermix setup` → Transcription."
+                               "installed. Install it in Fermix's Voice notes settings."
   # Neither a retry nor an install fixes a machine this build has no on-device
   # speech for; choosing another backend is the only remedy.
   @no_on_device_build_reply "I couldn't transcribe your voice note — on-device " <>

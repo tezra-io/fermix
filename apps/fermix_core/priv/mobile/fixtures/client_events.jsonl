@@ -1,5 +1,6 @@
 {"v":2,"t":"hello","seq":1,"device_id":"device-1","app_version":"1.0.0","last_server_seq":0,"protocol_v":2}
 {"v":2,"t":"hello","seq":1,"device_id":"device-1","app_version":"1.0.0","last_server_seq":0,"protocol_v":2,"relay_list_rev":"67352da82c1444b0"}
+{"v":2,"t":"hello","seq":1,"device_id":"device-1","app_version":"1.0.0","last_server_seq":12,"protocol_v":2,"primary_epoch":2}
 {"v":2,"t":"msg","seq":2,"client_msg_id":"client-1","profile_id":"main","text":"Hello","attach_ids":[]}
 {"v":2,"t":"attach_begin","seq":3,"attach_id":"attach-1","kind":"image","mime":"image/jpeg","size_bytes":4,"name":"photo.jpg","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 {"v":2,"t":"attach_end","seq":5,"attach_id":"attach-1","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
@@ -20,3 +21,14 @@
 {"v":2,"t":"unpair","seq":17}
 {"v":2,"t":"attach_begin","seq":18,"attach_id":"attach-3","kind":"image","mime":"image/jpeg","size_bytes":4,"name":"clip-poster.jpg","poster_of":"attach-2","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
 {"v":2,"t":"attach_begin","seq":19,"attach_id":"attach-4","kind":"voice","mime":"audio/ogg","size_bytes":4,"name":"recording.ogg","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+{"v":2,"t":"companion_open","seq":2,"channel":1}
+{"v":2,"t":"companion_close","seq":9,"channel":1}
+{"v":2,"t":"snapshot_stored","seq":21,"snapshot_id":"snap-20261021T0600Z","sha256":"4f2a7d3c9e1b6058a2d4c7e9f1b3a5d7c9e2f4a6b8d0c1e3f5a7b9c2d4e6f8a0"}
+{"v":2,"t":"snapshot_refused","seq":22,"snapshot_id":"snap-20261021T1200Z","reason":"disk_floor"}
+{"v":2,"t":"loopback_failed","seq":23,"loopback_id":"lb-2b90","port":53682,"reason":"port_in_use"}
+{"v":2,"t":"enroll_request","seq":1,"host":{"name":"fermix-vm","os":"debian","arch":"arm64","version":"0.17.0"},"candidate":{"node_id":"3c0f6e2a91b84d57a6e2f0c4d8b1937e5a2c6f08d4b7e19a3f5c2d8e6b0a4f71","relays":[{"url":"https://eu1.relay.fermix.ai/","quic_port":7842}],"recipient":"Xq3VbT0m9zKc2LwA7hRfN1eYp4sGuJ6dI8oQxM5nC0E="},"instance":{"provider":"hetzner","instance_id":"61839204","region":"fsn1"},"snapshots":{"s3_bucket":"fermix-always-on-snapshots-7c2a","s3_region":"eu-west-2"}}
+{"v":2,"t":"enroll_request","seq":1,"host":{"name":"basement-box","os":"ubuntu","arch":"x86_64","version":"0.17.0"},"candidate":{"node_id":"3c0f6e2a91b84d57a6e2f0c4d8b1937e5a2c6f08d4b7e19a3f5c2d8e6b0a4f71","relays":[{"url":"https://eu1.relay.fermix.ai/","quic_port":7842}],"recipient":"r8Ts2NcVq1LmYw0bKj6HdPf3XgZa9UeB5oIiR4tWy7A="}}
+{"v":2,"t":"move_offer","seq":1,"move_id":"mv-8e41","size_bytes":58213377,"sha256":"4f2a7d3c9e1b6058a2d4c7e9f1b3a5d7c9e2f4a6b8d0c1e3f5a7b9c2d4e6f8a0","source_epoch":3,"recovery_recipient":"fxsnap1.0Xn2b6QeT1o9cVr4yA8s3g.PtYk2mW9xQ4rB7nC1vL5zH8sD3fJ6gK0aE2uI9oR4wT","attempt":2}
+{"v":2,"t":"move_end","seq":15,"move_id":"mv-8e41"}
+{"v":2,"t":"move_commit","seq":16,"move_id":"mv-8e41"}
+{"v":2,"t":"move_resume","seq":1,"move_id":"mv-8e41"}

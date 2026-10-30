@@ -608,7 +608,8 @@ defmodule FermixChannels.Gateway.Queue do
   # warm for the next message (the ProfileServer re-arms its idle timer per
   # request). Gated on `fresh?`: a superseded/`/stop`ped turn is NOT reaped, so
   # the successor turn that now owns the conversation never loses its browser
-  # mid-run. Owner scope is per-conversation; this runs off the reply path (the
+  # mid-run. The owner's profile is shared by every owner conversation, so the
+  # reap stops only a guest-trust profile; this runs off the reply path (the
   # reply was already delivered) and only casts, so it adds no reply latency.
   defp reap_one_shot_browser(%{core_msg: %{channel: channel} = msg} = turn)
        when is_binary(channel) do
@@ -819,6 +820,11 @@ defmodule FermixChannels.Gateway.Queue do
 
   defp checkout_error_reply({:checkout_unavailable, _reason}),
     do: {"I'm restarting — please send your message again in a moment.", true}
+
+  # A device-role engine refuses every turn by name (`FermixCore.Home.Role`),
+  # and its sentence is what the channel tells the person.
+  defp checkout_error_reply({:device_role, sentence}) when is_binary(sentence),
+    do: {sentence, false}
 
   defp checkout_error_reply(_reason),
     do: {"Sorry, I encountered an error processing your message.", false}

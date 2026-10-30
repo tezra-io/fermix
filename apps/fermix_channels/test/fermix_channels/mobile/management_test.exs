@@ -283,6 +283,23 @@ defmodule FermixChannels.Mobile.ManagementTest do
              Management.health(opts)
   end
 
+  # A desktop's row lives in the same store, but the count is the channel's
+  # phones, as the phone surfaces show it beside their list.
+  test "the paired count is the phones', never a desktop" do
+    rows = [%{kind: :phone}, %{kind: :desktop}, %{}]
+
+    opts = [
+      config: [enabled: true],
+      listener: :listener,
+      device_store: :store,
+      listener_status: fn :listener -> {:listening, {{127, 0, 0, 1}, 4_031}} end,
+      load_identity: fn _opts -> {:ok, :identity} end,
+      list_devices: fn :store -> {:ok, rows} end
+    ]
+
+    assert {:ok, %{paired_devices: 2}} = Management.health(opts)
+  end
+
   test "health fails closed while disabled or dormant" do
     assert {:error, :mobile_disabled} = Management.health(config: [enabled: false])
 
@@ -847,6 +864,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
                device_id: older.device_id,
                name: "Pixel",
                model: "Google Pixel 9 Pro",
+               kind: :phone,
                platform: nil,
                signer_role: nil,
                boot_state: nil,

@@ -541,10 +541,12 @@ slack_overrides =
   [
     bot_token: Keyword.get(existing_slack, :bot_token, ""),
     signing_secret: Keyword.get(existing_slack, :signing_secret, ""),
+    app_token: Keyword.get(existing_slack, :app_token, ""),
     mode: slack_mode
   ]
   |> put_env_overlay.(:bot_token, "SLACK_BOT_TOKEN")
   |> put_env_overlay.(:signing_secret, "SLACK_SIGNING_SECRET")
+  |> put_env_overlay.(:app_token, "SLACK_APP_TOKEN")
 
 slack_overrides =
   case System.get_env("SLACK_ALLOWED_USER_IDS") do

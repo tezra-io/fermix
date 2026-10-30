@@ -37,6 +37,17 @@ defmodule FermixChannels.Mobile.Session do
   The carrier also sets its own process's memory bound before `hello`; the
   session raises it to `:authenticated_max_heap_size` once a paired phone says
   `hello`.
+
+  ## Phones and desktops
+
+  A paired session's kind is its device row's (M75 §3): a `phone`, or a
+  `desktop` engine. `Mobile.Peers` is the one table of what each kind may
+  send; a known event its kind may not send is answered
+  `error{code:"unsupported_event"}` and the session stays open, and a server
+  event its kind may not be sent is dropped as an event it cannot encode is.
+  A desktop's session starts its `Desktop.Peer` once `hello` is answered and
+  hands it every desktop-family event; it gets no approval cards, and phone
+  broadcasts never reach it.
   """
 
   require Logger
@@ -45,6 +56,8 @@ defmodule FermixChannels.Mobile.Session do
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Fanout
   alias FermixChannels.Companion.Output
+  alias FermixChannels.Desktop.Peer, as: DesktopPeer
+  alias FermixChannels.Home.EnrollmentResponder
   alias FermixChannels.Mobile.Attestation
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.DeviceStore
@@ -55,12 +68,18 @@ defmodule FermixChannels.Mobile.Session do
   alias FermixChannels.Mobile.MediaStore
   alias FermixChannels.Mobile.Noise
   alias FermixChannels.Mobile.PairManager
+  alias FermixChannels.Mobile.Peers
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Companion.Timeline
 
   @max_wire_bytes 65_535
+  # The modes a phone or a desktop dials in, and M75's own preludes with the
+  # responder serving each (`begin_handshake/2`); a carrier's options replace
+  # either (a candidate serves the move alone).
+  @phone_modes [:ik, :ikpsk2]
+  @responders %{ikpsk2_enroll: {EnrollmentResponder, []}}
   # The upgrade or bridge connection comes before the prelude picks paired or
   # pairing mode, so one idle bound covers both. It must outlive the
   # owner-approval window, or the carrier closes a pairing socket while the
@@ -101,11 +120,12 @@ defmodule FermixChannels.Mobile.Session do
   @typedoc """
   How the carrier closes: a close code and its reason text, the same pair a
   WebSocket close frame carries. `1000` the session's lifetime ran out, `1002` a
-  protocol error, `1008` the handshake deadline, `1009` a message over 65,535
-  bytes, `4001` replaced by a newer connection, `4003` revoked, refused pairing
-  or a mismatched device.
+  protocol error or a stale primary, `1008` the handshake deadline, `1009` a
+  message over 65,535 bytes, `1011` a desktop's peer failed or did not start,
+  `4001` replaced by a newer connection, `4003` revoked (live, or a key with
+  no row at the handshake), refused pairing or a mismatched device.
   """
-  @type close :: {1000 | 1002 | 1008 | 1009 | 4001 | 4003, String.t()}
+  @type close :: {1000 | 1002 | 1008 | 1009 | 1011 | 4001 | 4003, String.t()}
 
   @typedoc "Where a connection came from, for pairing-failure accounting only."
   @type peer :: PairManager.source()
@@ -152,6 +172,9 @@ defmodule FermixChannels.Mobile.Session do
   WebSocket's TLS) or an endpoint, not a stranger's stream.
   """
   @spec past_handshake?(state()) :: boolean()
+  def past_handshake?(%{phase: :delegated, delegate: {module, delegated}}),
+    do: module.past_handshake?(delegated)
+
   def past_handshake?(%{phase: :await_pair_decision}), do: true
   def past_handshake?(%{authenticated_device: device}), do: not is_nil(device)
 
@@ -214,6 +237,7 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:pair_manager, PairManager)
     |> Map.put_new(:request_coordinator, RequestCoordinator)
     |> Map.put_new(:identity_root, nil)
+    |> Map.put_new(:primary_epoch, nil)
     |> Map.put_new(:media_store, MediaStore)
     |> Map.put_new(:discovery, Discovery)
     |> Map.put_new(:max_media_bytes, @default_max_media_bytes)
@@ -222,6 +246,7 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:profile_id, @profile_id)
     |> Map.put_new(:device_id, nil)
     |> Map.put_new(:authenticated_device, nil)
+    |> Map.put_new(:peer_kind, :phone)
     |> Map.put_new(:client_seq, 0)
     |> Map.put_new(:server_seq, 0)
     |> Map.put_new(:negotiated_version, nil)
@@ -237,6 +262,10 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:handshake_deadline_ref, nil)
     |> Map.put_new(:handshake_deadline_token, nil)
     |> Map.put_new(:pair_failure_recorded?, false)
+    |> Map.put_new(:desktop_peers, FermixChannels.Desktop.Peers)
+    |> Map.put_new(:desktop_peer_supervisor, FermixChannels.Desktop.PeerSupervisor)
+    |> Map.put_new(:desktop_peer, nil)
+    |> Map.put_new(:desktop_peer_ref, nil)
     |> Map.put_new(:clock, clock(opts))
     |> Map.put_new(:wall_clock, &DateTime.utc_now/0)
     |> put_default_dependencies()
@@ -247,6 +276,10 @@ defmodule FermixChannels.Mobile.Session do
   def handle_frame(payload, state) when byte_size(payload) > @max_wire_bytes do
     {:stop, :frame_too_large, {1009, "mobile frame too large"}, state}
   end
+
+  def handle_frame(wire, %{phase: :delegated, delegate: {module, delegated}} = state)
+      when is_binary(wire),
+      do: wrap_delegated(module, module.handle_frame(wire, delegated), state)
 
   def handle_frame(wire, %{phase: :prelude} = state) when is_binary(wire) do
     begin_handshake(wire, state)
@@ -292,6 +325,9 @@ defmodule FermixChannels.Mobile.Session do
 
   @doc "Takes one mailbox message the carrier did not claim for itself."
   @spec handle_info(term(), state()) :: result()
+  def handle_info(message, %{phase: :delegated, delegate: {module, delegated}} = state),
+    do: wrap_delegated(module, module.handle_info(message, delegated), state)
+
   def handle_info({:mobile_replaced, _new_pid}, state) do
     {:stop, :replaced, {4001, "connection replaced"}, state}
   end
@@ -338,6 +374,10 @@ defmodule FermixChannels.Mobile.Session do
       else: {:ok, state}
   end
 
+  def handle_info({:DOWN, ref, :process, _peer, reason}, %{desktop_peer_ref: ref} = state)
+      when is_reference(ref),
+      do: desktop_peer_failed({:desktop_peer_down, reason}, state)
+
   def handle_info({:DOWN, ref, :process, _worker, reason}, %{request_ref: ref} = state) do
     client_msg_id = state.request_client_msg_id
 
@@ -347,10 +387,22 @@ defmodule FermixChannels.Mobile.Session do
     end
   end
 
+  # A process streaming to this session (the desktop snapshot target) waits
+  # for what it handed over to be written before it hands over more. The
+  # carrier pushes each event's frames before it reads its next message, so by
+  # the time this one is read every frame handed over before it is written.
+  def handle_info({:mobile_sync, from, ref}, state) when is_pid(from) and is_reference(ref) do
+    send(from, {:mobile_synced, ref})
+    {:ok, state}
+  end
+
   def handle_info(_message, state), do: {:ok, state}
 
   @doc "Releases the session's resources; the carrier calls it once, as it closes."
   @spec terminate(term(), state()) :: :ok
+  def terminate(reason, %{phase: :delegated, delegate: {module, delegated}}),
+    do: module.terminate(reason, delegated)
+
   def terminate(reason, state) do
     cancel_session_timer(state)
     detach_socket(state)
@@ -395,18 +447,83 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:media_descriptor, &Timeline.media_descriptor/2)
     |> Map.put_new(:event_router, &EventRouter.route/3)
     |> Map.put_new(:run_request, &Task.Supervisor.start_child(FermixCore.TaskSupervisor, &1))
+    |> put_peer_dependencies()
   end
 
+  # A desktop's peer.
+  defp put_peer_dependencies(state) do
+    supervisor = state.desktop_peer_supervisor
+
+    state
+    |> Map.put_new(:start_desktop_peer, &DesktopPeer.start(supervisor, &1))
+    |> Map.put_new(:deliver_desktop_event, &DesktopPeer.deliver/2)
+  end
+
+  # M75's own preludes (enrollment, the move) branch here, and only here: a
+  # mode one of `state.responders` serves right now (`Home.Responder`) hands
+  # the whole stream to that responder (`delegate/4`); every other stream is
+  # a phone's or a desktop's, in the modes `state.phone_modes` names (the
+  # paired and pairing modes, none on a candidate). Any other prelude closes
+  # `1002` before any Noise state exists, as before.
   defp begin_handshake(wire, state) do
-    case Noise.parse_prelude(wire, :any) do
-      {:ok, pattern, _body} -> load_and_continue_handshake(pattern, wire, state)
+    case Noise.parse_prelude(wire, served_modes(state)) do
+      {:ok, pattern, _body} -> continue_by_mode(pattern, wire, state)
       {:error, reason} -> protocol_error(reason, state)
     end
   end
 
+  defp served_modes(state) do
+    serving = for {mode, {module, opts}} <- responders(state), module.serving?(opts), do: mode
+    Map.get(state, :phone_modes, @phone_modes) ++ serving
+  end
+
+  defp responders(state), do: Map.get(state, :responders, @responders)
+
+  defp continue_by_mode(pattern, wire, state) do
+    case Map.fetch(responders(state), pattern) do
+      {:ok, {module, opts}} -> delegate(module, opts, wire, state)
+      :error -> load_and_continue_handshake(pattern, wire, state)
+    end
+  end
+
+  defp delegate(module, opts, wire, state) do
+    loader = state.load_gateway_keypair
+    root = state.identity_root
+
+    opts =
+      Keyword.merge(opts, peer: state.peer, load_gateway_keypair: fn -> loader.(root) end)
+
+    state =
+      state
+      |> stop_handshake_deadline()
+      |> scrub_identity_source()
+      |> Map.put(:phase, :delegated)
+
+    wrap_delegated(module, module.init(wire, opts), state)
+  end
+
+  defp wrap_delegated(module, result, state) do
+    case result do
+      {:ok, delegated} ->
+        {:ok, delegated_state(state, module, delegated)}
+
+      {:push, frames, delegated} ->
+        {:push, frames, delegated_state(state, module, delegated)}
+
+      {:stop, why, close, delegated} ->
+        {:stop, why, close, delegated_state(state, module, delegated)}
+
+      {:stop, why, close, frames, delegated} ->
+        {:stop, why, close, frames, delegated_state(state, module, delegated)}
+    end
+  end
+
+  defp delegated_state(state, module, delegated),
+    do: Map.put(state, :delegate, {module, delegated})
+
   defp load_and_continue_handshake(pattern, wire, state) do
     case gateway_keypair(state) do
-      {:ok, keypair} -> continue_handshake(pattern, wire, keypair, state)
+      {:ok, keypair, state} -> continue_handshake(pattern, wire, keypair, state)
       {:error, reason} -> protocol_error(reason, state)
     end
   end
@@ -436,6 +553,13 @@ defmodule FermixChannels.Mobile.Session do
   end
 
   defp handshake_error(:ikpsk2, reason, state), do: pairing_error(reason, state)
+
+  # A key the trust store holds no row for belongs to a device that was revoked
+  # (or never paired): told so (`4003`), so a phone or a desktop stops trying,
+  # where any other handshake failure is a protocol error.
+  defp handshake_error(:ik, {:unpaired_device, {:noise_identity_not_found, _key}}, state),
+    do: {:stop, :unknown_device, {4003, "device unknown"}, state}
+
   defp handshake_error(:ik, reason, state), do: protocol_error(reason, state)
 
   defp handshake_options(:ik, keypair, state) when not is_nil(keypair) do
@@ -465,7 +589,12 @@ defmodule FermixChannels.Mobile.Session do
     case state.find_device.(state.device_store, remote_static) do
       {:ok, device} ->
         {:ok,
-         Map.merge(state, %{phase: :await_hello, noise: noise, authenticated_device: device})
+         Map.merge(state, %{
+           phase: :await_hello,
+           noise: noise,
+           authenticated_device: device,
+           peer_kind: device_kind(device)
+         })
          |> scrub_identity_source()
          |> mark_session_start()}
 
@@ -496,7 +625,7 @@ defmodule FermixChannels.Mobile.Session do
          {:ok, state} <- consume_event(event, state),
          {:ok, state} <- accept_hello(event, state),
          {:ok, frames, state} <- hello_ack(state, event),
-         {:ok, frames, state} <- with_pending_approvals(frames, state) do
+         {:ok, frames, state} <- after_hello_ack(session_kind(state), frames, state) do
       reply(frames, state)
     else
       {:error, {:unsupported_protocol_version, direction, version}, state} ->
@@ -505,11 +634,39 @@ defmodule FermixChannels.Mobile.Session do
       {:error, :identity_mismatch, state} ->
         identity_mismatch(state)
 
+      {:error, {:stale_primary, mine, theirs}, state} ->
+        refuse_stale_primary(mine, theirs, state)
+
+      {:error, {:desktop_peer_not_started, reason}, state} ->
+        desktop_peer_failed(reason, state)
+
       {:error, reason, state} ->
         protocol_error(reason, state)
 
       {:error, reason} ->
         protocol_error(reason, state)
+    end
+  end
+
+  # M75 D14: a phone that has seen a higher primary epoch has met the engine
+  # this copy of the home moved to. It is told so by name and served nothing:
+  # no device update, no registry entry, no hello_ack.
+  defp refuse_stale_primary(mine, theirs, state) do
+    Logger.warning(
+      "mobile hello refused as a stale primary: this engine is at epoch #{mine}, " <>
+        "the phone has seen epoch #{theirs}"
+    )
+
+    payload = %{
+      "code" => "stale_primary",
+      "message" =>
+        "This engine is at epoch #{mine}; you have seen epoch #{theirs}: " <>
+          "the primary moved, reconnect to the current one"
+    }
+
+    case encode_event("error", payload, <<>>, state) do
+      {:ok, frames, state} -> {:stop, :stale_primary, {1002, "stale primary"}, frames, state}
+      {:error, reason, state} -> protocol_error(reason, state)
     end
   end
 
@@ -584,15 +741,30 @@ defmodule FermixChannels.Mobile.Session do
     with {:ok, event, state} <- decrypt_event(ciphertext, state),
          {:ok, state} <- consume_event(event, state),
          :ok <- reject_repeated_hello(event, state),
-         :ok <- authorize_ready_socket(state) do
-      case dispatch_event(event, state) do
-        {:ok, reply, state} -> reply(reply, state)
-        {:error, reason, state} -> application_error(reason, state)
-        {:error, reason} -> application_error(reason, state)
+         :ok <- authorize_ready_socket(state),
+         :ok <- authorize_kind(event, state) do
+      case dispatch_ready(event, state) do
+        {:ok, reply, state} ->
+          reply(reply, state)
+
+        {:error, reason, state} ->
+          application_error(reason, state)
+
+        {:error, reason} ->
+          application_error(reason, state)
+
+        {:close, {:desktop_peer_unavailable, _exit} = reason, state} ->
+          desktop_peer_failed(reason, state)
+
+        {:close, reason, state} ->
+          protocol_error(reason, state)
       end
     else
       {:error, :repeated_hello, failed_state} ->
         terminal_protocol_error(:repeated_hello, failed_state)
+
+      {:error, {:unsupported_event, _type} = reason, failed_state} ->
+        application_error(reason, failed_state)
 
       {:error, {:unknown_event, _type} = reason, failed_state} ->
         terminal_protocol_error(reason, failed_state)
@@ -612,6 +784,45 @@ defmodule FermixChannels.Mobile.Session do
     do: {:error, :repeated_hello, state}
 
   defp reject_repeated_hello(_event, _state), do: :ok
+
+  # M75 §5.3: a known event this session's kind may not send is refused, and
+  # the session stays open.
+  defp authorize_kind(%{type: type}, state) do
+    case Peers.authorize(session_kind(state), type) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  # A desktop hands its peer every desktop-family event; the phone events it
+  # may send (`hello`, `ping`, `media_fetch`, `ack`) are served here, as a
+  # phone's are.
+  defp dispatch_ready(%{type: type} = event, %{desktop_peer: peer} = state) when is_pid(peer) do
+    if DesktopPeer.family_event?(type),
+      do: deliver_to_peer(event, peer, state),
+      else: dispatch_event(event, state)
+  end
+
+  defp dispatch_ready(event, state), do: dispatch_event(event, state)
+
+  defp deliver_to_peer(event, peer, state) do
+    case state.deliver_desktop_event.(peer, event) do
+      :ok -> {:ok, nil, state}
+      {:error, reason} -> {:error, reason, state}
+      {:close, reason} -> {:close, reason, state}
+    end
+  end
+
+  # What the IK handshake proved, read once from the device's row: a row that
+  # names no kind is a phone's, as is every device a pairing approves.
+  defp session_kind(state), do: Map.get(state, :peer_kind, :phone)
+
+  defp device_kind(device) do
+    case value(device, :kind) do
+      :desktop -> :desktop
+      kind when kind in [nil, :phone] -> :phone
+    end
+  end
 
   defp authorize_ready_socket(state) do
     case state.authorize_socket.(state.device_registry, state.device_id, self()) do
@@ -668,7 +879,8 @@ defmodule FermixChannels.Mobile.Session do
     authenticated_id = value(state.authenticated_device, :device_id)
 
     if payload["device_id"] == authenticated_id do
-      with {:ok, state} <- persist_hello(state, authenticated_id, payload["relay_list_rev"]) do
+      with :ok <- current_primary(payload["primary_epoch"], state),
+           {:ok, state} <- persist_hello(state, authenticated_id, payload["relay_list_rev"]) do
         attach_authenticated(event, state, authenticated_id)
       end
     else
@@ -677,6 +889,27 @@ defmodule FermixChannels.Mobile.Session do
   end
 
   defp accept_hello(_event, state), do: {:error, :hello_required, state}
+
+  # The phone's highest-seen epoch against the one this session's identity
+  # carries; a phone that has seen none, or no higher one, is served.
+  defp current_primary(theirs, state) do
+    case session_primary_epoch(state) do
+      {:ok, mine} when is_integer(theirs) and theirs > mine ->
+        {:error, {:stale_primary, mine, theirs}, state}
+
+      {:ok, _mine} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, reason, state}
+    end
+  end
+
+  defp session_primary_epoch(%{primary_epoch: epoch}) when is_integer(epoch) and epoch > 0,
+    do: {:ok, epoch}
+
+  defp session_primary_epoch(state),
+    do: {:error, {:primary_epoch_unavailable, Map.get(state, :primary_epoch)}}
 
   defp attach_authenticated(_event, state, device_id) do
     case state.attach_socket.(state.device_registry, device_id, self(),
@@ -746,6 +979,44 @@ defmodule FermixChannels.Mobile.Session do
     end
   end
 
+  # A phone hears what waits for the owner; a desktop's chat, approvals
+  # included, rides its companion tunnel, and its peer starts once its
+  # hello_ack is ready to go.
+  defp after_hello_ack(:phone, frames, state), do: with_pending_approvals(frames, state)
+
+  defp after_hello_ack(:desktop, frames, state) do
+    case start_desktop_peer(state) do
+      {:ok, state} -> {:ok, frames, state}
+      {:error, reason} -> {:error, {:desktop_peer_not_started, reason}, state}
+    end
+  end
+
+  # The primary's side of a desktop's session failed, not the desktop.
+  defp desktop_peer_failed(reason, state) do
+    Logger.error("mobile desktop session closed: its peer failed: #{inspect(reason)}")
+    {:stop, reason, {1011, "desktop peer failed"}, state}
+  end
+
+  defp start_desktop_peer(state) do
+    opts = [
+      device_id: state.device_id,
+      session: self(),
+      registry: state.desktop_peers,
+      connected_since: state.wall_clock.()
+    ]
+
+    case state.start_desktop_peer.(opts) do
+      {:ok, peer} when is_pid(peer) ->
+        {:ok, %{state | desktop_peer: peer, desktop_peer_ref: Process.monitor(peer)}}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      other ->
+        {:error, {:invalid_peer_start, other}}
+    end
+  end
+
   # An approval still waiting for the owner follows the hello_ack in the same
   # push, so a phone that was away when it went out shows it. The socket is
   # attached already, so a resolution can only arrive after it. A card this
@@ -775,7 +1046,8 @@ defmodule FermixChannels.Mobile.Session do
 
   defp build_hello_ack(state) do
     with {:ok, history_head} <- history_head(state.profile_id, state),
-         {:ok, read_up_to} <- read_frontier(state.profile_id, state) do
+         {:ok, read_up_to} <- read_frontier(state.profile_id, state),
+         {:ok, primary_epoch} <- session_primary_epoch(state) do
       {min_version, max_version} = Protocol.supported_version_range()
 
       {:ok,
@@ -794,7 +1066,8 @@ defmodule FermixChannels.Mobile.Session do
            "turn_done" => true,
            "max_media_bytes" => state.max_media_bytes,
            "push" => state.push_services
-         }
+         },
+         "primary_epoch" => primary_epoch
        }}
     end
   end
@@ -876,25 +1149,10 @@ defmodule FermixChannels.Mobile.Session do
     end
   end
 
-  # The push salt is the device's own, for the key its notifications are
-  # encrypted under (see *Push notifications* in the protocol).
   defp handle_pair_decision(session_id, {:ok, device}, %{pairing_session_id: session_id} = state) do
-    payload = %{
-      "device_id" => value(device, :device_id),
-      "candidates" => current_candidates(state),
-      "profiles" => profiles(state),
-      "push_salt" => Base.encode64(value(device, :apns_key_salt)),
-      "push" => state.push_services
-    }
-
-    # The owner's decision can come at any time in the window, so the hello
-    # that follows gets a deadline of its own, not what was left of the first.
-    state =
-      start_handshake_deadline(%{state | phase: :await_hello, authenticated_device: device})
-
-    case encode_event("pair_approved", payload, <<>>, state) do
-      {:ok, frames, state} -> reply(frames, state)
-      {:error, reason, state} -> protocol_error(reason, state)
+    case session_primary_epoch(state) do
+      {:ok, epoch} -> approve_pairing(device, epoch, state)
+      {:error, reason} -> protocol_error(reason, state)
     end
   end
 
@@ -908,6 +1166,30 @@ defmodule FermixChannels.Mobile.Session do
   end
 
   defp handle_pair_decision(_session_id, _result, state), do: {:ok, state}
+
+  # The push salt is the device's own, for the key its notifications are
+  # encrypted under (see *Push notifications* in the protocol). The primary
+  # epoch is where the new phone's highest-seen epoch starts (M75 D14).
+  defp approve_pairing(device, epoch, state) do
+    payload = %{
+      "device_id" => value(device, :device_id),
+      "candidates" => current_candidates(state),
+      "profiles" => profiles(state),
+      "push_salt" => Base.encode64(value(device, :apns_key_salt)),
+      "push" => state.push_services,
+      "primary_epoch" => epoch
+    }
+
+    # The owner's decision can come at any time in the window, so the hello
+    # that follows gets a deadline of its own, not what was left of the first.
+    state =
+      start_handshake_deadline(%{state | phase: :await_hello, authenticated_device: device})
+
+    case encode_event("pair_approved", payload, <<>>, state) do
+      {:ok, frames, state} -> reply(frames, state)
+      {:error, reason, state} -> protocol_error(reason, state)
+    end
+  end
 
   defp dispatch_event(%{type: "attach_begin", payload: payload}, state) do
     spec = %{
@@ -1272,10 +1554,18 @@ defmodule FermixChannels.Mobile.Session do
   defp push_fanout_event(event, state) do
     started = System.monotonic_time()
 
-    case encode_plaintexts(event, state) do
-      {:ok, plaintexts} -> push_encrypted(plaintexts, state)
+    with :ok <- for_kind(event, session_kind(state)),
+         {:ok, plaintexts} <- encode_plaintexts(event, state) do
+      push_encrypted(plaintexts, state)
+    else
       {:error, reason} -> drop_event(event, reason, started, state)
     end
+  end
+
+  # M75 §5.3: a server event this session's kind is never sent.
+  defp for_kind(event, kind) do
+    type = event_type(event)
+    if Peers.server_event?(kind, type), do: :ok, else: {:error, {:not_for_kind, kind}}
   end
 
   defp drop_event(event, reason, started, state) do
@@ -1446,6 +1736,11 @@ defmodule FermixChannels.Mobile.Session do
 
   defp handshake_timeout(state),
     do: {:stop, :handshake_timeout, @handshake_deadline_close, state}
+
+  # A desktop's session (M75) is meant to stay up: it has no lifetime, and the
+  # 2^20-frame rekey still bounds every key. Every other session ends after an
+  # hour.
+  defp mark_session_start(%{peer_kind: :desktop} = state), do: state
 
   defp mark_session_start(state) do
     now = Map.get(state, :clock, fn -> System.monotonic_time(:millisecond) end).()
@@ -1735,13 +2030,18 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.delete(:load_gateway_keypair)
   end
 
-  defp gateway_keypair(%{gateway_keypair: keypair}) when not is_nil(keypair), do: {:ok, keypair}
+  defp gateway_keypair(%{gateway_keypair: keypair} = state) when not is_nil(keypair),
+    do: {:ok, keypair, state}
 
+  # The identity the handshake loads carries its primary epoch, kept in the
+  # session for `hello` and `pair_approved`: one load, one bundle, so the
+  # epoch announced is the one that came with the key (M75 D14).
   defp gateway_keypair(state) do
     case state.load_gateway_keypair.(state.identity_root) do
-      {:ok, %{private: private, public: public} = keypair}
+      {:ok, %{private: private, public: public} = loaded}
       when byte_size(private) == 32 and byte_size(public) == 32 ->
-        {:ok, keypair}
+        {:ok, %{private: private, public: public},
+         Map.merge(state, Map.take(loaded, [:primary_epoch]))}
 
       {:error, reason} ->
         {:error, {:gateway_identity_unavailable, reason}}
@@ -1756,7 +2056,12 @@ defmodule FermixChannels.Mobile.Session do
 
     case Identity.load(opts) do
       {:ok, identity} ->
-        {:ok, %{private: identity.gateway_private_key, public: identity.gateway_public_key}}
+        {:ok,
+         %{
+           private: identity.gateway_private_key,
+           public: identity.gateway_public_key,
+           primary_epoch: identity.primary_epoch
+         }}
 
       {:error, reason} ->
         {:error, reason}

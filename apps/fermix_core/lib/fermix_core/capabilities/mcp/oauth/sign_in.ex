@@ -51,7 +51,8 @@ defmodule FermixCore.Capabilities.MCP.OAuth.SignIn do
   @doc """
   Signs `server` in and starts it. `:phase` is told each phase as it begins,
   `:opener` gets the authorize url (as `Auth.OAuthFlow`'s does), and
-  `:mcp_supervisor` names the module that starts the server.
+  `:mcp_supervisor` names the module that starts the server, and
+  `:loopback_owner` the desktop that started the sign-in (`Auth.OAuthFlow`).
   """
   @spec login(map(), keyword()) :: {:ok, %{account_label: String.t()}} | {:error, term()}
   def login(%{name: name, url: url} = server, opts) when is_binary(name) and is_binary(url) do
@@ -147,7 +148,7 @@ defmodule FermixCore.Capabilities.MCP.OAuth.SignIn do
 
   defp flow_opts(metadata, choice, deadline, opts) do
     opts
-    |> Keyword.take([:opener, :timeout_ms])
+    |> Keyword.take([:opener, :timeout_ms, :loopback_owner])
     |> Keyword.put(:puts, fn _line -> :ok end)
     |> Keyword.merge(listener_opts(metadata, choice, deadline, opts))
   end

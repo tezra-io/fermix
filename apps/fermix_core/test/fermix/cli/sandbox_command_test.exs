@@ -162,6 +162,8 @@ defmodule Fermix.CLI.SandboxCommandTest do
       end)
 
     assert output =~ "MISSING_SECRET"
+    # The engine's sentence names the settings; the terminal adds its own command.
+    assert output =~ "allowed environment variables in the sandbox settings"
     assert output =~ "fermix sandbox env allow MISSING_SECRET"
   end
 

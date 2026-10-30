@@ -418,6 +418,7 @@ defmodule FermixCore.Browser.SignInTest do
   defp context do
     %{
       agent_name: "t",
+      source_trust: :operator,
       conversation_key: {"cli", "sign-in-#{System.unique_integer([:positive])}", :root}
     }
   end

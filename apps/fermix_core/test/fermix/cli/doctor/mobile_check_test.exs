@@ -2,6 +2,7 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
   use ExUnit.Case, async: false
 
   alias Fermix.CLI.Doctor.Checks
+  alias FermixCore.Home.Epoch
   alias FermixTestSupport.SafeRm
 
   defmodule StandaloneBuildInfo do
@@ -24,7 +25,12 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
 
   setup do
     original = Application.get_env(:fermix_channels, :mobile)
-    mobile_dir = SafeRm.make_tmp_dir!("doctor-mobile")
+    # A home's `mobile/`, as the doctor reads it: the primary epoch is
+    # `Home.Epoch.path(home)`, beside the identity files.
+    home = SafeRm.make_tmp_dir!("doctor-mobile")
+    mobile_dir = Path.join(home, "mobile")
+    File.mkdir!(mobile_dir)
+    File.chmod!(mobile_dir, 0o700)
 
     on_exit(fn ->
       case original do
@@ -32,10 +38,10 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
         value -> Application.put_env(:fermix_channels, :mobile, value)
       end
 
-      SafeRm.rm_rf!(mobile_dir)
+      SafeRm.rm_rf!(home)
     end)
 
-    %{mobile_dir: mobile_dir}
+    %{mobile_dir: mobile_dir, home: home}
   end
 
   test "disabled mobile is healthy and needs no identity", %{mobile_dir: mobile_dir} do
@@ -55,6 +61,34 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
     result = Checks.mobile(mobile_dir: mobile_dir, client: fn _ -> flunk("no RPC") end)
 
     assert result == %{name: "mobile companion", status: :ok, detail: "on, no phone paired yet"}
+  end
+
+  # M75 D14: the primary epoch is held to the identity files' rules when it is
+  # there, keys or no keys (a home gets one at its first primary boot); absent
+  # passes, since the daemon writes it at start.
+  test "a primary epoch must be valid wherever it is present", %{
+    mobile_dir: mobile_dir,
+    home: home
+  } do
+    Application.put_env(:fermix_channels, :mobile, enabled: true)
+    check = fn -> Checks.mobile(mobile_dir: mobile_dir, client: fn _ -> flunk("no RPC") end) end
+    :ok = Epoch.write(home, 3)
+
+    assert %{status: :ok, detail: "on, no phone paired yet"} = check.()
+
+    File.write!(Epoch.path(home), "zero\n")
+    assert %{status: :fail, detail: detail} = check.()
+    assert detail =~ "primary epoch"
+
+    write_identity_files(mobile_dir)
+    assert %{status: :fail, detail: detail} = check.()
+    assert detail =~ "primary epoch"
+
+    :ok = Epoch.write(home, 3)
+    File.chmod!(Epoch.path(home), 0o644)
+    assert %{status: :fail, detail: detail} = check.()
+    assert detail =~ "0600"
+    assert detail =~ "primary_epoch"
   end
 
   test "a half-created identity is refused rather than read as unpaired", %{

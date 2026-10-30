@@ -1,0 +1,32 @@
+#!/bin/sh
+# Test stand-in for the packaged fermix, installed by the fake installer.
+# Records its arguments, its account and the names (never the values) of its
+# environment; `home enroll` records the SHA-256 of the code file it can read
+# and writes a candidate home the way the real verb does. `home status --json`
+# answers the candidate's phases from /etc/fermix-test/phases, one line per
+# call ("phase|sentence"), the last repeated (enrolled without the file).
+set -eu
+log=/var/log/fermix-test
+fixtures=/etc/fermix-test
+printf 'fermix %s [as %s]\n' "$*" "$(id -un)" >>"$log/calls.log"
+verb="$1 $2"
+env | cut -d= -f1 | sort >"$log/env-$1-$2"
+case "$verb" in
+  "home enroll")
+    code_file=$4
+    sha256sum <"$code_file" | cut -d' ' -f1 >"$log/code-file.sha256"
+    mkdir -p "$FERMIX_HOME"
+    printf '[fermix_core.engine]\nrole = "candidate"\n' >"$FERMIX_HOME/config.toml"
+    ;;
+  "service install")
+    printf '%s\n' "$XDG_RUNTIME_DIR" >"$log/service-runtime-dir"
+    ;;
+  "home status")
+    calls=$(grep -c 'fermix home status' "$log/calls.log")
+    line="enrolled|Enrolled with Invented Mac; waiting for its move."
+    if [ -f "$fixtures/phases" ]; then line=$(sed -n "${calls}p" "$fixtures/phases"); fi
+    if [ -z "$line" ]; then line=$(tail -n 1 "$fixtures/phases"); fi
+    printf '{\n  "ok": true,\n  "result": {\n    "move": {\n      "candidate": null,\n      "phase": "%s",\n      "sentence": "%s"\n    },\n    "moved": null,\n    "role": "candidate"\n  },\n  "schema_version": 1\n}\n' \
+      "${line%%|*}" "${line#*|}"
+    ;;
+esac

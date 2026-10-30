@@ -480,6 +480,59 @@ defmodule FermixCore.Setup.SecretWriterTest do
     end
   end
 
+  # `secret-tool store` reads the value from stdin, which the shell feeds from
+  # a staged file. The file sits under the home's `secrets/`, which the sandbox
+  # closes to every command on macOS and Linux (`OsSandbox.unreadable/1`),
+  # never in the system temp folder, and it is gone once the write ends.
+  describe "secret-tool put/3 stages the value where no command reads it" do
+    setup do
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("secret-tool-staging")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      %{home: home}
+    end
+
+    test "a 0600 file in a 0700 folder under secrets/, removed after the write", ctx do
+      parent = self()
+      secrets = SecretWriter.File.directory(home: ctx.home)
+
+      runner = fn _shell, ["-c", _script, "fermix-secret", staged, _tool, "store" | _], _opts ->
+        send(
+          parent,
+          {:staged, staged, File.read(staged), mode(staged), mode(Path.dirname(staged))}
+        )
+
+        {:ok, %{exit: 0, stdout: "", truncated?: false}}
+      end
+
+      opts = [home: ctx.home] ++ host_opts("secret-tool", runner)
+      assert :ok = SecretWriter.SecretTool.put(:openai_api_key, "sk-invented-staged", opts)
+
+      assert_received {:staged, staged, {:ok, "sk-invented-staged"}, 0o600, 0o700}
+      assert Path.dirname(Path.dirname(staged)) == secrets
+      assert Path.basename(Path.dirname(staged)) =~ ~r/^\.staging-\d+$/
+      assert mode(secrets) == 0o700
+      refute File.exists?(Path.dirname(staged))
+    end
+
+    test "a failed write removes the staged value too", ctx do
+      parent = self()
+
+      runner = fn _shell, ["-c", _script, "fermix-secret", staged | _], _opts ->
+        send(parent, {:staged, staged})
+        {:ok, %{exit: 1, stdout: "refused", truncated?: false}}
+      end
+
+      opts = [home: ctx.home] ++ host_opts("secret-tool", runner)
+
+      assert {:error, {:helper_failed, _command, 1, "refused"}} =
+               SecretWriter.SecretTool.put(:openai_api_key, "sk-invented-staged", opts)
+
+      assert_received {:staged, staged}
+      refute File.exists?(Path.dirname(staged))
+      assert File.ls!(SecretWriter.File.directory(home: ctx.home)) == []
+    end
+  end
+
   # libsecret's `secret-tool lookup` writes the secret's bytes, and a newline
   # after them only when its stdout is a terminal (tool/secret-tool.c,
   # write_password_stdout: `if (isatty (1))`, the same from 0.18 to 0.21.8).
@@ -731,6 +784,8 @@ defmodule FermixCore.Setup.SecretWriterTest do
   defp host_opts(tool, runner) do
     [find_executable: fn ^tool -> "/usr/bin/" <> tool end, command_runner: runner]
   end
+
+  defp mode(path), do: Bitwise.band(File.stat!(path).mode, 0o777)
 
   # What `security -g` answers, as CommandRunner captures it: the password line,
   # then the attribute dump. The fixtures are `-g` answers, so the flag is checked.

@@ -41,13 +41,13 @@ header lists everything else left out.
 - `CapturerCanCrash`: a Capturer callback raises, and its DynamicSupervisor
   restarts it.
 - `ReconcileCanTimeOut`: `/history off`'s reconcile call gives up after its
-  15 s timeout (`controller.ex:45`, `:53-54`). The timer starts at
+  15 s timeout (`controller.ex:50`, `:58-59`). The timer starts at
   `history.ex:487`.
 - `ReconcileCanStall`: that timeout can fire before the DynamicSupervisor has
   sent the Capturer `:shutdown`. Setting it `FALSE` is a timing assumption:
   the work before the `:shutdown` is app-env reads, `File.regular?` stats in
-  `SidecarInstaller.installed?` (`controller.ex:94`,
-  `sidecar_installer.ex:94-99`) and a `Process.whereis` (`controller.ex:128`),
+  `SidecarInstaller.installed?` (`controller.ex:103`,
+  `sidecar_installer.ex:94-99`) and a `Process.whereis` (`controller.ex:137`),
   so the assumption fails only if the filesystem or the scheduler stalls for
   seconds. No safety rule needs it any more (see What holds).
 - `MaxFaults` bounds restarts and crashes together (1 in every check).
@@ -64,11 +64,11 @@ header lists everything else left out.
   gate is the flush-time rule of 693970b7.
 - `StopBeforeReply`: `/history off` replies only after its reconcile call
   returns, and that call returns only after the Capturer has exited
-  (`history.ex:487`, `computer_history.ex:70`, `controller.ex:53-54`, `:133`).
+  (`history.ex:487`, `computer_history.ex:70`, `controller.ex:58-59`, `:142`).
 - `SaveBeforeReply`: `/history off` writes `config.toml` before it replies
   (`history.ex:482`, `:490-493` before `:426-427`).
 - `BootReconciles`: a started or restarted Controller reconciles in
-  `handle_continue` (`controller.ex:57-74`).
+  `handle_continue` (`controller.ex:62-82`).
 - `OffConfirmsStop`: an exit of the reconcile call (no Controller, a crash
   mid-call, a timeout) comes back as `{:error, {:reconcile_failed, _}}`
   (`computer_history.ex:68-75`), and `/history off` then says the stop could
@@ -160,7 +160,7 @@ Witnesses:
 - Check 16: CH-4's second path, now harmless. The Controller's `whereis`
   returns a Capturer that then exits; its restart declines because the
   feature is off, so the Controller's `terminate_child` is answered
-  `{:error, :not_found}`, logged "already gone" (`controller.ex:142-143`),
+  `{:error, :not_found}`, logged "already gone" (`controller.ex:151-152`),
   with no Capturer running.
 - Check 29: CH-2's path, now closed. A row stamped inside the purged window
   reaches the spool insert after the purge committed, and the fence refuses
@@ -435,7 +435,7 @@ the fixed code.
   answer the status call in time reads "not answering (it may still be
   running)", not "not running" (`capturer.ex:113-122`, `history.ex:123`), so
   "not running" means the process is gone. `Controller.reconcile/2` waits
-  15 s (`controller.ex:45`, `:53-54`), above the two children's 5 s
+  15 s (`controller.ex:50`, `:58-59`), above the two children's 5 s
   shutdowns, so a slow `terminate/2` flush no longer turns into a false
   failure. Side effect: a timeout after the `:shutdown` (a Repo stalled for
   over 15 s) now reports an unconfirmed stop, which is true. Tests:
@@ -502,9 +502,9 @@ the fixed code.
   flips the env before it calls, so either the Controller's `whereis` sees
   the new pid and stops it, or `init` reads the flip and declines: both paths
   close. The Controller takes `:ignore` from `start_child` (a start racing
-  the flip, `controller.ex:117-118`) and logs `terminate_child`'s answer:
+  the flip, `controller.ex:126-127`) and logs `terminate_child`'s answer:
   `:ok` as "stopped", `{:error, :not_found}` as "already gone"
-  (`:133`, `:137-143`). Tests: `capturer_test.exs` "a restart racing
+  (`:142`, `:146-152`). Tests: `capturer_test.exs` "a restart racing
   /history off (CH-4)" (the DynamicSupervisor is suspended to hold the EXIT),
   `controller_test.exs` (a child that declines), `controller_stop_log_test.exs`
   (a not-found stop).
@@ -535,7 +535,7 @@ the fixed code.
 - **Fix:** `purge all` is `[0, now]` (`purge.ex:75-79`; `@max_ts` is gone).
   A row stamped in the future by a backwards clock step is therefore not
   covered; the 48 h sweep deletes it 48 h after its stamp (owner decision).
-  Migration 32 (`repo.ex:4118-4137`, `computer_history_sql.ex:276-299`)
+  Migration 32 (`repo.ex:4210-4229`, `computer_history_sql.ex:276-299`)
   carries a stored watermark W over as one interval `[0, min(W, now)]` issued
   at the migration, the sentinel included; nothing reads or writes a
   watermark any more. The old column stays, unread, because `fermix upgrade`

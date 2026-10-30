@@ -32,7 +32,7 @@ defmodule FermixCore.Auth.ChatGPT.Login do
 
   require Logger
 
-  @flow_opts [:opener, :puts, :timeout_ms]
+  @flow_opts [:opener, :puts, :timeout_ms, :loopback_owner]
 
   @doc "Runs one sign-in attempt in the calling process and stores the result."
   @spec run(keyword()) :: {:ok, Store.entry()} | {:error, term()}

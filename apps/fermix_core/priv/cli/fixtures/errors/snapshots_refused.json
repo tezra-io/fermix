@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "snapshots_refused",
+    "sentence": "Fermix did not do that. It said: Snapshots are off: set a recovery passphrase to turn them on."
+  },
+  "ok": false,
+  "schema_version": 1
+}
