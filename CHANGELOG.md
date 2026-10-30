@@ -267,6 +267,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   half a second or more per list, several times each time the pane opened or
   the menu bar showed what was waiting. A new index finds just the day's
   deliveries, so that count takes under a millisecond however many are kept.
+- **A full disk no longer stops Fermix.** When the disk filled, the first
+  trace Fermix could not write crashed the process that writes traces, and
+  the restarts that followed stopped the engine's core: messages went
+  unanswered until Fermix was restarted with space freed. A trace entry that
+  cannot be written is now dropped and the engine keeps running; the log says
+  so once, and once more when space returns, with how many entries were
+  dropped. Traces hold full request bodies and were never removed; Fermix now
+  keeps 14 days of them and at most 1 GiB, removing the oldest days first
+  when it starts and every hour.
 
 ### Security
 

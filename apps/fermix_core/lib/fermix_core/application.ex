@@ -658,7 +658,9 @@ defmodule FermixCore.Application do
     config.enabled? and RealtimeConfig.api_key_present?(config)
   end
 
-  defp trace_opts, do: [base_dir: trace_dir()]
+  # Trace's retention passes (M75 L14) stay dark under `mix test`, as the
+  # snapshot scheduler's timers do; tests start their own Trace with a clock.
+  defp trace_opts, do: [base_dir: trace_dir(), timer_enabled: @compiled_env != :test]
 
   defp jobs_scheduler_opts do
     Application.get_env(:fermix_core, :jobs, [])

@@ -479,7 +479,9 @@ a later run, a sleeping desktop), which
 `fermix home status` read. A capture needs about twice the home free
 (`Home.Disk`, which reads `df -Pk`'s available column so that a space in a
 filesystem's name or mount point moves nothing) and is refused by number
-otherwise. The
+otherwise. `Home.Disk.usage/2` reads how full the home's filesystem is (used
+over used plus available) and whether it reached 85%, where the disk warning
+of M75 L14 starts. The
 companion request store settles a request another boot started, or anything
 in flight after the epoch changed, as `uncertain` rather than re-running it.
 
@@ -550,9 +552,18 @@ capture, which is on unless `FERMIX_TRACE_CONTENT=0`. Tools emit through
 The local Doctor reads the `llm_call` rows back: `Setup.ProviderHealth` judges
 the primary provider from its recent calls, and finds them through
 `FermixCore.Application.trace_dir/0`, the resolver the `Trace` child starts with.
+`Trace.Retention` keeps the store bounded on every machine (M75 L14): when `Trace`
+starts and every hour, after closing the files of earlier days, it removes whole
+day folders older than 14 days, then the oldest until the rest fit in 1 GiB, at
+most 32 a pass, never today's or a later day's, and nothing but a folder named as
+a date that holds only `.jsonl` files (and hidden ones).
+The bounds are constants, not settings.
 
-Architecture Invariant: trace writes are best-effort. Failure to write a trace is
-logged and should not take down the runtime.
+Architecture Invariant: trace writes are best-effort. `Trace` is an early child of
+core's `:rest_for_one` supervisor, so it never raises on its I/O: an entry it
+cannot encode, open or write (a full disk's `:enospc`) is dropped, a failure to
+open or write is logged once when it starts and once when a later entry is written
+again, with the count dropped, and each new entry tries again.
 
 ### `FermixCore.Jobs`, `Temporal`, and `Delivery`
 

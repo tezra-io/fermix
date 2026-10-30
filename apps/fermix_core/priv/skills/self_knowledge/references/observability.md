@@ -18,7 +18,8 @@ On an app-managed Mac the bundled `fermix logs` returns one bounded page and ref
 
 ## Trace files
 
-- `~/.fermix/traces/<date>/<type>.jsonl` (`FERMIX_TRACE_DIR` moves them). Folders are named by the **UTC** date: "today" is `$(date -u +%F)`, and in the evening in the Americas the local date names the wrong folder. Nothing prunes them.
+- `~/.fermix/traces/<date>/<type>.jsonl` (`FERMIX_TRACE_DIR` moves them). Folders are named by the **UTC** date: "today" is `$(date -u +%F)`, and in the evening in the Americas the local date names the wrong folder. Fermix keeps 14 days of them and at most 1 GiB: when it starts and every hour it removes whole day folders, oldest first, never today's; a folder not named as a date, or holding anything but `.jsonl` files, is left alone.
+- On a full disk a trace entry Fermix cannot write is dropped, and the engine keeps running. The log says so once (`Trace cannot write <file>: no space left on device`), and once more when space returns (`Trace writes again in <dir> after dropping N entries`): a gap in a trace file between such a pair is the full disk, not a missing run.
 - Types written: `llm_call`, `tool_exec`, `agent_event`, `channel_msg`, `sandbox_event`. Nothing writes `error.jsonl`. Failures are `status: "error"` rows in `llm_call` (with `error_kind`, `error_code`, `error_status`, `error`), `success: false` rows in `tool_exec`, `event: "turn_error"` or `"job_run_error"` in `agent_event`, and the log.
 - A trace file is not a run: bucket rows by run window before counting error kinds. There is no `fermix traces` verb.
 
