@@ -92,13 +92,13 @@ What this deliberately does not cover:
   a search result or git history read from a folder the owner works in, an
   attachment an earlier turn saved included, leaves the turn clean, as a
   command's own output does. Marking them would not hold, since a command can
-  read the same bytes, and it would make a command on Linux, and a coding run
-  anywhere, wait in nearly every turn that first looked at a file. A coding
-  run reads the same repository with the owner's account anyway, and a build
-  or test runs its scripts, so a repository someone else wrote is trusted as
-  far as the owner trusts running it. On Linux the kernel sandbox, once it
-  lands, will hold a shell or git command as Seatbelt does on a Mac; a coding
-  run stays unconfined on either.
+  read the same bytes, and it would make a coding run wait in nearly every
+  turn that first looked at a file. A coding run reads the same repository
+  with the owner's account anyway, and a build or test runs its scripts, so a
+  repository someone else wrote is trusted as far as the owner trusts running
+  it. A shell or git command is held by the kernel: Seatbelt on a Mac, and on
+  Linux Landlock ABI 2 or later (Linux 5.19), where a kernel without it runs
+  no command; a coding run stays unconfined on either.
 - A voice note or Telegram video note is treated as the owner's own words when
   the channel declares it a recording and does not mark it forwarded; a
   forwarded one counts as outside content. A phone app that sends its
