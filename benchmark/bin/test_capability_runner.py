@@ -1057,15 +1057,18 @@ def test_backoff_minutes_default_env_and_disable(monkeypatch):
 # Fermix's actual auth-failure replies (`auth_reply/1` in agents/turn_runner.ex):
 # OAuth, api-key, and the generic fallback.
 _AUTH_REPLIES = [
-    "OpenAI Codex authentication failed — reconnect with `fermix auth login "
-    "--provider openai_codex` and retry.",
+    "Claude subscription authentication failed — sign in with the Claude "
+    "subscription again in Fermix's Providers settings and retry.",
     "OpenAI Codex authentication failed — check the OpenAI Codex API key in "
-    "`fermix setup` and retry.",
-    "Authentication failed — run `fermix auth login` from the host and try again.",
+    "Fermix's Providers settings and retry.",
+    "OpenAI Codex authentication failed with the API key from OPENAI_API_KEY in "
+    "the daemon's environment, which Fermix uses instead of a stored key.",
+    "Authentication failed — sign in with ChatGPT again in Fermix's Providers "
+    "settings and try again.",
     # Worded as an ACCESS denial, not an authentication failure: re-login cannot
     # buy a plan tier. Permanent for the run all the same.
     "SpaceXAI subscription access denied — the Grok plan may not include API "
-    "access. Switch to an API key in `fermix setup`, or check the plan tier.",
+    "access. Switch to an API key in Fermix's Providers settings, or check the plan tier.",
 ]
 
 

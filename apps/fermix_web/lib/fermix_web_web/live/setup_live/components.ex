@@ -4604,10 +4604,10 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp catalog_blocked_reason(_entry), do: nil
 
   defp compat_message({:needs_newer_core, :min_core_version, floor}),
-    do: "needs Fermix ≥ #{floor}; run `fermix upgrade`."
+    do: "needs Fermix ≥ #{floor}; update Fermix."
 
   defp compat_message({:needs_newer_core, :plugin_api, api}),
-    do: "needs a newer Fermix (plugin API #{api}); run `fermix upgrade`."
+    do: "needs a newer Fermix (plugin API #{api}); update Fermix."
 
   defp compat_message({:plugin_too_old, :plugin_api, _api}),
     do: "built for an older Fermix; awaiting a plugin update."

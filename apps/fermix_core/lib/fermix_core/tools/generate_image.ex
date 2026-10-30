@@ -151,7 +151,8 @@ defmodule FermixCore.Tools.GenerateImage do
 
       {:error, :not_configured} ->
         ToolSupport.error(
-          "Image generation is not configured. Run `fermix setup` and choose an image backend."
+          "Image generation is not configured. Choose an image backend in Fermix's Images " <>
+            "settings."
         )
     end
   end

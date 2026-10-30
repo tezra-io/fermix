@@ -3745,10 +3745,10 @@ defmodule FermixWebWeb.SetupLive do
   defp install_error({:verification_failed, _reason}), do: "signature invalid; refusing."
 
   defp install_error({:incompatible, {:needs_newer_core, :min_core_version, floor}}),
-    do: "needs Fermix ≥ #{floor}; run `fermix upgrade` first."
+    do: "needs Fermix ≥ #{floor}; update Fermix first."
 
   defp install_error({:incompatible, {:needs_newer_core, :plugin_api, api}}),
-    do: "needs a newer Fermix (plugin API #{api}); run `fermix upgrade` first."
+    do: "needs a newer Fermix (plugin API #{api}); update Fermix first."
 
   defp install_error({:incompatible, {:plugin_too_old, :plugin_api, _api}}),
     do: "built for an older Fermix; awaiting a plugin update."
@@ -3757,7 +3757,7 @@ defmodule FermixWebWeb.SetupLive do
     do: "#{name} #{version} was yanked; not installing."
 
   defp install_error({:unknown_plugin, _name}),
-    do: "not in the plugin catalog; run `fermix upgrade` to get the latest catalog."
+    do: "not in the plugin catalog; update Fermix to get the latest catalog."
 
   defp install_error({:no_build_for_target, target}), do: "no build for this machine (#{target})."
 

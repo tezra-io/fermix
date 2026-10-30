@@ -236,9 +236,7 @@ defmodule FermixCore.Readiness do
     advisory(
       %{
         component: "personalization",
-        action:
-          "Add your name, time zone, and communication style in Personality settings, " <>
-            "or run `fermix setup`."
+        action: "Add your name, time zone, and communication style in Personality settings."
       },
       "personality",
       "personalization"
@@ -351,7 +349,7 @@ defmodule FermixCore.Readiness do
     if oauth_mode?(block) do
       missing_credentials(
         :anthropic,
-        "Connect the Claude subscription: `fermix auth login --provider anthropic`."
+        "Sign in with the Claude subscription in Providers settings."
       )
     else
       missing_credentials(:anthropic, "Add the Anthropic API key in Providers settings.")
@@ -360,7 +358,10 @@ defmodule FermixCore.Readiness do
 
   defp missing_credentials_action(:xai, block) do
     if oauth_mode?(block) do
-      missing_credentials(:xai, "Connect SpaceXAI Grok: `fermix auth login --provider xai`.")
+      missing_credentials(
+        :xai,
+        "Sign in with the SpaceXAI Grok subscription in Providers settings."
+      )
     else
       missing_credentials(:xai, "Add the SpaceXAI API key in Providers settings.")
     end
@@ -592,8 +593,8 @@ defmodule FermixCore.Readiness do
 
   defp sandbox_env_helper_action(names) do
     "A configured helper failed for: #{backticked(names)}. Sandboxed commands run without " <>
-      "these until the helper works: run it by hand to verify it, or reconfigure it with " <>
-      "`fermix sandbox env set NAME -- <helper> [args...]`."
+      "these until the helper works: run it by hand to verify it, or change the command " <>
+      "the settings file sets for it."
   end
 
   defp backticked(names), do: Enum.map_join(names, ", ", &"`#{&1}`")

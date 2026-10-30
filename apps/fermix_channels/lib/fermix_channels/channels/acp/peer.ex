@@ -920,7 +920,7 @@ defmodule FermixChannels.Channels.Acp.Peer do
     if auth_failure?(reason) do
       Wire.auth_required(
         "Re-authenticate: the model provider rejected Fermix's credentials. " <>
-          "Refresh them on the Fermix host (`fermix setup`), then retry."
+          "Refresh them in Fermix's Providers settings on the Fermix host, then retry."
       )
     else
       Wire.internal_error("the Fermix turn failed; the daemon log has the reason")

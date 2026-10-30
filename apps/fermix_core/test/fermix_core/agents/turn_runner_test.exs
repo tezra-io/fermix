@@ -1634,7 +1634,8 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
 
     test "maps auth failures to the re-login hint" do
-      assert TurnRunner.error_reply(:no_auth_file) =~ "fermix auth login"
+      assert TurnRunner.error_reply(:no_auth_file) ==
+               "Authentication failed — sign in again in Fermix's Providers settings and try again."
     end
 
     test "rate-limit reply is the generic retry text" do
@@ -1698,7 +1699,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
           get_env: &Map.get(env, &1)
         )
 
-      assert reply =~ "check the Anthropic API key in `fermix setup`"
+      assert reply =~ "check the Anthropic API key in Fermix's Providers settings"
     end
 
     test "maps Anthropic OAuth auth failures to a subscription reconnect hint" do
@@ -1716,7 +1717,11 @@ defmodule FermixCore.Agents.TurnRunnerTest do
         )
 
       assert reply =~ "Claude subscription"
-      assert reply =~ "fermix auth login --provider anthropic"
+
+      assert reply =~
+               "sign in with the Claude subscription again in Fermix's Providers settings"
+
+      refute reply =~ ~r/\bfermix\s+[a-z]/
       refute reply =~ "API key"
     end
 
@@ -1773,7 +1778,8 @@ defmodule FermixCore.Agents.TurnRunnerTest do
            }}
         )
 
-      assert reply =~ "fermix auth login --provider xai"
+      assert reply =~
+               "sign in with the SpaceXAI Grok subscription again in Fermix's Providers settings"
     end
 
     # OpenAI Codex signs in with ChatGPT, so a 401 that survived the refresh

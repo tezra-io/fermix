@@ -1809,7 +1809,8 @@ defmodule FermixCore.Management.SettingsTest do
              ]
 
       assert row["footer"] =~ "Fermix home"
-      assert row["info"] =~ "`fermix setup --migrate-secrets`"
+      assert row["info"] =~ "Secrets you already saved stay where they are until you enter each"
+      refute row["info"] =~ "fermix setup"
     end
 
     # `config_store.ex` applies the store on every save, so the flag the row

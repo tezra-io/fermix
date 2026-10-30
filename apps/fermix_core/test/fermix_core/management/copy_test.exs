@@ -48,6 +48,9 @@ defmodule FermixCore.Management.CopyTest do
   # path belongs; the rest of the sentence is prose and may carry none.
   @backticked ~r/`[^`]*`/
   @term_shapes [map: ~r/%\{/, tuple: ~r/\{:/, absolute_path: ~r{(?<![\w~])/[A-Za-z0-9._-]+/}]
+  # A `fermix` verb, quoted or bare: what the CLI's user types, never what an
+  # app or the setup page asks of its owner.
+  @fermix_command ~r/\bfermix\s+[a-z]/
 
   describe "the rules themselves" do
     # A rule the module publishes and nothing here provokes is a rule nobody has
@@ -496,6 +499,25 @@ defmodule FermixCore.Management.CopyTest do
         record = ProposalView.record(row)
         assert_clean(record.status_sentence, :prose, [row.tool], "proposal #{row.state}")
       end
+    end
+  end
+
+  # The older copy the apps and the setup page show (readiness actions and
+  # every settings row) is held to the same rule: what to do in the app, or
+  # on the server, never a `fermix` command.
+  describe "the readiness and settings copy an app pane shows" do
+    test "names no fermix command" do
+      readiness =
+        for {key, action} <- Readiness.published_actions(), do: {"readiness #{key}", action}
+
+      rows =
+        for section <- Settings.sections(),
+            row <- rows(section.id),
+            text <- [row["label"], row["footer"], row["info"]],
+            is_binary(text),
+            do: {"#{section.id}.#{row["key"]}", text}
+
+      for {where, text} <- readiness ++ rows, do: refute_command(text, where)
     end
   end
 
@@ -1034,6 +1056,12 @@ defmodule FermixCore.Management.CopyTest do
   defp sentence?(text) do
     String.contains?(text, " ") and String.ends_with?(text, ".") and
       String.match?(text, ~r/^[A-Z]/)
+  end
+
+  defp command?(text), do: Regex.match?(@fermix_command, text)
+
+  defp refute_command(text, where) do
+    refute command?(text), "#{where}: #{inspect(text)} prescribes a fermix command"
   end
 
   defp assert_clean(nil, _kind, _names, _where), do: :ok

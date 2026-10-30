@@ -10,6 +10,8 @@ defmodule Fermix.CLI.SandboxCommand do
   alias FermixCore.Sandbox.OsSandbox
   alias FermixCore.Sandbox.PathPolicy
 
+  @set_helper " From a terminal: fermix sandbox env set NAME -- <helper> [args...]"
+
   @spec run([String.t()]) :: non_neg_integer()
   def run(["status"]), do: status()
   def run(["explain"]), do: explain()
@@ -232,23 +234,30 @@ defmodule Fermix.CLI.SandboxCommand do
     "unsafe_root: #{path} cannot be granted. Run: fermix sandbox explain"
   end
 
-  defp format_error({:env_not_allowed, _name} = reason), do: Env.format_error(reason)
-  defp format_error({:env_denied, _name} = reason), do: Env.format_error(reason)
+  # The engine's sentence names the settings every install has; a terminal
+  # also gets the command that makes the change here.
+  defp format_error({:env_not_allowed, name} = reason),
+    do: Env.format_error(reason) <> " From a terminal: fermix sandbox env allow #{name}"
+
+  defp format_error({:env_denied, name} = reason),
+    do: Env.format_error(reason) <> " From a terminal: fermix sandbox env allow #{name}"
+
   defp format_error({:missing_env, _name} = reason), do: Env.format_error(reason)
 
   defp format_error({:env_command_failed, _command, _code, _output} = reason),
-    do: Env.format_error(reason)
+    do: Env.format_error(reason) <> @set_helper
 
   defp format_error({:env_command_timeout, _command, _timeout} = reason),
-    do: Env.format_error(reason)
+    do: Env.format_error(reason) <> @set_helper
 
   defp format_error(:env_command_output_too_large),
-    do: Env.format_error(:env_command_output_too_large)
+    do: Env.format_error(:env_command_output_too_large) <> @set_helper
 
-  defp format_error(:empty_env_command_output), do: Env.format_error(:empty_env_command_output)
+  defp format_error(:empty_env_command_output),
+    do: Env.format_error(:empty_env_command_output) <> @set_helper
 
   defp format_error(:env_command_output_not_single_value),
-    do: Env.format_error(:env_command_output_not_single_value)
+    do: Env.format_error(:env_command_output_not_single_value) <> @set_helper
 
   defp format_error(reason) when is_binary(reason), do: reason
   defp format_error(reason), do: inspect(reason)

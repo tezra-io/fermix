@@ -278,7 +278,8 @@ defmodule FermixCore.Sandbox.EnvTest do
 
     message = Env.format_error({:env_command_not_found, missing})
     assert message =~ missing
-    assert message =~ "fermix sandbox env set"
+    assert message =~ "change the command the settings file sets for that variable"
+    refute message =~ ~r/\bfermix\s+[a-z]/
   end
 
   test "helper timeout kills the OS child" do
@@ -467,7 +468,8 @@ defmodule FermixCore.Sandbox.EnvTest do
 
     message = Env.format_error({:env_not_allowed, "FERMIX_TEST_SECRET"})
     assert message =~ "FERMIX_TEST_SECRET is not allowed"
-    assert message =~ "fermix sandbox env allow FERMIX_TEST_SECRET"
+    assert message =~ "Add it to the allowed environment variables in the sandbox settings."
+    refute message =~ ~r/\bfermix\s+[a-z]/
   end
 
   defp context(root, config) do

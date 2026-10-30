@@ -43,7 +43,8 @@ defmodule FermixCore.Tools.Media.SupportTest do
     test "fails loud with the labeled key when nothing is configured" do
       Application.put_env(:fermix_core, :providers, [])
 
-      assert {:error, "auth_failed: OPENAI_API_KEY is not set. Run `fermix setup` to add it."} =
+      assert {:error,
+              "auth_failed: OPENAI_API_KEY is not set. Add it in Fermix's Providers settings."} =
                Support.provider_credential([], :openai, "OPENAI_API_KEY")
     end
   end
@@ -59,10 +60,12 @@ defmodule FermixCore.Tools.Media.SupportTest do
     end
 
     test "rejects empty and unresolved-@keyring sentinels loudly" do
-      assert {:error, "auth_failed: GOOGLE_API_KEY is not set. Run `fermix setup` to add it."} =
+      assert {:error,
+              "auth_failed: GOOGLE_API_KEY is not set. Add it in Fermix's Images settings."} =
                Support.config_credential([google_api_key: ""], :google_api_key, "GOOGLE_API_KEY")
 
-      assert {:error, "auth_failed: GOOGLE_API_KEY is not set. Run `fermix setup` to add it."} =
+      assert {:error,
+              "auth_failed: GOOGLE_API_KEY is not set. Add it in Fermix's Images settings."} =
                Support.config_credential(
                  [google_api_key: "@keyring"],
                  :google_api_key,
@@ -71,7 +74,8 @@ defmodule FermixCore.Tools.Media.SupportTest do
     end
 
     test "fails loud when the key is missing" do
-      assert {:error, "auth_failed: GOOGLE_API_KEY is not set. Run `fermix setup` to add it."} =
+      assert {:error,
+              "auth_failed: GOOGLE_API_KEY is not set. Add it in Fermix's Images settings."} =
                Support.config_credential([], :google_api_key, "GOOGLE_API_KEY")
     end
   end
@@ -168,7 +172,7 @@ defmodule FermixCore.Tools.Media.SupportTest do
     test "a missing credential emits a symmetric error span (no HTTP made)" do
       Application.put_env(:fermix_core, :telemetry, capture_content: true)
 
-      reason = "auth_failed: OPENAI_API_KEY is not set. Run `fermix setup` to add it."
+      reason = "auth_failed: OPENAI_API_KEY is not set. Add it in Fermix's Providers settings."
 
       result =
         Support.provider_call_error(

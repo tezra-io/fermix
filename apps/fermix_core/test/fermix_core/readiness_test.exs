@@ -501,7 +501,7 @@ defmodule FermixCore.ReadinessTest do
 
       assert Enum.any?(report.failures, fn failure ->
                failure.component == "provider:anthropic" and
-                 failure.action =~ "fermix auth login --provider anthropic"
+                 failure.action == "Sign in with the Claude subscription in Providers settings."
              end)
 
       assert :ok =
@@ -580,7 +580,8 @@ defmodule FermixCore.ReadinessTest do
 
       assert Enum.any?(report.failures, fn failure ->
                failure.component == "provider:xai" and
-                 failure.action =~ "fermix auth login --provider xai"
+                 failure.action ==
+                   "Sign in with the SpaceXAI Grok subscription in Providers settings."
              end)
 
       assert :ok =
@@ -610,7 +611,8 @@ defmodule FermixCore.ReadinessTest do
 
       assert Enum.any?(report.failures, fn failure ->
                failure.component == "provider:xai" and
-                 failure.action =~ "fermix auth login --provider xai"
+                 failure.action ==
+                   "Sign in with the SpaceXAI Grok subscription in Providers settings."
              end)
     end
 

@@ -161,7 +161,8 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     assert result.success == false
     assert result.error =~ "missing a required scope"
     assert result.error =~ "https://www.googleapis.com/auth/calendar.events"
-    assert result.error =~ "fermix plugins auth reauthorize google_calendar"
+    assert result.error =~ "Sign in to google_calendar again in Fermix's Plugins settings"
+    refute result.error =~ ~r/\bfermix\s+[a-z]/
     refute_received {:provider_called, _path}
   end
 
@@ -194,8 +195,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     assert result.success == false
 
     assert result.error ==
-             "google_drive is disabled — enable it on the setup page or run " <>
-               "`fermix plugins enable google_drive`."
+             "google_drive is turned off — turn it on in Fermix's Plugins settings."
 
     refute_received {:provider_called, _path}
   end
@@ -346,7 +346,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
 
     assert result.success == false
     assert result.error =~ "enabled but not connected"
-    assert result.error =~ "fermix plugins auth login google_calendar"
+    assert result.error =~ "Sign in to google_calendar in Fermix's Plugins settings"
   end
 
   # No token is served for a grant minted in the wrong region, so the tool never
@@ -1217,7 +1217,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
       assert result.success == false
       # the bespoke message is preserved (not the interpreter's generic prose)
       assert result.error =~ "missing a required scope"
-      assert result.error =~ "fermix plugins auth reauthorize google_calendar"
+      assert result.error =~ "Sign in to google_calendar again in Fermix's Plugins settings"
       refute result.error =~ "secret-token"
     end
 
@@ -1323,7 +1323,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
       assert capture_scheme_header(nil) == "Bearer bot-token"
     end
 
-    test "a missing api_key surfaces `fermix plugins auth set` guidance" do
+    test "a missing api_key surfaces token guidance in the Plugins settings" do
       name = setup_scheme_fixture("Bot")
 
       context = %{
@@ -1335,7 +1335,9 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                ToolExecutor.execute(%{"id" => "42"}, context, name, scheme_fixture_tool(name))
 
       assert result.success == false
-      assert result.error =~ "fermix plugins auth set #{name}"
+
+      assert result.error ==
+               "#{name} is missing its API key. Add its token in Fermix's Plugins settings."
     end
   end
 
@@ -1579,8 +1581,12 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                )
 
       assert result.success == false
-      assert result.error =~ "sign in again so Fermix records the account region"
-      assert result.error =~ "fermix plugins auth reauthorize #{name}"
+
+      assert result.error =~
+               "Sign in to #{name} again in Fermix's Plugins settings so Fermix records the " <>
+                 "account region"
+
+      refute result.error =~ ~r/\bfermix\s+[a-z]/
       refute_received :transport_reached
     end
 

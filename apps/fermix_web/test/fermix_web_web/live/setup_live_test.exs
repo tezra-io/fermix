@@ -5991,6 +5991,8 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Incompatible"
       assert html =~ "needs Fermix"
       assert html =~ "9.9.9"
+      assert html =~ "update Fermix."
+      refute html =~ "fermix upgrade"
 
       refute has_element?(
                view,
@@ -5998,7 +6000,7 @@ defmodule FermixWebWeb.SetupLiveTest do
              )
     end
 
-    test "installing a name missing from the catalog points at fermix upgrade", %{
+    test "installing a name missing from the catalog points at updating Fermix", %{
       conn: conn,
       tmp_home: tmp_home
     } do
@@ -6010,7 +6012,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       render_click(view, "plugin_enable", %{"name" => "ghost"})
 
       html = render_until(view, "ghost install failed")
-      assert html =~ "not in the plugin catalog; run `fermix upgrade` to get the latest catalog."
+      assert html =~ "not in the plugin catalog; update Fermix to get the latest catalog."
     end
 
     test "an installed github-provider plugin renders a GitHub client form that persists", %{
