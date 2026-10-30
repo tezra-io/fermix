@@ -280,7 +280,7 @@ it, never a second writer.
 - The cutover has a gap: Telegram messages sent while the move runs are lost
   (the poller's place in Telegram's queue is kept in memory, not in the home),
   and a recurring job that comes due more than an hour late is skipped rather
-  than run late. The apps say so before the owner moves.
+  than run late. The apps and the setup page say so before the owner moves.
 - On the server Fermix keeps every secret in its file secret store
   (`<home>/secrets/`, readable by the server's `fermix` account only): in
   plain files, held by the disk's encryption (the owner encrypts the disk
@@ -297,8 +297,8 @@ it, never a second writer.
   `keep_as_desktop` false (`home.move.start`; true unless said), so the old
   server keeps no desktop key, row or link and serves nothing once the move
   commits. On a server primary with no desktop to start it from, the same
-  move is `fermix home move --to ID --retire` at the server's own terminal.
-  Moving Fermix back to a desktop is not part of this release: to
+  move is `fermix home move --to ID --retire` at the server's own terminal;
+  its setup page's Always On tab says when to add `--retire`. Moving Fermix back to a desktop is not part of this release: to
   bring it back to a computer, restore the newest snapshot into a fresh home
   there.
 
@@ -455,14 +455,12 @@ it, never a second writer.
 
 - Every surface draws one picture, the engine's `home.status`, and acts
   through the same `home.*` methods and settings sections: the Fermix Mac and
-  Linux apps' **Always On** pane and the CLI. Nothing on one surface is
-  missing from the other except where the table says so.
-- The browser setup page's **Always On** tab sets nothing up and shows one
-  sentence for where Fermix runs, read when the tab opens and on
-  **Refresh**: on the primary that Fermix runs on this computer; on a desktop
-  the link's own sentence, or, with no link, where the home moved.
+  Linux apps' **Always On** pane, the browser setup page's **Always On** tab
+  (for a host with no app, such as a headless Linux server: `fermix setup`
+  opens it), and the CLI. Nothing on one surface is missing from the others
+  except where the table says so.
 
-| Fact or action | App | CLI |
+| Fact or action | App and browser setup | CLI |
 |---|---|---|
 | The role and the epoch | This computer | `fermix home status` |
 | On a desktop: the primary (connected or not, since when, its sentence), or where the home moved | The primary | `fermix home status` |
@@ -475,17 +473,23 @@ it, never a second writer.
 | An enrollment code | **Get a code** (**Get a new code** while one is open, which stops the open one working), shown once with **Copy** and when it expires, beside the command for a server you have, and what to know before moving (the disk it needs, that this computer serves nothing meanwhile, the Telegram and late-job gap, where the server keeps secrets, no way back) | `fermix home enroll-code` |
 | The servers waiting for the move, with the instance facts they reported (unverified) | Servers waiting for the move | `fermix home candidates` |
 | Review the move (`home.move.readiness`): each item ready, a note or a block | **Review the move** on a server waiting; a block is shown as one | `fermix home move` says each block |
-| Start the move | the app's pane | `fermix home move --to ID [--retire]` |
+| Start the move | the app's pane; the browser tab shows the exact `fermix home move --to ID --recovery-passphrase-file FILE` once the review has nothing that blocks, because the move restarts the engine that serves the page, and says to add `--retire` on a server being replaced | `fermix home move --to ID [--retire]` |
 | Where the move stands (its phase and sentence) | The move | `fermix home status` |
 | On a linked desktop: the server's own recovery, its move, and the secrets it could not resolve (the composed `primary_home`, or why it is missing) | The server's recovery (**Back up now** asks the server), The server's move | `fermix home status --json` |
 | On a linked desktop: replace the server (a code from the server, the review on it, then the move with `keep_as_desktop` false) | Replace the server: **Get a code**, **Review the move**, the passphrase typed twice, **Move to NAME** (the server restarts, never this computer) | none |
 
+- The setup tab reads the picture again every five seconds while something
+  on it moves by itself (an open code, a move under way, a snapshot being
+  written, here or on the server a desktop shows), for at most ten minutes
+  per opening; **Refresh** reads it now. Its times are in the viewer's own
+  zone, named (UTC when the browser gives none); the daemon's own sentences
+  keep UTC.
 - In the device role the browser setup page opens on Always On and leads
   with a notice that Fermix-wide settings live on the primary and are changed
   in the Fermix app on this computer. Its tabs for providers,
   voice, channels, voice notes, plugins, search, images, coding agents,
   memory, personalization and cues show that sentence instead of their forms;
-  its Sandbox and Doctor tabs set up this computer.
+  its Sandbox, Doctor and Always On tabs set up this computer.
 
 ## What a restart or a move does to a message in flight
 

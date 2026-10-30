@@ -670,7 +670,7 @@ defmodule FermixCore.Management.CopyTest do
   # phases and refusals, the readiness items, the snapshot sentences, the
   # snapshots section, the owner decisions, and the refusals a server shows
   # while it enrolls.
-  describe "the Always On copy an app shows" do
+  describe "the Always On copy an app or the setup page shows" do
     test "names no fermix command" do
       {:ok, view} = Settings.get("snapshots")
 

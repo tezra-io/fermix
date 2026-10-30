@@ -108,7 +108,7 @@ defmodule FermixWebWeb.SetupLive do
       description: "User profile"
     },
     %{id: "cues", label: "Cues", component: nil, description: "Outside input"},
-    %{id: "always_on", label: "Always On", component: nil, description: "Where Fermix runs"},
+    %{id: "always_on", label: "Always On", component: nil, description: "Server and recovery"},
     %{id: "doctor", label: "Doctor", component: nil, description: "Final checks"}
   ]
 
@@ -221,7 +221,7 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:page_title, "Fermix setup")
       |> assign(:embed?, embed?)
       |> assign(:engine_record, record)
-      |> assign(:always_on, AlwaysOn.initial(record))
+      |> assign(:always_on, AlwaysOn.initial(record, AlwaysOn.viewer_zone(socket)))
       |> assign(:active_tab, active_tab)
       |> assign(:saved_flash, nil)
       |> assign(:doctor_result, nil)
@@ -253,8 +253,8 @@ defmodule FermixWebWeb.SetupLive do
     {:ok, socket}
   end
 
-  # A device-role page opens on Always On, which says whether this computer
-  # reaches the server (M75 B14): the rest of the setup is the primary's.
+  # A device-role page opens on what it sets up (M75 B14): the rest of the
+  # setup is the primary's.
   defp first_tab(%{role: :device}, _report), do: "always_on"
   defp first_tab(_record, report), do: next_action_tab(report)
 
@@ -911,9 +911,14 @@ defmodule FermixWebWeb.SetupLive do
      )}
   end
 
-  # The Always On tab (M75 B14).
-  def handle_event("always_on_" <> _rest = event, params, socket),
-    do: {:noreply, AlwaysOn.handle_event(event, params, socket)}
+  # The Always On tab (M75 B14). A write to the settings file refreshes the
+  # report, so the banner and every other tab start from what was saved.
+  def handle_event("always_on_" <> _rest = event, params, socket) do
+    case AlwaysOn.handle_event(event, params, socket) do
+      {socket, nil} -> {:noreply, socket}
+      {socket, :written} -> {:noreply, assign_report(socket, Wizard.report())}
+    end
+  end
 
   # The Cues tab (M60 §15): `CuesState` turns each `cues_*` event into a
   # change and says what follows.
@@ -1018,6 +1023,9 @@ defmodule FermixWebWeb.SetupLive do
   def handle_info({phone_read, _gen} = message, socket)
       when phone_read in [:phone_poll, :phone_reach],
       do: {:noreply, Phone.handle_info(message, socket)}
+
+  def handle_info({:always_on_poll, _gen} = message, socket),
+    do: {:noreply, AlwaysOn.handle_info(message, socket)}
 
   def handle_info(:perform_restart, socket) do
     # Supervised release only (gated in apply_restart): exit non-zero so the OS

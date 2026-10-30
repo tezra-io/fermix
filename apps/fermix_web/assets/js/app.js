@@ -122,7 +122,8 @@ const CopyText = {
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
-  params: {_csrf_token: csrfToken},
+  // The viewer's own zone, so the Always On tab draws its times there.
+  params: {_csrf_token: csrfToken, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone},
   hooks: {...colocatedHooks, UnsavedHint, RestartReconnect, CopyText},
 })
 

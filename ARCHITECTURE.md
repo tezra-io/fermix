@@ -1398,10 +1398,20 @@ The router exposes:
 asynchronously; a failed handoff returns 503 with the duplicate record rolled
 back, and a device-role engine answers every webhook route 503. `HealthController` reports `FermixCore.Health`'s status.
 `SetupLive` drives `Setup.Wizard` and the core setup modules. Its Always On tab
-(`SetupLive.AlwaysOn`, M75 B14) is read-only: one sentence for where Fermix
-runs, drawn from `Management.Home.status/1` in the page's own process when
-the tab opens and on Refresh (on a desktop, the link's own sentence); setting
-Always On up is the apps' and the CLI's. On a device-role engine the
+(`SetupLive.AlwaysOn`, M75 B14) calls what the `home.*` methods call
+(`Management.Home.status/1` is the one picture; `Management.HomeMove`,
+`Management.Settings` for the `snapshots` section, `Management.Secrets`) in
+the page's own process and derives nothing; on the primary the move is shown
+as its CLI command once its review (`home.move.readiness`) has nothing that blocks,
+because starting it restarts the engine serving the page, with when to add
+`--retire` (`keep_as_desktop` false: a server primary being replaced keeps no
+desktop). On a linked desktop
+(`Home.DesktopLink.linked?/2`, decided per page) the picture carries the
+primary's `primary_home` (the page passes `:primary_forward`), and what the
+tab asks of the server (back up now, a code, the review and the move that
+replaces it, `keep_as_desktop` false) goes through `Home.Link.forward/2`, the
+daemon's own way to the primary. Times are drawn in the viewer's zone, which
+the page's socket sends at connect. On a device-role engine the
 page leads with a notice and draws every tab whose request
 `Management.Placement` places on the primary as unavailable. Not all ingress is
 Phoenix: the mobile listener, the OAuth loopback listener, and the Unix sockets
