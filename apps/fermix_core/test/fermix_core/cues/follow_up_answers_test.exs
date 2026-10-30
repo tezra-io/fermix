@@ -19,6 +19,7 @@ defmodule FermixCore.Cues.FollowUpAnswersTest do
   alias FermixCore.Cues.Ingest
   alias FermixCore.Cues.Proposals
   alias FermixCore.Cues.Watchers
+  alias FermixCore.Jobs.CueAdmission
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesFollowUpSql
 
@@ -27,6 +28,14 @@ defmodule FermixCore.Cues.FollowUpAnswersTest do
   @stranger %{platform: "telegram", chat_id: "chat-9", user_id: "owner-1"}
   @prompt "Review the last day's commits on dev and report the findings."
   @app %{surface: :companion, device_id: nil}
+
+  defmodule RecordingDelivery do
+    @moduledoc false
+    def send_message(target, text, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:delivered, target, text})
+      :ok
+    end
+  end
 
   setup do
     ctx = start_repo("follow_up_answers")
@@ -51,7 +60,7 @@ defmodule FermixCore.Cues.FollowUpAnswersTest do
       refute Map.has_key?(card.outside, :args_text)
 
       assert {:ok, line} = Proposals.confirm("cp_card-one", @owner, opts(ctx))
-      assert line =~ ~s(Running "Codex review" for the item from post-1)
+      assert line =~ ~s(Starting "Codex review" for post-1's post · )
       assert_received :woken
       assert [%{state: "starting"}] = states(ctx, watcher)
 
@@ -94,29 +103,55 @@ defmodule FermixCore.Cues.FollowUpAnswersTest do
       assert id == trigger.id
       assert {:ok, []} = Proposals.waiting_in_chat(@stranger, opts(ctx))
 
-      assert {:ok, "Running" <> _rest} = Proposals.confirm(trigger.id, @owner, opts(ctx))
+      assert {:ok, "Starting" <> _rest} = Proposals.confirm(trigger.id, @owner, opts(ctx))
 
       assert [%{state: "starting", decided_from: "telegram:chat-1:owner-1"}] =
                states(ctx, watcher)
     end
 
-    # §4.2: one active run per job, and the card says so at the tap.
-    test "a yes while the follow-up runs is refused at once, and the card says so", ctx do
+    # §4.2: one active run per job. The tap says the follow-up is starting; the
+    # claim that finds it still running refuses it, and the owner hears so through
+    # where it reports, as every app surface does.
+    test "a yes while the follow-up runs is refused at its turn, and the owner is told", ctx do
       watcher = follow_up_watcher!(ctx)
-      _trigger = offer!(ctx, "cp_card-four")
+      trigger = offer!(ctx, "cp_card-four")
 
       exec!(ctx.conn, "UPDATE scheduled_jobs SET state = 'running' WHERE id = ?", [
         watcher.follow_up_job_id
       ])
 
-      assert {:ok, "Not started: it is already running."} =
+      assert {:ok, "Starting \"Codex review\" for post-1's post · " <> _time} =
                Proposals.confirm("cp_card-four", @owner, opts(ctx))
 
-      assert [%{state: "refused", reason: "Not started: it is already running."}] =
-               states(ctx, watcher)
+      assert_received :woken
+      assert [%{state: "starting"}] = states(ctx, watcher)
 
-      refute_received :woken
-      assert_received {:event, {:resolved, %{state: "refused"}}}
+      told = opts(ctx) ++ [adapter: RecordingDelivery, delivery_opts: [test_pid: self()]]
+
+      admission = [
+        repo_opts: [server: ctx.repo],
+        notice: fn _watcher, _kind, _data -> :ok end,
+        capability_registry: ctx.registry,
+        cues_config: [],
+        channel_ready?: fn :telegram -> true end,
+        refused: &FollowUps.refused(&1, &2, told)
+      ]
+
+      assert [] = CueAdmission.claim_follow_ups(1, @now, &run_attrs/1, admission)
+
+      running = "Not started: it is already running."
+      assert [%{state: "refused", reason: ^running}] = states(ctx, watcher)
+
+      assert_received {:event,
+                       {:resolved, %{proposal_id: id, state: "refused", sentence: ^running}}}
+
+      assert id == trigger.id
+
+      assert_received {:delivered, "chat-1", text}
+
+      assert text ==
+               ~s(Watcher codex-limits: "Codex review" for post-1's post did not start. ) <>
+                 running
     end
 
     test "an app answers by its id, and the app surfaces list it only while it waits", ctx do
@@ -192,8 +227,12 @@ defmodule FermixCore.Cues.FollowUpAnswersTest do
       assert [%{state: "waiting", mode: "approve"}] = states(ctx, watcher)
     end
 
-    test "the owner's no keeps it asking first", ctx do
+    # "Keep asking" clears an approval that stands, so the follow-up asks first
+    # until the owner approves it again (§5).
+    test "the owner's no keeps it asking first, and clears an approval it had", ctx do
       watcher = follow_up_watcher!(ctx, mode: "auto")
+      {:ok, digest} = Watchers.current_follow_up_digest(watcher.name, opts(ctx))
+      {:ok, _approved} = Watchers.approve_follow_up(watcher.name, digest, opts(ctx))
       {:ok, _sent} = FollowUpApprovals.ask(watcher.name, prompt_opts(ctx, "cp_prompt-three"))
 
       assert {:ok, ~s(Kept asking: each run of "Codex review" waits for your tap.)} =
@@ -296,6 +335,20 @@ defmodule FermixCore.Cues.FollowUpAnswersTest do
     |> Enum.map(fn [state, mode, reason, decided_from] ->
       %{state: state, mode: mode, reason: reason, decided_from: decided_from}
     end)
+  end
+
+  defp run_attrs(job_id) do
+    %{
+      id: "run_#{System.unique_integer([:positive])}",
+      job_id: job_id,
+      session_id: "cron_#{job_id}",
+      trigger: "watcher",
+      status: "queued",
+      claimed_at: @now,
+      delivery_status: "none",
+      created_at: @now,
+      updated_at: @now
+    }
   end
 
   defp context do

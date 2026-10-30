@@ -296,7 +296,7 @@ defmodule FermixCore.Tools.ManageWatcherTest do
                ManageWatcher.execute(create_args(), turn(ctx, []))
 
       assert echo =~
-               ~r/^Watcher market-news is set up: it listens to alpaca-news, filters with the Cues filter model \(the main model unless settings name another\), and wakes job \S+ \(watcher market-news\), which reports to Telegram chat-1\./
+               ~r/^Watcher market-news is set up: it listens to alpaca-news, filters with the Cues filter model \(the main model unless settings name another\), and wakes job \S+ \(watcher market-news\), which reports to Telegram \(chat-1\)\./
 
       assert echo =~ "Purpose: Market moves that need me"
       assert echo =~ "Listens for: earnings, guidance cut"
@@ -611,18 +611,82 @@ defmodule FermixCore.Tools.ManageWatcherTest do
                JobsRegistry.get_job(job_id, repo: ctx.repo)
     end
 
-    test "whose tool is not set up is still made, held, and says what is missing", ctx do
-      args = put_in(follow_up_args(), ["follow_up", "tools"], ["deploy_check"])
+    # §3.2: a tool this computer does not offer was never checked against the
+    # owner's turn, so it is never written; the watcher is still made.
+    test "naming a tool this computer does not offer is not written; the watcher is", ctx do
+      missing =
+        "deploy_check is not set up on this computer (its program was not found or its " <>
+          "plugin is not installed). Ask for it again once that is done."
+
+      args =
+        follow_up_args()
+        |> put_in(["follow_up", "tools"], ["shell", "deploy_check"])
+        |> Map.put("task", "Tell me about each release.")
 
       assert {:ok, %{success: true, output: echo}} =
                ManageWatcher.execute(args, follow_up_turn(ctx))
 
+      assert echo =~ "Watcher deploy-watch is set up"
+      assert echo =~ "No follow-up was set up: " <> missing
+      refute echo =~ ~s(Follow-up "Deploy check")
+
+      assert {:ok, %{follow_up_job_id: nil, task_job_id: task_job_id}} =
+               Watchers.show("deploy-watch", repo: ctx.repo)
+
+      assert {:ok, [%{id: ^task_job_id}]} = JobsRegistry.list_jobs(repo: ctx.repo)
+
+      # A change to it is not written either; the rest of the change is.
+      change = %{
+        "action" => "update",
+        "name" => "deploy-watch",
+        "daily_cap" => "3",
+        "follow_up" => %{"instructions" => "Run it.", "tools" => ["deploy_check"]}
+      }
+
+      assert {:ok, %{success: true, output: changed}} =
+               ManageWatcher.execute(change, follow_up_turn(ctx))
+
+      assert changed =~ "Watcher deploy-watch changed: daily cap 3 runs."
+      assert changed =~ "The follow-up did not change: " <> missing
+      assert {:ok, %{follow_up_job_id: nil}} = Watchers.show("deploy-watch", repo: ctx.repo)
+
+      # With no task the watcher would have nothing to do, so nothing is made.
+      alone =
+        follow_up_args()
+        |> put_in(["follow_up", "tools"], ["deploy_check"])
+        |> Map.put("name", "deploy-alone")
+
+      assert {:ok, %{success: false, error: error}} =
+               ManageWatcher.execute(alone, follow_up_turn(ctx))
+
+      assert error =~ "No follow-up was set up: " <> missing
+      assert error =~ "Nothing was set up"
+      assert {:error, _sentence} = Watchers.show("deploy-alone", repo: ctx.repo)
+    end
+
+    test "naming a tool that is here but not ready yet is written held, saying why", ctx do
+      codex_home = SafeRm.make_tmp_dir!("manage-watcher-signed-out")
+      on_exit(fn -> SafeRm.rm_rf!(codex_home) end)
+
+      vendors = [
+        find_executable: fn
+          "codex" -> "/stub/bin/codex"
+          _ -> nil
+        end,
+        codex_home: codex_home
+      ]
+
+      args = put_in(follow_up_args(), ["follow_up", "tools"], ["codex_run"])
+
+      assert {:ok, %{success: true, output: echo}} =
+               ManageWatcher.execute(args, follow_up_turn(ctx, vendor_opts: vendors))
+
       assert echo =~
-               "Held until it is ready: deploy_check is not set up on this computer (its " <>
-                 "program was not found or its plugin is not installed). The watcher is set up"
+               "Held until it is ready: Codex is not signed in on this computer: run " <>
+                 "`codex login` there. The watcher is set up"
 
       assert {:ok, %{follow_up_job_id: job_id}} = Watchers.show("deploy-watch", repo: ctx.repo)
-      assert is_binary(job_id)
+      assert {:ok, %{allowed_tools: ["codex_run"]}} = JobsRegistry.get_job(job_id, repo: ctx.repo)
     end
 
     test "gets at most the tools of the turn that sets it up, as a scheduled job does", ctx do

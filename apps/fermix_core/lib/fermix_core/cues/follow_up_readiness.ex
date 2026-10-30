@@ -20,6 +20,12 @@ defmodule FermixCore.Cues.FollowUpReadiness do
 
   A tool no capability carries and no plugin declares is named as not set up.
 
+  `unoffered/2` is the setup's stricter half: `manage_watcher` writes no
+  follow-up that names a tool this computer does not offer at all (no
+  capability carries it), since a tool loaded later was never checked against
+  the turn that set the follow-up up. A tool it offers that is not ready yet
+  (Codex installed and signed out, a plugin not connected) is written, held.
+
   Cheap reads only, since the scheduler asks at every trigger: the
   application's config, `PATH` lookups, the Codex sign-in file, the plugin
   manifests and the auth file. Never a subprocess, the network or the
@@ -94,6 +100,24 @@ defmodule FermixCore.Cues.FollowUpReadiness do
     case Enum.uniq(sentences) do
       [] -> :ready
       sentences -> {:not_ready, Enum.join(sentences, " ")}
+    end
+  end
+
+  @doc """
+  Fermix's sentence naming what is missing for the tools of `tools` this
+  computer does not offer (no capability carries them: a program not found, a
+  plugin not installed), in each family's words, or nil when it offers them
+  all. A follow-up naming one is not written (§3.2).
+  """
+  @spec unoffered([String.t()], keyword()) :: String.t() | nil
+  def unoffered(tools, opts) when is_list(tools) and is_list(opts) do
+    case Enum.reject(tools, &registered?(&1, opts)) do
+      [] ->
+        nil
+
+      missing ->
+        {:not_ready, sentence} = check(%{allowed_tools: missing}, opts)
+        sentence
     end
   end
 

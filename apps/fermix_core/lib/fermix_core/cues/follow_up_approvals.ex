@@ -7,11 +7,11 @@ defmodule FermixCore.Cues.FollowUpApprovals do
   first on a card. `ask/2` sends the prompt that approves it.
 
   The prompt goes the way a follow-up's card goes: a row in
-  `cue_follow_up_approvals` (`Memory.Repo.CuesFollowUpSql`) holding the digest
-  it showed (`Cues.Watchers.current_follow_up_digest/2`), the message and the
-  `cp_` token written by the sender the channels application registers as
-  `:cue_follow_up_sender` (`Cues.Card.approval/2`), where it went, and an
-  expiry of 30 minutes; every app surface is offered it
+  `cue_follow_up_approvals` (`Memory.Repo.CuesFollowUpApprovalsSql`) holding
+  the digest it showed (`Cues.Watchers.current_follow_up_digest/2`), the
+  message and the `cp_` token written by the sender
+  (`Cues.FollowUpCards.send_card/2`, `Cues.Card.approval/2`), where it went,
+  and an expiry of 30 minutes; every app surface is offered it
   (`Cues.ProposalView.approval_card/2`). One prompt waits per watcher: a new
   one expires the one before it.
 
@@ -21,7 +21,8 @@ defmodule FermixCore.Cues.FollowUpApprovals do
   expiry and, by token, the chat; a yes is then applied by
   `Cues.Watchers.approve_follow_up/3` with the digest the prompt showed, so it
   approves only what the owner read: a change since then approves nothing.
-  A no keeps the follow-up asking first. Nobody's answer expires the prompt
+  A no ("Keep asking") clears any approval the follow-up had, so it asks
+  first until it is approved again. Nobody's answer expires the prompt
   (`expire/3`, a `Cues.Sweeper` step). Each step is traced under the watcher.
 
   Seams (opts): `:repo`, `:now`, `:follow_up_sender`, `:proposal_listener`,
@@ -32,20 +33,19 @@ defmodule FermixCore.Cues.FollowUpApprovals do
 
   alias FermixCore.Cues
   alias FermixCore.Cues.Card
+  alias FermixCore.Cues.FollowUpCards
   alias FermixCore.Cues.Proposals
   alias FermixCore.Cues.ProposalView
   alias FermixCore.Cues.Telemetry
   alias FermixCore.Cues.Watchers
   alias FermixCore.Memory.Repo
-  alias FermixCore.Memory.Repo.CuesFollowUpSql
+  alias FermixCore.Memory.Repo.CuesFollowUpApprovalsSql
 
   @approve_within_s 30 * 60
-  @app_origins ["companion", "management"]
-  @max_device_id_bytes 128
   @unread "Fermix recorded your answer but could not read the prompt back."
 
-  @typedoc "An approval's prompt as `CuesFollowUpSql` reads it."
-  @type approval :: CuesFollowUpSql.approval()
+  @typedoc "An approval's prompt as `CuesFollowUpApprovalsSql` reads it."
+  @type approval :: CuesFollowUpApprovalsSql.approval()
 
   @doc "How long a prompt waits for the owner, in seconds."
   @spec approve_within_s() :: pos_integer()
@@ -76,7 +76,7 @@ defmodule FermixCore.Cues.FollowUpApprovals do
     do: {:error, "Watcher #{name}'s follow-up asks first; make it automatic first."}
 
   defp insert(watcher, digest, opts) do
-    now = now(opts)
+    now = FollowUpCards.now(opts)
 
     row = %{
       id: Cues.id("cfa"),
@@ -100,7 +100,7 @@ defmodule FermixCore.Cues.FollowUpApprovals do
   # prompt it could send nowhere stays for an app that connects within its
   # lifetime, and the owner's turn is told it did not reach a chat.
   defp send_prompt(approval, card, opts) do
-    case guarded_send(sender(opts), card) do
+    case FollowUpCards.send_card(card, opts) do
       {:ok, binding} when is_map(binding) ->
         record_offer(approval, card, binding, opts)
 
@@ -127,32 +127,6 @@ defmodule FermixCore.Cues.FollowUpApprovals do
   defp asked_sentence(_app_only),
     do: "The Fermix app shows a prompt to approve it; until you do, each run asks first."
 
-  # A sender that raises is a send that failed; its stacktrace is logged.
-  defp guarded_send(nil, _card), do: {:error, :no_follow_up_sender}
-
-  defp guarded_send(send_fun, card) do
-    send_fun.(card)
-  catch
-    kind, reason ->
-      Logger.error(
-        "The approval prompt's sender crashed: " <>
-          (kind |> Exception.format(reason, __STACKTRACE__) |> String.slice(0, 4_000))
-      )
-
-      {:error, {:sender_crashed, kind}}
-  end
-
-  # The channels application registers its sender module; nil while it is not
-  # running (a tree-less CLI, a test of core alone).
-  defp sender(opts) do
-    Keyword.get_lazy(opts, :follow_up_sender, fn ->
-      case Application.get_env(:fermix_core, :cue_follow_up_sender) do
-        nil -> nil
-        module when is_atom(module) -> &module.send_follow_up/1
-      end
-    end)
-  end
-
   # --- answers ---------------------------------------------------------------------------
 
   @doc """
@@ -163,12 +137,16 @@ defmodule FermixCore.Cues.FollowUpApprovals do
   """
   @spec confirm(String.t(), map(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
   def confirm(token, origin, opts \\ []) when is_binary(token) and is_map(origin),
-    do: answer({:answer_approval, Proposals.digest(token), origin, "approved", now(opts)}, opts)
+    do: answer_by_token(token, origin, "approved", opts)
 
-  @doc "The owner's no by token from `origin`: the follow-up keeps asking first."
+  @doc """
+  The owner's no ("Keep asking") by token from `origin`: recorded on the
+  prompt, with any approval the follow-up had cleared in the same
+  transaction, so it asks first until it is approved again.
+  """
   @spec deny(String.t(), map(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
   def deny(token, origin, opts \\ []) when is_binary(token) and is_map(origin),
-    do: answer({:answer_approval, Proposals.digest(token), origin, "denied", now(opts)}, opts)
+    do: answer_by_token(token, origin, "denied", opts)
 
   @doc """
   An answer by id from one of the owner's apps (`companion`, `management`,
@@ -179,15 +157,21 @@ defmodule FermixCore.Cues.FollowUpApprovals do
           {:ok, String.t()} | {:error, String.t()}
   def decide(approval_id, decision, origin_label, opts \\ [])
       when is_binary(approval_id) and decision in [:confirm, :deny] and is_binary(origin_label) do
-    with :ok <- known_origin(origin_label) do
-      answer({:decide_approval, approval_id, to_state(decision), origin_label, now(opts)}, opts)
+    with :ok <- FollowUpCards.known_origin(origin_label) do
+      now = FollowUpCards.now(opts)
+      answer({:decide_approval, approval_id, to_state(decision), origin_label, now}, opts)
     end
+  end
+
+  defp answer_by_token(token, origin, to_state, opts) do
+    now = FollowUpCards.now(opts)
+    answer({:answer_approval, Proposals.digest(token), origin, to_state, now}, opts)
   end
 
   defp answer(request, opts) do
     case repo_call(request, opts) do
       {:ok, approval} -> approval |> apply_answer(opts) |> tap(&ended(approval, &1, opts))
-      {:error, why} -> {:error, refusal_reply(why)}
+      {:error, why} -> {:error, FollowUpCards.refusal_reply(why, :prompt)}
     end
   end
 
@@ -220,43 +204,13 @@ defmodule FermixCore.Cues.FollowUpApprovals do
   defp to_state(:confirm), do: "approved"
   defp to_state(:deny), do: "denied"
 
-  # Where an answer by id may come from: an app, a phone, or a chat's origin.
-  defp known_origin(label) when label in @app_origins, do: :ok
-
-  defp known_origin("mobile:" <> device)
-       when device != "" and byte_size(device) <= @max_device_id_bytes,
-       do: :ok
-
-  defp known_origin(label) do
-    case String.split(label, ":", parts: 3) do
-      [platform, chat, user] when platform != "" and chat != "" and user != "" -> :ok
-      _other -> {:error, "Fermix does not know where that answer came from; nothing changed."}
-    end
-  end
-
-  defp refusal_reply(:unknown), do: "That prompt is not known to Fermix; nothing was approved."
-  defp refusal_reply(:wrong_origin), do: "Answer it from the chat Fermix sent it to."
-  defp refusal_reply(:expired), do: "That prompt expired; each run still asks first."
-  defp refusal_reply({:not_waiting, "approved"}), do: "That prompt was already approved."
-  defp refusal_reply({:not_waiting, "denied"}), do: "That prompt was already answered."
-
-  defp refusal_reply({:not_waiting, "expired"}),
-    do: "That prompt expired; each run still asks first."
-
-  defp refusal_reply(:disabled), do: "Cues keep their records in memory, which is off."
-
-  defp refusal_reply(reason) do
-    Logger.error("Approval answer failed: #{inspect(reason)}")
-    "Fermix could not read that prompt; nothing was approved."
-  end
-
   @doc """
   The prompts waiting in the chat `origin` (`%{platform, chat_id, user_id}`),
   oldest first: what a bare `/confirm` or `/deny` from it may answer.
   """
   @spec waiting_in_chat(map(), keyword()) :: {:ok, [approval()]} | {:error, term()}
   def waiting_in_chat(origin, opts \\ []) when is_map(origin) and is_list(opts),
-    do: repo_call({:approvals_waiting_in_chat, origin, now(opts)}, opts)
+    do: repo_call({:approvals_waiting_in_chat, origin, FollowUpCards.now(opts)}, opts)
 
   # --- reads --------------------------------------------------------------------------------
 
@@ -280,7 +234,8 @@ defmodule FermixCore.Cues.FollowUpApprovals do
   @doc "Every prompt still waiting, oldest first, as an app shows it."
   @spec waiting_cards(pos_integer(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def waiting_cards(limit, opts \\ []) when is_integer(limit) and limit > 0 and is_list(opts) do
-    with {:ok, cards} <- repo_call({:waiting_approval_cards, now(opts), limit}, opts),
+    with {:ok, cards} <-
+           repo_call({:waiting_approval_cards, FollowUpCards.now(opts), limit}, opts),
          do: {:ok, Enum.map(cards, &ProposalView.approval_card(&1, opts))}
   end
 
@@ -293,7 +248,7 @@ defmodule FermixCore.Cues.FollowUpApprovals do
   def expire(repo_opts, %DateTime{} = now, limit)
       when is_list(repo_opts) and is_integer(limit) and limit > 0 do
     with {:ok, expired} <-
-           Repo.cues_call(CuesFollowUpSql, {:expire_approvals, now, limit}, repo_opts) do
+           Repo.cues_call(CuesFollowUpApprovalsSql, {:expire_approvals, now, limit}, repo_opts) do
       Enum.each(expired, &ended(&1, repo_opts))
       {:ok, length(expired)}
     end
@@ -312,7 +267,11 @@ defmodule FermixCore.Cues.FollowUpApprovals do
   # An answer, with the line it came to.
   defp ended(approval, result, opts) do
     {_tag, sentence} = result
-    emit(:follow_up_approval_decided, approval, %{kind: origin_kind(approval.decided_from)})
+
+    emit(:follow_up_approval_decided, approval, %{
+      kind: FollowUpCards.origin_kind(approval.decided_from)
+    })
+
     announce_end(approval, sentence, opts)
   end
 
@@ -327,9 +286,6 @@ defmodule FermixCore.Cues.FollowUpApprovals do
 
     Proposals.announce({:resolved, resolved}, opts)
   end
-
-  defp origin_kind(nil), do: nil
-  defp origin_kind(label), do: label |> String.split(":", parts: 2) |> hd()
 
   defp emit(phase, approval, extra) do
     metadata =
@@ -347,12 +303,6 @@ defmodule FermixCore.Cues.FollowUpApprovals do
 
   # --- plumbing -------------------------------------------------------------------------------
 
-  defp repo_call(request, opts) do
-    repo_opts =
-      [server: Keyword.get(opts, :repo, Repo)] ++ Keyword.take(opts, [:timeout, :on_timeout])
-
-    Repo.cues_call(CuesFollowUpSql, request, repo_opts)
-  end
-
-  defp now(opts), do: Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+  defp repo_call(request, opts),
+    do: FollowUpCards.repo_call(CuesFollowUpApprovalsSql, request, opts)
 end

@@ -6,10 +6,13 @@ defmodule FermixCore.Tools.ManageWatcher.FollowUp do
 
   - **Tools** are bounded by the calling turn exactly as `schedule_job` bounds a
     job's (`JobRegistrySupport.within_run_tools/2`,
-    `AccessGate.check_job_tools/2`), and a tool this computer offers must be one
-    the turn sees. A tool it does not offer (a program not found, a plugin not
-    set up) is kept: the follow-up is written held, and the readiness check
-    names what is missing.
+    `AccessGate.check_job_tools/2`), and each must be one the turn sees, so
+    every tool written passed the access gate in the owner's turn. A tool this
+    computer does not offer (a program not found, a plugin not installed) is
+    never written: the follow-up is left out with the readiness check's
+    sentence (`Cues.FollowUpReadiness.unoffered/2`) and the owner asks again
+    once it is installed; the watcher is still made when it has a task. A
+    tool it offers that is not ready yet is written, held.
   - **The coding agent**: `coding_agent` in place of a tool, when the owner
     names no coding agent, is the configured default, else the one that is
     ready, else Fermix asks which (`Cues.FollowUpReadiness.coding_agent/1`).
@@ -24,7 +27,6 @@ defmodule FermixCore.Tools.ManageWatcher.FollowUp do
 
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.AccessGate
-  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Cues.Card
   alias FermixCore.Cues.FollowUpApprovals
   alias FermixCore.Cues.FollowUpReadiness
@@ -72,8 +74,8 @@ defmodule FermixCore.Tools.ManageWatcher.FollowUp do
           items: %{type: "string"},
           description:
             "The tools it may use, from this turn's (#{@coding_agent} when the owner asks " <>
-              "for a coding agent without naming Codex or Claude Code). A tool not set up " <>
-              "here is kept, and Fermix says what is missing."
+              "for a coding agent without naming Codex or Claude Code). A tool this computer " <>
+              "does not have leaves the follow-up out, and Fermix says what to install."
         },
         skill: %{type: "string", description: "A skill to run it in."},
         provider: %{type: "string", description: "With model: the route its runs use."},
@@ -105,8 +107,11 @@ defmodule FermixCore.Tools.ManageWatcher.FollowUp do
   `Cues.Watchers`' follow-up map from the `follow_up` argument, with only the
   keys given (an update changes those alone): the instructions as `prompt`, the
   tools resolved and bounded by `context`, a known skill, a paired route.
+  `{:unoffered, sentence}` when a tool it names is not on this computer at
+  all: the follow-up is not written, and `sentence` says what is missing.
   """
-  @spec params(term(), map(), keyword()) :: {:ok, map() | nil} | {:error, String.t()}
+  @spec params(term(), map(), keyword()) ::
+          {:ok, map() | nil} | {:unoffered, String.t()} | {:error, String.t()}
   def params(nil, _context, _opts), do: {:ok, nil}
 
   def params(args, context, opts) when is_map(args) and is_map(context) and is_list(opts) do
@@ -127,6 +132,7 @@ defmodule FermixCore.Tools.ManageWatcher.FollowUp do
 
   defp tools(%{"tools" => tools}, context, opts) when is_list(tools) do
     with {:ok, resolved} <- resolve_coding_agent(tools, opts),
+         :ok <- offered(resolved, opts),
          {:ok, bounded} <- bound(resolved, context),
          do: {:ok, %{allowed_tools: bounded}}
   end
@@ -146,9 +152,18 @@ defmodule FermixCore.Tools.ManageWatcher.FollowUp do
     end
   end
 
-  # `schedule_job`'s bounds (audit F-08 and the run's own tools); a name this
-  # computer does not offer passes to the readiness check instead of a refusal.
-  # An empty list is left for `Cues.Watchers`, which asks for the tools.
+  # A tool no capability carries was never checked against this turn, and one
+  # loaded later would run unchecked, so it is never written (§3.2).
+  defp offered(tools, opts) do
+    case FollowUpReadiness.unoffered(tools, opts) do
+      nil -> :ok
+      sentence -> {:unoffered, sentence}
+    end
+  end
+
+  # `schedule_job`'s bounds (audit F-08 and the run's own tools), on tools this
+  # computer offers. An empty list is left for `Cues.Watchers`, which asks for
+  # the tools.
   defp bound([], _context), do: {:ok, []}
 
   defp bound(tools, context) do
@@ -159,16 +174,26 @@ defmodule FermixCore.Tools.ManageWatcher.FollowUp do
   end
 
   defp visible(tools, context) do
-    registry = Map.get(context, :capability_registry) || CapabilityRegistry
     seen = JobRegistrySupport.tool_names(context, trust: Map.get(context, :source_trust))
 
-    case Enum.filter(tools, &(offered?(registry, &1) and &1 not in seen)) do
+    case Enum.reject(tools, &(&1 in seen)) do
       [] -> :ok
       hidden -> {:error, "tools not available to the caller: #{Enum.join(hidden, ", ")}"}
     end
   end
 
-  defp offered?(registry, tool), do: match?({:ok, _}, CapabilityRegistry.find(registry, tool))
+  @doc """
+  The summary's line for a follow-up left out of a create because a tool it
+  names is not on this computer (`params/3`'s `{:unoffered, sentence}`).
+  """
+  @spec not_set_up(String.t()) :: String.t()
+  def not_set_up(sentence) when is_binary(sentence),
+    do: "No follow-up was set up: #{sentence} Ask for it again once that is done."
+
+  @doc "The same, for a change to a follow-up that was left out."
+  @spec not_changed(String.t()) :: String.t()
+  def not_changed(sentence) when is_binary(sentence),
+    do: "The follow-up did not change: #{sentence} Ask for it again once that is done."
 
   defp skill(%{"skill" => name}, context) when is_binary(name) and name != "" do
     case SkillRegistry.load(Map.get(context, :skill_registry, SkillRegistry), name) do

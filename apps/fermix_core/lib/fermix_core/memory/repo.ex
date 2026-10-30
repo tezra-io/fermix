@@ -11,6 +11,7 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Memory.Repo.ComputerHistorySql
   alias FermixCore.Memory.Repo.CuesDeliveriesSql
   alias FermixCore.Memory.Repo.CuesFilterSql
+  alias FermixCore.Memory.Repo.CuesFollowUpApprovalsSql
   alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Memory.Repo.CuesMandateSql
   alias FermixCore.Memory.Repo.CuesRunsSql
@@ -88,7 +89,8 @@ defmodule FermixCore.Memory.Repo do
     CuesRunsSql,
     CuesDeliveriesSql,
     CuesMandateSql,
-    CuesFollowUpSql
+    CuesFollowUpSql,
+    CuesFollowUpApprovalsSql
   ]
 
   @base_schema_sql """
@@ -5140,7 +5142,8 @@ defmodule FermixCore.Memory.Repo do
          {:ok, indexes} <- table_indexes(conn, Enum.map(rebuilds, & &1.table)),
          :ok <- execute_each(conn, Enum.map(rebuilds, & &1.sql)),
          :ok <- replay_indexes(conn, indexes),
-         :ok <- Sqlite3.execute(conn, CuesFollowUpSql.schema_sql()) do
+         :ok <- Sqlite3.execute(conn, CuesFollowUpSql.schema_sql()),
+         :ok <- Sqlite3.execute(conn, CuesFollowUpApprovalsSql.schema_sql()) do
       Sqlite3.execute(
         conn,
         "INSERT INTO schema_migrations(version) VALUES (#{@watcher_follow_up_migration_version});"
@@ -7803,13 +7806,20 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  # A watcher's follow-up is a job: an edit that changes what its automatic
+  # approval is bound to clears that approval in the same transaction
+  # (M60_WATCHER_CODING_RUNS.md §5), whichever path changed the job.
   defp update_scheduled_job_fields_row(conn, id, assignments) do
     {columns, values} = Enum.unzip(assignments)
     set_sql = Enum.map_join(columns, ", ", &"#{&1} = ?")
+    update = "UPDATE scheduled_jobs SET #{set_sql} WHERE id = ?"
 
-    with :ok <- execute(conn, "UPDATE scheduled_jobs SET #{set_sql} WHERE id = ?", values ++ [id]) do
-      fetch_scheduled_job(conn, id)
-    end
+    CuesSql.with_immediate_transaction(conn, fn ->
+      with :ok <- execute(conn, update, values ++ [id]),
+           :ok <- CuesFollowUpApprovalsSql.clear_stale_approval(conn, {:follow_up_job, id}) do
+        fetch_scheduled_job(conn, id)
+      end
+    end)
   end
 
   defp fetch_scheduled_jobs(conn, selector) do

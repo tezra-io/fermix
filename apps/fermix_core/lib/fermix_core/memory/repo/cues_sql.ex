@@ -21,7 +21,9 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   - `execute/3`, `query_all/3`, `changes/1`: statement helpers;
   - `stamp/1`, `parse_stamp/1`: the repo's fixed-width UTC timestamp form
     (`TemporalSql.timestamp/1`), which keeps text comparison in time order;
-  - `extend_gap/7`: one open gap row per (source, watcher, reason).
+  - `extend_gap/7`: one open gap row per (source, watcher, reason);
+  - `checked_origin/1`, `origin_text/1`, `waiting_why/2`, `answer_chat/3`: an
+    answer from a chat, for `CuesFollowUpSql` and `CuesFollowUpApprovalsSql`.
   """
 
   require Logger
@@ -2006,6 +2008,44 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   @doc "Rows changed by the last statement on `conn`."
   @spec changes(conn()) :: {:ok, non_neg_integer()} | {:error, term()}
   def changes(conn), do: Sqlite3.changes(conn)
+
+  # --- an answer from a chat -----------------------------------------------------
+
+  @typedoc "The chat an answer by token came from: `platform`, `chat_id` and `user_id`."
+  @type origin :: %{platform: String.t(), chat_id: String.t(), user_id: String.t()}
+
+  @doc """
+  The chat an answer by token came from, checked: its `platform`, `chat_id`
+  and a non-empty `user_id`, else `:error`. A follow-up's card and an
+  approval's prompt answer only from the chat they went to.
+  """
+  @spec checked_origin(term()) :: {:ok, origin()} | :error
+  def checked_origin(%{platform: platform, chat_id: chat_id, user_id: user_id})
+      when is_binary(platform) and is_binary(chat_id) and is_binary(user_id) and user_id != "",
+      do: {:ok, %{platform: platform, chat_id: chat_id, user_id: user_id}}
+
+  def checked_origin(_origin), do: :error
+
+  @doc "A chat's answer as it is recorded: `<platform>:<chat>:<user>`, as a proposal's."
+  @spec origin_text(origin()) :: String.t()
+  def origin_text(origin), do: Enum.join([origin.platform, origin.chat_id, origin.user_id], ":")
+
+  @doc """
+  Why an answer to a card that still waits changed nothing: the fence that
+  failed was the chat (`:wrong_origin`) or the expiry (`:expired`).
+  """
+  @spec waiting_why(%{expires_at: DateTime.t()}, DateTime.t()) :: :wrong_origin | :expired
+  def waiting_why(%{expires_at: %DateTime{} = expires_at}, %DateTime{} = now) do
+    if DateTime.compare(expires_at, now) == :gt, do: :wrong_origin, else: :expired
+  end
+
+  @doc "The chat a card went to, from its stored columns; nil for one that went to no chat."
+  @spec answer_chat(String.t() | nil, String.t() | nil, String.t() | nil) ::
+          %{platform: String.t(), chat_id: String.t(), user_id: String.t() | nil} | nil
+  def answer_chat(nil, _chat_id, _user_id), do: nil
+
+  def answer_chat(platform, chat_id, user_id),
+    do: %{platform: platform, chat_id: chat_id, user_id: user_id}
 
   defp insert_returning_id(conn, sql, params) do
     case query_all(conn, sql, params) do

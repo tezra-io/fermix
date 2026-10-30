@@ -20,8 +20,11 @@ defmodule FermixCore.Jobs.CueAdmission do
   at most 10 a pass, each sent outside the scheduler's loop), then admits the
   oldest `starting` triggers into the free slots (`claim_follow_ups/4`): each
   is checked against the hold (`Cues.FollowUps.check/3`) and claimed with its
-  job (`Repo.claim_follow_up_run/4`), which refuses it when the job still runs.
-  A refused trigger spends no slot. Cue runs take the slots left.
+  job (`Repo.claim_follow_up_run/4`), which refuses it when the job still runs
+  or is paused or gone. A trigger refused either way spends no slot and goes
+  to `refused` (`Cues.FollowUps.refused/3`, outside the scheduler's loop), so
+  an owner who confirmed it hears why it did not start. Cue runs take the
+  slots left.
 
   ## Lifecycle telemetry
 
@@ -177,7 +180,9 @@ defmodule FermixCore.Jobs.CueAdmission do
   the hold and claimed with its job until the slots are spent. `run_attrs_fun`
   builds a run's attributes from its job id. Returns the claims the caller
   must start. `opts`: `:repo_opts`, `:notice` (`(watcher_id, kind, data) ->
-  term()`, the hold's notices) and `:capability_registry`.
+  term()`, the hold's notices), `:refused` (`(trigger, label) -> term()`, which
+  ends each refused trigger for the owner, `Cues.FollowUps.refused/3`),
+  `:capability_registry` and the hold's seams.
   """
   @spec claim_follow_ups(non_neg_integer(), DateTime.t(), (String.t() -> map()), keyword()) ::
           [follow_up_claim()]
@@ -219,12 +224,14 @@ defmodule FermixCore.Jobs.CueAdmission do
 
     case JobsRegistry.get_job(trigger.job_id, repo_opts) do
       {:ok, job} ->
-        if held_check(trigger, job, opts) == :ready,
-          do: claim_trigger(trigger, now, run_attrs_fun, repo_opts),
-          else: []
+        case held_check(trigger, job, opts) do
+          :ready -> claim_trigger(trigger, now, run_attrs_fun, opts)
+          {:refused, refused, label} -> refused(refused, label, opts)
+          {:error, _stale_or_logged} -> []
+        end
 
       {:error, :not_found} ->
-        claim_trigger(trigger, now, run_attrs_fun, repo_opts)
+        claim_trigger(trigger, now, run_attrs_fun, opts)
 
       {:error, reason} ->
         trace_error(:follow_up_claim, %{job_id: trigger.job_id}, reason)
@@ -247,15 +254,16 @@ defmodule FermixCore.Jobs.CueAdmission do
     FollowUps.check(trigger, job, check_opts)
   end
 
-  defp claim_trigger(trigger, now, run_attrs_fun, repo_opts) do
+  defp claim_trigger(trigger, now, run_attrs_fun, opts) do
+    repo_opts = Keyword.fetch!(opts, :repo_opts)
+
     case Repo.claim_follow_up_run(trigger.id, run_attrs_fun.(trigger.job_id), now, repo_opts) do
       {:ok, {:started, claim}} ->
         FollowUps.emit_started(claim.trigger, claim.run)
         [claim]
 
       {:ok, {:refused, refused}} ->
-        FollowUps.emit_refused(refused, "not_runnable")
-        []
+        refused(refused, "not_runnable", opts)
 
       {:error, :nothing_due} ->
         []
@@ -265,6 +273,12 @@ defmodule FermixCore.Jobs.CueAdmission do
         Logger.error("Follow-up claim of trigger #{trigger.id} failed: #{inspect(reason)}")
         []
     end
+  end
+
+  # Refused before it started: ended for the owner outside the caller's loop.
+  defp refused(trigger, label, opts) do
+    Keyword.fetch!(opts, :refused).(trigger, label)
+    []
   end
 
   defp cap_notice(%{watcher_id: watcher_id, daily_cap: cap, follow_up: true}, cue_notice),

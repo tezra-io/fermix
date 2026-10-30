@@ -13,7 +13,9 @@ defmodule FermixCore.Jobs.Scheduler do
   The same pass moves watcher follow-ups on (M60_WATCHER_CODING_RUNS.md
   §4.2): it hands each new waiting card to `Cues.FollowUps.offer/2` in a task,
   then admits `starting` triggers into the cue share (`trigger: "watcher"`, a
-  scheduled run's context) before cue runs take the slots left.
+  scheduled run's context) before cue runs take the slots left. A trigger its
+  claim refuses goes to `Cues.FollowUps.refused/3` in a task, which tells an
+  owner who confirmed it why it did not start.
   """
 
   use GenServer
@@ -108,6 +110,7 @@ defmodule FermixCore.Jobs.Scheduler do
           cues_running?: (-> boolean()),
           cue_notice: (String.t(), atom(), map() -> term()),
           follow_up_offer: (map() -> term()),
+          follow_up_refused: (map(), String.t() -> term()),
           follow_up_readiness: keyword(),
           cue_pending?: boolean()
         }
@@ -210,6 +213,7 @@ defmodule FermixCore.Jobs.Scheduler do
       cues_running?: Keyword.get(opts, :cues_running?, &Cues.running?/0),
       cue_notice: Keyword.get(opts, :cue_notice),
       follow_up_offer: Keyword.get(opts, :follow_up_offer),
+      follow_up_refused: Keyword.get(opts, :follow_up_refused),
       # `Cues.FollowUpReadiness`' seams, handed to the hold check of every card
       # and every follow-up run (tests).
       follow_up_readiness: Keyword.get(opts, :follow_up_readiness, []),
@@ -220,6 +224,7 @@ defmodule FermixCore.Jobs.Scheduler do
       state
       |> put_default_cue_notice()
       |> put_default_follow_up_offer()
+      |> put_default_follow_up_refused()
       |> reconcile_active_runs()
       |> schedule_due_timer()
       |> schedule_reconciliation_timer()
@@ -339,6 +344,7 @@ defmodule FermixCore.Jobs.Scheduler do
       [
         repo_opts: state.repo_opts,
         notice: state.cue_notice,
+        refused: state.follow_up_refused,
         capability_registry: state.capability_registry
       ] ++ state.follow_up_readiness
 
@@ -435,6 +441,35 @@ defmodule FermixCore.Jobs.Scheduler do
   end
 
   defp put_default_follow_up_offer(state), do: state
+
+  # A trigger refused before it started may be one the owner confirmed, whom
+  # `Cues.FollowUps.refused/3` tells through a channel: in a task of its own,
+  # as a card is offered. Opt `:follow_up_refused` replaces it (tests).
+  defp put_default_follow_up_refused(%{follow_up_refused: nil} = state) do
+    opts = [
+      repo: state.repo,
+      adapter: state.delivery_adapter,
+      channels: state.delivery_channels,
+      delivery_opts: state.delivery_opts,
+      timeout_ms: state.delivery_timeout_ms
+    ]
+
+    refused = fn trigger, label ->
+      tell = fn -> FollowUps.refused(trigger, label, opts) end
+
+      case Task.Supervisor.start_child(FermixCore.TaskSupervisor, tell) do
+        {:ok, _pid} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.error("Follow-up #{trigger.id}'s refusal was not told: #{inspect(reason)}")
+      end
+    end
+
+    %{state | follow_up_refused: refused}
+  end
+
+  defp put_default_follow_up_refused(state), do: state
 
   # The runner reads the delivery from the run row (`cue_delivery_id`).
   defp start_cue_run(%{job: job, run: run}, state), do: start_or_mark_failed(job, run, state)

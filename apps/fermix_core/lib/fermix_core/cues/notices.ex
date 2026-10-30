@@ -19,6 +19,7 @@ defmodule FermixCore.Cues.Notices do
   | source `:auth_failed`, `:refused`, `:down`, `:unreachable`, `:too_large` | episode, ended by the source's next good moment (`last_good_at` after the notice) |
   | source `:budget_reached` | source per UTC day |
   | mandate `:unpinned` | call: its caller sends it from the change that disabled the mandate, once per approval |
+  | a confirmed follow-up that did not start | trigger: `Cues.FollowUps.refused/3` sends it from the refusal that ended it |
 
   The watcher and source stamps live in `cue_watchers.notices` and
   `cue_sources.notices`. A send that fails releases its claim, so a later
@@ -126,6 +127,22 @@ defmodule FermixCore.Cues.Notices do
 
       {:error, reason} ->
         failed("watcher #{watcher_id} #{kind}", reason)
+    end
+  end
+
+  @doc """
+  Tells the owner that a follow-up run they confirmed did not start
+  (M60_WATCHER_CODING_RUNS.md §4.2, §4.6): `text`, Fermix's line naming the
+  card and why (`Cues.Card.not_started/1`), through the delivery of follow-up
+  job `job_id`. Once per trigger, with no claim: only the refusal that ended
+  the trigger sends it.
+  """
+  @spec follow_up_not_started(String.t(), String.t(), keyword()) :: :sent | {:error, term()}
+  def follow_up_not_started(job_id, text, opts)
+      when is_binary(job_id) and is_binary(text) and is_list(opts) do
+    case send_to_task(job_id, text, opts) do
+      :ok -> :sent
+      {:error, reason} -> failed("follow-up #{job_id} not started", reason)
     end
   end
 

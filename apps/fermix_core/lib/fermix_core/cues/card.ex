@@ -200,13 +200,25 @@ defmodule FermixCore.Cues.Card do
     do: Enum.join(lines, "\n") <> "\n\n" <> detail <> "\n\n" <> reply
 
   @doc """
-  The one line a follow-up's card becomes once the owner said yes (§3.3),
-  naming the item so the run's report can be matched to it.
+  The one line a follow-up's card becomes once the owner said yes (§3.3): it
+  is starting, naming the item so the run's report can be matched to it. Its
+  turn may still refuse it, and `not_started/1` then says why.
   """
-  @spec running(map(), keyword()) :: String.t()
-  def running(%{outside: outside} = card, opts) do
-    "Running #{quoted(follow_up_name(card))} for the item from #{who(outside)} · " <>
+  @spec starting(map(), keyword()) :: String.t()
+  def starting(%{outside: outside} = card, opts) do
+    "Starting #{quoted(follow_up_name(card))} for #{post(outside)} · " <>
       Clock.stated_time(now(opts), opts)
+  end
+
+  @doc """
+  What the owner is told when a follow-up they confirmed did not start: the
+  watcher, the follow-up and the item its card named, and Fermix's sentence
+  of why, the refused trigger's `reason`.
+  """
+  @spec not_started(map()) :: String.t()
+  def not_started(%{reason: reason, outside: outside} = card) when is_binary(reason) do
+    "Watcher #{card.watcher.name || "(removed)"}: #{quoted(follow_up_name(card))} for " <>
+      "#{post(outside)} did not start. " <> reason
   end
 
   @doc "The one line a follow-up's card becomes once the owner said no."
@@ -253,6 +265,8 @@ defmodule FermixCore.Cues.Card do
 
   defp who(outside),
     do: blank_to_nil(outside.subject) || blank_to_nil(outside.source_ref) || "An item"
+
+  defp post(outside), do: who(outside) <> "'s post"
 
   defp age(outside, opts) do
     case outside.occurred_at || outside.received_at do

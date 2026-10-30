@@ -287,12 +287,20 @@ defmodule FermixCore.Tools.ManageWatcher do
     opts = opts(context)
 
     with {:ok, params} <- create_params(args),
-         {:ok, name} <- watcher_name(args),
-         {:ok, follow_up} <- FollowUp.params(Map.get(args, "follow_up"), context, opts) do
-      params
-      |> put_follow_up(follow_up)
-      |> Watchers.create(context, opts)
-      |> FollowUp.summarize(name, nil, auto?(follow_up), context, opts)
+         {:ok, name} <- watcher_name(args) do
+      case FollowUp.params(Map.get(args, "follow_up"), context, opts) do
+        {:ok, follow_up} ->
+          params
+          |> put_follow_up(follow_up)
+          |> Watchers.create(context, opts)
+          |> FollowUp.summarize(name, nil, auto?(follow_up), context, opts)
+
+        {:unoffered, sentence} ->
+          create_without_follow_up(params, sentence, context, opts)
+
+        {:error, sentence} ->
+          {:error, sentence}
+      end
     end
   end
 
@@ -316,6 +324,20 @@ defmodule FermixCore.Tools.ManageWatcher do
 
   defp put_follow_up(params, nil), do: params
   defp put_follow_up(params, follow_up), do: Map.put(params, :follow_up, follow_up)
+
+  # A follow-up naming a tool this computer does not have is left out (§3.2);
+  # the watcher is still made with its task, so the owner hears from it
+  # meanwhile. With no task it would do nothing, so nothing is made.
+  defp create_without_follow_up(params, sentence, context, opts) do
+    if Enum.any?([:task, :task_job_id], &(Map.get(params, &1) not in [nil, ""])) do
+      with {:ok, %{echo: echo}} <- Watchers.create(params, context, opts),
+           do: {:ok, echo <> "\n" <> FollowUp.not_set_up(sentence)}
+    else
+      {:error,
+       FollowUp.not_set_up(sentence) <>
+         " Nothing was set up: without its follow-up the watcher would have no task."}
+    end
+  end
 
   defp auto?(%{mode: "auto"}), do: true
   defp auto?(%{"mode" => "auto"}), do: true
@@ -388,9 +410,12 @@ defmodule FermixCore.Tools.ManageWatcher do
   defp change("update", name, args, context) do
     opts = opts(context)
 
-    with {:ok, changes} <- update_changes(args),
-         {:ok, follow_up} <- FollowUp.params(Map.get(args, "follow_up"), context, opts) do
-      update(name, changes, follow_up, context, opts)
+    with {:ok, changes} <- update_changes(args) do
+      case FollowUp.params(Map.get(args, "follow_up"), context, opts) do
+        {:ok, follow_up} -> update(name, changes, follow_up, context, opts)
+        {:unoffered, sentence} -> update_without_follow_up(name, changes, sentence, opts)
+        {:error, sentence} -> {:error, sentence}
+      end
     end
   end
 
@@ -418,6 +443,16 @@ defmodule FermixCore.Tools.ManageWatcher do
         {:error, sentence} -> {:error, changed <> "\nThe follow-up did not change: " <> sentence}
       end
     end
+  end
+
+  # A follow-up change naming a tool this computer does not have is left out
+  # (§3.2); the rest of the change is made.
+  defp update_without_follow_up(_name, changes, sentence, _opts) when map_size(changes) == 0,
+    do: {:error, FollowUp.not_changed(sentence)}
+
+  defp update_without_follow_up(name, changes, sentence, opts) do
+    with {:ok, %{echo: echo} = result} <- Watchers.update(name, changes, opts),
+         do: {:ok, %{result | echo: echo <> "\n" <> FollowUp.not_changed(sentence)}}
   end
 
   defp already?(name, %{mode: "auto"} = follow_up, opts) when map_size(follow_up) == 1 do

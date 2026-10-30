@@ -79,10 +79,19 @@ defmodule FermixCore.Cues.CardTest do
     end
 
     test "after a tap becomes one line naming the item" do
-      assert Card.running(follow_up(), @opts) ==
-               ~s(Running "Codex review" for the item from @limits_bot · 2:02 PM UTC)
+      assert Card.starting(follow_up(), @opts) ==
+               ~s(Starting "Codex review" for @limits_bot's post · 2:02 PM UTC)
 
       assert Card.skipped(follow_up()) == ~s(Skipped "Codex review"; it did not run.)
+    end
+
+    test "confirmed and then refused, it tells the owner why it did not start" do
+      refused =
+        %{follow_up() | state: "refused"} |> Map.put(:reason, "Not started: it is paused.")
+
+      assert Card.not_started(refused) ==
+               ~s(Watcher codex-limits: "Codex review" for @limits_bot's post did not start. ) <>
+                 "Not started: it is paused."
     end
   end
 

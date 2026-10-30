@@ -43,7 +43,7 @@
 {"type":"proposal_resolved","profile_id":"main","proposal_id":"cpr_7b6a5f4e3d2c1b0a9f8e7d6c","state":"expired","sentence":"That proposal expired; nothing ran."}
 {"type":"proposal_resolved","profile_id":"main","proposal_id":"cft_5d2e8a1c9b4f7e3a6c0d1b2e","state":"confirmed","sentence":"Confirmed; the follow-up is starting."}
 {"type":"error","reason":"handshake_required"}
-{"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":5,"min_version":3,"max_version":4}
+{"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":6,"min_version":4,"max_version":5}
 {"type":"error","reason":"client_message_conflict","client_msg_id":"mac-2"}
 {"type":"error","reason":"invalid_field","field":"limit"}
 {"type":"error","reason":"request_failed","message":":timeout","client_msg_id":"mac-4"}

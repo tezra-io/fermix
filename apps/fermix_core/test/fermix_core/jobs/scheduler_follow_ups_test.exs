@@ -4,7 +4,8 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
   §4.2, §9): a `starting` trigger waits for the cue share of the run slots and
   starts a run with `trigger: "watcher"`, never through the manual path; a
   trigger whose follow-up still runs ends refused; a confirmed card starts
-  exactly one run; a follow-up whose tool is not set up is refused at its turn.
+  exactly one run, and one refused when its turn comes reaches the owner; a
+  follow-up whose tool is not set up is refused at its turn.
   """
   use ExUnit.Case, async: true
 
@@ -25,6 +26,14 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
   @arrives_ms 10_000
   @token "cp_scheduler-follow-up-token"
   @owner %{platform: "telegram", chat_id: "chat-1", user_id: "owner-1"}
+
+  defmodule RecordingDelivery do
+    @moduledoc false
+    def send_message(target, text, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:delivered, target, text})
+      :ok
+    end
+  end
 
   defmodule ParkedRunner do
     @moduledoc false
@@ -99,7 +108,7 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
 
     assert_receive {:parked, %{trigger: "watcher"} = run, pid}, @arrives_ms
     assert run.job_id == first.follow_up_job_id
-    drain(scheduler)
+    admit(scheduler)
     assert [%{state: "started", run_id: run_id}] = triggers(ctx, first)
     assert run_id == run.id
     assert [%{state: "starting"}] = triggers(ctx, second)
@@ -108,7 +117,7 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
     assert_receive {:settled, _run_id}, @arrives_ms
     assert_receive {:parked, %{trigger: "watcher"} = next, _pid}, @arrives_ms
     assert next.job_id == second.follow_up_job_id
-    drain(scheduler)
+    admit(scheduler)
     assert [%{state: "started"}] = triggers(ctx, second)
   end
 
@@ -117,10 +126,11 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
     pass!(ctx, watcher, 1)
     pass!(ctx, watcher, 2)
 
-    scheduler = start_scheduler(ctx)
+    test = self()
+    _scheduler = start_scheduler(ctx, follow_up_refused: &send(test, {:refused, &1, &2}))
 
     assert_receive {:parked, _run, _pid}, @arrives_ms
-    drain(scheduler)
+    assert_receive {:refused, %{state: "refused", mode: "auto"}, "not_runnable"}, @arrives_ms
 
     assert [
              %{state: "started"},
@@ -146,13 +156,52 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
 
     scheduler = start_scheduler(ctx)
     assert_receive {:parked, %{trigger: "watcher"}, _pid}, @arrives_ms
-    Scheduler.tick(scheduler, now: @now)
-    drain(scheduler)
+    admit(scheduler)
 
     refute_received {:parked, _again, _pid}
 
     assert [[1]] =
              rows(ctx.conn, "SELECT count(*) FROM job_runs WHERE job_id = ?", [trigger.job_id])
+  end
+
+  # The tap said it was starting: a claim that cannot start it (here the job is
+  # paused) tells the owner through where the follow-up reports, and every app.
+  test "a confirmed card refused when its turn comes reaches the owner", ctx do
+    watcher = watcher!(ctx, "paused", "approve", ["shell"])
+    pass!(ctx, watcher, 1)
+
+    {:ok, [trigger]} =
+      Repo.cues_call(CuesFollowUpSql, {:claim_offers, @now, 10}, server: ctx.repo)
+
+    :offered = FollowUps.offer(trigger, offer_opts(ctx))
+
+    {:ok, "Starting " <> _line} =
+      FollowUps.confirm(@token, @owner, repo: ctx.repo, now: @now, wake_scheduler: fn -> :ok end)
+
+    exec!(ctx.conn, "UPDATE scheduled_jobs SET enabled = 0 WHERE id = ?", [trigger.job_id])
+    test = self()
+
+    told = [
+      repo: ctx.repo,
+      now: @now,
+      adapter: RecordingDelivery,
+      delivery_opts: [test_pid: test],
+      proposal_listener: &send(test, {:event, &1})
+    ]
+
+    _scheduler = start_scheduler(ctx, follow_up_refused: &FollowUps.refused(&1, &2, told))
+
+    paused = "Not started: the follow-up is paused."
+    assert_receive {:delivered, "chat-1", text}, @arrives_ms
+
+    assert text ==
+             ~s(Watcher paused: "follow-up of paused" for feed-paused's post did not start. ) <>
+               paused
+
+    assert_receive {:event, {:resolved, %{proposal_id: id, state: "refused", sentence: ^paused}}}
+    assert id == trigger.id
+    assert [%{state: "refused", reason: ^paused}] = triggers(ctx, watcher)
+    refute_received {:parked, _run, _pid}
   end
 
   test "a follow-up whose tool is not set up is refused at its turn, with the held notice", ctx do
@@ -166,7 +215,7 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
         cue_notice: fn id, kind, data -> send(test, {:notice, id, kind, data}) end
       )
 
-    drain(scheduler)
+    admit(scheduler)
 
     assert [%{state: "refused", reason: "deploy_check is not set up on this computer" <> _}] =
              triggers(ctx, watcher)
@@ -241,6 +290,7 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
        cues_running?: fn -> true end,
        cue_notice: Keyword.get(opts, :cue_notice, fn _watcher, _kind, _data -> :ok end),
        follow_up_offer: fn _trigger -> :ok end,
+       follow_up_refused: Keyword.get(opts, :follow_up_refused, fn _trigger, _label -> :ok end),
        # The follow-ups report to Telegram, which the test config leaves off.
        follow_up_readiness: [channel_ready?: fn :telegram -> true end],
        max_active_runs: Keyword.get(opts, :max_active_runs, 4)
@@ -249,13 +299,10 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
     name
   end
 
-  # Waits until every message already in the scheduler's mailbox, and the
-  # admission pass any of them requested, has been handled.
-  defp drain(scheduler) do
-    _state = :sys.get_state(scheduler)
-    _state = :sys.get_state(scheduler)
-    :ok
-  end
+  # Runs one admission pass in the scheduler and waits for it: a call, handled
+  # after every message already in its mailbox, so whatever an earlier pass left
+  # undone this one does before the test reads the triggers.
+  defp admit(scheduler), do: Scheduler.tick(scheduler, now: @now)
 
   defp context do
     %{

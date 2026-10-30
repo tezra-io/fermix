@@ -23,11 +23,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   daily cap, which it needs (Fermix suggests 5), and any change to what it
   runs or what sets it off asks for that approval again. Fermix checks at
   setup that everything it needs is ready and says in one sentence what is
-  missing and where to fix it: a coding agent allowed, installed and signed
-  in, a plugin connected, the channel it reports to set up. Until then the
-  watcher still works and the follow-up waits, starting by itself once the
-  gap is fixed. Items older than 15 minutes set nothing off, it runs one at a
-  time, and "stop the follow-up" or "run the follow-up now" works in chat. A
+  missing and where to fix it. A tool this computer does not have (a coding
+  agent not installed, a plugin not added) leaves the follow-up out, while a
+  watcher with a task is still made, so you ask again once it is installed;
+  one that is here but not ready (signed out, a plugin not connected, the
+  channel it reports to not set up) is set up waiting, and starts by itself
+  once the gap is fixed. A run you confirmed that cannot start when its turn
+  comes (it is still running, paused, or held) tells you why where it
+  reports. Items
+  older than 15 minutes set nothing off, it runs one at a time, and "stop the
+  follow-up" or "run the follow-up now" works in chat. A
   bare /confirm or /deny answers the one thing waiting in that chat, and lists
   the choices when several wait.
 - **The agent signs in to websites with logins you save in the Mac app.**

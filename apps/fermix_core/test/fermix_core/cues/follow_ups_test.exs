@@ -179,7 +179,7 @@ defmodule FermixCore.Cues.FollowUpsTest do
                triggers(ctx, watcher)
     end
 
-    test "a change to what it runs or what sets it off leaves the approval behind", ctx do
+    test "a change to what it runs or what sets it off clears the approval", ctx do
       watcher = follow_up_watcher!(ctx, mode: "auto")
       job_id = watcher.follow_up_job_id
 
@@ -221,6 +221,10 @@ defmodule FermixCore.Cues.FollowUpsTest do
           )
         end,
         fn ->
+          Watchers.add_instructions(watcher.name, ["Pass resets only."], [], nil, opts(ctx))
+        end,
+        fn -> Watchers.set_purpose(watcher.name, "plan limit resets", opts(ctx)) end,
+        fn ->
           JobsRegistry.update_job(job_id, %{task_prompt: "Something else."}, registry_opts(ctx))
         end
       ]
@@ -231,7 +235,35 @@ defmodule FermixCore.Cues.FollowUpsTest do
         assert {:ok, _changed} = change.()
         {:ok, now} = Watchers.current_follow_up_digest(watcher.name, opts(ctx))
         refute now == approved
+        assert approval_columns(ctx, watcher) == [nil, nil]
       end
+    end
+
+    # §5: the approval is cleared, never left to match again, so a change and its
+    # undoing leave the follow-up asking first until the owner approves it again.
+    test "a change undone does not bring the approval back", ctx do
+      watcher = follow_up_watcher!(ctx, mode: "auto")
+      job_id = watcher.follow_up_job_id
+
+      approve!(ctx, watcher)
+
+      {:ok, _} =
+        Watchers.update(watcher.name, %{sources: [ctx.ref, "github-releases"]}, opts(ctx))
+
+      {:ok, _} = Watchers.update(watcher.name, %{sources: [ctx.ref]}, opts(ctx))
+      pass!(ctx, 1)
+      assert [%{state: "waiting", mode: "approve"}] = triggers(ctx, watcher)
+
+      approve!(ctx, watcher)
+      {:ok, _} = JobsRegistry.update_job(job_id, %{task_prompt: "Other."}, registry_opts(ctx))
+      {:ok, _} = JobsRegistry.update_job(job_id, %{task_prompt: @prompt}, registry_opts(ctx))
+      assert approval_columns(ctx, watcher) == [nil, nil]
+
+      # A change outside what it is bound to keeps it.
+      approve!(ctx, watcher)
+      {:ok, _} = Watchers.update(watcher.name, %{daily_cap: 4}, opts(ctx))
+      assert [approved_at, digest] = approval_columns(ctx, watcher)
+      assert is_binary(approved_at) and is_binary(digest)
     end
 
     test "the approval is refused for what the owner was not shown", ctx do
@@ -271,7 +303,7 @@ defmodule FermixCore.Cues.FollowUpsTest do
 
       # The card becomes one line naming the item (§3.3).
       assert {:ok, line} = FollowUps.confirm(@token, @owner, wake_opts(ctx))
-      assert line =~ ~s(Running "Codex review" for the item from post-1 · )
+      assert line =~ ~s(Starting "Codex review" for post-1's post · )
       assert_received :woken
 
       assert [%{state: "starting", decided_from: "telegram:chat-1:owner-1"}] =
@@ -349,6 +381,30 @@ defmodule FermixCore.Cues.FollowUpsTest do
              ] =
                triggers(ctx, trigger)
     end
+
+    # The scheduler offers each card in a task of its own, which nobody answers:
+    # an offer that fails says so there, in the log and the trace.
+    test "an offer that fails is traced, never dropped", ctx do
+      _watcher = follow_up_watcher!(ctx)
+      pass!(ctx, 1)
+      [trigger] = claim_offers!(ctx)
+      TelemetryCapture.attach([[:fermix, :cue, :lifecycle]], trigger_id: trigger.id)
+
+      # The card expired while it went out, so where it went cannot be recorded.
+      exec!(
+        ctx.conn,
+        "UPDATE cue_follow_up_triggers SET state = 'expired', reason = 'Gone.' WHERE id = ?",
+        [trigger.id]
+      )
+
+      assert {:error, :not_waiting} = FollowUps.offer(trigger, offer_opts(ctx))
+
+      assert_receive {:telemetry, _event, _measurements,
+                      %{phase: :sweep_error, reason: :follow_up_offer, result: :error} = meta}
+
+      assert meta.error_class == "not_waiting"
+      assert meta.watcher_id == trigger.watcher_id
+    end
   end
 
   # --- held (§4.6) ---------------------------------------------------------------------
@@ -383,6 +439,54 @@ defmodule FermixCore.Cues.FollowUpsTest do
 
       assert [%{reason: "deploy_check is not set up on this computer" <> _}] =
                triggers(ctx, watcher)
+    end
+
+    # The owner tapped Run and was told it is starting: a hold found when its turn
+    # comes reaches them through where the follow-up reports, and every app hears
+    # its end. An automatic trigger, which nobody confirmed, is traced only.
+    test "a confirmed trigger held when its turn comes reaches the owner", ctx do
+      watcher = follow_up_watcher!(ctx)
+      pass!(ctx, 1)
+      [trigger] = claim_offers!(ctx)
+      :offered = FollowUps.offer(trigger, offer_opts(ctx))
+      {:ok, "Starting " <> _line} = FollowUps.confirm(@token, @owner, wake_opts(ctx))
+
+      test = self()
+
+      told =
+        notice_opts(ctx) ++ [proposal_listener: fn event -> send(test, {:event, event}) end]
+
+      admission = [
+        repo_opts: [server: ctx.repo],
+        notice: fn _watcher, _kind, _data -> :ok end,
+        capability_registry: ctx.registry,
+        cues_config: [mandates_enabled: false],
+        refused: &FollowUps.refused(&1, &2, told)
+      ]
+
+      assert [] = CueAdmission.claim_follow_ups(1, @now, &%{id: &1}, admission)
+
+      switch_off = "Watchers may not act: \"Let watchers act\" is off in settings."
+      assert [%{state: "refused", reason: ^switch_off}] = triggers(ctx, watcher)
+
+      assert_received {:delivered, "chat-1", text}
+
+      assert text ==
+               ~s(Watcher codex-limits: "Codex review" for post-1's post did not start. ) <>
+                 switch_off
+
+      assert_received {:event,
+                       {:resolved, %{proposal_id: id, state: "refused", sentence: ^switch_off}}}
+
+      assert id == trigger.id
+
+      automatic = follow_up_watcher!(ctx, name: "automatic", mode: "auto", ref: "auto-feed")
+      approve!(ctx, automatic)
+      pass!(ctx, 2, @now, "auto-feed")
+      assert [] = CueAdmission.claim_follow_ups(1, @now, &%{id: &1}, admission)
+      assert [%{state: "refused", mode: "auto"}] = triggers(ctx, automatic)
+      refute_received {:delivered, _target, _text}
+      refute_received {:event, {:resolved, _resolved}}
     end
 
     test "the held and recovered notices go once each, through the follow-up's delivery", ctx do
@@ -634,6 +738,17 @@ defmodule FermixCore.Cues.FollowUpsTest do
         decided_from: decided_from
       }
     end)
+  end
+
+  defp approval_columns(ctx, watcher) do
+    [row] =
+      rows(
+        ctx.conn,
+        "SELECT follow_up_approved_at, follow_up_approval_digest FROM cue_watchers WHERE id = ?",
+        [watcher.id]
+      )
+
+    row
   end
 
   defp deliveries(ctx, watcher) do

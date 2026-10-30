@@ -63,6 +63,7 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
   """
 
   alias FermixCore.Cues
+  alias FermixCore.Memory.Repo.CuesFollowUpApprovalsSql
   alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Memory.Repo.CuesSql
 
@@ -550,12 +551,16 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
 
   # --- update --------------------------------------------------------------------
 
+  # A change to its sources or filter clears an automatic follow-up's approval
+  # it no longer matches, in the same write (M60_WATCHER_CODING_RUNS.md §5), as
+  # does a change to its instructions below.
   defp update_watcher(conn, id, expected, patch, sources, now) do
     with :ok <- check_patch(patch),
          :ok <- check_relink(conn, id, patch),
          :ok <- write_patch(conn, id, expected, patch, now),
          {:ok, expired} <- replace_sources(conn, id, sources, now),
          {:ok, passed} <- pass_pending(conn, id, patch, now),
+         :ok <- CuesFollowUpApprovalsSql.clear_stale_approval(conn, {:watcher, id}),
          {:ok, watcher} <- get_watcher(conn, "id", id) do
       {:ok, %{watcher: watcher, passed: passed, expired: expired}}
     end
@@ -855,7 +860,8 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
          :ok <- within_cap(length(active) - length(removed) + length(adds), cap),
          :ok <- mark_removed(conn, removed, from, stamp, nil),
          {:ok, next} <- next_number(conn, id),
-         {:ok, added} <- insert_instructions(conn, id, next, adds, from, stamp) do
+         {:ok, added} <- insert_instructions(conn, id, next, adds, from, stamp),
+         :ok <- CuesFollowUpApprovalsSql.clear_stale_approval(conn, {:watcher, id}) do
       {:ok, %{added: added, removed: removed}}
     end
   end
@@ -871,7 +877,8 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
              "UPDATE cue_watcher_instructions SET removed_at = NULL, removed_from = NULL, " <>
                "replaced_by = NULL WHERE id = ?",
              [row.id]
-           ) do
+           ),
+         :ok <- CuesFollowUpApprovalsSql.clear_stale_approval(conn, {:watcher, id}) do
       {:ok, %{restored: row}}
     end
   end
@@ -884,7 +891,8 @@ defmodule FermixCore.Memory.Repo.CuesWatchersSql do
          {:ok, removed} <- pick_active(active, numbers),
          {:ok, next} <- next_number(conn, id),
          {:ok, [added]} <- insert_instructions(conn, id, next, [text], from, stamp),
-         :ok <- mark_removed(conn, removed, from, stamp, added.id) do
+         :ok <- mark_removed(conn, removed, from, stamp, added.id),
+         :ok <- CuesFollowUpApprovalsSql.clear_stale_approval(conn, {:watcher, id}) do
       {:ok, %{added: [added], removed: removed}}
     end
   end

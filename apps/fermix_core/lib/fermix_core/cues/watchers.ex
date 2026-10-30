@@ -28,9 +28,10 @@ defmodule FermixCore.Cues.Watchers do
   both. A follow-up asks first (`approve`, the default) or runs on its own
   (`auto`), which needs the watcher's daily cap and the owner's one approval
   (`approve_follow_up/3`), bound to `follow_up_digest/2` of what it runs and
-  what sets it off: any change to those leaves the approval behind, and the
-  follow-up asks first until it is approved again. Removing the watcher
-  removes its follow-up's job.
+  what sets it off: any change to those clears the approval in its own write
+  (`Memory.Repo.CuesFollowUpApprovalsSql.clear_stale_approval/2`), so undoing
+  the change does not bring it back, and the follow-up asks first until it is
+  approved again. Removing the watcher removes its follow-up's job.
 
   ## Options
 
@@ -56,7 +57,7 @@ defmodule FermixCore.Cues.Watchers do
   alias FermixCore.Jobs.DeliveryDefaults
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
-  alias FermixCore.Memory.Repo.CuesFollowUpSql
+  alias FermixCore.Memory.Repo.CuesFollowUpApprovalsSql
   alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Memory.Repo.CuesWatchersSql
 
@@ -712,9 +713,10 @@ defmodule FermixCore.Cues.Watchers do
   Gives the watcher a follow-up, or changes the one it has (§3.5), on the
   owner's consent turn (`context`, which the caller checked). A new follow-up
   takes `create/3`'s `follow_up` map; a change takes any of its keys, and its
-  job changes through `Jobs.Registry.update_follow_up_job/3`. A change of
-  `mode` leaves any approval behind, and `"auto"` needs the watcher's daily
-  cap. The caller bounds the tools by its own turn.
+  job changes through `Jobs.Registry.update_follow_up_job/3`, whose write
+  clears an approval it no longer matches. A change of `mode` clears any
+  approval, and `"auto"` needs the watcher's daily cap. The caller bounds the
+  tools by its own turn.
   """
   @spec set_follow_up(String.t(), map(), map(), opts()) :: result()
   def set_follow_up(name, params, context, opts \\ [])
@@ -912,7 +914,7 @@ defmodule FermixCore.Cues.Watchers do
   The digest an automatic follow-up's approval is bound to (§5): the job's
   prompt, tools, skill, model, provider and delivery target, and the watcher's
   sources and filter (its kind, purpose, words and active instructions). Pure;
-  `CuesFollowUpSql` computes it from the stored rows for every pass.
+  `CuesFollowUpApprovalsSql` computes it from the stored rows for every pass.
   """
   @spec follow_up_digest(map(), map()) :: String.t()
   def follow_up_digest(job, watcher) when is_map(job) and is_map(watcher) do
@@ -943,7 +945,7 @@ defmodule FermixCore.Cues.Watchers do
     repo_opts =
       [server: Keyword.get(opts, :repo, Repo)] ++ Keyword.take(opts, [:timeout, :on_timeout])
 
-    Repo.cues_call(CuesFollowUpSql, request, repo_opts)
+    Repo.cues_call(CuesFollowUpApprovalsSql, request, repo_opts)
   end
 
   defp follow_up_refusal(:changed, _name),
@@ -1592,9 +1594,11 @@ defmodule FermixCore.Cues.Watchers do
   end
 
   defp set_up_line(watcher, job) do
+    delivery = %{mode: job.delivery_mode, target: job.delivery_target}
+
     "Watcher #{watcher.name} is set up: it listens to #{Enum.join(watcher.sources, ", ")}, " <>
       "#{filter_words(watcher)}, and wakes job #{job.id} (#{job.name}), which reports to " <>
-      "#{report_words(job)}."
+      "#{Card.reports_to(delivery, [])}."
   end
 
   defp updated_echo(watcher, patch, sources, job, opts) do
@@ -1634,13 +1638,6 @@ defmodule FermixCore.Cues.Watchers do
 
   defp filter_words(_watcher),
     do: "filters with the Cues filter model (the main model unless settings name another)"
-
-  defp report_words(job) do
-    target = job.delivery_target || %{}
-
-    "#{channel_name(target)} #{Map.get(target, "chat_id") || Map.get(target, "channel_id") || ""}"
-    |> String.trim()
-  end
 
   defp purpose_line(%{purpose: nil}), do: nil
   defp purpose_line(%{purpose: purpose}), do: "Purpose: #{purpose}"
