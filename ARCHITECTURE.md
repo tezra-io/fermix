@@ -318,7 +318,10 @@ Memory has two layers:
 
 The same database also holds full-text search, versioned resources, scheduled
 jobs and their runs, temporal events and reminders, harness runs, meetings,
-skill usage and curation, the companion timeline, and computer-history rows.
+skill usage and curation, the companion timeline, computer-history rows, and
+the inbound channel event ids `Gateway.Idempotency` keeps for 24 hours
+(`channel_event_ids`, migration 53, M75), so a provider's retry that arrives
+after a restart, or on the new host after the home moved, is still a duplicate.
 
 Durable memory has two writers, and both end by having `PromptFiles` rebuild
 `USER.md` and `MEMORY.md` under `FERMIX_HOME/memory/<agent>/`. `Memory.Reviewer`
@@ -1041,6 +1044,10 @@ through its album buffer). The web routes call it after their signature check,
 and Slack's Socket Mode calls it with each `events_api` payload, so both Slack
 transports share idempotency, authorization and the turn. A hand-off that
 fails forgets the ids it recorded, so the provider's retry is fresh.
+`Gateway.Idempotency` answers a known id from ETS and records an unknown one in
+`memory.db` once (`Memory.Repo`, pruned at most 1,000 expired rows a sweep);
+with memory turned off the ids live in the process only. Outbound media claims
+stay in memory.
 
 Architecture Invariant: channel adapters own platform quirks and webhook
 authenticity; sender authorization and trust are central (`Gateway.Authorizer`,

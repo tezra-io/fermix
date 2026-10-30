@@ -13,9 +13,10 @@ defmodule FermixChannels.Gateway.WebhookIngress do
   The answer tells the transport what to say to the provider: `:ok` once every
   fresh message is handed off, `{:error, {:parse, reason}}` for a payload the
   adapter refused, and `{:error, {:handoff, reason}}` when nothing could be
-  handed off (the task could not start). On a hand-off failure every id this
-  call recorded is forgotten again (audit F-06 follow-up), so the provider's
-  retry runs through the fresh path instead of being absorbed as a duplicate.
+  handed off (the idempotency store could not answer, or the task could not
+  start). On a hand-off failure every id this call recorded is forgotten again
+  (audit F-06 follow-up), so the provider's retry runs through the fresh path
+  instead of being absorbed as a duplicate.
 
   WhatsApp's messages go through its album buffer, which coalesces the images
   of one album, sent as separate webhook messages, into one turn; every other
@@ -47,23 +48,35 @@ defmodule FermixChannels.Gateway.WebhookIngress do
   end
 
   defp hand_off(channel_key, messages, channel_module) do
-    fresh = filter_fresh(messages, channel_key)
-    dispatch_fresh(channel_key, messages, fresh, channel_module)
+    case filter_fresh(messages, channel_key) do
+      {:ok, fresh} -> dispatch_fresh(channel_key, messages, fresh, channel_module)
+      {:error, recorded, reason} -> roll_back(channel_key, recorded, reason)
+    end
   end
 
+  # Stops at the first id the store cannot answer for: the ones recorded
+  # before it are rolled back with the rest of the hand-off.
   defp filter_fresh(messages, channel_key) do
-    Enum.filter(messages, fn message ->
+    messages
+    |> Enum.reduce_while({:ok, []}, fn message, {:ok, fresh} ->
       case Idempotency.check_and_record(channel_key, message.id) do
         :fresh ->
-          true
+          {:cont, {:ok, [message | fresh]}}
 
         :duplicate ->
           Logger.info(
             "#{channel_key} webhook dropped duplicate message #{inspect(message.id)} (idempotency)"
           )
 
-          false
+          {:cont, {:ok, fresh}}
+
+        {:error, reason} ->
+          {:halt, {:error, Enum.reverse(fresh), reason}}
       end
+    end)
+    |> then(fn
+      {:ok, fresh} -> {:ok, Enum.reverse(fresh)}
+      {:error, _recorded, _reason} = error -> error
     end)
   end
 
@@ -83,6 +96,7 @@ defmodule FermixChannels.Gateway.WebhookIngress do
     end
   end
 
+  # A forget that fails logs its own sentence (`Idempotency.forget/3`).
   defp roll_back(channel_key, recorded, reason) do
     Enum.each(recorded, &Idempotency.forget(channel_key, &1.id))
 

@@ -565,6 +565,7 @@ defmodule FermixChannels.Channels.IMessage.Listener do
     case Idempotency.check_and_record(:imessage, message.id) do
       :duplicate -> :ok
       :fresh -> ingest(message, state)
+      {:error, reason} -> {:error, reason}
     end
   end
 

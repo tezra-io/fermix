@@ -9,10 +9,10 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
   @tz "America/New_York"
   @open_loops_version 43
   @outside_content_version 49
-  # 50, the phone's link-preview icon index, only adds IF NOT EXISTS objects: a
-  # database at 48 or 49 lacks its version row too, and reapplying it changes
-  # nothing.
-  @mobile_icon_index_version 50
+  # Every migration after 49 but 51 can run again on a database that has it
+  # (50 and 53 add IF NOT EXISTS objects, 52 rebuilds its table in the same
+  # shape): a database at 48 or 49 lacks their version rows too, and
+  # reapplying them changes nothing.
   @curiosity_version 51
   # The columns migration 43 made, in its order: what a 48 database holds.
   @columns_43 ~w(id agent_id owner_id dedupe_key intention why_it_matters matters_by_kind
@@ -137,21 +137,20 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
   end
 
   # Puts the open_loops table back in migration 43's shape with its rows, drops
-  # what 49 and 51 add, and forgets 49, 50 and 51: the database an engine at
-  # version 48 left.
+  # what 49 and 51 add, and forgets every version after 48: the database an
+  # engine at version 48 left.
   defp downgrade_to_48!(conn) do
     downgrade_open_loops!(conn, @columns_43, [OpenLoopsSql.schema_sql()])
 
     execute!(
       conn,
-      "DELETE FROM schema_migrations WHERE version IN " <>
-        "(#{@outside_content_version}, #{@mobile_icon_index_version}, #{@curiosity_version})"
+      "DELETE FROM schema_migrations WHERE version > 48"
     )
   end
 
   # Puts the open_loops table back in migration 49's shape with its rows, the
-  # stamp among them, drops what 51 adds, and forgets 50 and 51: the database an
-  # engine at version 49 left.
+  # stamp among them, drops what 51 adds, and forgets every version after 49:
+  # the database an engine at version 49 left.
   defp downgrade_to_49!(conn) do
     downgrade_open_loops!(conn, @columns_49, [
       OpenLoopsSql.schema_sql(),
@@ -160,8 +159,7 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
 
     execute!(
       conn,
-      "DELETE FROM schema_migrations " <>
-        "WHERE version IN (#{@mobile_icon_index_version}, #{@curiosity_version})"
+      "DELETE FROM schema_migrations WHERE version > 49"
     )
   end
 

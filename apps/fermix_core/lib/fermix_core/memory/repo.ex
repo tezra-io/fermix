@@ -16,6 +16,7 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Memory.Repo.CuesWatchersSql
   alias FermixCore.Memory.Repo.FtsMatch
+  alias FermixCore.Memory.Repo.InboundEventsSql
   alias FermixCore.Memory.Repo.MeetingsSql
   alias FermixCore.Memory.Repo.MobileSql
   alias FermixCore.Memory.Repo.OpenLoopReactionsSql
@@ -75,6 +76,8 @@ defmodule FermixCore.Memory.Repo do
   @open_loop_outside_content_migration_version 49
   @mobile_icon_index_migration_version 50
   @open_loop_curiosity_migration_version 51
+  # M75 takes 52 (uncertain requests) and 53 (channel event ids).
+  @channel_event_ids_migration_version 53
   @sqlite_open_intent :readwritecreate
 
   # The cue SQL modules (M60), one per lane, all served by `cues_call/3`.
@@ -3623,6 +3626,44 @@ defmodule FermixCore.Memory.Repo do
     end)
   end
 
+  @doc """
+  Records a channel's inbound event id until `now_ms + ttl_ms` (Unix
+  milliseconds) unless a live row holds it (M75 B15): `{:ok, :fresh}` when it
+  was absent or expired, `{:ok, {:duplicate, expires_at_ms}}` otherwise. Only
+  `FermixChannels.Gateway.Idempotency` calls it, behind its in-memory cache.
+  """
+  @spec claim_inbound_event(atom() | String.t(), String.t(), integer(), pos_integer(), keyword()) ::
+          {:ok, :fresh | {:duplicate, integer()}} | {:error, term()}
+  def claim_inbound_event(channel, event_id, now_ms, ttl_ms, opts \\ [])
+      when is_binary(event_id) and is_integer(now_ms) and is_integer(ttl_ms) and ttl_ms > 0 do
+    with {:ok, {channel, event_id}} <- InboundEventsSql.normalize_key(channel, event_id) do
+      call({:claim_inbound_event, channel, event_id, now_ms, now_ms + ttl_ms}, opts)
+    end
+  end
+
+  @doc "Deletes a channel's inbound event id, so its next arrival is fresh."
+  @spec forget_inbound_event(atom() | String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def forget_inbound_event(channel, event_id, opts \\ []) when is_binary(event_id) do
+    with {:ok, {channel, event_id}} <- InboundEventsSql.normalize_key(channel, event_id) do
+      call({:forget_inbound_event, channel, event_id}, opts)
+    end
+  end
+
+  @doc """
+  Deletes at most `limit` inbound event ids that expired at or before `now_ms`,
+  and answers how many it deleted.
+  """
+  @spec prune_inbound_events(integer(), pos_integer(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def prune_inbound_events(now_ms, limit, opts \\ [])
+      when is_integer(now_ms) and is_integer(limit) and limit > 0 do
+    if limit > InboundEventsSql.prune_limit_max(),
+      do:
+        raise(ArgumentError, "a prune deletes at most #{InboundEventsSql.prune_limit_max()} rows")
+
+    call({:prune_inbound_events, now_ms, limit}, opts)
+  end
+
   @spec migrate(keyword()) :: :ok | {:error, term()}
   def migrate(opts \\ []) do
     call(:migrate, opts)
@@ -3807,6 +3848,24 @@ defmodule FermixCore.Memory.Repo do
   def handle_call({:list_temporal_reminders, filter}, _from, state) do
     reply = with_connection(state, &TemporalSql.list_reminders(&1, filter))
     {:reply, reply, state}
+  end
+
+  def handle_call({:claim_inbound_event, channel, event_id, now_ms, expires_at_ms}, _from, state) do
+    reply =
+      with_connection(
+        state,
+        &InboundEventsSql.claim(&1, channel, event_id, now_ms, expires_at_ms)
+      )
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:forget_inbound_event, channel, event_id}, _from, state) do
+    {:reply, with_connection(state, &InboundEventsSql.forget(&1, channel, event_id)), state}
+  end
+
+  def handle_call({:prune_inbound_events, now_ms, limit}, _from, state) do
+    {:reply, with_connection(state, &InboundEventsSql.prune(&1, now_ms, limit)), state}
   end
 
   def handle_call({:create_open_loop, row}, _from, state) do
@@ -4946,7 +5005,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_cue_retention_index_migration(conn, versions),
          :ok <- apply_open_loop_outside_content_migration(conn, versions),
          :ok <- apply_mobile_icon_index_migration(conn, versions),
-         :ok <- apply_open_loop_curiosity_migration(conn, versions) do
+         :ok <- apply_open_loop_curiosity_migration(conn, versions),
+         :ok <- apply_channel_event_ids_migration(conn, versions) do
       :ok
     end
   end
@@ -5188,6 +5248,25 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{MobileSql.media_index_schema_sql()}
         INSERT INTO schema_migrations(version) VALUES (#{@mobile_media_index_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # The channel event ids `Gateway.Idempotency` keeps for their window (M75
+  # B15), so they move with the home: the table, its expiry index and the
+  # version in one transaction.
+  defp apply_channel_event_ids_migration(conn, versions) do
+    if Enum.member?(versions, @channel_event_ids_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{InboundEventsSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@channel_event_ids_migration_version});
         COMMIT;
         """
       )
