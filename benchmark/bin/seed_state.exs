@@ -116,9 +116,11 @@ defmodule SeedState do
   end
 
   # The home's own config.toml through the engine's loader, so the timezone and the
-  # delivery target are read exactly as the daemon read them at boot.
+  # delivery target are read exactly as the daemon read them at boot. No secret is
+  # resolved: the seed needs none, and the default read runs through the daemon's
+  # command host, which this script never starts.
   defp home_config! do
-    {:ok, snapshot} = ConfigStore.load_runtime_config()
+    {:ok, snapshot} = ConfigStore.load_runtime_config(resolve_secrets: false)
     core = Map.fetch!(snapshot, :fermix_core)
     personalization = Keyword.fetch!(core, :personalization)
     zone = Keyword.get(personalization, :timezone) || raise "config.toml sets no timezone"
