@@ -2431,6 +2431,222 @@
       "why": "M60 app surface gives cues their own settings section, cues, published on every build: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."
     },
     {
+      "method": "(schema)",
+      "field": "methods:home.status",
+      "kind": "engine_only",
+      "why": "M75 adds the home family after the draft was written, so the draft publishes no home.* method. The four methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.snapshots.status",
+      "kind": "engine_only",
+      "why": "M75 adds the home family after the draft was written, so the draft publishes no home.* method. The four methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.snapshots.run",
+      "kind": "engine_only",
+      "why": "M75 adds the home family after the draft was written, so the draft publishes no home.* method. The four methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.snapshots.passphrase",
+      "kind": "engine_only",
+      "why": "M75 adds the home family after the draft was written, so the draft publishes no home.* method. The four methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Always On pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.status=2",
+      "kind": "engine_only",
+      "why": "M75: every home.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.snapshots.status=2",
+      "kind": "engine_only",
+      "why": "M75: every home.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.snapshots.run=2",
+      "kind": "engine_only",
+      "why": "M75: every home.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.snapshots.passphrase=2",
+      "kind": "engine_only",
+      "why": "M75: every home.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.status",
+      "kind": "engine_only",
+      "why": "M75: hello publishes every method this daemon serves with its minimum version, the home family included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.snapshots.status",
+      "kind": "engine_only",
+      "why": "M75: hello publishes every method this daemon serves with its minimum version, the home family included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.snapshots.run",
+      "kind": "engine_only",
+      "why": "M75: hello publishes every method this daemon serves with its minimum version, the home family included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.snapshots.passphrase",
+      "kind": "engine_only",
+      "why": "M75: hello publishes every method this daemon serves with its minimum version, the home family included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "home.snapshots.passphrase",
+      "field": "params:recovery_passphrase",
+      "kind": "engine_only",
+      "why": "M75: home.snapshots.passphrase takes the recovery passphrase it derives the recovery key from, and keeps only that key's public half. The draft predates the home family."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.enroll.open",
+      "kind": "engine_only",
+      "why": "M75 adds enrollment and the move to the home family after the draft was written, so the draft publishes no home.* method. The three methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the move."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.candidates.list",
+      "kind": "engine_only",
+      "why": "M75 adds enrollment and the move to the home family after the draft was written, so the draft publishes no home.* method. The three methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the move."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.move.start",
+      "kind": "engine_only",
+      "why": "M75 adds enrollment and the move to the home family after the draft was written, so the draft publishes no home.* method. The three methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the move."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.enroll.open=2",
+      "kind": "engine_only",
+      "why": "M75: every home.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.candidates.list=2",
+      "kind": "engine_only",
+      "why": "M75: every home.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.move.start=2",
+      "kind": "engine_only",
+      "why": "M75: every home.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.enroll.open",
+      "kind": "engine_only",
+      "why": "M75: hello publishes every method this daemon serves with its minimum version, the home family included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.candidates.list",
+      "kind": "engine_only",
+      "why": "M75: hello publishes every method this daemon serves with its minimum version, the home family included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.move.start",
+      "kind": "engine_only",
+      "why": "M75: hello publishes every method this daemon serves with its minimum version, the home family included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:home.move.readiness",
+      "kind": "engine_only",
+      "why": "M75 adds the move's readiness report after the draft was written: what blocks or warns before a move, which home.move.start then enforces. Minimum version 2 and additive: a client built against the draft never calls it."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:home.move.readiness=2",
+      "kind": "engine_only",
+      "why": "M75: every home.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.move.readiness",
+      "kind": "engine_only",
+      "why": "M75: hello publishes every method this daemon serves with its minimum version, the home family included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "home.move.readiness",
+      "field": "params:candidate_id",
+      "kind": "engine_only",
+      "why": "M75: home.move.readiness names the held candidate whose move it reviews, by the id home.candidates.list answers. The draft predates the home family."
+    },
+    {
+      "method": "home.move.start",
+      "field": "params:candidate_id",
+      "kind": "engine_only",
+      "why": "M75: home.move.start names the held candidate it moves the home to, by the id home.candidates.list answers. The draft predates the home family."
+    },
+    {
+      "method": "home.move.start",
+      "field": "params:recovery_passphrase",
+      "kind": "engine_only",
+      "why": "M75: home.move.start takes the recovery passphrase it derives the recovery key from, and keeps only that key's public half. The draft predates the home family."
+    },
+    {
+      "method": "settings.get:snapshots",
+      "field": "rows:snapshot_s3_access_key_id",
+      "kind": "engine_only",
+      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:snapshots",
+      "field": "rows:snapshot_s3_secret_access_key",
+      "kind": "engine_only",
+      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:snapshots",
+      "field": "rows:snapshots_interval_hours",
+      "kind": "engine_only",
+      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:snapshots",
+      "field": "rows:snapshots_recipient",
+      "kind": "engine_only",
+      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:snapshots",
+      "field": "rows:snapshots_s3_bucket",
+      "kind": "engine_only",
+      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:snapshots",
+      "field": "rows:snapshots_s3_endpoint",
+      "kind": "engine_only",
+      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:snapshots",
+      "field": "rows:snapshots_s3_prefix",
+      "kind": "engine_only",
+      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:snapshots",
+      "field": "rows:snapshots_s3_region",
+      "kind": "engine_only",
+      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
       "method": "(errors)",
       "field": "primary_unreachable:primary,sentence",
       "kind": "engine_only",
@@ -2453,6 +2669,12 @@
       "field": "error_codes:device_class_method",
       "kind": "engine_only",
       "why": "M75: the primary refuses a device-class request a desktop forwarded (one that configures the desktop itself) with the error code device_class_method, details {method, sentence}. Only a desktop's engine ever receives it. The draft predates the move, so its error catalog has no such code."
+    },
+    {
+      "method": "home.move.start",
+      "field": "params:keep_as_desktop",
+      "kind": "engine_only",
+      "why": "M75: replacing the server runs through the same move; false keeps the replaced server as nothing rather than a desktop of the new primary. Optional, true unless said, so a client built against the draft moves as before."
     },
     {
       "method": "settings.sections",

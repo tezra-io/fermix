@@ -164,8 +164,23 @@ defmodule Fermix.CLI.DaemonForwardingTest do
   end
 
   describe "composed requests on a linked device" do
-    test "while the primary cannot answer, settings.sections says why its part is missing",
+    test "home.status answers this machine's facts and the primary's picture, asked within 5 s",
          ctx do
+      socket = start_daemon!(ctx, engine_role: @device, desktop_link?: true)
+
+      assert {:ok, status} =
+               Client.request_v1("home.status", %{}, socket_path: socket, timeout: @reply_ms)
+
+      assert status["role"] == "device"
+      assert status["primary"]["name"] == "fermix-vm"
+      assert status["primary_home"] == %{"role" => "primary", "epoch" => 7, "candidates" => []}
+      assert status["primary_missing"] == nil
+      # The desktop's own snapshot status is a retired copy: no target of its own.
+      assert status["snapshots"]["targets"] == []
+      assert_receive {:forwarded, %{method: "home.status", params: %{}}, [deadline_ms: 5_000]}
+    end
+
+    test "while the primary cannot answer, home.status says why its picture is missing", ctx do
       unreachable = fn _request, _opts ->
         {:error, :primary_unreachable,
          %{
@@ -177,6 +192,13 @@ defmodule Fermix.CLI.DaemonForwardingTest do
 
       socket =
         start_daemon!(ctx, engine_role: @device, desktop_link?: true, forward: unreachable)
+
+      assert {:ok, status} =
+               Client.request_v1("home.status", %{}, socket_path: socket, timeout: @reply_ms)
+
+      assert status["role"] == "device"
+      assert status["primary_home"] == nil
+      assert status["primary_missing"] =~ "The server fermix-vm is unreachable."
 
       assert {:ok, %{"sections" => sections, "primary_missing" => missing}} =
                Client.request_v1("settings.sections", %{},
@@ -208,7 +230,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
       assert_receive {:forwarded, %{method: "settings.sections"}, [deadline_ms: 5_000]}
     end
 
-    test "an engine with no link answers on its own, missing nothing", ctx do
+    test "an engine with no link answers both on its own, missing nothing", ctx do
       socket = start_daemon!(ctx, engine_role: %{role: :primary, primary: nil})
 
       assert {:ok, %{"sections" => sections, "primary_missing" => nil}} =
@@ -218,6 +240,10 @@ defmodule Fermix.CLI.DaemonForwardingTest do
                )
 
       assert length(sections) == 3
+
+      assert {:ok, %{"primary_home" => nil, "primary_missing" => nil}} =
+               Client.request_v1("home.status", %{}, socket_path: socket, timeout: @reply_ms)
+
       refute_received {:forwarded, _request, _opts}
     end
 
@@ -240,6 +266,9 @@ defmodule Fermix.CLI.DaemonForwardingTest do
   describe "serve_forwarded/3, on the primary" do
     test "answers a composed request a desktop forwarded as its own", ctx do
       daemon = start_daemon!(ctx, [engine_role: %{role: :primary, primary: nil}], :name)
+
+      assert %{"request_id" => "call-5", "result" => %{"role" => "primary"}} =
+               Daemon.serve_forwarded(frame("call-5", "home.status", %{}), "desk-1", daemon)
 
       assert %{"result" => %{"sections" => [_one, _two, _three], "primary_missing" => nil}} =
                Daemon.serve_forwarded(frame("call-6", "settings.sections", %{}), "desk-1", daemon)

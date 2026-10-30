@@ -58,6 +58,7 @@ defmodule FermixCore.Management.Copy do
   @proper_nouns [
     "Fermix Computer Use",
     "Fermix Messages",
+    "Always On",
     "Apple ID",
     "Apple",
     "Full Disk Access",

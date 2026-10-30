@@ -1117,7 +1117,7 @@ the move reached on a `:done` finish, else nil), `result` (`:done`,
 `error_class` (the reason's atom or a tagged tuple's atom head, else
 `:unclassified`; nil unless aborted or failed). The reason never rides: the
 phase files (`.move/phase.json`, `candidate/state.json`) hold the sentence
-that says why. `Trace.TelemetryHandler` records each as a `home_move`
+`home.status` shows. `Trace.TelemetryHandler` records each as a `home_move`
 `agent_event` row keyed on the side; the Opik exporter does not subscribe
 (no session to nest under), as for snapshots and the channel points below.
 

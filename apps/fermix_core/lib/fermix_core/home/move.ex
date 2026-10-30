@@ -439,7 +439,7 @@ defmodule FermixCore.Home.Move do
     do: "Only the primary can move its home, and this engine runs in the #{role} role."
 
   def error_sentence({:move_pending, phase}),
-    do: "A move is already under way (#{phase})."
+    do: "A move is already under way (#{phase}); Always On shows where it stands."
 
   def error_sentence(:epoch_absent),
     do: "This home has never started as the primary, so there is nothing to move yet."

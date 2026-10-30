@@ -11,7 +11,7 @@ defmodule FermixCore.Management.PlacementTest do
     doctor.start doctor.get doctor.cancel setup.session.create setup.detect
     computer_use.grant.start computer_use.permissions.get imessage.permissions.get
     imessage.grant.start imessage.policy.confirm browser.install.start
-    capabilities.install.start settings.sections
+    capabilities.install.start home.status settings.sections
   )
 
   test "the device-class methods are this machine's, whatever their parameters" do
@@ -101,6 +101,19 @@ defmodule FermixCore.Management.PlacementTest do
 
     for method <- Protocol.methods() -- long,
         do: assert(Placement.forward_deadline_ms(method) == 8_000, method)
+  end
+
+  # The apps read the timeout they owe these calls from the export, so the
+  # export says every deadline past 8 s, and a client timeout 5 s past it.
+  test "PROTOCOL.md publishes every longer deadline and the client timeout it needs" do
+    doc = File.read!(Application.app_dir(:fermix_core, "priv/management/PROTOCOL.md"))
+
+    for {method, ms} <- Placement.long_forward_deadlines() do
+      seconds = div(ms, 1_000)
+      assert doc =~ "| `#{method}` | #{seconds} s | at least #{seconds + 5} s |", method
+    end
+
+    assert doc =~ "| every other forwarded method | 8 s | the usual 10 s |"
   end
 
   test "only a move's start whose answer was lost is unconfirmed, a published code" do

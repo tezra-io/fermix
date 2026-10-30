@@ -338,7 +338,9 @@ defmodule FermixWebWeb.SetupLiveTest do
   # M75 D5: on a device-role engine the token file is a retired copy of the
   # primary's, so every action on this page that reaches a provider, its session
   # or its token is refused with the device sentence, where that action's result
-  # is shown, and writes nothing.
+  # is shown, and writes nothing. The page no longer draws the primary's tabs
+  # there (M75 B14), so these cases send the events themselves: the gate still
+  # refuses an event no control on the page sent.
   describe "on a device-role engine" do
     @device_sentence "This engine runs in the device role; the primary is aws i-0f3b1c."
 
@@ -464,8 +466,8 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert render_until(view, escaped(@device_sentence)) =~ "Provider probe"
     end
 
-    # The listing would raise if it were reached; the provider pane shows the
-    # refusal where the list would be.
+    # The listing would raise if it were reached; the provider pane that shows
+    # its result is the primary's, so the page shows the primary's sentence.
     test "a provider's live model list is never called", %{conn: conn} do
       Application.put_env(:fermix_web, :model_listing_impl, UnreachableListing)
       {:ok, view, _html} = live(conn, "/setup?tab=provider")
@@ -475,7 +477,8 @@ defmodule FermixWebWeb.SetupLiveTest do
           "provider_form" => %{"provider" => "openrouter"}
         })
 
-      assert html =~ escaped(@device_sentence)
+      assert html =~ "id=\"primary-only-pane\""
+      assert html =~ "Change them in the Fermix app on this computer."
     end
   end
 

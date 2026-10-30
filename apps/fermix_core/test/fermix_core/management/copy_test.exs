@@ -19,6 +19,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.ProposalView
+  alias FermixCore.Home.Candidate, as: HomeCandidate
   alias FermixCore.Home.Move, as: HomeMove
   alias FermixCore.Home.MoveReadiness
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
@@ -32,8 +33,10 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Cues.SourceRow, as: CueSourceRow
   alias FermixCore.Management.Cues.WatcherRow, as: CueWatcherRow
   alias FermixCore.Management.Doctor.Remediation
+  alias FermixCore.Management.HomeMove, as: ManagementHomeMove
   alias FermixCore.Management.McpServers.Row, as: McpRow
   alias FermixCore.Management.Mobile
+  alias FermixCore.Management.Placement
   alias FermixCore.Management.Plugins
   alias FermixCore.Management.Plugins.Row, as: PluginRow
   alias FermixCore.Management.Protocol
@@ -657,6 +660,65 @@ defmodule FermixCore.Management.CopyTest do
           refute_command(item.sentence, item.id)
         end
       end
+    end
+  end
+
+  # Production Fermix is managed through the apps and the setup page, so a
+  # sentence they can show says what to do there, or names the server, and
+  # never prescribes a `fermix` command (AGENTS.md, "App-managed production
+  # configuration"). The Always On producers are walked whole: the move's
+  # phases and refusals, the readiness items, the snapshot sentences, the
+  # snapshots section, the owner decisions, and the refusals a server shows
+  # while it enrolls.
+  describe "the Always On copy an app shows" do
+    test "names no fermix command" do
+      {:ok, view} = Settings.get("snapshots")
+
+      section_rows =
+        for row <- view["rows"],
+            text <- [row["label"], row["footer"], row["info"]],
+            is_binary(text),
+            do: {"snapshots.#{row["key"]}", text}
+
+      move =
+        Enum.map(HomeMove.phases(), &{"move #{&1}", HomeMove.sentence(&1, "north-box")}) ++
+          for reason <- [
+                {:move_pending, "streaming"},
+                {:unknown_candidate, "cand-5e2a9c1f7b3d4086"},
+                {:not_primary, :device},
+                :epoch_absent
+              ],
+              do: {"move refusal", HomeMove.error_sentence(reason)}
+
+      enrolling =
+        for reason <- [
+              {:code_expired, ~U[2026-10-27 12:30:00Z]},
+              {:invalid_code, "a bad checksum"},
+              :already_candidate,
+              :moved
+            ],
+            do: {"candidate refusal", HomeCandidate.error_sentence(reason)}
+
+      owner = [
+        {"home owner decision", ManagementHomeMove.owner_only_sentence()}
+      ]
+
+      # The answer to a move's start whose answer was lost.
+      {:error, :unconfirmed, %{"sentence" => unconfirmed}} =
+        Placement.unconfirmed("north-box", "home.move.start")
+
+      device = [{"move unconfirmed", unconfirmed}]
+
+      for {where, text} <- section_rows ++ move ++ enrolling ++ owner ++ device,
+          do: refute_command(text, where)
+    end
+
+    # A gate nothing provokes is a gate nobody has seen fire.
+    test "catches a command, bare or quoted, and nothing else" do
+      assert command?("Run fermix home status to see where it stands.")
+      assert command?("Get a new code, then run `fermix home enroll-code` on the primary.")
+      refute command?("Fermix restarts as a desktop of fermix-vm.")
+      refute command?("Get a new code in Always On on the primary.")
     end
   end
 

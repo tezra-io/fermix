@@ -148,7 +148,15 @@ defmodule FermixCore.Management.ProtocolTest do
              "cues.mandates.approve",
              "cues.proposals.list",
              "cues.proposals.get",
-             "cues.proposals.decide"
+             "cues.proposals.decide",
+             "home.status",
+             "home.snapshots.status",
+             "home.snapshots.run",
+             "home.snapshots.passphrase",
+             "home.enroll.open",
+             "home.candidates.list",
+             "home.move.readiness",
+             "home.move.start"
            ]
 
     assert Protocol.error_codes() == [

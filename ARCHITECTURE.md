@@ -437,14 +437,16 @@ sign-in verbs. `Home.DesktopLink` is a moved desktop's link to its primary
 desktop relay reads it, and `DesktopLink.linked?/2` decides once per boot
 whether the daemon forwards primary-class management requests
 (`Management.Placement`, the one table of device-class methods and settings
-sections) through `Home.Link` and whether the companion socket tunnels.
-`settings.sections` is composed (`Placement.composed?/1`): the device answers
+sections; the home's recovery, enrollment and move are primary-class) through
+`Home.Link` and whether the companion socket tunnels. `home.status` and
+`settings.sections` are composed (`Placement.composed?/1`): the device answers
 its own part and the router adds the primary's through the daemon's
 `:primary_forward` (`Placement.primary_part/2`, within 5 s), or the sentence
 in `primary_missing` while it is missing; the primary answers a forwarded one
 as its own. `Placement.forward_deadline_ms/1` is the one table of how long a
-desktop waits for a forwarded answer (8 s), and a forwarded call whose effect
-may stand though its answer was lost is `unconfirmed`
+desktop waits for a forwarded answer (8 s; 60 s for `home.move.readiness` and
+`home.move.start`, which walk the whole home first), and a forwarded
+`home.move.start` the primary had whose answer was lost is `unconfirmed`
 (`Placement.unconfirmed/2`), never a failure.
 `Epoch.initialise/1` runs after `ConfigStore.ensure_workspace`
 on a primary boot and is the only writer of the first epoch. `Home.Archive`
@@ -472,7 +474,9 @@ each `Snapshot.Target` (`Snapshot.S3`: SigV4 `PutObject` with
 connected desktops over the rail) and is the one
 writer of `snapshots/status.json` (`Snapshot.Status`: per attempt the
 recovery key it was written for, and `waiting` for a target that takes it at
-a later run, a sleeping desktop). A capture needs about twice the home free
+a later run, a sleeping desktop), which
+`Management.Home` (`home.*`, answered locally in every role) and
+`fermix home status` read. A capture needs about twice the home free
 (`Home.Disk`, which reads `df -Pk`'s available column so that a space in a
 filesystem's name or mount point moves nothing) and is refused by number
 otherwise. The
@@ -480,18 +484,21 @@ companion request store settles a request another boot started, or anything
 in flight after the epoch changed, as `uncertain` rather than re-running it.
 
 The Always On move (M75 §7) adds a third role, `candidate`: a fresh server
-that `Home.Candidate.enroll/3` (tree-less) made one from an enrollment code
-(`Home.EnrollmentCode`, `fxenroll1.`), with its own keys, facts and phase
-under `<home>/candidate/`. `Role.children/2` keeps only
+that `fermix home enroll` (`Home.Candidate.enroll/3`, tree-less) made one from
+an enrollment code (`Home.EnrollmentCode`, `fxenroll1.`), with its own keys,
+facts and phase under `<home>/candidate/`. `Role.children/2` keeps only
 `Role.candidate_keeps/0` for it (the command host, which the offer's `df` and
 the restore's keyring probe run under, task supervisor, trace, the daemon socket
 and its stop path, `FermixChannels.Home.CandidateSupervisor`, and the web app's
 endpoint-less children; `CandidateTreeTest` runs a move's candidate side in a
 VM holding only those); `start_supervision_tree` writes nothing into its home
-and initialises no epoch, and the router answers it `hello` alone. The
-primary opens the window through `Home.Link` and keeps candidates in
-`mobile/candidates.json` (`Home.Candidates`, at most four, 24 hours).
-`Home.MoveReadiness` is the report the owner reviews (keychain secrets, engine versions, free disk, the S3 upload
+and initialises no epoch, and the router answers it `hello` and `home.status`
+alone. The primary opens the window through `Home.Link` and keeps candidates
+in `mobile/candidates.json` (`Home.Candidates`, at most four, 24 hours);
+`Management.HomeMove` answers `home.enroll.open`, `home.candidates.list`,
+`home.move.readiness`, `home.move.start` and the `enrollment`, `candidates`
+and `move` places of `home.status`. `Home.MoveReadiness` is the report the
+owner reviews (keychain secrets, engine versions, free disk, the S3 upload
 bound, plugins, what stays on the desktop, the cutover gap) and
 `Home.Move.start/5` refuses while an item blocks; the review is kept in
 `.move/readiness.json` and a start within 15 minutes of a ready one takes it
@@ -503,17 +510,18 @@ lock) before the restart, which is the daemon's deliberate self-restart
 (`Lifecycle.restart_self/0`: on a systemd user unit the start budget is reset
 first, then the one stop path) that launchd or systemd brings back; the boot
 after it records the move's ending (`Move.finish_at_boot/2`; a write that
-fails there is tried again at each read of `Move.view/3`, whose sentence says
-why until it is recorded, only in the engine whose boot left it unrecorded),
-never the engine about to stop. `Home.MoveSecrets` reads the
+fails there is tried again at each `home.status` read, whose sentence says why
+until it is recorded, `Move.view/3`, only in the engine whose boot left it
+unrecorded), never the engine about to stop. `Home.MoveSecrets` reads the
 keychain's value of every `@keyring` reference before the move's capture and
 hands them to it as file store entries that exist only inside the encrypted
 stream; on the candidate
 `Home.Candidate.Activation` restores the stream into `candidate/staging`,
 turns each carried reference into `@file`, and later renames it into place,
 `config.toml` last, asking the new primary's first boot for a snapshot at
-once; `Home.MoveTelemetry` emits the move's bookends. `MoveSecrets.missing/1`
-names the references that did not resolve on the primary. The channels half
+once; `Home.MoveTelemetry` emits the move's bookends. `home.status`'s
+`secrets_missing` names the references that did not resolve on the primary
+(`MoveSecrets.missing/1`). The channels half
 (`FermixChannels.Home`) is described under `fermix_channels`.
 
 Architecture Invariant: one role gate, one epoch writer, one marker, one
@@ -523,7 +531,7 @@ no token. One restore path (`Archive.install/5`) for an archive and a
 snapshot, and one writer of the snapshot status. A candidate never activates
 without `move_commit`, and a source sends `move_commit` only after its moved
 marker is written: at every crash and lost message at most one engine serves
-as the primary. A move is aborted only while the
+as the primary (`tla/specs/home_move`). A move is aborted only while the
 marker is absent; after it, it is only ever resumed. A candidate takes only an
 offer later than the move it holds (move ids ordered by start, then the
 attempt), so a late offer never un-stages a home its source retired for. The
@@ -947,7 +955,7 @@ auth (`setup`, `auth`), talking to the agent over the daemon socket (`ask`,
 `chat`), lifecycle (`run`, `service`, `start`, `stop`, `restart`, `status`,
 `health`, `upgrade`, `uninstall`, `migrate-to-app`), diagnostics (`doctor`,
 `diagnostics`, `logs`), administration (`agents`, `capabilities`, `skills`,
-`plugins`, `memory`, `sandbox`, `grant`, `revoke`), and companion surfaces
+`plugins`, `memory`, `sandbox`, `grant`, `revoke`, `home`), and companion surfaces
 (`voice`, `acp`, `pair`, `devices`). Mix tasks: `fermix.dev`, `fermix.setup`,
 `fermix.resource.*`, and the eval tasks in core; `fermix.bench*` in channels;
 `opik.ping` and `opik.replay` in opik. `Release.AppEngineManifest` records the
@@ -1135,14 +1143,14 @@ Current channels:
   once in a row (a renewed session ended normally again within a minute is
   an outage, `renewed_again`, on the ordinary backoff), and a revoked desktop
   (`4003`) stops dialing until the engine restarts. Its posture is
-  `emit_transport(:desktop_relay, …)` and `Relay.status/1`, whose `status`
-  word (`connected`, `renewing`, `unreachable`, `revoked`, `stale`; set at
-  each transition, so a redial during an outage keeps `unreachable`) tells a
-  quiet renewal apart from an outage; a revoked desktop's
+  `emit_transport(:desktop_relay, …)` and `home.status`'s `primary`, whose
+  `status` word (`connected`, `renewing`, `unreachable`, `revoked`, `stale`;
+  set at each transition, so a redial during an outage keeps `unreachable`)
+  lets an app draw a quiet renewal apart from an outage; a revoked desktop's
   companion channels are refused `desktop_revoked`, not `primary_unreachable`.
   A forwarded call is answered within its method's deadline
-  (`Placement.forward_deadline_ms/1`, or its caller's shorter one), and a call
-  whose effect may stand though its answer was lost is `unconfirmed`. It clamps
+  (`Placement.forward_deadline_ms/1`, or its caller's shorter one), and a move
+  start the primary had and never answered is `unconfirmed`. It clamps
   the primary's `caps.max_media_bytes` to 64 MiB and holds at most 32 open
   payloads. It is
   the session's one writer, and `@inbound` is its one map of who serves each
@@ -1358,7 +1366,13 @@ The router exposes:
 `Gateway.WebhookIngress`, which parses it, drops duplicates and dispatches it
 asynchronously; a failed handoff returns 503 with the duplicate record rolled
 back, and a device-role engine answers every webhook route 503. `HealthController` reports `FermixCore.Health`'s status.
-`SetupLive` drives `Setup.Wizard` and the core setup modules. Not all ingress is
+`SetupLive` drives `Setup.Wizard` and the core setup modules. Its Always On tab
+(`SetupLive.AlwaysOn`, M75 B14) is read-only: one sentence for where Fermix
+runs, drawn from `Management.Home.status/1` in the page's own process when
+the tab opens and on Refresh (on a desktop, the link's own sentence); setting
+Always On up is the apps' and the CLI's. On a device-role engine the
+page leads with a notice and draws every tab whose request
+`Management.Placement` places on the primary as unavailable. Not all ingress is
 Phoenix: the mobile listener, the OAuth loopback listener, and the Unix sockets
 (`daemon.sock`, `realtime.sock`, `acp.sock`, `companion.sock`) live in core and
 channels.

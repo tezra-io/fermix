@@ -125,7 +125,15 @@ defmodule FermixCore.Management.Protocol do
     {"cues.mandates.approve", 2},
     {"cues.proposals.list", 2},
     {"cues.proposals.get", 2},
-    {"cues.proposals.decide", 2}
+    {"cues.proposals.decide", 2},
+    {"home.status", 2},
+    {"home.snapshots.status", 2},
+    {"home.snapshots.run", 2},
+    {"home.snapshots.passphrase", 2},
+    {"home.enroll.open", 2},
+    {"home.candidates.list", 2},
+    {"home.move.readiness", 2},
+    {"home.move.start", 2}
   ]
   @methods Enum.map(@method_minimums, fn {method, _minimum} -> method end)
   @method_minimum_versions Map.new(@method_minimums)

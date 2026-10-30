@@ -13,9 +13,15 @@ defmodule FermixTestSupport.CliContractCases do
   change behind it.
   """
 
+  alias Fermix.CLI.HomeMovedCommand
   alias Fermix.CLI.MachineOutput
   alias Fermix.CLI.Service.Status
+  alias FermixCore.Home.Candidates
+  alias FermixCore.Home.Snapshot.S3, as: SnapshotS3
+  alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
   alias FermixCore.Management.Diagnostics.Offline
+  alias FermixCore.Management.Home
+  alias FermixCore.Management.HomeMove
 
   @vendor_unit "/usr/lib/systemd/user/fermix.service"
   @legacy_unit "/home/operator/.config/systemd/user/fermix.service"
@@ -198,9 +204,87 @@ defmodule FermixTestSupport.CliContractCases do
       {"service_install/unit.json", encoded(MachineOutput.ok(action("installed")))},
       {"service_uninstall/ok.json", encoded(MachineOutput.ok(action("uninstalled")))},
       {"restart/ok.json", encoded(MachineOutput.ok(restart("4711")))},
-      {"restart/recovered.json", encoded(MachineOutput.ok(restart(nil)))}
+      {"restart/recovered.json", encoded(MachineOutput.ok(restart(nil)))},
+      {"home_mark_moved/ok.json", encoded(MachineOutput.ok(HomeMovedCommand.result(moved())))},
+      {"home_status/primary.json", encoded(MachineOutput.ok(home_status()))},
+      {"home_snapshots_status/ok.json", encoded(MachineOutput.ok(snapshots_view()))},
+      {"home_candidates/ok.json", encoded(MachineOutput.ok(candidates_view()))},
+      {"home_move/ok.json", encoded(MachineOutput.ok(move_view(true)))},
+      {"home_move/retired.json", encoded(MachineOutput.ok(move_view(false)))}
     ]
   end
+
+  # `fermix home candidates`: the one candidate the primary holds, as the
+  # engine answers it or, stopped, as the home's own file holds it.
+  defp candidates_view, do: %{"candidates" => [Candidates.view(candidate())]}
+
+  # `fermix home move`: the move to that candidate as the running engine
+  # answers it, its recovery key the one the snapshot goldens show; with
+  # `--retire`, a server being replaced that keeps no desktop.
+  defp move_view(keep_as_desktop) do
+    HomeMove.started_view(%{
+      move_id: "mv-01a17cb1f5c04c1e9a7b",
+      candidate: candidate(),
+      recovery_recipient:
+        "fxsnap1.AAECAwQFBgcICQoLDA0ODw.B3l5ExMinEfPofapoLSG57ZGCBl_fiIqFbtB5nPDNqA",
+      key_id: "08c15ca36dd935c4",
+      keep_as_desktop: keep_as_desktop
+    })
+  end
+
+  # The facts a candidate's view publishes, with the instance and the bucket
+  # the host reported, so the goldens draw both.
+  defp candidate do
+    %{
+      candidate_id: "cand-5e2a9c1f7b3d4086",
+      name: "north-box",
+      os: "linux",
+      arch: "aarch64",
+      version: "1.2.3",
+      node_id: "bb716f238ec342e512e3400c6f8363f0fc3fd3ba2b6b749dd6130b81d7cb5827",
+      instance: %{"provider" => "hetzner", "instance_id" => "61839204", "region" => "fsn1"},
+      snapshots: %{"s3_bucket" => "invented-fermix-snapshots", "s3_region" => "eu-central-1"},
+      enrolled_at: ~U[2026-10-27 09:12:00Z],
+      expires_at: ~U[2026-10-28 09:12:00Z]
+    }
+  end
+
+  # `fermix home status`: a primary at epoch 4 whose last snapshot S3 stored.
+  defp home_status do
+    Home.picture(%{role: :primary, epoch: 4, moved: nil, snapshots: snapshots_view()})
+  end
+
+  defp snapshots_view do
+    attempt = %{
+      at: ~U[2026-10-27 09:30:00Z],
+      result: :verified,
+      name: "20261027T093000Z-e4.fxsnap",
+      epoch: 4,
+      size: 48_211,
+      sha256: "9c1f4e2a7b3d5c6e8f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6a",
+      location: "s3://invented-fermix-snapshots/fermix/general/20261027T093000Z-e4.fxsnap",
+      key_id: "08c15ca36dd935c4",
+      error: nil
+    }
+
+    status = %{
+      SnapshotStatus.record(SnapshotStatus.empty(), "s3", attempt)
+      | next_run_at: ~U[2026-10-27 15:30:00Z]
+    }
+
+    SnapshotStatus.view(status, %{
+      config: [
+        recipient: "fxsnap1.AAECAwQFBgcICQoLDA0ODw.B3l5ExMinEfPofapoLSG57ZGCBl_fiIqFbtB5nPDNqA",
+        s3_bucket: "invented-fermix-snapshots"
+      ],
+      targets: [SnapshotS3],
+      running: false,
+      profile: "general"
+    })
+  end
+
+  # The marker `fermix home mark-moved` writes and prints.
+  defp moved, do: %{epoch: 4, moved_at: ~U[2026-10-27 09:30:00Z], to: "aws i-0f3b1c"}
 
   defp action(past_tense), do: %{"action" => past_tense, "scope" => "user"}
 
@@ -291,6 +375,27 @@ defmodule FermixTestSupport.CliContractCases do
   def error_details(:systemctl_failed), do: [output: "Unit fermix.service not found."]
   def error_details(:lifecycle_refused), do: [output: "the daemon returned no lease"]
   def error_details(:diagnostics_unavailable), do: [output: "collecting it took too long"]
+  def error_details(:already_moved), do: [to: "hetzner cx22", date: "2026-10-20", epoch: 3]
+
+  def error_details(:snapshots_refused),
+    do: [output: "Snapshots are off: set a recovery passphrase to turn them on."]
+
+  def error_details(:home_status_unavailable),
+    do: [output: "The requested management method is not available. (method_not_found)"]
+
+  def error_details(:enrollment_refused),
+    do: [output: "Only the primary enrolls candidates and starts a move."]
+
+  def error_details(:move_refused),
+    do: [
+      output:
+        "No server waiting for the move has the id cand-0f1e2d3c4b5a6978. A server waits 24 " <>
+          "hours after it enrolls; after that, get a new code and enroll it again."
+    ]
+
+  def error_details(:mark_moved_failed),
+    do: [output: "could not tell whether Fermix is running (timeout)"]
+
   def error_details(_code), do: []
 
   defp invalid_binding_sentence do

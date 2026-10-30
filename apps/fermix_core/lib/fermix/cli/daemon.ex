@@ -57,6 +57,7 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Introspection.Capabilities
   alias FermixCore.Introspection.Wire
   alias FermixCore.Management.Cues, as: ManagementCues
+  alias FermixCore.Management.HomeMove, as: ManagementHomeMove
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Mobile, as: ManagementMobile
   alias FermixCore.Management.Placement
@@ -96,6 +97,11 @@ defmodule Fermix.CLI.Daemon do
   # on the phone that asked, closing the window, and forgetting a device.
   @mobile_decisions_v1 ~w(mobile.pair.start mobile.pair.decide mobile.pair.cancel
                           mobile.devices.revoke)
+  # Opening a code that lets a server take this home, reviewing a move (the
+  # review reads every keychain secret the move would carry) and starting it,
+  # and replacing the recovery key (M75).
+  @home_decisions_v1 ~w(home.enroll.open home.move.readiness home.move.start
+                        home.snapshots.passphrase)
   @owner_decisions_v0 ~w(mobile_pair_begin mobile_pair_decide mobile_pair_cancel
                          mobile_device_revoke)
   # The cue writes that widen what reaches a task or what a task may do, the
@@ -421,6 +427,7 @@ defmodule Fermix.CLI.Daemon do
   # `cues_mandates_enabled` back on undoes the owner's stop of every mandate.
   # Every other secret and section stays open, as it was.
   defp owner_family(method, _params) when method in @mobile_decisions_v1, do: :mobile
+  defp owner_family(method, _params) when method in @home_decisions_v1, do: :home
   defp owner_family(method, _params) when method in @cue_decisions_v1, do: :cues
 
   defp owner_family(method, %{"id" => @cue_secret_prefix <> _ref}) when method in @secret_writes,
@@ -449,7 +456,16 @@ defmodule Fermix.CLI.Daemon do
   # channel is fine and doctor says so, so "not running" would send the
   # operator after the wrong fault. The capability and the sentence are the
   # request's family's: the phone's own pair for its pairing methods, the
-  # cues' for theirs and for a cue write that rides a generic method.
+  # cues' for theirs and for a cue write that rides a generic method, and for
+  # M75's the home move's.
+  defp owner_decision_refusal(:home) do
+    {:error, :unavailable,
+     %{
+       "capability" => ManagementHomeMove.capability(),
+       "sentence" => ManagementHomeMove.owner_only_sentence()
+     }}
+  end
+
   defp owner_decision_refusal(:cues) do
     {:error, :unavailable,
      %{

@@ -134,6 +134,18 @@ defmodule FermixChannels.Home.CandidateTreeTest do
   end
 
   test "the candidate's own tree carries a move from the offer to the commit", ctx do
+    # What first boot reads until the candidate has enrolled.
+    assert {:ok, status} =
+             :peer.call(
+               ctx.peer,
+               FermixCore.Management.Home,
+               :status,
+               [[home: ctx.home, engine_role: %{role: :candidate, primary: nil}]],
+               @call_ms
+             )
+
+    assert %{"role" => "candidate", "move" => %{"phase" => "enrolled"}} = status
+
     # More than any disk holds: refused with the space `df` reported.
     assert {:error, "move_failed", sentence} = offer(ctx.peer, 1_125_899_906_842_624)
     assert sentence =~ ~r/needs about \d+ GiB free for the move and has \d+ (GiB|MiB)/

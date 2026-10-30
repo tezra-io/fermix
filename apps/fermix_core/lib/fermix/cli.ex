@@ -20,6 +20,7 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.DiagnosticsCommand
   alias Fermix.CLI.Doctor
   alias Fermix.CLI.HealthCommand
+  alias Fermix.CLI.HomeCommand
   alias Fermix.CLI.LogsCommand
   alias Fermix.CLI.MemoryCommand
   alias Fermix.CLI.MigrateToApp
@@ -88,6 +89,7 @@ defmodule Fermix.CLI do
   defp dispatch("settings", rest), do: SettingsCommand.run(rest)
   defp dispatch("logs", rest), do: LogsCommand.run(rest)
   defp dispatch("memory", rest), do: MemoryCommand.run(rest)
+  defp dispatch("home", rest), do: HomeCommand.run(rest)
   defp dispatch("upgrade", rest), do: UpgradeCommand.run(rest)
   defp dispatch("uninstall", rest), do: UninstallCommand.run(rest)
   defp dispatch("migrate-to-app", rest), do: MigrateToApp.run(rest)
@@ -151,6 +153,16 @@ defmodule Fermix.CLI do
       fermix settings reload [--json]              Read config.toml again after an outside edit
       fermix memory review --now [--conversation KEY] [--json]
       fermix memory restore ID [--json]
+      fermix home export FILE [--passphrase-file PATH] [--mark-moved --to TEXT]  Archive this home, sealed, while it is stopped
+      fermix home import FILE --into ROOT [--passphrase-file PATH]  Restore an archive or a snapshot as the next primary
+      fermix home mark-moved --to TEXT [--json]    Retire this home once its archive has left
+      fermix home status [--json]                  Show the role, epoch and snapshots of this home
+      fermix home snapshots status|run [--json]    Show the snapshots, or take one now
+      fermix home snapshots passphrase --passphrase-file PATH [--json]  Set the recovery passphrase
+      fermix home enroll-code [--json]             Open a one-time code a new server enrolls with
+      fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R] [--instance-file PATH]  Make this fresh home a candidate primary
+      fermix home candidates [--json]              List the enrolled candidate primaries
+      fermix home move --to ID [--recovery-passphrase-file PATH] [--retire] [--json]  Move this home to a candidate
       fermix logs   [-f] [-n LINES]                Show daemon log file
       fermix upgrade [--check]                     Self-update from signed releases
       fermix uninstall                             Remove a Fermix.app-managed installation

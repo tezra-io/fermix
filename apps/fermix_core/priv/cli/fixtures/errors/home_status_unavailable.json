@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "home_status_unavailable",
+    "sentence": "Fermix could not read this home's status. It said: The requested management method is not available. (method_not_found)"
+  },
+  "ok": false,
+  "schema_version": 1
+}

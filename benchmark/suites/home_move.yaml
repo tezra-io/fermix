@@ -1,0 +1,91 @@
+# Moving Fermix to an always-on machine (M75 stage 1), graded through the real
+# agent path.
+#
+# WHAT ROTS HERE. How a home moves to another host, and what the old machine
+# does afterwards, is written in the `self-knowledge` skill's `home` reference:
+# a stopped home is exported into one archive under a passphrase and imported
+# into an empty directory on the new host, the old home is marked moved so it
+# never starts as the primary again, and the old Mac may run on in the device
+# role for its desktop app. General knowledge says "copy the folder over". ExUnit
+# proves the sentences are in the file; this suite proves an owner who asks in
+# their own words gets them.
+#
+# WHY BEHAVIORAL. There is no end state to check: the answer is advice.
+#
+# GATES. One labelled sanity case pins that the answer comes from the skill
+# (`skill_view`); every other gate is a floor any correct answer meets (the
+# export and the import; the primary the device-role Mac points at). The rubric
+# owns the wording. No `reply_not_matches`: the wrong move (copying the home
+# folder by hand) is something a correct answer may well warn against, and a
+# pattern cannot tell the two polarities apart.
+#
+# NO NEW CONSENT GATE. Nothing here is gated on a human decision, so
+# `bin/seed_capability_home.py` needs no pre-grant (these are `host_readonly`,
+# and no case runs a command).
+suite: home_move
+risk: host_readonly
+title: "Moving Fermix to a VM — the export, the import, and the device role"
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: move_to_an_always_on_host
+    title: "Moving the home to a VM, and what the old Mac does afterwards"
+    severity: normal
+    risk: host_readonly
+    tags: [home, always-on, self-knowledge]
+    cases:
+      # SANITY CASE — the one route assertion in this suite. The move's verbs and
+      # their order are not general knowledge; they are in the skill's `home`
+      # reference, so this case pins that the model opened it.
+      - id: move_to_vm_sanity
+        query: >
+          I've rented a small Linux VM so Fermix can keep running when my Mac
+          is asleep. How do I move my Fermix over to it without losing my
+          memory and settings, and what will I have to redo on the VM?
+        expect:
+          tools_any: [skill_view]
+          reply_matches: '(?is)(?=.*\bexport)(?=.*\bimport)'
+          max_tool_calls: 8
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says the move is an export of the home, with Fermix stopped on the
+             Mac, into one archive protected by a passphrase the owner keeps
+             (`fermix home export`), copied to the VM and imported there into an
+             empty directory (`fermix home import ... --into ...`).
+          2. Says the Mac's home is marked as moved (`--mark-moved` on the
+             export, or `fermix home mark-moved`) so it can no longer start as
+             the primary.
+          3. Names at least two things that do not travel and are redone on the
+             VM: secrets kept in the operating system's keyring, browser
+             sign-ins (browser profiles stay with the Mac), coding-agent
+             consent, settings that point at paths outside the old home, or
+             plugins built for macOS.
+          4. Does not present copying or syncing the Fermix home folder by hand
+             as the way to move it.
+      - id: device_role_after_the_move
+        query: >
+          Once Fermix lives on my VM, what does my Mac's Fermix do? Someone
+          mentioned a "device role" for the old machine. What is that, and does
+          the Mac still answer my messages?
+        expect:
+          reply_matches: '(?i)\bprimary\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Explains the device role as the Mac's engine setting after the
+             move (`role = "device"` under `[fermix_core.engine]` in its
+             config), which keeps an engine on the Mac for the desktop app
+             there.
+          2. Says a device-role engine does not answer messages: it refuses
+             every turn and points at the primary (the VM), starts no chat
+             channels and no schedulers, and makes no provider calls or
+             sign-ins.
+          3. Says the VM is now the primary, the one copy that runs the agent
+             and writes long-term memory, and that a home marked moved can no
+             longer start as the primary.

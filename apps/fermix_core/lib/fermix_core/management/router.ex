@@ -17,6 +17,8 @@ defmodule FermixCore.Management.Router do
   alias FermixCore.Management.Detect
   alias FermixCore.Management.Diagnostics
   alias FermixCore.Management.Doctor
+  alias FermixCore.Management.Home
+  alias FermixCore.Management.HomeMove
   alias FermixCore.Management.IMessage
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Lifecycle
@@ -42,7 +44,8 @@ defmodule FermixCore.Management.Router do
     computer_use.grant.start computer_use.permissions.get mobile.status mobile.pair.start
     mobile.devices.list browser.install.start imessage.permissions.get imessage.policy.confirm
     mcp.servers.list mcp.servers.import.scan cues.status cues.sources.list cues.watchers.list
-    cues.mandates.list cues.mandates.choices
+    cues.mandates.list cues.mandates.choices home.status home.snapshots.status home.snapshots.run
+    home.enroll.open home.candidates.list
   )
   @lease_params ~w(lease_id)
   @doctor_session_params ~w(session_id)
@@ -74,11 +77,14 @@ defmodule FermixCore.Management.Router do
   @mcp_draft_params ~w(text)
   @mcp_import_params ~w(servers)
   @mcp_tool_params ~w(name tool enabled)
+  @home_passphrase_params ~w(recovery_passphrase)
+  @home_readiness_params ~w(candidate_id)
+  @home_move_params ~w(candidate_id recovery_passphrase keep_as_desktop)
   # A candidate (M75 §2) answers the protocol's hello and home.status, and
   # refuses every other method by name.
   @candidate_methods ~w(hello home.status)
-  @candidate_sentence "This engine is a candidate primary waiting for its move; it serves " <>
-                        "nothing until the move makes it the primary."
+  @candidate_sentence "This engine is a candidate primary waiting for its move; it answers " <>
+                        "home.status and nothing else until the move makes it the primary."
   @cue_ref_params ~w(ref)
   @cue_form_params ~w(kind preset verify)
   @cue_add_params ~w(ref kind preset values)
@@ -271,6 +277,58 @@ defmodule FermixCore.Management.Router do
     do: mcp_by_name(&McpServers.check_start/2, params, opts)
 
   defp route_known("cues." <> _rest = method, params, opts), do: route_cues(method, params, opts)
+  defp route_known("home." <> _rest = method, params, opts), do: route_home(method, params, opts)
+
+  # Answered locally in every role (M75 §14): a device reads its own home.
+  defp route_home("home.status", %{}, opts), do: operation_result(Home.status(home_opts(opts)))
+
+  defp route_home("home.snapshots.status", %{}, opts),
+    do: operation_result(Home.snapshots_status(home_opts(opts)))
+
+  defp route_home("home.snapshots.run", %{}, opts),
+    do: operation_result(Home.snapshots_run(home_opts(opts)))
+
+  defp route_home("home.snapshots.passphrase", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_passphrase_params) do
+      operation_result(
+        Home.snapshots_passphrase(Map.get(params, "recovery_passphrase"), home_opts(opts))
+      )
+    end
+  end
+
+  defp route_home("home.enroll.open", %{}, opts),
+    do: operation_result(HomeMove.enroll_open(home_opts(opts)))
+
+  defp route_home("home.candidates.list", %{}, opts),
+    do: operation_result(HomeMove.candidates_list(home_opts(opts)))
+
+  defp route_home("home.move.readiness", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_readiness_params) do
+      operation_result(HomeMove.move_readiness(Map.get(params, "candidate_id"), home_opts(opts)))
+    end
+  end
+
+  # `keep_as_desktop` (default true): false when the source is a server being
+  # replaced, which then becomes no desktop of the new primary (M75).
+  defp route_home("home.move.start", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_move_params),
+         {:ok, keep?} <- keep_as_desktop(params) do
+      operation_result(
+        HomeMove.move_start(
+          Map.get(params, "candidate_id"),
+          Map.get(params, "recovery_passphrase"),
+          Keyword.put(home_opts(opts), :keep_as_desktop, keep?)
+        )
+      )
+    end
+  end
+
+  defp keep_as_desktop(params) do
+    case Map.get(params, "keep_as_desktop", true) do
+      keep? when is_boolean(keep?) -> {:ok, keep?}
+      _other -> invalid_params("keep_as_desktop")
+    end
+  end
 
   defp route_cues("cues.status", %{}, opts), do: operation_result(Cues.status(cues_opts(opts)))
 
@@ -715,6 +773,24 @@ defmodule FermixCore.Management.Router do
   defp jobs_opts(opts), do: opts |> operation_opts() |> Keyword.get(:jobs, [])
   defp mobile_opts(opts), do: opts |> operation_opts() |> Keyword.get(:mobile, [])
   defp cues_opts(opts), do: opts |> operation_opts() |> Keyword.get(:cues, [])
+
+  # The router's own `:engine_role` (tests) reaches the family as its seam, and
+  # a linked device's way to its primary (`:primary_forward`, from the daemon)
+  # lets `home.status` add the primary's own.
+  defp home_opts(opts) do
+    home = opts |> operation_opts() |> Keyword.get(:home, [])
+
+    home =
+      case Keyword.fetch(opts, :engine_role) do
+        {:ok, role} -> Keyword.put_new(home, :engine_role, role)
+        :error -> home
+      end
+
+    case Keyword.fetch(opts, :primary_forward) do
+      {:ok, forward} -> Keyword.put(home, :primary_forward, forward)
+      :error -> home
+    end
+  end
 
   # Composed on a linked device (M75): this machine's own sections, which
   # configure it alone, and the primary's others, asked within the composed

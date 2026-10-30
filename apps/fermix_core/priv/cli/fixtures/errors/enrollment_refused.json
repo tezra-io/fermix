@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "enrollment_refused",
+    "sentence": "Fermix did not open an enrollment code. It said: Only the primary enrolls candidates and starts a move."
+  },
+  "ok": false,
+  "schema_version": 1
+}

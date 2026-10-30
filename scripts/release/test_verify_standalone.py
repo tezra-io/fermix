@@ -389,6 +389,86 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must exit 3, got 1", result.stderr)
 
+    # ── the fermix home stage ─────────────────────────────────────────────
+
+    def test_home_exports_imports_and_marks_moved_once(self):
+        self._write_artifact(create_disclaim=True)
+
+        result = self._run("macos_aarch64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("primary epoch: 5", result.stdout)
+        self.assertIn("at primary epoch 6.", result.stdout)
+
+    # The release that lacks the verb: the dispatcher's unknown-command exit.
+    def test_rejects_an_artifact_without_the_home_verb(self):
+        self._write_artifact(create_disclaim=True, home="unknown_verb")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix home export must exit 0 in the throwaway world, got 2", result.stderr)
+
+    def test_rejects_a_mark_moved_that_marks_a_moved_home_again(self):
+        self._write_artifact(create_disclaim=True, home="marks_twice")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("a second fermix home mark-moved must exit 1, got 0", result.stderr)
+
+    def test_rejects_a_mark_moved_that_writes_no_marker(self):
+        self._write_artifact(create_disclaim=True, home="not_moved")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix home mark-moved wrote no marker", result.stderr)
+
+    def test_rejects_a_home_status_that_does_not_read_the_epoch(self):
+        self._write_artifact(create_disclaim=True, home="status_blind")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix home status did not read the home's primary epoch", result.stderr)
+
+    # The class the enroll stage exists for: the packaged binary taking a code
+    # file that holds no enrollment code and making the home a candidate anyway.
+    def test_rejects_an_enroll_that_accepts_an_invalid_code(self):
+        self._write_artifact(create_disclaim=True, home="enroll_accepts")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix home enroll with an invalid code must exit 1, got 0", result.stderr)
+
+    def test_rejects_an_enroll_refusal_that_leaves_a_home_behind(self):
+        self._write_artifact(create_disclaim=True, home="enroll_leaves_home")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix home enroll left a home behind", result.stderr)
+
+    def test_rejects_an_enroll_refusal_that_removes_the_code_file(self):
+        self._write_artifact(create_disclaim=True, home="enroll_consumes")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix home enroll removed the code file it refused", result.stderr)
+
+    # The stage runs before migrate-to-app, which ends the script on Linux.
+    def test_linux_artifact_runs_the_home_stage_too(self):
+        self.artifact = self.base / "fermix_linux_x86_64"
+        self._write_artifact(create_disclaim=False, migrate="refused:not_macos", home="unknown_verb")
+
+        result = self._run("linux_x86_64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fermix home export must exit 0 in the throwaway world, got 2", result.stderr)
+
     # Every run passes its own pin, written for the target it verifies, and puts
     # a stand-in `codesign` first on PATH: the macOS rows must not depend on the
     # host's signing tools, and a Linux host has none.
@@ -855,6 +935,7 @@ class VerifyStandaloneTest(unittest.TestCase):
         auth_logout="removes",
         browser_bridge="works",
         settings="refuses",
+        home="carries",
         iroh_helper="pinned",
         iroh_notices="pinned",
         maintenance="answers",
@@ -892,6 +973,9 @@ class VerifyStandaloneTest(unittest.TestCase):
             "fi\n"
             'if [ "${1:-}" = "settings" ]; then\n'
             f"{self._settings_behaviour(settings)}"
+            "fi\n"
+            'if [ "${1:-}" = "home" ]; then\n'
+            f"{self._home_behaviour(home)}"
             "fi\n"
             f"printf 'fermix {version}\\n'\n",
             encoding="utf-8",
@@ -990,6 +1074,99 @@ class VerifyStandaloneTest(unittest.TestCase):
         if settings == "silent":
             return argv + json + "  exit 3\n"
         raise ValueError(f"unknown settings behaviour: {settings}")
+
+    # The real verbs' shapes in the throwaway world: export seals the home the
+    # environment names, import makes the next primary with the home's own path
+    # moved, and mark-moved writes the marker once and refuses the second time.
+    def _home_behaviour(self, home):
+        if home == "unknown_verb":
+            return "  printf 'fermix: unknown command: home\\n' >&2\n  exit 2\n"
+        export = (
+            '  if [ "$2" = "export" ]; then\n'
+            '    [ "$4" = "--passphrase-file" ] || exit 64\n'
+            '    epoch="$(cat "$FERMIX_HOME/mobile/primary_epoch")"\n'
+            '    printf \'sealed\\n\' > "$3"\n'
+            "    printf 'Exported %s to %s\\n  primary epoch: %s\\n' \"$FERMIX_HOME\" \"$3\" \"$epoch\"\n"
+            "    exit 0\n"
+            "  fi\n"
+        )
+        moved_path = "" if home == "not_moved" else (
+            '    printf \'{"ok":true}\\n\' > "$FERMIX_HOME/moved.json"\n'
+        )
+        restored = (
+            '  if [ "$2" = "import" ]; then\n'
+            '    [ "$4" = "--into" ] && [ "$6" = "--passphrase-file" ] || exit 64\n'
+            '    mkdir -p "$5/mobile"\n'
+            "    printf '6\\n' > \"$5/mobile/primary_epoch\"\n"
+            "    printf '[sandbox]\\nworkspace_root = \"%s/workspace\"\\n' \"$5\" > \"$5/config.toml\"\n"
+            "    printf 'Restored 2 files into %s at primary epoch 6.\\n' \"$5\"\n"
+            "    exit 0\n"
+            "  fi\n"
+        )
+        marked = (
+            '  [ "$*" = "home mark-moved --to verify-host --json" ] || exit 64\n'
+            '  if [ -e "$FERMIX_HOME/moved.json" ]; then\n'
+            '    printf \'{"error":{"code":"already_moved","sentence":"moved"},"ok":false}\\n\'\n'
+            "    exit 1\n"
+            "  fi\n"
+            f"{moved_path}"
+            '  printf \'{"ok":true,"result":{"epoch":5}}\\n\'\n'
+            "  exit 0\n"
+        )
+        status = (
+            '  if [ "$2" = "status" ]; then\n'
+            '    [ "$3" = "--json" ] || exit 64\n'
+            '    epoch="$(cat "$FERMIX_HOME/mobile/primary_epoch")"\n'
+            + ("    epoch=null\n" if home == "status_blind" else "")
+            + '    printf \'{"ok":true,"result":{"role":"primary","epoch":%s}}\\n\' "$epoch"\n'
+            "    exit 0\n"
+            "  fi\n"
+        )
+        if home == "marks_twice":
+            marked = (
+                '  : > "$FERMIX_HOME/moved.json"\n'
+                '  printf \'{"ok":true,"result":{"epoch":5}}\\n\'\n'
+                "  exit 0\n"
+            )
+        enroll = self._enroll_behaviour(home)
+        if home in (
+            "carries",
+            "marks_twice",
+            "not_moved",
+            "status_blind",
+            "enroll_accepts",
+            "enroll_leaves_home",
+            "enroll_consumes",
+        ):
+            return export + restored + status + enroll + marked
+        raise ValueError(f"unknown home behaviour: {home}")
+
+    # The real verb refuses a code file that holds no enrollment code: one
+    # sentence on stderr, exit 1, and the home and the code file as it found
+    # them. Each other shape is one way a release could get that wrong.
+    @staticmethod
+    def _enroll_behaviour(home):
+        refusal = (
+            "    printf 'fermix home enroll: That is not an enrollment code Fermix opened (json). "
+            "Copy the code again.\\n' >&2\n"
+            "    exit 1\n"
+        )
+        effect = {
+            "enroll_accepts": (
+                '    mkdir -p "$FERMIX_HOME/candidate"\n'
+                '    rm -f "$4"\n'
+                "    printf 'This home is now a candidate of studio-mac.\\n'\n"
+                "    exit 0\n"
+            ),
+            "enroll_leaves_home": '    mkdir -p "$FERMIX_HOME/logs"\n' + refusal,
+            "enroll_consumes": '    rm -f "$4"\n' + refusal,
+        }.get(home, refusal)
+        return (
+            '  if [ "$2" = "enroll" ]; then\n'
+            '    [ "$3" = "--code-file" ] && [ -f "$4" ] || exit 64\n'
+            f"{effect}"
+            "  fi\n"
+        )
 
     def _plugins_clear_behaviour(self, plugins_clear):
         forget = (

@@ -63,6 +63,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Transcription.Local.ModelStore, as: LocalModelStore
   alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
+  alias FermixWebWeb.SetupLive.AlwaysOn
   alias FermixWebWeb.SetupLive.Components
   alias FermixWebWeb.SetupLive.CuesState
   alias FermixWebWeb.SetupLive.Phone
@@ -107,6 +108,7 @@ defmodule FermixWebWeb.SetupLive do
       description: "User profile"
     },
     %{id: "cues", label: "Cues", component: nil, description: "Outside input"},
+    %{id: "always_on", label: "Always On", component: nil, description: "Where Fermix runs"},
     %{id: "doctor", label: "Doctor", component: nil, description: "Final checks"}
   ]
 
@@ -211,12 +213,16 @@ defmodule FermixWebWeb.SetupLive do
   # re-states it in the url so the post-restart reload stays native.
   defp mount_authorized(socket, requested_tab, embed?) do
     report = Wizard.report()
+    record = engine_record()
+    active_tab = requested_tab || first_tab(record, report)
 
     socket =
       socket
       |> assign(:page_title, "Fermix setup")
       |> assign(:embed?, embed?)
-      |> assign(:active_tab, requested_tab || next_action_tab(report))
+      |> assign(:engine_record, record)
+      |> assign(:always_on, AlwaysOn.initial(record))
+      |> assign(:active_tab, active_tab)
       |> assign(:saved_flash, nil)
       |> assign(:doctor_result, nil)
       |> assign(:doctor_probe_pending, MapSet.new())
@@ -242,9 +248,15 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:meetings_config_open?, false)
       |> assign(:phone, Phone.initial())
       |> assign_report(report)
+      |> AlwaysOn.on_tab(active_tab)
 
     {:ok, socket}
   end
+
+  # A device-role page opens on Always On, which says whether this computer
+  # reaches the server (M75 B14): the rest of the setup is the primary's.
+  defp first_tab(%{role: :device}, _report), do: "always_on"
+  defp first_tab(_record, report), do: next_action_tab(report)
 
   # A pairing window this page still shows is cancelled when the page goes away
   # (the tab closed or the socket dropped).
@@ -263,7 +275,8 @@ defmodule FermixWebWeb.SetupLive do
      socket
      |> assign(:active_tab, active_tab)
      |> assign(:saved_flash, nil)
-     |> refresh_cues_on(active_tab)}
+     |> refresh_cues_on(active_tab)
+     |> AlwaysOn.on_tab(active_tab)}
   end
 
   def handle_event("next_step", _params, socket) do
@@ -898,6 +911,10 @@ defmodule FermixWebWeb.SetupLive do
      )}
   end
 
+  # The Always On tab (M75 B14).
+  def handle_event("always_on_" <> _rest = event, params, socket),
+    do: {:noreply, AlwaysOn.handle_event(event, params, socket)}
+
   # The Cues tab (M60 §15): `CuesState` turns each `cues_*` event into a
   # change and says what follows.
   def handle_event("cues_" <> action, params, socket) do
@@ -1214,9 +1231,16 @@ defmodule FermixWebWeb.SetupLive do
       tabs={@tabs}
       tool_summary={@tool_summary}
       cues={@cues}
+      always_on={@always_on}
+      device_notice={AlwaysOn.device_notice(@engine_record)}
+      unavailable_tabs={AlwaysOn.primary_tabs(@engine_record, @tabs)}
+      unavailable_sentence={unavailable_sentence(@engine_record)}
     />
     """
   end
+
+  defp unavailable_sentence(%{role: :device} = record), do: AlwaysOn.unavailable_sentence(record)
+  defp unavailable_sentence(_record), do: nil
 
   # One banner, one action (M34 native setup §15.1). The state is the daemon's
   # and is re-read here rather than remembered: this is the render every save

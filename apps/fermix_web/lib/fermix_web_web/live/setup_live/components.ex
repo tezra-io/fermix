@@ -4,6 +4,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   alias FermixCore.Auth.Redaction
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
+  alias FermixWebWeb.SetupLive.AlwaysOn
   alias FermixWebWeb.SetupLive.CuesPane
   alias FermixWebWeb.SetupLive.Phone
 
@@ -66,6 +67,13 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :provider_statuses, :list, required: true
   # The Cues tab's state (M60 §15).
   attr :cues, :map, required: true
+  # The Always On tab's state, and the device role's word on the page (M75
+  # B14): the notice the page leads with, the tabs the primary serves, and the
+  # sentence those tabs show instead of their forms.
+  attr :always_on, :map, required: true
+  attr :device_notice, :string, default: nil
+  attr :unavailable_tabs, :list, default: []
+  attr :unavailable_sentence, :string, default: nil
 
   def page(assigns) do
     ~H"""
@@ -109,6 +117,15 @@ defmodule FermixWebWeb.SetupLive.Components do
               columns by the width they actually get, not the viewport's, so the
               narrow in-app pane and the browser page share one rule. --%>
         <section class={if @embed?, do: "@container min-w-0", else: "@container mt-6 min-w-0 lg:mt-0"}>
+          <div
+            :if={@device_notice}
+            id="device-role-notice"
+            class="mb-4 flex items-start gap-2 rounded-box border border-info/30 bg-info/5 px-4 py-3 text-sm"
+            role="note"
+          >
+            <.icon name="hero-computer-desktop" class="mt-0.5 size-4 shrink-0 text-info" />
+            <span>{@device_notice}</span>
+          </div>
           <div :if={@saved_flash} class="mb-4">
             <.flash_banner flash={@saved_flash} />
           </div>
@@ -176,6 +193,9 @@ defmodule FermixWebWeb.SetupLive.Components do
               tabs={@tabs}
               tool_summary={@tool_summary}
               cues={@cues}
+              always_on={@always_on}
+              unavailable_tabs={@unavailable_tabs}
+              unavailable_sentence={@unavailable_sentence}
             />
           </div>
         </section>
@@ -332,8 +352,35 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :tool_summary, :map, required: true
   attr :provider_statuses, :list, required: true
   attr :cues, :map, default: nil
+  attr :always_on, :map, default: nil
+  attr :unavailable_tabs, :list, default: []
+  attr :unavailable_sentence, :string, default: nil
 
-  defp active_pane(assigns), do: render_active_pane(assigns.active_tab, assigns)
+  # A tab the primary serves is drawn as unavailable on a device-role page
+  # (M75 B14), before the owner tries one of its controls.
+  defp active_pane(assigns) do
+    if assigns.active_tab in assigns.unavailable_tabs,
+      do: primary_only_pane(assigns),
+      else: render_active_pane(assigns.active_tab, assigns)
+  end
+
+  defp primary_only_pane(assigns) do
+    assigns =
+      assign(
+        assigns,
+        :label,
+        Enum.find_value(assigns.tabs, &(&1.id == assigns.active_tab && &1.label))
+      )
+
+    ~H"""
+    <div id="primary-only-pane" class="space-y-4">
+      <h2 class="text-2xl font-semibold tracking-normal">{@label}</h2>
+      <p class="rounded-box border border-base-300 bg-base-200/60 p-4 text-sm leading-6">
+        {@unavailable_sentence}
+      </p>
+    </div>
+    """
+  end
 
   defp render_active_pane("provider", assigns), do: provider_pane(assigns)
   defp render_active_pane("realtime", assigns), do: realtime_pane(assigns)
@@ -348,6 +395,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp render_active_pane("personalization", assigns), do: personalization_pane(assigns)
   defp render_active_pane("doctor", assigns), do: doctor_pane(assigns)
   defp render_active_pane("cues", assigns), do: CuesPane.pane(assigns)
+  defp render_active_pane("always_on", assigns), do: AlwaysOn.pane(assigns)
 
   defp provider_pane(assigns) do
     ~H"""

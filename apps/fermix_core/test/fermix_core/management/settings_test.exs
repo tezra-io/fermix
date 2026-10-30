@@ -129,8 +129,9 @@ defmodule FermixCore.Management.SettingsTest do
     end
 
     test "every pane a section names is a pane the app routes to" do
+      # `always_on` is the Always On pane the apps add with M75 (§14).
       panes = ~w(providers personality memory channels cues voice meetings computer coding
-                 search images sandbox browser secrets)
+                 search images sandbox browser secrets always_on)
 
       for section <- Settings.sections() do
         assert section.pane in panes, "#{section.id} names an unroutable pane"

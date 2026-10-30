@@ -203,7 +203,7 @@ defmodule FermixCore.Home.Candidate do
   def error_sentence({:code_expired, at}),
     do:
       "The enrollment code expired at #{DateTime.to_iso8601(at)}. Get a new code from the " <>
-        "primary and enroll with it."
+        "primary's Always On and enroll with it."
 
   def error_sentence(:primary_epoch),
     do:

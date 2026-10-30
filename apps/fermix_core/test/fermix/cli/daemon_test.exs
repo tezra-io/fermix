@@ -1122,6 +1122,62 @@ defmodule Fermix.CLI.DaemonTest do
     end
   end
 
+  # M75: a code that lets a server take this home, the move itself and the
+  # recovery key are the owner's decisions; a command the agent ran is refused.
+  describe "owner decisions on the home" do
+    @home_decisions ~w(home.enroll.open home.move.readiness home.move.start
+                       home.snapshots.passphrase)
+
+    test "a process the daemon started is refused, and so is one it cannot place" do
+      golden = home_owner_golden()
+
+      for peer <- [[daemon_os_pid: ParentProcess.os_pid()], [os: {:win32, :nt}]] do
+        socket_path = start_peer_daemon(peer)
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            for method <- @home_decisions do
+              assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                       Client.request_v1(method, %{}, socket_path: socket_path, timeout: 5_000),
+                     method
+            end
+          end)
+
+        assert log =~ "only the owner may"
+      end
+    end
+
+    test "a process the daemon did not start is not refused as an owner decision", %{
+      socket_path: socket_path
+    } do
+      golden = home_owner_golden()
+
+      for method <- @home_decisions do
+        result = Client.request_v1(method, %{}, socket_path: socket_path, timeout: 5_000)
+        refute match?({:error, {:management_error, "unavailable", _message, ^golden}}, result)
+      end
+    end
+
+    defp home_owner_golden do
+      golden =
+        :fermix_core
+        |> Application.app_dir("priv/management/fixtures/errors.jsonl")
+        |> File.stream!()
+        |> Enum.map(&Jason.decode!/1)
+        |> Enum.find(&(&1["name"] == "unavailable_home_owner_decision"))
+        |> get_in(["response", "error", "details"])
+
+      assert golden == %{
+               "capability" => "home",
+               "sentence" =>
+                 "Only the owner can move Fermix or set its recovery passphrase: use the " <>
+                   "Fermix app or your own terminal."
+             }
+
+      golden
+    end
+  end
+
   # M75 §2: a candidate primary runs no agent, phone channel or plugins until
   # its move, so of the unversioned methods it answers `shutdown` alone and
   # refuses the rest with the router's own sentence.

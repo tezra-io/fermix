@@ -49,6 +49,14 @@ never parses the sentence.
 | `fermix service uninstall --json` | the action result |
 | `fermix restart --json [--when-idle]` | the restart result |
 | `fermix diagnostics export --offline --json` | the diagnostics result |
+| `fermix home mark-moved --to TEXT --json` | the moved result |
+| `fermix home status --json` | the home result |
+| `fermix home snapshots status --json` | the snapshots result |
+| `fermix home snapshots run --json` | the management `home.snapshots.run` result |
+| `fermix home snapshots passphrase --passphrase-file PATH --json` | the management `home.snapshots.passphrase` result |
+| `fermix home enroll-code --json` | the management `home.enroll.open` result |
+| `fermix home candidates --json` | the candidates result |
+| `fermix home move --to ID [--recovery-passphrase-file PATH] [--retire] --json` | the move result |
 
 `fermix service run` is the systemd vendor unit's launch entry point. It is not
 a machine-mode verb: it becomes the daemon and never returns an envelope.
@@ -184,6 +192,135 @@ Exceeding either is an error, never a truncated bundle with a reassuring name.
 
 Goldens: `diagnostics_export/ok.json`, `diagnostics_export/degraded.json`.
 
+## The moved result
+
+`fermix home mark-moved --to TEXT --json` retires the home it runs against as
+the primary: it writes the moved marker, and the home then refuses to start as
+the primary and runs only in the device role. It refuses while the engine runs
+from that home. It answers with the marker as written:
+
+```json
+{"epoch": 4, "moved_at": "2026-10-27T09:30:00Z", "to": "aws i-0f3b1c"}
+```
+
+- `epoch` — integer. The home's primary epoch when it moved.
+- `moved_at` — string, ISO 8601 in UTC, whole seconds. When it was marked.
+- `to` — string. Where the primary went, as the person named it: 1 to 128
+  bytes of printable text. A `--to` outside that is a usage error.
+
+Golden: `home_mark_moved/ok.json`.
+
+## The home result
+
+`fermix home status --json` answers with the record the management method
+`home.status` answers (`priv/management/PROTOCOL.md`), whether or not Fermix
+runs: from the engine over its control socket when it runs, and from the
+home's own files when it does not (the role its settings configure, a device
+when it carries the moved marker, the epoch, the marker, the snapshot section
+and the snapshot status file, and the candidates it holds and where its move or
+its enrollment stands).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `role` | string | `primary`, `device` or `candidate` (a fresh host enrolled with `fermix home enroll`, waiting for its move). |
+| `epoch` | integer, null | The home's primary epoch. Null before its first start as the primary. |
+| `moved` | object, null | `to`, `moved_at`, `epoch`: the moved marker, or null. |
+| `primary` | object, null | In the device role after a move, the primary this desktop reaches: `name` (string, null), `connected` (boolean), `since` (string, null while not connected), `epoch` (integer, null; the highest primary epoch this desktop has seen) and `sentence` (string). Null on any other engine, and while Fermix is stopped. |
+| `desktops` | array | On the primary, each desktop that holds a session to it: `device_id`, `name`, `connected` (boolean) and `since` (string, null while not connected). Empty on any other engine, and while Fermix is stopped. |
+| `snapshots` | object | The snapshots result below. |
+| `enrollment` | object, null | On the primary, the enrollment window opened since Fermix started: `state` (`open`, `used` or `expired`) and `expires_at`, never the code. Null when none was opened, in every other role, and while Fermix is stopped. |
+| `candidates` | array | On the primary, the candidate primaries it holds, each as the candidates result below draws it. Empty in every other role. |
+| `move` | object, null | The move this home started or, on a candidate, the one it waits for: `phase`, `candidate` (the name of the host it moves to; null on a candidate) and `sentence`. On the home that moves, `phase` is `requested`, `streaming`, `committing`, `committed` (restarting as a desktop), `done`, `aborting`, `undoing` (restarting as the primary) or `aborted`, `done` and `aborted` written only by the start after the restart; on a candidate, `enrolling`, `enrolled`, `receiving`, `staged`, `activating`, `expired` or `failed`. Null when there is none. |
+| `secrets_missing` | array | On a running primary, the ids (as `fermix setup` and `secret.set` take them) of the secret references in its settings that did not resolve on this host: each needs entering again. Empty in every other role, and while Fermix is stopped. The human output names them on a line of its own. |
+| `primary_home` | object, null | On a running linked desktop, the primary's own record (this table's fields, as the primary answers them), asked within 5 s; its recovery, enrollment, candidates and move are the server's. Null on any other engine, while it is missing, and while Fermix is stopped. |
+| `primary_missing` | string, null | On a running linked desktop whose primary is unreachable or did not answer within 5 s, the sentence that says why `primary_home` is missing. Null otherwise. |
+
+## The snapshots result
+
+`fermix home snapshots status --json` answers with the `snapshots` object
+alone.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `configured` | boolean | Whether a recovery key is set and at least one target is on. |
+| `recipient_set` | boolean | Whether a recovery key is set. |
+| `interval_hours` | integer | How often a snapshot is taken, 1 to 168. |
+| `running` | boolean | Whether a snapshot is being written now. Always false with Fermix stopped. |
+| `next_run_at` | string, null | When the next one is planned, ISO 8601 in UTC. Null while snapshots are off. |
+| `targets` | array | One row per target: `id`, `label`, `configured`, `destination`, `last_attempt_at`, `last_result` (`verified`, `failed`, `waiting` for a target that takes it at a later run, such as a sleeping desktop, or null), `last_verified` (`at`, `name`, `epoch`, `size`, `sha256`, `location`, `key_id` (the recovery key it opens with, or null), or null), `last_error` (the newest failure's sentence, or null), `waiting` (why the last run left it waiting, or null). |
+| `sentence` | string | One sentence for the state as a whole. |
+
+`fermix home snapshots run --json` and `fermix home snapshots passphrase
+--json` print the management result unchanged (`{started, snapshots}` and
+`{recipient, key_id, snapshots, sentence}`, the sentence saying that
+snapshots written before open only with the earlier passphrase); both need
+Fermix running and refuse with
+`engine_stopped` otherwise. The passphrase is read from `--passphrase-file`
+or asked twice without echo, and never printed.
+
+Goldens: `home_status/primary.json`, `home_snapshots_status/ok.json`.
+
+## The enrollment and move results
+
+`fermix home enroll-code --json` prints the management `home.enroll.open`
+result unchanged (`{code, expires_at}`). The code is single use, valid for
+thirty minutes (an engine restart in between keeps it), shown once and never
+logged. It needs Fermix running on the primary
+and refuses with `engine_stopped` otherwise; a refusal the engine answered is
+`enrollment_refused`, carrying the engine's sentence.
+
+`fermix home candidates --json` answers `{candidates}`, the candidate primaries
+this home holds, from the engine when it runs and from the home's own file when
+it does not. A candidate is held for 24 hours after it enrolled, at most four at
+once, and its row is never its keys:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `candidate_id` | string | `cand-` and 16 hex digits: what `fermix home move --to` takes. |
+| `name` | string | The name the host gave itself. |
+| `os` | string | The host's operating system. |
+| `arch` | string | The host's architecture. |
+| `version` | string | The host's Fermix version. |
+| `node_id` | string | The host's endpoint id, 64 hex digits. |
+| `instance` | object, null | `provider`, `instance_id` and `region`, and `account_id` when the host gave one: what the host said of itself, which nobody verified. Compare it with what you launched before you move. Null when it gave none. |
+| `snapshots` | object, null | `s3_bucket` and `s3_region`: the bucket the host was told to keep snapshots in. Null when it was told none. |
+| `enrolled_at` | string | When it enrolled, ISO 8601 in UTC. |
+| `expires_at` | string | When the primary stops holding it, ISO 8601 in UTC. |
+
+A refusal is `home_status_unavailable`.
+
+`fermix home move --to ID --json` answers with the move as it was written:
+`move_id` (`mv-` and 20 hex digits, ordered by when the move started), `candidate` (the row above),
+`recovery_recipient` and `key_id` (the public half of the recovery key the
+passphrase derived, as `home.snapshots.passphrase` answers them),
+`keep_as_desktop` (true: this computer becomes a desktop of the new primary)
+and `sentence`. With Fermix running this is the management `home.move.start`
+result, and the engine then restarts in the device role and carries the move
+out. With Fermix stopped the move is written here, and `sentence` says so: The
+move to north-box is set up. Start Fermix: it starts in the device role and
+moves this home. `--retire` is for a server that is itself the primary, being
+replaced by another server and then destroyed: the move keeps no desktop here
+(`home.move.start` with `keep_as_desktop` false), so `keep_as_desktop` is
+false, the engine hands the home over and then serves nothing, and a move
+written while Fermix is stopped says: The move to north-box is set up. Start
+Fermix: it moves this home and then serves nothing here. The recovery passphrase is read from
+`--recovery-passphrase-file` or asked twice without echo, and never printed. A
+refusal is `move_refused`, carrying the engine's sentence or why the move could
+not be written here, or each item of the move's readiness report
+(`home.move.readiness`) that blocks it, after `The move cannot start yet.`
+
+`fermix home enroll --code-file PATH [--snapshot-bucket B --snapshot-region R]
+[--instance-file PATH]` is not a machine-mode verb: it takes no `--json` and no
+running Fermix, and makes a fresh home a candidate. It exits `0` with one line
+on stdout once the home is a candidate and the code file is removed, `1` with
+one sentence on stderr when it refused, leaving the home and the code file as
+it found them, and `2` on a usage error. A home that holds a candidate which
+never enrolled (its enrollment still trying, or refused) is replaced, the old
+candidate kept until the new one is in place; one that enrolled and waits for
+its move is refused, and so is any home while Fermix runs in it.
+
+Goldens: `home_candidates/ok.json`, `home_move/ok.json`, `home_move/retired.json`.
+
 ## Error codes
 
 Every refusal a `--json` verb can print, with the sentence it carries. Where a
@@ -208,6 +345,15 @@ sentence interpolates a fact, the example below is the golden's.
 - `config_write_failed` — Fermix could not record the web listener port in the settings file. It said: permission denied
 - `systemctl_failed` — The service manager refused the change. It said: Unit fermix.service not found.
 - `binding_write_failed` — Fermix could not record which home the background service runs from. It said: permission denied
+- `daemon_running` — Fermix is running from this home. Stop it, then try again.
+- `epoch_absent` — The home has no primary epoch: it has never started as the primary.
+- `already_moved` — This home already moved to hetzner cx22 on 2026-10-20 at epoch 3, and the first move stands.
+- `mark_moved_failed` — Fermix could not mark this home moved. It said: could not tell whether Fermix is running (timeout)
+- `engine_stopped` — Fermix is not running from this home, and this needs it. Start it, then try again.
+- `snapshots_refused` — Fermix did not do that. It said: Snapshots are off: set a recovery passphrase to turn them on.
+- `home_status_unavailable` — Fermix could not read this home's status. It said: The requested management method is not available. (method_not_found)
+- `enrollment_refused` — Fermix did not open an enrollment code. It said: Only the primary enrolls candidates and starts a move.
+- `move_refused` — Fermix did not start the move. It said: No server waiting for the move has the id cand-0f1e2d3c4b5a6978. A server waits 24 hours after it enrolls; after that, get a new code and enroll it again.
 
 A sentence ending in `It said:` carries the words of whatever refused —
 the service manager, the login manager, the filesystem. A client shows them and

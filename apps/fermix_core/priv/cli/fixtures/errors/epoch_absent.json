@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "epoch_absent",
+    "sentence": "The home has no primary epoch: it has never started as the primary."
+  },
+  "ok": false,
+  "schema_version": 1
+}

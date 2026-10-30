@@ -39,7 +39,10 @@ defmodule Fermix.CLI.MachineOutputTest do
       path: "/home/o/.config/systemd/user/fermix.service",
       home: "/home/o/.fermix",
       user: "operator",
-      output: "Access denied"
+      output: "Access denied",
+      to: "aws i-0f3b1c",
+      date: "2026-10-27",
+      epoch: 3
     ]
 
     for code <- MachineOutput.codes() do
@@ -55,7 +58,17 @@ defmodule Fermix.CLI.MachineOutputTest do
   # The sentences are read by a person in a terminal and in a desktop dialog.
   # Internal vocabulary in them is a support ticket nobody can answer.
   test "no sentence leaks an internal term" do
-    details = [reason: "r", path: "/p", home: "/h", user: "u", output: "o"]
+    details = [
+      reason: "r",
+      path: "/p",
+      home: "/h",
+      user: "u",
+      output: "o",
+      to: "t",
+      date: "d",
+      epoch: 1
+    ]
+
     internal = ~w(linux_package standalone macos_app systemd_environment BuildInfo GenServer)
 
     for code <- MachineOutput.codes(), term <- internal do
