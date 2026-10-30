@@ -35,8 +35,11 @@ defmodule FermixCore.Jobs.CueAdmission do
 
   Each admission pass also reads the watchers whose oldest waiting delivery
   only the daily cap (or a source's half of it) holds, and sends each the
-  `:cap_reached` watcher notice with the cap and how many items wait (C25).
-  `Cues.Notices` sends it once per 24-hour window.
+  `:cap_reached` watcher notice with the cap and how many items wait (C25),
+  and the watchers with no task whose follow-up the cap skipped an item of,
+  which get it with the cap and `follow_up: true` through their follow-up's
+  delivery (M60_WATCHER_CODING_RUNS.md §4.4, §4.6). `Cues.Notices` sends it
+  once per 24-hour window.
   """
 
   require Logger
@@ -91,7 +94,8 @@ defmodule FermixCore.Jobs.CueAdmission do
   `opts`: `:repo_opts` (the `Memory.Repo` call options) and `:cue_notice`, a
   function `(watcher_id, kind, data) -> term()` that sends one watcher notice,
   called with `:cap_reached` and `%{cap: n, waiting: n}` for each watcher only
-  its cap holds.
+  its cap holds, or `%{cap: n, follow_up: true}` for a watcher with no task
+  whose follow-up the cap skipped.
   """
   @spec claim(non_neg_integer(), DateTime.t(), (String.t() -> map()), keyword()) :: [claim()]
   def claim(0, %DateTime{}, run_attrs_fun, opts)
@@ -258,6 +262,9 @@ defmodule FermixCore.Jobs.CueAdmission do
         []
     end
   end
+
+  defp cap_notice(%{watcher_id: watcher_id, daily_cap: cap, follow_up: true}, cue_notice),
+    do: cue_notice.(watcher_id, :cap_reached, %{cap: cap, follow_up: true})
 
   defp cap_notice(%{watcher_id: watcher_id, daily_cap: cap, waiting: waiting}, cue_notice),
     do: cue_notice.(watcher_id, :cap_reached, %{cap: cap, waiting: waiting})

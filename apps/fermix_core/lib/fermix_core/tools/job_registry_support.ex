@@ -458,27 +458,36 @@ defmodule FermixCore.Tools.JobRegistrySupport do
   end
 
   @doc """
-  The words a job echo (`list_jobs` first) shows for a job that runs on cues,
+  The words a job echo (`list_jobs` first) shows for a job a watcher starts,
   in place of a schedule it does not have, or `nil` for any other job: "runs
   on cues from watcher <name>" (M60 build decision 8), or "runs on cues" for
-  one no watcher wakes. The one hook for that label.
+  one no watcher wakes; for a watcher's follow-up, "runs when watcher <name>
+  passes an item" (M60_WATCHER_CODING_RUNS.md §4.1), or "runs when its watcher
+  passes an item" while no watcher names it. The one hook for that label.
   """
   @spec schedule_label(map(), GenServer.server()) :: String.t() | nil
   def schedule_label(job, repo) when is_map(job) do
-    if JobsRegistry.cue_job?(job), do: cue_label(job, repo), else: nil
+    cond do
+      JobsRegistry.cue_job?(job) -> watcher_label(job, repo, &cue_words/1)
+      JobsRegistry.follow_up_job?(job) -> watcher_label(job, repo, &follow_up_words/1)
+      true -> nil
+    end
   end
 
-  defp cue_label(job, repo) do
-    case Watchers.name_for_job(job.id, repo: repo) do
-      {:ok, nil} ->
-        "runs on cues"
+  defp cue_words(nil), do: "runs on cues"
+  defp cue_words(name), do: "runs on cues from watcher #{name}"
 
+  defp follow_up_words(nil), do: "runs when its watcher passes an item"
+  defp follow_up_words(name), do: "runs when watcher #{name} passes an item"
+
+  defp watcher_label(job, repo, words) do
+    case Watchers.name_for_job(job.id, repo: repo) do
       {:ok, name} ->
-        "runs on cues from watcher #{name}"
+        words.(name)
 
       {:error, reason} ->
         Logger.warning("job #{job.id}: its watcher could not be read: #{inspect(reason)}")
-        "runs on cues (its watcher could not be read: #{inspect(reason)})"
+        words.(nil) <> " (its watcher could not be read: #{inspect(reason)})"
     end
   end
 

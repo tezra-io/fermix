@@ -16,12 +16,14 @@ defmodule FermixCore.Cues.FollowUpsTest do
   alias FermixCore.Cues.Ingest
   alias FermixCore.Cues.Notices
   alias FermixCore.Cues.Watchers
+  alias FermixCore.Jobs.CueAdmission
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Memory.Repo.CuesRunsSql
   alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Tools.JobRegistrySupport
+  alias FermixCore.Tools.ListJobs
   alias FermixTestSupport.TelemetryCapture
 
   @now ~U[2026-10-30 12:00:00.000000Z]
@@ -411,6 +413,49 @@ defmodule FermixCore.Cues.FollowUpsTest do
     assert text =~ "reached its daily cap of 2 runs"
   end
 
+  # Nothing of a task-less watcher waits for the cap (its items settle as they
+  # pass), so the admission pass reads the skip off its triggers. Every item
+  # here is accepted at one time, as one batch is.
+  test "a task-less watcher whose cap skips an item is told once a window, through its " <>
+         "follow-up's delivery",
+       ctx do
+    watcher = follow_up_watcher!(ctx, daily_cap: 1)
+    notice = &Notices.watcher(&1, &2, &3, notice_opts(ctx))
+
+    admit = fn ->
+      CueAdmission.claim(3, @now, &%{id: &1},
+        repo_opts: [server: ctx.repo],
+        cue_notice: notice
+      )
+    end
+
+    # A stale item skipped before the cap was spent, then the card that spends it.
+    pass!(ctx, 1, DateTime.add(@now, -16 * 60, :second))
+    pass!(ctx, 2)
+    assert admit.() == []
+    refute_received {:delivered, _target, _text}
+
+    pass!(ctx, 3)
+
+    assert [
+             _stale,
+             %{state: "waiting"},
+             %{state: "skipped", reason: "The watcher's daily cap" <> _}
+           ] =
+             triggers(ctx, watcher)
+
+    assert admit.() == []
+    assert_received {:delivered, "chat-1", text}
+
+    assert text ==
+             "Watcher codex-limits: it reached its daily cap of 1 runs; until there is room, " <>
+               "the items it passes start no follow-up."
+
+    pass!(ctx, 4)
+    assert admit.() == []
+    refute_received {:delivered, _target, _text}
+  end
+
   # --- lifecycle (§4.1, §5) ---------------------------------------------------------------
 
   describe "the follow-up's lifecycle" do
@@ -437,6 +482,33 @@ defmodule FermixCore.Cues.FollowUpsTest do
                JobRegistrySupport.check_unwatched(job_id, turn)
 
       assert {:error, "Watcher " <> _} = JobRegistrySupport.check_watcher_consent(job_id, turn)
+    end
+
+    test "list_jobs says what sets a follow-up off, in place of a schedule", ctx do
+      watcher = follow_up_watcher!(ctx)
+
+      {:ok, unwatched} =
+        JobsRegistry.create_follow_up_job(
+          %{
+            created_by_trust: "operator",
+            name: "Spare review",
+            task_prompt: @prompt,
+            allowed_tools: ["shell"],
+            delivery_mode: "origin",
+            delivery_target: %{"platform" => "telegram", "chat_id" => "chat-1"}
+          },
+          registry_opts(ctx)
+        )
+
+      assert {:ok, %{output: output}} =
+               ListJobs.execute(%{}, Map.put(context(), :memory_repo, ctx.repo))
+
+      jobs = Map.new(Jason.decode!(output)["jobs"], &{&1["id"], &1})
+
+      assert jobs[watcher.follow_up_job_id]["schedule_label"] ==
+               "runs when watcher codex-limits passes an item"
+
+      assert jobs[unwatched.id]["schedule_label"] == "runs when its watcher passes an item"
     end
 
     test "removing the watcher removes its follow-up's job and refuses its waiting card", ctx do

@@ -85,7 +85,9 @@ defmodule FermixCore.Cues.Notices do
   @doc """
   Sends watcher notice `kind` once per episode to the watcher's task's
   delivery target (its follow-up's when it has no task). `data` may hold
-  `:waiting` (items waiting), `:cap`, `:budget`; a `:needs_update` notice
+  `:waiting` (items waiting), `:cap`, `:budget`, and `follow_up: true` on a
+  `:cap_reached` notice for a watcher with no task, whose items the cap skips
+  rather than holds; a `:needs_update` notice
   needs `:needed` (`:words` or `:filter`, `Cues.Watchers.update_needed/2`); a
   `:follow_up_held` notice needs `:reason` (Fermix's sentence of why); a
   `:gap` notice needs `:gap_id`, `:source_ref`, `:count`, `:reason` and
@@ -292,6 +294,11 @@ defmodule FermixCore.Cues.Notices do
     do:
       "Watcher #{name}: it reached its filter budget#{of(data, :budget, "calls")} in 24 " <>
         "hours; new items wait until there is room."
+
+  defp watcher_text(:cap_reached, name, %{follow_up: true} = data),
+    do:
+      "Watcher #{name}: it reached its daily cap#{of(data, :cap, "runs")}; until there is " <>
+        "room, the items it passes start no follow-up."
 
   defp watcher_text(:cap_reached, name, data),
     do:

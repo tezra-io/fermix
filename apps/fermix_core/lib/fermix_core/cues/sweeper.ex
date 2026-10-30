@@ -41,6 +41,10 @@ defmodule FermixCore.Cues.Sweeper do
     {:delete_receipts, &__MODULE__.delete_receipts/3},
     {:prune_gaps, &__MODULE__.prune_gaps/3},
     {:prune_filter_calls, &__MODULE__.prune_filter_calls/3},
+    # A follow-up's ended triggers and its answered or expired approval
+    # prompts, 30 days on (M60_WATCHER_CODING_RUNS.md §4.3, §5).
+    {:prune_follow_up_triggers, &__MODULE__.prune_follow_up_triggers/3},
+    {:prune_follow_up_approvals, &__MODULE__.prune_follow_up_approvals/3},
     # What a stream counted instead of storing, 48 hours after its hour
     # (M60_CUE_INTAKE_AT_SCALE.md §3.4).
     {:prune_counts, &__MODULE__.prune_counts/3},
@@ -245,6 +249,18 @@ defmodule FermixCore.Cues.Sweeper do
           {:ok, non_neg_integer()} | {:error, term()}
   def prune_filter_calls(repo_opts, now, limit),
     do: sql_step(:prune_filter_calls, repo_opts, now, limit)
+
+  @doc false
+  @spec prune_follow_up_triggers(keyword(), DateTime.t(), pos_integer()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def prune_follow_up_triggers(repo_opts, now, limit),
+    do: sql_step(:prune_follow_up_triggers, repo_opts, now, limit)
+
+  @doc false
+  @spec prune_follow_up_approvals(keyword(), DateTime.t(), pos_integer()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def prune_follow_up_approvals(repo_opts, now, limit),
+    do: sql_step(:prune_follow_up_approvals, repo_opts, now, limit)
 
   @doc false
   @spec prune_counts(keyword(), DateTime.t(), pos_integer()) ::

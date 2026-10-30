@@ -54,11 +54,10 @@ defmodule FermixCore.Memory.Repo.CuesRunsSql do
   @type conn :: term()
   @type settle_by :: :ignored | :acted | {:failed, :provider} | {:failed, :other} | :scheduler
   @type candidate :: %{job_id: String.t(), watcher_id: String.t(), delivery_id: pos_integer()}
-  @type capped :: %{
-          watcher_id: String.t(),
-          daily_cap: pos_integer(),
-          waiting: non_neg_integer()
-        }
+  @typedoc "A watcher only its daily cap holds: what waits, or a task-less watcher's skip."
+  @type capped ::
+          %{watcher_id: String.t(), daily_cap: pos_integer(), waiting: non_neg_integer()}
+          | %{watcher_id: String.t(), daily_cap: pos_integer(), follow_up: true}
   @type delivery :: %{
           id: pos_integer(),
           cue_id: pos_integer(),
@@ -153,6 +152,36 @@ defmodule FermixCore.Memory.Repo.CuesRunsSql do
   LIMIT ?
   """
 
+  # Watchers with no task whose follow-up the cap skipped (C25 for
+  # M60_WATCHER_CODING_RUNS.md §4.4): such a watcher's items settle as they
+  # pass, so nothing of it waits and its triggers tell it. Its counted triggers
+  # of the window fill its cap, and a trigger written after the last of them
+  # (rowid: the writer's order, as one batch shares a time) was skipped: a
+  # trigger counted now was counted from the moment it was written, so the cap
+  # was already spent when that item passed. The `?` are the cap window
+  # thrice, then the row limit.
+  @capped_follow_ups_sql """
+  WITH spent AS (
+    SELECT w.id, w.daily_cap,
+      (SELECT COUNT(*) FROM cue_follow_up_triggers t
+       WHERE t.watcher_id = w.id AND t.created_at > ?
+         AND #{CuesFollowUpSql.counted_sql()}) AS used,
+      (SELECT MAX(t.rowid) FROM cue_follow_up_triggers t
+       WHERE t.watcher_id = w.id AND t.created_at > ?
+         AND #{CuesFollowUpSql.counted_sql()}) AS last_counted
+    FROM cue_watchers w
+    WHERE w.task_job_id IS NULL AND w.daily_cap > 0
+  )
+  SELECT s.id, s.daily_cap
+  FROM spent s
+  WHERE s.used >= s.daily_cap
+    AND EXISTS (SELECT 1 FROM cue_follow_up_triggers k
+                WHERE k.watcher_id = s.id AND k.created_at > ? AND k.rowid > s.last_counted
+                  AND k.state = 'skipped')
+  ORDER BY s.id
+  LIMIT ?
+  """
+
   @eligible_delivery_sql """
   SELECT d.id, d.cue_id, d.watcher_id, d.source_ref, d.subject, d.received_at, d.ready_at,
          d.task_attempts
@@ -184,14 +213,22 @@ defmodule FermixCore.Memory.Repo.CuesRunsSql do
   capped: [capped]}}`: at most `limit` tasks with an eligible delivery, one row
   each, ordered by that delivery's id; and at most 10 watchers whose oldest
   waiting delivery only the daily cap or the per-source half-cap holds (C25),
-  each with its `daily_cap` and how many deliveries are `waiting`.
+  each with its `daily_cap` and how many deliveries are `waiting`, then at most
+  10 watchers with no task whose follow-up the daily cap skipped an item of,
+  each with its `daily_cap` and `follow_up: true`.
   """
   @spec handle(conn(), tuple()) :: term()
   def handle(conn, {:admission_candidates, %DateTime{} = now, limit})
       when is_integer(limit) and limit > 0 do
     with {:ok, rows} <- CuesSql.query_all(conn, @candidates_sql, eligible_params(now) ++ [limit]),
-         {:ok, capped} <- CuesSql.query_all(conn, @capped_sql, capped_params(now)) do
-      {:ok, %{candidates: Enum.map(rows, &candidate/1), capped: Enum.map(capped, &capped/1)}}
+         {:ok, capped} <- CuesSql.query_all(conn, @capped_sql, capped_params(now)),
+         {:ok, follow_ups} <-
+           CuesSql.query_all(conn, @capped_follow_ups_sql, capped_follow_ups_params(now)) do
+      {:ok,
+       %{
+         candidates: Enum.map(rows, &candidate/1),
+         capped: Enum.map(capped, &capped/1) ++ Enum.map(follow_ups, &capped_follow_up/1)
+       }}
     end
   end
 
@@ -282,6 +319,11 @@ defmodule FermixCore.Memory.Repo.CuesRunsSql do
       [@capped_max]
   end
 
+  defp capped_follow_ups_params(now) do
+    window_start = window_start(now)
+    [window_start, window_start, window_start, @capped_max]
+  end
+
   defp window_start(now), do: CuesSql.stamp(DateTime.add(now, -@cap_window_s, :second))
 
   defp candidate([job_id, watcher_id, delivery_id]) do
@@ -290,6 +332,9 @@ defmodule FermixCore.Memory.Repo.CuesRunsSql do
 
   defp capped([watcher_id, daily_cap, waiting]),
     do: %{watcher_id: watcher_id, daily_cap: daily_cap, waiting: waiting}
+
+  defp capped_follow_up([watcher_id, daily_cap]),
+    do: %{watcher_id: watcher_id, daily_cap: daily_cap, follow_up: true}
 
   defp delivery([id, cue_id, watcher_id, source_ref, subject, received_at, ready_at, attempts]) do
     %{

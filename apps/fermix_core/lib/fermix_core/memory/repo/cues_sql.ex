@@ -605,6 +605,8 @@ defmodule FermixCore.Memory.Repo.CuesSql do
              :prune_deliveries,
              :prune_gaps,
              :prune_filter_calls,
+             :prune_follow_up_triggers,
+             :prune_follow_up_approvals,
              :prune_counts,
              :drop_snapshots
            ] and is_integer(limit) and limit > 0 do
@@ -1774,6 +1776,32 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   def retention_sql(:prune_filter_calls, now) do
     {"DELETE FROM cue_filter_calls WHERE id IN (SELECT id FROM cue_filter_calls " <>
        "WHERE started_at <= ? ORDER BY started_at LIMIT ?)", [ago(now, @prune_days * 86_400)]}
+  end
+
+  # A follow-up's trigger that ended (started, skipped, expired or refused) is
+  # pruned 30 days after it was written, long after its card's 30 minutes and
+  # the 24 hours its watcher's daily cap counts it; one waiting or starting is
+  # never touched. The state index hands each state's rows over oldest first,
+  # so the search reads only the rows it deletes and sorts nothing.
+  def retention_sql(:prune_follow_up_triggers, now) do
+    {"""
+     DELETE FROM cue_follow_up_triggers WHERE id IN (
+       SELECT id FROM cue_follow_up_triggers INDEXED BY cue_follow_up_triggers_state
+       WHERE state IN ('started', 'skipped', 'expired', 'refused') AND created_at <= ?
+       LIMIT ?)
+     """, [ago(now, @prune_days * 86_400)]}
+  end
+
+  # An automatic follow-up's approval prompt that was answered or expired is
+  # pruned 30 days after its expiry: an approval lives on its watcher's row
+  # (`follow_up_approved_at`), so the prompt holds nothing a later change reads.
+  def retention_sql(:prune_follow_up_approvals, now) do
+    {"""
+     DELETE FROM cue_follow_up_approvals WHERE id IN (
+       SELECT id FROM cue_follow_up_approvals INDEXED BY cue_follow_up_approvals_state
+       WHERE state IN ('approved', 'denied', 'expired') AND expires_at <= ?
+       LIMIT ?)
+     """, [ago(now, @prune_days * 86_400)]}
   end
 
   # Counts outlive the rolling day they are read for by one more day.
