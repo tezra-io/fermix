@@ -14,6 +14,10 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
   # nothing.
   @mobile_icon_index_version 50
   @curiosity_version 51
+  # 54, watcher follow-ups, rebuilds the cue tables only while they lack its
+  # shape and makes its own tables only if missing: a database at 48 or 49
+  # lacks its version row too, and reapplying it changes nothing.
+  @watcher_follow_up_version 54
   # The columns migration 43 made, in its order: what a 48 database holds.
   @columns_43 ~w(id agent_id owner_id dedupe_key intention why_it_matters matters_by_kind
                  matters_by_date matters_by_time matters_by_at timezone horizon_class said_at
@@ -137,7 +141,7 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
   end
 
   # Puts the open_loops table back in migration 43's shape with its rows, drops
-  # what 49 and 51 add, and forgets 49, 50 and 51: the database an engine at
+  # what 49 and 51 add, and forgets 49, 50, 51 and 54: the database an engine at
   # version 48 left.
   defp downgrade_to_48!(conn) do
     downgrade_open_loops!(conn, @columns_43, [OpenLoopsSql.schema_sql()])
@@ -145,12 +149,13 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
     execute!(
       conn,
       "DELETE FROM schema_migrations WHERE version IN " <>
-        "(#{@outside_content_version}, #{@mobile_icon_index_version}, #{@curiosity_version})"
+        "(#{@outside_content_version}, #{@mobile_icon_index_version}, #{@curiosity_version}, " <>
+        "#{@watcher_follow_up_version})"
     )
   end
 
   # Puts the open_loops table back in migration 49's shape with its rows, the
-  # stamp among them, drops what 51 adds, and forgets 50 and 51: the database an
+  # stamp among them, drops what 51 adds, and forgets 50, 51 and 54: the database an
   # engine at version 49 left.
   defp downgrade_to_49!(conn) do
     downgrade_open_loops!(conn, @columns_49, [
@@ -160,8 +165,8 @@ defmodule FermixCore.Memory.RepoOpenLoopsTest do
 
     execute!(
       conn,
-      "DELETE FROM schema_migrations " <>
-        "WHERE version IN (#{@mobile_icon_index_version}, #{@curiosity_version})"
+      "DELETE FROM schema_migrations WHERE version IN " <>
+        "(#{@mobile_icon_index_version}, #{@curiosity_version}, #{@watcher_follow_up_version})"
     )
   end
 

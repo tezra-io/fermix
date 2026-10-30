@@ -391,8 +391,8 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   end
 
   # Migration 54 (M60_WATCHER_CODING_RUNS.md §4.1, §4.3): the columns each
-  # rebuilt table holds before it, in order, so the copy names them and a
-  # store holding any other column is refused rather than losing it.
+  # rebuilt table holds before it, so the copy names them and a store holding
+  # any other column is refused rather than losing it.
   @watcher_columns_53 ~w(id name purpose filter task_job_id task_notes daily_cap filter_budget
                          filter_failures filter_retry_at held_notified_at notices enabled
                          created_from created_at updated_at listen_for)
@@ -400,7 +400,10 @@ defmodule FermixCore.Memory.Repo.CuesSql do
                           decision_reason hint filter_attempts task_attempts ready_at valid_until
                           filter_call_id claimed_run_id settled_at)
 
-  @follow_up_rebuild_sql """
+  @watcher_follow_up_columns ~w(follow_up_job_id follow_up_mode follow_up_approved_at
+                                follow_up_approval_digest)
+
+  @watcher_rebuild_sql """
   CREATE TABLE cue_watchers_54 (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -431,7 +434,9 @@ defmodule FermixCore.Memory.Repo.CuesSql do
     SELECT #{Enum.join(@watcher_columns_53, ", ")} FROM cue_watchers;
   DROP TABLE cue_watchers;
   ALTER TABLE cue_watchers_54 RENAME TO cue_watchers;
+  """
 
+  @delivery_rebuild_sql """
   CREATE TABLE cue_deliveries_54 (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     cue_id INTEGER NOT NULL REFERENCES cues(id),
@@ -464,18 +469,20 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   ALTER TABLE cue_deliveries_54 RENAME TO cue_deliveries;
   """
 
-  @doc """
-  The tables migration 54 rebuilds, each with the columns it must hold before
-  the rebuild, in order. The migration refuses a store whose table holds any
-  other (a column the copy would leave behind), and keeps every index the
-  table has, whichever migration made it.
+  @typedoc """
+  One table migration 54 rebuilds: the columns it holds before and after, the
+  text its definition holds once rebuilt, and the rebuild itself.
   """
-  @spec follow_up_rebuilt_tables() :: [{String.t(), [String.t()]}]
-  def follow_up_rebuilt_tables,
-    do: [{"cue_watchers", @watcher_columns_53}, {"cue_deliveries", @delivery_columns_53}]
+  @type follow_up_rebuild :: %{
+          table: String.t(),
+          before: [String.t()],
+          after: [String.t()],
+          marker: String.t(),
+          sql: String.t()
+        }
 
   @doc """
-  The rebuild of migration 54 (M60_WATCHER_CODING_RUNS.md §4.1, §4.3):
+  The rebuilds of migration 54 (M60_WATCHER_CODING_RUNS.md §4.1, §4.3):
 
     * `cue_watchers` with a nullable `task_job_id`, since a watcher may have
       only a follow-up, and the follow-up's job (`follow_up_job_id`, never
@@ -485,13 +492,32 @@ defmodule FermixCore.Memory.Repo.CuesSql do
     * `cue_deliveries` with the outcome `follow_up`: a watcher with no task
       settles a passing item at once, and what came of it is its trigger's.
 
-  Tables only: the caller replays each table's indexes after it and runs it
-  with foreign keys off (`cue_watchers` is the parent of three tables). The
-  AUTOINCREMENT counter of `cue_deliveries` is carried over, so no id is ever
-  given out twice.
+  A table is rebuilt only while its definition lacks `marker`, so a store that
+  already holds the new shape (one whose version row was lost) reapplies
+  nothing; one whose columns match neither shape is refused, never cut. Tables
+  only: the caller replays each rebuilt table's indexes and runs it with foreign
+  keys off (`cue_watchers` is the parent of three tables). The AUTOINCREMENT
+  counter of `cue_deliveries` is carried over, so no id is given out twice.
   """
-  @spec follow_up_rebuild_sql() :: String.t()
-  def follow_up_rebuild_sql, do: @follow_up_rebuild_sql
+  @spec follow_up_rebuilds() :: [follow_up_rebuild()]
+  def follow_up_rebuilds do
+    [
+      %{
+        table: "cue_watchers",
+        before: @watcher_columns_53,
+        after: @watcher_columns_53 ++ @watcher_follow_up_columns,
+        marker: "follow_up_job_id",
+        sql: @watcher_rebuild_sql
+      },
+      %{
+        table: "cue_deliveries",
+        before: @delivery_columns_53,
+        after: @delivery_columns_53,
+        marker: "'follow_up'",
+        sql: @delivery_rebuild_sql
+      }
+    ]
+  end
 
   @doc "Delivery states that hold a delivery open (never touched by retention)."
   @spec live_states() :: [String.t()]

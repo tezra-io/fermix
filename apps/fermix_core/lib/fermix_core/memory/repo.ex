@@ -5114,13 +5114,15 @@ defmodule FermixCore.Memory.Repo do
   end
 
   # Watcher follow-ups (M60_WATCHER_CODING_RUNS.md §4.1, §4.3): `cue_watchers`
-  # and `cue_deliveries` rebuilt (`CuesSql.follow_up_rebuild_sql/0`) and the
-  # trigger table, with the version, in one transaction. The rebuild drops the
-  # parent of three cascading foreign keys, so foreign keys are off around it,
-  # toggled outside the transaction as for migration 11. Each rebuilt table
-  # keeps every index it had, whichever migration made it: their DDL is read
-  # before the drop and replayed after. A table holding a column the copy
-  # would leave behind is refused, never cut.
+  # and `cue_deliveries` rebuilt (`CuesSql.follow_up_rebuilds/0`) and the
+  # trigger and approval tables, with the version, in one transaction. The
+  # rebuild drops the parent of three cascading foreign keys, so foreign keys
+  # are off around it, toggled outside the transaction as for migration 11.
+  # Each rebuilt table keeps every index it had, whichever migration made it:
+  # their DDL is read before the drop and replayed after. Reapplying it changes
+  # nothing: a table already in the new shape is not rebuilt, and the new tables
+  # are made only if missing. A table whose columns match neither shape is
+  # refused, never cut.
   defp apply_watcher_follow_up_migration(conn, versions) do
     if Enum.member?(versions, @watcher_follow_up_migration_version) do
       :ok
@@ -5134,11 +5136,9 @@ defmodule FermixCore.Memory.Repo do
   end
 
   defp follow_up_migration_in_tx(conn) do
-    tables = CuesSql.follow_up_rebuilt_tables()
-
-    with :ok <- check_rebuilt_columns(conn, tables),
-         {:ok, indexes} <- table_indexes(conn, Enum.map(tables, &elem(&1, 0))),
-         :ok <- Sqlite3.execute(conn, CuesSql.follow_up_rebuild_sql()),
+    with {:ok, rebuilds} <- pending_rebuilds(conn, CuesSql.follow_up_rebuilds()),
+         {:ok, indexes} <- table_indexes(conn, Enum.map(rebuilds, & &1.table)),
+         :ok <- execute_each(conn, Enum.map(rebuilds, & &1.sql)),
          :ok <- replay_indexes(conn, indexes),
          :ok <- Sqlite3.execute(conn, CuesFollowUpSql.schema_sql()) do
       Sqlite3.execute(
@@ -5148,18 +5148,60 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
-  defp check_rebuilt_columns(conn, tables) do
-    Enum.reduce_while(tables, :ok, fn {table, expected}, :ok ->
-      case query_all(conn, "SELECT name FROM pragma_table_info(?) ORDER BY cid", [table]) do
-        {:ok, []} -> {:halt, {:error, {:missing_table, table}}}
-        {:ok, rows} -> {:cont, same_columns(table, List.flatten(rows), expected)}
+  # The rebuilds a table's definition does not yet hold. Columns compare as
+  # sets: the copy names them, so their order does not matter.
+  defp pending_rebuilds(conn, rebuilds) do
+    Enum.reduce_while(rebuilds, {:ok, []}, fn rebuild, {:ok, pending} ->
+      case rebuild_state(conn, rebuild) do
+        :pending -> {:cont, {:ok, pending ++ [rebuild]}}
+        :done -> {:cont, {:ok, pending}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
   end
 
-  defp same_columns(_table, same, same), do: :ok
-  defp same_columns(table, found, _expected), do: {:error, {:unexpected_columns, table, found}}
+  defp rebuild_state(conn, %{table: table} = rebuild) do
+    with {:ok, ddl} <- table_ddl(conn, table),
+         {:ok, columns} <- table_columns(conn, table) do
+      rebuilt? = String.contains?(ddl, rebuild.marker)
+      expected = if rebuilt?, do: rebuild.after, else: rebuild.before
+
+      cond do
+        MapSet.new(columns) != MapSet.new(expected) ->
+          {:error, {:unexpected_columns, table, columns}}
+
+        rebuilt? ->
+          :done
+
+        true ->
+          :pending
+      end
+    end
+  end
+
+  defp table_ddl(conn, table) do
+    case query_all(conn, "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", [
+           table
+         ]) do
+      {:ok, [[ddl]]} -> {:ok, ddl}
+      {:ok, []} -> {:error, {:missing_table, table}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp table_columns(conn, table) do
+    with {:ok, rows} <- query_all(conn, "SELECT name FROM pragma_table_info(?)", [table]),
+         do: {:ok, List.flatten(rows)}
+  end
+
+  defp execute_each(conn, statements) do
+    Enum.reduce_while(statements, :ok, fn sql, :ok ->
+      case Sqlite3.execute(conn, sql) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
 
   # An index a UNIQUE or PRIMARY KEY constraint made has no DDL: the rebuilt
   # table's own constraint makes it again.

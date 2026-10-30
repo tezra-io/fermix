@@ -153,6 +153,25 @@ defmodule FermixCore.Memory.RepoFollowUpMigrationTest do
            )
   end
 
+  test "a store that holds 54's shape but lost its version row reapplies nothing", ctx do
+    stop_supervised!(:first)
+    seed_store_53(ctx.db_path)
+    reopen(ctx.repo, ctx.db_path)
+    stop_supervised!(:second)
+
+    raw(ctx.db_path, "DELETE FROM schema_migrations WHERE version = #{@version};")
+    raw(ctx.db_path, insert_delivery_sql({nil, 3}, "acked", "'follow_up'", "'#{@stamp}'"))
+
+    start_supervised!({Repo, name: ctx.repo, enabled: true, database_path: ctx.db_path},
+      id: :third
+    )
+
+    assert {:ok, versions} = Repo.migration_versions(server: ctx.repo)
+    assert @version in versions
+    assert [[1], [8]] = raw_rows(ctx.db_path, "SELECT id FROM cue_deliveries ORDER BY id")
+    assert "cue_deliveries_other_window" in index_names(ctx.db_path, "cue_deliveries")
+  end
+
   # --- the store as it stood before 54 --------------------------------------------------
 
   # Back to the tables 53 left (a task always set, no trigger table), with a

@@ -67,7 +67,7 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
   @no_card "It expired with no answer."
 
   @schema_sql """
-  CREATE TABLE cue_follow_up_triggers (
+  CREATE TABLE IF NOT EXISTS cue_follow_up_triggers (
     id TEXT PRIMARY KEY,
     watcher_id TEXT NOT NULL,
     delivery_id INTEGER NOT NULL UNIQUE,
@@ -91,10 +91,10 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
     CHECK ((state = 'started') = (run_id IS NOT NULL)),
     CHECK (state NOT IN ('skipped','refused') OR reason IS NOT NULL)
   );
-  CREATE INDEX cue_follow_up_triggers_state ON cue_follow_up_triggers (state, created_at);
-  CREATE INDEX cue_follow_up_triggers_watcher ON cue_follow_up_triggers (watcher_id, created_at);
-  CREATE INDEX cue_follow_up_triggers_job ON cue_follow_up_triggers (job_id, state);
-  CREATE TABLE cue_follow_up_approvals (
+  CREATE INDEX IF NOT EXISTS cue_follow_up_triggers_state ON cue_follow_up_triggers (state, created_at);
+  CREATE INDEX IF NOT EXISTS cue_follow_up_triggers_watcher ON cue_follow_up_triggers (watcher_id, created_at);
+  CREATE INDEX IF NOT EXISTS cue_follow_up_triggers_job ON cue_follow_up_triggers (job_id, state);
+  CREATE TABLE IF NOT EXISTS cue_follow_up_approvals (
     id TEXT PRIMARY KEY,
     watcher_id TEXT NOT NULL,
     shown_digest TEXT NOT NULL,
@@ -109,8 +109,8 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
     created_at TEXT NOT NULL,
     CHECK ((state IN ('approved','denied')) = (decided_at IS NOT NULL))
   );
-  CREATE INDEX cue_follow_up_approvals_state ON cue_follow_up_approvals (state, expires_at);
-  CREATE INDEX cue_follow_up_approvals_watcher ON cue_follow_up_approvals (watcher_id, state);
+  CREATE INDEX IF NOT EXISTS cue_follow_up_approvals_state ON cue_follow_up_approvals (state, expires_at);
+  CREATE INDEX IF NOT EXISTS cue_follow_up_approvals_watcher ON cue_follow_up_approvals (watcher_id, state);
   """
 
   # A trigger counts toward its watcher's daily cap once its follow-up was
