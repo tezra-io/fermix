@@ -145,6 +145,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   up"), because the search text was read as search syntax, where a hyphen
   means something else. Search text is now always plain words, so a hyphen,
   "OR", a colon or a stray quote is simply part of what is looked for.
+- **The agent uses the browser for what the X plugin can't do.** A pay-per-use
+  X app may no longer like, follow or quote, and the plugin has no tool to
+  block, report, mute or read bookmarks, yet its instructions forbade the
+  browser for anything on X, so the agent refused or told you to reconnect X.
+  It now uses the X tools for what they cover and the browser, signed in to X,
+  for the rest, and says why; a call X turns down for good (a feature the
+  app's plan leaves out, credits used up) moves to the browser too. Fermix's
+  own rule for connected plugins now says the same, though never past a Fermix
+  confirmation or your no, and a plugin that is not connected is offered for
+  connection, with the browser in its place only when you ask. The catalog
+  offers X 1.0.2 with the new instructions: a new install gets it, an
+  installed copy moves with `fermix plugins upgrade x`, and the Mac app has no
+  plugin update yet.
 
 ### Security
 

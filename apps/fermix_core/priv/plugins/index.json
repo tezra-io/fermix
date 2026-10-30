@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-10-17T05:03:57Z",
+  "generated_at": "2026-10-30T15:39:02Z",
   "plugins": [
     {
       "name": "agentmail",
@@ -630,9 +630,24 @@
       "rails": [
         "http"
       ],
-      "latest": "1.0.1",
+      "latest": "1.0.2",
       "yanked": [],
       "versions": [
+        {
+          "version": "1.0.2",
+          "published_at": "2026-10-30T15:31:52Z",
+          "min_core_version": "0.2.3",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "any",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/x/v1.0.2/x-1.0.2.tar.gz",
+              "sha256": "953ef0ef93fa4db7a994ef4d80ace8c03b4d65d7de957d52b264dcec90fedd9f",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/x/v1.0.2/x-1.0.2.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/x/v1.0.2/x-1.0.2.tar.gz.pem"
+            }
+          ]
+        },
         {
           "version": "1.0.1",
           "published_at": "2026-06-11T10:34:18Z",
