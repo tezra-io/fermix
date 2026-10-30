@@ -874,7 +874,18 @@ Current channels:
   by `Gateway.AlbumBuffer`; webhook transport is intentionally unsupported.
 - `WhatsApp` uses Cloud API webhook ingress and Graph API replies, with audio,
   image, and document download.
-- `Slack` uses signed Events API webhook ingress and Web API replies.
+- `Slack` uses Web API replies and takes events one of two ways
+  (`[fermix_channels.slack] mode`): signed Events API webhooks (`webhook`, the
+  default), or Socket Mode (`socket`, M75), where `Slack.SocketMode` opens a
+  WebSocket with the app-level token so a host with no inbound port runs Slack.
+  It asks `apps.connections.open` for a fresh address on every connection,
+  dials it through `Cues.Source.Stream.Socket` (the engine's client WebSocket),
+  acknowledges an event's envelope by its id once `Gateway.WebhookIngress` has
+  taken it (a failed hand-off is left unacknowledged for Slack to resend, as a
+  webhook answers 503), reconnects on `disconnect` and on a dropped or silent
+  connection (1 s doubling to 60 s after a failure), and publishes its posture
+  for `FermixCore.Health` and Doctor in Slack's own words, only while its
+  process runs. The registry starts it only in Socket Mode.
 - `Discord` uses a supervised Gateway connection and REST replies.
 - `Signal` polls `signal-cli receive` once a second and sends through
   subprocesses.
@@ -1023,6 +1034,14 @@ Current channels:
 `outbound/` holds pure long-form text helpers, and `harness/` re-ingests
 coding-harness completion notices.
 
+`Gateway.WebhookIngress` is the one path a verified webhook payload takes: the
+adapter parses it, `Gateway.Idempotency` drops the ids it has seen, and the rest
+go to `Gateway.ingest/2` in a task under `FermixCore.TaskSupervisor` (WhatsApp's
+through its album buffer). The web routes call it after their signature check,
+and Slack's Socket Mode calls it with each `events_api` payload, so both Slack
+transports share idempotency, authorization and the turn. A hand-off that
+fails forgets the ids it recorded, so the provider's retry is fresh.
+
 Architecture Invariant: channel adapters own platform quirks and webhook
 authenticity; sender authorization and trust are central (`Gateway.Authorizer`,
 `Gateway.ChannelRegistry`). After ingest the agent sees only normalized message
@@ -1044,12 +1063,13 @@ The router exposes:
 - `/health` and `/health/ready` for the readiness status alone, and
   `/health/live` for a static liveness payload; the full report stays with
   `fermix health --json`
-- `GET`/`POST /webhook/whatsapp` and `POST /webhook/slack`
+- `GET`/`POST /webhook/whatsapp` and `POST /webhook/slack`; Slack over Socket
+  Mode needs none of them
 
-`WebhookController` verifies the request and parses it with the channel adapter,
-drops duplicates, and hands the message to `Gateway.ingest/2` asynchronously
-under `FermixCore.TaskSupervisor`; a failed handoff returns 503 and rolls back
-the duplicate record. `HealthController` reports `FermixCore.Health`'s status.
+`WebhookController` verifies the request and hands the payload to
+`Gateway.WebhookIngress`, which parses it, drops duplicates and dispatches it
+asynchronously; a failed handoff returns 503 with the duplicate record rolled
+back. `HealthController` reports `FermixCore.Health`'s status.
 `SetupLive` drives `Setup.Wizard` and the core setup modules. Not all ingress is
 Phoenix: the mobile listener, the OAuth loopback listener, and the Unix sockets
 (`daemon.sock`, `realtime.sock`, `acp.sock`, `companion.sock`) live in core and

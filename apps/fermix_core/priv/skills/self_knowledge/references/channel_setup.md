@@ -45,10 +45,16 @@ Failures:
 
 ## Slack
 
-Needs a public HTTPS URL (Events API webhook; Socket Mode is not supported).
+Events reach Fermix one of two ways, set by **Receive events through** (`[fermix_channels.slack] mode`):
+- **Webhook** (`mode = "webhook"`, the default): Slack posts each event to a public HTTPS URL (the Events API). Needs the signing secret and a tunnel or reverse proxy (see "The public URL").
+- **Socket Mode** (`mode = "socket"`): Fermix opens a WebSocket to Slack with an app-level token, so no public URL, tunnel or open port is needed: the way to run Slack on a server with no inbound port (an Always On VM). Needs the app-level token instead of the signing secret.
+
+Both ways hand each event to the same handling (owner and allow list, the same turn, and a resent event dropped as a duplicate for 24 hours, until Fermix restarts), and replies go out through the bot token either way. Changing the way needs a restart.
 
 - **Bot token** (`xoxb-…`): https://api.slack.com/apps > Create New App > From a manifest (below) > OAuth & Permissions > **Install to Workspace** > copy the **Bot User OAuth Token**. Mac **Bot token**; `--slack-bot-token`; `bot_token`.
-- **Signing Secret**: Basic Information > App Credentials > **Signing Secret**. Mac **Signing secret**; `--slack-signing-secret`; `signing_secret`.
+- **Signing Secret** (webhook): Basic Information > App Credentials > **Signing Secret**. Mac **Signing secret**; `--slack-signing-secret`; `signing_secret`.
+- **App-level token** (Socket Mode, `xapp-…`): Basic Information > App-Level Tokens > **Generate Token and Scopes** > add the `connections:write` scope > copy the token. Mac **App-level token**; browser **App-level token (Socket Mode)**; `fermix settings secret set slack_app_token`; secret `slack_app_token` (`app_token`), overridden by `SLACK_APP_TOKEN` in the daemon's environment like the other Slack secrets.
+- **The way**: Mac and `fermix settings` **Receive events through** (`fermix settings set channels.slack slack_mode=socket`); browser **Receive events through**; `mode` in `config.toml`. No `fermix setup` flag sets it.
 - **Your member ID** (`U…`, or `W…` on Enterprise Grid; not a name or email): your Slack profile > More (⋮) > **Copy member ID**. Mac **Your Slack user ID**; browser **Owner user ID**; `--slack-owner-user-id`; `owner_user_id`.
 
 Manifest (bot scopes, DMs allowed, rotation and Socket Mode off):
@@ -73,7 +79,9 @@ settings:
   token_rotation_enabled: false
 ```
 
-Order matters: save the token and signing secret in Fermix and restart first, because Fermix answers Slack's URL check only after verifying its signature. Then Event Subscriptions > Enable Events > Request URL `https://<public-host>/webhook/slack` > wait for **Verified** > Subscribe to bot events: `app_mention` and `message.im` > Save Changes (reinstall if Slack asks).
+Webhook: order matters: save the token and signing secret in Fermix and restart first, because Fermix answers Slack's URL check only after verifying its signature. Then Event Subscriptions > Enable Events > Request URL `https://<public-host>/webhook/slack` > wait for **Verified** > Subscribe to bot events: `app_mention` and `message.im` > Save Changes (reinstall if Slack asks).
+
+Socket Mode: in the manifest set `socket_mode_enabled: true` (or Settings > Socket Mode > **Enable Socket Mode**), create the app-level token with `connections:write`, then Event Subscriptions > Enable Events > Subscribe to bot events: `app_mention` and `message.im` > Save Changes (no Request URL is asked for). In Fermix save the bot token and the app-level token, choose Socket Mode, and restart. The connection is live once `/health` (or Doctor's channel health) says Socket Mode connected; Slack refreshes it every few hours and Fermix reconnects on its own, waiting 1 second, doubling to 60, after a failure. Fermix acknowledges an event to Slack once it has taken it in; if it could not, it leaves the event unacknowledged and Slack sends it again, as it retries a webhook that failed. Slack's slash commands and interactive messages reach no handler in either way: they are acknowledged and logged.
 
 - **First message**: DM: Apps > the app > Messages tab > `hi`. Channel: `/invite @Fermix`, then `@Fermix hello`; the reply lands in a thread. Slack treats a leading `/` as its own slash command: in a channel send `@Fermix /new`; in a DM start with a space (` /new`), because a mention is not stripped in a DM.
 
@@ -87,6 +95,10 @@ Failures:
 - `missing_scope` in the log → add the scopes, reinstall.
 - Clock more than 5 minutes off → every event fails `:stale_timestamp`.
 - Tunnel down or Mac asleep for long → Slack disables event delivery and emails the app owner → stable hostname, re-enable under the Slack app's Event Subscriptions.
+- Socket Mode: `/health` and Doctor show `Slack refused apps.connections.open: invalid_auth` → the app-level token is wrong or revoked → generate a new one, `fermix settings secret set slack_app_token`, restart. `not_allowed_token_type` → a bot token (`xoxb-`) was saved where the app-level token (`xapp-`) belongs.
+- Socket Mode: `Slack turned Socket Mode off for this app (link_disabled)` → turn Socket Mode back on in the Slack app, or switch Fermix to the webhook.
+- Socket Mode chosen but the app-level token missing → Channels shows "Add the Slack bot token and app-level token" and nothing connects.
+- `SLACK_MODE=webhook` in the daemon's environment forces the webhook whatever `config.toml` says; unset it to use Socket Mode.
 
 ## WhatsApp
 
@@ -163,7 +175,7 @@ Troubleshooting, by what the helper reports (Doctor rows `imessage_helper` and `
 - `owner_user_id` is the operator: full tools and owner commands. With no allow list, the owner is the only sender let in.
 - Guests: `allowed_user_ids` (Telegram, Discord, Slack) or `allowed_sender_ids` (WhatsApp, Signal, iMessage), a list of quoted ids in `config.toml`; only iMessage's guest list also has a setup field. Guests get read-only chat. Setting a list replaces the owner-only default (the owner still gets in); an empty list (`[]`, or an empty `*_ALLOWED_*_IDS` variable on a Linux or dev install) keeps Telegram, Discord and Signal from starting even with an owner set; on iMessage it only means no guests.
 - `command_allowlist` lets listed guests run owner-tier commands such as `/new` and `/compact`; each must also be on the guest list, or they never reach Fermix.
-- With neither an owner nor a list, Telegram, Discord and Signal refuse to start ("Refusing to start the <channel> adapter" in the boot log) and the Slack and WhatsApp webhooks drop every sender. A sender who is not allowed gets no reply at all.
+- With neither an owner nor a list, Telegram, Discord, Signal and Slack over Socket Mode refuse to start ("Refusing to start the <channel> adapter" in the boot log) and the Slack and WhatsApp webhooks drop every sender. A sender who is not allowed gets no reply at all.
 - Reminders and skill proposals go to `[fermix_core.jobs] default_delivery_target` when set, else to the owner on the first of Telegram, Signal and WhatsApp with an `owner_user_id`; a Discord or Slack owner needs that target. A scheduled job delivers only where it was told to (its origin, an explicit target, or that default), never to an owner id on its own.
 
 ## Finding an id
@@ -185,6 +197,6 @@ Troubleshooting, by what the helper reports (Doctor rows `imessage_helper` and `
 - Doctor > **Run network checks** in the app (`fermix doctor --full` on Linux or dev): the `channel health` row checks only the token (plus Discord's bot user ID and WhatsApp's Phone number ID), not intents, webhook secrets, the public URL or the owner id; `command owners` warns when `owner_user_id` is missing.
 - A reply to the first message is the real proof. Logs: the app's Logs, or `~/.fermix/logs/fermix.log`.
 
-## The public URL (Slack, WhatsApp)
+## The public URL (Slack webhook, WhatsApp)
 
-Fermix serves plain HTTP on `127.0.0.1:4030` (`[fermix_web] port`); Slack and Meta call only HTTPS URLs with a valid certificate. Run an HTTPS tunnel or reverse proxy on the same machine (Cloudflare Tunnel, ngrok, Tailscale Funnel) that forwards to `http://127.0.0.1:4030`, and give the platform `https://<public-host>/webhook/slack` or `/webhook/whatsapp`. Forward only those paths if the tool allows it: the listener also serves the status page, which opens only in a browser setup signed in, and `/health`, which answers only its status. No `FERMIX_HTTP_BIND` change is needed, and on an app-managed Mac a same-machine tunnel or proxy is the only route. Those tunnels send `X-Forwarded-Proto: https` themselves; a hand-built reverse proxy must send it too (or forward with host `127.0.0.1`), or Fermix answers with a redirect to HTTPS and the platform's URL check fails. Fermix ships no tunnel. When the tunnel's hostname changes, update the Request or Callback URL.
+Slack over Socket Mode needs none of this (see Slack above). Fermix serves plain HTTP on `127.0.0.1:4030` (`[fermix_web] port`); Slack and Meta call only HTTPS URLs with a valid certificate. Run an HTTPS tunnel or reverse proxy on the same machine (Cloudflare Tunnel, ngrok, Tailscale Funnel) that forwards to `http://127.0.0.1:4030`, and give the platform `https://<public-host>/webhook/slack` or `/webhook/whatsapp`. The webhook routes are exactly three: `POST /webhook/slack`, `GET /webhook/whatsapp` (Meta's verification) and `POST /webhook/whatsapp`. Forward only those if the tool allows it: the listener also serves the status page, which opens only in a browser setup signed in, and `/health`, which answers only its status. No `FERMIX_HTTP_BIND` change is needed, and on an app-managed Mac a same-machine tunnel or proxy is the only route. Those tunnels send `X-Forwarded-Proto: https` themselves; a hand-built reverse proxy must send it too (or forward with host `127.0.0.1`), or Fermix answers with a redirect to HTTPS and the platform's URL check fails. Fermix ships no tunnel. When the tunnel's hostname changes, update the Request or Callback URL.

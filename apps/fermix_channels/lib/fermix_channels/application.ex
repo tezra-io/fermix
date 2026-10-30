@@ -52,6 +52,13 @@ defmodule FermixChannels.Application do
       FermixChannels.Channels.Telegram.Poller
     )
 
+    # Slack's Socket Mode connection reports its posture the same way (M75).
+    Application.put_env(
+      :fermix_core,
+      :slack_socket_health_provider,
+      FermixChannels.Channels.Slack.SocketMode
+    )
+
     # The Live voice engine delegates every task back to a Core turn through
     # this bridge (M41 §6). Core owns the behaviour and resolves an
     # implementation; it must not compile-depend on channels, so the bridge

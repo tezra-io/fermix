@@ -2,9 +2,14 @@ defmodule FermixChannels.Channels.Slack do
   @moduledoc """
   Slack direct-message and app-mention channel adapter.
 
-  Uses the Events API for signed webhook ingress and `chat.postMessage` for
-  outbound replies. Initial M3 scope is limited to DMs and `app_mention`
-  events.
+  Events arrive one of two ways, set by `[fermix_channels.slack] mode`:
+  `"webhook"` (the default) takes the Events API's signed requests at
+  `POST /webhook/slack`, and `"socket"` takes them over Socket Mode
+  (`Slack.SocketMode`), a WebSocket Fermix opens to Slack with the app-level
+  token, so a host with no inbound port can run Slack (M75). Both hand a
+  payload to the same path (`Gateway.WebhookIngress`). Replies go out through
+  `chat.postMessage` either way. Initial M3 scope is limited to DMs and
+  `app_mention` events.
   """
 
   @behaviour FermixChannels.Gateway.Channel
@@ -12,6 +17,7 @@ defmodule FermixChannels.Channels.Slack do
   require Logger
 
   alias FermixChannels.Channels.Slack.Mrkdwn
+  alias FermixChannels.Channels.Slack.SocketMode
   alias FermixChannels.Gateway.Idempotency
   alias FermixChannels.Gateway.MediaDownload
   alias FermixChannels.Gateway.Message
@@ -252,11 +258,89 @@ defmodule FermixChannels.Channels.Slack do
       |> Req.merge(health_req_options(opts))
       |> HttpClient.request("Slack health")
       |> classify_health_response(start)
+      |> with_socket_mode(
+        mode(),
+        Keyword.get_lazy(opts, :socket_health, &SocketMode.poll_health/0)
+      )
     else
       {:error, :not_configured} ->
         {:error, {:misconfigured, "slack bot_token is not configured"}}
     end
   end
+
+  # In Socket Mode the bot token answering is half the answer: events arrive
+  # only while the connection is up, so its state is part of the probe, in
+  # Slack's own words when it failed. `:socket_health` stands in for the
+  # running connection's (tests).
+  defp with_socket_mode(result, :webhook, _socket_health), do: result
+  defp with_socket_mode({:error, _reason} = error, :socket, _socket_health), do: error
+
+  defp with_socket_mode({:ok, %{detail: detail} = result}, :socket, socket_health) do
+    case socket_health do
+      %{status: :degraded, detail: sentence} ->
+        {:error, {:misconfigured, "#{detail}, but Socket Mode is down: #{sentence}"}}
+
+      %{status: :connected} ->
+        {:ok, %{result | detail: "#{detail}; Socket Mode connected"}}
+
+      %{status: status} when status in [:connecting, :reconnecting] ->
+        {:ok, %{result | detail: "#{detail}; Socket Mode #{status}"}}
+
+      nil ->
+        {:ok, %{result | detail: "#{detail}; Socket Mode is not running in this engine"}}
+    end
+  end
+
+  @doc """
+  How Slack events reach this engine: `:webhook` (the default) or `:socket`.
+  """
+  @spec mode() :: :webhook | :socket
+  def mode do
+    case FermixCore.Config.channel(:slack) do
+      {:ok, config} -> if Keyword.get(config, :mode) == :socket, do: :socket, else: :webhook
+      _ -> :webhook
+    end
+  end
+
+  @doc """
+  Asks Slack for a Socket Mode connection with the app-level token
+  (`apps.connections.open`): `{:ok, url}`, a one-time `wss://` address, or why
+  not, with Slack's own error code when Slack refused (`{:slack, code}`).
+  """
+  @spec open_socket_url(keyword()) ::
+          {:ok, String.t()}
+          | {:error,
+             :not_configured
+             | {:slack, String.t()}
+             | {:http_status, pos_integer()}
+             | {:unexpected_reply, String.t()}
+             | {:network, term()}}
+  def open_socket_url(opts \\ []) when is_list(opts) do
+    with {:ok, token} <- app_token() do
+      Req.new(url: "#{@api_base}/apps.connections.open", method: :post)
+      |> Req.Request.put_header("authorization", "Bearer #{token}")
+      |> Req.merge(req_options(opts))
+      |> HttpClient.request("Slack apps.connections.open")
+      |> classify_socket_url()
+    end
+  end
+
+  defp classify_socket_url({:ok, %{status: 200, body: %{"ok" => true, "url" => url}}})
+       when is_binary(url) do
+    if String.starts_with?(url, "wss://"),
+      do: {:ok, url},
+      else: {:error, {:unexpected_reply, "a connection address that is not wss://"}}
+  end
+
+  defp classify_socket_url({:ok, %{status: 200, body: %{"ok" => false, "error" => code}}})
+       when is_binary(code),
+       do: {:error, {:slack, code}}
+
+  defp classify_socket_url({:ok, %{status: 200}}),
+    do: {:error, {:unexpected_reply, "an answer with no connection address"}}
+
+  defp classify_socket_url({:ok, %{status: status}}), do: {:error, {:http_status, status}}
+  defp classify_socket_url({:error, reason}), do: {:error, {:network, reason}}
 
   @doc false
   @spec url_verification_challenge(map()) ::
@@ -564,6 +648,7 @@ defmodule FermixChannels.Channels.Slack do
   end
 
   defp bot_token, do: fetch_config_value(:bot_token)
+  defp app_token, do: fetch_config_value(:app_token)
   defp signing_secret, do: fetch_config_value(:signing_secret)
 
   defp fetch_config_value(key) do

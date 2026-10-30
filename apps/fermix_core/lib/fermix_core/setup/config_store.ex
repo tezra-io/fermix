@@ -2955,18 +2955,33 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_slack(config) do
     []
     |> put_if_present(:enabled, lookup(config, "enabled", :enabled))
-    |> put_if_present(:mode, normalize_mode(lookup(config, "mode", :mode)))
+    |> put_if_present(:mode, normalize_slack_mode(lookup(config, "mode", :mode)))
     |> put_streaming(config)
     |> put_if_present(:bot_token, normalize_string(lookup(config, "bot_token", :bot_token)))
     |> put_if_present(
       :signing_secret,
       normalize_string(lookup(config, "signing_secret", :signing_secret))
     )
+    |> put_if_present(:app_token, normalize_string(lookup(config, "app_token", :app_token)))
     |> put_command_auth(config)
     |> put_ids_if_present(
       :allowed_user_ids,
       lookup(config, "allowed_user_ids", :allowed_user_ids)
     )
+  end
+
+  # How Slack events arrive (M75): the Events API webhook, or Socket Mode.
+  # Accepts the file's strings and the atoms this returns, so a save of the
+  # live snapshot renders the same spelling back; refuses anything else by name.
+  defp normalize_slack_mode(nil), do: nil
+  defp normalize_slack_mode(mode) when mode in [:webhook, :socket], do: mode
+  defp normalize_slack_mode("webhook"), do: :webhook
+  defp normalize_slack_mode("socket"), do: :socket
+
+  defp normalize_slack_mode(other) do
+    raise ArgumentError,
+          ~s(config.toml [fermix_channels.slack] mode must be "webhook" or "socket", and ) <>
+            "#{inspect(other)} is not. Fix it; the daemon will not boot until this is fixed."
   end
 
   defp normalize_signal(nil), do: []

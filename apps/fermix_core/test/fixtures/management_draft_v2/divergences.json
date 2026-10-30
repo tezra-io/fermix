@@ -1255,6 +1255,18 @@
       "why": "M51 gives the phone channel its own settings section, channels.mobile: the enable switch, applied the moment it is written, and three boot-bound rows: the port, the address it listens on and the local-network announcement. The draft predates it and draws no such section; the rows are the ordinary row shape."
     },
     {
+      "method": "settings.get:channels.slack",
+      "field": "rows:slack_mode",
+      "kind": "engine_only",
+      "why": "M75: Slack takes events by webhook (the default) or over Socket Mode, which needs no public address, so a server with no open port can run Slack. The way is a boot-bound choice row with two options; the draft predates it, and the row is the ordinary choice shape, drawn through the descriptor form with no Swift work."
+    },
+    {
+      "method": "settings.get:channels.slack",
+      "field": "rows:slack_app_token",
+      "kind": "engine_only",
+      "why": "M75: Socket Mode connects with Slack's app-level token, a secret row stored and removed through secret.set and secret.clear with the key slack_app_token, like the bot token beside it. The draft predates it; the row is the ordinary secret shape, drawn with no Swift work."
+    },
+    {
       "method": "(schema)",
       "field": "job_kinds:browser_install",
       "kind": "engine_only",

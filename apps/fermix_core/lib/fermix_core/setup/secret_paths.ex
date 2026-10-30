@@ -224,6 +224,13 @@ defmodule FermixCore.Setup.SecretPaths do
       env_overlay: true,
       path: [:fermix_channels, :slack, :signing_secret]
     },
+    # The app-level token (`xapp-…`) Slack's Socket Mode connects with (M75).
+    %{
+      key: :slack_app_token,
+      env: "SLACK_APP_TOKEN",
+      env_overlay: true,
+      path: [:fermix_channels, :slack, :app_token]
+    },
     %{
       key: :mobile_apns_key,
       env: "FERMIX_APNS_KEY",

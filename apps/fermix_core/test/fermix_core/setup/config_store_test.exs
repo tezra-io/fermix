@@ -363,6 +363,62 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Application.get_env(:fermix_core, :secret_store) == :file
   end
 
+  # `[fermix_channels.slack] mode` (M75): the webhook or Socket Mode, an atom in
+  # app env and a string in the file. Seeded with the app-env shape a save
+  # reads (the config round-trip pitfall), and saved twice from the live
+  # snapshot so the second save is shown to be a fixed point.
+  test "save/load round-trips the Slack mode and its app-level token reference" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    previous = Application.fetch_env(:fermix_channels, :slack)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, value} -> Application.put_env(:fermix_channels, :slack, value)
+        :error -> Application.delete_env(:fermix_channels, :slack)
+      end
+
+      FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+    end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [],
+      fermix_channels: [slack: [enabled: true, mode: :socket, app_token: "@keyring"]],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~s(mode = "socket")
+    assert contents =~ ~s(app_token = "@keyring")
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    slack = Keyword.fetch!(loaded.fermix_channels, :slack)
+    assert slack[:mode] == :socket
+    assert slack[:app_token] == "@keyring"
+
+    assert :ok = ConfigStore.save_snapshot(loaded)
+    assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+    assert Keyword.fetch!(reloaded.fermix_channels, :slack)[:mode] == :socket
+  end
+
+  test "a Slack mode that is neither the webhook nor Socket Mode is refused by name" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+    File.write!(Path.join(tmp_home, "config.toml"), ~s([fermix_channels.slack]\nmode = "rtm"\n))
+
+    assert_raise ArgumentError,
+                 ~r/\[fermix_channels.slack\] mode must be "webhook" or "socket"/,
+                 fn -> ConfigStore.load_runtime_config() end
+  end
+
   test "an unknown secret store is refused by name when the file is loaded" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")

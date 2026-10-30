@@ -163,6 +163,75 @@ defmodule FermixCore.ReadinessTest do
     end
   end
 
+  # M75: the webhook checks Slack's signature, Socket Mode connects with the
+  # app-level token, so each mode asks for its own credential beside the bot
+  # token, and says so in its own sentence.
+  describe "slack" do
+    setup do
+      slack = Application.fetch_env(:fermix_channels, :slack)
+
+      on_exit(fn ->
+        case slack do
+          {:ok, value} -> Application.put_env(:fermix_channels, :slack, value)
+          :error -> Application.delete_env(:fermix_channels, :slack)
+        end
+      end)
+    end
+
+    test "the webhook needs the signing secret and not the app-level token" do
+      Application.put_env(:fermix_channels, :slack, enabled: true, mode: :webhook, bot_token: "b")
+      refute Readiness.channel_configured?(:slack)
+      assert slack_failure().detail_key == "channel:slack"
+
+      Application.put_env(:fermix_channels, :slack,
+        enabled: true,
+        mode: :webhook,
+        bot_token: "b",
+        signing_secret: "s"
+      )
+
+      assert Readiness.channel_configured?(:slack)
+      refute slack_failure()
+    end
+
+    test "Socket Mode needs the app-level token and not the signing secret" do
+      Application.put_env(:fermix_channels, :slack,
+        enabled: true,
+        mode: :socket,
+        bot_token: "b",
+        signing_secret: "s"
+      )
+
+      refute Readiness.channel_configured?(:slack)
+
+      assert %{detail_key: "channel:slack:socket", pane: "channels", gating: false} =
+               failure = slack_failure()
+
+      assert failure.action == "Add the Slack bot token and app-level token in Channels settings."
+
+      Application.put_env(:fermix_channels, :slack,
+        enabled: true,
+        mode: :socket,
+        bot_token: "b",
+        app_token: "xapp-1"
+      )
+
+      assert Readiness.channel_configured?(:slack)
+      refute slack_failure()
+    end
+
+    test "both of its sentences are published for the copy gate" do
+      keys = Enum.map(Readiness.published_actions(), &elem(&1, 0))
+
+      assert "channel:slack" in keys
+      assert "channel:slack:socket" in keys
+    end
+
+    defp slack_failure do
+      Enum.find(Readiness.report().failures, &String.starts_with?(&1.detail_key, "channel:slack"))
+    end
+  end
+
   # M54 §14: readiness reads the saved section and whether the helper is on
   # disk, and nothing else. The probe (grants, sign-in, the confirmed policy)
   # spawns the helper, so it belongs to Doctor and the permissions read, never

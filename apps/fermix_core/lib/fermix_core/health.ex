@@ -53,12 +53,15 @@ defmodule FermixCore.Health do
       child: FermixChannels.Channels.Discord.Gateway,
       health_provider_key: nil
     },
+    # Slack runs a child only over Socket Mode (M75), so liveness is not keyed
+    # on one; its connection's posture comes through the provider instead, and
+    # is absent (`nil`) under the webhook, where no connection runs.
     %{
       key: :slack,
       name: "slack",
       default_enabled: false,
       child: nil,
-      health_provider_key: nil
+      health_provider_key: :slack_socket_health_provider
     },
     %{
       key: :signal,

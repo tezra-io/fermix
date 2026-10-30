@@ -1152,6 +1152,14 @@ is ready again, never per retry. `error_class` is the failure's kind
 not a transition, and emits nothing; `mobile.status` and `fermix doctor` say
 it. A phone's session over the iroh carrier emits exactly the events a
 WebSocket session does.
+Slack over Socket Mode (M75) is another: `emit_transport(:slack, :degraded |
+:recovered, …)` fires when its connection first fails (Slack refused
+`apps.connections.open`, the WebSocket could not open, dropped or went silent,
+or Slack turned Socket Mode off) and when `hello` arrives after that, never
+per retry and never for Slack's routine refresh of a healthy connection.
+`error_class` is `auth` (Slack's own code, such as `invalid_auth`, is in the
+posture `/health` and Doctor show, never in the event), `http_status`,
+`network`, `socket`, `remote_closed`, `timeout` or `not_configured`.
 
 ## Inbound attachments (a pre-turn point per attachment)
 

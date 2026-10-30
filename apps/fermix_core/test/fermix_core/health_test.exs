@@ -346,6 +346,34 @@ defmodule FermixCore.HealthTest do
                channel(report, "slack")
     end
 
+    # M75: Slack over Socket Mode runs a connection, and its posture is the
+    # channel's health: a refused app-level token is degraded, in Slack's words.
+    test "slack over Socket Mode reports its connection's posture" do
+      Application.put_env(:fermix_channels, :slack, enabled: true, mode: :socket)
+      on_exit(fn -> Application.delete_env(:fermix_channels, :slack) end)
+
+      degraded = %{
+        status: :degraded,
+        detail: "Slack refused apps.connections.open: invalid_auth",
+        since: DateTime.utc_now(),
+        consecutive_failures: 1
+      }
+
+      transport_health = fn
+        :slack_socket_health_provider -> degraded
+        _other -> nil
+      end
+
+      report = health_report(fn _name -> nil end, transport_health: transport_health)
+
+      assert %{name: "slack", status: :degraded, mode: :socket, transport: ^degraded} =
+               channel(report, "slack")
+
+      connected = %{degraded | status: :connected, detail: nil, consecutive_failures: 0}
+      report = health_report(fn _name -> nil end, transport_health: fn _key -> connected end)
+      assert %{name: "slack", status: :ready, transport: ^connected} = channel(report, "slack")
+    end
+
     test "probes the acp transport through its endpoint, not its supervisor" do
       previous = Application.get_env(:fermix_channels, :acp)
       Application.put_env(:fermix_channels, :acp, enabled: true, mode: :gateway)

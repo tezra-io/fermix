@@ -156,8 +156,10 @@ defmodule FermixWebWeb.SetupLive do
     :discord_bot_token,
     :discord_bot_user_id,
     :discord_owner_user_id,
+    :slack_mode,
     :slack_bot_token,
     :slack_signing_secret,
+    :slack_app_token,
     :slack_owner_user_id,
     :signal_account,
     :signal_owner_user_id,
@@ -416,8 +418,10 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:discord_bot_token, params["discord_bot_token"])
       |> maybe_put_string(:discord_bot_user_id, params["discord_bot_user_id"])
       |> maybe_put_string(:discord_owner_user_id, params["discord_owner_user_id"])
+      |> maybe_put_string(:slack_mode, params["slack_mode"])
       |> maybe_put_string(:slack_bot_token, params["slack_bot_token"])
       |> maybe_put_string(:slack_signing_secret, params["slack_signing_secret"])
+      |> maybe_put_string(:slack_app_token, params["slack_app_token"])
       |> maybe_put_string(:slack_owner_user_id, params["slack_owner_user_id"])
       |> maybe_put_string(:signal_account, params["signal_account"])
       |> maybe_put_string(:signal_owner_user_id, params["signal_owner_user_id"])
@@ -1937,8 +1941,10 @@ defmodule FermixWebWeb.SetupLive do
 
     %{
       enabled: channel_enabled?(config, false),
+      mode: safe_string(Keyword.get(config, :mode, :webhook)),
       bot_token_set: secret_set?(config, :bot_token),
       signing_secret_set: secret_set?(config, :signing_secret),
+      app_token_set: secret_set?(config, :app_token),
       owner_user_id: safe_string(Keyword.get(config, :owner_user_id))
     }
   end

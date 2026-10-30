@@ -61,7 +61,9 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       assert value == Map.fetch!(secret_values(), secret.key)
     end)
 
-    assert_received {:puts, "Moved 34 secret(s) to the keyring store."}
+    # Every registered secret is in the fixture (the loop above), so every one moves.
+    moved = "Moved #{length(SecretPaths.all())} secret(s) to the keyring store."
+    assert_received {:puts, ^moved}
   end
 
   test "run writes a sandbox.env source for migrated AI-provider secrets", %{home: home} do
@@ -306,6 +308,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     [fermix_channels.slack]
     bot_token = "slack-old"
     signing_secret = "slack-signing-old"
+    app_token = "slack-app-old"
 
     [fermix_core.oauth.slack]
     client_type = "desktop_public_pkce"
@@ -358,6 +361,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       discord_bot_token: "discord-old",
       slack_bot_token: "slack-old",
       slack_signing_secret: "slack-signing-old",
+      slack_app_token: "slack-app-old",
       slack_oauth_client_secret: "slack-oauth-old",
       mobile_apns_key: "apns-old",
       discord_plugin_secret: "discord-plugin-old",

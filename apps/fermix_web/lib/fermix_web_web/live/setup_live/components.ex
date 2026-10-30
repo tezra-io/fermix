@@ -3805,6 +3805,18 @@ defmodule FermixWebWeb.SetupLive.Components do
       checked={@field.checked}
       hint={@field.hint}
     />
+    <label :if={@field.kind == :choice} class="form-control w-full">
+      <span class="label-text text-sm font-medium">{@field.label}</span>
+      <select name={@field.name} class="select select-bordered w-full bg-base-100">
+        <option
+          :for={{value, text} <- @field.options}
+          value={value}
+          selected={value == @field.value}
+        >
+          {text}
+        </option>
+      </select>
+    </label>
     <button
       :if={@field.kind == :action}
       type="button"
@@ -4240,10 +4252,17 @@ defmodule FermixWebWeb.SetupLive.Components do
     ]
   end
 
+  # The webhook needs the signing secret and a public address; Socket Mode
+  # needs the app-level token and no address at all (M75).
   defp channel_fields(:slack, form) do
     [
+      choice_field("Receive events through", "slack_mode", form.mode, [
+        {"webhook", "A webhook at a public address"},
+        {"socket", "Socket Mode, with no public address"}
+      ]),
       secret_field("Bot token", "slack_bot_token", form.bot_token_set),
-      secret_field("Signing secret", "slack_signing_secret", form.signing_secret_set),
+      secret_field("Signing secret (webhook)", "slack_signing_secret", form.signing_secret_set),
+      secret_field("App-level token (Socket Mode)", "slack_app_token", form.app_token_set),
       text_field("Owner user ID", "slack_owner_user_id", form.owner_user_id)
     ]
   end
@@ -4293,6 +4312,10 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp text_field(label, key, value) do
     %{kind: :text, label: label, name: "channels_form[#{key}]", value: value}
+  end
+
+  defp choice_field(label, key, value, options) do
+    %{kind: :choice, label: label, name: "channels_form[#{key}]", value: value, options: options}
   end
 
   defp toggle_field(label, key, checked, hint) do

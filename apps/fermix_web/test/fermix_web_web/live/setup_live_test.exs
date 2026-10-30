@@ -3912,6 +3912,39 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert Keyword.get(Application.get_env(:fermix_channels, :acp, []), :enabled) == true
     end
 
+    # M75: Slack takes events by webhook or over Socket Mode, each with its own
+    # credential beside the bot token, and the card offers both.
+    test "the slack card chooses how events arrive and takes the app-level token", %{
+      conn: conn
+    } do
+      slack = Application.fetch_env(:fermix_channels, :slack)
+      on_exit(fn -> restore_env(:fermix_channels, :slack, slack) end)
+      Application.put_env(:fermix_channels, :slack, enabled: false, mode: :webhook)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=channels")
+
+      html =
+        view
+        |> element(~s(button[phx-click="select_channel"][phx-value-channel="slack"]))
+        |> render_click()
+
+      assert html =~ ~s(name="channels_form[slack_mode]")
+      assert html =~ ~r/<option value="socket"[^>]*>\s*Socket Mode, with no public address\s*</
+      assert html =~ ~s(name="channels_form[slack_app_token]")
+      assert html =~ ~s(name="channels_form[slack_signing_secret]")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_channels\"]", channels_form: %{slack_mode: "socket"})
+        |> render_submit()
+
+      assert html =~ "Channels saved."
+      saved = Application.get_env(:fermix_channels, :slack, [])
+      assert Keyword.get(saved, :mode) == :socket
+      # Choosing the way is a setting; only the switch or a credential turns it on.
+      assert Keyword.get(saved, :enabled) == false
+    end
+
     # The phone channel's card pairs and switches through the management calls
     # (M51 web setup pairing); it has no token form, and nothing of its push
     # settings, the APNs key least of all, is ever drawn.

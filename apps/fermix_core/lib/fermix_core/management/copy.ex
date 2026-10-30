@@ -82,6 +82,7 @@ defmodule FermixCore.Management.Copy do
     "WhatsApp",
     "Discord",
     "Slack",
+    "Socket Mode",
     "Signal",
     "Google Meet",
     "Zoom",

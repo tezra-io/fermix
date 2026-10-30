@@ -1919,6 +1919,49 @@ defmodule FermixCore.Management.SettingsTest do
 
   defp settings_file(home), do: File.read!(Path.join(home, "config.toml"))
 
+  # M75: Slack takes events by webhook (the default) or over Socket Mode, and
+  # each way needs its own credential beside the bot token.
+  describe "the Slack section" do
+    test "offers the webhook and Socket Mode, the webhook until one is chosen" do
+      Application.put_env(:fermix_channels, :slack, [])
+
+      assert %{"kind" => "choice", "value" => "webhook", "restart" => true} =
+               row("channels.slack", "slack_mode")
+
+      assert option_values("channels.slack", "slack_mode") == ["webhook", "socket"]
+      assert %{"kind" => "secret", "present" => false} = row("channels.slack", "slack_app_token")
+    end
+
+    test "choosing Socket Mode writes the mode and leaves the switch alone", %{home: home} do
+      Application.put_env(:fermix_channels, :slack, enabled: false, mode: :webhook)
+
+      assert {:ok, result} = Settings.apply("channels.slack", %{"slack_mode" => "socket"})
+
+      assert result["applied"] == ["slack_mode"]
+      assert settings_file(home) =~ ~s(mode = "socket")
+      assert Keyword.get(Application.get_env(:fermix_channels, :slack), :mode) == :socket
+      assert Keyword.get(Application.get_env(:fermix_channels, :slack), :enabled) == false
+      assert %{"value" => "socket"} = row("channels.slack", "slack_mode")
+
+      assert {:error, {:invalid_params, "slack_mode", _sentence}} =
+               Settings.apply("channels.slack", %{"slack_mode" => "rtm"})
+    end
+
+    test "the app-level token is stored like the bot token, as a reference in the file", %{
+      home: home
+    } do
+      assert {:ok, %{"present" => true}} =
+               Secrets.set("slack_app_token", "xapp-1-A0TEST-1-c0ffee")
+
+      assert SecretWriterStub.get(:slack_app_token, store: :keyring) ==
+               {:ok, "xapp-1-A0TEST-1-c0ffee"}
+
+      assert settings_file(home) =~ ~s(app_token = "#{SecretWriter.sentinel()}")
+      refute settings_file(home) =~ "xapp-1-A0TEST"
+      assert %{"present" => true} = row("channels.slack", "slack_app_token")
+    end
+  end
+
   describe "the save then load round trip" do
     test "every section a write touches survives being written and read back", %{home: home} do
       seed_normalized_app_env()
@@ -1970,6 +2013,27 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert Enum.sort(mobile[:push]) ==
                Enum.sort(enabled: false, team_id: "TEAM123456", topic: "ai.fermix.app")
+    end
+
+    # The Slack mode normalizes to an atom; the live block a save reads holds
+    # that atom, and the file must carry it back as the same mode (M75).
+    test "a Slack mode write survives being written and read back" do
+      Application.put_env(:fermix_channels, :slack,
+        enabled: true,
+        mode: :socket,
+        allowed_user_ids: ["U0OWNER"]
+      )
+
+      assert {:ok, _result} = Settings.apply("channels.slack", %{"slack_enabled" => true})
+      assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+      slack = reloaded |> Map.get(:fermix_channels, []) |> Keyword.get(:slack, [])
+
+      assert slack[:mode] == :socket
+      assert slack[:enabled] == true
+
+      assert {:ok, _result} = Settings.apply("channels.slack", %{"slack_mode" => "webhook"})
+      assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+      assert reloaded |> Map.get(:fermix_channels, []) |> get_in([:slack, :mode]) == :webhook
     end
 
     test "a second save on top of a loaded file is stable" do

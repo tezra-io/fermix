@@ -94,8 +94,10 @@ defmodule FermixCore.Setup.Wizard do
           | {:discord_bot_token, String.t()}
           | {:discord_bot_user_id, String.t()}
           | {:discord_owner_user_id, String.t()}
+          | {:slack_mode, String.t()}
           | {:slack_bot_token, String.t()}
           | {:slack_signing_secret, String.t()}
+          | {:slack_app_token, String.t()}
           | {:slack_owner_user_id, String.t()}
           | {:signal_account, String.t()}
           | {:signal_owner_user_id, String.t()}
@@ -2562,12 +2564,38 @@ defmodule FermixCore.Setup.Wizard do
           secret_snapshot_value(
             :slack_signing_secret,
             Keyword.get(answers, :slack_signing_secret)
-          )
+          ),
+        app_token: secret_snapshot_value(:slack_app_token, Keyword.get(answers, :slack_app_token))
       ]
       |> reject_blank_values()
 
-    put_channel_config(snapshot, :slack, values, :webhook)
+    snapshot
+    |> put_channel_config(:slack, values, :webhook)
+    |> put_slack_mode(slack_mode(Keyword.get(answers, :slack_mode)))
   end
+
+  # How Slack events arrive (M75): the webhook, or Socket Mode. Choosing one is
+  # a setting like the switch beside it, so unlike saving a credential it does
+  # not turn the channel on.
+  defp put_slack_mode(snapshot, nil), do: snapshot
+
+  defp put_slack_mode(snapshot, mode) do
+    channels = Map.get(snapshot, :fermix_channels, [])
+    slack = channels |> Keyword.get(:slack, []) |> Keyword.put(:mode, mode)
+    Map.put(snapshot, :fermix_channels, Keyword.put(channels, :slack, slack))
+  end
+
+  defp slack_mode(nil), do: nil
+  defp slack_mode(""), do: nil
+  defp slack_mode("webhook"), do: :webhook
+  defp slack_mode("socket"), do: :socket
+
+  defp slack_mode(other),
+    do:
+      raise(
+        ArgumentError,
+        ~s(invalid slack_mode #{inspect(other)}; expected "webhook" or "socket")
+      )
 
   defp put_signal_config(snapshot, answers) do
     values =
