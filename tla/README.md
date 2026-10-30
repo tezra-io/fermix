@@ -200,11 +200,11 @@ must equal the `holds` check it covers, and the runner checks this.
 | Spec | Covers |
 |---|---|
 | [turn_queue](specs/turn_queue/README.md) | One conversation's turn queue: FIFO, `/stop`, crashes, Queue restarts, and how each turn's result reaches ACP, mobile and voice |
-| [job_runs](specs/job_runs/README.md) | Scheduled jobs: the atomic claim and settle, reconciliation, owner pause/resume/edit and run now, and delivery |
+| [job_runs](specs/job_runs/README.md) | Scheduled jobs: the atomic claim and settle, reconciliation, owner pause/resume/edit and run now, a watcher's follow-up runs from its triggers, and delivery |
 | [token_refresh](specs/token_refresh/README.md) | OAuth refresh across per-profile managers, the CLI and `auth.json`: rotation, reuse and logout |
 | [harness_delivery](specs/harness_delivery/README.md) | Coding-run outcomes: one terminal write, the inline hand-off versus the delivery worker, and continuations |
 | [reminder_delivery](specs/reminder_delivery/README.md) | Reminders: the single claimer, attempt cap, boot sweep, validity window and duplicate sends |
-| [cue_inbox](specs/cue_inbox/README.md) | Cues (M60): accept and route, one filter call per watcher with its fenced settle, boot reset and orphan reclaim, the cue claim and its settles by the runner and the scheduler, subject order over undecided items, cue runs never taking the last slot, no retry after an action, and a proposal run at most once |
+| [cue_inbox](specs/cue_inbox/README.md) | Cues (M60): accept and route, one filter call per watcher with its fenced settle, boot reset and orphan reclaim, the cue claim and its settles by the runner and the scheduler, subject order over undecided items, cue runs never taking the last slot, no retry after an action, a proposal run at most once, and a task-less watcher's item settled at its pass |
 | [computer_history](specs/computer_history/README.md) | The capture buffer against pause, `/history off` and purge: M32 invariant 12 |
 | [realtime_session](specs/realtime_session/README.md) | One voice call: how a tool result reaches the next spoken response, keeping one upstream OpenAI socket across drops and reconnects, and ending the call when OpenAI refuses to configure one |
 | [companion_session](specs/companion_session/README.md) | The companion chat socket: two clients sharing one conversation. Dedupe, the outbox and seq cursor, pages cut to their byte budget and live rows, cancel by name and before the hand-off, each request settled once whether or not it became a turn, a failed settlement included, turn endings, and approval cards kept across drops and dropped once they end |

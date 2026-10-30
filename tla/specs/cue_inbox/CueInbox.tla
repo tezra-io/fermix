@@ -39,6 +39,16 @@
 (* row no task holds) and CUE-2 (no cue run is admitted while the run set  *)
 (* is unknown), the review fixes after them, and the owner's devices       *)
 (* answering a proposal. Line numbers below are those of that commit.      *)
+(*                                                                         *)
+(* Watcher follow-ups (M60_WATCHER_CODING_RUNS.md, 2026-10-30): a watcher  *)
+(* may have a follow-up instead of a task, or both. A pass writes the      *)
+(* follow-up's trigger in its own transaction (CuesFollowUpSql.on_pass);   *)
+(* for a watcher with no task it also settles the delivery acked, outcome  *)
+(* follow_up, there and then (topology follow_up). The trigger, its card   *)
+(* and the run it starts are not modelled here: job_runs models the run's  *)
+(* admission and claim, and the card's confirm has the shape of the        *)
+(* proposal's (see the README). Line numbers of the code this changed are  *)
+(* those of 90a1f0f1.                                                      *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/ingest.ex @ 331e846921b6
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/filters.ex @ d1ca51d578e1
@@ -54,15 +64,16 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex#complete_run,mark_cue_completed,mark_failed @ 4006c75e7387
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,call_or_timeout_error,periodic_opts,claim_cue_run,claim_cue_run_tx,claim_cue_run_in_tx,claim_delivery,claim_in_tx,fetch_claimable_job,ensure_no_active_job_run,settle_cue_run,settle_cue_run_tx,settle_cue_run_in_tx,active_run_trigger,release_cue_job,ensure_job_run_active,finish_job_settle,rollback_job_settle,upsert_job_run_row @ 87275850c2a1
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,maybe_cues_supervisor @ 1a2b5951407a
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_follow_up_sql.ex#on_pass,trigger_pass,settle_taskless
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
     Topology,        \* which deliveries exist (see Wat, Subj, Kind below)
     MaxFaults,       \* how many injected faults one behaviour may contain
-    MaxActive,       \* the scheduler's run ceiling (@max_active_runs 4, scheduler.ex:70)
-    MaxCue,          \* the cue share of it (@max_cue_runs 3, cue_admission.ex:37)
+    MaxActive,       \* the scheduler's run ceiling (@max_active_runs 4, scheduler.ex:78)
+    MaxCue,          \* the cue share of it (@max_cue_runs 3, cue_admission.ex:58)
     MaxFilterAttempts, \* @max_filter_attempts 3 (cues_filter_sql.ex:66), scaled
-    MaxTaskAttempts, \* @max_task_attempts 3 (cues_runs_sql.ex:46), scaled
+    MaxTaskAttempts, \* @max_task_attempts 3 (cues_runs_sql.ex:49), scaled
     \* Environment switches: what may happen.
     ProviderCanFail,     \* a filter call fails (provider or content failure) or
                          \* is still running at the 60 s deadline
@@ -90,51 +101,55 @@ CONSTANTS
                          \* Cues.Proposals.decide/4; the answers share the taps
     \* Mechanism switches: TRUE is the real code; each is FALSE in a needs check.
     SubjectRule,                \* the subject clause of @open_sql
-                                \* (cues_runs_sql.ex:95-98)
-    SubjectRuleCoversUndecided, \* ... over pending and filtering rows too (:98,
+                                \* (cues_runs_sql.ex:97-100)
+    SubjectRuleCoversUndecided, \* ... over pending and filtering rows too (:100,
                                 \* PLAN §1; draft 7 read passed and claimed only)
     ExcludesBusyWatchers,       \* the dispatcher passes the watchers whose call it
-                                \* still holds (filters.ex:235)
+                                \* still holds (filters.ex:236)
     SettleFenced,               \* a filter settle needs its call open and the row's
-                                \* filter_call_id (cues_filter_sql.ex:432 open_call,
-                                \* :543 move)
+                                \* filter_call_id (cues_filter_sql.ex:434 open_call,
+                                \* :545 move)
     TasksDieWithDispatcher,     \* FilterSupervisor starts after Filters in the
                                 \* rest_for_one filtering group (FilteringSupervisor,
                                 \* cues/supervisor.ex:44-47, :51, :58-63)
     BootReset,                  \* Filters.init resets filtering rows
-                                \* (filters.ex:102, :159; cues_filter_sql.ex:635)
+                                \* (filters.ex:103, :160; cues_filter_sql.ex:640)
     NonePassesAtAccept,         \* a none watcher's delivery is inserted passed
-                                \* (cues_sql.ex:631)
+                                \* (cues_sql.ex:769)
     ClaimNeedsIdleJob,          \* a cue claim needs the job scheduled with no active
-                                \* run (@open_sql :91-94; repo.ex fetch_claimable_job,
+                                \* run (@open_sql :93-96; repo.ex fetch_claimable_job,
                                 \* ensure_no_active_job_run)
     CueSlotCap,                 \* free = min(max_active - active, 3 - active_cue)
-                                \* (cue_admission.ex:57)
+                                \* (cue_admission.ex:83)
     AtomicCueSettle,            \* the run row, the job release and the delivery move
                                 \* are one transaction (repo.ex settle_cue_run_in_tx)
     RunSettleFenced,            \* a run settle needs the run active
                                 \* (repo.ex ensure_job_run_active) and the delivery
-                                \* claimed by it (cues_runs_sql.ex:313)
+                                \* claimed by it (cues_runs_sql.ex:366)
     ReapsOnlyDeadRuns,          \* reconciliation reaps a run only when the runner
                                 \* supervisor no longer holds its runner
-                                \* (scheduler.ex:386, :398)
+                                \* (scheduler.ex:504, :516)
     ReconcilesRuns,             \* init and the 60 s tick reconcile unsettled runs
-                                \* (scheduler.ex:210, :250, :370)
+                                \* (scheduler.ex:228, :268, :488)
     ExhaustsAfterAction,        \* a failure once tools_started_at is set ends the
-                                \* delivery exhausted (cues_runs_sql.ex:335)
+                                \* delivery exhausted (cues_runs_sql.ex:388)
     ToolsMarkWriteOnce,         \* the run upsert never clears tools_started_at
                                 \* (repo.ex upsert_job_run_row: coalesce)
     ConfirmFenced,              \* a confirm is one UPDATE on state, token, chat and
                                 \* expiry (cues_mandate_sql.ex decide_waiting)
     ReclaimsOrphans,            \* every sweep puts back a filtering row whose call
                                 \* the dispatcher does not hold (R3, CUE-1:
-                                \* filters.ex:192-215 reclaim_orphans,
-                                \* cues_filter_sql.ex:670 reclaim_in_tx)
+                                \* filters.ex:193-216 reclaim_orphans,
+                                \* cues_filter_sql.ex:675 reclaim_in_tx)
     AdmitsAfterScan,            \* no cue run is admitted while the last reconcile
-                                \* scan failed (R3, CUE-2: scheduler.ex:312
-                                \* free_cue_slots; the flag :374, :382)
-    AppDecideFenced             \* a device's answer is one UPDATE on id, state and
+                                \* scan failed (R3, CUE-2: scheduler.ex:363
+                                \* free_cue_slots; the flag :492, :500)
+    AppDecideFenced,            \* a device's answer is one UPDATE on id, state and
                                 \* expiry (cues_mandate_sql.ex decide_by_id)
+    TaskLessSettlesAtPass       \* a watcher with no task settles its delivery acked
+                                \* (outcome follow_up) in the transaction that passes
+                                \* it (CuesFollowUpSql.on_pass -> settle_taskless,
+                                \* cues_follow_up_sql.ex:303-310, :412-415)
 
 -----------------------------------------------------------------------------
 (* Topologies *)
@@ -152,6 +167,9 @@ Wat == CASE Topology = "subject"      -> <<"a", "a">>
          [] Topology = "two_llm"      -> <<"a", "a">>
          [] Topology = "two_none"     -> <<"a", "a">>
          [] Topology = "mixed3"       -> <<"a", "a", "b">>
+         \* Watchers with a follow-up and no task (M60 follow-ups §4.3).
+         [] Topology = "follow_up"    -> <<"a", "b">>
+         [] Topology = "follow_up3"   -> <<"a", "a", "b">>
 
 Subj == CASE Topology = "subject"      -> <<"s", "s">>
           [] Topology = "two_subjects" -> <<"s", "t">>
@@ -165,10 +183,18 @@ Subj == CASE Topology = "subject"      -> <<"s", "s">>
           [] Topology = "two_llm"      -> <<"s", "t">>
           [] Topology = "two_none"     -> <<"s", "t">>
           [] Topology = "mixed3"       -> <<"s", "s", "t">>
+          [] Topology = "follow_up"    -> <<"s", "t">>
+          [] Topology = "follow_up3"   -> <<"s", "s", "t">>
 
 Kind(w) == IF \/ Topology \in {"subject", "one_llm", "subject3", "two_llm"}
-              \/ (Topology \in {"mixed", "mixed3"} /\ w = "a")
+              \/ (Topology \in {"mixed", "mixed3", "follow_up", "follow_up3"} /\ w = "a")
            THEN "llm" ELSE "none"
+
+\* A watcher holds a task or a follow-up, or both (cue_watchers' CHECK,
+\* cues_sql.ex:431). In the follow_up topologies neither watcher has a
+\* task; in every other one each watcher wakes its task and its follow-up,
+\* if any, is not modelled.
+HasTask(w) == Topology \notin {"follow_up", "follow_up3"}
 
 NDel == Len(Wat)
 D == 1..NDel
@@ -250,16 +276,27 @@ Fault == faults > 0 /\ faults' = faults - 1
 
 -----------------------------------------------------------------------------
 (* Accept and route: Cues.Ingest.accept/3 -> CuesSql {:accept, ...}, one   *)
-(* BEGIN IMMEDIATE (cues_sql.ex:330, accept_in_tx :420): insert_and_route  *)
-(* (:569) and insert_deliveries (:615): one delivery per enabled           *)
+(* BEGIN IMMEDIATE (cues_sql.ex:333, accept_in_tx :552): insert_and_route  *)
+(* (:703) and insert_deliveries (:749): one delivery per enabled           *)
 (* listening watcher, pending for llm, passed with reason "no filter" and  *)
 (* ready_at = now for none. Ids are AUTOINCREMENT: the arrival order.      *)
+(* A none watcher's pass writes its follow-up's trigger in the same        *)
+(* transaction (accepted_follow_up, cues_sql.ex:1209-1210), and one with   *)
+(* no task has the delivery settled acked there and then (PassedRow).      *)
+
+\* The state a pass leaves a delivery in: passed, or for a watcher with no
+\* task acked with outcome follow_up in the same transaction
+\* (CuesFollowUpSql.on_pass -> settle_taskless, cues_follow_up_sql.ex
+\* :303-310, :412-415): no task will claim it, and what the owner answers
+\* stays on the trigger row (design §4.3).
+PassedRow(w) == IF ~HasTask(w) /\ TaskLessSettlesAtPass THEN "acked" ELSE "passed"
 
 Accept(d) ==
     /\ dstate[d] = "absent"
     /\ \A o \in D : o < d => dstate[o] /= "absent"
     /\ dstate' = [dstate EXCEPT ![d] =
-                    IF Kind(Wat[d]) = "none" /\ NonePassesAtAccept THEN "passed" ELSE "pending"]
+                    IF Kind(Wat[d]) = "none" /\ NonePassesAtAccept THEN PassedRow(Wat[d])
+                    ELSE "pending"]
     /\ due' = [due EXCEPT ![d] = TRUE]
     /\ UNCHANGED <<fcall, holder, valid, fatt, tatt, wblocked, jstate, callRows, runRows,
                    propVars, dispVars, schedVars, obs, faults>>
@@ -274,8 +311,8 @@ HasFiltering(w) == \E d \in D : Wat[d] = w /\ dstate[d] = "filtering"
 DuePending(w) == {d \in D : Wat[d] = w /\ dstate[d] = "pending" /\ due[d] /\ valid[d]}
 Oldest(S) == CHOOSE d \in S : \A o \in S : d <= o
 
-\* CuesFilterSql eligible/4 (cues_filter_sql.ex:169): an enabled llm
-\* watcher, filter_retry_at null or past, no delivery in filtering (:179),
+\* CuesFilterSql eligible/4 (cues_filter_sql.ex:171): an enabled llm
+\* watcher, filter_retry_at null or past, no delivery in filtering (:181),
 \* not in `exclude`, with a due pending delivery; its oldest one is claimed.
 \* The 16-claim and 4-in-flight caps never bind with two llm deliveries.
 FilterClaimable(w) ==
@@ -285,7 +322,7 @@ FilterClaimable(w) ==
     /\ ~(ExcludesBusyWatchers /\ WatcherBusy(w))
     /\ DuePending(w) /= {}
 
-\* claim_one/3 (cues_filter_sql.ex:211): pending -> filtering with a new
+\* claim_one/3 (cues_filter_sql.ex:213): pending -> filtering with a new
 \* filter_call_id (CuesSql.transition, fence :none) and the call row.
 ClaimFilterRows(w) ==
     LET d == Oldest(DuePending(w))
@@ -296,8 +333,8 @@ ClaimFilterRows(w) ==
        /\ callDel' = [callDel EXCEPT ![c] = d]
        /\ nextCall' = nextCall + 1
 
-\* dispatch -> claim/2 (filters.ex:219, :233): one {:claim, now, free, busy}
-\* Repo call (periodic opts, :488), then start_call/2 (:249) starts each claim's task
+\* dispatch -> claim/2 (filters.ex:220, :234): one {:claim, now, free, busy}
+\* Repo call (periodic opts, :490), then start_call/2 (:250) starts each claim's task
 \* under FilterSupervisor (async_nolink, monitored) in the same callback.
 FClaim(w) ==
     /\ disp = "up" /\ ~resetPending
@@ -310,7 +347,7 @@ FClaim(w) ==
                    disp, resetPending, schedVars, obs, faults>>
 
 \* The same claim call times out: claim/2 traces sweep_error (filter_claim) and
-\* starts nothing (filters.ex:243-245), but the request still runs and its
+\* starts nothing (filters.ex:244-246), but the request still runs and its
 \* write lands. No task holds the row and the dispatcher's in_flight does not
 \* know it: the sweep's reclaim (FReclaim) or a boot reset puts it back (CUE-1,
 \* fixed in R3; without ReclaimsOrphans only a boot reset does).
@@ -324,7 +361,7 @@ FClaimTimesOut(w) ==
                    dispVars, schedVars, staleRunWrite, retriedAfterAction,
                    staleFilterWrite>>
 
-\* The boot reset: CuesFilterSql {:reset, now} (cues_filter_sql.ex:635, :655):
+\* The boot reset: CuesFilterSql {:reset, now} (cues_filter_sql.ex:640, :660):
 \* every filtering row back to pending with its fence cleared and its
 \* attempts unchanged, every open call finished as aborted. One transaction.
 ResetRows ==
@@ -332,10 +369,10 @@ ResetRows ==
     /\ fcall' = [d \in D |-> IF dstate[d] = "filtering" THEN 0 ELSE fcall[d]]
     /\ callOpen' = [c \in Calls |-> FALSE]
 
-\* Filters.init -> boot_reset/1 (filters.ex:102, :159). A reset that fails is
-\* traced and stays pending; every dispatch tries it first (:219). The new
-\* dispatcher claims nothing before its first sweep timer (ready?, :111, :129,
-\* :135); under weak fairness that timer always fires, so the delay is not
+\* Filters.init -> boot_reset/1 (filters.ex:103, :160). A reset that fails is
+\* traced and stays pending; every dispatch tries it first (:220). The new
+\* dispatcher claims nothing before its first sweep timer (ready?, :112, :130,
+\* :136); under weak fairness that timer always fires, so the delay is not
 \* modelled. A reset that times out still runs before the dispatcher's next
 \* call, so it is the success branch taken where it lands.
 FBoot ==
@@ -365,13 +402,13 @@ FRetryReset ==
 \* after its Repo call timed out, or a settle that rolled back (CUE-1).
 Orphan(d) == dstate[d] = "filtering" /\ fcall[d] \notin inflight
 
-\* The 60 s sweep -> reclaim_orphans/1 (filters.ex:133, :192-215), skipped
+\* The 60 s sweep -> reclaim_orphans/1 (filters.ex:134, :193-216), skipped
 \* while the boot reset is pending: CuesFilterSql {:reclaim_orphans, held,
-\* cutoff, now} (cues_filter_sql.ex:130, reclaim_in_tx :670), one transaction:
+\* cutoff, now} (cues_filter_sql.ex:132, reclaim_in_tx :675), one transaction:
 \* each filtering row whose filter_call_id is not one the dispatcher holds goes
-\* back to pending through the boot reset's fenced move (reset_each/2, :655),
+\* back to pending through the boot reset's fenced move (reset_each/2, :660),
 \* fence cleared and attempts unchanged, and its open call is finished aborted
-\* (abort_orphan_calls/3, :705). The cutoff (a call started more than the 60 s
+\* (abort_orphan_calls/3, :711). The cutoff (a call started more than the 60 s
 \* deadline plus 30 s ago) changes when, not whether: a younger orphan is
 \* reclaimed by a later sweep. A reclaim that fails changes no row and is
 \* tried by the next sweep; one that times out still lands, as this step.
@@ -388,12 +425,12 @@ FReclaim ==
 
 -----------------------------------------------------------------------------
 (* One call's settle: CuesFilterSql {:settle, call_id, result, now}, one   *)
-(* BEGIN IMMEDIATE (cues_filter_sql.ex:116, :400): open_call/2 refuses a  *)
-(* call already finished (:432), apply_result/5 (:482) moves the row       *)
-(* through move/5 (:543), fenced on filtering and filter_call_id. Zero     *)
+(* BEGIN IMMEDIATE (cues_filter_sql.ex:117, :402): open_call/2 refuses a  *)
+(* call already finished (:434), apply_result/5 (:484) moves the row       *)
+(* through move/5 (:545), fenced on filtering and filter_call_id. Zero     *)
 (* rows changed is {:error, :stale}: the row is not written, and since R1  *)
 (* the open call is closed aborted in the same commit (abort_stale_call/3, *)
-(* :421).                                                                   *)
+(* :423).                                                                   *)
 
 Holds(c) == LET d == callDel[c] IN dstate[d] = "filtering" /\ fcall[d] = c /\ callOpen[c]
 Lands(c) == IF SettleFenced THEN Holds(c) ELSE dstate[callDel[c]] = "filtering"
@@ -408,25 +445,28 @@ SettleRows(c, res) ==
        ELSE /\ staleFilterWrite' = (staleFilterWrite \/ ~Holds(c))
             /\ callOpen' = [callOpen EXCEPT ![c] = FALSE]
             /\ CASE res = "pass" ->
-                      \* :482: passed, ready_at = now; the fence is kept. A
+                      \* :484: passed, ready_at = now; the fence is kept. A
                       \* watcher paused while the call ran gets filtering ->
                       \* pending instead (fence cleared, attempts unchanged);
                       \* watchers are always enabled here, so that is never taken.
-                      /\ dstate' = [dstate EXCEPT ![d] = "passed"]
+                      \* The pass writes the follow-up's trigger, and settles a
+                      \* task-less watcher's delivery, in the same transaction
+                      \* (pass_delivery, cues_filter_sql.ex:609-616; PassedRow).
+                      /\ dstate' = [dstate EXCEPT ![d] = PassedRow(w)]
                       /\ due' = [due EXCEPT ![d] = TRUE]
                       /\ UNCHANGED <<fcall, fatt, wblocked>>
                  [] res = "drop" ->
-                      \* :491
+                      \* :493
                       /\ dstate' = [dstate EXCEPT ![d] = "dropped"]
                       /\ UNCHANGED <<fcall, due, fatt, wblocked>>
                  [] res = "pfail" ->
-                      \* :500: back to pending unchanged; the watcher backs off
+                      \* :502: back to pending unchanged; the watcher backs off
                       /\ dstate' = [dstate EXCEPT ![d] = "pending"]
                       /\ fcall' = [fcall EXCEPT ![d] = 0]
                       /\ wblocked' = [wblocked EXCEPT ![w] = TRUE]
                       /\ UNCHANGED <<due, fatt>>
                  [] res = "cfail" ->
-                      \* :518: an attempt spent; retried later, or exhausted
+                      \* :520: an attempt spent; retried later, or exhausted
                       /\ fatt' = [fatt EXCEPT ![d] = fatt[d] + 1]
                       /\ IF fatt[d] + 1 >= MaxFilterAttempts
                          THEN /\ dstate' = [dstate EXCEPT ![d] = "exhausted"]
@@ -436,8 +476,8 @@ SettleRows(c, res) ==
                               /\ due' = [due EXCEPT ![d] = FALSE]
                       /\ UNCHANGED wblocked
 
-\* run_call/2 inside the task (filters.ex:271): Llm.decide, then the task's
-\* own settle (:300). The model call is invisible; the Repo call is
+\* run_call/2 inside the task (filters.ex:272): Llm.decide, then the task's
+\* own settle (:301). The model call is invisible; the Repo call is
 \* the step. A failure result spends a fault.
 TaskSettle(c, res) ==
     /\ task[c] = "deciding"
@@ -451,7 +491,7 @@ TaskSettle(c, res) ==
 TaskStep(c) == \E res \in {"pass", "drop", "pfail", "cfail"} : TaskSettle(c, res)
 
 \* The task's settle rolls back: it traces run_error settle_failed and reports
-\* {:settled, false} (filters.ex:365-384, finish/5). The row stays filtering with its
+\* {:settled, false} (filters.ex:366-385, finish/5). The row stays filtering with its
 \* call open; once the task has reported, the sweep reclaims it (CUE-1).
 TaskSettleFails(c) ==
     /\ FilterRepoCanFail /\ Fault
@@ -460,7 +500,7 @@ TaskSettleFails(c) ==
     /\ UNCHANGED <<rowD, wblocked, jstate, callRows, runRows, propVars, disp,
                    resetPending, inflight, schedVars, obs>>
 
-\* The task returns and the dispatcher's reported/3 (filters.ex:307) frees
+\* The task returns and the dispatcher's reported/3 (filters.ex:308) frees
 \* its slot: one step, because the dispatcher still excludes the watcher until
 \* it handles the reply. A task whose dispatcher is gone just ends.
 TaskReport(c) ==
@@ -478,8 +518,8 @@ TaskCrash(c) ==
     /\ UNCHANGED <<rowD, wblocked, jstate, callRows, runRows, propVars, disp,
                    resetPending, inflight, schedVars, obs>>
 
-\* handle_info({:DOWN, ...}) -> crashed/3 -> end_here/3 (filters.ex:320, :346,
-\* down_result :360): an abnormal exit is a content failure for the cue,
+\* handle_info({:DOWN, ...}) -> crashed/3 -> end_here/3 (filters.ex:321, :347,
+\* down_result :361): an abnormal exit is a content failure for the cue,
 \* written with the same fence. A settle that rolls back leaves the row
 \* filtering for the sweep to reclaim (CUE-1).
 FDown(c) ==
@@ -492,7 +532,7 @@ FDown(c) ==
     /\ UNCHANGED <<holder, valid, tatt, jstate, callDel, nextCall, runRows, propVars,
                    disp, resetPending, schedVars, staleRunWrite, retriedAfterAction>>
 
-\* {:deadline, ref} -> expire/2 (filters.ex:332): a task still running 60 s
+\* {:deadline, ref} -> expire/2 (filters.ex:333): a task still running 60 s
 \* after its claim (the provider is slow, or a notice send is) is killed and
 \* a provider failure (kind timeout) is written with the same fence.
 FDeadline(c) ==
@@ -523,7 +563,7 @@ FiltersRestart ==
                   IF TasksDieWithDispatcher \/ task[c] = "crashed" THEN "none" ELSE task[c]]
     /\ UNCHANGED <<rowD, wblocked, jstate, callRows, runRows, propVars, schedVars, obs>>
 
-\* filter_retry_at passes: the claim's next_at timer (arm_due, filters.ex:263) or
+\* filter_retry_at passes: the claim's next_at timer (arm_due, filters.ex:264) or
 \* the 60 s sweep finds the watcher again.
 WatcherDue(w) ==
     /\ wblocked[w]
@@ -549,7 +589,7 @@ Expire(d) ==
                    runRows, propVars, dispVars, schedVars, obs, faults>>
 
 \* Cues.Sweeper :expire_lifetime (sweeper.ex:33) -> CuesSql expire_lifetime
-\* (cues_sql.ex:1115, expire_each :709): pending and passed rows past valid_until become
+\* (cues_sql.ex:1256, expire_each :853): pending and passed rows past valid_until become
 \* expired (transition with no fence); filtering and claimed are never touched.
 SweepExpire(d) ==
     /\ ~valid[d] /\ dstate[d] \in {"pending", "passed"}
@@ -565,21 +605,22 @@ SubjectStates == IF SubjectRuleCoversUndecided THEN Live ELSE {"passed", "claime
 OlderSameSubjectLive(d) ==
     \E o \in D : o < d /\ Wat[o] = Wat[d] /\ Subj[o] = Subj[d] /\ dstate[o] \in SubjectStates
 
-\* @eligible_sql = @open_sql and @cap_room_sql (cues_runs_sql.ex:81-118), one
-\* rule for the candidates (:123) and the claim's in-transaction re-read
-\* (eligible_delivery/3, :225). The daily cap is 0 here (no cap). Since R1 the
+\* @eligible_sql = @open_sql and @cap_room_sql (cues_runs_sql.ex:83-123), one
+\* rule for the candidates (:128) and the claim's in-transaction re-read
+\* (eligible_delivery/3, :268). The daily cap is 0 here (no cap). Since R1 the
 \* rule does not read cue_watchers.enabled (a paused watcher's passed items
 \* still run); watchers are always enabled here. A delivery past its
 \* valid_until is never claimed (`d.valid_until > ?`): the lifetime sweep's.
 Eligible(d) ==
     /\ dstate[d] = "passed" /\ due[d] /\ valid[d]
+    /\ HasTask(Wat[d])
     /\ ClaimNeedsIdleJob => (jstate[Wat[d]] = "scheduled" /\ ~ActiveRun(Wat[d]))
     /\ SubjectRule => ~OlderSameSubjectLive(d)
 EligibleOf(w) == {d \in D : Wat[d] = w /\ Eligible(d)}
 
 \* The runner supervisor's active children (active_run_count/1,
-\* scheduler.ex:489) and the scheduler's monitored cue runs
-\* (CueAdmission.active_cue_runs/1). free_cue_slots/1 (scheduler.ex:312):
+\* scheduler.ex:607) and the scheduler's monitored cue runs
+\* (CueAdmission.active_cue_runs/1). free_cue_slots/1 (scheduler.ex:363):
 \* none while the last reconcile scan failed (the monitors may miss runners
 \* that survived a restart, CUE-2), else CueAdmission.free_slots/3.
 LiveRunners == {r \in Runs : runner[r] \in {"live", "half"}}
@@ -604,10 +645,10 @@ ClaimRunRows(w) ==
        /\ jstate' = [jstate EXCEPT ![w] = "running"]
        /\ nextRun' = nextRun + 1
 
-\* :cue_admit / a tick -> admit_cue_runs/2 (scheduler.ex:260, :293), gated on
-\* cues_running? (the cue tree alive, :202; always true here):
-\* CueAdmission.free_slots/3 then claim/4 (cue_admission.ex:57, :82), each
-\* claim one Repo call, then start_cue_run/2 -> start_or_mark_failed/3 (scheduler.ex:357, :735)
+\* :cue_admit / a tick -> admit_cue_runs/2 (scheduler.ex:278, :311), gated on
+\* cues_running? (the cue tree alive, :213; always true here):
+\* CueAdmission.free_slots/3 then claim/4 (cue_admission.ex:83, :109), each
+\* claim one Repo call, then start_cue_run/2 -> start_or_mark_failed/3 (scheduler.ex:475, :853)
 \* starts the runner and monitors it, in the same callback. One claim per
 \* step; the slots are recomputed each step, which bounds the claims exactly
 \* as the pass's one `free` does.
@@ -623,7 +664,7 @@ Admit(w) ==
                    dispVars, sched, runsKnown, obs, faults>>
 
 \* The claim call times out (periodic opts): claim_candidate/4 logs it and
-\* starts nothing (claim_candidate/4, cue_admission.ex:132), but the write lands: a run with
+\* starts nothing (claim_candidate/4, cue_admission.ex:290), but the write lands: a run with
 \* no runner, which reconciliation reaps.
 AdmitTimesOut(w) ==
     /\ SchedulerRepoCanFail /\ Fault
@@ -638,12 +679,12 @@ AdmitTimesOut(w) ==
 -----------------------------------------------------------------------------
 (* The settle: Repo.settle_cue_run/3 (repo.ex settle_cue_run_in_tx):       *)
 (* ensure_job_run_active, the run row upserted, release_cue_job (running  *)
-(* -> scheduled), and CuesRunsSql.settle_delivery/4 (cues_runs_sql.ex:254), *)
-(* whose settle_held/5 (:313, :325) moves the delivery only while          *)
+(* -> scheduled), and CuesRunsSql.settle_delivery/4 (cues_runs_sql.ex:297), *)
+(* whose settle_held/5 (:366, :378) moves the delivery only while          *)
 (* it is claimed by this run; otherwise the run settles and the delivery   *)
 (* is left untouched.                                                      *)
 
-\* settle_move/4 (cues_runs_sql.ex:332-344), with `tools` the run row's
+\* settle_move/4 (cues_runs_sql.ex:385-397), with `tools` the run row's
 \* tools_started_at as the upsert left it. how: "ack" (ignored or acted),
 \* "pfail" (provider failure: no attempt spent), "ofail" (any other failure),
 \* "sched" (a reap or a monitored crash: as ofail, the cap being 0).
@@ -686,7 +727,7 @@ RunActive(r) == RunSettleFenced => rstatus[r] = "active"
 Exit(r, kind) == IF r \in monitors THEN kind ELSE "none"
 
 \* The runner's settle: complete_run/2 -> mark_cue_completed/4 or
-\* mark_failed/3 (runner.ex:230, :321, :409; the settle :340, :431) ->
+\* mark_failed/3 (runner.ex:241, :353, :441; the settle :372, :463) ->
 \* CueAdmission.settle/3. Its attrs are the run as the runner read it at
 \* start, with tools_started_at nil, so the column survives only through the
 \* upsert's coalesce. `{:ok, ...} =` on {:error, :run_not_active} raises: the
@@ -758,7 +799,7 @@ RunnerCrash(r) ==
 -----------------------------------------------------------------------------
 (* The scheduler's recovery paths *)
 
-\* mark_run_failed/4 -> mark_run_error/4 (scheduler.ex:831, :887):
+\* mark_run_failed/4 -> mark_run_error/4 (scheduler.ex:949, :1005):
 \* the run read fresh (so its tools_started_at is the column's), then
 \* CueAdmission.settle(attrs, :scheduler, ...).
 SchedulerSettle(r) ==
@@ -768,7 +809,7 @@ SchedulerSettle(r) ==
     ELSE UNCHANGED <<dstate, holder, due, tatt, staleRunWrite, retriedAfterAction,
                      rstatus, jstate>>
 
-\* handle_info({:DOWN, ...}) (scheduler.ex:266): a normal exit only frees
+\* handle_info({:DOWN, ...}) (scheduler.ex:284): a normal exit only frees
 \* the monitor; a crash is settled by the scheduler. A crash settle that
 \* rolls back is logged and left for reconciliation.
 SchedDown(r) ==
@@ -789,9 +830,9 @@ SchedDown(r) ==
 Alive(r) == runner[r] \in {"live", "half"}
 
 \* One unsettled run of a reconciliation pass (reconcile_active_runs/1 and
-\* reconcile_active_run/3, scheduler.ex:370, :386): a run whose runner the
-\* supervisor still holds is adopted (monitored, :398); any other is reaped
-\* (:412), whatever its monitor. Without ReapsOnlyDeadRuns a run
+\* reconcile_active_run/3, scheduler.ex:488, :504): a run whose runner the
+\* supervisor still holds is adopted (monitored, :516); any other is reaped
+\* (:530), whatever its monitor. Without ReapsOnlyDeadRuns a run
 \* the scheduler does not monitor is reaped even with its runner alive.
 ReconcileRun(r) ==
     /\ ReconcilesRuns
@@ -833,14 +874,14 @@ SchedRestart ==
     /\ runsKnown' = FALSE
     /\ UNCHANGED <<rowD, wblocked, jstate, callRows, runRows, propVars, dispVars, obs>>
 
-\* init/1 (scheduler.ex:152): runs_known? starts false (:200), then
-\* reconcile_active_runs (:210). The scan adopts every live runner's run (the
+\* init/1 (scheduler.ex:163): runs_known? starts false (:211), then
+\* reconcile_active_runs (:228). The scan adopts every live runner's run (the
 \* dead ones are reaped by ReconcileRun, the same function) and sets the run
-\* set known (:374). A scan that errors or times out (periodic opts) is logged,
-\* leaves the run set unknown (:382) and init goes on with no monitors
-\* (:370-384); it then requests an admission pass (:213,
+\* set known (:492). A scan that errors or times out (periodic opts) is logged,
+\* leaves the run set unknown (:500) and init goes on with no monitors
+\* (:488-502); it then requests an admission pass (:231,
 \* maybe_request_admission/1), which admits no cue run while the set is
-\* unknown (free_cue_slots/1, :312). Without reconciliation there is no scan,
+\* unknown (free_cue_slots/1, :363). Without reconciliation there is no scan,
 \* and the empty monitors are taken as the run set, as before R3.
 SchedBoot ==
     /\ sched = "down"
@@ -860,9 +901,9 @@ SchedBoot ==
                    obs>>
 
 \* The 60 s reconcile tick's scan (handle_info(:reconcile_tick),
-\* scheduler.ex:245-250 -> reconcile_active_runs/1, :370) succeeding while the
+\* scheduler.ex:263-268 -> reconcile_active_runs/1, :488) succeeding while the
 \* run set is unknown: every live runner's run is adopted in that callback and
-\* the set is known again (:374). Reaping the dead runs of the same pass is
+\* the set is known again (:492). Reaping the dead runs of the same pass is
 \* ReconcileRun (which, without ReapsOnlyDeadRuns, also reaps the live runs
 \* this step then leaves unmonitored).
 SchedRescan ==
@@ -876,7 +917,7 @@ SchedRescan ==
                    runner, obs, faults>>
 
 \* A tick's scan that fails: the run set is unknown until a scan succeeds
-\* (:382), even though the monitors already hold every runner.
+\* (:500), even though the monitors already hold every runner.
 SchedRescanFails ==
     /\ ReconcilesRuns /\ SchedulerRepoCanFail /\ Fault
     /\ sched = "up" /\ runsKnown
@@ -1125,7 +1166,7 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 -----------------------------------------------------------------------------
 (* PROPERTIES *)
 
-\* cues_runs_sql.ex:19-28 and PLAN §1 "Subject order": a delivery is claimable
+\* cues_runs_sql.ex:19-30 and PLAN §1 "Subject order": a delivery is claimable
 \* only if no older delivery of the same watcher and subject is pending,
 \* filtering, passed or claimed. Read as a state: while a delivery is
 \* claimed, no older one of its watcher and subject is live (terminal states
@@ -1149,24 +1190,29 @@ OneTaskPerWatcher ==
 \* is design §17's "a failed filter never passes or drops a cue".
 FencedFilterMoves == ~staleFilterWrite
 
-\* The same rule for runs (cues_runs_sql.ex:248-250, repo.ex settle_cue_run
+\* The same rule for runs (cues_runs_sql.ex:291-293, repo.ex settle_cue_run
 \* doc): a row leaves claimed only by the run that holds it, while active.
 FencedRunMoves == ~staleRunWrite
 
-\* Design §17: "a delivery is acked only by a settled run".
+\* Design §17: "a delivery is acked only by a settled run", and since watcher
+\* follow-ups (M60_WATCHER_CODING_RUNS.md §4.3) a watcher with no task acks
+\* its delivery at the pass, outcome follow_up. Read as: a delivery of a
+\* watcher with a task is acked only by a settled run.
 AckedBySettledRun ==
-    \A d \in D : dstate[d] = "acked" => rstatus[holder[d]] = "final"
+    \A d \in D : (dstate[d] = "acked" /\ HasTask(Wat[d])) => rstatus[holder[d]] = "final"
 
 \* Design §17 / §9.2: "one active run per job holds" for cue claims.
 OneActiveRunPerJob ==
     \A w \in Watchers : Cardinality({r \in Runs : rjob[r] = w /\ rstatus[r] = "active"}) <= 1
 
-\* cue_admission.ex:9-11: "Cue runs hold at most three of the scheduler's run
-\* slots ... so a cron run always keeps one"; design §17 "cue runs never take
-\* the last slot". Read as: live cue runners never exceed the cue share.
+\* cue_admission.ex:9-12: "Cue runs and watcher follow-up runs ... share at
+\* most three of the scheduler's run slots ... so a cron run always keeps
+\* one"; design §17 "cue runs never take the last slot". Read as: live cue
+\* runners never exceed the cue share (follow-up runs, which share it, are
+\* not modelled here).
 CueShare == Cardinality(LiveRunners) <= MaxCue
 
-\* cues_runs_sql.ex:238-239, design §17: "no run is retried after an allowed
+\* cues_runs_sql.ex:281-282, design §17: "no run is retried after an allowed
 \* mandate call or a proposal".
 NoRetryAfterAction == ~retriedAfterAction
 
@@ -1175,7 +1221,7 @@ NoRetryAfterAction == ~retriedAfterAction
 NonePassedAtAccept ==
     \A d \in D : Kind(Wat[d]) = "none" => dstate[d] \notin {"pending", "filtering"}
 
-\* Design §17 and proposals.ex:15-23: a proposal's call runs "only after a
+\* Design §17 and proposals.ex:17-25: a proposal's call runs "only after a
 \* confirmation while it was waiting and unexpired", from the chat it was
 \* sent to or one of the owner's devices, and "at most once", whichever
 \* surface answered first (M60 app surface §3.7).

@@ -81,7 +81,19 @@ written after the approval cards in the step that joined the registry
 (`send_waiting_proposals`). A proposal has no seq, request or turn, and a
 `proposal_answer` is served in the Connection's own step, so `server_hello`,
 the approval cards behind it and every rule here are as before; the header
-leaves proposals out.
+leaves proposals out. The re-read after watcher follow-ups (2026-10-30) found
+companion protocol 5: the window moves to {4, 5}; a follow-up's card, a
+`proposal` that carries `follow_up` in place of `mandate`, `tool` and
+`outside.args_text`, reaches only the owner's version 5 connections, the
+waiting cards written after `server_hello` now chosen card by card
+(`send_waiting_proposals`, `owner_reads?` reading
+`Protocol.server_payload_version`), and its `proposal_resolved` reaches every
+owner connection; a mandate's card gains `outside.args` and `outside.reason`,
+additive and sent on every version. These are proposal events, with no seq,
+request or turn, written in the same steps as before, so `server_hello`, the
+approval cards behind it and every rule here are as before; the header names
+them among what it leaves out. The line references into `sandbox.ex`, which
+had drifted, now point at the pinned functions.
 
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
@@ -201,9 +213,9 @@ answers however busy it is, so the model folds the Queue's stop into that
   lets it end with no reply may answer exactly `[SILENT]`. With it off the
   silence decision is never taken and the state space is the one before.
   `V1Clients` names the clients on companion protocol 1. Since protocol 3 the
-  daemon refuses a version 1 hello (since protocol 4 a version 2 one too, its
-  window being {3, 4}), so only checks 34 and 35, which prove the silence gate
-  the code keeps, name one.
+  daemon refuses a version 1 hello (since protocol 4 a version 2 one too, and
+  since protocol 5 a version 3 one, its window being {4, 5}), so only checks
+  34 and 35, which prove the silence gate the code keeps, name one.
 
 **Mechanism switches** (`TRUE` is the real code; each is switched off only by
 the checks that show a rule needs it):
@@ -215,21 +227,21 @@ the checks that show a rule needs it):
   (`request_coordinator.ex:125-132`).
 - `SeqCursor`: the client's cursor rules (`PROTOCOL.md`).
 - `SubscribeBeforePull`: the Connection joins the registry before
-  `server_hello` (`join`, `connection.ex:258-268`).
+  `server_hello` (`join`, `connection.ex:259-269`).
 - `PageWrittenInReadStep`: the Connection writes `history_page` to the socket
-  in the step that read it (`read_opts`, `connection.ex:534-538`). `FALSE`
+  in the step that read it (`read_opts`, `connection.ex:537-541`). `FALSE`
   sends it through its own mailbox, where a live row sent after the read can
   overtake it.
 - `AnnouncesEveryRow`: every row written outside a turn's completion is
   announced as a `row` as it is written: the user's row (`announce_user_row`,
-  `connection.ex:522-523`) and a delivery (`announce_written`,
+  `connection.ex:525-526`) and a delivery (`announce_written`,
   `channels/companion.ex:338-339`), both built by `Companion.Output.row` and
   sent through `Companion.Fanout.announce`. `FALSE` announces no user row.
 - `SingleAnswer`: `Confirmations.take` is an `:ets.take`, the sole consumer of
   a token (`confirmations.ex:21-31`).
 - `ResendsPendingApprovals`: the Connection writes every card still waiting
   right after `server_hello`, in the step that joined the registry
-  (`send_pending_approvals`, `connection.ex:274-283`, from
+  (`send_pending_approvals`, `connection.ex:275-284`, from
   `Approvals.pending`). `FALSE`: a card goes out once, live.
 - `DropsCardsAtHello`: when `server_hello` arrives the client drops every card
   it shows and keeps only those sent after it (`PROTOCOL.md` "Approvals").
@@ -261,7 +273,7 @@ the checks that show a rule needs it):
   that sent the request (`settle_inline`, `run_settle`, `turns.ex:368-403`;
   `fail_attempt`, `report_failure`, `requests.ex:340-360`), through the
   transport's `report_failure`, which the connection writes as a failed
-  worker's error (`connection.ex:510-517`, `:159-160`). `FALSE` only logs the
+  worker's error (`connection.ex:513-520`, `:160-161`). `FALSE` only logs the
   failure: the request stays `running`, and the next boot runs the command
   again.
 - `SeqAssignedOnInsert`: the seq comes from the counter inside the inserting
@@ -501,8 +513,15 @@ of an entity its rules are about. All still hold:
   `cue_proposals`, which no step here reads, and its `accepted` answers no
   `msg` or `command`, so no outbox rule reads it. That a confirmed proposal
   runs at most once is `cue_inbox`'s.
+- Companion protocol 5's follow-up cards (watcher follow-ups). A card that
+  carries `follow_up` in place of `mandate`, `tool` and `outside.args_text`
+  reaches only the owner's version 5 connections (`owner_reads?`, from
+  `Protocol.server_payload_version`), a waiting one after `server_hello`
+  included, and its `proposal_resolved` every owner connection. A mandate
+  card's `outside.args` and `outside.reason` are additive and ride every
+  version. They are proposal events, left out as above.
 - The peer check at the hand-over (`handle_info(:socket_handover)`,
-  `connection.ex:126-133`). A client the daemon cannot place is sent
+  `connection.ex:127-134`). A client the daemon cannot place is sent
   `error: unidentified_client` and closed before a line is read, which the
   client sees as a drop before `server_hello`. The caller it places rides on
   each turn (`metadata.caller`) and decides only what the turn's tools may do.
