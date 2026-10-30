@@ -194,8 +194,7 @@ it, never a second writer.
 - **Reviewing it.** `fermix home candidates` (or `home.candidates.list`)
   lists the candidates the primary holds (at most four, each for 24 hours):
   id, name, system, version, and the instance facts the server reported
-  about itself. Nobody verified those facts: compare the instance id with the
-  one the cloud provider shows before moving.
+  about itself, which nobody verified.
 - **The readiness report.** Before the move, `home.move.readiness
   {candidate_id}` (the apps' review step) answers each fact as `ok`, `warn` or
   `block`: the secrets this computer keeps in its keychain, which move with
@@ -380,8 +379,8 @@ it, never a second writer.
   itself): after the move the server holds them. What configures this
   computer is answered here: Fermix's own status and lifecycle, its logs,
   diagnostics and Doctor, the setup page, computer use, iMessage, the browser
-  and capability installers, and the settings sections engine, sandbox,
-  computer use, computer history and iMessage.
+  and capability installers, and the settings sections sandbox, computer
+  use, computer history and iMessage.
 - Two answers are put together here: the home's status is this computer's
   own (its role, its link to the primary, where the move went) with the
   primary's own picture added (its recovery, its enrollment and candidates,
@@ -473,7 +472,7 @@ it, never a second writer.
 | Where snapshots are kept (bucket, region, the S3-compatible address, how often) and the two access keys | Recovery: the `snapshots` section; the keys as hidden fields, never shown again | `fermix settings set snapshots …`, `fermix settings secret set snapshot_s3_access_key_id` |
 | Take a snapshot now | **Back up now**, offered once snapshots have somewhere to go | `fermix home snapshots run` |
 | An enrollment code | **Get a code** (**Get a new code** while one is open, which stops the open one working), shown once with **Copy** and when it expires, beside the command for a server you have, and what to know before moving (the disk it needs, that this computer serves nothing meanwhile, the Telegram and late-job gap, where the server keeps secrets, no way back) | `fermix home enroll-code` |
-| The servers waiting for the move, with the instance facts they reported (unverified: compare the instance id with the cloud provider's) | Servers waiting for the move | `fermix home candidates` |
+| The servers waiting for the move, with the instance facts they reported (unverified) | Servers waiting for the move | `fermix home candidates` |
 | Review the move (`home.move.readiness`): each item ready, a note or a block | **Review the move** on a server waiting; a block is shown as one | `fermix home move` says each block |
 | Start the move | the app's pane | `fermix home move --to ID [--retire]` |
 | Where the move stands (its phase and sentence) | The move | `fermix home status` |

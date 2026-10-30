@@ -1296,7 +1296,7 @@ Notes that the shapes alone do not carry:
   A move session has no one-hour lifetime, and its attempts send one capture. On a candidate, `phase` is `enrolling`, `enrolled`,
   `receiving`, `staged`, `activating`, `expired` or `failed`, and `candidate`
   is null. A candidate's `instance` is what the host said of itself: a client
-  shows it as unverified, for the owner to compare with what they launched.
+  shows it as unverified.
 - **A snapshot target row is the daemon's.** There are two targets, in
   order: `s3` (label `S3`) and `desktop` (label `your desktop`: every desktop
   connected to this primary over the rail, on while it has a desktop row).

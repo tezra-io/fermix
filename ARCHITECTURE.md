@@ -981,7 +981,8 @@ owner's primary (M75 step 6). It runs once as root, from cloud-init user data
 `curl -fsSL https://fermix.ai/always-on | sudo sh` (the code read from the
 terminal without echo), and in order: writes the enrollment code to
 `/run/fermix/enroll.code` (tmpfs, 0600); installs an nftables table that drops
-traffic to `169.254.169.254` from every uid but 0 (the `output` hook: the
+traffic to `169.254.169.254` and `fd00:ec2::254` from every uid but 0 (the
+`output` hook: the
 host's own processes, which is why the server runs no containers), with a root
 unit that loads it before the network at every boot and a `user@<uid>` drop-in
 that will not start the engine account's service manager without it; installs

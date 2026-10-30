@@ -977,8 +977,9 @@ to 128 letters, digits, `.`, `_`, `:` and `-`, starting with a letter or a
 digit. A name a person reads (`name`, `primary_name`, an enrollment's
 texts) is at most 128 bytes of UTF-8 with no control character.
 
-An event of a family the primary does not serve yet is answered
-`error{code:"unsupported_event"}`, and the session stays open. A desktop is
+A desktop's event outside the families the primary serves is answered
+`error{code:"unsupported_event"}`, and the session stays open (a
+forward-compatibility rule). A desktop is
 sent no approval card and no phone's broadcast: its chat, approvals included,
 rides its companion tunnel. A desktop's session closes `1011` (`desktop peer
 failed`) when the primary's side of it fails or does not start. A desktop
@@ -1159,7 +1160,7 @@ parsed.
 | `request_failed`, `client_message_conflict`, `unsupported_profile` | a request refused or failed after `accepted`, or any refusal with no word of its own | `client_msg_id` for a `msg` or `command` | open |
 | `attachment_unavailable` | a `msg` naming an `attach_id` the daemon no longer holds | `client_msg_id` | open |
 | `invalid_field`, `missing_field` | a field the daemon refuses once the frame decoded, such as a `msg`'s `attach_ids` | `client_msg_id` for a `msg` or `command` | open |
-| `unsupported_event` | a known event this session's kind may not send (see *Who may send what*), such as `pair_request` on a paired socket, or a desktop's event of a family the primary does not serve yet | — | open |
+| `unsupported_event` | a known event this session's kind may not send (see *Who may send what*), such as `pair_request` on a paired socket, or a desktop's event outside the families the primary serves | — | open |
 | `enrollment_expired`, `enrollment_used`, `enrollment_limit` | a refused enrollment (see *Enrollment and the move*) | — | closed `4003` |
 | `move_unknown`, `move_mismatch`, `move_failed` | a refused move step (see *Enrollment and the move*) | — | closed `4003` |
 | `request_backlog_full` | 32 requests already waiting | — | open |

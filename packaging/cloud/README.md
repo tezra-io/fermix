@@ -25,7 +25,8 @@ In this order, failing with one sentence and a non-zero exit at any step:
    directory 0700 and the file 0600, root's until the engine account exists,
    then its). Restore mode refuses a code.
 2. Loads the nftables table `inet fermix_metadata` (`/etc/fermix/metadata-block.nft`),
-   which drops traffic to `169.254.169.254` from every uid but 0, through
+   which drops traffic to `169.254.169.254` and `fd00:ec2::254` from every uid
+   but 0, through
    `fermix-metadata-block.service`: before `network-pre.target` at every boot,
    again after `nftables.service` starts or reloads (which flushes the
    ruleset). The rule sits on the `output` hook, so it covers what the host's
