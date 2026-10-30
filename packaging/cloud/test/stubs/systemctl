@@ -1,0 +1,24 @@
+#!/bin/sh
+# Test stand-in for systemctl: logs the call and, for start, restart and
+# enable --now of a unit under /etc/systemd/system, runs its ExecStart lines
+# the way a oneshot service would. A call whose arguments are the line in
+# /etc/fermix-test/systemctl-fails exits 1, as a unit that fails to load does.
+set -eu
+printf 'systemctl %s\n' "$*" >>/var/log/fermix-test/calls.log
+if [ -f /etc/fermix-test/systemctl-fails ] && [ "$*" = "$(cat /etc/fermix-test/systemctl-fails)" ]; then
+  exit 1
+fi
+
+run_unit() {
+  file=/etc/systemd/system/$1
+  [ -f "$file" ] || return 0
+  sed -n 's/^ExecStart=//p' "$file" >/var/log/fermix-test/exec-start
+  while IFS= read -r command; do
+    sh -c "$command" </dev/null
+  done </var/log/fermix-test/exec-start
+}
+
+case "$1" in
+  start | restart) run_unit "$2" ;;
+  enable) if [ "$2" = --now ]; then run_unit "$3"; fi ;;
+esac

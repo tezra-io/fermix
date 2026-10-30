@@ -1,6 +1,6 @@
 [Unit]
 Description=Fermix multi-agent platform daemon (user-scope)
-StartLimitIntervalSec=infinity
+StartLimitIntervalSec=600
 StartLimitBurst=5
 
 [Service]

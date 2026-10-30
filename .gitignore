@@ -111,3 +111,5 @@ packaging/linux/out/
 packaging/*
 # The Docker Sandboxes kit is tracked.
 !packaging/sbx/
+# The Always On cloud packaging (the first-boot script) is tracked.
+!packaging/cloud/

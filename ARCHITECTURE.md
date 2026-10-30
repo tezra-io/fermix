@@ -973,6 +973,36 @@ Architecture Invariant: only `run` and `service run` start the daemon tree
 the sibling applications start. An app engine is recognized from its
 compiled-in build identity, never from runtime detection.
 
+### `packaging/cloud`: Always On servers
+
+`packaging/cloud/first-boot.sh` is the root half of a server that becomes the
+owner's primary (M75 step 6). It runs once as root, from cloud-init user data
+(the code in `FERMIX_ENROLL_CODE`) or as
+`curl -fsSL https://fermix.ai/always-on | sudo sh` (the code read from the
+terminal without echo), and in order: writes the enrollment code to
+`/run/fermix/enroll.code` (tmpfs, 0600); installs an nftables table that drops
+traffic to `169.254.169.254` from every uid but 0 (the `output` hook: the
+host's own processes, which is why the server runs no containers), with a root
+unit that loads it before the network at every boot and a `user@<uid>` drop-in
+that will not start the engine account's service manager without it; installs
+the Linux package through `https://fermix.ai/install --no-setup`; creates the
+engine account `fermix` (home `/home/fermix`, no login, lingering); runs
+`fermix home enroll` and `fermix service install` as `fermix`; installs the
+distribution's Chromium on Debian (Ubuntu's is a snap: it says to install a
+browser by hand); and waits up to 5 minutes for the primary to accept the
+candidate, ending with one sentence on
+stderr and a non-zero exit at any step that fails. `--restore` takes no code
+and enrolls nothing: the same server, then the exact steps that import a
+snapshot and start the service. Everything networked after that (dialling the
+primary, the move) is the engine's own candidate role.
+`packaging/cloud/test/first_boot_test.sh` runs the script in throwaway Debian
+containers against stand-ins for systemd, curl, apt and `fermix`, and once
+with the real apt and Chromium.
+
+Architecture Invariant: no engine process reaches the instance metadata
+address. The enrollment code reaches the engine only as a file, never in an
+argument, an environment the engine inherits, or the console output.
+
 ### `apps/fermix_channels`
 
 This app owns messaging-platform and companion transports and depends on

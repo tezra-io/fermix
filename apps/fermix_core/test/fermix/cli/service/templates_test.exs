@@ -48,8 +48,10 @@ defmodule Fermix.CLI.Service.TemplatesTest do
 
       assert unit =~ "Description=Fermix multi-agent platform daemon (user-scope)"
       assert unit =~ "After=network-online.target"
-      assert unit =~ "StartLimitIntervalSec=infinity"
-      assert unit =~ "StartLimitBurst=5"
+      # Five starts in ten minutes: a crash loop still stops, and the budget
+      # comes back, so a host's deliberate restarts never use it up for good.
+      assert unit =~ "\nStartLimitIntervalSec=600\n"
+      assert unit =~ "\nStartLimitBurst=5\n"
       assert unit =~ "Type=simple"
       assert unit =~ ~s(Environment="FERMIX_HOME=/home/dev/.fermix")
       assert unit =~ "ExecStart=/usr/local/bin/fermix run"
@@ -248,8 +250,8 @@ defmodule Fermix.CLI.Service.TemplatesTest do
       unit = Templates.render_vendor_unit()
 
       assert unit =~ "Description=Fermix multi-agent platform daemon (user-scope)"
-      assert unit =~ "StartLimitIntervalSec=infinity"
-      assert unit =~ "StartLimitBurst=5"
+      assert unit =~ "\nStartLimitIntervalSec=600\n"
+      assert unit =~ "\nStartLimitBurst=5\n"
       assert unit =~ "ExecStart=/usr/bin/fermix service run"
       # The payload directory is a systemd specifier, never an interpolated home:
       # the package installs one unit for every account on the machine.

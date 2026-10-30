@@ -21,7 +21,9 @@ defmodule Fermix.CLI.Service.Packaged do
     6. require linger, which is fatal before enablement,
     7. reload, reset the start-limit budget, enable now,
     8. verify: the bound home's own socket answers `hello` as a packaged
-       engine, and that daemon's own web address answers, inside 90 seconds.
+       engine, and that daemon's own web address answers, inside 90 seconds;
+       a home its settings make a candidate primary (M75 §2) serves no web
+       address, so its socket's answer is the proof.
 
   Every command runs through `opts[:cmd]`, every socket call through
   `opts[:hello]` and every web probe through `opts[:health_probe]`, so the
@@ -35,6 +37,7 @@ defmodule Fermix.CLI.Service.Packaged do
   alias Fermix.CLI.Service.Systemd
   alias Fermix.CLI.Service.Templates
   alias FermixCore.BuildInfo
+  alias FermixCore.Home.Role
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.WebListener
 
@@ -291,15 +294,26 @@ defmodule Fermix.CLI.Service.Packaged do
 
   # The completion proof (§4.1): this home's own socket answers as a packaged
   # engine, and that same daemon's published web address answers. A `systemctl`
-  # exit status is not evidence that any of that happened.
+  # exit status is not evidence that any of that happened. A home its settings
+  # make a candidate primary (M75 §2) serves no web address at all, so for it
+  # the socket's answer is the whole proof; the role is the one the home's
+  # settings record, read as the engine reads it.
   defp verify(home, opts) do
     attempts = Keyword.get(opts, :poll_attempts, @poll_attempts)
 
     with {:ok, hello} <- await_packaged_hello(home, attempts, opts),
-         :ok <- await_health(get_in(hello, ["setup", "origin"]), attempts, opts) do
+         :ok <- await_web(Role.configured(home), hello, attempts, opts) do
       {:ok, hello}
     end
   end
+
+  defp await_web({:ok, %{role: :candidate}}, _hello, _attempts, _opts), do: :ok
+
+  defp await_web({:ok, %{role: _serving}}, hello, attempts, opts),
+    do: await_health(get_in(hello, ["setup", "origin"]), attempts, opts)
+
+  defp await_web({:error, reason}, _hello, _attempts, _opts),
+    do: {:error, {:invalid_home, Role.error_sentence(reason)}}
 
   defp await_packaged_hello(_home, attempts, _opts) when attempts <= 0 do
     {:error, :activation_timeout}

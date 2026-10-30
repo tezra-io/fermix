@@ -1,0 +1,24 @@
+#!/bin/sh
+# Test stand-in for curl. https://fermix.ai/install answers the fake
+# installer; any other address is refused, as one that does not resolve is.
+# Logs every call as a GET of its URL.
+set -eu
+log=/var/log/fermix-test
+url="" out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    --proto) shift 2 ;;
+    http://* | https://*) url=$1; shift ;;
+    --*) echo "curl stand-in: unexpected option $1" >&2; exit 2 ;;
+    -*) shift ;;
+    *) echo "curl stand-in: unexpected argument" >&2; exit 2 ;;
+  esac
+done
+printf 'curl GET %s\n' "$url" >>"$log/calls.log"
+
+case "$url" in
+  https://fermix.ai/install) body=/cloud/test/fake-install.sh ;;
+  *) exit 6 ;;
+esac
+if [ -n "$out" ]; then cat "$body" >"$out"; else cat "$body"; fi

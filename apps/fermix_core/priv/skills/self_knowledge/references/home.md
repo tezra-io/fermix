@@ -121,6 +121,38 @@ it, never a second writer.
 - Whoever holds an archive's passphrase can stand up a primary that every
   paired phone trusts.
 
+## Moving to a VM (Always On)
+
+- Always On puts the primary on a Linux server the owner controls, so Fermix
+  keeps working with the Mac closed. The server enrolls with an enrollment
+  code the primary opens (one use, 30 minutes), on an existing Debian 12,
+  Debian 13 or Ubuntu 24.04 host (arm64 or x86_64):
+  `curl -fsSL https://fermix.ai/always-on | sudo sh`, which asks for the code
+  without echoing it. After `sh -s --`:
+  `--snapshot-bucket NAME --snapshot-region REGION`, `--restore`.
+- The first boot, as root: writes the code to `/run/fermix/enroll.code`
+  (memory only, the engine account's), blocks the instance metadata address
+  for every account but root at every boot (the host's own processes: the
+  server runs no containers, whose traffic that rule would not see), installs
+  the Linux package, creates the account `fermix` (home `/home/fermix`, no
+  login shell, lingering), runs `fermix home enroll` and `fermix service
+  install` as `fermix`, installs Chromium on Debian for browser tasks, and
+  waits up to 5 minutes for the primary to accept the server. The engine
+  starts in the candidate role, enrolls with the primary and waits for the
+  move. Running it again is safe: a host whose home exists is not enrolled
+  again. It never prints the code; cloud-init's console log shows each step.
+- On Ubuntu there is no Chromium package (only a snap, which Fermix does not
+  use), so the first boot installs no browser there: an Ubuntu server needs
+  one installed by hand (Google Chrome's own package, for example), and until
+  then browser tasks on it answer that no Chrome or Chromium is installed. A
+  Debian server gets Chromium at its first boot.
+- **A restore host.** When the primary is gone, `--restore` on a host
+  prepares the same server without enrolling it and prints the exact steps:
+  copy the newest snapshot onto it (downloaded from the bucket by hand, when
+  one is named), `fermix home import` it into `/home/fermix/.fermix` as
+  `fermix` with the recovery passphrase, then `fermix service install`. The
+  restored home is the primary, one epoch up.
+
 ## Enrollment, the candidate and the move
 
 - **The code.** On the primary, `fermix home enroll-code` (or the
@@ -140,8 +172,8 @@ it, never a second writer.
   anywhere on and ready: otherwise it is refused by name ("Remote reach is
   off…", or "…starting; open the code again in a few seconds").
 - **The candidate.** `fermix home enroll --code-file PATH
-  [--snapshot-bucket B --snapshot-region R] [--instance-file PATH]` makes a
-  fresh home a candidate primary: it writes
+  [--snapshot-bucket B --snapshot-region R] [--instance-file PATH]` (what the
+  server's first boot runs) makes a fresh home a candidate primary: it writes
   `<home>/candidate/` (the code, the snapshot bucket and region the new
   primary will write to, what the host says of itself, its own iroh key, its
   Noise key and a one-time snapshot recipient, all 0600) and
@@ -250,7 +282,7 @@ it, never a second writer.
   and a recurring job that comes due more than an hour late is skipped rather
   than run late. The apps say so before the owner moves.
 - On the server Fermix keeps every secret in its file secret store
-  (`<home>/secrets/`, readable only by the account Fermix runs as): in
+  (`<home>/secrets/`, readable by the server's `fermix` account only): in
   plain files, held by the disk's encryption (the owner encrypts the disk
   where its host does not) and by Fermix's sandbox, which keeps them from
   every command Fermix runs. The secrets this computer kept in its keychain
@@ -440,7 +472,7 @@ it, never a second writer.
 | On the primary: the secrets that did not resolve on this host (`secrets_missing`), by id | Secrets to enter again | `fermix home status` |
 | Where snapshots are kept (bucket, region, the S3-compatible address, how often) and the two access keys | Recovery: the `snapshots` section; the keys as hidden fields, never shown again | `fermix settings set snapshots …`, `fermix settings secret set snapshot_s3_access_key_id` |
 | Take a snapshot now | **Back up now**, offered once snapshots have somewhere to go | `fermix home snapshots run` |
-| An enrollment code | **Get a code** (**Get a new code** while one is open, which stops the open one working), shown once with **Copy** and when it expires, and what to know before moving (the disk it needs, that this computer serves nothing meanwhile, the Telegram and late-job gap, where the server keeps secrets, no way back) | `fermix home enroll-code` |
+| An enrollment code | **Get a code** (**Get a new code** while one is open, which stops the open one working), shown once with **Copy** and when it expires, beside the command for a server you have, and what to know before moving (the disk it needs, that this computer serves nothing meanwhile, the Telegram and late-job gap, where the server keeps secrets, no way back) | `fermix home enroll-code` |
 | The servers waiting for the move, with the instance facts they reported (unverified: compare the instance id with the cloud provider's) | Servers waiting for the move | `fermix home candidates` |
 | Review the move (`home.move.readiness`): each item ready, a note or a block | **Review the move** on a server waiting; a block is shown as one | `fermix home move` says each block |
 | Start the move | the app's pane | `fermix home move --to ID [--retire]` |

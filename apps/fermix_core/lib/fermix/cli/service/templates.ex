@@ -76,6 +76,11 @@ defmodule Fermix.CLI.Service.Templates do
     """
   end
 
+  # Both units allow five starts in any ten minutes (`StartLimitIntervalSec`,
+  # `StartLimitBurst`): a crash loop restarting every five seconds still stops,
+  # and the budget comes back, so the restarts the engine makes on purpose (an
+  # applied setting, a move) never use it up for good on a host nobody logs
+  # into.
   @spec render_linux_unit(map()) :: String.t()
   def render_linux_unit(
         %{
@@ -91,7 +96,7 @@ defmodule Fermix.CLI.Service.Templates do
     Description=#{description}
     After=network-online.target
     Wants=network-online.target
-    StartLimitIntervalSec=infinity
+    StartLimitIntervalSec=600
     StartLimitBurst=5
 
     [Service]
@@ -155,7 +160,7 @@ defmodule Fermix.CLI.Service.Templates do
     """
     [Unit]
     Description=Fermix multi-agent platform daemon (user-scope)
-    StartLimitIntervalSec=infinity
+    StartLimitIntervalSec=600
     StartLimitBurst=5
 
     [Service]
