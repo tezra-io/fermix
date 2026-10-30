@@ -219,6 +219,14 @@ if it was sent, is already in the Repo's mailbox ahead of the reset.
     caps are 0 here.
   - The runner's settle telemetry carries a follow-up run's trigger, and the
     filter and accept emit the trigger's lifecycle event: nothing modelled.
+- **The screen as a two-way choice (2026-10-30).** `screen_provider` is gone:
+  `[fermix_core.cues] screen` is `keyword` (the default) or `decision_model`,
+  and Fermix picks the decision model's provider. The accept still routes an
+  `llm` watcher by its keywords exactly when no decision model screens
+  (`words?` is `Cues.Config.screen/0 == :keyword`, as it was
+  `screen_provider/0` unset), so which deliveries exist is unchanged. A
+  decision model with none set up holds the watcher at its filter call, the
+  provider-failure branch `TaskSettle` already takes. No step moved.
 
 ## Switches
 

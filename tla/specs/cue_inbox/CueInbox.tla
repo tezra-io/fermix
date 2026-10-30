@@ -50,7 +50,7 @@
 (* proposal's (see the README). Line numbers of the code this changed are  *)
 (* those of 90a1f0f1.                                                      *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/ingest.ex @ 3c7062290165
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/ingest.ex @ 61d136110d03
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/filters.ex @ 7ee5d5943d2e
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/supervisor.ex @ e1b36533a8b3
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/sweeper.ex @ cff6b376e8b6
