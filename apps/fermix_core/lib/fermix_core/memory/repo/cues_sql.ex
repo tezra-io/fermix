@@ -31,6 +31,7 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   alias FermixCore.Cues.Item
   alias FermixCore.Cues.ListenFor
   alias FermixCore.Memory.Repo.CuesFilterSql
+  alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Memory.Repo.TemporalSql
 
   @inbox_cap 250
@@ -389,6 +390,109 @@ defmodule FermixCore.Memory.Repo.CuesSql do
     """
   end
 
+  # Migration 54 (M60_WATCHER_CODING_RUNS.md §4.1, §4.3): the columns each
+  # rebuilt table holds before it, in order, so the copy names them and a
+  # store holding any other column is refused rather than losing it.
+  @watcher_columns_53 ~w(id name purpose filter task_job_id task_notes daily_cap filter_budget
+                         filter_failures filter_retry_at held_notified_at notices enabled
+                         created_from created_at updated_at listen_for)
+  @delivery_columns_53 ~w(id cue_id watcher_id source_ref subject received_at state outcome
+                          decision_reason hint filter_attempts task_attempts ready_at valid_until
+                          filter_call_id claimed_run_id settled_at)
+
+  @follow_up_rebuild_sql """
+  CREATE TABLE cue_watchers_54 (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    purpose TEXT,
+    filter TEXT NOT NULL CHECK (filter IN ('llm','none')),
+    task_job_id TEXT UNIQUE REFERENCES scheduled_jobs(id),
+    task_notes INTEGER NOT NULL DEFAULT 0 CHECK (task_notes IN (0, 1)),
+    daily_cap INTEGER NOT NULL DEFAULT 0 CHECK (daily_cap >= 0),
+    filter_budget INTEGER NOT NULL DEFAULT 0 CHECK (filter_budget >= 0),
+    filter_failures INTEGER NOT NULL DEFAULT 0,
+    filter_retry_at TEXT,
+    held_notified_at TEXT,
+    notices TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    created_from TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    listen_for TEXT NOT NULL DEFAULT '[]',
+    follow_up_job_id TEXT UNIQUE REFERENCES scheduled_jobs(id),
+    follow_up_mode TEXT CHECK (follow_up_mode IN ('approve','auto')),
+    follow_up_approved_at TEXT,
+    follow_up_approval_digest TEXT,
+    CHECK (task_job_id IS NOT NULL OR follow_up_job_id IS NOT NULL),
+    CHECK ((follow_up_job_id IS NULL) = (follow_up_mode IS NULL)),
+    CHECK ((follow_up_approved_at IS NULL) = (follow_up_approval_digest IS NULL))
+  );
+  INSERT INTO cue_watchers_54 (#{Enum.join(@watcher_columns_53, ", ")})
+    SELECT #{Enum.join(@watcher_columns_53, ", ")} FROM cue_watchers;
+  DROP TABLE cue_watchers;
+  ALTER TABLE cue_watchers_54 RENAME TO cue_watchers;
+
+  CREATE TABLE cue_deliveries_54 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cue_id INTEGER NOT NULL REFERENCES cues(id),
+    watcher_id TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    subject TEXT,
+    received_at TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN
+      ('pending','filtering','passed','claimed','acked','dropped','exhausted','expired')),
+    outcome TEXT CHECK (outcome IS NULL OR outcome IN
+      ('ignored','acted','filter_failed','task_failed','failed_after_action',
+       'lifetime','inbox_full','watcher_removed','follow_up')),
+    decision_reason TEXT,
+    hint TEXT,
+    filter_attempts INTEGER NOT NULL DEFAULT 0 CHECK (filter_attempts BETWEEN 0 AND 3),
+    task_attempts INTEGER NOT NULL DEFAULT 0 CHECK (task_attempts BETWEEN 0 AND 3),
+    ready_at TEXT NOT NULL,
+    valid_until TEXT NOT NULL,
+    filter_call_id TEXT,
+    claimed_run_id TEXT,
+    settled_at TEXT,
+    UNIQUE (cue_id, watcher_id)
+  );
+  INSERT INTO cue_deliveries_54 (#{Enum.join(@delivery_columns_53, ", ")})
+    SELECT #{Enum.join(@delivery_columns_53, ", ")} FROM cue_deliveries;
+  DELETE FROM sqlite_sequence WHERE name = 'cue_deliveries_54';
+  INSERT INTO sqlite_sequence (name, seq)
+    SELECT 'cue_deliveries_54', seq FROM sqlite_sequence WHERE name = 'cue_deliveries';
+  DROP TABLE cue_deliveries;
+  ALTER TABLE cue_deliveries_54 RENAME TO cue_deliveries;
+  """
+
+  @doc """
+  The tables migration 54 rebuilds, each with the columns it must hold before
+  the rebuild, in order. The migration refuses a store whose table holds any
+  other (a column the copy would leave behind), and keeps every index the
+  table has, whichever migration made it.
+  """
+  @spec follow_up_rebuilt_tables() :: [{String.t(), [String.t()]}]
+  def follow_up_rebuilt_tables,
+    do: [{"cue_watchers", @watcher_columns_53}, {"cue_deliveries", @delivery_columns_53}]
+
+  @doc """
+  The rebuild of migration 54 (M60_WATCHER_CODING_RUNS.md §4.1, §4.3):
+
+    * `cue_watchers` with a nullable `task_job_id`, since a watcher may have
+      only a follow-up, and the follow-up's job (`follow_up_job_id`, never
+      shared), its mode (`approve` asks first, `auto` runs on each passing
+      item) and the automatic approval (`follow_up_approved_at` and the digest
+      of what was approved); a watcher holds a task or a follow-up;
+    * `cue_deliveries` with the outcome `follow_up`: a watcher with no task
+      settles a passing item at once, and what came of it is its trigger's.
+
+  Tables only: the caller replays each table's indexes after it and runs it
+  with foreign keys off (`cue_watchers` is the parent of three tables). The
+  AUTOINCREMENT counter of `cue_deliveries` is carried over, so no id is ever
+  given out twice.
+  """
+  @spec follow_up_rebuild_sql() :: String.t()
+  def follow_up_rebuild_sql, do: @follow_up_rebuild_sql
+
   @doc "Delivery states that hold a delivery open (never touched by retention)."
   @spec live_states() :: [String.t()]
   def live_states, do: @live_states
@@ -586,7 +690,7 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   defp withhold_live(conn, watcher_id, {reason, hint}, call, now) do
     with {:ok, outcome} <-
            CuesFilterSql.record_withheld(conn, watcher_id, call, {:pass, reason, hint}, now),
-         do: {:ok, Map.merge(outcome, %{conflict?: false, evicted: [], gaps: []})}
+         do: {:ok, Map.merge(outcome, %{conflict?: false, evicted: [], gaps: [], follow_up: nil})}
   end
 
   # One transaction: the cue if its identity is new (with its payload), else
@@ -620,22 +724,32 @@ defmodule FermixCore.Memory.Repo.CuesSql do
 
   defp live_write(conn, {:conflict, cue_id}, ref, _item, _watcher_id, _decision, now) do
     with {:ok, _result, gaps} <- record_conflict(conn, ref, cue_id, now),
-         do: {:ok, %{delivery_id: nil, conflict?: true, evicted: [], gaps: gaps}}
+         do: {:ok, %{delivery_id: nil, conflict?: true, evicted: [], gaps: gaps, follow_up: nil}}
   end
 
+  # A new delivery's follow-up trigger is written before the inbox cap is
+  # kept, so a watcher with no task, whose item settles at once, holds no
+  # place in it. A repeat of a stored pass writes none.
   defp live_write(conn, cue, ref, item, watcher_id, decision, now) do
     with {:ok, delivery, inserted} <-
            live_delivery(conn, cue, ref, item, watcher_id, decision, now),
+         {:ok, follow_up} <- inserted_follow_up(conn, inserted, now),
          {:ok, evicted, gaps} <- evict_overflow(conn, ref, inserted, now) do
       {:ok,
        %{
          delivery_id: delivery && delivery.delivery_id,
          conflict?: false,
          evicted: evicted,
-         gaps: gaps
+         gaps: gaps,
+         follow_up: follow_up
        }}
     end
   end
+
+  defp inserted_follow_up(_conn, [], _now), do: {:ok, nil}
+
+  defp inserted_follow_up(conn, [%{delivery_id: id}], now),
+    do: CuesFollowUpSql.on_pass(conn, id, now)
 
   # `{:ok, delivery | nil, inserted}`. A delivery added to a stored cue counts
   # in its `routed_count`, makes it live again (`terminal_at` null) so its
@@ -1039,34 +1153,31 @@ defmodule FermixCore.Memory.Repo.CuesSql do
     Enum.reduce_while(targets, {:ok, []}, fn {watcher_id, filter}, {:ok, acc} ->
       {state, reason} = if filter == "none", do: {"passed", "no filter"}, else: {"pending", nil}
 
-      case insert_returning_id(
-             conn,
-             """
-             INSERT INTO cue_deliveries (cue_id, watcher_id, source_ref, subject, received_at, state,
-               decision_reason, ready_at, valid_until)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-             RETURNING id
-             """,
-             [
-               cue_id,
-               watcher_id,
-               ref,
-               item.subject,
-               received,
-               state,
-               reason,
-               received,
-               valid_until
-             ]
-           ) do
-        {:ok, id} ->
-          {:cont, {:ok, acc ++ [%{delivery_id: id, watcher_id: watcher_id, state: state}]}}
-
-        {:error, reason} ->
-          {:halt, {:error, reason}}
+      with {:ok, id} <-
+             insert_returning_id(
+               conn,
+               """
+               INSERT INTO cue_deliveries (cue_id, watcher_id, source_ref, subject, received_at,
+                 state, decision_reason, ready_at, valid_until)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               RETURNING id
+               """,
+               [cue_id, watcher_id, ref, item.subject, received, state, reason, received] ++
+                 [valid_until]
+             ),
+           {:ok, follow_up} <- accepted_follow_up(conn, id, state, now) do
+        delivery = %{delivery_id: id, watcher_id: watcher_id, state: state, follow_up: follow_up}
+        {:cont, {:ok, acc ++ [delivery]}}
+      else
+        {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
   end
+
+  # A `none` watcher's item passes at acceptance, so its follow-up's trigger is
+  # written here, in the accept's transaction.
+  defp accepted_follow_up(conn, id, "passed", now), do: CuesFollowUpSql.on_pass(conn, id, now)
+  defp accepted_follow_up(_conn, _id, _state, _now), do: {:ok, nil}
 
   # Design §7.1 step 3: past 250 `pending|passed` from this source, the oldest
   # `pending` goes, else the oldest `passed`; never a delivery in a filter call

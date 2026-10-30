@@ -20,6 +20,18 @@ defmodule FermixCore.Cues.Watchers do
   breaks one reads `needs_update` (`update_needed/2`) and is told once
   (`needs_update_notices/1`).
 
+  ## Follow-ups (M60_WATCHER_CODING_RUNS.md §4, §5)
+
+  A watcher has a task (a job that runs on cues and reads each item), a
+  follow-up (a job of its own kind, `Jobs.Registry.create_follow_up_job/2`,
+  that its passing items set off and that is handed nothing from them), or
+  both. A follow-up asks first (`approve`, the default) or runs on its own
+  (`auto`), which needs the watcher's daily cap and the owner's one approval
+  (`approve_follow_up/3`), bound to `follow_up_digest/2` of what it runs and
+  what sets it off: any change to those leaves the approval behind, and the
+  follow-up asks first until it is approved again. Removing the watcher
+  removes its follow-up's job.
+
   ## Options
 
   `:repo` (the `Memory.Repo` server), `:now`, `:cues_config` (the
@@ -33,6 +45,7 @@ defmodule FermixCore.Cues.Watchers do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Cues
   alias FermixCore.Cues.Config
+  alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.ListenFor
   alias FermixCore.Cues.Notices
   alias FermixCore.Cues.RecentDrops
@@ -42,6 +55,7 @@ defmodule FermixCore.Cues.Watchers do
   alias FermixCore.Jobs.DeliveryDefaults
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Memory.Repo.CuesWatchersSql
 
@@ -67,6 +81,15 @@ defmodule FermixCore.Cues.Watchers do
   @must_report "A watcher's task must reach you: pick where it reports."
   @stale "The watcher changed while this change was being made; look at it again and retry."
   @report_choices "Telegram, Slack, Discord, WhatsApp, the phone or the Mac app"
+  @suggested_cap 5
+  @auto_needs_cap "An automatic follow-up needs a daily cap on the watcher: say how many runs " <>
+                    "a day it may cause (Fermix suggests #{@suggested_cap})."
+  @needs_one "A watcher needs a task or a follow-up; give it a task before stopping its " <>
+               "follow-up."
+  @follow_up_needed "Give the follow-up its instructions: what it does when an item passes."
+  @names_tools "Name the tools the follow-up may use."
+  @follow_up_must_report "A watcher's follow-up must reach you: pick where it reports."
+  @no_approval %{follow_up_approved_at: nil, follow_up_approval_digest: nil}
 
   @channel_names %{
     "telegram" => "Telegram",
@@ -120,6 +143,15 @@ defmodule FermixCore.Cues.Watchers do
   (`task_job_id`), or a new one made from `task` (its prompt), with
   `task_timeout_minutes` (at most 30) and the delivery the context and
   `delivery_target` / `delivery_mode` give. Params are atom-keyed.
+
+  `follow_up` (a map) gives it a follow-up, made through
+  `Jobs.Registry.create_follow_up_job/2`: `prompt` (the owner's instructions),
+  `allowed_tools` (its grant, at least one), `name`, `skill_name`, `model`,
+  `provider`, `timeout_minutes`, `delivery_mode` / `delivery_target` (as the
+  task's) and `mode` (`"approve"`, the default, or `"auto"`, which needs a
+  daily cap and is written unapproved). A watcher needs a task or a
+  follow-up. The caller bounds the follow-up's tools by its own turn, as
+  `schedule_job` bounds a job's.
   """
   @spec create(map(), map(), opts()) :: result()
   def create(params, context, opts \\ []) when is_map(params) and is_map(context) do
@@ -128,31 +160,60 @@ defmodule FermixCore.Cues.Watchers do
          {:ok, sources} <- check_sources(Map.get(params, :sources)),
          :ok <- keeps_rules(Map.put(settings, :sources, sources), opts),
          {:ok, instructions} <- check_instructions(Map.get(params, :instructions) || []),
+         {:ok, spec} <- follow_up_spec(Map.get(params, :follow_up), settings.daily_cap),
          :ok <- name_free(name, opts),
-         {:ok, job, created?} <- task_for(name, params, context, opts) do
+         {:ok, jobs} <- jobs_for(name, params, spec, context, opts) do
       attrs =
         Map.merge(settings, %{
           id: Cues.id("cwt"),
           name: name,
-          task_job_id: job.id,
+          task_job_id: jobs.task && jobs.task.id,
+          follow_up_job_id: jobs.follow_up && jobs.follow_up.id,
+          follow_up_mode: spec && spec.mode,
           task_notes: Map.get(params, :task_notes, false) == true,
           created_from: origin(context)
         })
 
-      insert_created(attrs, sources, instructions, {job, created?}, opts)
+      insert_created(attrs, sources, instructions, jobs, opts)
     end
   end
 
-  defp insert_created(attrs, sources, instructions, {job, created?}, opts) do
+  defp insert_created(attrs, sources, instructions, jobs, opts) do
     request = {:insert_watcher, attrs, sources, instructions, now(opts)}
 
     case call(request, opts) do
       {:ok, watcher} ->
-        {:ok, %{watcher: watcher, job: job, echo: created_echo(watcher, job, opts)}}
+        {:ok,
+         %{
+           watcher: watcher,
+           job: jobs.task,
+           follow_up_job: jobs.follow_up,
+           echo: created_echo(watcher, jobs, opts)
+         }}
 
       {:error, reason} ->
-        if created?, do: drop_created_job(job, opts)
+        Enum.each(jobs.created, &drop_created_job(&1, opts))
         refusal(reason, attrs.name)
+    end
+  end
+
+  # The task and the follow-up's job, each made or linked; a follow-up job
+  # that cannot be made takes back a task job made for it.
+  defp jobs_for(name, params, spec, context, opts) do
+    with {:ok, task, task_created?} <- task_for(name, params, context, opts) do
+      created = if task_created?, do: [task], else: []
+
+      case follow_up_job_for(name, spec, context, opts) do
+        {:ok, nil} ->
+          {:ok, %{task: task, follow_up: nil, created: created}}
+
+        {:ok, job} ->
+          {:ok, %{task: task, follow_up: job, created: created ++ [job]}}
+
+        {:error, sentence} ->
+          Enum.each(created, &drop_created_job(&1, opts))
+          {:error, sentence}
+      end
     end
   end
 
@@ -382,10 +443,18 @@ defmodule FermixCore.Cues.Watchers do
 
   # --- the task ---------------------------------------------------------------------------
 
+  # A watcher needs a task or a follow-up: with a follow-up and no task given,
+  # it has none; with neither, the task is asked for.
   defp task_for(name, params, context, opts) do
-    case Map.get(params, :task_job_id) do
-      job_id when is_binary(job_id) and job_id != "" -> linked_task(job_id, opts)
-      _none -> new_task(name, params, context, opts)
+    case {Map.get(params, :task_job_id), present?(params, :task), present?(params, :follow_up)} do
+      {job_id, _task?, _follow_up?} when is_binary(job_id) and job_id != "" ->
+        linked_task(job_id, opts)
+
+      {_none, false, true} ->
+        {:ok, nil, false}
+
+      _new ->
+        new_task(name, params, context, opts)
     end
   end
 
@@ -538,6 +607,364 @@ defmodule FermixCore.Cues.Watchers do
     end
   end
 
+  # --- the follow-up (M60_WATCHER_CODING_RUNS.md §4.1, §5) -------------------------------
+
+  # The owner's follow-up as given, checked before any job is made.
+  defp follow_up_spec(nil, _daily_cap), do: {:ok, nil}
+
+  defp follow_up_spec(params, daily_cap) when is_map(params) do
+    with {:ok, prompt} <- follow_up_prompt(Map.get(params, :prompt)),
+         {:ok, tools} <- follow_up_tools(Map.get(params, :allowed_tools)),
+         {:ok, timeout} <- task_timeout(Map.get(params, :timeout_minutes)),
+         {:ok, mode} <- follow_up_mode(Map.get(params, :mode, "approve")),
+         :ok <- mode_keeps_cap(mode, daily_cap) do
+      {:ok, %{params: params, prompt: prompt, tools: tools, timeout: timeout, mode: mode}}
+    end
+  end
+
+  defp follow_up_spec(_params, _daily_cap),
+    do: {:error, "A follow-up is given as its instructions, its tools and its mode."}
+
+  defp follow_up_prompt(prompt) when is_binary(prompt) do
+    prompt = String.trim(prompt)
+
+    cond do
+      prompt == "" ->
+        {:error, @follow_up_needed}
+
+      String.length(prompt) > @task_prompt_max ->
+        {:error, "A follow-up's instructions are at most 8,000 characters."}
+
+      true ->
+        {:ok, prompt}
+    end
+  end
+
+  defp follow_up_prompt(_prompt), do: {:error, @follow_up_needed}
+
+  defp follow_up_tools([_ | _] = tools) do
+    if Enum.all?(tools, &(is_binary(&1) and &1 != "")),
+      do: {:ok, Enum.uniq(tools)},
+      else: {:error, @names_tools}
+  end
+
+  defp follow_up_tools(_tools), do: {:error, @names_tools}
+
+  defp follow_up_mode(mode) when mode in ["approve", "auto"], do: {:ok, mode}
+
+  defp follow_up_mode(_mode),
+    do: {:error, ~s|A follow-up asks first ("approve") or runs on its own ("auto").|}
+
+  defp mode_keeps_cap("auto", 0), do: {:error, @auto_needs_cap}
+  defp mode_keeps_cap(_mode, _daily_cap), do: :ok
+
+  defp follow_up_job_for(_name, nil, _context, _opts), do: {:ok, nil}
+
+  defp follow_up_job_for(name, spec, context, opts) do
+    with {:ok, {mode, target}} <- follow_up_delivery(spec.params, context),
+         {:ok, trust} <- creator_trust(context) do
+      attrs =
+        spec.params
+        |> follow_up_routing()
+        |> Map.merge(%{
+          name: blank_to_nil(Map.get(spec.params, :name)) || "follow-up of #{name}",
+          description: "The follow-up of watcher #{name}.",
+          task_prompt: spec.prompt,
+          allowed_tools: spec.tools,
+          delivery_mode: mode,
+          delivery_target: target,
+          created_by_agent_id: Map.get(context, :memory_agent_id, "main"),
+          created_by_session_id: origin_session_id(context),
+          created_by_channel: Map.get(context, :source_channel),
+          created_by_trust: trust
+        })
+        |> put_timeout(spec.timeout)
+
+      registry_result(JobsRegistry.create_follow_up_job(attrs, registry_opts(opts)), attrs.name)
+    end
+  end
+
+  # The skill, model and provider the owner named; absent ones stay unset.
+  defp follow_up_routing(params) do
+    for key <- [:skill_name, :model, :provider],
+        value = blank_to_nil(Map.get(params, key)),
+        into: %{},
+        do: {key, value}
+  end
+
+  # A follow-up reports as a task does: to this chat unless a target is named.
+  defp follow_up_delivery(params, context) do
+    with {:ok, {mode, target}} <- task_delivery(params, context),
+         :ok <- reachable_target(mode, target) do
+      {:ok, {mode, target}}
+    else
+      {:error, @must_report} -> {:error, @follow_up_must_report}
+      {:error, sentence} -> {:error, sentence}
+    end
+  end
+
+  defp registry_result({:ok, job}, _name), do: {:ok, job}
+  defp registry_result({:error, reason}, _name) when is_binary(reason), do: {:error, reason}
+  defp registry_result({:error, reason}, name), do: refusal(reason, name)
+
+  @doc """
+  Gives the watcher a follow-up, or changes the one it has (§3.5), on the
+  owner's consent turn (`context`, which the caller checked). A new follow-up
+  takes `create/3`'s `follow_up` map; a change takes any of its keys, and its
+  job changes through `Jobs.Registry.update_follow_up_job/3`. A change of
+  `mode` leaves any approval behind, and `"auto"` needs the watcher's daily
+  cap. The caller bounds the tools by its own turn.
+  """
+  @spec set_follow_up(String.t(), map(), map(), opts()) :: result()
+  def set_follow_up(name, params, context, opts \\ [])
+      when is_binary(name) and is_map(params) and is_map(context) do
+    with {:ok, watcher} <- fetch(name, opts) do
+      if watcher.follow_up_job_id,
+        do: change_follow_up(watcher, params, context, opts),
+        else: add_follow_up(watcher, params, context, opts)
+    end
+  end
+
+  defp add_follow_up(watcher, params, context, opts) do
+    with {:ok, spec} <- follow_up_spec(params, watcher.daily_cap),
+         {:ok, job} <- follow_up_job_for(watcher.name, spec, context, opts) do
+      patch = Map.merge(%{follow_up_job_id: job.id, follow_up_mode: spec.mode}, @no_approval)
+
+      case write(watcher, patch, nil, opts) do
+        {:ok, %{watcher: updated}} ->
+          {:ok, %{watcher: updated, follow_up_job: job, echo: follow_up_echo(updated, job)}}
+
+        {:error, sentence} ->
+          drop_created_job(job, opts)
+          {:error, sentence}
+      end
+    end
+  end
+
+  defp change_follow_up(watcher, params, context, opts) do
+    with {:ok, mode_patch} <- mode_patch(watcher, params),
+         {:ok, job_attrs} <- follow_up_job_attrs(params, context),
+         :ok <- something_to_change(mode_patch, job_attrs),
+         {:ok, job} <- update_follow_up_job(watcher.follow_up_job_id, job_attrs, opts),
+         {:ok, updated} <- write_mode(watcher, mode_patch, opts) do
+      {:ok, %{watcher: updated, follow_up_job: job, echo: follow_up_echo(updated, job)}}
+    end
+  end
+
+  defp mode_patch(watcher, params) do
+    case Map.fetch(params, :mode) do
+      :error ->
+        {:ok, %{}}
+
+      {:ok, mode} ->
+        with {:ok, mode} <- follow_up_mode(mode),
+             :ok <- mode_keeps_cap(mode, watcher.daily_cap) do
+          {:ok, if(mode == watcher.follow_up_mode, do: %{}, else: mode_change(mode))}
+        end
+    end
+  end
+
+  defp mode_change(mode), do: Map.put(@no_approval, :follow_up_mode, mode)
+
+  # The follow-up's job fields a change names, each checked as at creation.
+  defp follow_up_job_attrs(params, context) do
+    with {:ok, prompt} <- optional_check(params, :prompt, &follow_up_prompt/1),
+         {:ok, tools} <- optional_check(params, :allowed_tools, &follow_up_tools/1),
+         {:ok, timeout} <- optional_check(params, :timeout_minutes, &task_timeout/1),
+         {:ok, delivery} <- changed_delivery(params, context) do
+      attrs =
+        params
+        |> follow_up_routing()
+        |> put_given(:task_prompt, prompt)
+        |> put_given(:allowed_tools, tools)
+        |> put_given(:timeout_seconds, timeout)
+        |> Map.merge(delivery)
+
+      {:ok, attrs}
+    end
+  end
+
+  defp optional_check(params, key, check) do
+    if Map.has_key?(params, key), do: check.(Map.get(params, key)), else: {:ok, nil}
+  end
+
+  defp changed_delivery(params, context) do
+    if present?(params, :delivery_mode) or present?(params, :delivery_target) do
+      with {:ok, {mode, target}} <- follow_up_delivery(params, context),
+           do: {:ok, %{delivery_mode: mode, delivery_target: target}}
+    else
+      {:ok, %{}}
+    end
+  end
+
+  defp put_given(map, _key, nil), do: map
+  defp put_given(map, key, value), do: Map.put(map, key, value)
+
+  defp something_to_change(mode_patch, job_attrs)
+       when map_size(mode_patch) == 0 and map_size(job_attrs) == 0,
+       do: {:error, "Say what to change on the follow-up."}
+
+  defp something_to_change(_mode_patch, _job_attrs), do: :ok
+
+  defp update_follow_up_job(job_id, attrs, opts) when map_size(attrs) == 0,
+    do: fetch_job(job_id, opts)
+
+  defp update_follow_up_job(job_id, attrs, opts),
+    do:
+      registry_result(
+        JobsRegistry.update_follow_up_job(job_id, attrs, registry_opts(opts)),
+        job_id
+      )
+
+  defp write_mode(watcher, patch, _opts) when map_size(patch) == 0, do: {:ok, watcher}
+
+  defp write_mode(watcher, patch, opts) do
+    with {:ok, %{watcher: updated}} <- write(watcher, patch, nil, opts), do: {:ok, updated}
+  end
+
+  @doc """
+  Stops the watcher's follow-up (§3.5): its waiting card and any trigger left
+  to start are refused, and its job is removed. Refused while its run holds
+  the job, and for a watcher with no task, which would have nothing left.
+  """
+  @spec remove_follow_up(String.t(), opts()) :: result()
+  def remove_follow_up(name, opts \\ []) when is_binary(name) do
+    with {:ok, watcher} <- fetch(name, opts),
+         :ok <- has_follow_up(watcher),
+         :ok <- keeps_task(watcher) do
+      case call({:remove_follow_up, watcher.id, watcher.updated_at, now(opts)}, opts) do
+        {:ok, removed} ->
+          Enum.each(removed.refused_triggers, &FollowUps.emit_refused(&1, "follow_up_stopped"))
+          remove_follow_up_job(watcher.follow_up_job_id, opts)
+
+          {:ok,
+           %{
+             echo: "Watcher #{name}'s follow-up is stopped and its job removed.",
+             removed: removed
+           }}
+
+        {:error, reason} ->
+          refusal(reason, name)
+      end
+    end
+  end
+
+  defp has_follow_up(%{follow_up_job_id: nil, name: name}),
+    do: {:error, "Watcher #{name} has no follow-up."}
+
+  defp has_follow_up(_watcher), do: :ok
+
+  defp keeps_task(%{task_job_id: nil}), do: {:error, @needs_one}
+  defp keeps_task(_watcher), do: :ok
+
+  defp remove_follow_up_job(job_id, opts) do
+    case JobsRegistry.remove_job(job_id, registry_opts(opts)) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Cues.Watchers: follow-up job #{job_id} was not removed: #{inspect(reason)}")
+    end
+  end
+
+  @doc """
+  Records the owner's approval of the watcher's automatic follow-up (§3.4, §5),
+  bound to `shown_digest`, the `current_follow_up_digest/2` of what the owner
+  was shown: refused when the follow-up or what sets it off changed since, so
+  the owner approves exactly what they read. Only the owner's confirm calls it.
+  """
+  @spec approve_follow_up(String.t(), String.t(), opts()) :: result()
+  def approve_follow_up(name, shown_digest, opts \\ [])
+      when is_binary(name) and is_binary(shown_digest) do
+    with {:ok, watcher} <- fetch(name, opts) do
+      case follow_up_call({:approve, watcher.id, shown_digest, now(opts)}, opts) do
+        {:ok, _digest} -> {:ok, %{echo: approved_echo(watcher)}}
+        {:error, reason} -> follow_up_refusal(reason, name)
+      end
+    end
+  end
+
+  @doc """
+  The digest of what the watcher's follow-up runs and what sets it off, as
+  stored now: what an automatic approval prompt shows and `approve_follow_up/3`
+  is given back.
+  """
+  @spec current_follow_up_digest(String.t(), opts()) :: {:ok, String.t()} | {:error, String.t()}
+  def current_follow_up_digest(name, opts \\ []) when is_binary(name) do
+    with {:ok, watcher} <- fetch(name, opts) do
+      case follow_up_call({:follow_up_digest, watcher.id}, opts) do
+        {:ok, digest} -> {:ok, digest}
+        {:error, reason} -> follow_up_refusal(reason, name)
+      end
+    end
+  end
+
+  @doc """
+  The digest an automatic follow-up's approval is bound to (§5): the job's
+  prompt, tools, skill, model, provider and delivery target, and the watcher's
+  sources and filter (its kind, purpose, words and active instructions). Pure;
+  `CuesFollowUpSql` computes it from the stored rows for every pass.
+  """
+  @spec follow_up_digest(map(), map()) :: String.t()
+  def follow_up_digest(job, watcher) when is_map(job) and is_map(watcher) do
+    instructions = Enum.map(watcher.instructions, & &1.text)
+
+    [
+      ["prompt", job.task_prompt],
+      ["tools", Enum.sort(job.allowed_tools || [])],
+      ["skill", job.skill_name],
+      ["model", job.model],
+      ["provider", job.provider],
+      ["delivery", [job.delivery_mode, pairs(job.delivery_target)]],
+      ["sources", Enum.sort(watcher.sources)],
+      ["filter", [watcher.filter, watcher.purpose, watcher.listen_for, instructions]]
+    ]
+    |> Jason.encode!()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
+  # A map as sorted key-value pairs, so its digest never depends on order.
+  defp pairs(nil), do: nil
+
+  defp pairs(map) when is_map(map),
+    do: map |> Enum.map(fn {k, v} -> [to_string(k), v] end) |> Enum.sort()
+
+  defp follow_up_call(request, opts) do
+    repo_opts =
+      [server: Keyword.get(opts, :repo, Repo)] ++ Keyword.take(opts, [:timeout, :on_timeout])
+
+    Repo.cues_call(CuesFollowUpSql, request, repo_opts)
+  end
+
+  defp follow_up_refusal(:changed, _name),
+    do:
+      {:error,
+       "The follow-up or what sets it off changed since you were asked; nothing was approved. " <>
+         "Ask again to see what it does now."}
+
+  defp follow_up_refusal(:not_automatic, name),
+    do: {:error, "Watcher #{name}'s follow-up asks first; make it automatic first."}
+
+  defp follow_up_refusal(:no_follow_up, name), do: {:error, "Watcher #{name} has no follow-up."}
+  defp follow_up_refusal(reason, name), do: refusal(reason, name)
+
+  defp approved_echo(watcher) do
+    "Watcher #{watcher.name}'s follow-up now runs on each passing item with no card, at most " <>
+      "#{watcher.daily_cap} a day."
+  end
+
+  defp follow_up_echo(watcher, job) do
+    mode =
+      if watcher.follow_up_mode == "auto",
+        do: "runs on its own once you approve it",
+        else: "asks first: you confirm each run on a short card"
+
+    "Watcher #{watcher.name}'s follow-up #{job.name} (job #{job.id}) uses " <>
+      "#{Enum.join(job.allowed_tools, ", ")}, reports to #{report_words(job)}, and #{mode}. " <>
+      "It is never handed the item: the item only decides when it runs."
+  end
+
   # --- reads -------------------------------------------------------------------------------
 
   @doc "One watcher with its sources, instructions and 20 most recent examples."
@@ -553,12 +980,16 @@ defmodule FermixCore.Cues.Watchers do
     end
   end
 
-  @doc "The watcher whose task is `job_id`, or nil."
+  @doc """
+  The watcher whose task or follow-up is `job_id`, or nil: `update_job` on
+  either needs the owner's consent turn and `remove_job` refuses either while
+  its watcher exists (M60_WATCHER_CODING_RUNS.md §4.1).
+  """
   @spec watcher_for_job(String.t(), opts()) :: {:ok, watcher() | nil} | {:error, term()}
   def watcher_for_job(job_id, opts \\ []) when is_binary(job_id),
     do: call({:watcher_for_job, job_id}, opts)
 
-  @doc "The name of the watcher whose task is `job_id`, or nil."
+  @doc "The name of the watcher whose task or follow-up is `job_id`, or nil."
   @spec name_for_job(String.t(), opts()) :: {:ok, String.t() | nil} | {:error, term()}
   def name_for_job(job_id, opts \\ []) when is_binary(job_id) do
     case watcher_for_job(job_id, opts) do
@@ -616,22 +1047,26 @@ defmodule FermixCore.Cues.Watchers do
 
   @doc """
   Removes the watcher (design §8.8): refused while a filter call or a task run
-  holds one of its deliveries; otherwise its waiting deliveries expire with a
-  gap per source and the watcher, its instructions and examples go. Its task
-  job stays.
+  holds one of its deliveries, or its follow-up runs; otherwise its waiting
+  deliveries expire with a gap per source, its follow-up's open triggers are
+  refused, and the watcher, its instructions and examples go. Its task job
+  stays; its follow-up's job is removed with it (M60_WATCHER_CODING_RUNS.md §5).
   """
   @spec remove(String.t(), opts()) :: result()
   def remove(name, opts \\ []) when is_binary(name) do
     with {:ok, watcher} <- fetch(name, opts) do
       case call({:remove_watcher, watcher.id, now(opts)}, opts) do
-        {:ok, removed} ->
-          emit_removed(removed, watcher)
-          {:ok, %{echo: removed_echo(watcher, removed), removed: removed}}
-
-        {:error, reason} ->
-          refusal(reason, name)
+        {:ok, removed} -> removed(watcher, removed, opts)
+        {:error, reason} -> refusal(reason, name)
       end
     end
+  end
+
+  # The watcher is gone: its follow-up's job goes with it (§5).
+  defp removed(watcher, removed, opts) do
+    emit_removed(removed, watcher)
+    if watcher.follow_up_job_id, do: remove_follow_up_job(watcher.follow_up_job_id, opts)
+    {:ok, %{echo: removed_echo(watcher, removed), removed: removed}}
   end
 
   defp emit_removed(removed, watcher) do
@@ -644,6 +1079,8 @@ defmodule FermixCore.Cues.Watchers do
         reason: "watcher_removed"
       })
     end)
+
+    Enum.each(removed.refused_triggers, &FollowUps.emit_refused(&1, "watcher_removed"))
 
     Enum.each(removed.gaps, fn gap ->
       Telemetry.lifecycle(:gap, %{count: gap.count}, %{
@@ -886,6 +1323,7 @@ defmodule FermixCore.Cues.Watchers do
          {:ok, sources} <- update_sources(changes),
          :ok <- something_changed(patch, sources),
          :ok <- keeps_rules(changed(watcher, patch, sources), opts),
+         :ok <- keeps_auto_cap(watcher, patch),
          {:ok, job} <- relinked_job(patch, opts),
          {:ok, %{watcher: updated, passed: passed, expired: expired}} <-
            write(watcher, patch, sources, opts) do
@@ -923,7 +1361,13 @@ defmodule FermixCore.Cues.Watchers do
       watcher_id: watcher_id,
       reason: "no filter"
     })
+
+    FollowUps.emit_triggered(passed.follow_up, passed.source_ref)
   end
+
+  # An automatic follow-up keeps its watcher's daily cap (§3.4).
+  defp keeps_auto_cap(%{follow_up_mode: "auto"}, %{daily_cap: 0}), do: {:error, @auto_needs_cap}
+  defp keeps_auto_cap(_watcher, _patch), do: :ok
 
   defp wake_for_passed([], _opts), do: :ok
 
@@ -1073,20 +1517,30 @@ defmodule FermixCore.Cues.Watchers do
 
   # --- echoes (Fermix's words, design §8.4) --------------------------------------------------
 
-  defp created_echo(watcher, job, opts) do
+  defp created_echo(watcher, jobs, opts) do
     [
-      "Watcher #{watcher.name} is set up: it listens to #{Enum.join(watcher.sources, ", ")}, " <>
-        "#{filter_words(watcher)}, and wakes job #{job.id} (#{job.name}), which reports to " <>
-        "#{report_words(job)}.",
+      set_up_line(watcher, jobs.task),
       purpose_line(watcher),
       words_line(watcher),
       instructions_lines(watcher.instructions),
       cap_line(watcher),
       missing_line(missing_sources(watcher.sources, opts)),
-      lacking_line(job, watcher, opts)
+      jobs.task && lacking_line(jobs.task, watcher, opts),
+      jobs.follow_up && follow_up_echo(watcher, jobs.follow_up)
     ]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n")
+  end
+
+  defp set_up_line(watcher, nil) do
+    "Watcher #{watcher.name} is set up: it listens to #{Enum.join(watcher.sources, ", ")} " <>
+      "and #{filter_words(watcher)}."
+  end
+
+  defp set_up_line(watcher, job) do
+    "Watcher #{watcher.name} is set up: it listens to #{Enum.join(watcher.sources, ", ")}, " <>
+      "#{filter_words(watcher)}, and wakes job #{job.id} (#{job.name}), which reports to " <>
+      "#{report_words(job)}."
   end
 
   defp updated_echo(watcher, patch, sources, job, opts) do
@@ -1228,9 +1682,24 @@ defmodule FermixCore.Cues.Watchers do
         do: "nothing was waiting",
         else: "#{count} waiting #{plural(count, "item", "items")} expired"
 
-    "Watcher #{watcher.name} is removed: #{waiting}. Its task job #{watcher.task_job_id} " <>
-      "stays and runs on no cues until another watcher links it."
+    [
+      "Watcher #{watcher.name} is removed: #{waiting}.",
+      task_kept(watcher),
+      follow_up_gone(watcher)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" ")
   end
+
+  defp task_kept(%{task_job_id: nil}), do: nil
+
+  defp task_kept(watcher),
+    do:
+      "Its task job #{watcher.task_job_id} stays and runs on no cues until another watcher " <>
+        "links it."
+
+  defp follow_up_gone(%{follow_up_job_id: nil}), do: nil
+  defp follow_up_gone(watcher), do: "Its follow-up job #{watcher.follow_up_job_id} is removed."
 
   defp plural(1, one, _many), do: one
   defp plural(_n, _one, many), do: many
@@ -1248,6 +1717,9 @@ defmodule FermixCore.Cues.Watchers do
        "Watcher #{name} is filtering an item or running its task right now; remove it when " <>
          "that finishes."}
 
+  defp refusal(:follow_up_running, name),
+    do: {:error, "Watcher #{name}'s follow-up is running right now; try again when it finishes."}
+
   defp refusal(:job_not_found, _name), do: {:error, "There is no such job."}
 
   defp refusal(:not_cue_job, _name),
@@ -1255,6 +1727,12 @@ defmodule FermixCore.Cues.Watchers do
 
   defp refusal({:task_taken, other}, _name),
     do: {:error, "That job is already the task of watcher #{other}."}
+
+  defp refusal({:follow_up_taken, other}, _name),
+    do: {:error, "That job is already a job of watcher #{other}."}
+
+  defp refusal(:not_follow_up_job, _name),
+    do: {:error, "That job is not a watcher's follow-up."}
 
   defp refusal({:not_active, numbers}, _name),
     do: {:error, "Not an active instruction of this watcher: #{Enum.join(numbers, ", ")}."}

@@ -6,11 +6,22 @@ defmodule FermixCore.Jobs.CueAdmission do
 
   ## Slots
 
-  Cue runs hold at most three of the scheduler's run slots, counted from the
-  `trigger` each `run_monitors` entry carries, so a cron run always keeps one:
-  `free = min(max_active − active, 3 − active_cue)`. Manual runs still bypass
-  the ceiling. The scheduler admits only after a due scan, so a cron run that
-  is due, or that the ceiling held back, takes a freed slot first.
+  Cue runs and watcher follow-up runs (`trigger` `"cue"` and `"watcher"`,
+  M60_WATCHER_CODING_RUNS.md §4.2) share at most three of the scheduler's run
+  slots, counted from the `trigger` each `run_monitors` entry carries, so a
+  cron run always keeps one: `free = min(max_active − active, 3 − active_cue)`.
+  Manual runs still bypass the ceiling; a follow-up never takes that path. The
+  scheduler admits only after a due scan, so a cron run that is due, or that
+  the ceiling held back, takes a freed slot first.
+
+  ## Follow-ups
+
+  Each pass first hands every new waiting card to `offer` (`offer_follow_ups/2`,
+  at most 10 a pass, each sent outside the scheduler's loop), then admits the
+  oldest `starting` triggers into the free slots (`claim_follow_ups/4`): each
+  is checked against the hold (`Cues.FollowUps.check/3`) and claimed with its
+  job (`Repo.claim_follow_up_run/4`), which refuses it when the job still runs.
+  A refused trigger spends no slot. Cue runs take the slots left.
 
   ## Lifecycle telemetry
 
@@ -30,23 +41,31 @@ defmodule FermixCore.Jobs.CueAdmission do
 
   require Logger
 
+  alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Telemetry, as: CueTelemetry
+  alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Memory.Repo.CuesRunsSql
 
   @max_cue_runs 3
+  @cue_share_triggers ["cue", "watcher"]
+  # Cards offered, and starting triggers read, per admission pass.
+  @offers_per_pass 10
+  @follow_up_scan 10
 
   @type claim :: %{job: map(), run: map(), delivery: map()}
+  @type follow_up_claim :: %{job: map(), run: map(), trigger: map()}
   @type settled :: {map(), map(), CuesRunsSql.settlement()}
 
   @doc "The most run slots cue runs may hold at once."
   @spec max_cue_runs() :: pos_integer()
   def max_cue_runs, do: @max_cue_runs
 
-  @doc "How many of the scheduler's monitored runs are cue runs."
+  @doc "How many of the scheduler's monitored runs hold the cue share: cue and follow-up runs."
   @spec active_cue_runs(map()) :: non_neg_integer()
   def active_cue_runs(run_monitors) when is_map(run_monitors) do
-    Enum.count(run_monitors, fn {_ref, info} -> Map.get(info, :trigger) == "cue" end)
+    Enum.count(run_monitors, fn {_ref, info} -> Map.get(info, :trigger) in @cue_share_triggers end)
   end
 
   @doc """
@@ -124,7 +143,121 @@ defmodule FermixCore.Jobs.CueAdmission do
     end
   end
 
+  @doc """
+  Claims the waiting follow-up cards not yet offered (at most
+  #{@offers_per_pass}, each stamped so it is offered once) and hands each to
+  `offer`, a function `(trigger) -> term()` that sends it outside the caller's
+  loop. `opts`: `:repo_opts` and `:offer`. A failed claim is traced and
+  logged; the next pass reads them again.
+  """
+  @spec offer_follow_ups(DateTime.t(), keyword()) :: :ok
+  def offer_follow_ups(%DateTime{} = now, opts) when is_list(opts) do
+    repo_opts = Keyword.fetch!(opts, :repo_opts)
+    offer = Keyword.fetch!(opts, :offer)
+    true = is_function(offer, 1)
+
+    case Repo.cues_call(CuesFollowUpSql, {:claim_offers, now, @offers_per_pass}, repo_opts) do
+      {:ok, triggers} ->
+        Enum.each(triggers, offer)
+
+      {:error, reason} ->
+        trace_error(:follow_up_offer, %{}, reason)
+        Logger.error("Follow-up card claim failed: #{inspect(reason)}")
+    end
+  end
+
+  @doc """
+  Admits follow-up runs into `free` cue-share slots at `now`: the oldest
+  `starting` triggers (at most #{@follow_up_scan} read), each checked against
+  the hold and claimed with its job until the slots are spent. `run_attrs_fun`
+  builds a run's attributes from its job id. Returns the claims the caller
+  must start. `opts`: `:repo_opts`, `:notice` (`(watcher_id, kind, data) ->
+  term()`, the hold's notices) and `:capability_registry`.
+  """
+  @spec claim_follow_ups(non_neg_integer(), DateTime.t(), (String.t() -> map()), keyword()) ::
+          [follow_up_claim()]
+  def claim_follow_ups(0, %DateTime{}, run_attrs_fun, opts)
+      when is_function(run_attrs_fun, 1) and is_list(opts),
+      do: []
+
+  def claim_follow_ups(free, %DateTime{} = now, run_attrs_fun, opts)
+      when is_integer(free) and free > 0 and is_function(run_attrs_fun, 1) and is_list(opts) do
+    repo_opts = Keyword.fetch!(opts, :repo_opts)
+
+    case Repo.cues_call(CuesFollowUpSql, {:starting_triggers, @follow_up_scan}, repo_opts) do
+      {:ok, triggers} ->
+        Enum.reduce_while(
+          triggers,
+          [],
+          &admit_until_full(&1, &2, free, {now, run_attrs_fun, opts})
+        )
+
+      {:error, reason} ->
+        trace_error(:follow_up_claim, %{}, reason)
+        Logger.error("Follow-up admission scan failed: #{inspect(reason)}")
+        []
+    end
+  end
+
   # --- private ------------------------------------------------------------------
+
+  # A refused trigger spends no slot, so the scan goes on until `free` started.
+  defp admit_until_full(_trigger, claims, free, _admission) when length(claims) >= free,
+    do: {:halt, claims}
+
+  defp admit_until_full(trigger, claims, _free, {now, run_attrs_fun, opts}),
+    do: {:cont, claims ++ admit_trigger(trigger, now, run_attrs_fun, opts)}
+
+  # A job gone since its trigger was written is refused by the claim itself.
+  defp admit_trigger(trigger, now, run_attrs_fun, opts) do
+    repo_opts = Keyword.fetch!(opts, :repo_opts)
+
+    case JobsRegistry.get_job(trigger.job_id, repo_opts) do
+      {:ok, job} ->
+        if held_check(trigger, job, opts) == :ready,
+          do: claim_trigger(trigger, now, run_attrs_fun, repo_opts),
+          else: []
+
+      {:error, :not_found} ->
+        claim_trigger(trigger, now, run_attrs_fun, repo_opts)
+
+      {:error, reason} ->
+        trace_error(:follow_up_claim, %{job_id: trigger.job_id}, reason)
+        Logger.error("Follow-up #{trigger.id}: its job could not be read: #{inspect(reason)}")
+        []
+    end
+  end
+
+  defp held_check(trigger, job, opts) do
+    repo_opts = Keyword.fetch!(opts, :repo_opts)
+
+    check_opts =
+      [repo: Keyword.fetch!(repo_opts, :server)] ++
+        Keyword.take(repo_opts, [:timeout, :on_timeout]) ++
+        Keyword.take(opts, [:notice, :capability_registry, :cues_config])
+
+    FollowUps.check(trigger, job, check_opts)
+  end
+
+  defp claim_trigger(trigger, now, run_attrs_fun, repo_opts) do
+    case Repo.claim_follow_up_run(trigger.id, run_attrs_fun.(trigger.job_id), now, repo_opts) do
+      {:ok, {:started, claim}} ->
+        FollowUps.emit_started(claim.trigger, claim.run)
+        [claim]
+
+      {:ok, {:refused, refused}} ->
+        FollowUps.emit_refused(refused, "not_runnable")
+        []
+
+      {:error, :nothing_due} ->
+        []
+
+      {:error, reason} ->
+        trace_error(:follow_up_claim, %{job_id: trigger.job_id}, reason)
+        Logger.error("Follow-up claim of trigger #{trigger.id} failed: #{inspect(reason)}")
+        []
+    end
+  end
 
   defp cap_notice(%{watcher_id: watcher_id, daily_cap: cap, waiting: waiting}, cue_notice),
     do: cue_notice.(watcher_id, :cap_reached, %{cap: cap, waiting: waiting})

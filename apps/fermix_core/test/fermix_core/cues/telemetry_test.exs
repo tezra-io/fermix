@@ -15,13 +15,31 @@ defmodule FermixCore.Cues.TelemetryTest do
   # The phase surface is pinned, not inferred: adding a phase is a deliberate
   # edit that also updates `@cue_phases` in
   # apps/fermix_opik/test/fermix_opik/aggregation_test.exs.
-  test "every phase of design §14 is allowed, plus the counted ones and the two error phases" do
+  test "every phase of design §14 is allowed, plus the counted ones, the two error phases and a follow-up's" do
     assert Enum.sort(Telemetry.phases()) ==
              Enum.sort(~w(accepted duplicate conflict stale rejected rate_limited over_budget
                           routed gap expired unmatched overflow write_failed passed dropped
                           filter_retry filter_held filter_failed claimed settled retry exhausted
                           proposed confirmed denied proposal_expired proposal_refused
-                          ingest_error sweep_error)a)
+                          ingest_error sweep_error follow_up_triggered follow_up_decided
+                          follow_up_expired follow_up_refused follow_up_started)a)
+  end
+
+  test "a follow-up's trigger phases are sessionless and its start needs the run's session" do
+    ids = %{trigger_id: "cft_a", watcher_id: "cwt_a", delivery_id: 7, cue_id: 3, job_id: "j"}
+
+    assert :ok = Telemetry.lifecycle(:follow_up_triggered, %{}, Map.put(ids, :state, "waiting"))
+
+    assert_raise ArgumentError, ~r/sessionless/, fn ->
+      Telemetry.lifecycle(:follow_up_refused, %{}, Map.put(ids, :session_id, "cron_j_1"))
+    end
+
+    assert_raise ArgumentError, ~r/needs the run's :session_id/, fn ->
+      Telemetry.lifecycle(:follow_up_started, %{}, ids)
+    end
+
+    assert :ok =
+             Telemetry.lifecycle(:follow_up_started, %{}, Map.put(ids, :session_id, "cron_j_1"))
   end
 
   test "a counted phase carries its count and the source or watcher, and no session" do

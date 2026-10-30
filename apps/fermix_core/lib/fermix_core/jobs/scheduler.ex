@@ -9,6 +9,11 @@ defmodule FermixCore.Jobs.Scheduler do
   (`cue_wake/1`, coalesced into one pass), on every due and reconcile tick, on
   a run's end and on `job_changed`, always after a due scan, so a cron run
   takes a freed slot before a cue run.
+
+  The same pass moves watcher follow-ups on (M60_WATCHER_CODING_RUNS.md
+  §4.2): it hands each new waiting card to `Cues.FollowUps.offer/2` in a task,
+  then admits `starting` triggers into the cue share (`trigger: "watcher"`, a
+  scheduled run's context) before cue runs take the slots left.
   """
 
   use GenServer
@@ -17,6 +22,7 @@ defmodule FermixCore.Jobs.Scheduler do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Cues
+  alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Notices
   alias FermixCore.Jobs.CueAdmission
   alias FermixCore.Jobs.CueRun
@@ -101,6 +107,7 @@ defmodule FermixCore.Jobs.Scheduler do
           clock: (-> DateTime.t()),
           cues_running?: (-> boolean()),
           cue_notice: (String.t(), atom(), map() -> term()),
+          follow_up_offer: (map() -> term()),
           cue_pending?: boolean()
         }
 
@@ -201,12 +208,14 @@ defmodule FermixCore.Jobs.Scheduler do
       clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
       cues_running?: Keyword.get(opts, :cues_running?, &Cues.running?/0),
       cue_notice: Keyword.get(opts, :cue_notice),
+      follow_up_offer: Keyword.get(opts, :follow_up_offer),
       cue_pending?: false
     }
 
     state =
       state
       |> put_default_cue_notice()
+      |> put_default_follow_up_offer()
       |> reconcile_active_runs()
       |> schedule_due_timer()
       |> schedule_reconciliation_timer()
@@ -292,15 +301,46 @@ defmodule FermixCore.Jobs.Scheduler do
 
   defp admit_cue_runs(state, now) do
     if state.enabled? and state.cues_running?.() do
-      opts = [repo_opts: state.repo_opts, cue_notice: state.cue_notice]
-
       state
-      |> free_cue_slots()
-      |> CueAdmission.claim(now, &cue_run_attrs(&1, now), opts)
-      |> Enum.reduce(state, &start_cue_run/2)
+      |> offer_follow_ups(now)
+      |> admit_follow_up_runs(now)
+      |> admit_cue_task_runs(now)
     else
       state
     end
+  end
+
+  defp admit_cue_task_runs(state, now) do
+    opts = [repo_opts: state.repo_opts, cue_notice: state.cue_notice]
+
+    state
+    |> free_cue_slots()
+    |> CueAdmission.claim(now, &cue_run_attrs(&1, now), opts)
+    |> Enum.reduce(state, &start_cue_run/2)
+  end
+
+  # A card is a channel send, so each goes out in a task (`follow_up_offer`);
+  # it needs no run slot.
+  defp offer_follow_ups(state, now) do
+    :ok =
+      CueAdmission.offer_follow_ups(now, repo_opts: state.repo_opts, offer: state.follow_up_offer)
+
+    state
+  end
+
+  # A trigger takes a cue-share slot ahead of the cue runs: the owner tapped
+  # Run, or approved it to run on its own.
+  defp admit_follow_up_runs(state, now) do
+    opts = [
+      repo_opts: state.repo_opts,
+      notice: state.cue_notice,
+      capability_registry: state.capability_registry
+    ]
+
+    state
+    |> free_cue_slots()
+    |> CueAdmission.claim_follow_ups(now, &follow_up_run_attrs(&1, now), opts)
+    |> Enum.reduce(state, &start_follow_up_run/2)
   end
 
   # The cue share is counted from the monitors. After a reconcile scan that
@@ -352,6 +392,43 @@ defmodule FermixCore.Jobs.Scheduler do
   defp cue_run_attrs(job_id, now) do
     %{id: job_id} |> run_attrs(now) |> Map.put(:trigger, "cue")
   end
+
+  defp follow_up_run_attrs(job_id, now) do
+    %{id: job_id} |> run_attrs(now) |> Map.put(:trigger, "watcher")
+  end
+
+  # The runner reads the trigger from its run id (`Cues.FollowUps.run_trigger/2`).
+  defp start_follow_up_run(%{job: job, run: run}, state),
+    do: start_or_mark_failed(job, run, state)
+
+  # Each card is offered in its own task under the task supervisor, so a slow
+  # channel never holds this loop. Opt `:follow_up_offer` replaces it (tests).
+  defp put_default_follow_up_offer(%{follow_up_offer: nil} = state) do
+    opts = [
+      repo: state.repo,
+      adapter: state.delivery_adapter,
+      channels: state.delivery_channels,
+      delivery_opts: state.delivery_opts,
+      timeout_ms: state.delivery_timeout_ms,
+      capability_registry: state.capability_registry
+    ]
+
+    offer = fn trigger ->
+      send_card = fn -> FollowUps.offer(trigger, opts) end
+
+      case Task.Supervisor.start_child(FermixCore.TaskSupervisor, send_card) do
+        {:ok, _pid} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.error("Follow-up card #{trigger.id} did not start: #{inspect(reason)}")
+      end
+    end
+
+    %{state | follow_up_offer: offer}
+  end
+
+  defp put_default_follow_up_offer(state), do: state
 
   # The runner reads the delivery from the run row (`cue_delivery_id`).
   defp start_cue_run(%{job: job, run: run}, state), do: start_or_mark_failed(job, run, state)

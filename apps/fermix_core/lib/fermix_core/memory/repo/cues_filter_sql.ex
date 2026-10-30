@@ -75,6 +75,7 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
 
   alias FermixCore.Cues
   alias FermixCore.Cues.Filter.Telemetry, as: FilterTelemetry
+  alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Memory.Repo.CuesSql
 
   @provider_backoff_s %{1 => 30, 2 => 120}
@@ -118,14 +119,15 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
   held watcher's call succeeded), `watcher_id`, `watcher_name`, `task_job_id`,
   `delivery_id`, `cue_id`, `source_ref`, `attempt` (the delivery's filter
   attempts after this settle), `filter_failures` (the watcher's, after),
-  `retry_at` (the watcher's or the delivery's next try, when one is set) and
-  `waiting` (the watcher's `pending` deliveries).
+  `retry_at` (the watcher's or the delivery's next try, when one is set),
+  `waiting` (the watcher's `pending` deliveries) and `follow_up` (the trigger a
+  pass wrote for the watcher's follow-up, `CuesFollowUpSql.on_pass/3`, or nil).
   """
   @spec settle_outcome() :: [atom()]
   def settle_outcome do
     [:result, :passed?, :exhausted?, :held_now?, :held?, :recovered?, :watcher_id] ++
       [:watcher_name, :task_job_id, :delivery_id, :cue_id, :source_ref, :attempt] ++
-      [:filter_failures, :retry_at, :waiting]
+      [:filter_failures, :retry_at, :waiting, :follow_up]
   end
 
   @doc "Serves one request on `conn`; an unknown request is an error, never a raise."
@@ -602,11 +604,14 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
     end
   end
 
+  # The follow-up's trigger is written in the pass's transaction (M60
+  # follow-ups §4.3), so a passed item and its trigger commit together.
   defp pass_delivery(conn, call_id, target, {reason, hint}, now) do
     patch = %{decision_reason: reason, hint: hint, ready_at: now}
 
-    with :ok <- move(conn, target, call_id, "passed", patch) do
-      watcher_succeeded(conn, target, :passed, %{passed?: true})
+    with :ok <- move(conn, target, call_id, "passed", patch),
+         {:ok, follow_up} <- CuesFollowUpSql.on_pass(conn, target.delivery_id, now) do
+      watcher_succeeded(conn, target, :passed, %{passed?: true, follow_up: follow_up})
     end
   end
 
@@ -681,7 +686,8 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
         source_ref: target.source_ref,
         attempt: target.attempts,
         filter_failures: target.failures,
-        retry_at: nil
+        retry_at: nil,
+        follow_up: nil
       },
       extra
     )

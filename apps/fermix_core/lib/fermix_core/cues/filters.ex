@@ -61,6 +61,7 @@ defmodule FermixCore.Cues.Filters do
   alias FermixCore.Cues.Filter
   alias FermixCore.Cues.Filter.Llm
   alias FermixCore.Cues.Filter.Telemetry, as: FilterTelemetry
+  alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Notices
   alias FermixCore.Cues.Telemetry
   alias FermixCore.Memory.Repo
@@ -421,6 +422,7 @@ defmodule FermixCore.Cues.Filters do
       )
 
     Telemetry.lifecycle(phase, %{}, Map.reject(metadata, fn {_key, value} -> is_nil(value) end))
+    FollowUps.emit_triggered(Map.get(outcome, :follow_up), run.source_ref)
   end
 
   defp phase({:pass, reason, _hint}, _outcome), do: {:passed, %{decision: :pass, content: reason}}

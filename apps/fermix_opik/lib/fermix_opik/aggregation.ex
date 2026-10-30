@@ -51,6 +51,7 @@ defmodule FermixOpik.Aggregation do
     :filter_call_id,
     :mandate_call_id,
     :proposal_id,
+    :trigger_id,
     :attempt,
     :count,
     :content
@@ -315,10 +316,16 @@ defmodule FermixOpik.Aggregation do
               run_id: Map.get(meta, :run_id),
               schedule_kind: Map.get(meta, :schedule_kind),
               schedule_expr: Map.get(meta, :schedule_expr),
+              # What started the run: "schedule", "manual", "cue" (a watcher's
+              # task) or "watcher" (a watcher's follow-up).
               trigger: Map.get(meta, :trigger),
-              # A cue run's watcher and the delivery it held (M60 §9.6).
+              # A cue run's watcher and the delivery it held (M60 §9.6); a
+              # follow-up run's watcher, the cue that set it off and its
+              # trigger (M60_WATCHER_CODING_RUNS.md §8).
               watcher_id: Map.get(meta, :watcher_id),
-              delivery_id: Map.get(meta, :delivery_id)
+              delivery_id: Map.get(meta, :delivery_id),
+              cue_id: Map.get(meta, :cue_id),
+              trigger_id: Map.get(meta, :trigger_id)
             }),
           at: at.at,
           mono: at.mono
@@ -1052,8 +1059,9 @@ defmodule FermixOpik.Aggregation do
   # - The session of a filter call or a cue run that is open: a child span of
   #   that run (filter phases under the `cue_filter_` root, run and proposal
   #   phases under the run's `cron_` root).
-  # - `claimed` is traced by the scheduler before the runner exists, so it may
-  #   open the run's session itself; the job's opener adopts it (`adopt_opener/4`).
+  # - `claimed` (a cue run) and `follow_up_started` (a watcher's follow-up run)
+  #   are traced by the scheduler before the runner exists, so they may open
+  #   the run's session themselves; the job's opener adopts it (`adopt_opener/4`).
   # - Any other session, closed or never seen (a proposal confirmed after its
   #   run shipped, a crashed run reaped later): a self-closing trace carrying the
   #   session id, so the phase is neither dropped at the tombstone nor left as a
@@ -1857,14 +1865,14 @@ defmodule FermixOpik.Aggregation do
   # Whether a cue lifecycle phase nests (see the [:fermix, :cue, :lifecycle]
   # clause): only under a session that is open (a shipped one has left
   # `sessions`), or as the claim that opens a run's session before the runner
-  # does.
+  # does: a cue run's `claimed`, or a follow-up's `follow_up_started`.
   defp cue_nests?(state, meta) do
     session_id = Map.get(meta, :session_id)
 
     cond do
       not is_binary(session_id) -> false
       is_map_key(state.sessions, session_id) -> true
-      true -> stringify(Map.get(meta, :phase)) == "claimed"
+      true -> stringify(Map.get(meta, :phase)) in ["claimed", "follow_up_started"]
     end
   end
 

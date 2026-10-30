@@ -2912,7 +2912,9 @@ defmodule FermixOpik.AggregationTest do
   @cue_phases ~w(accepted duplicate conflict stale rejected rate_limited over_budget
                  routed gap expired unmatched overflow write_failed ingest_error sweep_error
                  passed dropped filter_retry filter_held filter_failed claimed settled retry
-                 exhausted proposed confirmed denied proposal_expired proposal_refused)a
+                 exhausted proposed confirmed denied proposal_expired proposal_refused
+                 follow_up_triggered follow_up_decided follow_up_expired follow_up_refused
+                 follow_up_started)a
   @cue_run_session "cron_job-8_20261017_120000_a1b2c3"
 
   # The emitter's own metadata shape (FermixCore.Cues.Telemetry): ids, labels
@@ -3090,6 +3092,42 @@ defmodule FermixOpik.AggregationTest do
       assert claim_parent == wrapper.id
       assert claimed.metadata.queue_ms == 2_500
       assert span_named(spans, "cue:settled").parent_span_id == wrapper.id
+    end
+
+    # A follow-up's run (trigger "watcher", M60_WATCHER_CODING_RUNS.md §8) is
+    # started by the scheduler before its runner exists, so its start opens the
+    # run's session as a cue run's claim does; the job's opener names the trace
+    # and gives it the trigger, the cue and the trigger's id.
+    test "a follow-up's run trace holds its start, with the watcher trigger's ids" do
+      started =
+        cue_run_meta(:follow_up_started, %{trigger_id: "cft_4a", cue_id: 31, state: "started"})
+
+      job =
+        cue_job_meta(%{
+          schedule_kind: "watcher",
+          schedule_expr: "watcher",
+          trigger: "watcher",
+          delivery_id: nil,
+          cue_id: 31,
+          trigger_id: "cft_4a"
+        })
+
+      {_state, closed} =
+        run([
+          {@cue_event, %{count: 1}, started},
+          {[:fermix, :job, :run_start], %{}, job},
+          {[:fermix, :job, :run_complete], %{duration_ms: 900}, Map.put(job, :status, "ok")}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == "scheduled:release watch"
+      assert trace.metadata.trigger == "watcher"
+      assert trace.metadata.cue_id == 31
+      assert trace.metadata.trigger_id == "cft_4a"
+      wrapper = span_named(spans, "scheduled:release watch")
+      start = span_named(spans, "cue:follow_up_started")
+      assert start.parent_span_id == wrapper.id
+      assert start.metadata.trigger_id == "cft_4a"
     end
 
     # A proposal is confirmed, or a crashed run reaped, after the run's trace

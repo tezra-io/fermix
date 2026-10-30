@@ -36,6 +36,7 @@ defmodule FermixCore.Cues.Ingest do
 
   alias FermixCore.Cues
   alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Item
   alias FermixCore.Cues.Telemetry
   alias FermixCore.Memory.Repo
@@ -257,9 +258,11 @@ defmodule FermixCore.Cues.Ingest do
 
     Telemetry.lifecycle(:routed, %{}, Map.put(ids, :state, delivery.state))
 
-    # A `none` watcher's delivery passes at acceptance, with no filter call (§14).
+    # A `none` watcher's delivery passes at acceptance, with no filter call (§14),
+    # and its follow-up's trigger was written with it.
     if delivery.state == "passed" do
       Telemetry.lifecycle(:passed, %{}, Map.put(ids, :reason, "no filter"))
+      FollowUps.emit_triggered(delivery.follow_up, ref)
     end
   end
 

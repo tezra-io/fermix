@@ -69,6 +69,7 @@ defmodule FermixCore.Cues.LiveFilters do
   alias FermixCore.Cues.Filter
   alias FermixCore.Cues.Filter.Llm
   alias FermixCore.Cues.Filter.Telemetry, as: FilterTelemetry
+  alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Notices
   alias FermixCore.Cues.RecentDrops
   alias FermixCore.Cues.Telemetry
@@ -567,6 +568,7 @@ defmodule FermixCore.Cues.LiveFilters do
       content: reason
     })
 
+    FollowUps.emit_triggered(outcome.follow_up, run.source_ref)
     Enum.each(outcome.evicted, &emit_evicted(run.source_ref, &1))
     Enum.each(outcome.gaps, &emit_gap/1)
   end

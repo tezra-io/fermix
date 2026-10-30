@@ -11,6 +11,7 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Memory.Repo.ComputerHistorySql
   alias FermixCore.Memory.Repo.CuesDeliveriesSql
   alias FermixCore.Memory.Repo.CuesFilterSql
+  alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Memory.Repo.CuesMandateSql
   alias FermixCore.Memory.Repo.CuesRunsSql
   alias FermixCore.Memory.Repo.CuesSql
@@ -75,6 +76,8 @@ defmodule FermixCore.Memory.Repo do
   @open_loop_outside_content_migration_version 49
   @mobile_icon_index_migration_version 50
   @open_loop_curiosity_migration_version 51
+  # 52 and 53 are claimed by other changes; this one stands on its own.
+  @watcher_follow_up_migration_version 54
   @sqlite_open_intent :readwritecreate
 
   # The cue SQL modules (M60), one per lane, all served by `cues_call/3`.
@@ -84,7 +87,8 @@ defmodule FermixCore.Memory.Repo do
     CuesFilterSql,
     CuesRunsSql,
     CuesDeliveriesSql,
-    CuesMandateSql
+    CuesMandateSql,
+    CuesFollowUpSql
   ]
 
   @base_schema_sql """
@@ -2512,6 +2516,25 @@ defmodule FermixCore.Memory.Repo do
     call({:claim_cue_run, job_id, run_attrs, now}, opts)
   end
 
+  @doc """
+  Claims the run of a watcher's follow-up for its `starting` trigger
+  `trigger_id` (M60_WATCHER_CODING_RUNS.md §4.2): in one `BEGIN IMMEDIATE`,
+  the trigger read while `starting`, its job taken with `state: "running"`,
+  the run inserted with `trigger: "watcher"`, and the trigger moved to
+  `started` with the run's id. A job that cannot take a run (one still
+  running, paused, or gone) refuses the trigger in that transaction with
+  Fermix's sentence, and the answer is `{:ok, {:refused, trigger}}`.
+  `{:error, :nothing_due}` when the trigger is not `starting`.
+  """
+  @spec claim_follow_up_run(String.t(), job_run_attrs(), DateTime.t(), keyword()) ::
+          {:ok, {:started, %{job: scheduled_job_row(), run: job_run_row(), trigger: map()}}}
+          | {:ok, {:refused, map()}}
+          | {:error, :nothing_due | :busy | term()}
+  def claim_follow_up_run(trigger_id, run_attrs, %DateTime{} = now, opts \\ [])
+      when is_binary(trigger_id) and is_map(run_attrs) do
+    call({:claim_follow_up_run, trigger_id, run_attrs, now}, opts)
+  end
+
   @spec upsert_scheduled_job(scheduled_job_attrs(), keyword()) ::
           {:ok, scheduled_job_row()} | {:error, term()}
   def upsert_scheduled_job(attrs, opts \\ []) when is_map(attrs) do
@@ -4619,6 +4642,11 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:claim_follow_up_run, trigger_id, run_attrs, now}, _from, state) do
+    reply = with_connection(state, &claim_follow_up_run_tx(&1, trigger_id, run_attrs, now))
+    {:reply, reply, state}
+  end
+
   def handle_call({:upsert_scheduled_job, attrs}, _from, state) do
     reply = with_connection(state, &upsert_scheduled_job_row(&1, attrs))
     {:reply, reply, state}
@@ -4946,7 +4974,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_cue_retention_index_migration(conn, versions),
          :ok <- apply_open_loop_outside_content_migration(conn, versions),
          :ok <- apply_mobile_icon_index_migration(conn, versions),
-         :ok <- apply_open_loop_curiosity_migration(conn, versions) do
+         :ok <- apply_open_loop_curiosity_migration(conn, versions),
+         :ok <- apply_watcher_follow_up_migration(conn, versions) do
       :ok
     end
   end
@@ -5082,6 +5111,80 @@ defmodule FermixCore.Memory.Repo do
         """
       )
     end
+  end
+
+  # Watcher follow-ups (M60_WATCHER_CODING_RUNS.md §4.1, §4.3): `cue_watchers`
+  # and `cue_deliveries` rebuilt (`CuesSql.follow_up_rebuild_sql/0`) and the
+  # trigger table, with the version, in one transaction. The rebuild drops the
+  # parent of three cascading foreign keys, so foreign keys are off around it,
+  # toggled outside the transaction as for migration 11. Each rebuilt table
+  # keeps every index it had, whichever migration made it: their DDL is read
+  # before the drop and replayed after. A table holding a column the copy
+  # would leave behind is refused, never cut.
+  defp apply_watcher_follow_up_migration(conn, versions) do
+    if Enum.member?(versions, @watcher_follow_up_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "PRAGMA foreign_keys=OFF;"),
+           :ok <- Sqlite3.execute(conn, "BEGIN;"),
+           :ok <- conn |> follow_up_migration_in_tx() |> commit_migration(conn) do
+        Sqlite3.execute(conn, "PRAGMA foreign_keys=ON;")
+      end
+    end
+  end
+
+  defp follow_up_migration_in_tx(conn) do
+    tables = CuesSql.follow_up_rebuilt_tables()
+
+    with :ok <- check_rebuilt_columns(conn, tables),
+         {:ok, indexes} <- table_indexes(conn, Enum.map(tables, &elem(&1, 0))),
+         :ok <- Sqlite3.execute(conn, CuesSql.follow_up_rebuild_sql()),
+         :ok <- replay_indexes(conn, indexes),
+         :ok <- Sqlite3.execute(conn, CuesFollowUpSql.schema_sql()) do
+      Sqlite3.execute(
+        conn,
+        "INSERT INTO schema_migrations(version) VALUES (#{@watcher_follow_up_migration_version});"
+      )
+    end
+  end
+
+  defp check_rebuilt_columns(conn, tables) do
+    Enum.reduce_while(tables, :ok, fn {table, expected}, :ok ->
+      case query_all(conn, "SELECT name FROM pragma_table_info(?) ORDER BY cid", [table]) do
+        {:ok, []} -> {:halt, {:error, {:missing_table, table}}}
+        {:ok, rows} -> {:cont, same_columns(table, List.flatten(rows), expected)}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp same_columns(_table, same, same), do: :ok
+  defp same_columns(table, found, _expected), do: {:error, {:unexpected_columns, table, found}}
+
+  # An index a UNIQUE or PRIMARY KEY constraint made has no DDL: the rebuilt
+  # table's own constraint makes it again.
+  defp table_indexes(conn, tables) do
+    sql =
+      "SELECT sql FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL " <>
+        "AND tbl_name IN (#{Enum.map_join(tables, ", ", fn _table -> "?" end)}) ORDER BY name"
+
+    with {:ok, rows} <- query_all(conn, sql, tables), do: {:ok, List.flatten(rows)}
+  end
+
+  defp replay_indexes(conn, indexes) do
+    Enum.reduce_while(indexes, :ok, fn ddl, :ok ->
+      case Sqlite3.execute(conn, ddl <> ";") do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp commit_migration(:ok, conn), do: Sqlite3.execute(conn, "COMMIT;")
+
+  defp commit_migration({:error, reason}, conn) do
+    _rolled_back = Sqlite3.execute(conn, "ROLLBACK;")
+    {:error, reason}
   end
 
   # A reply's blocks beside the timeline (M72), their table and version in one
@@ -7234,6 +7337,58 @@ defmodule FermixCore.Memory.Repo do
     CuesSql.transition(conn, delivery_id, "passed", :none, "claimed", %{claimed_run_id: run_id})
   end
 
+  # A follow-up's claim (M60_WATCHER_CODING_RUNS.md §4.2): the trigger, the job
+  # and its run, and the trigger's move to `started`, in one BEGIN IMMEDIATE,
+  # through the claim every job run takes, so one job holds one run. A job that
+  # cannot take one refuses the trigger in the same commit.
+  defp claim_follow_up_run_tx(conn, trigger_id, run_attrs, now) do
+    CuesSql.with_immediate_transaction(conn, fn ->
+      with {:ok, trigger} <- CuesFollowUpSql.claimable(conn, trigger_id) do
+        claim_follow_up_job(conn, trigger, Map.put(run_attrs, :trigger, "watcher"), now)
+      end
+    end)
+  end
+
+  defp claim_follow_up_job(conn, trigger, run_attrs, now) do
+    job_attrs = %{state: "running", updated_at: now}
+    fetched = fetch_claimable_job(conn, trigger.job_id)
+
+    case claim_in_tx(conn, trigger.job_id, job_attrs, run_attrs, fetched) do
+      {:ok, {job, run}} ->
+        with {:ok, started} <- CuesFollowUpSql.mark_started(conn, trigger.id, run.id, now),
+             do: {:ok, {:started, %{job: job, run: run, trigger: started}}}
+
+      {:error, reason} when reason in [:not_runnable, :already_running] ->
+        refuse_follow_up(conn, trigger, reason)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp refuse_follow_up(conn, trigger, reason) do
+    with {:ok, sentence} <- follow_up_refusal(conn, trigger.job_id, reason),
+         {:ok, refused} <- CuesFollowUpSql.refuse_starting(conn, trigger.id, sentence) do
+      {:ok, {:refused, refused}}
+    end
+  end
+
+  @follow_up_running "Not started: it is already running."
+
+  # Fermix's sentence for a follow-up whose job could not take its run, read
+  # from the job row in the claim's transaction.
+  defp follow_up_refusal(_conn, _job_id, :already_running), do: {:ok, @follow_up_running}
+
+  defp follow_up_refusal(conn, job_id, :not_runnable) do
+    case fetch_scheduled_job(conn, job_id) do
+      {:ok, %{state: "running"}} -> {:ok, @follow_up_running}
+      {:ok, %{enabled?: false}} -> {:ok, "Not started: the follow-up is paused."}
+      {:ok, %{state: state}} -> {:ok, "Not started: the follow-up's job is #{state}."}
+      {:error, :not_found} -> {:ok, "Not started: the follow-up's job is gone."}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp transact_claim(conn, claim_fun) do
     with :ok <- execute(conn, "BEGIN IMMEDIATE", []),
          result <- claim_fun.(),
@@ -8599,6 +8754,15 @@ defmodule FermixCore.Memory.Repo do
   defp scheduled_job_field_assignment!({:delivery_target, value})
        when is_map(value) or is_nil(value),
        do: {"delivery_target_json", encode_metadata(value)}
+
+  # A watcher's follow-up changes its tools and its timeout in place
+  # (`Jobs.Registry.update_follow_up_job/3`); no other write sets them.
+  defp scheduled_job_field_assignment!({:allowed_tools, [_ | _] = value}),
+    do: {"allowed_tools_json", encode_metadata(value)}
+
+  defp scheduled_job_field_assignment!({:timeout_seconds, value})
+       when is_integer(value) and value > 0,
+       do: {"timeout_seconds", value}
 
   defp scheduled_job_field_assignment!({key, value})
        when key in @owner_text_fields and (is_binary(value) or is_nil(value)),

@@ -4,6 +4,11 @@ defmodule FermixCore.Jobs.Runner do
 
   It records the lifecycle for a claimed job run, builds the isolated cron
   prompt, runs one bounded AgentLoop execution, and persists run artifacts.
+
+  A watcher's follow-up runs as a scheduled run (`trigger: "watcher"`,
+  M60_WATCHER_CODING_RUNS.md §4.2): its job's tools, a scheduled run's
+  context, and its job's prompt with one line naming the watcher that set it
+  off and when (`Cues.FollowUps.run_line/3`). Nothing of the item reaches it.
   """
 
   use GenServer
@@ -17,6 +22,7 @@ defmodule FermixCore.Jobs.Runner do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Capabilities.Skill
   alias FermixCore.Clock
+  alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Notices
   alias FermixCore.Jobs.CueAdmission
@@ -80,6 +86,8 @@ defmodule FermixCore.Jobs.Runner do
           readiness_port: :inet.port_number() | nil,
           readiness_opts: keyword(),
           cue: nil | {:ok, CueRun.context()} | {:error, term()},
+          follow_up:
+            nil | {:ok, %{trigger: map(), watcher_name: String.t() | nil}} | {:error, term()},
           cue_mandate: Mandates.t() | nil,
           cue_mandate_opts: keyword()
         }
@@ -176,6 +184,9 @@ defmodule FermixCore.Jobs.Runner do
       cue: nil,
       # The mandate a cue run acts under, read once at its start; nil otherwise.
       cue_mandate: nil,
+      # A follow-up run's trigger and its watcher's name, read at the start of
+      # the run by its run id; nil for every other run.
+      follow_up: nil,
       # Test seams for that read and for the run's mandate gate, one set for
       # both (the gate's `cue_mandate_opts`); none in production.
       cue_mandate_opts: Keyword.get(opts, :cue_mandate_opts, [])
@@ -188,7 +199,7 @@ defmodule FermixCore.Jobs.Runner do
 
   @impl true
   def handle_continue(:run, state) do
-    state = load_cue(state)
+    state = state |> load_cue() |> load_follow_up()
 
     case build_loop_input(state) do
       {:ok, loop_input} ->
@@ -283,6 +294,18 @@ defmodule FermixCore.Jobs.Runner do
 
   defp load_cue(state), do: state
 
+  # The trigger that started a follow-up's run (its claim wrote the run id on
+  # it), for the prompt's one line and the run's trace.
+  defp load_follow_up(%{run: %{trigger: "watcher", id: run_id}} = state) do
+    case FollowUps.run_trigger(run_id, repo: state.repo) do
+      {:ok, nil} -> %{state | follow_up: {:error, :no_trigger}}
+      {:ok, found} -> %{state | follow_up: {:ok, found}}
+      {:error, reason} -> %{state | follow_up: {:error, reason}}
+    end
+  end
+
+  defp load_follow_up(state), do: state
+
   defp mark_running(state, loop_input) do
     now = DateTime.utc_now()
 
@@ -305,6 +328,15 @@ defmodule FermixCore.Jobs.Runner do
   # `Jobs.Telemetry` reads a cue run's watcher from the run map: the row does
   # not carry it.
   defp telemetry_run(%{cue: {:ok, cue}}, run), do: Map.put(run, :watcher_id, cue.watcher.id)
+
+  defp telemetry_run(%{follow_up: {:ok, %{trigger: trigger}}}, run) do
+    Map.merge(run, %{
+      watcher_id: trigger.watcher_id,
+      cue_id: trigger.cue_id,
+      trigger_id: trigger.id
+    })
+  end
+
   defp telemetry_run(_state, run), do: run
 
   # The final run row and the job's release land in one settle
@@ -332,7 +364,7 @@ defmodule FermixCore.Jobs.Runner do
       })
 
     {:ok, {run, job}} = Repo.settle_job_run(attrs, server: state.repo)
-    JobTelemetry.run_complete(state.job, run, result)
+    JobTelemetry.run_complete(state.job, telemetry_run(state, run), result)
     {run, job}
   end
 
@@ -479,7 +511,7 @@ defmodule FermixCore.Jobs.Runner do
 
     {:ok, {run, job}} = Repo.settle_job_run(attrs, server: state.repo)
     failed_state = %{state | run: run}
-    JobTelemetry.run_error(state.job, run, status, error)
+    JobTelemetry.run_error(state.job, telemetry_run(state, run), status, error)
     update_memory_source_status(job, status, now, state.repo)
     finalize_delivery(failed_state, text)
   end
@@ -606,6 +638,9 @@ defmodule FermixCore.Jobs.Runner do
 
   defp build_loop_input(%{cue: {:error, reason}}), do: {:error, {:cue_run_context, reason}}
 
+  defp build_loop_input(%{follow_up: {:error, reason}}),
+    do: {:error, {:follow_up_trigger, reason}}
+
   # A cue run sends no attachment (`send_attachment` is outside its surface),
   # so it binds no media route. The watcher's gaps its prompt names are marked
   # reported by the settle that tells the owner (`mark_gaps_told/2`).
@@ -632,7 +667,7 @@ defmodule FermixCore.Jobs.Runner do
 
     with {:ok, skill} <- load_skill(state),
          {:ok, loop_opts, media} <- loop_opts(state, skill, media) do
-      messages = prompt_messages(state.job, skill, media)
+      messages = prompt_messages(state.job, skill, media, run_text(state))
 
       {:ok,
        %{
@@ -724,16 +759,23 @@ defmodule FermixCore.Jobs.Runner do
 
   # Job runs bypass TurnRunner, so they stamp the current date themselves —
   # scheduled work is exactly where "today" matters most.
-  defp prompt_messages(job, skill, media) do
+  defp prompt_messages(job, skill, media, text) do
     [
       %{role: "system", content: cron_guidance()},
       skill_prompt_message(skill, job),
       %{role: "system", content: job_context_prompt(job, media)},
       %{role: "system", content: CurrentDate.note()},
-      run_message(job.task_prompt)
+      run_message(text)
     ]
     |> Enum.reject(&is_nil/1)
   end
+
+  # A follow-up's run is told which watcher set it off and when, and nothing
+  # else; every other run is its job's prompt alone.
+  defp run_text(%{follow_up: {:ok, %{trigger: trigger, watcher_name: name}}, job: job}),
+    do: job.task_prompt <> "\n\n" <> FollowUps.run_line(name, trigger.created_at)
+
+  defp run_text(%{job: job}), do: job.task_prompt
 
   # The run's own message opens with the current time to the minute: scheduled
   # work reasons about time left, and the date note above stays date-only so

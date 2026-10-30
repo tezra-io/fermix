@@ -23,9 +23,11 @@ defmodule FermixCore.Memory.Repo.CuesRunsSql do
   is enabled, `scheduled` and holds no active run; no older delivery of the
   same watcher and the same non-null subject is still `pending`, `filtering`,
   `passed` or `claimed`; and, when the watcher's `daily_cap` is above 0, the
-  job's cue runs created in the last 24 hours are under the cap and, for a
-  watcher with more than one source, the runs caused by the delivery's source
-  are under half of it.
+  job's cue runs created in the last 24 hours, with the watcher's follow-ups
+  started or proposed in them (M60_WATCHER_CODING_RUNS.md §4.4,
+  `CuesFollowUpSql.counted_sql/0`), are under the cap and, for a watcher with
+  more than one source, the runs caused by the delivery's source are under
+  half of it.
 
   The watcher's own `enabled` is not part of the rule (design §8.8): a paused
   watcher stops routing and filtering, but the items it already passed still
@@ -35,6 +37,7 @@ defmodule FermixCore.Memory.Repo.CuesRunsSql do
   require Logger
 
   alias FermixCore.Memory.Repo.CuesDeliveriesSql
+  alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Memory.Repo.CuesSql
 
   # Retry delays (design §9.4): a provider failure spends no attempt and backs
@@ -98,14 +101,17 @@ defmodule FermixCore.Memory.Repo.CuesRunsSql do
         AND o.state IN ('pending', 'filtering', 'passed', 'claimed')))
   """
 
-  # The cap rule, true when the delivery has room. Its two `?` are the start of
-  # the 24-hour cap window. `julianday` reads job_runs times, which are ISO
-  # 8601 of varying width, as instants.
+  # The cap rule, true when the delivery has room. Its three `?` are the start
+  # of the 24-hour cap window. `julianday` reads job_runs times, which are ISO
+  # 8601 of varying width, as instants; trigger times are the fixed-width form.
   @cap_room_sql """
   (w.daily_cap = 0 OR (
       (SELECT COUNT(*) FROM job_runs r
        WHERE r.job_id = j.id AND r.trigger = 'cue'
-         AND julianday(r.created_at) > julianday(?)) < w.daily_cap
+         AND julianday(r.created_at) > julianday(?))
+      + (SELECT COUNT(*) FROM cue_follow_up_triggers t
+         WHERE t.watcher_id = w.id AND t.created_at > ?
+           AND #{CuesFollowUpSql.counted_sql()}) < w.daily_cap
       AND ((SELECT COUNT(*) FROM cue_watcher_sources s WHERE s.watcher_id = w.id) < 2
         OR 2 * (SELECT COUNT(*) FROM job_runs r
                 JOIN cue_deliveries x ON x.id = r.cue_delivery_id
@@ -114,7 +120,7 @@ defmodule FermixCore.Memory.Repo.CuesRunsSql do
                   AND x.source_ref = d.source_ref) < w.daily_cap)))
   """
 
-  # The eligibility rule: its four `?` are now twice, then the cap window twice.
+  # The eligibility rule: its five `?` are now twice, then the cap window thrice.
   @eligible_sql @open_sql <> "  AND " <> @cap_room_sql
 
   # One row per task: the task's oldest eligible delivery, tasks in the order
@@ -130,7 +136,7 @@ defmodule FermixCore.Memory.Repo.CuesRunsSql do
 
   # Watchers whose oldest waiting delivery only the cap holds (C25): every
   # other part of the rule lets it run. One row per watcher with the cap and
-  # how many of its deliveries are passed. The `?` are the cap window twice,
+  # how many of its deliveries are passed. The `?` are the cap window thrice,
   # now twice, then the row limit.
   @capped_sql """
   WITH open AS (
@@ -266,12 +272,14 @@ defmodule FermixCore.Memory.Repo.CuesRunsSql do
 
   defp eligible_params(now) do
     window_start = window_start(now)
-    [CuesSql.stamp(now), CuesSql.stamp(now), window_start, window_start]
+    [CuesSql.stamp(now), CuesSql.stamp(now), window_start, window_start, window_start]
   end
 
   defp capped_params(now) do
     window_start = window_start(now)
-    [window_start, window_start, CuesSql.stamp(now), CuesSql.stamp(now), @capped_max]
+
+    [window_start, window_start, window_start, CuesSql.stamp(now), CuesSql.stamp(now)] ++
+      [@capped_max]
   end
 
   defp window_start(now), do: CuesSql.stamp(DateTime.add(now, -@cap_window_s, :second))

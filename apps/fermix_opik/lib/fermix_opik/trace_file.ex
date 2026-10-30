@@ -216,7 +216,9 @@ defmodule FermixOpik.TraceFile do
        :trigger,
        :input,
        :watcher_id,
-       :delivery_id
+       :delivery_id,
+       :cue_id,
+       :trigger_id
      ])}
   end
 

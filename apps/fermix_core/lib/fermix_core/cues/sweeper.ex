@@ -49,6 +49,9 @@ defmodule FermixCore.Cues.Sweeper do
     # that never reported its result (a crash or restart mid-call) is reported
     # to the owner once as an unknown outcome, and never run (M60 §10.9).
     {:proposal_expiry, &FermixCore.Cues.Proposals.expire/3},
+    # A follow-up's card nobody answered within 30 minutes becomes `expired`;
+    # nothing runs (M60_WATCHER_CODING_RUNS.md §4.5).
+    {:follow_up_expiry, &FermixCore.Cues.FollowUps.expire/3},
     {:proposal_unknown_outcomes, &FermixCore.Cues.Proposals.report_unknown/3},
     # An allowed call in auto mode that never reported, once its run ended, is
     # finished `unknown` and never run again; the run's report already told
