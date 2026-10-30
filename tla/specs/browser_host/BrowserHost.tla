@@ -121,7 +121,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/connection.ex#attach,availability,host_stopping,task_request,bind_task,release_task,task_exited,write_request,cancel_task @ 03447d148ae1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/endpoint.ex @ 50e6a7f26529
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/supervisor.ex @ a91e3fe95333
-\* SOURCE: apps/fermix_core/priv/browser_host/PROTOCOL.md @ 2aec09784bfa
+\* SOURCE: apps/fermix_core/priv/browser_host/PROTOCOL.md @ 350c2848004e
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS

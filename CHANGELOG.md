@@ -42,7 +42,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whenever a password is about to be typed, naming the site and the account,
   on the chat, the Mac app or your phone. Filling only the username on a
   two-step sign-in page does not ask, so such a site takes one tap. A login
-  fills only its own site (`www.` aside), never a page on another host. The
+  fills its own site (`www.` aside) and, when a site signs in on a host of its
+  own with no login saved for that host, its subdomains too: a login for
+  walmart.com signs in on identity.walmart.com, and the question names both.
+  Never a look-alike such as evilwalmart.com. The
   password stays in the Mac app and the page: it never reaches the engine,
   the model, a trace or a log. Only your own chat or the app can ask for a
   sign-in, never a delegated worker, a cue, a scheduled job, a shared channel

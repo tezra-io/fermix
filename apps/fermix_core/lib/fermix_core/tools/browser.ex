@@ -408,7 +408,7 @@ defmodule FermixCore.Tools.Browser do
       %{
         tag: "sign_in_no_login",
         description:
-          "no login is saved for the page's host; the owner adds one for exactly that host in " <>
+          "no login is saved for the page's host or a site it is part of; the owner adds one in " <>
             "Settings > Browser > Website logins in the Fermix app on the Mac"
       },
       %{

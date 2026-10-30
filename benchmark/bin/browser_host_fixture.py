@@ -26,13 +26,16 @@ without starting anything.
     benchmark/bin/browser_host_fixture.py --no-attach   # a launch that connects but never attaches
     benchmark/bin/browser_host_fixture.py --login-page --saved-login example.com=person@example.com
     benchmark/bin/browser_host_fixture.py --login-page  # a login page with no login saved for it
+    benchmark/bin/browser_host_fixture.py --login-page --login-url https://accounts.example.com/login \
+        --saved-login example.com=person@example.com     # a site that signs in on a host of its own
 
 `--login-page` answers every page with an https sign-in form (an email field,
-a password field, a Sign in button) at https://example.com/login, and the
-two sign-in requests of protocol 2 as the Mac app does: `page.login_for` with
-the login `--saved-login` names for the page's host (key form: lower-cased,
-one leading `www.` folded), or `sign_in_no_login` when none is saved, and
-`page.sign_in` with the fields it was given. It holds no password and types
+a password field, a Sign in button) at `--login-url` (https://example.com/login
+unless given), and the two sign-in requests of protocol 2 as the Mac app does:
+`page.login_for` with the login `--saved-login` names for the page's host (key
+form: lower-cased, one leading `www.` folded) or, when none is, for the closest
+domain that host is under, or `sign_in_no_login`, and `page.sign_in` with the
+fields it was given. It holds no password and types
 nothing anywhere: a fill is only the answer naming what was filled.
 
 Ctrl-C stops it; the daemon reads the closed socket as `host_stopping` never
@@ -110,10 +113,10 @@ def example_page(url: str) -> dict:
     }
 
 
-def login_page() -> dict:
-    """The sign-in form `--login-page` answers every page with."""
+def login_page(url: str) -> dict:
+    """The sign-in form `--login-page` answers every page with, at `url`."""
     return {
-        "url": LOGIN_URL,
+        "url": url,
         "title": "Sign in to Example",
         "ready_state": "complete",
         "nodes": [
@@ -153,6 +156,15 @@ def site_key(host: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
+def login_site_for(host_key: str, saved: dict[str, str]) -> str | None:
+    """The saved site a page's key uses, as the Mac app picks it: its own,
+    else the longest saved site it ends with after a dot; never a look-alike."""
+    if host_key in saved:
+        return host_key
+    parents = [site for site in saved if host_key.endswith("." + site)]
+    return max(parents, key=len) if parents else None
+
+
 class Refusal(Exception):
     """A host error answer: `reason` from the protocol's vocabulary."""
 
@@ -180,6 +192,7 @@ class FakeHost:
         profile_id: str,
         login_page: bool = False,
         saved_logins: dict[str, str] | None = None,
+        login_url: str = LOGIN_URL,
     ) -> None:
         self.fail_after = fail_after
         self.fail_reason = fail_reason
@@ -189,6 +202,7 @@ class FakeHost:
         self.host_version = host_version
         self.profile_id = profile_id
         self.login_page = login_page
+        self.login_url = login_url
         self.saved_logins = {site_key(site): user for site, user in (saved_logins or {}).items()}
         self.tabs: dict[str, str] = {}
         self.next_tab = 1
@@ -287,7 +301,7 @@ class FakeHost:
         raise SystemExit(f"browser_host_fixture: no answer scripted for {request_type}")
 
     def page(self, url: str) -> dict:
-        return login_page() if self.login_page else example_page(url)
+        return login_page(self.login_url) if self.login_page else example_page(url)
 
     def opened(self, frame: dict) -> dict:
         tab_id = self.next_tab_id()
@@ -332,13 +346,14 @@ class FakeHost:
 
     # The page checks both sign-in requests make, in the app's order.
     def saved_login(self, site: str) -> tuple[str, str]:
-        page_host = "example.com"
+        page_host = self.login_url.split("://", 1)[1].split("/", 1)[0]
         if site_key(site) != site_key(page_host):
             raise Refusal("sign_in_wrong_site", f"the tab's page is not on {site}")
         key = site_key(page_host)
-        if key not in self.saved_logins:
+        login_site = login_site_for(key, self.saved_logins)
+        if login_site is None:
             raise Refusal("sign_in_no_login", f"no login is saved for {key}")
-        return key, self.saved_logins[key]
+        return login_site, self.saved_logins[login_site]
 
     def login_for(self, frame: dict) -> dict:
         login_site, username = self.saved_login(frame["site"])
@@ -353,7 +368,7 @@ class FakeHost:
             if field in frame and frame[field] != ref:
                 raise Refusal("sign_in_field", f"ref {frame[field]} is not the form's {field[:-4]} field")
         filled = [field[:-4] for field in expected if field in frame]
-        page = login_page()
+        page = login_page(self.login_url)
         result = {"url": page["url"], "title": page["title"], "filled": filled}
         if frame.get("observe"):
             result["page"] = page
@@ -420,6 +435,7 @@ def run(args: argparse.Namespace) -> None:
         args.profile_id,
         login_page=args.login_page,
         saved_logins=dict(args.saved_login),
+        login_url=args.login_url,
     )
     try:
         for frame in read_frames(sock):
@@ -464,6 +480,11 @@ def parse_args() -> argparse.Namespace:
         "--login-page",
         action="store_true",
         help="answer every page with an https sign-in form, and the two sign-in requests",
+    )
+    parser.add_argument(
+        "--login-url",
+        default=LOGIN_URL,
+        help="the https address the sign-in form is served at (default: %(default)s)",
     )
     parser.add_argument(
         "--saved-login",

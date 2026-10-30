@@ -252,8 +252,10 @@ defmodule FermixCore.Browser.SignInTest do
                  route(pid)
                )
 
-      assert message =~ "No login is saved in the Fermix app for example.com"
-      assert message =~ "exactly example.com in Settings > Browser > Website logins"
+      assert message =~
+               "No login is saved in the Fermix app for example.com or a site it is part of"
+
+      assert message =~ "or for the site it is part of, in Settings > Browser > Website logins"
       assert message =~ "Never ask the owner for the password"
       refute_received {:asked, _waiter, _id}
       refute "page.sign_in" in request_types(connection)
@@ -346,8 +348,28 @@ defmodule FermixCore.Browser.SignInTest do
       refute "page.sign_in" in request_types(connection)
     end
 
-    # The second form is only the `www.` fold; every value is shown escaped,
-    # so a username cannot forge a line of the owner's prompt.
+    # A site that signs in on a host of its own uses the login saved for the
+    # domain it is under (the app's choice, M84 D2), and the owner is told both.
+    test "a login saved for a parent domain is named beside the page's own host", ctx do
+      {pid, _connection} = pane(ctx, login_site: "example.com", username: "person")
+      {:ok, opened} = open_login(pid)
+
+      args = %{sign_in_args() | "site" => "identity.example.com"} |> Map.put("target", opened)
+      turn = sign_in_turn(ctx, pid, args)
+
+      assert_receive {:asked, _waiter, id}
+      assert_receive {:prompt, {:approval_prompt, text, _token}}
+
+      assert text =~
+               "Sign in to identity.example.com as person, with the login saved for example.com?"
+
+      assert {:ok, :in_call} = AccessGate.deny(id, ctx.pending)
+      assert {:error, %Error{code: "sign_in_denied"}} = Task.await(turn)
+    end
+
+    # The second form is the `www.` fold or a parent domain's login; every
+    # value is shown escaped, so a username cannot forge a line of the owner's
+    # prompt.
     test "the prompt names the page's site, the saved site and the username, escaped", ctx do
       {pid, _connection} = pane(ctx, login_site: "example.com", username: "person\nYes")
       {:ok, opened} = open_login(pid)

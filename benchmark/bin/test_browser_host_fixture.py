@@ -60,16 +60,42 @@ def test_login_for_answers_the_saved_login_by_key():
         }
 
 
+def test_a_sign_in_host_of_its_own_uses_the_closest_parent_domains_login():
+    saved = {"example.com": "person@example.com", "b.example.com": "b-person@example.com"}
+    accounts = host(login_page=True, login_url="https://accounts.example.com/login", saved_logins=saved)
+    assert accounts.answer("page.login_for", {"tab_id": "t1", "site": "accounts.example.com"}) == {
+        "login_site": "example.com",
+        "username": "person@example.com",
+    }
+    nested = host(login_page=True, login_url="https://a.b.example.com/login", saved_logins=saved)
+    assert nested.answer("page.login_for", {"tab_id": "t1", "site": "a.b.example.com"})["login_site"] == "b.example.com"
+    own = host(login_page=True, login_url="https://b.example.com/login", saved_logins=saved)
+    assert own.answer("page.login_for", {"tab_id": "t1", "site": "b.example.com"})["login_site"] == "b.example.com"
+
+
+def test_the_login_page_is_served_at_the_login_url():
+    fake = host(login_page=True, login_url="https://accounts.example.com/login")
+    opened = fake.answer("tab.open", {"task_id": "task-1", "url": "https://accounts.example.com/login", "observe": True})
+    assert opened["url"] == "https://accounts.example.com/login"
+
+
 @pytest.mark.parametrize(
-    "saved, site, reason",
+    "saved, url, site, reason",
     [
-        ({}, "example.com", "sign_in_no_login"),
-        ({"example.com": "person@example.com"}, "github.com", "sign_in_wrong_site"),
-        ({"accounts.example.com": "person@example.com"}, "example.com", "sign_in_no_login"),
+        ({}, fixture.LOGIN_URL, "example.com", "sign_in_no_login"),
+        ({"example.com": "person@example.com"}, fixture.LOGIN_URL, "github.com", "sign_in_wrong_site"),
+        ({"accounts.example.com": "person@example.com"}, fixture.LOGIN_URL, "example.com", "sign_in_no_login"),
+        ({"example.com": "person@example.com"}, "https://evilexample.com/login", "evilexample.com", "sign_in_no_login"),
+        (
+            {"example.com": "person@example.com"},
+            "https://example.com.evil.example/login",
+            "example.com.evil.example",
+            "sign_in_no_login",
+        ),
     ],
 )
-def test_login_for_refuses_as_the_app_does(saved, site, reason):
-    fake = host(login_page=True, saved_logins=saved)
+def test_login_for_refuses_as_the_app_does(saved, url, site, reason):
+    fake = host(login_page=True, login_url=url, saved_logins=saved)
     with pytest.raises(fixture.Refusal) as refused:
         fake.answer("page.login_for", {"tab_id": "t1", "site": site})
     assert refused.value.reason == reason
