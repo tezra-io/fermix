@@ -59,7 +59,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_worker.ex @ 3aca9cf6833e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ c287d9d78068
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_responder.ex @ 31d80078d517
-\* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ c3ceb82afe06
+\* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ af3eb52eb43c
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/move.ex#start,move_id,write_request,put_phase,pending?,not_pending,max_attempts,@max_attempts,@pending,@running,@phases,finish_at_boot,finish_due,ending,finish,view,remember_unrecorded_ending,boot_ending,@boot_key @ ea0b073a55f5
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/role.ex#resolve,primary,configured_role @ 6b56d83c809d
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/moved.ex#write,exclusive_write,read @ f1fa82381547
@@ -671,7 +671,7 @@ SelfActivate ==
     /\ UNCHANGED <<candUp, restore, held, Net, SrcFiles, boot, unsaid, wpc, Budgets, Hist>>
 
 \* Activation.activate/1 (activation.ex:71-80): the staged entries, then
-\* config.toml last (place_config/2, :192-197), the commit point: the next boot
+\* config.toml last (place_config/2, :193-198), the commit point: the next boot
 \* reads role = "primary". Then candidate/ goes, the restart is scheduled
 \* (candidate.ex:524, :544), and commit_move/2 answers, so the responder sends
 \* move_done and closes (move_responder.ex:119-124). A crash between the
