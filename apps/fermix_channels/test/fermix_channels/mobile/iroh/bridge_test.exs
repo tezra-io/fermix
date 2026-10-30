@@ -123,6 +123,7 @@ defmodule FermixChannels.Mobile.Iroh.BridgeTest do
       attach_socket: fn ^registry, "paired-device", _pid, _opts -> :ok end,
       hello_ack_builder: fn _state -> {:ok, %{"session_id" => "session"}} end,
       pending_approvals: fn _profile -> [] end,
+      pairing_pending: fn -> :none end,
       encode_server: fn "hello_ack", _payload, 1 -> {:ok, "encoded"} end,
       encrypt: fn {:ik, 3}, "encoded" -> {:ok, "hello-ack", {:ik, 4}} end,
       verify_pair: fn :pair, "pair-session", _evidence -> {:ok, %{}} end,

@@ -346,6 +346,7 @@ defmodule FermixChannels.Desktop.InvocationsTest do
         wall_clock: fn -> @seen end,
         hello_ack_builder: fn _state -> {:ok, hello_ack()} end,
         pending_approvals: fn "main" -> [] end,
+        pairing_pending: fn -> :none end,
         start_desktop_peer: fn opts ->
           Peer.start(supervisor, Keyword.put(opts, :families, @families))
         end

@@ -23,6 +23,13 @@ defmodule FermixChannels.Mobile.PairManager do
   ends the window (`refuse/3`). Google's attestation status list is fetched
   here when a window opens, beside the manager and bounded in time, and is
   used for as long as its max-age allows (`attestation_statuses/2`).
+
+  The owner decides from any paired phone too (M75 D16): a verified request
+  that starts waiting is announced to every connected phone as
+  `pair_pending`, and every window that closes, however it closed, as
+  `pair_decided` (`announce`, a broadcast through the device registry that
+  never waits on it). A phone that connects while a request waits reads it
+  with `pending_event/1`.
   """
 
   use GenServer
@@ -30,6 +37,7 @@ defmodule FermixChannels.Mobile.PairManager do
   import Bitwise, only: [band: 2, bor: 2]
 
   alias FermixChannels.Mobile.Attestation
+  alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.Identity
 
   require Logger
@@ -184,6 +192,13 @@ defmodule FermixChannels.Mobile.PairManager do
   @spec latest(GenServer.server()) :: {:ok, record()} | :none
   def latest(server \\ __MODULE__), do: GenServer.call(server, :latest)
 
+  @doc """
+  The `pair_pending` event of the request waiting for the owner's decision,
+  as a connecting phone is told of it (M75 D16), or `:none`.
+  """
+  @spec pending_event(GenServer.server()) :: {:ok, map()} | :none
+  def pending_event(server \\ __MODULE__), do: GenServer.call(server, :pending_event)
+
   @spec submit_request(GenServer.server(), session_id(), map()) ::
           {:ok, request()} | {:error, term()}
   def submit_request(server, session_id, attrs)
@@ -309,6 +324,11 @@ defmodule FermixChannels.Mobile.PairManager do
     {:reply, latest_session(state), state}
   end
 
+  def handle_call(:pending_event, _from, state) do
+    state = expire_if_due(state)
+    {:reply, pending_reply(state), state}
+  end
+
   def handle_call({:submit_request, session_id, attrs}, _from, state) do
     with {:ok, state, window} <- fetch_window(state, session_id),
          {:ok, request} <- normalize_request(attrs),
@@ -317,6 +337,7 @@ defmodule FermixChannels.Mobile.PairManager do
       public = public_request(request)
       window = %{window | request: request}
       window = reply_waiter(window, :request_waiter, {:ok, public}, state)
+      :ok = state.announce.(pending(window, state))
       {:reply, {:ok, public}, %{state | window: window}}
     else
       {:error, reason, state} -> {:reply, {:error, reason}, state}
@@ -482,6 +503,8 @@ defmodule FermixChannels.Mobile.PairManager do
       persist_device:
         Keyword.get(opts, :persist_device, default_persist_device(device_store, root)),
       emit_pair: Keyword.get(opts, :emit_pair, &default_emit_pair/3),
+      announce:
+        Keyword.get(opts, :announce, default_announce(Keyword.get(opts, :device_registry))),
       fetch_statuses: Keyword.get(opts, :status_fetch, &Attestation.fetch_status_list/0),
       statuses: nil,
       status_fetch: nil,
@@ -662,6 +685,7 @@ defmodule FermixChannels.Mobile.PairManager do
     notify_socket(window, socket_result || terminal_reply)
     duration_us = max(now - window.opened_at_ms, 0) * 1_000
     :ok = state.emit_pair.(status, duration_us, pair_facts(window))
+    :ok = state.announce.(decided(window.session_id, status))
     closed = closed_record(window, status, socket_result, now)
     prune_closed(%{state | window: nil, closed: [closed | state.closed]})
   end
@@ -676,6 +700,38 @@ defmodule FermixChannels.Mobile.PairManager do
       device_id: approved_device_id(socket_result),
       refusal: public_refusal(window.refusal),
       closed_at_ms: now
+    }
+  end
+
+  # What every phone is told (D16): the request waiting, with the SAS the
+  # pairing phone shows and the window's remaining time, and how the session
+  # ended, in the word `pair_denied` uses, or `approved`.
+  defp pending(window, state) do
+    remaining_ms = max(window.expires_at_ms - state.clock.(), 0)
+
+    %{
+      "t" => "pair_pending",
+      "session_id" => window.session_id,
+      "device_name" => window.request.name,
+      "model" => window.request.model,
+      "platform" => window.request.platform,
+      "sas" => window.request.sas,
+      "expires_in_s" => remaining_ms |> div_ceil(1_000) |> max(1) |> min(div(@max_ttl_ms, 1_000))
+    }
+  end
+
+  defp div_ceil(value, by), do: div(value + by - 1, by)
+
+  defp pending_reply(%{window: %{request: request} = window} = state) when not is_nil(request),
+    do: {:ok, pending(window, state)}
+
+  defp pending_reply(_state), do: :none
+
+  defp decided(session_id, status) do
+    %{
+      "t" => "pair_decided",
+      "session_id" => session_id,
+      "outcome" => status |> outcome_reason() |> Atom.to_string()
     }
   end
 
@@ -1101,6 +1157,12 @@ defmodule FermixChannels.Mobile.PairManager do
     fn attrs ->
       apply(FermixChannels.Mobile.DeviceStore, :add_approved, [attrs, [root: root]])
     end
+  end
+
+  # A cast that never waits: a registry that is not running has no phone.
+  defp default_announce(registry) do
+    registry = registry || DeviceRegistry
+    fn event -> DeviceRegistry.broadcast(registry, "main", event) end
   end
 
   defp default_emit_pair(status, duration_us, facts) do

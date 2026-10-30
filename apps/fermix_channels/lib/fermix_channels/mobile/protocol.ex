@@ -18,9 +18,9 @@ defmodule FermixChannels.Mobile.Protocol do
   events (hello, pairing, attachments and media, push, ack, keepalive) and the
   `history_pull`/`history_page` pair, whose mobile page always carries
   `next_after_seq` and names its backward cursor `prev_before_seq`. The fields
-  of the events M75 added (a desktop's session, enrollment and the move) are
-  `Mobile.PeerEvents`' table; which session may send which event is
-  `Mobile.Peers`'.
+  of the events M75 added (a desktop's session, pairing from a phone,
+  enrollment and the move) are `Mobile.PeerEvents`' table; which session may
+  send which event is `Mobile.Peers`'.
 
   A logical server event whose header would exceed the 4 KiB cap travels as one
   contiguous run of `event_part` frames: each raw tail is a slice of the

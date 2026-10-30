@@ -1187,6 +1187,15 @@ Current channels:
   disk and deletes it; `Desktop.Receipts`, the one writer of
   `<home>/device/receipts.jsonl` (newest 1,000, hashes only), records every
   decision; the relay answers `invoke_status` from it.
+  A phone opens and decides a pairing window itself (D16): `pair_start` and
+  `pair_decide` run `Mobile.Management`'s `mobile.pair.start` and
+  `mobile.pair.decide` paths in the session, and `PairManager` announces a
+  waiting verified request (`pair_pending`) and every window's end
+  (`pair_decided`) to the phones through the registry, and answers
+  `pending_event/1` for a phone whose `hello` comes while one waits. A phone
+  also lists and revokes the owner's devices (`devices_list` -> `devices`,
+  `device_revoke`), through `Mobile.Management`'s `mobile.devices.list` and
+  `mobile.devices.revoke` paths in the session.
 - Remote reach is the iroh rail (M62), `Mobile.Iroh`, the last child of
   `Mobile.Supervisor` (`:rest_for_one`: the bridge's connections, `Iroh.Bridge`
   on `mobile/bridge.sock`, then `Iroh.Helper`). `Iroh.Helper` owns the

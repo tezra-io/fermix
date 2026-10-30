@@ -124,7 +124,7 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
     {[{refusal, <<>>}], desktop_client} = Driver.client_receive(desktop, desktop_client)
     assert refusal["code"] == "unsupported_event"
 
-    desktop_client = Driver.client_send(desktop, desktop_client, "unpair", %{}, 3)
+    desktop_client = Driver.client_send(desktop, desktop_client, "pair_start", %{}, 3)
     {[{refusal, <<>>}], _client} = Driver.client_receive(desktop, desktop_client)
     assert refusal["code"] == "unsupported_event"
 
@@ -301,7 +301,8 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
       update_device: fn :store, id, %{last_seen: _seen} -> {:ok, row(id)} end,
       wall_clock: fn -> @seen end,
       hello_ack_builder: fn _state -> {:ok, hello_ack()} end,
-      pending_approvals: fn "main" -> [] end
+      pending_approvals: fn "main" -> [] end,
+      pairing_pending: fn -> :none end
     ]
   end
 
@@ -335,7 +336,8 @@ defmodule FermixChannels.Mobile.DesktopSessionTest do
           update_device: fn :store, id, %{last_seen: _seen} -> {:ok, row(id)} end,
           wall_clock: fn -> @seen end,
           hello_ack_builder: fn _state -> {:ok, hello_ack()} end,
-          pending_approvals: fn "main" -> [] end
+          pending_approvals: fn "main" -> [] end,
+          pairing_pending: fn -> :none end
         ] ++ opts
       )
 

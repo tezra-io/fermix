@@ -1,7 +1,9 @@
 defmodule FermixChannels.Mobile.PeerEvents do
   @moduledoc """
   The fields of the events M75 adds to the mobile wire: a desktop's session,
-  a candidate's enrollment and the move (`PROTOCOL.md`: *Desktop sessions*,
+  a phone opening and deciding a pairing (D16) and listing and revoking the
+  owner's devices, a candidate's enrollment and the move (`PROTOCOL.md`:
+  *Desktop sessions*, *Pairing from a phone*, *Devices from a phone*,
   *Enrollment and the move*).
 
   One declarative table per direction, `client` for what the initiator sends
@@ -25,9 +27,12 @@ defmodule FermixChannels.Mobile.PeerEvents do
   @relay_url ~r/\Ahttps:\/\/[a-z0-9]([a-z0-9.-]*[a-z0-9])?\/\z/
   @recipient ~r/\Afxsnap1\.[A-Za-z0-9_-]{1,128}\.[A-Za-z0-9_-]{43}\z/
   @sha256 ~r/\A[0-9a-fA-F]{64}\z/
+  @sas ~r/\A[0-9]{6}\z/
   @controls ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
   @blank ~r/\s/u
 
+  @pair_outcomes ~w(approved denied timeout cancelled device_disconnected attestation
+                    attestation_unavailable platform_unsupported)
   @invoke_statuses ~w(ok refused failed)
   @loopback_failures ~w(port_in_use not_permitted failed)
   @snapshot_refusals ~w(disk_floor space_unknown mismatch out_of_order invalid_name write_failed)
@@ -35,6 +40,17 @@ defmodule FermixChannels.Mobile.PeerEvents do
   @relay {:object, [{"url", :relay_url}, {"quic_port", :port}]}
   @receipt {:object,
             [{"invocation_id", :id}, {"status", {:enum, @invoke_statuses}}, {"finished_at", :ts}]}
+  @device_row {:object,
+               [
+                 {"device_id", :id},
+                 {"name", :name},
+                 {"model", :name},
+                 {"kind", {:enum, ~w(phone desktop)}},
+                 {"created_at", :ts},
+                 {"last_seen", {:optional, :ts}},
+                 {"executor", {:optional, :boolean}},
+                 {"this_device", :boolean}
+               ]}
 
   @client %{
     "companion_open" => {[{"channel", :channel}], :none},
@@ -76,6 +92,10 @@ defmodule FermixChannels.Mobile.PeerEvents do
     "snapshot_stored" => {[{"snapshot_id", :id}, {"sha256", :sha256}], :none},
     "snapshot_refused" =>
       {[{"snapshot_id", :id}, {"reason", {:enum, @snapshot_refusals}}], :none},
+    "pair_start" => {[], :none},
+    "pair_decide" => {[{"session_id", :id}, {"approved", :boolean}], :none},
+    "devices_list" => {[], :none},
+    "device_revoke" => {[{"device_id", :id}], :none},
     "enroll_request" =>
       {[
          {"host",
@@ -143,6 +163,19 @@ defmodule FermixChannels.Mobile.PeerEvents do
        :none},
     "snapshot_chunk" => {[{"snapshot_id", :id}, {"index", :count}], :required},
     "snapshot_end" => {[{"snapshot_id", :id}], :none},
+    "pair_window" =>
+      {[{"session_id", :id}, {"link", :link}, {"expires_in_s", {:range, 1, 120}}], :none},
+    "pair_pending" =>
+      {[
+         {"session_id", :id},
+         {"device_name", :name},
+         {"model", :name},
+         {"platform", {:enum, ~w(ios android)}},
+         {"sas", :sas},
+         {"expires_in_s", {:range, 1, 120}}
+       ], :none},
+    "pair_decided" => {[{"session_id", :id}, {"outcome", {:enum, @pair_outcomes}}], :none},
+    "devices" => {[{"devices", {:list, @device_row, 0, 64}}], :none},
     "enroll_accepted" => {[{"candidate_id", :id}, {"primary_name", :name}], :none},
     "move_accept" => {[{"move_id", :id}, {"recipient", :x25519}], :none},
     "move_ready" => {[{"move_id", :id}, {"epoch", :positive}], :none},
@@ -152,12 +185,14 @@ defmodule FermixChannels.Mobile.PeerEvents do
   @client_events ~w(
     companion_open companion_line companion_close manage invoke_result invoke_blob
     invoke_receipts loopback_request loopback_failed snapshot_stored snapshot_refused
+    pair_start pair_decide devices_list device_revoke
     enroll_request move_offer move_chunk move_end move_commit move_resume
   )
   @server_events ~w(
     companion_line companion_close manage_result invoke invoke_status loopback_open
     loopback_response loopback_close snapshot_begin snapshot_chunk snapshot_end
-    enroll_accepted move_accept move_ready move_done
+    pair_window pair_pending pair_decided devices enroll_accepted
+    move_accept move_ready move_done
   )
 
   if Enum.sort(@client_events) != Enum.sort(Map.keys(@client)) or
@@ -275,9 +310,11 @@ defmodule FermixChannels.Mobile.PeerEvents do
   defp valid?(:relay_url, value), do: matches?(@relay_url, value) and byte_size(value) <= 261
   defp valid?(:recipient, value), do: matches?(@recipient, value)
   defp valid?(:sha256, value), do: matches?(@sha256, value)
+  defp valid?(:sas, value), do: matches?(@sas, value)
   defp valid?(:name, value), do: printable?(value, 128)
   defp valid?(:text, value), do: printable?(value, 512)
   defp valid?(:target, value), do: target?(value)
+  defp valid?(:link, value), do: link?(value)
   defp valid?(:ts, value), do: timestamp?(value)
   defp valid?(:x25519, value), do: x25519?(value)
   defp valid?(:headers, value), do: headers?(value)
@@ -297,6 +334,10 @@ defmodule FermixChannels.Mobile.PeerEvents do
     do: printable?(value, 2_048) and not Regex.match?(@blank, value)
 
   defp target?(_value), do: false
+
+  # The pairing link, which carries the window's secret, never logged or kept.
+  defp link?("fermix://pair?" <> _query = value), do: byte_size(value) <= 2_048
+  defp link?(_value), do: false
 
   # RFC 3339 in UTC: every reader takes the instant as it is, so an offset is
   # refused here rather than mistaken there.

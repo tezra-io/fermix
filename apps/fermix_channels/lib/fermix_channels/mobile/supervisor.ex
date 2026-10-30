@@ -305,6 +305,7 @@ defmodule FermixChannels.Mobile.Supervisor do
        root: root,
        name: names.pair_manager,
        device_store: names.device_store,
+       device_registry: names.device_registry,
        listener: names.listener,
        rail: names.iroh_helper}
     ]
@@ -482,6 +483,7 @@ defmodule FermixChannels.Mobile.Supervisor do
       request_coordinator: names.request_coordinator,
       discovery: names.discovery,
       iroh_helper: names.iroh_helper,
+      listener: names.listener,
       desktop_peers: names.desktop_peers,
       desktop_peer_supervisor: names.desktop_peer_supervisor,
       max_media_bytes: Keyword.get(config, :max_media_bytes, @default_max_media_bytes),

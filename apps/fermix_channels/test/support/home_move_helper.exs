@@ -185,6 +185,7 @@ defmodule FermixChannels.Test.HomeMove do
       history_head: fn "main" -> {:ok, 0} end,
       read_frontier: fn "main" -> {:ok, 0} end,
       pending_approvals: fn _profile -> [] end,
+      pairing_pending: fn -> :none end,
       discover: fn -> {:ok, []} end,
       desktop_peers: peers,
       desktop_peer_supervisor: peer_supervisor,

@@ -31,12 +31,21 @@ defmodule FermixChannels.Mobile.PeersTest do
              Enum.sort(families ++ ~w(hello ping media_fetch ack))
 
     for type <- ~w(msg command cancel history_pull attach_begin push_register read_state
-                   request_status unpair) do
+                   request_status unpair pair_start pair_decide) do
       assert {:error, {:unsupported_event, ^type}} = Peers.authorize(:desktop, type)
     end
 
     for type <- families do
       assert {:error, {:unsupported_event, ^type}} = Peers.authorize(:phone, type)
+    end
+  end
+
+  test "pairing from a phone is a phone's alone" do
+    for type <- ~w(pair_start pair_decide), do: assert(:ok = Peers.authorize(:phone, type))
+
+    for type <- ~w(pair_window pair_pending pair_decided) do
+      assert Peers.server_event?(:phone, type)
+      refute Peers.server_event?(:desktop, type)
     end
   end
 

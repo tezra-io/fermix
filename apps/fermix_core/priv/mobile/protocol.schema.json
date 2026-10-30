@@ -31,7 +31,8 @@
           "request_status", "pair_request", "unpair", "ping",
           "companion_open", "companion_line", "companion_close", "manage", "invoke_result",
           "invoke_blob", "invoke_receipts", "loopback_request", "loopback_failed", "snapshot_stored",
-          "snapshot_refused", "enroll_request",
+          "snapshot_refused", "pair_start",
+          "pair_decide", "devices_list", "device_revoke", "enroll_request",
           "move_offer", "move_chunk", "move_end", "move_commit", "move_resume"
         ]}
       },
@@ -64,6 +65,10 @@
         {"if": {"properties": {"t": {"const": "loopback_failed"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/loopback_failed"}},
         {"if": {"properties": {"t": {"const": "snapshot_stored"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_stored"}},
         {"if": {"properties": {"t": {"const": "snapshot_refused"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_refused"}},
+        {"if": {"properties": {"t": {"const": "pair_start"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_start"}},
+        {"if": {"properties": {"t": {"const": "pair_decide"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_decide"}},
+        {"if": {"properties": {"t": {"const": "devices_list"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/devices_list"}},
+        {"if": {"properties": {"t": {"const": "device_revoke"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/device_revoke"}},
         {"if": {"properties": {"t": {"const": "enroll_request"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/enroll_request"}},
         {"if": {"properties": {"t": {"const": "move_offer"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_offer"}},
         {"if": {"properties": {"t": {"const": "move_chunk"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_chunk"}},
@@ -85,7 +90,8 @@
           "companion_line", "companion_close", "manage_result", "invoke", "invoke_status",
           "loopback_open", "loopback_response", "loopback_close", "snapshot_begin",
           "snapshot_chunk", "snapshot_end",
-          "enroll_accepted", "move_accept", "move_ready", "move_done"
+          "pair_window", "pair_pending",
+          "pair_decided", "devices", "enroll_accepted", "move_accept", "move_ready", "move_done"
         ]}
       },
       "allOf": [
@@ -126,6 +132,10 @@
         {"if": {"properties": {"t": {"const": "snapshot_begin"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_begin"}},
         {"if": {"properties": {"t": {"const": "snapshot_chunk"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_chunk"}},
         {"if": {"properties": {"t": {"const": "snapshot_end"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/snapshot_end"}},
+        {"if": {"properties": {"t": {"const": "pair_window"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_window"}},
+        {"if": {"properties": {"t": {"const": "pair_pending"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_pending"}},
+        {"if": {"properties": {"t": {"const": "pair_decided"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_decided"}},
+        {"if": {"properties": {"t": {"const": "devices"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/devices"}},
         {"if": {"properties": {"t": {"const": "enroll_accepted"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/enroll_accepted"}},
         {"if": {"properties": {"t": {"const": "move_accept"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_accept"}},
         {"if": {"properties": {"t": {"const": "move_ready"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/move_ready"}},
@@ -600,6 +610,50 @@
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "snapshot_id", "reason"],
       "description": "Desktop to primary: the desktop kept no copy of the snapshot, and why: it would have left the disk under its floor, the free space could not be read, the bytes did not match snapshot_begin, a chunk came out of order, the name was not a snapshot's, or the write failed.",
       "properties": {"t": {"const": "snapshot_refused"}, "snapshot_id": {"$ref": "#/$defs/wireId"}, "reason": {"enum": ["disk_floor", "space_unknown", "mismatch", "out_of_order", "invalid_name", "write_failed"]}}
+    },
+    "pair_start": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq"],
+      "description": "Phone to primary: open a pairing window, as mobile.pair.start does; answered with pair_window, or an error naming why not (pairing_active while one is open).",
+      "properties": {"t": {"const": "pair_start"}}
+    },
+    "pair_window": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "session_id", "link", "expires_in_s"],
+      "description": "Primary to the phone that sent pair_start: the window's pairing link, shown as a QR code on that phone; it carries the window's one-time secret and is never stored or logged.",
+      "properties": {"t": {"const": "pair_window"}, "session_id": {"$ref": "#/$defs/wireId"}, "link": {"type": "string", "pattern": "^fermix://pair\\?", "maxLength": 2048}, "expires_in_s": {"type": "integer", "minimum": 1, "maximum": 120}}
+    },
+    "pair_pending": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "session_id", "device_name", "model", "platform", "sas", "expires_in_s"],
+      "description": "Primary to every connected phone: a verified pairing request waits for the owner, wherever its window was opened; sent when it starts waiting and again after hello_ack. sas is the six digits the pairing phone shows.",
+      "properties": {"t": {"const": "pair_pending"}, "session_id": {"$ref": "#/$defs/wireId"}, "device_name": {"$ref": "#/$defs/peerName"}, "model": {"$ref": "#/$defs/peerName"}, "platform": {"enum": ["ios", "android"]}, "sas": {"type": "string", "pattern": "^[0-9]{6}$"}, "expires_in_s": {"type": "integer", "minimum": 1, "maximum": 120}}
+    },
+    "pair_decide": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "session_id", "approved"],
+      "description": "Phone to primary: approve or deny the phone waiting in this session, as mobile.pair.decide does; the outcome comes as pair_decided.",
+      "properties": {"t": {"const": "pair_decide"}, "session_id": {"$ref": "#/$defs/wireId"}, "approved": {"type": "boolean"}}
+    },
+    "pair_decided": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "session_id", "outcome"],
+      "description": "Primary to every connected phone: a pairing session ended, however it ended: approved, or the word pair_denied gives the pairing phone. A phone ignores a session it does not know.",
+      "properties": {"t": {"const": "pair_decided"}, "session_id": {"$ref": "#/$defs/wireId"}, "outcome": {"enum": ["approved", "denied", "timeout", "cancelled", "device_disconnected", "attestation", "attestation_unavailable", "platform_unsupported"]}}
+    },
+    "devices_list": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq"],
+      "description": "Phone to primary: list the owner's devices, as mobile.devices.list does; answered with devices.",
+      "properties": {"t": {"const": "devices_list"}}
+    },
+    "device_revoke": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "device_id"],
+      "description": "Phone to primary: revoke one device (a phone or a desktop), as mobile.devices.revoke does, closing its live session; answered with devices, the list left. An id no device has is error device_not_found.",
+      "properties": {"t": {"const": "device_revoke"}, "device_id": {"$ref": "#/$defs/wireId"}}
+    },
+    "devices": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "devices"],
+      "description": "Primary to the phone that asked: the owner's paired devices, oldest first, at most 64; this_device marks the asking phone.",
+      "properties": {"t": {"const": "devices"}, "devices": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/deviceRow"}}}
+    },
+    "deviceRow": {
+      "type": "object", "required": ["device_id", "name", "model", "kind", "created_at", "this_device"],
+      "properties": {"device_id": {"$ref": "#/$defs/wireId"}, "name": {"$ref": "#/$defs/peerName"}, "model": {"$ref": "#/$defs/peerName"}, "kind": {"enum": ["phone", "desktop"]}, "created_at": {"$ref": "#/$defs/timestamp"}, "last_seen": {"$ref": "#/$defs/timestamp"}, "executor": {"type": "boolean", "description": "A desktop's executor switch on the primary; absent for a phone."}, "this_device": {"type": "boolean"}}
     },
     "enroll_request": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "host", "candidate"],

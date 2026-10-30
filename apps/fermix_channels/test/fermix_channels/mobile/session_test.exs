@@ -249,6 +249,7 @@ defmodule FermixChannels.Mobile.SessionTest do
         discover: fn -> {:ok, []} end,
         iroh_candidate: fn -> :none end,
         pending_approvals: fn "main" -> [] end,
+        pairing_pending: fn -> :none end,
         schedule_handshake_deadline: fn _message, _delay_ms -> make_ref() end,
         cancel_handshake_deadline: fn _ref -> false end
       }

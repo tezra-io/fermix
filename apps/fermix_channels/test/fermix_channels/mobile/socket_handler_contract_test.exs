@@ -350,6 +350,12 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
   end
 
   # The peer `Mobile.Router` names for every WebSocket: the session requires one.
-  defp init_socket(opts),
-    do: opts |> Map.new() |> Map.put_new(:peer, {127, 0, 0, 1}) |> SocketHandler.init()
+  # No pair manager runs here, so no pairing waits for the owner (M75 D16).
+  defp init_socket(opts) do
+    opts
+    |> Map.new()
+    |> Map.put_new(:peer, {127, 0, 0, 1})
+    |> Map.put_new(:pairing_pending, fn -> :none end)
+    |> SocketHandler.init()
+  end
 end

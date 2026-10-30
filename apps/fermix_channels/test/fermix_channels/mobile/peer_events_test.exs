@@ -157,6 +157,77 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
     end
   end
 
+  describe "pairing from a phone (D16)" do
+    test "the window carries the pairing link, and only a pairing link" do
+      window = %{"session_id" => "5b0c7d2e-8f41-4a6b-9c3d-2e7f1a8b4c60", "expires_in_s" => 120}
+
+      assert {:ok, _frame} =
+               encode("pair_window", Map.put(window, "link", "fermix://pair?v=2&secret=x"))
+
+      assert {:error, {:invalid_field, "link"}} =
+               encode("pair_window", Map.put(window, "link", "https://fermix.ai/pair"))
+    end
+
+    test "a pending request shows its six-digit SAS, and a decision names a known ending" do
+      pending = %{
+        "session_id" => "s-1",
+        "device_name" => "Garden phone",
+        "model" => "Google Pixel 9",
+        "platform" => "android",
+        "sas" => "042917",
+        "expires_in_s" => 88
+      }
+
+      assert {:ok, _frame} = encode("pair_pending", pending)
+
+      assert {:error, {:invalid_field, "sas"}} =
+               encode("pair_pending", %{pending | "sas" => "42917"})
+
+      assert {:error, {:invalid_field, "device_name"}} =
+               encode("pair_pending", %{pending | "device_name" => "bad\e[2Jname"})
+
+      for outcome <- ~w(approved denied timeout cancelled device_disconnected attestation) do
+        assert {:ok, _frame} =
+                 encode("pair_decided", %{"session_id" => "s-1", "outcome" => outcome})
+      end
+
+      assert {:error, {:invalid_field, "outcome"}} =
+               encode("pair_decided", %{"session_id" => "s-1", "outcome" => "expired"})
+
+      assert {:ok, _event} = decode("pair_start", %{})
+
+      assert {:error, {:invalid_field, "approved"}} =
+               decode("pair_decide", %{"session_id" => "s-1", "approved" => "yes"})
+    end
+  end
+
+  describe "devices from a phone" do
+    test "a phone lists and revokes by id, and the list is the owner's devices" do
+      assert {:ok, _event} = decode("devices_list", %{})
+      assert {:ok, _event} = decode("device_revoke", %{"device_id" => "6f1e2d3c-4b5a"})
+      assert {:error, {:missing_field, "device_id"}} = decode("device_revoke", %{})
+
+      desktop = %{
+        "device_id" => "6f1e2d3c-4b5a",
+        "name" => "Studio Mac",
+        "model" => "macOS desktop",
+        "kind" => "desktop",
+        "created_at" => "2026-10-20T09:00:00Z",
+        "executor" => true,
+        "this_device" => false
+      }
+
+      assert {:ok, _frame} = encode("devices", %{"devices" => [desktop]})
+      assert {:ok, _frame} = encode("devices", %{"devices" => []})
+
+      assert {:error, {:invalid_field, "devices"}} =
+               encode("devices", %{"devices" => [%{desktop | "kind" => "tablet"}]})
+
+      assert {:error, {:invalid_field, "devices"}} =
+               encode("devices", %{"devices" => List.duplicate(desktop, 65)})
+    end
+  end
+
   describe "enrollment and the move" do
     test "an enrollment request names its host and its route, the rest optional" do
       request = %{

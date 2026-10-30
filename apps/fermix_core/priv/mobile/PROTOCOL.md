@@ -528,9 +528,9 @@ served.
 `profile_id` is `main`, the one profile; any other is refused with
 `unsupported_profile`.
 
-These are a phone's events. A desktop's, enrollment and the move have
-sections of their own below, and *Who may send what* says which session may
-send which.
+These are a phone's events. A desktop's, pairing from a phone, enrollment and
+the move have sections of their own below, and *Who may send what* says which
+session may send which.
 
 What each is answered with:
 
@@ -548,6 +548,10 @@ What each is answered with:
 | `media_fetch` | the blob as `media_begin`, `media_chunk`s and `media_end`, or an `error` naming its `ref` |
 | `unpair` | close `4003` |
 | `ping` | `pong` |
+| `pair_start` | `pair_window`, or an `error` naming why no window opened |
+| `pair_decide` | nothing; the session's ending reaches every phone as `pair_decided` |
+| `devices_list` | `devices` |
+| `device_revoke` | `devices`, the list left, or an `error` (`device_not_found`) |
 
 A client must not upload chunks after `present`.
 
@@ -983,12 +987,14 @@ The primary sends a desktop `hello_ack`, `pong`, `error`, `event_part`,
 `headers[]` is a list of `[name, value]` pairs, in order: a name is an HTTP
 token of at most 256 bytes, a value at most 4,096 bytes with no CR, LF or NUL,
 and there are at most 64. An id (`call_id`, `invocation_id`, `loopback_id`,
-`request_id`, `snapshot_id`, `status_id`, and on the other sessions
-`candidate_id` and `move_id`) is 1 to 128 letters, digits, `.`, `_`, `:` and
-`-`, starting with a letter or a digit. A time (`finished_at`) is RFC 3339 in
+`request_id`, `snapshot_id`, `status_id`, and on the other
+sessions `session_id`, `candidate_id`, `move_id` and `device_id`) is 1 to 128
+letters, digits, `.`, `_`, `:` and `-`, starting with a letter or a digit. A
+time (`finished_at`, `created_at`, `last_seen`) is RFC 3339 in
 UTC (`Z`, or an offset of zero); one with any other offset is refused as an
-invalid field. A name a person reads (`name`, `primary_name`, an enrollment's
-texts) is at most 128 bytes of UTF-8 with no control character.
+invalid field. A name a person reads (`name`,
+`device_name`, `model`, `primary_name`, an enrollment's texts) is at most 128
+bytes of UTF-8 with no control character.
 
 A desktop's event outside the families the primary serves is answered
 `error{code:"unsupported_event"}`, and the session stays open (a
@@ -1080,6 +1086,41 @@ settles one as having ended as it says, and none is ever sent again. An invocati
 with no result and no receipt by its deadline is reported to the asker as
 uncertain.
 
+## Pairing from a phone
+
+A paired phone can open a pairing window and decide on the phone that asks,
+as the owner's app on the owner's own computer can:
+
+| `t` | Required payload | Rules |
+|---|---|---|
+| `pair_start` | — | phone to daemon: open a pairing window, as the management protocol's `mobile.pair.start` does; answered with `pair_window`, or an `error` naming why no window opened (`pairing_active` while one is open) |
+| `pair_window` | `session_id`, `link`, `expires_in_s` | daemon to that phone alone: the window's pairing link (see *Pairing link*), for the phone to show as a QR code; it carries the window's one-time secret, so it is never stored or logged; `expires_in_s` is 1 to 120 |
+| `pair_pending` | `session_id`, `device_name`, `model`, `platform`, `sas`, `expires_in_s` | daemon to every connected phone, whoever opened the window: a phone whose attestation verified waits for the owner; `sas` is the six digits it shows. Sent when the request starts waiting (again when the same phone reconnects, with its new SAS) and after `hello_ack` to a phone that connects while it waits |
+| `pair_decide` | `session_id`, `approved` | phone to daemon: approve or deny the phone waiting, as `mobile.pair.decide` does; answered with nothing, or an `error`: `unknown_pairing_session`, or `request_missing` while no phone waits |
+| `pair_decided` | `session_id`, `outcome` | daemon to every connected phone: a pairing session ended, however it ended: `approved`, or the word `pair_denied` gives the pairing phone (see *Noise modes and pairing*) |
+
+The phone that decides compares the SAS it shows with the one on the pairing
+phone, as the owner does at a terminal. Whoever decides first (a phone, the
+app, the web setup page or the terminal) ends the window. A phone ignores a
+`pair_decided` for a session it does not know, and when `hello_ack` arrives it
+drops a request it shows and shows the `pair_pending` that follows, if any.
+Only a phone sends these two; a desktop is answered `unsupported_event`.
+
+## Devices from a phone
+
+A paired phone sees and revokes the owner's devices, as the owner's app on
+the owner's computer can: a stolen computer is revoked from the phone in the
+owner's pocket.
+
+| `t` | Required payload | Rules |
+|---|---|---|
+| `devices_list` | — | phone to daemon: the owner's devices, as the management protocol's `mobile.devices.list` lists them; answered with `devices` |
+| `device_revoke` | `device_id` | phone to daemon: revoke one device, a phone or a desktop, as `mobile.devices.revoke` does, closing its live session (`4003`); answered with `devices`, the list left, or an `error`: `device_not_found` |
+| `devices` | `devices[]` | daemon to the phone that asked: at most 64 rows, oldest first, each `{device_id, name, model, kind, created_at, last_seen?, executor?, this_device}`; `kind` is `phone` or `desktop`, `executor` a desktop's switch, `this_device` the asking phone |
+
+Only a phone sends these; a desktop is answered `unsupported_event`. A phone
+that revokes itself is closed `4003` as any revoked device is.
+
 ## Enrollment and the move
 
 Two more sessions use the prelude, the frames and the bounds above, each with
@@ -1157,7 +1198,7 @@ sent is never sent to it. `FermixChannels.Mobile.Peers` is this table.
 
 | Kind | Sends | Is sent |
 |---|---|---|
-| phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `ack` `read_state` `request_status` `unpair` `ping` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` |
+| phone | `hello` `msg` `attach_begin` `attach_chunk` `attach_end` `command` `cancel` `history_pull` `media_fetch` `push_register` `push_unregister` `ack` `read_state` `request_status` `unpair` `ping` `pair_start` `pair_decide` `devices_list` `device_revoke` | `hello_ack` `accepted` `attach_status` `turn_started` `text_delta` `tool_event` `text_done` `turn_done` `media_begin` `media_chunk` `media_end` `turn_error` `row` `reaction` `approval` `approval_resolved` `link_preview` `read_state` `history_page` `request_status_page` `notice` `error` `pong` `event_part` `pair_window` `pair_pending` `pair_decided` `devices` |
 | desktop | `hello` `ping` `media_fetch` `ack` `companion_open` `companion_line` `companion_close` `manage` `invoke_result` `invoke_blob` `invoke_receipts` `loopback_request` `loopback_failed` `snapshot_stored` `snapshot_refused` | `hello_ack` `error` `pong` `event_part` `media_begin` `media_chunk` `media_end` `companion_line` `companion_close` `manage_result` `invoke` `invoke_status` `loopback_open` `loopback_response` `loopback_close` `snapshot_begin` `snapshot_chunk` `snapshot_end` |
 | enrollment | `enroll_request` `ping` | `enroll_accepted` `error` `pong` |
 | move | `move_offer` `move_chunk` `move_end` `move_commit` `move_resume` `ping` | `move_accept` `move_ready` `move_done` `error` `pong` |
@@ -1227,6 +1268,9 @@ parsed.
 | `attachment_unavailable` | a `msg` naming an `attach_id` the daemon no longer holds | `client_msg_id` | open |
 | `invalid_field`, `missing_field` | a field the daemon refuses once the frame decoded, such as a `msg`'s `attach_ids` | `client_msg_id` for a `msg` or `command` | open |
 | `unsupported_event` | a known event this session's kind may not send (see *Who may send what*), such as `pair_request` on a paired socket, or a desktop's event outside the families the primary serves | — | open |
+| `pairing_active`, `identity_unavailable`, `listener_unavailable`, `device_store_unavailable` | a `pair_start` while a window is open, or one whose window could not open | — | open |
+| `unknown_pairing_session`, `request_missing` | a `pair_decide` naming a session the daemon does not hold, or one no phone waits in | — | open |
+| `device_not_found` | a `device_revoke` naming an id no device has | — | open |
 | `receipts_not_asked` | a desktop's `invoke_receipts` naming a `status_id` the primary does not wait on (an earlier session's question, answered late) | — | open |
 | `enrollment_expired`, `enrollment_used`, `enrollment_limit` | a refused enrollment (see *Enrollment and the move*) | — | closed `4003` |
 | `move_unknown`, `move_mismatch`, `move_failed` | a refused move step (see *Enrollment and the move*) | — | closed `4003` |

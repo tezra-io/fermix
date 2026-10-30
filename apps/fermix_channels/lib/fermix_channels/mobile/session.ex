@@ -48,6 +48,13 @@ defmodule FermixChannels.Mobile.Session do
   A desktop's session starts its `Desktop.Peer` once `hello` is answered and
   hands it every desktop-family event; it gets no approval cards, and phone
   broadcasts never reach it.
+
+  A phone can open a pairing window and decide on the phone waiting in one
+  (D16): `pair_start` is `mobile.pair.start`'s path and answers `pair_window`
+  with the link, which is never logged or kept; `pair_decide` is
+  `mobile.pair.decide`'s. The pair manager tells every phone of a request
+  waiting (`pair_pending`) and of how it ended (`pair_decided`), and a phone
+  that says `hello` while one waits hears it again after its `hello_ack`.
   """
 
   require Logger
@@ -65,6 +72,8 @@ defmodule FermixChannels.Mobile.Session do
   alias FermixChannels.Mobile.EventRouter
   alias FermixChannels.Mobile.Identity
   alias FermixChannels.Mobile.Iroh.Helper
+  alias FermixChannels.Mobile.Listener
+  alias FermixChannels.Mobile.Management
   alias FermixChannels.Mobile.MediaStore
   alias FermixChannels.Mobile.Noise
   alias FermixChannels.Mobile.PairManager
@@ -262,6 +271,8 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:handshake_deadline_ref, nil)
     |> Map.put_new(:handshake_deadline_token, nil)
     |> Map.put_new(:pair_failure_recorded?, false)
+    |> Map.put_new(:listener, Listener)
+    |> Map.put_new(:pairing_opts, [])
     |> Map.put_new(:desktop_peers, FermixChannels.Desktop.Peers)
     |> Map.put_new(:desktop_peer_supervisor, FermixChannels.Desktop.PeerSupervisor)
     |> Map.put_new(:desktop_peer, nil)
@@ -447,16 +458,41 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:media_descriptor, &Timeline.media_descriptor/2)
     |> Map.put_new(:event_router, &EventRouter.route/3)
     |> Map.put_new(:run_request, &Task.Supervisor.start_child(FermixCore.TaskSupervisor, &1))
-    |> put_peer_dependencies()
+    |> put_peer_dependencies(iroh_helper)
   end
 
-  # A desktop's peer.
-  defp put_peer_dependencies(state) do
+  # A desktop's peer, and a phone's pairing (D16) and device verbs, which run
+  # the management facade's own path with this session's processes.
+  defp put_peer_dependencies(state, iroh_helper) do
     supervisor = state.desktop_peer_supervisor
+    pair_manager = state.pair_manager
+
+    pairing =
+      Keyword.merge(
+        [
+          pair_manager: pair_manager,
+          listener: state.listener,
+          discovery: state.discovery,
+          iroh_helper: iroh_helper,
+          device_store: state.device_store
+        ],
+        state.pairing_opts
+      )
 
     state
     |> Map.put_new(:start_desktop_peer, &DesktopPeer.start(supervisor, &1))
     |> Map.put_new(:deliver_desktop_event, &DesktopPeer.deliver/2)
+    |> Map.put_new(:pair_start, fn -> Management.pair_start(pairing) end)
+    |> Map.put_new(:pair_decide, &Management.pair_decide(&1, &2, pairing))
+    |> Map.put_new(:pairing_pending, fn -> PairManager.pending_event(pair_manager) end)
+    |> Map.put_new(:devices_list, fn -> Management.devices_list(pairing) end)
+    |> Map.put_new(
+      :device_revoke,
+      &Management.devices_revoke(
+        &1,
+        Keyword.put(pairing, :device_registry, state.device_registry)
+      )
+    )
   end
 
   # M75's own preludes (enrollment, the move) branch here, and only here: a
@@ -982,7 +1018,11 @@ defmodule FermixChannels.Mobile.Session do
   # A phone hears what waits for the owner; a desktop's chat, approvals
   # included, rides its companion tunnel, and its peer starts once its
   # hello_ack is ready to go.
-  defp after_hello_ack(:phone, frames, state), do: with_pending_approvals(frames, state)
+  defp after_hello_ack(:phone, frames, state) do
+    with {:ok, frames, state} <- with_pending_approvals(frames, state) do
+      with_pending_pairing(frames, state)
+    end
+  end
 
   defp after_hello_ack(:desktop, frames, state) do
     case start_desktop_peer(state) do
@@ -1025,6 +1065,19 @@ defmodule FermixChannels.Mobile.Session do
   defp with_pending_approvals(frames, state) do
     state.pending_approvals.(state.profile_id)
     |> Enum.reduce_while({:ok, frames, state}, &append_pending_approval/2)
+  end
+
+  # A phone waiting for the owner's decision follows them (D16), so this phone
+  # can approve it although it connected after the request was made.
+  defp with_pending_pairing(frames, state) do
+    case state.pairing_pending.() do
+      {:ok, pending} ->
+        {_step, result} = append_pending_approval(pending, {:ok, frames, state})
+        result
+
+      :none ->
+        {:ok, frames, state}
+    end
   end
 
   defp append_pending_approval(approval, {:ok, frames, state}) do
@@ -1255,11 +1308,90 @@ defmodule FermixChannels.Mobile.Session do
     queue_request(event, state)
   end
 
+  defp dispatch_event(%{type: "pair_start"}, state), do: pair_start(state)
+
+  defp dispatch_event(%{type: "pair_decide", payload: payload}, state),
+    do: pair_decide(payload["session_id"], payload["approved"], state)
+
+  defp dispatch_event(%{type: "devices_list"}, state), do: devices(state)
+
+  defp dispatch_event(%{type: "device_revoke", payload: payload}, state),
+    do: device_revoke(payload["device_id"], state)
+
   defp dispatch_event(event, state) do
     case state.event_router.(event, ingress_context(state), router_opts(state)) do
       :ok -> {:ok, nil, state}
       {:error, reason} -> {:error, reason, state}
     end
+  end
+
+  # D16: the window opens exactly as `mobile.pair.start` opens it, and the
+  # link goes to this phone alone, encrypted, to show as a QR code: it is
+  # never logged or kept. A refusal is the facade's own word.
+  defp pair_start(state) do
+    case state.pair_start.() do
+      {:ok, %{session: session, uri: link}} ->
+        encode_event_frames(pair_window(session, link), state)
+
+      {:error, reason} ->
+        {:error, reason, state}
+    end
+  end
+
+  defp pair_window(session, link) do
+    %{
+      "t" => "pair_window",
+      "session_id" => session.session_id,
+      "link" => link,
+      "expires_in_s" => session.ttl_ms |> div_ceil(1_000) |> max(1) |> min(120)
+    }
+  end
+
+  defp div_ceil(value, by), do: div(value + by - 1, by)
+
+  # The decision is `mobile.pair.decide`'s; how the request ends reaches every
+  # phone as `pair_decided`, from the pair manager.
+  defp pair_decide(session_id, approved, state) do
+    case state.pair_decide.(session_id, approved) do
+      {:ok, _session} -> {:ok, nil, state}
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  # The owner's devices as `mobile.devices.list` answers them, so a phone can
+  # see the computers and phones paired with this Fermix.
+  defp devices(state) do
+    case state.devices_list.() do
+      {:ok, rows} ->
+        event = %{"t" => "devices", "devices" => Enum.map(rows, &device_wire(&1, state))}
+        encode_event_frames(event, state)
+
+      {:error, reason} ->
+        {:error, reason, state}
+    end
+  end
+
+  # A phone is an owner device: it revokes a device exactly as
+  # `mobile.devices.revoke` does (a stolen computer, with the owner's other
+  # computer out of reach), and hears the list that is left.
+  defp device_revoke(device_id, state) do
+    case state.device_revoke.(device_id) do
+      {:ok, _revoked} -> devices(state)
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  defp device_wire(row, state) do
+    %{
+      "device_id" => row.device_id,
+      "name" => row.name,
+      "model" => row.model,
+      "kind" => Atom.to_string(row.kind),
+      "created_at" => row.created_at,
+      "this_device" => row.device_id == state.device_id
+    }
+    |> maybe_put("last_seen", row.last_seen)
+    |> maybe_put("executor", row.executor)
   end
 
   # A `msg` or `command` carries the whole pre-turn pipeline — attachment

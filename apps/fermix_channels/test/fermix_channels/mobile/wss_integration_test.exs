@@ -221,7 +221,9 @@ defmodule FermixChannels.Mobile.WssIntegrationTest do
       profile_name: "Orbit",
       history_head: fn "main" -> {:ok, 0} end,
       read_frontier: fn "main" -> {:ok, 0} end,
-      discover: fn -> {:ok, []} end
+      discover: fn -> {:ok, []} end,
+      # No pair manager runs here, so no pairing waits for the owner (M75 D16).
+      pairing_pending: fn -> :none end
     ]
 
     start_supervised!(

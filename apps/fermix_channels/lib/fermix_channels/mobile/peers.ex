@@ -20,7 +20,8 @@ defmodule FermixChannels.Mobile.Peers do
 
   @phone_client ~w(
     hello msg attach_begin attach_chunk attach_end command cancel history_pull media_fetch
-    push_register push_unregister ack read_state request_status unpair ping
+    push_register push_unregister ack read_state request_status unpair ping pair_start
+    pair_decide devices_list device_revoke
   )
   @desktop_client ~w(
     hello ping media_fetch ack companion_open companion_line companion_close manage
@@ -31,6 +32,7 @@ defmodule FermixChannels.Mobile.Peers do
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
     media_begin media_chunk media_end turn_error row reaction approval approval_resolved
     link_preview read_state history_page request_status_page notice error pong event_part
+    pair_window pair_pending pair_decided devices
   )
   @desktop_server ~w(
     hello_ack error pong event_part media_begin media_chunk media_end companion_line
