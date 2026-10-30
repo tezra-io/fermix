@@ -50,21 +50,21 @@
 (* proposal's (see the README). Line numbers of the code this changed are  *)
 (* those of 90a1f0f1.                                                      *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/ingest.ex @ 331e846921b6
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/filters.ex @ d1ca51d578e1
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/ingest.ex @ 3c7062290165
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/filters.ex @ 7ee5d5943d2e
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/supervisor.ex @ e1b36533a8b3
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/sweeper.ex @ 7472388b5bc0
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/proposals.ex @ 47e885432444
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_sql.ex @ b55ea63d73b1
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_filter_sql.ex @ 867ac594eb14
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_runs_sql.ex#@open_sql,@cap_room_sql,@eligible_sql,@candidates_sql,@eligible_delivery_sql,@settle_facts_sql,eligible_delivery,settle_delivery,settle_facts,settle_held,settle_move,unspent_retry,spent_retry,move_patch,untouched @ f65310ef1716
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/sweeper.ex @ cff6b376e8b6
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/proposals.ex @ ba6fa50833a0
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_sql.ex @ abbaaf9ac090
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_filter_sql.ex @ 319f777956cf
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_runs_sql.ex#@open_sql,@cap_room_sql,@eligible_sql,@candidates_sql,@eligible_delivery_sql,@settle_facts_sql,eligible_delivery,settle_delivery,settle_facts,settle_held,settle_move,unspent_retry,spent_retry,move_patch,untouched @ 03becc353f97
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_mandate_sql.ex#mark_tools_started,decide_propose,store_proposal,point_at_existing,decide_waiting,decided_or_why,decide_by_id,decided_by_id,end_denied,settle_proposal,expire_proposals @ 029c6975cee1
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/cue_admission.ex @ 94f9aac007e9
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/scheduler.ex#init,handle_info,handle_cast,maybe_request_admission,request_admission,admit_cue_runs,free_cue_slots,cue_run_attrs,start_cue_run,reconcile_active_runs,reconcile_active_run,adopt_live_run,monitored_run?,reap_orphaned_run,live_runner_pids,put_live_runner,active_run_count,start_or_mark_failed,monitor_entry,mark_run_crashed,mark_run_failed,mark_run_error,fail_delivery_after_settle @ b0de1f598583
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex#complete_run,mark_cue_completed,mark_failed @ 4006c75e7387
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/cue_admission.ex @ 3791eb7ad5b0
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/scheduler.ex#init,handle_info,handle_cast,maybe_request_admission,request_admission,admit_cue_runs,free_cue_slots,cue_run_attrs,start_cue_run,reconcile_active_runs,reconcile_active_run,adopt_live_run,monitored_run?,reap_orphaned_run,live_runner_pids,put_live_runner,active_run_count,start_or_mark_failed,monitor_entry,mark_run_crashed,mark_run_failed,mark_run_error,fail_delivery_after_settle @ a7d895b46845
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex#complete_run,mark_cue_completed,mark_failed @ 81415352eea2
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,call_or_timeout_error,periodic_opts,claim_cue_run,claim_cue_run_tx,claim_cue_run_in_tx,claim_delivery,claim_in_tx,fetch_claimable_job,ensure_no_active_job_run,settle_cue_run,settle_cue_run_tx,settle_cue_run_in_tx,active_run_trigger,release_cue_job,ensure_job_run_active,finish_job_settle,rollback_job_settle,upsert_job_run_row @ 87275850c2a1
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,maybe_cues_supervisor @ 1a2b5951407a
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_follow_up_sql.ex#on_pass,trigger_pass,settle_taskless
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_follow_up_sql.ex#on_pass,trigger_pass,settle_taskless @ dccbfed103ed
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
