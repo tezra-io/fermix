@@ -69,6 +69,56 @@ defmodule FermixCore.Cues.FilterChoicesTest do
     assert label == Descriptor.fetch!(:openai).label
   end
 
+  describe "the screen" do
+    test "keyword match, then the decision model of a primary that serves one" do
+      snapshot =
+        snapshot(
+          openai: [api_key: "sk-invented"],
+          openrouter: [api_key: "sk-or-invented", primary: true]
+        )
+
+      assert FilterChoices.decision_model(snapshot) ==
+               %{provider: :openrouter, label: "OpenRouter · Jev"}
+
+      assert FilterChoices.screen_choices(snapshot) == [
+               %{id: "keyword", label: "Keyword match", hint: nil, disabled?: false},
+               %{
+                 id: "decision_model",
+                 label: "Decision model",
+                 hint: "Uses OpenRouter · Jev",
+                 disabled?: false
+               }
+             ]
+    end
+
+    test "under a primary that serves none, the first set up in catalog order" do
+      snapshot =
+        snapshot(
+          anthropic: [api_key: "sk-ant-invented", primary: true],
+          venice: [api_key: "vn-invented"],
+          openai: [api_key: "sk-invented"]
+        )
+
+      assert %{provider: :openai, label: "OpenAI · gpt-6-luna"} =
+               FilterChoices.decision_model(snapshot)
+    end
+
+    test "with none set up, the decision model is disabled with what to set up" do
+      snapshot =
+        snapshot(
+          anthropic: [api_key: "sk-ant-invented", primary: true],
+          venice: [default_model: "venice-uncensored"]
+        )
+
+      assert FilterChoices.decision_model(snapshot) == nil
+
+      assert %{id: "decision_model", disabled?: true, hint: hint} =
+               List.last(FilterChoices.screen_choices(snapshot))
+
+      assert hint == "Set up OpenAI, OpenRouter or Venice first."
+    end
+  end
+
   test "models are the catalog's suggestions, none for an unknown provider" do
     assert [%{id: _id, label: _label} | _more] = FilterChoices.models("anthropic")
     assert FilterChoices.models("nope") == []

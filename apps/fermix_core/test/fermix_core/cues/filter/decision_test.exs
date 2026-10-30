@@ -1,6 +1,8 @@
 defmodule FermixCore.Cues.Filter.DecisionTest do
-  # async: false — every screen resolves its route from the shared
-  # `[fermix_core.providers]` app env (established here, restored on exit).
+  # async: false — every screen picks its route from the shared
+  # `[fermix_core.providers]` app env (established here, restored on exit):
+  # Anthropic is the primary and serves no decision model, so OpenRouter, the
+  # one set up that does, is picked.
   use ExUnit.Case, async: false
 
   alias FermixCore.Cues.Filter.Decision
@@ -22,7 +24,7 @@ defmodule FermixCore.Cues.Filter.DecisionTest do
   end
 
   describe "the screen" do
-    test "asks the watcher's criteria, with its words as hints, about the item alone" do
+    test "asks the watcher's criteria, with its keywords as hints, about the item alone" do
       test = self()
 
       id =
@@ -45,7 +47,7 @@ defmodule FermixCore.Cues.Filter.DecisionTest do
       assert instructions =~ Prompt.criteria(claim)
 
       assert instructions =~
-               "Words the owner listens for, as hints of the topic (an item need not " <>
+               "Keywords the owner listens for, as hints of the topic (an item need not " <>
                  "contain them): recall, kettle"
 
       assert Map.keys(criteria) == ["false", "true"]
@@ -60,14 +62,14 @@ defmodule FermixCore.Cues.Filter.DecisionTest do
                   "did not read it."}
     end
 
-    test "a watcher with no words gets no hint line" do
+    test "a watcher with no keywords gets no hint line" do
       test = self()
       id = stub(fn conn, body -> send(test, {:body, body}) && noul(conn, 0.9) end)
       claim = put_in(claim().watcher.listen_for, [])
 
       assert screen(claim, id) == :through
       assert_received {:body, body}
-      refute body["questions"]["answer"]["instructions"] =~ "Words the owner listens for"
+      refute body["questions"]["answer"]["instructions"] =~ "Keywords the owner listens for"
     end
 
     test "the provider call lands in the filter call's own session" do
@@ -81,18 +83,22 @@ defmodule FermixCore.Cues.Filter.DecisionTest do
   end
 
   describe "failures" do
-    test "a screen provider not set up, or with no decision model, holds the watcher" do
+    test "no decision model set up holds the watcher, and never falls back" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true],
+        venice: [default_model: "venice-uncensored"]
+      )
+
       id = stub(fn _conn, _body -> flunk("no request may be made") end)
 
-      assert {:provider_failure, %{kind: :no_route, message: unset}} =
-               Decision.screen(claim(), :venice, opts(id))
-
-      assert unset =~ "The screen's provider, Venice, is not set up"
-
-      assert {:provider_failure, %{kind: :no_route, message: none}} =
-               Decision.screen(claim(), :anthropic, opts(id))
-
-      assert none =~ "Anthropic has no decision model Fermix uses"
+      assert screen(claim(), id) ==
+               {:provider_failure,
+                %{
+                  kind: :no_route,
+                  message:
+                    "No decision model is set up: set up OpenAI, OpenRouter or Venice, or " <>
+                      "switch the screen back to Keyword match in the Cues settings."
+                }}
     end
 
     test "an outage or a refused request holds the watcher; an item too large fails only it" do
@@ -127,7 +133,7 @@ defmodule FermixCore.Cues.Filter.DecisionTest do
           })
         end)
 
-      assert {:content_failure, %{kind: :refused}} = Decision.screen(claim(), :openai, opts(id))
+      assert {:content_failure, %{kind: :refused}} = screen(claim(), id)
     end
   end
 
@@ -160,7 +166,7 @@ defmodule FermixCore.Cues.Filter.DecisionTest do
     }
   end
 
-  defp screen(claim, id), do: Decision.screen(claim, :openrouter, opts(id))
+  defp screen(claim, id), do: Decision.screen(claim, opts(id))
   defp opts(id), do: [session_id: @session_id, req_options: [plug: {Req.Test, id}]]
 
   defp stub(answer) do

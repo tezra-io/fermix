@@ -2905,7 +2905,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       [
         enabled: true,
         mandates_enabled: false,
-        screen_provider: "openai",
+        screen: :decision_model,
         door_port: 4555,
         sources: %{
           "home-alerts" => [kind: :local_push, daily_budget: 500, token: "@keyring"],
@@ -2973,6 +2973,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
       contents = File.read!(Path.join(ctx.home, "config.toml"))
       assert contents =~ "[fermix_core.cues]\nenabled = true"
+      assert contents =~ ~s(screen = "decision_model")
       assert contents =~ "[fermix_core.cues.sources.home-alerts]\nkind = \"local_push\""
       assert contents =~ "[fermix_core.cues.mandates.release-issues]"
       assert contents =~ "[fermix_core.cues.mandates.release-issues.pin_args]"

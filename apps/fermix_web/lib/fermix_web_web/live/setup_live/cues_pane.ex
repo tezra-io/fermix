@@ -512,9 +512,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   attr :refusal, :map, default: nil
 
   defp screen(assigns) do
-    offered? = Enum.any?(assigns.screen.options, &(&1.id == assigns.screen.provider))
-    stale? = assigns.screen.provider != "" and not offered?
-    assigns = assign(assigns, stale?: stale?, card: @card)
+    assigns = assign(assigns, card: @card)
 
     ~H"""
     <div id="cues-screen" class={[@card, "flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3"]}>
@@ -522,23 +520,22 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
         Screen <.info text={@screen.info} />
       </span>
       <select
-        name="cues_settings[screen_provider]"
+        name="cues_settings[screen]"
         aria-label="Screen"
         class="select select-bordered select-sm w-full bg-base-100 sm:ml-auto sm:w-auto"
       >
-        <option value="" selected={@screen.provider == ""}>Words</option>
-        <option
-          :for={option <- @screen.options}
-          value={option.id}
-          selected={option.id == @screen.provider}
-        >
-          {option.label}
+        <option value="" selected={@screen.value == ""}>{@screen.keyword.label}</option>
+        <option value="decision_model" selected={@screen.value == "decision_model"}>
+          {@screen.decision_model.label}
         </option>
       </select>
-      <p :if={@stale?} class="w-full text-sm text-warning">
-        The saved screen, {@screen.provider}, is not set up, so watchers are held until it is set up or another screen is saved.
+      <p
+        :if={@screen.value == "decision_model"}
+        class={["w-full text-sm", @screen.decision_model.disabled? && "text-warning"]}
+      >
+        {@screen.decision_model.hint}
       </p>
-      <.settings_refusal refusal={@refusal} rows={["cues_screen_provider"]} />
+      <.settings_refusal refusal={@refusal} rows={["cues_screen"]} />
     </div>
     """
   end

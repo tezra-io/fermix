@@ -75,19 +75,22 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a link that redirects still pairs with its preview. A message's previews
   are now sent one by one as each resolves, so a slow site no longer costs
   the message the previews that already finished.
-- **Watchers can screen items by meaning, not only by their words.** A new
+- **Watchers can check items by meaning, not only by their keywords.** A new
   **Screen** setting in Settings → Cues and the setup page's Cues tab picks
-  how items are checked before the filter model reads them: **Words**, as
-  before, or a decision model from a provider you already set up (OpenAI's
-  Decisions API with gpt-6-luna, or TypeSafe's Jev through OpenRouter or
-  Venice), with that provider's key and nothing new to enter. A decision model
-  checks each item against the watcher's purpose and instructions, with its
-  words as hints, so a post worded differently or in another language is no
-  longer missed, in about a third of a second per item, roughly ten times
-  faster than a chat model. The filter model still makes every pass. Fermix
-  writes a watcher's words the same way either way, and if the chosen
-  provider fails or is removed, the watcher waits and retries instead of
-  falling back to the words.
+  how items are checked before the filter model reads them: **Keyword
+  match**, as before, or **Decision model**. There is no provider to choose:
+  Fermix uses your main provider's decision model when it has one, otherwise
+  the first you set up of OpenAI (its Decisions API with gpt-6-luna),
+  OpenRouter and Venice (both TypeSafe's Jev), with that provider's key and
+  nothing new to enter, and the setting names the one it uses. A decision
+  model checks each item against the watcher's purpose and instructions, with
+  its keywords as hints, so a post worded differently or in another language
+  is no longer missed, in about a third of a second per item, roughly ten
+  times faster than a chat model. The filter model still makes every pass.
+  Fermix writes a watcher's keywords the same way either way, and if the
+  decision model's provider fails or none is set up any more, the watcher
+  waits and retries instead of falling back to keyword match. A watcher's
+  words to listen for are now called keywords everywhere Fermix names them.
 - **Watch X accounts with the X sign-in you already have.** A new X accounts
   preset for feed sources takes up to 20 handles, typed with or without `@`,
   and brings each new post from those accounts in as a cue, replies and

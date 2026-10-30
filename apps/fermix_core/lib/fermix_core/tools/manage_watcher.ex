@@ -80,10 +80,10 @@ defmodule FermixCore.Tools.ManageWatcher do
       "streams, webhooks), judges each item against its one-line purpose and numbered " <>
       "instructions with a filter model (or passes every item when its filter is none), and " <>
       "wakes its task, a job that runs on cues, for each item that passes. A watcher that " <>
-      "filters listens for words (listen_for): only an item containing one of them reaches " <>
-      "its filter, and the words never decide a pass. Draft them yourself, broadly, from the " <>
+      "filters listens for keywords (listen_for): only an item containing one of them reaches " <>
+      "its filter, and the keywords never decide a pass. Draft them yourself, broadly, from the " <>
       "owner's purpose and instructions: names, products, common abbreviations, and the " <>
-      "languages the source likely carries, since an item no word matches is never judged; " <>
+      "languages the source likely carries, since an item no keyword matches is never judged; " <>
       "never ask the owner for a pattern. A watcher with no filter cannot listen to a stream " <>
       "source. Instructions are a list of single criteria that Fermix never rewrites: read " <>
       "the list with show before adding, and remove one that a new instruction contradicts in " <>
@@ -115,7 +115,7 @@ defmodule FermixCore.Tools.ManageWatcher do
           type: "array",
           items: %{type: "string"},
           description:
-            "Words and short phrases an item this watcher should see would contain (create, " <>
+            "Keywords and short phrases an item this watcher should see would contain (create, " <>
               "update, where it replaces the list): 1 to 200, each at most 64 characters, " <>
               "matched as whole words ignoring case and accents. Needed for filter llm."
         },
@@ -209,7 +209,7 @@ defmodule FermixCore.Tools.ManageWatcher do
         description: "a change from a shared chat or a turn that read outside text"
       },
       %{tag: "instruction_cap", description: "20 active instructions; merge first"},
-      %{tag: "needs_words", description: "a model filter with no words to listen for"},
+      %{tag: "needs_words", description: "a model filter with no keywords to listen for"},
       %{tag: "no_filter_on_stream", description: "a watcher with no filter on a stream source"}
     ]
   end
@@ -632,7 +632,7 @@ defmodule FermixCore.Tools.ManageWatcher do
   defp state_word(watcher, streams) do
     case Watchers.update_needed(watcher, streams) do
       nil -> "listening"
-      :words -> "needs words to listen for"
+      :words -> "needs keywords to listen for"
       :filter -> "needs a filter to listen to a stream"
     end
   end
@@ -640,7 +640,7 @@ defmodule FermixCore.Tools.ManageWatcher do
   defp needs_line(nil), do: nil
 
   defp needs_line(:words),
-    do: "It needs words to listen for, and no item reaches it until an update gives it some."
+    do: "It needs keywords to listen for, and no item reaches it until an update gives it some."
 
   defp needs_line(:filter),
     do:

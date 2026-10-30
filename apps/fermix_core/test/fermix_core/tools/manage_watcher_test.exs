@@ -25,7 +25,7 @@ defmodule FermixCore.Tools.ManageWatcherTest do
   @tainted "This turn has read outside text, so it cannot change a watcher; ask for the change " <>
              "again in a new message."
   @shared "Create the watcher from a private chat with Fermix."
-  @needs_words "A watcher that filters needs words to listen for: list the names, products, " <>
+  @needs_words "A watcher that filters needs keywords to listen for: list the names, products, " <>
                  "abbreviations and phrases an item it should see would contain, as listen_for."
 
   # Stands in for `Jobs.Scheduler.run_now/2`: tells the test which job it was
@@ -409,7 +409,7 @@ defmodule FermixCore.Tools.ManageWatcherTest do
       assert {:ok, %{success: false, error: @needs_words}} =
                ManageWatcher.execute(no_words, turn(ctx, []))
 
-      assert {:ok, %{success: false, error: "Give the words to listen for as a list."}} =
+      assert {:ok, %{success: false, error: "Give the keywords to listen for as a list."}} =
                ManageWatcher.execute(Map.put(no_words, "listen_for", "TSMC"), turn(ctx, []))
 
       assert {:ok, []} = JobsRegistry.list_jobs(repo: ctx.repo)
@@ -443,9 +443,9 @@ defmodule FermixCore.Tools.ManageWatcherTest do
                )
 
       assert shown =~
-               "It needs words to listen for, and no item reaches it until an update gives it some."
+               "It needs keywords to listen for, and no item reaches it until an update gives it some."
 
-      assert {:ok, %{success: true, output: "market-news: needs words to listen for" <> _}} =
+      assert {:ok, %{success: true, output: "market-news: needs keywords to listen for" <> _}} =
                ManageWatcher.execute(%{"action" => "list"}, turn(ctx, []))
 
       update = %{"action" => "update", "name" => "market-news", "listen_for" => ["NVDA", "AMD"]}
@@ -453,7 +453,7 @@ defmodule FermixCore.Tools.ManageWatcherTest do
       assert {:ok, %{success: true, output: echo}} = ManageWatcher.execute(update, turn(ctx, []))
 
       assert echo ==
-               "Watcher market-news changed: new words to listen for.\nListens for: NVDA, AMD"
+               "Watcher market-news changed: new keywords to listen for.\nListens for: NVDA, AMD"
 
       assert {:ok, %{success: true, output: shown}} =
                ManageWatcher.execute(

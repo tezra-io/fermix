@@ -324,7 +324,7 @@ defmodule FermixCore.Cues.Notices do
 
   defp watcher_text(:needs_update, name, %{needed: :words}),
     do:
-      "Watcher #{name}: it has no words to listen for, so no item reaches it. Ask Fermix in " <>
+      "Watcher #{name}: it has no keywords to listen for, so no item reaches it. Ask Fermix in " <>
         "chat to give it some."
 
   defp watcher_text(:needs_update, name, %{needed: :filter}),

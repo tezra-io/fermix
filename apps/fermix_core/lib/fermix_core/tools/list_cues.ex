@@ -99,7 +99,7 @@ defmodule FermixCore.Tools.ListCues do
       "its recent drops, which are not kept: the last 50 until Fermix restarts, each with " <>
       "the drop_key an example names), summary (per source, how many items arrived and " <>
       "which watchers listen; per watcher, its deliveries by state and outcome; for a " <>
-      "stream, stream_counts over the last day: what arrived, what no watcher's words " <>
+      "stream, stream_counts over the last day: what arrived, what no watcher's keywords " <>
       "matched, what each watcher was offered, dropped or turned away with a full queue " <>
       "(overflow)), proposals, gaps (items Fermix lost, " <>
       "and why), notes (what a watcher's task keeps for itself), sources (every cue source " <>

@@ -45,7 +45,7 @@ defmodule FermixCore.Management.Cues.WatcherRow do
   in the owner's words: the row's sentence, and the setup page's.
   """
   @spec needs_update_sentence(:words | :filter) :: String.t()
-  def needs_update_sentence(:words), do: "Needs words to listen for: update it in chat."
+  def needs_update_sentence(:words), do: "Needs keywords to listen for: update it in chat."
 
   def needs_update_sentence(:filter),
     do: "Passes everything, so it can't listen to a stream: give it a filter in chat."
