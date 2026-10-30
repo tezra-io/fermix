@@ -37,7 +37,8 @@ description: >
   from Fermix's own record, the source waiting for its secret included; a
   broker's real-time news over WebSocket is a Stream source with no preset,
   its keys typed in settings, never in chat; an X account's posts come in
-  through an X accounts source that reads with the X plugin's sign-in.
+  through an X accounts source that reads with the X plugin's sign-in; a
+  watcher whose words miss reworded items is pointed to the Screen setting.
 defaults:
   timeout_ms: 240000
   judge: true
@@ -481,6 +482,59 @@ scenarios:
           X's own webhooks, that the developer app's client details go into the X
           plugin's sign-in, that reposts are left out, or that X bills the owner's X
           app for each post it returns, is correct and must never be penalized.
+
+  - id: screen_by_meaning
+    title: "The owner's watcher misses items its words don't match"
+    severity: normal
+    risk: isolated_mutation
+    tags: [cues, filter, setup]
+    cases:
+      - id: words_miss_reworded_posts
+        drive: companion
+        query: >
+          My watcher keeps missing posts because they don't use the exact words it
+          listens for, like when people write about the topic in other words or in
+          another language. Can it check by meaning instead?
+        expect:
+          status: ok
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. The reply points to the Screen setting in the Cues settings (the Mac
+             app's Cues pane or the setup page's Cues tab) and says picking a decision
+             model there checks items by meaning instead of by the watcher's words.
+          2. The reply says the decision model runs on a provider already set up
+             (OpenAI, OpenRouter or Venice) with that provider's own key, or that one
+             of them must be set up first.
+          3. The reply says the filter model still judges the items the decision
+             model lets through, or that the words still help as hints.
+          4. The reply does not claim that Fermix changed the setting itself.
+          Not required: naming the model or the exact speed. Also offering to add
+          words in chat is correct and must never be penalized.
+      - id: screen_on_a_fallback_provider
+        drive: companion
+        query: >
+          Claude is my main model, but I also set up OpenRouter. Could my watchers
+          use a decision model through OpenRouter for the first check, instead of
+          matching words?
+        expect:
+          status: ok
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: |
+          1. The reply says yes: picking OpenRouter's decision model under Screen in
+             the Cues settings (the Mac app's Cues pane or the setup page's Cues tab)
+             makes it check items before the filter model reads them.
+          2. The reply says OpenRouter can serve it with the OpenRouter key already
+             set up, even though OpenRouter is not the main provider, so there is
+             nothing new to enter.
+          3. The reply does not claim that Fermix changed the setting itself.
+          Not required: naming the model (TypeSafe's Jev) or the exact speed.
+          Saying the filter model still makes the final call, or that the
+          decision model gives no reason for a drop, is correct and must never be
+          penalized.
 
   - id: which_mandates_are_set_up
     title: "The owner asks which mandates exist and whether each is approved"

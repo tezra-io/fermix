@@ -152,6 +152,27 @@ defmodule FermixCore.Cues.Filter.PromptTest do
     refute user =~ "cue_example"
   end
 
+  test "the user message is the owner's criteria, then the framed evidence, then the answer line" do
+    claim = claim()
+    criteria = Prompt.criteria(claim)
+    evidence = Prompt.evidence(claim)
+
+    assert criteria =~ "Purpose: Releases and advisories for the stack I run."
+    assert criteria =~ "4. Drop conference announcements."
+    refute criteria =~ @frame_open
+
+    assert evidence =~ "Example 1, the owner said it should have been dropped"
+    assert evidence =~ ~s(source="cue:eng-feeds">)
+    refute evidence =~ "Pass security advisories."
+
+    assert user_text(Prompt.messages(claim)) ==
+             criteria <>
+               "\n\n" <>
+               evidence <>
+               "\n\n" <>
+               "Answer with the one JSON object your instructions describe."
+  end
+
   test "a dropped payload says so instead of failing" do
     cue = %{claim().cue | payload: nil}
     assert user_text(Prompt.messages(claim(%{cue: cue}))) =~ "no payload"

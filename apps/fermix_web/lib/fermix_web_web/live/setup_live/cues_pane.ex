@@ -102,6 +102,7 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
       <.pane_title />
       <section class="space-y-2">
         <.switches switches={@cues.switches} door={@cues.door} />
+        <.screen screen={@cues.screen} />
         <.filter_model filter={@cues.filter} />
       </section>
       <.sources cues={@cues} />
@@ -400,6 +401,48 @@ defmodule FermixWebWeb.SetupLive.CuesPane do
   defp door_failure(:permission_denied, port), do: "this user may not listen on port #{port}"
   defp door_failure(:address_unavailable, _port), do: "the loopback address is not available"
   defp door_failure(_listen_failed, port), do: "it could not listen on port #{port}"
+
+  # --- screen ----------------------------------------------------------------
+
+  attr :screen, :map, required: true
+
+  defp screen(assigns) do
+    offered? = Enum.any?(assigns.screen.options, &(&1.id == assigns.screen.provider))
+    stale? = assigns.screen.provider != "" and not offered?
+    assigns = assign(assigns, stale?: stale?, card: @card)
+
+    ~H"""
+    <form
+      id="cues-screen-form"
+      phx-submit="cues_save_screen"
+      class={[@card, "flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3"]}
+    >
+      <span class="flex items-center gap-1.5 text-sm font-medium">
+        Screen <.info text={@screen.info} />
+      </span>
+      <div class="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
+        <select
+          name="cues_screen[provider]"
+          aria-label="Screen"
+          class="select select-bordered select-sm w-full bg-base-100 sm:w-auto"
+        >
+          <option value="" selected={@screen.provider == ""}>Words</option>
+          <option
+            :for={option <- @screen.options}
+            value={option.id}
+            selected={option.id == @screen.provider}
+          >
+            {option.label}
+          </option>
+        </select>
+        <button type="submit" class="btn btn-primary btn-sm">Save</button>
+      </div>
+      <p :if={@stale?} class="w-full text-sm text-warning">
+        The saved screen, {@screen.provider}, is not set up, so watchers are held until it is set up or another screen is saved.
+      </p>
+    </form>
+    """
+  end
 
   # --- filter model ----------------------------------------------------------
 

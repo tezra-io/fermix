@@ -321,19 +321,21 @@ defmodule FermixCore.Setup.RestartStateTest do
       assert RestartState.boot_bound?([:cues, :door_port])
     end
 
-    test "a source, a mandate or the mandates switch is no restart reason" do
+    test "a source, a mandate, the mandates switch or the screen is no restart reason" do
       Application.put_env(:fermix_core, :cues, enabled: true)
       server = start_state()
 
       Application.put_env(:fermix_core, :cues,
         enabled: true,
         mandates_enabled: false,
+        screen_provider: "openai",
         sources: %{"eng-blogs" => [preset: "rss", url: "https://example.org/feed"]},
         mandates: %{"release-issues" => [job: "job_1"]}
       )
 
       assert RestartState.restart(server: server) == %{required: false, reasons: []}
       refute RestartState.boot_bound?([:cues, :sources])
+      refute RestartState.boot_bound?([:cues, :screen_provider])
     end
   end
 

@@ -2384,6 +2384,12 @@
     },
     {
       "method": "settings.get:cues",
+      "field": "rows:cues_screen_provider",
+      "kind": "engine_only",
+      "why": "The screen postdates the draft, as the rest of the cues section does: one live choice in the ordinary row shape, read at every accept and filter call: the words to listen for, or the decision model of a provider that is set up, checking each item by meaning before the filter model reads it."
+    },
+    {
+      "method": "settings.get:cues",
       "field": "rows:cues_door_port",
       "kind": "engine_only",
       "why": "M60 app surface gives cues their own settings section, cues, published on every build: the cue switch and the door's port, both boot-bound, the mandates switch, and the default filter model's provider and model, applied together and read at every filter call. The draft predates it; the rows are the ordinary row shape."

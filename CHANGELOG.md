@@ -17,6 +17,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a link that redirects still pairs with its preview. A message's previews
   are now sent one by one as each resolves, so a slow site no longer costs
   the message the previews that already finished.
+- **Watchers can screen items by meaning, not only by their words.** A new
+  **Screen** setting in Settings → Cues and the setup page's Cues tab picks
+  how items are checked before the filter model reads them: **Words**, as
+  before, or a decision model from a provider you already set up (OpenAI's
+  Decisions API with gpt-6-luna, or TypeSafe's Jev through OpenRouter or
+  Venice), with that provider's key and nothing new to enter. A decision model
+  checks each item against the watcher's purpose and instructions, with its
+  words as hints, so a post worded differently or in another language is no
+  longer missed, in about a third of a second per item, roughly ten times
+  faster than a chat model. The filter model still makes every pass. Fermix
+  writes a watcher's words the same way either way, and if the chosen
+  provider fails or is removed, the watcher waits and retries instead of
+  falling back to the words.
 - **Watch X accounts with the X sign-in you already have.** A new X accounts
   preset for feed sources takes up to 20 handles, typed with or without `@`,
   and brings each new post from those accounts in as a cue, replies and

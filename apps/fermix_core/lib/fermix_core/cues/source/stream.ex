@@ -31,7 +31,11 @@ defmodule FermixCore.Cues.Source.Stream do
   `unmatched`; the rate buckets (`Cues.Buckets.admit/3`) and the daily budget
   apply to the matched ones; the rest go to `Cues.LiveFilters` with the
   watchers whose words matched, where each is judged and only a pass is
-  stored. A stream routes nothing to a `none` watcher, and never goes through
+  stored. While a decision model screens in place of the words
+  (`Cues.Config.screen_provider/0`, read for each frame), every item goes to
+  every `llm` watcher that has words, and its filter call screens it first
+  (`Cues.Filter`). A
+  stream routes nothing to a `none` watcher, and never goes through
   `Cues.Ingest.accept/3`. Repeats are refused at a pass, by identity.
 
   **Watchers.** At connect and on every flush of a live connection the worker
@@ -91,6 +95,7 @@ defmodule FermixCore.Cues.Source.Stream do
 
   require Logger
 
+  alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.Counts
   alias FermixCore.Cues.Item
   alias FermixCore.Cues.JsonStream
@@ -124,7 +129,9 @@ defmodule FermixCore.Cues.Source.Stream do
   `:schedule` (`(message, ms) -> term`), `:transport` (a module with this
   module's callbacks), `:transport_opts` (added to the transport's options),
   `:admit` (`(ref, n, now_ms) -> admitted`, default `Cues.Buckets.admit/3`),
-  `:live` (the `Cues.LiveFilters` server, default its name), `:notify`
+  `:live` (the `Cues.LiveFilters` server, default its name), `:words?`
+  (zero-arity, whether items are routed by words; default: unless
+  `Cues.Config.screen_provider/0` names a provider), `:notify`
   (default `Cues.Notices.source/4`), `:manager` (a pid linked from `init`;
   `Cues.SourceManager` passes itself). A transport implements
   `Cues.Source.Stream.Transport`.
@@ -148,6 +155,7 @@ defmodule FermixCore.Cues.Source.Stream do
         transport: Keyword.get(opts, :transport, Socket),
         transport_opts: Keyword.get(opts, :transport_opts, []),
         live: Keyword.get(opts, :live, LiveFilters),
+        words?: Keyword.get(opts, :words?, fn -> is_nil(CuesConfig.screen_provider()) end),
         socket: nil,
         socket_ref: nil,
         closing: nil,
@@ -396,7 +404,11 @@ defmodule FermixCore.Cues.Source.Stream do
   defp route(state, [], _now), do: state
 
   defp route(state, items, now) do
-    matched = for item <- items, ids = listeners(state.watchers, item), ids != [], do: {item, ids}
+    words? = state.words?.()
+
+    matched =
+      for item <- items, ids = listeners(state.watchers, item, words?), ids != [], do: {item, ids}
+
     state = counted(state, "unmatched", length(items) - length(matched), now)
     {admitted, state} = admit(state, matched, now)
     {offers, state} = within_budget(state, admitted, now)
@@ -404,10 +416,13 @@ defmodule FermixCore.Cues.Source.Stream do
     state
   end
 
-  # The item's text is prepared once for every watcher of the source.
-  defp listeners([], _item), do: []
+  # The item's text is prepared once for every watcher of the source; with a
+  # screen in place of the words, every watcher that has words listens (one
+  # with none waits for its update either way).
+  defp listeners([], _item, _words?), do: []
+  defp listeners(watchers, _item, false), do: for(%{id: id, words: [_ | _]} <- watchers, do: id)
 
-  defp listeners(watchers, item) do
+  defp listeners(watchers, item, true) do
     prepared = ListenFor.prepare(item)
     for %{id: id, matcher: matcher} <- watchers, ListenFor.match?(matcher, prepared), do: id
   end
@@ -546,7 +561,15 @@ defmodule FermixCore.Cues.Source.Stream do
 
   defp spec(watcher, context) do
     watcher
-    |> Map.take([:id, :name, :purpose, :filter_budget, :filter_failures, :filter_retry_at])
+    |> Map.take([
+      :id,
+      :name,
+      :purpose,
+      :listen_for,
+      :filter_budget,
+      :filter_failures,
+      :filter_retry_at
+    ])
     |> Map.merge(Map.fetch!(context, watcher.id))
   end
 

@@ -28,6 +28,7 @@ defmodule FermixCore.Cues.Settings do
   require Logger
 
   alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Cues.FilterChoices
   alias FermixCore.Cues.Pins
   alias FermixCore.Cues.Presets
   alias FermixCore.Providers.RoutingOverrides
@@ -41,6 +42,7 @@ defmodule FermixCore.Cues.Settings do
   # are made by Fermix (`new_token/1`, `Cues.Webhook.ensure_path_secret/2`).
   @typed_secret_fields [:key, :secret]
   @token_bytes 32
+  @screen_not_offered "Pick Words, or the decision model of a provider that is set up."
 
   @type refusal :: {:invalid, String.t()}
   @type secret_failure :: {:secret_store_failed, String.t(), String.t()}
@@ -63,6 +65,35 @@ defmodule FermixCore.Cues.Settings do
          {:ok, _report} <- commit(plan) do
       {:ok, %{restart?: restart?(plan.old, plan.new)}}
     end
+  end
+
+  @doc """
+  Saves how items are screened before the filter model reads them
+  (`[fermix_core.cues] screen_provider`): a provider whose decision model
+  screens in place of the words to listen for, or nil (or `""`) for the words.
+  Only a provider `FilterChoices.screen_options/1` offers is taken. Read at
+  every accept and filter call, so it applies at once.
+  """
+  @spec save_screen_provider(String.t() | nil) ::
+          {:ok, %{words?: boolean()}} | {:error, refusal() | term()}
+  def save_screen_provider(provider) when is_binary(provider) or is_nil(provider) do
+    provider = blank_to_nil(provider)
+
+    with :ok <- screen_offered(provider),
+         {:ok, plan} <- plan(&{:ok, put_or_delete(&1, :screen_provider, provider), nil}),
+         {:ok, _report} <- commit(plan) do
+      {:ok, %{words?: is_nil(provider)}}
+    end
+  end
+
+  defp screen_offered(nil), do: :ok
+
+  defp screen_offered(provider) do
+    offered = FilterChoices.screen_options(ConfigStore.current_snapshot())
+
+    if Enum.any?(offered, &(&1.id == provider)),
+      do: :ok,
+      else: {:error, {:invalid, @screen_not_offered}}
   end
 
   @doc """

@@ -1009,9 +1009,10 @@ Notes that the shapes alone do not carry:
   home-alerts.").
 - **`cues` is the cue section**, under pane `cues`: `cues_enabled` (the cue tree
   starts at boot, so `restart` is true), `cues_mandates_enabled` (read at every
-  mandate call), `filter_provider` and `filter_model` (the Cues filter model,
-  the one every watcher's filter uses, read at every filter call) and
-  `cues_door_port` (`advanced`, 1024 to 65535, always on 127.0.0.1). The rows
+  mandate call), `cues_screen_provider` (how items are screened, read at every
+  accept and filter call), `filter_provider` and `filter_model` (the Cues
+  filter model, the one every watcher's filter uses, read at every filter call)
+  and `cues_door_port` (`advanced`, 1024 to 65535, always on 127.0.0.1). The rows
   carry their explanations in `info` and no `footer`; the filter model's says
   a smaller, faster model works well. `filter_provider` offers `""`, the
   default, labelled with the main model it resolves to ("Default: your main
@@ -1021,7 +1022,15 @@ Notes that the shapes alone do not carry:
   catalog as suggestions. With neither set, every filter runs on the main
   model. The two are applied together in one `settings.apply`, both or `""`
   for both; either alone is refused with "Pick a provider and a model, or
-  clear both."
+  clear both." `cues_screen_provider` is how items are screened before the
+  filter model reads them: `""` ("Words"), the watcher's words to listen for,
+  then one option for the decision model of each provider that is set up and
+  serves one ("OpenAI · gpt-6-luna", "OpenRouter · Jev", "Venice · Jev"). A
+  decision model checks each item by meaning, with the watcher's purpose,
+  instructions and words as hints, and only an item it lets through reaches
+  the filter model. A saved provider that is no longer set up stays, disabled
+  with its hint, and its watchers are held until it is set up again or
+  another screen is picked.
 - **Every cue write goes through the setup page's own path**, so the outside
   edit refusal (`external_change`), the baseline re-record, the secret
   take-back and the source workers' reconcile apply identically from either

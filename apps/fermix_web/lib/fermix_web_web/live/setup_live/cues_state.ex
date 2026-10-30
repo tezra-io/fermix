@@ -100,6 +100,7 @@ defmodule FermixWebWeb.SetupLive.CuesState do
         memory_on?: MemoryConfig.enabled?()
       },
       door: Overview.door(Keyword.get(opts, :door, @door)),
+      screen: screen_view(raw, snapshot),
       filter: filter_view(Keyword.get(core, :routing, []), snapshot),
       sources: Enum.map(CuesConfig.sources(cues), &source_view(&1, rows, now)),
       sources_error: rows_error(rows),
@@ -140,6 +141,14 @@ defmodule FermixWebWeb.SetupLive.CuesState do
     case Settings.save_switches(changes) do
       {:ok, %{restart?: true}} -> {:saved, "Cues saved. Restart to apply.", restart?: true}
       {:ok, %{restart?: false}} -> {:saved, "Cues saved.", []}
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  defp event("save_screen", %{"cues_screen" => params}, state, _opts) do
+    case Settings.save_screen_provider(params["provider"]) do
+      {:ok, %{words?: true}} -> {:saved, "Items are screened by their words.", []}
+      {:ok, %{words?: false}} -> {:saved, "Items are screened by a decision model.", []}
       {:error, reason} -> {:error, reason, state}
     end
   end
@@ -248,6 +257,17 @@ defmodule FermixWebWeb.SetupLive.CuesState do
           "takes it down."
       ],
       else: []
+  end
+
+  # --- the screen ----------------------------------------------------------------
+
+  # Words first, then the decision model of each provider that is set up.
+  defp screen_view(raw, snapshot) do
+    %{
+      provider: raw |> Keyword.get(:screen_provider) |> text(),
+      options: FilterChoices.screen_options(snapshot),
+      info: FilterChoices.screen_info()
+    }
   end
 
   # --- default filter model ----------------------------------------------------

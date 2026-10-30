@@ -1,7 +1,8 @@
 defmodule FermixCore.Management.Settings.Cues do
   @moduledoc """
   The `cues` section (M60 app surface §3.2): the cue switches, the door's
-  port and the default filter model. Its rows are the scalars; the sources,
+  port, how items are screened and the default filter model. Its rows are the
+  scalars; the sources,
   watchers and mandates are the `cues.*` methods (`Management.Cues`), as the
   phone channel has `channels.mobile` beside `mobile.*`.
 
@@ -18,6 +19,13 @@ defmodule FermixCore.Management.Settings.Cues do
   models as suggestions. A provider whose list is the account's own publishes
   none, and the client asks `providers.models.list`. Each row keeps its
   explanation in `info`, with no footer.
+
+  `cues_screen_provider` is how items are screened before the filter model
+  reads them: `""`, the words to listen for, then the decision model of each
+  provider that is set up (`FilterChoices.screen_options/1`). A saved provider
+  that is no longer offered stays, disabled with its hint, so the value is
+  always an option; its watchers are held until it is set up again or another
+  screen is picked.
   """
 
   alias FermixCore.Cues.Config, as: CuesConfig
@@ -67,6 +75,12 @@ defmodule FermixCore.Management.Settings.Cues do
         value: CuesConfig.mandates_enabled?(cues),
         restart: Row.restart?([:cues, :mandates_enabled])
       ),
+      Row.new("cues_screen_provider", :choice, "Screen",
+        info: FilterChoices.screen_info(),
+        value: Source.string(Source.core(snapshot, :cues), :screen_provider),
+        options: screen_options(snapshot),
+        restart: Row.restart?([:cues, :screen_provider])
+      ),
       Row.new("filter_provider", :choice, "Filter model",
         info: @filter_info,
         value: provider,
@@ -94,8 +108,9 @@ defmodule FermixCore.Management.Settings.Cues do
 
   @doc """
   Writes one `settings.apply` of the section: the filter pair first, through
-  `Cues.Settings.save_filter_model/2`, then the switches through
-  `save_switches/1`. Either filter key alone is refused before anything is
+  `Cues.Settings.save_filter_model/2`, then the screen through
+  `save_screen_provider/1`, then the switches through `save_switches/1`.
+  Either filter key alone is refused before anything is
   written. A refusal answers `{:invalid_value, sentence}`, which the settings
   write names under the field that was sent.
   """
@@ -106,6 +121,7 @@ defmodule FermixCore.Management.Settings.Cues do
 
     with :ok <- whole_pair(filter),
          {:ok, _filter} <- save_filter(filter),
+         {:ok, _screen} <- save_screen(answers),
          {:ok, _switches} <- save_switches(switches) do
       {:ok, %{}}
     end
@@ -120,6 +136,13 @@ defmodule FermixCore.Management.Settings.Cues do
   defp save_filter(filter),
     do: refused(CueSettings.save_filter_model(filter[:filter_provider], filter[:filter_model]))
 
+  defp save_screen(answers) do
+    case Keyword.fetch(answers, :screen_provider) do
+      {:ok, provider} -> refused(CueSettings.save_screen_provider(provider))
+      :error -> {:ok, :untouched}
+    end
+  end
+
   defp save_switches([]), do: {:ok, :untouched}
   defp save_switches(switches), do: switches |> CueSettings.save_switches() |> refused()
 
@@ -132,6 +155,14 @@ defmodule FermixCore.Management.Settings.Cues do
   defp provider_options(snapshot, saved) do
     set_up = Enum.map(FilterChoices.providers(snapshot), &Row.option(&1.id, &1.label))
     [Row.option("", FilterChoices.main_model_label(snapshot)) | set_up] ++ stale(saved, set_up)
+  end
+
+  # Words first, then the decision models that are offered; a saved provider no
+  # longer offered stays, disabled, as the filter's own does.
+  defp screen_options(snapshot) do
+    saved = Source.string(Source.core(snapshot, :cues), :screen_provider)
+    offered = Enum.map(FilterChoices.screen_options(snapshot), &Row.option(&1.id, &1.label))
+    [Row.option("", "Words") | offered] ++ stale(saved, offered)
   end
 
   defp stale(saved, set_up) do

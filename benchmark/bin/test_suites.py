@@ -593,7 +593,8 @@ def test_the_shipped_numbered_rubrics_parse():
                       "sources_and_anything_broken": 4, "anything_waiting_on_me": 4,
                       "sanity_sources_read": 2, "broker_news_websocket": 3,
                       "market_headlines_wss": 3, "x_account_new_posts": 4,
-                      "x_handle_through_webhooks": 4, "mandates_and_approval": 3,
+                      "x_handle_through_webhooks": 4, "words_miss_reworded_posts": 4,
+                      "screen_on_a_fallback_provider": 3, "mandates_and_approval": 3,
                       "mandates_needing_approval": 3}
 
 

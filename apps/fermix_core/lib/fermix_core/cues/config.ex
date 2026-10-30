@@ -2,7 +2,8 @@ defmodule FermixCore.Cues.Config do
   @moduledoc """
   `[fermix_core.cues]` config (M60 §6.2, §10.1, §15).
 
-  Three scalar keys (`enabled`, `mandates_enabled`, `door_port`) and two tables
+  Four scalar keys (`enabled`, `mandates_enabled`, `screen_provider`,
+  `door_port`) and two tables
   of sections: `[fermix_core.cues.sources.<ref>]` and
   `[fermix_core.cues.mandates.<name>]`, a mandate's `pin_args` being its own
   sub-table (`[fermix_core.cues.mandates.<name>.pin_args]`), because the config
@@ -40,6 +41,7 @@ defmodule FermixCore.Cues.Config do
   alias FermixCore.Cues.Presets
   alias FermixCore.Cues.Webhook
   alias FermixCore.Cues.XAccounts
+  alias FermixCore.Providers.Descriptor
   alias FermixCore.Setup.SecretWriter
 
   @default_door_port 4032
@@ -55,7 +57,7 @@ defmodule FermixCore.Cues.Config do
   # A float the config parser reads back as the same float.
   @float_text_pattern ~r/\A-?\d+\.\d+\z/
 
-  @config_keys [:enabled, :mandates_enabled, :door_port, :sources, :mandates]
+  @config_keys [:enabled, :mandates_enabled, :screen_provider, :door_port, :sources, :mandates]
   @kinds [:stream, :feed, :webhook, :local_push]
   @verify_methods [:shared_secret, :hmac, :standard_webhooks]
   @id_choices [:content_hash]
@@ -304,6 +306,7 @@ defmodule FermixCore.Cues.Config do
       :mandates_enabled,
       normalize_boolean(lookup(config, :mandates_enabled), "cues.mandates_enabled")
     )
+    |> put_present(:screen_provider, normalize_screen_provider(lookup(config, :screen_provider)))
     |> put_present(:door_port, normalize_door_port(lookup(config, :door_port)))
     |> put_present(:sources, normalize_table(lookup(config, :sources), :sources))
     |> put_present(:mandates, normalize_table(lookup(config, :mandates), :mandates))
@@ -333,6 +336,21 @@ defmodule FermixCore.Cues.Config do
   @doc "The global switch for unattended mandate calls (default on)."
   @spec mandates_enabled?(t()) :: boolean()
   def mandates_enabled?(config \\ current()), do: Keyword.get(config, :mandates_enabled, true)
+
+  @doc """
+  The provider whose decision model screens items in place of the words to
+  listen for (`Cues.Filter`), or nil for the words (the default). Read at every
+  accept and every filter call. A known provider is all the file must name:
+  whether it serves a decision model and is set up is the call's to find, so a
+  provider removed later holds the watchers instead of stopping Fermix.
+  """
+  @spec screen_provider(t()) :: atom() | nil
+  def screen_provider(config \\ current()) do
+    case Keyword.get(config, :screen_provider) do
+      nil -> nil
+      name -> Enum.find(Descriptor.ids(), &(Atom.to_string(&1) == name))
+    end
+  end
 
   @doc "The loopback port the door listens on."
   @spec door_port(t()) :: :inet.port_number()
@@ -811,6 +829,24 @@ defmodule FermixCore.Cues.Config do
   end
 
   # --- shared validators -------------------------------------------------------
+
+  # Stored as the provider's name, the same string in the file and in
+  # application env, so it round-trips with nothing to convert.
+  defp normalize_screen_provider(nil), do: nil
+
+  defp normalize_screen_provider(name) when is_binary(name) do
+    if Enum.any?(Descriptor.ids(), &(Atom.to_string(&1) == name)),
+      do: name,
+      else: raise_screen_provider(name)
+  end
+
+  defp normalize_screen_provider(other), do: raise_screen_provider(other)
+
+  defp raise_screen_provider(value) do
+    raise ArgumentError,
+          "invalid cues.screen_provider #{inspect(value)}; expected a provider such as " <>
+            "\"openai\", \"openrouter\" or \"venice\", or no key for the words to listen for"
+  end
 
   defp normalize_door_port(nil), do: nil
   defp normalize_door_port(port) when is_integer(port) and port in @door_ports, do: port

@@ -297,27 +297,43 @@ defmodule FermixCore.Memory.Repo.CuesFilterSql do
 
   defp fetch_watcher(conn, watcher_id) do
     sql = """
-    SELECT id, name, purpose, task_job_id, filter_failures, filter_budget
+    SELECT id, name, purpose, listen_for, task_job_id, filter_failures, filter_budget
     FROM cue_watchers WHERE id = ?
     """
 
     case CuesSql.query_all(conn, sql, [watcher_id]) do
-      {:ok, [[id, name, purpose, job_id, failures, budget]]} ->
-        {:ok,
-         %{
-           id: id,
-           name: name,
-           purpose: purpose,
-           task_job_id: job_id,
-           filter_failures: failures,
-           filter_budget: budget
-         }}
+      {:ok, [[id, name, purpose, words, job_id, failures, budget]]} ->
+        with {:ok, listen_for} <- words(words) do
+          {:ok,
+           %{
+             id: id,
+             name: name,
+             purpose: purpose,
+             listen_for: listen_for,
+             task_job_id: job_id,
+             filter_failures: failures,
+             filter_budget: budget
+           }}
+        end
 
       {:ok, []} ->
         {:error, {:not_found, :watcher}}
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  # A watcher's words, which a decision model's screen reads as hints.
+  defp words(text) do
+    case Jason.decode(text) do
+      {:ok, list} when is_list(list) ->
+        if Enum.all?(list, &is_binary/1),
+          do: {:ok, list},
+          else: {:error, {:corrupt, "cue_watchers", {:json_list, :listen_for}}}
+
+      _not_a_list ->
+        {:error, {:corrupt, "cue_watchers", {:json_list, :listen_for}}}
     end
   end
 

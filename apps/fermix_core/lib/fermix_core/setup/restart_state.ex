@@ -86,13 +86,14 @@ defmodule FermixCore.Setup.RestartState do
   # cue filter's default model (`routing.filter_*`, M60 §8.2) is read at every
   # filter call; the rest of routing is read when a run starts its route. The
   # cue tree starts at boot (its switch and the door's port), but its sources
-  # are reconciled when the settings are applied and its mandates and their
-  # switch are read at every mandate call.
+  # are reconciled when the settings are applied, the screen is read at every
+  # accept and filter call, and its mandates and their switch are read at every
+  # mandate call.
   @live_parts [
     sandbox: [[:env]],
     channels: [[:mobile, :enabled], [:mobile, :iroh]],
     routing: [[:filter_provider], [:filter_model], [:filter_reasoning_effort]],
-    cues: [[:mandates_enabled], [:sources], [:mandates]]
+    cues: [[:screen_provider], [:mandates_enabled], [:sources], [:mandates]]
   ]
   @wrong_shape_sentence "The settings file could not be read: a value in it is not the shape Fermix expects."
   @external_change_section "settings_file"

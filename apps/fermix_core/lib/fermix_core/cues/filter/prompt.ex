@@ -13,6 +13,11 @@ defmodule FermixCore.Cues.Filter.Prompt do
 
   A call holds exactly one cue, so a planted item can decide only itself.
   The cue's payload is cut at `max_cue_chars/0`, and the frame says so.
+
+  The user message is `criteria/1` (the watcher and its instructions, the
+  owner's side) then `evidence/1` (the examples and the cue, outside data). A
+  decision model (`Cues.Filter.Decision`) takes the two apart: the first as its
+  question, the second as the content it reads.
   """
 
   alias FermixCore.Capabilities.UntrustedContent
@@ -51,20 +56,27 @@ defmodule FermixCore.Cues.Filter.Prompt do
 
   @doc "The messages for the filter call that `claim` describes."
   @spec messages(map()) :: [message()]
-  def messages(%{watcher: watcher, cue: cue, instructions: instructions, examples: examples})
-      when is_map(watcher) and is_map(cue) and is_list(instructions) and is_list(examples) do
-    user =
-      [
-        watcher_block(watcher),
-        instructions_block(instructions),
-        examples_block(examples),
-        "The item to decide:\n" <> cue_frame(cue),
-        @answer_line
-      ]
-      |> Enum.reject(&is_nil/1)
-      |> Enum.join("\n\n")
-
+  def messages(claim) when is_map(claim) do
+    user = Enum.join([criteria(claim), evidence(claim), @answer_line], "\n\n")
     [%{role: "system", content: String.trim_trailing(@system)}, %{role: "user", content: user}]
+  end
+
+  @doc """
+  The watcher's name and purpose and its instructions by number: what the
+  owner asked for, outside any frame.
+  """
+  @spec criteria(map()) :: String.t()
+  def criteria(%{watcher: watcher, instructions: instructions})
+      when is_map(watcher) and is_list(instructions) do
+    watcher_block(watcher) <> "\n\n" <> instructions_block(instructions)
+  end
+
+  @doc "The examples the owner marked, if any, then the one cue, each framed as outside data."
+  @spec evidence(map()) :: String.t()
+  def evidence(%{cue: cue, examples: examples}) when is_map(cue) and is_list(examples) do
+    [examples_block(examples), "The item to decide:\n" <> cue_frame(cue)]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n\n")
   end
 
   defp watcher_block(watcher) do

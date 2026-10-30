@@ -25,7 +25,7 @@ defmodule FermixCore.Cues.LiveFilters do
   this mailbox. Each call runs as one task under
   `FermixCore.Cues.LiveFilterSupervisor` (`Task.Supervisor.async_nolink/2`,
   monitored). The task opens the call's live run (`Cues.Filter.Telemetry`),
-  asks `Cues.Filter.Llm.decide/2`, tells this process it has decided, writes
+  asks `Cues.Filter.decide/2`, tells this process it has decided, writes
   the result itself, sends any notice, closes the run and reports back:
 
     * a pass: `CuesSql`'s `{:pass_live, …}` (the cue if its identity is new,
@@ -66,6 +66,7 @@ defmodule FermixCore.Cues.LiveFilters do
 
   alias FermixCore.Cues
   alias FermixCore.Cues.Counts
+  alias FermixCore.Cues.Filter
   alias FermixCore.Cues.Filter.Llm
   alias FermixCore.Cues.Filter.Telemetry, as: FilterTelemetry
   alias FermixCore.Cues.Notices
@@ -101,6 +102,7 @@ defmodule FermixCore.Cues.LiveFilters do
           required(:id) => String.t(),
           required(:name) => String.t(),
           required(:purpose) => String.t() | nil,
+          required(:listen_for) => [String.t()],
           required(:filter_budget) => non_neg_integer(),
           required(:filter_failures) => non_neg_integer(),
           required(:filter_retry_at) => DateTime.t() | nil,
@@ -117,7 +119,7 @@ defmodule FermixCore.Cues.LiveFilters do
   timer and the call deadline, for tests, which send `:flush` and `:due` by
   hand), `:task_supervisor` (default `FermixCore.Cues.LiveFilterSupervisor`),
   `:notices` (default `Cues.Notices`) and `:notice_opts` (appended to every
-  notice call's opts), `:llm` (opts for `Cues.Filter.Llm.decide/2`'s seams),
+  notice call's opts), `:llm` (opts for `Cues.Filter.decide/2`'s seams),
   `:wake_scheduler` (default `Cues.wake_scheduler/0`) and `:sleep` (the write
   retry's wait, default `Process.sleep/1`).
   """
@@ -412,7 +414,7 @@ defmodule FermixCore.Cues.LiveFilters do
     |> Map.merge(Llm.configured())
   end
 
-  # What `Cues.Filter.Llm.decide/2` takes, shaped as a stored claim: the
+  # What `Cues.Filter.decide/2` takes, shaped as a stored claim: the
   # watcher's purpose, instructions and examples, and the one item.
   defp claim_of(spec, %{item: item} = entry) do
     cue = %{
@@ -425,7 +427,7 @@ defmodule FermixCore.Cues.LiveFilters do
     }
 
     %{
-      watcher: Map.take(spec, [:id, :name, :purpose]),
+      watcher: Map.take(spec, [:id, :name, :purpose, :listen_for]),
       cue: cue,
       instructions: spec.instructions,
       examples: spec.examples
@@ -465,7 +467,7 @@ defmodule FermixCore.Cues.LiveFilters do
   defp run_call(run, claim, item, context) do
     started = monotonic_ms()
     FilterTelemetry.run_start(run)
-    result = Llm.decide(claim, Keyword.put(context.llm_opts, :session_id, run.session_id))
+    result = Filter.decide(claim, Keyword.put(context.llm_opts, :session_id, run.session_id))
     send(context.owner, {:decided, self()})
     end_call(context, run, item, result, started)
   end

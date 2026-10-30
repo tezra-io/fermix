@@ -206,6 +206,57 @@ defmodule FermixWebWeb.SetupLiveCuesTest do
     end
   end
 
+  describe "screen" do
+    test "offers the words, then only the decision models of providers that are set up",
+         %{conn: conn} do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "invented-key-2207"])
+      {:ok, view, _html} = live(conn, "/setup")
+      html = open_cues(view)
+
+      assert html =~ "How items are screened before the filter model reads them."
+      assert html =~ ~r/<option value="" selected[^>]*>\s*Words/
+      assert html =~ ~s(<option value="openai")
+      assert html =~ "OpenAI · gpt-6-luna"
+      refute html =~ ~s(<option value="openrouter")
+    end
+
+    test "saves a decision model live and clears back to words", %{conn: conn} do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "invented-key-2207"])
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+
+      html =
+        view
+        |> form("#cues-screen-form", cues_screen: %{provider: "openai"})
+        |> render_submit()
+
+      assert html =~ "Items are screened by a decision model."
+      refute html =~ "Restart to apply"
+      assert Keyword.get(persisted_cues(), :screen_provider) == "openai"
+
+      html =
+        view
+        |> form("#cues-screen-form", cues_screen: %{provider: ""})
+        |> render_submit()
+
+      assert html =~ "Items are screened by their words."
+      refute Keyword.has_key?(persisted_cues(), :screen_provider)
+    end
+
+    test "a provider that is not set up is refused and nothing is written", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+      open_cues(view)
+
+      html =
+        view
+        |> element("#cues-screen-form")
+        |> render_submit(%{cues_screen: %{provider: "venice"}})
+
+      assert html =~ "Pick Words, or the decision model of a provider that is set up."
+      assert persisted_cues() == []
+    end
+  end
+
   describe "default filter model" do
     test "offers the main model first and only the providers that are set up", %{conn: conn} do
       Application.put_env(:fermix_core, :providers, openai: [api_key: "invented-key-2207"])

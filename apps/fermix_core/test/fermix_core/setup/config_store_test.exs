@@ -2764,6 +2764,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       [
         enabled: true,
         mandates_enabled: false,
+        screen_provider: "openai",
         door_port: 4555,
         sources: %{
           "home-alerts" => [kind: :local_push, daily_budget: 500, token: "@keyring"],

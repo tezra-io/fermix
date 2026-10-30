@@ -1431,6 +1431,7 @@ defmodule FermixCore.Management.CuesTest do
       assert Enum.map(rows, &{&1["key"], &1["kind"], &1["restart"]}) == [
                {"cues_enabled", "toggle", true},
                {"cues_mandates_enabled", "toggle", false},
+               {"cues_screen_provider", "choice", false},
                {"filter_provider", "choice", false},
                {"filter_model", "choice", false},
                {"cues_door_port", "number", true}
@@ -1505,6 +1506,73 @@ defmodule FermixCore.Management.CuesTest do
                Settings.apply("cues", %{"filter_provider" => "", "filter_model" => ""})
 
       refute config_text(home) =~ "filter_model"
+    end
+
+    test "the screen offers the words, then the decision model of each provider set up" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true],
+        venice: [api_key: "vn-invented"],
+        openai: [api_key: "sk-invented"]
+      )
+
+      assert {:ok, %{"rows" => rows}} = Settings.get("cues")
+      screen = Enum.find(rows, &(&1["key"] == "cues_screen_provider"))
+
+      assert %{"label" => "Screen", "value" => ""} = screen
+      assert screen["info"] =~ "How items are screened before the filter model reads them."
+      assert screen["info"] =~ "roughly ten times faster than a chat model"
+
+      assert Enum.map(screen["options"], &{&1["value"], &1["label"]}) == [
+               {"", "Words"},
+               {"openai", "OpenAI · gpt-6-luna"},
+               {"venice", "Venice · Jev"}
+             ]
+    end
+
+    test "only an offered decision model is saved, applies live, and clears back to words",
+         %{home: home} do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true]
+      )
+
+      assert {:error, {:invalid_params, "cues_screen_provider", sentence}} =
+               Settings.apply("cues", %{"cues_screen_provider" => "openrouter"})
+
+      # A provider that is not set up is no published option.
+      assert sentence == "This setting takes one of its published values."
+      refute File.exists?(Path.join(home, "config.toml"))
+
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true],
+        openrouter: [api_key: "sk-or-invented"]
+      )
+
+      assert {:ok, %{"applied" => ["cues_screen_provider"]}} =
+               Settings.apply("cues", %{"cues_screen_provider" => "openrouter"})
+
+      assert config_text(home) =~ ~s(screen_provider = "openrouter")
+      assert CuesConfig.screen_provider() == :openrouter
+
+      assert {:ok, _words} = Settings.apply("cues", %{"cues_screen_provider" => ""})
+      refute config_text(home) =~ "screen_provider"
+      assert CuesConfig.screen_provider() == nil
+    end
+
+    test "a saved screen whose provider is no longer set up stays in the menu, disabled" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant-invented", primary: true]
+      )
+
+      Application.put_env(:fermix_core, :cues, screen_provider: "openai")
+
+      assert {:ok, %{"rows" => rows}} = Settings.get("cues")
+      screen = Enum.find(rows, &(&1["key"] == "cues_screen_provider"))
+
+      assert screen["value"] == "openai"
+      assert Enum.map(screen["options"], & &1["value"]) == ["", "openai"]
+
+      assert %{"disabled" => true, "hint" => "Set up this provider first."} =
+               Enum.find(screen["options"], &(&1["value"] == "openai"))
     end
 
     test "the switches write through the setup page's own path", %{home: home} do

@@ -410,11 +410,11 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   @spec handle(conn(), tuple()) :: term()
   def handle(
         conn,
-        {:accept, %{ref: ref, rejected: rejected, daily_budget: budget} = source, items,
-         %DateTime{} = now, state}
+        {:accept, %{ref: ref, rejected: rejected, daily_budget: budget, words?: words?} = source,
+         items, %DateTime{} = now, state}
       )
       when is_binary(ref) and is_map(rejected) and is_integer(budget) and budget >= 0 and
-             is_list(items) and (is_map(state) or is_nil(state)) do
+             is_boolean(words?) and is_list(items) and (is_map(state) or is_nil(state)) do
     with :ok <- valid_items(items),
          :ok <- valid_rejects(rejected),
          {:ok, attrs} <- source_attrs(state || %{}) do
@@ -781,7 +781,7 @@ defmodule FermixCore.Memory.Repo.CuesSql do
 
   defp accept_in_tx(conn, %{ref: ref, daily_budget: budget} = source, items, now, attrs) do
     with {:ok, room} <- budget_room(conn, ref, budget, now),
-         {:ok, watchers} <- listening_watchers(conn, ref),
+         {:ok, watchers} <- listening_watchers(conn, ref, source.words?),
          initial = %{results: [], gaps: [], llm?: false, none?: false, room: room},
          {:ok, acc} <- accept_items(conn, ref, items, watchers, now, initial),
          rejected = with_over_budget(source.rejected, acc.results),
@@ -829,8 +829,11 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   end
 
   # Each enabled watcher of the source with what it listens for: a `none`
-  # watcher everything, an `llm` watcher its words, compiled once per accept.
-  defp listening_watchers(conn, ref) do
+  # watcher everything, an `llm` watcher its words, compiled once per accept,
+  # or everything (`:any`) while a decision model checks items in place of the
+  # words (`words?` false). An `llm` watcher with no words gets nothing either
+  # way: it waits for its update (`needs_update`).
+  defp listening_watchers(conn, ref, words?) do
     with {:ok, rows} <-
            query_all(
              conn,
@@ -842,32 +845,35 @@ defmodule FermixCore.Memory.Repo.CuesSql do
              """,
              [ref]
            ) do
-      listeners(rows)
+      listeners(rows, words?)
     end
   end
 
-  defp listeners(rows) do
+  defp listeners(rows, words?) do
     Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
-      case listener(row) do
+      case listener(row, words?) do
         {:ok, watcher} -> {:cont, {:ok, acc ++ [watcher]}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
   end
 
-  defp listener([id, "none", _words]), do: {:ok, {id, "none", nil}}
+  defp listener([id, "none", _words], _words?), do: {:ok, {id, "none", nil}}
 
-  defp listener([id, "llm", words]) do
+  defp listener([id, "llm", words], words?) do
     case Jason.decode(words) do
       {:ok, list} when is_list(list) ->
         if Enum.all?(list, &is_binary/1),
-          do: {:ok, {id, "llm", ListenFor.compile(list)}},
+          do: {:ok, {id, "llm", matcher(list, words?)}},
           else: {:error, {:corrupt, "cue_watchers", {:json_list, :listen_for}}}
 
       _not_a_list ->
         {:error, {:corrupt, "cue_watchers", {:json_list, :listen_for}}}
     end
   end
+
+  defp matcher([_ | _], false), do: :any
+  defp matcher(list, _words?), do: ListenFor.compile(list)
 
   defp accept_items(_conn, _ref, [], _watchers, _now, acc), do: {:ok, acc}
 
@@ -976,16 +982,18 @@ defmodule FermixCore.Memory.Repo.CuesSql do
 
   # Routing by words (M60_CUE_INTAKE_AT_SCALE.md §3.1): a `none` watcher gets
   # every item, an `llm` watcher only one its words match, so one with no
-  # words gets nothing. The item's text is prepared once, for every watcher.
+  # words gets nothing, and one listening for `:any` every item. The item's
+  # text is prepared once, for every watcher that matches words.
   defp targets(%Item{self_caused?: true}, _watchers), do: []
   defp targets(%Item{receipt_only?: true}, _watchers), do: []
 
   defp targets(item, watchers) do
-    prepared = if Enum.any?(watchers, &match?({_id, "llm", _m}, &1)), do: ListenFor.prepare(item)
+    prepared = if Enum.any?(watchers, &match?({_id, "llm", %{}}, &1)), do: ListenFor.prepare(item)
     for {id, filter, matcher} <- watchers, listens?(filter, matcher, prepared), do: {id, filter}
   end
 
   defp listens?("none", _matcher, _prepared), do: true
+  defp listens?("llm", :any, _prepared), do: true
   defp listens?("llm", matcher, prepared), do: ListenFor.match?(matcher, prepared)
 
   # A cue no watcher gets is a receipt: no payload, and terminal from the start,

@@ -16,7 +16,7 @@ defmodule FermixCore.Cues.Filters do
 
   Each claim runs as one task under `FermixCore.Cues.FilterSupervisor`
   (`Task.Supervisor.async_nolink/2`, monitored). The task opens the call's
-  run (`Cues.Filter.Telemetry`), asks `Cues.Filter.Llm.decide/2`, writes the
+  run (`Cues.Filter.Telemetry`), asks `Cues.Filter.decide/2`, writes the
   result itself through the Repo (fenced on its `filter_call_id`), emits the
   filter-scoped lifecycle phase, sends any notice and closes the run. When it
   reports back, this process frees the slot, wakes the scheduler on a pass and
@@ -58,6 +58,7 @@ defmodule FermixCore.Cues.Filters do
   require Logger
 
   alias FermixCore.Cues
+  alias FermixCore.Cues.Filter
   alias FermixCore.Cues.Filter.Llm
   alias FermixCore.Cues.Filter.Telemetry, as: FilterTelemetry
   alias FermixCore.Cues.Notices
@@ -86,7 +87,7 @@ defmodule FermixCore.Cues.Filters do
   `Process.send_after/3` to this process), `:task_supervisor` (default
   `FermixCore.Cues.FilterSupervisor`), `:notices` (default `Cues.Notices`) and
   `:notice_opts` (appended to every notice call's opts), `:llm` (opts for
-  `Cues.Filter.Llm.decide/2`'s seams) and `:wake_scheduler` (default
+  `Cues.Filter.decide/2`'s seams) and `:wake_scheduler` (default
   `Cues.wake_scheduler/0`).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -278,7 +279,7 @@ defmodule FermixCore.Cues.Filters do
     started = monotonic_ms()
     FilterTelemetry.run_start(run)
 
-    result = Llm.decide(claim, Keyword.put(context.llm_opts, :session_id, claim.session_id))
+    result = Filter.decide(claim, Keyword.put(context.llm_opts, :session_id, claim.session_id))
     reply = settle(context, run, result)
     finish(context, run, result, reply, monotonic_ms() - started)
     {:settled, match?({:ok, %{passed?: true}}, reply)}

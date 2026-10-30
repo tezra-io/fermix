@@ -22,6 +22,7 @@ defmodule FermixCore.Net.TimeoutPolicy do
           | :transcription
           | :unfurl
           | :attestation_status
+          | :decision
 
   # Buffered LLM: whole-turn response budget (the full body lands at once).
   # Fermix consumes every LLM adapter except Codex in buffered mode; Codex
@@ -44,6 +45,11 @@ defmodule FermixCore.Net.TimeoutPolicy do
   # window opens, out of the phone's way; the window's wait on it is bounded
   # separately, so this only bounds idle network time.
   @attestation_status_ms 10_000
+  # A decision model's answer (`Providers.DecisionModel`): one typed yes or no,
+  # with no text to generate, typically back in under half a second. A slow
+  # answer is a provider fault the cue filter holds and retries, not a reason
+  # to keep a filter slot.
+  @decision_ms 15_000
 
   @doc """
   Returns the `receive_timeout` (ms) for a request `kind`.
@@ -58,4 +64,5 @@ defmodule FermixCore.Net.TimeoutPolicy do
   def receive_timeout_for(:transcription), do: @transcription_ms
   def receive_timeout_for(:unfurl), do: @unfurl_ms
   def receive_timeout_for(:attestation_status), do: @attestation_status_ms
+  def receive_timeout_for(:decision), do: @decision_ms
 end

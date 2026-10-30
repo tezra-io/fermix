@@ -33,6 +33,7 @@ defmodule FermixCore.Cues.ConfigTest do
     %{
       "enabled" => true,
       "mandates_enabled" => false,
+      "screen_provider" => "openrouter",
       "door_port" => 4555,
       "sources" => %{
         "eng-blogs" => %{
@@ -100,6 +101,7 @@ defmodule FermixCore.Cues.ConfigTest do
 
       assert config[:enabled] == true
       assert config[:mandates_enabled] == false
+      assert config[:screen_provider] == "openrouter"
       assert config[:door_port] == 4555
 
       assert config[:sources]["home-alerts"] ==
@@ -156,10 +158,24 @@ defmodule FermixCore.Cues.ConfigTest do
                    end
     end
 
+    # An upgrade must never stop Fermix over the screen: any provider the
+    # catalog knows loads, and whether it serves a decision model and is set up
+    # is the screen's to find at its call.
+    test "a known provider with no decision model still loads" do
+      assert Config.normalize(%{"screen_provider" => "anthropic"}) == [
+               screen_provider: "anthropic"
+             ]
+
+      assert Config.screen_provider(screen_provider: "anthropic") == :anthropic
+      assert Config.screen_provider([]) == nil
+    end
+
     test "value errors name the key" do
       cases = [
         {%{"enabled" => "yes"}, ~r/cues\.enabled/},
         {%{"mandates_enabled" => 1}, ~r/cues\.mandates_enabled/},
+        {%{"screen_provider" => "opnai"}, ~r/cues\.screen_provider/},
+        {%{"screen_provider" => true}, ~r/cues\.screen_provider/},
         {%{"door_port" => 80}, ~r/cues\.door_port.*1024/},
         {%{"door_port" => 70_000}, ~r/cues\.door_port/},
         {source(%{"kind" => "carrier_pigeon"}), ~r/sources\.s1\.kind/},
@@ -577,6 +593,7 @@ defmodule FermixCore.Cues.ConfigTest do
 
       refute Config.enabled?()
       assert Config.mandates_enabled?()
+      assert Config.screen_provider() == nil
       assert Config.door_port() == 4032
       assert Config.sources() == []
       assert Config.source("eng-blogs") == :error
@@ -588,6 +605,7 @@ defmodule FermixCore.Cues.ConfigTest do
 
       assert Config.enabled?()
       refute Config.mandates_enabled?()
+      assert Config.screen_provider() == :openrouter
       assert Config.door_port() == 4555
 
       assert Enum.map(Config.sources(), & &1.ref) == ["eng-blogs", "gh-hooks", "home-alerts"]

@@ -18,7 +18,10 @@ defmodule FermixCore.Cues.Ingest do
      gaps, and `:source_state`. Routing is by words
      (M60_CUE_INTAKE_AT_SCALE.md §3.1): a `none` watcher gets every item, an
      `llm` watcher only one its words to listen for match, and an item no
-     watcher took is a receipt;
+     watcher took is a receipt. While a decision model screens in place of the
+     words (`screen_provider`), an `llm` watcher that has words gets every item
+     too, and the decision model screens it first in its filter call
+     (`Cues.Filter`);
   5. lifecycle telemetry per result, then the wake-ups: `Cues.Filters` when an
      `llm` watcher got a delivery, `Jobs.Scheduler` when a `none` watcher did.
 
@@ -32,6 +35,7 @@ defmodule FermixCore.Cues.Ingest do
   require Logger
 
   alias FermixCore.Cues
+  alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Cues.Item
   alias FermixCore.Cues.Telemetry
   alias FermixCore.Memory.Repo
@@ -69,6 +73,9 @@ defmodule FermixCore.Cues.Ingest do
     `cue_sources` in the same transaction (a nil value leaves the column as it
     was); written even when no item arrived (a stream heartbeat);
   - `:received_mono` — monotonic ms at receipt, for `accept_ms` (default: now);
+  - `:words?` — whether `llm` watchers are routed by their words (default:
+    unless `Cues.Config.screen_provider/0` names a provider, read at each
+    accept);
   - `:wake_filters`, `:wake_scheduler` — zero-arity wake-ups (default
     `Cues.wake_filters/0`, `Cues.wake_scheduler/0`).
 
@@ -147,7 +154,8 @@ defmodule FermixCore.Cues.Ingest do
       {:ok, %{results: [], gaps: [], llm?: false, none?: false}}
     else
       items = Enum.map(admitted, &elem(&1, 1))
-      source = %{ref: ref, rejected: rejected, daily_budget: budget}
+      words? = Keyword.get_lazy(opts, :words?, fn -> is_nil(CuesConfig.screen_provider()) end)
+      source = %{ref: ref, rejected: rejected, daily_budget: budget, words?: words?}
       repo_call({:accept, source, items, now, state}, opts)
     end
   end
