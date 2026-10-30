@@ -20,6 +20,7 @@ defmodule FermixCore.Home.Snapshot.ConfigTest do
     s3_region: "eu-west-1",
     s3_prefix: "fermix/home",
     s3_endpoint: "https://s3.invented.test",
+    s3_credentials: :keys,
     s3_access_key_id: "AKIAINVENTED",
     s3_secret_access_key: "invented-secret"
   ]
@@ -49,6 +50,7 @@ defmodule FermixCore.Home.Snapshot.ConfigTest do
   test "normalize and to_keyword are inverses over the app-environment shape" do
     assert Config.normalize(@app_env) == @app_env
     assert Config.normalize(Config.to_keyword(@app_env)) == @app_env
+    assert Keyword.fetch!(Config.to_keyword(@app_env), :s3_credentials) == "keys"
     assert Config.to_keyword(Config.to_keyword(@app_env)) == Config.to_keyword(@app_env)
     assert Config.normalize(nil) == []
   end
@@ -61,6 +63,7 @@ defmodule FermixCore.Home.Snapshot.ConfigTest do
 
     assert contents =~ "[fermix_core.snapshots]\n"
     assert contents =~ ~s(\nrecipient = "#{@recipient}"\n)
+    assert contents =~ ~s(s3_credentials = "keys")
     assert contents =~ ~s(s3_access_key_id = "@keyring")
     refute contents =~ "invented-secret"
     assert SecretWriterStub.get(:snapshot_s3_secret_access_key) == {:ok, "invented-secret"}
@@ -105,6 +108,7 @@ defmodule FermixCore.Home.Snapshot.ConfigTest do
              region: "us-east-1",
              prefix: "fermix",
              endpoint: nil,
+             credentials: :instance_profile,
              access_key_id: nil,
              secret_access_key: nil
            }
@@ -124,6 +128,7 @@ defmodule FermixCore.Home.Snapshot.ConfigTest do
           {"s3_prefix", "/fermix", "with no slash at either end"},
           {"s3_endpoint", "ftp://s3.invented.test", "takes the storage service's address"},
           {"s3_endpoint", "https://s3.invented.test/path", "with no path"},
+          {"s3_credentials", "root", ~s(takes "instance_profile" or "keys")},
           {"s3_access_key_id", "two\nlines", "takes a single line"}
         ] do
       error = assert_raise ArgumentError, fn -> Config.normalize(%{key => value}) end

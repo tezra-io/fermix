@@ -19,8 +19,8 @@ defmodule FermixCore.Home.Snapshot.S3 do
   **Verified** means S3 accepted the checksum: a `200` to a request that
   carried it, since S3 refuses a body whose digest differs (`BadDigest`), and,
   when the answer echoes `x-amz-checksum-sha256`, the echo is ours. The
-  target never lists, reads or deletes, so an access key that may only
-  `PutObject` is enough.
+  instance role may only `PutObject`: the target never lists, reads or
+  deletes, so a compromised host can neither read old snapshots nor erase them.
 
   **One `PUT`.** A single `PutObject` carries up to 5 GiB. A larger snapshot is
   refused by name (`{:too_large, size, max}`) rather than split: multipart
@@ -76,7 +76,7 @@ defmodule FermixCore.Home.Snapshot.S3 do
   def store(%{path: path, size: size, sha256: sha256, name: name}, settings, opts)
       when is_binary(path) and is_list(opts) do
     with :ok <- within_one_put(size),
-         {:ok, credentials} <- Credentials.resolve(settings) do
+         {:ok, credentials} <- Credentials.resolve(settings, opts) do
       key = key(settings, name, opts)
 
       request =
@@ -102,6 +102,22 @@ defmodule FermixCore.Home.Snapshot.S3 do
 
   def sentence({:checksum_mismatch, _echoed}),
     do: "S3 answered with another checksum than the snapshot's, so it is not counted as stored."
+
+  def sentence({:instance_credentials, :absent}) do
+    "This host has no instance credentials at #{Credentials.instance_file()}; the " <>
+      "credentials timer writes them on a cloud host with an instance role."
+  end
+
+  def sentence({:instance_credentials, {:expired, at}}) do
+    "The instance credentials expired at #{DateTime.to_iso8601(at)}; the credentials " <>
+      "timer has not refreshed them."
+  end
+
+  def sentence({:instance_credentials, :invalid}),
+    do: "The instance credentials file is not one the credentials timer writes."
+
+  def sentence({:instance_credentials, {:unreadable, reason}}),
+    do: "The instance credentials could not be read (#{describe(reason)})."
 
   def sentence({:keys_missing, key}),
     do: "The S3 access keys are not stored: set `#{key}` and try again."

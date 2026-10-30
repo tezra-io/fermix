@@ -569,7 +569,7 @@
         "t": {"const": "enroll_request"},
         "host": {"type": "object", "required": ["name", "os", "arch", "version"], "properties": {"name": {"$ref": "#/$defs/peerName"}, "os": {"$ref": "#/$defs/peerName"}, "arch": {"$ref": "#/$defs/peerName"}, "version": {"$ref": "#/$defs/peerName"}}},
         "candidate": {"type": "object", "required": ["node_id", "relays", "recipient"], "properties": {"node_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "relays": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"$ref": "#/$defs/relay"}}, "recipient": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$", "description": "The one-time X25519 public key (standard base64) the move's stream will be encrypted to; move_accept names it again."}}},
-        "instance": {"type": "object", "required": ["provider", "instance_id", "region"], "properties": {"provider": {"$ref": "#/$defs/peerName"}, "instance_id": {"$ref": "#/$defs/peerName"}, "region": {"$ref": "#/$defs/peerName"}, "account_id": {"$ref": "#/$defs/peerName"}}},
+        "instance": {"type": "object", "required": ["provider", "instance_id", "region", "account_id"], "properties": {"provider": {"$ref": "#/$defs/peerName"}, "instance_id": {"$ref": "#/$defs/peerName"}, "region": {"$ref": "#/$defs/peerName"}, "account_id": {"$ref": "#/$defs/peerName"}}},
         "snapshots": {"type": "object", "required": ["s3_bucket", "s3_region"], "properties": {"s3_bucket": {"$ref": "#/$defs/peerName"}, "s3_region": {"$ref": "#/$defs/peerName"}}}
       }
     },

@@ -977,32 +977,50 @@ compiled-in build identity, never from runtime detection.
 
 `packaging/cloud/first-boot.sh` is the root half of a server that becomes the
 owner's primary (M75 step 6). It runs once as root, from cloud-init user data
-(the code in `FERMIX_ENROLL_CODE`) or as
-`curl -fsSL https://fermix.ai/always-on | sudo sh` (the code read from the
-terminal without echo), and in order: writes the enrollment code to
-`/run/fermix/enroll.code` (tmpfs, 0600); installs an nftables table that drops
-traffic to `169.254.169.254` and `fd00:ec2::254` from every uid but 0 (the
-`output` hook: the
-host's own processes, which is why the server runs no containers), with a root
-unit that loads it before the network at every boot and a `user@<uid>` drop-in
-that will not start the engine account's service manager without it; installs
-the Linux package through `https://fermix.ai/install --no-setup`; creates the
-engine account `fermix` (home `/home/fermix`, no login, lingering); runs
-`fermix home enroll` and `fermix service install` as `fermix`; installs the
-distribution's Chromium on Debian (Ubuntu's is a snap: it says to install a
-browser by hand); and waits up to 5 minutes for the primary to accept the
-candidate, ending with one sentence on
-stderr and a non-zero exit at any step that fails. `--restore` takes no code
-and enrolls nothing: the same server, then the exact steps that import a
-snapshot and start the service. Everything networked after that (dialling the
-primary, the move) is the engine's own candidate role.
+(the code in `FERMIX_ENROLL_CODE`, the stack's wait handle in
+`FERMIX_SIGNAL_URL`) or as `curl -fsSL https://fermix.ai/always-on | sudo sh`
+(the code read from the terminal without echo), and in order: writes the
+enrollment code to `/run/fermix/enroll.code` (tmpfs, 0600); installs an
+nftables table that drops traffic to `169.254.169.254` and `fd00:ec2::254`
+from every uid but 0 (the `output` hook: the host's own processes, which is
+why the server runs no containers), with a root unit that loads it before the
+network at every boot and a `user@<uid>` drop-in that will not start the
+engine account's service manager without it; installs the Linux package
+through `https://fermix.ai/install --no-setup`; creates the engine account
+`fermix` (home `/home/fermix`, no login, lingering); on an AWS instance with a
+role, installs the root `fermix-aws-credentials` timer that writes
+`/run/fermix/aws-credentials.json` every 15 minutes for the S3 snapshot target;
+writes `/run/fermix/instance.json`; with `--shell-access` turns the SSM agent
+on; runs `fermix home enroll` and `fermix service install` as `fermix`;
+installs the distribution's Chromium on Debian (Ubuntu's is a snap: it says
+to install a browser by hand); waits up to 5 minutes for the primary to accept
+the candidate; and signals the wait handle once, `SUCCESS` or `FAILURE` with
+its sentence. A step that fails ends it with one sentence on stderr and a
+non-zero exit. `--restore` takes no code and enrolls nothing: the same server,
+then the exact steps that import a snapshot and start the service. Everything
+networked after that (dialling the primary, the move) is the engine's own
+candidate role.
+`packaging/cloud/aws/fermix-always-on.yaml` is the CloudFormation quick-create
+wrapper: `Mode` (`enroll` or `restore`, with Rules on the code and the bucket
+to restore from, and one refusing `restore` without `ShellAccess`, since the
+restore steps need a shell the Debian image cannot give yet), a VPC with no
+inbound rule, IMDSv2 with hop limit 1, an
+encrypted gp3 disk, in enroll mode a versioned snapshot bucket kept when the
+stack is deleted (each snapshot current for 30 days, then noncurrent for 90),
+an instance role allowed only `s3:PutObject` on the bucket (a restore stack's
+on the lost server's), `ShellAccess` adding the SSM managed-instance policy,
+a wait condition first boot signals, and the script in user data
+(compressed, with its SHA-256, by `aws/embed-first-boot.sh`).
 `packaging/cloud/test/first_boot_test.sh` runs the script in throwaway Debian
 containers against stand-ins for systemd, curl, apt and `fermix`, and once
 with the real apt and Chromium.
 
 Architecture Invariant: no engine process reaches the instance metadata
-address. The enrollment code reaches the engine only as a file, never in an
-argument, an environment the engine inherits, or the console output.
+address; root fetches the role's credentials and hands them over as a file.
+The enrollment code reaches the engine only as a file, never in an argument,
+an environment the engine inherits, or the console output. Fermix holds no
+AWS credential of the owner's. A stack is complete only when its first boot
+said so.
 
 ### `apps/fermix_channels`
 

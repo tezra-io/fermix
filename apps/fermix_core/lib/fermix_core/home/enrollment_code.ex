@@ -15,9 +15,9 @@ defmodule FermixCore.Home.EnrollmentCode do
 
   The secret is the PSK of the enrollment handshake (`FXM1 0x03`, `IKpsk2`),
   so the code is shown once and never logged. A whole code is at most
-  #{2_048} characters, the bound the first-boot script holds it to.
-  `decode/1` trims surrounding whitespace, since a file written with
-  `printf '%s\\n'` ends in a newline.
+  #{2_048} characters, the bound the first-boot script and the CloudFormation
+  template hold it to. `decode/1` trims surrounding whitespace, since a file
+  written with `printf '%s\\n'` ends in a newline.
 
   Pure.
   """

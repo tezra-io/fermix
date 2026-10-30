@@ -17,9 +17,10 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
   @now ~U[2031-05-04 10:00:00Z]
   @passphrase "invented-lantern-orchard"
   @instance %{
-    "provider" => "hetzner",
-    "instance_id" => "61839204",
-    "region" => "fsn1"
+    "provider" => "aws",
+    "instance_id" => "i-0c4e7d2b9a1f30586",
+    "region" => "eu-north-1",
+    "account_id" => "481516234200"
   }
 
   setup do
@@ -163,7 +164,25 @@ defmodule Fermix.CLI.HomeMoveCommandTest do
       {0, out, _err} = run(["candidates"], home: ctx.home, client: stopped, now: fn -> @now end)
       assert out =~ record.candidate_id
 
-      assert out =~ "hetzner instance 61839204 in fsn1 (unverified)"
+      assert out =~
+               "aws instance i-0c4e7d2b9a1f30586 in eu-north-1, account 481516234200 (unverified)"
+
+      assert out =~ "compare the instance id with your stack's output"
+
+      # A server that reported no instance facts has no id to compare.
+      bare = %{
+        "candidate_id" => "cand-0b7e3d91c4a25f68",
+        "name" => "west-box",
+        "os" => "debian",
+        "arch" => "x86_64",
+        "enrolled_at" => "2031-05-04T10:00:00Z",
+        "expires_at" => "2031-05-05T10:00:00Z",
+        "instance" => nil
+      }
+
+      no_facts = fn "home.candidates.list", %{}, _opts -> {:ok, %{"candidates" => [bare]}} end
+      {0, out, _err} = run(["candidates"], home: ctx.home, client: no_facts)
+      assert out =~ "cand-0b7e3d91c4a25f68  west-box  debian/x86_64"
       refute out =~ ~r/compare/i
 
       empty = fn "home.candidates.list", %{}, _opts -> {:ok, %{"candidates" => []}} end

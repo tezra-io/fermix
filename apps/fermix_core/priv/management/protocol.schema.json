@@ -5820,7 +5820,7 @@
           "oneOf": [
             {
               "type": "object",
-              "required": ["provider", "instance_id", "region"],
+              "required": ["provider", "instance_id", "region", "account_id"],
               "properties": {
                 "provider": { "type": "string" },
                 "instance_id": { "type": "string" },

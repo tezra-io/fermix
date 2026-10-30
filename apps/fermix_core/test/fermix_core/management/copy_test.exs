@@ -566,6 +566,10 @@ defmodule FermixCore.Management.CopyTest do
         {:refused, 403, "AccessDenied", "Access Denied"},
         {:unreachable, "connection refused"},
         {:checksum_mismatch, "x"},
+        {:instance_credentials, :absent},
+        {:instance_credentials, {:expired, ~U[2026-10-27 09:30:00Z]}},
+        {:instance_credentials, :invalid},
+        {:instance_credentials, {:unreadable, :eacces}},
         {:keys_missing, :snapshot_s3_access_key_id},
         {:secret_unreadable, :snapshot_s3_secret_access_key, :missing_secret}
       ]

@@ -149,8 +149,8 @@ code on the primary, valid once for thirty minutes, and \fBenroll\fR
 candidate, with no engine running, and removes the code file.
 \fB\-\-snapshot\-bucket\fR and \fB\-\-snapshot\-region\fR name the bucket
 the new server keeps its snapshots in, and \fB\-\-instance\-file\fR what it
-reports about itself, in a file a provisioner writes (the first boot passes
-none). The primary holds the candidate for 24 hours:
+reports about itself, in a file the first boot writes on AWS. The primary
+holds the candidate for 24 hours:
 \fBcandidates\fR lists it, its instance facts unverified, and
 \fBmove \-\-to\fR \fIID\fR moves this home to it under a recovery passphrase
 read from \fB\-\-recovery\-passphrase\-file\fR or asked twice without echo.

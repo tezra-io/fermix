@@ -15,11 +15,10 @@ defmodule Fermix.CLI.HomeMoveCommand do
   - `enroll`, on the new host, makes a fresh home a candidate
     (`FermixCore.Home.Candidate.enroll/3`) with no engine running: it reads
     the code from the file (trimmed), the instance facts from
-    `--instance-file` (`{provider, instance_id, region}` and an optional
-    `account_id`, shown unverified; a provisioner writes that file, and the
-    first boot passes none), writes `candidate/` and the candidate
-    role, and removes the code file. A failure leaves the home as it found
-    it, and the code file too. Human output only.
+    `--instance-file` (`{provider, instance_id, region, account_id}`, shown
+    unverified; the first boot writes that file on AWS), writes `candidate/`
+    and the candidate role, and removes the code file. A failure leaves the
+    home as it found it, and the code file too. Human output only.
   - `candidates` lists the candidates the primary holds: from the engine
     (`home.candidates.list`), or from the home's file when it is stopped.
   - `move` starts the move (`home.move.start`): the running engine writes the
@@ -251,7 +250,18 @@ defmodule Fermix.CLI.HomeMoveCommand do
     do: ["No candidate is enrolled. Open a code with fermix home enroll-code."]
 
   defp candidate_lines(%{"candidates" => candidates}) do
-    Enum.flat_map(candidates, &candidate_line/1)
+    Enum.flat_map(candidates, &candidate_line/1) ++ facts_footer(candidates)
+  end
+
+  # Only a server that reported instance facts (an AWS first boot does) has an
+  # instance id to compare with its stack's output.
+  defp facts_footer(candidates) do
+    if Enum.any?(candidates, &match?(%{"instance" => %{"instance_id" => _}}, &1)),
+      do: [
+        "The instance facts are what each server says of itself, and nobody checked them: " <>
+          "compare the instance id with your stack's output before you move."
+      ],
+      else: []
   end
 
   defp candidate_line(candidate) do
@@ -262,13 +272,13 @@ defmodule Fermix.CLI.HomeMoveCommand do
   end
 
   defp instance_line(%{"provider" => provider, "instance_id" => id} = facts) do
-    ["  #{provider} instance #{id} in #{facts["region"]}#{account(facts)} (unverified)"]
+    [
+      "  #{provider} instance #{id} in #{facts["region"]}, account #{facts["account_id"]} " <>
+        "(unverified)"
+    ]
   end
 
   defp instance_line(_none), do: []
-
-  defp account(%{"account_id" => account}), do: ", account #{account}"
-  defp account(_facts), do: ""
 
   # -- move -------------------------------------------------------------------
 

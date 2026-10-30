@@ -9,7 +9,7 @@ defmodule FermixChannels.Home.Enrollment do
   (`FermixCore.Home.EnrollmentCode`): a fresh 32-byte secret, this primary's
   gateway key, its iroh endpoint id, the relays its endpoint listens on (the
   ones every paired device acknowledged), the host's name and the expiry.
-  Thirty minutes covers a cloud server's creation and first boot. The code is
+  Thirty minutes covers a cloud stack's creation and first boot. The code is
   answered once and never logged; the window (its secret, expiry, and who
   used it) is kept in `<home>/mobile/enrollment.json` (`0600`, device-local),
   so an engine restart between opening a code and the server's check-in loses

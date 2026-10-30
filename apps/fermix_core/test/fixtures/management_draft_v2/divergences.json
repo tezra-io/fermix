@@ -2630,6 +2630,12 @@
     },
     {
       "method": "settings.get:snapshots",
+      "field": "rows:snapshots_s3_credentials",
+      "kind": "engine_only",
+      "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:snapshots",
       "field": "rows:snapshots_s3_endpoint",
       "kind": "engine_only",
       "why": "M75: the snapshots section (pane always_on) publishes where and how often the primary keeps its encrypted snapshots, and the two S3 access-key secrets. The draft predates it; the rows are the ordinary row shape."

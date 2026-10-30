@@ -77,7 +77,7 @@ defmodule FermixChannels.Home.MoveTest do
     assert config =~ ~s(workspace_root = "#{home}/workspace")
     assert config =~ ~s(s3_bucket = "invented-bucket-91")
     assert config =~ ~s(s3_region = "eu-north-1")
-    refute config =~ "s3_credentials"
+    assert config =~ ~s(s3_credentials = "instance_profile")
     assert config =~ ~s(recipient = "#{ctx.started.recovery_recipient}")
     assert File.read!(Path.join([home, "journals", "day.md"])) == "an invented day\n"
 

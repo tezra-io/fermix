@@ -55,8 +55,8 @@ defmodule FermixCore.Sandbox.OsSandbox do
   @secret_prefixed ~w(auth.json memory.db)
 
   # Outside Fermix's home, what a command may never read in any mode: an
-  # Always-On host's enrollment code (M75). `PathPolicy` protects it from
-  # writes as well.
+  # Always-On host's enrollment code, instance facts and instance-profile
+  # credentials (M75). `PathPolicy` protects it from writes as well.
   @system_secret ~w(/run/fermix)
 
   # Outside Fermix's home, what a command may never write in any mode: on macOS

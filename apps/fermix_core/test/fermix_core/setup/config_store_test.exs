@@ -948,6 +948,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   s3_region = "eu-west-1"
   s3_prefix = "fermix/home"
   s3_endpoint = "https://s3.invented.test"
+  s3_credentials = "keys"
   s3_access_key_id = "@keyring"
   s3_secret_access_key = "@file"
 

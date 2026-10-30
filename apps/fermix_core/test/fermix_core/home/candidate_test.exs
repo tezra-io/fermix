@@ -18,9 +18,10 @@ defmodule FermixCore.Home.CandidateTest do
     expires_at: ~U[2031-05-04 10:10:00Z]
   }
   @instance %{
-    "provider" => "hetzner",
-    "instance_id" => "61839204",
-    "region" => "fsn1"
+    "provider" => "aws",
+    "instance_id" => "i-0c4e7d2b9a1f30586",
+    "region" => "eu-north-1",
+    "account_id" => "481516234200"
   }
 
   setup do
@@ -142,13 +143,6 @@ defmodule FermixCore.Home.CandidateTest do
       assert Enum.sort(File.ls!(ctx.home)) == ["candidate", "config.toml"]
     end
 
-    test "keeps an account id when the host gives one", ctx do
-      instance = Map.put(@instance, "account_id", "invented-project-7")
-
-      assert {:ok, _code} = Candidate.enroll(ctx.home, ctx.code, instance: instance, now: @now)
-      assert {:ok, ^instance} = Candidate.instance(ctx.home)
-    end
-
     test "refuses a code that ran out, or facts that are not text", ctx do
       assert {:error, {:code_expired, ~U[2031-05-04 10:10:00Z]}} =
                Candidate.enroll(ctx.home, ctx.code, now: ~U[2031-05-04 10:10:00Z])
@@ -156,12 +150,6 @@ defmodule FermixCore.Home.CandidateTest do
       assert {:error, {:invalid_instance, _sentence}} =
                Candidate.enroll(ctx.home, ctx.code,
                  instance: Map.delete(@instance, "region"),
-                 now: @now
-               )
-
-      assert {:error, {:invalid_instance, _sentence}} =
-               Candidate.enroll(ctx.home, ctx.code,
-                 instance: Map.put(@instance, "account_id", ""),
                  now: @now
                )
 

@@ -1,10 +1,10 @@
 #!/bin/sh
-# Proves packaging/cloud/first-boot.sh: shellcheck on every script here, then
-# in_container.sh in throwaway debian:trixie-slim containers, one scenario
-# each: an existing host typing the code at a terminal and then enrolling with
-# a bucket, a restore host, the failures that stop the
-# first boot, an Ubuntu host, and the distribution's Chromium installed for
-# real and started headless as the engine account.
+# Proves packaging/cloud/first-boot.sh and the CloudFormation template's copy
+# of it: shellcheck on every script here, then in_container.sh in throwaway
+# debian:trixie-slim containers, one scenario each: an existing host typing
+# the code at a terminal, an AWS instance from user data, a restore host, the
+# failures the stack is told about, an Ubuntu host, and the distribution's
+# Chromium installed for real and started headless as the engine account.
 # Needs shellcheck, Docker, the debian:trixie-slim image, and network inside
 # the containers (apt-get installs nftables, and Chromium in its scenario).
 # Not wired into CI; run it by hand:
@@ -26,11 +26,11 @@ command -v shellcheck >/dev/null 2>&1 || fail "shellcheck is not installed, so t
 command -v docker >/dev/null 2>&1 || fail "docker is not installed, so first-boot.sh cannot be run."
 docker image inspect "$image" >/dev/null 2>&1 || fail "the image $image is not present: docker pull $image"
 
-shellcheck -s sh "$cloud/first-boot.sh" "$here"/*.sh "$here"/stubs/*
-echo "ok: shellcheck finds nothing in first-boot.sh and the test scripts"
+shellcheck -s sh "$cloud/first-boot.sh" "$cloud/aws/embed-first-boot.sh" "$here"/*.sh "$here"/stubs/*
+echo "ok: shellcheck finds nothing in first-boot.sh, embed-first-boot.sh and the test scripts"
 
 status=0
-for scenario in existing-host restore failures ubuntu chromium; do
+for scenario in existing-host aws restore failures ubuntu chromium; do
   echo "--- $scenario"
   # Chromium's own sandbox needs the user namespaces a server's kernel gives
   # an unprivileged account; Docker's default seccomp profile refuses them, so

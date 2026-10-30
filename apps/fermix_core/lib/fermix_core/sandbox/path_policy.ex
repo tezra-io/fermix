@@ -19,7 +19,8 @@ defmodule FermixCore.Sandbox.PathPolicy do
     .config/gcloud/application_default_credentials.json
   )
   @os_roots ~w(/etc /usr /bin /sbin /System /Library)
-  # An Always-On host's enrollment code (M75), which its first boot writes.
+  # An Always-On host's enrollment code, instance facts and instance-profile
+  # credentials (M75), which its first boot and a root timer write.
   @fermix_run_dir "/run/fermix"
 
   # The daemon's own state under FERMIX_HOME, which no agent task reads or

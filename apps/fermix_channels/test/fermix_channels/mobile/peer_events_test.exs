@@ -114,21 +114,14 @@ defmodule FermixChannels.Mobile.PeerEventsTest do
                  update_in(request["candidate"], &Map.delete(&1, "recipient"))
                )
 
-      instance = %{"provider" => "hetzner", "instance_id" => "61839204", "region" => "fsn1"}
+      instance = %{
+        "provider" => "aws",
+        "instance_id" => "i-0abc",
+        "region" => "eu-west-2",
+        "account_id" => "000011112222"
+      }
 
       assert {:ok, _event} = decode("enroll_request", Map.put(request, "instance", instance))
-
-      assert {:ok, _event} =
-               decode(
-                 "enroll_request",
-                 Map.put(request, "instance", Map.put(instance, "account_id", "invented-7"))
-               )
-
-      assert {:error, {:invalid_field, "instance.account_id"}} =
-               decode(
-                 "enroll_request",
-                 Map.put(request, "instance", Map.put(instance, "account_id", ""))
-               )
 
       assert {:error, {:missing_field, "host.arch"}} =
                decode(

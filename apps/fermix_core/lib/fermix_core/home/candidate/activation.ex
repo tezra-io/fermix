@@ -10,10 +10,10 @@ defmodule FermixCore.Home.Candidate.Activation do
   what the new host needs: its paths moved from the staging directory to the
   home itself, `[fermix_core.engine] role = "primary"` (the source wrote
   `device` before it captured), the destination facts in
-  `[fermix_core.snapshots]` (the bucket and its region when one was named,
-  and the recovery recipient the move carried). On a host that is not a Mac
-  the restore itself has already turned iMessage off
-  (`FermixCore.Home.Archive.RestoredConfig`), as it does
+  `[fermix_core.snapshots]` (the bucket, its region, `s3_credentials =
+  "instance_profile"` when a bucket was named, and the recovery recipient the
+  move carried). On a host that is not a Mac the restore itself has already
+  turned iMessage off (`FermixCore.Home.Archive.RestoredConfig`), as it does
   for `fermix home import`: a settings file that turns iMessage on refuses to
   load anywhere else, and the new primary must boot. The keychain's secrets
   the source carried in the stream are in the staged file store by then, and
@@ -133,6 +133,7 @@ defmodule FermixCore.Home.Candidate.Activation do
     text
     |> ConfigText.put("fermix_core.snapshots", "s3_bucket", toml_string(bucket))
     |> ConfigText.put("fermix_core.snapshots", "s3_region", toml_string(region))
+    |> ConfigText.put("fermix_core.snapshots", "s3_credentials", ~s("instance_profile"))
   end
 
   defp put_destination(text, %{}), do: text

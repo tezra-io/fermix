@@ -10,14 +10,16 @@ defmodule FermixCore.Home.Snapshot.S3.SigV4Test do
 
   @suite_credentials %{
     access_key_id: "AKIDEXAMPLE",
-    secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
+    secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+    session_token: nil
   }
   @suite_scope %{region: "us-east-1", service: "service", now: ~U[2015-08-30 12:36:00Z]}
   @empty_sha256 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
   @s3_credentials %{
     access_key_id: "AKIAIOSFODNN7EXAMPLE",
-    secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    session_token: nil
   }
   @s3_scope %{region: "us-east-1", service: "s3", now: ~U[2013-05-24 00:00:00Z]}
 
@@ -88,6 +90,25 @@ defmodule FermixCore.Home.Snapshot.S3.SigV4Test do
       assert signature(request, @s3_credentials, @s3_scope) ==
                "f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41"
     end
+  end
+
+  test "a session token is sent and signed" do
+    credentials = %{@s3_credentials | session_token: "invented-session-token"}
+
+    request = %{
+      method: "PUT",
+      path: "/k",
+      query: [],
+      headers: [{"host", "h"}],
+      payload_sha256: @empty_sha256
+    }
+
+    headers = SigV4.sign(request, credentials, @s3_scope)
+
+    assert {"x-amz-security-token", "invented-session-token"} in headers
+
+    assert authorization(request, credentials, @s3_scope) =~
+             "SignedHeaders=host;x-amz-date;x-amz-security-token,"
   end
 
   test "a path is encoded once per segment, slashes kept" do

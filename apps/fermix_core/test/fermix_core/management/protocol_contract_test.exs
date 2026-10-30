@@ -1456,7 +1456,12 @@ defmodule FermixCore.Management.ProtocolContractTest do
       relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
       noise_pk: :binary.copy(<<1>>, 32),
       recipient: :binary.copy(<<2>>, 32),
-      instance: %{"provider" => "hetzner", "instance_id" => "61839204", "region" => "fsn1"},
+      instance: %{
+        "provider" => "aws",
+        "instance_id" => "i-0a1b2c3d4e5f60718",
+        "region" => "eu-central-1",
+        "account_id" => "111122223333"
+      },
       snapshots: %{"s3_bucket" => "invented-fermix-snapshots", "s3_region" => "eu-central-1"}
     }
   end

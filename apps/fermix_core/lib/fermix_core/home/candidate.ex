@@ -53,8 +53,7 @@ defmodule FermixCore.Home.Candidate do
   @file_mode 0o600
   @phases ~w(enrolling enrolled receiving staged activating expired failed)
   @config_text ~s([fermix_core.engine]\nrole = "candidate"\n)
-  @instance_fields ~w(provider instance_id region)
-  @optional_instance_fields ~w(account_id)
+  @instance_fields ~w(provider instance_id region account_id)
 
   @type phase :: String.t()
   @type state :: %{required(String.t()) => term()}
@@ -270,16 +269,13 @@ defmodule FermixCore.Home.Candidate do
   defp given_instance(nil), do: {:ok, %{}}
 
   defp given_instance(%{} = facts) do
-    optional = Map.take(facts, @optional_instance_fields)
-
-    if Enum.all?(@instance_fields, &EnrollmentCode.printable?(Map.get(facts, &1))) and
-         Enum.all?(Map.values(optional), &EnrollmentCode.printable?/1),
-       do: {:ok, Map.merge(Map.take(facts, @instance_fields), optional)},
-       else:
-         {:error,
-          {:invalid_instance,
-           "The instance file must hold provider, instance_id and region, and may hold " <>
-             "account_id, each text of 1 to 128 bytes."}}
+    if Enum.all?(@instance_fields, &EnrollmentCode.printable?(Map.get(facts, &1))),
+      do: {:ok, Map.take(facts, @instance_fields)},
+      else:
+        {:error,
+         {:invalid_instance,
+          "The instance file must hold provider, instance_id, region and account_id, each " <>
+            "text of 1 to 128 bytes."}}
   end
 
   # A fresh install writes nothing a move would carry: every top-level entry

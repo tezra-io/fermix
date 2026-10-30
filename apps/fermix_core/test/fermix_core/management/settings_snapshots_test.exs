@@ -70,8 +70,8 @@ defmodule FermixCore.Management.SettingsSnapshotsTest do
 
     assert Enum.map(rows, & &1["key"]) == ~w(
              snapshots_recipient snapshots_interval_hours snapshots_s3_bucket
-             snapshots_s3_region snapshot_s3_access_key_id snapshot_s3_secret_access_key
-             snapshots_s3_prefix snapshots_s3_endpoint
+             snapshots_s3_region snapshots_s3_credentials snapshot_s3_access_key_id
+             snapshot_s3_secret_access_key snapshots_s3_prefix snapshots_s3_endpoint
            )
 
     assert %{"read_only" => true, "value" => ""} = row(rows, "snapshots_recipient")
@@ -79,6 +79,7 @@ defmodule FermixCore.Management.SettingsSnapshotsTest do
     assert %{"value" => 6, "min" => 1, "max" => 168, "restart" => false} =
              row(rows, "snapshots_interval_hours")
 
+    assert %{"value" => "instance_profile"} = row(rows, "snapshots_s3_credentials")
     assert %{"kind" => "secret", "present" => false} = row(rows, "snapshot_s3_access_key_id")
   end
 
@@ -87,17 +88,20 @@ defmodule FermixCore.Management.SettingsSnapshotsTest do
              Settings.apply("snapshots", %{
                "snapshots_s3_bucket" => "invented-fermix-snapshots",
                "snapshots_s3_region" => "eu-west-1",
-               "snapshots_interval_hours" => 12
+               "snapshots_interval_hours" => 12,
+               "snapshots_s3_credentials" => "keys"
              })
 
     assert Enum.sort(result["applied"]) ==
-             ~w(snapshots_interval_hours snapshots_s3_bucket snapshots_s3_region)
+             ~w(snapshots_interval_hours snapshots_s3_bucket snapshots_s3_credentials snapshots_s3_region)
 
     contents = File.read!(Path.join(home, "config.toml"))
     assert contents =~ "[fermix_core.snapshots]"
     assert contents =~ ~s(s3_bucket = "invented-fermix-snapshots")
+    assert contents =~ ~s(s3_credentials = "keys")
     assert contents =~ "interval_hours = 12"
-    assert Keyword.get(Application.get_env(:fermix_core, :snapshots), :interval_hours) == 12
+
+    assert Keyword.get(Application.get_env(:fermix_core, :snapshots), :s3_credentials) == :keys
 
     {:ok, %{"rows" => rows}} = Settings.get("snapshots")
     assert %{"value" => "invented-fermix-snapshots"} = row(rows, "snapshots_s3_bucket")
@@ -135,6 +139,9 @@ defmodule FermixCore.Management.SettingsSnapshotsTest do
              Settings.apply("snapshots", %{"snapshots_s3_bucket" => "Not A Bucket"})
 
     assert sentence =~ "s3_bucket takes a bucket name"
+
+    assert {:error, {:invalid_params, "snapshots_s3_credentials", _sentence}} =
+             Settings.apply("snapshots", %{"snapshots_s3_credentials" => "root"})
 
     assert ConfigStore.current_snapshot().fermix_core
            |> Keyword.get(:snapshots, [])

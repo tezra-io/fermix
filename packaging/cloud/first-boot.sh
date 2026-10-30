@@ -1,8 +1,9 @@
 #!/bin/sh
 # Fermix Always On: first boot of a server that becomes the owner's primary.
 #
-# Runs once as root. Cloud-init user data runs it with the enrollment code in
-# FERMIX_ENROLL_CODE; on an existing Debian or Ubuntu host it asks for the code
+# Runs once as root. The CloudFormation template runs it from user-data with
+# the enrollment code in FERMIX_ENROLL_CODE and the stack's wait handle in
+# FERMIX_SIGNAL_URL; on an existing Debian or Ubuntu host it asks for the code
 # on the terminal, without echo:
 #
 #   curl -fsSL https://fermix.ai/always-on | sudo sh
@@ -11,7 +12,7 @@
 # server and prints the steps that restore a snapshot onto it.
 #
 # Options: --restore, --snapshot-bucket NAME --snapshot-region REGION
-# (together). It never prints the code, never logs it
+# (together), --shell-access. It never prints the code, never logs it
 # and never puts it on a command line. Run again, it converges on the same
 # state; a host whose Fermix home exists is not enrolled again.
 set -eu
@@ -24,8 +25,13 @@ FERMIX_HOME_DIR=$ACCOUNT_HOME/.fermix
 FERMIX_BIN=/usr/bin/fermix
 RUN_DIR=/run/fermix
 CODE_FILE=$RUN_DIR/enroll.code
+INSTANCE_FILE=$RUN_DIR/instance.json
+CREDENTIALS_FILE=$RUN_DIR/aws-credentials.json
+LIB_DIR=/usr/local/lib/fermix-always-on
+CREDENTIALS_HELPER=$LIB_DIR/aws-credentials
 UNIT_DIR=/etc/systemd/system
 INSTALL_URL=https://fermix.ai/install
+IMDS=http://169.254.169.254
 CODE_PREFIX=fxenroll1.
 CODE_MIN=42
 CODE_MAX=2048
@@ -39,17 +45,29 @@ RESTORE_FILE=$ACCOUNT_HOME/restore.fxsnap
 RESTORE_CLI_HOME=$ACCOUNT_HOME/.fermix-restore
 
 CODE=""
+SIGNAL_URL=""
+SIGNALED=0
+FAILURE_REASON=""
 RESTORE=0
+SHELL_ACCESS=0
 SNAPSHOT_BUCKET=""
 SNAPSHOT_REGION=""
 HOME_EXISTS=0
+AWS=0
+HAS_ROLE=0
+IMDS_TOKEN=""
+INSTANCE_ID=""
 ENGINE_UID=""
 APT_UPDATED=0
 WORK=""
 TTY_STATE=""
 
-# One sentence and a non-zero exit.
+# One sentence and a non-zero exit. A command substitution runs in a subshell,
+# which keeps no global, so the sentence is also left in the work directory
+# for finish to tell the stack.
 fail() {
+  FAILURE_REASON=$1
+  if [ -n "$WORK" ] && [ -d "$WORK" ]; then printf '%s\n' "$1" >"$WORK/failure"; fi
   printf 'fermix always-on: %s\n' "$1" >&2
   exit 1
 }
@@ -58,8 +76,32 @@ say() {
   printf '==> %s\n' "$1"
 }
 
+# Tells the stack's wait condition how the first boot ended, once: SUCCESS, or
+# FAILURE with the sentence, which then fails the stack and shows as its
+# reason. Without a wait handle (an existing host) it does nothing.
+signal() {
+  if [ -z "$SIGNAL_URL" ] || [ "$SIGNALED" -eq 1 ]; then return 0; fi
+  SIGNALED=1
+  reason=$(printf '%s' "$2" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g' | cut -c1-1000)
+  printf '{"Status":"%s","Reason":"%s","UniqueId":"fermix-first-boot","Data":"%s"}' "$1" "$reason" "$1" |
+    curl -fsS --retry 3 --max-time 30 -X PUT -H 'Content-Type:' --data-binary @- "$SIGNAL_URL" >/dev/null ||
+    printf 'fermix always-on: the stack could not be told how the first boot ended; it fails once its wait runs out.\n' >&2
+}
+
+failure_reason() {
+  if [ -n "$FAILURE_REASON" ]; then
+    printf '%s' "$FAILURE_REASON"
+  elif [ -n "$WORK" ] && [ -s "$WORK/failure" ]; then
+    head -n 1 "$WORK/failure"
+  else
+    printf 'The first boot stopped unexpectedly (exit %s); the console log shows the step it stopped at.' "$1"
+  fi
+}
+
 finish() {
+  status=$?
   if [ -n "$TTY_STATE" ]; then stty "$TTY_STATE" </dev/tty 2>/dev/null || true; fi
+  if [ "$status" -ne 0 ]; then signal FAILURE "$(failure_reason "$status")"; fi
   if [ -n "$WORK" ]; then rm -rf "$WORK"; fi
 }
 
@@ -76,6 +118,7 @@ parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --restore) RESTORE=1; shift ;;
+      --shell-access) SHELL_ACCESS=1; shift ;;
       --snapshot-bucket | --snapshot-region)
         [ $# -ge 2 ] || fail "$1 needs a value."
         case "$1" in
@@ -84,7 +127,7 @@ parse_args() {
         esac
         shift 2
         ;;
-      *) fail "An option was not recognised. This script takes --restore, --snapshot-bucket and --snapshot-region." ;;
+      *) fail "An option was not recognised. This script takes --restore, --snapshot-bucket, --snapshot-region and --shell-access." ;;
     esac
   done
 
@@ -93,6 +136,16 @@ parse_args() {
       fail "--snapshot-bucket is not an S3 bucket name, or is missing beside --snapshot-region."
     matches "$SNAPSHOT_REGION" '^[a-z0-9][a-z0-9-]{0,31}$' ||
       fail "--snapshot-region is not a region name, or is missing beside --snapshot-bucket."
+  fi
+}
+
+# The wait handle is a presigned AWS address. One that is not is dropped
+# before anything is sent to it, then refused.
+check_signal_url() {
+  [ -n "$SIGNAL_URL" ] || return 0
+  if ! matches "$SIGNAL_URL" '^https://[a-z0-9.-]+\.amazonaws\.com(\.cn)?/[A-Za-z0-9%._~/?&=+-]+$'; then
+    SIGNAL_URL=""
+    fail "FERMIX_SIGNAL_URL is not the stack's wait handle address."
   fi
 }
 
@@ -175,6 +228,11 @@ as_engine() {
     LOGNAME="$ENGINE_USER" SHELL=/usr/sbin/nologin PATH=/usr/bin:/bin LANG=C.UTF-8 \
     XDG_RUNTIME_DIR="/run/user/$ENGINE_UID" FERMIX_HOME="$FERMIX_HOME_DIR" \
     "$FERMIX_BIN" "$@" </dev/null
+}
+
+imds_get() {
+  curl -fsS --max-time 5 -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" "$IMDS/$1" ||
+    fail "The instance metadata service did not answer $1."
 }
 
 prepare_run_dir() {
@@ -291,7 +349,136 @@ EOF
   systemctl start "user@$ENGINE_UID.service"
 }
 
-# 5. The engine account writes its candidate home from the code file.
+detect_aws() {
+  IMDS_TOKEN=$(curl -fsS -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 300' \
+    --connect-timeout 2 --max-time 5 "$IMDS/latest/api/token" 2>/dev/null) || IMDS_TOKEN=""
+  [ -n "$IMDS_TOKEN" ] || return 0
+  AWS=1
+  status=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+    -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" "$IMDS/latest/meta-data/iam/security-credentials/") ||
+    fail "The instance metadata service did not say whether this instance has a role."
+  case "$status" in
+    200) HAS_ROLE=1 ;;
+    404) HAS_ROLE=0 ;;
+    *) fail "The instance metadata service answered $status when asked for this instance's role." ;;
+  esac
+}
+
+# 5. Root fetches the role's credentials, since the engine cannot reach the
+# metadata address, and hands them over in the shape the service answers.
+install_credentials_timer() {
+  if [ "$HAS_ROLE" -ne 1 ]; then
+    if [ "$AWS" -eq 1 ]; then say "This instance has no role, so no credentials are handed to Fermix"; fi
+    return 0
+  fi
+  say "Handing the instance role's credentials to Fermix every 15 minutes"
+  install -d -m 0755 "$LIB_DIR"
+  write_file "$CREDENTIALS_HELPER" 0755 <<'EOF'
+#!/bin/sh
+# Fermix Always On: writes the instance role's credentials to
+# /run/fermix/aws-credentials.json for the engine account
+# (fermix-aws-credentials.service). Never prints them.
+set -eu
+umask 077
+imds=http://169.254.169.254
+work=""
+fail() {
+  printf 'fermix-aws-credentials: %s\n' "$1" >&2
+  exit 1
+}
+trap 'if [ -n "$work" ]; then rm -rf "$work"; fi' EXIT
+[ -d /run/fermix ] || fail "/run/fermix is missing; systemd-tmpfiles creates it at boot."
+work=$(mktemp -d /run/fermix-credentials.XXXXXX)
+token=$(curl -fsS -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 300' \
+  --connect-timeout 2 --max-time 10 --retry 3 "$imds/latest/api/token") ||
+  fail "The instance metadata service gave no session token."
+get() {
+  curl -fsS --max-time 10 --retry 3 -H "X-aws-ec2-metadata-token: $token" "$@"
+}
+role=$(get "$imds/latest/meta-data/iam/security-credentials/") ||
+  fail "The instance metadata service names no role for this instance."
+role=$(printf '%s\n' "$role" | head -n 1)
+case "$role" in
+  "" | *[!A-Za-z0-9+=,.@_-]*) fail "The instance metadata service named a role IAM would not." ;;
+esac
+get -o "$work/credentials.json" "$imds/latest/meta-data/iam/security-credentials/$role" ||
+  fail "The instance metadata service gave no credentials for the role $role."
+grep -Eq '"Code"[[:space:]]*:[[:space:]]*"Success"' "$work/credentials.json" ||
+  fail "The instance metadata service did not answer Success for the role $role."
+for field in AccessKeyId SecretAccessKey Token Expiration; do
+  grep -q "\"$field\"" "$work/credentials.json" ||
+    fail "The credentials for the role $role carry no $field."
+done
+chown fermix:fermix "$work/credentials.json"
+chmod 0600 "$work/credentials.json"
+mv -fT "$work/credentials.json" /run/fermix/aws-credentials.json
+EOF
+  write_file "$UNIT_DIR/fermix-aws-credentials.service" 0644 <<EOF
+[Unit]
+Description=Fermix: write the instance role's credentials for the engine
+Wants=network-online.target
+After=network-online.target fermix-metadata-block.service
+
+[Service]
+Type=oneshot
+ExecStart=$CREDENTIALS_HELPER
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run
+EOF
+  write_file "$UNIT_DIR/fermix-aws-credentials.timer" 0644 <<'EOF'
+[Unit]
+Description=Fermix: refresh the instance role's credentials every 15 minutes
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=15min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl start fermix-aws-credentials.service
+  systemctl enable --now fermix-aws-credentials.timer
+  [ -s "$CREDENTIALS_FILE" ] ||
+    fail "The credentials service ran but wrote no $CREDENTIALS_FILE; journalctl -u fermix-aws-credentials says why."
+}
+
+# 6. The instance's facts, which the owner compares before the move.
+write_instance_file() {
+  [ "$AWS" -eq 1 ] || return 0
+  say "Writing this instance's facts to $INSTANCE_FILE"
+  INSTANCE_ID=$(imds_get latest/meta-data/instance-id)
+  region=$(imds_get latest/meta-data/placement/region)
+  document=$(imds_get latest/dynamic/instance-identity/document)
+  account_id=$(printf '%s\n' "$document" | sed -n 's/.*"accountId"[[:space:]]*:[[:space:]]*"\([0-9]*\)".*/\1/p')
+  matches "$INSTANCE_ID" '^i-[0-9a-f]{8,32}$' || fail "The instance metadata service gave no instance id."
+  matches "$region" '^[a-z0-9][a-z0-9-]{0,31}$' || fail "The instance metadata service gave no region."
+  matches "$account_id" '^[0-9]{12}$' || fail "The instance identity document names no account."
+  printf '{"provider": "aws", "instance_id": "%s", "region": "%s", "account_id": "%s"}\n' \
+    "$INSTANCE_ID" "$region" "$account_id" >"$WORK/instance.json"
+  publish "$WORK/instance.json" "$INSTANCE_FILE"
+}
+
+# 7. With the stack's ShellAccess on, the instance role lets Session Manager
+# open a shell here, through the SSM agent, for a restore or a repair.
+enable_shell_access() {
+  [ "$SHELL_ACCESS" -eq 1 ] || return 0
+  if [ -x /usr/bin/amazon-ssm-agent ]; then
+    unit=amazon-ssm-agent.service
+  elif [ -x /snap/amazon-ssm-agent/current/amazon-ssm-agent ]; then
+    unit=snap.amazon-ssm-agent.amazon-ssm-agent.service
+  else
+    fail "ShellAccess is on, but this server has no SSM agent (Debian's images carry none), so Session Manager cannot open a shell on it."
+  fi
+  say "Letting Session Manager open a shell on this server (ShellAccess)"
+  systemctl enable --now "$unit"
+}
+
+# 8. The engine account writes its candidate home from the code file.
 enroll() {
   if [ "$HOME_EXISTS" -eq 1 ]; then
     say "The Fermix home $FERMIX_HOME_DIR already exists, so this host is not enrolled again"
@@ -302,17 +489,18 @@ enroll() {
   if [ -n "$SNAPSHOT_BUCKET" ]; then
     set -- "$@" --snapshot-bucket "$SNAPSHOT_BUCKET" --snapshot-region "$SNAPSHOT_REGION"
   fi
+  if [ "$AWS" -eq 1 ]; then set -- "$@" --instance-file "$INSTANCE_FILE"; fi
   as_engine "$@" || fail "fermix home enroll stopped; its message above says why."
 }
 
-# 6. The packaged user service, bound to that home and started.
+# 9. The packaged user service, bound to that home and started.
 start_service() {
   say "Starting Fermix as the background service of $ENGINE_USER"
   as_engine service install --home "$FERMIX_HOME_DIR" ||
     fail "fermix service install stopped; its message above says why."
 }
 
-# 7. A browser for the agent's tasks. On Debian the distribution's Chromium,
+# 10. A browser for the agent's tasks. On Debian the distribution's Chromium,
 # which the engine finds on its PATH and starts headless as the engine account.
 # Ubuntu ships Chromium only as a snap.
 install_browser() {
@@ -334,7 +522,7 @@ move_field() {
     sed -n 's/.*"'"$2"'": *"\(\([^"\\]\|\\.\)*\)".*/\1/p' | sed 's/\\"/"/g; s/\\\\/\\/g'
 }
 
-# 8. The engine dials the primary from the code; the first boot ends once
+# 11. The engine dials the primary from the code; the first boot ends once
 # the primary accepted this server, refused it, or did not answer.
 await_enrollment() {
   say "Waiting for your primary to accept this server"
@@ -354,13 +542,15 @@ await_enrollment() {
 
 # The steps that restore the newest snapshot onto this server, exactly.
 print_restore_steps() {
-  say "Ready to restore your home here. In a shell on this server, as an account that may use sudo:"
+  say "Ready to restore your home here. In a shell on this server (Session Manager when the stack's ShellAccess is on), as an account that may use sudo:"
   if [ -n "$SNAPSHOT_BUCKET" ]; then
     cat <<EOF
-  1. Download your newest snapshot from the bucket $SNAPSHOT_BUCKET in
-     $SNAPSHOT_REGION (its name sorts last), then copy it onto this server as
-     $RESTORE_FILE, owned by $ENGINE_USER:
-       sudo install -o $ENGINE_USER -g $ENGINE_USER -m 0600 <the file> $RESTORE_FILE
+  1. On a computer with your AWS credentials, find the newest snapshot and make
+     a link to it that works for 15 minutes:
+       aws s3 ls s3://$SNAPSHOT_BUCKET/ --recursive | sort | tail -n 1
+       aws s3 presign s3://$SNAPSHOT_BUCKET/<the key it lists> --region $SNAPSHOT_REGION --expires-in 900
+     Then on this server download it as the account $ENGINE_USER:
+       sudo -H -u $ENGINE_USER curl -fsS -o $RESTORE_FILE '<the link>'
 EOF
   else
     cat <<EOF
@@ -385,20 +575,28 @@ finish_enrollment() {
   install_browser
   if [ "$HOME_EXISTS" -eq 1 ]; then
     say "Done. Fermix runs from the home it already had."
+    signal SUCCESS "This server already holds a Fermix home, which runs again."
     return 0
   fi
   await_enrollment
-  say "Done. Open Always On in Fermix to review this server, then move to it."
+  if [ -n "$INSTANCE_ID" ]; then
+    say "Done. Open Always On in Fermix, check that it shows the instance $INSTANCE_ID, then move to this server."
+  else
+    say "Done. Open Always On in Fermix to review this server, then move to it."
+  fi
+  signal SUCCESS "This server enrolled with your primary; open Always On in Fermix to move to it."
 }
 
 finish_restore() {
   install_browser
   print_restore_steps
+  signal SUCCESS "This server is ready for a snapshot to be restored onto it; its system log lists the steps."
 }
 
 main() {
   CODE=${FERMIX_ENROLL_CODE-}
-  unset FERMIX_ENROLL_CODE
+  SIGNAL_URL=${FERMIX_SIGNAL_URL-}
+  unset FERMIX_ENROLL_CODE FERMIX_SIGNAL_URL
   umask 077
   PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   LC_ALL=C
@@ -411,6 +609,7 @@ main() {
   trap 'exit 130' INT
   trap 'exit 143' TERM
 
+  check_signal_url
   parse_args "$@"
   check_host
   WORK=$(mktemp -d /run/fermix-always-on.XXXXXX)
@@ -434,6 +633,10 @@ main() {
   block_metadata
   install_fermix
   create_engine_user
+  detect_aws
+  install_credentials_timer
+  write_instance_file
+  enable_shell_access
   if [ "$RESTORE" -eq 1 ] && [ "$HOME_EXISTS" -eq 0 ]; then
     finish_restore
   else

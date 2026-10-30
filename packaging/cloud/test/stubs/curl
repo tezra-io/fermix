@@ -1,24 +1,68 @@
 #!/bin/sh
 # Test stand-in for curl. https://fermix.ai/install answers the fake
-# installer; any other address is refused, as one that does not resolve is.
-# Logs every call as a GET of its URL.
+# installer; http://169.254.169.254/ answers from /etc/fermix-test/imds when
+# that directory exists (IMDSv2: a token from PUT latest/api/token, then every
+# GET must carry it) and refuses the connection otherwise; a PUT to the stack's
+# wait handle (https://*.amazonaws.com/) keeps its body in
+# /var/log/fermix-test/signals, one line per signal. Logs the method and URL of
+# every call, never a header.
 set -eu
+imds=/etc/fermix-test/imds
 log=/var/log/fermix-test
-url="" out=""
+url="" out="" format="" method=GET token="" fail_on_error=0 data=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out=$2; shift 2 ;;
-    --proto) shift 2 ;;
+    -w) format=$2; shift 2 ;;
+    -X) method=$2; shift 2 ;;
+    -H)
+      case "$2" in X-aws-ec2-metadata-token:*) token=${2#*: } ;; esac
+      shift 2
+      ;;
+    --data-binary) data=$2; shift 2 ;;
+    --max-time | --connect-timeout | --retry | --proto) shift 2 ;;
     http://* | https://*) url=$1; shift ;;
     --*) echo "curl stand-in: unexpected option $1" >&2; exit 2 ;;
-    -*) shift ;;
+    -*)
+      case "$1" in *f*) fail_on_error=1 ;; esac
+      shift
+      ;;
     *) echo "curl stand-in: unexpected argument" >&2; exit 2 ;;
   esac
 done
-printf 'curl GET %s\n' "$url" >>"$log/calls.log"
+printf 'curl %s %s\n' "$method" "$url" >>"$log/calls.log"
 
+status=200
+body=""
 case "$url" in
   https://fermix.ai/install) body=/cloud/test/fake-install.sh ;;
+  https://*.amazonaws.com/*)
+    [ "$method" = PUT ] && [ "$data" = @- ] || { echo "curl stand-in: a wait handle takes PUT --data-binary @-" >&2; exit 2; }
+    cat >>"$log/signals"
+    printf '\n' >>"$log/signals"
+    ;;
+  http://169.254.169.254/*)
+    [ -d "$imds" ] || exit 7
+    path=${url#http://169.254.169.254/}
+    if [ "$path" = latest/api/token ]; then
+      if [ "$method" = PUT ]; then body=$imds/token; else status=405; fi
+    elif [ "$token" != "$(cat "$imds/token")" ]; then
+      status=401
+    else
+      case "$path" in */) body=$imds/$path/_index ;; *) body=$imds/$path ;; esac
+      [ -f "$body" ] || status=404
+    fi
+    ;;
   *) exit 6 ;;
 esac
-if [ -n "$out" ]; then cat "$body" >"$out"; else cat "$body"; fi
+
+if [ "$status" -ne 200 ]; then
+  [ "$fail_on_error" -eq 0 ] || exit 22
+  body=""
+fi
+if [ -n "$body" ]; then
+  if [ -n "$out" ]; then cat "$body" >"$out"; else cat "$body"; fi
+elif [ -n "$out" ]; then
+  : >"$out"
+fi
+if [ -n "$format" ]; then printf '%s' "$status"; fi

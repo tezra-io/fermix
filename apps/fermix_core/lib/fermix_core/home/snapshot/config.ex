@@ -10,14 +10,16 @@ defmodule FermixCore.Home.Snapshot.Config do
       s3_region = "eu-west-1"
       s3_prefix = "fermix"                        # the default
       s3_endpoint = "https://s3.example.net"      # S3-compatible hosts only
-      s3_access_key_id = "@keyring"               # the snapshot_s3_* secret
-      s3_secret_access_key = "@keyring"           # references
+      s3_credentials = "instance_profile"         # or "keys"
+      s3_access_key_id = "@keyring"               # with "keys": secret
+      s3_secret_access_key = "@keyring"           # snapshot_s3_* references
 
   The S3 target is on when `recipient` and `s3_bucket` are both set. Absent
-  keys read as their defaults (`interval_hours` 6, `s3_prefix` `fermix`) and
-  are never written for the owner. The two key fields hold the references
-  `SecretPaths` keeps for the secrets `snapshot_s3_access_key_id` and
-  `snapshot_s3_secret_access_key`, never typed by hand.
+  keys read as their defaults (`interval_hours` 6, `s3_prefix` `fermix`,
+  `s3_credentials` `instance_profile`) and are never written for the owner. The
+  two key fields hold the references `SecretPaths` keeps for the secrets
+  `snapshot_s3_access_key_id` and `snapshot_s3_secret_access_key`, never typed
+  by hand.
 
   `normalize/1` turns the parsed file into the keyword application environment
   holds, refusing an unknown key or a bad value by name with a sentence that
@@ -30,10 +32,11 @@ defmodule FermixCore.Home.Snapshot.Config do
   alias FermixCore.Home.Snapshot.Recipient
 
   @section "[fermix_core.snapshots]"
-  @keys ~w(recipient interval_hours s3_bucket s3_region s3_prefix s3_endpoint
+  @keys ~w(recipient interval_hours s3_bucket s3_region s3_prefix s3_endpoint s3_credentials
            s3_access_key_id s3_secret_access_key)
   @default_interval_hours 6
   @default_prefix "fermix"
+  @credentials %{"instance_profile" => :instance_profile, "keys" => :keys}
   @interval 1..168
   @bucket ~r/\A[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]\z/
   @region ~r/\A[a-z0-9][a-z0-9-]{0,31}\z/
@@ -41,12 +44,14 @@ defmodule FermixCore.Home.Snapshot.Config do
   @max_prefix_bytes 256
   @max_secret_bytes 4_096
 
+  @type credentials :: :instance_profile | :keys
   @type t :: keyword()
   @type s3 :: %{
           bucket: String.t(),
           region: String.t(),
           prefix: String.t(),
           endpoint: String.t() | nil,
+          credentials: credentials(),
           access_key_id: String.t() | nil,
           secret_access_key: String.t() | nil
         }
@@ -76,13 +81,16 @@ defmodule FermixCore.Home.Snapshot.Config do
     end)
   end
 
-  @doc """
-  The inverse of `normalize/1`, in the spellings `config.toml` holds: every
-  value `normalize/1` keeps is already one.
-  """
+  @doc "The inverse of `normalize/1`, in the spellings `config.toml` holds."
   @spec to_keyword(keyword() | map() | nil) :: keyword()
-  def to_keyword(config) when is_list(config) or is_map(config) or is_nil(config),
-    do: normalize(config)
+  def to_keyword(config) when is_list(config) or is_map(config) or is_nil(config) do
+    config
+    |> normalize()
+    |> Enum.map(fn
+      {:s3_credentials, credentials} -> {:s3_credentials, Atom.to_string(credentials)}
+      other -> other
+    end)
+  end
 
   @doc "The recipient, `:absent` when none is set."
   @spec recipient(t()) :: {:ok, Recipient.t()} | :absent
@@ -113,6 +121,7 @@ defmodule FermixCore.Home.Snapshot.Config do
            region: Keyword.get(config, :s3_region, "us-east-1"),
            prefix: Keyword.get(config, :s3_prefix, @default_prefix),
            endpoint: Keyword.get(config, :s3_endpoint),
+           credentials: Keyword.get(config, :s3_credentials, :instance_profile),
            access_key_id: Keyword.get(config, :s3_access_key_id),
            secret_access_key: Keyword.get(config, :s3_secret_access_key)
          }}
@@ -149,6 +158,7 @@ defmodule FermixCore.Home.Snapshot.Config do
   defp value!("s3_region", value), do: matching!("s3_region", value, @region, region_rule())
   defp value!("s3_prefix", value), do: prefix!(value)
   defp value!("s3_endpoint", value), do: endpoint!(value)
+  defp value!("s3_credentials", value), do: credentials!(value)
   defp value!(key, value), do: secret!(key, value)
 
   defp recipient!(value) do
@@ -212,6 +222,16 @@ defmodule FermixCore.Home.Snapshot.Config do
 
   defp endpoint_rule,
     do: "takes the storage service's address, such as `https://s3.example.net`, with no path"
+
+  defp credentials!(value) when is_atom(value) and value in [:instance_profile, :keys],
+    do: value
+
+  defp credentials!(value) do
+    case Map.fetch(@credentials, value) do
+      {:ok, credentials} -> credentials
+      :error -> refuse("s3_credentials", ~s(takes "instance_profile" or "keys"))
+    end
+  end
 
   defp secret!(key, value) when is_binary(value) and byte_size(value) <= @max_secret_bytes do
     if String.match?(value, ~r/[\x00-\x1F\x7F]/),

@@ -76,7 +76,7 @@ defmodule FermixChannels.Mobile.PeerEvents do
               {"provider", :name},
               {"instance_id", :name},
               {"region", :name},
-              {"account_id", {:optional, :name}}
+              {"account_id", :name}
             ]}}},
          {"snapshots", {:optional, {:object, [{"s3_bucket", :name}, {"s3_region", :name}]}}}
        ], :none},

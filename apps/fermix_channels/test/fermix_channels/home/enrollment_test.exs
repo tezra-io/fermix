@@ -249,9 +249,10 @@ defmodule FermixChannels.Home.EnrollmentTest do
 
   defp instance do
     %{
-      "provider" => "hetzner",
-      "instance_id" => "61839204",
-      "region" => "fsn1"
+      "provider" => "aws",
+      "instance_id" => "i-0c4e7d2b9a1f30586",
+      "region" => "eu-north-1",
+      "account_id" => "481516234200"
     }
   end
 

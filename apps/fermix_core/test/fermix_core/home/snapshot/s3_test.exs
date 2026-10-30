@@ -1,7 +1,7 @@
 defmodule FermixCore.Home.Snapshot.S3Test do
   # The S3 target against a local stand-in for S3 (Bandit and a Plug in this
   # file): a stored snapshot, a checksum S3 refuses, an authorization S3
-  # refuses, and the access keys it signs with.
+  # refuses, and the credentials each mode reads.
   use ExUnit.Case, async: true
 
   alias FermixCore.Home.Snapshot.S3
@@ -174,6 +174,43 @@ defmodule FermixCore.Home.Snapshot.S3Test do
     end
   end
 
+  describe "instance-profile credentials" do
+    test "are read from the timer's file, session token included", %{tmp: tmp} do
+      file = credentials_file!(tmp, "2026-10-27T15:00:00Z")
+      settings = %{settings(fake_s3!(:store)) | credentials: :instance_profile}
+
+      assert {:ok, _stored} =
+               S3.store(snapshot!(tmp, "bytes"), settings, opts(instance_credentials_file: file))
+
+      assert_receive {:fake_s3, "PUT", _path, headers, _body}
+      assert header(headers, "x-amz-security-token") == "invented-session-token"
+      assert header(headers, "authorization") =~ "Credential=ASIAINVENTED/"
+      assert header(headers, "authorization") =~ ";x-amz-security-token, Signature="
+    end
+
+    test "missing, expired or malformed, each by name", %{tmp: tmp} do
+      settings = %{settings("http://127.0.0.1:1") | credentials: :instance_profile}
+      snapshot = snapshot!(tmp, "bytes")
+      missing = Path.join(tmp, "absent.json")
+
+      assert {:error, {:instance_credentials, :absent} = absent} =
+               S3.store(snapshot, settings, opts(instance_credentials_file: missing))
+
+      assert S3.sentence(absent) =~ "no instance credentials at /run/fermix/aws-credentials.json"
+
+      expired = credentials_file!(tmp, "2026-10-27T09:30:30Z")
+
+      assert {:error, {:instance_credentials, {:expired, ~U[2026-10-27 09:30:30Z]}}} =
+               S3.store(snapshot, settings, opts(instance_credentials_file: expired))
+
+      malformed = Path.join(tmp, "malformed.json")
+      File.write!(malformed, ~s({"AccessKeyId": "x"}))
+
+      assert {:error, {:instance_credentials, :invalid}} =
+               S3.store(snapshot, settings, opts(instance_credentials_file: malformed))
+    end
+  end
+
   describe "access keys" do
     test "a reference the settings load could not resolve is read from its store",
          %{tmp: tmp} do
@@ -246,12 +283,13 @@ defmodule FermixCore.Home.Snapshot.S3Test do
       region: "eu-west-1",
       prefix: "fermix",
       endpoint: endpoint,
+      credentials: :keys,
       access_key_id: "AKIAINVENTED",
       secret_access_key: "invented-secret"
     }
   end
 
-  defp opts, do: [profile: "general", now: fn -> @now end]
+  defp opts(extra \\ []), do: [profile: "general", now: fn -> @now end] ++ extra
 
   defp snapshot!(tmp, bytes) do
     path = Path.join(tmp, "#{System.unique_integer([:positive])}.fxsnap")
@@ -265,6 +303,23 @@ defmodule FermixCore.Home.Snapshot.S3Test do
       epoch: 4,
       created_at: @now
     }
+  end
+
+  defp credentials_file!(tmp, expiration) do
+    path = Path.join(tmp, "aws-credentials-#{System.unique_integer([:positive])}.json")
+
+    File.write!(
+      path,
+      Jason.encode!(%{
+        "Code" => "Success",
+        "AccessKeyId" => "ASIAINVENTED",
+        "SecretAccessKey" => "invented-instance-secret",
+        "Token" => "invented-session-token",
+        "Expiration" => expiration
+      })
+    )
+
+    path
   end
 
   defp header(headers, name) do

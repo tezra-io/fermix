@@ -8,7 +8,8 @@ defmodule FermixCore.Home.Snapshot.S3.SigV4 do
   slashes kept), the query sorted by encoded name and value, every header the
   caller passes with its name lowercased and its value trimmed and its inner
   runs of spaces collapsed, sorted by name, the signed header names, and the
-  payload's SHA-256 in hex. `x-amz-date` is added and signed. The key is
+  payload's SHA-256 in hex. `x-amz-date`, and `x-amz-security-token` when the
+  credentials carry a session token, are added and signed. The key is
   `HMAC("AWS4" <> secret, date)`, then the region, the service and
   `aws4_request`. Pure: the clock is the caller's.
   """
@@ -16,7 +17,11 @@ defmodule FermixCore.Home.Snapshot.S3.SigV4 do
   @algorithm "AWS4-HMAC-SHA256"
   @unreserved ~c"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"
 
-  @type credentials :: %{access_key_id: String.t(), secret_access_key: String.t()}
+  @type credentials :: %{
+          access_key_id: String.t(),
+          secret_access_key: String.t(),
+          session_token: String.t() | nil
+        }
   @type request :: %{
           method: String.t(),
           path: String.t(),
@@ -27,15 +32,15 @@ defmodule FermixCore.Home.Snapshot.S3.SigV4 do
   @type scope :: %{region: String.t(), service: String.t(), now: DateTime.t()}
 
   @doc """
-  The headers to add to `request` so it is signed: `x-amz-date` and
-  `authorization`.
+  The headers to add to `request` so it is signed: `x-amz-date`,
+  `x-amz-security-token` when there is a session token, and `authorization`.
   `request.headers` must already hold every header to be signed, `host`
   included.
   """
   @spec sign(request(), credentials(), scope()) :: [{String.t(), String.t()}]
   def sign(request, credentials, %{now: %DateTime{} = now} = scope) do
     amz_date = Calendar.strftime(DateTime.truncate(now, :second), "%Y%m%dT%H%M%SZ")
-    added = [{"x-amz-date", amz_date}]
+    added = [{"x-amz-date", amz_date}] ++ token(credentials)
     headers = canonical_headers(request.headers ++ added)
     signed = Enum.map_join(headers, ";", &elem(&1, 0))
     credential_scope = credential_scope(amz_date, scope)
@@ -93,6 +98,11 @@ defmodule FermixCore.Home.Snapshot.S3.SigV4 do
   end
 
   defp trim(value), do: value |> String.trim() |> String.replace(~r/ +/, " ")
+
+  defp token(%{session_token: token}) when is_binary(token) and token != "",
+    do: [{"x-amz-security-token", token}]
+
+  defp token(_credentials), do: []
 
   defp credential_scope(amz_date, scope),
     do: "#{binary_part(amz_date, 0, 8)}/#{scope.region}/#{scope.service}/aws4_request"

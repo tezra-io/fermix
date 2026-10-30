@@ -242,7 +242,12 @@ defmodule FermixTestSupport.CliContractCases do
       arch: "aarch64",
       version: "1.2.3",
       node_id: "bb716f238ec342e512e3400c6f8363f0fc3fd3ba2b6b749dd6130b81d7cb5827",
-      instance: %{"provider" => "hetzner", "instance_id" => "61839204", "region" => "fsn1"},
+      instance: %{
+        "provider" => "aws",
+        "instance_id" => "i-0a1b2c3d4e5f60718",
+        "region" => "eu-central-1",
+        "account_id" => "111122223333"
+      },
       snapshots: %{"s3_bucket" => "invented-fermix-snapshots", "s3_region" => "eu-central-1"},
       enrolled_at: ~U[2026-10-27 09:12:00Z],
       expires_at: ~U[2026-10-28 09:12:00Z]

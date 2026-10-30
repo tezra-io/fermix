@@ -1034,7 +1034,7 @@ first frame within 10 s of the handshake, or the stream closes `1008`.
 
 | `t` | Required payload | Rules |
 |---|---|---|
-| `enroll_request` | `host{name, os, arch, version}`, `candidate{node_id, relays[], recipient}`; `instance?{provider, instance_id, region, account_id?}`, `snapshots?{s3_bucket, s3_region}` | candidate to primary, the session's first event; `node_id` and `relays` (1 to 8) as a route's; `recipient` the one-time X25519 public key (32 bytes, standard base64) the move's stream will be encrypted to; each text at most 128 bytes; `instance` is what the candidate says of itself, shown unverified |
+| `enroll_request` | `host{name, os, arch, version}`, `candidate{node_id, relays[], recipient}`; `instance?{provider, instance_id, region, account_id}`, `snapshots?{s3_bucket, s3_region}` | candidate to primary, the session's first event; `node_id` and `relays` (1 to 8) as a route's; `recipient` the one-time X25519 public key (32 bytes, standard base64) the move's stream will be encrypted to; each text at most 128 bytes; `instance` is what the candidate says of itself, shown unverified |
 | `enroll_accepted` | `candidate_id`, `primary_name` | primary to candidate; the session then closes `1000` |
 
 A refused enrollment is an `error` with `code` `enrollment_expired`,

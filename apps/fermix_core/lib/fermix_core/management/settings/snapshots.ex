@@ -21,6 +21,9 @@ defmodule FermixCore.Management.Settings.Snapshots do
 
   @recipient_info "Every snapshot is encrypted to this key. Restoring one needs the recovery " <>
                     "passphrase it came from, and Fermix never stores that passphrase."
+  @credentials_info "On a cloud server with an instance role, Fermix signs with the role's " <>
+                      "credentials, which a timer on the server keeps fresh. Anywhere else, " <>
+                      "store an access key that may only write to the bucket."
 
   @doc "The one section this module owns."
   @spec sections() :: [%{id: String.t(), pane: String.t(), title: String.t()}]
@@ -61,6 +64,15 @@ defmodule FermixCore.Management.Settings.Snapshots do
       Row.new("snapshots_s3_region", :text, "Region",
         example: "eu-west-1",
         value: Source.string(block, :s3_region),
+        restart: restart
+      ),
+      Row.new("snapshots_s3_credentials", :choice, "Sign in with",
+        info: @credentials_info,
+        value: block |> Keyword.get(:s3_credentials, :instance_profile) |> Atom.to_string(),
+        options: [
+          Row.option("instance_profile", "The server's instance role"),
+          Row.option("keys", "An access key")
+        ],
         restart: restart
       ),
       Row.new("snapshot_s3_access_key_id", :secret, "Access key ID",

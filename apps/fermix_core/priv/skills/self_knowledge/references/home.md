@@ -125,33 +125,63 @@ it, never a second writer.
 
 - Always On puts the primary on a Linux server the owner controls, so Fermix
   keeps working with the Mac closed. The server enrolls with an enrollment
-  code the primary opens (one use, 30 minutes), on an existing Debian 12,
-  Debian 13 or Ubuntu 24.04 host (arm64 or x86_64):
-  `curl -fsSL https://fermix.ai/always-on | sudo sh`, which asks for the code
-  without echoing it. After `sh -s --`:
-  `--snapshot-bucket NAME --snapshot-region REGION`, `--restore`.
+  code the primary opens (one use, 30 minutes), in one of two ways:
+  - AWS: the Always On CloudFormation quick-create template, `Mode` `enroll`.
+    The code is pasted into its `EnrollmentCode` field, which the console
+    never shows again, and never goes in a link. The stack makes one Debian
+    server with no inbound port, IMDSv2 only and an encrypted disk, plus a
+    versioned snapshot bucket its instance role can only add objects to. Its
+    outputs name the instance id; the owner checks that Fermix shows the same
+    one before moving. The stack completes only once the server says the
+    primary accepted it; a first boot that fails fails the stack, with its
+    sentence as the reason (the stack's Events).
+  - An existing Debian 12, Debian 13 or Ubuntu 24.04 host (arm64 or x86_64):
+    `curl -fsSL https://fermix.ai/always-on | sudo sh`, which asks for the
+    code without echoing it. After `sh -s --`:
+    `--snapshot-bucket NAME --snapshot-region REGION`, `--restore`.
 - The first boot, as root: writes the code to `/run/fermix/enroll.code`
   (memory only, the engine account's), blocks the instance metadata address
   for every account but root at every boot (the host's own processes: the
   server runs no containers, whose traffic that rule would not see), installs
   the Linux package, creates the account `fermix` (home `/home/fermix`, no
-  login shell, lingering), runs `fermix home enroll` and `fermix service
-  install` as `fermix`, installs Chromium on Debian for browser tasks, and
-  waits up to 5 minutes for the primary to accept the server. The engine
-  starts in the candidate role, enrolls with the primary and waits for the
-  move. Running it again is safe: a host whose home exists is not enrolled
-  again. It never prints the code; cloud-init's console log shows each step.
+  login shell, lingering), on AWS with an instance role hands the role's
+  credentials to Fermix in `/run/fermix/aws-credentials.json` every 15
+  minutes, writes the instance facts to `/run/fermix/instance.json`, runs
+  `fermix home enroll` and `fermix service install` as `fermix`, installs
+  Chromium on Debian for browser tasks, and waits up to 5 minutes for the
+  primary to accept the server. The engine starts in the candidate role,
+  enrolls with the primary and waits for the move. Running it again is safe:
+  a host whose home exists is not enrolled again. It never prints the code;
+  cloud-init's console log shows each step.
 - On Ubuntu there is no Chromium package (only a snap, which Fermix does not
   use), so the first boot installs no browser there: an Ubuntu server needs
   one installed by hand (Google Chrome's own package, for example), and until
   then browser tasks on it answer that no Chrome or Chromium is installed. A
   Debian server gets Chromium at its first boot.
-- **A restore host.** When the primary is gone, `--restore` on a host
+- Fermix never holds the owner's AWS credentials. The server's role can add
+  snapshots to its bucket but never read, list or delete them, so a restore
+  downloads the snapshot by hand from the bucket. The template's bucket keeps
+  each snapshot listed for 30 days and as a previous version for 90 more, so
+  restore within about four months of losing a server.
+- **A restore host.** When the primary is gone, the template's `Mode`
+  `restore` (no code; `ExistingSnapshotBucket` names the lost server's
+  bucket, which the new server keeps writing to), or `--restore` on a host,
   prepares the same server without enrolling it and prints the exact steps:
-  copy the newest snapshot onto it (downloaded from the bucket by hand, when
-  one is named), `fermix home import` it into `/home/fermix/.fermix` as
-  `fermix` with the recovery passphrase, then `fermix service install`. The
-  restored home is the primary, one epoch up.
+  fetch the newest snapshot (on AWS through a presigned link made with the
+  owner's own credentials), `fermix home import` it into `/home/fermix/.fermix`
+  as `fermix` with the recovery passphrase, then `fermix service install`.
+  The restored home is the primary, one epoch up.
+- **Shell access.** The template's `ShellAccess` (off by default) gives the
+  server's role what Session Manager needs, so the owner can open a shell on
+  it with no inbound port: the way to run those restore steps or repair the
+  server. It needs the SSM agent on the server, which Debian's images do not
+  carry, so for now the first boot fails the stack, saying so, when
+  `ShellAccess` is on.
+- So a restore on AWS is not available in this version: the restore steps
+  need a shell on the server, and the template's server offers none. The
+  template refuses `Mode` `restore` with `ShellAccess` off before it creates
+  anything ("A restore on AWS needs a shell on the server..."). Restore onto a
+  host of your own with a terminal (`--restore`, above) instead.
 
 ## Enrollment, the candidate and the move
 
@@ -160,7 +190,7 @@ it, never a second writer.
   window and shows its code once: `fxenroll1.` and a long string that carries
   a one-time secret, the primary's gateway key, its iroh endpoint id and
   relays, its name and when the window closes. The window lasts thirty
-  minutes (time for a cloud server to boot), takes one server, and opening
+  minutes (time for a cloud stack to boot), takes one server, and opening
   another replaces it; the code is shown once and never logged, and the
   window is kept on this machine (`mobile/enrollment.json`, 0600, never in a
   snapshot) so an engine restart before the server checks in loses nothing.
@@ -190,11 +220,13 @@ it, never a second writer.
   log and in `fermix home status`, and removes the code from the disk (every
   ending does). To enroll again with a new code, stop its service and run
   `fermix home enroll` again: a candidate that never enrolled is replaced
-  (one that enrolled and waits for its move is not).
+  (one that enrolled and waits for its move is not). On AWS without a shell,
+  that is a new stack.
 - **Reviewing it.** `fermix home candidates` (or `home.candidates.list`)
   lists the candidates the primary holds (at most four, each for 24 hours):
   id, name, system, version, and the instance facts the server reported
-  about itself, which nobody verified.
+  about itself, which nobody verified. On AWS, compare the instance id with
+  the stack's output (`CheckBeforeMoving`) before moving.
 - **The readiness report.** Before the move, `home.move.readiness
   {candidate_id}` (the apps' review step) answers each fact as `ok`, `warn` or
   `block`: the secrets this computer keeps in its keychain, which move with
@@ -243,7 +275,7 @@ it, never a second writer.
   keeps the phase, says the ending and why in its sentence, and tries again
   at each read). On the server:
   `enrolled`, `receiving`, `staged` (restored one epoch up, with its snapshot
-  bucket, region and recovery key, and
+  bucket, region and recovery key, `s3_credentials = "instance_profile"`, and
   iMessage turned off on a server that is not a Mac, in `candidate/staging`),
   `activating` (the restored home renamed into place,
   its settings last), then it restarts as the primary, and its first start
@@ -283,10 +315,10 @@ it, never a second writer.
   than run late. The apps say so before the owner moves.
 - On the server Fermix keeps every secret in its file secret store
   (`<home>/secrets/`, readable by the server's `fermix` account only): in
-  plain files, held by the disk's encryption (the owner encrypts the disk
-  where its host does not) and by Fermix's sandbox, which keeps them from
-  every command Fermix runs. The secrets this computer kept in its keychain
-  move into those files.
+  plain files, held by the disk's encryption (the AWS template encrypts the
+  server's disk; on a host of your own, the owner encrypts it) and by Fermix's
+  sandbox, which keeps them from every command Fermix runs. The secrets this
+  computer kept in its keychain move into those files.
 - After a move, or a restore, `home.status`'s `secrets_missing` on the
   primary names each secret reference that did not resolve on that host (by
   the id `fermix setup` and the app take), and the settings rows show those
@@ -316,11 +348,14 @@ it, never a second writer.
   them. Whoever holds the passphrase and a snapshot can stand up the primary.
 - They are on once a recovery passphrase is set and a bucket is named in
   `[fermix_core.snapshots]` (`s3_bucket`, `s3_region`, and `s3_endpoint` for a
-  service that is not AWS), every `interval_hours` (default 6). Fermix signs
-  with the secrets `snapshot_s3_access_key_id` and
-  `snapshot_s3_secret_access_key` (stored with `fermix settings secret set`).
-  The key should only be allowed to write objects: Fermix never lists, reads
-  or deletes them, and a versioned bucket keeps every snapshot.
+  service that is not AWS), every `interval_hours` (default 6). On an AWS
+  server with an instance role Fermix signs with the role's credentials,
+  which a timer on the server writes to `/run/fermix/aws-credentials.json`;
+  elsewhere `s3_credentials = "keys"` and the secrets
+  `snapshot_s3_access_key_id` and `snapshot_s3_secret_access_key` (stored
+  with `fermix settings secret set`). The key should only be allowed to write
+  objects: Fermix never lists, reads or deletes them, and a versioned bucket
+  keeps every snapshot.
 - Each snapshot is `<prefix>/<profile>/<UTC time>-e<epoch>.fxsnap` in the
   bucket. It counts as stored only when the bucket accepted its SHA-256
   checksum; a failure keeps the bucket's own words and is retried at the next
@@ -470,10 +505,10 @@ it, never a second writer.
 | Whether a recovery passphrase is set; each place snapshots go, its last verified snapshot (and the recovery key it opens with), a desktop copy that is waiting, and its last error | Recovery | `fermix home snapshots status` |
 | Set the recovery passphrase | Recovery: typed twice, never shown; a change says which snapshots open with which passphrase | `fermix home snapshots passphrase` |
 | On the primary: the secrets that did not resolve on this host (`secrets_missing`), by id | Secrets to enter again | `fermix home status` |
-| Where snapshots are kept (bucket, region, the S3-compatible address, how often) and the two access keys | Recovery: the `snapshots` section; the keys as hidden fields, never shown again | `fermix settings set snapshots …`, `fermix settings secret set snapshot_s3_access_key_id` |
+| Where snapshots are kept (bucket, region, how Fermix signs in, the S3-compatible address, how often) and the two access keys | Recovery: the `snapshots` section; the keys as hidden fields, never shown again | `fermix settings set snapshots …`, `fermix settings secret set snapshot_s3_access_key_id` |
 | Take a snapshot now | **Back up now**, offered once snapshots have somewhere to go | `fermix home snapshots run` |
-| An enrollment code | **Get a code** (**Get a new code** while one is open, which stops the open one working), shown once with **Copy** and when it expires, beside the command for a server you have, and what to know before moving (the disk it needs, that this computer serves nothing meanwhile, the Telegram and late-job gap, where the server keeps secrets, no way back) | `fermix home enroll-code` |
-| The servers waiting for the move, with the instance facts they reported (unverified) | Servers waiting for the move | `fermix home candidates` |
+| An enrollment code | **Get a code** (**Get a new code** while one is open, which stops the open one working), shown once with **Copy** and when it expires, beside the AWS guide (https://fermix.ai/docs/always-on, where the code goes into the stack's EnrollmentCode field), the command for a server you have, and what to know before moving (the disk it needs, that this computer serves nothing meanwhile, the Telegram and late-job gap, where the server keeps secrets, no way back) | `fermix home enroll-code` |
+| The servers waiting for the move, with the instance facts they reported (unverified: on AWS, compare the instance id with the stack's output) | Servers waiting for the move | `fermix home candidates` |
 | Review the move (`home.move.readiness`): each item ready, a note or a block | **Review the move** on a server waiting; a block is shown as one | `fermix home move` says each block |
 | Start the move | the app's pane | `fermix home move --to ID [--retire]` |
 | Where the move stands (its phase and sentence) | The move | `fermix home status` |

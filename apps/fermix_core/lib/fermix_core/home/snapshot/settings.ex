@@ -19,7 +19,7 @@ defmodule FermixCore.Home.Snapshot.Settings do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Wizard
 
-  @answers [:interval_hours, :s3_bucket, :s3_region, :s3_prefix, :s3_endpoint]
+  @answers [:interval_hours, :s3_bucket, :s3_region, :s3_prefix, :s3_endpoint, :s3_credentials]
 
   @doc "The settings door's keys this writer takes."
   @spec answers() :: [atom()]

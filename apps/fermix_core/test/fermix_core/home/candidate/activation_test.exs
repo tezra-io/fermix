@@ -75,7 +75,7 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
     assert config =~ ~s(workspace_root = "#{ctx.home}/workspace")
     assert config =~ ~s(s3_bucket = "invented-bucket-91")
     assert config =~ ~s(s3_region = "eu-north-1")
-    refute config =~ "s3_credentials"
+    assert config =~ ~s(s3_credentials = "instance_profile")
     assert config =~ ~s(recipient = "#{@recovery}")
     # iMessage runs only on a Mac; left on, the settings would not load here.
     assert config =~ "[fermix_channels.imessage]\nenabled = false"

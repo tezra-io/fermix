@@ -1,0 +1,607 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Fermix Always On: one Debian server in your own AWS account that enrolls
+  with your Fermix primary and becomes the primary once you move to it, or,
+  in restore mode, takes a snapshot of a lost one. No inbound port, IMDSv2
+  only, an encrypted disk, and a versioned snapshot bucket the server can add
+  to but never read or delete. Fermix holds no AWS credential.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Enrollment or restore
+        Parameters:
+          - Mode
+          - EnrollmentCode
+          - ExistingSnapshotBucket
+      - Label:
+          default: Server
+        Parameters:
+          - InstanceType
+          - VolumeSize
+          - Arm64ImageId
+          - X86ImageId
+      - Label:
+          default: Repair (optional)
+        Parameters:
+          - ShellAccess
+    ParameterLabels:
+      Mode:
+        default: Add a server, or restore one
+      EnrollmentCode:
+        default: Enrollment code from Fermix
+      ExistingSnapshotBucket:
+        default: Snapshot bucket to restore from
+      ShellAccess:
+        default: Shell access through Session Manager
+      InstanceType:
+        default: Instance type
+      VolumeSize:
+        default: Disk size (GiB)
+      Arm64ImageId:
+        default: Debian image for arm64 types
+      X86ImageId:
+        default: Debian image for x86_64 types
+
+Parameters:
+  Mode:
+    Type: String
+    Default: enroll
+    AllowedValues:
+      - enroll
+      - restore
+    Description: >-
+      enroll adds a server that your Fermix primary moves to, with the code it
+      shows. restore prepares a server for the newest snapshot of a primary
+      that is gone, with no code; its system log lists the steps. Restoring on
+      AWS is not available in this version: the steps need a shell on the
+      server, which the Debian image cannot give yet, so the stack refuses
+      restore. Restore onto a Linux host you have a terminal on instead
+      (curl -fsSL https://fermix.ai/always-on | sudo sh -s -- --restore).
+  EnrollmentCode:
+    Type: String
+    NoEcho: true
+    Default: ""
+    MaxLength: 2048
+    AllowedPattern: "^$|^fxenroll1\\.[A-Za-z0-9_-]{32,2038}$"
+    ConstraintDescription: >-
+      Paste the whole code Fermix shows: it starts with fxenroll1. and works
+      once, for 30 minutes.
+    Description: >-
+      enroll only: the code Fermix shows when you add an Always On server. It
+      works once, for 30 minutes, and the console never shows it again.
+  ExistingSnapshotBucket:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+    ConstraintDescription: An S3 bucket name, or empty.
+    Description: >-
+      restore only: the bucket the lost server wrote its snapshots to (its
+      stack's SnapshotBucket output). The new server keeps writing there, and
+      makes no bucket of its own. Launch the stack in that bucket's region.
+  ShellAccess:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "false"
+      - "true"
+    Description: >-
+      true lets Session Manager open a shell on the server, through the AWS
+      managed policy AmazonSSMManagedInstanceCore on its role: the way to
+      restore a snapshot onto it, or to repair it. The server needs the SSM
+      agent, which Debian's images do not carry; first boot fails the stack
+      when it is missing.
+  InstanceType:
+    Type: String
+    Default: t4g.medium
+    AllowedValues:
+      - t4g.medium
+      - t4g.large
+      - t4g.xlarge
+      - m7g.large
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - m7i.large
+    Description: >-
+      t4g and m7g are arm64 (Graviton); t3 and m7i are x86_64. The image
+      parameter of the matching architecture is used.
+  VolumeSize:
+    Type: Number
+    Default: 30
+    MinValue: 20
+    MaxValue: 1024
+    Description: The encrypted gp3 disk, in GiB.
+  Arm64ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/debian/release/13/latest/arm64
+    Description: The public parameter naming the latest Debian arm64 image.
+  X86ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/debian/release/13/latest/amd64
+    Description: The public parameter naming the latest Debian x86_64 image.
+
+Mappings:
+  InstanceArchitecture:
+    t4g.medium:
+      Architecture: arm64
+    t4g.large:
+      Architecture: arm64
+    t4g.xlarge:
+      Architecture: arm64
+    m7g.large:
+      Architecture: arm64
+    t3.medium:
+      Architecture: x86_64
+    t3.large:
+      Architecture: x86_64
+    t3.xlarge:
+      Architecture: x86_64
+    m7i.large:
+      Architecture: x86_64
+
+Rules:
+  EnrollTakesACode:
+    RuleCondition: !Equals [!Ref Mode, enroll]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref EnrollmentCode, ""]]
+        AssertDescription: To add a server, paste the enrollment code Fermix shows.
+      - Assert: !Equals [!Ref ExistingSnapshotBucket, ""]
+        AssertDescription: A new server makes its own snapshot bucket; leave the bucket to restore from empty.
+  RestoreTakesABucket:
+    RuleCondition: !Equals [!Ref Mode, restore]
+    Assertions:
+      - Assert: !Equals [!Ref EnrollmentCode, ""]
+        AssertDescription: A restore takes no enrollment code; leave it empty.
+      - Assert: !Not [!Equals [!Ref ExistingSnapshotBucket, ""]]
+        AssertDescription: Name the bucket the lost server wrote its snapshots to.
+  RestoreNeedsShellAccess:
+    RuleCondition: !Equals [!Ref Mode, restore]
+    Assertions:
+      - Assert: !Equals [!Ref ShellAccess, "true"]
+        AssertDescription: >-
+          A restore on AWS needs a shell on the server, which the template's
+          Debian image cannot give yet (it carries no SSM agent), so restoring
+          on AWS is not available in this version. Restore onto a Linux host you
+          have a terminal on instead, with the first-boot script's --restore.
+
+Conditions:
+  IsArm64: !Equals [!FindInMap [InstanceArchitecture, !Ref InstanceType, Architecture], arm64]
+  IsRestore: !Equals [!Ref Mode, restore]
+  IsEnroll: !Not [!Condition IsRestore]
+  HasShellAccess: !Equals [!Ref ShellAccess, "true"]
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.75.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.75.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet
+      RouteTableId: !Ref RouteTable
+
+  # No inbound rule: the server dials out to the primary and to every service
+  # it uses.
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Fermix Always On server, no inbound access
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - Description: Outbound to the primary, providers, relays and package mirrors
+          IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  # Versioned, so a snapshot the server overwrites stays recoverable for 90
+  # days as a noncurrent version. Each snapshot is current for 30 days, then
+  # noncurrent for 90 more, so the bucket holds about 120 days of them. Kept
+  # when the stack is deleted: it is the recovery point when the server is
+  # gone, and a restore stack writes to it again instead of making its own.
+  SnapshotBucket:
+    Type: AWS::S3::Bucket
+    Condition: IsEnroll
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireSnapshotsAfter30Days
+            Status: Enabled
+            ExpirationInDays: 30
+          - Id: ExpireNoncurrentAfter90Days
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  SnapshotBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: IsEnroll
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Bucket: !Ref SnapshotBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: TlsOnly
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt SnapshotBucket.Arn
+              - !Sub "${SnapshotBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  # The server's only permission: add objects to the snapshot bucket (this
+  # stack's, or in restore mode the lost server's). It can neither read, list
+  # nor delete them. With ShellAccess, also what Session Manager needs.
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns: !If
+        - HasShellAccess
+        - - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        - !Ref AWS::NoValue
+      Policies:
+        - PolicyName: fermix-snapshots-write-only
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !If
+                  - IsRestore
+                  - !Sub "arn:${AWS::Partition}:s3:::${ExistingSnapshotBucket}/*"
+                  - !Sub "${SnapshotBucket.Arn}/*"
+      Tags:
+        - Key: Name
+          Value: !Ref AWS::StackName
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !If [IsArm64, !Ref Arm64ImageId, !Ref X86ImageId]
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+          InstanceMetadataTags: disabled
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: !Ref VolumeSize
+              Encrypted: true
+              DeleteOnTermination: true
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            SubnetId: !Ref Subnet
+            Groups:
+              - !Ref SecurityGroup
+            AssociatePublicIpAddress: true
+            DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Ref AWS::StackName
+          - ResourceType: volume
+            Tags:
+              - Key: Name
+                Value: !Ref AWS::StackName
+        # The first-boot script is packaging/cloud/first-boot.sh in
+        # tezra-io/fermix, the same bytes https://fermix.ai/always-on serves.
+        # User data holds at most 16 KB, so it travels compressed; the server
+        # checks its SHA-256 before running it. The enrollment code and the
+        # wait handle reach the script only in its environment; the script
+        # signals the handle once, with the sentence when it fails.
+        UserData:
+          Fn::Base64:
+            Fn::Join:
+              - ""
+              - - |
+                  #!/bin/sh
+                  # Fermix Always On: unpack the first-boot script and run it once.
+                  set -eu
+                  umask 022
+                  mkdir -p /usr/local/lib/fermix-always-on
+                  base64 -d <<'FERMIX_FIRST_BOOT' | gzip -dc >/usr/local/lib/fermix-always-on/first-boot.sh
+                # >>> first-boot.sh (packaging/cloud/aws/embed-first-boot.sh writes this part)
+                - |
+                  H4sIAAAAAAACA608a3fbNrKfV78CZdXKSk097CRt5Spbx1YSnTq2j6XcZm/sqrQIWVxLpEpScdQk
+                  97ffeQAgQEl2smd7emKRxGMwmPcM8O03zesobmbTyrfihUzn0QdxOLsLVpk4iztiEqVZLq6TJBfJ
+                  RAQik+l7mYp8GsBbOU7mMoMHKZK7WKa1TCzSaB6kq0blWxjuYhlnIonHUgSZSGGMhhhC26NZsgxf
+                  JOk8yKMkFrmcL2ZBLkWKzaNcTNJkLpYwkx8GeSDuohxhw1lknCaz2VzGuRgnoRRRLF70Ll733456
+                  pxdnJyejo7PjngjikFpneTC+BZjuAhh0Cm9n2AOXyX0G/ZenhyejNxcnBwAldBPyQ5TlUXwjjuV1
+                  BM9JKt5cL+N8KaYJoAGGCbLbTEySlCZAGGA4XAM85Yi8OJjtEsTJMhdyPE06hAkhxst0JvxJNjgR
+                  0zxfZJ1mc0LYbgRRMyCE+zDQJ5Etw0TgbkC332Eg4fupzPIklTh/HtwCxuOE148rZZzgu3wKoHew
+                  1SKViyBVW5MFc4RS7Rx2gU2Kc/Uxl4uMt1PPApscB4tsilse5wmMx7t5tsDtyjoFQLvwU7f1r5fj
+                  W5mL08PXPft1Km9wky96L/tnpzDKTp7cSJg5rVPvqZzN/GA8llnWEP1cxBKBtADEde6q17PkBgkE
+                  RsFVqKbLnIgGNxAaz+f4aRbFsoHkJ4KbIIp3scE4iaH9jcz0fmm85EB7B9CZtvgO/pWaD6ZA3kwT
+                  MAVhWGFbhjxwo5LBkn25rFR6py/7p73Rm0HvossbC2OfQo/m+yBtzqJrtd0dRnaeSgnjz0JeJTKH
+                  jzwEsCdBCOvCxa3EAig4uJEhjCXjG1gVgCPHy1xmu4yDRL8HHCZAqWIerJAZYT1hlMoxbNNKBNfJ
+                  e0n7eHh0dPbmdDh6dfa6123i+hRYFcUT+GF03L/oVu2mzYbb6nn/tNtcZilJDvXp4s0pdWwCG+t3
+                  yI6jF/2TXreqPjcZgQ1inf7pYHh4elRuEsWwJyA1Gv/OkrhydNE77p0O+4cng1K74C7zx6kMQRxE
+                  wSzj5if95wwGgjdLxsHMQr5vGM0Z9lXv5By2rar6lgeuvDntD3lQmY+b2QqYZh6qv7yIExIj3XXO
+                  prXMZpX+6+MBfYav7ac/N/aePG6ov4yl84vei/7b7uQDI6jd4NevAdOP99Tvw7fdvdbjn4AYXiV3
+                  QCggqJB4LBmNoq6QT0oYC2BiZLEFkN0U6JglQUc8bcFIsyS5BWJ6IjIRgMxQIloR1a0k6ZCuUCYG
+                  k1xJ/l0BlBbNDH8CUS6A2LJGRYnh3w8BYcOLfm/QhUnsl4Pe0dkpoOJJ5aI3GJ5d6L13qE2Jl8bk
+                  A4oRABJBiuaLJM1ZSZCGCJg/QS3hmoHmd0WWaDGIHH+XRsAoqHvgAbYhzTNcMPBNhpqDFMp8ka94
+                  nMhIQPyaJw0D4dFJnxlmI09oYVihTep6XqXQK8VT77jbqrw47J+8gQEveoeDs1P8qKaAbwMgwpMR
+                  TNAbDPDx9PB88OpsOHr+5ui33pAG0q9YluIr4tbe2/5giH0Of8d/Xx0ORoBvHBOJbjQ8+61HjQ23
+                  9Y/xUQssfjo8H47enB8fDgnQ388ufsO3w+G/RtBpSMtCFQA0kQFXSNLpIH8CwHfs/y3TBOUkEM+h
+                  kcHZ8hp0ab4kHc+qHaUSvkahvwvD3U2j8VQRGUiym1lyjeoTdpHks54ISBa4MBEzOcn1xt0l6W0h
+                  4WAspPlJFEfZFMk9hxkKG6BRmQTRbKcuPlaEKG1CtQ3vool4J/xYeFVcuSeuxPff45uweHOAw8Ws
+                  mSai9l12Gdfga9sTz7hNE+dYptI7ADhgTN2SqUQYydMRdt/v96Apok60K58rlSxYKTB19273mdUB
+                  2wA7SFT4ayYOaLgwInRPQTyUJIOMQxnukjXWEYM3RGfwmKI5xBghs8XB/K7aIVo5Ls+alLYfNPyd
+                  YjBkrVQGIIIbZLag/RM4pteObWChsq0jz4WJNLYLqNPoBiwohQLelb9h4QVH4d58+gTv9cvesQcK
+                  +C/RNluUynyZxqKl9sHwH240Q9it7hT7iIjd88DwylPc8Nplq9XyL1v7P9bQGAOFXMual5fwP/xz
+                  cyCypge/veYNfgZNLPxx229Dn7q1aR+9AVgVy8zreN9l3q53QdPqpzdx9NdS9kN4ViKE9snHfYLP
+                  x2D0ctPPikq8KsPt8eMnmMkyKMkeAxkt9uHXPPjg5xGIs/2W8N+K8zdD4b8StaMEdzT3h6uF7NSg
+                  HVrWPmhvVA+/+iUUP2uG8n0zXgIPfeLJthNzQRBgf8xCMpKuwRgG02YrGR6QlU/0RN4Bym+iFBIT
+                  QDkNpHfkDSB3xVYjRoFDGsiwLjsbRnWg5k0utUS+m21j/EyUmNoZdyqDEHu1y61ozEw6kw9dBICu
+                  WCyAqpYxKE2QXjKcrcQOSYDvsvqB0qlxlgDHgL2rWEyb6qzJeIQgbyihIJDSEVUk/xSKMqLAbvWf
+                  DrqMRC9EWpaDCnS+/EL7j6/3HFIAFllKxVY0pFflWYAFQTO0iiGJjY1g8ao77i4WHeuePZ69E5qb
+                  58JPJ/r1gVopuEZgPEsfDX0weXMQUmAHJPDwPpgtJVvngHISOTkRHfD+zXIWpGisgMrOQE42KtRV
+                  Zgpl4wBsf2Ix0DKPapXao7qWJm1xcCBkFowrYpMO+CRuwOUSfu8vkiYMIjtMDBFISXCt2GVBtxDg
+                  uQam6ZDTAhbUIoDtDY12S9G2A68YmGO+zNDjQb4C5LE0timkUQGzLZOjIL3R6wCpDd/eieq3wr/J
+                  eV/ChKWGtUR6IQp3ri60OdIGOTeNQNseHJhGtqtWF465srF5yS/8tO4U1lVjoUGVYo/FO1ILQgkI
+                  k2CsBYzDhmc6bFjGxmkB0JIhVd0roCx1UVCJsqHldlFEwP/xsvfMs2kHlMOLOIxFwnRwF2RqF8fJ
+                  DTCqDNHWRnt8nEYL7drf51zvbnCsUQ2X/GhPg6FADYEvKg6LlZBilKr7kZfvij7FMJvGqP3xLvD/
+                  bvk/X6m/Df/qY3v3afuzfl+taX0iFHbW6UT52cC4g32h3sXgqaOtgh/nEbAuMMe1zCLgmzWEKCLZ
+                  AKdezhqcAGZrd7/9+V7wFLo1eEI9fxlovI5GIanZpXECU0jmKJhAdIIgAFteBGGYUlwEzW6KGqjZ
+                  4U+YkhKAga7lhKI28Uo5PhnZb4IiN7vaJJoskd4qgJPx7YjF8wgMCCUw9M6XzSxtSjHxfGNj1Wpa
+                  +0P7vcXG/3DZCObB30kMvvQlePvzHfg3rv+z+e7Q/19u9V1j9H/Nf37f/QFaV2sWjbn+U7Eba2E7
+                  jY9twT6NwALvSTaaRHIWah0pSY97WfOParvbbC48QS5+ksF+zyQKmU+Wtmd7EFu/u/RqV80mmoP0
+                  87LabJLUZwSjdWtQC9ovggGWdTZUW7aIwxAV+eQqQNr56jihx9uXrgF+pYmZZyJJQyGuKcmhcvvG
+                  WvAXZligy53paGh7b9f83CfBo4Kje48brceEZSWXdzSeRf+4LqzH/+ldDIAJwQWtG9HthXp41KPm
+                  aZ+eltYMXl0LNiNdi1WR6WjNdH7RQ4sGw5H1/8LaeGYlUPUql8j9wp8XawmCdDx9+hgg//DT09HT
+                  x/dBHCG8Zoj7YAzSOYyJQPGoJXCIxNCeAroBd0R8NxQYhAOouiKfLyZZmRbwayHJqInxussh9juy
+                  6q8lRVPAkkK5EkbZbcMid2zomlAYCik2uGpFuLxHm3BSyLZA46EEiPZFOY7Dvqo9LlhbEuMLsbwj
+                  OxBTA8pZAbylhs8obLtxOz/iaN+6wH42i3j07hsjuUb+lQX7Os44rguW3TRIgzFGzXTAHnivIY6S
+                  xYpyCQgLx7IY1BJcysT++C1CBJD4s1zj8nX/1PKEixY3RYvDt67m3g6uwvy1zO8k4NDMQJgzoxWr
+                  ySj0eO86jMAFkzW06aPw6ZlEbAh3OoXnUS+5Ho5aPk3Ka+gUO0xRJisXQ1Rj0jaoEuEPmNsUFdyY
+                  QFImRBH8Qu4CZ8i/seCjJvwa7fnii+P89UqotpAkdiJD9OjkxagDVslS5OCj1zuiptxwPWRKaigV
+                  lOIqPDQgAR13NBBtduZKi1IdNKTkcVtNySlTdoHaqkJtrW8AWbcYNkrBzCBNYCSD8tc4GJvlYUQy
+                  JLBzHhP0V4ilX8NUu7BW9H10GBc9vUaForkjbGlETW5ib1EMJga055nnSchBnQ1f5+9BSg7XvljR
+                  tVcUIA4YKARSp9PIPVOxZiu7kmvBaedhGhQOQ+G+s1dXft8EEEbxMsxP3YqADZdQYkSMUqFOALsY
+                  E/NdKrtDLqGBA2m+gGMcoKHHzwQ3WkOINPAQl9ezIjLACGo9bbV0+GBM9OdVrSRWx37wdEODPYpK
+                  saMbLPKRSnPYTO5VrZiyMX0sdod+4PKB0vrrL7FchJgB/sWJNjCt6WaqCb5Ez+kI6Ys5HrUppp45
+                  VwY4XKZjdLgpR5hjpFhxtB3kbmsat8HwQZ7xSsB6jxNfPfjoss2B1kM0fX/1XDgt6arHKkJherjq
+                  I1aYQTbiTVWogi3ETDeYhy76AWE+bD+gOxKUe/Cc5IMnKNFY6nJJoJycvUSrp/yRPHZOi2WYtouT
+                  WQKAiPPD4SuTzOvgP+Lk8PRl96jxZvjC/0kN+vb45egCZu+r9CDZEE0EvVktMgmesNKIAEApqagh
+                  NB+eoxorYRSxFM3DbASI1ARrhTpNgPMJBja9tz4m6+R4z5/LPKCoZp7cyrgjqkX2A+fApyaFaj6V
+                  1KFONwo9AiXIIngRRqFyRrM72KNqm/dQiYMRYGAE7KaAnN/Cb+EvYC6VoCyEUetH4jXznuRMm1Nt
+                  JD1vMAqOgoRtMcW9wQwtmSLXVkr1cmZaS0YcxxaPWQCKAKVuIUxciQ3TVU2CdhdlylzOUZAk8Wzl
+                  UZzLWeeGyBcrBi2ErdQudi/UkiNwNjV1hbL9UZszCKPC2x46xLMVi2YKialCh60buct6N07uOGmV
+                  c3YdnWcYY9dyoTVua5num7HF2RDPE5Ud6Z+/f6xdSzPQGGtasGglM+Un0O4pmaIZpyknWH0B01zP
+                  kvEt5mKCzNrVGqkVVaeBxLeMQfdRW2o2Z2pJlzNp3PC7KesQ6KVkIIrxRZpgGEhSHCA8oAhjnIOJ
+                  xgU6AYYiMoo2cXA+Se+CNIQPsD6AHfNyJL6UjaRNqAjnW9kZZPa5YlziDts0MP5JFC8/APHF4XXy
+                  ATrBcCfojcM6dpWBb8CpNyq0wJHeMJt0n+MXTbvrW6s3AI06rpXQbHG9ZPXnsXDXuknEkzy4nskM
+                  FZQW8mBRzYE7nzxhd1iVLQhRGBv2h6aRMQR2A0YEqn78WPzyS6139qK2sYLqXspUooWdf2K8hjjB
+                  AhCK7KyEyg+V5lWdDyw7iQqQcHkqnYoBKqwk0dYTfwOk52pMg/NKKGcy1703ttj+CbbrH+AXgOxI
+                  lvkCEA/P/0ADFq0ndHymSXKrv4H0SACvK/XtQCySWTReqdqEA+gZLUSIGytKJRKEN5HdLkEgf9MF
+                  OwLDX9T+qeowCVutDqiBTmd7888gP2CbYHu/NcSgcSkms2WmBQnhjFgNy3vuMIJmKgjQe2DUks9M
+                  gxFPEL9qEw+9ophreXhI2jhdNOTQl1fV5SXNe3fbc0nt3RuY76pyLDl6DNZj94UqMOK5/lO2gSEn
+                  wXKWH8sF5k3icSSzbpxUfg/iHH6wQeWDbmgAPkBHV56T9NzwBdyaZR6CSNItD7GCpFtGfeUc8Ho2
+                  WX9/QWg+h70DvOUyfAFCfL3VURJPgIwAtvJ0lXcDbnNVwbxnFwQVRmNh3DlsAwHT+xDl3RXIhN4H
+                  OR7gBtsW0oQiKvcLAOrJkH5118q7PguiK8KuDJ+vutkqi2Bn9RqYXrnUaJzPgNpBR8c+U6DzBZwN
+                  5NJ7acjpgHkGWPCDPXAt4D3k90gIO2O89+z79rqRZVoycWrLClfRMTNQXHL7LA1lAOyzKlSRclY4
+                  yvjHeHeaLG+mpsJPy3pTUkexN1TUjYr6NOJ5bOWj9gUlq5LoHHCyir3K6mUc+GOZ5tEkAscUBAka
+                  rRWn7tMH3kjA6qpxnRgaUPZ4wk8Kt5TGbGTTkr16ZBwLJHQS8LhQBWOxVLJ37NHJA8qmmyYgTwcE
+                  3XKx0f8abhpf5aAPyA2dg0BBx4vLDDNUfGApNFRk+kPJ3L9yh7Zgpuw1GkYoiqw+Vpg/lZoIHjuF
+                  akqIdZCAyK3ZNY46bqJMcSe1qJ8HMYCbcgVlAGORB6be6lrYCdlysFvMJJxSzdcpucj7NCpjsEZB
+                  rDNMIxzVpqkj/Kp1tZa6to+mLS0yq6zgJTj2zCs3gC2P/WuQDWjIo412F5Zdx4Ib7aIFsEK71Z17
+                  O6qKFmBJf/KUQ1zoyGNXDCaXfdCrcmDuMDYLw9BH6CwP3BmMYa10RS1xFO4Sld8B0mmeg/U4OCeB
+                  UaVCGxuChlNwgfgG9Qb0zPvg07g+/fHRNyuDr9KmYt0nvjRpbCpDvwGRssBxKQiQC8+EqHGjvRIW
+                  dWDBcf2cmeGjVX2n0kOlUeqVjR4YR2r86QPBGssD5YirdBwpU13xhcMVPXW1xhYDGv3XCLVzuMGI
+                  Lj6uleOCsxdPtIGDOg9IR62BMegQkvPgKx25ASTLtMJ9/NWKVGj91gi9rebY9j5bLDVcxGYzjY2n
+                  +zUtW0f3t7FMGmOxnIPx9YNrejygrh+0KogLCqPCZxm6TufFCCwlvW0oI6EdgugZ56PgTtepWPWp
+                  1R0ryFPUrW0L7/h5PgOdhRWPWUfst1o1xbPIpHEM01CQCIsQ99ygkYoE4YGTLG8Gi6hJA3p2vqGO
+                  KsotnjWxcDuqVM6RYwFu2yq9UmvCJSWiUK3+nah99xFtAArafK65EKqFfHVwSy0Jm1J5XzMK5k3A
+                  0RJ9LruevenV/5MoGCox8IVQC+tMi+qCGWWM58+knQTWpWEqgbbXatWFKU5u6yTg49Zj63VrQ27w
+                  YfcZFQ3Pxs5akN1iUiEpwVnLFIxWlo1siScNcYH+90TmJpiELaGDhTZw9yIEworEKc1s6rJgrLKn
+                  xVbGlHIKGMYRCUZOVJ1XNg0WUpXcOvGAwja1ABghgaRujF1jjivw2k6AXYfhfx+US2TJHhmu7SEY
+                  T7hslYaw106BK1wE4BVsItZ/WhkImwfoDY2PeZS1+M06WovxlIHefgIWVYxnXLxtYl0d1FgT3euH
+                  OjzuYgI09x52UwcGHgYYelvHXDYeRDGHMFwLFU9AaeVX6qVIoN4Qp6VDUPPinNFyDsQNa/qRYuTb
+                  TpSgI45Syyp7dyt4y5PfV5Sep8FC1IriMRx8Q30mvUaKqIne2/6wQuXzFpZsw99+XRjQB0qfhL62
+                  FARbctr4w2gtSBhaXXVnfosnB0uzOBh9S//VKyQ0/0sq5gEF025Z5dheFTdpXdco8fslAu4mAJcK
+                  eDHjilVBAwAOHkiOOGA8oEqU/sM0DOw20ju7CSXwv0KvfMnC0D8wEmddVsMSFSTlnAO+9uyyrHpF
+                  KRz+QurGwxZ2ycYP3d3Gr+W6jfuhC5VOE/3D1yokHiP9ofYg3UFZw0SRfrMsALyvx59e29cShy2c
+                  tNghyKtKJ5vi5Jp3hFmVd+862SIYy87V1aOO/eANllRD6tW2L+uLwSulz9TQmyHk4ztYuAWq8ZAa
+                  /iZX/VAMJECQmzdiiNQqenjgjHLmqrKZV/iX8C69Ko1z6XkPLMFexP0YBD2fAicBpnlsgJdqatl7
+                  Uuc6lTjbNmfFSYJtaWPyYFvgfkjpKMP+3ujyFrXj2d7XPcFlGvtBFekqv1LsOInpfK4bFN70TXyx
+                  M+TEd4tY7gaDoHKanMq78zR6D+i5kRlFf/ERuHQ4X6jHBD2VVxgxsZ4HpJ26WZ5GY4wiByEVtZwH
+                  +TSjY6//CfrJpvvy2H4qJ2BVTh/cgLIpBcga4kxXlbP4OahRYKtuu5XBE851OM6j95LePYEOFWC3
+                  ZRqMV/hmv5VtDFQT4NnXx6mdoPMWYtwU2MYw5Z24D4vspGUlO1AFPO7neS2y0iCm6OMd7jgxfHmo
+                  A/HvBGzdYIag+cstANlRUHIxnnK40nJFJsE4z6wTdnyFAh6f5KP7KilNIUfwGXSaX49gp/rLVn7J
+                  LS1VArgeEYFBtQDOaWw0re0Do9UdXZMh1vWZGs2PwjqdscPK+Ht7UBkThtKaxUmQMBkv8dWGjuEK
+                  9HE0tidCPOerpu6EAygLexSFG6wG3dBTRdxgONSyZuORp3r1w3uU4uXOOzwu8Oiy7jUeNS/bzUUN
+                  Jyyq4S1MYTl85GP7wJ9cffxpd3+PDxZ8lUY3LSKupiumYoQ9dIrhqyazDk4U8xTYpLlwoo/te5ai
+                  t8TsY2Hh6ZI4zzkhuUiT99Ap9TrCA+7xdoVnaBsmhbff0Uu1YPNsAcbvPuMO68IiZycKbLnreWZn
+                  QfRFAwQd18mJjd/t0a1ylB/5vKtzCGGAcWW2WQSW9a1JazHDGoyBMupfc+oBrxLhImaOS2O6w01o
+                  DQavBbSM813SsIG5s0M9LIIobVRYYI5okBGfCbIEhX1ya5vEYGfvgzB3PPBZDj/L5j7N78QZMPPd
+                  LbewRLk+Zgnj4YmYtcGaoGxS/PvwLNi/sTbVvXOr7ACTrL0xEe8Ninu7qEUFQgyqxQ6fC4BtjeYB
+                  3h+ircFY1ilUUtpGHRVy9hKPDpkDQEokn8icRHK5f7mjDd2OtYK6t11PelXElyLRnzblynS0AzMw
+                  YwzVUHkl5Uwoe2gud0BFg0SFRVml4FNx/UApwsS1yBxlcq9TKdcElrJC6hyCdUZi/dYVb3vMieut
+                  jZ5TSKNM0wrUtr4RgxCH3puv7nihbuTbh9LXwaSi7uz+s3P2knlQKmlcP9u2ofP6CbP1E2t6hffE
+                  85xpjZpUC3GllgramUJU7mWE+sS++obR8mXJXqK0n5nS9LU1nFk1VXjXQHch10sHuUr74S0CaBHi
+                  6TT6MVLN7dQpWfNWMl5VzuEJWszN4RhKpyUTUU5SFCvVjYoaX4JhQ52qYywqlJR7fwVa2i28GeM6
+                  Te4yqgNn54jESw1L8bJbOuWnTyBRWXiEfsY1XZ8BbY5AC8yj5by4NsOKLU4ijC4nXBSO9bwFWjOK
+                  k8xQ3jnlhnadujrplE2jRTERFaMJCuyT0DUBabUK97yPc+DLhPz5KJc+5lsurDAzaXxo/BA+9FZj
+                  Mlyf+3XKLVTvij5BbKsr/dGOOerabF1wEJohWAesdy6VHTgnfPlcmrO0L0GjtvfV4vTlF8gnHUNY
+                  gcHE9YqC7mLnZZLcAC/TqFLXeeqSF6rl+hDMFzNUSPDgIlKFX4jnQLHxGNjsyFqowYq70CJHckZ0
+                  hjsMLEa6QesMAOdP9FD+xNDNn7b8UDkZ30f76c9GBVs55y/1lRtgwP2iztE7xjl2ACvv0UewwP/4
+                  jAb4Z22Aq1swnOY1PJJQww5gsmMX7/Ly6vLT5WXjsm4b7/bFHl7T42s96IIPvOOjpni27WjNkEP/
+                  1q1KjpY82HDRBd9uoa6u07242BHTKIWC2tUHdPXxJDdy1qgEeKp1VBRwOyXeATt2SAW2jtt865NH
+                  WMeSvpZ1UYBXpXf6iNnaLU6edYMA967u7NAP8YNo15kNCjm7vvnG5KZiDP7kxuLEBv2jhvjSYqNC
+                  GhWEJrbOuwBDT9atCwSMkYGm8FhG7xGrnxCIG3oZYJCEKnjMrRCt4sA/X4GF7fiEio4zfxkw+sad
+                  evnsPmzyTMpFaVPULVqePtyvkfcve/+n6r6BTRQnVjLvaCnk3PK1+WYvzmIWJTnqCj09lb6kpBhf
+                  3etCx9rV/Ad8JowFkSXdWcCykXYh5xh44YQq+aTmsPyGmwoRhFjewVPpykKHt0A0gnm8alTI9xyp
+                  ziMaz2akCzJD88QMT9xEhEgaQPTvscpLJjylobd5hOR41Kn+PygKpmhleHsfCAI63N35CrsTz8Jx
+                  6FbguZIzdRniYpk75i/eKuBktNFy2IhG3O55cMu+kz6xRlcKMKAYrOUwbxFj7OhrMMCdF9m+wDDY
+                  fqfZLIPepNwUOH1Z9B4P2Gd4r9sn0FZAeJjQKQ2jLkXYMtYvCP2tpIOoVEP6jEYnU7psScMXRc9g
+                  I4ufWy2eaYibVdpRU15Jd35uLdkzS6bT+P4rjAg61UlWdi4RVfvOO1Ej0BGxz2oqfmq81dJ+0klb
+                  2sHyPu0EQl2TR35afY3+AXqG0Zl8V/DBSzAwti/HmMlJqeLqpvQ857TGL6wCZ/KZO5laHBfFWQvb
+                  awC/65tNDwrbXhEWrRdP3qmbMLNsMU1RwOvrVVHq8BnRB7cBT9LZR9Oq5bv9nHpTvg+Q7xt09wyd
+                  K4yVlhwGmH6/IchL0csw1oGSJiGN+kWAls/abTxq5wC8xbHZAObjBsnY9yw8NZUDdA7n5+a+RWVr
+                  ZuOULllaX4PK/7toWkMvkYC5oWrdkuEXXDpVuIBF+Yf2Or4u9nCcxMW9FsXFkbg6feWjjj5MA235
+                  qrur1BV5qkxG85JurQ74W4ENp3hX3TKwMU5RtuUcIe+EL7eshy46KFSxuehg19avUW7dHGZCj/b4
+                  6moYpgVHZLhltV8wMyvN95G8czWvM4ET/roHx8YMW4vaHHBkbAsAzjwFqSn204GrNXLaYBQ8ACD8
+                  YirgEKxhHJj72mJ3dXcyW60cpaMSbj7oYO5eZmDxQIoCkY5NVj+uX0vgf644d+OYNsU7agIECG7u
+                  hnux15pjY1NPJKyTwHxvbkYHgotn81h8oB+ZPjgMY5wcjQ5PTrpH8PO497x/eDp6cXF2OuydHnfj
+                  JI7wggCyoyWfwpIy1MdQuMJCP+nTl7t8stLHMzF4InauLr0Fp30ehT5wGx6nOu31jlHkHF6Abfxm
+                  cI7TtamGiWQ4hUQYsjJUm7qimgpFkzwl0qt0qygVNalXNS6O2m/VRP+0/Pbxfk0MAdUVcwtCcd8S
+                  Epy5rY1LbnQjjHfCA129uq24qaiX1qVNiMVD95Z2vKSFI0LLOMjV5XfLxU0Kcj4j0aWr8vSJecyq
+                  k6yh4cyJDMS3CpoU9wqjAZgkDSuVc3x+e9PpnMAYnc5Q1UR5YA94B3SnhPJ5YCSuj67wOXxwYF70
+                  X3bdj8WWFU0qhcxXWqXIWvBljfHG20TsWzH0bV7GcdC3qK9dI2J0A19try4a1jzecGOx/sbYoQ2E
+                  fUFvuwSWSouUluXekWCuT6Gn0kFvDYt7htaScuY46/rBFPQcTTm21WWt3NTUMziJZ1LZa1mmh3Zq
+                  g9Z2l+vKbCd9UzYczA0zKDqZk/4fxcRancpgAAA=
+                  FERMIX_FIRST_BOOT
+                  printf '%s  %s\n' 1f712612f00847d268b904864f220b24840e82687c6281cff1eb58c33f84a35c /usr/local/lib/fermix-always-on/first-boot.sh | sha256sum -c --quiet
+                # <<< first-boot.sh
+                - !If
+                  - IsRestore
+                  - !Sub
+                    - |
+                      FERMIX_SIGNAL_URL='${FirstBootHandle}' sh /usr/local/lib/fermix-always-on/first-boot.sh --restore --snapshot-bucket '${ExistingSnapshotBucket}' --snapshot-region '${AWS::Region}'${ShellOption}
+                    - ShellOption: !If [HasShellAccess, " --shell-access", ""]
+                  - !Sub
+                    - |
+                      FERMIX_SIGNAL_URL='${FirstBootHandle}' FERMIX_ENROLL_CODE='${EnrollmentCode}' sh /usr/local/lib/fermix-always-on/first-boot.sh --snapshot-bucket '${SnapshotBucket}' --snapshot-region '${AWS::Region}'${ShellOption}
+                    - ShellOption: !If [HasShellAccess, " --shell-access", ""]
+
+  Instance:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - DefaultRoute
+      - SubnetRouteTableAssociation
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+
+  # The stack is complete only once first boot says it ended well: enrolled
+  # with the primary, or ready for a restore. A first boot that fails sends
+  # its sentence, which fails the stack with it as the reason; one that never
+  # reports fails it when the 30 minutes run out.
+  FirstBootHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  FirstBoot:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: Instance
+    Properties:
+      Handle: !Ref FirstBootHandle
+      Timeout: "1800"
+      Count: 1
+
+Outputs:
+  InstanceId:
+    Description: The server's instance id.
+    Value: !Ref Instance
+  CheckBeforeMoving:
+    Condition: IsEnroll
+    Description: What to compare before you move to this server.
+    Value: !Sub "Before you move, check that Fermix shows the instance id ${Instance} for this server. If it shows another, do not move."
+  RestoreSteps:
+    Condition: IsRestore
+    Description: How to restore the newest snapshot onto this server.
+    Value: !Sub "Open a shell on ${Instance} with Session Manager and follow the steps its system log lists after Ready to restore your home here."
+  SnapshotBucket:
+    Description: >-
+      The versioned bucket the server writes encrypted snapshots to. Restore
+      from the newest one with your recovery passphrase.
+    Value: !If [IsRestore, !Ref ExistingSnapshotBucket, !Ref SnapshotBucket]
+  Region:
+    Description: The region of the server and its bucket.
+    Value: !Ref AWS::Region

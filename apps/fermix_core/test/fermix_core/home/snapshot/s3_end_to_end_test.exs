@@ -81,6 +81,7 @@ defmodule FermixCore.Home.Snapshot.S3EndToEndTest do
       s3_bucket: @bucket,
       s3_region: @region,
       s3_endpoint: ctx.endpoint,
+      s3_credentials: :keys,
       s3_access_key_id: @user,
       s3_secret_access_key: @secret
     ]
@@ -151,6 +152,7 @@ defmodule FermixCore.Home.Snapshot.S3EndToEndTest do
       region: @region,
       prefix: "fermix",
       endpoint: ctx.endpoint,
+      credentials: :keys,
       access_key_id: @user,
       secret_access_key: secret
     }
@@ -166,7 +168,7 @@ defmodule FermixCore.Home.Snapshot.S3EndToEndTest do
     signed_headers =
       SigV4.sign(
         %{method: method, path: path, query: query, headers: headers, payload_sha256: sha256},
-        %{access_key_id: @user, secret_access_key: @secret},
+        %{access_key_id: @user, secret_access_key: @secret, session_token: nil},
         %{region: @region, service: "s3", now: DateTime.utc_now()}
       )
 
