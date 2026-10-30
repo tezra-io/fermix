@@ -16,7 +16,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   channel does not hold one by itself, since a Buzz session answers through
   `shell`. Fermix cannot sandbox the call when the host's kernel does not hold
   commands (`Sandbox.OsSandbox.enforced?/1` false: a system other than macOS
-  and Linux, or a Linux host without Landlock ABI 2, where every confined
+  and Linux, or a Linux host without Landlock ABI 3, where every confined
   command refuses anyway; read through the context's `:os_sandbox` seam), or
   when the command runs unconfined even where it does
   (`metadata.host_command_confined?` false: the `codex` and `claude_code`

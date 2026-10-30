@@ -198,18 +198,15 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "sandbox_apply: Operation not permitted"
     end
 
-    test "Linux: the Landlock ABI, a warning at ABI 2, and the refusal below it" do
-      assert %{status: :ok, detail: detail} =
-               Checks.os_sandbox({:unix, :linux}, landlock: {:ok, 6})
+    test "Linux: the Landlock ABI from the floor up, and the refusal below it" do
+      for abi <- [3, 6] do
+        assert %{status: :ok, detail: detail} =
+                 Checks.os_sandbox({:unix, :linux}, landlock: {:ok, abi})
 
-      assert detail == "commands are held by the kernel (Landlock ABI 6)"
+        assert detail == "commands are held by the kernel (Landlock ABI #{abi})"
+      end
 
-      assert %{status: :warn, detail: detail} =
-               Checks.os_sandbox({:unix, :linux}, landlock: {:ok, 2})
-
-      assert detail =~ "truncate"
-
-      below = {:unavailable, "fermix_landlock: Landlock ABI 1 is below 2 (Linux before 5.19)"}
+      below = {:unavailable, "fermix_landlock: Landlock ABI 2 is below 3 (Linux before 6.2)"}
 
       assert %{status: :fail, detail: detail} =
                Checks.os_sandbox({:unix, :linux}, landlock: {:error, below})
@@ -217,8 +214,8 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert detail =~
                "This computer can't sandbox commands (Landlock is unavailable), so Fermix won't run them"
 
-      assert detail =~ "Landlock ABI 1 is below 2 (Linux before 5.19)"
-      assert detail =~ "Linux 5.19 or later"
+      assert detail =~ "Landlock ABI 2 is below 3 (Linux before 6.2)"
+      assert detail =~ "Fermix needs Linux 6.2 or later with Landlock enabled"
 
       missing = {:shim_missing, "/opt/fermix/priv/fermix_landlock"}
 

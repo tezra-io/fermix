@@ -28,7 +28,9 @@ defmodule FermixCore.Sandbox.Landlock do
   that disappears while the folder is read is skipped.
 
   The shim's access letters: `x` execute, `r` read a file, `l` list a folder,
-  `w` write (and truncate) a file, `c` create, remove, rename and link entries.
+  `w` write (and truncate) a file, `c` create, remove, rename and link entries,
+  `i` use a device's ioctl commands (only the terminals get it, so a pty
+  works; the kernel holds the rest from Landlock ABI 5).
   """
 
   alias FermixCore.Sandbox.OsSandbox
@@ -39,7 +41,12 @@ defmodule FermixCore.Sandbox.Landlock do
   # tens of thousands of entries holds a protected path (a Fermix home inside a
   # busy temp folder): the command refuses rather than fail to start.
   @max_rules 8_192
-  @letters ~w(x r l w c)
+  @letters ~w(x r l w c i)
+  # The lowest Landlock ABI that holds commands: ABI 2 (Linux 6.1 and before)
+  # cannot refuse `truncate(2)`, so a command could empty a file it may only
+  # read. The shim refuses below it too; this keeps a shim that answers lower
+  # from being taken at its word.
+  @floor 3
   @unavailable "This computer can't sandbox commands (Landlock is unavailable), so Fermix won't run them"
 
   @typedoc "One rule: a resolved path and the access letters it grants beneath it."
@@ -59,7 +66,7 @@ defmodule FermixCore.Sandbox.Landlock do
   Fermix's home and what stays writable inside it,
   what is never writable (`protected` trees, and the owner's `credentials`
   with the files named after them), what is never readable, the folders never
-  run from, and the device files a command writes.
+  run from, and the device files a command writes with the letters each gets.
   """
   @type input :: %{
           writable: [String.t()],
@@ -69,7 +76,7 @@ defmodule FermixCore.Sandbox.Landlock do
           credentials: [String.t()],
           unreadable: [OsSandbox.unreadable()],
           no_exec: [String.t()],
-          devices: [String.t()]
+          devices: [grant()]
         }
 
   @typedoc "Why the shim cannot hold commands here."
@@ -119,7 +126,7 @@ defmodule FermixCore.Sandbox.Landlock do
 
   @doc """
   Whether the kernel can hold commands here, asked of the shim itself
-  (`fermix_landlock --abi`): `{:ok, abi}` from ABI 2 (Linux 5.19), or why not.
+  (`fermix_landlock --abi`): `{:ok, abi}` from ABI 3 (Linux 6.2), or why not.
   Runs one short process; the shim makes the same check before every command.
   """
   @spec probe(String.t()) :: {:ok, pos_integer()} | {:error, probe_error()}
@@ -255,7 +262,9 @@ defmodule FermixCore.Sandbox.Landlock do
   end
 
   defp device_grants(devices, fs) do
-    for device <- devices, fs.type.(device) not in [:symlink, :missing], do: {device, "w"}
+    for {device, access} <- devices,
+        fs.type.(device) not in [:symlink, :missing],
+        do: {device, access}
   end
 
   # Whether a region covers `path`.
@@ -341,7 +350,7 @@ defmodule FermixCore.Sandbox.Landlock do
     error in ErlangError -> {:error, {:failed, error.original, "could not run #{shim}"}}
   end
 
-  defp abi({abi, "\n"}, _answer) when abi >= 2, do: {:ok, abi}
+  defp abi({abi, "\n"}, _answer) when abi >= @floor, do: {:ok, abi}
   defp abi(_parsed, {output, status}), do: {:error, {:failed, status, first_line(output)}}
 
   defp first_line(output), do: output |> String.split("\n", parts: 2) |> hd() |> String.trim()

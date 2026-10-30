@@ -162,7 +162,8 @@ printf "fermix-iroh notices: %s\n" "$doc_notices"
 # command. Checked on the installed package as the helper is, POSIX sh with
 # coreutils only: exactly one shim in the payload, an executable regular file,
 # and `--abi` answering its contract, its ABI (exit 0) or why this kernel or
-# container has no Landlock (exit 69). scripts/release/test_verify_linux_package.py
+# container cannot hold commands (exit 69: no Landlock, or an ABI below the
+# shim's floor). scripts/release/test_verify_linux_package.py
 # runs this check against fake payloads.
 # shellcheck disable=SC2016
 landlock_shim_check='

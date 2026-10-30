@@ -189,8 +189,9 @@ printf 'fermix-iroh notices: %s\n' "$iroh_notices"
 # per target with zig, static, so the packaged-interpreter rewrite leaves it
 # alone: exactly one shim in the payload, a regular executable file, an ELF
 # that names no program interpreter (checked before it runs), and `--abi`
-# answering its contract: its ABI (exit 0) or why this runner's kernel has no
-# Landlock (exit 69). A macOS release carries none. It runs before the
+# answering its contract: its ABI (exit 0) or why this runner's kernel cannot
+# hold commands (exit 69: no Landlock, or an ABI below the shim's floor). A
+# macOS release carries none. It runs before the
 # migrate-to-app stage because that stage ends the script on a Linux target.
 elf_interpreter() {
   uv run --no-project python -c '

@@ -16,6 +16,7 @@ defmodule FermixCore.Sandbox.LandlockTest do
     "/usr/bin/sh",
     "/etc/hostname",
     {"/dev/null", :other},
+    {"/dev/tty", :other},
     "/dev/pts/",
     {"/dev/ptmx", :symlink},
     "/tmp/build/",
@@ -106,7 +107,7 @@ defmodule FermixCore.Sandbox.LandlockTest do
       credentials: ["#{@home}/.ssh", "#{@home}/.config/gcloud/credentials.db"],
       unreadable: unreadable,
       no_exec: ["#{@fermix}/plugins"],
-      devices: ["/dev/null", "/dev/ptmx", "/dev/pts"]
+      devices: [{"/dev/null", "w"}, {"/dev/tty", "wi"}, {"/dev/ptmx", "wi"}, {"/dev/pts", "wi"}]
     }
   end
 
@@ -185,9 +186,21 @@ defmodule FermixCore.Sandbox.LandlockTest do
       assert grants["/tmp"] == "xrlwc"
       assert grants[@skills] == "xrl"
       assert grants["/dev/null"] == "w"
-      assert grants["/dev/pts"] == "w"
+      assert grants["/dev/pts"] == "wi"
       writable = for {path, access} <- grants, String.contains?(access, "c"), do: path
       assert Enum.sort(writable) == Enum.sort(["/tmp", @workspace])
+    end
+
+    # From ABI 5 the kernel refuses a device's ioctls wherever no rule grants
+    # them: only the terminals take them, so a pty still works.
+    test "only the terminal devices take ioctls" do
+      for mode <- [:strict, :standard, :open] do
+        grants = grants(mode)
+        ioctl = for {path, access} <- grants, String.contains?(access, "i"), do: path
+
+        assert Enum.sort(ioctl) == ["/dev/pts", "/dev/tty"], "#{mode}"
+        assert grants["/dev/tty"] == "wi"
+      end
     end
 
     test "symlinks, sockets and entries that are gone get no rule" do
@@ -271,19 +284,26 @@ defmodule FermixCore.Sandbox.LandlockTest do
 
   describe "args/1, refusal/2 and describe/1" do
     test "one ACCESS:PATH argument per rule" do
-      assert Landlock.args([{"/a b", "xrl"}, {"/w", "wc"}]) == ["xrl:/a b", "wc:/w"]
+      assert Landlock.args([{"/a b", "xrl"}, {"/w", "wc"}, {"/dev/pts", "wi"}]) ==
+               ["xrl:/a b", "wc:/w", "wi:/dev/pts"]
     end
 
     test "the shim's own refusals are told apart from the command's" do
       assert Landlock.refusal(
                69,
-               "fermix_landlock: Landlock ABI 1 is below 2 (Linux before 5.19)\n"
+               "fermix_landlock: Landlock ABI 2 is below 3 (Linux before 6.2)\n"
              ) ==
                "This computer can't sandbox commands (Landlock is unavailable), so Fermix won't run them: " <>
-                 "Landlock ABI 1 is below 2 (Linux before 5.19)."
+                 "Landlock ABI 2 is below 3 (Linux before 6.2)."
 
       assert Landlock.refusal(65, "fermix_landlock: /x is a symlink; rules name resolved paths\n") ==
                "The command could not start inside Fermix's sandbox: fermix_landlock: /x is a symlink; rules name resolved paths"
+
+      assert Landlock.refusal(
+               71,
+               "fermix_landlock: cannot start a session of its own: Operation not permitted\n"
+             ) ==
+               "The command could not start inside Fermix's sandbox: fermix_landlock: cannot start a session of its own: Operation not permitted"
 
       assert Landlock.refusal(69, "the command's own output") == nil
       assert Landlock.refusal(1, "fermix_landlock: looks like it, exit says otherwise") == nil
@@ -297,18 +317,25 @@ defmodule FermixCore.Sandbox.LandlockTest do
       held = fake_shim(tmp_dir, "held", "echo 'fermix_landlock: abi 5'; exit 0")
       assert Landlock.probe(held) == {:ok, 5}
 
+      floor = fake_shim(tmp_dir, "floor", "echo 'fermix_landlock: abi 3'; exit 0")
+      assert Landlock.probe(floor) == {:ok, 3}
+
       old =
         fake_shim(
           tmp_dir,
           "old",
-          "echo 'fermix_landlock: Landlock ABI 1 is below 2 (Linux before 5.19)' >&2; exit 69"
+          "echo 'fermix_landlock: Landlock ABI 2 is below 3 (Linux before 6.2)' >&2; exit 69"
         )
 
       assert {:error, {:unavailable, line}} = Landlock.probe(old)
-      assert line == "fermix_landlock: Landlock ABI 1 is below 2 (Linux before 5.19)"
+      assert line == "fermix_landlock: Landlock ABI 2 is below 3 (Linux before 6.2)"
 
-      odd = fake_shim(tmp_dir, "odd", "echo 'fermix_landlock: abi 1'; exit 0")
-      assert {:error, {:failed, 0, _line}} = Landlock.probe(odd)
+      # A shim that says it holds commands below the floor contradicts itself:
+      # ABI 2 cannot refuse a truncate, so it is not taken at its word.
+      for abi <- [1, 2] do
+        odd = fake_shim(tmp_dir, "odd#{abi}", "echo 'fermix_landlock: abi #{abi}'; exit 0")
+        assert {:error, {:failed, 0, _line}} = Landlock.probe(odd), "abi #{abi}"
+      end
 
       stuck = fake_shim(tmp_dir, "stuck", "exit 0")
       File.chmod!(stuck, 0o644)

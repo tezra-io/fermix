@@ -171,16 +171,22 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   carried over, so sign in to each site once more.
 - **On Linux the kernel now holds every command Fermix runs for you to the
   sandbox, as it does on a Mac.** The shell, git and operator commands run
-  under Landlock (Linux 5.19 or later): outside `open` they write only the
+  under Landlock (Linux 6.2 or later): outside `open` they write only the
   workspace, your grants and the temp folders, and in no mode can they write
   Fermix's home outside its workspace and skills, its systemd unit or the
-  protected paths, or read its secrets, tokens, the phone and desktop keys,
-  `/run/fermix`, or (outside `open`) your SSH and cloud credentials. So a
-  command in a turn that read outside content no longer waits for your
-  confirmation there. A Linux kernel without Landlock runs no command and says
-  why, `fermix doctor` gains an `os sandbox` row on both systems, and tool
-  caches move into the workspace's `.cache` on Linux too. On a Mac the same
-  read rules now also cover the phone and desktop keys and `/run/fermix`.
+  protected paths (nor empty one with a truncate), or read its secrets,
+  tokens, the phone and desktop keys, `/run/fermix`, or (outside `open`) your
+  SSH and cloud credentials. From Linux 6.10 a command can use no device's
+  ioctls but a terminal's (GPU compute such as CUDA does not run from a
+  command), and from Linux 6.12 it cannot signal a process outside the command
+  or connect to an abstract unix socket made outside it. Every command runs in
+  a session of its own, so it cannot type into the terminal of a `fermix` you
+  started by hand. So a command in a turn that read outside content no longer
+  waits for your confirmation there. A Linux kernel without Landlock, or older
+  than 6.2 (Debian 12's 6.1 included), runs no command and says why,
+  `fermix doctor` gains an `os sandbox` row on both systems, and tool caches
+  move into the workspace's `.cache` on Linux too. On a Mac the same read
+  rules now also cover the phone and desktop keys and `/run/fermix`.
 - **Adding a cue source starts from what you want watched.** The add form
   now opens on a list: Website or blog, X accounts, GitHub and Your scripts,
   with Any feed address, Live stream and Any webhook under Something else.

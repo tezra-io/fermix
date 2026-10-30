@@ -743,13 +743,16 @@ Secret Service writer stages a key being saved in `secrets/.staging-N/`). On mac
 `sandbox-exec` with a Seatbelt profile built from the same roots. On Linux it is
 the `fermix_landlock` exec shim (`apps/fermix_nif/c_src`, built like `disclaim`:
 strict flags in lockstep with `ci.yml`, zig per release target through the
-Burrito target's `LANDLOCK_TARGET`), which checks the Landlock ABI (below 2
-refuses), sets `no_new_privs`, adds one rule per argument and execs the
-command; `Sandbox.Landlock` carves those rules folder by folder around the
+Burrito target's `LANDLOCK_TARGET`), which checks the Landlock ABI (below 3
+refuses, since ABI 2 cannot refuse a truncate), starts a session of its own
+(an Erlang port's child already leads one), sets `no_new_privs`, adds one rule
+per argument and execs the command. ABI 5's device ioctls (granted to the
+terminals only) and ABI 6's signal and abstract-socket scopes are asked only
+of a kernel that has them. `Sandbox.Landlock` carves the rules folder by folder around the
 protected paths, since Landlock only grants, and the shim refuses every command
 by name on a kernel that cannot hold them. Doctor's `os sandbox` row checks
 either kernel. Where `OsSandbox.enforced?/1` is false (another system, or Linux
-without Landlock ABI 2), a built-in marked `host_command?`
+without Landlock ABI 3), a built-in marked `host_command?`
 (`shell`, `git_write`, a declared command) in a turn that read outside content
 goes through `Capabilities.AccessGate` like an access-sensitive plugin command.
 One that runs unconfined everywhere

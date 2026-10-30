@@ -102,10 +102,12 @@ jobs:
       - name: Landlock shim proof (Linux)
         # `mix compile` above built `fermix_landlock` through apps/fermix_nif's
         # Makefile. The script proves every denial and allowance the sandbox
-        # relies on against this runner's kernel, and fails on a kernel that
-        # cannot hold commands (Landlock ABI below 2): every command the agent
-        # runs refuses on such a host, and the suite below would fail
-        # piecemeal for it.
+        # relies on against this runner's kernel (those of Landlock ABI 5 and 6
+        # where it has them), that a command runs in a session of its own and
+        # dies with its process group, and fails on a kernel that cannot hold
+        # commands (Landlock ABI below 3): every command the agent runs
+        # refuses on such a host, and the suite below would fail piecemeal
+        # for it.
         if: runner.os == 'Linux'
         run: bash apps/fermix_nif/test/landlock_proof.sh _build/test/lib/fermix_nif/priv/fermix_landlock
 

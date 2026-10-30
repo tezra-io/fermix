@@ -24,7 +24,7 @@ defmodule FermixCore.Capabilities.AccessGateHostCommandTest do
 
   @token "TOKEN123"
   # A Linux host whose kernel cannot hold commands (no Landlock, or ABI below
-  # 2), the world the interim rule is for; `landlock:` pins the shim's answer,
+  # 3), the world the interim rule is for; `landlock:` pins the shim's answer,
   # so the kernel the suite runs on never decides. `@landlock` is one where it
   # holds them.
   @linux [os: {:unix, :linux}, landlock: {:error, {:unavailable, "fermix_landlock: no Landlock"}}]

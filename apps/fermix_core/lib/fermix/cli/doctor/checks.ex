@@ -2829,11 +2829,10 @@ defmodule Fermix.CLI.Doctor.Checks do
   @doc """
   Whether the kernel holds the commands Fermix runs for the agent
   (OS_SANDBOX_ENFORCEMENT): on macOS `sandbox-exec` must apply a profile; on
-  Linux the Landlock shim must report ABI 2 or later (Linux 5.19), asked of
+  Linux the Landlock shim must report ABI 3 or later (Linux 6.2), asked of
   the shim the commands run through. Where it cannot, every confined command
-  refuses, so the row fails with the sentence those commands get. ABI 2 holds
-  commands but cannot refuse `truncate(2)` (ABI 3, Linux 6.2), which the row
-  warns. `:seatbelt` and `:landlock` inject the probe's answer.
+  refuses, so the row fails with the sentence those commands get.
+  `:seatbelt` and `:landlock` inject the probe's answer.
   """
   @spec os_sandbox({atom(), atom()}, keyword()) :: result()
   def os_sandbox(os_type \\ :os.type(), opts \\ [])
@@ -2854,13 +2853,6 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   def os_sandbox({:unix, :linux}, opts) do
     case Keyword.get_lazy(opts, :landlock, fn -> Landlock.probe(Landlock.shim_path()) end) do
-      {:ok, 2} ->
-        warn(
-          "os sandbox",
-          "commands are held by the kernel (Landlock ABI 2), but before Linux 6.2 a " <>
-            "command can still truncate a protected file"
-        )
-
       {:ok, abi} ->
         ok("os sandbox", "commands are held by the kernel (Landlock ABI #{abi})")
 
@@ -2868,7 +2860,7 @@ defmodule Fermix.CLI.Doctor.Checks do
         fail(
           "os sandbox",
           Landlock.describe(reason) <>
-            " Fermix needs Linux 5.19 or later with Landlock enabled (in the kernel's lsm= list)."
+            " Fermix needs Linux 6.2 or later with Landlock enabled (in the kernel's lsm= list)."
         )
     end
   end

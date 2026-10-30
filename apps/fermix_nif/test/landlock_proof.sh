@@ -5,18 +5,27 @@
 # Usage: apps/fermix_nif/test/landlock_proof.sh [SHIM]
 #
 # SHIM is a built fermix_landlock. Without it the script builds one from
-# c_src/fermix_landlock.c with cc under the release's strict flags, plus a
-# test build that reports ABI 1, which proves the refusal of a kernel before
-# 5.19 on any kernel.
+# c_src/fermix_landlock.c with cc under the release's strict flags, plus two
+# test builds: one that reports ABI 2, which proves the refusal of a kernel
+# before 6.2 on any kernel, and one that reports ABI 4, which proves that the
+# restrictions of ABI 5 and 6 are asked only of a kernel that has them.
 #
 # It lays out a Fermix home in a scratch folder and carves rules the way
 # `FermixCore.Sandbox.Landlock` does for `strict`: every folder above a
 # protected path gets only `l`, its other entries are granted whole, and the
 # workspace and a temp stand-in are writable. Then it runs each case under the
 # shim and checks the kernel's answer. Running as root (a container), it also
-# proves the real /run/fermix. Exits 1 when any case does not hold, and on a
-# host without Landlock ABI 2: this is the gate that says so.
+# proves the real /run/fermix. It also proves the command runs in a session
+# of its own, without its caller's terminal, and that a signal to the process
+# group whose id is the command's pid (what kill_pgid/2 sends) reaches what it
+# started. Exits 1 when any case does not hold, and on a host without
+# Landlock ABI 3: this is the gate that says so. Needs perl, and setsid and
+# script from util-linux.
 set -euo pipefail
+
+for tool in perl setsid script; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "error: the proof needs $tool" >&2; exit 1; }
+done
 
 nif_dir="$(cd "$(dirname "$0")/.." && pwd -P)"
 work="$(mktemp -d "${TMPDIR:-/tmp}/fermix-landlock-proof.XXXXXX")"
@@ -26,6 +35,7 @@ case "$work" in
   *) echo "error: unexpected scratch folder $work" >&2; exit 1 ;;
 esac
 cleanup() {
+  if [ -n "${listener:-}" ]; then kill "$listener" 2>/dev/null || true; fi
   chmod -R u+w "$work" 2>/dev/null || true
   rm -rf -- "$work"
   if [ -n "${run_dir:-}" ]; then rm -rf -- "$run_dir"; fi
@@ -39,8 +49,10 @@ else
   shim="$work/fermix_landlock"
   cc "${flags[@]}" "$nif_dir/c_src/fermix_landlock.c" -o "$shim"
 fi
-shim_abi1="$work/fermix_landlock_abi1"
-cc "${flags[@]}" -DFERMIX_LANDLOCK_TEST_ABI=1 "$nif_dir/c_src/fermix_landlock.c" -o "$shim_abi1"
+shim_abi2="$work/fermix_landlock_abi2"
+cc "${flags[@]}" -DFERMIX_LANDLOCK_TEST_ABI=2 "$nif_dir/c_src/fermix_landlock.c" -o "$shim_abi2"
+shim_abi4="$work/fermix_landlock_abi4"
+cc "${flags[@]}" -DFERMIX_LANDLOCK_TEST_ABI=4 "$nif_dir/c_src/fermix_landlock.c" -o "$shim_abi4"
 
 if ! abi_line="$("$shim" --abi 2>&1)"; then
   echo "error: this kernel cannot hold commands: $abi_line" >&2
@@ -118,8 +130,12 @@ rules+=(
   "l:$base/run"
   "wc:$fermix/workspace" "wc:$base/scratch"
 )
-for device in /dev/null /dev/zero /dev/full /dev/tty /dev/ptmx /dev/pts; do
+# The null sinks are written; the terminals also take ioctls, so a pty works.
+for device in /dev/null /dev/zero /dev/full; do
   if [ -e "$device" ] && [ ! -L "$device" ]; then rules+=("w:$device"); fi
+done
+for device in /dev/tty /dev/ptmx /dev/pts; do
+  if [ -e "$device" ] && [ ! -L "$device" ]; then rules+=("wi:$device"); fi
 done
 echo "rules: ${#rules[@]}"
 
@@ -158,6 +174,60 @@ allowed() {
   if [ "$status" -eq 0 ]; then pass "allowed: $name"; else miss "should be allowed: $name"; fi
 }
 
+# Refused by ABI 6's scoping, which the kernel answers with EPERM.
+scoped_out() {
+  local name="$1" command="$2"
+  confined "$command"
+  if [ "$status" -ne 0 ] && printf '%s' "$output" | grep -q 'Operation not permitted'; then
+    pass "denied: $name"
+  else
+    miss "should be denied: $name"
+  fi
+}
+
+# Waits up to 10 s for a condition (a command), looking every 0.1 s.
+wait_for() {
+  local tries=0
+  until "$@"; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 100 ] || return 1
+    sleep 0.1
+  done
+}
+
+# A process that exists and has not died (a zombie has).
+alive() {
+  local state
+  state="$(cut -d' ' -f3 "/proc/$1/stat" 2>/dev/null)" || return 1
+  [ -n "$state" ] && [ "$state" != Z ]
+}
+gone() { ! alive "$1"; }
+
+# An abstract unix socket made outside the sandbox, for ABI 6's scope.
+if [ "$abi" -ge 6 ]; then
+  abstract="fermix-landlock-proof-$$"
+  cat > "$work/listen.pl" <<'PERL'
+use strict;
+use Socket;
+my ($name, $ready) = @ARGV;
+socket(my $s, AF_UNIX, SOCK_STREAM, 0) or die "socket: $!\n";
+bind($s, pack_sockaddr_un("\0$name")) or die "bind: $!\n";
+listen($s, 1) or die "listen: $!\n";
+open(my $f, '>', $ready) or die "ready: $!\n";
+close($f);
+sleep 300;
+PERL
+  cat > "$base/outside/connect.pl" <<'PERL'
+use strict;
+use Socket;
+socket(my $s, AF_UNIX, SOCK_STREAM, 0) or die "socket: $!\n";
+connect($s, pack_sockaddr_un("\0$ARGV[0]")) or die "connect: $!\n";
+PERL
+  perl "$work/listen.pl" "$abstract" "$work/listening" &
+  listener=$!
+  wait_for test -e "$work/listening" || { echo "error: the abstract socket never listened" >&2; exit 1; }
+fi
+
 denied "read a stored secret" "cat '$fermix/secrets/KEY'"
 denied "read auth.json" "cat '$fermix/auth.json'"
 denied "read a file named after auth.json" "cat '$fermix/auth.json.tmp.1'"
@@ -184,10 +254,18 @@ denied "make a folder in Fermix's home" "mkdir '$fermix/planted'"
 denied "make a file directly in a carved folder" "touch '$home/planted'"
 denied "run a plugin's program directly" "'$fermix/plugins/probe/tool'"
 denied "read the environment of a process outside the sandbox" "cat /proc/\$PPID/environ"
-if [ "$abi" -ge 3 ]; then
-  denied "truncate config.toml (ABI 3 and later)" "truncate -s 0 '$fermix/config.toml'"
+denied "truncate config.toml" "truncate -s 0 '$fermix/config.toml'"
+if [ "$abi" -ge 5 ]; then
+  denied "an ioctl on a device that is not a terminal (ABI 5 and later)" "stty -F /dev/null"
 else
-  echo "limit truncate(2) is not mediated before ABI 3 (Linux 6.2)"
+  echo "limit device ioctls are not mediated before ABI 5 (Linux 6.10)"
+fi
+if [ "$abi" -ge 6 ]; then
+  scoped_out "signal a process outside the sandbox (ABI 6 and later)" 'kill -0 "$PPID"'
+  scoped_out "connect to an abstract unix socket made outside the sandbox (ABI 6 and later)" \
+    "perl '$base/outside/connect.pl' '$abstract'"
+else
+  echo "limit signals and abstract unix sockets are not scoped before ABI 6 (Linux 6.12)"
 fi
 if [ -n "${run_dir:-}" ]; then
   denied "read the real /run/fermix/enroll.code" "cat /run/fermix/enroll.code"
@@ -207,14 +285,76 @@ allowed "write /dev/null" "echo x > /dev/null"
 allowed "run programs from the system" "/bin/ls /usr/bin >/dev/null"
 allowed "run a plugin's script through an interpreter" "sh '$fermix/plugins/probe/tool' | grep -q ran"
 allowed "no_new_privs is set" "grep -q '^NoNewPrivs:[[:space:]]*1' /proc/self/status"
-if command -v script >/dev/null 2>&1; then
-  allowed "allocate and use a pseudo-terminal" "script -qec true /dev/null"
-fi
+allowed "allocate and use a pseudo-terminal" "script -qec true /dev/null"
+allowed "signal a process the command started" 'sleep 30 & kill "$!"'
+allowed "the command leads a session and process group of its own, with no terminal" \
+  'set -- $(cut -d" " -f5-7 /proc/$$/stat); [ "$1" = "$$" ] && [ "$2" = "$$" ] && [ "$3" = 0 ]'
 
 [ ! -e "$base/outside/new" ] || miss "a file appeared outside every grant"
 grep -q '^seeded = 1$' "$fermix/config.toml" || miss "config.toml changed"
 [ -d "$fermix" ] || miss "Fermix's home moved"
 [ ! -e "$fermix/workspace/k" ] || miss "a secret was linked into the workspace"
+
+# ── the session ─────────────────────────────────────────────────────────────
+# Under script(1) the shell that starts the shim has a controlling terminal,
+# as a `fermix` started by hand does; the command it runs must have none, or
+# it could push input into that terminal (TIOCSTI).
+tty_probe="$work/tty_probe.sh"
+{
+  printf 'caller="$(cut -d" " -f7 /proc/$$/stat)"\n'
+  printf 'rules=(\n'
+  printf '  %q\n' "${rules[@]}"
+  printf ')\n'
+  printf '%q "${rules[@]}" -- /bin/sh -c %q\n' "$shim" \
+    'echo "command-tty=$(cut -d" " -f7 /proc/$$/stat)"'
+  printf 'echo "caller-tty=$caller"\n'
+} > "$tty_probe"
+set +e
+output="$(script -qec "bash '$tty_probe'" /dev/null 2>&1 | tr -d '\r')"
+status=$?
+set -e
+name="the command does not keep its caller's terminal"
+if printf '%s' "$output" | grep -q '^caller-tty=0$'; then
+  miss "$name (the caller had no terminal, so this proves nothing)"
+elif printf '%s' "$output" | grep -q '^command-tty=0$'; then
+  pass "$name"
+else
+  miss "$name"
+fi
+
+# The daemon ends a command by signalling the process group whose id is the
+# command's pid (kill_pgid/2), which must reach what the command started:
+# whether the shim started its session or already led one, as a port of the
+# Erlang VM does (`setsid` stands in for it here).
+group_signal_case() {
+  local name="$1"
+  shift
+  local pidfile="$base/scratch/started.pid"
+  rm -f "$pidfile"
+  "$@" "$shim" "${rules[@]}" -- /bin/sh -c 'sleep 300 & echo "$!" > "$1"; wait' sh "$pidfile" &
+  local leader=$!
+  if ! wait_for test -s "$pidfile"; then
+    kill -KILL "$leader" 2>/dev/null || true
+    status="none" output="the command never wrote its child's pid"
+    miss "$name"
+    return
+  fi
+  local started
+  started="$(cat "$pidfile")"
+  kill -KILL -- "-$leader" 2>/dev/null || true
+  if wait_for gone "$started"; then
+    pass "$name"
+  else
+    status="alive" output="pid $started outlived the group signal"
+    miss "$name"
+  fi
+  # Whatever the group signal missed is ended one by one, so a miss never
+  # leaves the proof waiting on it.
+  kill -KILL "$leader" "$started" 2>/dev/null || true
+  wait "$leader" 2>/dev/null || true
+}
+group_signal_case "a signal to the command's process group reaches what it started"
+group_signal_case "the same when the shim already leads its session" setsid -w
 
 # ── the shim's own refusals ─────────────────────────────────────────────────
 shim_case() {
@@ -232,10 +372,30 @@ shim_case() {
 }
 
 marker="$base/scratch/ran"
-shim_case "ABI 1 refuses before anything runs" 69 "below 2 (Linux before 5.19)" \
-  "$shim_abi1" "wc:$base/scratch" -- /bin/sh -c "touch '$marker'"
+shim_case "ABI 2 refuses before anything runs" 69 "below 3 (Linux before 6.2)" \
+  "$shim_abi2" "wc:$base/scratch" -- /bin/sh -c "touch '$marker'"
 [ ! -e "$marker" ] || miss "the command ran on a refused ABI"
-shim_case "--abi on ABI 1" 69 "Landlock ABI 1 is below 2" "$shim_abi1" --abi
+shim_case "--abi on ABI 2" 69 "Landlock ABI 2 is below 3" "$shim_abi2" --abi
+# A build that reports ABI 4 on a newer kernel: it holds commands, and asks
+# the kernel for neither ABI 5's device ioctls nor ABI 6's scopes.
+shim_case "ABI 4 holds commands" 0 "" \
+  "$shim_abi4" "${rules[@]}" -- /bin/sh -c "cat '$fermix/config.toml' >/dev/null"
+if [ "$abi" -ge 5 ]; then
+  shim_case "ABI 4 leaves device ioctls as they are" 1 "Inappropriate ioctl" \
+    "$shim_abi4" "${rules[@]}" -- /bin/sh -c 'stty -F /dev/null'
+fi
+if [ "$abi" -ge 6 ]; then
+  shim_case "ABI 4 leaves signals as they are" 0 "" \
+    "$shim_abi4" "${rules[@]}" -- /bin/sh -c 'kill -0 "$PPID"'
+fi
+shim_case "a shim that already leads its own session goes on" 0 "" \
+  setsid -w "$shim" "${rules[@]}" -- /bin/sh -c 'set -- $(cut -d" " -f6 /proc/$$/stat); [ "$1" = "$$" ]'
+session_marker="$base/scratch/ran-in-callers-session"
+shim_case "a process-group leader in its caller's session is refused" 71 \
+  "cannot start a session of its own" \
+  perl -e 'setpgrp(0, 0) or die "setpgrp: $!\n"; exec { $ARGV[0] } @ARGV or die "exec: $!\n"' \
+  "$shim" "${rules[@]}" -- /bin/sh -c "touch '$session_marker'"
+[ ! -e "$session_marker" ] || miss "the command ran in its caller's session"
 shim_case "a rule naming a symlink" 65 "is a symlink" \
   "$shim" "r:$base/outside/link" -- /bin/true
 shim_case "a malformed rule" 64 "malformed rule" "$shim" "q:/tmp" -- /bin/true

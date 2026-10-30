@@ -10,31 +10,47 @@
  *   x  execute a file
  *   r  read a file
  *   l  list a directory (open it, read its entries)
- *   w  write a file, and truncate it from ABI 3
+ *   w  write and truncate a file
  *   c  create, remove, rename and link entries in a directory, across
  *      directories too (REFER)
+ *   i  use a device's ioctl commands (a terminal's), from ABI 5
  *
- * Every other filesystem access the running ABI knows (up to TRUNCATE) is
- * denied wherever no rule grants it. Device ioctls, network access and signals
- * are left as they are. Directory rights on a rule for a file are dropped,
- * since the kernel refuses them there.
+ * Every filesystem access the running ABI knows is denied wherever no rule
+ * grants it: up to TRUNCATE at the floor, device ioctls too from ABI 5. From
+ * ABI 6 the command also cannot signal a process outside its sandbox or
+ * connect to an abstract unix socket made outside it. Network access is left
+ * as it is. Directory rights on a rule for a file are dropped, since the
+ * kernel refuses them there. Each restriction past the floor applies where the
+ * running kernel has it; none is asked of a kernel that lacks it.
  *
- * The shim checks the Landlock ABI (below 2, i.e. Linux before 5.19, is
- * refused: ABI 1 refuses every rename and link across directories), sets
- * no_new_privs (which also disables setuid helpers), adds the rules, restricts
- * itself and execs the command in place: same pid, same fds, same environment.
- * Any step that fails exits non-zero with one line on stderr and the command
- * never runs; there is no unconfined path. One exception is not a failure: a
- * rule whose path no longer exists (an entry removed between the caller's
- * listing and this open) grants nothing, so it is skipped.
+ * The shim checks the Landlock ABI (below 3, i.e. Linux before 6.2, is
+ * refused: ABI 2 cannot refuse truncate(2), so a command could empty a file it
+ * may only read), starts a session of its own, sets no_new_privs (which also
+ * disables setuid helpers), adds the rules, restricts itself and execs the
+ * command in place: same pid, same fds, same environment. Any step that fails
+ * exits non-zero with one line on stderr and the command never runs; there is
+ * no unconfined path. One exception is not a failure: a rule whose path no
+ * longer exists (an entry removed between the caller's listing and this open)
+ * grants nothing, so it is skipped.
+ *
+ * The session: a new session has no controlling terminal, so the command
+ * cannot push input into the terminal of whoever started Fermix (TIOCSTI).
+ * setsid() fails with EPERM for a process-group leader. A port of the Erlang
+ * VM is one already, and leads a session of its own (its child calls setsid()
+ * before exec), so the shim goes on. A process-group leader inside its
+ * caller's session (a shell with job control started it) would keep that
+ * terminal, and is refused. Either way the command leads its own process group
+ * and session, whose id is its pid: the group the daemon signals to end the
+ * command and everything it started (kill_pgid/2).
  *
  * `--abi` prints the ABI and exits 0, or prints the refusal and exits 69.
  *
  * Exit codes of the shim itself, before the command runs:
  *   64   usage: no `--`, no executable, or a malformed rule
  *   65   a rule's path cannot be opened or added (a symlink included)
- *   69   Landlock is unavailable here, or its ABI is below 2
- *   71   a step that must succeed failed (ruleset, no_new_privs, restrict)
+ *   69   Landlock is unavailable here, or its ABI is below 3
+ *   71   a step that must succeed failed (session, ruleset, no_new_privs,
+ *        restrict)
  *   126  the executable could not be run; 127 it does not exist
  *
  * The syscalls are made by number (444 to 446, the same on every Linux
@@ -42,8 +58,9 @@
  * needed: the release builds cross-compile with zig against musl.
  *
  * FERMIX_LANDLOCK_TEST_ABI, defined at compile time only, replaces the
- * kernel's answer to the ABI query so a test build can prove the refusal on a
- * kernel that has Landlock. The shipped binary has no such seam.
+ * kernel's answer to the ABI query so a test build can prove the refusal, and
+ * that an older ABI is asked only for what it has, on a kernel that has more.
+ * The shipped binary has no such seam.
  */
 #define _GNU_SOURCE 1
 
@@ -81,12 +98,20 @@
 #define FX_MAKE_SYM (1ULL << 12)
 #define FX_REFER (1ULL << 13)
 #define FX_TRUNCATE (1ULL << 14)
+#define FX_IOCTL_DEV (1ULL << 15)
 
-/* Every access right of ABI 2 (bits 0 to 13) and of ABI 3 (TRUNCATE added). */
-#define FX_HANDLED_ABI2 ((1ULL << 14) - 1)
+#define FX_SCOPE_ABSTRACT_UNIX_SOCKET (1ULL << 0)
+#define FX_SCOPE_SIGNAL (1ULL << 1)
+
+/* The lowest ABI that holds commands: ABI 2 cannot refuse truncate(2). */
+#define FX_FLOOR_ABI 3
+
+/* Every access right up to ABI 3's TRUNCATE (bits 0 to 14), and ABI 5's
+ * IOCTL_DEV (bit 15) on top. */
 #define FX_HANDLED_ABI3 ((1ULL << 15) - 1)
+#define FX_HANDLED_ABI5 ((1ULL << 16) - 1)
 
-#define FX_FILE_ACCESS (FX_EXECUTE | FX_WRITE_FILE | FX_READ_FILE | FX_TRUNCATE)
+#define FX_FILE_ACCESS (FX_EXECUTE | FX_WRITE_FILE | FX_READ_FILE | FX_TRUNCATE | FX_IOCTL_DEV)
 #define FX_CHANGE_ACCESS                                                              \
   (FX_REMOVE_DIR | FX_REMOVE_FILE | FX_MAKE_DIR | FX_MAKE_REG | FX_MAKE_SOCK |       \
    FX_MAKE_FIFO | FX_MAKE_SYM | FX_REFER)
@@ -96,8 +121,13 @@
 #define EXIT_UNAVAILABLE 69
 #define EXIT_OSERR 71
 
+/* The whole structure of ABI 6. A kernel older than a field reads it only when
+ * it is zero (a nonzero byte it does not know is E2BIG), so each field is set
+ * only from the ABI that has it. Network rights (ABI 4) stay unhandled. */
 struct fx_ruleset_attr {
   uint64_t handled_access_fs;
+  uint64_t handled_access_net;
+  uint64_t scoped;
 };
 
 struct fx_path_beneath_attr {
@@ -121,11 +151,21 @@ static int checked_abi(int *abi) {
             strerror(errno));
     return EXIT_UNAVAILABLE;
   }
-  if (*abi < 2) {
-    fprintf(stderr, "fermix_landlock: Landlock ABI %d is below 2 (Linux before 5.19)\n", *abi);
+  if (*abi < FX_FLOOR_ABI) {
+    fprintf(stderr, "fermix_landlock: Landlock ABI %d is below 3 (Linux before 6.2)\n", *abi);
     return EXIT_UNAVAILABLE;
   }
   return 0;
+}
+
+/* Starts a session of its own, or EXIT_OSERR after one line (the header says
+ * why EPERM from a port of the Erlang VM is not a failure). */
+static int own_session(void) {
+  if (setsid() >= 0) return 0;
+  int error = errno;
+  if (error == EPERM && getsid(0) == getpid()) return 0;
+  fprintf(stderr, "fermix_landlock: cannot start a session of its own: %s\n", strerror(error));
+  return EXIT_OSERR;
 }
 
 static int parse_access(const char *letters, size_t length, uint64_t *access) {
@@ -138,6 +178,7 @@ static int parse_access(const char *letters, size_t length, uint64_t *access) {
       case 'l': *access |= FX_READ_DIR; break;
       case 'w': *access |= FX_WRITE_FILE | FX_TRUNCATE; break;
       case 'c': *access |= FX_CHANGE_ACCESS; break;
+      case 'i': *access |= FX_IOCTL_DEV; break;
       default: return -1;
     }
   }
@@ -198,8 +239,10 @@ static int restrict_self(int ruleset) {
 
 /* Builds the ruleset from argv[1..separator) and restricts this process. */
 static int confine(char **argv, int separator, int abi) {
-  uint64_t handled = abi >= 3 ? FX_HANDLED_ABI3 : FX_HANDLED_ABI2;
-  struct fx_ruleset_attr attr = {.handled_access_fs = handled};
+  uint64_t handled = abi >= 5 ? FX_HANDLED_ABI5 : FX_HANDLED_ABI3;
+  uint64_t scoped = abi >= 6 ? FX_SCOPE_SIGNAL | FX_SCOPE_ABSTRACT_UNIX_SOCKET : 0;
+  struct fx_ruleset_attr attr = {
+      .handled_access_fs = handled, .handled_access_net = 0, .scoped = scoped};
   int ruleset = (int)syscall(FX_SYS_CREATE_RULESET, &attr, sizeof(attr), 0);
   if (ruleset < 0) {
     fprintf(stderr, "fermix_landlock: cannot create the ruleset: %s\n", strerror(errno));
@@ -232,6 +275,7 @@ int main(int argc, char **argv) {
   }
 
   int status = checked_abi(&abi);
+  if (status == 0) status = own_session();
   if (status == 0) status = confine(argv, separator, abi);
   if (status != 0) return status;
 

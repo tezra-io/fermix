@@ -43,9 +43,15 @@ channels. Areas of particular interest:
 The kernel holds the commands a turn runs (the shell, git and
 operator-declared command tools; not coding agents or plugin processes) to the
 sandbox mode and keeps Fermix's own secrets and keys out of their reach:
-Seatbelt on macOS, Landlock on Linux. A Linux kernel without Landlock ABI 2
-(Linux 5.19) runs none of them. Landlock cannot refuse a connection to
-Fermix's local sockets, so on Linux those keep only their own peer checks.
+Seatbelt on macOS, Landlock on Linux. A Linux kernel without Landlock ABI 3
+(Linux 6.2) runs none of them: ABI 2 cannot refuse a truncate, so a command
+could empty a file it may only read. Where the kernel has them, Landlock also
+refuses a command's ioctls on every device but a terminal (ABI 5, Linux 6.10)
+and its signals and abstract unix socket connections to anything outside its
+sandbox (ABI 6, Linux 6.12). Each command runs in a session of its own, so it
+cannot push input into the terminal of a `fermix` started by hand. Landlock
+cannot refuse a connection to Fermix's local sockets, so on Linux those keep
+only their own peer checks.
 Where the kernel does not hold commands, a command (shell, git writes,
 operator-declared commands) in a turn that has read content someone else could
 have written — a web page, a plugin's or MCP server's result, a worker's
@@ -97,7 +103,7 @@ What this deliberately does not cover:
   with the owner's account anyway, and a build or test runs its scripts, so a
   repository someone else wrote is trusted as far as the owner trusts running
   it. A shell or git command is held by the kernel: Seatbelt on a Mac, and on
-  Linux Landlock ABI 2 or later (Linux 5.19), where a kernel without it runs
+  Linux Landlock ABI 3 or later (Linux 6.2), where a kernel without it runs
   no command; a coding run stays unconfined on either.
 - A voice note or Telegram video note is treated as the owner's own words when
   the channel declares it a recording and does not mark it forwarded; a

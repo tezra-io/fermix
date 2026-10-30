@@ -27,7 +27,7 @@ defmodule FermixCore.Sandbox.OsSandbox do
 
   On Linux the command runs under the `fermix_landlock` exec shim with Landlock
   rules carved from the same path sets (`Sandbox.Landlock`). A kernel that
-  cannot hold them (no Landlock, or ABI below 2: Linux before 5.19) refuses
+  cannot hold them (no Landlock, or ABI below 3: Linux before 6.2) refuses
   every command by name; nothing runs unconfined. On any other system commands
   run as before, and `Capabilities.AccessGate` asks the owner before one runs
   in a turn that read outside content (`enforced?/1`).
@@ -82,8 +82,17 @@ defmodule FermixCore.Sandbox.OsSandbox do
   @linux_writable ~w(/tmp /var/tmp /dev/shm)
 
   # The device files a command writes on Linux (Seatbelt names its own in the
-  # profile): the null sinks, its terminal, and pseudo-terminals it opens.
-  @linux_devices ~w(/dev/null /dev/zero /dev/full /dev/tty /dev/ptmx /dev/pts)
+  # profile): the null sinks, its terminal, and pseudo-terminals it opens. The
+  # terminals also take ioctls (`i`), as Seatbelt's pty rules allow, so a pty
+  # still works where the kernel refuses every other device's (Landlock ABI 5).
+  @linux_devices [
+    {"/dev/null", "w"},
+    {"/dev/zero", "w"},
+    {"/dev/full", "w"},
+    {"/dev/tty", "wi"},
+    {"/dev/ptmx", "wi"},
+    {"/dev/pts", "wi"}
+  ]
 
   # Tool caches redirected into the workspace: the owner's own caches hold code
   # the daemon or the owner later runs (the browser tool's Chromium lives under
@@ -262,7 +271,7 @@ defmodule FermixCore.Sandbox.OsSandbox do
   @doc """
   Whether the kernel holds commands to the sandbox on this host: macOS
   (Seatbelt), and Linux where the Landlock shim is installed and the kernel's
-  ABI is 2 or later, which asks the shim (one short process; `:landlock` pins
+  ABI is 3 or later, which asks the shim (one short process; `:landlock` pins
   its answer in tests). `:os` is the platform seam, as in `wrap/5`. The one
   source of this fact: `Capabilities.AccessGate` reads it too, to ask the owner
   before a host command runs after outside content where it is false. A Linux

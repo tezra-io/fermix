@@ -316,16 +316,16 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
       assert OsSandbox.enforcement(os: @linux, landlock: {:ok, 6}) ==
                "held by the kernel (Landlock ABI 6)"
 
-      below = {:unavailable, "fermix_landlock: Landlock ABI 1 is below 2 (Linux before 5.19)"}
+      below = {:unavailable, "fermix_landlock: Landlock ABI 2 is below 3 (Linux before 6.2)"}
 
       assert OsSandbox.enforcement(os: @linux, landlock: {:error, below}) ==
                "refused: This computer can't sandbox commands (Landlock is unavailable), so " <>
-                 "Fermix won't run them: Landlock ABI 1 is below 2 (Linux before 5.19)."
+                 "Fermix won't run them: Landlock ABI 2 is below 3 (Linux before 6.2)."
 
       assert OsSandbox.enforcement(os: {:unix, :freebsd}) ==
                "not held by the kernel on this system"
 
-      assert OsSandbox.enforced?(os: @linux, landlock: {:ok, 2})
+      assert OsSandbox.enforced?(os: @linux, landlock: {:ok, 3})
       refute OsSandbox.enforced?(os: @linux, landlock: {:error, below})
       refute OsSandbox.enforced?(os: @linux, landlock_shim: "/nonexistent/fermix_landlock")
     end
@@ -444,6 +444,8 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
       assert ("xrlwc:" <> resolved(ctx.workspace)) in rules
       assert ("l:" <> resolved(ctx.fermix_home)) in rules
       assert "l:/" in rules
+      assert "w:/dev/null" in rules
+      assert "wi:/dev/tty" in rules
 
       refute Enum.any?(
                rules,
@@ -761,7 +763,7 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
 
   # The same through Landlock: the real tools, the real `fermix_landlock` that
   # `mix compile` built, the real kernel. It runs only on Linux where the shim
-  # reports Landlock ABI 2 or later (`--only landlock` names it); a Linux host
+  # reports Landlock ABI 3 or later (`--only landlock` names it); a Linux host
   # without it is refused loudly by the CI leg's `landlock_proof.sh` step, and
   # every command on it refuses anyway.
   @landlock_probe if :os.type() == @linux, do: Landlock.probe(Landlock.shim_path())
@@ -791,6 +793,7 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
 
       for command <- [
             "echo planted >> #{config_toml}",
+            "truncate -s 0 #{config_toml}",
             "mv #{config_toml} #{ctx.workspace}/",
             "rm -f #{config_toml}"
           ] do
@@ -854,6 +857,18 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
       assert output =~ "private-key"
       assert %{success: false} = shell("mv #{key} #{ctx.outside}/", config(ctx, :open))
       assert File.exists?(key)
+    end
+
+    # The shim starts a session of its own; a port of the VM already leads
+    # one, which the shim accepts. Either way the command has no terminal to
+    # push input into, and it leads the process group the daemon signals.
+    test "a command leads its own session and process group, with no terminal", ctx do
+      assert %{success: true, output: output} =
+               shell(~s|echo $$ $(cut -d" " -f5-7 /proc/$$/stat)|, config(ctx, :strict))
+
+      assert [pid, pgrp, session, "0"] = String.split(output)
+      assert pgrp == pid
+      assert session == pid
     end
 
     test "the daemon's own process is out of a command's reach", ctx do
