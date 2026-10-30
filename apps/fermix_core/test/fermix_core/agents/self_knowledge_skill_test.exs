@@ -732,9 +732,34 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "Copy URL",
           "Confirm",
           "Linux app",
-          "Only the owner can change cues"
+          "Only the owner can change cues",
+          # Follow-ups (M60_WATCHER_CODING_RUNS.md): the field, its verbs, the
+          # boundary with the task, readiness, both modes, the switch and cards.
+          "follow_up",
+          "stop_follow_up",
+          "run_follow_up",
+          "coding_agent",
+          "Fermix hands the follow-up nothing from the item",
+          "held",
+          "Ask first",
+          "Automatic",
+          "Keep asking",
+          "Let watchers act",
+          "runs when watcher <name> passes an item",
+          "Run \"<name>\"?",
+          "Run <tool> for <watcher>?"
         ] do
       assert reference =~ required, "cues self-knowledge does not mention #{required}"
+    end
+
+    jobs = "jobs" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    for required <- [
+          "kind `watcher`",
+          "runs when watcher <name> passes an item",
+          "file: \"cues\""
+        ] do
+      assert jobs =~ required, "jobs self-knowledge does not mention #{required}"
     end
 
     for gone <- ["Development builds only", "development daemon", "no published release"] do

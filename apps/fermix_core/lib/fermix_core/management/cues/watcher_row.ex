@@ -12,18 +12,31 @@ defmodule FermixCore.Management.Cues.WatcherRow do
   the owner's own words and travel on `cues.watchers.get` alone, and examples
   are counted, never shown. Decision reasons and filter hints never cross: a
   model wrote them from outside text.
+
+  A watcher has a task, a follow-up or both (M60_WATCHER_CODING_RUNS.md §3.5):
+  `task` is null for one with none, and `follow_up` is null for one with no
+  follow-up, else its job, name, `mode` (`approve` or `auto`), whether an
+  automatic one is `approved` (null for one that asks first), `state` (`ready`,
+  or `held` while it cannot run: the owner's switch is off, or a tool or the
+  channel it needs is not set up) and Fermix's sentence, which says what is
+  missing and where to fix it while it is held. Read-only, like the rest.
   """
 
   alias FermixCore.Cues.Filter.Llm
   alias FermixCore.Cues.Overview
 
   @states ~w(on paused needs_update held)
+  @follow_up_states ~w(ready held)
 
   @type facts :: %{window_s: pos_integer()}
 
   @doc "Every state a watcher row can carry."
   @spec states() :: [String.t()]
   def states, do: @states
+
+  @doc "Every state a watcher's follow-up can carry."
+  @spec follow_up_states() :: [String.t()]
+  def follow_up_states, do: @follow_up_states
 
   @doc """
   What a watcher that needs an update (`Cues.Watchers.update_needed/2`) needs,
@@ -49,11 +62,8 @@ defmodule FermixCore.Management.Cues.WatcherRow do
       "state" => state,
       "status_sentence" => sentence(state, watcher),
       "sources" => watcher.sources,
-      "task" => %{
-        "job_id" => watcher.task_job_id,
-        "name" => watcher.task_name,
-        "paused" => watcher.task_paused?
-      },
+      "task" => task(watcher),
+      "follow_up" => follow_up(watcher.follow_up),
       "task_notes" => watcher.task_notes?,
       "daily_cap" => watcher.daily_cap,
       "filter_budget" => watcher.filter_budget,
@@ -113,8 +123,44 @@ defmodule FermixCore.Management.Cues.WatcherRow do
   defp sentence("held", watcher),
     do: "Held: it cannot reach its filter model. #{watcher.waiting} items are waiting."
 
+  defp sentence("on", %{filter: "none", task_job_id: nil}),
+    do: "Passes every item to its follow-up."
+
   defp sentence("on", %{filter: "none"}), do: "Passes every item to its task."
   defp sentence("on", _watcher), do: "Filtering normally."
+
+  defp task(%{task_job_id: nil}), do: nil
+
+  defp task(watcher),
+    do: %{
+      "job_id" => watcher.task_job_id,
+      "name" => watcher.task_name,
+      "paused" => watcher.task_paused?
+    }
+
+  defp follow_up(nil), do: nil
+
+  defp follow_up(follow_up) do
+    %{
+      "job_id" => follow_up.job_id,
+      "name" => follow_up.name,
+      "mode" => follow_up.mode,
+      "approved" => follow_up.approved?,
+      "state" => if(follow_up.held, do: "held", else: "ready"),
+      "status_sentence" => follow_up_sentence(follow_up)
+    }
+  end
+
+  defp follow_up_sentence(%{held: held}) when is_binary(held), do: held
+
+  defp follow_up_sentence(%{mode: "approve"}),
+    do: "Asks first: you confirm each run on a short card."
+
+  defp follow_up_sentence(%{approved?: true}),
+    do: "Runs on its own on each passing item, within the daily cap."
+
+  defp follow_up_sentence(_unapproved),
+    do: "Asks first until you approve it to run on its own."
 
   # The one Cues filter model every `llm` watcher uses; null when that is the
   # main model, and for a watcher with no filter.

@@ -44,6 +44,7 @@ defmodule FermixCore.Jobs.CueAdmission do
 
   require Logger
 
+  alias FermixCore.Cues.FollowUpReadiness
   alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Telemetry, as: CueTelemetry
   alias FermixCore.Jobs.Registry, as: JobsRegistry
@@ -238,7 +239,10 @@ defmodule FermixCore.Jobs.CueAdmission do
     check_opts =
       [repo: Keyword.fetch!(repo_opts, :server)] ++
         Keyword.take(repo_opts, [:timeout, :on_timeout]) ++
-        Keyword.take(opts, [:notice, :capability_registry, :cues_config])
+        Keyword.take(
+          opts,
+          [:notice, :capability_registry, :cues_config] ++ FollowUpReadiness.seams()
+        )
 
     FollowUps.check(trigger, job, check_opts)
   end

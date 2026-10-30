@@ -44,6 +44,7 @@ defmodule FermixCore.Cues.Watchers do
 
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Cues
+  alias FermixCore.Cues.Card
   alias FermixCore.Cues.Config
   alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.ListenFor
@@ -174,11 +175,11 @@ defmodule FermixCore.Cues.Watchers do
           created_from: origin(context)
         })
 
-      insert_created(attrs, sources, instructions, jobs, opts)
+      insert_created(attrs, sources, instructions, jobs, chat(context), opts)
     end
   end
 
-  defp insert_created(attrs, sources, instructions, jobs, opts) do
+  defp insert_created(attrs, sources, instructions, jobs, chat, opts) do
     request = {:insert_watcher, attrs, sources, instructions, now(opts)}
 
     case call(request, opts) do
@@ -188,7 +189,7 @@ defmodule FermixCore.Cues.Watchers do
            watcher: watcher,
            job: jobs.task,
            follow_up_job: jobs.follow_up,
-           echo: created_echo(watcher, jobs, opts)
+           echo: created_echo(watcher, jobs, chat, opts)
          }}
 
       {:error, reason} ->
@@ -732,7 +733,11 @@ defmodule FermixCore.Cues.Watchers do
 
       case write(watcher, patch, nil, opts) do
         {:ok, %{watcher: updated}} ->
-          {:ok, %{watcher: updated, follow_up_job: job, echo: follow_up_echo(updated, job)}}
+          echo =
+            "Watcher #{updated.name} now has a follow-up.\n" <>
+              follow_up_echo(updated, job, chat(context))
+
+          {:ok, %{watcher: updated, follow_up_job: job, echo: echo}}
 
         {:error, sentence} ->
           drop_created_job(job, opts)
@@ -747,7 +752,11 @@ defmodule FermixCore.Cues.Watchers do
          :ok <- something_to_change(mode_patch, job_attrs),
          {:ok, job} <- update_follow_up_job(watcher.follow_up_job_id, job_attrs, opts),
          {:ok, updated} <- write_mode(watcher, mode_patch, opts) do
-      {:ok, %{watcher: updated, follow_up_job: job, echo: follow_up_echo(updated, job)}}
+      echo =
+        "Watcher #{updated.name}'s follow-up changed.\n" <>
+          follow_up_echo(updated, job, chat(context))
+
+      {:ok, %{watcher: updated, follow_up_job: job, echo: echo}}
     end
   end
 
@@ -954,15 +963,60 @@ defmodule FermixCore.Cues.Watchers do
       "#{watcher.daily_cap} a day."
   end
 
-  defp follow_up_echo(watcher, job) do
-    mode =
-      if watcher.follow_up_mode == "auto",
-        do: "runs on its own once you approve it",
-        else: "asks first: you confirm each run on a short card"
+  # The follow-up as design §3.1 sums it up, below the watcher it belongs to.
+  defp follow_up_echo(watcher, job, chat) do
+    delivery = %{mode: job.delivery_mode, target: job.delivery_target}
 
-    "Watcher #{watcher.name}'s follow-up #{job.name} (job #{job.id}) uses " <>
-      "#{Enum.join(job.allowed_tools, ", ")}, reports to #{report_words(job)}, and #{mode}. " <>
-      "It is never handed the item: the item only decides when it runs."
+    Enum.join(
+      [
+        ~s(Follow-up "#{job.name}", run when an item passes:),
+        "  It will: #{job.task_prompt}",
+        "  Uses: #{Enum.join(job.allowed_tools, ", ")}",
+        "  Reports to: #{Card.reports_to(delivery, chat: chat)}",
+        "  Mode: #{mode_words(watcher.follow_up_mode)}",
+        "  Limits: #{limits_words(watcher.daily_cap)}",
+        "It is never handed the item: the item only decides when it runs."
+      ],
+      "\n"
+    )
+  end
+
+  defp mode_words("auto"),
+    do: "Automatic: with your approval, it runs on each passing item with no card."
+
+  defp mode_words(_approve), do: "Ask first: you confirm each run on a short card."
+
+  defp limits_words(0),
+    do: "items older than 15 minutes are ignored; one run at a time."
+
+  defp limits_words(cap),
+    do:
+      "items older than 15 minutes are ignored; one run at a time; at most #{cap} a day " <>
+        "(the watcher's daily cap)."
+
+  # The chat a change came from, which a follow-up reporting there calls "this chat".
+  defp chat(%{conversation_key: {channel, chat_id, _thread}}),
+    do: %{platform: to_string(channel), chat_id: to_string(chat_id)}
+
+  defp chat(_context), do: nil
+
+  @doc """
+  Where watcher `watcher`'s follow-up stands on running by itself (§3.4, §5):
+  nil with no follow-up, `:asks_first`, `:approved` (automatic, and its
+  approval still matches what it runs and what sets it off) or `:unapproved`
+  (automatic and not approved for what it is now, so each run asks first).
+  """
+  @spec follow_up_approval(watcher(), opts()) ::
+          {:ok, nil | :asks_first | :approved | :unapproved} | {:error, String.t()}
+  def follow_up_approval(%{follow_up_job_id: nil}, _opts), do: {:ok, nil}
+  def follow_up_approval(%{follow_up_mode: "approve"}, _opts), do: {:ok, :asks_first}
+
+  def follow_up_approval(%{id: id, name: name, follow_up_mode: "auto"}, opts) do
+    case follow_up_call({:effective_mode, id}, opts) do
+      {:ok, "auto"} -> {:ok, :approved}
+      {:ok, _asks_first} -> {:ok, :unapproved}
+      {:error, reason} -> follow_up_refusal(reason, name)
+    end
   end
 
   # --- reads -------------------------------------------------------------------------------
@@ -1517,7 +1571,7 @@ defmodule FermixCore.Cues.Watchers do
 
   # --- echoes (Fermix's words, design §8.4) --------------------------------------------------
 
-  defp created_echo(watcher, jobs, opts) do
+  defp created_echo(watcher, jobs, chat, opts) do
     [
       set_up_line(watcher, jobs.task),
       purpose_line(watcher),
@@ -1526,7 +1580,7 @@ defmodule FermixCore.Cues.Watchers do
       cap_line(watcher),
       missing_line(missing_sources(watcher.sources, opts)),
       jobs.task && lacking_line(jobs.task, watcher, opts),
-      jobs.follow_up && follow_up_echo(watcher, jobs.follow_up)
+      jobs.follow_up && follow_up_echo(watcher, jobs.follow_up, chat)
     ]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n")

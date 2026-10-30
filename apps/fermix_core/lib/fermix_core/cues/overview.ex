@@ -18,12 +18,14 @@ defmodule FermixCore.Cues.Overview do
   Every read takes `:repo` (default `Memory.Repo`) or a door server, so a test
   names its own; `:cues_config` (the `[fermix_core.cues]` keyword, default the
   application's) names the stream sources a watcher's state reads;
-  `:mandate_opts` carries the `Cues.Mandates` and `Cues.Pins` seams. Memory
-  switched off answers `{:error, :memory_off}`.
+  `:mandate_opts` carries the `Cues.Mandates` and `Cues.Pins` seams, and
+  `:follow_up_opts` the `Cues.FollowUpReadiness` seams a watcher's follow-up
+  reads. Memory switched off answers `{:error, :memory_off}`.
   """
 
   alias FermixCore.Cues.Deliveries
   alias FermixCore.Cues.Door
+  alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Pins
   alias FermixCore.Cues.Watchers
@@ -56,8 +58,9 @@ defmodule FermixCore.Cues.Overview do
           name: String.t(),
           filter: String.t(),
           sources: [String.t()],
-          task_job_id: String.t(),
+          task_job_id: String.t() | nil,
           task_name: String.t() | nil,
+          follow_up: follow_up() | nil,
           enabled?: boolean(),
           held?: boolean(),
           needs_update: Watchers.update_needed(),
@@ -73,6 +76,20 @@ defmodule FermixCore.Cues.Overview do
           task_paused?: boolean(),
           instruction_count: non_neg_integer(),
           created_at: DateTime.t() | nil
+        }
+
+  @typedoc """
+  A watcher's follow-up (M60_WATCHER_CODING_RUNS.md §3.5): its job and name,
+  how it runs (`approve` or `auto`), whether an automatic one is approved for
+  what it runs now (nil for one that asks first), and Fermix's sentence while
+  it is held (`Cues.FollowUps.held/2`), else nil.
+  """
+  @type follow_up :: %{
+          job_id: String.t(),
+          name: String.t() | nil,
+          mode: String.t(),
+          approved?: boolean() | nil,
+          held: String.t() | nil
         }
 
   @type mandate_counts :: %{
@@ -184,7 +201,7 @@ defmodule FermixCore.Cues.Overview do
 
   @doc """
   Every watcher, by name, with its task's name and whether the task is paused,
-  whether its filter is held by provider failures, the update it needs to keep
+  its follow-up (`t:follow_up/0`), whether its filter is held by provider failures, the update it needs to keep
   the rules (`Cues.Watchers.update_needed/2`), its budgets and instruction
   count, and what it received in the day before `now`: `offered` (every item
   its words let through, kept or not), `waiting` (pending or being filtered),
@@ -201,12 +218,14 @@ defmodule FermixCore.Cues.Overview do
            {:ok, held} <- call(CuesFilterSql, {:held_watchers}, opts),
            {:ok, summary} <- Deliveries.summary(%{since: since}, repo: repo(opts)),
            {:ok, counted} <- counted("watcher", now, opts),
-           {:ok, jobs} <- cue_jobs(opts, & &1) do
+           {:ok, jobs} <- all_jobs(opts),
+           {:ok, follow_ups} <- follow_ups(watchers, jobs, opts) do
         facts = %{
           held_ids: MapSet.new(held, & &1.watcher_id),
           stored: Map.new(summary.watchers, &{&1.watcher_id, &1}),
           counted: counted,
-          jobs: Map.new(jobs, &{&1.id, &1}),
+          jobs: Map.new(jobs, &{&1.id, job_view(&1)}),
+          follow_ups: follow_ups,
           streams: Watchers.stream_refs(opts)
         }
 
@@ -225,14 +244,46 @@ defmodule FermixCore.Cues.Overview do
   def cue_jobs(opts) when is_list(opts), do: cue_jobs(opts, &JobRegistry.cue_job?/1)
 
   defp cue_jobs(opts, keep?) do
-    result =
-      with :ok <- running(opts),
-           {:ok, jobs} <- JobRegistry.list_jobs(repo: repo(opts)) do
-        {:ok, jobs |> Enum.filter(keep?) |> Enum.map(&job_view/1)}
-      end
+    with {:ok, jobs} <- all_jobs(opts),
+         do: {:ok, jobs |> Enum.filter(keep?) |> Enum.map(&job_view/1)}
+  end
 
+  defp all_jobs(opts) do
+    result = with :ok <- running(opts), do: JobRegistry.list_jobs(repo: repo(opts))
     memory_off(result)
   end
+
+  # Each follow-up, by watcher id: its job's name, how it runs, and whether it is
+  # held now. A follow-up whose job is gone has no row.
+  defp follow_ups(watchers, jobs, opts) do
+    by_id = Map.new(jobs, &{&1.id, &1})
+    held_opts = Keyword.take(opts, [:cues_config]) ++ Keyword.get(opts, :follow_up_opts, [])
+
+    watchers
+    |> Enum.filter(&Map.has_key?(by_id, &1.follow_up_job_id))
+    |> Enum.reduce_while({:ok, %{}}, fn watcher, {:ok, acc} ->
+      case follow_up_view(watcher, Map.fetch!(by_id, watcher.follow_up_job_id), held_opts, opts) do
+        {:ok, view} -> {:cont, {:ok, Map.put(acc, watcher.id, view)}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp follow_up_view(watcher, job, held_opts, opts) do
+    with {:ok, approval} <- Watchers.follow_up_approval(watcher, repo: repo(opts)) do
+      {:ok,
+       %{
+         job_id: job.id,
+         name: job.name,
+         mode: watcher.follow_up_mode,
+         approved?: if(approval == :asks_first, do: nil, else: approval == :approved),
+         held: held_sentence(FollowUps.held(job, held_opts))
+       }}
+    end
+  end
+
+  defp held_sentence(nil), do: nil
+  defp held_sentence({_label, sentence}), do: sentence
 
   defp job_view(job), do: %{id: job.id, name: job.name, paused?: Map.get(job, :enabled?) == false}
 
@@ -280,6 +331,7 @@ defmodule FermixCore.Cues.Overview do
       sources: watcher.sources,
       task_job_id: watcher.task_job_id,
       task_name: Map.get(job, :name),
+      follow_up: Map.get(facts.follow_ups, watcher.id),
       enabled?: watcher.enabled?,
       held?: MapSet.member?(facts.held_ids, watcher.id),
       needs_update: Watchers.update_needed(watcher, facts.streams),

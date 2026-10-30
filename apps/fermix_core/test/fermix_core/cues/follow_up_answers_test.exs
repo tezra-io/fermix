@@ -317,6 +317,8 @@ defmodule FermixCore.Cues.FollowUpAnswersTest do
       scheduler: nil,
       cues_config: [],
       capability_registry: ctx.registry,
+      # The follow-ups report to Telegram, which the test config leaves off.
+      channel_ready?: fn :telegram -> true end,
       wake_scheduler: fn -> send(test, :woken) end,
       proposal_listener: fn event -> send(test, {:event, event}) end
     ]

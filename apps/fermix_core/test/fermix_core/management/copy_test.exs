@@ -16,7 +16,10 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.Redaction
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Cues.Config, as: CuesConfig
+  alias FermixCore.Cues.FollowUpReadiness
+  alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.ProposalView
   alias FermixCore.Management.Copy
@@ -405,9 +408,19 @@ defmodule FermixCore.Management.CopyTest do
     end
 
     test "every watcher and mandate row sentence obeys the rules" do
+      # The tools a held follow-up names are data, like a plugin's name.
+      tools = ~w(github_create_issue linear_create deploy_check)
+
       for row <- cue_watcher_rows() do
         assert_clean(row["status_sentence"], :prose, [], "cue watcher #{row["state"]}")
+
+        if follow_up = row["follow_up"] do
+          where = "cue follow-up #{follow_up["state"]}"
+          assert_clean(follow_up["status_sentence"], :prose, ["GitHub", "Linear" | tools], where)
+        end
       end
+
+      assert length(follow_up_held_sentences()) >= 15
 
       for row <- cue_mandate_rows() do
         where = "cue mandate #{row["status_sentence"]}"
@@ -847,6 +860,7 @@ defmodule FermixCore.Management.CopyTest do
       sources: ["eng-blogs"],
       task_job_id: "job_1",
       task_name: "Release watch",
+      follow_up: nil,
       task_paused?: false,
       task_notes?: false,
       daily_cap: 0,
@@ -855,16 +869,108 @@ defmodule FermixCore.Management.CopyTest do
       created_at: nil
     }
 
-    for watcher <- [
-          base,
-          %{base | enabled?: false},
-          %{base | held?: true},
-          %{base | held?: true, waiting: 1},
-          %{base | needs_update: :words},
-          %{base | filter: "none", needs_update: :filter},
-          %{base | filter: "none"}
-        ] do
+    for watcher <-
+          [
+            base,
+            %{base | enabled?: false},
+            %{base | held?: true},
+            %{base | held?: true, waiting: 1},
+            %{base | needs_update: :words},
+            %{base | filter: "none", needs_update: :filter},
+            %{base | filter: "none"},
+            %{base | filter: "none", task_job_id: nil, follow_up: follow_up_view("approve")}
+          ] ++ Enum.map(follow_up_views(), &%{base | follow_up: &1}) do
       CueWatcherRow.build(watcher, %{window_s: 86_400})
+    end
+  end
+
+  # A watcher's follow-up in every mode and approval, and held for each reason
+  # the readiness check words (M60_WATCHER_CODING_RUNS.md §3.2).
+  defp follow_up_views do
+    held = follow_up_held_sentences()
+
+    [
+      follow_up_view("approve"),
+      %{follow_up_view("auto") | approved?: true},
+      %{follow_up_view("auto") | approved?: false}
+    ] ++ Enum.map(held, &%{follow_up_view("approve") | held: &1})
+  end
+
+  defp follow_up_view(mode),
+    do: %{job_id: "job_2", name: "Codex review", mode: mode, approved?: nil, held: nil}
+
+  # Every sentence `Cues.FollowUpReadiness` and the hold can answer, walked out of
+  # the check with every read a seam.
+  defp follow_up_held_sentences do
+    registry = :"copy_follow_up_caps_#{System.unique_integer([:positive])}"
+    start_supervised!({CapabilityRegistry, name: registry}, id: registry)
+
+    plugin = %{
+      name: "github",
+      display_name: "GitHub",
+      runtime: nil,
+      tools: [%{"name" => "github_create_issue"}]
+    }
+
+    runtime_plugin = %{
+      plugin
+      | name: "linear",
+        display_name: "Linear",
+        runtime: %{"kind" => "node"}
+    }
+
+    base = [capability_registry: registry, plugins: fn -> {:ok, [plugin, runtime_plugin]} end]
+
+    harnesses = [
+      [enabled: false],
+      [enabled: true, approved: false],
+      [enabled: true, approved: true],
+      [enabled: true, approved: true, cloud_enabled: true]
+    ]
+
+    statuses = ~w(not_configured needs_auth needs_secret needs_config not_installed ready error)a
+
+    coding =
+      for harness <- harnesses,
+          path <- [[], ["codex", "claude"]],
+          tools <- [["codex_run"], ["claude_code_run"], ["codex_cloud_run"]] do
+        follow_up_check(tools, base,
+          harness_config: harness,
+          vendor_opts: [
+            find_executable: fn name -> if name in path, do: "/stub/#{name}" end,
+            codex_home: "/nonexistent/codex",
+            claude_config_dir: "/nonexistent/claude"
+          ]
+        )
+      end
+
+    plugins =
+      for status <- statuses, tool <- ["github_create_issue", "linear_create", "deploy_check"] do
+        follow_up_check([tool], base, plugin_status: fn _plugin -> status end)
+      end
+
+    channels =
+      for platform <- ~w(telegram slack discord whatsapp) do
+        follow_up_check([], base, target: platform, channel_ready?: fn _key -> false end)
+      end
+
+    switch_off =
+      {_label, _sentence} =
+      FollowUps.held(
+        %{allowed_tools: []},
+        cues_config: [mandates_enabled: false]
+      )
+
+    Enum.uniq(coding ++ plugins ++ channels ++ [elem(switch_off, 1)]) -- [nil]
+  end
+
+  defp follow_up_check(tools, base, extra) do
+    {target, extra} = Keyword.pop(extra, :target, "companion")
+    job = %{allowed_tools: tools, delivery_target: %{"platform" => target, "chat_id" => "1"}}
+
+    case FollowUpReadiness.check(job, base ++ extra) do
+      :ready -> nil
+      {:not_ready, sentence} -> sentence
     end
   end
 

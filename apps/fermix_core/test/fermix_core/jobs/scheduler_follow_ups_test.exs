@@ -156,7 +156,7 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
   end
 
   test "a follow-up whose tool is not set up is refused at its turn, with the held notice", ctx do
-    watcher = watcher!(ctx, "unready", "auto", ["codex_run"])
+    watcher = watcher!(ctx, "unready", "auto", ["deploy_check"])
     approve!(ctx, watcher)
     pass!(ctx, watcher, 1)
     test = self()
@@ -168,10 +168,10 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
 
     drain(scheduler)
 
-    assert [%{state: "refused", reason: "codex_run is not set up on this computer" <> _}] =
+    assert [%{state: "refused", reason: "deploy_check is not set up on this computer" <> _}] =
              triggers(ctx, watcher)
 
-    assert_received {:notice, _id, :follow_up_held, %{reason: "codex_run is not set up" <> _}}
+    assert_received {:notice, _id, :follow_up_held, %{reason: "deploy_check is not set up" <> _}}
     refute_received {:parked, _run, _pid}
   end
 
@@ -227,24 +227,24 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
   defp start_scheduler(ctx, opts \\ []) do
     name = :"follow_up_scheduler_#{System.unique_integer([:positive])}"
 
-    start_supervised!(
-      {Scheduler,
-       [
-         name: name,
-         repo: ctx.repo,
-         runner_supervisor: ctx.runner_supervisor,
-         capability_registry: ctx.registry,
-         scheduler_enabled: true,
-         timer_enabled: false,
-         runner_module: ParkedRunner,
-         runner_notify: self(),
-         clock: fn -> @now end,
-         cues_running?: fn -> true end,
-         cue_notice: Keyword.get(opts, :cue_notice, fn _watcher, _kind, _data -> :ok end),
-         follow_up_offer: fn _trigger -> :ok end,
-         max_active_runs: Keyword.get(opts, :max_active_runs, 4)
-       ]}
-    )
+    start_supervised!({Scheduler,
+     [
+       name: name,
+       repo: ctx.repo,
+       runner_supervisor: ctx.runner_supervisor,
+       capability_registry: ctx.registry,
+       scheduler_enabled: true,
+       timer_enabled: false,
+       runner_module: ParkedRunner,
+       runner_notify: self(),
+       clock: fn -> @now end,
+       cues_running?: fn -> true end,
+       cue_notice: Keyword.get(opts, :cue_notice, fn _watcher, _kind, _data -> :ok end),
+       follow_up_offer: fn _trigger -> :ok end,
+       # The follow-ups report to Telegram, which the test config leaves off.
+       follow_up_readiness: [channel_ready?: fn :telegram -> true end],
+       max_active_runs: Keyword.get(opts, :max_active_runs, 4)
+     ]})
 
     name
   end
@@ -267,7 +267,14 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
     }
   end
 
-  defp opts(ctx), do: [repo: ctx.repo, now: @now, scheduler: nil, cues_config: []]
+  defp opts(ctx),
+    do: [
+      repo: ctx.repo,
+      now: @now,
+      scheduler: nil,
+      cues_config: [],
+      channel_ready?: fn :telegram -> true end
+    ]
 
   defp offer_opts(ctx) do
     digest = :sha256 |> :crypto.hash(@token) |> Base.encode16(case: :lower)

@@ -51,6 +51,14 @@ tokens for the `drive: cue` runner; a seed without `--cues` removes it and the
 watchers' manifest, so the cue suites are held out as NOT EVALUATED, never scored.
 `--cue-mandates` (needs `--cues`) adds the stub `http` plugin and the two
 auto-mode mandates the mandate cases need; without it those cases are held out.
+`--cues` also readies the coding agents for the follow-up cases
+(M60_WATCHER_CODING_RUNS.md §9) without touching the operator's own: a stub
+`codex` in `<home>/eval-bin` (`capability-daemon.sh` puts it first on the
+daemon's PATH; it answers `--version` and refuses to run anything), a stub
+Codex sign-in in `<home>/eval-codex` (`codex_home`), and a Claude Code config
+dir that does not exist (`claude_config_dir`), so Claude Code is never ready
+whether or not its program is installed. The harness consent is pre-granted
+for every home (below).
 
 `--voice` turns Grok voice on for the `drive: voice` suite (grok_voice.yaml):
 `[fermix_core.realtime]` enabled, engine `xai_realtime`, model `grok-voice-3.0`.
@@ -165,6 +173,21 @@ CUE_WATCHERS_MANIFEST = os.path.join("eval-fixtures", "cue_watchers.json")
 CUE_PLUGIN_DIR = "eval-plugins"
 CUE_PLUGIN = "eval_tickets"
 CUE_PLUGIN_TOOL = "eval_tickets_file"
+# The follow-up cases' coding agents (with --cues): a stub `codex` first on the
+# daemon's PATH, a stub Codex sign-in, and a Claude Code config dir never made.
+CUE_BIN_DIR = "eval-bin"
+CUE_CODEX_HOME = "eval-codex"
+CUE_CLAUDE_DIR = "eval-claude"
+CODEX_STUB = """#!/bin/sh
+# The cue evals' stand-in for the Codex CLI (seed_capability_home.py --cues): it
+# makes a follow-up that names Codex ready to set up, and never runs one.
+if [ "$1" = "--version" ]; then
+  echo "codex-cli eval-stub"
+  exit 0
+fi
+echo "codex stub: the cue evals never run Codex" >&2
+exit 1
+"""
 _ENV_KEY_PROVIDERS = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
@@ -276,7 +299,13 @@ def render_config(
     # --confirm-daemon-isolated / --confirm-isolated-env flags attest to). Left
     # unset: default_vendor (so both CLIs stay advertised for tasks that name
     # either) and cloud_enabled (defaults off — the cloud rail is not evaluated).
-    lines += ["[fermix_core.harness]", "approved = true", ""]
+    lines += ["[fermix_core.harness]", "approved = true"]
+    # With --cues, the follow-up cases' coding agents: the stub Codex sign-in, and
+    # a Claude Code config dir that is never made (see the module docstring).
+    if cues:
+        lines += [f"codex_home = {json.dumps(os.path.join(home, CUE_CODEX_HOME))}",
+                  f"claude_config_dir = {json.dumps(os.path.join(home, CUE_CLAUDE_DIR))}"]
+    lines += [""]
     # Meetings (MILESTONE_21) are off until the operator turns them on, and a
     # fresh eval home has never made that decision — so `Meetings.ready?()` is
     # false, the seeder registers NO meetings tool, and a task asking the
@@ -413,6 +442,7 @@ def write_cue_fixtures(home: str, cues: dict) -> dict:
         write_private(os.path.join(directory, f"cue_source.{ref}.token"), tokens[ref])
     if cues["mandates"]:
         write_cue_plugin(home)
+    write_coding_stubs(home)
     manifest = {"door_port": cues["door_port"], "mandates": cues["mandates"],
                 "sources": {ref: {"token": token} for ref, token in tokens.items()}}
     write_private(os.path.join(home, CUE_MANIFEST), json.dumps(manifest, indent=2))
@@ -421,11 +451,24 @@ def write_cue_fixtures(home: str, cues: dict) -> dict:
 
 def clear_cue_fixtures(home: str) -> None:
     """A seed without --cues: remove both cue manifests a previous --cues seed left,
-    so the runners hold the cue suites out instead of driving a home with cues off."""
-    for name in (CUE_MANIFEST, CUE_WATCHERS_MANIFEST):
+    so the runners hold the cue suites out instead of driving a home with cues off,
+    and the coding stubs, so no other suite's daemon finds the stub `codex`."""
+    for name in (CUE_MANIFEST, CUE_WATCHERS_MANIFEST,
+                 os.path.join(CUE_BIN_DIR, "codex"), os.path.join(CUE_CODEX_HOME, "auth.json")):
         path = os.path.join(home, name)
         if os.path.isfile(path):
             os.remove(safe_rm.check(path, home, min_below=1))
+
+
+def write_coding_stubs(home: str) -> None:
+    """The follow-up cases' coding agents: the stub `codex` (executable) and its
+    stub sign-in, a refresh token the Codex readiness check reads and nothing
+    uses. Claude Code's config dir is left unmade, so it is never ready."""
+    stub = os.path.join(home, CUE_BIN_DIR, "codex")
+    write_private(stub, CODEX_STUB)
+    os.chmod(stub, 0o700)
+    auth = {"tokens": {"refresh_token": "eval-stub-refresh-token"}}
+    write_private(os.path.join(home, CUE_CODEX_HOME, "auth.json"), json.dumps(auth))
 
 
 def write_private(path: str, text: str) -> None:

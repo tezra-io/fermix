@@ -172,13 +172,20 @@ defmodule FermixCore.Harness.Vendors do
     end
   end
 
-  defp auth_state("codex", opts) do
+  @doc """
+  The vendor's network-free sign-in state, read from its own config dir: file
+  reads only, never a subprocess, a network call or the keychain, so it is safe
+  where `detect/2`'s version probe is not (a watcher follow-up's readiness).
+  Tests inject `:codex_home` and `:claude_config_dir`.
+  """
+  @spec auth_state(String.t(), keyword()) :: auth_state()
+  def auth_state("codex", opts) when is_list(opts) do
     auth_path = Path.join(codex_home(opts), "auth.json")
 
     if codex_signed_in?(auth_path), do: :authenticated, else: :absent
   end
 
-  defp auth_state("claude", opts) do
+  def auth_state("claude", opts) when is_list(opts) do
     dir = claude_config_dir(opts)
 
     cond do

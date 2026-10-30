@@ -65,7 +65,12 @@ up() {
   log "starting disposable daemon (no web/realtime); log: $LOGFILE"
   local -a opik_env=(FERMIX_OPIK_ENABLED=1 FERMIX_OPIK_PROJECT="$PROJECT")
   if [ "${FERMIX_CAP_OPIK:-1}" = "0" ]; then opik_env=(); fi
+  # With --cues the seeder leaves a stub `codex` in eval-bin for the follow-up
+  # cases; first on the daemon's PATH, it is the Codex the daemon finds at boot.
+  local daemon_path="$PATH"
+  if [ -x "$HOME_DIR/eval-bin/codex" ]; then daemon_path="$HOME_DIR/eval-bin:$PATH"; fi
   ( cd "$REPO_ROOT" && exec env \
+      PATH="$daemon_path" \
       FERMIX_HOME="$HOME_DIR" \
       ${opik_env[@]+"${opik_env[@]}"} \
       FERMIX_BROWSER_HEADLESS=1 \

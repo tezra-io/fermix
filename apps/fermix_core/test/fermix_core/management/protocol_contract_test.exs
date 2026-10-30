@@ -986,6 +986,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert published["source_states"] == CueSourceRow.states()
     assert published["source_actions"] == CueSourceRow.actions()
     assert published["watcher_states"] == CueWatcherRow.states()
+    assert published["follow_up_states"] == CueWatcherRow.follow_up_states()
     assert published["mandate_actions"] == CueMandateRow.actions()
     assert defs["cueSourceAction"]["enum"] == CueSourceRow.actions()
     assert defs["cueMandateAction"]["enum"] == CueMandateRow.actions()
@@ -1310,6 +1311,27 @@ defmodule FermixCore.Management.ProtocolContractTest do
       watcher
     ])
 
+    # The watcher's follow-up, which asks first (M60_WATCHER_CODING_RUNS.md §3.5).
+    {:ok, follow_up} =
+      JobsRegistry.create_follow_up_job(
+        %{
+          name: "Deploy check",
+          task_prompt: "Run the deploy check and report what it says.",
+          allowed_tools: ["shell"],
+          delivery_mode: "channel",
+          delivery_target: %{"platform" => "telegram", "chat_id" => "4417"},
+          created_by_trust: "operator"
+        },
+        repo: repo,
+        scheduler: nil
+      )
+
+    CueFixtures.exec!(
+      conn,
+      "UPDATE cue_watchers SET follow_up_job_id = ?, follow_up_mode = 'approve' WHERE id = ?",
+      [follow_up.id, watcher]
+    )
+
     for request <- [
           {:source_reject, "gh-hooks", %{"unauthorized" => 3}, now},
           {:extend_gap, "gh-hooks", nil, "rate_limited", 4, nil, now}
@@ -1357,7 +1379,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
           proposals: FakeProposals,
           mandate_opts: [plugin_tool: MandateFixtures.plugin_tool()],
           plugins: fn -> {:ok, [plugin]} end,
-          enabled_plugins: fn -> ["github"] end
+          enabled_plugins: fn -> ["github"] end,
+          follow_up_opts: [plugins: fn -> {:ok, []} end, channel_ready?: fn _channel -> true end]
         ]
       ]
     ]

@@ -110,6 +110,10 @@
       "needs_update",
       "held"
     ],
+    "follow_up_states": [
+      "ready",
+      "held"
+    ],
     "mandate_actions": [
       "approve",
       "enable",
@@ -3719,6 +3723,7 @@
         "status_sentence",
         "sources",
         "task",
+        "follow_up",
         "task_notes",
         "daily_cap",
         "filter_budget",
@@ -3784,27 +3789,91 @@
           }
         },
         "task": {
-          "type": "object",
-          "required": [
-            "job_id",
-            "name",
-            "paused"
-          ],
-          "additionalProperties": false,
-          "properties": {
-            "job_id": {
-              "type": "string"
+          "description": "The job that runs on the cues it passes; null for a watcher with only a follow-up.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "job_id",
+                "name",
+                "paused"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "job_id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "paused": {
+                  "type": "boolean"
+                }
+              }
             },
-            "name": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "paused": {
-              "type": "boolean"
+            {
+              "type": "null"
             }
-          }
+          ]
+        },
+        "follow_up": {
+          "description": "The job a passing item sets off, handed nothing from the item (read-only, made in chat); null for a watcher with none.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "job_id",
+                "name",
+                "mode",
+                "approved",
+                "state",
+                "status_sentence"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "job_id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "mode": {
+                  "enum": [
+                    "approve",
+                    "auto"
+                  ],
+                  "description": "`approve` asks first on a card for each run; `auto` runs on its own within the daily cap once approved."
+                },
+                "approved": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ],
+                  "description": "Whether an automatic follow-up is approved for what it runs now; null for one that asks first. Unapproved, each run asks first."
+                },
+                "state": {
+                  "enum": [
+                    "ready",
+                    "held"
+                  ],
+                  "description": "Published for logs and support; a client draws `status_sentence`."
+                },
+                "status_sentence": {
+                  "type": "string",
+                  "description": "Fermix's sentence: how it runs, or, while it is held, what is missing and where to fix it."
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "task_notes": {
           "type": "boolean"
@@ -3884,6 +3953,7 @@
         "status_sentence",
         "sources",
         "task",
+        "follow_up",
         "task_notes",
         "daily_cap",
         "filter_budget",
@@ -3923,6 +3993,9 @@
         },
         "task": {
           "$ref": "#/$defs/cueWatcherRow/properties/task"
+        },
+        "follow_up": {
+          "$ref": "#/$defs/cueWatcherRow/properties/follow_up"
         },
         "task_notes": {
           "$ref": "#/$defs/cueWatcherRow/properties/task_notes"

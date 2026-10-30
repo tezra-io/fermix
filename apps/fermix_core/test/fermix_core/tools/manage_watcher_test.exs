@@ -4,9 +4,12 @@ defmodule FermixCore.Tools.ManageWatcherTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Capabilities.Builtin
+  alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Cues.Item
   alias FermixCore.Cues.RecentDrops
+  alias FermixCore.Cues.Watchers
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesWatchersSql
@@ -15,6 +18,7 @@ defmodule FermixCore.Tools.ManageWatcherTest do
   alias FermixCore.Tools.RemoveJob
   alias FermixCore.Tools.UpdateJob
   alias FermixTestSupport.CueFixtures
+  alias FermixTestSupport.SafeRm
   alias FermixTestSupport.TelemetryCapture
 
   @t0 ~U[2026-10-05 09:00:00.000000Z]
@@ -23,6 +27,24 @@ defmodule FermixCore.Tools.ManageWatcherTest do
   @shared "Create the watcher from a private chat with Fermix."
   @needs_words "A watcher that filters needs words to listen for: list the names, products, " <>
                  "abbreviations and phrases an item it should see would contain, as listen_for."
+
+  # Stands in for `Jobs.Scheduler.run_now/2`: tells the test which job it was
+  # asked to run, and answers a queued run.
+  defmodule FakeScheduler do
+    @moduledoc false
+    use GenServer
+
+    def start_link(test), do: GenServer.start_link(__MODULE__, test)
+
+    @impl true
+    def init(test), do: {:ok, test}
+
+    @impl true
+    def handle_call({:run_now, job_id, _now}, _from, test) do
+      send(test, {:run_now, job_id})
+      {:reply, {:ok, %{id: "run_1", job_id: job_id}}, test}
+    end
+  end
 
   setup do
     %{repo: repo, conn: conn} = CueFixtures.start_repo("manage_watcher")
@@ -535,6 +557,211 @@ defmodule FermixCore.Tools.ManageWatcherTest do
     end
   end
 
+  # M60_WATCHER_CODING_RUNS.md §3: a follow-up set up, bounded, checked and
+  # summed up in the consent turn, and its automatic approval asked for.
+  describe "a follow-up" do
+    setup ctx do
+      registry = :"manage_watcher_caps_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry})
+      Enum.each(["shell", "web_fetch", "codex_run"], &register!(registry, &1))
+      test = self()
+
+      seams = [
+        capability_registry: registry,
+        cues_config: [],
+        # The follow-ups report to Telegram, which the test config leaves off.
+        channel_ready?: fn :telegram -> true end,
+        harness_config: [enabled: true, approved: true],
+        vendor_opts: [
+          find_executable: fn
+            "codex" -> "/stub/bin/codex"
+            _ -> nil
+          end
+        ],
+        follow_up_sender: fn card ->
+          send(test, {:prompt, card})
+          {:ok, %{token_digest: "digest-#{System.unique_integer([:positive])}"}}
+        end,
+        proposal_listener: fn event -> send(test, {:event, event}) end
+      ]
+
+      %{seams: seams}
+    end
+
+    test "is set up with the watcher, and its summary is Fermix's", ctx do
+      assert {:ok, %{success: true, output: echo}} =
+               ManageWatcher.execute(follow_up_args(), follow_up_turn(ctx))
+
+      lines = String.split(echo, "\n")
+      assert hd(lines) =~ "Watcher deploy-watch is set up: it listens to alpaca-news"
+      assert ~s(Follow-up "Deploy check", run when an item passes:) in lines
+      assert "  It will: Run the deploy check script in ~/ops and report what it says." in lines
+      assert "  Uses: shell" in lines
+      assert "  Reports to: this chat" in lines
+      assert "  Mode: Ask first: you confirm each run on a short card." in lines
+      assert "  Limits: items older than 15 minutes are ignored; one run at a time." in lines
+      assert "It is never handed the item: the item only decides when it runs." in lines
+      refute echo =~ "Held"
+      refute_received {:prompt, _card}
+
+      assert {:ok, %{task_job_id: nil, follow_up_job_id: job_id}} =
+               Watchers.show("deploy-watch", repo: ctx.repo)
+
+      assert {:ok, %{allowed_tools: ["shell"], schedule_kind: "watcher"}} =
+               JobsRegistry.get_job(job_id, repo: ctx.repo)
+    end
+
+    test "whose tool is not set up is still made, held, and says what is missing", ctx do
+      args = put_in(follow_up_args(), ["follow_up", "tools"], ["deploy_check"])
+
+      assert {:ok, %{success: true, output: echo}} =
+               ManageWatcher.execute(args, follow_up_turn(ctx))
+
+      assert echo =~
+               "Held until it is ready: deploy_check is not set up on this computer (its " <>
+                 "program was not found or its plugin is not installed). The watcher is set up"
+
+      assert {:ok, %{follow_up_job_id: job_id}} = Watchers.show("deploy-watch", repo: ctx.repo)
+      assert is_binary(job_id)
+    end
+
+    test "gets at most the tools of the turn that sets it up, as a scheduled job does", ctx do
+      args = put_in(follow_up_args(), ["follow_up", "tools"], ["web_fetch"])
+      narrowed = follow_up_turn(ctx, effective_allowed_tools: ["shell"])
+
+      assert {:ok, %{success: false, error: error}} = ManageWatcher.execute(args, narrowed)
+      assert error =~ "web_fetch"
+      assert Watchers.show("deploy-watch", repo: ctx.repo) |> elem(0) == :error
+    end
+
+    test "with no coding agent named, takes the one that is ready, else asks which", ctx do
+      args = put_in(follow_up_args(), ["follow_up", "tools"], ["coding_agent"])
+      codex_home = SafeRm.make_tmp_dir!("manage-watcher-codex")
+      on_exit(fn -> SafeRm.rm_rf!(codex_home) end)
+      File.write!(Path.join(codex_home, "auth.json"), ~s({"tokens":{"refresh_token":"rt"}}))
+
+      vendors = [
+        find_executable: fn
+          "codex" -> "/stub/bin/codex"
+          _ -> nil
+        end,
+        codex_home: codex_home
+      ]
+
+      assert {:ok, %{success: true, output: echo}} =
+               ManageWatcher.execute(args, follow_up_turn(ctx, vendor_opts: vendors))
+
+      assert "  Uses: codex_run" in String.split(echo, "\n")
+      refute echo =~ "Held"
+
+      both = [find_executable: &"/stub/bin/#{&1}/", codex_home: codex_home]
+      again = Map.put(args, "name", "deploy-watch-2")
+
+      assert {:ok, %{success: false, error: "Codex and Claude Code are both ready" <> _}} =
+               ManageWatcher.execute(
+                 again,
+                 follow_up_turn(ctx,
+                   vendor_opts: both ++ [claude_config_dir: codex_home],
+                   capability_registry: claude_too()
+                 )
+               )
+    end
+
+    test "automatic needs the watcher's daily cap, then asks for its approval and names the cost",
+         ctx do
+      auto = put_in(follow_up_args(), ["follow_up", "mode"], "auto")
+
+      assert {:ok, %{success: false, error: error}} =
+               ManageWatcher.execute(auto, follow_up_turn(ctx))
+
+      assert error ==
+               "An automatic follow-up needs a daily cap on the watcher: say how many runs a " <>
+                 "day it may cause (Fermix suggests 5)."
+
+      assert {:ok, %{success: true, output: echo}} =
+               ManageWatcher.execute(Map.put(auto, "daily_cap", "5"), follow_up_turn(ctx))
+
+      assert echo =~
+               ~s(Automatic means a run of "Deploy check" with shell each time an item passes, ) <>
+                 "at most 5 a day."
+
+      assert echo =~ "until you do, each run asks first."
+      assert_received {:prompt, %{watcher_name: "deploy-watch", daily_cap: 5}}
+    end
+
+    test "a change that clears an automatic follow-up's approval asks again; others do not",
+         ctx do
+      auto = follow_up_args() |> put_in(["follow_up", "mode"], "auto") |> Map.put("daily_cap", 5)
+      assert {:ok, %{success: true}} = ManageWatcher.execute(auto, follow_up_turn(ctx))
+      assert_received {:prompt, _card}
+
+      {:ok, digest} = Watchers.current_follow_up_digest("deploy-watch", repo: ctx.repo)
+      {:ok, _approved} = Watchers.approve_follow_up("deploy-watch", digest, repo: ctx.repo)
+
+      assert {:ok, %{success: true, output: paused}} =
+               ManageWatcher.execute(
+                 %{"action" => "pause", "name" => "deploy-watch"},
+                 follow_up_turn(ctx)
+               )
+
+      refute paused =~ "approve"
+      refute_received {:prompt, _card}
+
+      change = %{
+        "action" => "update",
+        "name" => "deploy-watch",
+        "follow_up" => %{"instructions" => "Run the deploy check script twice."}
+      }
+
+      assert {:ok, %{success: true, output: echo}} =
+               ManageWatcher.execute(change, follow_up_turn(ctx))
+
+      assert echo =~ "Watcher deploy-watch's follow-up changed."
+      assert echo =~ "Automatic means a run of"
+      assert_received {:prompt, %{task_prompt: "Run the deploy check script twice."}}
+
+      words = %{"action" => "update", "name" => "deploy-watch", "listen_for" => ["deploy"]}
+
+      assert {:ok, %{success: true, output: unchanged}} =
+               ManageWatcher.execute(words, follow_up_turn(ctx))
+
+      assert unchanged =~ "It is not approved to run on its own yet, so each run asks first."
+      refute_received {:prompt, _card}
+    end
+
+    test "is stopped, and run by hand, from the consent turn", ctx do
+      task = Map.put(follow_up_args(), "task", "Tell me about it.")
+      assert {:ok, %{success: true}} = ManageWatcher.execute(task, follow_up_turn(ctx))
+      scheduler = start_supervised!({FakeScheduler, self()})
+
+      assert {:ok, %{success: true, output: ran}} =
+               ManageWatcher.execute(
+                 %{"action" => "run_follow_up", "name" => "deploy-watch"},
+                 follow_up_turn(ctx, scheduler: scheduler)
+               )
+
+      assert ran =~ ~s|Watcher deploy-watch's follow-up "Deploy check" is running now (run run_1)|
+      assert_received {:run_now, job_id}
+
+      assert {:ok, %{success: true, output: shown}} =
+               ManageWatcher.execute(
+                 %{"action" => "show", "name" => "deploy-watch"},
+                 follow_up_turn(ctx)
+               )
+
+      assert shown =~ ~s(Follow-up "Deploy check": uses shell; asks first on a card; ready.)
+
+      tainted = follow_up_turn(ctx, outside_sources: MapSet.new([{:tool, "list_cues"}]))
+      stop = %{"action" => "stop_follow_up", "name" => "deploy-watch"}
+      assert {:ok, %{success: false, error: @tainted}} = ManageWatcher.execute(stop, tainted)
+
+      assert {:ok, %{success: true, output: "Watcher deploy-watch's follow-up is stopped" <> _}} =
+               ManageWatcher.execute(stop, follow_up_turn(ctx))
+
+      assert {:error, :not_found} = JobsRegistry.get_job(job_id, repo: ctx.repo)
+    end
+  end
+
   test "manage_watcher returns no outside text, so reading it does not taint the turn" do
     capability = Builtin.from_tool_module(ManageWatcher)
     assert UntrustedContent.outside_source(capability) == nil
@@ -562,6 +789,48 @@ defmodule FermixCore.Tools.ManageWatcherTest do
       },
       Map.new(overrides)
     )
+  end
+
+  defp follow_up_args do
+    %{
+      "action" => "create",
+      "name" => "deploy-watch",
+      "filter" => "llm",
+      "purpose" => "Releases that need a deploy check",
+      "listen_for" => ["release", "deploy"],
+      "sources" => ["alpaca-news"],
+      "follow_up" => %{
+        "name" => "Deploy check",
+        "instructions" => "Run the deploy check script in ~/ops and report what it says.",
+        "tools" => ["shell"]
+      }
+    }
+  end
+
+  defp follow_up_turn(ctx, overrides \\ []),
+    do: turn(ctx, ctx.seams |> Keyword.merge(overrides))
+
+  # A registry with Claude Code's run tool too, so both coding agents are loaded.
+  defp claude_too do
+    registry = :"manage_watcher_both_#{System.unique_integer([:positive])}"
+    start_supervised!({CapabilityRegistry, name: registry}, id: registry)
+    Enum.each(["shell", "codex_run", "claude_code_run"], &register!(registry, &1))
+    registry
+  end
+
+  defp register!(registry, name) do
+    :ok =
+      CapabilityRegistry.register(
+        registry,
+        Capability.new(%{
+          name: name,
+          description: "a test tool",
+          parameters: %{"type" => "object", "properties" => %{}},
+          kind: :builtin,
+          executor: {__MODULE__, :never, []},
+          policy_class: :exec
+        })
+      )
   end
 
   defp create_args do

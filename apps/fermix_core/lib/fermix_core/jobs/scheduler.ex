@@ -108,6 +108,7 @@ defmodule FermixCore.Jobs.Scheduler do
           cues_running?: (-> boolean()),
           cue_notice: (String.t(), atom(), map() -> term()),
           follow_up_offer: (map() -> term()),
+          follow_up_readiness: keyword(),
           cue_pending?: boolean()
         }
 
@@ -209,6 +210,9 @@ defmodule FermixCore.Jobs.Scheduler do
       cues_running?: Keyword.get(opts, :cues_running?, &Cues.running?/0),
       cue_notice: Keyword.get(opts, :cue_notice),
       follow_up_offer: Keyword.get(opts, :follow_up_offer),
+      # `Cues.FollowUpReadiness`' seams, handed to the hold check of every card
+      # and every follow-up run (tests).
+      follow_up_readiness: Keyword.get(opts, :follow_up_readiness, []),
       cue_pending?: false
     }
 
@@ -331,11 +335,12 @@ defmodule FermixCore.Jobs.Scheduler do
   # A trigger takes a cue-share slot ahead of the cue runs: the owner tapped
   # Run, or approved it to run on its own.
   defp admit_follow_up_runs(state, now) do
-    opts = [
-      repo_opts: state.repo_opts,
-      notice: state.cue_notice,
-      capability_registry: state.capability_registry
-    ]
+    opts =
+      [
+        repo_opts: state.repo_opts,
+        notice: state.cue_notice,
+        capability_registry: state.capability_registry
+      ] ++ state.follow_up_readiness
 
     state
     |> free_cue_slots()
@@ -404,14 +409,15 @@ defmodule FermixCore.Jobs.Scheduler do
   # Each card is offered in its own task under the task supervisor, so a slow
   # channel never holds this loop. Opt `:follow_up_offer` replaces it (tests).
   defp put_default_follow_up_offer(%{follow_up_offer: nil} = state) do
-    opts = [
-      repo: state.repo,
-      adapter: state.delivery_adapter,
-      channels: state.delivery_channels,
-      delivery_opts: state.delivery_opts,
-      timeout_ms: state.delivery_timeout_ms,
-      capability_registry: state.capability_registry
-    ]
+    opts =
+      [
+        repo: state.repo,
+        adapter: state.delivery_adapter,
+        channels: state.delivery_channels,
+        delivery_opts: state.delivery_opts,
+        timeout_ms: state.delivery_timeout_ms,
+        capability_registry: state.capability_registry
+      ] ++ state.follow_up_readiness
 
     offer = fn trigger ->
       send_card = fn -> FollowUps.offer(trigger, opts) end

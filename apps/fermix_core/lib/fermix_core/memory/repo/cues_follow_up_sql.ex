@@ -274,6 +274,10 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
     automatic approval when `shown_digest` is still the follow-up's;
     `{:error, :changed}` when it is not, `{:error, :not_automatic}` for a
     follow-up that asks first.
+  - `{:effective_mode, watcher_id}` → `{:ok, "auto" | "approve" | nil}`: how
+    the watcher's follow-up runs now, as a pass decides it: `"auto"` only while
+    its approval's digest is still that of what it runs and what sets it off;
+    nil for a watcher with no follow-up.
   """
   @spec handle(conn(), tuple()) :: term()
   def handle(conn, {:claim_offers, %DateTime{} = now, limit})
@@ -446,6 +450,21 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
   def handle(conn, {:approve, watcher_id, shown, %DateTime{} = now})
       when is_binary(watcher_id) and is_binary(shown) do
     CuesSql.with_immediate_transaction(conn, fn -> approve(conn, watcher_id, shown, now) end)
+  end
+
+  def handle(conn, {:effective_mode, watcher_id}) when is_binary(watcher_id) do
+    sql = "SELECT follow_up_mode, follow_up_approval_digest FROM cue_watchers WHERE id = ?"
+
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, [watcher_id]),
+         {:ok, [mode, approval]} <- one(rows, :not_found) do
+      case mode do
+        nil ->
+          {:ok, nil}
+
+        mode ->
+          effective_mode(conn, %{mode: mode, approval_digest: approval, watcher_id: watcher_id})
+      end
+    end
   end
 
   def handle(_conn, request), do: {:error, {:unknown_request, request}}

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import tomllib
 
@@ -456,6 +457,33 @@ def test_a_default_seed_leaves_cues_off_and_no_cue_manifest(tmp_path, monkeypatc
     assert "routing" not in off["fermix_core"] and "plugins" not in off["fermix_core"]
     assert not (home / seed.CUE_MANIFEST).exists()
     assert not (home / seed.CUE_WATCHERS_MANIFEST).exists()
+
+
+def test_cues_ready_codex_and_leave_claude_code_unready_for_the_follow_up_cases(
+        tmp_path, monkeypatch):
+    # M60_WATCHER_CODING_RUNS.md §9: a follow-up naming Codex is ready to set up and
+    # one naming Claude Code is not, whatever the host has installed; the harness
+    # consent is granted for every home, and the operator's own sign-ins are never read.
+    home = tmp_path / "x-eval"
+    on = _seed_main(monkeypatch, home, "--cues")
+    harness = on["fermix_core"]["harness"]
+    assert harness["approved"] is True
+    assert harness["codex_home"] == str(home / seed.CUE_CODEX_HOME)
+    assert harness["claude_config_dir"] == str(home / seed.CUE_CLAUDE_DIR)
+    assert not (home / seed.CUE_CLAUDE_DIR).exists()
+
+    stub = home / seed.CUE_BIN_DIR / "codex"
+    assert stub.stat().st_mode & 0o777 == 0o700
+    version = subprocess.run([str(stub), "--version"], capture_output=True, text=True)
+    assert version.returncode == 0 and version.stdout.strip() == "codex-cli eval-stub"
+    assert subprocess.run([str(stub), "exec", "anything"], capture_output=True).returncode == 1
+    auth = json.loads((home / seed.CUE_CODEX_HOME / "auth.json").read_text())
+    assert auth["tokens"]["refresh_token"]
+
+    # A seed without --cues takes the stubs away, so no other suite finds them.
+    off = _seed_main(monkeypatch, home)
+    assert off["fermix_core"]["harness"] == {"approved": True}
+    assert not stub.exists() and not (home / seed.CUE_CODEX_HOME / "auth.json").exists()
 
 
 @pytest.mark.parametrize("flags", [["--cue-mandates"], ["--cue-filter-model", "openai/m"]])

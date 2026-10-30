@@ -8,6 +8,28 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A watcher can set off a follow-up: your own job, run whenever it passes
+  an item.** Ask in chat ("watch x-feed, and whenever a post says the limits
+  reset, launch Codex in ~/projects/app to review yesterday's commits") and
+  the watcher gets a follow-up that runs like a scheduled job, with the
+  instructions you gave and the tools you allow: a Codex or Claude Code run, a
+  shell command, a browser task, a plugin action, a message to a channel or an
+  image. Fermix hands it nothing from the item, so a stranger's post decides
+  when it runs, never what it does; work on the post itself stays the
+  watcher's task or a mandate. By default each run asks first on a short card
+  made for a phone (the post quoted, why it passed, what will run, with
+  Details behind a tap, and Run and Skip on Telegram); automatic, once you
+  approve it on the prompt Fermix sends, runs on its own within the watcher's
+  daily cap, which it needs (Fermix suggests 5), and any change to what it
+  runs or what sets it off asks for that approval again. Fermix checks at
+  setup that everything it needs is ready and says in one sentence what is
+  missing and where to fix it: a coding agent allowed, installed and signed
+  in, a plugin connected, the channel it reports to set up. Until then the
+  watcher still works and the follow-up waits, starting by itself once the
+  gap is fixed. Items older than 15 minutes set nothing off, it runs one at a
+  time, and "stop the follow-up" or "run the follow-up now" works in chat. A
+  bare /confirm or /deny answers the one thing waiting in that chat, and lists
+  the choices when several wait.
 - **The agent signs in to websites with logins you save in the Mac app.**
   Save a site, a username and a password in Settings > Browser > Website
   logins in the Fermix app, and the agent can sign in there from the app's own
@@ -82,6 +104,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A mandate's proposal is a short card too.** It names the tool and the
+  watcher, quotes the item, says why it passed, and shows each argument on its
+  own line, with every argument whole and the whole item behind Details, in
+  place of the JSON block; Telegram answers it with Run and Skip.
 - **Reminders read naturally.** A reminder now leads with the moment in plain
   words, then what it's about: "Tonight at 7:00 PM EDT, in 3 hours: Dinner with
   Sam." or "Sarah's birthday is this Monday, September 14." Every fact stays:

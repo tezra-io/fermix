@@ -10,6 +10,8 @@ defmodule FermixCore.Management.CuesTest do
 
   use ExUnit.Case, async: false
 
+  alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Cues.Config, as: CuesConfig
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Management.Cues
@@ -1046,6 +1048,84 @@ defmodule FermixCore.Management.CuesTest do
 
       assert Cues.watchers_get("nowhere", opts) ==
                {:error, {:invalid_params, "name", "There is no watcher named nowhere."}}
+    end
+
+    # M60_WATCHER_CODING_RUNS.md §3.5: the Cues pane shows a watcher's follow-up
+    # with its mode and readiness, read-only; a watcher with only a follow-up has
+    # no task.
+    test "carry the follow-up, its mode, approval and readiness, and a null task without one",
+         %{opts: opts, conn: conn, repo: repo} do
+      id =
+        CueFixtures.insert_watcher(conn, %{name: "deploy-watch", filter: "none", sources: ["s"]})
+
+      {:ok, job} =
+        JobsRegistry.create_follow_up_job(
+          %{
+            name: "Deploy check",
+            task_prompt: "Run the deploy check.",
+            allowed_tools: ["deploy_check"],
+            delivery_mode: "channel",
+            delivery_target: %{"platform" => "slack", "channel_id" => "C1"},
+            created_by_trust: "operator"
+          },
+          repo: repo,
+          scheduler: nil
+        )
+
+      CueFixtures.exec!(
+        conn,
+        "UPDATE cue_watchers SET task_job_id = NULL, follow_up_job_id = ?, " <>
+          "follow_up_mode = 'auto', daily_cap = 5 WHERE id = ?",
+        [job.id, id]
+      )
+
+      held = Keyword.put(opts, :follow_up_opts, plugins: fn -> {:ok, []} end)
+
+      assert {:ok, %{"watchers" => [row]}} = Cues.watchers_list(held)
+      assert row["task"] == nil
+      assert row["status_sentence"] == "Passes every item to its follow-up."
+
+      assert row["follow_up"] == %{
+               "job_id" => job.id,
+               "name" => "Deploy check",
+               "mode" => "auto",
+               "approved" => false,
+               "state" => "held",
+               "status_sentence" =>
+                 "deploy_check is not set up on this computer (its program was not found or " <>
+                   "its plugin is not installed). Slack, where the follow-up reports, is not " <>
+                   "set up: set it up under Channels in settings."
+             }
+
+      registry = :"cues_test_caps_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry})
+
+      :ok =
+        CapabilityRegistry.register(
+          registry,
+          Capability.new(%{
+            name: "deploy_check",
+            description: "a test tool",
+            parameters: %{"type" => "object", "properties" => %{}},
+            kind: :builtin,
+            executor: {__MODULE__, :never, []},
+            policy_class: :exec
+          })
+        )
+
+      ready =
+        Keyword.put(opts, :follow_up_opts,
+          capability_registry: registry,
+          channel_ready?: fn :slack -> true end
+        )
+
+      assert {:ok, %{"watcher" => detail}} = Cues.watchers_get("deploy-watch", ready)
+
+      assert %{
+               "state" => "ready",
+               "approved" => false,
+               "status_sentence" => "Asks first until you approve it to run on its own."
+             } = detail["follow_up"]
     end
 
     test "an llm watcher with no model while no default is set is on: the main model filters",

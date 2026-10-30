@@ -375,12 +375,14 @@ defmodule FermixCore.Cues.FollowUpsTest do
     end
 
     test "is refused while a tool it names is not set up, naming the tool", ctx do
-      watcher = follow_up_watcher!(ctx, tools: ["shell", "codex_run"])
+      watcher = follow_up_watcher!(ctx, tools: ["shell", "deploy_check"])
       pass!(ctx, 1)
       [trigger] = claim_offers!(ctx)
 
       assert :refused = FollowUps.offer(trigger, offer_opts(ctx))
-      assert [%{reason: "codex_run is not set up on this computer" <> _}] = triggers(ctx, watcher)
+
+      assert [%{reason: "deploy_check is not set up on this computer" <> _}] =
+               triggers(ctx, watcher)
     end
 
     test "the held and recovered notices go once each, through the follow-up's delivery", ctx do
@@ -679,7 +681,9 @@ defmodule FermixCore.Cues.FollowUpsTest do
       now: @now,
       scheduler: nil,
       cues_config: [],
-      capability_registry: ctx.registry
+      capability_registry: ctx.registry,
+      # The follow-ups report to Telegram, which the test config leaves off.
+      channel_ready?: fn :telegram -> true end
     ]
 
   defp registry_opts(ctx), do: [repo: ctx.repo, scheduler: nil]

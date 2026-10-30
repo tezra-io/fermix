@@ -25,6 +25,15 @@ defmodule FermixCore.Tools.ManageWatcher do
   `show` and then changing it in the same turn is consent (design §8.4: "before
   adding, the agent sees the active list"). Should `show` ever return outside
   text, it must frame it and join the relaying modules.
+
+  ## Follow-ups (M60_WATCHER_CODING_RUNS.md §3)
+
+  `create` and `update` take a `follow_up`: a job in the owner's words that a
+  passing item sets off and that is handed nothing from it. `stop_follow_up`
+  removes it and `run_follow_up` is the owner's run of it by hand. Its tools
+  are bounded by this turn as `schedule_job` bounds a job's, the readiness
+  check names what is missing, and an automatic one gets its approval prompt:
+  `ManageWatcher.FollowUp`.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
@@ -33,16 +42,24 @@ defmodule FermixCore.Tools.ManageWatcher do
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Clock
   alias FermixCore.Cues
+  alias FermixCore.Cues.FollowUpReadiness
+  alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Watchers
+  alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Temporal.Access
+  alias FermixCore.Tools.ManageWatcher.FollowUp
   alias FermixCore.Tools.Support
 
   @read_actions ~w(list show)
   @change_actions ~w(create pause resume remove add_instructions remove_instructions
                      restore_instruction merge_instructions set_purpose add_example
-                     remove_example update)
+                     remove_example update stop_follow_up run_follow_up)
   @actions @read_actions ++ @change_actions
+  # The changes that can leave an automatic follow-up's approval behind: what it
+  # runs, or what sets it off (its sources and filter).
+  @approval_actions ~w(update set_purpose add_instructions remove_instructions
+                       restore_instruction merge_instructions)
 
   @update_keys ~w(sources filter listen_for purpose task_job_id task_notes daily_cap
                   filter_budget)
@@ -74,7 +91,11 @@ defmodule FermixCore.Tools.ManageWatcher do
       "characters; past that, merge several into one. An example must be an item the watcher " <>
       "received, or one of a stream watcher's recent drops (find either with list_cues). " <>
       "Changes need the owner's own request in a private chat; Fermix answers every change " <>
-      "with its own summary, which you pass on to the owner as written."
+      "with its own summary, which you pass on to the owner as written. A watcher may also " <>
+      "have a follow-up (follow_up): the owner's own job that each passing item sets off, " <>
+      "with fixed instructions and tools, asking first on a card or, once approved, " <>
+      "automatic within the daily cap. Fermix hands it nothing from the item, so work on " <>
+      "the item's content is the task's or a mandate's; say so when the owner asks for it."
   end
 
   @impl true
@@ -132,7 +153,8 @@ defmodule FermixCore.Tools.ManageWatcher do
         daily_cap: %{
           type: "string",
           description:
-            ~s(Most task runs a day, as a whole number, or "none". Required for filter none.)
+            ~s(Most runs a day of its task and follow-up together, as a whole number, or ) <>
+              ~s("none". Required for filter none and for an automatic follow-up.)
         },
         filter_budget: %{
           type: "string",
@@ -165,7 +187,8 @@ defmodule FermixCore.Tools.ManageWatcher do
           description: "pass: it should have reached the task; drop: it should not have."
         },
         note: %{type: "string", description: "Why, in a few words (at most 300 characters)."},
-        example_id: %{type: "string", description: "The example to remove."}
+        example_id: %{type: "string", description: "The example to remove."},
+        follow_up: FollowUp.schema()
       }
     }
   end
@@ -173,8 +196,8 @@ defmodule FermixCore.Tools.ManageWatcher do
   @impl true
   def when_to_use do
     "When the owner asks Fermix to watch sources for something, to change what a watcher " <>
-      "looks for or where it reports, to react to an item a watcher passed or missed, or asks " <>
-      "what a watcher is watching for."
+      "looks for or where it reports, to react to an item a watcher passed or missed, to have " <>
+      "something done whenever a watcher passes an item, or asks what a watcher is watching for."
   end
 
   @impl true
@@ -261,8 +284,27 @@ defmodule FermixCore.Tools.ManageWatcher do
   end
 
   defp dispatch("create", args, context) do
-    with {:ok, params} <- create_params(args) do
-      echo_of(Watchers.create(params, context, opts(context)))
+    opts = opts(context)
+
+    with {:ok, params} <- create_params(args),
+         {:ok, name} <- watcher_name(args),
+         {:ok, follow_up} <- FollowUp.params(Map.get(args, "follow_up"), context, opts) do
+      params
+      |> put_follow_up(follow_up)
+      |> Watchers.create(context, opts)
+      |> FollowUp.summarize(name, nil, auto?(follow_up), context, opts)
+    end
+  end
+
+  defp dispatch(action, args, context) when action in @approval_actions do
+    opts = opts(context)
+
+    with {:ok, name} <- watcher_name(args) do
+      before = FollowUp.approval_before(name, opts)
+
+      action
+      |> change(name, args, context)
+      |> FollowUp.summarize(name, before, auto?(Map.get(args, "follow_up")), context, opts)
     end
   end
 
@@ -271,6 +313,13 @@ defmodule FermixCore.Tools.ManageWatcher do
       echo_of(change(action, name, args, context))
     end
   end
+
+  defp put_follow_up(params, nil), do: params
+  defp put_follow_up(params, follow_up), do: Map.put(params, :follow_up, follow_up)
+
+  defp auto?(%{mode: "auto"}), do: true
+  defp auto?(%{"mode" => "auto"}), do: true
+  defp auto?(_follow_up), do: false
 
   defp change("pause", name, _args, context), do: Watchers.pause(name, opts(context))
   defp change("resume", name, _args, context), do: Watchers.resume(name, opts(context))
@@ -337,8 +386,45 @@ defmodule FermixCore.Tools.ManageWatcher do
     do: Watchers.remove_example(name, Map.get(args, "example_id"), opts(context))
 
   defp change("update", name, args, context) do
-    with {:ok, changes} <- update_changes(args), do: Watchers.update(name, changes, opts(context))
+    opts = opts(context)
+
+    with {:ok, changes} <- update_changes(args),
+         {:ok, follow_up} <- FollowUp.params(Map.get(args, "follow_up"), context, opts) do
+      update(name, changes, follow_up, context, opts)
+    end
   end
+
+  defp change("stop_follow_up", name, _args, context),
+    do: Watchers.remove_follow_up(name, opts(context))
+
+  defp change("run_follow_up", name, _args, context),
+    do: FollowUp.run_now(name, context, opts(context))
+
+  # The watcher first, then its follow-up, so a daily cap set in the same request
+  # is there for an automatic follow-up. A follow-up that already is what was
+  # asked for (automatic and waiting for approval) is asked again, unchanged.
+  defp update(name, changes, nil, _context, opts), do: Watchers.update(name, changes, opts)
+
+  defp update(name, changes, follow_up, context, opts) when map_size(changes) == 0 do
+    if already?(name, follow_up, opts),
+      do: {:ok, %{echo: "Watcher #{name}'s follow-up is already automatic."}},
+      else: Watchers.set_follow_up(name, follow_up, context, opts)
+  end
+
+  defp update(name, changes, follow_up, context, opts) do
+    with {:ok, %{echo: changed}} <- Watchers.update(name, changes, opts) do
+      case Watchers.set_follow_up(name, follow_up, context, opts) do
+        {:ok, result} -> {:ok, %{result | echo: changed <> "\n" <> result.echo}}
+        {:error, sentence} -> {:error, changed <> "\nThe follow-up did not change: " <> sentence}
+      end
+    end
+  end
+
+  defp already?(name, %{mode: "auto"} = follow_up, opts) when map_size(follow_up) == 1 do
+    match?({:ok, %{follow_up_mode: "auto"}}, Watchers.show(name, opts))
+  end
+
+  defp already?(_name, _follow_up, _opts), do: false
 
   defp echo_of({:ok, %{echo: echo}}), do: {:ok, echo}
   defp echo_of({:error, sentence}), do: {:error, sentence}
@@ -406,10 +492,25 @@ defmodule FermixCore.Tools.ManageWatcher do
     end
   end
 
+  # The seams a turn's context carries for the domain calls: the registries, the
+  # scheduler, and the follow-up's sender and readiness reads (tests).
+  @context_seams [
+                   :skill_registry,
+                   :scheduler,
+                   :capability_registry,
+                   :cues_config,
+                   :follow_up_sender,
+                   :proposal_listener
+                 ] ++ FollowUpReadiness.seams()
+
   defp opts(context) do
     [repo: Map.get(context, :memory_repo, Repo)] ++
-      Enum.flat_map([:skill_registry, :scheduler], fn key ->
-        if Map.has_key?(context, key), do: [{key, Map.fetch!(context, key)}], else: []
+      Enum.flat_map(@context_seams, fn key ->
+        case Map.fetch(context, key) do
+          {:ok, nil} when key != :scheduler -> []
+          {:ok, value} -> [{key, value}]
+          :error -> []
+        end
       end)
   end
 
@@ -423,7 +524,7 @@ defmodule FermixCore.Tools.ManageWatcher do
     Enum.map_join(watchers, "\n", fn watcher ->
       "#{watcher.name}: #{state_word(watcher, streams)}; #{filter_word(watcher)}; " <>
         "#{watcher.active_instructions} active instructions; sources " <>
-        "#{Enum.join(watcher.sources, ", ")}; task job #{watcher.task_job_id}"
+        "#{Enum.join(watcher.sources, ", ")}; #{jobs_words(watcher)}"
     end)
   end
 
@@ -432,8 +533,9 @@ defmodule FermixCore.Tools.ManageWatcher do
 
     [
       "Watcher #{watcher.name} (#{watcher.id}): #{state_word(watcher, streams)}; " <>
-        "#{filter_word(watcher)}; task job #{watcher.task_job_id}; task notes " <>
+        "#{filter_word(watcher)}; #{jobs_words(watcher)}; task notes " <>
         "#{if watcher.task_notes?, do: "on", else: "off"}.",
+      follow_up_line(watcher, context),
       needs_line(Watchers.update_needed(watcher, streams)),
       "Sources: #{Enum.join(watcher.sources, ", ")}." <> missing(watcher, context),
       "Daily cap: #{count_word(watcher.daily_cap, "runs")}. Filter budget: " <>
@@ -447,6 +549,41 @@ defmodule FermixCore.Tools.ManageWatcher do
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
   end
+
+  defp jobs_words(%{task_job_id: nil} = watcher), do: "no task" <> follow_up_words(watcher)
+
+  defp jobs_words(watcher),
+    do: "task job #{watcher.task_job_id}" <> follow_up_words(watcher)
+
+  defp follow_up_words(%{follow_up_job_id: nil}), do: ""
+
+  defp follow_up_words(watcher) do
+    mode = if watcher.follow_up_mode == "auto", do: "automatic", else: "asks first"
+    "; follow-up job #{watcher.follow_up_job_id} (#{mode})"
+  end
+
+  # The follow-up as it stands: what it runs, how, and whether it is held now.
+  defp follow_up_line(%{follow_up_job_id: nil}, _context), do: nil
+
+  defp follow_up_line(watcher, context) do
+    opts = opts(context)
+
+    with {:ok, job} <- JobsRegistry.get_job(watcher.follow_up_job_id, repo: opts[:repo]),
+         {:ok, approval} <- Watchers.follow_up_approval(watcher, opts) do
+      ~s(Follow-up "#{job.name}": uses #{Enum.join(job.allowed_tools, ", ")}; ) <>
+        "#{approval_words(approval)}; #{held_words(FollowUps.held(job, opts))}"
+    else
+      {:error, sentence} when is_binary(sentence) -> "Follow-up: #{sentence}"
+      {:error, reason} -> "Follow-up: its job could not be read (#{inspect(reason)})."
+    end
+  end
+
+  defp approval_words(:asks_first), do: "asks first on a card"
+  defp approval_words(:approved), do: "automatic and approved, within the daily cap"
+  defp approval_words(:unapproved), do: "automatic once approved, so each run asks first now"
+
+  defp held_words(nil), do: "ready."
+  defp held_words({_label, sentence}), do: "held: #{sentence}"
 
   defp missing(watcher, context) do
     case Watchers.missing_sources(watcher.sources, opts(context)) do

@@ -73,3 +73,12 @@ At most four scheduled runs execute at once; a due job over the cap stays `sched
 - `remove_job` deletes the job and tombstones its memory source; it refuses while a run is active.
 - `run_job_now` fires one run immediately through the same runner, tagged `manual`: a recurring job keeps its cadence, and a one-off run by hand is done (it does not fire again at its instant); it refuses a paused, disabled, expired or already-running job.
 - `list_job_runs` reads history newest first, optional `status` (`queued`/`running`/`ok`/`error`) and `limit` (default 20, max 100). `get_job_run` reads one run in full: the `task_prompt` it executed, prompt snapshot, token usage, final response, error. A just-triggered run can still be `queued`, so re-read before reporting an outcome. A run's `status: ok` means the loop finished, not that the task succeeded: each run row carries `tool_failures`, the number of tool calls that came back as errors, visible in `list_job_runs`, the run's `output.md` and its `job_run_complete` trace event.
+
+## A watcher's jobs
+
+Two kinds of job belong to a watcher and are made only by `manage_watcher`: `schedule_job` has no schedule for either, and the agent never types their kind.
+
+- **A task** (kind `cue`) runs once per item the watcher passes and reads it; `list_jobs` labels it "runs on cues from watcher <name>". `run_job_now` refuses it, since a run of it is the run of one item.
+- **A follow-up** (kind `watcher`) is the owner's own job that each passing item sets off, handed nothing from the item; `list_jobs` labels it "runs when watcher <name> passes an item". Its run is a scheduled run (`trigger: "watcher"`): its `allowed_tools` is its grant, bounded when it was set up by the turn that set it up, and its prompt is its instructions plus one line naming the watcher that set it off and when. `run_job_now` runs it by hand on the owner's turn.
+
+Neither has a schedule or an expiry or takes a capability policy, and each reports to the owner. `update_job` on either needs the owner's own request in a private chat in a turn that has read no outside text, and `remove_job` refuses either while its watcher exists. Follow-ups, their cards and their approval: skill_view(name: "self-knowledge", file: "cues").

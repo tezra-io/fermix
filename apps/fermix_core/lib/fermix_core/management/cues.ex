@@ -31,8 +31,10 @@ defmodule FermixCore.Management.Cues do
   `:repo`, `:door`, `:now` (zero-arity, a
   `DateTime`), `:mandate_opts` (the `Cues.Mandates` and `Cues.Pins` seams),
   `:plugins` and `:enabled_plugins` (zero-arity: the plugin list and the
-  enabled names the mandate choices read), and `:proposals` (the module that
-  answers `records/2`, `card/2` and `decide/4`, default `Cues.Proposals`).
+  enabled names the mandate choices read), `:proposals` (the module that
+  answers `records/2`, `card/2` and `decide/4`, default `Cues.Proposals`), and
+  `:follow_up_opts` (the `Cues.FollowUpReadiness` seams a watcher's follow-up
+  reads).
   """
 
   require Logger
@@ -851,8 +853,14 @@ defmodule FermixCore.Management.Cues do
   defp repo_opts(opts), do: [repo: repo(opts)]
   defp repo(opts), do: Keyword.get(opts, :repo, Repo)
 
-  # A watcher's state reads the stream sources in the cue settings a read uses.
-  defp watcher_opts(opts), do: [repo: repo(opts), cues_config: cue_config(opts)]
+  # A watcher's state reads the stream sources in the cue settings a read uses,
+  # and its follow-up's readiness its seams.
+  defp watcher_opts(opts),
+    do: [
+      repo: repo(opts),
+      cues_config: cue_config(opts),
+      follow_up_opts: Keyword.get(opts, :follow_up_opts, [])
+    ]
 
   defp mandate_seams(opts),
     do: [repo: repo(opts), mandate_opts: Keyword.get(opts, :mandate_opts, [])]
