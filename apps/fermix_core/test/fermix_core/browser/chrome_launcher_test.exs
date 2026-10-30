@@ -191,6 +191,20 @@ defmodule FermixCore.Browser.ChromeLauncherTest do
 
       assert {:ok, 4242} = ChromeLauncher.parse_ps_pid(line, @dir)
     end
+
+    # The managed profile browses pages nobody vetted and keeps the owner's
+    # sign-ins for months, so Chrome's phishing check, its Safe Browsing
+    # service and its component updates (the certificate revocation list among
+    # them) stay on: these are network-benchmarking flags, not a browser's.
+    test "leaves Chrome's own protections on" do
+      for headless <- [true, false] do
+        args = ChromeLauncher.launch_args(@dir, 0, headless)
+
+        refute "--disable-client-side-phishing-detection" in args
+        refute "--disable-background-networking" in args
+        refute "--disable-component-update" in args
+      end
+    end
   end
 
   describe "spawn_plan/4 (macOS disclaim shim wrapping)" do

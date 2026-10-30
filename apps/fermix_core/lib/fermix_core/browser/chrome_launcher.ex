@@ -441,10 +441,7 @@ defmodule FermixCore.Browser.ChromeLauncher do
       "--user-data-dir=#{profile_dir}",
       "--no-first-run",
       "--no-default-browser-check",
-      "--disable-background-networking",
       "--disable-background-timer-throttling",
-      "--disable-client-side-phishing-detection",
-      "--disable-component-update",
       "--disable-default-apps",
       "--disable-features=Translate,MediaRouter",
       # A site that registers its WebMCP tools only when the native API exists
