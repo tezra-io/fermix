@@ -560,7 +560,7 @@ defmodule FermixCore.Tools.ManageWatcherTest do
   # M60_WATCHER_CODING_RUNS.md §3: a follow-up set up, bounded, checked and
   # summed up in the consent turn, and its automatic approval asked for.
   describe "a follow-up" do
-    setup ctx do
+    setup do
       registry = :"manage_watcher_caps_#{System.unique_integer([:positive])}"
       start_supervised!({CapabilityRegistry, name: registry})
       Enum.each(["shell", "web_fetch", "codex_run"], &register!(registry, &1))
