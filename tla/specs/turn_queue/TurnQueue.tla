@@ -23,7 +23,7 @@
 (*    the owner's chat turn, first saves them to the workspace             *)
 (*    (turn_runner.ex:479): file writes while the task is at "start",      *)
 (*    no Queue state, and nothing in history until PersistUser;            *)
-(*  - the empty-completion path (queue.ex:541-544, :723-732): it delivers *)
+(*  - the empty-completion path (queue.ex:541-544, :724-733): it delivers *)
 (*    a canned retry and commits nothing, leaving the user message        *)
 (*    unanswered by design;                                                *)
 (*  - the terminal_error_owner? branch (only who sends the error text);   *)
@@ -41,7 +41,7 @@
 (* One step = one indivisible thing in the code: one Queue callback, or   *)
 (* one step of the turn task between two calls into another process.     *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/queue.ex @ 0bff11f02da5
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/queue.ex @ 25e2b97861b9
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/queue_supervisor.ex @ 6bd48b7f67a7
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/stopper.ex @ 3f42aedf7399
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/typing.ex#with_indicator,stop_typing_loop @ 4e91ea3d2f7d
@@ -74,22 +74,22 @@ CONSTANTS
     \* Mechanism switches: what the code does about it. TRUE is the real code;
     \* each is switched off by exactly one kind of check to show a property needs it.
     OneClaimant,        \* the closure is handed to the claimant only and the Queue
-                        \* clears its copy (queue.ex:250-259, :1127-1131)
+                        \* clears its copy (queue.ex:250-259, :1128-1132)
     StartsWhenIdle,     \* a message starts only when no turn is active (queue.ex:317-325)
-    CrashFiresOutcome,  \* a crashed turn's held closure fires {:failed, _} (queue.ex:914-922)
+    CrashFiresOutcome,  \* a crashed turn's held closure fires {:failed, _} (queue.ex:915-923)
     TurnsShareQueueFate,    \* turn tasks run under a Task.Supervisor that QueueSupervisor
                             \* (:one_for_all) terminates before it restarts the Queue
                             \* (queue_supervisor.ex:46-51, application.ex:102)
     CrashClosesUserMessage, \* a crashed turn's DOWN writes the stopped marker before the
-                            \* next message starts (queue.ex:873, :887-893)
+                            \* next message starts (queue.ex:874, :888-894)
     StopSparesClaimedTurn,  \* a stop leaves a turn that claimed its outcome running
-                            \* (queue.ex:1085-1087)
+                            \* (queue.ex:1086-1088)
     StopCancelsPending,     \* a stop fires {:cancelled} for every message it drops
-                            \* (queue.ex:1105-1111)
+                            \* (queue.ex:1106-1112)
     StopTurnSparesClaimedTurn, \* a named stop leaves the named turn running once it has
-                               \* claimed its outcome (queue.ex:1042-1048)
+                               \* claimed its outcome (queue.ex:1043-1049)
     StopTurnNamesTurn,      \* a named stop ends the named message's turn only
-                            \* (stop_named_in, queue.ex:1042-1079); FALSE is the
+                            \* (stop_named_in, queue.ex:1043-1080); FALSE is the
                             \* conversation stop, the only stop the Queue had before
     ConsumerFencesQueue,    \* the consumer monitors the Queue process it handed the
                             \* message to and answers it as failed on that Queue's
@@ -97,7 +97,7 @@ CONSTANTS
     \* Timing idealisation. TRUE is the real code; FALSE forbids a crash in
     \* the gap between the task claiming the closure and invoking it
     \* (finish_turn, queue.ex:587-593). There invoke_turn_result catches
-    \* whatever the closure raises, exits or throws (:933-948), so only a
+    \* whatever the closure raises, exits or throws (:934-949), so only a
     \* linked helper's exit can land in the gap. A check that sets it FALSE
     \* proves a property only for a Queue without that gap.
     CrashInClaimGap
@@ -197,7 +197,7 @@ StartNext(p, pcNow) ==
 \* busy in a bounded callback (the client API note, queue.ex:80-91), so only
 \* a dead Queue ends the wait. After a Queue restart the task's calls go to
 \* the dead pid, exit, and are logged and read as "not fresh" (fresh?/1,
-\* :678-684); the new Queue never holds m.
+\* :679-685); the new Queue never holds m.
 Fresh(m) == active = m
 
 -----------------------------------------------------------------------------
@@ -226,14 +226,14 @@ Send(m) ==
 KillsActive == active /= None /\ (~claimed \/ ~StopSparesClaimedTurn)
 
 \* stop_one_conversation/2 and stop_all_conversations/1 ->
-\* stop_conversation_runtime/3 (queue.ex:234, :229, :1005-1031), one callback:
-\* - stop_active_turn/3 (:1085-1101): a claimed turn is left running with its
-\*   slot and monitor (:1085-1087); any other active turn is killed
+\* stop_conversation_runtime/3 (queue.ex:234, :229, :1006-1032), one callback:
+\* - stop_active_turn/3 (:1086-1102): a claimed turn is left running with its
+\*   slot and monitor (:1086-1088); any other active turn is killed
 \*   synchronously, fires {:cancelled} if the Queue still holds its closure,
-\*   gets the stopped marker (mark_stopped_turn, :1145-1158), and the
+\*   gets the stopped marker (mark_stopped_turn, :1146-1159), and the
 \*   conversation is dropped. A task killed while it holds a claimed closure
 \*   takes the closure with it.
-\* - cancel_pending/1 (:1105-1111): every dropped message fires {:cancelled}.
+\* - cancel_pending/1 (:1106-1112): every dropped message fires {:cancelled}.
 \* A stop that would change nothing (a claimed turn and nothing waiting) is
 \* not a step. The claim is a Queue callback too, so the Queue serialises it
 \* against the stop: claimed is exact here.
@@ -241,7 +241,7 @@ KillsActive == active /= None /\ (~claimed \/ ~StopSparesClaimedTurn)
 \* registered name exits :noproc there. Acp.Peer sends its cancel to the
 \* Queue it handed the prompt to instead (stop_turn, peer.ex:726-734); a dead
 \* one exits :noproc, a session/cancel is then answered cancelled, and
-\* closing the turn flushes that Queue's :DOWN (cancel_turn, :700-705), so
+\* closing the turn flushes that Queue's :DOWN (cancel_turn, :701-706), so
 \* the connection lives on. ExUnit covers that window, not check 17.
 StopConversation ==
     /\ pending /= <<>> \/ KillsActive
@@ -273,14 +273,14 @@ Stop ==
 KillsNamed == active = Named /\ (~claimed \/ ~StopTurnSparesClaimedTurn)
 
 \* Queue.stop_turn/3 -> handle_call({:stop_turn, ...}) -> stop_named_turn/3
-\* (queue.ex:185, :239, :1035-1079), one callback, naming the message Named:
+\* (queue.ex:185, :239, :1036-1080), one callback, naming the message Named:
 \* - Named is active and has claimed its outcome: left running with its slot
-\*   (:1042-1048).
+\*   (:1043-1049).
 \* - Named is active otherwise: killed synchronously, fires {:cancelled} if
 \*   the Queue still holds its closure, gets the stopped marker, and the next
-\*   waiting message starts in the same callback (:1052-1063). A task killed
+\*   waiting message starts in the same callback (:1053-1064). A task killed
 \*   while it holds a claimed closure takes the closure with it.
-\* - Named is waiting: dropped alone, with {:cancelled} (:1065-1079).
+\* - Named is waiting: dropped alone, with {:cancelled} (:1066-1080).
 \* - Otherwise (it ended, or was never sent) nothing changes: not a step.
 \* Without StopTurnNamesTurn the named stop is the conversation stop.
 StopNamed ==
@@ -348,7 +348,7 @@ QueueRestart ==
                    history, dropped, watch>>
 
 \* Acp.Peer handle_info({:DOWN, ...}) -> settle_queue_down (peer.ex:205-207,
-\* :954-959): the :DOWN comes before any result for m in the mailbox, so the
+\* :955-960): the :DOWN comes before any result for m in the mailbox, so the
 \* Peer answers m as a failed turn through apply_turn_result and closes the
 \* turn. (Mailbox order is taken to be send order; Erlang orders only each
 \* sender's own messages, which changes who answers, not whether or how
@@ -436,7 +436,7 @@ MarkFailed(m) ==
     /\ QueueUnchanged /\ UNCHANGED <<holding, outcomes, shown>>
 
 \* finish_turn/2 part 1 -> handle_call({:claim_turn_result, ...}) (queue.ex:587-590,
-\* :250-259): the active turn gets its closure, and claim_active_turn (:1127-1131)
+\* :250-259): the active turn gets its closure, and claim_active_turn (:1128-1132)
 \* marks it claimed and clears the Queue's copy. A turn that is no longer
 \* active, or a dead or restarted Queue (claim_turn_result's catch, which
 \* logs it, :597-603), gets nil.
@@ -450,7 +450,7 @@ Claim(m, from, outcome) ==
     /\ UNCHANGED <<unsent, pending, active, finalSent, restarting, dropped, outcomes, shown,
                    history>>
 
-\* finish_turn/2 part 2 -> invoke_turn_result/2 (queue.ex:590, :933-948), in the
+\* finish_turn/2 part 2 -> invoke_turn_result/2 (queue.ex:590, :934-949), in the
 \* task: run the claimed closure, if any. It catches whatever the closure
 \* raises, exits or throws, so the closure itself cannot kill the task.
 Invoke(m) ==
@@ -471,11 +471,11 @@ Exit(m) ==
        ELSE /\ pc' = pcNow /\ UNCHANGED <<active, held, claimed, finalSent, pending>>
     /\ UNCHANGED <<unsent, restarting, holding, outcomes, shown, history, dropped>>
 
-\* The task dies -> abnormal DOWN -> clear_active_request/4 (queue.ex:858-880):
-\* maybe_close_crashed_turn writes the stopped marker (:873, :887-893);
+\* The task dies -> abnormal DOWN -> clear_active_request/4 (queue.ex:859-881):
+\* maybe_close_crashed_turn writes the stopped marker (:874, :888-894);
 \* maybe_reply_on_crash sends the generic error unless the final reply was
-\* marked delivered (:898); maybe_fail_turn_result fires {:failed, _} if
-\* the Queue still holds the closure (:914-922). A closure the task had
+\* marked delivered (:899); maybe_fail_turn_result fires {:failed, _} if
+\* the Queue still holds the closure (:915-923). A closure the task had
 \* already claimed dies with it. The next message starts in the same
 \* callback, after the marker.
 \* Where nothing in the task can raise, only a linked helper's exit kills
@@ -626,7 +626,7 @@ CancelledMeansNotAnswered ==
 NoDanglingUserMessage ==
     (\A m \in Msgs : pc[m] \in {"idle", "gone"}) => LastKind /= "user"
 
-\* maybe_reply_on_crash (queue.ex:895-897): "If the final reply was already
+\* maybe_reply_on_crash (queue.ex:896-898): "If the final reply was already
 \* delivered, do not send a second generic error".
 NoErrorAfterReply == \A m \in Msgs : ~({"reply", "error"} \subseteq shown[m])
 

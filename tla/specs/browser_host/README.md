@@ -305,7 +305,7 @@ more of an entity its rules are about. All still hold:
   design spec. A turn (the process that made the first browser call — a
   conversation's turn, a scheduled run, a subagent — not the task itself) that
   loses its pane is marked, and `dispatch` reads that mark before `Routing`
-  ever runs (`browser.ex:120-126`), so every later browser call of *that
+  ever runs (`browser.ex:153-159`), so every later browser call of *that
   turn* answers the same sentence instead of being routed — a turn whose
   first task failed on the host never starts a second task that `Routing`
   could send to Chrome. This is a strictly stronger version of

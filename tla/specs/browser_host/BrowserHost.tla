@@ -36,7 +36,7 @@
 (*    since a crashed launch and a quit before attach look identical;      *)
 (*  - FermixCore.Browser.Routing: decides a task's backend once, when no   *)
 (*    profile is live for it, and pins every later request of it to the    *)
-(*    backend the live profile was started on (for_request, routing.ex:44) *)
+(*    backend the live profile was started on (for_request, routing.ex:62) *)
 (*    (ProfileManager.backend, not this spec's: it is not one of the files *)
 (*    below, since it also covers profiles this design never routes);      *)
 (*  - FermixCore.Browser.execute/dispatch (browser.ex): where a call first *)
@@ -89,7 +89,7 @@
 (*  - FermixCore.Browser.TurnMarker: a turn (the caller of a task, not the *)
 (*    task itself) that loses its pane marks every later browser call of   *)
 (*    THAT TURN with the same sentence (dispatch reads the mark before     *)
-(*    Routing ever runs, browser.ex:120-126), so a turn whose first task   *)
+(*    Routing ever runs, browser.ex:153-159), so a turn whose first task   *)
 (*    failed on the host never starts a second task Routing could send to  *)
 (*    Chrome. This spec's Tasks are already turn-sized: a Task is one      *)
 (*    script run to one Terminal state, and nothing here lets a second     *)
@@ -104,11 +104,11 @@
 (* One step = one callback of the HostServer, one reducer step of the      *)
 (* host, or one thing the person, a page or the environment does.          *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser.ex#dispatch,dispatch_profile @ d5d1f1812173
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser.ex#dispatch,dispatch_profile @ e9b40dc744ab
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_server.ex#init,stop,handle_message,operate,ensure_task,bind,check_host,lose,lost_error,request,host_error,public_id @ 1b6599997033
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_availability.ex @ 5ea87b4f20e6
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_launcher.ex @ 927740e4c233
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser/routing.ex @ 5d20a7d37936
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser/routing.ex @ fcf3735c6378
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/turn_marker.ex @ 9e55937dc45a
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser_host/protocol.ex#listed_tab? @ 883cbc90b089
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser_host/link.ex @ 279273a16f24
@@ -143,7 +143,7 @@ CONSTANTS
     \* Mechanism switches: what the design does about it. TRUE is the design;
     \* each is switched off only by the checks that show a rule needs it.
     DecideOnceAtStart,  \* the backend is decided once, when no profile is live for the
-                        \* task (Routing.for_request, routing.ex:44-50), and a host task is
+                        \* task (Routing.for_request, routing.ex:62-68), and a host task is
                         \* bound to the connection it was decided on and refused on any
                         \* other (HostServer.check_host, host_server.ex:417-430); FALSE
                         \* re-decides before every step
@@ -401,7 +401,7 @@ Settle(v) ==
 (* boundary                                                               *)
 
 \* A task's first browser call: decided once, when no profile is live for it
-\* (Routing.for_request, routing.ex:44-50; ProfileManager.backend is nil).
+\* (Routing.for_request, routing.ex:62-89; ProfileManager.backend is nil).
 \*  - An attached host whose report says available runs it, bound to this
 \*    connection (HostAvailability.usable?, host_availability.ex:116-119).
 \*    With LastReportWins that is the last report; without, the first after
@@ -449,7 +449,7 @@ Deadline ==
 
 \* Where t's next step goes. DecideOnceAtStart: where it was decided --
 \* route[t] never changes once set, because Routing.for_request only
-\* re-decides when no profile is live (routing.ex:46-49) and a live host
+\* re-decides when no profile is live (routing.ex:64-67, :76-89) and a live host
 \* profile's task is refused on any other connection (check_host,
 \* host_server.ex:417-430). Without it the step re-decides from what
 \* HostServer knows now, and NoChromeRetry still refuses Chrome to a task

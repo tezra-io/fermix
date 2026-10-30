@@ -55,8 +55,8 @@
 (* refused by the tool before any registry write or Scheduler call         *)
 (* (job_registry_support.ex:36-41): a request the owner never made. Its    *)
 (* job-row read feeds no modelled column. The store of parked              *)
-(* confirmations (AccessGate.Pending, application.ex:237) and the holder   *)
-(* of a conversation's place records (ReplyBlocks, :241), which no job     *)
+(* confirmations (AccessGate.Pending, application.ex:240) and the holder   *)
+(* of a conversation's place records (ReplyBlocks, :244), which no job     *)
 (* process reads, are two more core children started before the            *)
 (* RunnerSupervisor, so a crash of either is the daemon crash below.       *)
 (*                                                                         *)
@@ -89,10 +89,10 @@
 (* Run ids are reused once a run is fully finished, so two ids model an    *)
 (* unbounded run history. A daemon crash also stands for a crash of any    *)
 (* core child started before the RunnerSupervisor (Memory.Repo, Trace,     *)
-(* Finch, MainAgent and the rest, application.ex:172-243) or of the        *)
+(* Finch, MainAgent and the rest, application.ex:172-246) or of the        *)
 (* RunnerSupervisor itself: under :rest_for_one each restarts the          *)
 (* RunnerSupervisor with its runners and the Scheduler                     *)
-(* (application.ex:289). A runner's send helper (REMIND-2,                 *)
+(* (application.ex:292). A runner's send helper (REMIND-2,                 *)
 (* channel_send.ex:219-224) and its AgentLoop (JOB-8, runner.ex:1243-1247) *)
 (* are linked to it, so the restart kills them too. With                   *)
 (* LoopDiesWithRunner off (the code before JOB-8's fix, an unlinked        *)
@@ -141,7 +141,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/registry.ex @ a70716ed25d3
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 9b06289e25ae
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,call_or_timeout_error,request_name,periodic_opts,claim_due_job,claim_job_now,claim_due_job_tx,claim_in_tx,claim_job_now_tx,transact_claim,fetch_claimable_due_job,finish_job_claim,rollback_job_claim,upsert_scheduled_job_row,upsert_job_run_row,ensure_no_active_job_run,fetch_claimable_job,settle_job_run,settle_job_run_tx,settle_job_run_in_tx,ensure_job_run_active,release_settled_job,finish_job_settle,rollback_job_settle,unsettled_job_runs,fetch_unsettled_job_runs,@unsettled_job_runs_sql,update_scheduled_job_fields,update_scheduled_job_fields_row,scheduled_job_field_assignments!,scheduled_job_field_assignment!,@owner_text_fields,due_scheduled_jobs,fetch_due_scheduled_jobs,next_scheduled_job,fetch_next_scheduled_job,upsert_job_run,upsert_scheduled_job,get_job_run,get_scheduled_job,upsert_memory @ 4babf473a267
-\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,jobs_scheduler_opts @ 819435b927f9
+\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,jobs_scheduler_opts @ 1735358ba3cf
 \* SOURCE: apps/fermix_core/lib/fermix_core/timeouts.ex#expired,repo_call,@repo_call_ms @ 05d3e6ea2142
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/cue_admission.ex @ 94f9aac007e9
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#claim_cue_run,claim_cue_run_tx,claim_cue_run_in_tx,claim_delivery,settle_cue_run,settle_cue_run_tx,settle_cue_run_in_tx,ensure_not_cue_run,active_run_trigger,release_cue_job @ 895445d8ff8b
@@ -163,7 +163,7 @@ CONSTANTS
     SchedulerCrashes,   \* how many times the Scheduler alone may die of a cause other than a
                         \* Repo timeout, e.g. :rest_for_one restarting it when the
                         \* MeetingsSupervisor between the RunnerSupervisor and it dies
-                        \* (application.ex:244-251)
+                        \* (application.ex:247-254)
     SchedulerTimeouts,  \* how many of the Scheduler's Repo calls may time out (5 s); it takes
                         \* that call site's error branch and keeps running (repo.ex:1219-1221)
     RunnerCanCrash,     \* a runner dies at one of its Repo calls (a timeout, a failed match)
@@ -1346,7 +1346,7 @@ ReportWrite(r) ==
 \* A pending :cue_admit dies with the old process, and init asks for none:
 \* maybe_request_admission (scheduler.ex:213, :282-284) asks only while the cue
 \* tree runs (Cues.running?/0), and that tree starts after the Scheduler under
-\* :rest_for_one (application.ex:285, :289), so it is never up while the
+\* :rest_for_one (application.ex:288, :292), so it is never up while the
 \* Scheduler inits. The first admission after a restart is a tick's, a wake's,
 \* a run's end's or a job change's. The run set starts unknown (runs_known?
 \* false, scheduler.ex:200) until init's reconcile scan succeeds; without
@@ -1372,9 +1372,9 @@ SchedRestart ==
 \* waited on never lands. A Repo call that times out no longer kills it
 \* (the timeout steps above); another cause still does, such as
 \* :rest_for_one restarting it when the MeetingsSupervisor started between
-\* the RunnerSupervisor and it dies (application.ex:244-251), or a raise in
+\* the RunnerSupervisor and it dies (application.ex:247-254), or a raise in
 \* its own code. FermixCore.Supervisor is :rest_for_one and starts
-\* JobRunnerSupervisor before JobScheduler (application.ex:244, :251, :289),
+\* JobRunnerSupervisor before JobScheduler (application.ex:247, :254, :292),
 \* so the restart leaves every runner running.
 SchedulerCrash ==
     /\ schedCrashes < SchedulerCrashes
