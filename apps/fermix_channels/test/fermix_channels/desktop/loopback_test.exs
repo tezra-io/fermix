@@ -10,6 +10,9 @@ defmodule FermixChannels.Desktop.LoopbackTest do
   use ExUnit.Case, async: true
 
   alias FermixChannels.Desktop.Loopback
+  alias FermixChannels.Desktop.LoopbackHttp
+
+  @wait 10_000
 
   setup do
     test = self()
@@ -63,20 +66,30 @@ defmodule FermixChannels.Desktop.LoopbackTest do
     assert Loopback.listening(ctx.loopback) == %{"lb-2" => []}
   end
 
-  test "a free port is taken, and one left by closed connections alone is taken again", ctx do
-    {:ok, earlier} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
-    {:ok, port} = :inet.port(earlier)
-    {:ok, client} = :gen_tcp.connect({127, 0, 0, 1}, port, [:binary, active: false])
-    {:ok, served} = :gen_tcp.accept(earlier, 1_000)
-    # The serving side closes first, as a sign-in's listener does, leaving the
-    # port's closed connection behind it.
-    :ok = :gen_tcp.close(served)
-    :ok = :gen_tcp.close(earlier)
-    :ok = :gen_tcp.close(client)
-
+  # A sign-in served here closes its connection from this side once it has
+  # answered, which leaves the port to that closed connection for about a
+  # minute. Linux binds over it only when the connection carried
+  # `SO_REUSEADDR` too, which it takes from the listener that accepted it;
+  # macOS asks only the socket binding. So the listener carries the option
+  # (checked on every host), and a second sign-in on the port within the
+  # minute is listened for again (which only Linux refuses without it).
+  test "a free port is taken, and one a previous sign-in was served on is taken again", ctx do
+    port = free_port()
     open(ctx, "lb-3", [port])
-
     assert Loopback.listening(ctx.loopback) == %{"lb-3" => [port]}
+    assert {:ok, [reuseaddr: true]} = :inet.getopts(listener(ctx, "lb-3", port), [:reuseaddr])
+
+    request = %{method: "GET", target: "/callback?code=c1", headers: [], body: ""}
+    browser = Task.async(fn -> LoopbackHttp.replay(port, request, @wait) end)
+    assert_receive {:to_primary, %{"t" => "loopback_request", "request_id" => request_id}}, @wait
+    answer(ctx, request_id, "signed in")
+    assert {:ok, %{status: 200, body: "signed in"}} = Task.await(browser, @wait)
+
+    close(ctx, "lb-3")
+    assert Loopback.listening(ctx.loopback) == %{}
+
+    open(ctx, "lb-4", [port])
+    assert Loopback.listening(ctx.loopback) == %{"lb-4" => [port]}
     refute_received {:to_primary, %{"t" => "loopback_failed"}}
   end
 
@@ -104,6 +117,32 @@ defmodule FermixChannels.Desktop.LoopbackTest do
                       "reason" => "failed"
                     }}
   end
+
+  defp free_port do
+    {:ok, probe} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+    {:ok, port} = :inet.port(probe)
+    :ok = :gen_tcp.close(probe)
+    port
+  end
+
+  # The loopback's own listening socket for `port`.
+  defp listener(ctx, id, port) do
+    %{loopbacks: %{^id => %{listeners: %{^port => socket}}}} = :sys.get_state(ctx.loopback)
+    socket
+  end
+
+  defp answer(ctx, request_id, body) do
+    fields = %{
+      "request_id" => request_id,
+      "status" => 200,
+      "headers" => [["Content-Type", "text/plain; charset=utf-8"]]
+    }
+
+    :ok = Loopback.handle(ctx.loopback, "loopback_response", fields, body)
+  end
+
+  defp close(ctx, id),
+    do: :ok = Loopback.handle(ctx.loopback, "loopback_close", %{"loopback_id" => id}, <<>>)
 
   defp open(ctx, id, ports) do
     :ok =

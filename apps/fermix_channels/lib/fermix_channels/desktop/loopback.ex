@@ -18,10 +18,14 @@ defmodule FermixChannels.Desktop.Loopback do
   without `SO_REUSEADDR`, and when the port is taken it asks the port itself
   (a connect to `127.0.0.1`): a port something answers on is refused, and only
   a port held by closed connections alone (a previous sign-in's) is bound
-  again with `SO_REUSEADDR`. Ports below 1024 and this engine's own listeners
-  (its setup page, its phone listener) are never taken, and at most 8
-  loopbacks are open at once, so the primary can never take over a service
-  this computer runs on `localhost`.
+  again with `SO_REUSEADDR`. Once bound, its listener takes `SO_REUSEADDR`
+  too, and every connection it accepts with it: Linux binds over a closed
+  connection only when that connection carried the option as well (macOS
+  asks only the socket binding), so without it a sign-in on the same port
+  within about a minute of the last would be refused there. Ports below 1024
+  and this engine's own listeners (its setup page, its phone listener) are
+  never taken, and at most 8 loopbacks are open at once, so the primary can
+  never take over a service this computer runs on `localhost`.
 
   A port this machine will not or cannot listen on (another program has it,
   the system refuses, it is one Fermix keeps, or 8 loopbacks are open) is
@@ -207,8 +211,24 @@ defmodule FermixChannels.Desktop.Loopback do
   # bound again with the option.
   defp listen(port) do
     case bind(port, false) do
+      {:ok, socket} -> reuse_once_bound(socket)
       {:error, :eaddrinuse} -> rebind(port)
-      result -> result
+      error -> error
+    end
+  end
+
+  # Set once the port is held, the option opens it to no other socket (Linux
+  # never binds over a listener, macOS asks only the socket binding); the
+  # connections it accepts take it, so on Linux a later loopback can bind over
+  # them once they are closed.
+  defp reuse_once_bound(socket) do
+    case :inet.setopts(socket, reuseaddr: true) do
+      :ok ->
+        {:ok, socket}
+
+      {:error, reason} ->
+        :ok = :gen_tcp.close(socket)
+        {:error, reason}
     end
   end
 
