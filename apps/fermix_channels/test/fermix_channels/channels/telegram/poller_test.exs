@@ -3,20 +3,29 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
 
   import ExUnit.CaptureLog, only: [capture_log: 1]
 
+  alias FermixChannels.Channels.Telegram
   alias FermixChannels.Channels.Telegram.Poller
+  alias FermixChannels.Gateway.AlbumBuffer
+  alias FermixChannels.Gateway.Idempotency
+  alias FermixCore.Memory.Repo
+  alias FermixTestSupport.SafeRm
 
   setup do
     Req.Test.set_req_test_to_shared()
-
-    Application.put_env(:fermix_channels, :telegram,
-      bot_token: "test-bot-token",
-      # F-02: empty allowlist now denies; poller tests need an explicit allow.
-      allowed_user_ids: ["111"]
-    )
+    put_bot_token("123456789:test-bot-token")
 
     on_exit(fn ->
       Application.delete_env(:fermix_channels, :telegram)
     end)
+  end
+
+  # A real token's part before its colon is the bot's id.
+  defp put_bot_token(token) do
+    Application.put_env(:fermix_channels, :telegram,
+      bot_token: token,
+      # F-02: empty allowlist now denies; poller tests need an explicit allow.
+      allowed_user_ids: ["111"]
+    )
   end
 
   defp stub_get_updates(test_pid, updates) do
@@ -81,10 +90,61 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
       name: :"poller_#{System.unique_integer([:positive])}"
     ]
 
-    opts = Keyword.merge(defaults, opts)
+    opts =
+      defaults
+      |> Keyword.merge(opts)
+      |> Keyword.put_new_lazy(:idempotency, fn -> start_idempotency() end)
+
     pid = start_supervised!({Poller, opts})
     Req.Test.allow(:telegram_poller, self(), pid)
     pid
+  end
+
+  # A cache of update ids of the test's own (in this process only unless
+  # `store:` names a Repo), so no test shares ids with another or with the
+  # application's. `:name` lets a test replace a cache under the name its
+  # poller already holds.
+  defp start_idempotency(opts \\ []) do
+    name = Keyword.get(opts, :name, :"poller_idempotency_#{System.unique_integer([:positive])}")
+
+    spec =
+      {Idempotency,
+       name: name,
+       table: :"poller_idempotency_table_#{System.unique_integer([:positive])}",
+       store: Keyword.get(opts, :store, :memory)}
+
+    start_supervised!(Supervisor.child_spec(spec, id: Keyword.get(opts, :id, name)))
+    name
+  end
+
+  # A Repo on `db_path`, as a restart (or the host a home moved to) opens it.
+  defp start_repo(db_path, id, enabled? \\ true) do
+    name = :"poller_repo_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      Supervisor.child_spec({Repo, name: name, enabled: enabled?, database_path: db_path}, id: id)
+    )
+
+    name
+  end
+
+  defp memory_db_path do
+    dir = SafeRm.make_tmp_dir!("telegram-poller")
+    on_exit(fn -> SafeRm.rm_rf!(dir) end)
+    Path.join(dir, "memory.db")
+  end
+
+  defp album_part(update_id, file_id) do
+    %{
+      "update_id" => update_id,
+      "message" => %{
+        "message_id" => update_id,
+        "media_group_id" => "album-7",
+        "photo" => [%{"file_id" => file_id, "file_size" => 2_000, "width" => 90, "height" => 90}],
+        "chat" => %{"id" => 42},
+        "from" => %{"id" => 111, "username" => "alice"}
+      }
+    }
   end
 
   defp telegram_update(update_id, text) do
@@ -192,7 +252,7 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
   end
 
   describe "init/1" do
-    test "starts with offset 0 before the startup probe runs" do
+    test "starts with offset 0, so the first poll asks for everything Telegram holds" do
       stub_get_updates(self(), [])
 
       pid = start_poller()
@@ -202,24 +262,17 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
   end
 
   describe "polling" do
-    test "uses a zero-timeout startup probe before regular long polling" do
-      stub_get_updates_sequence(self(), [{:ok, []}, {:ok, []}])
+    test "the first poll is a regular long poll from offset 0" do
+      stub_get_updates_sequence(self(), [{:ok, []}])
 
       pid = start_poller()
-      send(pid, :poll)
+      poll_once(pid)
 
-      assert_receive {:get_updates, startup_body}
-      assert startup_body["offset"] == 0
-      assert startup_body["timeout"] == 0
-      assert startup_body["allowed_updates"] == ["message", "callback_query"]
-      assert_offset(pid, 0)
-
-      send(pid, :poll)
-
-      assert_receive {:get_updates, poll_body}
-      assert poll_body["offset"] == 0
-      assert poll_body["timeout"] == 50
-      assert poll_body["allowed_updates"] == ["message", "callback_query"]
+      assert_received {:get_updates, first_body}
+      assert first_body["offset"] == 0
+      assert first_body["timeout"] == 50
+      assert first_body["allowed_updates"] == ["message", "callback_query"]
+      assert :sys.get_state(pid).offset == 0
     end
 
     test "advances offset after processing updates" do
@@ -228,19 +281,19 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
         telegram_update(101, "world")
       ]
 
-      stub_get_updates_sequence(self(), [{:ok, []}, {:ok, updates}])
+      stub_get_updates_sequence(self(), [{:ok, updates}, {:ok, []}])
 
       pid = start_poller()
-      send(pid, :poll)
-      assert_receive {:get_updates, startup_body}
-      assert startup_body["timeout"] == 0
-
       send(pid, :poll)
       assert_receive {:get_updates, body}
       assert body["offset"] == 0
       assert body["timeout"] == 50
 
       assert_offset(pid, 102)
+
+      send(pid, :poll)
+      assert_receive {:get_updates, next_body}
+      assert next_body["offset"] == 102
     end
 
     test "keeps offset unchanged on empty regular response" do
@@ -248,45 +301,39 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
 
       pid = start_poller()
       send(pid, :poll)
-      assert_receive {:get_updates, startup_body}
-      assert startup_body["timeout"] == 0
-
-      send(pid, :poll)
       assert_receive {:get_updates, body}
       assert body["offset"] == 0
       assert body["timeout"] == 50
 
+      send(pid, :poll)
+      assert_receive {:get_updates, next_body}
+      assert next_body["offset"] == 0
+
       assert_offset(pid, 0)
     end
 
-    test "drops stale queued updates when switching from webhook to polling" do
-      stale_update = telegram_update(200, "stale webhook update")
-      fresh_update = telegram_update(201, "fresh polling update")
-      stub_get_updates_sequence(self(), [{:ok, [stale_update]}, {:ok, [fresh_update]}])
+    # Telegram keeps an update until a later call confirms it, for 24 hours:
+    # what was sent while Fermix was stopped (a restart, an update, a move to
+    # another host) or what a deleted webhook left behind is answered now.
+    test "hands off what Telegram held when the poller started" do
+      held = [telegram_update(200, "sent while stopped"), telegram_update(201, "also then")]
+      stub_get_updates_sequence(self(), [{:ok, held}, {:ok, []}])
 
       handler_id = attach_inbound_telemetry(self())
       on_exit(fn -> :telemetry.detach(handler_id) end)
 
       pid = start_poller()
-      send(pid, :poll)
+      poll_once(pid)
 
-      assert_receive {:get_updates, startup_body}
-      assert startup_body["offset"] == 0
-      assert startup_body["timeout"] == 0
-      refute_receive {:telemetry, [:fermix, :channel, :message], _, _}, 100
-      assert_offset(pid, 201)
+      assert_received {:get_updates, %{"offset" => 0}}
+      assert_received {:"$gen_cast", {:ingest, %{content: "sent while stopped"}}}
+      assert_received {:"$gen_cast", {:ingest, %{content: "also then"}}}
+      assert_receive {:telemetry, [:fermix, :channel, :message], %{count: 1}, metadata}
+      assert metadata == %{channel: :telegram, direction: :inbound}
+      assert :sys.get_state(pid).offset == 202
 
-      send(pid, :poll)
-
-      assert_receive {:get_updates, poll_body}
-      assert poll_body["offset"] == 201
-      assert poll_body["timeout"] == 50
-
-      assert_receive {:telemetry, [:fermix, :channel, :message], measurements, metadata}
-      assert measurements.count == 1
-      assert metadata.channel == :telegram
-      assert metadata.direction == :inbound
-      assert_offset(pid, 202)
+      poll_once(pid)
+      assert_received {:get_updates, %{"offset" => 202}}
     end
 
     test "retries after error" do
@@ -308,8 +355,8 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
 
       pid = start_poller(poll_interval: :manual, transient_backoff_ms: 10)
       send(pid, :poll)
-      assert_receive {:get_updates, startup_body}
-      assert startup_body["timeout"] == 0
+      assert_receive {:get_updates, first_body}
+      assert first_body["timeout"] == 50
 
       send(pid, :poll)
       assert_receive {:get_updates, poll_body}
@@ -330,8 +377,7 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
 
       pid = start_poller()
       send(pid, :poll)
-      assert_receive {:get_updates, startup_body}
-      assert startup_body["timeout"] == 0
+      assert_receive {:get_updates, _first_body}
 
       send(pid, :poll)
       assert_receive {:get_updates, _poll_body}
@@ -382,20 +428,150 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
 
       pid = start_poller()
       send(pid, :poll)
-      assert_receive {:tg_call, startup_path, _}
-      assert String.ends_with?(startup_path, "/getUpdates")
+      assert_receive {:tg_call, first_path, _}
+      assert String.ends_with?(first_path, "/getUpdates")
 
       send(pid, :poll)
 
       # The tap funnels through as the synthesized /confirm inbound message.
       assert_receive {:"$gen_cast", {:ingest, %{content: "/confirm TOK98765", chat_id: "42"}}}
       # ...and the poller clears the spinner and strips the used button.
-      assert_receive {:tg_call, "/bottest-bot-token/answerCallbackQuery", ack}
+      assert_receive {:tg_call, "/bot123456789:test-bot-token/answerCallbackQuery", ack}
       assert ack["callback_query_id"] == "cbq-1"
-      assert_receive {:tg_call, "/bottest-bot-token/editMessageReplyMarkup", edit}
+      assert_receive {:tg_call, "/bot123456789:test-bot-token/editMessageReplyMarkup", edit}
       assert edit["message_id"] == 55
 
       assert_offset(pid, 301)
+    end
+  end
+
+  describe "recorded update ids" do
+    test "an update sent again is not handed off twice" do
+      stub_get_updates_sequence(self(), [
+        {:ok, [telegram_update(100, "hello")]},
+        {:ok, [telegram_update(100, "hello"), telegram_update(101, "world")]}
+      ])
+
+      pid = start_poller()
+      poll_once(pid)
+      assert_received {:"$gen_cast", {:ingest, %{content: "hello"}}}
+
+      poll_once(pid)
+      assert_received {:"$gen_cast", {:ingest, %{content: "world"}}}
+      refute_received {:"$gen_cast", {:ingest, _message}}
+      assert :sys.get_state(pid).offset == 102
+    end
+
+    # The batch handled last before a stop is sent again, because only the
+    # next call confirms it. A fresh Repo and cache on the same memory.db are
+    # what a restart starts with, and what the host a home moved to opens.
+    test "an update handled before a restart is not handed off again after it" do
+      db_path = memory_db_path()
+      repo = start_repo(db_path, :repo_before)
+      cache = start_idempotency(store: {:repo, repo}, id: :cache_before)
+
+      stub_get_updates_sequence(self(), [{:ok, [telegram_update(100, "before the stop")]}])
+      start_poller(idempotency: cache) |> poll_once()
+      assert_received {:"$gen_cast", {:ingest, %{content: "before the stop"}}}
+
+      stop_supervised!(Poller)
+      :ok = stop_supervised(:cache_before)
+      :ok = stop_supervised(:repo_before)
+      repo = start_repo(db_path, :repo_after)
+      cache = start_idempotency(store: {:repo, repo}, id: :cache_after)
+
+      stub_get_updates_sequence(self(), [
+        {:ok, [telegram_update(100, "before the stop"), telegram_update(101, "while stopped")]}
+      ])
+
+      second = start_poller(idempotency: cache)
+      poll_once(second)
+
+      assert_received {:"$gen_cast", {:ingest, %{content: "while stopped"}}}
+      refute_received {:"$gen_cast", {:ingest, _message}}
+      assert :sys.get_state(second).offset == 102
+    end
+
+    # Telegram numbers updates per bot: a token for another bot starts a
+    # count of its own, which may pass the same numbers.
+    test "an update id is recorded per bot" do
+      cache = start_idempotency()
+      stub_get_updates_sequence(self(), [{:ok, [telegram_update(100, "to the first bot")]}])
+      start_poller(idempotency: cache) |> poll_once()
+      assert_received {:"$gen_cast", {:ingest, %{content: "to the first bot"}}}
+      stop_supervised!(Poller)
+
+      put_bot_token("987654321:another-bot-token")
+      stub_get_updates_sequence(self(), [{:ok, [telegram_update(100, "to the second bot")]}])
+      start_poller(idempotency: cache) |> poll_once()
+      assert_received {:"$gen_cast", {:ingest, %{content: "to the second bot"}}}
+    end
+
+    test "the parts of an album coalesce, and a part sent again is not added twice" do
+      test_pid = self()
+      cache = start_idempotency()
+
+      buffer =
+        start_supervised!(
+          {AlbumBuffer,
+           channel: Telegram,
+           name: :"album_buffer_#{System.unique_integer([:positive])}",
+           debounce_ms: 60_000,
+           max_parts: 2,
+           dispatch: fn messages, _opts ->
+             send(test_pid, {:dispatched, messages})
+             :ok
+           end}
+        )
+
+      stub_get_updates_sequence(self(), [{:ok, [album_part(300, "photo-a")]}])
+      start_poller(buffer: buffer, idempotency: cache) |> poll_once()
+      stop_supervised!(Poller)
+
+      # After the poller restarts, the first part comes again, beside the second.
+      stub_get_updates_sequence(self(), [
+        {:ok, [album_part(300, "photo-a"), album_part(301, "photo-b")]}
+      ])
+
+      start_poller(buffer: buffer, idempotency: cache) |> poll_once()
+
+      assert_receive {:dispatched, [album]}
+      assert Enum.map(album.attachments, & &1.file_id) == ["photo-a", "photo-b"]
+      # Every cast the buffer was sent is handled once this call returns.
+      :sys.get_state(buffer)
+      refute_received {:dispatched, _messages}
+    end
+
+    test "an update the store cannot record is not handed off, and is asked for again" do
+      name = unique_poller_name()
+      on_exit(fn -> Poller.forget_poll_health(name) end)
+
+      # A Repo that is turned off answers every claim with an error.
+      off = start_repo(memory_db_path(), :repo_off, false)
+      cache = start_idempotency(store: {:repo, off}, id: :cache_off)
+
+      stub_get_updates_sequence(self(), [
+        {:ok, [telegram_update(100, "hello"), telegram_update(101, "world")]}
+      ])
+
+      pid = start_escalating_poller(name, idempotency: cache)
+      log = capture_log(fn -> poll_once(pid) end)
+
+      assert_received {:get_updates, %{"offset" => 0}}
+      refute_received {:"$gen_cast", {:ingest, _message}}
+      assert %{offset: 0, consecutive_failures: 1} = :sys.get_state(pid)
+      assert log =~ "could not be recorded in memory.db"
+      assert log =~ "Telegram poller update record error"
+
+      # Once the store answers, the same updates are asked for and handed off.
+      :ok = stop_supervised(:cache_off)
+      start_idempotency(name: cache, id: :cache_on)
+      poll_once(pid)
+
+      assert_received {:get_updates, %{"offset" => 0}}
+      assert_received {:"$gen_cast", {:ingest, %{content: "hello"}}}
+      assert_received {:"$gen_cast", {:ingest, %{content: "world"}}}
+      assert %{offset: 102, consecutive_failures: 0} = :sys.get_state(pid)
     end
   end
 
@@ -407,7 +583,7 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
       stub_get_updates_sequence(self(), [{:ok, []}, {:transport_error, :timeout}])
       pid = start_escalating_poller(name)
 
-      # Startup probe answers, so the poller reaches :polling with a clean slate.
+      # The first poll answers, so the poller starts from a clean slate.
       poll_once(pid)
       assert Poller.poll_health(name) == %{status: :polling, consecutive_failures: 0, since: nil}
 
@@ -445,18 +621,18 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
       assert Poller.poll_health(name) == %{status: :polling, consecutive_failures: 0, since: nil}
     end
 
-    test "a failing startup probe counts toward escalation" do
+    test "a poller whose first poll never answers escalates" do
       name = unique_poller_name()
       on_exit(fn -> Poller.forget_poll_health(name) end)
 
-      # A poller that never gets past its startup probe must still escalate,
-      # otherwise the one failure mode that blocks every message is silent.
+      # A poller that never gets one answer must still escalate, otherwise the
+      # one failure mode that blocks every message is silent.
       stub_get_updates_sequence(self(), [{:transport_error, :timeout}])
       pid = start_escalating_poller(name)
 
       poll_times(pid, 3)
 
-      assert :drain_backlog == :sys.get_state(pid).startup_phase
+      assert :sys.get_state(pid).offset == 0
       assert %{status: :degraded, consecutive_failures: 3} = Poller.poll_health(name)
     end
 
@@ -622,19 +798,6 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
       log = capture_log(fn -> poll_once(pid) end)
 
       assert log =~ "reconnecting after"
-      assert_elapsed_ms(log)
-    end
-
-    test "the startup probe error log carries the elapsed time" do
-      name = unique_poller_name()
-      on_exit(fn -> Poller.forget_poll_health(name) end)
-
-      stub_get_updates_sequence(self(), [{:transport_error, :timeout}])
-      pid = start_escalating_poller(name)
-
-      log = capture_log(fn -> poll_once(pid) end)
-
-      assert log =~ "Telegram poller startup probe"
       assert_elapsed_ms(log)
     end
   end

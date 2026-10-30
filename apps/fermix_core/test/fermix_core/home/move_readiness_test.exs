@@ -62,7 +62,9 @@ defmodule FermixCore.Home.MoveReadinessTest do
 
     assert sentence.("plugins") =~ "invented-notes"
     assert sentence.("stays_here") =~ "iMessage"
-    assert sentence.("cutover_gap") =~ "Telegram"
+    # Telegram keeps what it holds until the poller asks again.
+    assert sentence.("cutover_gap") =~ "Telegram while the move runs wait until it is done"
+    refute sentence.("cutover_gap") =~ "lost"
     assert sentence.("serves_nothing") =~ "north-box"
     refute Enum.any?(items, &(&1.sentence =~ "sk-ant-invented"))
   end

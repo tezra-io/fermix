@@ -39,16 +39,20 @@ defmodule FermixChannels.Gateway.AlbumBuffer do
     * **Ordering** is enforced by the gateway's per-conversation FIFO queue. A
       coalesce key is a subset of the conversation key, so a flushed album and a
       trailing message stay in arrival order.
-    * **Idempotency** stays where the transport records it. Webhook channels
-      record per message id *before* buffering (pass `idempotency_key:`); on a
-      flush-time dispatch error the buffer `Idempotency.forget/2`s every buffered
-      part id so a provider re-delivery can re-run. Polling channels dedup via
-      offset advance and record nothing (`idempotency_key: nil` — no forget).
+    * **Idempotency** stays where the transport records it, *before*
+      buffering. Webhook channels record per message id (pass
+      `idempotency_key:`); on a flush-time dispatch error the buffer
+      `Idempotency.forget/2`s every buffered part id so a provider re-delivery
+      can re-run. Telegram's poller records each update by its update id,
+      which the buffer does not hold, so its buffer has no key
+      (`idempotency_key: nil` — no forget): Telegram sends an update again only
+      when the poller stopped before its next call confirmed it, and a
+      dispatch error leaves the update recorded and logged.
     * **At-most-once across restart.** A daemon restart inside the (sub-second)
-      debounce window drops unflushed parts; webhook acks are already sent and
-      the polling offset already advanced, so there is no re-delivery backstop.
-      Acceptable for a rare restart vs. a short window; documented, not silently
-      degraded.
+      debounce window drops unflushed parts; webhook acks are already sent, and
+      a part Telegram sends again is skipped as already recorded, so there is
+      no re-delivery backstop. Acceptable for a rare restart vs. a short
+      window; documented, not silently degraded.
   """
 
   use GenServer
@@ -260,9 +264,10 @@ defmodule FermixChannels.Gateway.AlbumBuffer do
     end
   end
 
-  # Polling channels record no idempotency (`idempotency_key` nil) — nothing to
-  # forget. Webhook channels forget every buffered part id so a re-delivery can
-  # re-run (the ack is already committed, so the flush is the only chance).
+  # A buffer with no key has nothing to forget: Telegram's poller records update
+  # ids, which the buffer does not hold. Webhook channels forget every buffered
+  # part id so a re-delivery can re-run (the ack is already committed, so the
+  # flush is the only chance).
   defp forget(_ids, reason, %{idempotency_key: nil} = state) do
     Logger.error("#{inspect(state.channel)} album-buffer dispatch failed: #{inspect(reason)}")
     :ok

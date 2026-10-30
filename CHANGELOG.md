@@ -255,6 +255,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   moves to another host too. With memory turned off the ids are kept until the
   next restart, as before, and an event whose id Fermix cannot record is
   refused, so Slack or WhatsApp sends it again.
+- **Telegram messages sent while Fermix is stopped are answered when it
+  starts.** Each time Fermix started it skipped whatever Telegram was holding
+  for the bot, so a message sent during a restart, an update, a crash or a
+  move to another host was never answered. Fermix now answers everything
+  Telegram still holds, which is up to 24 hours of messages, and each one
+  once: it keeps the ids of the Telegram updates it took for 24 hours in its
+  memory database, so the last messages before a stop, which Telegram sends
+  again, are not answered twice, after a restart or on the host your home
+  moved to. With memory turned off a restart can answer those last ones
+  again. A message that waited is answered as if it had just been sent.
 - **Fermix's Linux service no longer stays down after its fifth start.** The
   systemd service allowed five starts with no time window, so restarts added
   up over the life of the service until one more stop left Fermix down. It

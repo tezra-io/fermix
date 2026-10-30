@@ -15,14 +15,15 @@ No public URL: Fermix polls Telegram.
 
 - **Bot token**: in Telegram open @BotFather, send `/newbot`, give a display name and a username ending in `bot`, copy the token (`123456789:AA…`) exactly, with no `bot` prefix. `/token` in @BotFather issues a new one. Mac **Bot token**; browser **Bot token**; `--telegram-bot-token`; `bot_token`. Never read from the environment.
 - **Your numeric user id** (not your @username, not your phone number): open @userinfobot, press **Start**, copy the number. Mac **Your Telegram user ID**; browser **Owner user ID**; `--telegram-owner-user-id`; `owner_user_id = "123456789"`.
-- **First message**: after the restart, open `https://t.me/<bot_username>` and press **Start** (it sends `/start`); Fermix answers, and `/whoami` then echoes the id you entered. Messages sent before the restart are discarded. Pressing Start once is also what lets reminders reach you: Telegram refuses a bot's first message to a user who never started it.
+- **First message**: after the restart, open `https://t.me/<bot_username>` and press **Start** (it sends `/start`); Fermix answers, and `/whoami` then echoes the id you entered. Pressing Start once is also what lets reminders reach you: Telegram refuses a bot's first message to a user who never started it.
+- **While Fermix is stopped** (a restart, an update, a crash, a move to a server), Telegram keeps the bot's messages for 24 hours and Fermix answers them when it starts; older ones are gone. Each is answered once: Fermix keeps the ids of the updates it took for 24 hours in its memory database, which moves with the home, so the last ones before a stop are not answered again (with memory turned off, a restart can answer those again). A message answered after a stop is answered as if just sent.
 - **Groups**: direct messages are the main path. In a group, privacy mode hides ordinary messages from the bot: @BotFather `/setprivacy` > Disable, then re-add the bot, or make it an admin.
 
 Failures:
 - No owner id → Telegram never starts, nothing answers, the app still says Connected, the boot log says "Refusing to start the telegram adapter" → enter the id, restart.
 - @username or phone number as owner → every message dropped, log `Dispatcher ingress denied telegram message (unauthorized)`, ending in `sender_id="…"` (the id Fermix read from that message) → use the numeric id: the `sender_id` on the owner's own dropped message is it.
 - Token with a `bot` prefix or truncated → Doctor network check shows `invalid bot token (Telegram API HTTP 404 …)` → paste the exact @BotFather string. Revoked token → HTTP 401.
-- Two pollers on one token (a dev and a prod home, another bot framework) or a webhook left on it by an earlier tool → `409` poll errors, channel degraded → one bot per install; open `https://api.telegram.org/bot<TOKEN>/deleteWebhook` once.
+- Two pollers on one token (a dev and a prod home, another bot framework) or a webhook left on it by an earlier tool → `409` poll errors, channel degraded → one bot per install; open `https://api.telegram.org/bot<TOKEN>/deleteWebhook` once, after which Fermix answers what Telegram still holds from the last 24 hours (`deleteWebhook?drop_pending_updates=true` discards that instead).
 
 ## Discord
 

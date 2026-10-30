@@ -204,10 +204,10 @@ it, never a second writer.
   a home over one S3 upload (5 GiB) when the server keeps snapshots in S3
   (warns: it would never back up there); plugins built for another system
   (warns, named); voice calls and meetings, and iMessage on a Mac, stopping
-  after the move; the cutover gap
-  (Telegram messages sent during the move are lost, and a recurring job more
-  than an hour late is skipped); and this computer serving nothing while the
-  move runs. The move does not start while anything blocks, from the apps or
+  after the move; the cutover gap (Telegram messages sent during the move
+  wait until it is done, and a recurring job more than an hour late is
+  skipped); and this computer serving nothing while the move runs. The move
+  does not start while anything blocks, from the apps or
   from `fermix home move`, which says each block. Checking the keychain reads
   each secret, which opens the keychain and can ask the owner to allow it; a
   start within 15 minutes of a ready review takes that review rather than
@@ -277,10 +277,12 @@ it, never a second writer.
 - While the move runs this computer serves nothing; a message typed in the
   app then is answered "Fermix is moving this home to <name>; your message is
   kept until it is done." and sent again once Fermix is back.
-- The cutover has a gap: Telegram messages sent while the move runs are lost
-  (the poller's place in Telegram's queue is kept in memory, not in the home),
-  and a recurring job that comes due more than an hour late is skipped rather
-  than run late. The apps say so before the owner moves.
+- The cutover has a gap: a recurring job that comes due more than an hour
+  late is skipped rather than run late. The apps say so before the owner
+  moves. Telegram messages sent while the move runs are not lost: Telegram
+  keeps them for 24 hours, and Fermix answers each once when it runs again,
+  on the server (or here, if the move is undone), since the ids of the
+  updates it already took move with the home's memory database.
 - On the server Fermix keeps every secret in its file secret store
   (`<home>/secrets/`, readable by the server's `fermix` account only): in
   plain files, held by the disk's encryption (the owner encrypts the disk
@@ -472,7 +474,7 @@ it, never a second writer.
 | On the primary: the secrets that did not resolve on this host (`secrets_missing`), by id | Secrets to enter again | `fermix home status` |
 | Where snapshots are kept (bucket, region, the S3-compatible address, how often) and the two access keys | Recovery: the `snapshots` section; the keys as hidden fields, never shown again | `fermix settings set snapshots …`, `fermix settings secret set snapshot_s3_access_key_id` |
 | Take a snapshot now | **Back up now**, offered once snapshots have somewhere to go | `fermix home snapshots run` |
-| An enrollment code | **Get a code** (**Get a new code** while one is open, which stops the open one working), shown once with **Copy** and when it expires, beside the command for a server you have, and what to know before moving (the disk it needs, that this computer serves nothing meanwhile, the Telegram and late-job gap, where the server keeps secrets, no way back) | `fermix home enroll-code` |
+| An enrollment code | **Get a code** (**Get a new code** while one is open, which stops the open one working), shown once with **Copy** and when it expires, beside the command for a server you have, and what to know before moving (the disk it needs, that this computer serves nothing meanwhile, the cutover gap, where the server keeps secrets, no way back) | `fermix home enroll-code` |
 | The servers waiting for the move, with the instance facts they reported (unverified) | Servers waiting for the move | `fermix home candidates` |
 | Review the move (`home.move.readiness`): each item ready, a note or a block | **Review the move** on a server waiting; a block is shown as one | `fermix home move` says each block |
 | Start the move | the app's pane | `fermix home move --to ID [--retire]` |

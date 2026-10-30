@@ -2,12 +2,32 @@ defmodule FermixChannels.Channels.Telegram.Poller do
   @moduledoc """
   Long-polls Telegram's getUpdates API for incoming messages.
 
-  Startup/backlog policy:
-  - The first poll cycle is a zero-timeout startup probe.
-  - Any updates already queued in Telegram when the poller starts are treated as stale backlog.
-  - The poller advances its offset past that backlog without processing it.
-  - This also applies when switching from webhook mode to polling: queued pre-switch
-    updates are dropped, and only updates that arrive after the startup probe are processed.
+  Nothing Telegram holds is skipped. Telegram keeps an update for 24 hours,
+  until a call with a higher offset confirms it. The poller starts at offset
+  0, so its first call returns everything still held: a message sent while
+  Fermix was stopped (a restart, an update, a crash, a move to another host)
+  is answered once it is back. The same holds after a webhook: getUpdates
+  answers 409 while a webhook is set, and once it is deleted the first poll
+  takes what Telegram still holds, unless it was deleted with
+  `drop_pending_updates`.
+
+  The batch handed off last before a stop comes again, because only the next
+  call confirms it. So each update's id is recorded in `Gateway.Idempotency`
+  before the update is handed off, and an update whose id is already recorded
+  is skipped. The record lives in `memory.db` for 24 hours, so it survives a
+  restart and moves with the home; with memory turned off it lives in this
+  run only, and a restart answers that batch again. The recorded id is
+  `<bot id>:<update_id>`: Telegram numbers updates per bot, and the bot id
+  (the token's part before its colon) stays the same when the token is
+  replaced. Albums need nothing more: each part of a media group is an update
+  of its own, recorded on its own.
+
+  An update whose id the store cannot record halts the batch there: the
+  updates before it are handed off and confirmed, and it and the rest stay in
+  Telegram, which sends them again on the next poll, after the error backoff.
+  That counts as a failed poll toward the degraded escalation below. No update
+  is handed off unrecorded, and none is confirmed before it is handed off;
+  Telegram's 24 hours bound how long one can wait.
 
   Parsed messages are forwarded to `Gateway.AlbumBuffer` (a separate,
   non-blocking process) for album coalescing and dispatch. The poller never
@@ -24,13 +44,13 @@ defmodule FermixChannels.Channels.Telegram.Poller do
 
   alias FermixChannels.Channels.Telegram
   alias FermixChannels.Gateway.AlbumBuffer
+  alias FermixChannels.Gateway.Idempotency
   alias FermixChannels.Telemetry
   alias FermixCore.Net.Egress
 
   @bot_api_base "https://api.telegram.org"
   @default_error_backoff_ms 5_000
   @default_transient_backoff_ms 250
-  @startup_probe_timeout 0
   @poll_timeout 50
   @receive_timeout_ms 60_000
   @transient_transport_errors [:closed, :timeout, :econnreset, :socket_closed_remotely]
@@ -86,13 +106,13 @@ defmodule FermixChannels.Channels.Telegram.Poller do
   def init(opts) do
     state = %{
       offset: 0,
-      startup_phase: :drain_backlog,
       req_options: Keyword.get(opts, :req_options, []),
       poll_interval: Keyword.get(opts, :poll_interval, :immediate),
       error_backoff_ms: Keyword.get(opts, :error_backoff_ms, @default_error_backoff_ms),
       transient_backoff_ms:
         Keyword.get(opts, :transient_backoff_ms, @default_transient_backoff_ms),
       buffer: Keyword.get(opts, :buffer, AlbumBuffer.name_for(Telegram)),
+      idempotency: Keyword.get(opts, :idempotency, Idempotency),
       name: Keyword.get(opts, :name, __MODULE__),
       consecutive_failures: 0,
       poll_status: :polling,
@@ -119,58 +139,40 @@ defmodule FermixChannels.Channels.Telegram.Poller do
   end
 
   @impl true
-  def handle_info(:poll, %{startup_phase: :drain_backlog} = state) do
-    {result, elapsed_ms} = probe_startup_backlog(state)
-
-    case result do
-      {:ok, updates, state} ->
-        state =
-          state
-          |> note_poll_success()
-          |> advance_offset(updates)
-          |> Map.put(:startup_phase, :polling)
-
-        if state.poll_interval == :immediate do
-          send(self(), :poll)
-        end
-
-        {:noreply, state}
-
-      {:error, reason, state} ->
-        state = note_poll_failure(state, "startup probe", reason, elapsed_ms)
-        schedule_error_retry(state, reason)
-        {:noreply, state}
-    end
-  end
-
-  @impl true
   def handle_info(:poll, state) do
     {result, elapsed_ms} = do_poll(state)
 
     case result do
-      {:ok, updates, state} ->
-        process_updates(updates, state)
-
-        state =
-          state
-          |> note_poll_success()
-          |> advance_offset(updates)
-
-        if state.poll_interval == :immediate do
-          send(self(), :poll)
-        end
-
-        {:noreply, state}
-
-      {:error, reason, state} ->
-        state = note_poll_failure(state, "poll", reason, elapsed_ms)
-        schedule_error_retry(state, reason)
-        {:noreply, state}
+      {:ok, batch, state} -> {:noreply, take_batch(batch, state, elapsed_ms)}
+      {:error, reason, state} -> {:noreply, poll_failed(state, "poll", reason, elapsed_ms)}
     end
   end
 
-  defp probe_startup_backlog(state) do
-    timed_get_updates(state, @startup_probe_timeout)
+  # The offset passes only the updates handed off or skipped as recorded, in
+  # update_id order, so an update the store could not record, and every one
+  # after it, stays in Telegram for the next poll.
+  defp take_batch(%{bot: bot, updates: updates}, state, elapsed_ms) do
+    case hand_off_updates(Enum.sort_by(updates, & &1["update_id"]), bot, state) do
+      {:ok, taken} ->
+        state |> note_poll_success() |> advance_offset(taken) |> poll_again()
+
+      {:error, taken, reason} ->
+        state |> advance_offset(taken) |> poll_failed("update record", reason, elapsed_ms)
+    end
+  end
+
+  defp poll_again(state) do
+    if state.poll_interval == :immediate do
+      send(self(), :poll)
+    end
+
+    state
+  end
+
+  defp poll_failed(state, context, reason, elapsed_ms) do
+    state = note_poll_failure(state, context, reason, elapsed_ms)
+    schedule_error_retry(state, reason)
+    state
   end
 
   defp do_poll(state) do
@@ -188,7 +190,8 @@ defmodule FermixChannels.Channels.Telegram.Poller do
   end
 
   defp get_updates(state, timeout) do
-    with {:ok, token} <- Telegram.get_bot_token() do
+    with {:ok, token} <- Telegram.get_bot_token(),
+         {:ok, bot} <- bot_id(token) do
       url = "#{@bot_api_base}/bot#{token}/getUpdates"
 
       body = %{
@@ -205,7 +208,7 @@ defmodule FermixChannels.Channels.Telegram.Poller do
 
       case result do
         {:ok, %{status: 200, body: %{"ok" => true, "result" => updates}}} ->
-          {:ok, updates, state}
+          {:ok, %{bot: bot, updates: updates}, state}
 
         {:ok, %{status: status, body: resp_body}} ->
           {:error, "Telegram API error #{status}: #{inspect(resp_body)}", state}
@@ -218,10 +221,19 @@ defmodule FermixChannels.Channels.Telegram.Poller do
     end
   end
 
-  # Only an answered `getUpdates` clears the counter. Resetting on anything that
-  # merely looks different — a new error shape, a transient/permanent switch —
-  # is the bug that defeats strike counters: an outage that alternates two
-  # failure kinds would never escalate.
+  # The part of a bot token before its colon is the bot's id, kept when the
+  # token is replaced in @BotFather.
+  defp bot_id(token) do
+    case String.split(token, ":", parts: 2) do
+      [bot, _secret] when bot != "" -> {:ok, bot}
+      _other -> {:error, :malformed_bot_token}
+    end
+  end
+
+  # Only an answered `getUpdates` whose updates were all recorded clears the
+  # counter. Resetting on anything that merely looks different — a new error
+  # shape, a transient/permanent switch — is the bug that defeats strike
+  # counters: an outage that alternates two failure kinds would never escalate.
   defp note_poll_success(%{poll_status: :degraded} = state) do
     Logger.warning(
       "Telegram poller recovered after #{state.consecutive_failures} consecutive failures"
@@ -356,21 +368,44 @@ defmodule FermixChannels.Channels.Telegram.Poller do
 
   defp transient_transport_error?(_reason), do: false
 
-  # Forward each parsed message to the album buffer (a separate, non-blocking
-  # process) for coalescing and dispatch. Returns :ok — the poller carries no
-  # album state; offset advance is handled separately by the caller.
-  defp process_updates(updates, state) do
-    Enum.each(updates, fn update ->
-      case Telegram.parse_update(update) do
-        {:ok, messages} when messages != [] ->
-          emit_inbound_telemetry(length(messages))
-          Enum.each(messages, &AlbumBuffer.ingest(&1, state.buffer))
-          maybe_ack_callback(update, state)
+  # Hands off each update whose id is recorded now, skips one recorded
+  # before, and stops at the first one the store cannot record. Answers the
+  # updates taken either way, which the offset may pass.
+  defp hand_off_updates(updates, bot, state) do
+    Enum.reduce_while(updates, {:ok, []}, fn update, {:ok, taken} ->
+      case claim(update, bot, state) do
+        :fresh ->
+          hand_off(update, state)
+          {:cont, {:ok, [update | taken]}}
 
-        _ ->
-          :ok
+        :duplicate ->
+          Logger.info("Telegram update #{bot}:#{update["update_id"]} skipped: already handled")
+          {:cont, {:ok, [update | taken]}}
+
+        {:error, reason} ->
+          {:halt, {:error, taken, reason}}
       end
     end)
+  end
+
+  # Recorded before it is parsed, so an update whose parse crashes the poller
+  # is skipped after the restart instead of crashing every start.
+  defp claim(%{"update_id" => update_id}, bot, state) when is_integer(update_id) do
+    Idempotency.check_and_record(:telegram, "#{bot}:#{update_id}", server: state.idempotency)
+  end
+
+  # Forward each parsed message to the album buffer (a separate, non-blocking
+  # process) for coalescing and dispatch. The poller carries no album state.
+  defp hand_off(update, state) do
+    case Telegram.parse_update(update) do
+      {:ok, messages} when messages != [] ->
+        emit_inbound_telemetry(length(messages))
+        Enum.each(messages, &AlbumBuffer.ingest(&1, state.buffer))
+        maybe_ack_callback(update, state)
+
+      _ ->
+        :ok
+    end
   end
 
   # An inline-button tap is dispatched as its synthesized `/confirm` message above;

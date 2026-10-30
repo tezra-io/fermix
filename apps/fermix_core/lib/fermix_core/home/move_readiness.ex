@@ -27,7 +27,8 @@ defmodule FermixCore.Home.MoveReadiness do
       the move;
     * `stays_here`: voice calls and meetings, and iMessage on a Mac, stop after
       the move;
-    * `cutover_gap`: Telegram messages sent during the move are lost, and a
+    * `cutover_gap`: Telegram messages sent during the move wait until it
+      is done (Telegram keeps them, `Channels.Telegram.Poller`), and a
       recurring job more than an hour late is skipped;
     * `serves_nothing`: this computer serves nothing during the move.
 
@@ -293,8 +294,8 @@ defmodule FermixCore.Home.MoveReadiness do
 
   defp cutover_sentence,
     do:
-      "Messages sent to Telegram while the move runs are lost, and a recurring job more " <>
-        "than an hour late is skipped."
+      "Messages sent to Telegram while the move runs wait until it is done, and a recurring " <>
+        "job more than an hour late is skipped."
 
   # -- facts ------------------------------------------------------------------
 

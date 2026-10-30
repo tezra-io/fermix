@@ -328,8 +328,9 @@ The same database also holds full-text search, versioned resources, scheduled
 jobs and their runs, temporal events and reminders, harness runs, meetings,
 skill usage and curation, the companion timeline, computer-history rows, and
 the inbound channel event ids `Gateway.Idempotency` keeps for 24 hours
-(`channel_event_ids`, migration 53, M75), so a provider's retry that arrives
-after a restart, or on the new host after the home moved, is still a duplicate.
+(`channel_event_ids`, migration 53, M75), so a provider's retry, or a
+Telegram update sent again, that arrives after a restart, or on the new host
+after the home moved, is still a duplicate.
 
 Durable memory has two writers, and both end by having `PromptFiles` rebuild
 `USER.md` and `MEMORY.md` under `FERMIX_HOME/memory/<agent>/`. `Memory.Reviewer`
@@ -1050,6 +1051,12 @@ Current channels:
 
 - `Telegram` uses long polling through `Telegram.Poller`, with albums coalesced
   by `Gateway.AlbumBuffer`; webhook transport is intentionally unsupported.
+  The first poll takes everything Telegram still holds (it keeps an update 24
+  hours until a later call confirms it), so a message sent while Fermix was
+  stopped is answered (M75). Each update's id (`<bot id>:<update_id>`) is
+  recorded in `Gateway.Idempotency` before hand-off, so the batch Telegram
+  sends again after a stop is not answered twice; an update the store cannot
+  record halts the batch there, unconfirmed, for the next poll.
 - `WhatsApp` uses Cloud API webhook ingress and Graph API replies, with audio,
   image, and document download.
 - `Slack` uses Web API replies and takes events one of two ways
