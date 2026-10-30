@@ -435,7 +435,7 @@ Notes that the shapes alone do not carry:
   terminal."} to the same callers. So do the two cue writes that ride a
   generic method: `secret.set` and `secret.clear` on a `cue_source:` id, and
   `settings.apply` on the `cues` section, whatever its values, since turning
-  `cues_mandates_enabled` back on undoes the owner's stop of every mandate. The
+  `cues_mandates_enabled` back on undoes the owner's stop of every watcher action. The
   capability and the sentence are the request's family's. This raises the bar
   and authenticates nobody: it stops a model's own command from approving a
   mandate, answering a proposal or switching mandates back on. Every cue read
@@ -1008,8 +1008,8 @@ Notes that the shapes alone do not carry:
   `invalid_params` with the field and a sentence ("There is no source named
   home-alerts.").
 - **`cues` is the cue section**, under pane `cues`: `cues_enabled` (the cue tree
-  starts at boot, so `restart` is true), `cues_mandates_enabled` (read at every
-  mandate call), `cues_screen_provider` (how items are screened, read at every
+  starts at boot, so `restart` is true), `cues_mandates_enabled` ("Let watchers
+  act", read at every mandate call and every follow-up trigger), `cues_screen_provider` (how items are screened, read at every
   accept and filter call), `filter_provider` and `filter_model` (the Cues
   filter model, the one every watcher's filter uses, read at every filter call)
   and `cues_door_port` (`advanced`, 1024 to 65535, always on 127.0.0.1). The rows

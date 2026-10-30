@@ -43,8 +43,8 @@ defmodule FermixCore.Management.Settings.Cues do
   @not_set_up "Set up this provider first."
   @enabled_info "Starts the sources, the door, the filters and the tasks watchers wake. " <>
                   "Applies after a restart."
-  @mandates_info "Off stops the next call of every mandate at once, even in a run already " <>
-                   "going. No restart needed."
+  @mandates_info "Off stops every watcher action at once: the next call of every mandate and " <>
+                   "every follow-up, even in a run already going. No restart needed."
   @filter_info "Judges each item on its own, so a smaller, faster model works well and costs " <>
                  "much less than your main model."
   @door_info "The door listens on this Mac only. Applies after a restart."
@@ -70,7 +70,7 @@ defmodule FermixCore.Management.Settings.Cues do
         value: CuesConfig.enabled?(cues),
         restart: Row.restart?([:cues, :enabled])
       ),
-      Row.new("cues_mandates_enabled", :toggle, "Let mandates act",
+      Row.new("cues_mandates_enabled", :toggle, "Let watchers act",
         info: @mandates_info,
         value: CuesConfig.mandates_enabled?(cues),
         restart: Row.restart?([:cues, :mandates_enabled])
