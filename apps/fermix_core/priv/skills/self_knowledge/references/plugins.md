@@ -4,8 +4,8 @@ Plugins are connected integrations that own a surface (an API, a vault) and regi
 
 ## What the agent sees
 
-- A ready plugin lists its tool names under `## Plugins`: call them directly (its skill, via `skill_view`, documents arguments; deferred schemas resolve via `tool_describe`/`tool_search`) and prefer them over browser, web or shell for that surface.
-- An enabled plugin that is not ready shows `status=` and a fix instead of vanishing: `needs_auth`, `needs_client_config`, `needs_secret`, `needs_config`, `needs_workspace`, `reauthorization_required`, `wrong_region`, `missing_host_runtime`, `not_installed`, `incompatible`. It is not connected: offer to connect it, never scrape around it.
+- A ready plugin lists its tool names under `## Plugins`: call them directly (its skill, via `skill_view`, documents arguments; deferred schemas resolve via `tool_describe`/`tool_search`) and prefer them over browser, web or shell for what they cover. What no listed tool does, or a call the service rejects for good (an action its plan excludes, credits run out), goes to the browser; a Fermix hold or the user's refusal never does.
+- An enabled plugin that is not ready shows `status=` and a fix instead of vanishing: `needs_auth`, `needs_client_config`, `needs_secret`, `needs_config`, `needs_workspace`, `reauthorization_required`, `wrong_region`, `missing_host_runtime`, `not_installed`, `incompatible`. It is not connected: offer to connect it, and use the browser in its place only if the user asks.
 - The fix text names CLI commands. For a Mac app user translate it to the app: Settings > Integrations > the plugin's row, whose leading button is the fix (**Install…**, **Turn on**, **Sign in**, **Sign in again**, **Add token…**, **Replace the token**, **Set up the sign-in client**). On Linux or dev: browser setup's Plugins page, or the `fermix plugins` verbs below.
 - Enable, disable and sign-out reach the agent on its next turn, with no restart. A disabled plugin's tool refuses with an enable hint.
 - A connected plugin registers all its tools; one whose scope was not granted answers "reauthorize" rather than disappearing.

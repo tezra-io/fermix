@@ -37,6 +37,10 @@ defaults:
   expect:
     status: ok
     tools_none:
+      # What a connected plugin covers stays on the plugin: a silent detour
+      # through the browser or web search would pass every reply gate.
+      - browser
+      - web_search
       - gmail_send_message
       - gmail_reply_to_thread
       - gmail_create_draft
