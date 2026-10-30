@@ -243,7 +243,7 @@ reconcile scan errors), `LifetimesCanEnd`, `Proposals`, `OwnerCanMistap`,
 | `SettleFenced` | a filter settle needs its call open (`open_call/2`, `cues_filter_sql.ex:434`) and the row's `filter_call_id` (`move/5`, `:545`); a refused settle closes the open call `aborted` (R1, `abort_stale_call/3`, `:423`) |
 | `TasksDieWithDispatcher` | the filtering group (`FermixCore.Cues.FilteringSupervisor`, defined inline in `cues/supervisor.ex:44-51`, `:58-63`) is `rest_for_one`, `Cues.Filters` before `FilterSupervisor`; the cue supervisor above the groups is `one_for_one` (`:55`) |
 | `BootReset` | `Filters.init` resets `filtering` rows (`filters.ex:103`, `:160`; `cues_filter_sql.ex:640`) |
-| `NonePassesAtAccept` | a `none` watcher's delivery is inserted `passed` (`cues_sql.ex:754`) |
+| `NonePassesAtAccept` | a `none` watcher's delivery is inserted `passed` (`cues_sql.ex:768`) |
 | `ClaimNeedsIdleJob` | the cue claim needs the job `scheduled` with no active run (`@open_sql :93-96`; `repo.ex` `fetch_claimable_job`, `ensure_no_active_job_run`) |
 | `CueSlotCap` | `free = min(max_active − active, 3 − active_cue)` (`cue_admission.ex:83`) |
 | `AtomicCueSettle` | the run row, the job's release and the delivery's move are one transaction (`repo.ex` `settle_cue_run_in_tx`) |
@@ -371,7 +371,7 @@ runs, ahead of the dispatcher's next claim.
 
 Nothing then moves the row. The claim query skips a watcher that has a
 `filtering` delivery (`cues_filter_sql.ex:181`), so the watcher takes no more
-calls at all; the lifetime sweep never touches `filtering` (`cues_sql.ex:1232`,
+calls at all; the lifetime sweep never touches `filtering` (`cues_sql.ex:1246`,
 `sweeper.ex` moduledoc); the dispatcher's 60 s sweep only dispatches; the only
 reset is the boot reset in `Filters.init`. The delivery and every later delivery
 of that watcher wait until the daemon (or the filtering group) restarts. The
@@ -389,7 +389,7 @@ the row a way out:
   stranded call has no task, so no result ever comes;
 - the first-timer rule (`filters.ex:112`, `:130`, `:136`) only delays the
   dispatcher's first claim after a start;
-- `prune_filter_calls` now deletes unfinished calls too (`cues_sql.ex:1318`),
+- `prune_filter_calls` now deletes unfinished calls too (`cues_sql.ex:1332`),
   but only after 30 days, and it leaves the delivery `filtering`: the claim
   query still skips the watcher, and only the boot reset (which fences on the
   delivery's own `filter_call_id`, not the call row) moves it;
