@@ -609,7 +609,12 @@ def test_the_shipped_numbered_rubrics_parse():
                       "status_script_on_outage": 3, "claude_code_changelog_on_release": 3,
                       "claude_code_issue_triage_on_report": 3, "codex_quotes_the_post": 3,
                       "summarise_each_post_into_notes": 3, "automatic_with_a_cap": 3,
-                      "automatic_without_a_cap": 3}
+                      "automatic_without_a_cap": 3,
+                      # lists.yaml
+                      "batteries": 2, "garden_and_kitchen": 3, "groceries": 2,
+                      "hardware": 2, "landing_page": 2, "newsletter": 2,
+                      "oat_milk_route_sanity": 2, "packing": 2, "reading": 2,
+                      "site_and_app": 3}
 
 
 if __name__ == "__main__":
