@@ -49,7 +49,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
 - `OldRequestsArrive`: a request the worker sent on a rail it has since given
   up on still reaches the candidate. Two rails are two streams, so nothing
   orders one rail's frames against another's. The worker closes a rail it
-  gives up on (`close_rail/1`, `move_worker.ex:207`, `:416`, `:429`), but
+  gives up on (`close_rail/1`, `move_worker.ex:208`, `:426`, `:439`), but
   `Rail.close/1` sends its close frame behind whatever the rail already sent
   (`rail.ex`). Whether the iroh helper still delivers what it holds once the
   socket closes ("the helper ends its stream on its own", `helper.ex`) is
@@ -60,12 +60,12 @@ Models one move of M75 §7.2 (B5). Three parts take part:
   for the move it staged (`commit_move/2`, `candidate.ex:503-536`).
 - `MarkerBeforeCommit`: the worker writes `moved.json` and records
   `committing` before it sends `move_commit` (`commit/4`, then `retired/4`,
-  `move_worker.ex:410-432`).
+  `move_worker.ex:420-442`).
 - `OffersFenced`: the candidate takes an offer only when it is later than the
   move it holds, a later move id or a later attempt of the same move, and
   refuses an earlier or equal one (`move_mismatch`), leaving what it holds
   untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:400-412`).
-  `move_offer` carries the attempt (`stream/3`, `move_worker.ex:360`), which
+  `move_offer` carries the attempt (`stream/3`, `move_worker.ex:370`), which
   only grows across restarts. Move ids are ordered by when the move started
   (`move_id/1`, `move.ex:463-472`); with one move id, the fence orders by
   attempt.
@@ -74,7 +74,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
   (`candidate.ex:481-487`), which answers `move_ready` only then
   (`move_responder.ex:65-69`).
 - `AwaitPinsRail`: the worker takes an answer only from the rail it waits on
-  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:732-745`).
+  (`await_any/3` matches `{:rail, ^rail, _}`, `move_worker.ex:742-755`).
 - `EndingsAfterRestart`: the worker records `committed` (after `move_done`)
   or `undoing` (after an undo) and then restarts itself (`SelfRestart`,
   `Lifecycle.restart_self/0`); the engine that boots after it records `done`
@@ -93,7 +93,7 @@ in `abort/3` never finds a marker. Every road to `abort/3` starts before
 - a refusal or the attempt cap, in `transfer/1` and `attempt_failed/2`,
   which run only while the marker is absent;
 - `commit/4`'s error clause, after the ready epoch or the marker could not
-  be written (`move_worker.ex:415-417`);
+  be written (`move_worker.ex:425-427`);
 - a recorded `aborting`, which `carry_on/3` reaches only when the marker is
   absent.
 
@@ -311,8 +311,8 @@ This was noticed while reading the code. TLC does not show it.
   exclusively, then writes it (`moved.ex:45-59`). If the write or the close
   fails (a full disk), the file may be left unreadable. `commit/4` then
   aborts, and `abort/3` raises on the unreadable marker
-  (`move_worker.ex:648-654`). The worker's restart reaches `carry_on/3`'s
-  clause for an unreadable marker (`:153`), which records a sentence asking for the
+  (`move_worker.ex:658-664`). The worker's restart reaches `carry_on/3`'s
+  clause for an unreadable marker (`:154`), which records a sentence asking for the
   marker to be fixed and does nothing else. The source stays a device and
   the candidate stays staged: safe, never two primaries, and stopped until a
   person acts. This is by design, since whether the home retired cannot be
