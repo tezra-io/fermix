@@ -154,6 +154,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   anything is installed. `--snapshot-bucket` and `--snapshot-region` name
   where the server will keep its snapshots, and `--restore` prepares a server
   to restore your home from a snapshot instead.
+- **The browser fills a form and sends it in one step.** When the agent fills
+  in a form, or signs you in with a login saved in the Mac app, it can send
+  the form in the same step instead of a second one, and it sees the page the
+  form leads to right away. Signing in still asks you first, exactly as
+  before. If sending fails once the fields are filled, the agent is told what
+  they hold, so it does not type them again.
 
 ### Changed
 
