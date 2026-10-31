@@ -25,7 +25,12 @@ defmodule FermixChannels.Desktop.Relay do
   comes from a stale primary (a retired copy that kept the identity): the
   relay closes the session, says so, and keeps the epoch it holds. A higher
   one is recorded. A route with another relay revision is recorded too, so
-  the next `hello` acknowledges it and the primary may use it.
+  the next `hello` acknowledges it and the primary may use it. Every session
+  that opens tells the Always On provisioner the epoch it reached
+  (`FermixCore.Management.Provision.primary_reached/2`, in a task of its own,
+  so the session never waits on it): one above the epoch the old server of a
+  replace held is how this desktop sees the move to the new server done, and
+  the old server is deleted then (M75 lean v1 §4.3).
 
   Every ending it did not ask for is retried after 1 s, doubling to 60 s, and
   the backoff starts over once a session is up. While the session is down,
@@ -97,7 +102,9 @@ defmodule FermixChannels.Desktop.Relay do
   Test seams: `:connect` (handed to `Rail.open/3` in place of dialing),
   `:addrs` (a route's direct addresses, a test's), `:rail_opts`, `:schedule`
   and `:cancel_timer` (this process's timers, delivered by hand in a test),
-  `:clock`, `:monotonic` (a 0-arity count of milliseconds) and `:emit`.
+  `:clock`, `:monotonic` (a 0-arity count of milliseconds), `:emit` and
+  `:primary_reached` (a 1-arity function of the epoch, in place of the
+  provisioner's).
   """
 
   use GenServer
@@ -114,6 +121,7 @@ defmodule FermixChannels.Desktop.Relay do
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Management.Placement
   alias FermixCore.Management.Protocol, as: ManagementProtocol
+  alias FermixCore.Management.Provision
   alias FermixCore.Setup.ConfigStore
 
   @first_backoff_ms 1_000
@@ -344,6 +352,7 @@ defmodule FermixChannels.Desktop.Relay do
       down_since_ms: monotonic.(),
       emit:
         Keyword.get(opts, :emit, &ChannelTelemetry.emit_transport(:desktop_relay, &1, &2, &3)),
+      primary_reached: Keyword.get_lazy(opts, :primary_reached, fn -> provisioner(root) end),
       link: nil,
       keypair: nil,
       phase: :connecting,
@@ -602,6 +611,7 @@ defmodule FermixChannels.Desktop.Relay do
   defp connected(epoch, fields, state) do
     link = state.link |> keep_epoch(epoch, state.root) |> keep_route(fields, state.root)
     max_media = media_bound(get_in(fields, ["caps", "max_media_bytes"]))
+    :ok = state.primary_reached.(epoch)
 
     if state.degraded?, do: state.emit.(:recovered, state.failures, :none)
 
@@ -617,6 +627,20 @@ defmodule FermixChannels.Desktop.Relay do
         max_media_bytes: max_media,
         sentence: "Fermix is connected to the server #{link.primary.name}."
     }
+  end
+
+  # What the primary's epoch means for a replace of the server is read in a
+  # task: the provisioner reads its ledger and may start deleting the old
+  # server, none of which this session waits for.
+  defp provisioner(root) do
+    fn epoch ->
+      {:ok, _pid} =
+        Task.Supervisor.start_child(FermixCore.TaskSupervisor, fn ->
+          Provision.primary_reached(epoch, home: root)
+        end)
+
+      :ok
+    end
   end
 
   # The primary names its blob bound; this desktop takes no more than its own

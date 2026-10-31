@@ -175,6 +175,195 @@ defmodule FermixCore.Home.Provision.LedgerTest do
     end
   end
 
+  # M75 lean v1 §4.3, §7 `on` Details "Replace the server": a linked desktop
+  # creates a new server for the home, the old one keeps the home until the
+  # move to the new one is done, and only then is the old one deleted.
+  describe "a replace" do
+    setup %{home: home} do
+      put!(home, &Ledger.connect(&1, @token, @now))
+      put!(home, &Ledger.begin_create(&1, "a3f9", server_facts()))
+      put!(home, &Ledger.put_server(&1, created_server(:created)))
+      put!(home, &Ledger.put_primary_ips(&1, [%{id: 91, type: "ipv4", ip: "203.0.113.7"}]))
+      :ok
+    end
+
+    test "sets the server it replaces aside, and the new one is created in its place", %{
+      home: home
+    } do
+      {:ok, ledger} = Ledger.read(home, "hetzner")
+      assert Ledger.replacing(ledger) == :begin
+
+      {:ok, _ledger} = Ledger.update(home, "hetzner", &Ledger.begin_replace(&1, 5, @now))
+      {:ok, ledger} = Ledger.read(home, "hetzner")
+
+      assert %{ref: nil, server: nil, firewall: nil, primary_ips: [], failure: nil} = ledger
+      assert Ledger.replaced_ref(ledger) == "a3f9"
+
+      assert %{from_epoch: 5, started_at: @now, old: %{ref: "a3f9", server: %{id: 61_839_204}}} =
+               ledger.replace
+
+      assert %{
+               state: :connected,
+               server: nil,
+               replace: %{state: :creating, current: :old, old: %{name: "fermix-general-a3f9"}}
+             } = Ledger.state(home)
+
+      # A create that had not begun its new server goes on with it.
+      assert Ledger.replacing(ledger) == :continue
+      assert {:ok, ^ledger} = Ledger.begin_replace(ledger, 9, @now)
+    end
+
+    test "creating, waiting, moving, deleting the old one, done", %{home: home} do
+      begin_replace!(home)
+      put!(home, &Ledger.begin_create(&1, "b7c2", new_facts()))
+      assert %{replace: %{state: :creating, current: :old}} = Ledger.state(home)
+
+      put!(home, &Ledger.put_server(&1, new_server(:created)))
+
+      assert %{state: :created, server: %{name: "fermix-general-b7c2"}, replace: replace} =
+               Ledger.state(home)
+
+      assert %{state: :waiting, current: :old, old: %{name: "fermix-general-a3f9"}} = replace
+
+      {:ok, _ledger} =
+        Ledger.update(home, "hetzner", &Ledger.move_started(&1, "cand-b7c2", @now))
+
+      assert %{replace: %{state: :moving, current: :old}} = Ledger.state(home)
+      {:ok, ledger} = Ledger.read(home, "hetzner")
+      assert ledger.replace.candidate_id == "cand-b7c2"
+      assert {:error, :live_home} = Ledger.retired(ledger)
+
+      {:ok, _ledger} = Ledger.update(home, "hetzner", &Ledger.moved(&1, 6, @now))
+      assert %{replace: %{state: :deleting, current: :new}} = Ledger.state(home)
+      {:ok, ledger} = Ledger.read(home, "hetzner")
+      assert {:ok, %{server: %{name: "fermix-general-a3f9"}}} = Ledger.retired(ledger)
+
+      put!(home, &Ledger.replaced_deleted(&1, @now))
+
+      assert %{state: :created, replace: %{state: :done, current: :new, old: nil}} =
+               Ledger.state(home)
+
+      {:ok, ledger} = Ledger.read(home, "hetzner")
+      assert {:error, :nothing_to_delete} = Ledger.retired(ledger)
+      # The new server is the one the home lives on, so it can be replaced in turn.
+      assert Ledger.replacing(ledger) == :begin
+    end
+
+    test "failed with its reason: the new server's create stopped, or the old one's delete", %{
+      home: home
+    } do
+      begin_replace!(home)
+      put!(home, &Ledger.begin_create(&1, "b7c2", new_facts()))
+      put!(home, &Ledger.put_failure(&1, failure("account_limit")))
+
+      assert %{
+               state: :failed,
+               replace: %{state: :failed, current: :old, failure: %{reason: "account_limit"}}
+             } = Ledger.state(home)
+
+      put!(home, &Ledger.begin_create(&1, "b7c2", new_facts()))
+      put!(home, &Ledger.put_server(&1, new_server(:created)))
+      {:ok, _ledger} = Ledger.update(home, "hetzner", &Ledger.moved(&1, 6, @now))
+      put!(home, &Ledger.put_replace_failure(&1, failure("unreachable")))
+
+      assert %{replace: %{state: :failed, current: :new, failure: %{reason: "unreachable"}}} =
+               Ledger.state(home)
+
+      {:ok, ledger} = Ledger.read(home, "hetzner")
+      assert Ledger.replacing(ledger) == {:error, :old_server_remains}
+      assert {:ok, %{ref: "a3f9"}} = Ledger.retired(ledger)
+    end
+
+    test "a new server deleted in Hetzner before the move is a failed replace", %{home: home} do
+      begin_replace!(home)
+      put!(home, &Ledger.begin_create(&1, "b7c2", new_facts()))
+      put!(home, &Ledger.put_server(&1, new_server(:gone)))
+
+      assert %{state: :gone, replace: %{state: :failed, current: :old, failure: failure}} =
+               Ledger.state(home)
+
+      assert failure.reason == "gone"
+
+      assert failure.sentence ==
+               "Your new server was deleted in Hetzner, so replace the server again."
+    end
+
+    test "cancelling the new one gives the ledger back the server it would have replaced", %{
+      home: home
+    } do
+      {:ok, before} = Ledger.read(home, "hetzner")
+      begin_replace!(home)
+      put!(home, &Ledger.begin_create(&1, "b7c2", new_facts()))
+      put!(home, &Ledger.put_server(&1, new_server(:deleting)))
+
+      assert %{state: :deleting, replace: %{state: :cancelling, current: :old}} =
+               Ledger.state(home)
+
+      put!(home, &Ledger.clear/1)
+      assert {:ok, ^before} = Ledger.read(home, "hetzner")
+      assert %{state: :created, replace: nil} = Ledger.state(home)
+    end
+
+    test "no second replace while one waits, moves or leaves its old server", %{home: home} do
+      begin_replace!(home)
+      put!(home, &Ledger.begin_create(&1, "b7c2", new_facts()))
+      put!(home, &Ledger.put_server(&1, new_server(:created)))
+      {:ok, ledger} = Ledger.read(home, "hetzner")
+      assert Ledger.replacing(ledger) == {:error, :replacement_exists}
+      assert {:error, :replacement_exists} = Ledger.begin_replace(ledger, 5, @now)
+
+      {:ok, moving} = Ledger.move_started(ledger, "cand-b7c2", @now)
+      assert Ledger.replacing(moving) == {:error, :replace_moving}
+
+      assert Ledger.replacing(Ledger.empty()) == {:error, :not_primary}
+    end
+
+    test "the desktop's sight of the server's epoch says when the move is done, or undone", %{
+      home: home
+    } do
+      begin_replace!(home)
+      put!(home, &Ledger.begin_create(&1, "b7c2", new_facts()))
+      put!(home, &Ledger.put_server(&1, new_server(:created)))
+      {:ok, waiting} = Ledger.read(home, "hetzner")
+
+      # The old server still answering, before or after a move it undid.
+      assert Ledger.replace_due(waiting, 5) == :none
+      assert Ledger.replace_due(waiting, 6) == :clean_up
+      {:ok, moving} = Ledger.move_started(waiting, "cand-b7c2", @now)
+      assert Ledger.replace_due(moving, 5) == :undone
+      assert {:ok, %{replace: %{move_started_at: nil}}} = Ledger.move_undone(moving)
+      assert {:error, :not_moved} = Ledger.moved(moving, 5, @now)
+
+      {:ok, moved} = Ledger.moved(moving, 6, @now)
+      # Seen again: still due, so a delete a restart cut short is carried on.
+      assert Ledger.replace_due(moved, 6) == :clean_up
+      assert {:ok, ^moved} = Ledger.moved(moved, 7, ~U[2031-05-04 11:00:00Z])
+
+      failed = Ledger.put_replace_failure(moved, failure("unreachable"))
+      assert Ledger.replace_due(failed, 6) == :none
+      assert Ledger.replace_due(Ledger.replaced_deleted(moved, @now), 6) == :none
+      assert Ledger.replace_due(Ledger.empty(), 6) == :none
+    end
+  end
+
+  defp begin_replace!(home) do
+    {:ok, _ledger} = Ledger.update(home, "hetzner", &Ledger.begin_replace(&1, 5, @now))
+  end
+
+  defp new_facts, do: %{name: "fermix-general-b7c2", type: "cpx32", location: "nbg1"}
+
+  defp new_server(status) do
+    Map.merge(new_facts(), %{
+      id: 61_839_377,
+      status: status,
+      ipv4: "203.0.113.9",
+      created_at: @now
+    })
+  end
+
+  defp failure(reason),
+    do: %{reason: reason, sentence: "Invented sentence.", next_location: nil, at: @now}
+
   defp put!(home, transform) do
     {:ok, _ledger} = Ledger.update(home, "hetzner", &{:ok, transform.(&1)})
   end

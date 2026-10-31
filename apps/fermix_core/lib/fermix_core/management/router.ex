@@ -46,7 +46,7 @@ defmodule FermixCore.Management.Router do
     mobile.devices.list browser.install.start imessage.permissions.get imessage.policy.confirm
     mcp.servers.list mcp.servers.import.scan cues.status cues.sources.list cues.watchers.list
     cues.mandates.list cues.mandates.choices home.status home.snapshots.status home.snapshots.run
-    home.enroll.open home.candidates.list home.provision.options home.provision.resources
+    home.enroll.withdraw home.candidates.list home.provision.options home.provision.resources
     home.provision.delete
   )
   @lease_params ~w(lease_id)
@@ -80,6 +80,7 @@ defmodule FermixCore.Management.Router do
   @mcp_import_params ~w(servers)
   @mcp_tool_params ~w(name tool enabled)
   @home_passphrase_params ~w(recovery_passphrase)
+  @home_enroll_params ~w(kind)
   @home_readiness_params ~w(candidate_id)
   @home_move_params ~w(candidate_id recovery_passphrase keep_as_desktop)
   @provision_connect_params ~w(token)
@@ -299,8 +300,16 @@ defmodule FermixCore.Management.Router do
     end
   end
 
-  defp route_home("home.enroll.open", %{}, opts),
-    do: operation_result(HomeMove.enroll_open(home_opts(opts)))
+  # `kind` `provisioned`, from the desktop replacing this server: the 24-hour
+  # code it puts inside the new one.
+  defp route_home("home.enroll.open", params, opts) do
+    with :ok <- reject_unknown_params(params, @home_enroll_params) do
+      operation_result(HomeMove.enroll_open(Map.get(params, "kind"), home_opts(opts)))
+    end
+  end
+
+  defp route_home("home.enroll.withdraw", %{}, opts),
+    do: operation_result(HomeMove.enroll_withdraw(home_opts(opts)))
 
   defp route_home("home.candidates.list", %{}, opts),
     do: operation_result(HomeMove.candidates_list(home_opts(opts)))
@@ -809,21 +818,34 @@ defmodule FermixCore.Management.Router do
   defp mobile_opts(opts), do: opts |> operation_opts() |> Keyword.get(:mobile, [])
   defp cues_opts(opts), do: opts |> operation_opts() |> Keyword.get(:cues, [])
 
-  # The router's own `:engine_role` (tests) reaches the provisioner as its seam.
+  # The router's own `:engine_role` (tests) reaches the provisioner as its
+  # seam, and a linked desktop's way to its server (`:primary_forward`, from
+  # the daemon) lets a replace ask that server for the new one's code.
   defp provision_opts(opts) do
     provision = opts |> operation_opts() |> Keyword.get(:provision, [])
 
-    case Keyword.fetch(opts, :engine_role) do
-      {:ok, role} -> Keyword.put_new(provision, :engine_role, role)
+    provision =
+      case Keyword.fetch(opts, :engine_role) do
+        {:ok, role} -> Keyword.put_new(provision, :engine_role, role)
+        :error -> provision
+      end
+
+    case Keyword.fetch(opts, :primary_forward) do
+      {:ok, forward} -> Keyword.put(provision, :primary_forward, forward)
       :error -> provision
     end
   end
 
-  # The router's own `:engine_role` (tests) reaches the family as its seam, and
-  # a linked device's way to its primary (`:primary_forward`, from the daemon)
-  # lets `home.status` add the primary's own.
+  # The router's own `:engine_role` (tests) reaches the family as its seam, a
+  # linked device's way to its primary (`:primary_forward`, from the daemon)
+  # lets `home.status` add the primary's own, and the actor says whether a
+  # desktop forwarded the request.
   defp home_opts(opts) do
-    home = opts |> operation_opts() |> Keyword.get(:home, [])
+    home =
+      opts
+      |> operation_opts()
+      |> Keyword.get(:home, [])
+      |> Keyword.merge(Keyword.take(opts, [:actor]))
 
     home =
       case Keyword.fetch(opts, :engine_role) do

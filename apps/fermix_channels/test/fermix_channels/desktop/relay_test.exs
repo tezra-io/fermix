@@ -71,6 +71,26 @@ defmodule FermixChannels.Desktop.RelayTest do
     refute_received {:relay_emit, _status, _failures, _class}
   end
 
+  # M75 lean v1 §4.3: reaching the server one epoch above the one a replace's
+  # old server held is how this desktop sees the move to the new one done, so
+  # every session the relay opens says the primary's epoch.
+  test "every session it opens tells the Always On provisioner the primary's epoch" do
+    primary = DesktopRail.primary!(epoch: 6)
+    root = DesktopRail.desktop_home!(primary, epoch: 5)
+    relay = DesktopRail.start_relay!(root, primary)
+
+    pid = GenServer.whereis(relay)
+
+    DesktopRail.await_connected(relay)
+    assert_receive {:primary_reached, 6}, 10_000
+
+    :ok = drop_sessions(primary)
+    assert_receive {:scheduled, {:relay_timer, :reconnect, _token} = timer, 1_000}, 10_000
+    send(pid, timer)
+    DesktopRail.await_connected(relay)
+    assert_receive {:primary_reached, 6}, 10_000
+  end
+
   # A hello_ack that names no epoch never reaches the relay: the rail's codec
   # refuses it (the primary's own codec will not even send one), and the
   # relay names that refusal a stale primary too.

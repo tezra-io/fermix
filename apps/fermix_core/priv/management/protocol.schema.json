@@ -232,6 +232,7 @@
     "home.snapshots.run": 2,
     "home.snapshots.passphrase": 2,
     "home.enroll.open": 2,
+    "home.enroll.withdraw": 2,
     "home.candidates.list": 2,
     "home.move.readiness": 2,
     "home.move.start": 2,
@@ -346,6 +347,7 @@
             "home.snapshots.run",
             "home.snapshots.passphrase",
             "home.enroll.open",
+            "home.enroll.withdraw",
             "home.candidates.list",
             "home.move.readiness",
             "home.move.start",
@@ -994,6 +996,13 @@
         {
           "if": {
             "required": ["method"],
+            "properties": { "method": { "const": "home.enroll.withdraw" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/home_enroll_withdraw_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
             "properties": { "method": { "const": "home.candidates.list" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/home_candidates_list_params" } } }
@@ -1212,6 +1221,7 @@
         { "$ref": "#/$defs/home_snapshots_run_result" },
         { "$ref": "#/$defs/home_snapshots_passphrase_result" },
         { "$ref": "#/$defs/home_enroll_open_result" },
+        { "$ref": "#/$defs/home_enroll_withdraw_result" },
         { "$ref": "#/$defs/home_candidates_list_result" },
         { "$ref": "#/$defs/home_move_readiness_result" },
         { "$ref": "#/$defs/home_move_start_result" },
@@ -5959,7 +5969,12 @@
         }
       }
     },
-    "home_enroll_open_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "home_enroll_open_params": {
+      "type": "object",
+      "description": "kind is manual (the default: thirty minutes, the code a person copies) or provisioned (24 hours, the code inside a server Fermix creates), which the primary opens only for a request a desktop forwarded.",
+      "additionalProperties": false,
+      "properties": { "kind": { "enum": ["manual", "provisioned"] } }
+    },
     "home_enroll_open_result": {
       "description": "The enrollment code, shown once: single use, valid until expires_at, never logged and never answered again.",
       "type": "object",
@@ -5969,6 +5984,14 @@
         "code": { "type": "string", "maxLength": 2048, "pattern": "^fxenroll1\\.[A-Za-z0-9_-]+$" },
         "expires_at": { "type": "string" }
       }
+    },
+    "home_enroll_withdraw_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "home_enroll_withdraw_result": {
+      "description": "The primary's 24-hour window is released: an open one ended, a used one no longer holds a manual code back.",
+      "type": "object",
+      "required": ["withdrawn"],
+      "additionalProperties": false,
+      "properties": { "withdrawn": { "const": true } }
     },
     "home_candidates_list_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
     "home_candidates_list_result": {
@@ -6104,11 +6127,13 @@
     },
     "home_provision_create_params": {
       "type": "object",
+      "description": "replace (default false) is true only on the linked desktop whose ledger holds the server the home lives on: the new server is created with a 24-hour code the old server opens, and the old one is deleted once the move to the new one is done.",
       "required": ["type", "location"],
       "additionalProperties": false,
       "properties": {
         "type": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
-        "location": { "enum": ["fsn1", "nbg1", "hel1"] }
+        "location": { "enum": ["fsn1", "nbg1", "hel1"] },
+        "replace": { "type": "boolean" }
       }
     },
     "home_provision_create_result": { "$ref": "#/$defs/jobView" },
@@ -6125,18 +6150,31 @@
     "home_provision_delete_result": { "$ref": "#/$defs/jobView" },
     "homeProvisionView": {
       "type": "object",
-      "description": "What Fermix created on Hetzner, from this computer's ledger. state is none (no token), connected, creating, created (the server exists and waits for its enrollment and move), deleting, gone (deleted outside Fermix), failed (the last create stopped; failure says why) or unreadable. other_servers is answered by home.provision.connect, checked and sentence by home.provision.resources: whether Hetzner was read just now, and why not. The token is never answered.",
-      "required": ["state", "token", "server", "failure", "resources", "sentence"],
+      "description": "What Fermix created on Hetzner, from this computer's ledger. state is none (no token), connected, creating, created (the server exists and waits for its enrollment and move), deleting, gone (deleted outside Fermix), failed (the last create stopped; failure says why) or unreadable. replace, while one is recorded, says where a replace of the server stands, and state and server are then the new server's. other_servers is answered by home.provision.connect, checked and sentence by home.provision.resources: whether Hetzner was read just now, and why not. The token is never answered.",
+      "required": ["state", "token", "server", "failure", "replace", "resources", "sentence"],
       "additionalProperties": false,
       "properties": {
         "state": { "enum": ["none", "connected", "creating", "created", "deleting", "gone", "failed", "unreadable"] },
         "token": { "enum": ["none", "accepted", "refused"] },
         "server": { "oneOf": [{ "$ref": "#/$defs/homeProvisionServer" }, { "type": "null" }] },
         "failure": { "oneOf": [{ "$ref": "#/$defs/homeProvisionFailure" }, { "type": "null" }] },
+        "replace": { "oneOf": [{ "$ref": "#/$defs/homeProvisionReplace" }, { "type": "null" }] },
         "resources": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/homeProvisionResource" } },
         "sentence": { "type": ["string", "null"] },
         "other_servers": { "type": "boolean" },
         "checked": { "type": "boolean" }
+      }
+    },
+    "homeProvisionReplace": {
+      "type": "object",
+      "description": "A replace of the server from the linked desktop. state is creating (the new server), waiting (it exists and waits for its enrollment and move), moving (this desktop started the move to it; the old server serves nothing meanwhile), deleting (the move is done and the old server is being deleted, once), done, failed (failure says why: the new server's create stopped or it was deleted in Hetzner, reason gone, with current old; or deleting the old server stopped, with current new, and it stays listed for home.provision.delete) or cancelling (the new server is being deleted before the move). current is the server that holds the home: old until the move is done, then new. old is the old server's facts, null once it is deleted.",
+      "required": ["state", "current", "old", "failure"],
+      "additionalProperties": false,
+      "properties": {
+        "state": { "enum": ["creating", "waiting", "moving", "deleting", "done", "failed", "cancelling"] },
+        "current": { "enum": ["old", "new"] },
+        "old": { "oneOf": [{ "$ref": "#/$defs/homeProvisionServer" }, { "type": "null" }] },
+        "failure": { "oneOf": [{ "$ref": "#/$defs/homeProvisionFailure" }, { "type": "null" }] }
       }
     },
     "homeProvisionServer": {
@@ -6163,7 +6201,7 @@
     },
     "homeProvisionFailure": {
       "type": "object",
-      "description": "Why the last create stopped: reason is a word (unavailable, account_limit, read_only_token, token_refused and others), sentence the daemon's words, next_location the next location in stock when Hetzner had no capacity.",
+      "description": "Why the last create stopped, or why deleting a replaced server stopped: reason is a word (unavailable, account_limit, read_only_token, token_refused, gone and others), sentence the daemon's words, next_location the next location in stock when Hetzner had no capacity.",
       "required": ["reason", "sentence", "next_location", "at"],
       "additionalProperties": false,
       "properties": {
@@ -6175,14 +6213,15 @@
     },
     "homeProvisionResource": {
       "type": "object",
-      "description": "One thing Fermix created and Hetzner bills for until it is deleted: the server, its firewall or one of its primary addresses (named by the address).",
-      "required": ["kind", "name", "id", "status"],
+      "description": "One thing Fermix created and Hetzner bills for until it is deleted: the server, its firewall or one of its primary addresses (named by the address). replaced is true for the old server's, while a replace keeps it.",
+      "required": ["kind", "name", "id", "status", "replaced"],
       "additionalProperties": false,
       "properties": {
         "kind": { "enum": ["server", "firewall", "primary_ip"] },
         "name": { "type": ["string", "null"] },
         "id": { "type": ["integer", "null"] },
-        "status": { "$ref": "#/$defs/homeProvisionStatus" }
+        "status": { "$ref": "#/$defs/homeProvisionStatus" },
+        "replaced": { "type": "boolean" }
       }
     },
     "homeCandidate": {
@@ -6216,12 +6255,14 @@
     },
     "homeEnrollment": {
       "type": "object",
-      "description": "The primary's enrollment window: open until expires_at, used once a candidate enrolled with it, or expired.",
-      "required": ["state", "expires_at"],
+      "description": "The primary's enrollment window: open until expires_at, used once a candidate enrolled with it, or expired. kind is manual (the code a person copies) or provisioned (the code inside a server Fermix created); candidate_id is the candidate that enrolled with it, null until one did, which is how the server Fermix created is known.",
+      "required": ["state", "expires_at", "kind", "candidate_id"],
       "additionalProperties": false,
       "properties": {
         "state": { "enum": ["open", "used", "expired"] },
-        "expires_at": { "type": "string" }
+        "expires_at": { "type": "string" },
+        "kind": { "enum": ["manual", "provisioned"] },
+        "candidate_id": { "oneOf": [{ "type": "string", "pattern": "^cand-[0-9a-f]{16}$" }, { "type": "null" }] }
       }
     },
     "homeMove": {

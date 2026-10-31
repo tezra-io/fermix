@@ -154,6 +154,7 @@ defmodule FermixCore.Management.ProtocolTest do
              "home.snapshots.run",
              "home.snapshots.passphrase",
              "home.enroll.open",
+             "home.enroll.withdraw",
              "home.candidates.list",
              "home.move.readiness",
              "home.move.start",

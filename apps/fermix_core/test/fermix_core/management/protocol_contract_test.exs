@@ -1408,12 +1408,18 @@ defmodule FermixCore.Management.ProtocolContractTest do
             %{
               primary: nil,
               desktops: [],
-              enrollment: %{state: :used, expires_at: ~U[2026-10-27 09:22:00Z]}
+              enrollment: %{
+                state: :used,
+                expires_at: ~U[2026-10-27 09:22:00Z],
+                kind: :manual,
+                candidate_id: "cand-5e2a9c1f7b3d4086"
+              }
             }
           end,
-          open_enrollment: fn ->
+          open_enrollment: fn :manual ->
             {:ok, %{code: "fxenroll1.aW52ZW50ZWQ", expires_at: ~U[2026-10-27 09:40:00Z]}}
           end,
+          withdraw_enrollment: fn -> :ok end,
           # A keychain reference this host could not resolve, as a home a
           # restore carried here without its values shows it.
           settings_snapshot: fn ->
@@ -1430,6 +1436,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       {"home.snapshots.passphrase", %{"recovery_passphrase" => "invented-lighthouse-meridian"},
        opts},
       {"home.enroll.open", %{}, opts},
+      {"home.enroll.withdraw", %{}, opts},
       {"home.candidates.list", %{}, opts},
       move_readiness_case(),
       move_start_case()
@@ -1438,12 +1445,14 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
   # The Always On provisioner against the recorded Hetzner API: a project the
   # token was just pasted for, the options it sells, and a home whose server
-  # was created, which the power action, the resources and the delete read.
-  # The job-backed methods answer their running job.
+  # was created, which the power action and the delete read; the resources
+  # are those of a replace whose new server waits for its move, as the golden
+  # shows them. The job-backed methods answer their running job.
   defp provision_cases do
     stub = HetznerStub.start!()
     connected = provision_home!(stub, false)
     created = provision_home!(stub, true)
+    replacing = replacing_home!(provision_home!(stub, true), stub)
 
     [
       {"home.provision.connect", %{"token" => HetznerStub.token()},
@@ -1452,7 +1461,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       {"home.provision.create", %{"type" => "cpx22", "location" => "fsn1"},
        provision_opts(connected, stub)},
       {"home.provision.power", %{"action" => "reset"}, provision_opts(created, stub)},
-      {"home.provision.resources", %{}, provision_opts(created, stub)},
+      {"home.provision.resources", %{}, provision_opts(replacing, stub)},
       {"home.provision.delete", %{}, provision_opts(provision_home!(stub, true), stub)}
     ]
   end
@@ -1479,6 +1488,23 @@ defmodule FermixCore.Management.ProtocolContractTest do
       {:ok, _server} =
         ProvisionHetzner.create(home, request, provision_host_opts(stub) ++ code_seams())
     end
+
+    home
+  end
+
+  # The server the home lives on set aside, and its replacement created.
+  defp replacing_home!(home, stub) do
+    {:ok, _ledger} =
+      ProvisionLedger.update(
+        home,
+        "hetzner",
+        &ProvisionLedger.begin_replace(&1, 4, ~U[2026-10-30 09:00:00Z])
+      )
+
+    request = %{type: "cpx32", location: "hel1", profile: "general"}
+
+    {:ok, _server} =
+      ProvisionHetzner.create(home, request, provision_host_opts(stub) ++ code_seams())
 
     home
   end

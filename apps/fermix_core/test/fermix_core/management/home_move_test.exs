@@ -43,11 +43,10 @@ defmodule FermixCore.Management.HomeMoveTest do
     %{home: home, seams: seams}
   end
 
-  defp route(method, params, role, seams) do
+  defp route(method, params, role, seams, opts \\ []) do
     Router.route(
       %{method: method, protocol_version: Protocol.protocol_version(), params: params},
-      engine_role: role,
-      operation_opts: [home: seams]
+      [engine_role: role, operation_opts: [home: seams]] ++ opts
     )
   end
 
@@ -95,7 +94,7 @@ defmodule FermixCore.Management.HomeMoveTest do
       at = ~U[2031-05-04 10:10:00Z]
 
       seams =
-        Keyword.put(ctx.seams, :open_enrollment, fn ->
+        Keyword.put(ctx.seams, :open_enrollment, fn :manual ->
           {:ok, %{code: "fxenroll1.abc", expires_at: at}}
         end)
 
@@ -103,7 +102,7 @@ defmodule FermixCore.Management.HomeMoveTest do
                route("home.enroll.open", %{}, @primary, seams)
 
       refused =
-        Keyword.put(ctx.seams, :open_enrollment, fn ->
+        Keyword.put(ctx.seams, :open_enrollment, fn :manual ->
           {:error, {:unavailable, "Remote reach is off."}}
         end)
 
@@ -117,6 +116,76 @@ defmodule FermixCore.Management.HomeMoveTest do
 
       assert {:error, :invalid_params, _details} =
                route("home.enroll.open", %{"code" => "x"}, @primary, seams)
+
+      assert {:ok, %{"code" => "fxenroll1.abc"}} =
+               route("home.enroll.open", %{"kind" => "manual"}, @primary, seams)
+    end
+
+    # M75 lean v1 L15, §4.3: the code inside a server Fermix creates lives 24
+    # hours, and a desktop replacing its server asks the server for one.
+    test "a 24-hour code opens only when the desktop asks over the link", ctx do
+      test = self()
+
+      seams =
+        Keyword.put(ctx.seams, :open_enrollment, fn kind ->
+          send(test, {:opened, kind})
+          {:ok, %{code: "fxenroll1.def", expires_at: ~U[2031-05-05 10:00:00Z]}}
+        end)
+
+      assert {:ok, %{"code" => "fxenroll1.def", "expires_at" => "2031-05-05T10:00:00Z"}} =
+               route("home.enroll.open", %{"kind" => "provisioned"}, @primary, seams,
+                 actor: {:desktop, "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"}
+               )
+
+      assert_received {:opened, :provisioned}
+
+      assert {:error, :invalid_params, %{"field" => "kind", "sentence" => sentence}} =
+               route("home.enroll.open", %{"kind" => "provisioned"}, @primary, seams)
+
+      assert sentence ==
+               "A code that lives 24 hours opens only for a server Fermix creates from your " <>
+                 "computer."
+
+      assert {:error, :invalid_params, %{"field" => "kind"}} =
+               route("home.enroll.open", %{"kind" => "forever"}, @primary, seams)
+
+      refute_received {:opened, _kind}
+    end
+  end
+
+  describe "home.enroll.withdraw" do
+    test "closes the server's 24-hour code on the primary", ctx do
+      test = self()
+
+      seams =
+        Keyword.put(ctx.seams, :withdraw_enrollment, fn ->
+          send(test, :withdrawn)
+          :ok
+        end)
+
+      assert {:ok, %{"withdrawn" => true}} = route("home.enroll.withdraw", %{}, @primary, seams)
+      assert_received :withdrawn
+
+      refused =
+        Keyword.put(ctx.seams, :withdraw_enrollment, fn ->
+          {:error, {:unavailable, "Fermix could not keep the enrollment window."}}
+        end)
+
+      assert {:error, :unavailable,
+              %{
+                "capability" => "home",
+                "sentence" => "Fermix could not keep the enrollment window."
+              }} =
+               route("home.enroll.withdraw", %{}, @primary, refused)
+
+      assert {:error, :unavailable,
+              %{"sentence" => "Only the primary enrolls candidates and starts a move."}} =
+               route("home.enroll.withdraw", %{}, @device, seams)
+
+      assert {:error, :invalid_params, _details} =
+               route("home.enroll.withdraw", %{"kind" => "manual"}, @primary, seams)
+
+      refute_received :withdrawn
     end
   end
 
@@ -130,7 +199,12 @@ defmodule FermixCore.Management.HomeMoveTest do
       assert view["candidate_id"] == record.candidate_id
       refute Map.has_key?(view, "noise_pk")
 
-      window = %{state: :used, expires_at: ~U[2031-05-04 10:10:00Z]}
+      window = %{
+        state: :used,
+        expires_at: ~U[2031-05-04 10:10:00Z],
+        kind: :provisioned,
+        candidate_id: record.candidate_id
+      }
 
       seams =
         Keyword.put(ctx.seams, :link_status, fn ->
@@ -138,7 +212,15 @@ defmodule FermixCore.Management.HomeMoveTest do
         end)
 
       assert {:ok, status} = route("home.status", %{}, @primary, seams)
-      assert status["enrollment"] == %{"state" => "used", "expires_at" => "2031-05-04T10:10:00Z"}
+      # Which candidate used the window, and whether it was the code inside a
+      # server Fermix created: the desktop that replaces its server reads it.
+      assert status["enrollment"] == %{
+               "state" => "used",
+               "expires_at" => "2031-05-04T10:10:00Z",
+               "kind" => "provisioned",
+               "candidate_id" => record.candidate_id
+             }
+
       assert [%{"name" => "north-box"}] = status["candidates"]
       assert status["move"] == nil
 

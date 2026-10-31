@@ -565,6 +565,7 @@ def test_the_shipped_numbered_rubrics_parse():
                       "hetzner_server_from_a_token": 5,
                       "deleting_the_server_the_home_moved_to": 3,
                       "what_the_always_on_pane_says": 4,
+                      "replacing_the_hetzner_server": 4,
                       # open_loops.yaml
                       "grant_overhead": 3, "contractor_choice": 3,
                       "fence_paint_route_sanity": 3,

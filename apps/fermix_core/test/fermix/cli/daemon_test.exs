@@ -1125,8 +1125,8 @@ defmodule Fermix.CLI.DaemonTest do
   # M75: a code that lets a server take this home, the move itself and the
   # recovery key are the owner's decisions; a command the agent ran is refused.
   describe "owner decisions on the home" do
-    @home_decisions ~w(home.enroll.open home.move.readiness home.move.start
-                       home.snapshots.passphrase)
+    @home_decisions ~w(home.enroll.open home.enroll.withdraw home.move.readiness
+                       home.move.start home.snapshots.passphrase)
 
     test "a process the daemon started is refused, and so is one it cannot place" do
       golden = home_owner_golden()

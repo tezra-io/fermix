@@ -85,7 +85,12 @@ no SSH key is dropped where the answer arrives: it reaches no file, log,
 trace, status or crash report. The
 server's cloud-init user data carries a single-use enrollment code and stays
 readable through the metadata service, which the server's first boot blocks
-for every account but root.
+for every account but root. When the desktop replaces that server, the old
+server opens the new one's 24-hour code only for a request its desktop
+forwarded over the rail (never for a local caller, who gets thirty minutes),
+the code crosses only that encrypted session, and closing it again is an
+owner decision too. The old server is deleted only once a primary one epoch
+up answered the desktop, so the server that holds the home is never deleted.
 
 What this deliberately does not cover:
 

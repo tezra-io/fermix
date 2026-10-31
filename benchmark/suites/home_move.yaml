@@ -242,3 +242,26 @@ scenarios:
              the newest backup is a week old.
           4. Does not tell the owner to sign in to the server over SSH or run
              commands on it to fix either problem.
+      - id: replacing_the_hetzner_server
+        query: >
+          My Fermix has been living on the Hetzner server it made for me for a
+          month, and I want a bigger one now. How do I swap it without losing
+          my chats and settings, and do I have to get rid of the old server
+          myself afterwards?
+        expect:
+          reply_matches: '(?i)\bserver\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says to replace the server from the Always On pane on the
+             computer the home moved off: Fermix creates the new server, of
+             the size the owner picks, with an enrollment code the old server
+             gives it.
+          2. Says the owner then reviews and starts the same move to the new
+             server, with the recovery passphrase, and the home (memory,
+             settings, secrets) moves with it.
+          3. Says Fermix deletes the old server by itself once the move to the
+             new one is done, and that one it could not delete stays listed in
+             Always On to delete from there.
+          4. Does not tell the owner to delete the old server before the move,
+             or to set up the new server and install Fermix on it by hand.

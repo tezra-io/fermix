@@ -585,6 +585,27 @@ kept in `snapshots/status.json`'s `stale_notice`), when the newest verified
 snapshot passes 7 days, through the phones' own path: a message in the
 owner's phone chat (`ChannelSend` to `mobile`, its proactive key the point).
 
+Replace the server (`home.provision.create {replace: true}`) runs on the
+linked desktop whose ledger holds the server the home lives on. The job sets
+that server aside in the ledger (`Ledger.begin_replace/3`: the old set and
+the primary epoch it held, from `desktop.json`), then creates the new server
+as any create does, under another ref (`Provision.fresh_ref/2`), with a
+provisioned window the old server opens for a request the desktop forwards
+(`home.enroll.open {kind: provisioned}`, served only to a desktop's forward;
+`home.enroll.withdraw` releases it when the new server will not exist). The
+move is the existing one, forwarded; beside the forward of `home.move.start`
+the daemon records that the move started (`Provision.move_forwarded/3`),
+because the old server serves nothing while it runs. The desktop relay
+reports every primary epoch a session reaches (`Provision.primary_reached/2`,
+in a task): one above the old server's is the move to the new one done, and
+the old server is deleted, once, as a `home_provision` job
+(`Provision.delete_replaced/2`, the same order as any delete, refused unless
+the move is done); a failed delete stays in the ledger with its sentence for
+`home.provision.delete` to try again, and the old server answering at its own
+epoch after the move started is a move it undid. `Ledger.state/1`'s `replace`
+says where it stands: creating, waiting, moving, deleting, done, failed (with
+which server holds the home) or cancelling.
+
 Architecture Invariant: one role gate, one epoch writer, one marker, one
 device-local list, one placement table; a linked device's request takes one
 path, here or the primary, never both. A device-role engine makes no provider call and refreshes
@@ -600,7 +621,9 @@ move's ending (`done`, `aborted`) is written only by the engine that came
 back after the restart. A move's keychain values exist only in memory and
 inside the stream encrypted to the candidate's one-time key. The
 provisioner's token never leaves the computer that pasted it, and Hetzner's
-root password for a created server is read for nothing.
+root password for a created server is read for nothing. A replace deletes the
+old server only once a primary of a higher epoch answered this desktop, never
+the server that holds the home.
 
 ### `FermixCore.Trace` and Telemetry
 

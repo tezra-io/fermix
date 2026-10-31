@@ -213,9 +213,10 @@ it, never a second writer.
   runs. While the server stands, a new token replaces the kept one only when
   it is from the same Hetzner project (a token that stopped working is
   replaced by a new one from that project; one for another project is
-  refused). On a computer whose home already moved to the server, Fermix
-  creates no second server: replace it with a code from Always On used on a
-  Linux server of the owner's.
+  refused). On a computer whose home already moved to that server, Fermix
+  creates another only to replace it (below); a home that moved to a server
+  of the owner's own is replaced with a code from Always On used on a Linux
+  server of theirs.
 - **A restore host.** When the primary is gone, `--restore` on a host
   prepares the same server without enrolling it and prints the exact steps:
   copy the newest snapshot onto it (downloaded from the bucket by hand, when
@@ -234,7 +235,9 @@ it, never a second writer.
   another replaces it, except while a server Fermix created on Hetzner waits
   on its own 24-hour code (until it enrolls, and then while the primary holds
   it for its move), when a new code is refused; deleting that server lets a
-  new code open again; the code is
+  new code open again. A 24-hour code opens only inside a server Fermix
+  creates: on this computer, or for the desktop that replaces this server,
+  which asks for it over the link; it is never shown to copy. The code is
   shown once and never logged, and the
   window is kept on this machine (`mobile/enrollment.json`, 0600, never in a
   snapshot) so an engine restart before the server checks in loses nothing.
@@ -405,7 +408,26 @@ it, never a second writer.
   server enrolls with it, and the move starts on the old server with
   `keep_as_desktop` false (`home.move.start`; true unless said), so the old
   server keeps no desktop key, row or link and serves nothing once the move
-  commits. On a server primary with no desktop to start it from, the same
+  commits.
+- **Replacing a server Fermix created on Hetzner** (Always On's details,
+  Replace the server, on the computer the home left, which keeps the token
+  and the record of what Fermix created): pick the size and location, and
+  Fermix asks the old server for a 24-hour code (the old server opens one only
+  when its desktop asks), creates the new server with it, named apart from
+  the old one, and keeps both in its record, the old one holding the home.
+  While the new one waits, no other code opens on the old server. Once it
+  enrolled, the owner reviews and starts the same move to it, with the
+  recovery passphrase; the old server serves nothing while the move runs.
+  When this computer next reaches its server and finds it one epoch above
+  the old one, the move is done, and Fermix deletes the old server by itself,
+  once (its addresses unless they went with it, then its firewall). If that
+  delete fails, the old server stays listed, with why, and Delete tries it
+  again; the new one, which now holds the home, is never deleted from here.
+  Before the move, Cancel or Start again deletes only the new server, closes
+  its code on the old one and leaves the home where it was; a move the old
+  server undid leaves the new one waiting for its move again. Replace is
+  refused while the new server stands, while the move to it runs and while the
+  old one is not deleted yet, each in one sentence. On a server primary with no desktop to start it from, the same
   move is `fermix home move --to ID --retire` at the server's own terminal.
   Moving Fermix back to a desktop is not part of this release: to
   bring it back to a computer, restore the newest snapshot into a fresh home
@@ -632,6 +654,7 @@ it, never a second writer.
 | What Fermix created on Hetzner and Hetzner bills for, each marked gone once deleted outside Fermix (`home.provision.resources`) | Details | none |
 | Turn the created server on, or restart it (`home.provision.power`) | **Turn it on**, **Restart server** | none |
 | Delete what Fermix created on Hetzner (`home.provision.delete`), never the server the home moved to | Cancel, Start again | none |
+| On a linked desktop: replace a server Fermix created on Hetzner (`home.provision.create` with `replace`; `home.provision.resources`' `replace` says where it stands), the move to it as below, then the old one deleted by itself | Replace the server, then the review and the move; the old server listed with Delete if its delete failed | none |
 | The servers waiting for the move | Servers waiting for the move | `fermix home candidates` |
 | Review the move (`home.move.readiness`): each item ready, a note or a block | **Review the move** on a server waiting; a block is shown as one | `fermix home move` says each block |
 | Start the move | the app's pane | `fermix home move --to ID [--retire]` |

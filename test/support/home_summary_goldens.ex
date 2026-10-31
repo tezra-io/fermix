@@ -37,7 +37,12 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
     record(:primary, %{epoch: 4, snapshots: s3_snapshots(), disk: disk(0.31)}, %{
       link: link(enrollment: window),
       provision: ledger(),
-      enrollment: %{"state" => "open", "expires_at" => "2031-05-05T11:00:00Z"}
+      enrollment: %{
+        "state" => "open",
+        "expires_at" => "2031-05-05T11:00:00Z",
+        "kind" => "provisioned",
+        "candidate_id" => nil
+      }
     })
   end
 
@@ -62,7 +67,12 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       provision: ledger(),
       candidates: [candidate_view()],
       review: review,
-      enrollment: %{"state" => "used", "expires_at" => "2031-05-05T11:00:00Z"}
+      enrollment: %{
+        "state" => "used",
+        "expires_at" => "2031-05-05T11:00:00Z",
+        "kind" => "provisioned",
+        "candidate_id" => @cand
+      }
     })
   end
 
@@ -178,7 +188,8 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
     }
   end
 
-  defp none, do: %{state: :none, token: :none, server: nil, failure: nil, sentence: nil}
+  defp none,
+    do: %{state: :none, token: :none, server: nil, failure: nil, sentence: nil, replace: nil}
 
   defp ledger do
     %{
@@ -186,6 +197,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       token: :accepted,
       failure: nil,
       sentence: nil,
+      replace: nil,
       server: %{
         name: @server_name,
         id: 61_839_204,

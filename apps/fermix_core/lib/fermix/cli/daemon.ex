@@ -30,7 +30,9 @@ defmodule Fermix.CLI.Daemon do
   passed this socket's own owner placement is answered here when it is
   device-class (`FermixCore.Management.Placement`) and sent to the primary
   through `FermixCore.Home.Link` when it is primary-class; no request takes
-  both paths. A composed request (`home.status`, `settings.sections`) is
+  both paths. Beside a forwarded `home.move.start`, the Always On ledger
+  keeps that this desktop started the move to a server replacing the one the
+  home lives on (`FermixCore.Management.Provision.move_forwarded/3`). A composed request (`home.status`, `settings.sections`) is
   answered here, and the router asks the primary for its part through the
   same link (`:primary_forward`). On the primary, `serve_forwarded/3` answers a
   request a desktop forwarded exactly as this socket would, with the router's
@@ -98,11 +100,12 @@ defmodule Fermix.CLI.Daemon do
   # on the phone that asked, closing the window, and forgetting a device.
   @mobile_decisions_v1 ~w(mobile.pair.start mobile.pair.decide mobile.pair.cancel
                           mobile.devices.revoke)
-  # Opening a code that lets a server take this home, reviewing a move (the
-  # review reads every keychain secret the move would carry) and starting it,
-  # and replacing the recovery key (M75).
-  @home_decisions_v1 ~w(home.enroll.open home.move.readiness home.move.start
-                        home.snapshots.passphrase)
+  # Opening a code that lets a server take this home, closing the one inside
+  # a server Fermix creates (its server would never enroll), reviewing a move
+  # (the review reads every keychain secret the move would carry) and
+  # starting it, and replacing the recovery key (M75).
+  @home_decisions_v1 ~w(home.enroll.open home.enroll.withdraw home.move.readiness
+                        home.move.start home.snapshots.passphrase)
   # Giving Fermix the Hetzner token (it decides which project Fermix acts
   # in), creating the Always On server, turning it on or resetting it, and
   # deleting it: each can spend the owner's money or take the home away (M75
@@ -517,12 +520,26 @@ defmodule Fermix.CLI.Daemon do
         route_management_request(request, opts)
 
       :primary ->
-        guarded(request.method, fn -> state.forward.(request, []) end)
+        guarded(request.method, fn -> forward(request, state) end)
     end
   end
 
   defp dispatch_management_request(request, state),
     do: route_management_request(request, management_opts(state))
+
+  # A move the primary starts to a server that replaces it (M75 lean v1
+  # §4.3): that server serves nothing while it moves, so this desktop keeps,
+  # in its Always On ledger, that it started the move.
+  defp forward(%{method: "home.move.start"} = request, state) do
+    answer = state.forward.(request, [])
+    _recorded = ManagementProvision.move_forwarded(request.params, answer, provision_opts(state))
+    answer
+  end
+
+  defp forward(request, state), do: state.forward.(request, [])
+
+  defp provision_opts(state),
+    do: state.management_opts |> Keyword.get(:operation_opts, []) |> Keyword.get(:provision, [])
 
   defp route_management_request(request, opts),
     do: guarded(request.method, fn -> ManagementRouter.route(request, opts) end)

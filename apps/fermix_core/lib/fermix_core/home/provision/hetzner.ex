@@ -35,6 +35,16 @@ defmodule FermixCore.Home.Provision.Hetzner do
   (no connection, a 5xx) stays `requested` in the ledger and keeps its code,
   and `reconcile/2` finds it by its labels.
 
+  **Replace.** A replace (`Ledger.begin_replace/3`) sets the server the home
+  lives on aside; the new server is created by `create/3` as any is, under a
+  short id other than the old one's (`Provision.fresh_ref/2`), so their names
+  and labels never collide. `reconcile/2` reads the old server by its ids
+  too, and `reaches/3` checks it while no new one stands. `delete_replaced/2`
+  deletes the old server, its addresses unless they went with it, and its
+  firewall, in the order `delete/2` uses, only once the move to the new one is
+  done (`Ledger.retired/1`), and records the replace done; `delete/2` refuses
+  the new server once it holds the home.
+
   **The root password.** Hetzner answers a create made with no SSH key with
   the server's root password. The answer is read for its ids and dropped:
   nothing of it reaches the ledger, a log, a trace or a status.
@@ -90,7 +100,7 @@ defmodule FermixCore.Home.Provision.Hetzner do
   # answers 404 for a resource of another project.
   @impl true
   def reaches(token, ledger, opts) when is_binary(token) and is_map(ledger) do
-    case standing(ledger) do
+    case standing(ledger) || standing(Ledger.replaced_set(ledger)) do
       nil -> :ok
       path -> reached(get(token, path, opts))
     end
@@ -346,7 +356,7 @@ defmodule FermixCore.Home.Provision.Hetzner do
     {ref, reuse} =
       case ledger do
         %{ref: ref, firewall: %{status: :created, id: id}} when is_binary(ref) -> {ref, id}
-        _fresh -> {fresh_ref(), nil}
+        _fresh -> {fresh_ref(ledger), nil}
       end
 
     plan =
@@ -365,7 +375,8 @@ defmodule FermixCore.Home.Provision.Hetzner do
     with {:ok, _ledger} <- update(home, &{:ok, transform.(&1)}), do: {:ok, plan}
   end
 
-  defp fresh_ref, do: 2 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
+  defp fresh_ref(ledger),
+    do: Provision.fresh_ref(:crypto.strong_rand_bytes(2), Ledger.replaced_ref(ledger))
 
   defp firewall(_home, _token, %{reuse_firewall: id}, _opts) when is_integer(id), do: {:ok, id}
 
@@ -558,7 +569,17 @@ defmodule FermixCore.Home.Provision.Hetzner do
          {:ok, changed} <-
            update(home, &{:ok, apply_observed(&1, ledger, {server, firewall}, opts)}),
          :ok <- withdraw_unborn(ledger, server, opts) do
-      {:ok, changed}
+      reconciled_replaced(home, token, Ledger.replaced_set(ledger), changed, opts)
+    end
+  end
+
+  # The server a replace set aside was created, so it is read by its ids.
+  defp reconciled_replaced(_home, _token, nil, changed, _opts), do: {:ok, changed}
+
+  defp reconciled_replaced(home, token, old, _changed, opts) do
+    with {:ok, server} <- observe_server(token, old, opts),
+         {:ok, firewall} <- observe_firewall(token, old, opts) do
+      update(home, :replaced, &{:ok, apply_observed(&1, old, {server, firewall}, opts)})
     end
   end
 
@@ -690,47 +711,75 @@ defmodule FermixCore.Home.Provision.Hetzner do
   def delete(home, opts) when is_binary(home) and is_list(opts) do
     with {:ok, ledger} <- read(home),
          {:ok, token} <- token(ledger),
-         :ok <- something(ledger) do
+         :ok <- something(ledger),
+         :ok <- not_moved_to(ledger) do
       report(opts, "deleting")
 
       with :ok <- withdraw_code(opts),
-           :ok <- delete_server(home, token, ledger, opts),
-           :ok <- delete_ips(token, ledger.primary_ips, opts),
-           :ok <- delete_firewall(home, token, ledger, opts),
+           :ok <- delete_set(home, :current, token, ledger, opts),
            {:ok, _ledger} <- update(home, &{:ok, Ledger.clear(&1)}) do
         :ok
       end
     end
   end
 
-  defp something(%{server: nil, firewall: nil, primary_ips: [], ref: nil}),
+  # A replace begun with nothing created yet is something to undo.
+  defp something(%{server: nil, firewall: nil, primary_ips: [], ref: nil, replace: nil}),
     do: {:error, :nothing_to_delete}
 
   defp something(_ledger), do: :ok
 
-  defp delete_server(_home, _token, %{server: nil}, _opts), do: :ok
+  # The new server a replace moved the home to holds it.
+  defp not_moved_to(%{replace: %{moved_at: %DateTime{}}}), do: {:error, :live_home}
+  defp not_moved_to(_ledger), do: :ok
 
-  defp delete_server(home, _token, %{server: %{status: :gone}}, _opts),
-    do: forgotten(home, :server)
+  @impl true
+  def delete_replaced(home, opts) when is_binary(home) and is_list(opts) do
+    with {:ok, ledger} <- read(home),
+         {:ok, token} <- token(ledger),
+         {:ok, old} <- Ledger.retired(ledger) do
+      report(opts, "deleting")
 
-  defp delete_server(home, token, %{server: %{id: nil}} = ledger, opts) do
-    case by_labels(token, "/servers", "servers", ledger, opts) do
+      with :ok <- delete_set(home, :replaced, token, old, opts),
+           {:ok, _ledger} <- update(home, &{:ok, Ledger.replaced_deleted(&1, now(opts))}) do
+        :ok
+      end
+    end
+  end
+
+  # One server and what came with it, in the ledger's own places (`:current`)
+  # or the ones a replace set aside (`:replaced`): the server, then its
+  # addresses unless they went with it, then the firewall.
+  defp delete_set(home, slot, token, set, opts) do
+    with :ok <- delete_server(home, slot, token, set, opts),
+         :ok <- delete_ips(token, set.primary_ips, opts) do
+      delete_firewall(home, slot, token, set, opts)
+    end
+  end
+
+  defp delete_server(_home, _slot, _token, %{server: nil}, _opts), do: :ok
+
+  defp delete_server(home, slot, _token, %{server: %{status: :gone}}, _opts),
+    do: forgotten(home, slot, :server)
+
+  defp delete_server(home, slot, token, %{server: %{id: nil}} = set, opts) do
+    case by_labels(token, "/servers", "servers", set, opts) do
       {:ok, {:found, %{"id" => id}}} ->
-        delete_server(home, token, put_in(ledger.server.id, id), opts)
+        delete_server(home, slot, token, put_in(set.server.id, id), opts)
 
       {:ok, :absent} ->
-        forgotten(home, :server)
+        forgotten(home, slot, :server)
 
       {:error, _reason} = error ->
         error
     end
   end
 
-  defp delete_server(home, token, %{server: %{id: id}}, opts) do
+  defp delete_server(home, slot, token, %{server: %{id: id}}, opts) do
     with {:ok, _ledger} <-
-           update(home, &{:ok, Ledger.put_server(&1, %{id: id, status: :deleting})}),
+           update(home, slot, &{:ok, Ledger.put_server(&1, %{id: id, status: :deleting})}),
          :ok <- server_deleted(token, id, opts) do
-      forgotten(home, :server)
+      forgotten(home, slot, :server)
     end
   end
 
@@ -743,8 +792,8 @@ defmodule FermixCore.Home.Provision.Hetzner do
     end
   end
 
-  defp forgotten(home, kind) do
-    with {:ok, _ledger} <- update(home, &{:ok, Ledger.remove(&1, kind)}), do: :ok
+  defp forgotten(home, slot, kind) do
+    with {:ok, _ledger} <- update(home, slot, &{:ok, Ledger.remove(&1, kind)}), do: :ok
   end
 
   # An address that went with its server answers 404; one that stayed is
@@ -770,28 +819,29 @@ defmodule FermixCore.Home.Provision.Hetzner do
   defp gone_ok({:error, :not_found}), do: :ok
   defp gone_ok({:error, _reason} = error), do: error
 
-  defp delete_firewall(_home, _token, %{firewall: nil}, _opts), do: :ok
+  defp delete_firewall(_home, _slot, _token, %{firewall: nil}, _opts), do: :ok
 
-  defp delete_firewall(home, _token, %{firewall: %{status: :gone}}, _opts),
-    do: forgotten(home, :firewall)
+  defp delete_firewall(home, slot, _token, %{firewall: %{status: :gone}}, _opts),
+    do: forgotten(home, slot, :firewall)
 
-  defp delete_firewall(home, token, %{firewall: %{id: nil}} = ledger, opts) do
-    case by_labels(token, "/firewalls", "firewalls", ledger, opts) do
+  defp delete_firewall(home, slot, token, %{firewall: %{id: nil}} = set, opts) do
+    case by_labels(token, "/firewalls", "firewalls", set, opts) do
       {:ok, {:found, %{"id" => id}}} ->
-        delete_firewall(home, token, put_in(ledger.firewall.id, id), opts)
+        delete_firewall(home, slot, token, put_in(set.firewall.id, id), opts)
 
       {:ok, :absent} ->
-        forgotten(home, :firewall)
+        forgotten(home, slot, :firewall)
 
       {:error, _reason} = error ->
         error
     end
   end
 
-  defp delete_firewall(home, token, %{firewall: %{id: id}}, opts) do
-    with {:ok, _ledger} <- update(home, &{:ok, Ledger.put_firewall(&1, %{status: :deleting})}),
+  defp delete_firewall(home, slot, token, %{firewall: %{id: id}}, opts) do
+    with {:ok, _ledger} <-
+           update(home, slot, &{:ok, Ledger.put_firewall(&1, %{status: :deleting})}),
          :ok <- delete_firewall_tries(token, id, opts, @in_use_tries) do
-      forgotten(home, :firewall)
+      forgotten(home, slot, :firewall)
     end
   end
 
@@ -986,6 +1036,19 @@ defmodule FermixCore.Home.Provision.Hetzner do
     case Ledger.update(home, @host, fun) do
       {:ok, ledger} -> {:ok, ledger}
       {:error, reason} -> {:error, {:ledger, reason}}
+    end
+  end
+
+  # `fun` changes one server and what came with it: the ledger's own places,
+  # or the ones a replace set aside (left as it is once none is).
+  defp update(home, :current, fun), do: update(home, fun)
+
+  defp update(home, :replaced, fun), do: update(home, &replaced_changed(&1, fun))
+
+  defp replaced_changed(ledger, fun) do
+    case Ledger.replaced_set(ledger) do
+      nil -> {:ok, ledger}
+      set -> with {:ok, changed} <- fun.(set), do: {:ok, Ledger.put_replaced_set(ledger, changed)}
     end
   end
 

@@ -13,9 +13,9 @@ defmodule FermixCore.Management.Placement do
   (`FermixCore.Home.DesktopLink.linked?/2`) forwards it over the rail
   (`FermixCore.Home.Link`), and a device with no link refuses it as stage 1
   did. The home's recovery, enrollment and move are the primary's too
-  (`home.snapshots.*`, `home.enroll.open`, `home.candidates.list`,
-  `home.move.readiness`, `home.move.start`): after a move the server holds
-  them, and the desktop reaches them only through it. The Always On
+  (`home.snapshots.*`, `home.enroll.open`, `home.enroll.withdraw`,
+  `home.candidates.list`, `home.move.readiness`, `home.move.start`): after a
+  move the server holds them, and the desktop reaches them only through it. The Always On
   provisioner (`home.provision.*`) is device-class: its token and the ledger
   of what it created stay on the computer that created the server, which
   manages that server itself and never sends the request to it.

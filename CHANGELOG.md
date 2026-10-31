@@ -166,7 +166,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   restarts it, and deletes what it created, but never the server your home
   moved to. While a created server waits for its code or its move, a new
   enrollment code is not opened, and while it stands a token from another
-  Hetzner project does not replace the one that reaches it.
+  Hetzner project does not replace the one that reaches it. Once your home
+  lives on that server, Replace the server (in Always On's details on the
+  computer it left) creates a new one, named apart from the old, with a
+  24-hour code the old server gives it; you review and start the same move
+  to it, and once the move is done Fermix deletes the old server by itself.
+  If that delete fails, the old server stays listed with why, and Delete
+  tries again.
   The server's hosting provider can technically read its disk, so Fermix
   keeps less there: the prompts, replies, tool input and output and shell
   commands in its traces are kept about a day (through the previous UTC

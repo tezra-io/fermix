@@ -2516,6 +2516,12 @@
     },
     {
       "method": "(schema)",
+      "field": "methods:home.enroll.withdraw",
+      "kind": "engine_only",
+      "why": "M75 lean v1: a desktop replacing the Always On server Fermix created asks that server to release the 24-hour code it opened for the new one when the new server will not exist or is deleted, so a copied code can open again. The draft predates the home family; the method is minimum version 2 and additive, and a client never calls it: the desktop's own engine forwards it."
+    },
+    {
+      "method": "(schema)",
       "field": "methods:home.candidates.list",
       "kind": "engine_only",
       "why": "M75 adds enrollment and the move to the home family after the draft was written, so the draft publishes no home.* method. The three methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the move."
@@ -2534,6 +2540,12 @@
     },
     {
       "method": "(schema)",
+      "field": "minimum_versions:home.enroll.withdraw=2",
+      "kind": "engine_only",
+      "why": "M75 lean v1: home.enroll.withdraw is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
       "field": "minimum_versions:home.candidates.list=2",
       "kind": "engine_only",
       "why": "M75: every home.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the home family, so its table has no entry for it; the addition is additive and needs no protocol bump."
@@ -2549,6 +2561,12 @@
       "field": "capabilities.minimum_versions.home.enroll.open",
       "kind": "engine_only",
       "why": "M75: hello publishes every method this daemon serves with its minimum version, the home family included. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.home.enroll.withdraw",
+      "kind": "engine_only",
+      "why": "M75 lean v1: hello publishes every method this daemon serves with its minimum version, home.enroll.withdraw included. The draft predates it; a client ignores a method it does not know."
     },
     {
       "method": "hello",
@@ -2819,6 +2837,12 @@
       "field": "params:location",
       "kind": "engine_only",
       "why": "M75 lean v1: home.provision.create takes the location to create the server in, one of fsn1, nbg1 and hel1 as home.provision.options names them. The draft predates the provisioner."
+    },
+    {
+      "method": "home.provision.create",
+      "field": "params:replace",
+      "kind": "engine_only",
+      "why": "M75 lean v1: home.provision.create takes replace, true on the linked desktop whose ledger holds the server the home lives on, to create the server that replaces it; the old one is deleted once the move to the new one is done. The draft predates the provisioner."
     },
     {
       "method": "home.provision.create",

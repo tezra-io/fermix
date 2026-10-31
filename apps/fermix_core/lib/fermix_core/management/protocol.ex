@@ -131,6 +131,7 @@ defmodule FermixCore.Management.Protocol do
     {"home.snapshots.run", 2},
     {"home.snapshots.passphrase", 2},
     {"home.enroll.open", 2},
+    {"home.enroll.withdraw", 2},
     {"home.candidates.list", 2},
     {"home.move.readiness", 2},
     {"home.move.start", 2},

@@ -785,6 +785,7 @@ defmodule FermixCore.Management.CopyTest do
   end
 
   defp vendor_words({:refused, _status, _code, message}), do: [message]
+  defp vendor_words({:old_server, reason}), do: vendor_words(reason)
   defp vendor_words(_reason), do: []
 
   defp provision_copy do
@@ -819,7 +820,21 @@ defmodule FermixCore.Management.CopyTest do
       :live_home,
       :move_under_way,
       :not_found,
-      {:ledger, :eacces}
+      {:ledger, :eacces},
+      # Replace the server, from the linked desktop.
+      :replace_only,
+      :nothing_to_replace,
+      :replacement_exists,
+      :replace_moving,
+      :old_server_remains,
+      :replacement_gone,
+      :no_link,
+      :code_unreachable,
+      :withdraw_unreachable,
+      {:code_refused, "unavailable"},
+      {:withdraw_refused, "unavailable"},
+      {:old_server, :unauthorized},
+      {:old_server, {:refused, 500, "server_error", "Hetzner had a hiccup."}}
     ]
 
     for reason <- reasons, do: {reason, Provision.error_sentence(reason)}

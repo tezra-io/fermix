@@ -16,6 +16,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
 
   alias Fermix.CLI.Daemon
   alias Fermix.CLI.Daemon.Client
+  alias FermixCore.Home.Provision.Ledger
   alias FermixTestSupport.ParentProcess
   alias FermixTestSupport.SafeRm
 
@@ -253,13 +254,36 @@ defmodule Fermix.CLI.DaemonForwardingTest do
       for {method, params} <- [
             {"home.snapshots.status", %{}},
             {"home.candidates.list", %{}},
-            {"home.enroll.open", %{}}
+            {"home.enroll.open", %{}},
+            {"home.enroll.withdraw", %{}}
           ] do
         assert {:ok, %{"answered_by" => "primary"}} =
                  Client.request_v1(method, params, socket_path: socket, timeout: @reply_ms)
 
         assert_receive {:forwarded, %{method: ^method}, []}
       end
+    end
+
+    # M75 lean v1 §4.3: the old server serves nothing while it moves the home
+    # to the server replacing it, so the desktop keeps that it started that
+    # move, beside the forward, for the summary to say "moving".
+    test "a move the primary started to a server replacing it is kept in the ledger", ctx do
+      {socket, root} = start_daemon!(ctx, [engine_role: @device, desktop_link?: true], :both)
+      waiting_replace!(root)
+      start = %{"candidate_id" => "cand-new", "recovery_passphrase" => "invented-lantern-orchard"}
+
+      assert {:ok, %{"answered_by" => "primary"}} =
+               Client.request_v1("home.move.start", start,
+                 socket_path: socket,
+                 timeout: @reply_ms
+               )
+
+      assert_receive {:forwarded, %{method: "home.move.start"}, []}
+
+      assert {:ok, %{replace: %{candidate_id: "cand-new", move_started_at: %DateTime{}}}} =
+               Ledger.read(root, "hetzner")
+
+      assert %{replace: %{state: :moving}} = Ledger.state(root)
     end
   end
 
@@ -364,7 +388,8 @@ defmodule Fermix.CLI.DaemonForwardingTest do
            endpoint_opts: [port: 4041],
            operation_opts: [
              mobile: [provider: PairProvider, test: test],
-             home: [home: root, scheduler: nil, link_status: &link_status/0]
+             home: [home: root, scheduler: nil, link_status: &link_status/0],
+             provision: [home: root]
            ]
          ]
        ]
@@ -373,7 +398,37 @@ defmodule Fermix.CLI.DaemonForwardingTest do
       id: name
     )
 
-    if answer == :name, do: name, else: socket_path
+    case answer do
+      :name -> name
+      :socket -> socket_path
+      :both -> {socket_path, root}
+    end
+  end
+
+  # A replace whose new server stands and waits for its move, as the
+  # provisioner left it in this computer's ledger.
+  defp waiting_replace!(root) do
+    now = ~U[2031-05-04 10:00:00Z]
+    server = %{name: "fermix-general-a3f9", type: "cpx22", location: "fsn1", id: 7}
+
+    {:ok, _ledger} =
+      Ledger.update(root, "hetzner", fn ledger ->
+        ledger
+        |> Ledger.connect("invented-hetzner-token-6d1f0c9a2b7e4f3a", now)
+        |> Ledger.begin_create("a3f9", server)
+        |> Ledger.put_server(Map.put(server, :status, :created))
+        |> Ledger.begin_replace(5, now)
+      end)
+
+    new = %{name: "fermix-general-b7c2", type: "cpx32", location: "hel1", id: 8}
+
+    {:ok, _ledger} =
+      Ledger.update(root, "hetzner", fn ledger ->
+        {:ok,
+         ledger
+         |> Ledger.begin_create("b7c2", new)
+         |> Ledger.put_server(Map.put(new, :status, :created))}
+      end)
   end
 
   # What the primary answers each forwarded request: its own home picture and

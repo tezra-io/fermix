@@ -27,6 +27,9 @@ defmodule FermixCore.Home.Provision do
       a create whose answer was lost is found again by its labels.
     * `delete/2`: the server, then its primary addresses unless they went with
       it, then the firewall.
+    * `delete_replaced/2`: the same, in the same order, for the server a
+      replace retired (`Ledger.retired/1`), never one that still holds the
+      home; the ledger then keeps that the replace is done.
 
   Every refusal is a reason `error_sentence/1` turns into one sentence in
   the daemon's words, and `failure_word/1` into the word the ledger keeps.
@@ -69,6 +72,18 @@ defmodule FermixCore.Home.Provision do
           | :other_project
           | :live_home
           | :move_under_way
+          | :replace_only
+          | :nothing_to_replace
+          | :replacement_exists
+          | :replace_moving
+          | :old_server_remains
+          | :replacement_gone
+          | :no_link
+          | :code_unreachable
+          | :withdraw_unreachable
+          | {:code_refused, String.t()}
+          | {:withdraw_refused, String.t()}
+          | {:old_server, reason()}
           | {:ledger, term()}
 
   @typedoc """
@@ -101,6 +116,7 @@ defmodule FermixCore.Home.Provision do
   @callback power(Path.t(), :on | :reset, opts()) :: :ok | {:error, reason()}
   @callback reconcile(Path.t(), opts()) :: {:ok, Ledger.t()} | {:error, reason()}
   @callback delete(Path.t(), opts()) :: :ok | {:error, reason()}
+  @callback delete_replaced(Path.t(), opts()) :: :ok | {:error, reason()}
 
   @max_profile_label 40
 
@@ -108,6 +124,21 @@ defmodule FermixCore.Home.Provision do
   @spec server_name(String.t(), String.t()) :: String.t()
   def server_name(profile, ref) when is_binary(profile) and is_binary(ref),
     do: "fermix-#{label_value(profile)}-#{ref}"
+
+  @doc """
+  A server's short id from two random bytes: four hex digits, never `avoid`
+  (the id of the server a replace keeps until the move to the new one is
+  done), so the new server's name and labels never collide with the old
+  one's.
+  """
+  @spec fresh_ref(<<_::16>>, String.t() | nil) :: String.t()
+  def fresh_ref(<<value::16>>, avoid) when is_binary(avoid) or is_nil(avoid) do
+    ref = hex4(value)
+    if ref == avoid, do: hex4(rem(value + 1, 0x10000)), else: ref
+  end
+
+  defp hex4(value),
+    do: value |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(4, "0")
 
   @doc "The labels every resource of `ref` carries."
   @spec labels(String.t(), String.t()) :: %{String.t() => String.t()}
@@ -140,6 +171,7 @@ defmodule FermixCore.Home.Provision do
 
   @doc "The word the ledger keeps for why a create stopped."
   @spec failure_word(reason()) :: String.t()
+  def failure_word({:old_server, reason}), do: failure_word(reason)
   def failure_word({kind, _detail}) when is_atom(kind), do: Atom.to_string(kind)
   def failure_word({:refused, _status, _code, _message}), do: "refused"
   def failure_word({:action_failed, _command, _message}), do: "action_failed"
@@ -235,6 +267,48 @@ defmodule FermixCore.Home.Provision do
 
   def error_sentence(:move_under_way),
     do: "Fermix is moving to your server, so it is not deleted while the move runs."
+
+  def error_sentence(:replace_only),
+    do: "Fermix runs on your server now, so a new server from here can only replace it."
+
+  def error_sentence(:nothing_to_replace),
+    do: "Fermix runs on this computer, so there is no server to replace yet."
+
+  def error_sentence(:replacement_exists),
+    do: "Your new server already exists, so delete it before creating another."
+
+  def error_sentence(:replace_moving),
+    do: "Fermix is moving to your new server, so it creates no other one until the move is done."
+
+  def error_sentence(:old_server_remains),
+    do: "Your old server still exists, so delete it before replacing this one."
+
+  def error_sentence(:replacement_gone),
+    do: "Your new server was deleted in Hetzner, so replace the server again."
+
+  def error_sentence(:no_link),
+    do:
+      "Fermix could not read how this computer reaches your server, so it created nothing; " <>
+        "the daemon log says why."
+
+  def error_sentence(:code_unreachable),
+    do:
+      "Fermix cannot reach your server to get a code for the new one, so try again once your " <>
+        "server is back."
+
+  def error_sentence(:withdraw_unreachable),
+    do:
+      "Fermix cannot reach your server to close the code it gave the new one, so try again " <>
+        "once your server is back."
+
+  def error_sentence({:code_refused, code}),
+    do: "Your server did not open a code for the new one (`#{code}`)."
+
+  def error_sentence({:withdraw_refused, code}),
+    do: "Your server did not close the code it gave the new one (`#{code}`)."
+
+  def error_sentence({:old_server, reason}),
+    do: "Fermix could not delete your old server: #{error_sentence(reason)}"
 
   def error_sentence(reason) when reason in [:not_found, :resource_in_use],
     do: "Hetzner no longer has what Fermix created there, so open Always On again."

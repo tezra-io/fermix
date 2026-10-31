@@ -7,6 +7,7 @@ defmodule FermixCore.Home.Provision.HetznerTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixCore.Home.Provision
   alias FermixCore.Home.Provision.FirstBoot
   alias FermixCore.Home.Provision.Hetzner
   alias FermixCore.Home.Provision.Ledger
@@ -548,6 +549,118 @@ defmodule FermixCore.Home.Provision.HetznerTest do
       HetznerStub.delete_outside(ctx.stub, :servers, ledger!(ctx.home).server.id)
       assert :ok = Hetzner.delete(ctx.home, ctx.opts)
       assert %{server: nil, firewall: nil} = ledger!(ctx.home)
+    end
+  end
+
+  # M75 lean v1 §4.3, §7 `on` Details "Replace the server": the server the
+  # home lives on is set aside (`Ledger.begin_replace/3`), the new one is
+  # created as any server is, and the old one is deleted, in the same order
+  # as any, only once the move to the new one is done.
+  describe "a replace" do
+    setup ctx do
+      ctx = created!(connect!(ctx))
+      {:ok, _ledger} = Ledger.update(ctx.home, "hetzner", &Ledger.begin_replace(&1, 5, @now))
+      Map.put(ctx, :old, Ledger.replaced_set(ledger!(ctx.home)))
+    end
+
+    test "names the new server apart from the old one, both standing", ctx do
+      {:ok, server} = Hetzner.create(ctx.home, %{@request | type: "cpx32"}, ctx.opts)
+
+      ledger = ledger!(ctx.home)
+      assert ledger.ref != ctx.old.ref
+      assert server.name == "fermix-general-" <> ledger.ref
+      assert server.name != ctx.old.server.name
+      assert %{status: :created, type: "cpx32"} = ledger.server
+      assert Ledger.replaced_set(ledger) == ctx.old
+      assert map_size(HetznerStub.world(ctx.stub).servers) == 2
+    end
+
+    test "a new server's short id is never the one it replaces" do
+      assert Provision.fresh_ref(<<0xA3, 0xF9>>, nil) == "a3f9"
+      assert Provision.fresh_ref(<<0x00, 0x07>>, "a3f9") == "0007"
+      assert Provision.fresh_ref(<<0xA3, 0xF9>>, "a3f9") == "a3fa"
+      assert Provision.fresh_ref(<<0xFF, 0xFF>>, "ffff") == "0000"
+    end
+
+    test "the old server is never deleted while it holds the home", ctx do
+      {:ok, _server} = Hetzner.create(ctx.home, %{@request | type: "cpx32"}, ctx.opts)
+      before = length(HetznerStub.requests(ctx.stub))
+
+      assert {:error, :live_home} = Hetzner.delete_replaced(ctx.home, ctx.opts)
+      assert length(HetznerStub.requests(ctx.stub)) == before
+      assert map_size(HetznerStub.world(ctx.stub).servers) == 2
+    end
+
+    test "once the move is done: the old server, its addresses unless they went, its firewall",
+         ctx do
+      {:ok, _server} = Hetzner.create(ctx.home, %{@request | type: "cpx32"}, ctx.opts)
+      flush()
+      {:ok, _ledger} = Ledger.update(ctx.home, "hetzner", &Ledger.moved(&1, 6, @now))
+      new = ledger!(ctx.home).server
+      before = length(HetznerStub.requests(ctx.stub))
+
+      assert :ok = Hetzner.delete_replaced(ctx.home, ctx.opts)
+
+      deletes =
+        for {"DELETE", path, _q, _b} <- Enum.drop(HetznerStub.requests(ctx.stub), before),
+            do: path
+
+      assert deletes == [
+               "/v1/servers/#{ctx.old.server.id}",
+               "/v1/firewalls/#{ctx.old.firewall.id}"
+             ]
+
+      assert_received {:phase, "deleting"}
+      refute_received :code_withdrawn
+
+      ledger = ledger!(ctx.home)
+      assert %{old: nil, deleted_at: @now} = ledger.replace
+      assert ledger.server == new
+      assert Map.keys(HetznerStub.world(ctx.stub).servers) == [new.id]
+      assert %{replace: %{state: :done, current: :new}} = Ledger.state(ctx.home)
+    end
+
+    test "an old server deleted in Hetzner's console is read gone, then dropped", ctx do
+      {:ok, _server} = Hetzner.create(ctx.home, %{@request | type: "cpx32"}, ctx.opts)
+      HetznerStub.delete_outside(ctx.stub, :servers, ctx.old.server.id)
+      HetznerStub.server_status(ctx.stub, ledger!(ctx.home).server.id, "off")
+
+      assert {:ok, ledger} = Hetzner.reconcile(ctx.home, ctx.opts)
+      assert %{server: %{status: :gone}, firewall: %{status: :created}} = ledger.replace.old
+      assert %{status: :created, power: "off"} = ledger.server
+
+      {:ok, _ledger} = Ledger.update(ctx.home, "hetzner", &Ledger.moved(&1, 6, @now))
+      assert :ok = Hetzner.delete_replaced(ctx.home, ctx.opts)
+      assert %{replace: %{state: :done, old: nil}} = Ledger.state(ctx.home)
+      assert HetznerStub.world(ctx.stub).firewalls |> Map.keys() |> length() == 1
+    end
+
+    test "a delete Hetzner refuses leaves the old server listed as it stood", ctx do
+      {:ok, _server} = Hetzner.create(ctx.home, %{@request | type: "cpx32"}, ctx.opts)
+      {:ok, _ledger} = Ledger.update(ctx.home, "hetzner", &Ledger.moved(&1, 6, @now))
+      HetznerStub.fault(ctx.stub, "DELETE", ~r"^/v1/servers/", 500, "server_error")
+
+      assert {:error, {:refused, 500, "server_error", _message}} =
+               Hetzner.delete_replaced(ctx.home, ctx.opts)
+
+      old = Ledger.replaced_set(ledger!(ctx.home))
+      assert %{server: %{status: :deleting, id: id}, firewall: %{status: :created}} = old
+      assert id == ctx.old.server.id
+    end
+
+    test "while no new server stands, a token must reach the old one", ctx do
+      HetznerStub.set(ctx.stub, :other_tokens, ["invented-other-project-token-77"])
+      ledger = ledger!(ctx.home)
+
+      assert :ok = Hetzner.reaches(HetznerStub.token(), ledger, ctx.opts)
+
+      assert {:error, :other_project} =
+               Hetzner.reaches("invented-other-project-token-77", ledger, ctx.opts)
+
+      assert {"GET", "/v1/servers/" <> id, _query, nil} =
+               List.last(HetznerStub.requests(ctx.stub))
+
+      assert String.to_integer(id) == ctx.old.server.id
     end
   end
 
