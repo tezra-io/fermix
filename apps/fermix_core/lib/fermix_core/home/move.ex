@@ -55,6 +55,7 @@ defmodule FermixCore.Home.Move do
   alias FermixCore.Home.Moved
   alias FermixCore.Home.MoveReadiness
   alias FermixCore.Home.Snapshot.Recipient
+  alias FermixCore.Home.StatusWatch
   alias FermixCore.Setup.ConfigStore
 
   @dir ".move"
@@ -177,7 +178,11 @@ defmodule FermixCore.Home.Move do
     end
   end
 
-  @doc "Records `phase` and `fields` (merged over what was recorded), with `updated_at`."
+  @doc """
+  Records `phase` and `fields` (merged over what was recorded), with
+  `updated_at`, and tells the Always On watch (`Home.StatusWatch`), since the
+  summary reads the phase.
+  """
   @spec put_phase(Path.t(), phase(), map(), DateTime.t()) :: :ok | {:error, term()}
   def put_phase(home, phase, fields, %DateTime{} = now) when phase in @phases do
     previous =
@@ -191,7 +196,8 @@ defmodule FermixCore.Home.Move do
       |> Map.merge(fields)
       |> Map.merge(%{"v" => @version, "phase" => phase, "updated_at" => iso(now)})
 
-    write_private(Path.join(dir(home), "phase.json"), Jason.encode!(state))
+    with :ok <- write_private(Path.join(dir(home), "phase.json"), Jason.encode!(state)),
+         do: StatusWatch.changed(:move)
   end
 
   @doc """

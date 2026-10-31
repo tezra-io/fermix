@@ -27,6 +27,7 @@ defmodule FermixChannels.Desktop.TunnelTest do
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixChannels.Test.DesktopRail
+  alias FermixCore.Home.StatusWatch
   alias FermixCore.Memory.Repo
   alias FermixTestSupport.ParentProcess
 
@@ -332,6 +333,75 @@ defmodule FermixChannels.Desktop.TunnelTest do
     assert %{"type" => "accepted", "client_msg_id" => "mac-2"} = recv(hd(clients))
   end
 
+  # Companion protocol 6 (M75 lean v1 §7): after a move the app's Always On
+  # pane reads this computer's own `home.status`, so a tunneled version 6
+  # app hears this desktop's notice after the primary's hello. The primary's
+  # own notice says only that its part of that status may have moved: it is
+  # dropped here, and this desktop reads its summary again.
+  describe "Always On (version 6)" do
+    setup ctx do
+      test = self()
+
+      {:ok, desk} =
+        Agent.start_link(fn -> %{key: :on, off: false, next_change_ms: nil} end)
+
+      watch =
+        start_watch!(:desktop_watch, fn ->
+          send(test, :desktop_read)
+          Agent.get(desk, & &1)
+        end)
+
+      root = DesktopRail.desktop_home!(ctx.primary)
+
+      %{
+        desk: desk,
+        watch: watch,
+        socket: start_device_socket!(root, ctx.relay, status_watch: watch)
+      }
+    end
+
+    test "the app hears this desktop's notice after the primary's hello, never the primary's",
+         ctx do
+      client = connect(ctx.socket)
+      send_line(client, %{"type" => "client_hello", "protocol_version" => 6})
+
+      assert %{"type" => "server_hello", "role" => "primary", "max_version" => 6} = recv(client)
+      assert recv(client) == %{"type" => "home_status_changed"}
+
+      # Read once when the tunnel joined, once more for the primary's own
+      # notice, which the app never sees.
+      assert_receive :desktop_read, @arrival_ms
+      assert_receive :desktop_read, @arrival_ms
+      _state = :sys.get_state(ctx.watch)
+      assert_nothing_before_read_state(client)
+
+      # The primary's part moved, this desktop's summary did not: nothing.
+      Agent.update(ctx.companion.status_read, &%{&1 | key: :primary_backup_old})
+      :ok = StatusWatch.changed(ctx.companion.status_watch, :snapshots)
+      assert_receive :desktop_read, @arrival_ms
+      _state = :sys.get_state(ctx.watch)
+      assert_nothing_before_read_state(client)
+
+      # This desktop's summary moved with it: the app hears it.
+      Agent.update(ctx.desk, &%{&1 | key: :backup_old})
+      Agent.update(ctx.companion.status_read, &%{&1 | key: :primary})
+      :ok = StatusWatch.changed(ctx.companion.status_watch, :snapshots)
+      assert_receive :desktop_read, @arrival_ms
+      assert recv(client) == %{"type" => "home_status_changed"}
+    end
+
+    test "a version 4 app through the tunnel is never told, and this desktop reads nothing",
+         ctx do
+      client = connect(ctx.socket)
+      send_line(client, %{"type" => "client_hello", "protocol_version" => 4})
+      assert %{"type" => "server_hello", "role" => "primary"} = recv(client)
+
+      assert_nothing_before_read_state(client)
+      _state = :sys.get_state(ctx.watch)
+      refute_received :desktop_read
+    end
+  end
+
   test "the tunnel's own error reasons are documented in the companion protocol" do
     protocol = File.read!(Application.app_dir(:fermix_core, "priv/companion/PROTOCOL.md"))
 
@@ -392,6 +462,13 @@ defmodule FermixChannels.Desktop.TunnelTest do
       engine_role: %{role: :primary, primary: nil}
     ]
 
+    # The primary's own Always On watch (companion protocol 6), its read the
+    # test's.
+    {:ok, status_read} =
+      Agent.start_link(fn -> %{key: :primary, off: false, next_change_ms: nil} end)
+
+    status_watch = start_watch!(:primary_watch, fn -> Agent.get(status_read, & &1) end)
+
     start_supervised!(
       {Endpoint,
        name: endpoint,
@@ -400,12 +477,30 @@ defmodule FermixChannels.Desktop.TunnelTest do
        connection_opts: [
          registry: registry,
          request_opts: request_opts,
-         primary_epoch: fn -> {:ok, 3} end
+         primary_epoch: fn -> {:ok, 3} end,
+         status_watch: status_watch
        ]},
       id: endpoint
     )
 
-    %{endpoint: endpoint, registry: registry}
+    %{
+      endpoint: endpoint,
+      registry: registry,
+      status_watch: status_watch,
+      status_read: status_read
+    }
+  end
+
+  defp start_watch!(id, read) do
+    start_supervised!(
+      {StatusWatch,
+       name: nil,
+       read: read,
+       timer: fn _message, _delay -> make_ref() end,
+       cancel_timer: fn _ref -> false end,
+       clock_monitor: false},
+      id: id
+    )
   end
 
   defp start_blob_store! do
@@ -475,6 +570,13 @@ defmodule FermixChannels.Desktop.TunnelTest do
     end
 
     forward(test_pid)
+  end
+
+  # The client's next line is the answer to its read_state: nothing came
+  # before it.
+  defp assert_nothing_before_read_state(client) do
+    send_line(client, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 0})
+    assert %{"type" => "read_state"} = recv(client)
   end
 
   defp message(id, text),

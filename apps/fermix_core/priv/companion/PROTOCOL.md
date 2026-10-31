@@ -22,7 +22,9 @@ history message. This wire's `row` carries the message's `kind`, `metadata`,
 chunks inside its envelope, and this one grants a managed file on the same
 machine, so neither it nor its answers are shared. The proposal events
 (version 4, and the follow-up's card of version 5) are this wire's alone for
-now: the phone's wire carries them at its next version.
+now: the phone's wire carries them at its next version. So is
+`home_status_changed` (version 6): Always On is set up and watched from the
+computer, never from a phone.
 
 ## Transport
 
@@ -57,15 +59,17 @@ now: the phone's wire carries them at its next version.
 ## Versioning
 
 The protocol is versioned by a single integer, `protocol_version`. The daemon
-advertises the inclusive range `{min_version, max_version}` it accepts, an
-**N/N-1 window**: `max_version` is the current version and `min_version` the
-previous one (or the same value while only one version exists).
+advertises the inclusive range `{min_version, max_version}` it accepts. Up to
+version 5 that was an **N/N-1 window**: `max_version` the current version and
+`min_version` the previous one. Version 6 brings only a server event that no
+client below it is sent, so it keeps version 4 as well: the window is
+`{4, 6}`, three versions wide while the apps move to 6.
 
 | Field | Value |
 |---|---|
-| `protocol_version` (companion declares) | `5` |
+| `protocol_version` (companion declares) | `6` |
 | daemon `min_version` | `4` |
-| daemon `max_version` | `5` |
+| daemon `max_version` | `6` |
 
 ### Version 2: a turn that ends with no reply
 
@@ -174,6 +178,19 @@ client ignores them.
 Every version 4 event, field and rule holds unchanged on version 5. Since
 version 5 the window is {4, 5}, so a version 3 client is refused with
 `error: unsupported_protocol_version` (`client_too_old`).
+
+### Version 6: Always On's state, without polling
+
+Version 6 lets an app stop asking for Always On's state on a timer. It adds
+one server event, `home_status_changed`, with no fields: Always On's summary
+(management `home.status`'s `summary`, the one source of its words) changed,
+and the app reads `home.status` again over management for what it is now
+(see *When Always On changes*). It names version 6 as its `x-since-version`
+and reaches version 6 connections only. It adds no client event.
+
+Every version 5 event, field and rule holds unchanged on version 6. The
+window is {4, 6}: versions 4 and 5 are served exactly as before, and are never
+sent `home_status_changed`.
 
 ## Handshake state machine
 
@@ -308,6 +325,7 @@ in a fixed order:
 | `media_missing` | `ref` | Version 3. Nothing to grant for `ref`; see *Managed media files*. Sent only to a connection on version 3. |
 | `proposal` | `profile_id`, `proposal` (the card) | Version 4. A proposal waiting for the owner: sent when it is stored, and again after `server_hello` for each still waiting, oldest first. Sent only to a connection on version 4 placed as the owner's; see *Proposals*. |
 | `proposal_resolved` | `profile_id`, `proposal_id`, `state`, `sentence`; `result_status?`, `result_text?` | Version 4. A proposal left `waiting`: `denied`, `expired` or `refused`, or `confirmed` once its call has finished, whichever surface decided it. Sent only to a connection on version 4 placed as the owner's; see *Proposals*. |
+| `home_status_changed` | none | Version 6. Always On's summary changed: read `home.status` over management. Carries no content. Sent once after `server_hello` unless Always On is off, then at each change, only to a connection on version 6; see *When Always On changes*. |
 | `error` | `reason`; `message?`, `field?`, `event?`, `client_msg_id?`, `ref?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | A refusal; see *Errors*. |
 
 ### Timeline shapes
@@ -458,6 +476,54 @@ The phones are not sent it: their wire has `link_preview`, which reaches them
 as before. A notice sent while a client was disconnected is lost, so a client
 that reconnects reads again the rows it shows.
 
+## When Always On changes
+
+`home_status_changed` (version 6) says that Always On's summary changed, and
+carries none of it: the app reads management's `home.status` and draws its
+`summary`, so the words come from one place. The daemon sends it to every
+version 6 connection:
+
+- **once after `server_hello`**, after the approvals and proposals that
+  follow it, unless Always On is `off`: an app that connects while Always On
+  is set up, moving or running reads its state once, and one that connects
+  while it is off reads nothing and asks nothing until it is told;
+- **at each change** of the summary after that: of its `state`, its
+  `action` (id and label) or its problem kind (`detail.kind`), or of its
+  `sentence` on any state but `on` and `problem`, where the sentence carries
+  a figure that moves with the clock (the last backup's age, a count of days,
+  how full the disk is) and the state, action and kind already say every
+  change of note. `detail` alone never counts: an app reads it when the owner
+  opens Details. On the server, which its desktops' summaries read in their
+  `primary_home`, a change of its newest backup, of its enrollment code or of
+  the servers it holds counts as well.
+
+The daemon works this out without polling anything. It reads the summary
+again only when something it rests on happens (the move's phase, a server
+enrolling or its code being opened, used, withdrawn or expiring, the Always
+On provisioner's file being written, the link to the server going up or
+down, a backup run finishing, a settings write) and at the next time the
+summary changes by the clock alone (a code open 30 minutes while the
+computer is awake, a link down 10 minutes while it is awake, a waiting
+server's 24 hours, a backup's 3 days), on one timer, armed again at each
+read; and only while a version 6 connection is attached. While Always On is
+`off` it arms nothing and reads only on what could end `off` (a token, a
+code, a move, a settings write). It never calls the cloud provider: Hetzner
+is read when the app asks (`home.provision.resources`) or a job runs.
+
+A notice sent while the app was disconnected is lost, so an app that
+connects reads nothing on its own: the notice after `server_hello` is its
+cue. The figures in `on` and `problem` sentences move without a notice, so
+an app that shows one reads `home.status` again when the owner opens the
+pane. A server's disk filling has no event of its own: its summary is read
+again at the next event (on the server, every backup run).
+
+**After a move.** The app's Always On pane reads the desktop's own
+`home.status`, so the desktop's engine sends the notice for its summary, not
+the server's (see *After a move: the desktop's tunnel*). While the server is
+unreachable the tunnel refuses every connection with `primary_unreachable`,
+so the app reads `home.status` when it is refused and when its connection
+ends that way: that is when the summary moves to `cannot_reach` and back.
+
 ## Blocks under a reply
 
 A reply can carry `blocks[]`: records its text links, which a client draws
@@ -531,6 +597,14 @@ refuses a client that has seen a later primary.
   it against its ref and grants the managed file under its own home, as
   *Managed media files* says, once the connection's `client_hello` declared a
   version that has it. `media_release` is answered by nothing, as always.
+- **Always On is the desktop's.** The app's Always On pane reads this
+  computer's `home.status`, so on a connection whose `client_hello` declared
+  version 6 the desktop's engine sends its own `home_status_changed` after
+  the primary's `server_hello` and at each change of its own summary. The
+  primary's `home_status_changed` on that connection is never passed on: it
+  says the primary's part of the desktop's `home.status` (`primary_home`) may
+  have moved, and the desktop reads its summary again, telling the app only
+  if that changed.
 - **The primary unreachable.** A connection made while the engine cannot reach
   the primary is answered with
   `error: primary_unreachable` and closed, its `message` naming the primary:
@@ -817,8 +891,10 @@ a `media_fetch`. A refused `proposal_answer` is a `request_failed` whose
 ## Chat sequence
 
 ```
-companion -> daemon:  client_hello { protocol_version: 5 }
-daemon -> companion:  server_hello { min_version: 4, max_version: 5 }
+companion -> daemon:  client_hello { protocol_version: 6 }
+daemon -> companion:  server_hello { min_version: 4, max_version: 6 }
+daemon -> companion:  home_status_changed {}                                (Always On is not off)
+                      (the app reads management home.status)
 companion -> daemon:  history_pull { profile_id: "main", after_seq: 12, limit: 200 }
 daemon -> companion:  history_page { messages: [...], next_after_seq: 12, history_head_seq: 12 }
 companion -> daemon:  msg { client_msg_id: "mac-1", profile_id: "main", text, attach_ids: [] }

@@ -106,6 +106,7 @@ defmodule FermixCore.Home.Provision.Ledger do
 
   alias FermixCore.Home.Provision
   alias FermixCore.Home.Provision.Ledger.Lock
+  alias FermixCore.Home.StatusWatch
   alias FermixCore.Home.UnreadableFiles
 
   @version 1
@@ -218,7 +219,9 @@ defmodule FermixCore.Home.Provision.Ledger do
   (`{:ok, ledger}`), all under the file's lock (`Ledger.Lock`, released on
   every path); `{:error, _}` from `fun` is answered as it is and writes
   nothing. `{:error, {:locked, file}}` when the lock did not come within its
-  bound.
+  bound. This is the one write of every provider's ledger (the driver's and
+  the management family's), so it is where the Always On watch
+  (`Home.StatusWatch`) is told, since the summary reads this file.
   """
   @spec update(Path.t(), String.t(), (t() -> {:ok, t()} | {:error, term()})) ::
           {:ok, t()} | {:error, term()}
@@ -238,6 +241,7 @@ defmodule FermixCore.Home.Provision.Ledger do
     with {:ok, ledger} <- read(home, id),
          {:ok, changed} <- fun.(ledger),
          :ok <- write(path(home, id), changed) do
+      :ok = StatusWatch.changed(:ledger)
       {:ok, changed}
     end
   end

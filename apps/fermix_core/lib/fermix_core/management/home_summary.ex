@@ -60,6 +60,11 @@ defmodule FermixCore.Management.HomeSummary do
   this computer's copies take, the disk, what lives on the server and the two
   actions Details offers (Back up now, Replace the server), and on `problem`
   its kind, what Fermix last saw and when, one note, and the other actions.
+
+  `watch/1` is what `FermixCore.Home.StatusWatch` reads (companion protocol
+  6, which lets the apps stop polling): the key a change is told by, whether
+  Always On is off, and when the summary next changes by the clock alone,
+  from the same time rules.
   """
 
   alias FermixCore.Home.DesktopLink
@@ -84,6 +89,10 @@ defmodule FermixCore.Management.HomeSummary do
   @setup_ms 30 * 60_000
   @backup_old_s 3 * 86_400
   @day_s 86_400
+  # The states whose sentence carries a figure that moves with the clock (a
+  # backup's age, a count of days, how full a disk is): `watch/1`'s key leaves
+  # it out, since their state, action and kind say every change of note.
+  @clock_sentences ~w(on problem)
   @moving ~w(requested streaming committed)
   @undoing ~w(aborting undoing)
   @receiving ~w(receiving staged activating)
@@ -127,6 +136,32 @@ defmodule FermixCore.Management.HomeSummary do
   def summary(%{role: :device} = facts), do: device(facts)
   def summary(%{role: :primary, link: %{desktops: [_ | _]}} = facts), do: server(facts)
   def summary(%{role: :primary} = facts), do: setup(facts)
+
+  @doc """
+  What `FermixCore.Home.StatusWatch` watches, from `facts` (`gather/5`'s):
+
+    * `key` changes exactly when the summary changes the way a surface draws
+      it: its state, its action (id and label), its problem kind, and its
+      sentence on every state but `on` and `problem`, whose sentences carry a
+      figure that moves with the clock. On a server with desktops it also
+      holds what their own summaries read from its `home.status`: its newest
+      backup, its enrollment code (kind, state, who used it) and the servers
+      it holds. `detail` alone is no change.
+    * `off`: whether the summary is `off`.
+    * `next_change_ms`: the milliseconds until the summary next changes by
+      the clock alone (a created server's code open 30 minutes awake, a link
+      down 10 minutes awake, a held server's 24 hours, a backup's 3 days), or
+      nil when nothing does; always nil while off. A deadline may change
+      nothing when it comes (another rule decided first): the watch then reads
+      a same key and tells nobody.
+  """
+  @spec watch(facts()) :: %{key: term(), off: boolean(), next_change_ms: pos_integer() | nil}
+  def watch(facts) when is_map(facts) do
+    summary = summary(facts)
+    off = summary["state"] == "off"
+    next = if off, do: nil, else: next_change(facts)
+    %{key: {key(summary), drawn(facts)}, off: off, next_change_ms: next}
+  end
 
   @doc """
   The facts of `home`'s summary: `status` is the `home.status` record's own
@@ -765,6 +800,90 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp iso(nil), do: nil
   defp iso(%DateTime{} = at), do: at |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+  # -- watching ------------------------------------------------------------------
+
+  defp key(%{"state" => state, "action" => action, "detail" => detail} = summary) do
+    sentence = if state in @clock_sentences, do: nil, else: summary["sentence"]
+    {state, action, Map.get(detail, "kind"), sentence}
+  end
+
+  # What a desktop's own summary reads from its server's `home.status`
+  # (`primary_home`); only a server with desktops has anyone to tell.
+  defp drawn(%{role: :primary, link: %{desktops: [_ | _]} = link} = facts) do
+    window = link.enrollment && Map.take(link.enrollment, [:kind, :state, :candidate_id])
+    {newest_backup(facts.snapshots), window, Enum.map(facts.candidates, & &1["candidate_id"])}
+  end
+
+  defp drawn(_facts), do: nil
+
+  # The soonest time rule of this place's summary that has not come yet.
+  defp next_change(facts) do
+    facts
+    |> deadlines()
+    |> Enum.filter(&(is_integer(&1) and &1 > 0))
+    |> Enum.min(fn -> nil end)
+  end
+
+  defp deadlines(%{role: :candidate}), do: []
+
+  defp deadlines(%{role: :device} = facts),
+    do: [link_deadline(facts), desktop_backup_deadline(facts) | replace_deadlines(facts)]
+
+  defp deadlines(%{role: :primary, link: %{desktops: [_ | _]}} = facts),
+    do: [backup_deadline(newest_backup(facts.snapshots), facts)]
+
+  defp deadlines(%{role: :primary} = facts),
+    do: [window_deadline(window(facts)) | expiries(facts.candidates, facts)]
+
+  # A created server's code, open while this computer is awake (`not_set_up`).
+  defp window_deadline(%{kind: :provisioned, state: :open} = window),
+    do: @setup_ms - Map.get(window, :awake_ms, 0)
+
+  defp window_deadline(_window), do: nil
+
+  # A held server is dropped at its expiry (`Home.Candidates`).
+  defp expiries(candidates, facts),
+    do: for(%{"expires_at" => at} <- candidates, do: ms_until(time(at), facts))
+
+  # No session with the server, counted while this computer is awake.
+  defp link_deadline(%{link: %{primary: %{status: status} = link}})
+       when status in [:unreachable, :stale],
+       do: @unreachable_ms - (Map.get(link, :down_ms) || 0)
+
+  defp link_deadline(_facts), do: nil
+
+  defp desktop_backup_deadline(%{primary_home: %{"snapshots" => snapshots}} = facts) do
+    case newest_backup(snapshots) do
+      nil -> backup_deadline(get_in(facts, [:moved, :moved_at]), facts)
+      at -> backup_deadline(at, facts)
+    end
+  end
+
+  defp desktop_backup_deadline(_facts), do: nil
+
+  # A backup is old once it is more than three days old, in whole seconds.
+  defp backup_deadline(%DateTime{} = at, facts),
+    do: ms_until(DateTime.add(at, @backup_old_s + 1, :second), facts)
+
+  defp backup_deadline(nil, _facts), do: nil
+
+  # During a replace: the new server's 30 minutes from its creation while its
+  # code is open on the old server, and the day each server the old one holds
+  # waits.
+  defp replace_deadlines(%{provision: %{replace: %{state: :waiting}} = provision} = facts) do
+    held = get_in(facts, [:primary_home, "candidates"]) || []
+    [new_server_deadline(new_window(facts), provision.server, facts) | expiries(held, facts)]
+  end
+
+  defp replace_deadlines(_facts), do: []
+
+  defp new_server_deadline(%{"state" => "open"}, %{created_at: %DateTime{} = at}, facts),
+    do: ms_until(DateTime.add(at, @setup_ms, :millisecond), facts)
+
+  defp new_server_deadline(_window, _server, _facts), do: nil
+
+  defp ms_until(%DateTime{} = at, facts), do: DateTime.diff(at, facts.now, :millisecond)
 
   # -- gathering -----------------------------------------------------------------
 

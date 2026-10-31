@@ -39,6 +39,10 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   task returns, or from its exit when it crashed. The clock and the timer are
   injected (`:now`, `:timer`), so tests deliver a tick by hand, and so is the
   push (`:notify`).
+
+  **The Always On watch.** A finished run moved the newest backup the Always
+  On summary reads, so once the status file holds it the scheduler tells
+  `Home.StatusWatch` (`:status_changed`, its 0-arity stand-in).
   """
 
   use GenServer
@@ -48,6 +52,7 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   alias FermixCore.Home.Snapshot.Run
   alias FermixCore.Home.Snapshot.S3
   alias FermixCore.Home.Snapshot.Status
+  alias FermixCore.Home.StatusWatch
   alias FermixCore.Management.Copy
   alias FermixCore.Setup.ConfigStore
 
@@ -71,6 +76,7 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
           run_opts: keyword(),
           task_supervisor: GenServer.server(),
           notify: (String.t(), String.t() -> :ok | {:error, term()}),
+          status_changed: (-> :ok),
           started_at: DateTime.t(),
           task: reference() | nil,
           token: reference() | nil,
@@ -91,9 +97,10 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   (false keeps it from planning timers: a test tree), `:timer` (a 2-arity
   `send_after` in its place, given the message and the delay in ms), `:run`
   (`Run.run/4` in its place), `:run_opts` (passed to every run: `:profile`,
-  `:host`, a target's seams), `:task_supervisor` and `:notify` (a 2-arity
+  `:host`, a target's seams), `:task_supervisor`, `:notify` (a 2-arity
   push of a sentence and its proactive key to the phones, in place of their
-  push path).
+  push path) and `:status_changed` (a 0-arity call in place of telling the
+  Always On watch).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts) do
@@ -133,6 +140,8 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
       run_opts: Keyword.get(opts, :run_opts, []),
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
       notify: Keyword.get(opts, :notify, &push_to_phones/2),
+      status_changed:
+        Keyword.get(opts, :status_changed, fn -> StatusWatch.changed(:snapshots) end),
       started_at: now.(),
       task: nil,
       token: nil,
@@ -205,6 +214,7 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
     end)
 
     :ok = notice_stale(state)
+    :ok = state.status_changed.()
     plan(%{state | task: nil}, started_at)
   end
 

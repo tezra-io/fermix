@@ -26,8 +26,12 @@ defmodule FermixChannels.Companion.Supervisor do
      before the connections, so a restart that forgets every hold takes the
      connections that held them down with it, and its fresh directory never
      outlives the holds it forgot,
-  3. a `DynamicSupervisor` for the connections, one `temporary` child each,
-  4. the `Endpoint`, which binds `companion.sock` and accepts.
+  3. the Always On watch (`FermixCore.Home.StatusWatch`, companion protocol
+     6), which tells a version 6 connection when Always On changed: before the
+     connections, so a restart that forgets who it tells takes them down
+     with it, and they subscribe again,
+  4. a `DynamicSupervisor` for the connections, one `temporary` child each,
+  5. the `Endpoint`, which binds `companion.sock` and accepts.
 
   A desktop's device-role engine after a move (`:tunnel`, M75 §6) serves the
   same socket for its app, but hands each connection to a `Desktop.Tunnel`
@@ -54,6 +58,7 @@ defmodule FermixChannels.Companion.Supervisor do
   alias FermixChannels.Desktop.Relay.Media, as: RelayMedia
   alias FermixChannels.Desktop.Tunnel
   alias FermixChannels.Mobile.RequestCoordinator
+  alias FermixCore.Home.StatusWatch
 
   @connection_supervisor FermixChannels.Companion.ConnectionSupervisor
   @request_coordinator FermixChannels.Companion.RequestCoordinator
@@ -108,7 +113,8 @@ defmodule FermixChannels.Companion.Supervisor do
   defp serving(false, _opts, _registry, _approvals), do: []
 
   # `:media_grants_opts` are `MediaGrants.start_link/1`'s: a test tree names
-  # its own server and a temporary root, never the home's.
+  # its own server and a temporary root, never the home's; `:status_watch_opts`
+  # are `StatusWatch.start_link/1`'s, a test tree's own name and read.
   defp socket_children(opts, registry, approvals) do
     coordinator = Keyword.get(opts, :request_coordinator, @request_coordinator)
     connection_supervisor = Keyword.get(opts, :connection_supervisor, @connection_supervisor)
@@ -123,6 +129,11 @@ defmodule FermixChannels.Companion.Supervisor do
       |> tunnel_blobs(tunnel)
 
     media_grants = Keyword.fetch!(media_grants_opts, :name)
+
+    status_watch_opts =
+      opts |> Keyword.get(:status_watch_opts, []) |> Keyword.put_new(:name, StatusWatch)
+
+    status_watch = Keyword.fetch!(status_watch_opts, :name)
 
     request_opts = [
       request_coordinator: coordinator,
@@ -142,33 +153,36 @@ defmodule FermixChannels.Companion.Supervisor do
         id: coordinator
       ),
       Supervisor.child_spec({MediaGrants, media_grants_opts}, id: media_grants),
+      Supervisor.child_spec({StatusWatch, status_watch_opts}, id: status_watch),
       {DynamicSupervisor, name: connection_supervisor, strategy: :one_for_one},
       {Endpoint,
        Keyword.take(opts, [:socket_path, :max_clients]) ++
          [connection_supervisor: connection_supervisor] ++
-         connections(tunnel, media_grants, registry, request_opts, approvals)}
+         connections(
+           tunnel,
+           [media_grants: media_grants, status_watch: status_watch],
+           registry,
+           request_opts,
+           approvals
+         )}
     ]
   end
 
-  defp connections(nil, media_grants, registry, request_opts, approvals) do
+  # `shared` (the media grants and the Always On watch) go to every
+  # connection of either kind.
+  defp connections(nil, shared, registry, request_opts, approvals) do
     [
-      connection_opts: [
-        registry: registry,
-        request_opts: request_opts,
-        approvals: approvals,
-        media_grants: media_grants
-      ]
+      connection_opts:
+        [registry: registry, request_opts: request_opts, approvals: approvals] ++ shared
     ]
   end
 
-  defp connections(tunnel, media_grants, _registry, _request_opts, _approvals) do
+  defp connections(tunnel, shared, _registry, _request_opts, _approvals) do
     [
       connection_module: Tunnel,
-      connection_opts: [
-        relay: Keyword.fetch!(tunnel, :relay),
-        staging: Keyword.fetch!(tunnel, :staging),
-        media_grants: media_grants
-      ]
+      connection_opts:
+        [relay: Keyword.fetch!(tunnel, :relay), staging: Keyword.fetch!(tunnel, :staging)] ++
+          shared
     ]
   end
 

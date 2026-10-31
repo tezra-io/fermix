@@ -615,7 +615,7 @@ and once this engine is its linked desktop (or the home carries the moved
 marker). `Ledger.state/3` is the one reading of the provisioner for `home.status`'s
 summary: none, connected, creating, created, deleting, gone, failed (with the
 reason) or unreadable, beside whether the token is still accepted. The apps
-poll `home.status`, so everything it reads on each poll (the ledger, the
+read `home.status` often, so everything it reads on each read (the ledger, the
 settings its summary reads, `MoveReadiness.stays_here/3`, the primary's
 disk, the last review of the move and each copy a desktop stores) logs a
 failure to read it through `Home.UnreadableFiles`, a supervised memory in
@@ -665,6 +665,31 @@ which reach the new one, are not offered for it. The snapshot scheduler tells th
 kept in `snapshots/status.json`'s `stale_notice`), when the newest verified
 snapshot passes 7 days, through the phones' own path: a message in the
 owner's phone chat (`ChannelSend` to `mobile`, its proactive key the point).
+
+The apps do not poll the summary (companion protocol 6). `Home.StatusWatch`,
+started by `Companion.Supervisor` before the connections (a restart that
+forgets its subscribers takes them down too), keeps the last
+`HomeSummary.watch/1` read (`Management.Home.summary_facts/1`, gathered as
+`home.status` gathers them, through the server on a linked desktop): its key
+(state, action, problem kind, and the sentence except on `on` and `problem`,
+whose figures move with the clock; on a server with desktops also its newest
+backup, its window and its candidates, which their summaries read), whether it
+is `off`, and the milliseconds to its next change by the clock alone. A
+version 6 `Companion.Connection` subscribes before its `server_hello` and
+writes `home_status_changed` when told: once after the hello unless off, then
+at each change of key. It reads only while subscribed, on `changed/2` from the
+writers the summary rests on, each a cast that is a no-op with no watch
+running: `Provision.Ledger.update/3` (`:ledger`), `Move.put_phase/4`
+(`:move`), the enrollment window's kept changes and expiry (`:enrollment`),
+`ConfigStore.save_snapshot/2` (`:config`, the `off` line), a finished
+`Snapshot.Scheduler` run (`:snapshots`), the desktop relay's session up or
+down (`:link`) and a tunnel that heard its server's own notice (`:server`);
+events that arrive together are one read (a message it sends itself, queued
+behind them). One timer, replaced at each read, at least a second and at most
+a week, waits for the next clock change; a time-offset monitor reads again
+after a wake from sleep, since the monotonic timers stop while the computer
+sleeps. While off nothing is armed and only `:ledger`, `:move`,
+`:enrollment` and `:config` are read. It never calls Hetzner.
 
 Replace the server (`home.provision.create {replace: true}`) runs on the
 linked desktop whose ledger holds the server the home lives on. The job sets
@@ -1411,8 +1436,12 @@ Current channels:
   owner's app (`unattended_client` otherwise), sends each line as one
   `companion_line` of its channel (at most 4), answers `media_fetch` locally
   (the relay stages the blob, `Desktop.Relay.Media`, and the same
-  `Companion.MediaGrants` grants it), and ends with `primary_unreachable`,
-  naming the primary, when the session is down. On the primary,
+  `Companion.MediaGrants` grants it), answers Always On locally on a version 6
+  connection (it subscribes to this engine's `Home.StatusWatch` when the
+  primary's `server_hello` comes back and writes its notices; the primary's
+  own `home_status_changed` is dropped and tells the watch `:server`), and
+  ends with `primary_unreachable`, naming the primary, when the session is
+  down. On the primary,
   `Desktop.Companion` (the `companion` family) runs one
   `Desktop.CompanionPump` per channel under `Desktop.TunnelSupervisor`: a
   private Unix socket under `<home>/mobile` whose accepted end must name the

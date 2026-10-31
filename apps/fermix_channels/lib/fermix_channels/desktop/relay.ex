@@ -55,6 +55,10 @@ defmodule FermixChannels.Desktop.Relay do
   unknown key at the handshake) is not retried: the relay says so and stays
   down until the engine restarts.
 
+  A session that comes up and every ending tell this engine's Always On watch
+  (`FermixCore.Home.StatusWatch`, `:link`): the summary an app draws reads
+  the link (companion protocol 6).
+
   `status/1` also says how long the link has had no session (`down_ms`, on
   the monotonic clock, which stops while this computer sleeps): from the
   engine's start until the first session, nil while one is up, and from the
@@ -104,9 +108,10 @@ defmodule FermixChannels.Desktop.Relay do
   Test seams: `:connect` (handed to `Rail.open/3` in place of dialing),
   `:addrs` (a route's direct addresses, a test's), `:rail_opts`, `:schedule`
   and `:cancel_timer` (this process's timers, delivered by hand in a test),
-  `:clock`, `:monotonic` (a 0-arity count of milliseconds), `:emit` and
+  `:clock`, `:monotonic` (a 0-arity count of milliseconds), `:emit`,
   `:primary_reached` (a 1-arity function of the epoch, in place of the
-  provisioner's).
+  provisioner's) and `:status_changed` (a 0-arity call in place of telling
+  the Always On watch).
   """
 
   use GenServer
@@ -121,6 +126,7 @@ defmodule FermixChannels.Desktop.Relay do
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.BuildInfo
   alias FermixCore.Home.DesktopLink
+  alias FermixCore.Home.StatusWatch
   alias FermixCore.Management.Placement
   alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Management.Provision
@@ -365,6 +371,7 @@ defmodule FermixChannels.Desktop.Relay do
       emit:
         Keyword.get(opts, :emit, &ChannelTelemetry.emit_transport(:desktop_relay, &1, &2, &3)),
       primary_reached: Keyword.get_lazy(opts, :primary_reached, fn -> provisioner(root) end),
+      status_changed: Keyword.get(opts, :status_changed, fn -> StatusWatch.changed(:link) end),
       link: nil,
       keypair: nil,
       phase: :connecting,
@@ -625,6 +632,7 @@ defmodule FermixChannels.Desktop.Relay do
     link = state.link |> keep_epoch(epoch, state.root) |> keep_route(fields, state.root)
     max_media = media_bound(get_in(fields, ["caps", "max_media_bytes"]))
     :ok = state.primary_reached.(epoch)
+    :ok = state.status_changed.()
 
     if state.degraded?, do: state.emit.(:recovered, state.failures, :none)
 
@@ -1164,11 +1172,15 @@ defmodule FermixChannels.Desktop.Relay do
   # quietly, a primary that no longer knows this computer is not tried again,
   # and anything else is an outage, retried with backoff.
   defp link_down(reason, state) do
-    case ending_kind(reason, state) do
-      :renewal -> renewal(reason, state)
-      :revoked -> revoked(reason, state)
-      :outage -> outage(reason, state)
-    end
+    state =
+      case ending_kind(reason, state) do
+        :renewal -> renewal(reason, state)
+        :revoked -> revoked(reason, state)
+        :outage -> outage(reason, state)
+      end
+
+    :ok = state.status_changed.()
+    state
   end
 
   # One normal ending in a row is renewed quietly. A renewed session the

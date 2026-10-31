@@ -131,8 +131,6 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     schema: schema,
     protocol: protocol
   } do
-    assert Protocol.protocol_version() == 5
-    assert Protocol.supported_version_range() == {4, 5}
     assert schema["$defs"]["followUpCard"]["x-since-version"] == 5
 
     assert schema["$defs"]["followUpCard"]["properties"] |> Map.keys() |> Enum.sort() ==
@@ -146,6 +144,32 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     assert Enum.all?(mandates, &(Protocol.server_payload_version("proposal", &1) == 4))
     assert protocol =~ "### Version 5: a watcher's follow-ups on the owner's devices"
     assert protocol =~ "Every version 4 event, field and rule holds unchanged on version 5."
+  end
+
+  # Version 6 (M75 lean v1 §7): Always On's state changed. The notice carries
+  # nothing, since the client reads `home.status` for what it is now, and it
+  # brought the window to {4, 6}: no client below 6 is ever sent it.
+  test "home_status_changed is version 6's, carries nothing, and the window keeps 4", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    assert Protocol.protocol_version() == 6
+    assert Protocol.supported_version_range() == {4, 6}
+    assert Protocol.server_event_version("home_status_changed") == 6
+
+    definition = schema["$defs"]["home_status_changed"]
+    assert definition["x-since-version"] == 6
+    assert definition["required"] == ["type"]
+    assert Map.keys(definition["properties"]) == ["type"]
+
+    goldens =
+      @server_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "home_status_changed"))
+
+    assert goldens == [%{"type" => "home_status_changed"}]
+
+    assert protocol =~ "### Version 6: Always On's state, without polling"
+    assert protocol =~ "Every version 5 event, field and rule holds unchanged on version 6."
+    assert protocol =~ "## When Always On changes"
   end
 
   # The schema names every field of the card the engine builds, and bounds the

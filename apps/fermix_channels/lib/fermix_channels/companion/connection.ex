@@ -55,6 +55,15 @@ defmodule FermixChannels.Companion.Connection do
   otherwise it is refused, and nothing runs. `:proposal_opts` are core's
   `Cues.Proposals` options (a test's repo and seams).
 
+  ## Always On (version 6, M75 lean v1 §7)
+
+  A connection whose hello declared version 6 subscribes to the Always On
+  watch (`FermixCore.Home.StatusWatch`, `:status_watch`, nil for none) in the
+  step that joins the registry, before its `server_hello` is written, and
+  writes `home_status_changed` each time the watch tells it: once after the
+  hello unless Always On is off, then at each change. The app reads
+  `home.status` itself. A connection on version 4 or 5 never subscribes.
+
   ## The primary epoch (M75 D14)
 
   The hello carries the home's primary epoch, read through
@@ -106,6 +115,7 @@ defmodule FermixChannels.Companion.Connection do
   alias FermixCore.Companion.Timeline
   alias FermixCore.Home.Move
   alias FermixCore.Home.Role
+  alias FermixCore.Home.StatusWatch
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.SocketPeer
 
@@ -175,6 +185,8 @@ defmodule FermixChannels.Companion.Connection do
       media_grants: Keyword.get(opts, :media_grants, MediaGrants),
       media_grants_module: Keyword.get(opts, :media_grants_module, MediaGrants),
       proposal_opts: Keyword.get(opts, :proposal_opts, []),
+      # The Always On watch a version 6 connection subscribes to.
+      status_watch: Keyword.get(opts, :status_watch, StatusWatch),
       # Placed once at handover, before any line is read (moduledoc); the
       # daemon's process and platform are seams a test stands in for.
       daemon_os_pid: Keyword.get(opts, :daemon_os_pid, String.to_integer(System.pid())),
@@ -221,6 +233,10 @@ defmodule FermixChannels.Companion.Connection do
 
   def handle_info({:companion_stream, turn_id, update}, state),
     do: write_stream(turn_id, update, state)
+
+  # Always On changed (version 6): the client reads `home.status` itself.
+  def handle_info(:home_status_changed, state),
+    do: write_event(%{"t" => "home_status_changed"}, state)
 
   def handle_info({:companion_request_failed, client_msg_id, reason}, state),
     do: write_request_error(while_moving(reason, state), client_msg_id, state)
@@ -416,6 +432,7 @@ defmodule FermixChannels.Companion.Connection do
     server_hello = Map.merge(%{"min_version" => min, "max_version" => max}, epoch)
 
     with {:ok, _owner} <- Registry.register(state.registry, @profile, version),
+         :ok <- watch_home(version, state),
          :ok <- send_event("server_hello", server_hello, state),
          :ok <- send_pending_approvals(state),
          state = %{state | version: version},
@@ -424,6 +441,13 @@ defmodule FermixChannels.Companion.Connection do
     else
       _failed -> {:stop, state}
     end
+  end
+
+  # Before the hello is written, so the watch's first word follows it.
+  defp watch_home(version, %{status_watch: watch}) do
+    if watch != nil and Protocol.server_event_version("home_status_changed") <= version,
+      do: StatusWatch.subscribe(watch, self()),
+      else: :ok
   end
 
   # Every proposal still waiting follows the server_hello, oldest first, for

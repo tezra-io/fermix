@@ -4,8 +4,8 @@ defmodule FermixCore.Companion.ProtocolTest do
   alias FermixCore.Companion.Protocol
 
   test "publishes the version window, the line cap and the ordered catalogs" do
-    assert Protocol.protocol_version() == 5
-    assert Protocol.supported_version_range() == {4, 5}
+    assert Protocol.protocol_version() == 6
+    assert Protocol.supported_version_range() == {4, 6}
     assert Protocol.max_line_bytes() == 65_536
 
     assert Protocol.client_events() ==
@@ -15,7 +15,8 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert Protocol.server_events() ==
              ~w(server_hello accepted turn_started text_delta tool_event text_done turn_error
                 turn_done row row_updated approval approval_resolved read_state history_page
-                search_results media_path media_missing proposal proposal_resolved error)
+                search_results media_path media_missing proposal proposal_resolved
+                home_status_changed error)
   end
 
   # M56 §6: a turn that ends with no reply needs a frame an older client would
@@ -28,7 +29,8 @@ defmodule FermixCore.Companion.ProtocolTest do
       "media_path" => 3,
       "media_missing" => 3,
       "proposal" => 4,
-      "proposal_resolved" => 4
+      "proposal_resolved" => 4,
+      "home_status_changed" => 6
     }
 
     for type <- Protocol.server_events() do
@@ -52,6 +54,18 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert_raise ArgumentError, fn -> Protocol.client_event_version("ping") end
   end
 
+  # Version 6: Always On's state changed, and the client reads `home.status`
+  # over management for what it is now, so the notice carries nothing.
+  test "home_status_changed carries nothing, and refuses any field" do
+    assert {:ok, line} = Protocol.encode_server_event("home_status_changed", %{})
+    assert Jason.decode!(line) == %{"type" => "home_status_changed"}
+
+    assert {:error, {:invalid_field, "state"}} =
+             Protocol.encode_server_event("home_status_changed", %{"state" => "on"})
+
+    refute "home_status_changed" in Protocol.shared_server_events()
+  end
+
   test "turn_done names the turn it ends and nothing else" do
     assert {:ok, line} = Protocol.encode_server_event("turn_done", %{"turn_id" => "turn-mac-1"})
     assert Jason.decode!(line) == %{"type" => "turn_done", "turn_id" => "turn-mac-1"}
@@ -72,11 +86,14 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert "row" in Protocol.shared_server_events()
   end
 
-  test "negotiates directionally, version 4 and version 5 both accepted, version 3 too old" do
+  # Version 6 brings only a server event that no client below it is sent, so
+  # version 4 stays served beside 5 (the window is three versions wide).
+  test "negotiates directionally, versions 4, 5 and 6 accepted, 3 too old and 7 too new" do
     assert :ok = Protocol.negotiate(4)
     assert :ok = Protocol.negotiate(5)
+    assert :ok = Protocol.negotiate(6)
     assert {:error, :client_too_old} = Protocol.negotiate(3)
-    assert {:error, :client_too_new} = Protocol.negotiate(6)
+    assert {:error, :client_too_new} = Protocol.negotiate(7)
   end
 
   test "client_hello refuses a missing or malformed version with the Realtime reasons" do
@@ -105,7 +122,7 @@ defmodule FermixCore.Companion.ProtocolTest do
              inspect(bad)
     end
 
-    hello = %{"min_version" => 4, "max_version" => 5, "role" => "primary"}
+    hello = %{"min_version" => 4, "max_version" => 6, "role" => "primary"}
 
     assert {:ok, line} =
              Protocol.encode_server_event("server_hello", Map.put(hello, "primary_epoch", 2))
@@ -221,7 +238,7 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert {:ok, line} =
              Protocol.encode_server_event("server_hello", %{
                min_version: 4,
-               max_version: 5,
+               max_version: 6,
                role: "primary"
              })
 
@@ -230,14 +247,14 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert Jason.decode!(line) == %{
              "type" => "server_hello",
              "min_version" => 4,
-             "max_version" => 5,
+             "max_version" => 6,
              "role" => "primary"
            }
 
     assert {:error, {:invalid_field, "version_range"}} =
              Protocol.encode_server_event("server_hello", %{
                min_version: 3,
-               max_version: 5,
+               max_version: 6,
                role: "primary"
              })
   end
@@ -245,7 +262,7 @@ defmodule FermixCore.Companion.ProtocolTest do
   # M75: the engine names its role on every hello, so a desktop app never
   # compares a device-role engine's epoch against the primary's.
   test "server_hello names the engine's role, primary or device" do
-    hello = %{"min_version" => 4, "max_version" => 5}
+    hello = %{"min_version" => 4, "max_version" => 6}
 
     for role <- ~w(primary device) do
       assert {:ok, line} =

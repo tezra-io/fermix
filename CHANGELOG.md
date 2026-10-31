@@ -150,7 +150,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   over three days old (Back up now). Details says what lives on the server
   (conversations and memories, secrets, the browser, traces) and that Hetzner
   can technically read its disk, and the server tells your phones once when
-  its newest backup is a week old. `fermix home` does all of
+  its newest backup is a week old. Fermix tells the app when that sentence
+  changes, so the app need not check Always On on a timer, and while Always
+  On is off nothing runs for it. `fermix home` does all of
   this at a terminal, with `export`, `import` and `mark-moved` for moving a
   home by hand. Fermix can also create the server
   for you on Hetzner: paste a Read & Write API token from a Hetzner project

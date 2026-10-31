@@ -39,6 +39,18 @@ defmodule FermixChannels.Desktop.Tunnel do
   answered `media_path` or `media_missing`. A `media_release` is answered by
   nothing, as on any engine. Every other line, the hello included, is the
   primary's.
+
+  ## Always On, answered here (companion protocol 6)
+
+  The app's Always On pane reads this computer's own `home.status`, so on a
+  connection whose hello declared version 6 the tunnel subscribes to this
+  engine's Always On watch (`FermixCore.Home.StatusWatch`, `:status_watch`)
+  when the primary's `server_hello` comes back, before passing it on, and
+  writes `home_status_changed` whenever the watch tells it. The primary's own
+  `home_status_changed` is never passed on: it says the primary's part of this
+  computer's `home.status` may have moved, so the tunnel tells the watch
+  (`:server`), which reads this computer's summary again and tells the app
+  only if it changed.
   """
 
   use GenServer, restart: :temporary
@@ -49,6 +61,7 @@ defmodule FermixChannels.Desktop.Tunnel do
   alias FermixChannels.Desktop.Relay
   alias FermixChannels.Desktop.Relay.Media
   alias FermixCore.Companion.Protocol
+  alias FermixCore.Home.StatusWatch
   alias FermixCore.SocketPeer
 
   @profile "main"
@@ -72,6 +85,9 @@ defmodule FermixChannels.Desktop.Tunnel do
       media_grants: Keyword.get(opts, :media_grants, MediaGrants),
       media_grants_module: Keyword.get(opts, :media_grants_module, MediaGrants),
       staging: Keyword.fetch!(opts, :staging),
+      # This engine's Always On watch, for a version 6 app (moduledoc).
+      status_watch: Keyword.get(opts, :status_watch, StatusWatch),
+      watching: false,
       daemon_os_pid: Keyword.get(opts, :daemon_os_pid, String.to_integer(System.pid())),
       os: Keyword.get(opts, :os, :os.type()),
       channel: nil,
@@ -111,11 +127,15 @@ defmodule FermixChannels.Desktop.Tunnel do
     do: {:stop, :normal, close(state)}
 
   def handle_info({:relay_line, channel, line}, %{channel: channel} = state) do
-    case :gen_tcp.send(state.socket, [line, "\n"]) do
-      :ok -> {:noreply, state}
-      {:error, _reason} -> {:stop, :normal, close(state)}
+    case from_primary(line, state) do
+      {:pass, state} -> relay_line(line, state)
+      {:drop, state} -> {:noreply, state}
     end
   end
+
+  # This engine's Always On changed (version 6): the app reads its own
+  # `home.status`.
+  def handle_info(:home_status_changed, state), do: reply({"home_status_changed", %{}}, state)
 
   # The primary's connection ended; its last lines (an error, say) are
   # already written.
@@ -257,6 +277,55 @@ defmodule FermixChannels.Desktop.Tunnel do
   end
 
   defp hello_version(_line, state), do: state
+
+  # -- the primary's lines ---------------------------------------------------------
+
+  defp relay_line(line, state) do
+    case :gen_tcp.send(state.socket, [line, "\n"]) do
+      :ok -> {:noreply, state}
+      {:error, _reason} -> {:stop, :normal, close(state)}
+    end
+  end
+
+  # Only two of the primary's lines are this tunnel's to read (moduledoc):
+  # its own Always On notice, dropped, and its hello to a version 6 app.
+  defp from_primary(line, state) do
+    case primary_type(line, state) do
+      "home_status_changed" -> {:drop, server_moved(state)}
+      "server_hello" -> {:pass, watch_home(state)}
+      _other -> {:pass, state}
+    end
+  end
+
+  defp primary_type(line, state) do
+    if String.contains?(line, "home_status_changed") or hello_due?(line, state) do
+      case Jason.decode(line) do
+        {:ok, %{"type" => type}} -> type
+        _other -> nil
+      end
+    end
+  end
+
+  defp hello_due?(line, %{watching: false, status_watch: watch, version: version})
+       when watch != nil and is_integer(version),
+       do:
+         version >= Protocol.server_event_version("home_status_changed") and
+           String.contains?(line, "server_hello")
+
+  defp hello_due?(_line, _state), do: false
+
+  # Before the hello reaches the app, so the watch's first word follows it.
+  defp watch_home(state) do
+    :ok = StatusWatch.subscribe(state.status_watch, self())
+    %{state | watching: true}
+  end
+
+  defp server_moved(%{status_watch: nil} = state), do: state
+
+  defp server_moved(state) do
+    :ok = StatusWatch.changed(state.status_watch, :server)
+    state
+  end
 
   # -- media ---------------------------------------------------------------------
 

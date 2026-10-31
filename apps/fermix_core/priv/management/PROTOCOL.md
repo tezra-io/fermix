@@ -230,6 +230,11 @@ An engine that sends no `summary` is older than this record: the apps answer
 it with their "update Fermix" screen, so they raise their own minimum for
 `home.status` to an engine that sends it.
 
+A client need not read the summary on a timer: on the companion chat socket,
+`home_status_changed` (companion protocol 6) says when it changed, once after
+the hello unless the state is `off` (`priv/companion/PROTOCOL.md`, *When
+Always On changes*).
+
 | `state` | Where it is answered | What it means |
 |---|---|---|
 | `off` | the computer that sets Always On up | Nothing is set up. The sentence's second line names what this home has turned on that stops after the move (iMessage on a Mac, voice calls, meetings), only when there is something. Its action, `set_up`, opens the token screen, whose words `detail.connect` holds (`{sentence, steps, alternatives}`); pressing it records nothing. |

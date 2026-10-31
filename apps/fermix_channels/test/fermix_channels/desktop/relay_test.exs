@@ -213,6 +213,37 @@ defmodule FermixChannels.Desktop.RelayTest do
     assert %{connected: false, down_ms: 600_000} = Relay.status(relay)
   end
 
+  # Companion protocol 6 (M75 lean v1 §7): the link feeds the Always On
+  # summary, so a session coming up or ending tells the watch.
+  test "a session that comes up, ends and is revoked each tells the Always On watch" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    test = self()
+
+    relay =
+      DesktopRail.start_relay!(root, primary,
+        status_changed: fn ->
+          send(test, :status_changed)
+          :ok
+        end
+      )
+
+    DesktopRail.await_connected(relay)
+    assert_receive :status_changed, 10_000
+
+    :ok = drop_sessions(primary)
+    assert_receive {:scheduled, {:relay_timer, :reconnect, _token} = timer, 1_000}, 10_000
+    assert_receive :status_changed, 10_000
+
+    send(GenServer.whereis(relay), timer)
+    DesktopRail.await_connected(relay)
+    assert_receive :status_changed, 10_000
+
+    :ok = DeviceRegistry.revoke(primary.registry, DesktopRail.device_id())
+    assert_receive {:relay_emit, :degraded, 1, :revoked}, 10_000
+    assert_receive :status_changed, 10_000
+  end
+
   # The status word is what an app draws: the first dial is quiet, and a
   # redial during an outage is still the outage until a session is up.
   test "the first dial is renewing, and a redial during an outage stays unreachable" do
