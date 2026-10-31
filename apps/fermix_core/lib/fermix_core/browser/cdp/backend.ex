@@ -1411,7 +1411,8 @@ defmodule FermixCore.Browser.CDP.Backend do
   # mistaken for a finished task. Returns the clicked label + the resulting url.
   defp run_ref_action("submit", args, tab, _box, state, deadline) do
     with {:ok, ref_data} <- ref_data(tab, args["ref"], state),
-         {:ok, label} <- click_primary_submit(state, tab.session_id, ref_data.backend_node_id) do
+         {:ok, label} <-
+           click_primary_submit(state, tab.session_id, ref_data.backend_node_id, args["ref"]) do
       result = %{"ok" => true, "target" => tab.id, "action" => "submit", "submitted" => label}
       {:ok, Map.merge(result, url_receipt(state, tab, deadline))}
     end
@@ -1939,9 +1940,12 @@ defmodule FermixCore.Browser.CDP.Backend do
     Map.put(result, "page", "unobserved")
   end
 
+  # The form is the one the ref is in, and no other: a field in none (a
+  # single-page login, a checkout of loose inputs) answers null, never the
+  # page's first form, which is as often a header search or a newsletter box.
   @submit_js """
   function() {
-    const form = this.form || this.closest('form') || document.forms[0];
+    const form = this.form || this.closest('form');
     if (!form) { return null; }
     const sels = ['button[type="submit"]', 'input[type="submit"]', "[role='search'] button", 'button:not([type])', 'button'];
     for (const sel of sels) {
@@ -1953,7 +1957,7 @@ defmodule FermixCore.Browser.CDP.Backend do
   }
   """
 
-  defp click_primary_submit(state, session_id, backend_node_id) do
+  defp click_primary_submit(state, session_id, backend_node_id, ref) do
     with {:ok, %{"object" => %{"objectId" => object_id}}} <-
            command(state, "DOM.resolveNode", %{backendNodeId: backend_node_id}, session_id),
          {:ok, result} <-
@@ -1964,10 +1968,20 @@ defmodule FermixCore.Browser.CDP.Backend do
              session_id
            ) do
       case runtime_value(result) do
-        nil -> {:error, Error.new("no_submit_control", "No form or submit control found for ref")}
+        nil -> {:error, not_in_a_form(ref)}
         label -> {:ok, label}
       end
     end
+  end
+
+  # The script answers null only for a ref in no form: a form with no submit
+  # control is sent by `requestSubmit`. Nothing was sent, so the page is as it
+  # was and the refs the model holds still name it.
+  defp not_in_a_form(ref) do
+    Error.new(
+      "no_form",
+      "`#{ref}` is in no form, so nothing was submitted: click the page's own submit button."
+    )
   end
 
   defp handle_get(args, state), do: read_page(args, state, &get_page(args, &1, &2))

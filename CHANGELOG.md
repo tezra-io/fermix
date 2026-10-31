@@ -399,6 +399,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dropped. Traces hold full request bodies and were never removed; Fermix now
   keeps 14 days of them and at most 1 GiB, removing the oldest days first
   when it starts and every hour.
+- **Submitting a form in Chrome sends that form.** When the field the agent
+  submitted from sat outside any form, as on many single-page sign-ins and
+  checkouts, Chrome sent the page's first form instead, often a search box or
+  a newsletter sign-up. Nothing is sent now, and the agent is told to click the
+  page's own submit button.
 
 ### Security
 

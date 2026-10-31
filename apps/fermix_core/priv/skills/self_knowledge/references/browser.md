@@ -156,6 +156,9 @@ fields filled. With `submit: true`, which `act` `kind: "fill_form"` takes too,
 Fermix then submits the form in the same call, so the result is the page the
 form led to, with the sign-in's receipt beside it as `fill`; the owner's
 approval is the same either way, and a sign-in that fails submits nothing.
+A submit sends only the form its field is in: from a field in no form it
+sends nothing and fails, and the agent clicks the page's own submit button
+instead.
 
 It works only in the Fermix app's own browser pane on a Mac with the app open,
 on an `https` page whose host is the saved site (a leading `www.` aside) or,
