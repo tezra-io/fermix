@@ -9,6 +9,7 @@ defmodule FermixCore.AgentLoopTest do
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.OpenAI.ChatCompletions
   alias FermixCore.Tools.Telemetry, as: ToolsTelemetry
@@ -258,6 +259,44 @@ defmodule FermixCore.AgentLoopTest do
           {:ok, result}
       end
     end
+  end
+
+  # Stands in for `browser`: registered under its name, so its results are
+  # framed as untrusted exactly as the real tool's are, it returns the result
+  # (or the error) the call scripts and asks `Tools.Browser` itself which results
+  # are looks at a page and how a superseded one reads.
+  defmodule PageTool do
+    @behaviour Tool
+
+    @impl true
+    def name, do: "browser"
+    @impl true
+    def description, do: "Returns the browser result the call scripts"
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}}
+
+    defdelegate page_look(result), to: FermixCore.Tools.Browser
+    defdelegate superseded_look(result), to: FermixCore.Tools.Browser
+
+    @impl true
+    def execute(%{"error" => message}, _ctx), do: {:ok, Tool.error(message)}
+    def execute(%{"result" => result}, _ctx), do: {:ok, Tool.success(Jason.encode!(result))}
+  end
+
+  # Returns the same scripted result as `PageTool` but asks nobody whether it
+  # is a look: a tool without the hooks never has a result replaced.
+  defmodule PageCopyTool do
+    @behaviour Tool
+
+    @impl true
+    def name, do: "page_copy"
+    @impl true
+    def description, do: "Returns the result the call scripts"
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}}
+
+    @impl true
+    def execute(%{"result" => result}, _ctx), do: {:ok, Tool.success(Jason.encode!(result))}
   end
 
   # -- Helpers --
@@ -3552,6 +3591,325 @@ defmodule FermixCore.AgentLoopTest do
       assert recalled.call_id == "call_r"
       assert recalled.output =~ "7: row 7: value 49"
       refute recalled.output =~ "row 8:"
+    end
+  end
+
+  # -- Only the newest look at a page stays in the run's history --
+
+  describe "run/1 superseded page looks" do
+    @page_a "https://example.com/a"
+
+    # A browser result carrying about `bytes` of page text, as a `snapshot`
+    # returns it (`Browser.Cdp.Backend.snapshot_result/2`).
+    defp look_result(target, url, word, bytes \\ 34_000) do
+      %{
+        "ok" => true,
+        "target" => target,
+        "url" => url,
+        "title" => "Page",
+        "ready_state" => "complete",
+        "snapshot" => String.duplicate("#{word} ", div(bytes, byte_size(word) + 1)),
+        "truncated" => false
+      }
+    end
+
+    defp look_call(call_id, result), do: tool_call(call_id, "browser", %{"result" => result})
+
+    defp browse(calls, opts \\ []), do: turn("", Keyword.merge([tool_calls: calls], opts))
+
+    defp substituted_ids(continue) do
+      (substitutions_of(continue) || %{}) |> Map.keys() |> Enum.sort()
+    end
+
+    defp answered_outputs({_state, results, _opts}),
+      do: Map.new(results, &{&1.call_id, &1.output})
+
+    defp marked_look(text) do
+      assert {:ok, inner} = UntrustedContent.unframe("browser", text)
+      Jason.decode!(inner)
+    end
+
+    test "nothing is replaced below the threshold; crossing it replaces every superseded look at once",
+         %{registry: registry} do
+      attach_loop_events()
+      register_caps(registry, [PageTool])
+
+      # 12,000 bytes of page text each: two superseded looks stay under the
+      # 32,000-byte threshold, the third crosses it.
+      set_mock_responses([
+        browse([look_call("c1", look_result("T1", @page_a, "PAGE-ONE", 12_000))]),
+        browse([look_call("c2", look_result("T1", @page_a, "PAGE-TWO", 12_000))]),
+        browse([look_call("c3", look_result("T1", @page_a, "PAGE-THREE", 12_000))]),
+        browse([look_call("c4", look_result("T1", @page_a, "PAGE-FOUR", 12_000))]),
+        turn("done")
+      ])
+
+      assert {:ok, %{response: "done"}} =
+               run_loop(
+                 capability_registry: registry,
+                 context_window: 1_000_000,
+                 trust: :operator
+               )
+
+      [c1, c2, c3, c4] = mock_continues()
+      assert Enum.all?([c1, c2, c3], &is_nil(substitutions_of(&1)))
+      assert substituted_ids(c4) == ["c1", "c2", "c3"]
+
+      subs = substitutions_of(c4)
+
+      for {call_id, word} <- [{"c1", "PAGE-ONE"}, {"c2", "PAGE-TWO"}, {"c3", "PAGE-THREE"}] do
+        refute subs[call_id] =~ word
+        look = marked_look(subs[call_id])
+        assert %{"target" => "T1", "url" => @page_a, "title" => "Page"} = look
+        assert look["snapshot"] =~ "a later look at the same page replaced it"
+      end
+
+      # the newest look is the step being answered, raw
+      assert answered_outputs(c4)["c4"] =~ "PAGE-FOUR"
+
+      raw_bytes =
+        [c1, c2, c3]
+        |> Enum.map(fn continue -> continue |> answered_outputs() |> Map.values() end)
+        |> List.flatten()
+        |> Enum.map(&byte_size/1)
+        |> Enum.sum()
+
+      marked_bytes = subs |> Map.values() |> Enum.map(&byte_size/1) |> Enum.sum()
+
+      assert_received {:loop_event, [:fermix, :agent_loop, :context_compaction],
+                       %{
+                         count: 1,
+                         results: 3,
+                         bytes_before: ^raw_bytes,
+                         bytes_after: ^marked_bytes
+                       }, %{agent: "test", iteration: 4, level: 1, trigger: :superseded_look}}
+
+      refute_received {:loop_event, [:fermix, :agent_loop, :context_compaction], _, _}
+    end
+
+    test "a look at another address or in another tab is never replaced", %{registry: registry} do
+      register_caps(registry, [PageTool])
+
+      set_mock_responses([
+        browse([look_call("c1", look_result("T1", @page_a, "PAGE-A"))]),
+        browse([
+          look_call("c2", look_result("T1", "https://example.com/b", "PAGE-B")),
+          look_call("c3", look_result("T2", @page_a, "PAGE-A-OTHER-TAB"))
+        ]),
+        # the same address as c1: only the fragment differs
+        browse([look_call("c4", look_result("T1", @page_a <> "#reviews", "PAGE-A-AGAIN"))]),
+        # not c2's address: the query differs
+        browse([look_call("c5", look_result("T1", "https://example.com/b?sort=1", "PAGE-B2"))]),
+        turn("done")
+      ])
+
+      assert {:ok, %{response: "done"}} =
+               run_loop(
+                 capability_registry: registry,
+                 context_window: 1_000_000,
+                 trust: :operator
+               )
+
+      [c1, c2, c3, c4] = mock_continues()
+      assert Enum.all?([c1, c2], &is_nil(substitutions_of(&1)))
+      assert substituted_ids(c3) == ["c1"]
+      assert substituted_ids(c4) == ["c1"]
+      assert marked_look(substitutions_of(c4)["c1"])["snapshot"] =~ @page_a
+    end
+
+    test "the step being answered is never touched, even where a later look in it supersedes one",
+         %{registry: registry} do
+      register_caps(registry, [PageTool, EchoTool])
+
+      set_mock_responses([
+        browse([look_call("c1", look_result("T1", @page_a, "PAGE-1"))]),
+        browse([
+          look_call("c2", look_result("T1", @page_a, "PAGE-2")),
+          look_call("c3", look_result("T1", @page_a, "PAGE-3"))
+        ]),
+        browse([tool_call("e1", "echo", %{"text" => "between"})]),
+        turn("done")
+      ])
+
+      assert {:ok, %{response: "done"}} =
+               run_loop(
+                 capability_registry: registry,
+                 context_window: 1_000_000,
+                 trust: :operator
+               )
+
+      [_c1, c2, c3] = mock_continues()
+
+      # c2 is superseded by c3 in the same step, the one being answered: it
+      # rides raw, and is replaced only once a later step is being answered
+      assert substituted_ids(c2) == ["c1"]
+      assert answered_outputs(c2)["c2"] =~ "PAGE-2"
+      assert answered_outputs(c2)["c3"] =~ "PAGE-3"
+      assert substituted_ids(c3) == ["c1", "c2"]
+    end
+
+    test "results of another tool and browser results that are not looks are never replaced",
+         %{registry: registry} do
+      register_caps(registry, [PageTool, PageCopyTool])
+
+      read_text = fn n ->
+        %{"ok" => true, "target" => "T1", "value" => String.duplicate("TEXT-#{n} ", 3_400)}
+      end
+
+      unchanged = %{
+        "ok" => true,
+        "target" => "T1",
+        "action" => "click",
+        "page" => "unchanged",
+        "url" => @page_a,
+        "ready_state" => "complete"
+      }
+
+      set_mock_responses([
+        browse([
+          look_call("c1", look_result("T1", @page_a, "PAGE-1")),
+          tool_call("copy1", "page_copy", %{"result" => look_result("T1", @page_a, "COPY-1")}),
+          look_call("get1", read_text.(1))
+        ]),
+        browse([
+          look_call("c2", look_result("T1", @page_a, "PAGE-2")),
+          tool_call("copy2", "page_copy", %{"result" => look_result("T1", @page_a, "COPY-2")}),
+          look_call("get2", read_text.(2)),
+          look_call("act1", unchanged),
+          tool_call("err1", "browser", %{"error" => "Snapshot unavailable (snapshot_unavailable)"})
+        ]),
+        browse([
+          look_call("c3", look_result("T1", @page_a, "PAGE-3")),
+          tool_call("copy3", "page_copy", %{"result" => look_result("T1", @page_a, "COPY-3")}),
+          look_call("get3", read_text.(3))
+        ]),
+        turn("done")
+      ])
+
+      assert {:ok, %{response: "done"}} =
+               run_loop(
+                 capability_registry: registry,
+                 context_window: 1_000_000,
+                 trust: :operator
+               )
+
+      [c1, c2, c3] = mock_continues()
+      assert is_nil(substitutions_of(c1))
+      assert substituted_ids(c2) == ["c1"]
+      assert substituted_ids(c3) == ["c1", "c2"]
+    end
+
+    test "what the replacement gave back counts toward the budget, so no digest follows it",
+         %{registry: registry} do
+      register_caps(registry, [PageTool, BigTool, EchoTool])
+
+      # 40,000-token window → 34,000-token budget. The request answering step 4
+      # starts from 30,000 measured tokens plus the new look's ~8,700: over the
+      # budget until the ~8,500 tokens the replaced look gave back are counted.
+      # Counted, nothing is digested; uncounted, step 1's big result would be.
+      set_mock_responses([
+        browse([
+          look_call("c1", look_result("T1", @page_a, "PAGE-1")),
+          tool_call("big", "big_tool", %{})
+        ]),
+        browse([tool_call("e2", "echo", %{"text" => "two"})]),
+        browse([tool_call("e3", "echo", %{"text" => "three"})]),
+        browse([look_call("c4", look_result("T1", @page_a, "PAGE-4"))], total_tokens: 30_000),
+        turn("done")
+      ])
+
+      assert {:ok, %{response: "done"}} =
+               run_loop(capability_registry: registry, context_window: 40_000, trust: :operator)
+
+      assert digest_calls() == []
+      assert substituted_ids(List.last(mock_continues())) == ["c1"]
+    end
+
+    test "the provider replays the marker in place of the superseded look's page text",
+         %{registry: registry} do
+      register_caps(registry, [PageTool])
+      test_pid = self()
+
+      completion = fn message ->
+        %{
+          "model" => "anthropic/claude-sonnet-4.6",
+          "choices" => [%{"message" => Map.put(message, "role", "assistant")}],
+          "usage" => %{"prompt_tokens" => 7, "completion_tokens" => 5, "total_tokens" => 12}
+        }
+      end
+
+      look_message = fn call_id, result ->
+        %{
+          "content" => nil,
+          "tool_calls" => [
+            %{
+              "id" => call_id,
+              "type" => "function",
+              "function" => %{
+                "name" => "browser",
+                "arguments" => Jason.encode!(%{"result" => result})
+              }
+            }
+          ]
+        }
+      end
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        messages = Jason.decode!(body)["messages"]
+
+        message =
+          case Enum.count(messages, &(&1["role"] == "tool")) do
+            0 ->
+              look_message.("c1", look_result("T1", @page_a, "PAGE-ONE"))
+
+            1 ->
+              look_message.("c2", look_result("T1", @page_a, "PAGE-TWO"))
+
+            2 ->
+              send(test_pid, {:replayed, messages})
+              %{"content" => "read it"}
+          end
+
+        Req.Test.json(conn, completion.(message))
+      end)
+
+      route_key = %{
+        provider: :openrouter,
+        model: "anthropic/claude-sonnet-4.6",
+        auth_mode: :api_key,
+        base_url: "https://openrouter.ai/api/v1"
+      }
+
+      assert {:ok, %{response: "read it"}} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "read the page"}],
+                 routes: [
+                   {route_key,
+                    [
+                      api_key: "sk-or-test",
+                      provider: :openrouter,
+                      auth: :api_key,
+                      model: "anthropic/claude-sonnet-4.6",
+                      base_url: "https://openrouter.ai/api/v1",
+                      req_options: [plug: {Req.Test, __MODULE__}]
+                    ]}
+                 ],
+                 capability_registry: registry,
+                 trust: :operator,
+                 context_window: 1_000_000,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      assert_receive {:replayed, messages}
+      assert [first, second] = Enum.filter(messages, &(&1["role"] == "tool"))
+
+      assert first["tool_call_id"] == "c1"
+      refute first["content"] =~ "PAGE-ONE"
+      assert marked_look(first["content"])["snapshot"] =~ "a later look at the same page"
+
+      assert second["tool_call_id"] == "c2"
+      assert second["content"] =~ "PAGE-TWO"
     end
   end
 end
