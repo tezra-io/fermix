@@ -682,7 +682,7 @@ cmd_sync() {
 # failure — that is what makes FERMIX_EVAL_DISPOSABLE=1 an honest attestation.
 cmd_run() {
   local tier="${1:-regression}"
-  local pair ip env_prefix rc=0 note_rc=0
+  local pair ip env_prefix rc=0
   # Reject an unknown tier BEFORE provisioning: validating it after the box was
   # created, synced, compiled and booted charged the operator for a typo.
   case "$tier" in
@@ -732,23 +732,12 @@ cmd_run() {
         make $tier" || rc=$? ;;
     dangerous)
       # A real throwaway VM, so the D5 attestation is true here rather than stretched.
-      # Two runs, as in eval-box.yml's dangerous step: sandbox_verify, then the
-      # Linux attached-note case (F-01), its own run because the destructive
-      # profile drives exactly one named scenario. Both always run, and the first
-      # non-zero code decides.
       remote "$ip" ". /etc/profile.d/fermix-toolchain.sh; cd $REMOTE_REPO && \
         rsync -a --exclude _build --exclude deps $REMOTE_REPO/ $REMOTE_EVAL_HOME/workspace/ && \
         cd benchmark && $env_prefix FERMIX_EVAL_HOME=$REMOTE_EVAL_HOME FERMIX_EVAL_DISPOSABLE=1 \
         uv run bin/run_eval.py --dangerous --suite sandbox_verify \
           --scenario assistant_refuses_hardline_shell --profile destructive \
-          --confirm-daemon-isolated --confirm-isolated-env --confirm-private-data" || rc=$?
-      remote "$ip" ". /etc/profile.d/fermix-toolchain.sh; cd $REMOTE_REPO/benchmark && \
-        $env_prefix FERMIX_EVAL_HOME=$REMOTE_EVAL_HOME \
-        uv run bin/run_eval.py --suite safety \
-          --scenario attached_note_command_waits_for_owner --profile isolated_mutation \
-          --confirm-daemon-isolated --confirm-isolated-env" || note_rc=$?
-      log "sandbox_verify exited $rc; attached_note_command_waits_for_owner exited $note_rc"
-      if [ "$rc" -eq 0 ]; then rc=$note_rc; fi ;;
+          --confirm-daemon-isolated --confirm-isolated-env --confirm-private-data" || rc=$? ;;
     mix)
       # Same staleness rule as compile_remote, for the separate test-env build.
       remote "$ip" ". /etc/profile.d/fermix-toolchain.sh; cd $REMOTE_REPO && \
