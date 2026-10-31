@@ -35,6 +35,12 @@ defmodule FermixCore.Home.MoveReadinessTest do
 
     [fermix_channels.slack]
     enabled = true
+
+    [fermix_channels.imessage]
+    enabled = true
+
+    [fermix_core.meetings]
+    enabled = true
     """)
 
     File.mkdir_p!(Path.join(home, "plugins"))
@@ -93,7 +99,10 @@ defmodule FermixCore.Home.MoveReadinessTest do
              "These plugins have no build for north-box, so they stop working after the " <>
                "move: invented-notes."
 
-    assert sentence.("stays_here") =~ "iMessage"
+    # Only what this home uses of what runs here alone is named.
+    assert sentence.("stays_here") ==
+             "iMessage and meetings stop after the move: neither this Mac nor north-box " <>
+               "runs them."
 
     assert sentence.("whatsapp") ==
              "WhatsApp stops after the move: it needs an address on the internet that " <>
@@ -134,6 +143,9 @@ defmodule FermixCore.Home.MoveReadinessTest do
 
     assert %{status: :ok, sentence: "No coding agent has your approval on this computer."} =
              item.("coding_agents")
+
+    assert %{status: :ok, sentence: "iMessage, voice calls and meetings are not turned on."} =
+             item.("stays_here")
 
     File.write!(Path.join(ctx.home, "config.toml"), "")
     assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
@@ -179,6 +191,30 @@ defmodule FermixCore.Home.MoveReadinessTest do
     assert secrets =~ "anthropic_api_key"
     assert version =~ "north-box runs an older Fermix"
     assert disk =~ "make room first"
+  end
+
+  test "on a Linux computer, voice calls on are named, and iMessage never is", ctx do
+    File.write!(Path.join(ctx.home, "config.toml"), """
+    [fermix_core.realtime]
+    enabled = true
+
+    [fermix_channels.imessage]
+    enabled = true
+    """)
+
+    linux = Keyword.put(opts(ctx), :host, "linux-x86_64")
+    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, linux)
+
+    assert %{status: :warn, sentence: sentence} = item_in(items, "stays_here")
+
+    assert sentence ==
+             "Voice calls stop after the move: neither this computer nor north-box runs them."
+
+    File.write!(Path.join(ctx.home, "config.toml"), "")
+    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, linux)
+
+    assert %{status: :ok, sentence: "Voice calls and meetings are not turned on."} =
+             item_in(items, "stays_here")
   end
 
   test "a home over one S3 upload warns where the server keeps snapshots in S3", ctx do

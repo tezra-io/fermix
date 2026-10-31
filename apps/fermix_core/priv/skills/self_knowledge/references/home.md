@@ -280,8 +280,10 @@ it, never a second writer.
   a home over one S3 upload (5 GiB) when the server keeps snapshots in S3
   (warns: it would never back up there); on a server of another system, the
   plugins the catalog has no build of for it (warns, named: they stop
-  working; the server installs every other one again itself); voice calls
-  and meetings, and iMessage on a Mac, stopping after the move; WhatsApp
+  working; the server installs every other one again itself); what this
+  home has turned on that runs only here stopping after the move, each named
+  (iMessage on a Mac, voice calls, meetings; nothing to warn of when none is
+  on); WhatsApp
   turned on (warns: it needs an address on the internet the server does not
   have, so it stops); Slack turned on without Socket Mode (warns: it stops
   unless switched to Socket Mode in the Slack app's settings and Fermix's);
@@ -599,7 +601,9 @@ it, never a second writer.
   primary, a candidate, the relay, the rail or a phase. Its states:
   - before the move, on the computer that sets it up: nothing set up ("Keep
     Fermix running when this Mac sleeps. It moves to a server you own.", with
-    what stops after the move, and **Set up**); the token step ("Paste a
+    a second line only when this home uses something that stops after the
+    move, naming only that: iMessage on a Mac, voice calls, meetings; and
+    **Set up**); the token step ("Paste a
     Hetzner API token…", whose How to get one says to turn on two-factor
     sign-in in Hetzner and make a project for Fermix alone); the token works
     (choose the server); creating (starting, installing Fermix, connecting,

@@ -871,7 +871,8 @@ defmodule FermixCore.Management.CopyTest do
       percent: 90,
       provider: "Hetzner",
       block: "This home is about 4 GiB; the move needs about 9 GiB free.",
-      location: "nbg1"
+      location: "nbg1",
+      stays_here: [:imessage, :voice, :meetings]
     }
 
     sentences =

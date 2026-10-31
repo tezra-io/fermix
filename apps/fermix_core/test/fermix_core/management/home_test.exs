@@ -167,6 +167,34 @@ defmodule FermixCore.Management.HomeTest do
       assert status["version"] == "9.9.9"
     end
 
+    test "off names what this home uses that stops after the move, read from its settings",
+         %{home: home} do
+      File.write!(Path.join(home, "config.toml"), """
+      [fermix_channels.imessage]
+      enabled = true
+
+      [fermix_core.realtime]
+      enabled = false
+
+      [fermix_core.meetings]
+      enabled = true
+      """)
+
+      assert {:ok, %{"summary" => summary}} =
+               route("home.status", %{}, opts(home, host_os: :macos))
+
+      assert summary["sentence"] ==
+               "Keep Fermix running when this Mac sleeps. It moves to a server you own. " <>
+                 "iMessage and meetings stop after the move."
+
+      File.write!(Path.join(home, "config.toml"), "")
+
+      assert {:ok, %{"summary" => %{"sentence" => sentence}}} =
+               route("home.status", %{}, opts(home, host_os: :macos))
+
+      assert sentence == "Keep Fermix running when this Mac sleeps. It moves to a server you own."
+    end
+
     test "the ledger's token makes choose, and its created server waiting makes ready, " <>
            "with the last review's warnings",
          %{home: home} do

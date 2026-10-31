@@ -124,9 +124,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   With Reach from anywhere on, Always On on your primary gives an enrollment
   code, good once for thirty minutes; a server enrolled with it waits for the
   move, and you review the move (the secrets that travel, the server's Fermix,
-  free disk, the plugins with no build for the server, and what stops:
-  iMessage, voice calls and meetings, WhatsApp, and Slack unless it uses
-  Socket Mode; coding agents ask for your approval again on the server) and
+  free disk, the plugins with no build for the server, and what stops: those
+  of iMessage, voice calls and meetings you use, WhatsApp, and Slack unless it
+  uses Socket Mode; coding agents ask for your approval again on the server) and
   start it from the app with a recovery passphrase. Your Mac (or Linux
   computer) stays awake while the move runs, and only then. The computer the
   home left stays a desktop of the server: the app's chat and Fermix-wide

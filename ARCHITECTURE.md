@@ -503,7 +503,9 @@ in `mobile/candidates.json` (`Home.Candidates`, at most four, 24 hours);
 and `move` places of `home.status`. `Home.MoveReadiness` is the report the
 owner reviews (keychain secrets, engine versions, free disk, the S3 upload
 bound, the plugins the catalog has no build of for the server, what stops:
-iMessage, voice calls and meetings, WhatsApp, and Slack without Socket Mode;
+those of iMessage, voice calls and meetings the home has turned on
+(`MoveReadiness.stays_here/2`, which the summary's `off` line reads too),
+WhatsApp, and Slack without Socket Mode;
 coding agents asking for approval again, read from `config.toml`; the
 cutover gap) and
 `Home.Move.start/5` refuses while an item blocks; the review is kept in

@@ -27,8 +27,9 @@ defmodule FermixCore.Home.MoveReadiness do
       named: they stop working after the move. The server installs every
       other one again for itself right after the move
       (`FermixCore.Plugins.Dist.Reinstall`), through the plugin installer;
-    * `stays_here`: voice calls and meetings, and iMessage on a Mac, stop after
-      the move;
+    * `stays_here`: what the home has turned on that runs only on this
+      computer (iMessage on a Mac, voice calls, meetings; `stays_here/2`)
+      stops after the move, each named; with none of them on it is `ok`;
     * `whatsapp`: WhatsApp turned on warns: it needs an inbound address Meta
       can reach, which the server does not have, so it stops after the move;
     * `slack`: Slack turned on in its Events (webhook) mode warns for the
@@ -54,6 +55,7 @@ defmodule FermixCore.Home.MoveReadiness do
   alias FermixCore.Home.Disk
   alias FermixCore.Home.MoveSecrets
   alias FermixCore.Home.Snapshot.S3
+  alias FermixCore.Management.Copy
   alias FermixCore.Plugins.Dist.Index
 
   require Logger
@@ -83,7 +85,7 @@ defmodule FermixCore.Home.MoveReadiness do
       disk(home, home_bytes, name, opts),
       s3_size(candidate, home_bytes),
       plugins(home, host, candidate, opts),
-      stays_here(host, name),
+      stays_here_item(config, host, name),
       whatsapp(config, name),
       slack(config, name),
       coding_agents(config, name),
@@ -97,6 +99,18 @@ defmodule FermixCore.Home.MoveReadiness do
     ]
 
     %{ready: not Enum.any?(items, &(&1.status == :block)), items: items}
+  end
+
+  @doc """
+  What the home at `home` has turned on that runs only on this computer and
+  stops after a move, read from its settings: iMessage (only when `macos?`),
+  voice calls and meetings, in that order; or the sentence that says the
+  settings could not be read (logged).
+  """
+  @spec stays_here(Path.t(), boolean()) ::
+          {:ok, [:imessage | :voice | :meetings]} | {:error, String.t()}
+  def stays_here(home, macos?) when is_binary(home) and is_boolean(macos?) do
+    with {:ok, text} <- read_config(home), do: {:ok, features(text, macos?)}
   end
 
   @doc "The block sentences of `report`, in order; none when it is ready."
@@ -323,23 +337,36 @@ defmodule FermixCore.Home.MoveReadiness do
           "#{Enum.join(names, ", ")}."
       )
 
-  defp stays_here("macos-" <> _arch, name),
-    do:
-      item(
-        "stays_here",
-        :warn,
-        "iMessage, voice calls and meetings stop after the move: neither this Mac nor " <>
-          "#{name} runs them."
-      )
+  defp stays_here_item({:ok, text}, host, name) do
+    macos? = String.starts_with?(host, "macos-")
 
-  defp stays_here(_host, name),
-    do:
-      item(
-        "stays_here",
-        :warn,
-        "Voice calls and meetings stop after the move: neither this computer nor " <>
-          "#{name} runs them."
-      )
+    case features(text, macos?) do
+      [] -> item("stays_here", :ok, none_on(macos?))
+      features -> item("stays_here", :warn, stops(features, macos?, name))
+    end
+  end
+
+  defp stays_here_item({:error, sentence}, _host, _name), do: item("stays_here", :warn, sentence)
+
+  defp stops(features, macos?, name) do
+    machine = if macos?, do: "Mac", else: "computer"
+    them = if features == [:imessage], do: "it", else: "them"
+    "#{Copy.stops_after_move(features)}: neither this #{machine} nor #{name} runs #{them}."
+  end
+
+  defp none_on(true), do: "iMessage, voice calls and meetings are not turned on."
+  defp none_on(false), do: "Voice calls and meetings are not turned on."
+
+  # iMessage runs only on a Mac, so another computer never names it.
+  defp features(text, macos?) do
+    [
+      imessage: macos? and on?(text, "fermix_channels.imessage", "enabled"),
+      voice: on?(text, "fermix_core.realtime", "enabled"),
+      meetings: on?(text, "fermix_core.meetings", "enabled")
+    ]
+    |> Enum.filter(fn {_feature, on} -> on end)
+    |> Enum.map(fn {feature, _on} -> feature end)
+  end
 
   # WhatsApp's Cloud API reaches Fermix only at an inbound address, and the
   # server takes no inbound connection.

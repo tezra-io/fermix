@@ -25,11 +25,21 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
     [
       {"a home with nothing", facts([]), "off",
+       "Keep Fermix running when this Mac sleeps. It moves to a server you own.", "set_up"},
+      {"a home that uses iMessage and meetings", facts(stays_here: [:imessage, :meetings]), "off",
+       "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage and " <>
+         "meetings stop after the move.", "set_up"},
+      {"a home that uses all three", facts(stays_here: [:imessage, :voice, :meetings]), "off",
        "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage, " <>
          "voice calls and meetings stop after the move.", "set_up"},
+      {"a home that uses only iMessage", facts(stays_here: [:imessage]), "off",
+       "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage " <>
+         "stops after the move.", "set_up"},
       {"a Linux home with nothing", facts(host_os: :linux), "off",
+       "Keep Fermix running when this computer sleeps. It moves to a server you own.", "set_up"},
+      {"a Linux home with voice calls on", facts(host_os: :linux, stays_here: [:voice]), "off",
        "Keep Fermix running when this computer sleeps. It moves to a server you own. Voice " <>
-         "calls and meetings stop after the move.", "set_up"},
+         "calls stop after the move.", "set_up"},
       {"a code for a server of the owner's own", facts(link: link(enrollment: manual(:open))),
        "connect", "Paste a Hetzner API token to let Fermix create your server.", nil},
       {"a token Hetzner refused before anything was made",
@@ -113,8 +123,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
        ready_facts(move: move("aborted"), link: link(enrollment: provisioned(:used, @cand))),
        "undone", "The move was undone. Fermix still runs on this Mac.", "try_again"},
       {"a move undone long ago, nothing held", facts(move: move("aborted")), "off",
-       "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage, " <>
-         "voice calls and meetings stop after the move.", "set_up"}
+       "Keep Fermix running when this Mac sleeps. It moves to a server you own.", "set_up"}
     ]
   end
 
@@ -610,7 +619,8 @@ defmodule FermixCore.Management.HomeSummaryTest do
         disk: nil,
         primary_home: nil,
         primary_too_old: false,
-        copies_bytes: nil
+        copies_bytes: nil,
+        stays_here: []
       },
       Map.new(overrides)
     )

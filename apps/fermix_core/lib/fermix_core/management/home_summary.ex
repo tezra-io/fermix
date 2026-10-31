@@ -59,6 +59,7 @@ defmodule FermixCore.Management.HomeSummary do
 
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Move
+  alias FermixCore.Home.MoveReadiness
   alias FermixCore.Home.Provision.Ledger
   alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Management.Copy
@@ -96,7 +97,8 @@ defmodule FermixCore.Management.HomeSummary do
           disk: map() | nil,
           primary_home: map() | nil,
           primary_too_old: boolean(),
-          copies_bytes: non_neg_integer() | nil
+          copies_bytes: non_neg_integer() | nil,
+          stays_here: [:imessage | :voice | :meetings]
         }
   @type summary :: %{String.t() => term()}
 
@@ -123,15 +125,18 @@ defmodule FermixCore.Management.HomeSummary do
   The facts of `home`'s summary: `status` is the `home.status` record's own
   facts (`Management.Home.status/1` has gathered them, with
   `primary_too_old`), `link` the rail's status, and `opts` the seams `:now`
-  and `:host_os`. Reads the ledger, the last readiness review and, on a
+  and `:host_os`. Reads the ledger, the last readiness review, on the
+  primary what its settings turn on that stops after a move, and, on a
   desktop, the size of its stored copies.
   """
   @spec gather(Path.t(), map(), map(), map(), keyword()) :: facts()
   def gather(home, %{role: role} = record, link, status, opts)
       when is_binary(home) and is_map(link) and is_map(status) and is_list(opts) do
+    host_os = Keyword.get_lazy(opts, :host_os, &host_os/0)
+
     %{
       role: role,
-      host_os: Keyword.get_lazy(opts, :host_os, &host_os/0),
+      host_os: host_os,
       now: Keyword.get_lazy(opts, :now, &DateTime.utc_now/0),
       linked: DesktopLink.linked?(record, home),
       moved: status.moved,
@@ -144,7 +149,8 @@ defmodule FermixCore.Management.HomeSummary do
       disk: status.disk,
       primary_home: status.primary_home,
       primary_too_old: Map.get(status, :primary_too_old, false),
-      copies_bytes: copies_bytes(home, role)
+      copies_bytes: copies_bytes(home, role),
+      stays_here: stays_here(home, role, host_os)
     }
   end
 
@@ -278,7 +284,7 @@ defmodule FermixCore.Management.HomeSummary do
   defp chosen(_facts), do: nil
 
   defp off(facts) do
-    view("off", sentence(:off, facts), action(:set_up), %{
+    view("off", sentence(:off, facts, %{stays_here: facts.stays_here}), action(:set_up), %{
       "connect" => Map.put(connect_detail(), "sentence", sentence(:connect, facts))
     })
   end
@@ -757,6 +763,16 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp review(_home, _role), do: nil
+
+  # What stops after a move, which only the computer that sets it up says.
+  defp stays_here(home, :primary, host_os) do
+    case MoveReadiness.stays_here(home, host_os == :macos) do
+      {:ok, features} -> features
+      {:error, _sentence} -> []
+    end
+  end
+
+  defp stays_here(_home, _role, _host_os), do: []
 
   # The space the server's backups take on this desktop (`Desktop.SnapshotStore`).
   defp copies_bytes(home, :device) do

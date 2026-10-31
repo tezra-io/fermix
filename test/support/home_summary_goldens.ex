@@ -153,7 +153,8 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         disk: facts.disk,
         primary_home: facts.primary_home,
         primary_too_old: false,
-        copies_bytes: Map.get(extra, :copies_bytes)
+        copies_bytes: Map.get(extra, :copies_bytes),
+        stays_here: []
       })
 
     Home.picture(Map.put(facts, :summary, summary))

@@ -60,6 +60,8 @@ defmodule FermixCore.Management.Copy do
   # The engine's own words for the move, which no summary word may carry.
   @internal_words ~r/\b(?:epochs?|primar(?:y|ies)|candidates?|relays?|rails?|phases?|ledgers?|key ids?)\b/i
   @cities %{"fsn1" => "Falkenstein", "nbg1" => "Nuremberg", "hel1" => "Helsinki"}
+  # What runs only on the computer a move leaves, in the order it is named.
+  @stays_here [imessage: "iMessage", voice: "voice calls", meetings: "meetings"]
   @summary_keys ~w(off connect choose starting installing connecting deleting ready moving
                    waiting on on_backup on_no_backup undone retired candidate_waiting
                    candidate_receiving primary turned_off cannot_reach deleted not_set_up
@@ -241,18 +243,15 @@ defmodule FermixCore.Management.Copy do
   @doc """
   One sentence of `home.status.summary`, by its key, with the values it
   names: `machine` ("Mac" or "computer"), `age` (seconds since the last
-  backup), `days`, `percent`, `block` (a readiness sentence) or `provider`.
+  backup), `days`, `percent`, `block` (a readiness sentence), `provider` or
+  `stays_here` (what this home uses that stops after a move, `off`'s second
+  line only when there is something).
   """
   @spec summary_sentence(atom(), map()) :: String.t()
-  def summary_sentence(:off, %{machine: "Mac"}),
+  def summary_sentence(:off, %{machine: machine, stays_here: features}),
     do:
-      "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage, " <>
-        "voice calls and meetings stop after the move."
-
-  def summary_sentence(:off, %{machine: machine}),
-    do:
-      "Keep Fermix running when this #{machine} sleeps. It moves to a server you own. Voice " <>
-        "calls and meetings stop after the move."
+      "Keep Fermix running when this #{machine} sleeps. It moves to a server you own." <>
+        stops_line(features)
 
   def summary_sentence(:connect, _values),
     do: "Paste a Hetzner API token to let Fermix create your server."
@@ -378,6 +377,30 @@ defmodule FermixCore.Management.Copy do
       "Your conversations and memories, the secrets, the browser and traces live on your " <>
         "server, and #{provider} can technically read its disk. Backups are encrypted to " <>
         "your recovery passphrase."
+
+  @doc """
+  What a move stops among `features` (`:imessage`, `:voice`, `:meetings`),
+  as a sentence starts: "iMessage, voice calls and meetings stop after the
+  move", "Voice calls stop after the move".
+  """
+  @spec stops_after_move([:imessage | :voice | :meetings, ...]) :: String.t()
+  def stops_after_move([_ | _] = features) do
+    names = for {feature, name} <- @stays_here, feature in features, do: name
+    true = length(names) == length(Enum.uniq(features))
+    verb = if features == [:imessage], do: "stops", else: "stop"
+
+    "#{names |> join_names() |> capitalised()} #{verb} after the move"
+  end
+
+  defp stops_line([]), do: ""
+  defp stops_line(features), do: " #{stops_after_move(features)}."
+
+  defp join_names([name]), do: name
+  defp join_names(names), do: Enum.join(Enum.drop(names, -1), ", ") <> " and " <> List.last(names)
+
+  # A sentence's first letter, unless the first word is iMessage.
+  defp capitalised("iMessage" <> _rest = text), do: text
+  defp capitalised(<<first::utf8, rest::binary>>), do: String.upcase(<<first::utf8>>) <> rest
 
   @doc """
   The label of one summary action, by its id; `create_in` names the city of
