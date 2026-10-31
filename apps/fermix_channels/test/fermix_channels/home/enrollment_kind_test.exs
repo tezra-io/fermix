@@ -67,13 +67,52 @@ defmodule FermixChannels.Home.EnrollmentKindTest do
     assert secret(ctx.primary) == {:ok, facts.secret}
   end
 
-  test "the server's window, once used, makes room for a copied code", ctx do
+  # The window is the binding between the server Fermix created and the
+  # candidate it enrolled as: a copied code would replace it and lose the
+  # candidate's id, so it waits while that candidate is held.
+  test "the server's used window holds a copied code back while its candidate is held", ctx do
     {:ok, _code} = Enrollment.open(ctx.primary.enrollment, :provisioned)
-    :ok = Enrollment.take(ctx.primary.enrollment, :binary.copy(<<7>>, 32))
-    assert %{state: :used, kind: :provisioned} = Enrollment.status(ctx.primary.enrollment)
+    HomeMove.advance!(ctx.primary, 600)
+    remote = :binary.copy(<<7>>, 32)
+    :ok = Enrollment.take(ctx.primary.enrollment, remote)
 
+    # Enrolling: the code is used and its candidate not yet recorded.
+    assert {:error, {:unavailable, waits}} = Enrollment.open(ctx.primary.enrollment, :manual)
+
+    {:ok, %{candidate_id: id}} = Enrollment.enroll(ctx.primary.enrollment, request(), remote)
+
+    assert %{state: :used, kind: :provisioned, candidate_id: ^id} =
+             Enrollment.status(ctx.primary.enrollment)
+
+    assert {:error, {:unavailable, ^waits}} = Enrollment.open(ctx.primary.enrollment, :manual)
+
+    assert waits ==
+             "Your new server waits for its move with the code Fermix gave it, so Fermix " <>
+               "opens no other code until you move to it or delete it."
+
+    assert Copy.violations(waits, :prose) == []
+
+    # Past the window's own 24 hours the candidate is still held.
+    HomeMove.advance!(ctx.primary, 86_400 - 600 + 1)
+    assert {:error, {:unavailable, ^waits}} = Enrollment.open(ctx.primary.enrollment, :manual)
+
+    # Once the primary no longer holds it, a copied code opens.
+    HomeMove.advance!(ctx.primary, 600)
     assert {:ok, _manual} = Enrollment.open(ctx.primary.enrollment, :manual)
     assert %{state: :open, kind: :manual} = Enrollment.status(ctx.primary.enrollment)
+  end
+
+  test "withdrawing the server's used window lets a copied code open", ctx do
+    {:ok, _code} = Enrollment.open(ctx.primary.enrollment, :provisioned)
+    remote = :binary.copy(<<7>>, 32)
+    :ok = Enrollment.take(ctx.primary.enrollment, remote)
+    {:ok, _enrolled} = Enrollment.enroll(ctx.primary.enrollment, request(), remote)
+
+    assert :ok = Enrollment.withdraw(ctx.primary.enrollment)
+    assert kept(ctx.primary)["withdrawn"] == true
+
+    restart!(ctx.primary.enrollment)
+    assert {:ok, _manual} = Enrollment.open(ctx.primary.enrollment, :manual)
   end
 
   test "a created server's window replaces a copied code and an earlier server's window", ctx do
@@ -134,6 +173,23 @@ defmodule FermixChannels.Home.EnrollmentKindTest do
   end
 
   defp secret(primary), do: Enrollment.secret(primary.enrollment)
+
+  # What the created server's first boot sends when it enrolls; invented.
+  defp request do
+    %{
+      "host" => %{
+        "name" => "fermix-general-a3f9",
+        "os" => "linux",
+        "arch" => "x86_64",
+        "version" => "9.9.9"
+      },
+      "candidate" => %{
+        "node_id" => String.duplicate("cd", 32),
+        "relays" => [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+        "recipient" => Base.encode64(:binary.copy(<<3>>, 32))
+      }
+    }
+  end
 
   defp decoded_secret(code) do
     {:ok, facts} = EnrollmentCode.decode(code)

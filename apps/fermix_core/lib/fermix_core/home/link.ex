@@ -56,17 +56,19 @@ defmodule FermixCore.Home.Link do
   the code and when it expires: `:manual` (`home.enroll.open`, thirty
   minutes) or `:provisioned` (the code inside a server Fermix creates, 24
   hours, M75 lean v1 L15). One window at a time; opening another replaces it,
-  except that a manual one is refused while a provisioned one is open. A
-  refusal carries the sentence a person is shown.
+  except that a manual one is refused while a provisioned one is open, and
+  while a used one's candidate is still held. A refusal carries the sentence
+  a person is shown.
   """
   @callback open_enrollment(:manual | :provisioned) ::
               {:ok, %{code: String.t(), expires_at: DateTime.t()}}
               | {:error, {:unavailable, String.t()}}
 
   @doc """
-  Closes the primary's provisioned window while it is open (the server it
-  was opened for was never created, or is being deleted); any other window,
-  or none, and any other role, is left as it is.
+  Releases the primary's provisioned window (the server it was opened for
+  was never created, or is being deleted): an open one ends, a used one no
+  longer holds a manual code back. A manual window, or none, and any other
+  role, is left as it is.
   """
   @callback withdraw_enrollment() :: :ok | {:error, {:unavailable, String.t()}}
 

@@ -225,8 +225,10 @@ it, never a second writer.
   a one-time secret, the primary's gateway key, its iroh endpoint id and
   relays, its name and when the window closes. The window lasts thirty
   minutes (time for a cloud server to boot), takes one server, and opening
-  another replaces it, except while the 24-hour window of a server Fermix
-  created on Hetzner waits for it, when a new code is refused; the code is
+  another replaces it, except while a server Fermix created on Hetzner waits
+  on its own 24-hour code (until it enrolls, and then while the primary holds
+  it for its move), when a new code is refused; deleting that server lets a
+  new code open again; the code is
   shown once and never logged, and the
   window is kept on this machine (`mobile/enrollment.json`, 0600, never in a
   snapshot) so an engine restart before the server checks in loses nothing.

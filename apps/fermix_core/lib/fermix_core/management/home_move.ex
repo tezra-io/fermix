@@ -9,8 +9,8 @@ defmodule FermixCore.Management.HomeMove do
     manual one of thirty minutes, replacing an open one, through the rail
     (`FermixCore.Home.Link.impl().open_enrollment/1`), and answers the code
     and when it expires; while a server Fermix created waits on its own
-    24-hour window (M75 lean v1 L15), it is refused with the rail's
-    sentence. The code is answered once and never logged or kept in a
+    24-hour window (M75 lean v1 L15), and while it is held as the candidate
+    that window enrolled, it is refused with the rail's sentence. The code is answered once and never logged or kept in a
     status.
   - `home.candidates.list` answers the candidates the primary holds
     (`FermixCore.Home.Candidates`), never their keys.
