@@ -74,6 +74,15 @@ defmodule FermixChannels.Desktop.LoopbackForwardTest do
     end
   end
 
+  # The desktop's own port for `port`, once it listens there. `{:bound, ...}`
+  # comes from inside the desktop's `loopback_open`, before it listens; its
+  # answer to `listening/1` comes after it has served that event.
+  defp desktop_port(ctx, port) do
+    assert_receive {:bound, ^port, desktop_port}
+    assert [{_id, [^port]}] = Map.to_list(Loopback.listening(ctx.name))
+    desktop_port
+  end
+
   defp provider do
     %OAuthProvider{
       id: :mcp,
@@ -142,7 +151,7 @@ defmodule FermixChannels.Desktop.LoopbackForwardTest do
 
     assert_receive {:to_desktop, "loopback_open", %{"ports" => [^port], "expires_in_s" => s}, _}
     assert s > 0 and s <= 900
-    assert_receive {:bound, ^port, desktop_port}
+    desktop_port = desktop_port(ctx, port)
 
     {status, head, body} = browse(desktop_port, port, "/callback?code=c1&state=#{state}")
     assert status == 200
@@ -196,7 +205,7 @@ defmodule FermixChannels.Desktop.LoopbackForwardTest do
     start_desktop(ctx, bind_port: free_port_for(ctx.me))
     task = sign_in(ctx)
     {port, _state} = authorize_params()
-    assert_receive {:bound, ^port, desktop_port}
+    desktop_port = desktop_port(ctx, port)
 
     # Not the callback, so the listener answers each and keeps waiting.
     for _n <- 1..8 do
