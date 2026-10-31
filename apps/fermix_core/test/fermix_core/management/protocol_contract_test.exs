@@ -17,6 +17,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Home.Candidates, as: HomeCandidates
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move, as: HomeMove
+  alias FermixCore.Home.Provision.Driver, as: ProvisionDriver
   alias FermixCore.Home.Provision.Hetzner, as: ProvisionHetzner
   alias FermixCore.Home.Provision.Ledger, as: ProvisionLedger
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
@@ -1512,7 +1513,12 @@ defmodule FermixCore.Management.ProtocolContractTest do
       request = %{type: "cpx22", location: "fsn1", profile: "general"}
 
       {:ok, _server} =
-        ProvisionHetzner.create(home, request, provision_host_opts(stub) ++ code_seams())
+        ProvisionDriver.create(
+          ProvisionHetzner,
+          home,
+          request,
+          provision_host_opts(stub) ++ code_seams()
+        )
     end
 
     home
@@ -1530,7 +1536,12 @@ defmodule FermixCore.Management.ProtocolContractTest do
     request = %{type: "cpx32", location: "hel1", profile: "general"}
 
     {:ok, _server} =
-      ProvisionHetzner.create(home, request, provision_host_opts(stub) ++ code_seams())
+      ProvisionDriver.create(
+        ProvisionHetzner,
+        home,
+        request,
+        provision_host_opts(stub) ++ code_seams()
+      )
 
     home
   end

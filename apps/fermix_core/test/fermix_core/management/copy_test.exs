@@ -833,25 +833,22 @@ defmodule FermixCore.Management.CopyTest do
       {:code_refused, "unavailable"},
       {:withdraw_refused, "unavailable"},
       {:old_server, :unauthorized},
-      {:old_server, Hetzner.error({:refused, 500, "server_error", "Hetzner had a hiccup."})}
-    ]
-
-    # Hetzner's own refusals, as the shared kind each becomes.
-    hetzner = [
+      {:old_server, Hetzner.error({:refused, 422, "server_error", "Hetzner had a hiccup."})},
+      # What the driver answers around a provider's primitives.
       {:ineligible_type, "cpx12"},
-      {:refused, 422, "invalid_input", "invalid input in field 'server_type'"},
-      {:action_failed, "create_server", "server placement failed"},
-      {:action_timeout, "start_server"},
-      :forbidden,
+      {:action_failed, :create, "server placement failed"},
+      {:action_timeout, :start},
       :no_image,
-      :too_many_types,
-      :resource_unavailable,
+      :no_capacity,
       :not_found,
-      :resource_in_use
+      :resource_in_use,
+      # Hetzner's own refusals, in its words.
+      Hetzner.error({:refused, 422, "invalid_input", "invalid input in field 'server_type'"}),
+      Hetzner.error(:too_many_types)
     ]
 
     for provider <- ProvisionRegistry.all(),
-        reason <- reasons ++ Enum.map(hetzner, &Hetzner.error/1),
+        reason <- reasons,
         do: {reason, Provision.error_sentence(reason, provider)}
   end
 

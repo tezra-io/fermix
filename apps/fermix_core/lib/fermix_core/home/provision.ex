@@ -1,102 +1,180 @@
 defmodule FermixCore.Home.Provision do
   @moduledoc """
   The contract every cloud provider Always On creates a server on implements
-  (M75 lean v1 §4.3, L1, L2): one behaviour in the engine, so both apps and
-  the CLI share one implementation over management
-  (`FermixCore.Management.Provision`, `home.provision.*`). This is where a new
-  provider plugs in: a module implementing the callbacks below, listed in
-  `Provision.Registry` (one provider today).
+  (M75 lean v1 §4.3, L1, L2), and where a new provider plugs in: a module of
+  the callbacks below, listed in `Provision.Registry` (one provider today).
+  A provider is only an API adapter. Its callbacks are the provider's own
+  primitive operations, each one call (or a fixed few) to its API, answering
+  normalized facts and the closed set of kinds below; everything around them
+  is shared, in `Provision.Driver`: every ledger write before a call and
+  after it, the order (firewall, image, enrollment code, server, its start),
+  the labels, the polling and its bounds, a lost create found again by its
+  labels, the reconcile, the delete order and its guard, the code window,
+  and the L2 offer (`Provision.Offering`). Both apps and the CLI reach it
+  over management (`FermixCore.Management.Provision`, `home.provision.*`).
 
-  Everything provider-specific lives in the provider's module: its API, its
-  label and naming rules, how it reads prices, its error codes, its
-  locations, its system image and what it answers that must never be kept.
-  The shared code (this module's own functions, `Provision.Ledger`,
-  `Provision.FirstBoot`, the job, the summary, `Management.Copy` and the
-  management family) reaches a provider only through the callbacks and its
-  display data, and names none.
+  What stays in a provider's module is what only it knows: its API (its
+  endpoints, how it encodes labels and finds by them, how it writes prices,
+  its error codes and their mapping), its locations and their cities, its
+  system image, its user data limit and anything its answers carry that must
+  never be kept (a root password, dropped where the answer arrives).
+  The shared code names no provider.
 
-  A provider keeps its token and what it created in one ledger file of its
-  own (`Provision.Ledger`, `device/provision/<id>.json`), written before each
-  call that creates or deletes and updated after it. The callbacks:
+  The plug-in surface (`opts` carries the provider's own seams, such as a
+  test's request plug, untouched by the driver):
 
-    * `id/0`: the provider's id, its ledger's file name and what the wire
-      calls it (lower case, as `"examplecloud"`).
-    * `display/0`: what the apps draw and the shared sentences say of it
-      (`t:display/0`): its name, the token field's label, the "How to get
-      one" steps (two-factor sign-in first and an account for Fermix alone,
-      L20), its console and docs section, its locations and the proper nouns
-      its words use.
-    * `type_name/1`: a server type as its console names it.
-    * `check_token/2`: reads the account, so a token the provider refuses is
-      named at once; answers whether the account holds servers Fermix did
-      not create (Details says "Fermix only touches what it creates").
-    * `reaches/3`: whether a new token is of the account the ledger's server
-      (or firewall) is in, so a token for another account never replaces the
-      one that reaches what Fermix created.
-    * `options/2`: the orderable types per location with their monthly
-      prices as the account is billed (VAT included), and the L2
-      recommendation, read live.
-    * `create/3`: what the server needs before it (a firewall with no inbound
-      rule first, where a read-only token fails before anything costs money),
-      then the server with the first boot (`Provision.FirstBoot`) and a fresh
-      24-hour enrollment code as its user data, each write's action polled
-      with a bound.
-    * `power/3`: turns the server on, or restarts it.
-    * `reconcile/2`: reads what the ledger names from the provider: a
-      resource deleted outside Fermix is marked gone, a server's power is
-      recorded (`"running"`, `"off"`, or another word of the provider's), and
-      a create whose answer was lost is found again by its labels.
-    * `delete/2`: the server, then its addresses unless they went with it,
-      then the firewall.
-    * `delete_replaced/2`: the same, in the same order, for the server a
-      replace retired (`Ledger.retired/1`), never one that still holds the
-      home; the ledger then keeps that the replace is done.
+    * identity: `id/0` (the ledger's file name and the wire's id, lower
+      case, as `"examplecloud"`), `display/0` (`t:display/0`), `type_name/1`
+      (a type as its console names it) and `max_user_data/0` (the most bytes
+      of user data a server takes);
+    * `check_token/2`: reads the account; whether it holds servers Fermix did
+      not create;
+    * `catalog/2`: what the account can order now, `t:catalog/0`: every
+      type with its shape, where it is in stock and its monthly price there,
+      each place's IPv4 price, the currency and the places' names;
+    * `server_type/3`: one type as sold now, and the places' names, so a
+      create checks stock before anything is written;
+    * `system_image/2`: the Debian 13 image to create from, as the provider
+      names it;
+    * `create_firewall/3`: a firewall with no inbound rule, named and
+      labelled (`t:labels/0`) as given;
+    * `create_server/3`: the server (`t:server_spec/0`), started, with the
+      firewall and the user data; answers `t:created/0`;
+    * `power/4`: turns a server on, or restarts it; answers its action;
+    * `action/3`: reads one action (`t:action/0`);
+    * `get/4`, `find/4`: one resource by id, or by its labels
+      (`t:resource/0`); a server's power is `"running"`, `"off"` or another
+      word of the provider's;
+    * `delete/4`: deletes one resource; a server answers its action.
 
-  A provider answers its own refusals as one of a small closed set of shared
-  kinds (`t:provider_error/0`), so the shared code words them alike for every
-  provider: the token refused (`:unauthorized`, which is "does not accept"
-  when pasted and "no longer accepts" after), a read-only token, the
-  account's limit, no capacity where asked (with the next location in
-  stock), the rate limit, no answer, another account's token, or any other
-  refusal as the provider's own plain sentence (`{:other, sentence}`). The
-  rest of `t:reason/0` is the engine's own. Every reason is one sentence
-  (`error_sentence/2`, in the provider's words where it names it) and one
-  word the ledger keeps (`failure_word/1`).
+  Ids are the provider's own and opaque to Fermix: strings. A provider
+  answers its refusals as one of a closed set (`t:error/0`): the shared kinds
+  every sentence words alike (the token refused, a read-only token, the
+  account's limit, the rate limit, no answer, the provider's own refusal as
+  a plain sentence in `{:other, sentence}`), the kinds the driver reads
+  (`:not_found`, `:in_use` for a firewall its server still holds,
+  `:no_capacity` where the server was asked for, `:no_image`), and
+  `{:unknown, error}` when a write may have been carried out (no answer, a
+  server error, a name it already holds), which the driver keeps for the
+  reconcile to find. Every reason the driver and the management family
+  answer (`t:reason/0`) is one sentence (`error_sentence/2`, in the
+  provider's words where it names it) and one word the ledger keeps
+  (`failure_word/1`).
 
   Names and labels (`server_name/2`, `labels/2`): a server is named
   `fermix-<profile>-<ref>`, `ref` four hex digits from the ledger, so a new
   server never collides with one it replaces, and every resource carries
   `fermix=always-on`, `fermix-profile=<profile>` and `fermix-ref=<ref>`, the
-  profile sanitised to label rules strict enough for every provider (lower
-  case, digits and hyphens).
+  profile lower case, digits and hyphens, which every provider can store.
 
   A provider served by an external plugin (not built) would be a module of
-  this contract inside the engine that forwards each callback to the plugin.
-  The engine keeps what it keeps for every provider: the token's custody
-  (read from the ledger and passed with each call, never stored by the
-  plugin), the owner's decisions over connect, create, power and delete
-  (`Fermix.CLI.Daemon`), the enrollment code's window, and the ledger, whose
-  write-ahead steps would move out of the provider module into a shared
-  driver first, so that the plugin answers single steps (create the
-  firewall, create the server, read one resource, delete one) with the
-  shared error kinds.
+  this contract in the engine that forwards each primitive to the plugin, the
+  token passed with each call. The engine keeps what it keeps for every
+  provider: the token's custody (in the provider's ledger, never stored by
+  the plugin), the owner's decisions over connect, create, power and delete
+  (`Fermix.CLI.Daemon`), the enrollment code's window, the display data the
+  apps draw, and the ledger, which only the driver writes.
   """
 
   alias FermixCore.Home.Provision.Ledger
 
+  @typedoc "A resource's id: the provider's own, opaque to Fermix."
+  @type id :: String.t()
+
+  @typedoc "What a primitive acts on: a server, a firewall or a primary address."
+  @type kind :: :server | :firewall | :primary_ip
+
+  @typedoc "The labels every resource of one server carries (`labels/2`)."
+  @type labels :: %{String.t() => String.t()}
+
   @typedoc """
-  A provider's own refusal, as the shared code words it: the closed set every
-  provider maps its errors to.
+  One type as the provider sells it: its shape, whether it is x86 and still
+  sold, the places it is in stock now and its monthly price in each, gross
+  as the account is billed, in ten-thousandths of the currency's unit.
   """
-  @type provider_error ::
+  @type server_type :: %{
+          name: String.t(),
+          description: String.t(),
+          cores: integer(),
+          memory_gb: number() | nil,
+          disk_gb: integer(),
+          x86: boolean(),
+          sold: boolean(),
+          dedicated: boolean(),
+          stock: [String.t()],
+          monthly: %{String.t() => non_neg_integer()}
+        }
+
+  @typedoc "What the account can order now (`catalog/2`)."
+  @type catalog :: %{
+          currency: String.t(),
+          locations: [%{id: String.t(), city: String.t(), country: String.t()}],
+          types: [server_type()],
+          ipv4_monthly: %{String.t() => non_neg_integer()}
+        }
+
+  @typedoc "The server `create_server/3` asks for."
+  @type server_spec :: %{
+          name: String.t(),
+          type: String.t(),
+          location: String.t(),
+          image: String.t(),
+          firewall: id(),
+          labels: labels(),
+          user_data: String.t()
+        }
+
+  @typedoc """
+  An action a write started, as `action/3` reads it: `step` names what it
+  does (create, start, delete, power on, reset), `message` the provider's
+  own words when it ended in `:error`.
+  """
+  @type action :: %{
+          id: String.t(),
+          status: :running | :success | :error,
+          step: :create | :start | :delete | :power_on | :reset | :other,
+          message: String.t() | nil
+        }
+
+  @typedoc "A created server, as `create_server/3` answers it: its facts and its actions."
+  @type created :: %{
+          id: id(),
+          ipv4: String.t() | nil,
+          created_at: DateTime.t() | nil,
+          primary_ips: [Ledger.primary_ip()],
+          actions: [action()]
+        }
+
+  @typedoc """
+  A resource `get/4` or `find/4` answers: its id, and for a server its power,
+  its IPv4 address, when it was created and its primary addresses.
+  """
+  @type resource :: %{
+          required(:id) => id(),
+          optional(:power) => String.t() | nil,
+          optional(:ipv4) => String.t() | nil,
+          optional(:created_at) => DateTime.t() | nil,
+          optional(:primary_ips) => [Ledger.primary_ip()],
+          optional(atom()) => term()
+        }
+
+  @typedoc """
+  A provider's refusal, the closed set its primitives answer: the shared
+  kinds, the kinds the driver reads, and `{:unknown, error}` for a write
+  whose outcome is not known.
+  """
+  @type error ::
           :unauthorized
           | :read_only_token
           | :account_limit
-          | {:unavailable, capacity()}
           | {:rate_limited, integer() | nil}
           | {:unreachable, String.t()}
-          | :other_project
           | {:other, String.t()}
+          | :not_found
+          | :in_use
+          | :no_capacity
+          | :no_image
+          | {:unknown, error()}
 
   @typedoc """
   No capacity where asked: the type (`description` as the provider names it)
@@ -110,8 +188,24 @@ defmodule FermixCore.Home.Provision do
           optional(atom()) => term()
         }
 
+  @type step :: :create | :start | :delete | :power_on | :reset | :other
+
   @type reason ::
-          provider_error()
+          :unauthorized
+          | :read_only_token
+          | :account_limit
+          | {:rate_limited, integer() | nil}
+          | {:unreachable, String.t()}
+          | {:other, String.t()}
+          | :not_found
+          | :resource_in_use
+          | :no_capacity
+          | :no_image
+          | :other_project
+          | {:unavailable, capacity()}
+          | {:ineligible_type, String.t()}
+          | {:action_failed, step(), String.t()}
+          | {:action_timeout, step()}
           | :token_invalid
           | :token_refused
           | {:code_unavailable, String.t()}
@@ -172,38 +266,42 @@ defmodule FermixCore.Home.Provision do
         }
 
   @typedoc """
-  What a create asks for: the type and location (`options/2` names them) and
-  the profile the server is named and labelled by.
+  What a create asks for: the type and location (`Driver.options/3` names
+  them) and the profile the server is named and labelled by.
   """
   @type request :: %{type: String.t(), location: String.t(), profile: String.t()}
 
   @typedoc """
-  The seams every callback takes: `:req_options` (merged into each request,
-  a test's plug), `:now` (a 0-arity clock), `:sleep` (the pause between two
-  polls), `:report` (the job's phase reporter), `:open_code` (a 0-arity
-  function answering a fresh provisioned enrollment code) and
-  `:withdraw_code` (closing that window when its server will not exist).
+  The seams: the driver's own (`:now`, a 0-arity clock; `:sleep`, the pause
+  between two polls; `:max_polls`; `:report`, the job's phase reporter;
+  `:open_code`, a 0-arity function answering a fresh provisioned enrollment
+  code; `:withdraw_code`, closing that window when its server will not
+  exist; `:running?`), and the provider's own (such as `:req_options`, a
+  test's plug), which the driver passes to every primitive as they are.
   """
   @type opts :: keyword()
 
   @callback id() :: String.t()
   @callback display() :: display()
   @callback type_name(String.t()) :: String.t()
-  @doc """
-  Whether `token` reaches what the ledger holds: one read, by id, of its
-  server (or else its firewall) that is not gone; `{:error,
-  :other_project}` when the provider says it has no such thing for this
-  token. Nothing standing is reached by any token.
-  """
-  @callback reaches(String.t(), Ledger.t(), opts()) :: :ok | {:error, reason()}
+  @callback max_user_data() :: pos_integer()
   @callback check_token(String.t(), opts()) ::
-              {:ok, %{other_servers: boolean()}} | {:error, reason()}
-  @callback options(String.t(), opts()) :: {:ok, map()} | {:error, reason()}
-  @callback create(Path.t(), request(), opts()) :: {:ok, Ledger.server()} | {:error, reason()}
-  @callback power(Path.t(), :on | :reset, opts()) :: :ok | {:error, reason()}
-  @callback reconcile(Path.t(), opts()) :: {:ok, Ledger.t()} | {:error, reason()}
-  @callback delete(Path.t(), opts()) :: :ok | {:error, reason()}
-  @callback delete_replaced(Path.t(), opts()) :: :ok | {:error, reason()}
+              {:ok, %{other_servers: boolean()}} | {:error, error()}
+  @callback catalog(String.t(), opts()) :: {:ok, catalog()} | {:error, error()}
+  @callback server_type(String.t(), String.t(), opts()) ::
+              {:ok, %{type: server_type() | nil, cities: %{String.t() => String.t()}}}
+              | {:error, error()}
+  @callback system_image(String.t(), opts()) :: {:ok, String.t()} | {:error, error()}
+  @callback create_firewall(String.t(), %{name: String.t(), labels: labels()}, opts()) ::
+              {:ok, id()} | {:error, error()}
+  @callback create_server(String.t(), server_spec(), opts()) ::
+              {:ok, created()} | {:error, error()}
+  @callback power(String.t(), id(), :on | :reset, opts()) :: {:ok, action()} | {:error, error()}
+  @callback action(String.t(), String.t(), opts()) :: {:ok, action()} | {:error, error()}
+  @callback get(String.t(), kind(), id(), opts()) :: {:ok, resource()} | {:error, error()}
+  @callback find(String.t(), :server | :firewall, labels(), opts()) ::
+              {:ok, resource() | nil} | {:error, error()}
+  @callback delete(String.t(), kind(), id(), opts()) :: {:ok, action() | nil} | {:error, error()}
 
   @doc "The provider of `providers` (the registry's list) whose id is `id`."
   @spec provider([module(), ...], term()) :: {:ok, module()} | :error
@@ -317,9 +415,25 @@ defmodule FermixCore.Home.Provision do
 
   defp named(value, _profile), do: value
 
+  @doc "The labels every resource of the server named for `profile` and `ref` carries."
+  @spec labels(String.t(), String.t()) :: labels()
+  def labels(profile, ref) when is_binary(profile) and is_binary(ref),
+    do: %{"fermix" => "always-on", "fermix-profile" => name_part(profile), "fermix-ref" => ref}
+
+  @doc """
+  A provider's own message as plain words a sentence can carry: a backtick
+  reads as a quote, and it ends as a sentence does.
+  """
+  @spec plain(String.t()) :: String.t()
+  def plain(message) when is_binary(message) do
+    plain = String.replace(message, "`", "'")
+    if String.ends_with?(plain, [".", "?", "!"]), do: plain, else: plain <> "."
+  end
+
   @doc "The word the ledger keeps for why a create stopped."
   @spec failure_word(reason()) :: String.t()
   def failure_word({:old_server, reason}), do: failure_word(reason)
+  def failure_word({:action_failed, _step, _message}), do: "action_failed"
   def failure_word({kind, _detail}) when is_atom(kind), do: Atom.to_string(kind)
   def failure_word(reason) when is_atom(reason), do: Atom.to_string(reason)
 
@@ -368,6 +482,29 @@ defmodule FermixCore.Home.Provision do
         "created, so paste a token from that #{words.account}."
 
   defp sentence({:other, sentence}, _words) when is_binary(sentence), do: sentence
+
+  defp sentence({:ineligible_type, type}, words),
+    do:
+      "Fermix creates only a server type #{words.name} still sells with at least 4 GB on " <>
+        "x86, and #{type} is not one."
+
+  defp sentence({:action_failed, step, message}, words),
+    do: "#{words.name} could not finish #{doing(step)}: #{plain(message)}"
+
+  defp sentence({:action_timeout, step}, words),
+    do:
+      "#{words.name} had not finished #{doing(step)} after five minutes; Always On checks " <>
+        "again when it opens."
+
+  defp sentence(:no_image, words),
+    do: "#{words.name} offers no Debian 13 image right now, so Fermix created no server."
+
+  defp sentence(:no_capacity, words),
+    do: "#{words.name} has no room for that right now, so try again in a few minutes."
+
+  defp sentence(reason, words) when reason in [:not_found, :resource_in_use],
+    do: "#{words.name} no longer has what Fermix created there, so open Always On again."
+
   defp sentence({:code_unavailable, sentence}, _words), do: sentence
 
   defp sentence(:user_data_too_large, words),
@@ -452,4 +589,11 @@ defmodule FermixCore.Home.Provision do
     do:
       "Fermix could not read its #{words.name} file, so it shows nothing it created there; " <>
         "Fermix's log says why."
+
+  defp doing(:create), do: "creating your server"
+  defp doing(:start), do: "starting your server"
+  defp doing(:delete), do: "deleting your server"
+  defp doing(:power_on), do: "turning your server on"
+  defp doing(:reset), do: "restarting your server"
+  defp doing(:other), do: "what Fermix asked of it"
 end

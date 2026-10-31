@@ -1,25 +1,29 @@
 defmodule FermixTestSupport.FakeCloudProvider do
   @moduledoc """
   An invented second Always On provider, "Nimbus", for the tests that prove
-  the shared provisioning code (`Home.Provision`, its ledger,
+  the shared provisioning code (`Home.Provision`, its driver and ledger,
   `Management.Provision`, the summary, `Management.Copy`) needs nothing of
-  Hetzner's: it implements the whole `FermixCore.Home.Provision` contract and
-  keeps no world of its own beyond the ledger, writing there what a provider
-  writes once its API answered.
+  Hetzner's. It is what a new provider is: only API primitives of the
+  `FermixCore.Home.Provision` contract, over a world of its own (an `Agent`
+  the test owns, passed as `opts[:world]`), and it never touches a ledger:
+  `Provision.Driver` does every write.
 
   Tokens: `token/0` is accepted and may write; `read_only_token/0` is
-  accepted and cannot write (a create answers `:read_only_token`);
-  `other_project_token/0` is accepted and reaches nothing Fermix created
-  (`:other_project` while something stands); any other is refused
-  (`:unauthorized`). `opts[:fail]` makes a create answer that shared kind
-  after its check, before anything is written.
+  accepted and cannot write (a write answers `:read_only_token`);
+  `other_project_token/0` is accepted and sees none of what the world holds;
+  any other is refused (`:unauthorized`).
+
+  The world: the firewalls, servers and addresses it holds (ids are strings,
+  as every provider's are to Fermix), the labels of each, how many reads an
+  action answers `running` (`:action_polls`), queued `faults` (the next call
+  of a primitive answers that error instead), how many deletes a firewall
+  answers `:in_use`, and every primitive called, in order, with the arguments
+  that matter (`calls/1`). `opts[:spy]`, when given, is called with each
+  primitive's name before it runs, so a test can read the ledger as the
+  driver left it at that moment.
   """
 
   @behaviour FermixCore.Home.Provision
-
-  alias FermixCore.Home.Provision
-  alias FermixCore.Home.Provision.FirstBoot
-  alias FermixCore.Home.Provision.Ledger
 
   @id "nimbus"
   @token "invented-nimbus-token-5f2c8e1a"
@@ -35,6 +39,49 @@ defmodule FermixTestSupport.FakeCloudProvider do
 
   @doc "A token of another Nimbus workspace."
   def other_project_token, do: @other_project
+
+  @doc "Starts a world owned by the calling test."
+  def start!(overrides \\ []) do
+    world =
+      Map.merge(
+        %{
+          servers: %{},
+          firewalls: %{},
+          primary_ips: %{},
+          actions: %{},
+          action_polls: 0,
+          in_use: 0,
+          faults: [],
+          calls: [],
+          next_id: 100
+        },
+        Map.new(overrides)
+      )
+
+    ExUnit.Callbacks.start_supervised!(
+      {Agent, fn -> world end},
+      id: {__MODULE__, System.unique_integer([:positive])}
+    )
+  end
+
+  @doc "Every primitive called, oldest first: `{name, detail}`."
+  def calls(world), do: world |> Agent.get(& &1.calls) |> Enum.reverse()
+
+  @doc "The world as it stands."
+  def world(world), do: Agent.get(world, & &1)
+
+  @doc "Sets one fact of the world."
+  def set(world, key, value), do: Agent.update(world, &Map.put(&1, key, value))
+
+  @doc "The next call of `primitive` answers `{:error, reason}` and does nothing."
+  def fault(world, primitive, reason),
+    do: Agent.update(world, &%{&1 | faults: &1.faults ++ [{primitive, reason}]})
+
+  @doc "Removes a held resource, as the provider's console would."
+  def delete_outside(world, kind, id) when kind in [:servers, :firewalls, :primary_ips],
+    do: Agent.update(world, &update_in(&1, [kind], fn held -> Map.delete(held, id) end))
+
+  # -- identity -----------------------------------------------------------------
 
   @impl true
   def id, do: @id
@@ -64,179 +111,251 @@ defmodule FermixTestSupport.FakeCloudProvider do
     do: type |> String.replace("-", " ") |> String.capitalize()
 
   @impl true
-  def check_token(token, _opts) when token in [@token, @read_only],
-    do: {:ok, %{other_servers: false}}
+  def max_user_data, do: @max_user_data
 
-  def check_token(@other_project, _opts), do: {:ok, %{other_servers: true}}
-  def check_token(_token, _opts), do: {:error, :unauthorized}
+  # -- reads --------------------------------------------------------------------
 
   @impl true
-  def reaches(@other_project, %{server: %{status: status}}, _opts) when status != :gone,
-    do: {:error, :other_project}
-
-  def reaches(_token, _ledger, _opts), do: :ok
-
-  @impl true
-  def options(_token, _opts) do
-    {:ok,
-     %{
-       "currency" => "EUR",
-       "locations" => [
-         %{"id" => "osl1", "city" => "Oslo", "country" => "NO"},
-         %{"id" => "lis1", "city" => "Lisbon", "country" => "PT"}
-       ],
-       "offers" => [
-         offer("small-4", 4, "osl1", "11.00"),
-         offer("small-4", 4, "lis1", "12.00"),
-         offer("large-8", 8, "osl1", "21.00")
-       ],
-       "recommended" => %{"type" => "small-4", "location" => "osl1"},
-       "more_room" => %{"type" => "large-8", "location" => "osl1"}
-     }}
+  def check_token(token, opts) do
+    call(opts, :check_token, nil, fn world ->
+      case token do
+        t when t in [@token, @read_only] -> {{:ok, %{other_servers: false}}, world}
+        @other_project -> {{:ok, %{other_servers: true}}, world}
+        _other -> {{:error, :unauthorized}, world}
+      end
+    end)
   end
 
-  defp offer(type, memory, location, monthly) do
+  @impl true
+  def catalog(token, opts) do
+    call(opts, :catalog, nil, fn world ->
+      {readable(token, fn ->
+         %{
+           currency: "EUR",
+           locations: [
+             %{id: "osl1", city: "Oslo", country: "NO"},
+             %{id: "lis1", city: "Lisbon", country: "PT"},
+             %{id: "rey1", city: "Reykjavik", country: "IS"}
+           ],
+           types: types(),
+           ipv4_monthly: %{"osl1" => 10_000, "lis1" => 10_000}
+         }
+       end), world}
+    end)
+  end
+
+  @impl true
+  def server_type(token, type, opts) do
+    call(opts, :server_type, type, fn world ->
+      {readable(token, fn ->
+         %{
+           type: Enum.find(types(), &(&1.name == type)),
+           cities: %{"osl1" => "Oslo", "lis1" => "Lisbon"}
+         }
+       end), world}
+    end)
+  end
+
+  defp types do
+    [
+      type("small-4", 4, %{"osl1" => 110_000, "lis1" => 120_000}, ["osl1", "lis1"]),
+      type("large-8", 8, %{"osl1" => 210_000}, ["osl1"]),
+      type("tiny-2", 2, %{"osl1" => 50_000}, ["osl1"])
+    ]
+  end
+
+  defp type(name, memory, monthly, stock) do
     %{
-      "type" => type,
-      "description" => type_name(type),
-      "cores" => div(memory, 2),
-      "memory_gb" => memory,
-      "disk_gb" => memory * 20,
-      "dedicated" => false,
-      "location" => location,
-      "monthly" => monthly,
-      "ipv4_monthly" => "1.00",
-      "total_monthly" => "#{String.to_integer(hd(String.split(monthly, "."))) + 1}.00"
+      name: name,
+      description: type_name(name),
+      cores: div(memory, 2),
+      memory_gb: memory,
+      disk_gb: memory * 20,
+      x86: true,
+      sold: true,
+      dedicated: false,
+      stock: stock,
+      monthly: monthly
     }
   end
 
   @impl true
-  def create(home, %{type: type, location: location, profile: profile}, opts) do
-    report(opts, "checking")
+  def system_image(token, opts),
+    do: call(opts, :system_image, nil, &{readable(token, fn -> "debian-13-x64" end), &1})
 
-    with {:ok, ledger} <- read(home),
-         {:ok, token} <- token(ledger),
-         :ok <- no_server(ledger),
-         :ok <- writes(token),
-         :ok <- Keyword.get(opts, :fail, :ok) |> failing(),
-         {:ok, code} <- open_code(opts),
-         {:ok, _user_data} <- user_data(code) do
-      report(opts, "server")
-      ref = Provision.fresh_ref(:crypto.strong_rand_bytes(2), Ledger.replaced_ref(ledger))
-      name = Provision.server_name(profile, ref)
-
-      server = %{
-        name: name,
-        id: 21,
-        status: :created,
-        type: type,
-        location: location,
-        ipv4: "198.51.100.7",
-        power: "running",
-        created_at: now(opts),
-        seen_at: now(opts)
-      }
-
-      with {:ok, written} <- update(home, &created(&1, ref, name, server)),
-           do: {:ok, written.server}
-    end
+  @impl true
+  def action(token, id, opts) do
+    call(opts, :action, id, fn world ->
+      case {token in [@token, @read_only], world.actions[id]} do
+        {false, _action} -> {{:error, :unauthorized}, world}
+        {true, nil} -> {{:error, :not_found}, world}
+        {true, action} -> polled(action, world)
+      end
+    end)
   end
 
-  defp created(ledger, ref, name, server) do
-    {:ok,
-     ledger
-     |> Ledger.begin_create(ref, %{name: name})
-     |> Ledger.put_firewall(%{id: 11, status: :created})
-     |> Ledger.put_server(server)}
-  end
+  defp polled(%{polls: 0} = action, world),
+    do: {{:ok, %{action.view | status: :success}}, world}
 
-  defp no_server(%{server: %{status: status}}) when status != :gone, do: {:error, :server_exists}
-  defp no_server(_ledger), do: :ok
+  defp polled(action, world),
+    do: {{:ok, action.view}, put_in(world.actions[action.view.id].polls, action.polls - 1)}
 
-  defp writes(@read_only), do: {:error, :read_only_token}
-  defp writes(_token), do: :ok
-
-  defp failing(:ok), do: :ok
-  defp failing(reason), do: {:error, reason}
-
-  defp open_code(opts) do
-    case Keyword.fetch!(opts, :open_code).() do
-      {:ok, code} -> {:ok, code}
-      {:error, sentence} -> {:error, {:code_unavailable, sentence}}
-    end
-  end
-
-  defp user_data(code) do
-    case FirstBoot.user_data(code, @max_user_data) do
-      {:ok, user_data} -> {:ok, user_data}
-      {:error, :too_large} -> {:error, :user_data_too_large}
-      {:error, :invalid_code} -> {:error, :invalid_code}
-    end
+  @impl true
+  def get(token, kind, id, opts) do
+    call(opts, :get, {kind, id}, fn world ->
+      case {token, Map.get(held(world, kind), id)} do
+        {@other_project, _found} -> {{:error, :not_found}, world}
+        {_token, nil} -> {{:error, :not_found}, world}
+        {_token, found} -> {{:ok, found}, world}
+      end
+    end)
   end
 
   @impl true
-  def power(home, action, opts) when action in [:on, :reset] do
-    report(opts, "power")
+  def find(token, kind, labels, opts) when kind in [:server, :firewall] do
+    call(opts, :find, {kind, labels}, fn world ->
+      found =
+        world
+        |> held(kind)
+        |> Map.values()
+        |> Enum.find(&(token != @other_project and &1.labels == labels))
 
-    with {:ok, ledger} <- read(home),
-         {:ok, _token} <- token(ledger),
-         :ok <- standing(ledger),
-         {:ok, _ledger} <- update(home, &{:ok, Ledger.put_server(&1, %{power: "running"})}) do
-      :ok
-    end
+      {{:ok, found}, world}
+    end)
   end
 
-  defp standing(%{server: %{status: :created}}), do: :ok
-  defp standing(_ledger), do: {:error, :no_server}
+  # -- writes -------------------------------------------------------------------
 
   @impl true
-  def reconcile(home, _opts) do
-    with {:ok, ledger} <- read(home),
-         {:ok, _token} <- token(ledger),
-         do: {:ok, ledger}
-  end
-
-  @impl true
-  def delete(home, opts) do
-    report(opts, "deleting")
-
-    with {:ok, ledger} <- read(home),
-         {:ok, _token} <- token(ledger),
-         :ok <- Keyword.fetch!(opts, :withdraw_code).(),
-         {:ok, _ledger} <- update(home, &{:ok, Ledger.clear(&1)}) do
-      :ok
-    end
+  def create_firewall(token, %{name: name, labels: labels}, opts) do
+    call(opts, :create_firewall, %{name: name, labels: labels}, fn world ->
+      writable(token, world, fn world ->
+        {id, world} = next_id(world)
+        firewall = %{id: id, name: name, labels: labels}
+        {{:ok, id}, put_in(world.firewalls[id], firewall)}
+      end)
+    end)
   end
 
   @impl true
-  def delete_replaced(home, opts) do
-    report(opts, "deleting")
+  def create_server(token, spec, opts) do
+    call(opts, :create_server, Map.delete(spec, :user_data), fn world ->
+      writable(token, world, &created(&1, spec))
+    end)
+  end
 
-    with {:ok, ledger} <- read(home),
-         {:ok, _old} <- Ledger.retired(ledger),
-         {:ok, _ledger} <- update(home, &{:ok, Ledger.replaced_deleted(&1, now(opts))}) do
-      :ok
+  # The answer carries a password the driver must keep nowhere, as a
+  # provider's create can.
+  defp created(world, spec) do
+    {id, world} = next_id(world)
+    {ip_id, world} = next_id(world)
+    ips = [%{id: ip_id, type: "ipv4", ip: "198.51.100.7"}]
+
+    server = %{
+      id: id,
+      name: spec.name,
+      labels: spec.labels,
+      power: "running",
+      ipv4: "198.51.100.7",
+      created_at: ~U[2031-05-04 10:00:00Z],
+      primary_ips: ips
+    }
+
+    {action, world} = new_action(world, :create)
+    world = %{world | servers: Map.put(world.servers, id, server)}
+    world = %{world | primary_ips: Map.put(world.primary_ips, ip_id, hd(ips))}
+
+    answer =
+      server
+      |> Map.take([:id, :ipv4, :created_at, :primary_ips])
+      |> Map.merge(%{actions: [action], password: "invented-nimbus-password-Zk3"})
+
+    {{:ok, answer}, world}
+  end
+
+  @impl true
+  def power(token, id, verb, opts) when verb in [:on, :reset] do
+    call(opts, :power, {id, verb}, fn world ->
+      writable(token, world, &powered(&1, id, verb))
+    end)
+  end
+
+  defp powered(world, id, verb) when is_map_key(world.servers, id) do
+    {action, world} = new_action(world, if(verb == :on, do: :power_on, else: :reset))
+    {{:ok, action}, put_in(world.servers[id].power, "running")}
+  end
+
+  defp powered(world, _id, _verb), do: {{:error, :not_found}, world}
+
+  @impl true
+  def delete(token, kind, id, opts) do
+    call(opts, :delete, {kind, id}, fn world ->
+      writable(token, world, &deleted(&1, kind, id))
+    end)
+  end
+
+  defp deleted(%{in_use: tries} = world, :firewall, _id) when tries > 0,
+    do: {{:error, :in_use}, %{world | in_use: tries - 1}}
+
+  defp deleted(world, kind, id) do
+    key = plural(kind)
+
+    case Map.fetch(Map.fetch!(world, key), id) do
+      :error ->
+        {{:error, :not_found}, world}
+
+      {:ok, _found} ->
+        world = Map.update!(world, key, &Map.delete(&1, id))
+        if kind == :server, do: deleted_server(world, id), else: {{:ok, nil}, world}
     end
   end
 
-  defp read(home) do
-    case Ledger.read(home, @id) do
-      {:ok, ledger} -> {:ok, ledger}
-      {:error, reason} -> {:error, {:ledger, reason}}
-    end
+  # A server's addresses go with it.
+  defp deleted_server(world, _id) do
+    {action, world} = new_action(world, :delete)
+    {{:ok, action}, %{world | primary_ips: %{}}}
   end
 
-  defp update(home, fun) do
-    case Ledger.update(home, @id, fun) do
-      {:ok, ledger} -> {:ok, ledger}
-      {:error, reason} -> {:error, {:ledger, reason}}
-    end
+  # -- the world ----------------------------------------------------------------
+
+  defp call(opts, primitive, detail, fun) do
+    if spy = Keyword.get(opts, :spy), do: spy.(primitive)
+
+    Agent.get_and_update(Keyword.fetch!(opts, :world), fn world ->
+      world = %{world | calls: [{primitive, detail} | world.calls]}
+
+      case Enum.split_with(world.faults, &(elem(&1, 0) == primitive)) do
+        {[{_primitive, reason} | rest], others} ->
+          {{:error, reason}, %{world | faults: rest ++ others}}
+
+        {[], _faults} ->
+          fun.(world)
+      end
+    end)
   end
 
-  defp token(%{token: token}) when is_binary(token), do: {:ok, token}
-  defp token(_ledger), do: {:error, :no_token}
+  defp readable(token, answer) when token in [@token, @read_only, @other_project],
+    do: {:ok, answer.()}
 
-  defp report(opts, phase), do: Keyword.get(opts, :report, fn _phase -> :ok end).(phase)
+  defp readable(_token, _answer), do: {:error, :unauthorized}
 
-  defp now(opts), do: DateTime.truncate(Keyword.get(opts, :now, &DateTime.utc_now/0).(), :second)
+  defp writable(@token, world, write), do: write.(world)
+  defp writable(@read_only, world, _write), do: {{:error, :read_only_token}, world}
+  defp writable(@other_project, world, _write), do: {{:error, :not_found}, world}
+  defp writable(_token, world, _write), do: {{:error, :unauthorized}, world}
+
+  defp new_action(world, step) do
+    {id, world} = next_id(world)
+    status = if world.action_polls == 0, do: :success, else: :running
+    view = %{id: id, status: status, step: step, message: nil}
+    {view, put_in(world.actions[id], %{view: view, polls: world.action_polls})}
+  end
+
+  defp next_id(world), do: {"nb-#{world.next_id}", %{world | next_id: world.next_id + 1}}
+
+  defp held(world, kind), do: Map.fetch!(world, plural(kind))
+
+  defp plural(:server), do: :servers
+  defp plural(:firewall), do: :firewalls
+  defp plural(:primary_ip), do: :primary_ips
 end

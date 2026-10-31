@@ -23,11 +23,11 @@ defmodule FermixCore.Home.Provision.Ledger do
         "token_state": "accepted",
         "connected_at": "2031-05-04T10:00:00Z",
         "ref": "a3f9",
-        "server": {"name": "fermix-general-a3f9", "id": 61839204, "status": "created",
+        "server": {"name": "fermix-general-a3f9", "id": "61839204", "status": "created",
                    "type": "cpx22", "location": "fsn1", "ipv4": "203.0.113.7",
                    "power": "running", "created_at": "...", "seen_at": "..."},
-        "firewall": {"name": "fermix-general-a3f9", "id": 1203, "status": "created"},
-        "primary_ips": [{"id": 91, "type": "ipv4", "ip": "203.0.113.7"}],
+        "firewall": {"name": "fermix-general-a3f9", "id": "1203", "status": "created"},
+        "primary_ips": [{"id": "91", "type": "ipv4", "ip": "203.0.113.7"}],
         "failure": {"reason": "resource_unavailable", "sentence": "...",
                     "next_location": "nbg1", "at": "..."},
         "replace": null
@@ -39,6 +39,9 @@ defmodule FermixCore.Home.Provision.Ledger do
   - `ref` is the short id (four hex digits) a create mints and every resource
     it makes is named and labelled by, so a lost create is found again by its
     labels; null when nothing was created.
+  - A resource's `id` is its provider's own, opaque to Fermix: a string (a
+    file written before ids were strings holds the provider's numbers, and each
+    reads as its string). Null until the provider answered with one.
   - A resource's `status` is `requested` (written before the call that
     creates it, with no id yet), `creating` (the provider answered with an id
     and its action runs), `created`, `deleting` (written before the call that
@@ -114,7 +117,7 @@ defmodule FermixCore.Home.Provision.Ledger do
   @type status :: :requested | :creating | :created | :deleting | :gone
   @type server :: %{
           name: String.t(),
-          id: pos_integer() | nil,
+          id: String.t() | nil,
           status: status(),
           type: String.t(),
           location: String.t(),
@@ -123,8 +126,8 @@ defmodule FermixCore.Home.Provision.Ledger do
           created_at: DateTime.t() | nil,
           seen_at: DateTime.t() | nil
         }
-  @type firewall :: %{name: String.t(), id: pos_integer() | nil, status: status()}
-  @type primary_ip :: %{id: pos_integer(), type: String.t(), ip: String.t() | nil}
+  @type firewall :: %{name: String.t(), id: String.t() | nil, status: status()}
+  @type primary_ip :: %{id: String.t(), type: String.t(), ip: String.t() | nil}
   @type failure :: %{
           reason: String.t(),
           sentence: String.t(),
@@ -836,9 +839,10 @@ defmodule FermixCore.Home.Provision.Ledger do
 
   defp decode_ips(_ips), do: :error
 
-  defp decode_ip(%{"id" => id, "type" => type} = map)
-       when is_integer(id) and id > 0 and type in ["ipv4", "ipv6"] do
-    with {:ok, ip} <- optional_text(map["ip"]), do: {:ok, %{id: id, type: type, ip: ip}}
+  defp decode_ip(%{"id" => id, "type" => type} = map) when type in ["ipv4", "ipv6"] do
+    with {:ok, id} <- id(id),
+         {:ok, ip} <- optional_text(map["ip"]),
+         do: {:ok, %{id: id, type: type, ip: ip}}
   end
 
   defp decode_ip(_map), do: :error
@@ -877,8 +881,13 @@ defmodule FermixCore.Home.Provision.Ledger do
   defp optional_word(_word, _words), do: :error
 
   defp optional_id(nil), do: {:ok, nil}
-  defp optional_id(id) when is_integer(id) and id > 0, do: {:ok, id}
-  defp optional_id(_id), do: :error
+  defp optional_id(id), do: id(id)
+
+  # The provider's own id, as a string; a positive number a file written
+  # before ids were strings holds reads as its string.
+  defp id(id) when is_binary(id) and byte_size(id) in 1..128, do: {:ok, id}
+  defp id(id) when is_integer(id) and id > 0, do: {:ok, Integer.to_string(id)}
+  defp id(_id), do: :error
 
   defp optional_time(nil), do: {:ok, nil}
 

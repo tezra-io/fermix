@@ -428,7 +428,7 @@ defmodule FermixCore.Management.ProvisionTest do
       {:ok, _view} = connect(ctx)
       finished(elem(create(ctx), 1), ctx)
       {:ok, ledger} = Ledger.read(ctx.home, "hetzner")
-      HetznerStub.delete_outside(ctx.stub, :servers, ledger.server.id)
+      HetznerStub.delete_outside(ctx.stub, :servers, String.to_integer(ledger.server.id))
 
       assert {:ok, %{"state" => "gone", "server" => %{"status" => "gone"}}} =
                route("home.provision.resources", %{}, ctx)
@@ -608,7 +608,7 @@ defmodule FermixCore.Management.ProvisionTest do
 
       assert %{"status" => "completed"} = finished(job, ctx)
       assert_received {:forwarded, "home.enroll.withdraw", %{}}
-      assert Map.keys(HetznerStub.world(ctx.stub).servers) == [ctx.old.id]
+      assert Map.keys(HetznerStub.world(ctx.stub).servers) == [String.to_integer(ctx.old.id)]
 
       assert %{state: :created, server: %{name: name}, replace: nil} =
                Ledger.state(ctx.home, Hetzner)
@@ -673,7 +673,9 @@ defmodule FermixCore.Management.ProvisionTest do
       assert_received {:renamed, ^new_name}
       refute new_name == ctx.old.name
 
-      assert Map.keys(HetznerStub.world(ctx.stub).servers) == [ledger.server.id]
+      assert Map.keys(HetznerStub.world(ctx.stub).servers) == [
+               String.to_integer(ledger.server.id)
+             ]
 
       assert %{state: :created, replace: %{state: :done, current: :new, old: nil}} =
                Ledger.state(ctx.home, Hetzner)
