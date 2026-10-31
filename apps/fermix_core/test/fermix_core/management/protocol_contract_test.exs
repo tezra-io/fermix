@@ -42,8 +42,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Management.McpServers.Interchange
   alias FermixCore.Management.McpServers.PastedValues
   alias FermixCore.Management.McpServers.Row, as: McpRow
-  alias FermixCore.Management.Plugins.Row, as: PluginRow
   alias FermixCore.Management.Placement
+  alias FermixCore.Management.Plugins.Row, as: PluginRow
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Router
   alias FermixCore.Management.Settings
