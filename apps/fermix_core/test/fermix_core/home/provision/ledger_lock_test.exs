@@ -110,7 +110,7 @@ defmodule FermixCore.Home.Provision.Ledger.LockTest do
       end)
 
     assert_receive :holding
-    ip = %{id: 7, type: "ipv4", ip: nil}
+    ip = %{id: "7", type: "ipv4", ip: nil}
 
     waiter =
       Task.async(fn -> Ledger.update(home, "hetzner", &{:ok, %{&1 | primary_ips: [ip]}}) end)

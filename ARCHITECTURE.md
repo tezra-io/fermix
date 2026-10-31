@@ -545,35 +545,48 @@ which build a host installs, shared by the installer and the readiness.
 
 `Home.Provision` is the contract every cloud provider Fermix creates the
 Always On server on implements (M75 lean v1 §4.3), and the place a new
-provider plugs in: a module of its `@callback`s (`id/0`, `display/0` with
-the name, token label, How to get one steps, console URL, docs anchor,
-locations and the proper nouns its words use, `type_name/1`,
-`check_token/2`, `reaches/3`, `options/2`, `create/3`, `power/3`,
-`reconcile/2`, `delete/2`, `delete_replaced/2`) listed in
-`Provision.Registry`, a compile-time list. `Provision.Hetzner` is the one
-provider today: Req over the Hetzner Cloud API through `Net.HttpClient`,
-and everything of Hetzner's (endpoints, label rules, price parsing, error
-codes, locations and cities, the image, the 32 KiB user data limit, the
-root-password drop) lives there only. A provider answers its own refusals
-as one of the contract's closed shared kinds (`:unauthorized`,
-`:read_only_token`, `:account_limit`, `{:unavailable, capacity}` with the
-next location in stock, `{:rate_limited, _}`, `{:unreachable, _}`,
-`:other_project`, or `{:other, sentence}`, the provider's own plain
-message), and `Provision.error_sentence/2` words every reason in the
-provider's display data, so the shared code (`Provision`, the ledger, the
-job, `HomeSummary`, `Copy`, `Management.Provision`, the router) names no
-provider, which `provider_contract_test.exs` holds by scanning every lib
-file and by running the shared code on an invented second provider.
-`Provision.current/2` is the one resolver of which provider Always On
-speaks of: the one whose ledger holds what Fermix created (or cannot be
-read), else the one whose token was given last, else the first the registry
-offers. A provider's token and the ledger of what was created on it live in
-its own file, `device/provision/<id>.json` (`Provision.Ledger`, `0600`,
-device-local, never `config.toml` or the keyring, so a move never carries
-it), which is how the ledger records which provider each resource belongs
-to, written before each call that creates or deletes and updated after it.
-Every write is `Ledger.update/3`, which holds the file's lock across its
-read, change, write and rename (never across a call to the provider); `Provision.Ledger.Lock`, one supervised owner in the
+provider plugs in: a module of its `@callback`s, listed in
+`Provision.Registry`, a compile-time list. A provider is only an API
+adapter, and its callbacks are its primitive operations, the plug-in
+surface: identity (`id/0`, `display/0` with the name, token label, How to
+get one steps, console URL, docs anchor, locations and the proper nouns its
+words use, `type_name/1`, `max_user_data/0`), `check_token/2`, `catalog/2`,
+`server_type/3`, `system_image/2`, `create_firewall/3`, `create_server/3`,
+`power/4`, `action/3`, `get/4`, `find/4` (by labels) and `delete/4`, each
+answering normalized facts with ids as opaque strings. `Provision.Hetzner` is
+the one provider today: Req over the Hetzner Cloud API through
+`Net.HttpClient`, its endpoints, label encoding, price parsing, error codes,
+cities, image, 32 KiB user data limit and its root password, dropped where
+the answer arrives, and nothing else. Everything around the primitives is
+`Provision.Driver`'s, the same for every provider: every ledger write before
+a call and after it, the order (firewall, image, enrollment code, server, its
+start), the labels (`Provision.labels/2`), the polling (every 2 s, at most
+150 reads, a rate-limited read waiting 10 s), a write of unknown outcome kept
+`requested` for the reconcile to find by its labels, the reconcile, the
+delete order (server, addresses, firewall, an in-use firewall tried ten
+times) and its guard, the code window, and keeping only a created server's
+facts of its answer; `Provision.Offering` is the pure L2 rule over a
+provider's catalog. A primitive answers its refusals as a closed set: the
+shared kinds (`:unauthorized`, `:read_only_token`, `:account_limit`,
+`{:rate_limited, _}`, `{:unreachable, _}`, `{:other, sentence}` with the
+provider's own plain message), the kinds the driver reads (`:not_found`,
+`:in_use`, `:no_capacity`, `:no_image`), and `{:unknown, _}` for a write that
+may have been carried out; `Provision.error_sentence/2` words every reason
+in the provider's display data. The shared code (`Provision`, the driver,
+the offering, the ledger, the job, `HomeSummary`, `Copy`,
+`Management.Provision`, the router) names no provider, which
+`provider_contract_test.exs` holds by scanning every lib file, and
+`driver_test.exs` runs the driver alone on an invented provider that is only
+primitives over a world of its own. `Provision.current/2` is the one
+resolver of which provider Always On speaks of: the one whose ledger holds
+what Fermix created (or cannot be read), else the one whose token was given
+last, else the first the registry offers. A provider's token and the ledger
+of what was created on it live in its own file, `device/provision/<id>.json`
+(`Provision.Ledger`, `0600`, device-local, never `config.toml` or the
+keyring, so a move never carries it), which is how the ledger records which
+provider each resource belongs to; only the driver writes it. Every write is
+`Ledger.update/3`, which holds the file's lock across its read, change,
+write and rename (never across a call to the provider); `Provision.Ledger.Lock`, one supervised owner in the
 primary's and a desktop's tree, serves writers in the order they asked, each
 the moment the one before is done or exits, with no retry or backoff, and
 refuses only a writer whose turn has not come in 30 s. `Provision.FirstBoot` embeds `packaging/cloud/first-boot.sh`
@@ -612,18 +625,18 @@ no memory and logs its one read.
 
 A provider served by an external plugin is not built. It would be one more
 module of the contract in the engine, listed in the registry, that forwards
-each callback to the plugin; what the engine keeps for every provider stays
+each primitive to the plugin; what the engine keeps for every provider stays
 in the engine: the token's custody (read from the provider's ledger and
 passed with each call, never stored by the plugin or seen by a command, as
 `device/` is denied to the sandbox), the owner's decisions over connect,
 create, power and delete (the daemon), the enrollment code's window, the
 display data the apps draw (answered from the plugin's manifest, held to the
-copy rules), and the ledger. Since `create/3`, `reconcile/2` and the deletes
-write the ledger themselves today, their write-ahead steps would first move
-out of the provider module into a shared driver, so the plugin answers
-single steps (create the firewall, create the server, read one resource,
-delete one, power one) with the shared error kinds, and no plugin ever
-writes a ledger.
+copy rules), and the ledger, which only `Provision.Driver` writes. The
+plugin answers only the primitives (create the firewall, create the server,
+read an action, get, find, delete or power one resource, read the catalog),
+with the contract's closed set of kinds and ids as strings, so a plugin
+never writes a ledger and needs nothing of the driver's order, bounds or
+guards.
 
 `Management.HomeSummary` is that summary (M75 lean v1 §7): `gather/5` reads
 the provider in use and its ledger, the last kept review (`Move.last_review/1`) and a desktop's stored

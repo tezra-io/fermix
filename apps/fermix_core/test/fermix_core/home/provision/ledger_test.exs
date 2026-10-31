@@ -40,6 +40,53 @@ defmodule FermixCore.Home.Provision.LedgerTest do
     assert File.ls!(Path.dirname(Ledger.path(home, "nimbus"))) == ["nimbus.json"]
   end
 
+  # A resource's id is its provider's own, opaque to Fermix: a string. A file
+  # written before ids were strings holds Hetzner's numbers; each reads as
+  # its string, and is written as one from then on.
+  test "an id is an opaque string, and a number the file holds reads as its string",
+       %{home: home} do
+    file = Ledger.path(home, "nimbus")
+    File.mkdir_p!(Path.dirname(file))
+
+    File.write!(
+      file,
+      Jason.encode!(%{
+        "v" => 1,
+        "token" => @token,
+        "ref" => "a3f9",
+        "server" => %{
+          "name" => "fermix-general-a3f9",
+          "id" => 61_839_204,
+          "status" => "created",
+          "type" => "cpx22",
+          "location" => "fsn1"
+        },
+        "firewall" => %{"name" => "fermix-general-a3f9", "id" => "fw-7", "status" => "created"},
+        "primary_ips" => [%{"id" => 91, "type" => "ipv4", "ip" => "203.0.113.7"}]
+      })
+    )
+
+    assert {:ok, ledger} = Ledger.read(home, "nimbus")
+    assert %{server: %{id: "61839204"}, firewall: %{id: "fw-7"}} = ledger
+    assert [%{id: "91"}] = ledger.primary_ips
+
+    {:ok, _ledger} = Ledger.update(home, "nimbus", &{:ok, &1})
+    assert %{"server" => %{"id" => "61839204"}} = file |> File.read!() |> Jason.decode!()
+
+    for bad <- [0, -3, "", 1.5, %{}] do
+      File.write!(
+        file,
+        Jason.encode!(%{
+          "v" => 1,
+          "firewall" => %{"name" => "f", "id" => bad, "status" => "created"},
+          "primary_ips" => []
+        })
+      )
+
+      assert {:error, {:invalid_ledger, _path}} = Ledger.read(home, "nimbus"), inspect(bad)
+    end
+  end
+
   test "an absent file is an empty ledger, and the summary says none", %{home: home} do
     assert {:ok, %{token: nil, server: nil, firewall: nil, primary_ips: []}} =
              Ledger.read(home, "nimbus")
@@ -70,7 +117,7 @@ defmodule FermixCore.Home.Provision.LedgerTest do
       for n <- 1..20 do
         Task.async(fn ->
           Ledger.update(home, "nimbus", fn ledger ->
-            ip = %{id: n, type: "ipv4", ip: "203.0.113.#{n}"}
+            ip = %{id: "ip-#{n}", type: "ipv4", ip: "203.0.113.#{n}"}
             {:ok, %{ledger | primary_ips: [ip | ledger.primary_ips]}}
           end)
         end)
@@ -78,7 +125,9 @@ defmodule FermixCore.Home.Provision.LedgerTest do
 
     Enum.each(tasks, &({:ok, _ledger} = Task.await(&1, 10_000)))
     {:ok, ledger} = Ledger.read(home, "nimbus")
-    assert ledger.primary_ips |> Enum.map(& &1.id) |> Enum.sort() == Enum.to_list(1..20)
+
+    assert ledger.primary_ips |> Enum.map(& &1.id) |> Enum.sort() ==
+             Enum.sort(for n <- 1..20, do: "ip-#{n}")
   end
 
   test "a file that is not one this engine writes is refused by name", %{home: home} do
@@ -103,7 +152,7 @@ defmodule FermixCore.Home.Provision.LedgerTest do
 
       put!(
         home,
-        &Ledger.put_firewall(&1, %{name: "fermix-general-a3f9", id: 1203, status: :created})
+        &Ledger.put_firewall(&1, %{name: "fermix-general-a3f9", id: "1203", status: :created})
       )
 
       put!(home, &Ledger.put_server(&1, Map.merge(server_facts(), %{status: :requested})))
@@ -113,7 +162,7 @@ defmodule FermixCore.Home.Provision.LedgerTest do
 
       put!(home, &Ledger.put_server(&1, created_server(:creating)))
 
-      assert %{state: :creating, server: %{id: 61_839_204}} =
+      assert %{state: :creating, server: %{id: "61839204"}} =
                Ledger.state(home, FakeCloudProvider)
 
       put!(home, &Ledger.put_server(&1, created_server(:created)))
@@ -195,7 +244,7 @@ defmodule FermixCore.Home.Provision.LedgerTest do
       put!(home, &Ledger.connect(&1, @token, @now))
       put!(home, &Ledger.begin_create(&1, "a3f9", server_facts()))
       put!(home, &Ledger.put_server(&1, created_server(:created)))
-      put!(home, &Ledger.put_primary_ips(&1, [%{id: 91, type: "ipv4", ip: "203.0.113.7"}]))
+      put!(home, &Ledger.put_primary_ips(&1, [%{id: "91", type: "ipv4", ip: "203.0.113.7"}]))
       :ok
     end
 
@@ -211,7 +260,7 @@ defmodule FermixCore.Home.Provision.LedgerTest do
       assert %{ref: nil, server: nil, firewall: nil, primary_ips: [], failure: nil} = ledger
       assert Ledger.replaced_ref(ledger) == "a3f9"
 
-      assert %{from_epoch: 5, started_at: @now, old: %{ref: "a3f9", server: %{id: 61_839_204}}} =
+      assert %{from_epoch: 5, started_at: @now, old: %{ref: "a3f9", server: %{id: "61839204"}}} =
                ledger.replace
 
       assert %{
@@ -371,7 +420,7 @@ defmodule FermixCore.Home.Provision.LedgerTest do
 
   defp new_server(status) do
     Map.merge(new_facts(), %{
-      id: 61_839_377,
+      id: "61839377",
       status: status,
       ipv4: "203.0.113.9",
       created_at: @now
@@ -390,7 +439,7 @@ defmodule FermixCore.Home.Provision.LedgerTest do
 
   defp created_server(status) do
     Map.merge(server_facts(), %{
-      id: 61_839_204,
+      id: "61839204",
       status: status,
       ipv4: "203.0.113.7",
       created_at: @now

@@ -93,8 +93,10 @@ defmodule FermixCore.Management.Copy do
     "Fermix Computer Use",
     "Fermix Messages",
     "Always On",
-    # The system of the server Always On moves to.
+    # The system of the server Always On moves to, and the one Fermix creates
+    # its server with.
     "Linux",
+    "Debian",
     "Apple ID",
     "Apple",
     "Full Disk Access",

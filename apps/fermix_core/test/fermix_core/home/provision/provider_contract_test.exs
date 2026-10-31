@@ -164,22 +164,53 @@ defmodule FermixCore.Home.Provision.ProviderContractTest do
       assert Provision.failure_word({:unavailable, %{}}) == "unavailable"
     end
 
-    test "every refusal Hetzner's own errors become is a shared kind" do
-      for reason <- [
-            :forbidden,
-            :not_found,
-            :resource_in_use,
-            :resource_unavailable,
-            :no_image,
-            :too_many_types,
-            {:ineligible_type, "cpx12"},
-            {:refused, 422, "invalid_input", "invalid input in field 'server_type'"},
-            {:action_failed, "create_server", "server placement failed"},
-            {:action_timeout, "start_server"}
+    test "the steps the driver words name the provider and its own message" do
+      assert Provision.error_sentence(
+               {:action_failed, :create, "placement `failed`"},
+               FakeCloudProvider
+             ) ==
+               "Nimbus could not finish creating your server: placement 'failed'."
+
+      assert Provision.error_sentence({:action_timeout, :reset}, FakeCloudProvider) ==
+               "Nimbus had not finished restarting your server after five minutes; Always On " <>
+                 "checks again when it opens."
+
+      assert Provision.error_sentence({:ineligible_type, "tiny-2"}, FakeCloudProvider) ==
+               "Fermix creates only a server type Nimbus still sells with at least 4 GB on x86, " <>
+                 "and tiny-2 is not one."
+
+      assert Provision.error_sentence(:no_image, FakeCloudProvider) ==
+               "Nimbus offers no Debian 13 image right now, so Fermix created no server."
+
+      assert Provision.failure_word({:action_failed, :create, "x"}) == "action_failed"
+      assert Provision.failure_word({:action_timeout, :start}) == "action_timeout"
+    end
+
+    # Hetzner's own refusals as the kinds its primitives answer: a shared kind,
+    # one the driver reads (`:not_found`, `:in_use`, `:no_capacity`), an
+    # outcome it cannot know (`{:unknown, _}`: no answer, a 5xx, a name it
+    # already holds), or its own message in a plain sentence.
+    test "every refusal of Hetzner's own is a kind the driver reads" do
+      refused = "Hetzner refused the request: "
+
+      for {reason, kind} <- [
+            {:unauthorized, :unauthorized},
+            {:forbidden, :read_only_token},
+            {:account_limit, :account_limit},
+            {{:rate_limited, 5}, {:rate_limited, 5}},
+            {:not_found, :not_found},
+            {:resource_in_use, :in_use},
+            {:resource_unavailable, :no_capacity},
+            {{:unreachable, "timeout"}, {:unknown, {:unreachable, "timeout"}}},
+            {{:refused, 500, "server_error", "Down."}, {:unknown, {:other, refused <> "Down."}}},
+            {{:refused, 409, "uniqueness_error", "Taken"},
+             {:unknown, {:other, refused <> "Taken."}}},
+            {{:refused, 422, "invalid_input", "bad `name`"}, {:other, refused <> "bad 'name'."}},
+            {:too_many_types,
+             {:other,
+              "Hetzner listed more server types than Fermix reads, so it offers none right now."}}
           ] do
-        shared = Hetzner.error(reason)
-        assert shared == :read_only_token or match?({:other, _sentence}, shared), inspect(reason)
-        assert Provision.error_sentence(shared, Hetzner) =~ ~r/\A[A-Z].*[.]\z/
+        assert Hetzner.error(reason) == kind, inspect(reason)
       end
     end
   end
@@ -203,6 +234,7 @@ defmodule FermixCore.Home.Provision.ProviderContractTest do
 
       for file <-
             ~w(home/provision.ex home/provision/ledger.ex home/provision/first_boot.ex
+               home/provision/driver.ex home/provision/offering.ex
                management/provision.ex management/home_summary.ex management/copy.ex
                management/jobs.ex management/home.ex management/router.ex) do
         assert ("apps/fermix_core/lib/fermix_core/" <> file) in scanned, file

@@ -37,12 +37,14 @@ defmodule FermixCore.Management.ProvisionProvidersTest do
         {Jobs, name: :"providers_jobs_#{:erlang.phash2(context.test)}", task_supervisor: tasks}
       )
 
+    world = FakeCloudProvider.start!()
+
     seams = [
       home: home,
       profile: "general",
       jobs: [server: jobs],
       providers: [FakeCloudProvider],
-      provider_opts: [now: fn -> @now end],
+      provider_opts: [now: fn -> @now end, world: world],
       open_code: fn ->
         send(test, :code_opened)
         {:ok, @code}
@@ -53,7 +55,7 @@ defmodule FermixCore.Management.ProvisionProvidersTest do
       end
     ]
 
-    %{home: home, seams: seams, jobs: [server: jobs]}
+    %{home: home, seams: seams, jobs: [server: jobs], world: world}
   end
 
   describe "home.provision.providers" do
@@ -118,6 +120,10 @@ defmodule FermixCore.Management.ProvisionProvidersTest do
       assert %{"provider" => "nimbus", "state" => "created", "checked" => true} = view
       assert %{"type" => "small-4", "location" => "osl1"} = view["server"]
 
+      # A resource's id is the provider's own, opaque, as a string.
+      assert [_server, _firewall, _ip] = view["resources"]
+      assert Enum.all?(view["resources"], &match?(%{"id" => "nb-" <> _}, &1))
+
       assert {:ok, job} = route("home.provision.power", %{"action" => "on"}, ctx)
       assert %{"status" => "completed"} = finished(job, ctx)
 
@@ -158,7 +164,7 @@ defmodule FermixCore.Management.ProvisionProvidersTest do
 
     test "a refusal the provider maps to a shared kind is kept in the ledger", ctx do
       {:ok, _view} = connect(ctx)
-      ctx = put_in(ctx.seams[:provider_opts], now: fn -> @now end, fail: :account_limit)
+      FakeCloudProvider.fault(ctx.world, :create_server, :account_limit)
 
       assert {:ok, job} = create(ctx)
 

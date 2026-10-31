@@ -64,7 +64,7 @@ defmodule FermixCore.Management.Provision do
   reaches (`primary_reached/2`). Once that is above the epoch the old server
   held, the move to the new one is done: this desktop's link names the new
   server from then on (`Home.Link`'s `rename_primary/1`), and the old server
-  is deleted, once, as a job of the same kind (`Provision.delete_replaced/2`); a failed delete
+  is deleted, once, as a job of the same kind (`Provision.Driver.delete_replaced/3`); a failed delete
   stays in the ledger with its sentence, and `home.provision.delete` tries it
   again. The old server answering again at its own epoch after the move
   started means it undid the move: the replace waits for its move again.
@@ -79,7 +79,8 @@ defmodule FermixCore.Management.Provision do
   null), `failure` (`{reason, sentence, next_location, at}` or null),
   `replace` (null, or `{state, current, old, failure}` as `Ledger.state/3`'s),
   `resources` (every resource the ledger holds: `{kind, name, id, status,
-  replaced}`, `replaced` true for the old server's), and from
+  replaced}`, `id` the provider's own as a string, `replaced` true for the
+  old server's), and from
   `home.provision.resources` `checked` (whether the provider was read just
   now) and `sentence` (why not, or null). The token never leaves the ledger.
 
@@ -96,6 +97,7 @@ defmodule FermixCore.Management.Provision do
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
   alias FermixCore.Home.Provision
+  alias FermixCore.Home.Provision.Driver
   alias FermixCore.Home.Provision.Ledger
   alias FermixCore.Home.Provision.Registry
   alias FermixCore.Home.Role
@@ -176,7 +178,7 @@ defmodule FermixCore.Management.Provision do
   # A token that replaces another must reach what the ledger holds.
   defp same_project(provider, token, opts) do
     with {:ok, ledger} <- ledger(provider, opts) do
-      case provider.reaches(token, ledger, provider_opts(opts)) do
+      case Driver.reaches(provider, token, ledger, provider_opts(opts)) do
         :ok ->
           :ok
 
@@ -232,7 +234,7 @@ defmodule FermixCore.Management.Provision do
   def options(params, opts \\ []) when is_map(params) and is_list(opts) do
     with {:ok, provider} <- provider_param(params, opts),
          {:ok, token} <- stored_token(provider, opts) do
-      case provider.options(token, provider_opts(opts)) do
+      case Driver.options(provider, token, provider_opts(opts)) do
         {:ok, options} -> {:ok, Map.put(options, "sentence", recommendation(options, provider))}
         {:error, reason} -> refused(reason, provider, opts)
       end
@@ -402,7 +404,7 @@ defmodule FermixCore.Management.Provision do
   end
 
   defp run_create(provider, :create, request, report, opts) do
-    case provider.create(home(opts), request, run_opts(provider, report, opts)) do
+    case Driver.create(provider, home(opts), request, run_opts(provider, report, opts)) do
       {:ok, server} ->
         {:ok, %{"server" => server.name, "type" => server.type, "location" => server.location}}
 
@@ -459,14 +461,14 @@ defmodule FermixCore.Management.Provision do
 
   defp has_server(provider, opts) do
     case Ledger.read(home(opts), provider.id()) do
-      {:ok, %{server: %{status: :created, id: id}}} when is_integer(id) -> :ok
+      {:ok, %{server: %{status: :created, id: id}}} when is_binary(id) -> :ok
       {:ok, _ledger} -> refusal(:no_server, provider)
       {:error, reason} -> refused({:ledger, reason}, provider, opts)
     end
   end
 
   defp run_power(provider, action, report, opts) do
-    case provider.power(home(opts), action, run_opts(provider, report, opts)) do
+    case Driver.power(provider, home(opts), action, run_opts(provider, report, opts)) do
       :ok -> {:ok, %{"action" => Atom.to_string(action)}}
       {:error, reason} -> job_failure(token_reason(reason, provider, opts), provider)
     end
@@ -486,7 +488,8 @@ defmodule FermixCore.Management.Provision do
   end
 
   defp reconciled(home, provider, opts) do
-    case provider.reconcile(
+    case Driver.reconcile(
+           provider,
            home,
            Keyword.put(provider_opts(opts), :running?, running?(opts)) ++
              code_opts(provider, opts)
@@ -553,7 +556,7 @@ defmodule FermixCore.Management.Provision do
   end
 
   defp run_delete(provider, :current, report, opts) do
-    case provider.delete(home(opts), run_opts(provider, report, opts)) do
+    case Driver.delete(provider, home(opts), run_opts(provider, report, opts)) do
       :ok -> {:ok, %{"deleted" => true}}
       {:error, reason} -> job_failure(token_reason(reason, provider, opts), provider)
     end
@@ -569,7 +572,7 @@ defmodule FermixCore.Management.Provision do
   end
 
   defp delete_replaced(provider, report, opts) do
-    case provider.delete_replaced(home(opts), run_opts(provider, report, opts)) do
+    case Driver.delete_replaced(provider, home(opts), run_opts(provider, report, opts)) do
       :ok ->
         {:ok, %{"deleted" => true}}
 
@@ -926,7 +929,7 @@ defmodule FermixCore.Management.Provision do
   end
 
   defp unavailable_reason?({kind, _detail})
-       when kind in [:unreachable, :rate_limited, :code_unavailable, :ledger],
+       when kind in [:unreachable, :rate_limited, :action_timeout, :code_unavailable, :ledger],
        do: true
 
   defp unavailable_reason?({:old_server, reason}), do: unavailable_reason?(reason)

@@ -6266,7 +6266,7 @@
       "properties": {
         "kind": { "enum": ["server", "firewall", "primary_ip"] },
         "name": { "type": ["string", "null"] },
-        "id": { "type": ["integer", "null"] },
+        "id": { "description": "The provider's own id of the resource, opaque to Fermix; null until the provider answered with one.", "type": ["string", "null"], "minLength": 1, "maxLength": 128 },
         "status": { "$ref": "#/$defs/homeProvisionStatus" },
         "replaced": { "type": "boolean" }
       }

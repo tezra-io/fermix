@@ -1,83 +1,56 @@
 defmodule FermixCore.Home.Provision.Hetzner do
   @moduledoc """
-  The Hetzner Cloud provider (M75 lean v1 §3, §4.3, L1, L2), a module of the
-  `FermixCore.Home.Provision` contract: Req over
-  `https://api.hetzner.cloud/v1` with the project token the owner pasted, kept
-  in `Provision.Ledger`'s `device/provision/hetzner.json`. Every request goes
-  through `Net.HttpClient` (the shared pool and the egress proxy), with no
-  automatic retry and no redirect. Everything of Hetzner's lives here: its
-  endpoints, its label rules, how it writes prices, its error codes, its
-  locations and their cities, its system image, its user data limit (32 KiB)
-  and the root password it answers a create with.
+  The Hetzner Cloud provider (M75 lean v1 §3, §4.3, L1, L2): an API adapter
+  of the `FermixCore.Home.Provision` contract, Req over
+  `https://api.hetzner.cloud/v1` with the project token the owner pasted,
+  which `Provision.Driver` reads from `device/provision/hetzner.json` and
+  passes with each call. It writes no ledger: every primitive is one call (or
+  a fixed few) to Hetzner's API, answered as the contract's normalized facts
+  and kinds. Every request goes through `Net.HttpClient` (the shared pool and
+  the egress proxy), with no automatic retry and no redirect.
 
-  **Options (L2).** `GET /server_types` (shape, per-location stock in
-  `locations[].available`, and prices), `GET /pricing` (the currency and the
-  IPv4 address's price) and `GET /locations` (the city names), read live and
-  never written into the engine. Offered: every type that is x86, has at
-  least 4 GB and is not deprecated, in Falkenstein (`fsn1`), Nuremberg
-  (`nbg1`) and Helsinki (`hel1`), wherever it is in stock, at the gross
-  monthly price, VAT included as the account is billed, plus the IPv4
-  address's. Recommended: the cheapest such type, in the first of the three
-  where it is in stock; "more room": the cheapest type with more memory,
-  where the recommendation is or else the first place it is in stock.
+  What is Hetzner's lives here only: its endpoints; Fermix's labels encoded
+  as Hetzner labels and found again with a `label_selector`; its prices,
+  decimal strings ("19.4900000000") read as ten-thousandths; its error codes
+  and their kinds; Falkenstein (`fsn1`), Nuremberg (`nbg1`) and Helsinki
+  (`hel1`), the places Fermix creates a server in, in that order; its Debian
+  13 image (`GET /images?type=system&name=debian-13&architecture=x86`); its
+  32 KiB of user data; and its ids, numbers Fermix keeps as their strings.
 
-  **Create.** The type and location are checked against the live stock
-  first (`GET /server_types?name=`, `GET /locations`), so a type sold out
-  there is refused before anything is written, naming the next location in
-  stock. Then, each written to the ledger before its call and after it: the
-  firewall with no inbound rule (`POST /firewalls`, the first write, where a
-  read-only token is refused before anything costs money); the Debian 13
-  image (`GET /images?type=system&name=debian-13&architecture=x86`); a fresh
-  provisioned enrollment code (24 hours, L15); and the server (`POST
-  /servers`): its name and labels from the ledger's ref, the firewall, the
-  primary IPv4 kept (and IPv6), no SSH key, and the first boot with the code
-  as user data. Its create and start actions are polled (`GET /actions/{id}`,
-  every 2 s, at most 150 times each); then `GET /servers/{id}` records it
-  running. A create that stopped after its firewall stood reuses that
-  firewall and the ledger's ref on the next try. A `POST` refused outright
-  leaves nothing behind (its code withdrawn); one whose answer did not come
-  (no connection, a 5xx) stays `requested` in the ledger and keeps its code,
-  and `reconcile/2` finds it by its labels.
-
-  **Replace.** A replace (`Ledger.begin_replace/3`) sets the server the home
-  lives on aside; the new server is created by `create/3` as any is, under a
-  short id other than the old one's (`Provision.fresh_ref/2`), so their names
-  and labels never collide. `reconcile/2` reads the old server by its ids
-  too, and `reaches/3` checks it while no new one stands. `delete_replaced/2`
-  deletes the old server, its addresses unless they went with it, and its
-  firewall, in the order `delete/2` uses, only once the move to the new one is
-  done (`Ledger.retired/1`), and records the replace done; `delete/2` refuses
-  the new server once it holds the home.
+  The primitives: `check_token/2` (`GET /servers` without Fermix's label,
+  `GET /pricing`), `catalog/2` (`GET /server_types`, paged, at most 5 pages;
+  `GET /pricing`; `GET /locations`), `server_type/3` (`GET
+  /server_types?name=`, `GET /locations`), `system_image/2`,
+  `create_firewall/3` (`POST /firewalls` with no rule and nothing applied
+  to), `create_server/3` (`POST /servers`: its type and place, the image, the
+  firewall, the primary IPv4 kept and IPv6, the labels, no SSH key, the user
+  data, started on create; its create and start actions), `power/4` (`POST
+  /servers/{id}/actions/poweron` or `reset`), `action/3` (`GET
+  /actions/{id}`), `get/4` and `find/4` (`GET /servers`, `/firewalls`,
+  `/primary_ips`, by id or by labels) and `delete/4`.
 
   **The root password.** Hetzner answers a create made with no SSH key with
-  the server's root password. The answer is read for its ids and dropped:
-  nothing of it reaches the ledger, a log, a trace or a status.
+  the server's root password. It is deleted from every answer where the
+  answer arrives (`answer/3`), before anything matches on it, so not even a
+  crash report carries it; the driver then keeps only the created server's
+  facts.
 
-  **Errors.** Inside, a refusal keeps Hetzner's status and code, which
-  decide whether a write is known to have failed. Every callback answers it
-  as one of the contract's shared kinds (`error/1`): `401` is
-  `:unauthorized`; `403 forbidden` on a write a read-only token
-  (`:read_only_token`); `403 resource_limit_exceeded` the account's limit;
-  `412 resource_unavailable` on a create no capacity, with the next location
-  in stock (`{:unavailable, _}`); `429` rate limited, with Hetzner's
-  `RateLimit-Reset` (a poll waits 10 s and goes on, still counted against its
-  bound); no answer `{:unreachable, _}`; a 404 on a token check of what the
-  ledger holds another project's token; and every other refusal Hetzner's
-  own message in a plain sentence (`{:other, sentence}`). The log names each
-  refusal's status and code; the sentence it becomes says only the message.
-
-  **Labels.** Every resource carries `fermix=always-on`,
-  `fermix-profile=<profile>` and `fermix-ref=<ref>`, the profile as
-  `Provision.name_part/1` makes it (Hetzner takes at most 63 characters of
-  letters, digits, `-`, `_` and `.` in a label value), so a lost create is
-  found again by a label selector.
+  **Errors** (`error/1`). `401` is `:unauthorized`; `403 forbidden` a
+  read-only token (`:read_only_token`); `403 resource_limit_exceeded` the
+  account's limit; `404` `:not_found`; `412 resource_unavailable` no
+  capacity (`:no_capacity`); `422 resource_in_use` a firewall its deleted
+  server still holds (`:in_use`); `429` rate limited, with Hetzner's
+  `RateLimit-Reset`. A write whose outcome is unknown is `{:unknown, _}`: no
+  answer, a 5xx, or a `409 uniqueness_error` (the shared pool sends a
+  request again once when its connection closed under it, so the first may
+  have been carried out). Every other refusal is Hetzner's own message in
+  one plain sentence (`{:other, sentence}`). The log names each refusal's
+  status and code; the sentence says only the message.
   """
 
   @behaviour FermixCore.Home.Provision
 
   alias FermixCore.Home.Provision
-  alias FermixCore.Home.Provision.FirstBoot
-  alias FermixCore.Home.Provision.Ledger
   alias FermixCore.Net.HttpClient
 
   require Logger
@@ -88,14 +61,19 @@ defmodule FermixCore.Home.Provision.Hetzner do
   @cities %{"fsn1" => "Falkenstein", "nbg1" => "Nuremberg", "hel1" => "Helsinki"}
   @image "debian-13"
   @max_user_data 32_768
-  @min_memory_gb 4
-  @poll_ms 2_000
-  @max_polls 150
-  @rate_wait_ms 10_000
-  @in_use_tries 10
   @receive_timeout_ms 10_000
   @max_pages 5
   @max_vendor_bytes 300
+  @paths %{server: "/servers", firewall: "/firewalls", primary_ip: "/primary_ips"}
+  @steps %{
+    "create_server" => :create,
+    "start_server" => :start,
+    "delete_server" => :delete,
+    "poweron_server" => :power_on,
+    "reset_server" => :reset
+  }
+
+  # -- identity -------------------------------------------------------------------
 
   @impl true
   def id, do: @id
@@ -118,9 +96,8 @@ defmodule FermixCore.Home.Provision.Hetzner do
       docs_anchor: "hetzner",
       locations: Enum.map(@locations, &%{id: &1, city: Map.fetch!(@cities, &1)}),
       # Its name, the permission and the two places in its console the steps
-      # name as it labels them, its cities, and the system its servers run.
-      proper_nouns:
-        ["Hetzner", "Read & Write", "API Tokens", "Security", "Debian"] ++ Map.values(@cities)
+      # name as it labels them, and its cities.
+      proper_nouns: ["Hetzner", "Read & Write", "API Tokens", "Security"] ++ Map.values(@cities)
     }
   end
 
@@ -128,67 +105,97 @@ defmodule FermixCore.Home.Provision.Hetzner do
   @impl true
   def type_name(type) when is_binary(type), do: String.upcase(type)
 
-  @doc "The most bytes of user data Hetzner takes."
-  @spec max_user_data() :: pos_integer()
+  @impl true
   def max_user_data, do: @max_user_data
 
-  # -- the token ----------------------------------------------------------------
+  # -- reads ------------------------------------------------------------------------
 
   @impl true
   def check_token(token, opts) when is_binary(token) and is_list(opts),
-    do: token |> project(opts) |> shared()
+    do: token |> project(opts) |> result()
 
   defp project(token, opts) do
     with {:ok, %{"servers" => servers}} <-
-           get(token, "/servers", opts, label_selector: "!fermix", per_page: 1),
-         {:ok, _pricing} <- get(token, "/pricing", opts) do
+           http_get(token, "/servers", opts, label_selector: "!fermix", per_page: 1),
+         {:ok, _pricing} <- http_get(token, "/pricing", opts) do
       {:ok, %{other_servers: servers != []}}
     end
   end
 
-  # One read by id, with the new token, of what the ledger holds: Hetzner
-  # answers 404 for a resource of another project.
   @impl true
-  def reaches(token, ledger, opts) when is_binary(token) and is_map(ledger) do
-    case standing(ledger) || standing(Ledger.replaced_set(ledger)) do
-      nil -> :ok
-      path -> token |> get(path, opts) |> reached() |> shared()
+  def catalog(token, opts) when is_binary(token) and is_list(opts),
+    do: token |> priced(opts) |> result()
+
+  defp priced(token, opts) do
+    with {:ok, types} <- server_types(token, opts, 1, []),
+         {:ok, %{"pricing" => pricing}} <- http_get(token, "/pricing", opts),
+         {:ok, %{"locations" => locations}} <- http_get(token, "/locations", opts) do
+      {:ok,
+       %{
+         currency: pricing["currency"],
+         locations: Enum.map(locations, &location/1),
+         types: Enum.map(types, &type_view/1),
+         ipv4_monthly: ipv4_prices(pricing)
+       }}
     end
   end
 
-  defp standing(%{server: %{id: id, status: status}}) when is_integer(id) and status != :gone,
-    do: "/servers/#{id}"
-
-  defp standing(%{firewall: %{id: id, status: status}}) when is_integer(id) and status != :gone,
-    do: "/firewalls/#{id}"
-
-  defp standing(_ledger), do: nil
-
-  defp reached({:ok, _found}), do: :ok
-  defp reached({:error, :not_found}), do: {:error, :other_project}
-  defp reached({:error, _reason} = error), do: error
-
-  # -- options ------------------------------------------------------------------
-
   @impl true
-  def options(token, opts) when is_binary(token) and is_list(opts),
-    do: token |> offered(opts) |> shared()
+  def server_type(token, type, opts) when is_binary(token) and is_binary(type),
+    do: token |> typed(type, opts) |> result()
 
-  defp offered(token, opts) do
-    with {:ok, types} <- server_types(token, opts),
-         {:ok, %{"pricing" => pricing}} <- get(token, "/pricing", opts),
-         {:ok, %{"locations" => locations}} <- get(token, "/locations", opts) do
-      {:ok, offering(types, pricing, locations)}
+  defp typed(token, type, opts) do
+    with {:ok, %{"server_types" => types}} <- http_get(token, "/server_types", opts, name: type),
+         {:ok, %{"locations" => locations}} <- http_get(token, "/locations", opts) do
+      found = Enum.find(types, &(&1["name"] == type))
+      cities = Map.new(locations, &{&1["name"], &1["city"]})
+      {:ok, %{type: found && type_view(found), cities: cities}}
     end
   end
 
-  defp server_types(token, opts), do: server_types(token, opts, 1, [])
+  @impl true
+  def system_image(token, opts) when is_binary(token) do
+    case http_get(token, "/images", opts, type: "system", name: @image, architecture: "x86") do
+      {:ok, %{"images" => [%{"id" => id} | _rest]}} -> {:ok, Integer.to_string(id)}
+      {:ok, _none} -> {:error, :no_image}
+      {:error, reason} -> {:error, error(reason)}
+    end
+  end
+
+  @impl true
+  def action(token, id, opts) when is_binary(token) and is_binary(id) do
+    case http_get(token, "/actions/#{id}", opts) do
+      {:ok, %{"action" => read}} -> {:ok, action_view(read)}
+      {:error, reason} -> {:error, error(reason)}
+    end
+  end
+
+  @impl true
+  def get(token, kind, id, opts) when is_map_key(@paths, kind) and is_binary(id) do
+    key = Atom.to_string(kind)
+
+    case http_get(token, "#{@paths[kind]}/#{id}", opts) do
+      {:ok, %{^key => found}} -> {:ok, resource(kind, found)}
+      {:error, reason} -> {:error, error(reason)}
+    end
+  end
+
+  @impl true
+  def find(token, kind, labels, opts) when kind in [:server, :firewall] and is_map(labels) do
+    key = Atom.to_string(kind) <> "s"
+
+    case http_get(token, @paths[kind], opts, label_selector: selector(labels)) do
+      {:ok, %{^key => [found | _rest]}} -> {:ok, resource(kind, found)}
+      {:ok, %{^key => []}} -> {:ok, nil}
+      {:error, reason} -> {:error, error(reason)}
+    end
+  end
 
   defp server_types(_token, _opts, page, _acc) when page > @max_pages,
     do: {:error, :too_many_types}
 
   defp server_types(token, opts, page, acc) do
-    case get(token, "/server_types", opts, per_page: 50, page: page) do
+    case http_get(token, "/server_types", opts, per_page: 50, page: page) do
       {:ok, %{"server_types" => types} = body} ->
         case get_in(body, ["meta", "pagination", "next_page"]) do
           next when is_integer(next) -> server_types(token, opts, next, acc ++ types)
@@ -200,111 +207,138 @@ defmodule FermixCore.Home.Provision.Hetzner do
     end
   end
 
-  @doc false
-  # Pure: the offers, the recommendation and "more room" from the three
-  # answers. Public for the tests of the L2 rule.
-  @spec offering([map()], map(), [map()]) :: map()
-  def offering(types, pricing, locations) do
-    ipv4 = ipv4_prices(pricing)
+  # -- writes -----------------------------------------------------------------------
 
-    offers =
-      types |> Enum.filter(&eligible?/1) |> Enum.flat_map(&offers(&1, ipv4)) |> sort_offers()
+  @impl true
+  def create_firewall(token, %{name: name, labels: labels}, opts) when is_binary(token) do
+    body = %{name: name, labels: labels, rules: [], apply_to: []}
 
-    recommended = recommend(offers)
+    case http_post(token, "/firewalls", body, opts) do
+      {:ok, %{"firewall" => %{"id" => id}}} -> {:ok, Integer.to_string(id)}
+      {:error, reason} -> {:error, error(reason)}
+    end
+  end
 
+  @impl true
+  def create_server(token, spec, opts) when is_binary(token) and is_map(spec) do
+    body = %{
+      name: spec.name,
+      server_type: spec.type,
+      location: spec.location,
+      image: String.to_integer(spec.image),
+      start_after_create: true,
+      firewalls: [%{firewall: String.to_integer(spec.firewall)}],
+      public_net: %{enable_ipv4: true, enable_ipv6: true},
+      labels: spec.labels,
+      user_data: spec.user_data
+    }
+
+    case http_post(token, "/servers", body, opts) do
+      {:ok, answer} -> {:ok, created(answer)}
+      {:error, reason} -> {:error, error(reason)}
+    end
+  end
+
+  # Only the ids, the address, the time and the actions are read; the rest of
+  # the answer is dropped here (the root password went at the client's
+  # boundary). An answer shaped otherwise fails loud.
+  defp created(%{"server" => %{"id" => _id} = server, "action" => action} = answer) do
+    server
+    |> resource_server()
+    |> Map.take([:id, :ipv4, :created_at, :primary_ips])
+    |> Map.put(:actions, Enum.map([action | answer["next_actions"] || []], &action_view/1))
+  end
+
+  @impl true
+  def power(token, id, verb, opts) when is_binary(id) and verb in [:on, :reset] do
+    case http_post(token, "/servers/#{id}/actions/#{power_verb(verb)}", %{}, opts) do
+      {:ok, %{"action" => started}} -> {:ok, action_view(started)}
+      {:error, reason} -> {:error, error(reason)}
+    end
+  end
+
+  defp power_verb(:on), do: "poweron"
+  defp power_verb(:reset), do: "reset"
+
+  @impl true
+  def delete(token, kind, id, opts) when is_map_key(@paths, kind) and is_binary(id) do
+    case http_delete(token, "#{@paths[kind]}/#{id}", opts) do
+      {:ok, %{"action" => started}} -> {:ok, action_view(started)}
+      {:ok, _body} -> {:ok, nil}
+      {:error, reason} -> {:error, error(reason)}
+    end
+  end
+
+  # -- Hetzner's shapes, normalized -------------------------------------------------
+
+  defp type_view(type) do
     %{
-      "currency" => pricing["currency"],
-      "locations" => location_views(locations),
-      "offers" => offers,
-      "recommended" => recommended && pick(recommended),
-      "more_room" => more_room(offers, recommended)
+      name: type["name"],
+      description: type["description"],
+      cores: type["cores"],
+      memory_gb: whole(type["memory"]),
+      disk_gb: type["disk"],
+      x86: type["architecture"] == "x86",
+      sold: type["deprecated"] == false,
+      dedicated: type["cpu_type"] == "dedicated",
+      stock: for(%{"available" => true, "name" => name} <- type["locations"] || [], do: name),
+      monthly: prices(type["prices"] || [])
     }
   end
 
-  defp eligible?(type) do
-    type["architecture"] == "x86" and type["deprecated"] == false and
-      is_number(type["memory"]) and type["memory"] >= @min_memory_gb
-  end
-
-  defp offers(type, ipv4) do
-    for location <- @locations,
-        in_stock?(type, location),
-        {:ok, monthly} <- [monthly(type, location)] do
-      address = Map.get(ipv4, location, 0)
-
-      %{
-        "type" => type["name"],
-        "description" => type["description"],
-        "cores" => type["cores"],
-        "memory_gb" => whole(type["memory"]),
-        "disk_gb" => type["disk"],
-        "dedicated" => type["cpu_type"] == "dedicated",
-        "location" => location,
-        "monthly" => money(monthly),
-        "ipv4_monthly" => money(address),
-        "total_monthly" => money(monthly + address)
-      }
-    end
-  end
-
-  defp in_stock?(type, location),
-    do: Enum.any?(type["locations"] || [], &(&1["name"] == location and &1["available"] == true))
-
-  defp monthly(type, location) do
-    case Enum.find(type["prices"] || [], &(&1["location"] == location)) do
-      %{"price_monthly" => %{"gross" => gross}} -> {:ok, units(gross)}
-      _none -> :error
-    end
+  defp prices(prices) do
+    for %{"location" => location, "price_monthly" => %{"gross" => gross}} <- prices,
+        into: %{},
+        do: {location, units(gross)}
   end
 
   defp ipv4_prices(pricing) do
     case Enum.find(pricing["primary_ips"] || [], &(&1["type"] == "ipv4")) do
-      %{"prices" => prices} ->
-        Map.new(prices, &{&1["location"], units(&1["price_monthly"]["gross"])})
-
-      _none ->
-        %{}
+      %{"prices" => prices} -> prices(prices)
+      _none -> %{}
     end
   end
 
-  # Cheapest first; among equals, in the order of the three locations.
-  defp sort_offers(offers),
-    do: Enum.sort_by(offers, &{units(&1["total_monthly"]), location_rank(&1["location"])})
+  defp location(location),
+    do: %{id: location["name"], city: location["city"], country: location["country"]}
 
-  defp location_rank(location), do: Enum.find_index(@locations, &(&1 == location))
+  defp resource(:server, server), do: resource_server(server)
+  defp resource(_kind, %{"id" => id}), do: %{id: Integer.to_string(id)}
 
-  # The cheapest type, in the first location where it is in stock.
-  defp recommend([]), do: nil
-
-  defp recommend([cheapest | _rest] = offers) do
-    offers
-    |> Enum.filter(&(&1["type"] == cheapest["type"]))
-    |> Enum.min_by(&location_rank(&1["location"]))
+  defp resource_server(server) do
+    %{
+      id: Integer.to_string(server["id"]),
+      power: server["status"],
+      ipv4: get_in(server, ["public_net", "ipv4", "ip"]),
+      created_at: time(server["created"]),
+      primary_ips: primary_ips(server)
+    }
   end
 
-  defp more_room(_offers, nil), do: nil
-
-  defp more_room(offers, recommended) do
-    bigger = Enum.filter(offers, &(&1["memory_gb"] > recommended["memory_gb"]))
-
-    case bigger do
-      [] ->
-        nil
-
-      [next | _rest] ->
-        same_type = Enum.filter(bigger, &(&1["type"] == next["type"]))
-        here = Enum.find(same_type, &(&1["location"] == recommended["location"]))
-        pick(here || Enum.min_by(same_type, &location_rank(&1["location"])))
-    end
+  defp primary_ips(server) do
+    for type <- ["ipv4", "ipv6"],
+        %{"id" => id} = ip <- [get_in(server, ["public_net", type])],
+        do: %{id: Integer.to_string(id), type: type, ip: ip["ip"]}
   end
 
-  defp pick(offer), do: %{"type" => offer["type"], "location" => offer["location"]}
-
-  defp location_views(locations) do
-    for id <- @locations, %{} = location <- [Enum.find(locations, &(&1["name"] == id))] do
-      %{"id" => id, "city" => location["city"], "country" => location["country"]}
-    end
+  defp action_view(%{"id" => id, "status" => status, "command" => command} = action) do
+    %{
+      id: Integer.to_string(id),
+      status: action_status(status),
+      step: Map.get(@steps, command, :other),
+      message: if(status == "error", do: action_message(action["error"]))
+    }
   end
+
+  defp action_status("success"), do: :success
+  defp action_status("error"), do: :error
+  defp action_status(_running), do: :running
+
+  defp action_message(error), do: bounded((error || %{})["message"] || "Hetzner gave no reason.")
+
+  # Fermix's labels as Hetzner's label selector.
+  defp selector(labels),
+    do: labels |> Enum.sort() |> Enum.map_join(",", fn {key, value} -> "#{key}=#{value}" end)
 
   # Hetzner writes prices as decimal strings ("19.4900000000"); a ten
   # thousandth of a unit is exact for every price it sells.
@@ -314,673 +348,58 @@ defmodule FermixCore.Home.Provision.Hetzner do
     String.to_integer(whole) * 10_000 + String.to_integer(fraction)
   end
 
-  defp money(units) when is_integer(units) do
-    cents = div(units + 50, 100)
-    "#{div(cents, 100)}.#{cents |> rem(100) |> Integer.to_string() |> String.pad_leading(2, "0")}"
-  end
-
   defp whole(memory) when is_float(memory) and memory == trunc(memory), do: trunc(memory)
   defp whole(memory), do: memory
 
-  # -- create -------------------------------------------------------------------
-
-  @impl true
-  def create(home, %{type: type, location: location, profile: profile} = request, opts)
-      when is_binary(home) and is_binary(type) and location in @locations and is_binary(profile),
-      do: home |> created_server(request, opts) |> shared()
-
-  defp created_server(home, %{type: type, location: location, profile: profile}, opts) do
-    report(opts, "checking")
-
-    with {:ok, ledger} <- read(home),
-         {:ok, token} <- token(ledger),
-         :ok <- no_server(ledger),
-         {:ok, facts} <- checked(token, type, location, opts),
-         {:ok, plan} <- begin(home, ledger, facts, profile),
-         {:ok, firewall_id} <- firewall(home, token, plan, opts),
-         {:ok, image_id} <- image(token, opts),
-         {:ok, user_data} <- user_data(opts),
-         {:ok, created} <-
-           server(
-             home,
-             token,
-             plan,
-             %{firewall: firewall_id, image: image_id, user_data: user_data},
-             opts
-           ) do
-      started(home, token, created, opts)
+  defp time(text) when is_binary(text) do
+    case DateTime.from_iso8601(text) do
+      {:ok, at, _offset} -> DateTime.truncate(at, :second)
+      _invalid -> nil
     end
   end
 
-  defp no_server(%{server: %{status: status}}) when status != :gone, do: {:error, :server_exists}
-  defp no_server(_ledger), do: :ok
+  defp time(_text), do: nil
 
-  # The type as Hetzner sells it now, and the city names, before anything is
-  # written: a type sold out where asked is refused with the next location in
-  # stock.
-  defp checked(token, type, location, opts) do
-    with {:ok, %{"server_types" => types}} <- get(token, "/server_types", opts, name: type),
-         {:ok, %{"locations" => locations}} <- get(token, "/locations", opts),
-         {:ok, found} <- eligible(types, type) do
-      facts = %{
-        type: type,
-        description: found["description"],
-        location: location,
-        city: city(locations, location),
-        stock: Enum.filter(@locations, &in_stock?(found, &1)),
-        cities: Map.new(@locations, &{&1, city(locations, &1)})
-      }
+  # -- the kinds --------------------------------------------------------------------
 
-      if location in facts.stock, do: {:ok, facts}, else: {:error, unavailable(facts)}
-    end
-  end
+  defp result({:error, reason}), do: {:error, error(reason)}
+  defp result(answer), do: answer
 
-  defp eligible(types, type) do
-    case Enum.find(types, &(&1["name"] == type)) do
-      %{} = found ->
-        if eligible?(found), do: {:ok, found}, else: {:error, {:ineligible_type, type}}
+  @doc """
+  One of Hetzner's own refusals as the kind its primitives answer
+  (`Provision.error/0`): a shared kind, one the driver reads, an outcome it
+  cannot know (`{:unknown, _}`), or Hetzner's own message in a plain
+  sentence (`{:other, sentence}`).
+  """
+  @spec error(term()) :: Provision.error()
+  def error(:forbidden), do: :read_only_token
+  def error(:resource_in_use), do: :in_use
+  def error(:resource_unavailable), do: :no_capacity
+  def error({:unreachable, _message} = reason), do: {:unknown, reason}
 
-      nil ->
-        {:error, {:ineligible_type, type}}
-    end
-  end
+  def error({:refused, status, _code, _message} = refused) when status >= 500,
+    do: {:unknown, refused_sentence(refused)}
 
-  defp city(locations, id) do
-    case Enum.find(locations, &(&1["name"] == id)) do
-      %{"city" => city} when is_binary(city) -> city
-      _unknown -> id
-    end
-  end
+  def error({:refused, 409, "uniqueness_error", _message} = refused),
+    do: {:unknown, refused_sentence(refused)}
 
-  defp unavailable(facts) do
-    next = Enum.find(facts.stock, &(&1 != facts.location))
+  def error({:refused, _status, _code, _message} = refused), do: refused_sentence(refused)
 
-    {:unavailable,
-     %{
-       type: facts.type,
-       description: facts.description,
-       location: facts.location,
-       city: facts.city,
-       next: next,
-       next_city: next && facts.cities[next]
-     }}
-  end
+  def error(:too_many_types),
+    do:
+      {:other, "Hetzner listed more server types than Fermix reads, so it offers none right now."}
 
-  # A create that stopped after its firewall stood keeps that firewall and the
-  # ledger's ref; any other starts afresh with a new ref.
-  defp begin(home, ledger, facts, profile) do
-    {ref, reuse} =
-      case ledger do
-        %{ref: ref, firewall: %{status: :created, id: id}} when is_binary(ref) -> {ref, id}
-        _fresh -> {fresh_ref(ledger), nil}
-      end
+  def error(reason), do: reason
 
-    plan =
-      Map.merge(facts, %{
-        ref: ref,
-        profile: profile,
-        name: Provision.server_name(profile, ref),
-        reuse_firewall: reuse
-      })
+  defp refused_sentence({:refused, _status, _code, message}),
+    do: {:other, "Hetzner refused the request: #{Provision.plain(message)}"}
 
-    transform =
-      if reuse,
-        do: &%{&1 | failure: nil, server: nil},
-        else: &Ledger.begin_create(&1, ref, %{name: plan.name})
+  # -- the client -------------------------------------------------------------------
 
-    with {:ok, _ledger} <- update(home, &{:ok, transform.(&1)}), do: {:ok, plan}
-  end
+  defp http_get(token, path, opts, params \\ []),
+    do: request(token, :get, path, opts, params: params)
 
-  defp fresh_ref(ledger),
-    do: Provision.fresh_ref(:crypto.strong_rand_bytes(2), Ledger.replaced_ref(ledger))
-
-  defp firewall(_home, _token, %{reuse_firewall: id}, _opts) when is_integer(id), do: {:ok, id}
-
-  defp firewall(home, token, plan, opts) do
-    report(opts, "firewall")
-
-    body = %{
-      name: plan.name,
-      labels: labels(plan.profile, plan.ref),
-      rules: [],
-      apply_to: []
-    }
-
-    case post(token, "/firewalls", body, opts) do
-      {:ok, %{"firewall" => %{"id" => id}}} ->
-        with {:ok, _ledger} <-
-               update(home, &{:ok, Ledger.put_firewall(&1, %{id: id, status: :created})}),
-             do: {:ok, id}
-
-      {:error, reason} ->
-        forget_if_refused(home, :firewall, reason)
-    end
-  end
-
-  defp image(token, opts) do
-    case get(token, "/images", opts, type: "system", name: @image, architecture: "x86") do
-      {:ok, %{"images" => [%{"id" => id} | _rest]}} -> {:ok, id}
-      {:ok, _none} -> {:error, :no_image}
-      {:error, _reason} = error -> error
-    end
-  end
-
-  defp user_data(opts) do
-    with {:ok, code} <- open_code(opts) do
-      case FirstBoot.user_data(code, @max_user_data) do
-        {:ok, user_data} -> {:ok, user_data}
-        {:error, :too_large} -> withdrawn(opts, :user_data_too_large)
-        {:error, :invalid_code} -> withdrawn(opts, :invalid_code)
-      end
-    end
-  end
-
-  defp open_code(opts) do
-    case Keyword.fetch!(opts, :open_code).() do
-      {:ok, code} -> {:ok, code}
-      {:error, sentence} when is_binary(sentence) -> {:error, {:code_unavailable, sentence}}
-    end
-  end
-
-  defp withdraw_code(opts) do
-    case Keyword.fetch!(opts, :withdraw_code).() do
-      :ok -> :ok
-      {:error, {:unavailable, sentence}} -> {:error, {:code_unavailable, sentence}}
-    end
-  end
-
-  # The code of a server that will not exist is withdrawn; the create's own
-  # reason is the answer, and a code that could not be withdrawn is logged
-  # beside it (it expires by itself).
-  defp withdrawn(opts, reason) do
-    case withdraw_code(opts) do
-      :ok ->
-        {:error, reason}
-
-      {:error, {:code_unavailable, sentence}} ->
-        Logger.error("provision: the server's enrollment code stays open: #{sentence}")
-        {:error, reason}
-    end
-  end
-
-  defp server(home, token, plan, parts, opts) do
-    report(opts, "server")
-    asked = %{name: plan.name, type: plan.type, location: plan.location, status: :requested}
-
-    with {:ok, _ledger} <- update(home, &{:ok, Ledger.put_server(&1, asked)}) do
-      case post(token, "/servers", server_body(plan, parts), opts) do
-        {:ok, answer} -> created(home, answer)
-        {:error, reason} -> server_refused(home, plan, reason, opts)
-      end
-    end
-  end
-
-  defp server_body(plan, parts) do
-    %{
-      name: plan.name,
-      server_type: plan.type,
-      location: plan.location,
-      image: parts.image,
-      start_after_create: true,
-      firewalls: [%{firewall: parts.firewall}],
-      public_net: %{enable_ipv4: true, enable_ipv6: true},
-      labels: labels(plan.profile, plan.ref),
-      user_data: parts.user_data
-    }
-  end
-
-  # Only the ids and the address are read; the rest of the answer is dropped
-  # here (the root password went at the client's boundary).
-  defp created(home, %{"server" => %{"id" => id} = server, "action" => action} = answer) do
-    ips = primary_ips(server)
-
-    facts = %{
-      id: id,
-      status: :creating,
-      ipv4: get_in(server, ["public_net", "ipv4", "ip"]),
-      created_at: time(server["created"])
-    }
-
-    with {:ok, _ledger} <-
-           update(home, &{:ok, &1 |> Ledger.put_server(facts) |> Ledger.put_primary_ips(ips)}) do
-      {:ok, %{id: id, actions: [action | answer["next_actions"] || []]}}
-    end
-  end
-
-  defp primary_ips(server) do
-    for type <- ["ipv4", "ipv6"],
-        %{"id" => id} = ip <- [get_in(server, ["public_net", type])],
-        do: %{id: id, type: type, ip: ip["ip"]}
-  end
-
-  defp server_refused(home, plan, reason, opts) do
-    if definitive?(reason) do
-      with {:ok, _ledger} <- update(home, &{:ok, Ledger.remove(&1, :server)}),
-           do: withdrawn(opts, named_refusal(reason, plan))
-    else
-      {:error, reason}
-    end
-  end
-
-  defp named_refusal(:resource_unavailable, plan), do: unavailable(plan)
-  defp named_refusal(reason, _plan), do: reason
-
-  defp started(home, token, %{id: id, actions: actions}, opts) do
-    report(opts, "starting")
-
-    with :ok <- await_all(token, actions, opts),
-         {:ok, %{"server" => server}} <- get(token, "/servers/#{id}", opts),
-         {:ok, ledger} <-
-           update(home, &{:ok, Ledger.put_server(&1, seen(server, :created, opts))}) do
-      {:ok, ledger.server}
-    end
-  end
-
-  defp seen(server, status, opts),
-    do: %{status: status, power: server["status"], seen_at: now(opts)}
-
-  # -- power ----------------------------------------------------------------------
-
-  @impl true
-  def power(home, action, opts) when is_binary(home) and action in [:on, :reset],
-    do: home |> powered(action, opts) |> shared()
-
-  defp powered(home, action, opts) do
-    report(opts, "power")
-
-    with {:ok, ledger} <- read(home),
-         {:ok, token} <- token(ledger),
-         {:ok, id} <- server_id(ledger),
-         {:ok, %{"action" => started}} <-
-           post(token, "/servers/#{id}/actions/#{verb(action)}", %{}, opts),
-         :ok <- await_all(token, [started], opts),
-         {:ok, %{"server" => server}} <- get(token, "/servers/#{id}", opts),
-         {:ok, _ledger} <-
-           update(
-             home,
-             &{:ok, Ledger.put_server(&1, %{power: server["status"], seen_at: now(opts)})}
-           ) do
-      :ok
-    end
-  end
-
-  defp verb(:on), do: "poweron"
-  defp verb(:reset), do: "reset"
-
-  defp server_id(%{server: %{status: :created, id: id}}) when is_integer(id), do: {:ok, id}
-  defp server_id(_ledger), do: {:error, :no_server}
-
-  # -- reconcile ------------------------------------------------------------------
-
-  @impl true
-  def reconcile(home, opts) when is_binary(home) and is_list(opts),
-    do: home |> read_back(opts) |> shared()
-
-  defp read_back(home, opts) do
-    with {:ok, ledger} <- read(home),
-         {:ok, token} <- token(ledger) do
-      if Keyword.get(opts, :running?, false),
-        do: {:ok, ledger},
-        else: reconciled(home, token, ledger, opts)
-    end
-  end
-
-  defp reconciled(home, token, ledger, opts) do
-    with {:ok, server} <- observe_server(token, ledger, opts),
-         {:ok, firewall} <- observe_firewall(token, ledger, opts),
-         {:ok, changed} <-
-           update(home, &{:ok, apply_observed(&1, ledger, {server, firewall}, opts)}),
-         :ok <- withdraw_unborn(ledger, server, opts) do
-      reconciled_replaced(home, token, Ledger.replaced_set(ledger), changed, opts)
-    end
-  end
-
-  # The server a replace set aside was created, so it is read by its ids.
-  defp reconciled_replaced(_home, _token, nil, changed, _opts), do: {:ok, changed}
-
-  defp reconciled_replaced(home, token, old, _changed, opts) do
-    with {:ok, server} <- observe_server(token, old, opts),
-         {:ok, firewall} <- observe_firewall(token, old, opts) do
-      update(home, :replaced, &{:ok, apply_observed(&1, old, {server, firewall}, opts)})
-    end
-  end
-
-  # A server asked for whose create never reached Hetzner will not enroll.
-  defp withdraw_unborn(%{server: %{id: nil}}, :absent, opts), do: withdraw_code(opts)
-  defp withdraw_unborn(_ledger, _observed, _opts), do: :ok
-
-  defp observe_server(_token, %{server: nil}, _opts), do: {:ok, :unchanged}
-  defp observe_server(_token, %{server: %{status: :gone}}, _opts), do: {:ok, :unchanged}
-
-  defp observe_server(token, %{server: %{id: nil}} = ledger, opts),
-    do: by_labels(token, "/servers", "servers", ledger, opts)
-
-  defp observe_server(token, %{server: %{id: id}}, opts),
-    do: by_id(token, "/servers/#{id}", "server", opts)
-
-  defp observe_firewall(_token, %{firewall: nil}, _opts), do: {:ok, :unchanged}
-  defp observe_firewall(_token, %{firewall: %{status: :gone}}, _opts), do: {:ok, :unchanged}
-
-  defp observe_firewall(token, %{firewall: %{id: nil}} = ledger, opts),
-    do: by_labels(token, "/firewalls", "firewalls", ledger, opts)
-
-  defp observe_firewall(token, %{firewall: %{id: id}}, opts),
-    do: by_id(token, "/firewalls/#{id}", "firewall", opts)
-
-  defp by_id(token, path, key, opts) do
-    case get(token, path, opts) do
-      {:ok, %{^key => found}} -> {:ok, {:found, found}}
-      {:error, :not_found} -> {:ok, :absent}
-      {:error, _reason} = error -> error
-    end
-  end
-
-  defp by_labels(token, path, key, ledger, opts) do
-    case get(token, path, opts, label_selector: selector(ledger)) do
-      {:ok, %{^key => [found | _rest]}} -> {:ok, {:found, found}}
-      {:ok, %{^key => []}} -> {:ok, :absent}
-      {:error, _reason} = error -> error
-    end
-  end
-
-  # The labels a create of the ledger's ref put on everything it made; the
-  # profile's label is the middle of the name it gave them.
-  defp selector(%{ref: ref} = ledger) do
-    name = (ledger.server || ledger.firewall).name
-
-    profile =
-      name |> String.replace_prefix("fermix-", "") |> String.replace_suffix("-" <> ref, "")
-
-    "fermix=always-on,fermix-profile=#{profile},fermix-ref=#{ref}"
-  end
-
-  # Applied to the ledger as it is now, and only where it still names what
-  # was read, so a change written meanwhile is never undone.
-  defp apply_observed(current, read, {server, firewall}, opts) do
-    current
-    |> apply_server(read.server, server, opts)
-    |> apply_firewall(read.firewall, firewall)
-  end
-
-  defp apply_server(current, _read, :unchanged, _opts), do: current
-
-  # Absent from Hetzner: never created (no id), deleted by a delete that
-  # stopped before it recorded so (no job runs while this is read), or
-  # deleted outside Fermix.
-  defp apply_server(%{server: %{id: nil}} = current, %{id: nil}, :absent, opts),
-    do: interrupted(current, opts)
-
-  defp apply_server(%{server: %{id: id, status: :deleting}} = current, %{id: id}, :absent, _opts),
-    do: Ledger.remove(current, :server)
-
-  defp apply_server(%{server: %{id: id}} = current, %{id: id}, :absent, _opts),
-    do: Ledger.put_server(current, %{status: :gone})
-
-  defp apply_server(%{server: %{id: id}} = current, %{id: id}, {:found, found}, opts) do
-    status = if found["status"] in ["running", "off"], do: :created, else: :creating
-
-    facts =
-      Map.merge(seen(found, status, opts), %{
-        id: found["id"],
-        ipv4: get_in(found, ["public_net", "ipv4", "ip"]),
-        created_at: time(found["created"])
-      })
-
-    current |> Ledger.put_server(facts) |> recovered(id, found)
-  end
-
-  defp apply_server(current, _read, _observed, _opts), do: current
-
-  # A lost create found again stands: its addresses are recorded, and the
-  # failure its lost answer left goes.
-  defp recovered(ledger, nil, found),
-    do: ledger |> Ledger.put_primary_ips(primary_ips(found)) |> Ledger.put_failure(nil)
-
-  defp recovered(ledger, _id, _found), do: ledger
-
-  # Nothing was created: the server leaves the ledger, and a create that
-  # recorded no reason of its own stopped before it was done.
-  defp interrupted(current, opts) do
-    failure =
-      current.failure ||
-        %{
-          reason: "interrupted",
-          sentence: Provision.error_sentence(:interrupted, __MODULE__),
-          next_location: nil,
-          at: now(opts)
-        }
-
-    current |> Ledger.remove(:server) |> Ledger.put_failure(failure)
-  end
-
-  defp apply_firewall(current, _read, :unchanged), do: current
-
-  defp apply_firewall(%{firewall: %{id: id, status: status}} = current, %{id: id}, :absent)
-       when id == nil or status == :deleting,
-       do: Ledger.remove(current, :firewall)
-
-  defp apply_firewall(%{firewall: %{id: id}} = current, %{id: id}, :absent),
-    do: Ledger.put_firewall(current, %{status: :gone})
-
-  defp apply_firewall(%{firewall: %{id: id}} = current, %{id: id}, {:found, found}),
-    do: Ledger.put_firewall(current, %{id: found["id"], status: :created})
-
-  defp apply_firewall(current, _read, _observed), do: current
-
-  # -- delete ---------------------------------------------------------------------
-
-  @impl true
-  def delete(home, opts) when is_binary(home) and is_list(opts),
-    do: home |> deleted(opts) |> shared()
-
-  defp deleted(home, opts) do
-    with {:ok, ledger} <- read(home),
-         {:ok, token} <- token(ledger),
-         :ok <- something(ledger),
-         :ok <- not_moved_to(ledger) do
-      report(opts, "deleting")
-
-      with :ok <- withdraw_code(opts),
-           :ok <- delete_set(home, :current, token, ledger, opts),
-           {:ok, _ledger} <- update(home, &{:ok, Ledger.clear(&1)}) do
-        :ok
-      end
-    end
-  end
-
-  # A replace begun with nothing created yet is something to undo.
-  defp something(%{server: nil, firewall: nil, primary_ips: [], ref: nil, replace: nil}),
-    do: {:error, :nothing_to_delete}
-
-  defp something(_ledger), do: :ok
-
-  # The new server a replace moved the home to holds it.
-  defp not_moved_to(%{replace: %{moved_at: %DateTime{}}}), do: {:error, :live_home}
-  defp not_moved_to(_ledger), do: :ok
-
-  @impl true
-  def delete_replaced(home, opts) when is_binary(home) and is_list(opts),
-    do: home |> replaced_deleted(opts) |> shared()
-
-  defp replaced_deleted(home, opts) do
-    with {:ok, ledger} <- read(home),
-         {:ok, token} <- token(ledger),
-         {:ok, old} <- Ledger.retired(ledger) do
-      report(opts, "deleting")
-
-      with :ok <- delete_set(home, :replaced, token, old, opts),
-           {:ok, _ledger} <- update(home, &{:ok, Ledger.replaced_deleted(&1, now(opts))}) do
-        :ok
-      end
-    end
-  end
-
-  # One server and what came with it, in the ledger's own places (`:current`)
-  # or the ones a replace set aside (`:replaced`): the server, then its
-  # addresses unless they went with it, then the firewall.
-  defp delete_set(home, slot, token, set, opts) do
-    with :ok <- delete_server(home, slot, token, set, opts),
-         :ok <- delete_ips(token, set.primary_ips, opts) do
-      delete_firewall(home, slot, token, set, opts)
-    end
-  end
-
-  defp delete_server(_home, _slot, _token, %{server: nil}, _opts), do: :ok
-
-  defp delete_server(home, slot, _token, %{server: %{status: :gone}}, _opts),
-    do: forgotten(home, slot, :server)
-
-  defp delete_server(home, slot, token, %{server: %{id: nil}} = set, opts) do
-    case by_labels(token, "/servers", "servers", set, opts) do
-      {:ok, {:found, %{"id" => id}}} ->
-        delete_server(home, slot, token, put_in(set.server.id, id), opts)
-
-      {:ok, :absent} ->
-        forgotten(home, slot, :server)
-
-      {:error, _reason} = error ->
-        error
-    end
-  end
-
-  defp delete_server(home, slot, token, %{server: %{id: id}}, opts) do
-    with {:ok, _ledger} <-
-           update(home, slot, &{:ok, Ledger.put_server(&1, %{id: id, status: :deleting})}),
-         :ok <- server_deleted(token, id, opts) do
-      forgotten(home, slot, :server)
-    end
-  end
-
-  # A server already gone from Hetzner is as good as deleted.
-  defp server_deleted(token, id, opts) do
-    case http_delete(token, "/servers/#{id}", opts) do
-      {:ok, %{"action" => action}} -> await_all(token, [action], opts)
-      {:error, :not_found} -> :ok
-      {:error, _reason} = error -> error
-    end
-  end
-
-  defp forgotten(home, slot, kind) do
-    with {:ok, _ledger} <- update(home, slot, &{:ok, Ledger.remove(&1, kind)}), do: :ok
-  end
-
-  # An address that went with its server answers 404; one that stayed is
-  # deleted.
-  defp delete_ips(token, ips, opts) do
-    Enum.reduce_while(ips, :ok, fn %{id: id}, :ok ->
-      case delete_ip(token, id, opts) do
-        :ok -> {:cont, :ok}
-        {:error, _reason} = error -> {:halt, error}
-      end
-    end)
-  end
-
-  defp delete_ip(token, id, opts) do
-    case get(token, "/primary_ips/#{id}", opts) do
-      {:ok, _ip} -> gone_ok(http_delete(token, "/primary_ips/#{id}", opts))
-      {:error, :not_found} -> :ok
-      {:error, _reason} = error -> error
-    end
-  end
-
-  defp gone_ok({:ok, _body}), do: :ok
-  defp gone_ok({:error, :not_found}), do: :ok
-  defp gone_ok({:error, _reason} = error), do: error
-
-  defp delete_firewall(_home, _slot, _token, %{firewall: nil}, _opts), do: :ok
-
-  defp delete_firewall(home, slot, _token, %{firewall: %{status: :gone}}, _opts),
-    do: forgotten(home, slot, :firewall)
-
-  defp delete_firewall(home, slot, token, %{firewall: %{id: nil}} = set, opts) do
-    case by_labels(token, "/firewalls", "firewalls", set, opts) do
-      {:ok, {:found, %{"id" => id}}} ->
-        delete_firewall(home, slot, token, put_in(set.firewall.id, id), opts)
-
-      {:ok, :absent} ->
-        forgotten(home, slot, :firewall)
-
-      {:error, _reason} = error ->
-        error
-    end
-  end
-
-  defp delete_firewall(home, slot, token, %{firewall: %{id: id}}, opts) do
-    with {:ok, _ledger} <-
-           update(home, slot, &{:ok, Ledger.put_firewall(&1, %{status: :deleting})}),
-         :ok <- delete_firewall_tries(token, id, opts, @in_use_tries) do
-      forgotten(home, slot, :firewall)
-    end
-  end
-
-  # Hetzner detaches a deleted server's firewall a moment after the server's
-  # action ends; until then the firewall answers `resource_in_use`.
-  defp delete_firewall_tries(_token, _id, _opts, 0), do: {:error, :resource_in_use}
-
-  defp delete_firewall_tries(token, id, opts, tries) do
-    case http_delete(token, "/firewalls/#{id}", opts) do
-      {:ok, _body} ->
-        :ok
-
-      {:error, :not_found} ->
-        :ok
-
-      {:error, :resource_in_use} ->
-        paused(opts, @poll_ms, fn -> delete_firewall_tries(token, id, opts, tries - 1) end)
-
-      {:error, _reason} = error ->
-        error
-    end
-  end
-
-  # -- actions ------------------------------------------------------------------
-
-  defp await_all(token, actions, opts) do
-    Enum.reduce_while(actions, :ok, fn action, :ok ->
-      case await(token, action, opts, Keyword.get(opts, :max_polls, @max_polls)) do
-        :ok -> {:cont, :ok}
-        {:error, _reason} = error -> {:halt, error}
-      end
-    end)
-  end
-
-  defp await(_token, %{"status" => "success"}, _opts, _polls), do: :ok
-  defp await(_token, %{"status" => "error"} = action, _opts, _polls), do: action_failed(action)
-  defp await(_token, %{"command" => command}, _opts, 0), do: {:error, {:action_timeout, command}}
-
-  defp await(token, %{"id" => id} = action, opts, polls) do
-    paused(opts, @poll_ms, fn -> poll(token, action, id, opts, polls) end)
-  end
-
-  # A rate-limited read waits longer, and a read that got no answer is tried
-  # again; both count against the bound.
-  defp poll(token, action, id, opts, polls) do
-    case get(token, "/actions/#{id}", opts) do
-      {:ok, %{"action" => read}} ->
-        await(token, read, opts, polls - 1)
-
-      {:error, {:rate_limited, _reset}} ->
-        paused(opts, @rate_wait_ms, fn -> await(token, action, opts, polls - 1) end)
-
-      {:error, reason} ->
-        if definitive?(reason), do: {:error, reason}, else: await(token, action, opts, polls - 1)
-    end
-  end
-
-  defp action_failed(%{"command" => command, "error" => error}) do
-    message = bounded((error || %{})["message"] || "Hetzner gave no reason.")
-    {:error, {:action_failed, command, message}}
-  end
-
-  defp paused(opts, ms, next) do
-    Keyword.get(opts, :sleep, &Process.sleep/1).(ms)
-    next.()
-  end
-
-  # -- the client -----------------------------------------------------------------
-
-  defp get(token, path, opts, params \\ []), do: request(token, :get, path, opts, params: params)
-  defp post(token, path, body, opts), do: request(token, :post, path, opts, json: body)
+  defp http_post(token, path, body, opts), do: request(token, :post, path, opts, json: body)
   defp http_delete(token, path, opts), do: request(token, :delete, path, opts, [])
 
   defp request(token, method, path, opts, extra) do
@@ -1025,8 +444,8 @@ defmodule FermixCore.Home.Provision.Hetzner do
     {:error, {:unreachable, message}}
   end
 
-  # Hetzner's error codes the provisioner answers by name; any other refusal
-  # keeps Hetzner's own code and message.
+  # Hetzner's error codes answered by name; any other refusal keeps
+  # Hetzner's own code and message.
   @named_refusals %{
     {403, "resource_limit_exceeded"} => :account_limit,
     {403, "forbidden"} => :forbidden,
@@ -1070,144 +489,10 @@ defmodule FermixCore.Home.Provision.Hetzner do
     end
   end
 
-  # A refusal Hetzner answered (a 4xx) means nothing was done; no answer, or
-  # a 5xx, leaves it unknown. So does a name Hetzner already holds: the shared
-  # pool sends a request again once when its connection closed under it
-  # (`Net.HttpClient`), so the first may have been carried out.
-  defp definitive?({:unreachable, _message}), do: false
-  defp definitive?({:refused, status, _code, _message}) when status >= 500, do: false
-  defp definitive?({:refused, 409, "uniqueness_error", _message}), do: false
-  defp definitive?(_reason), do: true
-
-  defp forget_if_refused(home, kind, reason) do
-    if definitive?(reason) do
-      with {:ok, _ledger} <- update(home, &{:ok, Ledger.remove(&1, kind)}), do: {:error, reason}
-    else
-      {:error, reason}
-    end
-  end
-
   defp bounded(text) when is_binary(text) do
     text
     |> String.replace(~r/[\x{0000}-\x{001F}\x{007F}]/u, " ")
     |> String.slice(0, @max_vendor_bytes)
     |> String.trim()
   end
-
-  # The labels every resource of `ref` carries.
-  defp labels(profile, ref),
-    do: %{
-      "fermix" => "always-on",
-      "fermix-profile" => Provision.name_part(profile),
-      "fermix-ref" => ref
-    }
-
-  # -- the shared kinds -----------------------------------------------------------
-
-  defp shared({:error, reason}), do: {:error, error(reason)}
-  defp shared(answer), do: answer
-
-  @doc """
-  One of Hetzner's own refusals as the contract's shared kind
-  (`Provision.provider_error/0`), which every callback answers: a read-only
-  token's `forbidden` is `:read_only_token`, and every refusal the contract
-  has no kind for is Hetzner's own message in a plain sentence
-  (`{:other, sentence}`). A shared kind, and a reason of the engine's own,
-  is answered as it is.
-  """
-  @spec error(term()) :: Provision.reason()
-  def error(:forbidden), do: :read_only_token
-
-  def error({:refused, _status, _code, message}),
-    do: {:other, "Hetzner refused the request: #{vendor(message)}"}
-
-  def error({:action_failed, command, message}),
-    do: {:other, "Hetzner could not finish #{doing(command)}: #{vendor(message)}"}
-
-  def error({:action_timeout, command}),
-    do:
-      {:other,
-       "Hetzner had not finished #{doing(command)} after five minutes; Always On checks " <>
-         "again when it opens."}
-
-  def error({:ineligible_type, type}),
-    do:
-      {:other,
-       "Fermix creates only a server type Hetzner still sells with at least 4 GB on x86, " <>
-         "and #{type} is not one."}
-
-  def error(:no_image),
-    do: {:other, "Hetzner offers no Debian 13 image right now, so Fermix created no server."}
-
-  def error(:too_many_types),
-    do:
-      {:other, "Hetzner listed more server types than Fermix reads, so it offers none right now."}
-
-  def error(:resource_unavailable),
-    do: {:other, "Hetzner has no room for that right now, so try again in a few minutes."}
-
-  def error(reason) when reason in [:not_found, :resource_in_use],
-    do: {:other, "Hetzner no longer has what Fermix created there, so open Always On again."}
-
-  def error(reason), do: reason
-
-  defp doing("create_server"), do: "creating your server"
-  defp doing("start_server"), do: "starting your server"
-  defp doing("delete_server"), do: "deleting your server"
-  defp doing("poweron_server"), do: "turning your server on"
-  defp doing("reset_server"), do: "restarting your server"
-  defp doing(_command), do: "what Fermix asked of it"
-
-  # Hetzner's own message, as plain words the summary can print: a backtick
-  # in it reads as a quote. Its code and HTTP status are in the log, never in
-  # the sentence.
-  defp vendor(message) do
-    plain = String.replace(message, "`", "'")
-    if String.ends_with?(plain, [".", "?", "!"]), do: plain, else: plain <> "."
-  end
-
-  # -- the ledger -----------------------------------------------------------------
-
-  defp read(home) do
-    case Ledger.read(home, @id) do
-      {:ok, ledger} -> {:ok, ledger}
-      {:error, reason} -> {:error, {:ledger, reason}}
-    end
-  end
-
-  defp update(home, fun) do
-    case Ledger.update(home, @id, fun) do
-      {:ok, ledger} -> {:ok, ledger}
-      {:error, reason} -> {:error, {:ledger, reason}}
-    end
-  end
-
-  # `fun` changes one server and what came with it: the ledger's own places,
-  # or the ones a replace set aside (left as it is once none is).
-  defp update(home, :current, fun), do: update(home, fun)
-
-  defp update(home, :replaced, fun), do: update(home, &replaced_changed(&1, fun))
-
-  defp replaced_changed(ledger, fun) do
-    case Ledger.replaced_set(ledger) do
-      nil -> {:ok, ledger}
-      set -> with {:ok, changed} <- fun.(set), do: {:ok, Ledger.put_replaced_set(ledger, changed)}
-    end
-  end
-
-  defp token(%{token: token}) when is_binary(token), do: {:ok, token}
-  defp token(_ledger), do: {:error, :no_token}
-
-  defp report(opts, phase), do: Keyword.get(opts, :report, fn _phase -> :ok end).(phase)
-
-  defp now(opts), do: DateTime.truncate(Keyword.get(opts, :now, &DateTime.utc_now/0).(), :second)
-
-  defp time(text) when is_binary(text) do
-    case DateTime.from_iso8601(text) do
-      {:ok, at, _offset} -> DateTime.truncate(at, :second)
-      _invalid -> nil
-    end
-  end
-
-  defp time(_text), do: nil
 end
