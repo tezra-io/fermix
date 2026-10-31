@@ -383,6 +383,36 @@ defmodule FermixCore.Home.Provision.HetznerTest do
     end
   end
 
+  describe "reaches/3" do
+    setup ctx, do: created!(connect!(ctx))
+
+    test "a token of the same project reaches what Fermix created; another project's does not",
+         ctx do
+      {:ok, ledger} = Ledger.read(ctx.home, "hetzner")
+      HetznerStub.set(ctx.stub, :other_tokens, ["invented-other-project-token-77"])
+
+      assert :ok = Hetzner.reaches(HetznerStub.token(), ledger, ctx.opts)
+
+      assert {:error, :other_project} =
+               Hetzner.reaches("invented-other-project-token-77", ledger, ctx.opts)
+
+      assert {"GET", "/v1/servers/" <> id, _query, nil} =
+               List.last(HetznerStub.requests(ctx.stub))
+
+      assert String.to_integer(id) == ledger.server.id
+    end
+
+    test "with nothing standing, any token reaches", ctx do
+      {:ok, ledger} = Ledger.read(ctx.home, "hetzner")
+      before = length(HetznerStub.requests(ctx.stub))
+
+      assert :ok =
+               Hetzner.reaches("invented-other-project-token-77", Ledger.clear(ledger), ctx.opts)
+
+      assert length(HetznerStub.requests(ctx.stub)) == before
+    end
+  end
+
   describe "power/3" do
     setup ctx, do: created!(connect!(ctx))
 

@@ -814,6 +814,7 @@ defmodule FermixCore.Management.CopyTest do
       :server_exists,
       :nothing_to_delete,
       :not_primary,
+      :other_project,
       :live_home,
       :move_under_way,
       :not_found,

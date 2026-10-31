@@ -14,7 +14,9 @@ defmodule FermixTestSupport.HetznerStub do
   error bodies by code.
 
   The stub keeps a world (an `Agent` the test owns): the one token it
-  accepts, whether that token may only read, the firewalls, servers, primary
+  accepts, the tokens of another project (`:other_tokens`, which see none of
+  what this one holds and change nothing), whether that token may only read,
+  the firewalls, servers, primary
   addresses and actions it holds, and every request it was sent. An action
   answers `running` for `:action_polls` reads and then `success` (or the
   error `fail_action/3` gave it). `fault/5` queues an answer that takes the
@@ -55,6 +57,7 @@ defmodule FermixTestSupport.HetznerStub do
           primary_ips: %{},
           actions: %{},
           faults: [],
+          other_tokens: [],
           requests: [],
           next_id: 1_000
         },
@@ -149,7 +152,7 @@ defmodule FermixTestSupport.HetznerStub do
   end
 
   defp answer(conn, stub, query, body) do
-    with :ok <- authorized(conn, stub),
+    with {:ok, :this_project} <- authorized(conn, stub),
          :ok <- writable(conn, stub) do
       case take_fault(stub, conn.method, conn.request_path) do
         :none -> routed(conn, stub, query, body)
@@ -171,9 +174,24 @@ defmodule FermixTestSupport.HetznerStub do
   end
 
   defp authorized(conn, stub) do
-    if get_req_header(conn, "authorization") == ["Bearer " <> Agent.get(stub, & &1.token)],
-      do: :ok,
-      else: error(401, "unauthorized")
+    world = Agent.get(stub, & &1)
+
+    case get_req_header(conn, "authorization") do
+      ["Bearer " <> token] when token == world.token -> {:ok, :this_project}
+      ["Bearer " <> token] -> other_project(token, conn, world)
+      _none -> error(401, "unauthorized")
+    end
+  end
+
+  # Another project answers its reads as an empty project and keeps nothing.
+  defp other_project(token, conn, world) do
+    if token in world.other_tokens do
+      empty = %{world | servers: %{}, firewalls: %{}, primary_ips: %{}, actions: %{}}
+      {answer, _world} = route(conn.method, path_parts(conn.request_path), %{}, nil, empty)
+      answer
+    else
+      error(401, "unauthorized")
+    end
   end
 
   defp writable(%{method: "GET"}, _stub), do: :ok

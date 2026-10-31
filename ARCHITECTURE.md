@@ -557,9 +557,11 @@ ledger's ref, and polls each action with a bound; a create whose answer was
 lost is found again by its labels in `reconcile/2`, which also marks a
 resource deleted outside Fermix gone. `Management.Provision` answers
 `home.provision.*` (device-class in `Placement`: the computer that created
-the server manages it and never forwards the request); create, power and
-delete are owner decisions in the daemon and run as one `home_provision`
-management job at a time; delete refuses while a move to the server runs
+the server manages it and never forwards the request); connect, create,
+power and delete are owner decisions in the daemon, a new token replaces
+the kept one only when it reaches the ledger's server or firewall (one read
+by id, the same project), and create, power and delete run as one
+`home_provision` management job at a time; delete refuses while a move to the server runs
 and once this engine is its linked desktop (or the home carries the moved
 marker). `Ledger.state/1` is the one reading of the provisioner for `home.status`'s
 summary: none, connected, creating, created, deleting, gone, failed (with the

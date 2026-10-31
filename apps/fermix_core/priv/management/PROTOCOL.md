@@ -178,7 +178,7 @@ primary's, exactly as its own socket would give it.
   |---|---|---|
   | `home.move.readiness` | 60 s | at least 65 s |
   | `home.move.start` | 60 s | at least 65 s |
-| `home.provision.connect` | `token` (16 to 512 printable bytes) | Checks a Hetzner project API token (it reads the project's servers and its prices) and keeps it in this computer's `device/provision/hetzner.json` (`0600`), never in the settings file or the keychain, so a move never carries it. Answers the provisioner's view (below) and `other_servers` (the project holds servers Fermix did not create; Fermix touches only what it creates). A token Hetzner refuses is `invalid_params` on `token` with the sentence; Hetzner out of reach is `unavailable` {`capability`: `home`} with the sentence. The token is never logged, traced or answered. Device-class. Minimum version `2`. |
+| `home.provision.connect` | `token` (16 to 512 printable bytes) | Checks a Hetzner project API token (it reads the project's servers and its prices) and keeps it in this computer's `device/provision/hetzner.json` (`0600`), never in the settings file or the keychain, so a move never carries it. Answers the provisioner's view (below) and `other_servers` (the project holds servers Fermix did not create; Fermix touches only what it creates). A token Hetzner refuses is `invalid_params` on `token` with the sentence. While Fermix's server or firewall stands, a new token replaces the kept one only when it reaches it (one read of it by id, so the same Hetzner project): a token that stopped working is replaced by a new one from that project, and one for another project is `invalid_params` on `token` with the sentence. Hetzner out of reach is `unavailable` {`capability`: `home`} with the sentence. The token is never logged, traced or answered. An owner decision. Device-class. Minimum version `2`. |
 | `home.provision.options` | none | What Hetzner sells now, read live: `{currency, locations, offers, recommended, more_room, sentence}`. `offers` is every x86 type with at least 4 GB that is not deprecated, in each of Falkenstein (`fsn1`), Nuremberg (`nbg1`) and Helsinki (`hel1`) where it is in stock, cheapest first: `{type, description, cores, memory_gb, disk_gb, dedicated, location, monthly, ipv4_monthly, total_monthly}`, the prices monthly and gross (VAT as the account is billed) as decimal strings, `total_monthly` with the IPv4 address. `recommended` is the cheapest type in the first of the three where it is in stock, `more_room` the cheapest type with more memory (where the recommendation is, or else where it is in stock), each `{type, location}` or null; `sentence` says the recommendation ("Recommended: CPX22 in Falkenstein, €20 a month.") or that nothing is in stock. With no token, `unavailable` {`capability`: `home`} "Paste a Hetzner API token first." Device-class. Minimum version `2`. |
 | `home.provision.create` | `type`, `location` (`fsn1`, `nbg1` or `hel1`) | On the primary only. Starts a job, kind `home_provision`: the type is checked against the live stock (one sold out there fails naming the next location in stock), then a firewall with no inbound rule (the first write, where a read-only token fails before anything costs money), then the Debian 13 server named `fermix-<profile>-<4 hex>` with the labels `fermix=always-on`, `fermix-profile` and `fermix-ref`, its primary IPv4 kept, no SSH key, and the first boot with a fresh enrollment code as user data; that code's window lives 24 hours and, while it is open, `home.enroll.open` is refused. The job's result is `{server, type, location}`; its failure sentence names Hetzner's capacity ("Falkenstein has no CPX22 right now."), the account's limit ("Hetzner limits new servers on this account."), a read-only token, a token that stopped working, the rate limit, or Hetzner's own words, and the ledger keeps it for `home.provision.resources`. A server that already exists, no token, or another role is `unavailable` {`capability`: `home`} with the sentence; another job of the kind running is `busy`. The root password Hetzner answers is never kept, logged or answered. An owner decision. Device-class. Minimum version `2`. |
 | `home.provision.power` | `action` (`on` or `reset`) | Turns the server Fermix created on, or resets it, as a `home_provision` job whose result is `{action}`. With no server, `unavailable` {`capability`: `home`} with the sentence. An owner decision. Device-class. Minimum version `2`. |
@@ -554,13 +554,14 @@ Notes that the shapes alone do not carry:
   server nor replace the key its snapshots are encrypted to. `home.status`,
   `home.candidates.list`, `home.snapshots.status` and `home.snapshots.run`
   stay open.
-- **Creating, powering and deleting the Always On server are the owner's
-  decisions (M75 lean v1).** `home.provision.create`, `home.provision.power`
-  and `home.provision.delete` answer `unavailable` {`capability`: `home`,
-  `sentence`: "Only the owner can create, restart or delete Fermix's server:
-  use the Fermix app."} to the same callers: each spends the owner's money or
-  can take the home away. `home.provision.connect`, `home.provision.options`
-  and `home.provision.resources` stay open.
+- **The Hetzner token and creating, powering and deleting the Always On
+  server are the owner's decisions (M75 lean v1).** `home.provision.connect`,
+  `home.provision.create`, `home.provision.power` and `home.provision.delete`
+  answer `unavailable` {`capability`: `home`, `sentence`: "Only the owner can
+  give Fermix a Hetzner token or create, restart or delete its server: use
+  the Fermix app."} to the same callers: the token decides which project
+  Fermix acts in, and the rest spend the owner's money or can take the home
+  away. `home.provision.options` and `home.provision.resources` stay open.
 - **`channels.mobile` is the phone channel's settings section**: the enable
   switch and the remote-reach switch `mobile_iroh` (on by default), each
   applied the moment it is written (their rows' `restart` is false), and the

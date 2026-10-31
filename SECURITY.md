@@ -75,10 +75,12 @@ before the token is written into it, renamed into place), never in
 `config.toml`, the keychain or the file secret store, because a move carries
 those to the server, and `device/` is left out of every archive, snapshot and
 move and denied to sandboxed commands. It is never logged, traced or answered
-(`home.provision.*` answers only whether it is accepted). Creating, powering
-and deleting the server are owner decisions, refused to a command Fermix
-started, and Fermix touches only what it created (named and labelled by its
-own short id). The root password Hetzner answers for a server created with
+(`home.provision.*` answers only whether it is accepted). Giving Fermix the
+token and creating, powering and deleting the server are owner decisions,
+refused to a command Fermix started; while the server stands, a new token
+replaces the kept one only when it reaches that server (the same project),
+so no token for another project can take its place. Fermix touches only
+what it created (named and labelled by its own short id). The root password Hetzner answers for a server created with
 no SSH key is dropped where the answer arrives: it reaches no file, log,
 trace, status or crash report. The
 server's cloud-init user data carries a single-use enrollment code and stays

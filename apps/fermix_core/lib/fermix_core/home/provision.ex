@@ -12,6 +12,9 @@ defmodule FermixCore.Home.Provision do
     * `check_token/2`: reads the project, so a token the host refuses is
       named at once; answers whether the project holds servers Fermix did not
       create (Details says "Fermix only touches what it creates").
+    * `reaches/3`: whether a new token is of the project the ledger's server
+      (or firewall) is in, so a token for another project never replaces the
+      one that reaches what Fermix created.
     * `options/2`: the orderable types per location with their monthly prices
       as the account is billed, and the L2 recommendation, read live.
     * `create/3`: the firewall with no inbound rule first (a read-only token
@@ -63,6 +66,7 @@ defmodule FermixCore.Home.Provision do
           | :server_exists
           | :nothing_to_delete
           | :not_primary
+          | :other_project
           | :live_home
           | :move_under_way
           | {:ledger, term()}
@@ -83,6 +87,13 @@ defmodule FermixCore.Home.Provision do
   @type opts :: keyword()
 
   @callback host() :: String.t()
+  @doc """
+  Whether `token` reaches what the ledger holds: one read, by id, of its
+  server (or else its firewall) that is not gone; `{:error,
+  :other_project}` when the host says it has no such thing for this token.
+  Nothing standing is reached by any token.
+  """
+  @callback reaches(String.t(), Ledger.t(), opts()) :: :ok | {:error, reason()}
   @callback check_token(String.t(), opts()) ::
               {:ok, %{other_servers: boolean()}} | {:error, reason()}
   @callback options(String.t(), opts()) :: {:ok, map()} | {:error, reason()}
@@ -209,6 +220,11 @@ defmodule FermixCore.Home.Provision do
 
   def error_sentence(:not_primary),
     do: "Fermix creates a server only on the computer its home runs on."
+
+  def error_sentence(:other_project),
+    do:
+      "This token is for another Hetzner project than the server Fermix created, so paste " <>
+        "a token from that project."
 
   def error_sentence(:live_home),
     do:

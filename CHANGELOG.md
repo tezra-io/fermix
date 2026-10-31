@@ -154,8 +154,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stock, and an account Hetzner limits is said in one sentence. The pane
   lists what Fermix created until you delete it, turns the server on or
   restarts it, and deletes what it created, but never the server your home
-  moved to. While a created server waits for its code, a new enrollment code
-  is not opened.
+  moved to. While a created server waits for its code or its move, a new
+  enrollment code is not opened, and while it stands a token from another
+  Hetzner project does not replace the one that reaches it.
 - **A server gets ready for Always On from one command.** On a Debian 12,
   Debian 13 or Ubuntu 24.04 server (arm64 or x86_64) running Linux 6.2 or
   later with Landlock enabled (Debian 13 and Ubuntu 24.04 do by default),

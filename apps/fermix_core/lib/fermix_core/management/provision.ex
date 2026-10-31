@@ -9,10 +9,14 @@ defmodule FermixCore.Management.Provision do
   the ledger (`Home.Provision.Ledger`, `device/provision/hetzner.json`) stay
   on the computer that created the server.
 
-    * `home.provision.connect {token}` checks the token against Hetzner
-      (`GET /servers`, `GET /pricing`) and keeps it; one Hetzner refuses is
-      `invalid_params` on `token` with its sentence. Answers the view below
-      and `other_servers` (the project holds servers Fermix did not create).
+    * `home.provision.connect {token}` (an owner decision) checks the token
+      against Hetzner (`GET /servers`, `GET /pricing`) and keeps it; one
+      Hetzner refuses is `invalid_params` on `token` with its sentence. While
+      the ledger holds a server or firewall that is not gone, a new token
+      replaces the old only when it reaches it (`reaches/3`, the same
+      project), so a token that stopped working is replaced and one for
+      another project is refused, also on `token`. Answers the view below and
+      `other_servers` (the project holds servers Fermix did not create).
     * `home.provision.options` reads the orderable types per location live,
       with their monthly prices as the account is billed, the L2
       recommendation, "more room", and the recommendation in one `sentence`.
@@ -63,8 +67,8 @@ defmodule FermixCore.Management.Provision do
   @kind :home_provision
   @token_pattern ~r/\A[!-~]{16,512}\z/
   @type_pattern ~r/\A[a-z0-9][a-z0-9-]{0,31}\z/
-  @owner_sentence "Only the owner can create, restart or delete Fermix's server: use the " <>
-                    "Fermix app."
+  @owner_sentence "Only the owner can give Fermix a Hetzner token or create, restart or " <>
+                    "delete its server: use the Fermix app."
   @token_shape_sentence "Paste the API token exactly as Hetzner shows it."
   @no_offer_sentence "Hetzner has no server type with 4 GB in stock in Falkenstein, " <>
                        "Nuremberg or Helsinki right now."
@@ -91,7 +95,7 @@ defmodule FermixCore.Management.Provision do
     with {:ok, token} <- token_param(token) do
       case host(opts).check_token(token, host_opts(opts)) do
         {:ok, %{other_servers: others?}} ->
-          keep_token(token, others?, opts)
+          with :ok <- same_project(token, opts), do: keep_token(token, others?, opts)
 
         {:error, :unauthorized} ->
           {:error, {:invalid_params, "token", Provision.error_sentence(:token_invalid)}}
@@ -99,6 +103,29 @@ defmodule FermixCore.Management.Provision do
         {:error, reason} ->
           refused(reason, opts)
       end
+    end
+  end
+
+  # A token that replaces another must reach what the ledger holds.
+  defp same_project(token, opts) do
+    with {:ok, ledger} <- ledger(opts) do
+      case host(opts).reaches(token, ledger, host_opts(opts)) do
+        :ok ->
+          :ok
+
+        {:error, :other_project} ->
+          {:error, {:invalid_params, "token", Provision.error_sentence(:other_project)}}
+
+        {:error, reason} ->
+          refused(reason, opts)
+      end
+    end
+  end
+
+  defp ledger(opts) do
+    case Ledger.read(home(opts), host(opts).host()) do
+      {:ok, ledger} -> {:ok, ledger}
+      {:error, reason} -> refused({:ledger, reason}, opts)
     end
   end
 

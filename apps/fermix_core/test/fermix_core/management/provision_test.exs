@@ -97,6 +97,50 @@ defmodule FermixCore.Management.ProvisionTest do
       refute File.exists?(Ledger.path(ctx.home, "hetzner"))
     end
 
+    test "a token for another Hetzner project is refused while Fermix's server stands", ctx do
+      {:ok, _view} = connect(ctx)
+      finished(elem(create(ctx), 1), ctx)
+      HetznerStub.set(ctx.stub, :other_tokens, ["invented-other-project-token-77"])
+
+      assert {:error, :invalid_params, %{"field" => "token", "sentence" => sentence}} =
+               route(
+                 "home.provision.connect",
+                 %{"token" => "invented-other-project-token-77"},
+                 ctx
+               )
+
+      assert sentence ==
+               "This token is for another Hetzner project than the server Fermix created, so " <>
+                 "paste a token from that project."
+
+      assert {:ok, %{token: token}} = Ledger.read(ctx.home, "hetzner")
+      assert token == HetznerStub.token()
+    end
+
+    test "a new token from the same project replaces one that stopped working", ctx do
+      {:ok, _view} = connect(ctx)
+      finished(elem(create(ctx), 1), ctx)
+      HetznerStub.set(ctx.stub, :token, "invented-renewed-token-0042")
+      {:ok, %{"token" => "refused"}} = route("home.provision.resources", %{}, ctx)
+
+      assert {:ok, %{"token" => "accepted", "state" => "created"}} =
+               route("home.provision.connect", %{"token" => "invented-renewed-token-0042"}, ctx)
+
+      assert {:ok, %{token: "invented-renewed-token-0042"}} = Ledger.read(ctx.home, "hetzner")
+    end
+
+    test "with nothing created, a token for any project replaces the last", ctx do
+      {:ok, _view} = connect(ctx)
+      HetznerStub.set(ctx.stub, :other_tokens, ["invented-other-project-token-77"])
+
+      assert {:ok, %{"token" => "accepted"}} =
+               route(
+                 "home.provision.connect",
+                 %{"token" => "invented-other-project-token-77"},
+                 ctx
+               )
+    end
+
     test "a value that cannot be a token is refused before Hetzner is asked", ctx do
       for token <- ["", "short", "has a space in it, long enough", 7] do
         assert {:error, :invalid_params, %{"field" => "token"}} =

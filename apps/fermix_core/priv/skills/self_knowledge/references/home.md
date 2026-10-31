@@ -208,8 +208,12 @@ it, never a second writer.
   bring Fermix back to it: the home is restored from a snapshot onto a new
   server. Hetzner's root password for the
   server is never kept, and restoring a lost one starts from Hetzner's
-  root-password reset (below). Creating, restarting and deleting the server
-  are the owner's decisions, refused to a command Fermix runs.
+  root-password reset (below). Pasting the token, creating, restarting and
+  deleting the server are the owner's decisions, refused to a command Fermix
+  runs. While the server stands, a new token replaces the kept one only when
+  it is from the same Hetzner project (a token that stopped working is
+  replaced by a new one from that project; one for another project is
+  refused).
 - **A restore host.** When the primary is gone, `--restore` on a host
   prepares the same server without enrolling it and prints the exact steps:
   copy the newest snapshot onto it (downloaded from the bucket by hand, when

@@ -1178,12 +1178,14 @@ defmodule Fermix.CLI.DaemonTest do
     end
   end
 
-  # M75 lean v1 §4.3: creating, powering and deleting the Always On server
-  # spend the owner's money and can take Fermix's home away, so a command the
-  # agent ran is refused; the reads and the token are not decisions.
+  # M75 lean v1 §4.3: the Hetzner token decides which project Fermix acts in,
+  # and creating, powering and deleting the Always On server spend the owner's
+  # money and can take Fermix's home away, so a command the agent ran is
+  # refused each; the reads are not decisions.
   describe "owner decisions on the Always On server" do
-    @provision_decisions ~w(home.provision.create home.provision.power home.provision.delete)
-    @provision_open ~w(home.provision.connect home.provision.options home.provision.resources)
+    @provision_decisions ~w(home.provision.connect home.provision.create home.provision.power
+                            home.provision.delete)
+    @provision_open ~w(home.provision.options home.provision.resources)
 
     test "a process the daemon started is refused, and so is one it cannot place" do
       golden = provision_owner_golden()
@@ -1204,7 +1206,7 @@ defmodule Fermix.CLI.DaemonTest do
       end
     end
 
-    test "the token and the reads are not owner decisions" do
+    test "the reads are not owner decisions" do
       golden = provision_owner_golden()
       socket_path = start_peer_daemon(daemon_os_pid: ParentProcess.os_pid())
 
@@ -1226,8 +1228,8 @@ defmodule Fermix.CLI.DaemonTest do
       assert golden == %{
                "capability" => "home",
                "sentence" =>
-                 "Only the owner can create, restart or delete Fermix's server: use the " <>
-                   "Fermix app."
+                 "Only the owner can give Fermix a Hetzner token or create, restart or " <>
+                   "delete its server: use the Fermix app."
              }
 
       golden

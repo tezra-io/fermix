@@ -86,6 +86,28 @@ defmodule FermixCore.Home.Provision.Hetzner do
     end
   end
 
+  # One read by id, with the new token, of what the ledger holds: Hetzner
+  # answers 404 for a resource of another project.
+  @impl true
+  def reaches(token, ledger, opts) when is_binary(token) and is_map(ledger) do
+    case standing(ledger) do
+      nil -> :ok
+      path -> reached(get(token, path, opts))
+    end
+  end
+
+  defp standing(%{server: %{id: id, status: status}}) when is_integer(id) and status != :gone,
+    do: "/servers/#{id}"
+
+  defp standing(%{firewall: %{id: id, status: status}}) when is_integer(id) and status != :gone,
+    do: "/firewalls/#{id}"
+
+  defp standing(_ledger), do: nil
+
+  defp reached({:ok, _found}), do: :ok
+  defp reached({:error, :not_found}), do: {:error, :other_project}
+  defp reached({:error, _reason} = error), do: error
+
   # -- options ------------------------------------------------------------------
 
   @impl true
