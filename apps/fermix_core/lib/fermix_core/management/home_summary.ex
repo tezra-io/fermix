@@ -7,17 +7,21 @@ defmodule FermixCore.Management.HomeSummary do
       summary: {state, sentence, action: {id, label} | null, detail}
 
   `summary/1` is pure: it reads the facts `gather/5` collects (the role, the
-  move's phase, the candidates held, the provisioner's ledger
-  (`Provision.Ledger.state/2`), the enrollment window and the link as the rail
+  move's phase, the candidates held, the cloud provider Always On speaks of
+  (`Home.Provision.current/2`) and its ledger (`Provision.Ledger.state/3`),
+  the enrollment window and the link as the rail
   says them (`Home.Link.status/0`), the last readiness review, the snapshots,
   the disk, and on a linked desktop the server's own `home.status`). Its words
-  are `Management.Copy`'s (`summary_sentence/2`, `summary_label/2`).
+  are `Management.Copy`'s (`summary_sentence/2`, `summary_label/2`), with the
+  provider's own (its name, its token's label, its cities, its type names and
+  its "How to get one" steps) from its display data; nothing here names a
+  provider.
 
   `state` is one of `states/0`:
 
     * the computer that sets Always On up, before the move: `off`, `connect`
-      (a code for a server of the owner's own is open, or Hetzner refused the
-      token before anything was created), `choose` (the token works),
+      (a code for a server of the owner's own is open, or the provider refused
+      the token before anything was created), `choose` (the token works),
       `creating` (starting, installing, connecting, or deleting), `ready`,
       `undone` (a move was undone and its server is still held);
     * the computer the move left: `moving` (its last word, once it waits on
@@ -34,8 +38,8 @@ defmodule FermixCore.Management.HomeSummary do
   answering after 10 minutes of no session, counted the same way (the link's
   `down_ms`). The last backup is old past 3 days.
 
-  On the computer the home left, a replace of the server Fermix created on
-  Hetzner (`Ledger.state/1`'s `replace`) leads while it runs: creating the
+  On the computer the home left, a replace of the server Fermix created
+  (`Ledger.state/3`'s `replace`) leads while it runs: creating the
   new server (`creating`, with Cancel), its code and its enrollment as the
   old server's own `home.status` draws them (`primary_home`'s `enrollment`
   and `candidates`: starting, installing, connecting, then `ready` with Move
@@ -43,14 +47,15 @@ defmodule FermixCore.Management.HomeSummary do
   serves nothing while it runs), removing the old server, or deleting the new
   one; a failure is a `problem` with its one action (`delete_failed` and
   Delete when the old server could not be deleted). Until the move is done
-  the old server is the one the home lives on, and Hetzner's power actions,
-  which reach only the new one, are not offered for it. The new server's
+  the old server is the one the home lives on, and the provider's power
+  actions, which reach only the new one, are not offered for it. The new
+  server's
   code lives on the old server, which never sleeps, so its 30 minutes count
   from its creation.
 
   `detail` holds what §7 lists and nothing else: on `off` the token step its
   Set up opens, on `connect` the "How to get one" steps, on `choose` how
-  Hetzner bills, on `ready` the server's facts, the readiness warnings and
+  the provider bills, on `ready` the server's facts, the readiness warnings and
   blocks and until when it waits, on `on` the server, each backup, the space
   this computer's copies take, the disk, what lives on the server and the two
   actions Details offers (Back up now, Replace the server), and on `problem`
@@ -60,7 +65,9 @@ defmodule FermixCore.Management.HomeSummary do
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Move
   alias FermixCore.Home.MoveReadiness
+  alias FermixCore.Home.Provision
   alias FermixCore.Home.Provision.Ledger
+  alias FermixCore.Home.Provision.Registry
   alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.UnreadableFiles
   alias FermixCore.Management.Copy
@@ -70,7 +77,7 @@ defmodule FermixCore.Management.HomeSummary do
                account_limit read_only_token token_refused create_failed update disk_full
                backup_old not_ready unreadable delete_failed)
   @actions ~w(set_up create_server cancel move_now try_again learn_more turn_on restart_server
-              start_again create_in open_hetzner paste_token update back_up_now replace_server
+              start_again create_in open_console paste_token update back_up_now replace_server
               check_again own_server delete_server)
 
   @unreachable_ms 10 * 60_000
@@ -90,6 +97,7 @@ defmodule FermixCore.Management.HomeSummary do
           move: map() | nil,
           link: map(),
           candidates: [map()],
+          provider: module(),
           provision: map(),
           review: map() | nil,
           snapshots: map(),
@@ -123,9 +131,10 @@ defmodule FermixCore.Management.HomeSummary do
   @doc """
   The facts of `home`'s summary: `status` is the `home.status` record's own
   facts (`Management.Home.status/1` has gathered them, with
-  `primary_too_old`), `link` the rail's status, and `opts` the seams `:now`
-  and `:host_os`, and `:unreadable_files` (`Home.UnreadableFiles`, or nil
-  for a verb with no engine tree). Reads the ledger, the last readiness
+  `primary_too_old`), `link` the rail's status, and `opts` the seams `:now`,
+  `:host_os`, `:providers` (in place of `Provision.Registry.all/0`), and
+  `:unreadable_files` (`Home.UnreadableFiles`, or nil for a verb with no
+  engine tree). Reads the provider's ledger, the last readiness
   review, on the primary what its settings turn on that stops after a move,
   and, on a desktop, the size of its stored copies.
   """
@@ -134,6 +143,7 @@ defmodule FermixCore.Management.HomeSummary do
       when is_binary(home) and is_map(link) and is_map(status) and is_list(opts) do
     host_os = Keyword.get_lazy(opts, :host_os, &host_os/0)
     reads = Keyword.take(opts, [:unreadable_files])
+    provider = Provision.current(home, Keyword.get_lazy(opts, :providers, &Registry.all/0))
 
     %{
       role: role,
@@ -144,7 +154,8 @@ defmodule FermixCore.Management.HomeSummary do
       move: status.move,
       link: link,
       candidates: status.candidates,
-      provision: Ledger.state(home, "hetzner", reads),
+      provider: provider,
+      provision: Ledger.state(home, provider, reads),
       review: review(home, role, reads),
       snapshots: status.snapshots,
       disk: status.disk,
@@ -185,7 +196,9 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp failure_problem(%{reason: "unavailable", next_location: next} = failure, facts)
        when is_binary(next) do
-    problem("no_capacity", failure.sentence, action(:create_in, %{location: next}), %{
+    city = Provision.city(facts.provider, next)
+
+    problem("no_capacity", failure.sentence, action(:create_in, %{city: city}), %{
       "next_location" => next,
       "seen_at" => iso(failure.at)
     })
@@ -196,15 +209,15 @@ defmodule FermixCore.Management.HomeSummary do
     {kind, act, alternatives} =
       case reason do
         "unavailable" -> {"no_capacity", :learn_more, []}
-        "account_limit" -> {"account_limit", :open_hetzner, [:own_server]}
+        "account_limit" -> {"account_limit", :open_console, [:own_server]}
         "read_only_token" -> {"read_only_token", :paste_token, []}
         "gone" -> {"deleted", :start_again, []}
         _other -> {"create_failed", :start_again, []}
       end
 
-    problem(kind, failure.sentence, act, %{
+    problem(kind, failure.sentence, action(act, words(facts)), %{
       "seen_at" => iso(failure.at),
-      "alternatives" => Enum.map(alternatives, &action/1)
+      "alternatives" => Enum.map(alternatives, &action(&1, words(facts)))
     })
     |> before_move(facts)
   end
@@ -215,7 +228,7 @@ defmodule FermixCore.Management.HomeSummary do
   defp provisioned(%{provision: %{state: :creating}}), do: creating(:starting)
 
   defp provisioned(%{provision: %{state: :gone, server: server}} = facts),
-    do: deleted(server, :start_again) |> before_move(facts)
+    do: deleted(server, :start_again, facts) |> before_move(facts)
 
   defp provisioned(%{provision: %{state: :created, server: server}} = facts),
     do: created(server, facts)
@@ -254,12 +267,12 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp not_set_up(_server, facts) do
     problem("not_set_up", sentence(:not_set_up, facts), :start_again, %{
-      "alternatives" => [action(:own_server), action(:open_hetzner)]
+      "alternatives" => [action(:own_server), action(:open_console, words(facts))]
     })
     |> before_move(facts)
   end
 
-  # A server of the owner's own (`home.enroll.open`), with no Hetzner server.
+  # A server of the owner's own (`home.enroll.open`), with none Fermix created.
   defp own_server(facts) do
     case {target(facts), window(facts)} do
       {%{} = candidate, _window} ->
@@ -286,14 +299,16 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp off(facts) do
     view("off", sentence(:off, facts, %{stays_here: facts.stays_here}), action(:set_up), %{
-      "connect" => Map.put(connect_detail(), "sentence", sentence(:connect, facts))
+      "connect" => Map.put(connect_detail(facts), "sentence", sentence(:connect, facts))
     })
   end
 
-  defp connect(facts), do: view("connect", sentence(:connect, facts), nil, connect_detail())
+  defp connect(facts),
+    do: view("connect", sentence(:connect, facts), nil, connect_detail(facts))
 
-  defp connect_detail,
-    do: %{"steps" => Copy.token_steps(), "alternatives" => [action(:own_server)]}
+  # The provider's own "How to get one" steps.
+  defp connect_detail(facts),
+    do: %{"steps" => facts.provider.display().steps, "alternatives" => [action(:own_server)]}
 
   defp creating(step),
     do: view("creating", Copy.summary_sentence(step, %{}), action(:cancel), %{})
@@ -310,7 +325,7 @@ defmodule FermixCore.Management.HomeSummary do
 
       [] ->
         view("ready", sentence(:ready, facts), action(:move_now), %{
-          "server" => server_facts(candidate, server),
+          "server" => server_facts(candidate, server, facts),
           "readiness" => items,
           "waits_until" => candidate["expires_at"]
         })
@@ -324,11 +339,11 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp review_items(_review, _candidate_id), do: []
 
-  defp server_facts(candidate, server) do
+  defp server_facts(candidate, server, facts) do
     %{
       "name" => (server && server.name) || candidate["name"],
-      "type" => server && String.upcase(server.type),
-      "location" => server && Copy.city(server.location),
+      "type" => server && facts.provider.type_name(server.type),
+      "location" => server && Provision.city(facts.provider, server.location),
       "ipv4" => server && server.ipv4,
       "system" => "#{candidate["os"]} #{candidate["arch"]}",
       "version" => candidate["version"]
@@ -393,14 +408,14 @@ defmodule FermixCore.Management.HomeSummary do
     Enum.find_value(checks, & &1.(facts)) || on(facts)
   end
 
-  # No session with the server: what Hetzner last said, else ten minutes of
-  # silence while this computer is awake.
-  defp away(%{link: %{primary: %{status: status} = link}, provision: provision})
+  # No session with the server: what the provider last said, else ten
+  # minutes of silence while this computer is awake.
+  defp away(%{link: %{primary: %{status: status} = link}, provision: provision} = facts)
        when status in [:unreachable, :stale] do
     {server, powered?} = home_server(provision)
 
     cond do
-      match?(%{status: :gone}, server) -> deleted(server, :learn_more)
+      match?(%{status: :gone}, server) -> deleted(server, :learn_more, facts)
       match?(%{power: "off"}, server) -> turned_off(server, :turned_off, powered?)
       (Map.get(link, :down_ms) || 0) >= @unreachable_ms -> cannot_reach(server, powered?)
       true -> nil
@@ -420,9 +435,9 @@ defmodule FermixCore.Management.HomeSummary do
   defp cannot_reach(_server, _powered?),
     do: problem("cannot_reach", Copy.summary_sentence(:cannot_reach, %{}), :learn_more, %{})
 
-  # The server the home lives on, and whether Hetzner's power actions reach
-  # it: during a replace the old one until the move is done, which they do
-  # not (they act on the new server).
+  # The server the home lives on, and whether the provider's power actions
+  # reach it: during a replace the old one until the move is done, which
+  # they do not (they act on the new server).
   defp home_server(%{replace: %{current: :old, old: old}}), do: {old, false}
   defp home_server(provision), do: {provision.server, true}
 
@@ -491,7 +506,7 @@ defmodule FermixCore.Management.HomeSummary do
   defp on_server(%{provision: %{server: server}} = facts) do
     %{
       "name" => (server && server.name) || link_name(facts),
-      "location" => server && Copy.city(server.location),
+      "location" => server && Provision.city(facts.provider, server.location),
       "version" => get_in(facts, [:primary_home, "version"])
     }
   end
@@ -500,7 +515,7 @@ defmodule FermixCore.Management.HomeSummary do
   defp link_name(%{moved: %{to: to}}), do: to
   defp link_name(_facts), do: nil
 
-  defp provider(%{provision: %{server: %{}}}), do: "Hetzner"
+  defp provider(%{provision: %{server: %{}}} = facts), do: facts.provider.display().name
   defp provider(_facts), do: "whoever hosts it"
 
   # -- a replace of the server, on the computer the home left -------------------
@@ -554,7 +569,7 @@ defmodule FermixCore.Management.HomeSummary do
 
       candidate ->
         view("ready", sentence(:replace_ready, facts), action(:move_now), %{
-          "server" => server_facts(candidate, server),
+          "server" => server_facts(candidate, server, facts),
           "readiness" => [],
           "waits_until" => candidate["expires_at"]
         })
@@ -564,7 +579,8 @@ defmodule FermixCore.Management.HomeSummary do
   defp new_server_window(%{"state" => "expired"}, _server, facts),
     do: new_server_problem("not_set_up", :replace_not_set_up, facts)
 
-  # The old server's part is missing, or holds no such code: what Hetzner says.
+  # The old server's part is missing, or holds no such code: what the provider
+  # says.
   defp new_server_window(nil, server, facts), do: new_server_step(power_step(server), facts)
 
   defp power_step(%{power: "running"}), do: :replace_installing
@@ -641,8 +657,8 @@ defmodule FermixCore.Management.HomeSummary do
     })
   end
 
-  defp deleted(server, act) do
-    problem("deleted", Copy.summary_sentence(:deleted, %{}), act, %{
+  defp deleted(server, act, facts) do
+    problem("deleted", sentence(:deleted, facts), act, %{
       "seen_at" => iso(server && server.seen_at)
     })
   end
@@ -731,7 +747,18 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   defp sentence(key, facts, values \\ %{}),
-    do: Copy.summary_sentence(key, Map.put(values, :machine, machine(facts.host_os)))
+    do: Copy.summary_sentence(key, Map.merge(words(facts), values))
+
+  # What every sentence may name: this computer, and the provider's own words.
+  defp words(facts) do
+    display = facts.provider.display()
+
+    %{
+      machine: machine(facts.host_os),
+      provider: display.name,
+      token_label: display.token_label
+    }
+  end
 
   defp machine(:macos), do: "Mac"
   defp machine(:linux), do: "computer"

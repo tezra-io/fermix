@@ -1,13 +1,14 @@
 defmodule FermixCore.Home.Provision.HetznerTest do
-  # M75 lean v1 §4.3 and L2: the Hetzner provisioner against the recorded
-  # Hetzner Cloud API (`FermixTestSupport.HetznerStub`). Nothing leaves the
-  # machine, no clock is waited on (the poll's pause is a function the test
-  # owns), and every home is a temporary one.
+  # M75 lean v1 §4.3 and L2: the Hetzner provider against the recorded
+  # Hetzner Cloud API (`FermixTestSupport.HetznerStub`). Every callback
+  # answers a refusal as one of the contract's shared kinds, which is what
+  # these tests read. Nothing leaves the machine, no clock is waited on (the
+  # poll's pause is a function the test owns), and every home is a temporary
+  # one.
   use ExUnit.Case, async: true
 
   import ExUnit.CaptureLog
 
-  alias FermixCore.Home.Provision
   alias FermixCore.Home.Provision.FirstBoot
   alias FermixCore.Home.Provision.Hetzner
   alias FermixCore.Home.Provision.Ledger
@@ -166,7 +167,7 @@ defmodule FermixCore.Home.Provision.HetznerTest do
       assert {"GET", "/v1/images",
               %{"type" => "system", "name" => "debian-13", "architecture" => "x86"}, nil} = image
 
-      {:ok, user_data} = FirstBoot.user_data(@code)
+      {:ok, user_data} = FirstBoot.user_data(@code, Hetzner.max_user_data())
       firewall_id = ledger!(ctx.home).firewall.id
 
       assert {"POST", "/v1/servers", %{},
@@ -206,7 +207,7 @@ defmodule FermixCore.Home.Provision.HetznerTest do
       assert %{status: :created, power: "running", ipv4: "203.0.113." <> _} = ledger.server
       assert [%{type: "ipv4"}, %{type: "ipv6"}] = ledger.primary_ips
       assert ledger.ref == ref
-      assert Ledger.state(ctx.home).state == :created
+      assert Ledger.state(ctx.home, Hetzner).state == :created
 
       # The root password Hetzner answers is read for nothing.
       password = HetznerStub.root_password()
@@ -237,7 +238,7 @@ defmodule FermixCore.Home.Provision.HetznerTest do
     test "the ledger names the server before Hetzner is asked to create it", ctx do
       HetznerStub.fault(ctx.stub, "POST", ~r"^/v1/servers$", 500, "server_error")
 
-      assert {:error, {:refused, 500, "server_error", _message}} =
+      assert {:error, {:other, "Hetzner refused the request: " <> _message}} =
                Hetzner.create(ctx.home, @request, ctx.opts)
 
       # Whether Hetzner made it is not known: it stays asked for, found again
@@ -251,7 +252,7 @@ defmodule FermixCore.Home.Provision.HetznerTest do
     test "a read-only token is refused at the firewall, before anything costs money", ctx do
       HetznerStub.set(ctx.stub, :read_only, true)
 
-      assert {:error, :forbidden} = Hetzner.create(ctx.home, @request, ctx.opts)
+      assert {:error, :read_only_token} = Hetzner.create(ctx.home, @request, ctx.opts)
 
       refute Enum.any?(HetznerStub.requests(ctx.stub), &match?({"POST", "/v1/servers", _, _}, &1))
       refute_received {:code_opened, _ledger}
@@ -305,9 +306,19 @@ defmodule FermixCore.Home.Provision.HetznerTest do
 
     test "a type that is not x86 with 4 GB is refused", ctx do
       for type <- ["cax11", "cpx12", "cx22", "no-such-type"] do
-        assert {:error, {:ineligible_type, ^type}} =
+        assert {:error, {:other, sentence}} =
                  Hetzner.create(ctx.home, %{@request | type: type}, ctx.opts)
+
+        assert sentence ==
+                 "Fermix creates only a server type Hetzner still sells with at least 4 GB on " <>
+                   "x86, and #{type} is not one."
       end
+    end
+
+    test "the first boot fits the 32 KiB of user data Hetzner takes" do
+      assert Hetzner.max_user_data() == 32_768
+      assert {:ok, user_data} = FirstBoot.user_data(@code, Hetzner.max_user_data())
+      assert byte_size(user_data) <= 32_768
     end
 
     test "the account's limit is refused in its own words", ctx do
@@ -331,7 +342,8 @@ defmodule FermixCore.Home.Provision.HetznerTest do
               do: HetznerStub.fail_action(stub, id, "server placement failed")
         end)
 
-      assert {:error, {:action_failed, "create_server", "server placement failed"}} =
+      assert {:error,
+              {:other, "Hetzner could not finish creating your server: server placement failed."}} =
                Hetzner.create(ctx.home, @request, opts)
 
       assert %{status: :creating} = ledger!(ctx.home).server
@@ -340,8 +352,12 @@ defmodule FermixCore.Home.Provision.HetznerTest do
     test "polling an action stops at its bound", ctx do
       HetznerStub.set(ctx.stub, :action_polls, 1_000)
 
-      assert {:error, {:action_timeout, "create_server"}} =
+      assert {:error, {:other, sentence}} =
                Hetzner.create(ctx.home, @request, Keyword.put(ctx.opts, :max_polls, 3))
+
+      assert sentence ==
+               "Hetzner had not finished creating your server after five minutes; Always On " <>
+                 "checks again when it opens."
 
       for _n <- 1..3, do: assert_received({:slept, 2_000})
       refute_received {:slept, _ms}
@@ -368,7 +384,7 @@ defmodule FermixCore.Home.Provision.HetznerTest do
       # already holds.
       HetznerStub.lose_answer(ctx.stub, "POST", ~r"^/v1/servers$", 409, "uniqueness_error")
 
-      assert {:error, {:refused, 409, "uniqueness_error", _message}} =
+      assert {:error, {:other, "Hetzner refused the request: " <> _message}} =
                Hetzner.create(ctx.home, @request, ctx.opts)
 
       assert %{status: :requested, id: nil} = ledger!(ctx.home).server
@@ -442,7 +458,7 @@ defmodule FermixCore.Home.Provision.HetznerTest do
       assert {:ok, %{server: %{status: :gone}, firewall: %{status: :gone}}} =
                Hetzner.reconcile(ctx.home, ctx.opts)
 
-      assert Ledger.state(ctx.home).state == :gone
+      assert Ledger.state(ctx.home, Hetzner).state == :gone
     end
 
     test "a server turned off in Hetzner is recorded off", ctx do
@@ -465,7 +481,7 @@ defmodule FermixCore.Home.Provision.HetznerTest do
     test "is found again by its labels and the ledger's id", ctx do
       HetznerStub.lose_answer(ctx.stub, "POST", ~r"^/v1/servers$", 500, "server_error")
 
-      assert {:error, {:refused, 500, _code, _message}} =
+      assert {:error, {:other, "Hetzner refused the request: " <> _message}} =
                Hetzner.create(ctx.home, @request, ctx.opts)
 
       assert %{status: :requested, id: nil, name: name} = ledger!(ctx.home).server
@@ -496,7 +512,7 @@ defmodule FermixCore.Home.Provision.HetznerTest do
                Hetzner.reconcile(ctx.home, ctx.opts)
 
       assert_received :code_withdrawn
-      assert Ledger.state(ctx.home).state == :failed
+      assert Ledger.state(ctx.home, Hetzner).state == :failed
     end
   end
 
@@ -519,7 +535,7 @@ defmodule FermixCore.Home.Provision.HetznerTest do
                ledger!(ctx.home)
 
       assert token == HetznerStub.token()
-      assert Ledger.state(ctx.home).state == :connected
+      assert Ledger.state(ctx.home, Hetzner).state == :connected
       assert HetznerStub.world(ctx.stub).servers == %{}
     end
 
@@ -575,13 +591,6 @@ defmodule FermixCore.Home.Provision.HetznerTest do
       assert map_size(HetznerStub.world(ctx.stub).servers) == 2
     end
 
-    test "a new server's short id is never the one it replaces" do
-      assert Provision.fresh_ref(<<0xA3, 0xF9>>, nil) == "a3f9"
-      assert Provision.fresh_ref(<<0x00, 0x07>>, "a3f9") == "0007"
-      assert Provision.fresh_ref(<<0xA3, 0xF9>>, "a3f9") == "a3fa"
-      assert Provision.fresh_ref(<<0xFF, 0xFF>>, "ffff") == "0000"
-    end
-
     test "the old server is never deleted while it holds the home", ctx do
       {:ok, _server} = Hetzner.create(ctx.home, %{@request | type: "cpx32"}, ctx.opts)
       before = length(HetznerStub.requests(ctx.stub))
@@ -617,7 +626,7 @@ defmodule FermixCore.Home.Provision.HetznerTest do
       assert %{old: nil, deleted_at: @now} = ledger.replace
       assert ledger.server == new
       assert Map.keys(HetznerStub.world(ctx.stub).servers) == [new.id]
-      assert %{replace: %{state: :done, current: :new}} = Ledger.state(ctx.home)
+      assert %{replace: %{state: :done, current: :new}} = Ledger.state(ctx.home, Hetzner)
     end
 
     test "an old server deleted in Hetzner's console is read gone, then dropped", ctx do
@@ -631,7 +640,7 @@ defmodule FermixCore.Home.Provision.HetznerTest do
 
       {:ok, _ledger} = Ledger.update(ctx.home, "hetzner", &Ledger.moved(&1, 6, @now))
       assert :ok = Hetzner.delete_replaced(ctx.home, ctx.opts)
-      assert %{replace: %{state: :done, old: nil}} = Ledger.state(ctx.home)
+      assert %{replace: %{state: :done, old: nil}} = Ledger.state(ctx.home, Hetzner)
       assert HetznerStub.world(ctx.stub).firewalls |> Map.keys() |> length() == 1
     end
 
@@ -640,7 +649,7 @@ defmodule FermixCore.Home.Provision.HetznerTest do
       {:ok, _ledger} = Ledger.update(ctx.home, "hetzner", &Ledger.moved(&1, 6, @now))
       HetznerStub.fault(ctx.stub, "DELETE", ~r"^/v1/servers/", 500, "server_error")
 
-      assert {:error, {:refused, 500, "server_error", _message}} =
+      assert {:error, {:other, "Hetzner refused the request: " <> _message}} =
                Hetzner.delete_replaced(ctx.home, ctx.opts)
 
       old = Ledger.replaced_set(ledger!(ctx.home))

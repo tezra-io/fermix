@@ -9,6 +9,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   answers for the same facts, so a golden can only say what the engine says.
   """
 
+  alias FermixCore.Home.Provision.Hetzner
   alias FermixCore.Home.Snapshot.S3, as: SnapshotS3
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
   alias FermixCore.Management.Home
@@ -147,6 +148,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         move: facts.move,
         link: link,
         candidates: facts.candidates,
+        provider: Hetzner,
         provision: Map.get(extra, :provision, none()),
         review: Map.get(extra, :review),
         snapshots: facts.snapshots,

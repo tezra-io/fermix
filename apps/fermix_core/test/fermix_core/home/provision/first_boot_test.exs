@@ -9,9 +9,11 @@ defmodule FermixCore.Home.Provision.FirstBootTest do
 
   @script Path.expand("../../../../../../packaging/cloud/first-boot.sh", __DIR__)
   @code "fxenroll1.eyJ2IjoxLCJuYW1lIjoiaW52ZW50ZWQifQ_-Zx9"
+  # A provider's user data limit, as its module passes it in.
+  @max 32_768
 
   test "the user data unpacks the first boot byte for byte and checks it before it runs" do
-    {:ok, user_data} = FirstBoot.user_data(@code)
+    {:ok, user_data} = FirstBoot.user_data(@code, @max)
 
     assert String.starts_with?(user_data, "#!/bin/sh\n")
 
@@ -31,7 +33,7 @@ defmodule FermixCore.Home.Provision.FirstBootTest do
   end
 
   test "the code reaches the first boot only in its environment, never on a command line" do
-    {:ok, user_data} = FirstBoot.user_data(@code)
+    {:ok, user_data} = FirstBoot.user_data(@code, @max)
 
     assert user_data =~
              "FERMIX_ENROLL_CODE='#{@code}' sh /usr/local/lib/fermix-always-on/first-boot.sh\n"
@@ -39,13 +41,18 @@ defmodule FermixCore.Home.Provision.FirstBootTest do
     assert length(String.split(user_data, @code)) == 2
   end
 
-  test "the user data is shell the server can parse, and fits the 32 KiB Hetzner takes" do
-    {:ok, user_data} = FirstBoot.user_data(@code)
-    assert byte_size(user_data) <= FirstBoot.max_bytes()
-    assert FirstBoot.max_bytes() == 32_768
+  test "the user data is shell the server can parse" do
+    {:ok, user_data} = FirstBoot.user_data(@code, @max)
 
     {output, status} = System.cmd("sh", ["-n", "-c", user_data], stderr_to_stdout: true)
     assert {output, status} == {"", 0}
+  end
+
+  test "user data past the provider's limit is refused, never cut" do
+    {:ok, user_data} = FirstBoot.user_data(@code, @max)
+
+    assert FirstBoot.user_data(@code, byte_size(user_data)) == {:ok, user_data}
+    assert FirstBoot.user_data(@code, byte_size(user_data) - 1) == {:error, :too_large}
   end
 
   test "anything but an enrollment code is refused before it can reach a shell" do
@@ -57,7 +64,7 @@ defmodule FermixCore.Home.Provision.FirstBootTest do
           "fxenroll1.abc\nrm",
           String.duplicate("a", 10)
         ] do
-      assert FirstBoot.user_data(bad) == {:error, :invalid_code}, inspect(bad)
+      assert FirstBoot.user_data(bad, @max) == {:error, :invalid_code}, inspect(bad)
     end
   end
 end

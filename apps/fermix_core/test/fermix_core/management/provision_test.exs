@@ -9,6 +9,7 @@ defmodule FermixCore.Management.ProvisionTest do
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
   alias FermixCore.Home.Provision.FirstBoot
+  alias FermixCore.Home.Provision.Hetzner
   alias FermixCore.Home.Provision.Ledger
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Jobs
@@ -25,8 +26,9 @@ defmodule FermixCore.Management.ProvisionTest do
   @device %{role: :device, primary: "fermix-general-a3f9"}
   @code "fxenroll1.eyJ2IjoxLCJuYW1lIjoiaW52ZW50ZWQifQ"
   @server_code "fxenroll1.eyJ2IjoxLCJuYW1lIjoib2xkLXNlcnZlciJ9"
-  @methods ~w(home.provision.connect home.provision.options home.provision.create
-              home.provision.power home.provision.resources home.provision.delete)
+  @methods ~w(home.provision.providers home.provision.connect home.provision.options
+              home.provision.create home.provision.power home.provision.resources
+              home.provision.delete)
 
   setup context do
     home = SafeRm.make_tmp_dir!("provision")
@@ -47,7 +49,7 @@ defmodule FermixCore.Management.ProvisionTest do
       home: home,
       profile: "general",
       jobs: [server: jobs],
-      host_opts: [
+      provider_opts: [
         req_options: HetznerStub.req_options(stub),
         now: fn -> @now end,
         sleep: fn _ms -> :ok end
@@ -81,6 +83,7 @@ defmodule FermixCore.Management.ProvisionTest do
     test "checks the token, keeps it on this computer and says what the project holds", ctx do
       assert {:ok, view} = connect(ctx)
 
+      assert view["provider"] == "hetzner"
       assert view["state"] == "connected"
       assert view["token"] == "accepted"
       assert view["other_servers"] == false
@@ -95,7 +98,11 @@ defmodule FermixCore.Management.ProvisionTest do
 
     test "a token Hetzner does not accept is refused at once, and kept nowhere", ctx do
       assert {:error, :invalid_params, %{"field" => "token", "sentence" => sentence}} =
-               route("home.provision.connect", %{"token" => "invented-wrong-token-0000"}, ctx)
+               route(
+                 "home.provision.connect",
+                 %{"provider" => "hetzner", "token" => "invented-wrong-token-0000"},
+                 ctx
+               )
 
       assert sentence ==
                "Hetzner does not accept this token, so paste a Read & Write API token from " <>
@@ -112,7 +119,7 @@ defmodule FermixCore.Management.ProvisionTest do
       assert {:error, :invalid_params, %{"field" => "token", "sentence" => sentence}} =
                route(
                  "home.provision.connect",
-                 %{"token" => "invented-other-project-token-77"},
+                 %{"provider" => "hetzner", "token" => "invented-other-project-token-77"},
                  ctx
                )
 
@@ -131,7 +138,11 @@ defmodule FermixCore.Management.ProvisionTest do
       {:ok, %{"token" => "refused"}} = route("home.provision.resources", %{}, ctx)
 
       assert {:ok, %{"token" => "accepted", "state" => "created"}} =
-               route("home.provision.connect", %{"token" => "invented-renewed-token-0042"}, ctx)
+               route(
+                 "home.provision.connect",
+                 %{"provider" => "hetzner", "token" => "invented-renewed-token-0042"},
+                 ctx
+               )
 
       assert {:ok, %{token: "invented-renewed-token-0042"}} = Ledger.read(ctx.home, "hetzner")
     end
@@ -143,7 +154,7 @@ defmodule FermixCore.Management.ProvisionTest do
       assert {:ok, %{"token" => "accepted"}} =
                route(
                  "home.provision.connect",
-                 %{"token" => "invented-other-project-token-77"},
+                 %{"provider" => "hetzner", "token" => "invented-other-project-token-77"},
                  ctx
                )
     end
@@ -151,7 +162,11 @@ defmodule FermixCore.Management.ProvisionTest do
     test "a value that cannot be a token is refused before Hetzner is asked", ctx do
       for token <- ["", "short", "has a space in it, long enough", 7] do
         assert {:error, :invalid_params, %{"field" => "token"}} =
-                 route("home.provision.connect", %{"token" => token}, ctx)
+                 route(
+                   "home.provision.connect",
+                   %{"provider" => "hetzner", "token" => token},
+                   ctx
+                 )
       end
 
       assert HetznerStub.requests(ctx.stub) == []
@@ -161,14 +176,14 @@ defmodule FermixCore.Management.ProvisionTest do
   describe "home.provision.options" do
     test "asks for a token first", ctx do
       assert {:error, :unavailable, %{"capability" => "home", "sentence" => sentence}} =
-               route("home.provision.options", %{}, ctx)
+               route("home.provision.options", %{"provider" => "hetzner"}, ctx)
 
       assert sentence == "Paste a Hetzner API token first."
     end
 
     test "answers the offers live, with the recommendation in one sentence", ctx do
       {:ok, _view} = connect(ctx)
-      assert {:ok, options} = route("home.provision.options", %{}, ctx)
+      assert {:ok, options} = route("home.provision.options", %{"provider" => "hetzner"}, ctx)
 
       assert options["recommended"] == %{"type" => "cpx22", "location" => "fsn1"}
       assert options["sentence"] == "Recommended: CPX22 in Falkenstein, €20 a month."
@@ -216,7 +231,7 @@ defmodule FermixCore.Management.ProvisionTest do
       assert done["failure"]["sentence"] == "Falkenstein has no CPX22 right now."
 
       assert %{state: :failed, failure: %{reason: "unavailable", next_location: "nbg1"}} =
-               Ledger.state(ctx.home)
+               Ledger.state(ctx.home, Hetzner)
     end
 
     test "a read-only token fails at the firewall, before anything costs money", ctx do
@@ -224,7 +239,10 @@ defmodule FermixCore.Management.ProvisionTest do
 
       done = finished(elem(create(ctx), 1), ctx)
       assert done["failure"]["sentence"] =~ "This token can only read"
-      assert %{state: :failed, failure: %{reason: "read_only_token"}} = Ledger.state(ctx.home)
+
+      assert %{state: :failed, failure: %{reason: "read_only_token"}} =
+               Ledger.state(ctx.home, Hetzner)
+
       refute_received :code_opened
     end
 
@@ -239,12 +257,15 @@ defmodule FermixCore.Management.ProvisionTest do
       done = finished(elem(create(ctx), 1), ctx)
 
       assert done["failure"]["sentence"] == "Hetzner no longer accepts Fermix's token."
-      assert %{token: :refused} = Ledger.state(ctx.home)
+      assert %{token: :refused} = Ledger.state(ctx.home, Hetzner)
     end
 
     test "only the primary creates a server", ctx do
       assert {:error, :unavailable, %{"sentence" => sentence}} =
-               route("home.provision.create", %{"type" => "cpx22", "location" => "fsn1"}, ctx,
+               route(
+                 "home.provision.create",
+                 %{"provider" => "hetzner", "type" => "cpx22", "location" => "fsn1"},
+                 ctx,
                  role: @device
                )
 
@@ -265,15 +286,28 @@ defmodule FermixCore.Management.ProvisionTest do
 
     test "a type or location outside what Fermix offers is refused by field", ctx do
       assert {:error, :invalid_params, %{"field" => "location"}} =
-               route("home.provision.create", %{"type" => "cpx22", "location" => "ash"}, ctx)
+               route(
+                 "home.provision.create",
+                 %{"provider" => "hetzner", "type" => "cpx22", "location" => "ash"},
+                 ctx
+               )
 
       assert {:error, :invalid_params, %{"field" => "type"}} =
-               route("home.provision.create", %{"type" => "CPX 22", "location" => "fsn1"}, ctx)
+               route(
+                 "home.provision.create",
+                 %{"provider" => "hetzner", "type" => "CPX 22", "location" => "fsn1"},
+                 ctx
+               )
 
       assert {:error, :invalid_params, %{"field" => "extra"}} =
                route(
                  "home.provision.create",
-                 %{"type" => "cpx22", "location" => "fsn1", "extra" => 1},
+                 %{
+                   "provider" => "hetzner",
+                   "type" => "cpx22",
+                   "location" => "fsn1",
+                   "extra" => 1
+                 },
                  ctx
                )
     end
@@ -283,7 +317,7 @@ defmodule FermixCore.Management.ProvisionTest do
       gate = self()
 
       seams =
-        Keyword.update!(ctx.seams, :host_opts, fn host ->
+        Keyword.update!(ctx.seams, :provider_opts, fn host ->
           Keyword.put(host, :sleep, fn _ms ->
             send(gate, :polling)
 
@@ -294,10 +328,14 @@ defmodule FermixCore.Management.ProvisionTest do
         end)
 
       {:ok, job} =
-        route("home.provision.create", %{"type" => "cpx22", "location" => "fsn1"}, %{
-          ctx
-          | seams: seams
-        })
+        route(
+          "home.provision.create",
+          %{"provider" => "hetzner", "type" => "cpx22", "location" => "fsn1"},
+          %{
+            ctx
+            | seams: seams
+          }
+        )
 
       assert_receive :polling, 10_000
 
@@ -354,7 +392,7 @@ defmodule FermixCore.Management.ProvisionTest do
                "Your server runs Fermix now, so Fermix does not delete it; replace the server " <>
                  "instead."
 
-      assert Ledger.state(ctx.home).state == :created
+      assert Ledger.state(ctx.home, Hetzner).state == :created
     end
 
     test "refuses while this home is moving to it", ctx do
@@ -434,7 +472,7 @@ defmodule FermixCore.Management.ProvisionTest do
       assert_received {:forwarded, "home.enroll.open", %{"kind" => "provisioned"}}
       refute_received :code_opened
 
-      {:ok, user_data} = FirstBoot.user_data(@server_code)
+      {:ok, user_data} = FirstBoot.user_data(@server_code, Hetzner.max_user_data())
 
       assert [%{"user_data" => ^user_data, "name" => ^new_name}] =
                for({"POST", "/v1/servers", _q, body} <- HetznerStub.requests(ctx.stub), do: body)
@@ -444,7 +482,7 @@ defmodule FermixCore.Management.ProvisionTest do
                state: :created,
                server: %{name: ^new_name},
                replace: %{state: :waiting, current: :old, old: %{name: old_name}}
-             } = Ledger.state(ctx.home)
+             } = Ledger.state(ctx.home, Hetzner)
 
       assert old_name == ctx.old.name
 
@@ -465,7 +503,10 @@ defmodule FermixCore.Management.ProvisionTest do
 
     test "a create without the replace intent, or one with nothing to replace, is refused", ctx do
       assert {:error, :unavailable, %{"sentence" => sentence}} =
-               route("home.provision.create", %{"type" => "cpx32", "location" => "hel1"}, ctx,
+               route(
+                 "home.provision.create",
+                 %{"provider" => "hetzner", "type" => "cpx32", "location" => "hel1"},
+                 ctx,
                  role: @device
                )
 
@@ -475,7 +516,12 @@ defmodule FermixCore.Management.ProvisionTest do
       assert {:error, :unavailable, %{"sentence" => sentence}} =
                route(
                  "home.provision.create",
-                 %{"type" => "cpx32", "location" => "hel1", "replace" => true},
+                 %{
+                   "provider" => "hetzner",
+                   "type" => "cpx32",
+                   "location" => "hel1",
+                   "replace" => true
+                 },
                  ctx
                )
 
@@ -484,7 +530,12 @@ defmodule FermixCore.Management.ProvisionTest do
       assert {:error, :invalid_params, %{"field" => "replace"}} =
                route(
                  "home.provision.create",
-                 %{"type" => "cpx32", "location" => "hel1", "replace" => "yes"},
+                 %{
+                   "provider" => "hetzner",
+                   "type" => "cpx32",
+                   "location" => "hel1",
+                   "replace" => "yes"
+                 },
                  ctx,
                  role: @device
                )
@@ -519,7 +570,7 @@ defmodule FermixCore.Management.ProvisionTest do
                  failure: %{sentence: "Remote reach is off."}
                }
              } =
-               Ledger.state(ctx.home)
+               Ledger.state(ctx.home, Hetzner)
 
       unreachable =
         answering(ctx, %{
@@ -542,12 +593,12 @@ defmodule FermixCore.Management.ProvisionTest do
       assert_received {:forwarded, "home.enroll.withdraw", %{}}
 
       assert %{state: :failed, replace: %{state: :failed, current: :old}} =
-               Ledger.state(ctx.home)
+               Ledger.state(ctx.home, Hetzner)
 
       # Cancel gives the ledger back the server the home lives on.
       done = finished(elem(route("home.provision.delete", %{}, ctx, role: @device), 1), ctx)
       assert done["status"] == "completed"
-      assert %{state: :created, server: server, replace: nil} = Ledger.state(ctx.home)
+      assert %{state: :created, server: server, replace: nil} = Ledger.state(ctx.home, Hetzner)
       assert server.name == ctx.old.name
     end
 
@@ -558,7 +609,10 @@ defmodule FermixCore.Management.ProvisionTest do
       assert %{"status" => "completed"} = finished(job, ctx)
       assert_received {:forwarded, "home.enroll.withdraw", %{}}
       assert Map.keys(HetznerStub.world(ctx.stub).servers) == [ctx.old.id]
-      assert %{state: :created, server: %{name: name}, replace: nil} = Ledger.state(ctx.home)
+
+      assert %{state: :created, server: %{name: name}, replace: nil} =
+               Ledger.state(ctx.home, Hetzner)
+
       assert name == ctx.old.name
 
       # The server the home lives on is still never deleted.
@@ -574,7 +628,7 @@ defmodule FermixCore.Management.ProvisionTest do
       assert :nothing =
                Provision.move_forwarded(%{"candidate_id" => "cand-new"}, refused(), ctx.seams)
 
-      assert %{replace: %{state: :waiting}} = Ledger.state(ctx.home)
+      assert %{replace: %{state: :waiting}} = Ledger.state(ctx.home, Hetzner)
 
       assert :recorded =
                Provision.move_forwarded(
@@ -583,7 +637,7 @@ defmodule FermixCore.Management.ProvisionTest do
                  ctx.seams
                )
 
-      assert %{replace: %{state: :moving, current: :old}} = Ledger.state(ctx.home)
+      assert %{replace: %{state: :moving, current: :old}} = Ledger.state(ctx.home, Hetzner)
 
       assert {:error, :unavailable, %{"sentence" => sentence}} =
                route("home.provision.delete", %{}, ctx, role: @device)
@@ -599,7 +653,7 @@ defmodule FermixCore.Management.ProvisionTest do
 
       # The old server answering again at its own epoch undid the move.
       assert :undone = Provision.primary_reached(5, ctx.seams)
-      assert %{replace: %{state: :waiting}} = Ledger.state(ctx.home)
+      assert %{replace: %{state: :waiting}} = Ledger.state(ctx.home, Hetzner)
     end
 
     test "once this computer reaches a server one epoch up, the old one is deleted, once", ctx do
@@ -622,7 +676,7 @@ defmodule FermixCore.Management.ProvisionTest do
       assert Map.keys(HetznerStub.world(ctx.stub).servers) == [ledger.server.id]
 
       assert %{state: :created, replace: %{state: :done, current: :new, old: nil}} =
-               Ledger.state(ctx.home)
+               Ledger.state(ctx.home, Hetzner)
 
       assert :nothing = Provision.primary_reached(6, ctx.seams)
       assert {:ok, views} = Jobs.list(ctx.jobs)
@@ -646,7 +700,7 @@ defmodule FermixCore.Management.ProvisionTest do
       assert_received {:renamed, _new_name}
 
       assert %{replace: %{state: :failed, current: :new, failure: %{sentence: ^sentence}}} =
-               Ledger.state(ctx.home)
+               Ledger.state(ctx.home, Hetzner)
 
       # Once: seeing the server again tries nothing by itself.
       assert :nothing = Provision.primary_reached(6, ctx.seams)
@@ -661,7 +715,7 @@ defmodule FermixCore.Management.ProvisionTest do
 
       {:ok, job} = route("home.provision.delete", %{}, ctx, role: @device)
       assert %{"status" => "completed"} = finished(job, ctx)
-      assert %{replace: %{state: :done}} = Ledger.state(ctx.home)
+      assert %{replace: %{state: :done}} = Ledger.state(ctx.home, Hetzner)
       assert map_size(HetznerStub.world(ctx.stub).servers) == 1
     end
   end
@@ -669,7 +723,7 @@ defmodule FermixCore.Management.ProvisionTest do
   defp replace(ctx) do
     route(
       "home.provision.create",
-      %{"type" => "cpx32", "location" => "hel1", "replace" => true},
+      %{"provider" => "hetzner", "type" => "cpx32", "location" => "hel1", "replace" => true},
       ctx,
       role: @device
     )
@@ -703,10 +757,20 @@ defmodule FermixCore.Management.ProvisionTest do
   end
 
   defp connect(ctx),
-    do: route("home.provision.connect", %{"token" => HetznerStub.token()}, ctx)
+    do:
+      route(
+        "home.provision.connect",
+        %{"provider" => "hetzner", "token" => HetznerStub.token()},
+        ctx
+      )
 
   defp create(ctx),
-    do: route("home.provision.create", %{"type" => "cpx22", "location" => "fsn1"}, ctx)
+    do:
+      route(
+        "home.provision.create",
+        %{"provider" => "hetzner", "type" => "cpx22", "location" => "fsn1"},
+        ctx
+      )
 
   # The daemon hands a linked desktop's device-class requests its way to the
   # server (`:primary_forward`), as `Fermix.CLI.Daemon` does.

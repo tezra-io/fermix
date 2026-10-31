@@ -1,37 +1,47 @@
 defmodule FermixCore.Management.Provision do
   @moduledoc """
   The `home.provision.*` family (M75 lean v1 §4.3): Fermix creates the
-  owner's Always On server on Hetzner (`FermixCore.Home.Provision.Hetzner`)
-  from a project token pasted once.
+  owner's Always On server on a cloud provider (`FermixCore.Home.Provision`,
+  the contract; `Provision.Registry`, the providers, one today) from an API
+  token pasted once. Nothing here names a provider: each one's words come
+  from its display data, and its refusals arrive as the contract's shared
+  kinds.
 
   Every method is device-class (`Management.Placement`): a linked desktop
-  answers it itself and never sends it to the server, since the token and
-  the ledger (`Home.Provision.Ledger`, `device/provision/hetzner.json`) stay
-  on the computer that created the server.
+  answers it itself and never sends it to the server, since the tokens and
+  the ledgers (`Home.Provision.Ledger`, `device/provision/<id>.json`, one per
+  provider) stay on the computer that created the server.
 
-    * `home.provision.connect {token}` (an owner decision) checks the token
-      against Hetzner (`GET /servers`, `GET /pricing`) and keeps it; one
-      Hetzner refuses is `invalid_params` on `token` with its sentence. While
-      the ledger holds a server or firewall that is not gone, a new token
-      replaces the old only when it reaches it (`reaches/3`, the same
-      project), so a token that stopped working is replaced and one for
-      another project is refused, also on `token`. Answers the view below and
-      `other_servers` (the project holds servers Fermix did not create).
-    * `home.provision.options` reads the orderable types per location live,
-      with their monthly prices as the account is billed, the L2
-      recommendation, "more room", and the recommendation in one `sentence`.
-    * `home.provision.create {type, location, replace?}` (an owner
+    * `home.provision.providers` answers each provider's display data, in
+      the order the apps offer them: `{id, name, token_label, steps,
+      console_url, docs_anchor}`, so the apps draw the token and choose
+      screens from it and need no change for a new provider.
+    * `home.provision.connect {provider, token}` (an owner decision) checks
+      the token with that provider and keeps it in that provider's ledger;
+      one the provider refuses is `invalid_params` on `token` with its
+      sentence. While that ledger holds a server or firewall that is not
+      gone, a new token replaces the old only when it reaches it
+      (`reaches/3`, the same account), so a token that stopped working is
+      replaced and one for another account is refused, also on `token`.
+      Answers that provider's view (below) and `other_servers` (the account
+      holds servers Fermix did not create).
+    * `home.provision.options {provider}` reads the orderable types per
+      location live, with their monthly prices as the account is billed, the
+      L2 recommendation, "more room", and the recommendation in one
+      `sentence`.
+    * `home.provision.create {provider, type, location, replace?}` (an owner
       decision) starts a job, kind `home_provision`, that creates the
-      firewall and the server, the 24-hour enrollment code inside. On the
-      primary only, unless `replace` is true: then on the linked desktop
-      whose ledger holds the server the home lives on, which asks that
+      firewall and the server, the 24-hour enrollment code inside. Refused
+      while any provider holds a server Fermix created. On the primary only,
+      unless `replace` is true: then on the linked desktop whose ledger of
+      that provider holds the server the home lives on, which asks that
       server over the link for the code (`home.enroll.open {kind:
       provisioned}`, forwarded) and keeps both servers in the ledger
       (`Ledger.begin_replace/3`), the old one holding the home until the move
       to the new one is done.
     * `home.provision.power {action}` (an owner decision), `on` or `reset`, a
       job of the same kind.
-    * `home.provision.resources` reads the ledger back from Hetzner (a
+    * `home.provision.resources` reads the ledger back from the provider (a
       resource deleted outside Fermix is marked gone) and answers the view.
     * `home.provision.delete` (an owner decision) deletes the server, its
       addresses unless they went with it, and the firewall, as a job; it is
@@ -42,6 +52,11 @@ defmodule FermixCore.Management.Provision do
       (Cancel, which closes its code on the old server and gives the ledger
       back the old one), or the old server after it (when deleting it
       failed); while the move runs, nothing.
+
+  Power, resources, delete and what follows a replace's move act on the
+  provider Always On speaks of (`Provision.current/2`): the one Fermix
+  created something on, else the one whose token was given last, else the
+  first the registry offers.
 
   After a replace's move: the daemon records that this desktop started the
   move to the new server (`move_forwarded/3`, beside the forwarded
@@ -58,21 +73,22 @@ defmodule FermixCore.Management.Provision do
   is kept in the ledger, so the summary and `home.provision.resources` say
   it after the job is gone; a refusal for the token marks it refused.
 
-  The view: `state` (`none`, `connected`, `creating`, `created`, `deleting`,
-  `gone`, `failed`, `unreadable`, as `Ledger.state/1`), `token` (`none`,
-  `accepted`, `refused`), `server` (or null), `failure` (`{reason, sentence,
-  next_location, at}` or null), `replace` (null, or `{state, current, old,
-  failure}` as `Ledger.state/1`'s), `resources` (every resource the ledger
-  holds: `{kind, name, id, status, replaced}`, `replaced` true for the old
-  server's), and from `home.provision.resources` `checked` (whether Hetzner
-  was read just now) and `sentence` (why not, or null). The token never
-  leaves the ledger.
+  The view: `provider` (the provider's id), `state` (`none`, `connected`,
+  `creating`, `created`, `deleting`, `gone`, `failed`, `unreadable`, as
+  `Ledger.state/3`), `token` (`none`, `accepted`, `refused`), `server` (or
+  null), `failure` (`{reason, sentence, next_location, at}` or null),
+  `replace` (null, or `{state, current, old, failure}` as `Ledger.state/3`'s),
+  `resources` (every resource the ledger holds: `{kind, name, id, status,
+  replaced}`, `replaced` true for the old server's), and from
+  `home.provision.resources` `checked` (whether the provider was read just
+  now) and `sentence` (why not, or null). The token never leaves the ledger.
 
-  Test seams in `opts`: `:home`, `:engine_role`, `:profile`, `:host` (the
-  host module), `:host_opts` (the host's own seams), `:jobs`, `:open_code`
-  and `:withdraw_code` (in place of the rail's provisioned window), and
-  `:primary_forward`, the daemon's way to the server on a linked desktop, and
-  `:rename_primary` (in place of the rail's, given the new server's name).
+  Test seams in `opts`: `:home`, `:engine_role`, `:profile`, `:providers` (in
+  place of `Provision.Registry.all/0`), `:provider_opts` (the providers' own
+  seams), `:jobs`, `:open_code` and `:withdraw_code` (in place of the rail's
+  provisioned window), and `:primary_forward`, the daemon's way to the server
+  on a linked desktop, and `:rename_primary` (in place of the rail's, given
+  the new server's name).
   """
 
   alias FermixCore.Home.DesktopLink
@@ -80,8 +96,8 @@ defmodule FermixCore.Management.Provision do
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
   alias FermixCore.Home.Provision
-  alias FermixCore.Home.Provision.Hetzner
   alias FermixCore.Home.Provision.Ledger
+  alias FermixCore.Home.Provision.Registry
   alias FermixCore.Home.Role
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Protocol
@@ -93,18 +109,16 @@ defmodule FermixCore.Management.Provision do
   @kind :home_provision
   @token_pattern ~r/\A[!-~]{16,512}\z/
   @type_pattern ~r/\A[a-z0-9][a-z0-9-]{0,31}\z/
-  @owner_sentence "Only the owner can give Fermix a Hetzner token or create, restart or " <>
-                    "delete its server: use the Fermix app."
-  @token_shape_sentence "Paste the API token exactly as Hetzner shows it."
-  @no_offer_sentence "Hetzner has no server type with 4 GB in stock in Falkenstein, " <>
-                       "Nuremberg or Helsinki right now."
+  @owner_sentence "Only the owner can give Fermix an API token or create, restart or delete " <>
+                    "its server: use the Fermix app."
+  @provider_sentence "Choose one of the providers Fermix creates a server on."
   # What `Ledger.begin_replace/3` refuses, each a reason with its sentence.
   @replace_refusals [:replacement_exists, :replace_moving, :old_server_remains, :not_primary]
 
   @doc """
   The sentence `daemon.sock` answers when a process Fermix started (or one it
-  cannot place) asks to create, power or delete the server: the owner's
-  decisions.
+  cannot place) asks to give Fermix a token, or to create, power or delete
+  the server: the owner's decisions.
   """
   @spec owner_only_sentence() :: String.t()
   def owner_only_sentence, do: @owner_sentence
@@ -117,85 +131,123 @@ defmodule FermixCore.Management.Provision do
   @spec job_kind() :: atom()
   def job_kind, do: @kind
 
+  @doc "`home.provision.providers`: each provider's display data, in the order offered."
+  @spec providers(keyword()) :: {:ok, map()}
+  def providers(opts \\ []) when is_list(opts),
+    do: {:ok, %{"providers" => Enum.map(providers_of(opts), &provider_view/1)}}
+
+  defp provider_view(provider) do
+    display = provider.display()
+
+    %{
+      "id" => provider.id(),
+      "name" => display.name,
+      "token_label" => display.token_label,
+      "steps" => display.steps,
+      "console_url" => display.console_url,
+      "docs_anchor" => display.docs_anchor
+    }
+  end
+
   @doc "`home.provision.connect`."
-  @spec connect(term(), keyword()) :: {:ok, map()} | {:error, term()}
-  def connect(token, opts \\ []) when is_list(opts) do
-    with {:ok, token} <- token_param(token),
-         {:ok, others?} <- accepted(token, opts),
-         :ok <- same_project(token, opts) do
-      keep_token(token, others?, opts)
+  @spec connect(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def connect(params, opts \\ []) when is_map(params) and is_list(opts) do
+    with {:ok, provider} <- provider_param(params, opts),
+         {:ok, token} <- token_param(params, provider),
+         {:ok, others?} <- accepted(provider, token, opts),
+         :ok <- same_project(provider, token, opts) do
+      keep_token(provider, token, others?, opts)
     end
   end
 
-  defp accepted(token, opts) do
-    case host(opts).check_token(token, host_opts(opts)) do
+  defp accepted(provider, token, opts) do
+    case provider.check_token(token, provider_opts(opts)) do
       {:ok, %{other_servers: others?}} ->
         {:ok, others?}
 
       {:error, :unauthorized} ->
-        {:error, {:invalid_params, "token", Provision.error_sentence(:token_invalid)}}
+        {:error, {:invalid_params, "token", Provision.error_sentence(:token_invalid, provider)}}
 
       {:error, reason} ->
-        refused(reason, opts)
+        refused(reason, provider, opts)
     end
   end
 
   # A token that replaces another must reach what the ledger holds.
-  defp same_project(token, opts) do
-    with {:ok, ledger} <- ledger(opts) do
-      case host(opts).reaches(token, ledger, host_opts(opts)) do
+  defp same_project(provider, token, opts) do
+    with {:ok, ledger} <- ledger(provider, opts) do
+      case provider.reaches(token, ledger, provider_opts(opts)) do
         :ok ->
           :ok
 
         {:error, :other_project} ->
-          {:error, {:invalid_params, "token", Provision.error_sentence(:other_project)}}
+          {:error, {:invalid_params, "token", Provision.error_sentence(:other_project, provider)}}
 
         {:error, reason} ->
-          refused(reason, opts)
+          refused(reason, provider, opts)
       end
     end
   end
 
-  defp ledger(opts) do
-    case Ledger.read(home(opts), host(opts).host()) do
+  defp ledger(provider, opts) do
+    case Ledger.read(home(opts), provider.id()) do
       {:ok, ledger} -> {:ok, ledger}
-      {:error, reason} -> refused({:ledger, reason}, opts)
+      {:error, reason} -> refused({:ledger, reason}, provider, opts)
     end
   end
 
-  defp keep_token(token, others?, opts) do
-    case Ledger.update(
-           home(opts),
-           host(opts).host(),
-           &{:ok, Ledger.connect(&1, token, now(opts))}
-         ) do
-      {:ok, _ledger} -> {:ok, Map.put(view(home(opts), opts), "other_servers", others?)}
-      {:error, reason} -> refused({:ledger, reason}, opts)
+  defp keep_token(provider, token, others?, opts) do
+    case Ledger.update(home(opts), provider.id(), &{:ok, Ledger.connect(&1, token, now(opts))}) do
+      {:ok, _ledger} ->
+        {:ok, Map.put(provider_ledger_view(home(opts), provider), "other_servers", others?)}
+
+      {:error, reason} ->
+        refused({:ledger, reason}, provider, opts)
     end
   end
 
-  defp token_param(token) when is_binary(token) do
+  defp token_param(%{"token" => token}, provider) when is_binary(token) do
     if Regex.match?(@token_pattern, token),
       do: {:ok, token},
-      else: {:error, {:invalid_params, "token", @token_shape_sentence}}
+      else: token_shape(provider)
   end
 
-  defp token_param(_token), do: {:error, {:invalid_params, "token", @token_shape_sentence}}
+  defp token_param(_params, provider), do: token_shape(provider)
+
+  defp token_shape(provider),
+    do: invalid("token", "Paste the API token exactly as #{provider.display().name} shows it.")
+
+  # The provider a call names: one the registry offers.
+  defp provider_param(%{"provider" => id}, opts) do
+    case Provision.provider(providers_of(opts), id) do
+      {:ok, provider} -> {:ok, provider}
+      :error -> invalid("provider", @provider_sentence)
+    end
+  end
+
+  defp provider_param(_params, _opts), do: invalid("provider", @provider_sentence)
 
   @doc "`home.provision.options`."
-  @spec options(keyword()) :: {:ok, map()} | {:error, term()}
-  def options(opts \\ []) when is_list(opts) do
-    with {:ok, token} <- stored_token(opts) do
-      case host(opts).options(token, host_opts(opts)) do
-        {:ok, options} -> {:ok, Map.put(options, "sentence", recommendation(options))}
-        {:error, reason} -> refused(reason, opts)
+  @spec options(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def options(params, opts \\ []) when is_map(params) and is_list(opts) do
+    with {:ok, provider} <- provider_param(params, opts),
+         {:ok, token} <- stored_token(provider, opts) do
+      case provider.options(token, provider_opts(opts)) do
+        {:ok, options} -> {:ok, Map.put(options, "sentence", recommendation(options, provider))}
+        {:error, reason} -> refused(reason, provider, opts)
       end
     end
   end
 
-  defp recommendation(%{"recommended" => nil}), do: @no_offer_sentence
+  defp recommendation(%{"recommended" => nil}, provider),
+    do:
+      "#{provider.display().name} has no server type with 4 GB in stock in " <>
+        "#{Provision.cities(provider)} right now."
 
-  defp recommendation(%{"recommended" => %{"type" => type, "location" => location}} = options) do
+  defp recommendation(
+         %{"recommended" => %{"type" => type, "location" => location}} = options,
+         _provider
+       ) do
     offer = Enum.find(options["offers"], &(&1["type"] == type and &1["location"] == location))
     city = Enum.find_value(options["locations"], location, &(&1["id"] == location && &1["city"]))
 
@@ -221,18 +273,19 @@ defmodule FermixCore.Management.Provision do
   """
   @spec create(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def create(params, opts \\ []) when is_map(params) and is_list(opts) do
-    with {:ok, request, replace?} <- create_params(params, opts),
-         {:ok, plan} <- create_plan(replace?, opts) do
-      start(opts, fn report -> run_create(plan, request, report, opts) end)
+    with {:ok, provider, request, replace?} <- create_params(params, opts),
+         {:ok, plan} <- create_plan(provider, replace?, opts) do
+      start(provider, opts, fn report -> run_create(provider, plan, request, report, opts) end)
     end
   end
 
   defp create_params(params, opts) do
-    with :ok <- known_params(params, ~w(type location replace)),
+    with :ok <- known_params(params, ~w(provider type location replace)),
+         {:ok, provider} <- provider_param(params, opts),
          {:ok, type} <- matching(params, "type", @type_pattern),
-         {:ok, location} <- location(params),
+         {:ok, location} <- location(params, provider),
          {:ok, replace?} <- replace_param(params) do
-      {:ok, %{type: type, location: location, profile: profile(opts)}, replace?}
+      {:ok, provider, %{type: type, location: location, profile: profile(opts)}, replace?}
     end
   end
 
@@ -245,123 +298,135 @@ defmodule FermixCore.Management.Provision do
 
   # A server is created on the primary, and replaced from the linked desktop
   # whose ledger holds the server the home lives on.
-  defp create_plan(false, opts) do
-    with :ok <- creating_here(opts),
-         {:ok, _token} <- stored_token(opts),
-         :ok <- no_server(opts),
+  defp create_plan(provider, false, opts) do
+    with :ok <- creating_here(provider, opts),
+         {:ok, _token} <- stored_token(provider, opts),
+         :ok <- no_server(provider, opts),
          do: {:ok, :create}
   end
 
-  defp create_plan(true, opts) do
-    with :ok <- replacing_here(opts),
-         {:ok, _token} <- stored_token(opts),
-         {:ok, from_epoch} <- replaceable(opts),
+  defp create_plan(provider, true, opts) do
+    with :ok <- replacing_here(provider, opts),
+         {:ok, _token} <- stored_token(provider, opts),
+         {:ok, from_epoch} <- replaceable(provider, opts),
          do: {:ok, {:replace, from_epoch}}
   end
 
-  defp creating_here(opts) do
+  defp creating_here(provider, opts) do
     cond do
-      primary(role(opts)) == :ok -> :ok
-      not DesktopLink.linked?(role(opts), home(opts)) -> refusal(:not_primary)
-      holds_nothing?(opts) -> refusal(:not_primary)
-      true -> refusal(:replace_only)
+      primary?(role(opts)) -> :ok
+      not DesktopLink.linked?(role(opts), home(opts)) -> refusal(:not_primary, provider)
+      holds_nothing?(provider, opts) -> refusal(:not_primary, provider)
+      true -> refusal(:replace_only, provider)
     end
   end
 
-  defp holds_nothing?(opts) do
-    case Ledger.read(home(opts), host(opts).host()) do
+  defp holds_nothing?(provider, opts) do
+    case Ledger.read(home(opts), provider.id()) do
       {:ok, ledger} -> Ledger.replacing(ledger) == {:error, :not_primary}
       {:error, _reason} -> true
     end
   end
 
-  defp replacing_here(opts) do
+  defp replacing_here(provider, opts) do
     cond do
-      primary(role(opts)) == :ok -> refusal(:nothing_to_replace)
+      primary?(role(opts)) -> refusal(:nothing_to_replace, provider)
       DesktopLink.linked?(role(opts), home(opts)) -> :ok
-      true -> refusal(:not_primary)
+      true -> refusal(:not_primary, provider)
     end
   end
 
   # The primary epoch the old server holds: this desktop's highest seen, since
   # it reaches that server now.
-  defp replaceable(opts) do
-    with {:ok, ledger} <- ledger(opts) do
+  defp replaceable(provider, opts) do
+    with {:ok, ledger} <- ledger(provider, opts) do
       case Ledger.replacing(ledger) do
-        :begin -> held_epoch(opts)
+        :begin -> held_epoch(provider, opts)
         :continue -> {:ok, ledger.replace.from_epoch}
-        {:error, reason} -> refusal(reason)
+        {:error, reason} -> refusal(reason, provider)
       end
     end
   end
 
-  defp held_epoch(opts) do
+  defp held_epoch(provider, opts) do
     case DesktopLink.read(home(opts)) do
       {:ok, %{epoch: epoch}} ->
         {:ok, epoch}
 
       {:error, reason} ->
         Logger.error("provision: the desktop link could not be read: #{inspect(reason)}")
-        refusal(:no_link)
+        refusal(:no_link, provider)
     end
   end
 
-  defp location(%{"location" => location}) when is_binary(location) do
-    if location in Hetzner.locations(),
+  defp location(%{"location" => location}, provider) when is_binary(location) do
+    if location in Provision.location_ids(provider),
       do: {:ok, location},
-      else: invalid("location", "Fermix creates a server in Falkenstein, Nuremberg or Helsinki.")
+      else: location_refused(provider)
   end
 
-  defp location(_params),
-    do: invalid("location", "Fermix creates a server in Falkenstein, Nuremberg or Helsinki.")
+  defp location(_params, provider), do: location_refused(provider)
 
-  defp no_server(opts) do
-    case Ledger.read(home(opts), host(opts).host()) do
-      {:ok, %{server: %{status: status}}} when status != :gone -> refusal(:server_exists)
-      {:ok, _ledger} -> :ok
-      {:error, reason} -> refused({:ledger, reason}, opts)
-    end
+  defp location_refused(provider),
+    do: invalid("location", "Fermix creates a server in #{Provision.cities(provider)}.")
+
+  # Fermix creates on one provider at a time: a server any provider's ledger
+  # holds, or one it cannot read, comes first.
+  defp no_server(provider, opts) do
+    Enum.reduce_while(providers_of(opts), :ok, fn each, :ok ->
+      case Ledger.read(home(opts), each.id()) do
+        {:ok, %{server: %{status: status}}} when status != :gone ->
+          {:halt, refusal(:server_exists, provider)}
+
+        {:ok, _ledger} ->
+          {:cont, :ok}
+
+        {:error, reason} ->
+          {:halt, refused({:ledger, reason}, each, opts)}
+      end
+    end)
   end
 
   # The server a replace leaves is set aside first, so a refusal from here on
   # is the new server's.
-  defp run_create({:replace, from_epoch}, request, report, opts) do
+  defp run_create(provider, {:replace, from_epoch}, request, report, opts) do
     case Ledger.update(
            home(opts),
-           host(opts).host(),
+           provider.id(),
            &Ledger.begin_replace(&1, from_epoch, now(opts))
          ) do
-      {:ok, _ledger} -> run_create(:create, request, report, opts)
-      {:error, reason} when reason in @replace_refusals -> job_failure(reason, opts)
-      {:error, reason} -> job_failure({:ledger, reason}, opts)
+      {:ok, _ledger} -> run_create(provider, :create, request, report, opts)
+      {:error, reason} when reason in @replace_refusals -> job_failure(reason, provider)
+      {:error, reason} -> job_failure({:ledger, reason}, provider)
     end
   end
 
-  defp run_create(:create, request, report, opts) do
-    case host(opts).create(home(opts), request, run_opts(report, opts)) do
+  defp run_create(provider, :create, request, report, opts) do
+    case provider.create(home(opts), request, run_opts(provider, report, opts)) do
       {:ok, server} ->
         {:ok, %{"server" => server.name, "type" => server.type, "location" => server.location}}
 
       {:error, reason} ->
-        job_failure(remembered(reason, opts), opts)
+        job_failure(remembered(reason, provider, opts), provider)
     end
   end
 
   # A create's refusal stays in the ledger, for the summary; one for the
   # token marks it refused.
-  defp remembered(reason, _opts) when reason in [:server_exists, :no_token], do: reason
+  defp remembered(reason, _provider, _opts) when reason in [:server_exists, :no_token],
+    do: reason
 
-  defp remembered(reason, opts) do
-    reason = token_reason(reason, opts)
+  defp remembered(reason, provider, opts) do
+    reason = token_reason(reason, provider, opts)
 
     failure = %{
       reason: Provision.failure_word(reason),
-      sentence: Provision.error_sentence(reason),
+      sentence: Provision.error_sentence(reason, provider),
       next_location: next_location(reason),
       at: now(opts)
     }
 
-    case Ledger.update(home(opts), host(opts).host(), &{:ok, Ledger.put_failure(&1, failure)}) do
+    case Ledger.update(home(opts), provider.id(), &{:ok, Ledger.put_failure(&1, failure)}) do
       {:ok, _ledger} -> reason
       {:error, why} -> log_unkept(why, reason)
     end
@@ -378,11 +443,13 @@ defmodule FermixCore.Management.Provision do
   @doc "`home.provision.power`: starts the job that turns the server on or restarts it."
   @spec power(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def power(params, opts \\ []) when is_map(params) and is_list(opts) do
+    provider = current(opts)
+
     with :ok <- known_params(params, ~w(action)),
          {:ok, action} <- power_action(params),
-         {:ok, _token} <- stored_token(opts),
-         :ok <- has_server(opts) do
-      start(opts, fn report -> run_power(action, report, opts) end)
+         {:ok, _token} <- stored_token(provider, opts),
+         :ok <- has_server(provider, opts) do
+      start(provider, opts, fn report -> run_power(provider, action, report, opts) end)
     end
   end
 
@@ -390,44 +457,51 @@ defmodule FermixCore.Management.Provision do
   defp power_action(%{"action" => "reset"}), do: {:ok, :reset}
   defp power_action(_params), do: invalid("action", "Turn the server on, or reset it.")
 
-  defp has_server(opts) do
-    case Ledger.read(home(opts), host(opts).host()) do
+  defp has_server(provider, opts) do
+    case Ledger.read(home(opts), provider.id()) do
       {:ok, %{server: %{status: :created, id: id}}} when is_integer(id) -> :ok
-      {:ok, _ledger} -> refusal(:no_server)
-      {:error, reason} -> refused({:ledger, reason}, opts)
+      {:ok, _ledger} -> refusal(:no_server, provider)
+      {:error, reason} -> refused({:ledger, reason}, provider, opts)
     end
   end
 
-  defp run_power(action, report, opts) do
-    case host(opts).power(home(opts), action, run_opts(report, opts)) do
+  defp run_power(provider, action, report, opts) do
+    case provider.power(home(opts), action, run_opts(provider, report, opts)) do
       :ok -> {:ok, %{"action" => Atom.to_string(action)}}
-      {:error, reason} -> job_failure(token_reason(reason, opts), opts)
+      {:error, reason} -> job_failure(token_reason(reason, provider, opts), provider)
     end
   end
 
-  @doc "`home.provision.resources`: the ledger, read back from Hetzner."
+  @doc "`home.provision.resources`: the ledger, read back from its provider."
   @spec resources(keyword()) :: {:ok, map()}
   def resources(opts \\ []) when is_list(opts) do
     home = home(opts)
+    provider = current(opts)
 
-    case Ledger.read(home, host(opts).host()) do
-      {:ok, %{token: nil}} -> {:ok, checked(view(home, opts), false, nil)}
-      {:ok, _ledger} -> {:ok, reconciled(home, opts)}
-      {:error, _reason} -> {:ok, checked(view(home, opts), false, nil)}
+    case Ledger.read(home, provider.id()) do
+      {:ok, %{token: nil}} -> {:ok, checked(provider_ledger_view(home, provider), false, nil)}
+      {:ok, _ledger} -> {:ok, reconciled(home, provider, opts)}
+      {:error, _reason} -> {:ok, checked(provider_ledger_view(home, provider), false, nil)}
     end
   end
 
-  defp reconciled(home, opts) do
-    case host(opts).reconcile(
+  defp reconciled(home, provider, opts) do
+    case provider.reconcile(
            home,
-           Keyword.put(host_opts(opts), :running?, running?(opts)) ++ code_opts(opts)
+           Keyword.put(provider_opts(opts), :running?, running?(opts)) ++
+             code_opts(provider, opts)
          ) do
       {:ok, _ledger} ->
-        checked(view(home, opts), true, nil)
+        checked(provider_ledger_view(home, provider), true, nil)
 
       {:error, reason} ->
-        reason = token_reason(reason, opts)
-        checked(view(home, opts), false, Provision.error_sentence(reason))
+        reason = token_reason(reason, provider, opts)
+
+        checked(
+          provider_ledger_view(home, provider),
+          false,
+          Provision.error_sentence(reason, provider)
+        )
     end
   end
 
@@ -440,80 +514,90 @@ defmodule FermixCore.Management.Provision do
   """
   @spec delete(keyword()) :: {:ok, map()} | {:error, term()}
   def delete(opts \\ []) when is_list(opts) do
-    with {:ok, ledger} <- ledger(opts),
-         {:ok, target} <- delete_target(ledger, home(opts), role(opts)),
-         {:ok, _token} <- stored_token(opts),
-         :ok <- something(ledger) do
-      start(opts, fn report -> run_delete(target, report, opts) end)
+    provider = current(opts)
+
+    with {:ok, ledger} <- ledger(provider, opts),
+         {:ok, target} <- delete_target(ledger, provider, home(opts), role(opts)),
+         {:ok, _token} <- stored_token(provider, opts),
+         :ok <- something(ledger, provider) do
+      start(provider, opts, fn report -> run_delete(provider, target, report, opts) end)
     end
   end
 
   # The server the home moved to holds it (this engine is its linked
   # desktop, or this home is retired); a move to it under way is refused too.
-  defp delete_target(ledger, home, record) do
+  defp delete_target(ledger, provider, home, record) do
     cond do
-      Move.moving_to(home) != :none -> refusal(:move_under_way)
-      DesktopLink.linked?(record, home) -> not_holding(ledger)
-      Moved.read(home) != :absent -> not_holding(ledger)
+      Move.moving_to(home) != :none -> refusal(:move_under_way, provider)
+      DesktopLink.linked?(record, home) -> not_holding(ledger, provider)
+      Moved.read(home) != :absent -> not_holding(ledger, provider)
       true -> {:ok, :current}
     end
   end
 
   # On the computer the home left, only what does not hold it: the new server
   # before a replace's move (Cancel), the old one after it.
-  defp not_holding(%{replace: %{deleted_at: %DateTime{}}}), do: refusal(:live_home)
-  defp not_holding(%{replace: %{moved_at: %DateTime{}}}), do: {:ok, :replaced}
-  defp not_holding(%{replace: %{move_started_at: %DateTime{}}}), do: refusal(:move_under_way)
-  defp not_holding(%{replace: %{}}), do: {:ok, :current}
-  defp not_holding(_ledger), do: refusal(:live_home)
+  defp not_holding(%{replace: %{deleted_at: %DateTime{}}}, provider),
+    do: refusal(:live_home, provider)
 
-  defp something(%{server: nil, firewall: nil, primary_ips: [], ref: nil, replace: nil}),
-    do: refusal(:nothing_to_delete)
+  defp not_holding(%{replace: %{moved_at: %DateTime{}}}, _provider), do: {:ok, :replaced}
 
-  defp something(_ledger), do: :ok
+  defp not_holding(%{replace: %{move_started_at: %DateTime{}}}, provider),
+    do: refusal(:move_under_way, provider)
 
-  defp run_delete(:current, report, opts) do
-    case host(opts).delete(home(opts), run_opts(report, opts)) do
+  defp not_holding(%{replace: %{}}, _provider), do: {:ok, :current}
+  defp not_holding(_ledger, provider), do: refusal(:live_home, provider)
+
+  defp something(ledger, provider) do
+    if Ledger.holding?(ledger), do: :ok, else: refusal(:nothing_to_delete, provider)
+  end
+
+  defp run_delete(provider, :current, report, opts) do
+    case provider.delete(home(opts), run_opts(provider, report, opts)) do
       :ok -> {:ok, %{"deleted" => true}}
-      {:error, reason} -> job_failure(token_reason(reason, opts), opts)
+      {:error, reason} -> job_failure(token_reason(reason, provider, opts), provider)
     end
   end
 
   # A failed delete of the old server is kept with its sentence, for the
   # summary and for the owner's Delete, which tries it again.
-  defp run_delete(:replaced, report, opts) do
-    case keep_replace_failure(nil, opts) do
-      {:ok, _ledger} -> delete_replaced(report, opts)
-      {:error, reason} -> job_failure({:ledger, reason}, opts)
+  defp run_delete(provider, :replaced, report, opts) do
+    case keep_replace_failure(provider, nil, opts) do
+      {:ok, _ledger} -> delete_replaced(provider, report, opts)
+      {:error, reason} -> job_failure({:ledger, reason}, provider)
     end
   end
 
-  defp delete_replaced(report, opts) do
-    case host(opts).delete_replaced(home(opts), run_opts(report, opts)) do
-      :ok -> {:ok, %{"deleted" => true}}
-      {:error, reason} -> job_failure(old_server_kept(token_reason(reason, opts), opts), opts)
+  defp delete_replaced(provider, report, opts) do
+    case provider.delete_replaced(home(opts), run_opts(provider, report, opts)) do
+      :ok ->
+        {:ok, %{"deleted" => true}}
+
+      {:error, reason} ->
+        reason = token_reason(reason, provider, opts)
+        job_failure(old_server_kept(reason, provider, opts), provider)
     end
   end
 
-  defp old_server_kept(reason, opts) do
+  defp old_server_kept(reason, provider, opts) do
     failure = %{
       reason: Provision.failure_word(reason),
-      sentence: Provision.error_sentence({:old_server, reason}),
+      sentence: Provision.error_sentence({:old_server, reason}, provider),
       next_location: nil,
       at: now(opts)
     }
 
-    case keep_replace_failure(failure, opts) do
+    case keep_replace_failure(provider, failure, opts) do
       {:ok, _ledger} -> {:old_server, reason}
       {:error, why} -> log_unkept(why, {:old_server, reason})
     end
   end
 
-  defp keep_replace_failure(failure, opts),
+  defp keep_replace_failure(provider, failure, opts),
     do:
       Ledger.update(
         home(opts),
-        host(opts).host(),
+        provider.id(),
         &{:ok, Ledger.put_replace_failure(&1, failure)}
       )
 
@@ -542,7 +626,7 @@ defmodule FermixCore.Management.Provision do
   defp record_move(candidate_id, opts) do
     case Ledger.update(
            home(opts),
-           host(opts).host(),
+           current(opts).id(),
            &Ledger.move_started(&1, candidate_id, now(opts))
          ) do
       {:ok, _ledger} -> :recorded
@@ -564,16 +648,18 @@ defmodule FermixCore.Management.Provision do
           :nothing | :undone | {:deleting, map()} | {:error, term()}
   def primary_reached(epoch, opts \\ [])
       when is_integer(epoch) and epoch > 0 and is_list(opts) do
-    case Ledger.read(home(opts), host(opts).host()) do
-      {:ok, ledger} -> reached(Ledger.replace_due(ledger, epoch), epoch, opts)
+    provider = current(opts)
+
+    case Ledger.read(home(opts), provider.id()) do
+      {:ok, ledger} -> reached(Ledger.replace_due(ledger, epoch), provider, epoch, opts)
       {:error, reason} -> unrecorded("what the server's epoch means for a replace", reason)
     end
   end
 
-  defp reached(:none, _epoch, _opts), do: :nothing
+  defp reached(:none, _provider, _epoch, _opts), do: :nothing
 
-  defp reached(:undone, _epoch, opts) do
-    case Ledger.update(home(opts), host(opts).host(), &Ledger.move_undone/1) do
+  defp reached(:undone, provider, _epoch, opts) do
+    case Ledger.update(home(opts), provider.id(), &Ledger.move_undone/1) do
       {:ok, _ledger} ->
         Logger.info("provision: your server answered again without the move; it waits again")
         :undone
@@ -586,8 +672,8 @@ defmodule FermixCore.Management.Provision do
     end
   end
 
-  defp reached(:clean_up, epoch, opts) do
-    case start(opts, fn report -> run_clean_up(epoch, report, opts) end) do
+  defp reached(:clean_up, provider, epoch, opts) do
+    case start(provider, opts, fn report -> run_clean_up(provider, epoch, report, opts) end) do
       {:ok, view} ->
         Logger.info("provision: the move to your new server is done; deleting the old one")
         {:deleting, view}
@@ -598,17 +684,17 @@ defmodule FermixCore.Management.Provision do
     end
   end
 
-  defp run_clean_up(epoch, report, opts) do
-    case Ledger.update(home(opts), host(opts).host(), &Ledger.moved(&1, epoch, now(opts))) do
+  defp run_clean_up(provider, epoch, report, opts) do
+    case Ledger.update(home(opts), provider.id(), &Ledger.moved(&1, epoch, now(opts))) do
       {:ok, ledger} ->
         :ok = rename_primary(ledger, opts)
-        run_delete(:replaced, report, opts)
+        run_delete(provider, :replaced, report, opts)
 
       {:error, :not_moved} ->
         {:ok, %{"deleted" => false}}
 
       {:error, reason} ->
-        job_failure({:ledger, reason}, opts)
+        job_failure({:ledger, reason}, provider)
     end
   end
 
@@ -635,20 +721,25 @@ defmodule FermixCore.Management.Provision do
   # -- the view -----------------------------------------------------------------
 
   @doc """
-  The family's view of the ledger under `home`: the state, the token's
+  The family's view of the ledger under `home` of the provider Always On
+  speaks of (`Provision.current/2`): the provider, the state, the token's
   standing, the server, the failure and every resource. Never the token.
   """
   @spec view(Path.t(), keyword()) :: map()
-  def view(home, opts \\ []) when is_binary(home) and is_list(opts) do
-    state = Ledger.state(home, host(opts).host())
+  def view(home, opts \\ []) when is_binary(home) and is_list(opts),
+    do: provider_ledger_view(home, Provision.current(home, providers_of(opts)))
+
+  defp provider_ledger_view(home, provider) do
+    state = Ledger.state(home, provider)
 
     resources =
-      case Ledger.read(home, host(opts).host()) do
+      case Ledger.read(home, provider.id()) do
         {:ok, ledger} -> resource_views(ledger)
         {:error, _reason} -> []
       end
 
     %{
+      "provider" => provider.id(),
       "state" => Atom.to_string(state.state),
       "token" => Atom.to_string(state.token),
       "server" => state.server && server_view(state.server),
@@ -727,12 +818,12 @@ defmodule FermixCore.Management.Provision do
 
   # -- jobs -----------------------------------------------------------------------
 
-  defp start(opts, run) do
+  defp start(provider, opts, run) do
     started =
       Jobs.start(
         @kind,
         Keyword.merge(Keyword.get(opts, :jobs, []),
-          name: host(opts).host(),
+          name: provider.id(),
           run: fn _job_id, report -> run.(&report.({:phase, &1})) end
         )
       )
@@ -749,10 +840,11 @@ defmodule FermixCore.Management.Provision do
     Enum.any?(views, &(&1["kind"] == kind and &1["status"] == "running"))
   end
 
-  defp run_opts(report, opts), do: host_opts(opts) ++ [report: report] ++ code_opts(opts)
+  defp run_opts(provider, report, opts),
+    do: provider_opts(opts) ++ [report: report] ++ code_opts(provider, opts)
 
-  defp code_opts(opts) do
-    {open, withdraw} = code_window(opts)
+  defp code_opts(provider, opts) do
+    {open, withdraw} = code_window(provider, opts)
 
     [
       open_code: Keyword.get(opts, :open_code, open),
@@ -762,40 +854,41 @@ defmodule FermixCore.Management.Provision do
 
   # On a linked desktop the window is its server's, reached over the link; on
   # the primary, its own.
-  defp code_window(opts) do
+  defp code_window(provider, opts) do
     case Keyword.fetch(opts, :primary_forward) do
       {:ok, forward} ->
-        {fn -> forwarded_code(forward) end, fn -> forwarded_withdraw(forward) end}
+        {fn -> forwarded_code(forward, provider) end,
+         fn -> forwarded_withdraw(forward, provider) end}
 
       :error ->
         {&open_code/0, fn -> Link.impl().withdraw_enrollment() end}
     end
   end
 
-  defp forwarded_code(forward) do
+  defp forwarded_code(forward, provider) do
     case forward.(server_request("home.enroll.open", %{"kind" => "provisioned"}), []) do
       {:ok, %{"code" => code}} when is_binary(code) ->
         {:ok, code}
 
       {:error, :primary_unreachable, _details} ->
-        {:error, Provision.error_sentence(:code_unreachable)}
+        {:error, Provision.error_sentence(:code_unreachable, provider)}
 
       {:error, _code, %{"sentence" => sentence}} when is_binary(sentence) ->
         {:error, sentence}
 
       {:error, code, _details} ->
         Logger.warning("provision: your server refused home.enroll.open (#{code})")
-        {:error, Provision.error_sentence({:code_refused, Atom.to_string(code)})}
+        {:error, Provision.error_sentence({:code_refused, Atom.to_string(code)}, provider)}
     end
   end
 
-  defp forwarded_withdraw(forward) do
+  defp forwarded_withdraw(forward, provider) do
     case forward.(server_request("home.enroll.withdraw", %{}), []) do
       {:ok, _result} ->
         :ok
 
       {:error, :primary_unreachable, _details} ->
-        {:error, {:unavailable, Provision.error_sentence(:withdraw_unreachable)}}
+        {:error, {:unavailable, Provision.error_sentence(:withdraw_unreachable, provider)}}
 
       {:error, _code, %{"sentence" => sentence}} when is_binary(sentence) ->
         {:error, {:unavailable, sentence}}
@@ -804,7 +897,8 @@ defmodule FermixCore.Management.Provision do
         Logger.warning("provision: your server refused home.enroll.withdraw (#{code})")
 
         {:error,
-         {:unavailable, Provision.error_sentence({:withdraw_refused, Atom.to_string(code)})}}
+         {:unavailable,
+          Provision.error_sentence({:withdraw_refused, Atom.to_string(code)}, provider)}}
     end
   end
 
@@ -824,54 +918,54 @@ defmodule FermixCore.Management.Provision do
     end
   end
 
-  # A host that answered, or could not be reached, refused; anything the
-  # engine itself could not do is unavailable.
-  defp job_failure(reason, _opts) do
+  # A provider that answered refused; one out of reach or limiting the rate,
+  # and anything the engine itself could not do, is unavailable.
+  defp job_failure(reason, provider) do
     code = if unavailable_reason?(reason), do: :unavailable, else: :refused
-    {:error, {code, Provision.error_sentence(reason)}}
+    {:error, {code, Provision.error_sentence(reason, provider)}}
   end
 
   defp unavailable_reason?({kind, _detail})
-       when kind in [:unreachable, :rate_limited, :action_timeout, :code_unavailable, :ledger],
+       when kind in [:unreachable, :rate_limited, :code_unavailable, :ledger],
        do: true
 
   defp unavailable_reason?({:old_server, reason}), do: unavailable_reason?(reason)
   defp unavailable_reason?(_reason), do: false
 
-  # Hetzner refusing the token after it accepted it: the token stopped working.
-  defp token_reason(:unauthorized, opts) do
-    case Ledger.update(home(opts), host(opts).host(), &token_refused/1) do
+  # The provider refusing the token after it accepted it: the token stopped
+  # working.
+  defp token_reason(:unauthorized, provider, opts) do
+    case Ledger.update(home(opts), provider.id(), &token_refused/1) do
       {:ok, _ledger} -> :token_refused
       {:error, why} -> log_unkept(why, :token_refused)
     end
   end
 
-  defp token_reason(reason, _opts), do: reason
+  defp token_reason(reason, _provider, _opts), do: reason
 
   defp token_refused(%{token: nil}), do: {:error, :no_token}
   defp token_refused(ledger), do: {:ok, Ledger.token_refused(ledger)}
 
   # -- refusals and seams -------------------------------------------------------
 
-  defp refused(reason, opts) do
-    reason = token_reason(reason, opts)
-    Logger.warning("provision: refused (#{Provision.failure_word(reason)})")
-    refusal(reason)
+  defp refused(reason, provider, opts) do
+    reason = token_reason(reason, provider, opts)
+    Logger.warning("provision: #{provider.id()} refused (#{Provision.failure_word(reason)})")
+    refusal(reason, provider)
   end
 
-  defp refusal(reason),
-    do: {:error, {:unavailable, @capability, Provision.error_sentence(reason)}}
+  defp refusal(reason, provider),
+    do: {:error, {:unavailable, @capability, Provision.error_sentence(reason, provider)}}
 
-  defp stored_token(opts) do
-    case Ledger.read(home(opts), host(opts).host()) do
+  defp stored_token(provider, opts) do
+    case Ledger.read(home(opts), provider.id()) do
       {:ok, %{token: token}} when is_binary(token) -> {:ok, token}
-      {:ok, _ledger} -> refusal(:no_token)
-      {:error, reason} -> refused({:ledger, reason}, opts)
+      {:ok, _ledger} -> refusal(:no_token, provider)
+      {:error, reason} -> refused({:ledger, reason}, provider, opts)
     end
   end
 
-  defp primary(%{role: :primary}), do: :ok
-  defp primary(_record), do: refusal(:not_primary)
+  defp primary?(%{role: role}), do: role == :primary
 
   defp known_params(params, allowed) do
     case Enum.find(Map.keys(params), &(&1 not in allowed)) do
@@ -890,13 +984,14 @@ defmodule FermixCore.Management.Provision do
 
   defp invalid(field, sentence), do: {:error, {:invalid_params, field, sentence}}
 
-  defp host(opts), do: Keyword.get(opts, :host, Hetzner)
-  defp host_opts(opts), do: Keyword.get(opts, :host_opts, [])
+  defp providers_of(opts), do: Keyword.get_lazy(opts, :providers, &Registry.all/0)
+  defp current(opts), do: Provision.current(home(opts), providers_of(opts))
+  defp provider_opts(opts), do: Keyword.get(opts, :provider_opts, [])
   defp home(opts), do: Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
   defp role(opts), do: Keyword.get_lazy(opts, :engine_role, &Role.recorded/0)
 
   defp now(opts),
-    do: DateTime.truncate(Keyword.get(host_opts(opts), :now, &DateTime.utc_now/0).(), :second)
+    do: DateTime.truncate(Keyword.get(provider_opts(opts), :now, &DateTime.utc_now/0).(), :second)
 
   defp profile(opts) do
     Keyword.get_lazy(opts, :profile, fn ->

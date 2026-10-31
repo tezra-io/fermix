@@ -1479,10 +1479,12 @@ defmodule FermixCore.Management.ProtocolContractTest do
     replacing = replacing_home!(provision_home!(stub, true), stub)
 
     [
-      {"home.provision.connect", %{"token" => HetznerStub.token()},
+      {"home.provision.providers", %{}, provision_opts(provision_home!(stub, nil), stub)},
+      {"home.provision.connect", %{"provider" => "hetzner", "token" => HetznerStub.token()},
        provision_opts(provision_home!(stub, nil), stub)},
-      {"home.provision.options", %{}, provision_opts(connected, stub)},
-      {"home.provision.create", %{"type" => "cpx22", "location" => "fsn1"},
+      {"home.provision.options", %{"provider" => "hetzner"}, provision_opts(connected, stub)},
+      {"home.provision.create",
+       %{"provider" => "hetzner", "type" => "cpx22", "location" => "fsn1"},
        provision_opts(connected, stub)},
       {"home.provision.power", %{"action" => "reset"}, provision_opts(created, stub)},
       {"home.provision.resources", %{}, provision_opts(replacing, stub)},
@@ -1538,7 +1540,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       engine_role: %{role: :primary, primary: nil},
       operation_opts: [
         provision:
-          [home: home, profile: "general", jobs: jobs(), host_opts: provision_host_opts(stub)] ++
+          [home: home, profile: "general", jobs: jobs(), provider_opts: provision_host_opts(stub)] ++
             code_seams()
       ]
     ]

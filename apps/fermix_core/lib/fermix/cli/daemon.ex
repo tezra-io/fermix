@@ -106,8 +106,8 @@ defmodule Fermix.CLI.Daemon do
   # starting it, and replacing the recovery key (M75).
   @home_decisions_v1 ~w(home.enroll.open home.enroll.withdraw home.move.readiness
                         home.move.start home.snapshots.passphrase)
-  # Giving Fermix the Hetzner token (it decides which project Fermix acts
-  # in), creating the Always On server, turning it on or resetting it, and
+  # Giving Fermix a cloud provider's token (it decides which account Fermix
+  # acts in), creating the Always On server, turning it on or resetting it, and
   # deleting it: each can spend the owner's money or take the home away (M75
   # lean v1 §4.3). The reads stay open.
   @provision_decisions_v1 ~w(home.provision.connect home.provision.create

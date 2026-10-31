@@ -140,7 +140,8 @@ defmodule FermixCore.Management.Protocol do
     {"home.provision.create", 2},
     {"home.provision.power", 2},
     {"home.provision.resources", 2},
-    {"home.provision.delete", 2}
+    {"home.provision.delete", 2},
+    {"home.provision.providers", 2}
   ]
   @methods Enum.map(@method_minimums, fn {method, _minimum} -> method end)
   @method_minimum_versions Map.new(@method_minimums)

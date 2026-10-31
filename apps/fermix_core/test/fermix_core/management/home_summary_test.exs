@@ -5,8 +5,10 @@ defmodule FermixCore.Management.HomeSummaryTest do
   # and written here, so each row names exactly what makes its state.
   use ExUnit.Case, async: true
 
+  alias FermixCore.Home.Provision.Hetzner
   alias FermixCore.Management.Copy
   alias FermixCore.Management.HomeSummary
+  alias FermixTestSupport.FakeCloudProvider
 
   @now ~U[2031-05-04 12:00:00Z]
   @minute 60_000
@@ -102,13 +104,13 @@ defmodule FermixCore.Management.HomeSummaryTest do
        "problem", "Falkenstein has no CPX22 right now.", "learn_more"},
       {"the account's limit",
        facts(provision: ledger(:failed, failure: failure("account_limit"))), "problem",
-       "Hetzner limits new servers on this account.", "open_hetzner"},
+       "Hetzner limits new servers on this account.", "open_console"},
       {"a token that can only read",
        facts(provision: ledger(:failed, failure: failure("read_only_token"))), "problem",
        "This token can only read, so Fermix created nothing; paste a Read & Write API token " <>
          "from your Hetzner project.", "paste_token"},
-      {"a create that stopped",
-       facts(provision: ledger(:failed, failure: failure("action_timeout"))), "problem",
+      {"a create that stopped", facts(provision: ledger(:failed, failure: failure("other"))),
+       "problem",
        "Hetzner had not finished starting your server after five minutes; Always On checks " <>
          "again when it opens.", "start_again"},
       {"a token that stopped working while the server stands",
@@ -264,7 +266,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
            replacing(:failed,
              server: nil,
              ledger_state: :failed,
-             failure: failure("action_timeout")
+             failure: failure("other")
            )
        ), "problem",
        "Hetzner had not finished starting your server after five minutes; Always On checks " <>
@@ -385,6 +387,76 @@ defmodule FermixCore.Management.HomeSummaryTest do
     end
   end
 
+  # -- a provider that is not Hetzner -------------------------------------------
+
+  # The summary names no provider of its own: its name, its token, its
+  # cities, its type names and its steps are the provider's display data, so
+  # an invented provider reads in its own words throughout.
+  describe "on a provider that is not Hetzner" do
+    test "the token step, the choice and the bill name the provider" do
+      %{"detail" => %{"connect" => connect}} =
+        HomeSummary.summary(facts(provider: FakeCloudProvider))
+
+      assert connect["sentence"] == "Paste a Nimbus access key to let Fermix create your server."
+      assert connect["steps"] == FakeCloudProvider.display().steps
+
+      summary =
+        HomeSummary.summary(facts(provider: FakeCloudProvider, provision: ledger(:connected)))
+
+      assert summary["sentence"] ==
+               "Your Nimbus token works, so choose the server Fermix creates."
+
+      assert summary["detail"]["billing"] ==
+               "Nimbus bills by the hour until the server is deleted."
+    end
+
+    test "a problem's action names the provider and its city" do
+      limit = %{failure("account_limit") | sentence: "Nimbus limits new servers on this account."}
+
+      summary =
+        HomeSummary.summary(
+          facts(provider: FakeCloudProvider, provision: ledger(:failed, failure: limit))
+        )
+
+      assert summary["action"] == %{"id" => "open_console", "label" => "Open Nimbus"}
+
+      full = %{failure("unavailable", "lis1") | sentence: "Oslo has no Small 4 right now."}
+
+      summary =
+        HomeSummary.summary(
+          facts(provider: FakeCloudProvider, provision: ledger(:failed, failure: full))
+        )
+
+      assert summary["action"] == %{"id" => "create_in", "label" => "Create in Lisbon"}
+    end
+
+    test "a server's facts are the provider's, and so is who can read its disk" do
+      nimbus = created_ledger(type: "small-4", location: "osl1")
+
+      %{"detail" => detail} =
+        HomeSummary.summary(ready_facts(provider: FakeCloudProvider, provision: nimbus))
+
+      assert %{"type" => "Small 4", "location" => "Oslo"} = detail["server"]
+
+      %{"detail" => detail} =
+        HomeSummary.summary(desktop(provider: FakeCloudProvider, provision: nimbus))
+
+      assert detail["server"]["location"] == "Oslo"
+      assert detail["data"] =~ "and Nimbus can technically read its disk"
+
+      %{"sentence" => sentence} =
+        HomeSummary.summary(
+          facts(
+            provider: FakeCloudProvider,
+            provision:
+              created_ledger(type: "small-4", location: "osl1", status: :gone, state: :gone)
+          )
+        )
+
+      assert sentence == "Your server was deleted in Nimbus."
+    end
+  end
+
   # -- what Details holds -------------------------------------------------------
 
   describe "the detail" do
@@ -494,7 +566,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       assert detail["kind"] == "not_set_up"
       assert detail["note"] == "Your server costs its monthly price until it is deleted."
-      assert ids(detail["alternatives"]) == ["own_server", "open_hetzner", "delete_server"]
+      assert ids(detail["alternatives"]) == ["own_server", "open_console", "delete_server"]
     end
 
     test "the account's limit offers a server of the owner's own beside it" do
@@ -616,6 +688,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
         move: nil,
         link: link([]),
         candidates: [],
+        provider: Hetzner,
         provision: ledger(:none),
         review: nil,
         snapshots: snapshots([]),
@@ -800,7 +873,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
   defp old_server_failure do
     %{
-      reason: "action_timeout",
+      reason: "other",
       sentence:
         "Fermix could not delete your old server: Hetzner had not finished deleting your " <>
           "server after five minutes; Always On checks again when it opens.",
@@ -838,7 +911,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
       "read_only_token" =>
         "This token can only read, so Fermix created nothing; paste a Read & Write API " <>
           "token from your Hetzner project.",
-      "action_timeout" =>
+      "other" =>
         "Hetzner had not finished starting your server after five minutes; Always On " <>
           "checks again when it opens."
     }

@@ -26,6 +26,8 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Home.Move, as: HomeMove
   alias FermixCore.Home.MoveReadiness
   alias FermixCore.Home.Provision
+  alias FermixCore.Home.Provision.Hetzner
+  alias FermixCore.Home.Provision.Registry, as: ProvisionRegistry
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
   alias FermixCore.Home.Snapshot.Run, as: SnapshotRun
   alias FermixCore.Home.Snapshot.S3, as: SnapshotS3
@@ -57,6 +59,8 @@ defmodule FermixCore.Management.CopyTest do
   # produces: a tuple, a map, and the operator's own home directory.
   @internal_term Redaction.format({:tree_missing, %{root: "/Users/example/.fermix/plugins"}})
   @placeholder "Value"
+  # Hetzner's own messages a refusal carries: its words, not the daemon's.
+  @vendor_messages ["invalid input in field 'server_type'", "server placement failed"]
 
   # A backticked span is a literal the operator types, which is the one place a
   # path belongs; the rest of the sentence is prose and may carry none.
@@ -769,14 +773,16 @@ defmodule FermixCore.Management.CopyTest do
     end
   end
 
-  # The provisioner's refusals are written in `Home.Provision`, outside the
-  # management tree the sweep below reads, so each reason it can answer is
-  # rendered here; the type and the city it names are Hetzner's words.
+  # The provisioner's refusals are written in `Home.Provision` (the shared
+  # kinds, in each provider's words) and in the provider's own module (its
+  # other refusals), outside the management tree the sweep below reads, so
+  # each reason they can answer is rendered here, for every provider in the
+  # registry; the type and the city it names are Hetzner's words.
   describe "the Always On provisioner copy" do
     test "every refusal obeys the rules and names no fermix command" do
       for {reason, sentence} <- provision_copy() do
         # Hetzner's own message is its words, not the daemon's.
-        assert_clean(sentence, :prose, ["CPX22", "cpx12" | vendor_words(reason)], inspect(reason))
+        assert_clean(sentence, :prose, ["CPX22", "cpx12" | @vendor_messages], inspect(reason))
         refute_command(sentence, inspect(reason))
       end
     end
@@ -787,10 +793,6 @@ defmodule FermixCore.Management.CopyTest do
     end
   end
 
-  defp vendor_words({:refused, _status, _code, message}), do: [message]
-  defp vendor_words({:old_server, reason}), do: vendor_words(reason)
-  defp vendor_words(_reason), do: []
-
   defp provision_copy do
     unavailable = %{city: "Falkenstein", description: "CPX22", next_city: "Nuremberg"}
 
@@ -798,20 +800,14 @@ defmodule FermixCore.Management.CopyTest do
       :token_invalid,
       :token_refused,
       :unauthorized,
-      :forbidden,
+      :read_only_token,
       :account_limit,
       {:unavailable, unavailable},
       {:unavailable, %{unavailable | next_city: nil}},
-      {:ineligible_type, "cpx12"},
       {:rate_limited, 1_999_999_999},
       {:unreachable, "timeout"},
-      {:refused, 422, "invalid_input", "invalid input in field 'server_type'"},
-      {:action_failed, "create_server", "server placement failed"},
-      {:action_timeout, "start_server"},
       {:code_unavailable, "Remote reach is off."},
       :user_data_too_large,
-      :no_image,
-      :too_many_types,
       :invalid_code,
       :interrupted,
       :no_token,
@@ -822,8 +818,8 @@ defmodule FermixCore.Management.CopyTest do
       :other_project,
       :live_home,
       :move_under_way,
-      :not_found,
       {:ledger, :eacces},
+      :unreadable,
       # Replace the server, from the linked desktop.
       :replace_only,
       :nothing_to_replace,
@@ -837,10 +833,26 @@ defmodule FermixCore.Management.CopyTest do
       {:code_refused, "unavailable"},
       {:withdraw_refused, "unavailable"},
       {:old_server, :unauthorized},
-      {:old_server, {:refused, 500, "server_error", "Hetzner had a hiccup."}}
+      {:old_server, Hetzner.error({:refused, 500, "server_error", "Hetzner had a hiccup."})}
     ]
 
-    for reason <- reasons, do: {reason, Provision.error_sentence(reason)}
+    # Hetzner's own refusals, as the shared kind each becomes.
+    hetzner = [
+      {:ineligible_type, "cpx12"},
+      {:refused, 422, "invalid_input", "invalid input in field 'server_type'"},
+      {:action_failed, "create_server", "server placement failed"},
+      {:action_timeout, "start_server"},
+      :forbidden,
+      :no_image,
+      :too_many_types,
+      :resource_unavailable,
+      :not_found,
+      :resource_in_use
+    ]
+
+    for provider <- ProvisionRegistry.all(),
+        reason <- reasons ++ Enum.map(hetzner, &Hetzner.error/1),
+        do: {reason, Provision.error_sentence(reason, provider)}
   end
 
   # The words of `home.status.summary` (M75 lean v1 §7): every sentence key
@@ -900,7 +912,12 @@ defmodule FermixCore.Management.CopyTest do
 
       assert offenders == []
 
-      quoted = Provision.error_sentence({:refused, 422, "invalid_input", "bad `name` field"})
+      quoted =
+        Provision.error_sentence(
+          Hetzner.error({:refused, 422, "invalid_input", "bad `name` field"}),
+          Hetzner
+        )
+
       assert Copy.summary_violations(quoted) == [], inspect(quoted)
     end
 
@@ -916,22 +933,29 @@ defmodule FermixCore.Management.CopyTest do
       age: 7_200,
       days: 5,
       percent: 90,
-      provider: "Hetzner",
       block: "This home is about 4 GiB; the move needs about 9 GiB free.",
-      location: "nbg1",
       stays_here: [:imessage, :voice, :meetings]
     }
 
     sentences =
-      for key <- Copy.summary_keys(),
+      for provider <- ProvisionRegistry.all(),
+          key <- Copy.summary_keys(),
           machine <- ["Mac", "computer"],
+          values = Map.merge(values, provider_values(provider)),
           do:
             {"summary #{key}", Copy.summary_sentence(key, Map.put(values, :machine, machine)),
              :prose}
 
     labels =
-      for id <- HomeSummary.actions(),
+      for provider <- ProvisionRegistry.all(),
+          id <- HomeSummary.actions(),
+          values = provider_values(provider),
           do: {"action #{id}", Copy.summary_label(String.to_existing_atom(id), values), :name}
+
+    steps =
+      for provider <- ProvisionRegistry.all(),
+          step <- provider.display().steps,
+          do: {"#{provider.id()} token step", step, :prose}
 
     {:too_old, too_old} =
       Placement.primary_part(
@@ -939,10 +963,19 @@ defmodule FermixCore.Management.CopyTest do
         "home.status"
       )
 
-    sentences ++
-      labels ++
-      Enum.map(Copy.token_steps(), &{"token step", &1, :prose}) ++
-      [{"too old", too_old, :prose}]
+    sentences ++ labels ++ steps ++ [{"too old", too_old, :prose}]
+  end
+
+  # What the summary names of a provider: its name, its token's label and a
+  # city of its own.
+  defp provider_values(provider) do
+    display = provider.display()
+
+    %{
+      provider: display.name,
+      token_label: display.token_label,
+      city: List.last(display.locations).city
+    }
   end
 
   # The older copy the apps and the setup page show (readiness actions and
@@ -968,8 +1001,10 @@ defmodule FermixCore.Management.CopyTest do
     test "the sweep reads every producer" do
       files = summary_sources() |> Enum.map(&Path.basename(elem(&1, 0))) |> Enum.uniq()
 
+      # The ledger's own sentences are the contract's now (`Provision`), in
+      # its provider's words; it is still read, so one written there is held.
       assert Enum.sort(files) ==
-               ~w(enrollment.ex ledger.ex link.ex move_readiness.ex provision.ex)
+               ~w(enrollment.ex hetzner.ex link.ex move_readiness.ex provision.ex)
 
       assert Enum.count(summary_sources()) > 60
     end
@@ -1063,12 +1098,33 @@ defmodule FermixCore.Management.CopyTest do
     assert unused == [], "proper nouns no published sentence uses: #{inspect(unused)}"
   end
 
-  # The derived half comes from the provider registry and cannot go stale; only
-  # what the module writes by hand has to be asserted against the copy.
+  # A proper noun an Always On provider declares is held to its own words: a
+  # name none of them uses has quietly widened the rule.
+  test "every proper noun an Always On provider declares is used by its words" do
+    for provider <- ProvisionRegistry.all() do
+      display = provider.display()
+
+      corpus =
+        Enum.join(
+          [display.name, display.token_label, display.write_token] ++
+            display.steps ++
+            Enum.map(display.locations, & &1.city) ++
+            Enum.map(provision_copy(), &elem(&1, 1)),
+          "\n"
+        )
+
+      unused = Enum.reject(display.proper_nouns, &String.contains?(corpus, &1))
+      assert unused == [], "#{provider.id()} declares unused proper nouns: #{inspect(unused)}"
+    end
+  end
+
+  # The derived half comes from the provider registries and cannot go stale;
+  # only what the module writes by hand has to be asserted against the copy.
   defp hand_listed do
     derived =
       Descriptor.all()
       |> Enum.flat_map(&String.split(&1.label, ~r/[\s()]+/, trim: true))
+      |> Enum.concat(Enum.flat_map(ProvisionRegistry.all(), & &1.display().proper_nouns))
       |> MapSet.new()
 
     Enum.reject(Copy.proper_nouns(), &MapSet.member?(derived, &1))
@@ -1631,7 +1687,12 @@ defmodule FermixCore.Management.CopyTest do
   defp summary_sources do
     files =
       Enum.map(
-        ["home/provision.ex", "home/provision/ledger.ex", "home/move_readiness.ex"],
+        [
+          "home/provision.ex",
+          "home/provision/ledger.ex",
+          "home/provision/hetzner.ex",
+          "home/move_readiness.ex"
+        ],
         &Path.join(@lib, &1)
       ) ++ Enum.map(["home/enrollment.ex", "home/link.ex"], &Path.join(@channels_lib, &1))
 

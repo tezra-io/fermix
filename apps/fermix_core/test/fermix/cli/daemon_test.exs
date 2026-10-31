@@ -1178,7 +1178,7 @@ defmodule Fermix.CLI.DaemonTest do
     end
   end
 
-  # M75 lean v1 §4.3: the Hetzner token decides which project Fermix acts in,
+  # M75 lean v1 §4.3: a provider's token decides which account Fermix acts in,
   # and creating, powering and deleting the Always On server spend the owner's
   # money and can take Fermix's home away, so a command the agent ran is
   # refused each; the reads are not decisions.
@@ -1228,8 +1228,8 @@ defmodule Fermix.CLI.DaemonTest do
       assert golden == %{
                "capability" => "home",
                "sentence" =>
-                 "Only the owner can give Fermix a Hetzner token or create, restart or " <>
-                   "delete its server: use the Fermix app."
+                 "Only the owner can give Fermix an API token or create, restart or delete " <>
+                   "its server: use the Fermix app."
              }
 
       golden

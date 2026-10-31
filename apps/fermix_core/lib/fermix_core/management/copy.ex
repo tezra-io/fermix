@@ -37,16 +37,20 @@ defmodule FermixCore.Management.Copy do
   it is the operator's word rather than one this daemon wrote.
 
   The words of `home.status.summary` (M75 lean v1 §7) are held here too, beside
-  the rules (`summary_sentence/2`, `summary_label/2`, `token_steps/0`): one
+  the rules (`summary_sentence/2`, `summary_label/2`): one
   sentence and at most one action for where Always On stands, which the Mac
   app, the Linux app, the setup page and `fermix home status` print as they
   are (`FermixCore.Management.HomeSummary` picks them). They obey one rule
   more, `summary_violations/1`: none of the engine's own words for the move
   or itself (epoch, primary, candidate, relay, rail, phase, ledger, daemon,
   key id) reaches an owner (`internal_words/1`), and no backticked literal,
-  code or secret id does either.
+  code or secret id does either. A cloud provider's words (its name, its
+  token's label, its cities, its "How to get one" steps) are its own display
+  data (`FermixCore.Home.Provision`), passed in as values; the proper nouns
+  they use are read from the provider registry.
   """
 
+  alias FermixCore.Home.Provision.Registry, as: ProvisionRegistry
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Setup.SecretPaths
 
@@ -65,7 +69,6 @@ defmodule FermixCore.Management.Copy do
   # word may carry. A key id is the recovery key's; an S3 "access key ID" is
   # AWS's name.
   @internal_words ~r/\b(?:epochs?|primar(?:y|ies)|candidates?|relays?|rails?|phases?|ledgers?|daemons?|(?<!access )key ids?)\b/i
-  @cities %{"fsn1" => "Falkenstein", "nbg1" => "Nuremberg", "hel1" => "Helsinki"}
   # What runs only on the computer a move leaves, in the order it is named.
   @stays_here [imessage: "iMessage", voice: "voice calls", meetings: "meetings"]
   @summary_keys ~w(off connect choose starting installing connecting deleting ready moving
@@ -84,24 +87,14 @@ defmodule FermixCore.Management.Copy do
 
   # The hand-maintained half, and the only one. Every entry is asserted used by
   # a live string, so a name that leaves the copy leaves this list in the same
-  # change. Provider labels are derived below rather than repeated here.
+  # change. Provider labels, and the names a cloud provider's own words use,
+  # are derived below rather than repeated here.
   @proper_nouns [
     "Fermix Computer Use",
     "Fermix Messages",
     "Always On",
-    # The Always On host, the permission its API token needs, as Hetzner names
-    # it, the three locations Fermix creates a server in, and its system.
-    "Read & Write",
-    "Hetzner",
-    "Debian",
+    # The system of the server Always On moves to.
     "Linux",
-    "Falkenstein",
-    "Nuremberg",
-    "Helsinki",
-    # The two places in Hetzner's console the token steps name, as it labels
-    # them.
-    "API Tokens",
-    "Security",
     "Apple ID",
     "Apple",
     "Full Disk Access",
@@ -157,13 +150,14 @@ defmodule FermixCore.Management.Copy do
   @doc """
   The proper nouns and proper phrases the sentence-case rule accepts.
 
-  Provider labels are read from the descriptor registry, so a provider added in
-  Elixir needs no entry here; the rest is the hand-maintained list this module
-  documents.
+  Provider labels are read from the descriptor registry, and the names each
+  Always On cloud provider's words use from its display data, so a provider
+  added in Elixir needs no entry here; the rest is the hand-maintained list
+  this module documents.
   """
   @spec proper_nouns() :: [String.t()]
   def proper_nouns do
-    (@proper_nouns ++ descriptor_names())
+    (@proper_nouns ++ descriptor_names() ++ provision_names())
     |> Enum.uniq()
     |> Enum.sort_by(&(-String.length(&1)))
   end
@@ -277,9 +271,11 @@ defmodule FermixCore.Management.Copy do
   @doc """
   One sentence of `home.status.summary`, by its key, with the values it
   names: `machine` ("Mac" or "computer"), `age` (seconds since the last
-  backup), `days`, `percent`, `block` (a readiness sentence), `provider` or
-  `stays_here` (what this home uses that stops after a move, `off`'s second
-  line only when there is something).
+  backup), `days`, `percent`, `block` (a readiness sentence), `provider` (a
+  cloud provider's name, or who hosts the server), `token_label` (the
+  provider's token, as its field is labelled) or `stays_here` (what this home
+  uses that stops after a move, `off`'s second line only when there is
+  something).
   """
   @spec summary_sentence(atom(), map()) :: String.t()
   def summary_sentence(:off, %{machine: machine, stays_here: features}),
@@ -287,11 +283,11 @@ defmodule FermixCore.Management.Copy do
       "Keep Fermix running when this #{machine} sleeps. It moves to a server you own." <>
         stops_line(features)
 
-  def summary_sentence(:connect, _values),
-    do: "Paste a Hetzner API token to let Fermix create your server."
+  def summary_sentence(:connect, %{token_label: label}),
+    do: "Paste a #{label} to let Fermix create your server."
 
-  def summary_sentence(:choose, _values),
-    do: "Your Hetzner token works, so choose the server Fermix creates."
+  def summary_sentence(:choose, %{provider: provider}),
+    do: "Your #{provider} token works, so choose the server Fermix creates."
 
   def summary_sentence(:starting, _values), do: "Starting your server…"
   def summary_sentence(:installing, _values), do: "Installing Fermix on your server…"
@@ -333,7 +329,9 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:cannot_reach, _values),
     do: "Fermix cannot reach your server. Your messages wait until it is back."
 
-  def summary_sentence(:deleted, _values), do: "Your server was deleted in Hetzner."
+  def summary_sentence(:deleted, %{provider: provider}),
+    do: "Your server was deleted in #{provider}."
+
   def summary_sentence(:not_set_up, _values), do: "Your server did not finish setting up."
   def summary_sentence(:server_not_set_up, _values), do: "This server did not finish setting up."
 
@@ -343,7 +341,8 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:server_waited_too_long, _values),
     do: "This server waited too long for its move and must be set up again."
 
-  def summary_sentence(:token_refused, _values), do: "Hetzner no longer accepts Fermix's token."
+  def summary_sentence(:token_refused, %{provider: provider}),
+    do: "#{provider} no longer accepts Fermix's token."
 
   def summary_sentence(:update, %{machine: machine}),
     do: "Update Fermix on this #{machine} to keep using Always On."
@@ -378,8 +377,8 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:server_costs, _values),
     do: "Your server costs its monthly price until it is deleted."
 
-  def summary_sentence(:billing, _values),
-    do: "Hetzner bills by the hour until the server is deleted."
+  def summary_sentence(:billing, %{provider: provider}),
+    do: "#{provider} bills by the hour until the server is deleted."
 
   def summary_sentence(:replace_creating, _values), do: "Creating your new server…"
   def summary_sentence(:replace_starting, _values), do: "Starting your new server…"
@@ -437,9 +436,9 @@ defmodule FermixCore.Management.Copy do
   defp capitalised(<<first::utf8, rest::binary>>), do: String.upcase(<<first::utf8>>) <> rest
 
   @doc """
-  The label of one summary action, by its id; `create_in` names the city of
-  `location` (`fsn1`, `nbg1` or `hel1`), and `delete_server` the server a
-  replace deletes (`which`: `"new"` or `"old"`) when there are two.
+  The label of one summary action, by its id; `create_in` names a `city`,
+  `open_console` the `provider`, and `delete_server` the server a replace
+  deletes (`which`: `"new"` or `"old"`) when there are two.
   """
   @spec summary_label(atom(), map()) :: String.t()
   def summary_label(:set_up, _values), do: "Set up"
@@ -451,8 +450,8 @@ defmodule FermixCore.Management.Copy do
   def summary_label(:turn_on, _values), do: "Turn it on"
   def summary_label(:restart_server, _values), do: "Restart server"
   def summary_label(:start_again, _values), do: "Start again"
-  def summary_label(:create_in, %{location: location}), do: "Create in #{city(location)}"
-  def summary_label(:open_hetzner, _values), do: "Open Hetzner"
+  def summary_label(:create_in, %{city: city}), do: "Create in #{city}"
+  def summary_label(:open_console, %{provider: provider}), do: "Open #{provider}"
   def summary_label(:paste_token, _values), do: "Paste a new token"
   def summary_label(:update, _values), do: "Update"
   def summary_label(:back_up_now, _values), do: "Back up now"
@@ -465,26 +464,6 @@ defmodule FermixCore.Management.Copy do
 
   def summary_label(:delete_server, _values), do: "Delete your server"
 
-  @doc """
-  The "How to get one" steps of the token screen (M75 lean v1 §2, L20): two-
-  factor sign-in first, and a project made for Fermix alone, since a token
-  reaches its whole project.
-  """
-  @spec token_steps() :: [String.t()]
-  def token_steps do
-    [
-      "Sign in to Hetzner's console and turn on two-factor sign-in for your account.",
-      "Make a new project for Fermix alone, so the token reaches nothing else.",
-      "In that project, open Security, then API Tokens, and generate a token with Read & " <>
-        "Write permission.",
-      "Paste the token here: Fermix checks it at once."
-    ]
-  end
-
-  @doc "The city of a Hetzner location Fermix creates a server in, as Hetzner names it."
-  @spec city(String.t()) :: String.t()
-  def city(location) when is_map_key(@cities, location), do: Map.fetch!(@cities, location)
-
   # How long ago, in the largest whole unit: minutes, hours or days.
   defp ago(seconds) when seconds < 60, do: "just now"
   defp ago(seconds) when seconds < 3_600, do: count(div(seconds, 60), "minute") <> " ago"
@@ -493,6 +472,8 @@ defmodule FermixCore.Management.Copy do
 
   defp count(1, unit), do: "1 #{unit}"
   defp count(n, unit), do: "#{n} #{unit}s"
+
+  defp provision_names, do: Enum.flat_map(ProvisionRegistry.all(), & &1.display().proper_nouns)
 
   defp descriptor_names do
     Descriptor.all()

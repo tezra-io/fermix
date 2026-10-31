@@ -274,6 +274,7 @@ defmodule FermixTestSupport.CliContractCases do
       move: nil,
       link: %{primary: nil, desktops: [], enrollment: nil},
       candidates: [],
+      provider: FermixCore.Home.Provision.Hetzner,
       provision: %{state: :none, token: :none, server: nil, failure: nil, sentence: nil},
       review: nil,
       snapshots: snapshots_view(),
