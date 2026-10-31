@@ -43,7 +43,8 @@ defmodule FermixCore.Companion.Protocol do
 
   A reply's `text_done`, its `row` and its history message carry `blocks`
   when the reply has one (M72): records its text links, drawn beside it
-  (`FermixCore.ReplyBlocks`). Additive and optional, so on every version.
+  (`FermixCore.ReplyBlocks`), and the lists its turn read or changed (M85),
+  by id. Additive and optional, so on every version.
 
   Version 4 brings a mandate's proposals to the owner's Mac (M60 app surface
   §3.7, D28): `proposal` carries the card (Fermix's record, its sentence and
@@ -1005,7 +1006,8 @@ defmodule FermixCore.Companion.Protocol do
   defp link_previews?(_previews), do: false
 
   # A reply has the key only when it carries a block, at most one of each
-  # type, and a `places` block holds one to ten places.
+  # type: a `places` block holds one to ten places, and a `checklists` block one
+  # to eight lists, each its id, title and row ids.
   defp optional_blocks(%{"blocks" => blocks}) do
     if blocks?(blocks), do: :ok, else: {:error, {:invalid_field, "blocks"}}
   end
@@ -1026,7 +1028,18 @@ defmodule FermixCore.Companion.Protocol do
     places != [] and length(places) <= ReplyBlocks.max_places() and Enum.all?(places, &is_map/1)
   end
 
+  defp block?(%{"type" => "checklists", "lists" => lists}) when is_list(lists) do
+    lists != [] and length(lists) <= ReplyBlocks.max_checklists() and
+      Enum.all?(lists, &checklist_ref?/1)
+  end
+
   defp block?(_block), do: false
+
+  defp checklist_ref?(%{"list_id" => "ck_" <> _id, "title" => title, "rows" => rows})
+       when is_binary(title) and title != "" and is_list(rows),
+       do: Enum.all?(rows, &match?("ci_" <> _id, &1))
+
+  defp checklist_ref?(_list), do: false
 
   defp list_field(payload, field) do
     if is_list(Map.get(payload, field)), do: :ok, else: {:error, {:invalid_field, field}}

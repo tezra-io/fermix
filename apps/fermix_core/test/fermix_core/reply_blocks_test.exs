@@ -69,7 +69,7 @@ defmodule FermixCore.ReplyBlocksTest do
 
     # M85 §07: the lists a list tool read or changed are kept beside the places,
     # in the order the tools touched them, and taken with them.
-    test "keeps the lists a tool touched beside the places, and the places' block draws only places" do
+    test "keeps the lists a tool touched beside the places, and builds a block of each" do
       {server, _clock} = holder()
       touch = %{list_id: "ck_3m9q2x7d1a", title: "Fermix", rows: ["ci_7k2m9d0q4a"]}
 
@@ -77,7 +77,15 @@ defmodule FermixCore.ReplyBlocksTest do
       :ok = ReplyBlocks.put_checklists(server, @chat, [touch])
 
       assert [%{name: "Cafe 1"}, {:checklist, ^touch}] = records = ReplyBlocks.take(server, @chat)
-      assert names(ReplyBlocks.build("[Cafe 1](https://cafe1.example/)", records)) == ["Cafe 1"]
+
+      assert [%{"type" => "places"}, %{"type" => "checklists", "lists" => [list]}] =
+               ReplyBlocks.build("[Cafe 1](https://cafe1.example/)", records)
+
+      assert list == %{
+               "list_id" => "ck_3m9q2x7d1a",
+               "title" => "Fermix",
+               "rows" => ["ci_7k2m9d0q4a"]
+             }
     end
 
     test "a conversation keeps its newest records, never more than the bound" do
@@ -274,6 +282,49 @@ defmodule FermixCore.ReplyBlocksTest do
 
       [%{"places" => [brave]}] = ReplyBlocks.build("https://cafe1.example/", [record(1)])
       refute Map.has_key?(brave, "apple_place_id")
+    end
+  end
+
+  # M85 §07: the lists a turn's list tools read or changed, by id.
+  describe "the checklists block" do
+    defp touch(n, rows, title \\ nil),
+      do: {:checklist, %{list_id: "ck_#{n}m9q2x7d1a", title: title || "List #{n}", rows: rows}}
+
+    test "names each list once, in first-touch order, its newest title and every row it touched" do
+      records = [
+        touch(1, ["ci_7k2m9d0q4a"]),
+        record(1),
+        touch(2, []),
+        touch(1, ["ci_2x8w1d5h3n", "ci_7k2m9d0q4a"], "Renamed")
+      ]
+
+      assert [%{"type" => "checklists", "lists" => [first, second]}] =
+               ReplyBlocks.checklists(records)
+
+      assert first == %{
+               "list_id" => "ck_1m9q2x7d1a",
+               "title" => "Renamed",
+               "rows" => ["ci_7k2m9d0q4a", "ci_2x8w1d5h3n"]
+             }
+
+      assert second == %{"list_id" => "ck_2m9q2x7d1a", "title" => "List 2", "rows" => []}
+    end
+
+    test "names at most eight lists, and none without a touch" do
+      lists = for n <- 0..9, do: touch(n, [])
+      assert [%{"lists" => kept}] = ReplyBlocks.checklists(lists)
+      assert length(kept) == ReplyBlocks.max_checklists()
+      assert ReplyBlocks.checklists([record(1)]) == []
+    end
+
+    test "a built block is what the exported schema describes" do
+      schema = @schema_path |> File.read!() |> Jason.decode!()
+      [block] = ReplyBlocks.checklists([touch(1, ["ci_7k2m9d0q4a"]), touch(2, [])])
+
+      assert WireSchema.errors(block, WireSchema.ref("replyBlock"), schema) == []
+
+      drifted = put_in(block, ["lists", Access.at(0), "rows"], ["a row's words"])
+      refute WireSchema.errors(drifted, WireSchema.ref("replyBlock"), schema) == []
     end
   end
 

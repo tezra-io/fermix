@@ -579,7 +579,7 @@ defmodule FermixCore.Jobs.Runner do
   defp persisted_error("error", reason), do: inspect(reason)
 
   defp finalize_delivery(state, text) do
-    case Delivery.deliver_with_timeout(state.job, text, delivery_opts(state)) do
+    case Delivery.deliver_with_timeout(state.job, text, reply_delivery_opts(state)) do
       {:ok, delivery_status} ->
         mark_delivery(state, delivery_status, nil)
 
@@ -1776,6 +1776,22 @@ defmodule FermixCore.Jobs.Runner do
       delivery_opts: Keyword.put(state.delivery_opts, :proactive_key, "job:#{state.run.id}"),
       timeout_ms: state.delivery_timeout_ms
     ]
+  end
+
+  # A job's message carries the lists its run read or changed (M85 §07), as a
+  # turn's reply does, so the evening check-in's row names them too. The run's
+  # list tools kept them under its conversation key in the one holder; a
+  # channel that draws no block ignores the option.
+  defp reply_delivery_opts(state) do
+    key = {:scheduled_job, state.job.id, state.run.id}
+
+    case key |> FermixCore.ReplyBlocks.take() |> FermixCore.ReplyBlocks.checklists() do
+      [] ->
+        delivery_opts(state)
+
+      blocks ->
+        Keyword.update!(delivery_opts(state), :delivery_opts, &Keyword.put(&1, :blocks, blocks))
+    end
   end
 
   defp default_delivery_timeout_ms do

@@ -305,12 +305,14 @@
         "in_reply_to": {"type": "string", "minLength": 1},
         "metadata": {"type": "object"},
         "link_previews": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"$ref": "#/$defs/linkPreviewCard"}},
-        "blocks": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/replyBlock"}},
+        "blocks": {"type": "array", "minItems": 1, "maxItems": 2, "items": {"$ref": "#/$defs/replyBlock"}},
         "truncated": {"const": true}
       }
     },
-    "replyBlock": {"type": "object", "description": "Records a reply's text links, drawn beside it (the companion PROTOCOL.md, Blocks under a reply). type says what the block holds, and a client skips a type it does not know; places is the only type so far.", "required": ["type"], "properties": {"type": {"enum": ["places"]}}, "allOf": [{"if": {"required": ["type"], "properties": {"type": {"const": "places"}}}, "then": {"$ref": "#/$defs/placesBlock"}}]},
+    "replyBlock": {"type": "object", "description": "Records a reply carries beside its text, drawn under it (the companion PROTOCOL.md, Blocks under a reply). type says what the block holds, and a client skips a type it does not know; the types are places and checklists.", "required": ["type"], "properties": {"type": {"enum": ["places", "checklists"]}}, "allOf": [{"if": {"required": ["type"], "properties": {"type": {"const": "places"}}}, "then": {"$ref": "#/$defs/placesBlock"}}, {"if": {"required": ["type"], "properties": {"type": {"const": "checklists"}}}, "then": {"$ref": "#/$defs/checklistsBlock"}}]},
     "placesBlock": {"type": "object", "description": "The places place_search found that the reply links, in the order it first links them.", "required": ["type", "places"], "properties": {"type": {"const": "places"}, "places": {"type": "array", "minItems": 1, "maxItems": 10, "items": {"$ref": "#/$defs/place"}}}},
+    "checklistsBlock": {"type": "object", "description": "The owner's lists checklist_read or checklist_edit read or changed in the reply's turn, in the order the turn first touched them, each with the ids of the rows the turn added or changed (none for a list it only read). Ids and the title only: a client draws each list's rows as they stand now.", "required": ["type", "lists"], "properties": {"type": {"const": "checklists"}, "lists": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"$ref": "#/$defs/checklistRef"}}}},
+    "checklistRef": {"type": "object", "description": "One list a turn touched: its id, its title when the turn ended, and the ids of the rows the turn added or changed.", "required": ["list_id", "title", "rows"], "properties": {"list_id": {"type": "string", "pattern": "^ck_[0-9a-z]{10}$"}, "title": {"type": "string", "minLength": 1, "maxLength": 80}, "rows": {"type": "array", "items": {"type": "string", "pattern": "^ci_[0-9a-z]{10}$"}}}},
     "place": {"type": "object", "description": "One place as the search returned it, a subset of its record under the record's own names. A field the source did not give is absent. canonical_url and source_url are HTTPS addresses exactly as returned, at least one of them present. apple_place_id is Apple Maps' identifier for a place Apple Maps found, which a Mac opens the place by. opening_hours.current_day is today's hours as the source wrote them.", "required": ["name", "location"], "anyOf": [{"required": ["canonical_url"]}, {"required": ["source_url"]}], "properties": {"name": {"type": "string", "minLength": 1}, "canonical_url": {"type": "string", "minLength": 1}, "source_url": {"type": "string", "minLength": 1}, "apple_place_id": {"type": "string", "minLength": 1}, "location": {"type": "object", "required": ["latitude", "longitude"], "properties": {"latitude": {"type": "number", "minimum": -90, "maximum": 90}, "longitude": {"type": "number", "minimum": -180, "maximum": 180}}}, "address": {"type": "string", "minLength": 1}, "rating": {"type": "object", "properties": {"value": {"type": "number"}, "best": {"type": "number"}, "count": {"type": "number"}}}, "price_range": {"type": "string", "minLength": 1}, "categories": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "string", "minLength": 1}}, "opening_hours": {"type": "object", "required": ["current_day"], "properties": {"current_day": {"type": "string", "minLength": 1}}}, "distance": {"type": "object", "required": ["value", "units"], "properties": {"value": {"type": "number"}, "units": {"type": "string", "minLength": 1}}}}},
     "linkPreviewCard": {
       "type": "object", "required": ["url", "site", "title"],
@@ -350,7 +352,7 @@
     "text_done": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "turn_id", "server_seq", "text"],
       "description": "truncated is present, and true, only when text was cut to keep the event within x-max-event-bytes; the stored row is whole.",
-      "properties": {"t": {"const": "text_done"}, "turn_id": {"type": "string", "minLength": 1}, "server_seq": {"type": "integer", "minimum": 1}, "text": {"type": "string"}, "blocks": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/replyBlock"}}, "truncated": {"const": true}}
+      "properties": {"t": {"const": "text_done"}, "turn_id": {"type": "string", "minLength": 1}, "server_seq": {"type": "integer", "minimum": 1}, "text": {"type": "string"}, "blocks": {"type": "array", "minItems": 1, "maxItems": 2, "items": {"$ref": "#/$defs/replyBlock"}}, "truncated": {"const": true}}
     },
     "turn_done": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "turn_id"],
@@ -389,7 +391,7 @@
         "in_reply_to": {"type": "string", "minLength": 1},
         "metadata": {"type": "object"},
         "link_previews": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"$ref": "#/$defs/linkPreviewCard"}},
-        "blocks": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/replyBlock"}},
+        "blocks": {"type": "array", "minItems": 1, "maxItems": 2, "items": {"$ref": "#/$defs/replyBlock"}},
         "truncated": {"const": true}
       }
     },

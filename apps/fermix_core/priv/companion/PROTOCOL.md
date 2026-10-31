@@ -494,16 +494,16 @@ that reconnects reads again the rows it shows.
 
 ## Blocks under a reply
 
-A reply can carry `blocks[]`: records its text links, which a client draws
-beside the text. Its `text_done`, its `row` and its history message carry the
+A reply can carry `blocks[]`: records its text links, and the lists its turn
+read or changed, which a client draws beside the text. Its `text_done`, its `row` and its history message carry the
 same `blocks`, and have the key only when the reply has one. The rules:
 
 - **The text stands alone.** Every reply is complete as text, each place it
   recommends linked by name. A block adds to the text and never replaces it,
   so a client that draws no blocks, every other channel and the transcript
   search lose nothing.
-- **A client skips a block `type` it does not know.** `places` is the only
-  type so far, and `blocks` holds at most one block of each type.
+- **A client skips a block `type` it does not know.** The types are `places`
+  and `checklists`, and `blocks` holds at most one block of each type.
 - **Additive, so no version bump.** An older client ignores the key (*Absent
   is absent*, under *Transport*).
 - **Places, in first-link order.** A `places` block holds the places a
@@ -536,6 +536,15 @@ same `blocks`, and have the key only when the reply has one. The rules:
 - **Bounds.** The counts are the search's own: at most 10 places and 5
   categories a place. Strings are as the source gave them, inside its 1 MiB
   response.
+- **Lists, by id.** A `checklists` block (M85) names the owner's lists that
+  `checklist_read` or `checklist_edit` read or changed in the reply's turn, in
+  the order the turn first touched them, one to eight: each `{list_id, title,
+  rows[]}`, `list_id` a `ck_` id, `title` the list's title when the turn ended
+  (at most 80 characters), and `rows` the `ci_` ids of the rows the turn added
+  or changed, empty for a list it only read. It holds ids and the title, never
+  an item's words: a client that draws it draws each list's rows as they stand
+  now, and the reply's text stays the record of what happened. A scheduled
+  job's message carries one the same way.
 
 The phones' `row` carries the history message whole, so it carries `blocks`
 too, and a phone app may ignore them.

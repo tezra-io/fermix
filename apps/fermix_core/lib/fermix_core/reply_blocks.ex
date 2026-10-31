@@ -25,12 +25,20 @@ defmodule FermixCore.ReplyBlocks do
 
   `links/2` is the same reading's other half: the links a reply names that no
   block draws, which are the ones its link previews are made from.
+
+  `checklists/1` is the other block (M85 §07): the lists the turn's list tools
+  read or changed, in the order the turn first touched them, at most eight,
+  each its id, its newest title and the ids of the rows the turn added or
+  changed, none for a list it only read. Ids, never words: a client draws a
+  list's rows as they stand now. `build/2` adds it after the places, and a
+  job's delivery takes it alone.
   """
 
   use GenServer
 
-  @types ["places"]
+  @types ["places", "checklists"]
   @max_places 10
+  @max_checklists 8
   @max_categories 5
   @max_records 50
   @ttl_ms 30 * 60 * 1_000
@@ -72,6 +80,10 @@ defmodule FermixCore.ReplyBlocks do
   @doc "The most places one `places` block holds."
   @spec max_places() :: pos_integer()
   def max_places, do: @max_places
+
+  @doc "The most lists one `checklists` block names."
+  @spec max_checklists() :: pos_integer()
+  def max_checklists, do: @max_checklists
 
   @doc "The most categories one place carries."
   @spec max_categories() :: pos_integer()
@@ -120,9 +132,10 @@ defmodule FermixCore.ReplyBlocks do
   end
 
   @doc """
-  The blocks a reply's `text` makes of `records`: `[]`, or one `places` block
-  with the places the text links. When two records name the same link, the
-  later one (the newer search) is the one drawn.
+  The blocks a reply's `text` makes of `records`: a `places` block with the
+  places the text links, when it links any, then a `checklists` block with the
+  lists the turn touched, when it touched any. When two records name the same
+  link, the later one (the newer search) is the one drawn.
   """
   @spec build(String.t(), [record()]) :: [block()]
   def build(text, records) when is_binary(text) and is_list(records) do
@@ -135,6 +148,51 @@ defmodule FermixCore.ReplyBlocks do
     |> Enum.uniq_by(&{&1["name"], &1["location"]})
     |> Enum.take(@max_places)
     |> places_block()
+    |> Kernel.++(checklists(records))
+  end
+
+  @doc """
+  The `checklists` block `records` make: `[]`, or one block naming each list a
+  list tool touched, in first-touch order, at most #{@max_checklists}, with the
+  rows every touch of it added or changed, in the order they were first named.
+  """
+  @spec checklists([record()]) :: [block()]
+  def checklists(records) when is_list(records) do
+    records
+    |> Enum.flat_map(fn
+      {:checklist, touch} -> [touch]
+      _place -> []
+    end)
+    |> Enum.reduce([], &merge_touch/2)
+    |> Enum.reverse()
+    |> Enum.take(@max_checklists)
+    |> checklists_block()
+  end
+
+  # Newest first while folding: a list touched again keeps its first place,
+  # takes its newest title and adds the rows it had not named.
+  defp merge_touch(touch, merged) do
+    case Enum.find_index(merged, &(&1.list_id == touch.list_id)) do
+      nil ->
+        [touch | merged]
+
+      index ->
+        List.update_at(merged, index, fn kept ->
+          %{kept | title: touch.title, rows: kept.rows ++ (touch.rows -- kept.rows)}
+        end)
+    end
+  end
+
+  defp checklists_block([]), do: []
+
+  defp checklists_block(lists) do
+    [
+      %{
+        "type" => "checklists",
+        "lists" =>
+          Enum.map(lists, &%{"list_id" => &1.list_id, "title" => &1.title, "rows" => &1.rows})
+      }
+    ]
   end
 
   @doc """

@@ -624,8 +624,9 @@ sent it: `url`, `site`, `title`, and optional `description`, `image_ref` and
 stored before links were kept has none). A row carries at most 4, and has the
 key only when it has one.
 
-`blocks[]` are records a reply's text links, such as the places a search found
-that it recommends, which the Mac's chat draws beside the text: the shape and
+`blocks[]` are records a reply carries, such as the places a search found
+that it recommends or the lists its turn read or changed, which the Mac's chat
+draws beside the text: the shape and
 rules are the companion socket's (`priv/companion/PROTOCOL.md`, *Blocks under
 a reply*). A row has the key only when it has one. The text stands alone, so a
 phone may ignore them, and skips a block `type` it does not know.

@@ -412,7 +412,7 @@
         "blocks": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 1,
+          "maxItems": 2,
           "items": { "$ref": "#/$defs/replyBlock" }
         }
       }
@@ -462,7 +462,7 @@
         "blocks": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 1,
+          "maxItems": 2,
           "items": { "$ref": "#/$defs/replyBlock" }
         }
       }
@@ -732,20 +732,24 @@
         "blocks": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 1,
+          "maxItems": 2,
           "items": { "$ref": "#/$defs/replyBlock" }
         }
       }
     },
     "replyBlock": {
       "type": "object",
-      "description": "Records a reply's text links, drawn beside it (the companion PROTOCOL.md, Blocks under a reply). type says what the block holds, and a client skips a type it does not know; places is the only type so far.",
+      "description": "Records a reply carries beside its text, drawn under it (the companion PROTOCOL.md, Blocks under a reply). type says what the block holds, and a client skips a type it does not know; the types are places and checklists.",
       "required": ["type"],
-      "properties": { "type": { "enum": ["places"] } },
+      "properties": { "type": { "enum": ["places", "checklists"] } },
       "allOf": [
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "places" } } },
           "then": { "$ref": "#/$defs/placesBlock" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "checklists" } } },
+          "then": { "$ref": "#/$defs/checklistsBlock" }
         }
       ]
     },
@@ -761,6 +765,30 @@
           "maxItems": 10,
           "items": { "$ref": "#/$defs/place" }
         }
+      }
+    },
+    "checklistsBlock": {
+      "type": "object",
+      "description": "The owner's lists checklist_read or checklist_edit read or changed in the reply's turn, in the order the turn first touched them, each with the ids of the rows the turn added or changed (none for a list it only read). Ids and the title only: a client draws each list's rows as they stand now.",
+      "required": ["type", "lists"],
+      "properties": {
+        "type": { "const": "checklists" },
+        "lists": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/checklistRef" }
+        }
+      }
+    },
+    "checklistRef": {
+      "type": "object",
+      "description": "One list a turn touched: its id, its title when the turn ended, and the ids of the rows the turn added or changed.",
+      "required": ["list_id", "title", "rows"],
+      "properties": {
+        "list_id": { "type": "string", "pattern": "^ck_[0-9a-z]{10}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "rows": { "type": "array", "items": { "type": "string", "pattern": "^ci_[0-9a-z]{10}$" } }
       }
     },
     "place": {

@@ -322,7 +322,8 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   test "a timeline row has one exported shape on both wires", %{schema: schema} do
     mobile = @mobile_schema_path |> File.read!() |> Jason.decode!()
 
-    for def <- ~w(mediaRef linkPreviewCard replyBlock placesBlock place) do
+    for def <-
+          ~w(mediaRef linkPreviewCard replyBlock placesBlock place checklistsBlock checklistRef) do
       assert schema["$defs"][def] == mobile["$defs"][def], "#{def} differs between the wires"
     end
 
@@ -469,6 +470,28 @@ defmodule FermixCore.Companion.ProtocolContractTest do
 
     [_before, section] = String.split(protocol, "## Blocks under a reply", parts: 2)
     assert section =~ "`apple_place_id`"
+  end
+
+  # M85 §07: a reply's lists ride beside its places, by id, on every version.
+  test "the codec takes a checklists block beside places, and refuses one the export rules out" do
+    done = %{"turn_id" => "t-1", "server_seq" => 7, "text" => "Filed both."}
+    list = %{"list_id" => "ck_3m9q2x7d1a", "title" => "Fermix", "rows" => ["ci_7k2m9d0q4a"]}
+    checklists = %{"type" => "checklists", "lists" => [list]}
+
+    assert :ok =
+             Protocol.validate_server_payload("text_done", Map.put(done, "blocks", [checklists]))
+
+    for blocks <- [
+          [checklists, checklists],
+          [%{checklists | "lists" => []}],
+          [%{checklists | "lists" => List.duplicate(list, ReplyBlocks.max_checklists() + 1)}],
+          [%{checklists | "lists" => [%{list | "rows" => ["Lemons"]}]}],
+          [%{checklists | "lists" => [Map.delete(list, "title")]}]
+        ] do
+      assert {:error, {:invalid_field, "blocks"}} =
+               Protocol.validate_server_payload("text_done", Map.put(done, "blocks", blocks)),
+             "text_done accepted blocks #{inspect(blocks)}"
+    end
   end
 
   test "the codec refuses blocks the export rules out" do
