@@ -84,6 +84,10 @@ defmodule FermixCore.Management.Mobile do
   @unavailable_attestation_sentence "Google's attestation service could not be reached."
   @no_request_sentence "No phone is waiting for a decision."
   @unknown_device_sentence "No paired phone has that id."
+  # The desktop a move linked to this primary (M75): this version cannot link
+  # a revoked desktop again, and it keeps copies of the primary's snapshots.
+  @desktop_sentence "This desktop cannot be removed: this version of Fermix cannot link it " <>
+                      "to the server again, and it keeps copies of the server's backups."
   @owner_only_sentence "Only the owner can pair or forget a phone; run this from your own terminal."
   # What a settings write says when the channel did not follow its switch.
   @switch_not_started_sentence "The phone channel is on but could not start. See the daemon log."
@@ -95,6 +99,7 @@ defmodule FermixCore.Management.Mobile do
   @type refusal ::
           {:busy, String.t()}
           | {:unavailable, String.t()}
+          | {:unavailable, String.t(), String.t()}
           | {:invalid_params, String.t(), String.t()}
           | {:unknown_pairing_session, String.t()}
   @type result :: {:ok, map()} | {:error, refusal()}
@@ -119,6 +124,7 @@ defmodule FermixCore.Management.Mobile do
         @unavailable_attestation_sentence,
         @no_request_sentence,
         @unknown_device_sentence,
+        @desktop_sentence,
         @owner_only_sentence,
         @switch_not_started_sentence,
         @switch_not_ready_sentence,
@@ -232,7 +238,7 @@ defmodule FermixCore.Management.Mobile do
     with {:ok, reply} <- call(opts, :devices_list, []), do: devices_reply(reply)
   end
 
-  @doc "Forgets one paired phone."
+  @doc "Forgets one paired phone. A desktop is refused: see `@desktop_sentence`."
   @spec devices_revoke(String.t(), keyword()) :: result()
   def devices_revoke(device_id, opts \\ []) when is_binary(device_id) and is_list(opts) do
     with {:ok, reply} <- call(opts, :devices_revoke, [device_id]), do: revoke_reply(reply)
@@ -333,6 +339,9 @@ defmodule FermixCore.Management.Mobile do
 
   defp revoke_reply({:error, :device_not_found}),
     do: {:error, {:invalid_params, "device_id", @unknown_device_sentence}}
+
+  defp revoke_reply({:error, :desktop_device}),
+    do: {:error, {:unavailable, @capability, @desktop_sentence}}
 
   defp revoke_reply({:error, reason}) when reason in @channel_down,
     do: {:error, {:unavailable, @capability}}

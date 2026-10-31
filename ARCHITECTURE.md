@@ -1160,7 +1160,9 @@ Current channels:
 - The phone wire's sessions have kinds (M75 §3, §5). A paired device's row in
   `devices.toml` (`Mobile.DeviceStore`) names `kind`: a `phone` (a row that
   names none, as every row before desktops) or a `desktop` engine with no
-  push or attestation field; `DeviceRegistry`
+  push or attestation field, which `Mobile.Management`'s one revoke path
+  refuses to forget (`:desktop_device`: this version cannot link it again);
+  `DeviceRegistry`
   carries the kind and keeps the phones' audience (`broadcast/3`,
   `connected/2`) to phones. `Mobile.Peers` is the one table of kind × event
   (`phone`, `desktop`, and the enrollment and move sessions wave two serves):

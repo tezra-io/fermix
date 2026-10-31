@@ -396,6 +396,16 @@ defmodule FermixCore.Management.MobileTest do
       assert Mobile.devices_revoke("nope", fake({:error, :device_not_found})) ==
                {:error, {:invalid_params, "device_id", "No paired phone has that id."}}
     end
+
+    # A desktop linked after a move cannot be linked again in this version,
+    # and it keeps copies of the server's snapshots.
+    test "a desktop is never forgotten, and the owner is told why" do
+      assert Mobile.devices_revoke(@device_id, fake({:error, :desktop_device})) ==
+               {:error,
+                {:unavailable, "mobile",
+                 "This desktop cannot be removed: this version of Fermix cannot link it to " <>
+                   "the server again, and it keeps copies of the server's backups."}}
+    end
   end
 
   describe "the channel status" do
@@ -607,6 +617,8 @@ defmodule FermixCore.Management.MobileTest do
              "Google's attestation service could not be reached.",
              "No phone is waiting for a decision.",
              "No paired phone has that id.",
+             "This desktop cannot be removed: this version of Fermix cannot link it to the " <>
+               "server again, and it keeps copies of the server's backups.",
              "Only the owner can pair or forget a phone; run this from your own terminal.",
              "The phone channel is on but could not start. See the daemon log.",
              "The phone channel starts the next time Fermix starts.",

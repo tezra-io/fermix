@@ -196,6 +196,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
                config: [enabled: true],
                whereis: fn _manager -> self() end,
                device_registry: :registry,
+               fetch_device: fn _store, ^device_id -> {:ok, Map.put(device, :kind, :phone)} end,
                revoke_device: fn :registry, id ->
                  send(test_pid, {:revoked, id})
                  :ok
@@ -214,7 +215,8 @@ defmodule FermixChannels.Mobile.ManagementTest do
                config: [enabled: true],
                whereis: fn _manager -> self() end,
                device_registry: :registry,
-               revoke_device: fn :registry, id -> {:error, {:device_not_found, id}} end
+               fetch_device: fn _store, id -> {:error, {:device_not_found, id}} end,
+               revoke_device: fn :registry, _id -> flunk("an unknown device is not revoked") end
              )
   end
 
@@ -734,6 +736,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
           :ok
         end)
         |> Keyword.put(:device_registry, :registry)
+        |> Keyword.put(:fetch_device, fn _store, _id -> {:ok, %{kind: :phone}} end)
 
       assert {:ok, %{device_id: "known"}} = Management.devices_revoke("known", revoking)
       assert_received {:revoked, "known"}
@@ -756,7 +759,8 @@ defmodule FermixChannels.Mobile.ManagementTest do
         config: [enabled: false],
         pair_manager: :pair,
         device_registry: registry,
-        whereis: fn MobileSupervisor -> self() end
+        whereis: fn MobileSupervisor -> self() end,
+        fetch_device: fn _store, "live-phone" -> {:ok, %{kind: :phone}} end
       ]
 
       assert {:ok, %{device_id: "live-phone"}} = Management.devices_revoke("live-phone", opts)
@@ -965,7 +969,11 @@ defmodule FermixChannels.Mobile.ManagementTest do
         if id == "known", do: :ok, else: {:error, {:device_not_found, id}}
       end
 
-      opts = serving_opts(device_registry: :registry, revoke_device: revoke)
+      fetch = fn :store, id ->
+        if id == "known", do: {:ok, %{kind: :phone}}, else: {:error, {:device_not_found, id}}
+      end
+
+      opts = serving_opts(device_registry: :registry, revoke_device: revoke, fetch_device: fetch)
 
       assert {:ok, %{device_id: "known"}} = Management.devices_revoke("known", opts)
       assert_received {:revoked, "known"}
@@ -993,6 +1001,35 @@ defmodule FermixChannels.Mobile.ManagementTest do
       assert {:error, :device_not_found} = Management.devices_revoke(revoked, opts)
       refute_received {:requests_revoked, _id}
       assert {:ok, [%{device_id: ^kept}]} = DeviceStore.list(root: root)
+    end
+
+    # The desktop a move linked to this primary is refused, running or not:
+    # this version cannot link it again, and it keeps the server's snapshots.
+    test "a desktop is refused and stays, whether the channel runs or not" do
+      desktop = "33333333-3333-4333-8333-333333333333"
+      attrs = device_attrs(desktop) |> Map.drop([:push_token, :apns_key_salt])
+      root = stored_root([Map.put(attrs, :kind, :desktop)])
+
+      stopped =
+        serving_opts(
+          config: [enabled: false],
+          root: root,
+          whereis: fn MobileSupervisor -> nil end,
+          revoke_requests: fn _id -> flunk("a desktop's work is not revoked") end
+        )
+
+      assert {:error, :desktop_device} = Management.devices_revoke(desktop, stopped)
+      assert {:error, :desktop_device} = Management.revoke_device(desktop, stopped)
+
+      running =
+        serving_opts(
+          device_registry: :registry,
+          fetch_device: fn :store, ^desktop -> DeviceStore.fetch(desktop, root: root) end,
+          revoke_device: fn _registry, _id -> flunk("a desktop is not revoked") end
+        )
+
+      assert {:error, :desktop_device} = Management.devices_revoke(desktop, running)
+      assert {:ok, [%{device_id: ^desktop, kind: :desktop}]} = DeviceStore.list(root: root)
     end
   end
 

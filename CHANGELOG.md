@@ -129,7 +129,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   uses Socket Mode; coding agents ask for your approval again on the server)
   and start it from the app with a recovery passphrase. The computer the home
   left stays a desktop of the server: the app's chat and Fermix-wide settings
-  go to the server through it, and paired phones see a reconnect. Right after
+  go to the server through it, and paired phones see a reconnect. The server
+  will not remove that desktop from its devices, since this version cannot
+  link it again and it keeps copies of the server's backups. Right after
   the move the server installs your plugins again for itself, checked as any
   install is; one it could not install says so in Plugins, with Install…. Once a recovery passphrase is set, a primary keeps
   encrypted snapshots of itself in an S3 bucket, every six hours by default,

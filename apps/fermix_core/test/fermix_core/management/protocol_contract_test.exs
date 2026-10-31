@@ -1720,6 +1720,10 @@ defmodule FermixCore.Management.ProtocolContractTest do
        ]}
     end
 
+    # The desktop a move linked is refused, as the phone channel refuses it.
+    def devices_revoke("c41e9d27-5a8b-4f63-9e20-7d1b3c5a8f94", _opts),
+      do: {:error, :desktop_device}
+
     def devices_revoke(device_id, _opts), do: {:ok, %{device_id: device_id}}
 
     defp desktop do
@@ -1760,6 +1764,16 @@ defmodule FermixCore.Management.ProtocolContractTest do
         attestation: :verified
       }
     end
+  end
+
+  test "forgetting the desktop a move linked is refused with the golden's sentence" do
+    opts = [operation_opts: [mobile: [provider: FakeMobileProvider]]]
+    params = %{"device_id" => "c41e9d27-5a8b-4f63-9e20-7d1b3c5a8f94"}
+
+    assert {:error, :unavailable, details} =
+             Router.route(request("mobile.devices.revoke", params), opts)
+
+    assert details == golden_error_details("unavailable_mobile_desktop_revoke")
   end
 
   # The seven phone methods against the fake above: what is compared is the view

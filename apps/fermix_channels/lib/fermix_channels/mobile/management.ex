@@ -684,12 +684,35 @@ defmodule FermixChannels.Mobile.Management do
   end
 
   defp revoke(device_id, opts) do
-    case revoke_call(device_id, opts) do
-      :ok -> {:ok, %{device_id: device_id}}
-      # The facade's wire vocabulary: the registry's tuple would reach the CLI
-      # as an inspect() dump, and the id is already in the caller's hands.
+    with :ok <- not_desktop(device_id, opts) do
+      case revoke_call(device_id, opts) do
+        :ok -> {:ok, %{device_id: device_id}}
+        # The facade's wire vocabulary: the registry's tuple would reach the CLI
+        # as an inspect() dump, and the id is already in the caller's hands.
+        {:error, {:device_not_found, _id}} -> {:error, :device_not_found}
+        {:error, _reason} = error -> error
+      end
+    end
+  end
+
+  # The desktop a move linked to this primary (M75) is never revoked: this
+  # version cannot link a revoked desktop again, and it keeps copies of the
+  # primary's snapshots. Read from the same place the revoke would delete it.
+  defp not_desktop(device_id, opts) do
+    case fetch_device(device_id, opts) do
+      {:ok, %{kind: :desktop}} -> {:error, :desktop_device}
+      {:ok, _phone} -> :ok
       {:error, {:device_not_found, _id}} -> {:error, :device_not_found}
       {:error, _reason} = error -> error
+    end
+  end
+
+  defp fetch_device(device_id, opts) do
+    if subtree_started?(opts) do
+      store = Keyword.get(opts, :device_store, DeviceStore)
+      invoke(opts, :fetch_device, &DeviceStore.fetch/2, [store, device_id])
+    else
+      DeviceStore.fetch(device_id, Keyword.take(opts, [:root]))
     end
   end
 

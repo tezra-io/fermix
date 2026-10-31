@@ -469,9 +469,12 @@ it, never a second writer.
   is treated as an outage from then on: this desktop waits longer between
   tries (the usual backoff) and says "The server <name> ends this computer's
   session each time it opens."
-  When the server does not know this computer (it was revoked from the Mac
-  app, the phone or the server itself, or the server was restored from a
-  snapshot taken before this computer joined it), this desktop stops trying
+  The server refuses to remove this computer from its devices ("This desktop
+  cannot be removed: …"), since this version cannot link it again and it
+  keeps copies of the server's backups.
+  When the server does not know this computer anyway (the server was
+  restored from a snapshot taken before this computer joined it), this
+  desktop stops trying
   and says "The server <name> does not know this computer: it was removed from
   the server's devices, or the server was restored from a snapshot taken
   before this computer joined it. Fermix stopped reaching it." until Fermix
