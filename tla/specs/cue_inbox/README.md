@@ -247,6 +247,28 @@ if it was sent, is already in the Repo's mailbox ahead of the reset.
   next tick starts again at the first step; the sweeper's steps are modelled
   one at a time with no pass, so an early stop changes when a later step
   runs, not whether. No step moved.
+- **Always allow replaces automatic mode (M60_WATCHER_CODING_RUNS.md §14;
+  2026-10-31).** A follow-up asks first until the owner's Always allow on one
+  of its cards, which lets later items run it with no card for exactly what
+  the card showed. Re-read against `2dd0e88c`, which builds it:
+  - `proposals.ex`: `always_allow/3` and `decide/4` with `:always_allow` hand
+    a follow-up's card to `Cues.FollowUps`, whose answer is the card's fenced
+    `waiting → starting` (token, chat and expiry, or id and expiry) with the
+    approval written in the same transaction over the watcher's row and the
+    trigger's: rows the model leaves out. A mandate's proposal refuses it
+    before any read or write, so `decide_waiting`, `OwnerConfirm` and the
+    proposal's states are as before. The approval prompt's dispatch (`cfa_`)
+    is gone.
+  - `sweeper.ex`: the prompt's prune and expiry steps are gone, with its
+    table; the steps the model has run as before.
+  - `cues_sql.ex`: the prompt's retention SQL is gone, and migration 58's
+    rebuild of `cue_watchers` (no `follow_up_mode`) is DDL the model does not
+    read. The pass hook (`on_pass`, `trigger_pass`, `settle_taskless`) is
+    unchanged: what decides a trigger's state now reads Always allow where it
+    read the mode, and a watcher with no task still settles its delivery at
+    its pass whatever state its trigger takes, which is all
+    `TaskLessSettlesAtPass` reads.
+  No step moved.
 
 ## Switches
 
@@ -271,7 +293,7 @@ reconcile scan errors), `LifetimesCanEnd`, `Proposals`, `OwnerCanMistap`,
 | `SettleFenced` | a filter settle needs its call open (`open_call/2`, `cues_filter_sql.ex:434`) and the row's `filter_call_id` (`move/5`, `:545`); a refused settle closes the open call `aborted` (R1, `abort_stale_call/3`, `:423`) |
 | `TasksDieWithDispatcher` | the filtering group (`FermixCore.Cues.FilteringSupervisor`, defined inline in `cues/supervisor.ex:44-51`, `:58-63`) is `rest_for_one`, `Cues.Filters` before `FilterSupervisor`; the cue supervisor above the groups is `one_for_one` (`:55`) |
 | `BootReset` | `Filters.init` resets `filtering` rows (`filters.ex:103`, `:160`; `cues_filter_sql.ex:640`) |
-| `NonePassesAtAccept` | a `none` watcher's delivery is inserted `passed` (`cues_sql.ex:768`) |
+| `NonePassesAtAccept` | a `none` watcher's delivery is inserted `passed` (`cues_sql.ex:838`) |
 | `ClaimNeedsIdleJob` | the cue claim needs the job `scheduled` with no active run (`@open_sql :93-96`; `repo.ex` `fetch_claimable_job`, `ensure_no_active_job_run`) |
 | `CueSlotCap` | `free = min(max_active − active, 3 − active_cue)` (`cue_admission.ex:83`) |
 | `AtomicCueSettle` | the run row, the job's release and the delivery's move are one transaction (`repo.ex` `settle_cue_run_in_tx`) |
@@ -284,7 +306,7 @@ reconcile scan errors), `LifetimesCanEnd`, `Proposals`, `OwnerCanMistap`,
 | `AppDecideFenced` | a device's answer is one `UPDATE` fenced on id, state and expiry (`cues_mandate_sql.ex` `decide_by_id`) |
 | `ReclaimsOrphans` | every sweep puts back a `filtering` row whose call the dispatcher does not hold, fence cleared, attempts unchanged, its call finished `aborted` (R3, CUE-1: `reclaim_orphans/1`, `filters.ex:193-216`; `{:reclaim_orphans, …}`, `cues_filter_sql.ex:132`, `reclaim_in_tx/4` `:675`) |
 | `AdmitsAfterScan` | no cue run is admitted while the last reconcile scan failed, since the monitors may then miss runners that survived a restart (R3, CUE-2: `free_cue_slots/1`, `scheduler.ex:363`; `runs_known?` set by `reconcile_active_runs/1`, `:492`, `:500`) |
-| `TaskLessSettlesAtPass` | a watcher with no task settles its delivery `acked`, outcome `follow_up`, in the transaction that passes it (`CuesFollowUpSql.on_pass` → `settle_taskless`, `cues_follow_up_sql.ex:303-310`, `:412-415`) |
+| `TaskLessSettlesAtPass` | a watcher with no task settles its delivery `acked`, outcome `follow_up`, in the transaction that passes it (`CuesFollowUpSql.on_pass` → `settle_taskless`, `cues_follow_up_sql.ex:349-356`, `:460-463`) |
 
 ## Checks
 
@@ -399,7 +421,7 @@ runs, ahead of the dispatcher's next claim.
 
 Nothing then moves the row. The claim query skips a watcher that has a
 `filtering` delivery (`cues_filter_sql.ex:181`), so the watcher takes no more
-calls at all; the lifetime sweep never touches `filtering` (`cues_sql.ex:1246`,
+calls at all; the lifetime sweep never touches `filtering` (`cues_sql.ex:1316`,
 `sweeper.ex` moduledoc); the dispatcher's 60 s sweep only dispatches; the only
 reset is the boot reset in `Filters.init`. The delivery and every later delivery
 of that watcher wait until the daemon (or the filtering group) restarts. The
@@ -417,7 +439,7 @@ the row a way out:
   stranded call has no task, so no result ever comes;
 - the first-timer rule (`filters.ex:112`, `:130`, `:136`) only delays the
   dispatcher's first claim after a start;
-- `prune_filter_calls` now deletes unfinished calls too (`cues_sql.ex:1332`),
+- `prune_filter_calls` now deletes unfinished calls too (`cues_sql.ex:1402`),
   but only after 30 days, and it leaves the delivery `filtering`: the claim
   query still skips the watcher, and only the boot reset (which fences on the
   delivery's own `filter_call_id`, not the call row) moves it;

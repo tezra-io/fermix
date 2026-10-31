@@ -58,9 +58,9 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/ingest.ex @ 61d136110d03
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/filters.ex @ 110e5fad9800
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/supervisor.ex @ e1b36533a8b3
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/sweeper.ex @ 9807ef13859e
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/proposals.ex @ 02fb8fec1eb8
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_sql.ex @ e09460089a9d
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/sweeper.ex @ 2f4ac202fed9
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/proposals.ex @ d5da6d1e6ba8
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_sql.ex @ 5a1008301ef3
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_filter_sql.ex @ 319f777956cf
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_runs_sql.ex#@open_sql,@cap_room_sql,@eligible_sql,@candidates_sql,@eligible_delivery_sql,@settle_facts_sql,eligible_delivery,settle_delivery,settle_facts,settle_held,settle_move,unspent_retry,spent_retry,move_patch,untouched @ 03becc353f97
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_mandate_sql.ex#mark_tools_started,decide_propose,store_proposal,point_at_existing,decide_waiting,decided_or_why,decide_by_id,decided_by_id,end_denied,settle_proposal,expire_proposals @ 029c6975cee1
@@ -120,7 +120,7 @@ CONSTANTS
     BootReset,                  \* Filters.init resets filtering rows
                                 \* (filters.ex:103, :160; cues_filter_sql.ex:640)
     NonePassesAtAccept,         \* a none watcher's delivery is inserted passed
-                                \* (cues_sql.ex:783)
+                                \* (cues_sql.ex:853)
     ClaimNeedsIdleJob,          \* a cue claim needs the job scheduled with no active
                                 \* run (@open_sql :93-96; repo.ex fetch_claimable_job,
                                 \* ensure_no_active_job_run)
@@ -154,7 +154,7 @@ CONSTANTS
     TaskLessSettlesAtPass       \* a watcher with no task settles its delivery acked
                                 \* (outcome follow_up) in the transaction that passes
                                 \* it (CuesFollowUpSql.on_pass -> settle_taskless,
-                                \* cues_follow_up_sql.ex:303-310, :412-415)
+                                \* cues_follow_up_sql.ex:349-356, :460-463)
 
 -----------------------------------------------------------------------------
 (* Topologies *)
@@ -196,7 +196,7 @@ Kind(w) == IF \/ Topology \in {"subject", "one_llm", "subject3", "two_llm"}
            THEN "llm" ELSE "none"
 
 \* A watcher holds a task or a follow-up, or both (cue_watchers' CHECK,
-\* cues_sql.ex:431). In the follow_up topologies neither watcher has a
+\* cues_sql.ex:435). In the follow_up topologies neither watcher has a
 \* task; in every other one each watcher wakes its task and its follow-up,
 \* if any, is not modelled.
 HasTask(w) == Topology \notin {"follow_up", "follow_up3"}
@@ -286,7 +286,7 @@ Fault == faults > 0 /\ faults' = faults - 1
 (* listening watcher, pending for llm, passed with reason "no filter" and  *)
 (* ready_at = now for none. Ids are AUTOINCREMENT: the arrival order.      *)
 (* A none watcher's pass writes its follow-up's trigger in the same        *)
-(* transaction (accepted_follow_up, cues_sql.ex:1223-1224), and one with   *)
+(* transaction (accepted_follow_up, cues_sql.ex:1293-1294), and one with   *)
 (* no task has the delivery settled acked there and then (PassedRow).      *)
 
 \* The state a pass leaves a delivery in: passed, or for a watcher with no
@@ -598,7 +598,7 @@ Expire(d) ==
                    runRows, propVars, dispVars, schedVars, obs, faults>>
 
 \* Cues.Sweeper :expire_lifetime (sweeper.ex:33) -> CuesSql expire_lifetime
-\* (cues_sql.ex:1270, expire_each :867): pending and passed rows past valid_until become
+\* (cues_sql.ex:1340, expire_each :867): pending and passed rows past valid_until become
 \* expired (transition with no fence); filtering and claimed are never touched.
 SweepExpire(d) ==
     /\ ~valid[d] /\ dstate[d] \in {"pending", "passed"}

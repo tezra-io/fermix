@@ -112,7 +112,12 @@ them whole and, on a failed write, ends the connection as a drop does; and
 turn's prompt reads. None of them has a seq, request or turn, none moves a
 cursor or the outbox, and every row, seq, ending and settlement is as
 before, so nothing the spec models changed; the header names them among
-what it leaves out.
+what it leaves out. The re-read after Always allow (2026-10-31) found a
+follow-up's card carrying `follow_up.offers_always_allow` and `proposal_answer`
+taking the decision `always_allow`, both additive with no version, and the
+approval prompt's card (`cfa_…`) gone: proposal events and a client request
+served in the Connection's own step, as before, so nothing the spec models
+changed.
 
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
