@@ -213,7 +213,9 @@ it, never a second writer.
   runs. While the server stands, a new token replaces the kept one only when
   it is from the same Hetzner project (a token that stopped working is
   replaced by a new one from that project; one for another project is
-  refused).
+  refused). On a computer whose home already moved to the server, Fermix
+  creates no second server: replace it with a code from Always On used on a
+  Linux server of the owner's.
 - **A restore host.** When the primary is gone, `--restore` on a host
   prepares the same server without enrolling it and prints the exact steps:
   copy the newest snapshot onto it (downloaded from the bucket by hand, when

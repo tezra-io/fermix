@@ -64,6 +64,7 @@ defmodule FermixCore.Management.Copy do
     "Read & Write",
     "Hetzner",
     "Debian",
+    "Linux",
     "Falkenstein",
     "Nuremberg",
     "Helsinki",

@@ -219,7 +219,9 @@ defmodule FermixCore.Home.Provision do
   def error_sentence(:nothing_to_delete), do: "Fermix created nothing on Hetzner to delete."
 
   def error_sentence(:not_primary),
-    do: "Fermix creates a server only on the computer its home runs on."
+    do:
+      "Fermix runs on your server now, so it creates no other one from here; to replace " <>
+        "that server, get a code in Always On and use it on a Linux server of your own."
 
   def error_sentence(:other_project),
     do:

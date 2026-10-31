@@ -241,7 +241,12 @@ defmodule FermixCore.Management.ProvisionTest do
                  role: @device
                )
 
-      assert sentence == "Fermix creates a server only on the computer its home runs on."
+      # Replacing the server through Fermix's own Hetzner path is later work;
+      # in this version the sentence says what to do instead.
+      assert sentence ==
+               "Fermix runs on your server now, so it creates no other one from here; to " <>
+                 "replace that server, get a code in Always On and use it on a Linux server " <>
+                 "of your own."
     end
 
     test "a second server is refused while the first exists", ctx do
