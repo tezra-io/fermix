@@ -274,14 +274,20 @@ defmodule FermixCore.Checklists.RegistryTest do
       refute Enum.any?(rows(repo, "Fermix"), &(&1.n == 5))
     end
 
-    test "section adds a heading, after a row or at the end, never a second of one name", %{
-      repo: repo
-    } do
+    test "section adds a heading, after a section's last row or at the end, never a second of one name",
+         %{repo: repo} do
       edit!(repo, [
-        %{"list" => "Fermix", "ops" => [%{"op" => "section", "text" => "Blocked", "after" => 2}]}
+        %{"list" => "Fermix", "ops" => [%{"op" => "section", "text" => "Blocked", "after" => 3}]}
       ])
 
-      assert [1, 2, 6, 3, 4, 5] = Enum.map(rows(repo, "Fermix"), & &1.n)
+      assert [1, 2, 3, 6, 4, 5] = Enum.map(rows(repo, "Fermix"), & &1.n)
+
+      # After an empty section's heading is a boundary too: no item moves.
+      edit!(repo, [
+        %{"list" => "Fermix", "ops" => [%{"op" => "section", "text" => "Someday", "after" => 6}]}
+      ])
+
+      assert [1, 2, 3, 6, 7, 4, 5] = Enum.map(rows(repo, "Fermix"), & &1.n)
 
       assert refusal(
                edit(repo, [
@@ -289,6 +295,41 @@ defmodule FermixCore.Checklists.RegistryTest do
                ])
              ) =~
                ~s(already has a section named "later")
+    end
+
+    # A new section never takes items from the section it lands in: inside one
+    # it is refused, with the way to do it, and nothing moves.
+    test "a section put inside a section, or inside the first group, is refused", %{repo: repo} do
+      before = rows(repo, "Fermix")
+
+      for after_n <- [1, 2] do
+        op = %{"op" => "section", "text" => "Blocked", "after" => after_n}
+
+        assert refusal(edit(repo, [%{"list" => "Fermix", "ops" => [op]}])) =~
+                 "a new section there would take the items below it"
+      end
+
+      edit!(repo, [
+        %{
+          "list" => "Loose",
+          "ops" => [
+            %{"op" => "create"},
+            %{"op" => "add", "text" => "a"},
+            %{"op" => "add", "text" => "b"}
+          ]
+        }
+      ])
+
+      assert refusal(
+               edit(repo, [
+                 %{
+                   "list" => "Loose",
+                   "ops" => [%{"op" => "section", "text" => "Later", "after" => 1}]
+                 }
+               ])
+             ) =~ "a new section there would take the items below it"
+
+      assert rows(repo, "Fermix") == before
     end
 
     test "remove takes an item or an empty section, and keeps the row for 30 days", %{
@@ -339,7 +380,23 @@ defmodule FermixCore.Checklists.RegistryTest do
 
       assert %{title: "Fermix engine", folder: "Work", rev: 2} = list(repo, "fermix engine")
 
-      edit!(repo, [%{"list" => "Fermix engine", "ops" => [%{"op" => "folder"}]}])
+      # Only an explicit null or "" takes a list out of its folder; no folder
+      # key, or the name under another key, is refused.
+      for op <- [%{"op" => "folder"}, %{"op" => "folder", "text" => "Home"}] do
+        assert refusal(edit(repo, [%{"list" => "Fermix engine", "ops" => [op]}])) =~
+                 "The op needs folder."
+      end
+
+      assert %{folder: "Work"} = list(repo, "Fermix engine")
+
+      edit!(repo, [%{"list" => "Fermix engine", "ops" => [%{"op" => "folder", "folder" => nil}]}])
+      assert %{folder: nil} = list(repo, "Fermix engine")
+
+      edit!(repo, [
+        %{"list" => "Fermix engine", "ops" => [%{"op" => "folder", "folder" => "Work"}]}
+      ])
+
+      edit!(repo, [%{"list" => "Fermix engine", "ops" => [%{"op" => "folder", "folder" => ""}]}])
       assert %{folder: nil} = list(repo, "Fermix engine")
 
       answer = edit!(repo, [%{"list" => "Fermix engine", "ops" => [%{"op" => "remove_list"}]}])
@@ -468,6 +525,42 @@ defmodule FermixCore.Checklists.RegistryTest do
 
       assert {:error, {:no_list, _, _}} =
                Registry.read(%{"list" => "Portfolio site"}, @owner, repo: repo)
+    end
+
+    # A title one list gives up and another takes in the same call lands
+    # whatever order the call touched the lists in: the store's unique index on
+    # live titles never sees two lists hold one title mid-call.
+    test "a title passed between lists in one call lands, whichever list the call touched first",
+         %{repo: repo} do
+      fermix!(repo)
+      edit!(repo, [%{"list" => "Groceries", "ops" => [%{"op" => "create"}]}])
+      fermix_id = list(repo, "Fermix").id
+      groceries_id = list(repo, "Groceries").id
+
+      edit!(repo, [
+        %{"list" => "Fermix", "ops" => [%{"op" => "check", "n" => 2}]},
+        %{"list" => "Groceries", "ops" => [%{"op" => "rename", "text" => "Food"}]},
+        %{"list" => "Fermix", "ops" => [%{"op" => "rename", "text" => "Groceries"}]}
+      ])
+
+      assert list(repo, "Groceries").id == fermix_id
+      assert list(repo, "Food").id == groceries_id
+
+      edit!(repo, [
+        %{"list" => "Groceries", "ops" => [%{"op" => "check", "n" => 3}]},
+        %{"list" => "Food", "ops" => [%{"op" => "remove_list"}]},
+        %{"list" => "Groceries", "ops" => [%{"op" => "rename", "text" => "Food"}]}
+      ])
+
+      assert list(repo, "Food").id == fermix_id
+
+      edit!(repo, [
+        %{"list" => "Food", "ops" => [%{"op" => "rename", "text" => "Pantry"}]},
+        %{"list" => "Food", "ops" => [%{"op" => "create"}, %{"op" => "add", "text" => "Lemons"}]}
+      ])
+
+      assert list(repo, "Pantry").id == fermix_id
+      assert [%{text: "Lemons"}] = rows(repo, "Food")
     end
 
     test "a call holds at most 8 lists and 100 ops", %{repo: repo} do

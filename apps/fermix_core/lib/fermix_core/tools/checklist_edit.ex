@@ -74,7 +74,7 @@ defmodule FermixCore.Tools.ChecklistEdit do
           description:
             "create (first op; folder?) makes the list. add (text, note?, section? or after?). " <>
               "check, uncheck, remove (n). edit (n, text?, note?; \"\" clears). move (n, " <>
-              "section?, after?, to_list?). section (text, after?). folder (folder; none takes " <>
+              "section?, after?, to_list?). section (text, after?). folder (folder; null takes " <>
               "it out). rename (text). remove_list. replace (markdown, rev): a line with [n] " <>
               "keeps that row, one without is new, a missing number is removed."
         },

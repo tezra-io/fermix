@@ -291,9 +291,12 @@ defmodule FermixCore.Checklists.Registry do
     end
   end
 
-  # The folder a list goes in, named as a create names it; none takes it out.
+  # The folder a list goes in, named as a create names it. Only an explicit
+  # null or "" takes it out: a call that names no folder is refused, never
+  # read as one.
   defp op_fields(:folder, op, _creates?) do
-    with {:ok, folder} <- optional_text(op, "folder", :folder, @folder_max),
+    with :ok <- present(op, "folder"),
+         {:ok, folder} <- optional_text(op, "folder", :folder, @folder_max),
          do: {:ok, %{op: :folder, text: folder}}
   end
 
@@ -310,6 +313,10 @@ defmodule FermixCore.Checklists.Registry do
          {:ok, rows} <- parsed(markdown) do
       {:ok, %{op: :replace, rev: rev, rows: rows}}
     end
+  end
+
+  defp present(op, key) do
+    if Map.has_key?(op, key), do: :ok, else: {:error, {:missing, String.to_existing_atom(key)}}
   end
 
   defp something_to_edit(nil, :keep), do: {:error, :nothing_to_edit}
@@ -616,6 +623,12 @@ defmodule FermixCore.Checklists.Registry do
 
   def describe_error({:kind_changed, n}),
     do: "[#{n}] cannot change between a section and an item; give the new one no number."
+
+  def describe_error({:section_inside, n}) do
+    "[#{n}] has items after it in its section, and a new section there would take the items " <>
+      "below it; put the section after that section's last row or at the end, then move the " <>
+      "items you want into it."
+  end
 
   def describe_error({:section_not_empty, n}),
     do: "Section [#{n}] still holds items; move or remove them first."

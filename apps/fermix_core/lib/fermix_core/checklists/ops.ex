@@ -22,6 +22,13 @@ defmodule FermixCore.Checklists.Ops do
   unstamped and the per-turn note names it on every owner turn. A row it adds
   is stamped, and the stamp is never cleared.
 
+  A new section goes only at a section boundary, after a section's last row
+  or at the end, so it never takes items from the section it lands in.
+
+  A removed list's title is free at once, so another list may take it within
+  the 30 days the removed one is kept: the wire's `restore`, when it comes,
+  must meet that clash rather than let the store's unique index refuse it.
+
   Refusals are `{:error, {:op_failed, change, op, list, reason}}`, the change
   and the op counted from 1, which `Checklists.Registry.describe_error/1`
   turns into the sentence the model reads.
@@ -637,9 +644,16 @@ defmodule FermixCore.Checklists.Ops do
   defp place_index(rows, _op),
     do: {:ok, Enum.find_index(rows, &(&1.kind == :section)) || length(rows)}
 
-  # A new section goes right after the row `after` names, or at the list's end.
+  # A new section goes right after the row `after` names when that row ends
+  # its section (or the first group), or at the list's end: anywhere else it
+  # would take the items below it.
   defp section_index(rows, %{after: n}) when is_integer(n) do
-    with {:ok, index, _row} <- find(rows, n), do: {:ok, index + 1}
+    with {:ok, index, _row} <- find(rows, n) do
+      case Enum.at(rows, index + 1) do
+        %{kind: :item} -> {:error, {:section_inside, n}}
+        _section_or_end -> {:ok, index + 1}
+      end
+    end
   end
 
   defp section_index(rows, _op), do: {:ok, length(rows)}

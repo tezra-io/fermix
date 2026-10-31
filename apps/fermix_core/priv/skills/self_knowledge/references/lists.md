@@ -43,9 +43,9 @@ One call is `{"changes": [{"list": <title or id>, "ops": [...]}]}`: at most 8 li
 - `check`, `uncheck` (`n`): done or not; twice changes nothing.
 - `edit` (`n`; `text`, `note`, an empty note clearing it): rewords an item or a section heading.
 - `move` (`n`; `section`, `after`, `to_list`): reorders an item, or moves it to another list, where it takes that list's next number.
-- `section` (`text`; `after`): a new heading, at the end without `after`.
+- `section` (`text`; `after`): a new heading right after a section's last row, or at the end without `after`; never inside a section, where it would take the items below it.
 - `remove` (`n`): an item, or a section with no items under it.
-- `folder` (`folder`, none taking the list out of its folder); `rename` (`text`); `remove_list`.
+- `folder` (`folder`, an explicit null or "" taking the list out of its folder; a call with no `folder` is refused); `rename` (`text`); `remove_list`.
 - `replace` (`markdown`, `rev`): the whole list as text. A line with `[n]` keeps that row, a line without one is new, a number left out is removed. Refused when the list moved past `rev`: "The list changed since you read it at rev 112; read it again." A list created in the same call needs no `rev`.
 
 ## Who can use them
