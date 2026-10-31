@@ -8,9 +8,11 @@ defmodule FermixCore.Browser.BrowserObserveTest do
   # commands are reported to a registered collector.
   use ExUnit.Case, async: false
 
+  alias FermixCore.Browser
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
   alias FermixCore.Browser.ProfileServer
+  alias FermixCore.Browser.Scope
 
   @page :observe_fake_page
   @collector :observe_cdp_collector
@@ -282,6 +284,31 @@ defmodule FermixCore.Browser.BrowserObserveTest do
     after
       0 -> Enum.reverse(acc)
     end
+  end
+
+  # A server on the fake page that the facade routes a guest conversation's
+  # calls to: registered under that conversation's profile key, where
+  # `ProfileManager` would have started it.
+  defp facade_server(config) do
+    conversation = {"cli", "observe-facade-#{System.unique_integer([:positive])}", :root}
+    context = %{agent_name: "t", conversation_key: conversation, source_trust: :guest}
+    {:ok, owner} = Scope.owner_key(context)
+
+    pid =
+      start_supervised!(
+        {ProfileServer,
+         owner_key: owner,
+         profile_name: "fermix",
+         profile: %{cdp_url: "ws://fake/observe"},
+         config: config,
+         launcher: NoLauncher,
+         connection: Page,
+         registry: FermixCore.Browser.Registry,
+         key: {owner, "fermix"}},
+        id: :facade_server
+      )
+
+    {pid, context}
   end
 
   # What each probe of the page saw, oldest first, up to the first render since
@@ -1098,5 +1125,39 @@ defmodule FermixCore.Browser.BrowserObserveTest do
 
     assert Agent.get(:observe_fake_clock, & &1) == Config.act_limits().settle_budget_ms,
            "the snapshot gave up before the budget"
+  end
+
+  # ── a form that submits in the same call ───────────────────────────────────
+
+  # `submit: true` is the fill, then `act kind=submit` on the form's first
+  # field, composed by the facade over this profile's own route. The fill does
+  # not look, so the ref it was given still names the form when the submit is
+  # sent, and the submit is looked at as any submit is: one look, at the end.
+  test "a fill_form that submits fills, submits from its first field, and looks once",
+       %{config: config} do
+    {pid, context} = facade_server(config)
+    assert {:ok, _} = req(pid, "start")
+    assert {:ok, %{"target" => target}} = req(pid, "snapshot")
+    change_page()
+    Agent.update(@page, &%{&1 | log: []})
+
+    args = %{
+      "action" => "act",
+      "kind" => "fill_form",
+      "target" => target,
+      "fields" => [%{"ref" => "textbox_1", "text" => "Rome"}],
+      "submit" => true
+    }
+
+    assert {{:ok, json}, :cdp} = Browser.execute(args, context)
+    result = Jason.decode!(json)
+
+    assert result["action"] == "submit"
+    assert result["submitted"] == "Search"
+    assert result["page"] == "changed"
+    assert result["snapshot"] =~ "Book this flight"
+    assert result["ready_state"] == "complete"
+    assert %{"action" => "fill_form", "filled" => [_field]} = result["fill"]
+    assert Enum.count(Agent.get(@page, & &1.log), &(&1 == :render)) == 1
   end
 end

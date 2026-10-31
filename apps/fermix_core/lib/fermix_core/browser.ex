@@ -28,6 +28,9 @@ defmodule FermixCore.Browser do
   # form, so they are decided from their arguments in `mutating?/2`.
   @mutating_actions ~w(open navigate act close upload download dialog focus)
   @mutating_act_kinds @act_kinds -- ["get", "wait"]
+  # The `act` kinds that fill a form and can send it in the same call
+  # (`submit: true`, composed in `run/5`).
+  @submitting_kinds ~w(fill_form sign_in)
 
   @spec actions() :: [String.t()]
   def actions, do: @actions
@@ -169,14 +172,71 @@ defmodule FermixCore.Browser do
     end
   end
 
+  # A fill that submits is the fill and then `act kind=submit` on a ref of the
+  # same form, on the tab the fill reports, over the same route as any other
+  # request: every backend already answers both. A fill that fails submits
+  # nothing.
+  defp run("act", %{"submit" => true} = args, context, mode, route) do
+    with {:ok, receipt} <- fill(Map.delete(args, "submit"), context, mode, route) do
+      submit = request("act", submit_args(args, receipt), context)
+      submitted(route.(submit), receipt)
+    end
+  end
+
   # A sign-in is two requests with the owner's answer between them
   # (`SignIn`); every other call is one request.
   defp run("act", %{"kind" => "sign_in"} = args, context, mode, route),
     do: SignIn.run(args, context, mode, route)
 
-  defp run(action, args, context, _mode, route) do
-    route.(%{action: action, args: args, context: context, mutating: mutating?(action, args)})
+  defp run(action, args, context, _mode, route), do: route.(request(action, args, context))
+
+  defp request(action, args, context),
+    do: %{action: action, args: args, context: context, mutating: mutating?(action, args)}
+
+  # The fill a submit follows is not looked at: the submit's look is the one the
+  # model reads, and a look between them would replace the refs the submit is
+  # sent with. `fill_form` never looks; the pane's sign-in is told not to.
+  defp fill(%{"kind" => "sign_in"} = args, context, mode, route),
+    do: SignIn.run(args, context, mode, route, false)
+
+  defp fill(args, context, _mode, route), do: route.(request("act", args, context))
+
+  # The submit goes to the tab the fill reports, with a ref of the form it
+  # filled.
+  defp submit_args(args, receipt) do
+    %{
+      "action" => "act",
+      "kind" => "submit",
+      "ref" => form_ref(args),
+      "target" => receipt["target"]
+    }
   end
+
+  # `fill_form`'s first field, a sign-in's password field, else its username
+  # field.
+  defp form_ref(%{"kind" => "fill_form", "fields" => [%{"ref" => ref} | _rest]}), do: ref
+  defp form_ref(%{"kind" => "sign_in"} = args), do: args["password_ref"] || args["username_ref"]
+
+  # The call answers in the vocabulary every act answers in, the submit's
+  # result at the top (`page`, `snapshot`, `url`, `ready_state`), and the
+  # fill's receipt beside it as `fill`. The receipt's tab list is left out: the
+  # submit's, taken after both, is the one that is current.
+  defp submitted({:ok, result}, receipt), do: {:ok, Map.put(result, "fill", filled(receipt))}
+
+  # The fields hold what was typed, so the failure keeps the submit's own code
+  # and recovery and says so, with the fill's receipt, rather than leaving the
+  # model to fill the form again blindly.
+  defp submitted({:error, %Error{} = error}, receipt) do
+    message =
+      "The form was filled (`fill` below is the fill's receipt), and then submitting it failed. " <>
+        "Take a snapshot to see the form as it stands before acting on it again. The " <>
+        "submit's error: " <> error.message
+
+    {:error,
+     %{error | message: message, details: Map.put(error.details, "fill", filled(receipt))}}
+  end
+
+  defp filled(receipt), do: Map.delete(receipt, "tabs")
 
   # The turn's lost pane answers here too, since a sign-in's second request
   # comes after the owner's answer, and the pane may have gone meanwhile. A
@@ -226,7 +286,9 @@ defmodule FermixCore.Browser do
   end
 
   defp validate_args("act", %{"kind" => kind} = args) when is_binary(kind) do
-    validate_act_args(kind, args)
+    with :ok <- validate_act_args(kind, args) do
+      validate_submit(kind, Map.get(args, "submit"))
+    end
   end
 
   defp validate_args("act", _args), do: {:error, Error.new("missing_arg", "act requires kind")}
@@ -396,6 +458,32 @@ defmodule FermixCore.Browser do
 
   defp validate_act_args(kind, _args),
     do: {:error, Error.new("invalid_action", "Invalid act kind: #{kind}")}
+
+  # `submit` sends the form a fill has just filled, so only the two kinds that
+  # fill a form take it, and only as a boolean: anything else is refused here,
+  # before anything is typed, with the call that does what it was reaching for.
+  defp validate_submit(_kind, nil), do: :ok
+
+  defp validate_submit(kind, submit) when kind in @submitting_kinds and is_boolean(submit),
+    do: :ok
+
+  defp validate_submit(kind, _submit) when kind in @submitting_kinds do
+    {:error,
+     Error.new(
+       "invalid_arg",
+       "#{kind} `submit` must be true or false. Pass true to send the form once it is " <>
+         "filled, in the same call; leave it out to fill only."
+     )}
+  end
+
+  defp validate_submit(kind, _submit) do
+    {:error,
+     Error.new(
+       "invalid_arg",
+       "#{kind} takes no `submit`: only `fill_form` and `sign_in` fill a form and can send " <>
+         "it in the same call. To send a form, call `act` `kind=submit` with a ref from it."
+     )}
+  end
 
   defp validate_form_fields([]), do: {:error, Error.new("missing_arg", fill_form_shape())}
 

@@ -54,11 +54,12 @@ defmodule FermixCore.Browser.HostServer do
   (`Browser.SignIn` asks the owner between them, in the tool call's process):
   `login_for/3` sends `page.login_for` and answers the saved login's site and
   username, and `sign_in/3` sends `page.sign_in` with the snapshot's refs
-  turned into the app's and answers which fields were filled. The task
-  records the version its connection declared when it binds; on an app that
-  declared 1 both answer `sign_in_app_too_old` and nothing is sent. No
-  password crosses this wire: the app reads it from its keychain and types it
-  itself.
+  turned into the app's and answers which fields were filled, with a look at
+  the page as an observed act has, unless the same call submits the form
+  next. The task records the version its connection declared when it binds;
+  on an app that declared 1 both answer `sign_in_app_too_old` and nothing is
+  sent. No password crosses this wire: the app reads it from its keychain and
+  types it itself.
   """
 
   @behaviour FermixCore.Browser.Backend
@@ -425,7 +426,7 @@ defmodule FermixCore.Browser.HostServer do
            {:ok, tab} <- resolve_tab(args["target"], state),
            :ok <- undialogged(tab, state),
            {:ok, refs} <- sign_in_refs(args, tab, state) do
-        mark = Map.get(state.observations, tab.id)
+        mark = sign_in_observation(args, tab, state)
 
         payload =
           %{"tab_id" => tab.wire, "site" => args["site"], "login_site" => args["login_site"]}
@@ -1091,6 +1092,12 @@ defmodule FermixCore.Browser.HostServer do
   end
 
   defp no_login_names(answer, _site), do: answer
+
+  # A sign-in is looked at afterwards on a tab the model has looked at, as an
+  # observed act is, unless a submit follows it in the same call
+  # (`Browser.SignIn.run/5`): the submit's look is the one the model reads.
+  defp sign_in_observation(%{"observe" => false}, _tab, _state), do: nil
+  defp sign_in_observation(_args, tab, state), do: Map.get(state.observations, tab.id)
 
   # The snapshot's refs the call names, as the app's own element refs.
   defp sign_in_refs(args, tab, state) do
