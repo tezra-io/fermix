@@ -65,7 +65,9 @@ defmodule FermixCore.Management.Home do
   reader of the live settings, `ConfigStore.current_snapshot/0`),
   `:disk_usage` (a 1-arity reader of a home's disk, `Home.Disk.usage/2`),
   `:version`, `:now` and `:host_os`. `:supervised` is the caller's world for
-  the disk's `df` (false from a tree-less verb).
+  the disk's `df` (false from a tree-less verb), and `:unreadable_files` the
+  memory that logs an unreadable file the summary reads once per stretch
+  (`Home.UnreadableFiles`, the default; nil from a tree-less verb).
   `:primary_forward` is the daemon's way to the primary, given only on a
   linked desktop.
   """

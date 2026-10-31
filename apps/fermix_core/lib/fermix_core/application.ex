@@ -267,6 +267,10 @@ defmodule FermixCore.Application do
         # write the ledger (a management call, a job, the desktop relay). It
         # runs no writer's code, so nothing it serves can bring it down.
         FermixCore.Home.Provision.Ledger.Lock,
+        # Which files `home.status` reads cannot be read now, so each is
+        # logged once a stretch however often the apps poll; in every role,
+        # before anything that answers `home.status`.
+        FermixCore.Home.UnreadableFiles,
         # The OAuth loopback listeners open now (M75 D17), before anything
         # that runs a sign-in: a desktop's sign-in is forwarded from it.
         FermixCore.Auth.LoopbackRegistry,

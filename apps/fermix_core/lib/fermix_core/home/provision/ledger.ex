@@ -99,8 +99,7 @@ defmodule FermixCore.Home.Provision.Ledger do
 
   alias FermixCore.Home.Provision
   alias FermixCore.Home.Provision.Ledger.Lock
-
-  require Logger
+  alias FermixCore.Home.UnreadableFiles
 
   @version 1
   @dir_mode 0o700
@@ -478,11 +477,19 @@ defmodule FermixCore.Home.Provision.Ledger do
   @doc """
   What the summary reads for `host` (`"hetzner"` unless named): the state,
   whether the token is accepted, the server's facts and the last failure.
-  An unreadable file is logged and answered `unreadable` with its sentence.
+  An unreadable file is answered `unreadable` with its sentence on every
+  read, and logged once when it stops being readable and once when it reads
+  again (`Home.UnreadableFiles`, `opts`' `:unreadable_files`: that memory,
+  or nil for none), since `home.status` is polled.
   """
-  @spec state(Path.t(), String.t()) :: state_view()
-  def state(home, host \\ "hetzner") when is_binary(home) and is_binary(host) do
-    case read(home, host) do
+  @spec state(Path.t(), String.t(), keyword()) :: state_view()
+  def state(home, host \\ "hetzner", opts \\ [])
+      when is_binary(home) and is_binary(host) and is_list(opts) do
+    read = read(home, host)
+    memory = Keyword.get(opts, :unreadable_files, UnreadableFiles)
+    :ok = UnreadableFiles.log_read(path(home, host), "provision", read, memory)
+
+    case read do
       {:ok, ledger} ->
         %{
           state: derive(ledger),
@@ -493,9 +500,7 @@ defmodule FermixCore.Home.Provision.Ledger do
           replace: replace_view(ledger)
         }
 
-      {:error, reason} ->
-        Logger.error("provision: #{path(home, host)} could not be read: #{inspect(reason)}")
-
+      {:error, _reason} ->
         %{
           state: :unreadable,
           token: :none,

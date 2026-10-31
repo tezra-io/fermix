@@ -85,7 +85,8 @@ defmodule Fermix.CLI.HomeStatusCommand do
         engine_role: role,
         config: config,
         scheduler: nil,
-        supervised: false
+        supervised: false,
+        unreadable_files: nil
       )
     end
   end

@@ -135,6 +135,8 @@ defmodule FermixCore.Home.Role do
        "(busctl) run under"},
     {Task.Supervisor, "the task supervisor the candidate's enrollment and restore run under"},
     {FermixCore.Trace, "the run trace the move's lifecycle events are recorded in"},
+    {FermixCore.Home.UnreadableFiles,
+     "the memory home.status logs an unreadable file through, once while it stays unreadable"},
     {FermixCore.Management.Lifecycle, "the daemon's one stop path, which restarts it"},
     {Fermix.CLI.Daemon, "daemon.sock, which answers home.status and refuses the rest"},
     {FermixChannels.Home.CandidateSupervisor,

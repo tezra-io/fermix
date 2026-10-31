@@ -55,12 +55,14 @@ defmodule FermixCore.Home.MoveReadiness do
   alias FermixCore.Home.Disk
   alias FermixCore.Home.MoveSecrets
   alias FermixCore.Home.Snapshot.S3
+  alias FermixCore.Home.UnreadableFiles
   alias FermixCore.Management.Copy
   alias FermixCore.Plugins.Dist.Index
 
   require Logger
 
   @plugin_lockfile "plugins/installed.json"
+  @unreadable_settings "The settings file could not be read; the daemon log says why."
 
   @type status :: :ok | :warn | :block
   @type item :: %{id: String.t(), status: status(), sentence: String.t()}
@@ -105,12 +107,24 @@ defmodule FermixCore.Home.MoveReadiness do
   What the home at `home` has turned on that runs only on this computer and
   stops after a move, read from its settings: iMessage (only when `macos?`),
   voice calls and meetings, in that order; or the sentence that says the
-  settings could not be read (logged).
+  settings could not be read. `home.status` reads it on every poll, so an
+  unreadable file is logged once when it stops being readable and once when
+  it reads again (`Home.UnreadableFiles`, `opts`' `:unreadable_files`: that
+  memory, or nil for none).
   """
-  @spec stays_here(Path.t(), boolean()) ::
+  @spec stays_here(Path.t(), boolean(), keyword()) ::
           {:ok, [:imessage | :voice | :meetings]} | {:error, String.t()}
-  def stays_here(home, macos?) when is_binary(home) and is_boolean(macos?) do
-    with {:ok, text} <- read_config(home), do: {:ok, features(text, macos?)}
+  def stays_here(home, macos?, opts \\ [])
+      when is_binary(home) and is_boolean(macos?) and is_list(opts) do
+    file = config_path(home)
+    read = config_text(file)
+    memory = Keyword.get(opts, :unreadable_files, UnreadableFiles)
+    :ok = UnreadableFiles.log_read(file, "home status", read, memory)
+
+    case read do
+      {:ok, text} -> {:ok, features(text, macos?)}
+      {:error, _reason} -> {:error, @unreadable_settings}
+    end
   end
 
   @doc "The block sentences of `report`, in order; none when it is ready."
@@ -433,17 +447,25 @@ defmodule FermixCore.Home.MoveReadiness do
 
   defp item(id, status, sentence), do: %{id: id, status: status, sentence: sentence}
 
+  # A review is asked for, not polled, so each unreadable read is logged.
   defp read_config(home) do
-    case File.read(Path.join(home, "config.toml")) do
+    case config_text(config_path(home)) do
       {:ok, text} ->
         {:ok, text}
 
-      {:error, :enoent} ->
-        {:ok, ""}
-
       {:error, reason} ->
         Logger.error("move readiness: config.toml could not be read: #{inspect(reason)}")
-        {:error, "The settings file could not be read; the daemon log says why."}
+        {:error, @unreadable_settings}
+    end
+  end
+
+  defp config_path(home), do: Path.join(home, "config.toml")
+
+  # A home with no settings file turns nothing on.
+  defp config_text(file) do
+    case File.read(file) do
+      {:error, :enoent} -> {:ok, ""}
+      read -> read
     end
   end
 

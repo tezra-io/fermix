@@ -125,14 +125,16 @@ defmodule FermixCore.Management.HomeSummary do
   The facts of `home`'s summary: `status` is the `home.status` record's own
   facts (`Management.Home.status/1` has gathered them, with
   `primary_too_old`), `link` the rail's status, and `opts` the seams `:now`
-  and `:host_os`. Reads the ledger, the last readiness review, on the
-  primary what its settings turn on that stops after a move, and, on a
-  desktop, the size of its stored copies.
+  and `:host_os`, and `:unreadable_files` (`Home.UnreadableFiles`, or nil
+  for a verb with no engine tree). Reads the ledger, the last readiness
+  review, on the primary what its settings turn on that stops after a move,
+  and, on a desktop, the size of its stored copies.
   """
   @spec gather(Path.t(), map(), map(), map(), keyword()) :: facts()
   def gather(home, %{role: role} = record, link, status, opts)
       when is_binary(home) and is_map(link) and is_map(status) and is_list(opts) do
     host_os = Keyword.get_lazy(opts, :host_os, &host_os/0)
+    reads = Keyword.take(opts, [:unreadable_files])
 
     %{
       role: role,
@@ -143,14 +145,14 @@ defmodule FermixCore.Management.HomeSummary do
       move: status.move,
       link: link,
       candidates: status.candidates,
-      provision: Ledger.state(home),
+      provision: Ledger.state(home, "hetzner", reads),
       review: review(home, role),
       snapshots: status.snapshots,
       disk: status.disk,
       primary_home: status.primary_home,
       primary_too_old: Map.get(status, :primary_too_old, false),
       copies_bytes: copies_bytes(home, role),
-      stays_here: stays_here(home, role, host_os)
+      stays_here: stays_here(home, role, host_os, reads)
     }
   end
 
@@ -765,14 +767,14 @@ defmodule FermixCore.Management.HomeSummary do
   defp review(_home, _role), do: nil
 
   # What stops after a move, which only the computer that sets it up says.
-  defp stays_here(home, :primary, host_os) do
-    case MoveReadiness.stays_here(home, host_os == :macos) do
+  defp stays_here(home, :primary, host_os, reads) do
+    case MoveReadiness.stays_here(home, host_os == :macos, reads) do
       {:ok, features} -> features
       {:error, _sentence} -> []
     end
   end
 
-  defp stays_here(_home, _role, _host_os), do: []
+  defp stays_here(_home, _role, _host_os, _reads), do: []
 
   # The space the server's backups take on this desktop (`Desktop.SnapshotStore`).
   defp copies_bytes(home, :device) do
