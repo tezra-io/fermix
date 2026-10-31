@@ -44,6 +44,14 @@
 {"type":"proposal_resolved","profile_id":"main","proposal_id":"cpr_0e1d2c3b4a5f6e7d8c9b0a1f","state":"refused","sentence":"Not run: the validator refused it.","result_text":"Only issues in the ops repository."}
 {"type":"proposal_resolved","profile_id":"main","proposal_id":"cpr_7b6a5f4e3d2c1b0a9f8e7d6c","state":"expired","sentence":"That proposal expired; nothing ran."}
 {"type":"proposal_resolved","profile_id":"main","proposal_id":"cft_5d2e8a1c9b4f7e3a6c0d1b2e","state":"confirmed","sentence":"Confirmed; the follow-up is starting."}
+{"type":"checklists","profile_id":"main","lists":[{"list_id":"ck_9t3k6w0p5h","title":"Fermix","folder":"Projects","open":4,"done":1,"rev":12},{"list_id":"ck_4q8m2x7v1d","title":"Groceries","open":3,"done":1,"rev":7}]}
+{"type":"checklists","profile_id":"main","lists":[]}
+{"type":"accepted","client_msg_id":"mac-21","duplicate":false}
+{"type":"checklist","profile_id":"main","list":{"list_id":"ck_4q8m2x7v1d","title":"Groceries","rev":7,"rows":[{"row_id":"ci_8f3k2m9q1x","kind":"item","text":"Bread","done":false},{"row_id":"ci_5w7p0t4n6b","kind":"section","text":"Produce"},{"row_id":"ci_0r2y8e6u3g","kind":"item","text":"Lemons","note":"The unwaxed ones","done":false},{"row_id":"ci_3h9d1v8r2k","kind":"item","text":"Basil","done":true,"done_at":"2031-06-02T14:00:00.000000Z"},{"row_id":"ci_6j4c7x0m5s","kind":"item","text":"Rice","done":false}]},"made":{"mac-21":"ci_0r2y8e6u3g"}}
+{"type":"checklist","profile_id":"main","list":{"list_id":"ck_4q8m2x7v1d","title":"Groceries","rev":8,"rows":[{"row_id":"ci_8f3k2m9q1x","kind":"item","text":"Bread","done":false},{"row_id":"ci_5w7p0t4n6b","kind":"section","text":"Produce"},{"row_id":"ci_0r2y8e6u3g","kind":"item","text":"Lemons","note":"The unwaxed ones","done":false},{"row_id":"ci_6j4c7x0m5s","kind":"item","text":"Rice","done":false}],"removed":[{"row_id":"ci_3h9d1v8r2k","kind":"item","text":"Basil","done":true,"done_at":"2031-06-02T14:00:00.000000Z","removed_at":"2031-06-02T14:05:00.000000Z"}]}}
+{"type":"checklist","profile_id":"main","list":{"list_id":"ck_2b7n5r8c3j","title":"Packing","rev":1,"rows":[]},"made":{"mac-20":"ck_2b7n5r8c3j"}}
+{"type":"checklist","profile_id":"main","list":{"list_id":"ck_2b7n5r8c3j","title":"Packing","rev":3,"rows":[{"row_id":"ci_7l1z4a9f2o","kind":"item","text":"Passport","done":false}],"removed_at":"2031-05-20T08:00:00.000000Z"}}
+{"type":"accepted","client_msg_id":"mac-21","duplicate":true}
 {"type":"error","reason":"handshake_required"}
 {"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":7,"min_version":5,"max_version":6}
 {"type":"error","reason":"stale_primary","message":"This engine is at epoch 2; you have seen epoch 3: the primary moved, reconnect to the current one"}
@@ -54,6 +62,9 @@
 {"type":"error","reason":"request_failed","message":"{:media_copy_failed, :enospc}","ref":"586f997a42496291b5d9295745b229ab0754319579aaa610e689d5b25060646c"}
 {"type":"error","reason":"request_failed","message":"That call was already confirmed; it runs at most once.","client_msg_id":"mac-10"}
 {"type":"error","reason":"request_failed","message":"Only the owner can answer a proposal, from the Fermix app or a paired phone.","client_msg_id":"mac-11"}
+{"type":"error","reason":"request_failed","message":"That row is not in this list any more; pull the list again.","client_msg_id":"mac-23"}
+{"type":"error","reason":"request_failed","message":"Another list is named \"Packing\" now, so this one cannot come back under that name; restore it with a new title, or rename the other list first.","client_msg_id":"mac-35"}
+{"type":"error","reason":"request_failed","message":"Only the owner's own Fermix app can read or change the owner's lists."}
 {"type":"error","reason":"primary_unreachable","message":"The server fermix-vm is unreachable. Fermix keeps your message until it is back."}
 {"type":"error","reason":"desktop_revoked","message":"The server fermix-vm does not know this computer: it was removed from the server's devices, or the server was restored from a snapshot taken before this computer joined it. Fermix stopped reaching it."}
 {"type":"error","reason":"unattended_client","message":"Only the Fermix app chats with the server from this computer, and this process was started by Fermix or runs detached."}

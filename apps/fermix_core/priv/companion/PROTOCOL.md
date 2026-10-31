@@ -24,7 +24,9 @@ machine, so neither it nor its answers are shared. The proposal events
 (version 4, and the follow-up's card of version 5) are this wire's alone for
 now: the phone's wire carries them at its next version. So are what a turn is
 doing (version 6): `reasoning`, and the `activity` a `tool_event` that starts
-a tool carries here, which the phone's `tool_event` does not.
+a tool carries here, which the phone's `tool_event` does not. So are the
+owner's lists (version 6): the phone's wire does not carry them yet, and gains
+them with the Android app's lists.
 
 ## Transport
 
@@ -204,6 +206,24 @@ is thinking. It adds:
 A client shows the latest of the two as the turn's current step, and keeps
 `tool` for its logs: the activity is the words, the tool is the id.
 
+Version 6 also brings the owner's lists (M85) to the Mac, drawn and changed
+live beside the chat. It adds:
+
+- three client events: `checklists_pull { profile_id }`, the index;
+  `checklist_pull { profile_id, list_id, removed? }`, one whole list; and
+  `checklist_edit { client_msg_id, profile_id, list_id?, op }`, one change by
+  row id;
+- two server events: `checklists`, the index, and `checklist`, one whole list,
+  each the answer to its pull and pushed again, whole, after every committed
+  change (see *Lists*).
+
+Each of the five names version 6 as its `x-since-version`. The daemon takes
+them from, and sends them to, only a version 6 connection placed as the
+owner's, and sends a list event only to a connection that pulled: the index
+to one that pulled the index, a list to one that holds it. A version 5
+connection that sends one is refused with `error: unknown_event` and closed,
+and is never sent one. The phone's wire does not carry lists in this version.
+
 Every version 5 event, field and rule holds unchanged on version 6. Since
 version 6 the window is {5, 6}, so a version 4 client is refused with
 `error: unsupported_protocol_version` (`client_too_old`).
@@ -266,10 +286,11 @@ older daemon and is treated as `primary`. An engine in the device role runs on
 a home that is a retired copy of the primary, or never was one, so its epoch
 can be lower than the primary's without anything being wrong. Since that copy
 is retired, it refuses every event that would write it (`msg`, `command`,
-`cancel`, `read_state`, `proposal_answer`) with `error: request_failed` and
-the `message` `This engine runs in the device role; the primary is <host>.`,
-writing nothing, and serves the reads (`history_pull`, `history_search`,
-`media_fetch`) as before.
+`cancel`, `read_state`, `proposal_answer`, `checklist_edit`) with
+`error: request_failed` and the `message` `This engine runs in the device
+role; the primary is <host>.`, writing nothing, and serves the reads
+(`history_pull`, `history_search`, `media_fetch`, `checklists_pull`,
+`checklist_pull`) as before.
 
 A client keeps the highest `primary_epoch` it has seen from a `primary` only,
 and sends it as `client_hello.primary_epoch`. A `device` engine's epoch is
@@ -314,6 +335,9 @@ in a fixed order:
 | `media_fetch` | `profile_id`, `ref` (64 lowercase hex digits) | Version 3. Asks for a managed local file holding the bytes of `ref`, a media ref a row of the profile names. Answered by `media_path`, `media_missing`, or `error: request_failed` with `ref`. Any other `ref` is refused with `error: invalid_field` (`ref`) and the connection is closed. See *Managed media files*. |
 | `media_release` | `profile_id`, `ref` (64 lowercase hex digits) | Version 3. The client has finished with the file `media_path` granted for `ref`. Never answered. Releasing a ref this connection does not hold changes nothing. |
 | `proposal_answer` | `client_msg_id`, `profile_id`, `proposal_id`, `decision` (`confirm` or `deny`) | Version 4. The owner's answer to a proposal. Answered `accepted` (`duplicate: false`) once the decision is recorded, then `proposal_resolved`; a refusal is `error: request_failed` with the daemon's sentence and `client_msg_id`. Taken only from a connection placed as the owner's; see *Proposals*. |
+| `checklists_pull` | `profile_id` | Version 6. Asks for the index of the owner's lists, answered `checklists`; from then on this connection is sent the index again after any change. Taken only from a connection placed as the owner's; see *Lists*. |
+| `checklist_pull` | `profile_id`, `list_id` (`ck_` id); `removed?` (boolean) | Version 6. Asks for one whole list, answered `checklist`; the connection then holds it (at most 16) and is sent it again after every change. `removed: true` adds the rows removed in the last 30 days. Owner's connection only; see *Lists*. |
+| `checklist_edit` | `client_msg_id` (at most 128 characters), `profile_id`, `op`; `list_id?` (`ck_` id, for every op but `create`) | Version 6. One op on the owner's lists, by row id. Answered `accepted` once applied, `duplicate: true` when the `client_msg_id` was already applied; a refusal is `error: request_failed` with the engine's sentence and `client_msg_id`, and changes nothing. Owner's connection only; see *Lists*. |
 
 `profile_id` is `main`, the one profile; any other is refused with
 `error: unsupported_profile`, and the connection stays open.
@@ -323,7 +347,7 @@ in a fixed order:
 | `type` | Fields | Notes |
 |---|---|---|
 | `server_hello` | `min_version`, `max_version`; `primary_epoch?`, `role?` | Handshake reply. `primary_epoch` is the home's primary epoch, absent only from a home that has never booted as the primary; `role` is the engine's, `primary` or `device`, which this daemon always sends and an older daemon leaves out; see *Primary epoch*. |
-| `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | Durable receipt for a `msg` or `command`; clears the outbox item. `server_seq` is present only on a duplicate whose request already has a reply row: that reply's seq. A first `accepted` never carries it; the request's own row arrives as a `row`. |
+| `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | Durable receipt for a `msg`, a `command` or (version 6) a `checklist_edit`; clears the outbox item. `server_seq` is present only on a duplicate whose request already has a reply row: that reply's seq. A first `accepted` never carries it; the request's own row arrives as a `row`. |
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | A turn began answering `in_reply_to`. |
 | `text_delta` | `turn_id`, `text` | Text to append to the turn's draft, exactly as sent. |
 | `tool_event` | `turn_id`, `tool`, `phase`; `detail?`, `activity?` | `phase` is `start` or `stop`. `detail` is at most 512 bytes. `activity`, on a start, is the engine's sentence for the step, at most 120 bytes; see *Version 6*. |
@@ -342,6 +366,8 @@ in a fixed order:
 | `media_missing` | `ref` | Version 3. Nothing to grant for `ref`; see *Managed media files*. Sent only to a connection on version 3. |
 | `proposal` | `profile_id`, `proposal` (the card) | Version 4. A proposal waiting for the owner: sent when it is stored, and again after `server_hello` for each still waiting, oldest first. Sent only to a connection on version 4 placed as the owner's; see *Proposals*. |
 | `proposal_resolved` | `profile_id`, `proposal_id`, `state`, `sentence`; `result_status?`, `result_text?` | Version 4. A proposal left `waiting`: `denied`, `expired` or `refused`, or `confirmed` once its call has finished, whichever surface decided it. Sent only to a connection on version 4 placed as the owner's; see *Proposals*. |
+| `checklists` | `profile_id`, `lists[]` | Version 6. The index: every live list as `{list_id, title, folder?, open, done, rev}`, in picker order. The answer to `checklists_pull`, and pushed again, whole, after any change. Sent only to a version 6 connection placed as the owner's that pulled the index; see *Lists*. |
+| `checklist` | `profile_id`, `list`; `made?` | Version 6. One whole list, `{list_id, title, rev, rows[], removed[]?, removed_at?}`. The answer to `checklist_pull`, and pushed again, whole, after every committed change to it, at most once per 100 ms. Sent only to a version 6 connection placed as the owner's that holds the list; see *Lists*. |
 | `error` | `reason`; `message?`, `field?`, `event?`, `client_msg_id?`, `ref?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | A refusal; see *Errors*. |
 
 ### Timeline shapes
@@ -543,7 +569,8 @@ same `blocks`, and have the key only when the reply has one. The rules:
   (at most 80 characters), and `rows` the `ci_` ids of the rows the turn added
   or changed, empty for a list it only read. It holds ids and the title, never
   an item's words: a client that draws it draws each list's rows as they stand
-  now, and the reply's text stays the record of what happened. A scheduled
+  now (on version 6, by `checklist_pull`; see *Lists*), and the reply's text
+  stays the record of what happened. A scheduled
   job's message carries one the same way.
 
 The phones' `row` carries the history message whole, so it carries `blocks`
@@ -829,6 +856,90 @@ it survives a restart.
   again: its waiting card is dropped at the next `server_hello`, since the
   daemon does not send it back.
 
+## Lists
+
+The owner's lists (M85) live in the engine's store, and the model, a scheduled
+job and the Mac change them through one transaction. Version 6 brings them to
+this socket: the Mac reads the index and whole lists, changes them by row id,
+and draws every change as it commits, whoever made it.
+
+- **Who.** List events go only to version 6 connections the daemon placed as
+  the owner's (see *Transport*). A pull or an edit from any other connection
+  is refused with `error: request_failed`, `message` "Only the owner's own
+  Fermix app can read or change the owner's lists.", and reads or changes
+  nothing.
+- **The index** (`checklists_pull`, answered `checklists`). Every live list
+  in picker order, each `{list_id, title, folder?, open, done, rev}`: `open`
+  and `done` count its items, and `rev` moves with every change to it. Once a
+  connection has pulled the index it is sent the index again, whole, after any
+  change to any list.
+- **A list** (`checklist_pull`, answered `checklist`). `list` is `{list_id,
+  title, rev, rows[]}`, the rows in order: an item is `{row_id, kind: "item",
+  text, done, note?, done_at?}` and a section heading `{row_id, kind:
+  "section", text}`. With `removed: true` the list also carries `removed[]`,
+  the rows removed in the last 30 days, newest first, each with its
+  `removed_at`; Recently removed is drawn from it. A list itself removed and
+  not yet swept still answers, with `removed_at`, so it can be restored. A
+  list that is gone is `error: request_failed` ("No list has that id; it may
+  have been removed more than 30 days ago."). Times are RFC 3339 UTC with
+  microseconds.
+- **Holding.** A connection holds each list it pulled, and the list a
+  `create` from it made, at most 16: pulling another lets the one it pulled
+  longest ago go, and nothing more of that list is sent to it until it pulls
+  it again. A list is held with or without its removed rows, as its last pull
+  asked. A list swept while held is let go.
+- **Pushes.** After every committed change to a list, by the model, a job or
+  any device, every connection that holds it is sent `checklist`, the whole
+  list again, and every connection that pulled the index `checklists`, at
+  most once per 100 ms per connection: a burst of changes is one push of each
+  list carrying the rev it ended on, then the index. Every push is whole
+  state, never a delta; a client drops one whose `rev` is below the one it
+  shows. A connection that never pulled is sent nothing.
+- **An edit** (`checklist_edit`). One `op`, applied in the same transaction
+  as the model's edits, its rows recorded as made from the Mac. `list_id`
+  names the list for every op but `create`. It is answered `accepted`
+  (`duplicate: false`) once applied, and its change reaches every holder as a
+  push, the sender too. An edit sent again with a `client_msg_id` already
+  applied (kept 30 days) is answered `accepted` with `duplicate: true`,
+  changes nothing, and the sender, when it holds the list, is sent it again.
+  `made` on the next push of a list maps the `client_msg_id` of each `create`
+  or `add` a device sent since the last one to what it made: a `create`'s
+  `list_id`, an `add`'s `row_id`. A client matches the ids it sent and
+  ignores the rest.
+- **Refusals.** An op the engine cannot take changes nothing and is answered
+  `error: request_failed` with the engine's sentence as `message` and the
+  edit's `client_msg_id`; the connection stays open. A client shows the
+  sentence and pulls the list again. A `row_id` the list no longer has is
+  "That row is not in this list any more; pull the list again."
+- **Bounds.** A title is at most 80 characters, a folder 40, an item's or a
+  section's text 280 and a note 1,000, each one line, trimmed (a note may
+  hold line breaks). The owner keeps at most 50 lists and a list holds at
+  most 500 rows. Ids are the engine's: `ck_` and ten lowercase letters or
+  digits for a list, `ci_` for a row, stable for the row's life.
+- **The reply.** A turn this connection carries after it pulled the index is
+  told the app draws lists, so the reply says in a sentence what changed and
+  leaves the items to the list drawn under it (the reply's `checklists` block,
+  see *Blocks under a reply*). A turn from a connection that never pulled the
+  index writes the list out as text.
+
+The ops, the model's by row id without its `replace`, with `clear_done` and
+`restore`:
+
+| `op` | Fields | Effect |
+|---|---|---|
+| `create` | `title`; `folder?` | Makes a list, held by the sending connection. A live list with the title is refused. |
+| `add` | `text`; `note?`; `section_id?` or `after_id?` | Adds an item at the end of that section, or right after that row; with neither, at the end of the list's first group. |
+| `check`, `uncheck` | `row_id` | Marks the item done or not done. |
+| `edit` | `row_id`; `text?`, `note?` (one at least) | Changes the item's words; `note: ""` clears its note. |
+| `move` | `row_id`; `section_id?` or `after_id?`; `to_list_id?` (one at least) | Moves the item within the list, or to another list, placed as an add is. |
+| `section` | `text`; `after_id?` | Adds a section heading after that row, which must end its section, or at the end. |
+| `remove` | `row_id` | Removes the row; it stays in Recently removed for 30 days. A section must be empty. |
+| `folder` | `folder` | Puts the list in that folder; `""` takes it out of its folder. |
+| `rename` | `text` | Renames the list. |
+| `remove_list` | — | Removes the list; it can be restored for 30 days. |
+| `clear_done` | — | Removes every done item; each stays in Recently removed. |
+| `restore` | `row_id?`; `title?` | With `row_id`, brings that removed row back at its place. Without it, brings the removed list back, under `title` when given, else under its own; a live list holding that title refuses it ("Another list is named "…" now, so this one cannot come back under that name; restore it with a new title, or rename the other list first."). |
+
 ## Errors
 
 | `reason` | Context | Connection |
@@ -861,7 +972,9 @@ is answered `primary_unreachable` with `Fermix is moving this home to <name>;
 your message is kept until it is done.` and the connection is closed; the app
 keeps its outbox and sends again once the engine is back. `ref` is set only on the `request_failed` that answers
 a `media_fetch`. A refused `proposal_answer` is a `request_failed` whose
-`message` is the daemon's sentence, with the answer's `client_msg_id`.
+`message` is the daemon's sentence, with the answer's `client_msg_id`. So is
+a refused `checklist_edit`, with the edit's `client_msg_id`; a refused
+`checklists_pull` or `checklist_pull` carries none.
 
 ## Chat sequence
 

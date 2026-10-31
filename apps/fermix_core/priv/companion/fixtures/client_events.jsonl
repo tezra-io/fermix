@@ -13,3 +13,24 @@
 {"type":"media_release","profile_id":"main","ref":"9879f6d3c9efefe8c4f4aabe9d3269762264be52794e96f62ab8ffa53b7fadec"}
 {"type":"proposal_answer","client_msg_id":"mac-10","profile_id":"main","proposal_id":"cpr_4f1c2a9b7e3d5a60c8b1f2e3","decision":"confirm"}
 {"type":"proposal_answer","client_msg_id":"mac-11","profile_id":"main","proposal_id":"cpr_9a0b1c2d3e4f5a6b7c8d9e0f","decision":"deny"}
+{"type":"checklists_pull","profile_id":"main"}
+{"type":"checklist_pull","profile_id":"main","list_id":"ck_4q8m2x7v1d"}
+{"type":"checklist_pull","profile_id":"main","list_id":"ck_4q8m2x7v1d","removed":true}
+{"type":"checklist_edit","client_msg_id":"mac-20","profile_id":"main","op":{"op":"create","title":"Packing","folder":"Trips"}}
+{"type":"checklist_edit","client_msg_id":"mac-21","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"add","text":"Lemons","note":"The unwaxed ones","section_id":"ci_5w7p0t4n6b"}}
+{"type":"checklist_edit","client_msg_id":"mac-22","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"add","text":"Bread","after_id":"ci_8f3k2m9q1x"}}
+{"type":"checklist_edit","client_msg_id":"mac-23","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"check","row_id":"ci_3h9d1v8r2k"}}
+{"type":"checklist_edit","client_msg_id":"mac-24","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"uncheck","row_id":"ci_3h9d1v8r2k"}}
+{"type":"checklist_edit","client_msg_id":"mac-25","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"edit","row_id":"ci_3h9d1v8r2k","text":"Basil, two bunches","note":""}}
+{"type":"checklist_edit","client_msg_id":"mac-26","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"move","row_id":"ci_6j4c7x0m5s","to_list_id":"ck_9t3k6w0p5h"}}
+{"type":"checklist_edit","client_msg_id":"mac-27","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"move","row_id":"ci_6j4c7x0m5s","section_id":"ci_5w7p0t4n6b"}}
+{"type":"checklist_edit","client_msg_id":"mac-28","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"section","text":"Dairy","after_id":"ci_6j4c7x0m5s"}}
+{"type":"checklist_edit","client_msg_id":"mac-29","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"remove","row_id":"ci_6j4c7x0m5s"}}
+{"type":"checklist_edit","client_msg_id":"mac-30","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"folder","folder":"Home"}}
+{"type":"checklist_edit","client_msg_id":"mac-31","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"folder","folder":""}}
+{"type":"checklist_edit","client_msg_id":"mac-32","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"rename","text":"Weekly groceries"}}
+{"type":"checklist_edit","client_msg_id":"mac-33","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"clear_done"}}
+{"type":"checklist_edit","client_msg_id":"mac-34","profile_id":"main","list_id":"ck_4q8m2x7v1d","op":{"op":"restore","row_id":"ci_6j4c7x0m5s"}}
+{"type":"checklist_edit","client_msg_id":"mac-35","profile_id":"main","list_id":"ck_2b7n5r8c3j","op":{"op":"restore"}}
+{"type":"checklist_edit","client_msg_id":"mac-36","profile_id":"main","list_id":"ck_2b7n5r8c3j","op":{"op":"restore","title":"Packing, spring"}}
+{"type":"checklist_edit","client_msg_id":"mac-37","profile_id":"main","list_id":"ck_2b7n5r8c3j","op":{"op":"remove_list"}}

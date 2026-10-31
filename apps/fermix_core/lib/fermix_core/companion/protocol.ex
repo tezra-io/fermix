@@ -78,6 +78,15 @@ defmodule FermixCore.Companion.Protocol do
   wire's alone: the phone's `tool_event` does not carry it. The window is now
   {5, 6}.
 
+  Version 6 also brings the owner's lists (M85 §07): `checklists_pull` and
+  `checklist_pull` ask for the index and one whole list, answered `checklists`
+  and `checklist`, and `checklist_edit` changes one by row id, answered
+  `accepted` once, by its `client_msg_id`, or `error: request_failed` with
+  the engine's sentence. Every one is taken from, and sent to, only a version
+  6 connection placed as the owner's, and the daemon sends a list event only
+  to a connection that pulled: the index to one that pulled it, a list to one
+  that holds it. The phone's wire does not carry lists yet.
+
   Both hellos carry the primary epoch (M75 D14), additive and optional on
   every version: `server_hello.primary_epoch` is the home's, absent only from a
   home that has never booted as the primary, and `client_hello.primary_epoch`
@@ -133,19 +142,32 @@ defmodule FermixCore.Companion.Protocol do
   # the model's summary of a step of its reasoning, each bounded in bytes.
   @max_activity_bytes 120
   @max_reasoning_bytes 4_096
+  # The owner's lists (version 6, M85 §07): ids as the engine mints them, and a
+  # device edit's own id bounded as the store keeps it.
+  @list_id ~r/\Ack_[0-9a-z]{10}\z/
+  @row_id ~r/\Aci_[0-9a-z]{10}\z/
+  @max_checklist_msg_id 128
+  @row_kinds ~w(item section)
 
   @client_events ~w(
     client_hello msg command cancel history_pull history_search read_state media_fetch
-    media_release proposal_answer
+    media_release proposal_answer checklists_pull checklist_pull checklist_edit
   )
   @server_events ~w(
     server_hello accepted turn_started text_delta tool_event reasoning text_done turn_error
     turn_done row row_updated approval approval_resolved read_state history_page search_results
-    media_path media_missing proposal proposal_resolved error
+    media_path media_missing proposal proposal_resolved checklists checklist error
   )
 
   # The events a version after 1 brought; every other one is version 1.
-  @client_event_versions %{"media_fetch" => 3, "media_release" => 3, "proposal_answer" => 4}
+  @client_event_versions %{
+    "media_fetch" => 3,
+    "media_release" => 3,
+    "proposal_answer" => 4,
+    "checklists_pull" => 6,
+    "checklist_pull" => 6,
+    "checklist_edit" => 6
+  }
   @server_event_versions %{
     "turn_done" => 2,
     "row_updated" => 3,
@@ -153,11 +175,13 @@ defmodule FermixCore.Companion.Protocol do
     "media_missing" => 3,
     "proposal" => 4,
     "proposal_resolved" => 4,
-    "reasoning" => 6
+    "reasoning" => 6,
+    "checklists" => 6,
+    "checklist" => 6
   }
 
-  # The events only the owner's connection is sent or may send (version 4).
-  @owner_server_events ~w(proposal proposal_resolved)
+  # The events only the owner's connection is sent or may send (versions 4 and 6).
+  @owner_server_events ~w(proposal proposal_resolved checklists checklist)
 
   # A row a Live call writes carries `metadata.call` (M56 §6): what happened
   # on the call, and which task it was about.
@@ -192,7 +216,10 @@ defmodule FermixCore.Companion.Protocol do
     "read_state" => ~w(profile_id read_up_to_seq),
     "media_fetch" => ~w(profile_id ref),
     "media_release" => ~w(profile_id ref),
-    "proposal_answer" => ~w(client_msg_id profile_id proposal_id decision)
+    "proposal_answer" => ~w(client_msg_id profile_id proposal_id decision),
+    "checklists_pull" => ~w(profile_id),
+    "checklist_pull" => ~w(profile_id list_id),
+    "checklist_edit" => ~w(client_msg_id profile_id op)
   }
 
   @server_required %{
@@ -216,6 +243,8 @@ defmodule FermixCore.Companion.Protocol do
     "media_missing" => ~w(ref),
     "proposal" => ~w(profile_id proposal),
     "proposal_resolved" => ~w(profile_id proposal_id state sentence),
+    "checklists" => ~w(profile_id lists),
+    "checklist" => ~w(profile_id list),
     "error" => ~w(reason)
   }
 
@@ -296,6 +325,10 @@ defmodule FermixCore.Companion.Protocol do
   @doc "The longest `reasoning` text, in bytes (version 6)."
   @spec max_reasoning_bytes() :: pos_integer()
   def max_reasoning_bytes, do: @max_reasoning_bytes
+
+  @doc "The longest `client_msg_id` of a `checklist_edit`, in characters (version 6)."
+  @spec max_checklist_msg_id() :: pos_integer()
+  def max_checklist_msg_id, do: @max_checklist_msg_id
 
   @doc "The client chat events whose payload the mobile wire shares verbatim."
   @spec shared_client_events() :: [String.t()]
@@ -546,6 +579,29 @@ defmodule FermixCore.Companion.Protocol do
     end
   end
 
+  defp validate_client("checklists_pull", payload), do: nonempty(payload, "profile_id")
+
+  defp validate_client("checklist_pull", payload) do
+    with :ok <- nonempty(payload, "profile_id"),
+         :ok <- pattern(payload, "list_id", @list_id) do
+      optional_boolean(payload, "removed")
+    end
+  end
+
+  # The op's shape is the engine's to judge (`Checklists.Registry`), which
+  # refuses an op it cannot take with a sentence and keeps the connection; the
+  # wire holds what an op is carried in.
+  defp validate_client("checklist_edit", payload) do
+    with :ok <- bounded_nonempty(payload, "client_msg_id", @max_checklist_msg_id),
+         :ok <- nonempty(payload, "profile_id"),
+         :ok <- optional_pattern(payload, "list_id", @list_id) do
+      case payload["op"] do
+        %{"op" => op} when is_binary(op) and op != "" -> :ok
+        _other -> {:error, {:invalid_field, "op"}}
+      end
+    end
+  end
+
   # Version 2 (M56 §4.6): a cancel may name a task that outlived its call by
   # exactly its three ids, the ones its `task_running` row carries.
   defp optional_task_ref(%{"task_ref" => task_ref}) do
@@ -703,11 +759,96 @@ defmodule FermixCore.Companion.Protocol do
     end
   end
 
+  defp validate_server("checklists", payload) do
+    with :ok <- nonempty(payload, "profile_id") do
+      if is_list(payload["lists"]) and Enum.all?(payload["lists"], &checklist_entry?/1),
+        do: :ok,
+        else: {:error, {:invalid_field, "lists"}}
+    end
+  end
+
+  defp validate_server("checklist", payload) do
+    with :ok <- nonempty(payload, "profile_id"),
+         :ok <- checklist_field(payload["list"]) do
+      optional_made(payload)
+    end
+  end
+
   defp validate_server("error", payload) do
     with :ok <- nonempty(payload, "reason") do
       if Map.has_key?(payload, "ref"), do: media_ref(payload, "ref"), else: :ok
     end
   end
+
+  # A list in the index: its id, title and counts, and its folder when it is
+  # in one.
+  defp checklist_entry?(%{"list_id" => id, "title" => title} = entry) do
+    is_binary(id) and Regex.match?(@list_id, id) and is_binary(title) and title != "" and
+      Enum.all?(~w(open done rev), &(nonnegative_u64(entry, &1) == :ok)) and
+      optional_nonempty(entry, "folder") == :ok and not has_null?(entry)
+  end
+
+  defp checklist_entry?(_entry), do: false
+
+  # A whole list, its rows in order; `removed` the rows removed in the last 30
+  # days when asked for, and `removed_at` when the list itself was removed.
+  defp checklist_field(%{"list_id" => id, "title" => title, "rows" => rows} = list)
+       when is_binary(id) and is_binary(title) and is_list(rows) do
+    ok =
+      Regex.match?(@list_id, id) and title != "" and nonnegative_u64(list, "rev") == :ok and
+        Enum.all?(rows, &checklist_row?(&1, false)) and removed_parts?(list)
+
+    if ok, do: :ok, else: {:error, {:invalid_field, "list"}}
+  end
+
+  defp checklist_field(_list), do: {:error, {:invalid_field, "list"}}
+
+  # What a removed row or list adds: the rows when asked for, the list's
+  # `removed_at` when it was removed; no null anywhere.
+  defp removed_parts?(list),
+    do:
+      removed_rows?(list) and optional_nonempty(list, "removed_at") == :ok and not has_null?(list)
+
+  defp removed_rows?(%{"removed" => rows}) when is_list(rows),
+    do: Enum.all?(rows, &checklist_row?(&1, true))
+
+  defp removed_rows?(%{"removed" => _rows}), do: false
+  defp removed_rows?(_list), do: true
+
+  defp checklist_row?(%{"row_id" => id, "kind" => kind, "text" => text} = row, removed?)
+       when is_binary(id) and kind in @row_kinds and is_binary(text) do
+    Regex.match?(@row_id, id) and text != "" and optional_nonempty(row, "note") == :ok and
+      optional_boolean(row, "done") == :ok and optional_nonempty(row, "done_at") == :ok and
+      (not removed? or nonempty(row, "removed_at") == :ok)
+  end
+
+  defp checklist_row?(_row, _removed?), do: false
+
+  # An add's or a create's `client_msg_id` to the id it made.
+  defp optional_made(%{"made" => made}) when is_map(made) and map_size(made) > 0 do
+    if Enum.all?(made, fn {key, value} -> is_binary(key) and is_binary(value) end),
+      do: :ok,
+      else: {:error, {:invalid_field, "made"}}
+  end
+
+  defp optional_made(%{"made" => _made}), do: {:error, {:invalid_field, "made"}}
+  defp optional_made(_payload), do: :ok
+
+  defp pattern(payload, field, regex) do
+    case Map.get(payload, field) do
+      value when is_binary(value) ->
+        if Regex.match?(regex, value), do: :ok, else: {:error, {:invalid_field, field}}
+
+      _other ->
+        {:error, {:invalid_field, field}}
+    end
+  end
+
+  defp optional_pattern(payload, field, regex),
+    do: if(Map.has_key?(payload, field), do: pattern(payload, field, regex), else: :ok)
+
+  defp optional_boolean(payload, field),
+    do: if(Map.has_key?(payload, field), do: boolean_field(payload, field), else: :ok)
 
   # The card, string keyed as it travels, with no null anywhere: an absent
   # value is an absent key on this wire, nested as at the top.

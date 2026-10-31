@@ -468,7 +468,7 @@ defmodule FermixChannels.Channels.Companion do
       channel: @channel,
       chat_id: profile,
       reply_target: profile,
-      metadata: put_caller(metadata, event),
+      metadata: metadata |> put_caller(event) |> put_draws_lists(event),
       attachments: []
     })
   end
@@ -485,6 +485,11 @@ defmodule FermixChannels.Channels.Companion do
     do: raise(ArgumentError, "unknown companion caller #{inspect(other)}")
 
   defp put_caller(metadata, _event), do: metadata
+
+  # Whether the connection that carried the turn draws the owner's lists: it
+  # pulled their index (M85 §07), read off the connection, never the payload.
+  defp put_draws_lists(metadata, %{draws_lists: true}), do: Map.put(metadata, :draws_lists, true)
+  defp put_draws_lists(metadata, _event), do: metadata
 
   @doc "The send options a reply to `message` carries: its turn, request and attempt."
   @spec reply_opts(Message.t()) :: keyword()

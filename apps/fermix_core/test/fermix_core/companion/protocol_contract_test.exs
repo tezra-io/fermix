@@ -10,6 +10,8 @@ defmodule FermixCore.Companion.ProtocolContractTest do
 
   use ExUnit.Case, async: true
 
+  alias FermixCore.Checklists.Ops
+  alias FermixCore.Checklists.Registry, as: ChecklistRegistry
   alias FermixCore.Companion.Protocol
   alias FermixCore.Cues.ProposalView
   alias FermixCore.ReplyBlocks
@@ -33,6 +35,9 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   # The events version 4 brought (M60 app surface §3.7): a mandate's proposals.
   @version_4_client_events ~w(proposal_answer)
   @version_4_server_events ~w(proposal proposal_resolved)
+  # The events version 6 brought for the owner's lists (M85 §07).
+  @version_6_list_client_events ~w(checklists_pull checklist_pull checklist_edit)
+  @version_6_list_server_events ~w(checklists checklist)
   # The follow-up's fields of a card version 5 brought (M60_WATCHER_CODING_RUNS.md §6.2).
   @follow_up_fields ~w(asks name instructions tools reports_to daily_cap set_off_by)
 
@@ -119,7 +124,9 @@ defmodule FermixCore.Companion.ProtocolContractTest do
       refute type in Protocol.shared_server_events()
     end
 
-    assert Protocol.owner_server_events() == @version_4_server_events
+    assert Protocol.owner_server_events() ==
+             @version_4_server_events ++ @version_6_list_server_events
+
     assert protocol =~ "### Version 4: proposals on the owner's devices"
     assert protocol =~ "## Proposals"
 
@@ -180,6 +187,63 @@ defmodule FermixCore.Companion.ProtocolContractTest do
 
     assert protocol =~ "### Version 6: what a turn is doing"
     assert protocol =~ "Every version 5 event, field and rule holds unchanged on version 6."
+  end
+
+  # M85 §07: the owner's lists are version 6 events this wire alone carries,
+  # sent only to the owner's connection; the ops and bounds the schema
+  # publishes are the engine's, and the goldens carry every op and shape.
+  test "the owner's lists are version 6 events this wire does not share, with goldens", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    defs = schema["$defs"]
+
+    for type <- @version_6_list_client_events do
+      assert Protocol.client_event_version(type) == 6, "#{type} is not a version 6 event"
+      assert defs[type]["x-since-version"] == 6
+      refute type in Protocol.shared_client_events()
+    end
+
+    for type <- @version_6_list_server_events do
+      assert Protocol.server_event_version(type) == 6, "#{type} is not a version 6 event"
+      assert defs[type]["x-since-version"] == 6
+      refute type in Protocol.shared_server_events()
+      assert type in Protocol.owner_server_events()
+    end
+
+    assert defs["checklistOp"]["properties"]["op"]["enum"] == ChecklistRegistry.device_ops()
+
+    assert defs["checklist_edit"]["properties"]["client_msg_id"]["maxLength"] ==
+             Protocol.max_checklist_msg_id()
+
+    assert defs["checklists"]["properties"]["lists"]["maxItems"] == Ops.max_lists()
+    assert defs["checklistList"]["properties"]["rows"]["maxItems"] == Ops.max_rows()
+
+    edits = @client_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "checklist_edit"))
+
+    assert edits |> Enum.map(& &1["op"]["op"]) |> MapSet.new() ==
+             MapSet.new(ChecklistRegistry.device_ops())
+
+    lists = @server_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "checklist"))
+    assert Enum.any?(lists, &Map.has_key?(&1, "made"))
+    assert Enum.any?(lists, &Map.has_key?(&1["list"], "removed"))
+    assert Enum.any?(lists, &Map.has_key?(&1["list"], "removed_at"))
+
+    assert Enum.any?(
+             jsonl(@server_fixtures),
+             &(&1["reason"] == "request_failed" and
+                 &1["message"] == "That row is not in this list any more; pull the list again.")
+           )
+
+    flat = String.replace(protocol, ~r/\s+/, " ")
+    assert protocol =~ "## Lists"
+    assert flat =~ "Version 6 also brings the owner's lists"
+    assert flat =~ "The phone's wire does not carry lists in this version."
+    assert flat =~ "at most once per 100 ms"
+
+    for op <- ChecklistRegistry.device_ops() do
+      assert protocol =~ ~r/^\| `#{op}`|, `#{op}` \|/m, "PROTOCOL.md has no row for the #{op} op"
+    end
   end
 
   # The schema names every field of the card the engine builds, and bounds the
@@ -788,6 +852,13 @@ defmodule FermixCore.Companion.ProtocolContractTest do
         "profile_id" => "main",
         "proposal_id" => "cpr_1",
         "decision" => "confirm"
+      },
+      "checklists_pull" => %{"profile_id" => "main"},
+      "checklist_pull" => %{"profile_id" => "main", "list_id" => "ck_0123456789"},
+      "checklist_edit" => %{
+        "client_msg_id" => "c",
+        "profile_id" => "main",
+        "op" => %{"op" => "clear_done"}
       }
     }
   end
@@ -848,6 +919,11 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   # Anything outside it fails loudly rather than passing unchecked, so extending
   # the schema with an unsupported keyword breaks this test instead of quietly
   # weakening the gate. Returns a list of problems; empty means valid.
+  # `additionalProperties` is held only for a map with no named keys (a
+  # checklist's `made`), so beside `properties` it fails loudly.
+  defp schema_errors(_value, %{"additionalProperties" => _, "properties" => _}, _root),
+    do: ["additionalProperties beside properties is outside this validator"]
+
   defp schema_errors(value, schema, root) when is_map(schema) do
     conditional_errors(schema, value, root) ++
       Enum.flat_map(Map.drop(schema, ["if", "then"]), &keyword_errors(&1, value, root))
@@ -899,6 +975,20 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     end)
   end
 
+  defp keyword_errors({"additionalProperties", subschema}, value, root) when is_map(value) do
+    Enum.flat_map(value, fn {key, sub} ->
+      Enum.map(schema_errors(sub, subschema, root), &"#{key}: #{&1}")
+    end)
+  end
+
+  defp keyword_errors({"minProperties", min}, value, _root) when is_map(value) do
+    if map_size(value) >= min, do: [], else: ["fewer than #{min} properties"]
+  end
+
+  defp keyword_errors({"maxProperties", max}, value, _root) when is_map(value) do
+    if map_size(value) <= max, do: [], else: ["more than #{max} properties"]
+  end
+
   defp keyword_errors({"items", subschema}, value, root) when is_list(value) do
     Enum.flat_map(value, &schema_errors(&1, subschema, root))
   end
@@ -940,8 +1030,8 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   end
 
   defp keyword_errors({keyword, _constraint}, _value, _root)
-       when keyword in ~w(required properties items minItems maxItems minLength maxLength pattern
-                          minimum maximum) do
+       when keyword in ~w(required properties additionalProperties minProperties maxProperties
+                          items minItems maxItems minLength maxLength pattern minimum maximum) do
     []
   end
 

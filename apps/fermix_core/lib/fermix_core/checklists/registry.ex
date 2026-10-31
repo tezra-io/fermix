@@ -33,6 +33,7 @@ defmodule FermixCore.Checklists.Registry do
   alias FermixCore.Checklists.Parse
   alias FermixCore.Checklists.Render
   alias FermixCore.Checklists.Telemetry
+  alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
 
   @max_changes 8
@@ -43,6 +44,20 @@ defmodule FermixCore.Checklists.Registry do
   @note_max 1_000
   @markdown_max_bytes 262_144
   @ops ~w(create add check uncheck edit move section remove folder rename remove_list replace)
+  # A device's ops (M85 §07): the model's by row id, without `replace`, with
+  # `clear_done` and `restore`.
+  @device_ops ~w(create add check uncheck edit move section remove folder rename remove_list
+                 clear_done restore)
+  @list_id ~r/\Ack_[0-9a-z]{10}\z/
+  @row_id ~r/\Aci_[0-9a-z]{10}\z/
+  # The id fields a device's op carries, by the name each is refused under.
+  @id_fields %{
+    "list_id" => :list_id,
+    "row_id" => :row_id,
+    "section_id" => :section_id,
+    "after_id" => :after_id,
+    "to_list_id" => :to_list_id
+  }
   # A line break, another control character, a line or paragraph separator,
   # or a bidi override: none belongs in one line of a list.
   @forbidden ~r/[\p{Cc}\p{Zl}\p{Zp}\x{202A}-\x{202E}\x{2066}-\x{2069}]/u
@@ -136,6 +151,7 @@ defmodule FermixCore.Checklists.Registry do
       with :ok <- gate(context, "checklist_edit"),
            {:ok, changes} <- changes(Map.get(params, "changes")),
            {:ok, applied} <- store(context, opts, {:edit, changes, edit_context(context, opts)}) do
+        :ok = announce(context, applied, %{}, opts)
         {:ok, edit_answer(applied.summary)}
       end
 
@@ -152,6 +168,214 @@ defmodule FermixCore.Checklists.Registry do
       text: Enum.map_join(summary, "\n", &Render.answer/1),
       touched: Enum.map(summary, &Map.take(&1, [:list_id, :title, :rows]))
     }
+  end
+
+  # --- the owner's devices (M85 §07) -----------------------------------------
+
+  @doc "Every op a device's `checklist_edit` takes, by name."
+  @spec device_ops() :: [String.t()]
+  def device_ops, do: @device_ops
+
+  @doc """
+  The index a device draws (`checklists`): every live list with its counts and
+  rev, in picker order. Only a connection placed as the owner's (`caller`
+  `:independent`) reads it.
+  """
+  @spec device_index(atom() | nil, keyword()) :: {:ok, [map()]} | {:error, term()}
+  def device_index(caller, opts \\ []) when is_list(opts) do
+    with :ok <- device_gate(caller), do: store(device_context(), opts, :index)
+  end
+
+  @doc """
+  One list a device draws (`checklist`), live or removed and not yet swept:
+  `%{list, rows, removed_rows}`, the rows removed in the last 30 days only when
+  `removed?`.
+  """
+  @spec device_list(String.t(), boolean(), atom() | nil, keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def device_list(list_id, removed?, caller, opts \\ [])
+      when is_binary(list_id) and is_boolean(removed?) and is_list(opts) do
+    with :ok <- device_gate(caller),
+         :ok <- matches(list_id, @list_id, :list_id),
+         do: store(device_context(), opts, {:list_by_id, list_id, removed?})
+  end
+
+  @doc """
+  One edit a device sent (`checklist_edit`): `"client_msg_id"`, `"op"` and,
+  for every op but `create`, `"list_id"`. It goes through the same
+  transaction as the model's (`Checklists.Ops`), its rows made via `mac`, and
+  once only: an id already applied is answered `duplicate: true` and changes
+  nothing. Answers the list it changed and the id an add or create made.
+  """
+  @spec device_edit(map(), atom() | nil, keyword()) ::
+          {:ok, %{list_id: String.t(), made: String.t() | nil, duplicate: boolean()}}
+          | {:error, term()}
+  def device_edit(%{"client_msg_id" => client_msg_id} = params, caller, opts \\ [])
+      when is_binary(client_msg_id) and is_list(opts) do
+    start = System.monotonic_time(:microsecond)
+    context = device_context()
+    edit = %{now: now(opts), outside?: false, made_via: "mac"}
+
+    result =
+      with :ok <- device_gate(caller),
+           {:ok, change} <- device_change(params),
+           {:ok, outcome} <- store(context, opts, {:device_edit, client_msg_id, [change], edit}) do
+        device_outcome(outcome, context, {client_msg_id, opts})
+      end
+
+    result = device_refusal(result)
+    emit_device_edit(result, start)
+    result
+  end
+
+  # A device sends one op, so its refusal is the op's own sentence, without
+  # the place in a call the model is told, and names the fields a device
+  # sends where the model's sentence names the model's.
+  defp device_refusal({:error, {:op_failed, _change, _list, _op, reason}}),
+    do: {:error, device_reason(reason)}
+
+  defp device_refusal({:error, reason}), do: {:error, device_reason(reason)}
+  defp device_refusal(result), do: result
+
+  defp device_reason({:no_list, id, _titles}), do: {:no_such_list, id}
+  defp device_reason(:move_needs_place), do: {:device, :move_needs_place}
+  defp device_reason(:place_conflict), do: {:device, :place_conflict}
+  defp device_reason(:same_list), do: {:device, :same_list}
+  defp device_reason(reason), do: reason
+
+  defp device_outcome({:applied, applied}, context, {client_msg_id, opts}) do
+    [%{list_id: list_id} | _rest] = applied.summary
+    made = if applied.made, do: %{list_id => %{client_msg_id => applied.made}}, else: %{}
+    :ok = announce(context, applied, made, opts)
+    {:ok, %{list_id: list_id, made: applied.made, duplicate: false}}
+  end
+
+  defp device_outcome({:duplicate, record}, _context, _id_and_opts),
+    do: {:ok, Map.put(record, :duplicate, true)}
+
+  defp device_gate(caller) do
+    if Access.device_owner?(caller), do: :ok, else: {:error, :not_owner}
+  end
+
+  defp device_context,
+    do: %{memory_owner_id: MemoryConfig.owner_id(), memory_agent_id: MemoryConfig.agent_id()}
+
+  # A device's op, as `Checklists.Ops` takes it: rows named `{:id, row_id}`.
+  defp device_change(%{"op" => %{"op" => "create"} = op}) do
+    with {:ok, title} <- required_text(op, "title", :title, @title_max),
+         {:ok, folder} <- optional_text(op, "folder", :folder, @folder_max),
+         do: {:ok, %{list: title, ops: [%{op: :create, folder: folder}]}}
+  end
+
+  defp device_change(%{"op" => %{"op" => name} = op} = params) when name in @device_ops do
+    with {:ok, list_id} <- required_id(params, "list_id", @list_id),
+         {:ok, normalized} <- device_op(String.to_existing_atom(name), op),
+         do: {:ok, %{list: list_id, ops: [normalized]}}
+  end
+
+  defp device_change(%{"op" => %{"op" => name}}), do: {:error, {:unknown_device_op, name}}
+  defp device_change(_params), do: {:error, {:missing, :op}}
+
+  defp device_op(:add, op) do
+    with {:ok, text} <- required_text(op, "text", :text, @text_max),
+         {:ok, note} <- note(op, :absent_is_nil),
+         {:ok, place} <- device_place(op),
+         do: {:ok, Map.merge(%{op: :add, text: text, note: note}, place)}
+  end
+
+  defp device_op(row_op, op) when row_op in [:check, :uncheck, :remove] do
+    with {:ok, row} <- required_id(op, "row_id", @row_id), do: {:ok, %{op: row_op, n: {:id, row}}}
+  end
+
+  defp device_op(:edit, op) do
+    with {:ok, row} <- required_id(op, "row_id", @row_id),
+         {:ok, text} <- optional_text(op, "text", :text, @text_max),
+         {:ok, note} <- note(op, :absent_is_keep),
+         :ok <- something_to_edit(text, note),
+         do: {:ok, %{op: :edit, n: {:id, row}, text: text, note: note}}
+  end
+
+  defp device_op(:move, op) do
+    with {:ok, row} <- required_id(op, "row_id", @row_id),
+         {:ok, place} <- device_place(op),
+         {:ok, to_list} <- optional_id(op, "to_list_id", @list_id),
+         do: {:ok, Map.merge(%{op: :move, n: {:id, row}, to_list: to_list}, place)}
+  end
+
+  defp device_op(:section, op) do
+    with {:ok, text} <- required_text(op, "text", :text, @text_max),
+         {:ok, after_row} <- optional_id(op, "after_id", @row_id),
+         do: {:ok, %{op: :section, text: text, after: row_ref(after_row)}}
+  end
+
+  defp device_op(:restore, op) do
+    with {:ok, row} <- optional_id(op, "row_id", @row_id),
+         {:ok, title} <- optional_text(op, "title", :title, @title_max),
+         do: {:ok, %{op: :restore, row: row_ref(row), title: title}}
+  end
+
+  defp device_op(list_op, _op) when list_op in [:remove_list, :clear_done],
+    do: {:ok, %{op: list_op}}
+
+  # `folder` and `rename` take what the model's ops take.
+  defp device_op(name, op) when name in [:folder, :rename], do: op_fields(name, op, false)
+
+  defp device_place(op) do
+    with {:ok, section} <- optional_id(op, "section_id", @row_id),
+         {:ok, after_row} <- optional_id(op, "after_id", @row_id) do
+      if section && after_row,
+        do: {:error, :place_conflict},
+        else: {:ok, %{section: row_ref(section), after: row_ref(after_row)}}
+    end
+  end
+
+  defp row_ref(nil), do: nil
+  defp row_ref(id), do: {:id, id}
+
+  defp required_id(map, key, pattern) do
+    case Map.get(map, key) do
+      nil -> {:error, {:missing, Map.fetch!(@id_fields, key)}}
+      id -> with :ok <- matches(id, pattern, Map.fetch!(@id_fields, key)), do: {:ok, id}
+    end
+  end
+
+  defp optional_id(map, key, pattern) do
+    case Map.get(map, key) do
+      nil -> {:ok, nil}
+      id -> with :ok <- matches(id, pattern, Map.fetch!(@id_fields, key)), do: {:ok, id}
+    end
+  end
+
+  defp matches(id, pattern, field) when is_binary(id) do
+    if Regex.match?(pattern, id), do: :ok, else: {:error, {:invalid_param, field}}
+  end
+
+  defp matches(_id, _pattern, field), do: {:error, {:invalid_param, field}}
+
+  # Every committed change reaches the owner's devices through the notifier
+  # the channels app registers (`:checklists_notifier`), right after the store
+  # committed it, whoever made it: the lists it changed with their revs, and
+  # what a device's add or create made. With none registered nobody listens.
+  # `opts[:notifier]` is a test's own.
+  defp announce(context, applied, made, opts) do
+    lists =
+      for %{changed?: true} = entry <- applied.summary,
+          do: %{list_id: entry.list_id, rev: entry.rev, made: Map.get(made, entry.list_id, %{})}
+
+    case {lists, notifier(opts)} do
+      {[], _notifier} -> :ok
+      {_lists, nil} -> :ok
+      {lists, notifier} -> notifier.(%{owner_id: owner_id(context), lists: lists})
+    end
+  end
+
+  defp notifier(opts) do
+    Keyword.get_lazy(opts, :notifier, fn ->
+      case Application.get_env(:fermix_core, :checklists_notifier) do
+        nil -> nil
+        module -> &module.changed/1
+      end
+    end)
   end
 
   @doc """
@@ -181,6 +405,12 @@ defmodule FermixCore.Checklists.Registry do
 
   defp request(context, {:edit, changes, edit}),
     do: {:edit, owner_id(context), agent_id(context), changes, edit}
+
+  defp request(context, {:list_by_id, list_id, removed?}),
+    do: {:list_by_id, owner_id(context), agent_id(context), list_id, removed?}
+
+  defp request(context, {:device_edit, client_msg_id, changes, edit}),
+    do: {:device_edit, owner_id(context), agent_id(context), client_msg_id, changes, edit}
 
   defp repo_opts(repo, opts), do: [server: repo] ++ Keyword.take(opts, [:on_timeout, :timeout])
 
@@ -536,6 +766,21 @@ defmodule FermixCore.Checklists.Registry do
     )
   end
 
+  defp emit_device_edit(result, start) do
+    {outcome, lists} =
+      case result do
+        {:ok, %{duplicate: true}} -> {:ok, 0}
+        {:ok, _changed} -> {:ok, 1}
+        {:error, reason} -> {outcome(reason), 0}
+      end
+
+    Telemetry.emit_edit(
+      %{},
+      %{lists: lists, ops: 1, outcome: outcome, made_via: "mac", error_code: code(result)},
+      elapsed(start)
+    )
+  end
+
   defp outcome(reason) do
     if error_tag(reason) == "storage_failed", do: :failed, else: :refused
   end
@@ -554,6 +799,7 @@ defmodule FermixCore.Checklists.Registry do
   @spec error_tag(term()) :: String.t()
   def error_tag({:op_failed, _change, _list, _op, reason}), do: error_tag(reason)
   def error_tag({:invalid_op, _change, _op, reason}), do: error_tag(reason)
+  def error_tag({:device, reason}), do: error_tag(reason)
 
   def error_tag(reason) when is_atom(reason) and reason not in [nil, true, false],
     do: Atom.to_string(reason)
@@ -616,25 +862,58 @@ defmodule FermixCore.Checklists.Registry do
   def describe_error({:section_exists, name}),
     do: "This list already has a section named #{Render.quoted(name)}."
 
+  def describe_error({:no_row, {:id, _id}}),
+    do: "That row is not in this list any more; pull the list again."
+
   def describe_error({:no_row, n}),
     do: "This list has no row [#{n}]; read it again for its numbers."
 
-  def describe_error({:not_an_item, n}), do: "[#{n}] is a section, not an item."
+  def describe_error({:not_an_item, n}), do: "#{subject(n)} is a section, not an item."
+  def describe_error({:not_a_section, n}), do: "#{subject(n)} is an item, not a section."
 
   def describe_error({:kind_changed, n}),
     do: "[#{n}] cannot change between a section and an item; give the new one no number."
 
   def describe_error({:section_inside, n}) do
-    "[#{n}] has items after it in its section, and a new section there would take the items " <>
+    "#{subject(n)} has items after it in its section, and a new section there would take the items " <>
       "below it; put the section after that section's last row or at the end, then move the " <>
       "items you want into it."
   end
 
+  def describe_error({:section_not_empty, {:id, _id}}),
+    do: "That section still holds items; move or remove them first."
+
   def describe_error({:section_not_empty, n}),
     do: "Section [#{n}] still holds items; move or remove them first."
 
-  def describe_error({:note_on_section, n}), do: "[#{n}] is a section, and a section has no note."
-  def describe_error({:after_self, n}), do: "[#{n}] cannot be moved after itself."
+  def describe_error({:note_on_section, n}),
+    do: "#{subject(n)} is a section, and a section has no note."
+
+  def describe_error({:after_self, n}), do: "#{subject(n)} cannot be moved after itself."
+  def describe_error(:not_removed), do: "That is not removed, so there is nothing to restore."
+
+  def describe_error({:title_in_use, title}) do
+    "Another list is named #{Render.quoted(title)} now, so this one cannot come back under " <>
+      "that name; restore it with a new title, or rename the other list first."
+  end
+
+  def describe_error({:no_such_list, _id}),
+    do: "No list has that id; it may have been removed more than 30 days ago."
+
+  def describe_error(:not_owner),
+    do: "Only the owner's own Fermix app can read or change the owner's lists."
+
+  def describe_error({:device, :move_needs_place}),
+    do: "A move needs a section_id, an after_id or a to_list_id."
+
+  def describe_error({:device, :place_conflict}), do: "Give section_id or after_id, not both."
+
+  def describe_error({:device, :same_list}),
+    do: "to_list_id names the list the row is already in."
+
+  def describe_error({:unknown_device_op, name}),
+    do: "#{inspect(name)} is not an op here; the ops are #{Enum.join(@device_ops, ", ")}."
+
   def describe_error(:same_list), do: "to_list names the list the item is already in."
   def describe_error(:move_needs_place), do: "A move needs a section, an after or a to_list."
   def describe_error(:place_conflict), do: "Give section or after, not both."
@@ -686,6 +965,10 @@ defmodule FermixCore.Checklists.Registry do
 
   defp where(change, list, op),
     do: " Nothing in this call was changed (change #{change}, #{Render.quoted(list)}, op #{op})."
+
+  # A row the model names by its number; a device's, by its id.
+  defp subject({:id, _id}), do: "That row"
+  defp subject(n), do: "[#{n}]"
 
   defp titles_part([]), do: "; the owner keeps no lists yet"
 

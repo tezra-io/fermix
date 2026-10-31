@@ -1284,12 +1284,13 @@ keyed on `channel`, and the Opik exporter places it under the turn's trace as an
 event carries `error_code` (`Checklists.Registry.error_tag/1`) and
 `error_summary`, the sentence the model received. Beside them,
 `Checklists.Registry` emits **one point event per read and per edit**
-through `FermixCore.Checklists.Telemetry`, the event a later wire edit from
-the Mac or the phone will emit too: `[:fermix, :checklist, :read]` with
+through `FermixCore.Checklists.Telemetry`, the event an edit the Mac sends
+over its chat socket emits too (`made_via: "mac"`, one op, no session; the
+phone's wire carries no list yet): `[:fermix, :checklist, :read]` with
 measurements `duration_us` (the store's read) and `lists` (how many it
 returned), and `[:fermix, :checklist, :edit]` with `duration_us` (the call's
 one transaction), `lists` (the lists it touched) and `ops`. Metadata on both:
-`component: "checklists"`, `made_via` (`chat | job`), `outcome` (`ok |
+`component: "checklists"`, `made_via` (`chat | job | mac`), `outcome` (`ok |
 refused | failed`), `error_code` (the refusal's tag, else nil), `scope` on a
 read (`list | folder | index`), and the caller's `session_id` when it has one.
 Neither event ever carries an item's words or a list's title.

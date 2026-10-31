@@ -26,8 +26,14 @@ defmodule FermixCore.Checklists.Ops do
   or at the end, so it never takes items from the section it lands in.
 
   A removed list's title is free at once, so another list may take it within
-  the 30 days the removed one is kept: the wire's `restore`, when it comes,
-  must meet that clash rather than let the store's unique index refuse it.
+  the 30 days the removed one is kept. A `restore` of the list (the Mac's
+  wire, M85 §07) therefore comes back under its title only while no live list
+  holds it, compared case-blind, and is refused otherwise unless it names a
+  new `title`; a restored row comes back at its place, its number its own.
+
+  Rows are named by `n` from the model, or `{:id, row_id}` from the wire;
+  the wire's ops add `clear_done` and `restore`. The id the last `add` or
+  `create` made is the result's `made`, which the wire hands back.
 
   Refusals are `{:error, {:op_failed, change, op, list, reason}}`, the change
   and the op counted from 1, which `Checklists.Registry.describe_error/1`
@@ -62,6 +68,7 @@ defmodule FermixCore.Checklists.Ops do
           rows: %{String.t() => [map()]},
           removed_rows: [map()],
           changed: [String.t()],
+          made: String.t() | nil,
           summary: [map()]
         }
 
@@ -134,6 +141,19 @@ defmodule FermixCore.Checklists.Ops do
   defp to_list(%{op: :move, to_list: ref}) when is_binary(ref), do: [ref]
   defp to_list(_op), do: []
 
+  @doc "The ids of the removed lists a call brings back, which the store loads beside the live ones."
+  @spec restored_lists([map()]) :: [String.t()]
+  def restored_lists(changes) when is_list(changes),
+    do: for(%{list: id, ops: [%{op: :restore, row: nil}]} <- changes, do: id)
+
+  @doc "Whether a call brings back a removed row, so the store loads its list's removed rows."
+  @spec restores_rows?([map()]) :: boolean()
+  def restores_rows?(changes) when is_list(changes),
+    do:
+      Enum.any?(changes, fn change ->
+        Enum.any?(change.ops, &match?(%{op: :restore, row: {:id, _}}, &1))
+      end)
+
   defp found_id({:ok, list}), do: [list.id]
   defp found_id({:error, _reason}), do: []
 
@@ -146,15 +166,18 @@ defmodule FermixCore.Checklists.Ops do
   end
 
   @doc """
-  Applies `changes` to `state` (`%{lists: [list_meta], rows: %{id => rows}}`)
-  under `edit` (`now`, `outside?`, `made_via`), all of them or none.
+  Applies `changes` to `state` (`%{lists: [list_meta], rows: %{id => rows}}`,
+  and `removed: %{id => rows}` when a call brings rows back) under `edit`
+  (`now`, `outside?`, `made_via`), all of them or none.
   """
   @spec apply(map(), [map()], map()) :: {:ok, result()} | {:error, term()}
-  def apply(%{lists: lists, rows: rows}, changes, %{now: %DateTime{}} = edit)
+  def apply(%{lists: lists, rows: rows} = loaded, changes, %{now: %DateTime{}} = edit)
       when is_list(lists) and is_map(rows) and is_list(changes) do
     initial = %{
       lists: Map.new(lists, &{&1.id, &1}),
       rows: rows,
+      removed: Map.get(loaded, :removed, %{}),
+      made: nil,
       removed_rows: [],
       changed: [],
       order: [],
@@ -190,9 +213,42 @@ defmodule FermixCore.Checklists.Ops do
          do: {:ok, {id, rest, 2}, touch(state, id)}
   end
 
+  # A removed list a call brings back (the wire's list `restore`): its title is
+  # its own again only while no live list holds it.
+  defp change_list(state, %{list: id, ops: [%{op: :restore, row: nil} = restore]}, edit) do
+    with :ok <- outside_allows(edit, restore), do: restorable(state, id, restore)
+  end
+
   defp change_list(state, %{list: ref, ops: ops}, _edit) do
     with {:ok, list} <- resolve(live(state), ref),
          do: {:ok, {list.id, ops, 1}, touch(state, list.id)}
+  end
+
+  defp restorable(state, id, restore) do
+    case Map.fetch(state.lists, id) do
+      {:ok, %{removed_at: %DateTime{}} = list} -> restore_list(state, list, restore)
+      {:ok, _live} -> {:error, :not_removed}
+      :error -> {:error, {:no_list, id, Enum.map(live(state), & &1.title)}}
+    end
+  end
+
+  defp restore_list(state, list, restore) do
+    title = restore.title || list.title
+
+    cond do
+      length(live(state)) >= @max_lists -> {:error, :too_many_lists}
+      title_taken?(live(state), title, list.id) -> {:error, {:title_in_use, title}}
+      true -> {:ok, {list.id, [], 2}, restored_list(state, list, title)}
+    end
+  end
+
+  defp restored_list(state, list, title) do
+    words = if title == list.title, do: "restored", else: "restored as " <> Render.quoted(title)
+
+    state
+    |> update_list(list.id, removed_at: nil, title: title, restored?: true)
+    |> touch(list.id)
+    |> event(list.id, words)
   end
 
   defp run_ops(indexed, id, state, edit) do
@@ -238,6 +294,7 @@ defmodule FermixCore.Checklists.Ops do
       |> put_in([:rows, id], [])
       |> changed(id)
       |> event(id, "created" <> folder_words(folder))
+      |> Map.put(:made, id)
 
     {:ok, id, state}
   end
@@ -360,6 +417,44 @@ defmodule FermixCore.Checklists.Ops do
     end
   end
 
+  defp row_op(state, id, %{op: :clear_done}, edit) do
+    {done, kept} = Enum.split_with(rows(state, id), &(&1.kind == :item and &1.done))
+
+    case done do
+      [] ->
+        {:ok, event(state, id, "nothing done to clear")}
+
+      _some ->
+        gone = Enum.map(done, &(%{&1 | updated_at: edit.now} |> Map.put(:removed_at, edit.now)))
+
+        state
+        |> put_rows(id, kept)
+        |> Map.update!(:removed_rows, &(gone ++ &1))
+        |> event(id, "cleared #{length(gone)} done")
+        |> changed(id)
+        |> ok()
+    end
+  end
+
+  defp row_op(_state, _id, %{op: :restore, row: nil}, _edit), do: {:error, :not_removed}
+
+  defp row_op(state, id, %{op: :restore, row: ref}, edit) do
+    with {:ok, row} <- removed_row(state, id, ref),
+         :ok <- room(state, id) do
+      back = %{row | updated_at: edit.now, dirty: :restored} |> Map.delete(:removed_at)
+      rows = rows(state, id)
+      at = Enum.find_index(rows, &(&1.position > row.position)) || length(rows)
+
+      state
+      |> put_rows(id, List.insert_at(rows, at, back))
+      |> update_in([:removed, id], &List.delete(&1, row))
+      |> event(id, "restored " <> handle(back))
+      |> touch_row(id, back.id)
+      |> changed(id)
+      |> ok()
+    end
+  end
+
   defp row_op(state, id, %{op: :remove, n: n}, edit) do
     rows = rows(state, id)
 
@@ -416,7 +511,7 @@ defmodule FermixCore.Checklists.Ops do
       dirty: :new
     }
 
-    {row, put_in(state, [:lists, id, :next_n], list.next_n + 1)}
+    {row, state |> put_in([:lists, id, :next_n], list.next_n + 1) |> Map.put(:made, row.id)}
   end
 
   defp set_done(state, id, {_index, %{done: done} = row}, done, _now) do
@@ -634,7 +729,15 @@ defmodule FermixCore.Checklists.Ops do
     end
   end
 
-  defp place_index(rows, %{after: n}) when is_integer(n) do
+  defp place_index(rows, %{section: {:id, _id} = ref}) do
+    with {:ok, index, row} <- find(rows, ref) do
+      if row.kind == :section,
+        do: {:ok, section_end(rows, index)},
+        else: {:error, {:not_a_section, ref}}
+    end
+  end
+
+  defp place_index(rows, %{after: n}) when not is_nil(n) do
     with {:ok, index, _row} <- find(rows, n), do: {:ok, index + 1}
   end
 
@@ -647,7 +750,7 @@ defmodule FermixCore.Checklists.Ops do
   # A new section goes right after the row `after` names when that row ends
   # its section (or the first group), or at the list's end: anywhere else it
   # would take the items below it.
-  defp section_index(rows, %{after: n}) when is_integer(n) do
+  defp section_index(rows, %{after: n}) when not is_nil(n) do
     with {:ok, index, _row} <- find(rows, n) do
       case Enum.at(rows, index + 1) do
         %{kind: :item} -> {:error, {:section_inside, n}}
@@ -711,10 +814,25 @@ defmodule FermixCore.Checklists.Ops do
 
   # --- lookups and bookkeeping -----------------------------------------------
 
+  # A row by its number (the model's) or by `{:id, row_id}` (the wire's).
+  defp find(rows, {:id, id} = ref) do
+    case Enum.find_index(rows, &(&1.id == id)) do
+      nil -> {:error, {:no_row, ref}}
+      index -> {:ok, index, Enum.at(rows, index)}
+    end
+  end
+
   defp find(rows, n) do
     case Enum.find_index(rows, &(&1.n == n)) do
       nil -> {:error, {:no_row, n}}
       index -> {:ok, index, Enum.at(rows, index)}
+    end
+  end
+
+  defp removed_row(state, id, {:id, row_id} = ref) do
+    case Enum.find(Map.get(state.removed, id, []), &(&1.id == row_id)) do
+      nil -> {:error, {:no_row, ref}}
+      row -> {:ok, row}
     end
   end
 
@@ -791,6 +909,7 @@ defmodule FermixCore.Checklists.Ops do
        rows: state.rows,
        removed_rows: state.removed_rows,
        changed: state.changed,
+       made: state.made,
        summary: Enum.map(state.order, &summary(state, &1))
      }}
   end

@@ -40,6 +40,14 @@ defmodule FermixChannels.Application do
     # dependency). Registered here so the provider is present iff the queue runs.
     Application.put_env(:fermix_core, :queue_status_provider, FermixChannels.Gateway.Queue)
 
+    # Core tells the Mac of every committed change to the owner's lists through
+    # this notifier (M85 §07), with no compile-time core→channels dependency.
+    Application.put_env(
+      :fermix_core,
+      :checklists_notifier,
+      FermixChannels.Companion.ChecklistNotifier
+    )
+
     # Core's daemon control socket must not compile-depend on channels. Register
     # the mobile management facade only while this application is running; CLI
     # pair/devices requests resolve it dynamically through the daemon.
