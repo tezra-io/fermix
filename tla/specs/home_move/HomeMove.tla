@@ -314,7 +314,7 @@ Goto(w) ==
     /\ wpc' = w
     /\ UNCHANGED <<SrcFiles, boot, unsaid, CandAll, Net, Budgets, Hist>>
 
-\* home.move.start (HomeMove.move_start/3, home_move.ex:140-158): Move.start/5
+\* home.move.start (HomeMove.move_start/3, home_move.ex:188-206): Move.start/5
 \* writes request.json, phase "requested", then role = "device", the last
 \* write (write_request/3, move.ex:518-545: a failure part-way removes .move/,
 \* so a part-way start leaves the primary as it was), and the handler restarts
