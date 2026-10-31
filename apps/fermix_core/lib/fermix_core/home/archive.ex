@@ -155,7 +155,9 @@ defmodule FermixCore.Home.Archive do
 
   `opts` replace this host's facts in tests: `:host` (the plugin installer's
   target name, such as `linux-x86_64`), `:keyring_usable?` (a 0-arity
-  function) and `:now_ms` (the screen-history clear's bound).
+  function), `:probe_timeout_ms` (the bound on each question the keyring
+  probe asks, when `:keyring_usable?` is not given) and `:now_ms` (the
+  screen-history clear's bound).
 
   Refuses, by name: a passphrase under twelve bytes, a root that is not empty
   (`:root_not_empty`), an archive that does not open (`:archive_rejected`), a
@@ -645,7 +647,7 @@ defmodule FermixCore.Home.Archive do
       old_root: manifest.home_root,
       new_root: root,
       macos?: String.starts_with?(host, "macos-"),
-      keyring_usable?: Keyword.get(opts, :keyring_usable?, &keyring_usable?/0)
+      keyring_usable?: Keyword.get(opts, :keyring_usable?, fn -> keyring_usable?(opts) end)
     }
 
     case source_read(source, manifest, @config) do
@@ -690,7 +692,10 @@ defmodule FermixCore.Home.Archive do
     end
   end
 
-  defp keyring_usable?, do: SecretWriter.usable?(SecretWriter.probe(store: :keyring))
+  defp keyring_usable?(opts) do
+    probe_opts = [store: :keyring] ++ Keyword.take(opts, [:probe_timeout_ms])
+    SecretWriter.usable?(SecretWriter.probe(probe_opts))
+  end
 
   # A plugin installed on another OS or architecture carries a build for that
   # one; the restore names them and installs nothing.

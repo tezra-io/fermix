@@ -115,7 +115,8 @@ defmodule FermixCore.Home.Snapshot do
   or absent, decrypting with `pair` (the recipient with its private half,
   `Recipient.derive/2` or `Recipient.generate/0`).
 
-  `opts` as `Archive.restore/4`: `:host`, `:keyring_usable?` and `:now_ms`.
+  `opts` as `Archive.restore/4`: `:host`, `:keyring_usable?`,
+  `:probe_timeout_ms` and `:now_ms`.
   Answers what `Archive.restore/4` answers.
   """
   @spec restore(source(), Recipient.pair(), Path.t(), keyword()) ::

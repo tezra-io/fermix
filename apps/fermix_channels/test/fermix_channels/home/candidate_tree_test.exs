@@ -98,7 +98,9 @@ defmodule FermixChannels.Home.CandidateTreeTest do
           clock: &__MODULE__.now/0,
           schedule: &__MODULE__.schedule/2,
           restart: &__MODULE__.restart/0,
-          restore_opts: [host: "linux-aarch64"],
+          # The keyring probe gives each `busctl` 1.5 s, which a loaded
+          # runner's process start alone can take; the question is the same.
+          restore_opts: [host: "linux-aarch64", probe_timeout_ms: @wait_ms],
           host: %{
             "name" => "north-box",
             "os" => "linux",

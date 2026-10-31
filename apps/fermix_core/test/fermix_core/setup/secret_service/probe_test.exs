@@ -2,6 +2,7 @@ defmodule FermixCore.Setup.SecretService.ProbeTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Setup.SecretService.Probe
+  alias FermixTestSupport.SafeRm
 
   @busctl "/usr/bin/busctl"
   @login "/org/freedesktop/secrets/collection/login"
@@ -142,10 +143,29 @@ defmodule FermixCore.Setup.SecretService.ProbeTest do
       run(%{
         "NameHasOwner" => {:ok, "b true\n"},
         "ReadAlias" => {:ok, ~s(o "#{@login}"\n)},
-        "Locked" => {:error, :timeout}
+        "Locked" => {:error, {:timeout, 1_500}}
       })
 
-    assert %{state: :unknown, evidence: "timed out" <> _} = verdict
+    assert %{state: :unknown, evidence: "timed out after 1500ms"} = verdict
+  end
+
+  # The bound is a real one, so the question goes to a stand-in that never
+  # answers: it times out at whatever bound it is given, however busy the host.
+  test "a caller's bound replaces each question's own" do
+    dir = SafeRm.make_tmp_dir!("probe_bound")
+    on_exit(fn -> SafeRm.rm_rf!(dir) end)
+    busctl = Path.join(dir, "busctl")
+    File.write!(busctl, "#!/bin/sh\nexec sleep 30\n")
+    File.chmod!(busctl, 0o755)
+
+    verdict =
+      Probe.run(
+        find_executable: fn "busctl" -> busctl end,
+        probe_timeout_ms: 100,
+        supervised: false
+      )
+
+    assert %{state: :unknown, evidence: "timed out after 100ms"} = verdict
   end
 
   test "without busctl the state is unknown and nothing is run" do

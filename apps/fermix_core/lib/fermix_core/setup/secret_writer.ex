@@ -210,7 +210,8 @@ defmodule FermixCore.Setup.SecretWriter do
   @doc """
   Whether the store `opts` selects can be used right now. Read-only and
   bounded: it never writes, never reads a secret and never raises an unlock
-  prompt, so a daemon may run it at boot.
+  prompt, so a daemon may run it at boot. `:probe_timeout_ms` replaces the
+  bound on each question a Linux keyring probe asks.
   """
   @spec probe(keyword()) :: verdict()
   def probe(opts \\ []) when is_list(opts), do: impl(opts).probe(opts)
@@ -443,7 +444,9 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
   @impl true
   def probe(opts \\ []) do
     if available?(opts) do
-      SecretService.Probe.run(Keyword.take(opts, [:supervised, :runner, :find_executable]))
+      opts
+      |> Keyword.take([:supervised, :runner, :find_executable, :probe_timeout_ms])
+      |> SecretService.Probe.run()
     else
       SecretWriter.None.probe(opts)
     end

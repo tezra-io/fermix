@@ -33,7 +33,8 @@ defmodule FermixCore.Setup.SecretService.Probe do
 
   @doc """
   The verdict for this process. `opts[:runner]` and `opts[:find_executable]`
-  are test seams; `opts[:supervised]` reaches `CommandRunner` unchanged.
+  are test seams; `opts[:supervised]` reaches `CommandRunner` unchanged, and
+  `opts[:probe_timeout_ms]` replaces each question's 1.5 s bound.
   """
   @spec run(keyword()) :: FermixCore.Setup.SecretWriter.verdict()
   def run(opts \\ []) when is_list(opts) do
@@ -184,7 +185,7 @@ defmodule FermixCore.Setup.SecretService.Probe do
 
   defp evidence({:helper_failed, code, output}), do: "exit #{code}: #{clip(output)}"
   defp evidence({:unexpected_output, output}), do: "unexpected output: #{clip(output)}"
-  defp evidence(:timeout), do: "timed out after #{@call_timeout_ms}ms"
+  defp evidence({:timeout, ms}), do: "timed out after #{ms}ms"
   defp evidence(other), do: clip(inspect(other))
 
   defp clip(text) do
@@ -207,16 +208,20 @@ defmodule FermixCore.Setup.SecretService.Probe do
   @spec runner(keyword()) :: runner()
   defp runner(opts) do
     case Keyword.get(opts, :runner) do
-      nil -> &run_bounded(&1, &2, Keyword.take(opts, [:supervised]))
+      nil -> &run_bounded(&1, &2, bounded_opts(opts))
       runner when is_function(runner, 2) -> runner
     end
   end
 
-  defp run_bounded(busctl, args, supervised) do
-    case CommandRunner.run(busctl, args, [timeout_ms: @call_timeout_ms] ++ supervised) do
+  defp bounded_opts(opts) do
+    [timeout_ms: Keyword.get(opts, :probe_timeout_ms, @call_timeout_ms)] ++
+      Keyword.take(opts, [:supervised])
+  end
+
+  defp run_bounded(busctl, args, command_opts) do
+    case CommandRunner.run(busctl, args, command_opts) do
       {:ok, %{exit: 0, stdout: output}} -> {:ok, output}
       {:ok, %{exit: code, stdout: output}} -> {:error, {:helper_failed, code, output}}
-      {:error, {:timeout, _ms}} -> {:error, :timeout}
       {:error, reason} -> {:error, reason}
     end
   end
