@@ -5,8 +5,8 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   alias FermixCore.Checklists.Access, as: ChecklistAccess
   alias FermixCore.Checklists.Registry, as: ChecklistRegistry
   alias FermixCore.Delivery.OwnerInbox
-  alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.NativeHost.Server, as: NativeHostServer
+  alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Temporal.Registry, as: TemporalRegistry
   alias FermixCore.Trace
 
