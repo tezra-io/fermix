@@ -75,7 +75,7 @@ class LandlockShimCheckTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("(fermix_landlock: Landlock is unavailable on this kernel (x))", result.stdout)
 
-    # A kernel below the shim's floor (Debian 12's Linux 6.1) answers the same
+    # A kernel below the shim's floor (a stock Debian 12's Linux 6.1) answers the same
     # way: the shim runs, and says why commands cannot.
     def test_accepts_a_shim_whose_kernel_is_below_its_floor(self):
         self._shim("printf 'fermix_landlock: Landlock ABI 2 is below 3 (Linux before 6.2)\\n' >&2\nexit 69")

@@ -192,10 +192,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a session of its own, so it cannot type into the terminal of a `fermix` you
   started by hand. So a command in a turn that read outside content no longer
   waits for your confirmation there. A Linux kernel without Landlock, or older
-  than 6.2 (Debian 12's 6.1 included), runs no command and says why,
-  `fermix doctor` gains an `os sandbox` row on both systems, and tool caches
-  move into the workspace's `.cache` on Linux too. On a Mac the same read
-  rules now also cover the phone and desktop keys and `/run/fermix`.
+  than 6.2 (a stock Debian 12's 6.1 included; Debian 12 on a 6.2 or later
+  kernel runs commands), runs no command and says why, `fermix doctor` gains
+  an `os sandbox` row on both systems, and tool caches move into the
+  workspace's `.cache` on Linux too. On a Mac the same read rules now also
+  cover the phone and desktop keys and `/run/fermix`.
 - **Adding a cue source starts from what you want watched.** The add form
   now opens on a list: Website or blog, X accounts, GitHub and Your scripts,
   with Any feed address, Live stream and Any webhook under Something else.
