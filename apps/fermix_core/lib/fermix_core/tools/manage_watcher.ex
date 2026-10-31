@@ -32,8 +32,8 @@ defmodule FermixCore.Tools.ManageWatcher do
   passing item sets off and that is handed nothing from it. `stop_follow_up`
   removes it and `run_follow_up` is the owner's run of it by hand. Its tools
   are bounded by this turn as `schedule_job` bounds a job's, the readiness
-  check names what is missing, and an automatic one gets its approval prompt:
-  `ManageWatcher.FollowUp`.
+  check names what is missing, and `always_allow: false` takes back the
+  owner's Always allow, which only a card grants: `ManageWatcher.FollowUp`.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
@@ -56,10 +56,6 @@ defmodule FermixCore.Tools.ManageWatcher do
                      restore_instruction merge_instructions set_purpose add_example
                      remove_example update stop_follow_up run_follow_up)
   @actions @read_actions ++ @change_actions
-  # The changes that can leave an automatic follow-up's approval behind: what it
-  # runs, or what sets it off (its sources and filter).
-  @approval_actions ~w(update set_purpose add_instructions remove_instructions
-                       restore_instruction merge_instructions)
 
   @update_keys ~w(sources filter listen_for purpose task_job_id task_notes daily_cap
                   filter_budget)
@@ -93,9 +89,9 @@ defmodule FermixCore.Tools.ManageWatcher do
       "Changes need the owner's own request in a private chat; Fermix answers every change " <>
       "with its own summary, which you pass on to the owner as written. A watcher may also " <>
       "have a follow-up (follow_up): the owner's own job that each passing item sets off, " <>
-      "with fixed instructions and tools, asking first on a card or, once approved, " <>
-      "automatic within the daily cap. Fermix hands it nothing from the item, so work on " <>
-      "the item's content is the task's or a mandate's; say so when the owner asks for it."
+      "with fixed instructions and tools, asking first on a card. Fermix hands it nothing " <>
+      "from the item, so work on the item's content is the task's or a mandate's; say so " <>
+      "when the owner asks for it."
   end
 
   @impl true
@@ -154,7 +150,7 @@ defmodule FermixCore.Tools.ManageWatcher do
           type: "string",
           description:
             ~s(Most runs a day of its task and follow-up together, as a whole number, or ) <>
-              ~s("none". Required for filter none and for an automatic follow-up.)
+              ~s("none". Required for filter none.)
         },
         filter_budget: %{
           type: "string",
@@ -287,13 +283,13 @@ defmodule FermixCore.Tools.ManageWatcher do
     opts = opts(context)
 
     with {:ok, params} <- create_params(args),
-         {:ok, name} <- watcher_name(args) do
+         {:ok, _name} <- watcher_name(args) do
       case FollowUp.params(Map.get(args, "follow_up"), context, opts) do
         {:ok, follow_up} ->
           params
           |> put_follow_up(follow_up)
           |> Watchers.create(context, opts)
-          |> FollowUp.summarize(name, nil, auto?(follow_up), context, opts)
+          |> FollowUp.summarize(context, opts)
 
         {:unoffered, sentence} ->
           create_without_follow_up(params, sentence, context, opts)
@@ -304,15 +300,11 @@ defmodule FermixCore.Tools.ManageWatcher do
     end
   end
 
-  defp dispatch(action, args, context) when action in @approval_actions do
-    opts = opts(context)
-
+  defp dispatch("update", args, context) do
     with {:ok, name} <- watcher_name(args) do
-      before = FollowUp.approval_before(name, opts)
-
-      action
+      "update"
       |> change(name, args, context)
-      |> FollowUp.summarize(name, before, auto?(Map.get(args, "follow_up")), context, opts)
+      |> FollowUp.summarize(context, opts(context))
     end
   end
 
@@ -338,10 +330,6 @@ defmodule FermixCore.Tools.ManageWatcher do
          " Nothing was set up: without its follow-up the watcher would have no task."}
     end
   end
-
-  defp auto?(%{mode: "auto"}), do: true
-  defp auto?(%{"mode" => "auto"}), do: true
-  defp auto?(_follow_up), do: false
 
   defp change("pause", name, _args, context), do: Watchers.pause(name, opts(context))
   defp change("resume", name, _args, context), do: Watchers.resume(name, opts(context))
@@ -425,16 +413,11 @@ defmodule FermixCore.Tools.ManageWatcher do
   defp change("run_follow_up", name, _args, context),
     do: FollowUp.run_now(name, context, opts(context))
 
-  # The watcher first, then its follow-up, so a daily cap set in the same request
-  # is there for an automatic follow-up. A follow-up that already is what was
-  # asked for (automatic and waiting for approval) is asked again, unchanged.
+  # The watcher first, then its follow-up.
   defp update(name, changes, nil, _context, opts), do: Watchers.update(name, changes, opts)
 
-  defp update(name, changes, follow_up, context, opts) when map_size(changes) == 0 do
-    if already?(name, follow_up, opts),
-      do: {:ok, %{echo: "Watcher #{name}'s follow-up is already automatic."}},
-      else: Watchers.set_follow_up(name, follow_up, context, opts)
-  end
+  defp update(name, changes, follow_up, context, opts) when map_size(changes) == 0,
+    do: Watchers.set_follow_up(name, follow_up, context, opts)
 
   defp update(name, changes, follow_up, context, opts) do
     with {:ok, %{echo: changed}} <- Watchers.update(name, changes, opts) do
@@ -454,12 +437,6 @@ defmodule FermixCore.Tools.ManageWatcher do
     with {:ok, %{echo: echo} = result} <- Watchers.update(name, changes, opts),
          do: {:ok, %{result | echo: echo <> "\n" <> FollowUp.not_changed(sentence)}}
   end
-
-  defp already?(name, %{mode: "auto"} = follow_up, opts) when map_size(follow_up) == 1 do
-    match?({:ok, %{follow_up_mode: "auto"}}, Watchers.show(name, opts))
-  end
-
-  defp already?(_name, _follow_up, _opts), do: false
 
   defp echo_of({:ok, %{echo: echo}}), do: {:ok, echo}
   defp echo_of({:error, sentence}), do: {:error, sentence}
@@ -592,10 +569,8 @@ defmodule FermixCore.Tools.ManageWatcher do
 
   defp follow_up_words(%{follow_up_job_id: nil}), do: ""
 
-  defp follow_up_words(watcher) do
-    mode = if watcher.follow_up_mode == "auto", do: "automatic", else: "asks first"
-    "; follow-up job #{watcher.follow_up_job_id} (#{mode})"
-  end
+  defp follow_up_words(watcher),
+    do: "; follow-up job #{watcher.follow_up_job_id}"
 
   # The follow-up as it stands: what it runs, how, and whether it is held now.
   defp follow_up_line(%{follow_up_job_id: nil}, _context), do: nil
@@ -604,18 +579,17 @@ defmodule FermixCore.Tools.ManageWatcher do
     opts = opts(context)
 
     with {:ok, job} <- JobsRegistry.get_job(watcher.follow_up_job_id, repo: opts[:repo]),
-         {:ok, approval} <- Watchers.follow_up_approval(watcher, opts) do
+         {:ok, allowed?} <- Watchers.always_allowed(watcher, opts) do
       ~s(Follow-up "#{job.name}": uses #{Enum.join(job.allowed_tools, ", ")}; ) <>
-        "#{approval_words(approval)}; #{held_words(FollowUps.held(job, opts))}"
+        "#{allow_words(allowed?)}; #{held_words(FollowUps.held(job, opts))}"
     else
       {:error, sentence} when is_binary(sentence) -> "Follow-up: #{sentence}"
       {:error, reason} -> "Follow-up: its job could not be read (#{inspect(reason)})."
     end
   end
 
-  defp approval_words(:asks_first), do: "asks first on a card"
-  defp approval_words(:approved), do: "automatic and approved, within the daily cap"
-  defp approval_words(:unapproved), do: "automatic once approved, so each run asks first now"
+  defp allow_words(true), do: "always allowed, so it runs with no card"
+  defp allow_words(false), do: "asks first on a card"
 
   defp held_words(nil), do: "ready."
   defp held_words({_label, sentence}), do: "held: #{sentence}"

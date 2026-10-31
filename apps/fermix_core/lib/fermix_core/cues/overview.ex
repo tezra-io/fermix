@@ -80,15 +80,14 @@ defmodule FermixCore.Cues.Overview do
 
   @typedoc """
   A watcher's follow-up (M60_WATCHER_CODING_RUNS.md §3.5): its job and name,
-  how it runs (`approve` or `auto`), whether an automatic one is approved for
-  what it runs now (nil for one that asks first), and Fermix's sentence while
+  whether the owner's Always allow lets it run with no card for what it runs
+  and what sets it off now (else it asks first), and Fermix's sentence while
   it is held (`Cues.FollowUps.held/2`), else nil.
   """
   @type follow_up :: %{
           job_id: String.t(),
           name: String.t() | nil,
-          mode: String.t(),
-          approved?: boolean() | nil,
+          always_allowed?: boolean(),
           held: String.t() | nil,
           paused?: boolean()
         }
@@ -271,13 +270,12 @@ defmodule FermixCore.Cues.Overview do
   end
 
   defp follow_up_view(watcher, job, held_opts, opts) do
-    with {:ok, approval} <- Watchers.follow_up_approval(watcher, repo: repo(opts)) do
+    with {:ok, allowed?} <- Watchers.always_allowed(watcher, repo: repo(opts)) do
       {:ok,
        %{
          job_id: job.id,
          name: job.name,
-         mode: watcher.follow_up_mode,
-         approved?: if(approval == :asks_first, do: nil, else: approval == :approved),
+         always_allowed?: allowed?,
          held: held_sentence(FollowUps.held(job, held_opts)),
          paused?: Map.get(job, :enabled?) == false
        }}

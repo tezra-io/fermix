@@ -535,22 +535,18 @@ defmodule FermixCore.Management.CopyTest do
       end
     end
 
-    # M60_WATCHER_CODING_RUNS.md §6.2: a watcher's follow-up card and an
-    # automatic follow-up's approval prompt reach the Mac's chat as cards,
-    # their summary and status sentence drawn verbatim.
-    test "every follow-up card and approval prompt sentence obeys the rules" do
+    # M60_WATCHER_CODING_RUNS.md §6.2: a watcher's follow-up card reaches the
+    # Mac's chat as a card, its summary and status sentence drawn verbatim,
+    # after Run and after an Always allow that allowed or found a change.
+    test "every follow-up card sentence obeys the rules" do
       names = ["codex-limits", "Codex review"]
 
-      for state <- ~w(waiting starting started skipped expired refused) do
-        card = ProposalView.follow_up_card(follow_up_card(state), [])
+      for state <- ~w(waiting starting started skipped expired refused),
+          always_allow <- [nil, "allowed", "changed"] do
+        card = state |> follow_up_card() |> Map.put(:always_allow, always_allow)
+        card = ProposalView.follow_up_card(card, [])
         assert_clean(card.summary, :prose, names, "follow-up summary")
         assert_clean(card.status_sentence, :prose, names, "follow-up #{state}")
-      end
-
-      for state <- ~w(waiting approved denied expired) do
-        card = ProposalView.approval_card(approval_card(state), [])
-        assert_clean(card.summary, :prose, names, "approval summary")
-        assert_clean(card.status_sentence, :prose, names, "approval #{state}")
       end
     end
   end
@@ -1340,30 +1336,26 @@ defmodule FermixCore.Management.CopyTest do
             %{base | needs_update: :words},
             %{base | filter: "none", needs_update: :filter},
             %{base | filter: "none"},
-            %{base | filter: "none", task_job_id: nil, follow_up: follow_up_view("approve")}
+            %{base | filter: "none", task_job_id: nil, follow_up: follow_up_view(false)}
           ] ++ Enum.map(follow_up_views(), &%{base | follow_up: &1}) do
       CueWatcherRow.build(watcher, %{window_s: 86_400})
     end
   end
 
-  # A watcher's follow-up in every mode and approval, and held for each reason
-  # the readiness check words (M60_WATCHER_CODING_RUNS.md §3.2).
+  # A watcher's follow-up asking first and always allowed, and held for each
+  # reason the readiness check words (M60_WATCHER_CODING_RUNS.md §3.2).
   defp follow_up_views do
     held = follow_up_held_sentences()
 
-    [
-      follow_up_view("approve"),
-      %{follow_up_view("auto") | approved?: true},
-      %{follow_up_view("auto") | approved?: false}
-    ] ++ Enum.map(held, &%{follow_up_view("approve") | held: &1})
+    [follow_up_view(false), follow_up_view(true)] ++
+      Enum.map(held, &%{follow_up_view(false) | held: &1})
   end
 
-  defp follow_up_view(mode),
+  defp follow_up_view(always_allowed?),
     do: %{
       job_id: "job_2",
       name: "Codex review",
-      mode: mode,
-      approved?: nil,
+      always_allowed?: always_allowed?,
       held: nil,
       paused?: false
     }
@@ -1542,29 +1534,6 @@ defmodule FermixCore.Management.CopyTest do
         text: "Limits reset.",
         reason: "a reset"
       }
-    }
-  end
-
-  defp approval_card(state) do
-    %{
-      id: "cfa_1",
-      watcher_id: "cwt_1",
-      watcher_name: "codex-limits",
-      shown_digest: "d",
-      state: state,
-      created_at: ~U[2026-10-30 12:00:00Z],
-      expires_at: ~U[2026-10-30 12:30:00Z],
-      decided_at: nil,
-      decided_from: nil,
-      daily_cap: 5,
-      sources: ["x-feed"],
-      listen_for: ["reset"],
-      job_id: "job_1",
-      job_name: "Codex review",
-      task_prompt: "Review the last day's commits on dev.",
-      allowed_tools: ["codex_run"],
-      delivery_mode: "origin",
-      delivery_target: %{"platform" => "telegram", "chat_id" => "1"}
     }
   end
 

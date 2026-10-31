@@ -25,8 +25,9 @@ defmodule FermixCore.Reply do
 
   A watcher's card (`:follow_up`, and a mandate's proposal, `:mandate`;
   `FermixCore.Cues.Card`) also carries its visible `lines`, its expandable
-  `detail` and its two `actions`' words, so a channel with buttons draws it
-  compactly; `text` is the whole card for every other chat.
+  `detail` and its `actions`' words (a follow-up's card adds Always allow), so
+  a channel with buttons draws it compactly; `text` is the whole card for
+  every other chat.
   """
   @type approval_spec :: %{
           required(:kind) => :sandbox | :soul | :follow_up | :mandate,
@@ -35,7 +36,11 @@ defmodule FermixCore.Reply do
           optional(:detail) => String.t() | nil,
           optional(:ttl_s) => pos_integer(),
           optional(:lines) => [String.t()],
-          optional(:actions) => %{confirm: String.t(), deny: String.t()}
+          optional(:actions) => %{
+            required(:confirm) => String.t(),
+            required(:deny) => String.t(),
+            optional(:always_allow) => String.t()
+          }
         }
   @type approval_prompt ::
           {:approval_prompt, text :: String.t(), token :: String.t()}

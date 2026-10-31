@@ -399,6 +399,9 @@ defmodule FermixCore.Management.Router do
   defp route_cues("cues.watchers.get", params, opts),
     do: cue_by_name(&Cues.watchers_get/2, params, opts)
 
+  defp route_cues("cues.watchers.always_allow.revoke", params, opts),
+    do: cue_by_name(&Cues.watchers_always_allow_revoke/2, params, opts)
+
   defp route_cues("cues.mandates.list", %{}, opts),
     do: operation_result(Cues.mandates_list(cues_opts(opts)))
 

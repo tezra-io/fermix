@@ -2,11 +2,12 @@ defmodule FermixChannels.Companion.Proposals do
   @moduledoc """
   A mandate's proposals on the Mac's chat (companion protocol 4; M60 app
   surface §3.7, D28): the card the owner decides from, the proposal's end, and
-  the owner's answer. Since protocol 5 a watcher's follow-up card and an
-  automatic follow-up's approval prompt are cards too
-  (M60_WATCHER_CODING_RUNS.md §6.2): announced, listed and answered the same
-  way, by id, through `Cues.Proposals`, and written only to a connection on
-  version 5 (`Protocol.server_payload_version/2`).
+  the owner's answer. Since protocol 5 a watcher's follow-up card is a card
+  too (M60_WATCHER_CODING_RUNS.md §6.2): announced, listed and answered the
+  same way, by id, through `Cues.Proposals`, and written only to a connection
+  on version 5 (`Protocol.server_payload_version/2`). It also takes the
+  decision `always_allow`, which its `follow_up.offers_always_allow`
+  advertises.
 
   Core announces through the listener `FermixChannels.Application` registers
   as `:cue_proposal_listener`: `proposal_event/1` turns `{:offered, card}` into
@@ -100,7 +101,7 @@ defmodule FermixChannels.Companion.Proposals do
   @spec answer(map(), FermixCore.SocketPeer.caller() | nil, keyword()) ::
           {:ok, map()} | {:error, String.t()}
   def answer(%{"proposal_id" => id, "decision" => decision}, :independent, opts)
-      when is_binary(id) and decision in ["confirm", "deny"] and is_list(opts) do
+      when is_binary(id) and decision in ["confirm", "deny", "always_allow"] and is_list(opts) do
     origin = %{surface: :companion, device_id: nil}
 
     case CueProposals.decide(id, decision_atom(decision), origin, opts) do
@@ -117,6 +118,7 @@ defmodule FermixChannels.Companion.Proposals do
 
   defp decision_atom("confirm"), do: :confirm
   defp decision_atom("deny"), do: :deny
+  defp decision_atom("always_allow"), do: :always_allow
 
   # String keys, and no nil: an absent value is an absent key on this wire.
   defp wire(%{} = map) when not is_struct(map) do

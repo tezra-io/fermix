@@ -74,7 +74,7 @@ defmodule FermixCore.Memory.RepoChecklistsTest do
   } do
     assert {:ok, versions} = Repo.migration_versions(server: repo)
     assert @version in versions
-    assert Enum.max(versions) == @edits_version
+    assert @edits_version in versions
 
     with_raw_conn(db_path, fn conn ->
       assert objects(conn) == @objects

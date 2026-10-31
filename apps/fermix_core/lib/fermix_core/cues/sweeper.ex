@@ -41,10 +41,8 @@ defmodule FermixCore.Cues.Sweeper do
     {:delete_receipts, &__MODULE__.delete_receipts/3},
     {:prune_gaps, &__MODULE__.prune_gaps/3},
     {:prune_filter_calls, &__MODULE__.prune_filter_calls/3},
-    # A follow-up's ended triggers and its answered or expired approval
-    # prompts, 30 days on (M60_WATCHER_CODING_RUNS.md §4.3, §5).
+    # A follow-up's ended triggers, 30 days on (M60_WATCHER_CODING_RUNS.md §4.3).
     {:prune_follow_up_triggers, &__MODULE__.prune_follow_up_triggers/3},
-    {:prune_follow_up_approvals, &__MODULE__.prune_follow_up_approvals/3},
     # What a stream counted instead of storing, 48 hours after its hour
     # (M60_CUE_INTAKE_AT_SCALE.md §3.4).
     {:prune_counts, &__MODULE__.prune_counts/3},
@@ -56,9 +54,6 @@ defmodule FermixCore.Cues.Sweeper do
     # A follow-up's card nobody answered within 30 minutes becomes `expired`;
     # nothing runs (M60_WATCHER_CODING_RUNS.md §4.5).
     {:follow_up_expiry, &FermixCore.Cues.FollowUps.expire/3},
-    # An automatic follow-up's approval prompt nobody answered within 30
-    # minutes becomes `expired`; the follow-up keeps asking first (§5).
-    {:follow_up_approval_expiry, &FermixCore.Cues.FollowUpApprovals.expire/3},
     {:proposal_unknown_outcomes, &FermixCore.Cues.Proposals.report_unknown/3},
     # An allowed call in auto mode that never reported, once its run ended, is
     # finished `unknown` and never run again; the run's report already told
@@ -262,12 +257,6 @@ defmodule FermixCore.Cues.Sweeper do
           {:ok, non_neg_integer()} | {:error, term()}
   def prune_follow_up_triggers(repo_opts, now, limit),
     do: sql_step(:prune_follow_up_triggers, repo_opts, now, limit)
-
-  @doc false
-  @spec prune_follow_up_approvals(keyword(), DateTime.t(), pos_integer()) ::
-          {:ok, non_neg_integer()} | {:error, term()}
-  def prune_follow_up_approvals(repo_opts, now, limit),
-    do: sql_step(:prune_follow_up_approvals, repo_opts, now, limit)
 
   @doc false
   @spec prune_counts(keyword(), DateTime.t(), pos_integer()) ::

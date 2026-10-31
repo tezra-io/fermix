@@ -21,25 +21,31 @@ defmodule FermixCore.Cues.FollowUps do
 
   ## The card
 
-  `offer/2` hands a waiting trigger's card (`card/2`: the watcher, the
-  follow-up and its instructions, tools and delivery, the item apart as
-  outside text, the expiry) to the sender (`Cues.FollowUpCards.send_card/2`),
-  which writes the message (`Cues.Card.follow_up/2`) and the token
-  (`Cues.Proposals.new_token/0`) and answers where it went
-  (`CuesFollowUpSql.binding()`): the token's digest and the chat that may
-  answer it, or no chat when only an app can show it. A sender that fails, or
-  no sender, refuses the trigger ("could not reach you"). A card that went out
-  is offered to every app surface through `Cues.Proposals.announce/2`
-  (`Cues.ProposalView.follow_up_card/2`), and its end is told there too. An
-  offer runs in a task nobody answers, so one that fails is logged and traced
-  there.
+  `offer/2` hands a waiting trigger's card (`card/2`: the watcher and what
+  sets it off, the follow-up and its instructions, tools and delivery, the
+  item apart as outside text, the expiry) to the sender
+  (`Cues.FollowUpCards.send_card/2`), which writes the message
+  (`Cues.Card.follow_up/2`) and the token (`Cues.Proposals.new_token/0`) and
+  answers where it went (`CuesFollowUpSql.binding()`): the token's digest and
+  the chat that may answer it, or no chat when only an app can show it. Where
+  it went is recorded with the digest of what the card showed, read with the
+  card. A sender that fails, or no sender, refuses the trigger ("could not
+  reach you"). A card that went out is offered to every app surface through
+  `Cues.Proposals.announce/2` (`Cues.ProposalView.follow_up_card/2`), and its
+  end is told there too. An offer runs in a task nobody answers, so one that
+  fails is logged and traced there.
 
-  The owner answers by token from that chat (`confirm/3`, `deny/3`, which
-  `Cues.Proposals` dispatches to), by id from an app (`decide/4`), or with a
-  bare `/confirm` resolved through `waiting_in_chat/2`. A yes moves the
-  trigger to `starting` and wakes the scheduler, and a chat's card becomes
-  the one line saying it is starting (`Cues.Card.starting/2`); a card nobody
-  answers expires after 30 minutes (`expire/3`, a `Cues.Sweeper` step).
+  The owner answers Run, Skip or Always allow: by token from that chat
+  (`confirm/3`, `deny/3`, `always_allow/3`, which `Cues.Proposals` dispatches
+  to), by id from an app (`decide/4`), or with a bare command resolved
+  through `waiting_in_chat/2`. Run moves the trigger to `starting` and wakes
+  the scheduler, and a chat's card becomes the one line saying it is starting
+  (`Cues.Card.starting/2`). Always allow does the same and, in that one write,
+  allows the follow-up for what the card showed, so later items run it with
+  no card until what it runs or what sets it off changes; one whose follow-up
+  changed since the card was shown allows nothing, and its line says so. A
+  card nobody answers expires after 30 minutes (`expire/3`, a `Cues.Sweeper`
+  step).
 
   ## Refused at its turn
 
@@ -96,7 +102,14 @@ defmodule FermixCore.Cues.FollowUps do
           decided_at: DateTime.t() | nil,
           decided_from: String.t() | nil,
           run_id: String.t() | nil,
-          watcher: %{id: String.t(), name: String.t() | nil},
+          always_allow: String.t() | nil,
+          digest: String.t() | nil,
+          watcher: %{
+            id: String.t(),
+            name: String.t() | nil,
+            sources: [String.t()],
+            listen_for: [String.t()]
+          },
           follow_up: %{
             job_id: String.t(),
             name: String.t() | nil,
@@ -221,9 +234,12 @@ defmodule FermixCore.Cues.FollowUps do
     end
   end
 
-  # Recorded, then offered to every app surface, which hears its end too.
+  # Recorded with the digest of what the card showed, then offered to every
+  # app surface, which hears its end too.
   defp record_offer(trigger, card, binding, opts) do
-    case repo_call({:record_offer, trigger.id, binding, FollowUpCards.now(opts)}, opts) do
+    request = {:record_offer, trigger.id, binding, card.digest, FollowUpCards.now(opts)}
+
+    case repo_call(request, opts) do
       {:ok, _offered} ->
         Proposals.announce({:offered, ProposalView.follow_up_card(card, opts)}, opts)
         :offered
@@ -234,8 +250,10 @@ defmodule FermixCore.Cues.FollowUps do
   end
 
   @doc """
-  What trigger `trigger_id`'s card shows (§6.1, §6.2): Fermix's fields, and
-  the item and the filter's reason apart, in `outside`.
+  What trigger `trigger_id`'s card shows (§6.1, §6.2): Fermix's fields, the
+  digest of what it shows now (`digest`, nil once the watcher or its
+  follow-up is gone), and the item and the filter's reason apart, in
+  `outside`.
   """
   @spec card(String.t(), keyword()) :: {:ok, card()} | {:error, :not_found | term()}
   def card(trigger_id, opts \\ []) when is_binary(trigger_id) and is_list(opts) do
@@ -248,7 +266,9 @@ defmodule FermixCore.Cues.FollowUps do
 
   defp card_of(row) do
     with {:ok, tools} <- decoded(row.allowed_tools, []),
-         {:ok, target} <- decoded(row.delivery_target, nil) do
+         {:ok, target} <- decoded(row.delivery_target, nil),
+         {:ok, sources} <- decoded(row.sources, []),
+         {:ok, words} <- decoded(row.listen_for, []) do
       {:ok,
        %{
          trigger_id: row.id,
@@ -260,7 +280,14 @@ defmodule FermixCore.Cues.FollowUps do
          decided_at: row.decided_at,
          decided_from: row.decided_from,
          run_id: row.run_id,
-         watcher: %{id: row.watcher_id, name: row.watcher_name},
+         always_allow: row.always_allow,
+         digest: row.digest,
+         watcher: %{
+           id: row.watcher_id,
+           name: row.watcher_name,
+           sources: sources || [],
+           listen_for: words || []
+         },
          follow_up: %{
            job_id: row.job_id,
            name: row.job_name,
@@ -308,60 +335,71 @@ defmodule FermixCore.Cues.FollowUps do
   # --- answers -----------------------------------------------------------------------
 
   @doc """
-  The owner's yes by token from `origin` (`%{platform, chat_id, user_id}`):
+  The owner's Run by token from `origin` (`%{platform, chat_id, user_id}`):
   one Repo call fenced on the token's digest, `waiting`, the chat it went to
   and the expiry moves the trigger to `starting`, and the scheduler is woken
   to start it. Returns the one line the card becomes.
   """
   @spec confirm(String.t(), map(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
-  def confirm(token, origin, opts \\ []) when is_binary(token) and is_map(origin) do
-    request = {:confirm, Proposals.digest(token), origin, FollowUpCards.now(opts)}
+  def confirm(token, origin, opts \\ []) when is_binary(token) and is_map(origin),
+    do: answer_by_token(token, origin, :confirm, opts)
 
-    case repo_call(request, opts) do
-      {:ok, trigger} -> trigger |> decided(:confirm, origin.platform, opts) |> answered(opts)
-      {:error, why} -> {:error, FollowUpCards.refusal_reply(why, :card)}
-    end
-  end
-
-  @doc "The owner's no by token from `origin`: `waiting → skipped`. Returns the card's line."
+  @doc "The owner's Skip by token from `origin`: `waiting → skipped`. Returns the card's line."
   @spec deny(String.t(), map(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
-  def deny(token, origin, opts \\ []) when is_binary(token) and is_map(origin) do
-    request = {:deny, Proposals.digest(token), origin, FollowUpCards.now(opts)}
+  def deny(token, origin, opts \\ []) when is_binary(token) and is_map(origin),
+    do: answer_by_token(token, origin, :deny, opts)
+
+  @doc """
+  The owner's Always allow by token from `origin`: Run's write, which in the
+  same transaction allows the follow-up for the digest the card showed, so
+  later items run it with no card. Allows nothing when the follow-up or what
+  sets it off changed since the card was shown; the run starts either way.
+  Returns the card's line, which says which.
+  """
+  @spec always_allow(String.t(), map(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
+  def always_allow(token, origin, opts \\ []) when is_binary(token) and is_map(origin),
+    do: answer_by_token(token, origin, :always_allow, opts)
+
+  defp answer_by_token(token, origin, decision, opts) do
+    request = {:answer, Proposals.digest(token), origin, decision, FollowUpCards.now(opts)}
 
     case repo_call(request, opts) do
-      {:ok, trigger} -> trigger |> decided(:deny, origin.platform, opts) |> answered(opts)
-      {:error, why} -> {:error, FollowUpCards.refusal_reply(why, :card)}
+      {:ok, trigger} -> trigger |> decided(decision, origin.platform, opts) |> answered(opts)
+      {:error, why} -> {:error, FollowUpCards.refusal_reply(why)}
     end
   end
 
   @doc """
-  An answer by id from one of the owner's apps or from a chat whose waiting
-  card `waiting_in_chat/2` resolved: `origin_label` is where it came from
-  (`companion`, `management`, `mobile:<device>`, or a chat's
-  `<platform>:<chat>:<user>`). Fenced on `waiting` and the expiry, so the first
-  answer from any surface wins. Returns the trigger as it now is.
+  An answer by id (`:confirm`, `:deny` or `:always_allow`) from one of the
+  owner's apps or from a chat whose waiting card `waiting_in_chat/2`
+  resolved: `origin_label` is where it came from (`companion`, `management`,
+  `mobile:<device>`, or a chat's `<platform>:<chat>:<user>`). Fenced on
+  `waiting` and the expiry, so the first answer from any surface wins.
+  Returns the trigger as it now is, its `always_allow` saying what an Always
+  allow came to.
   """
-  @spec decide(String.t(), :confirm | :deny, String.t(), keyword()) ::
+  @spec decide(String.t(), :confirm | :deny | :always_allow, String.t(), keyword()) ::
           {:ok, trigger()} | {:error, String.t()}
   def decide(trigger_id, decision, origin_label, opts \\ [])
-      when is_binary(trigger_id) and decision in [:confirm, :deny] and is_binary(origin_label) do
+      when is_binary(trigger_id) and decision in [:confirm, :deny, :always_allow] and
+             is_binary(origin_label) do
     with :ok <- FollowUpCards.known_origin(origin_label) do
-      request =
-        {:decide, trigger_id, to_state(decision), origin_label, FollowUpCards.now(opts)}
+      request = {:decide, trigger_id, decision, origin_label, FollowUpCards.now(opts)}
 
       case repo_call(request, opts) do
         {:ok, trigger} ->
           {:ok, decided(trigger, decision, FollowUpCards.origin_kind(origin_label), opts)}
 
         {:error, why} ->
-          {:error, FollowUpCards.refusal_reply(why, :card)}
+          {:error, FollowUpCards.refusal_reply(why)}
       end
     end
   end
 
   @doc """
-  The one line a decided card becomes (§3.3): starting, naming the item, or
-  skipped. A run refused when its turn comes is told by `refused/3`.
+  The one line a decided card becomes (§3.3): starting, naming the item and,
+  after Always allow, whether it runs with no card from now on; or skipped. A
+  run refused when its turn comes is told by `refused/3`.
   """
   @spec answered(trigger(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
   def answered(%{id: id, state: state}, opts) when is_list(opts) do
@@ -408,21 +446,22 @@ defmodule FermixCore.Cues.FollowUps do
     end)
   end
 
-  # Traced; a yes wakes the scheduler, whose claim starts the run or refuses it
-  # (`refused/3`); every app surface hears the end. Returns the trigger.
+  # Traced, an Always allow with what it came to; a run wakes the scheduler,
+  # whose claim starts it or refuses it (`refused/3`); every app surface hears
+  # the end. Returns the trigger.
   defp decided(trigger, decision, kind, opts) do
-    Telemetry.lifecycle(:follow_up_decided, %{}, %{
-      trigger_id: trigger.id,
-      watcher_id: trigger.watcher_id,
-      delivery_id: trigger.delivery_id,
-      cue_id: trigger.cue_id,
-      job_id: trigger.job_id,
-      state: trigger.state,
-      decision: decision,
-      kind: kind
-    })
+    Telemetry.lifecycle(
+      :follow_up_decided,
+      %{},
+      Map.merge(trigger_ids(trigger), %{
+        state: trigger.state,
+        decision: decision,
+        kind: kind,
+        outcome: trigger.always_allow
+      })
+    )
 
-    if decision == :confirm, do: Keyword.get(opts, :wake_scheduler, &Cues.wake_scheduler/0).()
+    if decision != :deny, do: Keyword.get(opts, :wake_scheduler, &Cues.wake_scheduler/0).()
     announce_end(trigger, opts)
     trigger
   end
@@ -439,15 +478,22 @@ defmodule FermixCore.Cues.FollowUps do
     Proposals.announce({:resolved, resolved}, opts)
   end
 
+  defp end_sentence(%{state: state, always_allow: "allowed"})
+       when state in ["starting", "started"],
+       do: "Confirmed; the follow-up is starting, and runs with no card from now on."
+
+  defp end_sentence(%{state: state, always_allow: "changed"})
+       when state in ["starting", "started"],
+       do:
+         "Confirmed; the follow-up is starting. It changed since this card was shown, so it " <>
+           "still asks first."
+
   defp end_sentence(%{state: state}) when state in ["starting", "started"],
     do: "Confirmed; the follow-up is starting."
 
   defp end_sentence(%{state: "skipped"}), do: "Skipped; the follow-up did not run."
   defp end_sentence(%{state: "expired"}), do: "That card expired; nothing ran."
   defp end_sentence(%{reason: reason}) when is_binary(reason), do: reason
-
-  defp to_state(:confirm), do: "starting"
-  defp to_state(:deny), do: "skipped"
 
   # --- refusal, expiry --------------------------------------------------------------------
 

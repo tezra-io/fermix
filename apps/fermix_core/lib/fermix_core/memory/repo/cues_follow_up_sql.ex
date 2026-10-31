@@ -2,9 +2,9 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
   @moduledoc """
   SQL for watcher follow-ups (M60_WATCHER_CODING_RUNS.md §4.3–§4.5): the
   trigger table `cue_follow_up_triggers`, which is both a follow-up's trigger
-  and, in ask first, its card; the pass hook that writes one; the card's
-  answers; and the expiry. An automatic follow-up's approval and its prompts
-  are `CuesFollowUpApprovalsSql`'s.
+  and, when it asks first, its card; the pass hook that writes one; the card's
+  answers; and the expiry. The owner's Always allow, which lets a follow-up
+  run with no card, is `CuesFollowUpAllowSql`'s.
 
   Pure SQL over the caller's `conn`, reached only through
   `FermixCore.Memory.Repo.cues_call/3`. One `handle/2` head per request tuple,
@@ -25,25 +25,37 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
   - `skipped`: the item is older than 15 minutes, the watcher's daily cap is
     reached (task runs and follow-ups started or proposed in 24 hours), or a
     card of this follow-up already waits;
-  - `starting`: an automatic follow-up whose approval still matches what it
-    runs (`CuesFollowUpApprovalsSql.effective_mode/2`); the scheduler's next
-    admission pass starts it;
-  - `waiting`: ask first, or an automatic follow-up whose approval no longer
-    matches, with an expiry 30 minutes on; the scheduler offers its card.
+  - `starting`: a follow-up always allowed for what it runs and what sets it
+    off now (`CuesFollowUpAllowSql.allowed?/2`), with no card; the
+    scheduler's next admission pass starts it;
+  - `waiting`: every other follow-up asks first, with an expiry 30 minutes
+    on; the scheduler offers its card.
 
-  Then `waiting → starting` (the owner's yes), `waiting → skipped` (no),
-  `waiting → expired`, `waiting | starting → refused` (held, or not runnable
-  when its turn came, with Fermix's sentence in `reason`) and
-  `starting → started` with the run's id. A watcher with no task settles the
-  delivery `acked` with outcome `follow_up` in the pass's transaction.
+  The trigger's `mode` records which: `auto`, started with no card, or
+  `approve`, a card that asks. Then `waiting → starting` (the owner's Run, or
+  Always allow), `waiting → skipped` (Skip), `waiting → expired`,
+  `waiting | starting → refused` (held, or not runnable when its turn came,
+  with Fermix's sentence in `reason`) and `starting → started` with the run's
+  id. A watcher with no task settles the delivery `acked` with outcome
+  `follow_up` in the pass's transaction.
 
-  A `cp_` token answers a mandate's proposal, a follow-up's card or an
-  approval's prompt: `{:token_kind, digest}` says which table holds it, so
-  `Cues.Proposals` dispatches each answer from one place.
+  ## Always allow
+
+  A card records the digest of what it showed (`shown_digest`, read with the
+  card and written with where it went). The owner's Always allow moves the
+  card `waiting → starting` as Run does and, in the same transaction, allows
+  the follow-up for that digest (`CuesFollowUpAllowSql.allow_shown/5`): its
+  `always_allow` says what came of it, `allowed`, or `changed` when what it
+  runs or what sets it off is no longer what the card showed, so nothing was
+  allowed. Migration 58 added both columns to the table 54 made.
+
+  A `cp_` token answers a mandate's proposal or a follow-up's card:
+  `{:token_kind, digest}` says which table holds it, so `Cues.Proposals`
+  dispatches each answer from one place.
   """
 
   alias FermixCore.Cues
-  alias FermixCore.Memory.Repo.CuesFollowUpApprovalsSql
+  alias FermixCore.Memory.Repo.CuesFollowUpAllowSql
   alias FermixCore.Memory.Repo.CuesSql
 
   @fresh_s 15 * 60
@@ -52,6 +64,7 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
   @offers_max 20
 
   @states ~w(waiting starting started skipped expired refused)
+  @decisions [:confirm, :deny, :always_allow]
 
   @stale "The item is older than 15 minutes."
   @card_waiting "A card for this follow-up is already waiting."
@@ -98,11 +111,12 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
   @trigger_columns """
   t.id, t.watcher_id, t.delivery_id, t.cue_id, t.job_id, t.mode, t.state, t.reason,
   t.token_digest IS NOT NULL, t.chat_platform, t.chat_id, t.chat_user_id, t.offered_at,
-  t.expires_at, t.run_id, t.decided_from, t.decided_at, t.created_at
+  t.expires_at, t.run_id, t.decided_from, t.decided_at, t.created_at, t.shown_digest,
+  t.always_allow
   """
 
   @pass_facts_sql """
-  SELECT d.watcher_id, d.cue_id, w.task_job_id, w.follow_up_job_id, w.follow_up_mode,
+  SELECT d.watcher_id, d.cue_id, w.task_job_id, w.follow_up_job_id,
          w.follow_up_approval_digest, w.daily_cap, coalesce(c.occurred_at, c.received_at)
   FROM cue_deliveries d
   JOIN cue_watchers w ON w.id = d.watcher_id
@@ -112,9 +126,13 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
 
   @card_sql """
   SELECT t.id, t.state, t.mode, t.reason, t.created_at, t.expires_at, t.decided_at,
-         t.decided_from, t.run_id, t.watcher_id, w.name, t.job_id, j.name, j.task_prompt,
-         j.allowed_tools_json, j.delivery_mode, j.delivery_target_json, d.source_ref,
-         d.decision_reason, d.received_at, c.occurred_at, c.snapshot
+         t.decided_from, t.run_id, t.always_allow, t.watcher_id, w.name, w.listen_for,
+         (SELECT json_group_array(source_ref) FROM
+            (SELECT source_ref FROM cue_watcher_sources s WHERE s.watcher_id = t.watcher_id
+             ORDER BY source_ref)),
+         t.job_id, j.name, j.task_prompt, j.allowed_tools_json, j.delivery_mode,
+         j.delivery_target_json, d.source_ref, d.decision_reason, d.received_at, c.occurred_at,
+         c.snapshot
   FROM cue_follow_up_triggers t
   LEFT JOIN cue_watchers w ON w.id = t.watcher_id
   LEFT JOIN scheduled_jobs j ON j.id = t.job_id
@@ -139,7 +157,9 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
           run_id: String.t() | nil,
           decided_from: String.t() | nil,
           decided_at: DateTime.t() | nil,
-          created_at: DateTime.t()
+          created_at: DateTime.t(),
+          shown_digest: String.t() | nil,
+          always_allow: String.t() | nil
         }
   @typedoc "Where a card went: the token's digest and the chat that may answer it."
   @type binding :: %{
@@ -149,9 +169,34 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
           user_id: String.t() | nil
         }
 
+  # Migration 58: the columns the table holds before it, and the two it adds.
+  @columns_54 ~w(id watcher_id delivery_id cue_id job_id mode state reason token_digest
+                 chat_platform chat_id chat_user_id offered_at expires_at run_id decided_from
+                 decided_at created_at)
+  @always_allow_columns ~w(shown_digest always_allow)
+
+  @always_allow_sql """
+  ALTER TABLE cue_follow_up_triggers ADD COLUMN shown_digest TEXT;
+  ALTER TABLE cue_follow_up_triggers ADD COLUMN always_allow TEXT
+    CHECK (always_allow IN ('allowed','changed'));
+  """
+
   @doc "The DDL of the trigger table and its indexes (migration 54)."
   @spec schema_sql() :: String.t()
   def schema_sql, do: @schema_sql
+
+  @doc """
+  Migration 58's change to the trigger table: the columns it holds before and
+  after, and the statements that add the digest a card showed and what the
+  owner's Always allow came to.
+  """
+  @spec always_allow_columns() :: %{before: [String.t()], after: [String.t()], sql: String.t()}
+  def always_allow_columns,
+    do: %{
+      before: @columns_54,
+      after: @columns_54 ++ @always_allow_columns,
+      sql: @always_allow_sql
+    }
 
   @doc """
   The condition, on a trigger aliased `t`, under which it counts toward its
@@ -168,25 +213,28 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
   - `{:claim_offers, now, limit}` → `{:ok, [trigger]}`: waiting triggers not
     yet offered and not past their expiry, oldest first, each stamped
     `offered_at` so it is offered once.
-  - `{:record_offer, id, binding, now}` → `{:ok, trigger}`: where the card
-    went, on a waiting trigger with no card yet; `{:error, :not_waiting}`.
+  - `{:record_offer, id, binding, shown_digest, now}` → `{:ok, trigger}`:
+    where the card went and the digest it showed, on a waiting trigger with no
+    card yet; `{:error, :not_waiting}`.
   - `{:refuse, id, from_states, reason}` → `{:ok, trigger}`: to
     `refused` with Fermix's sentence, from one of `from_states`;
     `{:error, :stale}` when it is in none of them.
   - `{:starting_triggers, limit}` → `{:ok, [trigger]}`, oldest first.
-  - `{:confirm, digest, origin, now}`, `{:deny, digest, origin, now}`: the
-    owner's answer by token, fenced on the digest, `waiting`, the chat it went
-    to and the expiry (`waiting → starting | skipped`).
-  - `{:decide, id, "starting" | "skipped", decided_from, now}`: an answer by
-    id from an app the transport authenticated, fenced on `waiting` and the
-    expiry.
+  - `{:answer, token_digest, origin, decision, now}`: the owner's answer by
+    token (`:confirm`, `:deny` or `:always_allow`), fenced on the digest,
+    `waiting`, the chat it went to and the expiry (`waiting → starting |
+    skipped`); Always allow also allows the digest the card showed.
+  - `{:decide, id, decision, decided_from, now}`: the same answer by id from
+    an app the transport authenticated, or from a chat whose waiting card a
+    bare command resolved, fenced on `waiting` and the expiry.
   - `{:waiting_in_chat, origin, now}` → `{:ok, [trigger]}`: the cards waiting
     in that chat.
-  - `{:card, id}` → `{:ok, card_row | nil}`: what the card shows.
+  - `{:card, id}` → `{:ok, card_row | nil}`: what the card shows, with the
+    digest of what it shows now (`CuesFollowUpAllowSql.card_digest/3`).
   - `{:waiting_cards, now, limit}` → `{:ok, [card_row]}`: every card still
     waiting that went out, oldest first, for an app that connects.
-  - `{:token_kind, digest}` → `{:ok, :mandate | :follow_up | :approval | nil}`:
-    which table holds a `cp_` token's digest.
+  - `{:token_kind, digest}` → `{:ok, :mandate | :follow_up | nil}`: which
+    table holds a `cp_` token's digest.
   - `{:expire, now, limit}` → `{:ok, [trigger]}`: waiting past the expiry →
     `expired`.
   - `{:run_trigger, run_id}` → `{:ok, %{trigger: trigger, watcher_name:
@@ -198,9 +246,11 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
     CuesSql.with_immediate_transaction(conn, fn -> claim_offers(conn, now, limit) end)
   end
 
-  def handle(conn, {:record_offer, id, binding, %DateTime{} = now})
-      when is_binary(id) and is_map(binding) do
-    CuesSql.with_immediate_transaction(conn, fn -> record_offer(conn, id, binding, now) end)
+  def handle(conn, {:record_offer, id, binding, shown, %DateTime{} = now})
+      when is_binary(id) and is_map(binding) and (is_binary(shown) or is_nil(shown)) do
+    CuesSql.with_immediate_transaction(conn, fn ->
+      record_offer(conn, id, binding, shown, now)
+    end)
   end
 
   def handle(conn, {:refuse, id, [_ | _] = from, reason})
@@ -212,18 +262,15 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
     do:
       list_triggers(conn, "t.state = 'starting' ORDER BY t.created_at, t.rowid LIMIT ?", [limit])
 
-  def handle(conn, {:confirm, digest, origin, %DateTime{} = now}) when is_binary(digest) do
-    answer_by_token(conn, digest, origin, {"starting", nil}, now)
+  def handle(conn, {:answer, digest, origin, decision, %DateTime{} = now})
+      when is_binary(digest) and decision in @decisions do
+    answer_by_token(conn, digest, origin, decision, now)
   end
 
-  def handle(conn, {:deny, digest, origin, %DateTime{} = now}) when is_binary(digest) do
-    answer_by_token(conn, digest, origin, {"skipped", @denied}, now)
-  end
-
-  def handle(conn, {:decide, id, to_state, decided_from, %DateTime{} = now})
-      when is_binary(id) and to_state in ["starting", "skipped"] and is_binary(decided_from) do
+  def handle(conn, {:decide, id, decision, decided_from, %DateTime{} = now})
+      when is_binary(id) and decision in @decisions and is_binary(decided_from) do
     CuesSql.with_immediate_transaction(conn, fn ->
-      decide_by_id(conn, id, to_state, decided_from, now)
+      decide_by_id(conn, id, decision, decided_from, now)
     end)
   end
 
@@ -243,7 +290,7 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
 
   def handle(conn, {:card, id}) when is_binary(id) do
     case CuesSql.query_all(conn, @card_sql <> "WHERE t.id = ?", [id]) do
-      {:ok, [row]} -> {:ok, card_row(row)}
+      {:ok, [row]} -> card_row(conn, row)
       {:ok, []} -> {:ok, nil}
       {:error, reason} -> {:error, reason}
     end
@@ -256,18 +303,17 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
         "ORDER BY t.created_at, t.rowid LIMIT ?"
 
     with {:ok, rows} <- CuesSql.query_all(conn, @card_sql <> where, [CuesSql.stamp(now), limit]),
-         do: {:ok, Enum.map(rows, &card_row/1)}
+         do: collect(rows, &card_row(conn, &1))
   end
 
   def handle(conn, {:token_kind, digest}) when is_binary(digest) do
     sql = """
     SELECT 'mandate' FROM cue_proposals WHERE token_digest = ?
     UNION ALL SELECT 'follow_up' FROM cue_follow_up_triggers WHERE token_digest = ?
-    UNION ALL SELECT 'approval' FROM cue_follow_up_approvals WHERE token_digest = ?
     LIMIT 1
     """
 
-    case CuesSql.query_all(conn, sql, [digest, digest, digest]) do
+    case CuesSql.query_all(conn, sql, [digest, digest]) do
       {:ok, []} -> {:ok, nil}
       {:ok, [[kind]]} -> {:ok, token_kind(kind)}
       {:error, reason} -> {:error, reason}
@@ -296,7 +342,7 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
   delivery `passed → acked`, outcome `follow_up`, in the same transaction.
 
   The answer is the trigger with `code`, a short label of why it was written
-  in its state (`stale`, `capped`, `card_waiting`, `ask_first`, `automatic`),
+  in its state (`stale`, `capped`, `card_waiting`, `ask_first`, `always_allowed`),
   and `settled_delivery?` (the watcher had no task), for its lifecycle event.
   """
   @spec on_pass(conn(), pos_integer(), DateTime.t()) :: {:ok, map() | nil} | {:error, term()}
@@ -309,14 +355,13 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
     end
   end
 
-  defp pass_facts(delivery_id, [watcher, cue, task, job, mode, approval, cap, item_at]) do
+  defp pass_facts(delivery_id, [watcher, cue, task, job, approval, cap, item_at]) do
     %{
       delivery_id: delivery_id,
       watcher_id: watcher,
       cue_id: cue,
       task_job_id: task,
       job_id: job,
-      mode: mode,
       approval_digest: approval,
       daily_cap: cap,
       item_at: CuesSql.parse_stamp(item_at)
@@ -334,15 +379,18 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
     end
   end
 
-  # The rules in order (design §4.4): freshness, the daily cap, then the mode;
-  # ask first writes a card only while none of this follow-up waits.
+  # The rules in order (design §4.4): freshness, the watcher's own daily cap
+  # when it has one, then Always allow; asking first writes a card only while
+  # none of this follow-up waits.
   defp pass_decision(conn, facts, now) do
     with {:ok, used} <- cap_used(conn, facts, now),
-         {:ok, mode} <- CuesFollowUpApprovalsSql.effective_mode(conn, facts) do
+         {:ok, allowed?} <- CuesFollowUpAllowSql.allowed?(conn, facts) do
+      mode = if allowed?, do: "auto", else: "approve"
+
       cond do
         stale?(facts.item_at, now) -> {:ok, {mode, "skipped", "stale", @stale}}
         capped?(facts.daily_cap, used) -> {:ok, {mode, "skipped", "capped", capped(facts)}}
-        mode == "auto" -> {:ok, {"auto", "starting", "automatic", nil}}
+        allowed? -> {:ok, {"auto", "starting", "always_allowed", nil}}
         true -> card_decision(conn, facts, now)
       end
     end
@@ -440,11 +488,11 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
     end)
   end
 
-  defp record_offer(conn, id, binding, now) do
+  defp record_offer(conn, id, binding, shown, now) do
     sql = """
     UPDATE cue_follow_up_triggers
     SET token_digest = ?, chat_platform = ?, chat_id = ?, chat_user_id = ?,
-        offered_at = coalesce(offered_at, ?)
+        offered_at = coalesce(offered_at, ?), shown_digest = ?
     WHERE id = ? AND state = 'waiting' AND token_digest IS NULL
     """
 
@@ -454,6 +502,7 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
       Map.get(binding, :chat_id),
       Map.get(binding, :user_id),
       CuesSql.stamp(now),
+      shown,
       id
     ]
 
@@ -510,11 +559,11 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
   def refuse_starting(conn, id, reason) when is_binary(id) and is_binary(reason),
     do: refuse(conn, id, ["starting"], reason)
 
-  defp answer_by_token(conn, digest, origin, {to_state, reason}, now) do
+  defp answer_by_token(conn, digest, origin, decision, now) do
     case CuesSql.checked_origin(origin) do
       {:ok, origin} ->
         CuesSql.with_immediate_transaction(conn, fn ->
-          token_answer(conn, digest, origin, {to_state, reason}, now)
+          token_answer(conn, digest, origin, decision, now)
         end)
 
       :error ->
@@ -522,8 +571,9 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
     end
   end
 
-  defp token_answer(conn, digest, origin, {to_state, reason}, now) do
+  defp token_answer(conn, digest, origin, decision, now) do
     stamp = CuesSql.stamp(now)
+    {to_state, reason} = to_state(decision)
 
     sql = """
     UPDATE cue_follow_up_triggers
@@ -536,14 +586,15 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
     params = params ++ [origin.platform, origin.chat_id, origin.user_id, stamp]
 
     with :ok <- CuesSql.execute(conn, sql, params),
-         {:ok, changed} <- CuesSql.changes(conn) do
-      answered_or_why(conn, "t.token_digest = ?", [digest], changed, now)
+         {:ok, changed} <- CuesSql.changes(conn),
+         {:ok, trigger} <- answered_or_why(conn, "t.token_digest = ?", [digest], changed, now) do
+      allow_if_asked(conn, trigger, decision, now)
     end
   end
 
-  defp decide_by_id(conn, id, to_state, decided_from, now) do
+  defp decide_by_id(conn, id, decision, decided_from, now) do
     stamp = CuesSql.stamp(now)
-    reason = if to_state == "skipped", do: @denied
+    {to_state, reason} = to_state(decision)
 
     sql = """
     UPDATE cue_follow_up_triggers
@@ -552,10 +603,27 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
     """
 
     with :ok <- CuesSql.execute(conn, sql, [to_state, reason, stamp, decided_from, id, stamp]),
-         {:ok, changed} <- CuesSql.changes(conn) do
-      answered_or_why(conn, "t.id = ?", [id], changed, now)
+         {:ok, changed} <- CuesSql.changes(conn),
+         {:ok, trigger} <- answered_or_why(conn, "t.id = ?", [id], changed, now) do
+      allow_if_asked(conn, trigger, decision, now)
     end
   end
+
+  defp to_state(:deny), do: {"skipped", @denied}
+  defp to_state(_run), do: {"starting", nil}
+
+  # Always allow runs this one as Run does and, in the same transaction, allows
+  # the follow-up for what the card showed; what came of it is the card's.
+  defp allow_if_asked(conn, trigger, :always_allow, now) do
+    sql = "UPDATE cue_follow_up_triggers SET always_allow = ? WHERE id = ?"
+    %{watcher_id: watcher_id, job_id: job_id, shown_digest: shown} = trigger
+
+    with {:ok, outcome} <- CuesFollowUpAllowSql.allow_shown(conn, watcher_id, job_id, shown, now),
+         :ok <- CuesSql.execute(conn, sql, [outcome, trigger.id]),
+         do: {:ok, %{trigger | always_allow: outcome}}
+  end
+
+  defp allow_if_asked(_conn, trigger, _decision, _now), do: {:ok, trigger}
 
   defp answered_or_why(conn, where, params, 1, _now), do: fetch_one(conn, where, params)
 
@@ -604,7 +672,6 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
 
   defp token_kind("mandate"), do: :mandate
   defp token_kind("follow_up"), do: :follow_up
-  defp token_kind("approval"), do: :approval
 
   # --- reads -----------------------------------------------------------------------
 
@@ -650,7 +717,9 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
          run_id,
          decided_from,
          decided_at,
-         created_at
+         created_at,
+         shown_digest,
+         always_allow
        ])
        when state in @states do
     %{
@@ -669,11 +738,22 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
       run_id: run_id,
       decided_from: decided_from,
       decided_at: CuesSql.parse_stamp(decided_at),
-      created_at: CuesSql.parse_stamp(created_at)
+      created_at: CuesSql.parse_stamp(created_at),
+      shown_digest: shown_digest,
+      always_allow: always_allow
     }
   end
 
-  defp card_row([
+  # The card as stored, with the digest of what it shows now, read in this one
+  # call so a card handed to the owner and the digest it records agree.
+  defp card_row(conn, row) do
+    card = card_fields(row)
+
+    with {:ok, digest} <- CuesFollowUpAllowSql.card_digest(conn, card.watcher_id, card.job_id),
+         do: {:ok, Map.put(card, :digest, digest)}
+  end
+
+  defp card_fields([
          id,
          state,
          mode,
@@ -683,8 +763,11 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
          decided_at,
          decided_from,
          run_id,
+         always_allow,
          watcher_id,
          watcher_name,
+         listen_for,
+         sources,
          job_id,
          job_name,
          prompt,
@@ -707,8 +790,11 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
       decided_at: CuesSql.parse_stamp(decided_at),
       decided_from: decided_from,
       run_id: run_id,
+      always_allow: always_allow,
       watcher_id: watcher_id,
       watcher_name: watcher_name,
+      listen_for: listen_for,
+      sources: sources,
       job_id: job_id,
       job_name: job_name,
       task_prompt: prompt,
@@ -721,6 +807,15 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
       occurred_at: CuesSql.parse_stamp(occurred_at),
       snapshot: snapshot
     }
+  end
+
+  defp collect(rows, fun) do
+    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, done} ->
+      case fun.(row) do
+        {:ok, value} -> {:cont, {:ok, done ++ [value]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp marks(list), do: Enum.map_join(list, ", ", fn _item -> "?" end)

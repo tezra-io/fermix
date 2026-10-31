@@ -98,10 +98,9 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
 
   @doc """
   Sends a watcher's card (M60_WATCHER_CODING_RUNS.md §6): a follow-up waiting
-  to run, or an automatic follow-up's approval prompt, as core read it
-  (`Cues.FollowUps.card/2`, `Cues.FollowUpApprovals.card/2`). The way a
-  proposal goes, beside it: the reach rule (`Cues.Proposals.owner_chat/1`), a
-  fresh `cp_` token, the compact card (`Cues.Card.of/2`) delivered to the
+  to run, as core read it (`Cues.FollowUps.card/2`). The way a proposal goes,
+  beside it: the reach rule (`Cues.Proposals.owner_chat/1`), a fresh `cp_`
+  token, the compact card (`Cues.Card.follow_up/2`) delivered to the
   owner's DM, and where it went answered for core to record: the token's
   digest and the DM's origin. With no DM, or a send that failed, while an
   app can show it, it is answered with no chat, and only the apps show it;
@@ -122,7 +121,7 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
   defp send_follow_up_card(card, inbox, origin, opts) do
     token = CueProposals.new_token()
     card_opts = [now: Keyword.get_lazy(opts, :now, &DateTime.utc_now/0), chat: origin]
-    spec = card |> CueCard.of(card_opts) |> CueCard.spec(token)
+    spec = card |> CueCard.follow_up(card_opts) |> CueCard.spec(token)
 
     with {:ok, adapter} <- adapter(inbox.platform, opts),
          :ok <- deliver_card(adapter, inbox, spec) do

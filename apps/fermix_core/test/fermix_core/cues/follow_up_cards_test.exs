@@ -1,9 +1,8 @@
 defmodule FermixCore.Cues.FollowUpCardsTest do
   @moduledoc """
-  What a follow-up's card and an automatic follow-up's approval prompt share
-  on their way to the owner (M60_WATCHER_CODING_RUNS.md §4.5): a sender that
-  crashes is a send that failed, logged with every `cp_` token taken out, so a
-  log never carries what answers a card.
+  A follow-up's card on its way to the owner (M60_WATCHER_CODING_RUNS.md
+  §4.5): a sender that crashes is a send that failed, logged with every `cp_`
+  token taken out, so a log never carries what answers a card.
   """
   # Asserts on the log, which is global.
   use ExUnit.Case, async: false
@@ -13,7 +12,6 @@ defmodule FermixCore.Cues.FollowUpCardsTest do
 
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
-  alias FermixCore.Cues.FollowUpApprovals
   alias FermixCore.Cues.FollowUps
   alias FermixCore.Cues.Ingest
   alias FermixCore.Cues.Proposals
@@ -32,7 +30,7 @@ defmodule FermixCore.Cues.FollowUpCardsTest do
   end
 
   test "a card's sender that crashes is logged with no token in the log", ctx do
-    _watcher = watcher!(ctx, "approve")
+    _watcher = watcher!(ctx)
     pass!(ctx)
 
     {:ok, [trigger]} =
@@ -51,26 +49,10 @@ defmodule FermixCore.Cues.FollowUpCardsTest do
     refute log =~ token
   end
 
-  test "an approval prompt's sender that crashes is logged with no token in the log", ctx do
-    watcher = watcher!(ctx, "auto")
-    token = Proposals.new_token()
-    opts = opts(ctx) ++ [follow_up_sender: raising(token)]
-
-    log =
-      capture_log(fn ->
-        assert {:error, "Fermix could not reach you" <> _} =
-                 FollowUpApprovals.ask(watcher.name, opts)
-      end)
-
-    assert log =~ "The follow-up sender crashed"
-    assert log =~ "cp_…"
-    refute log =~ token
-  end
-
   # A sender that wrote its token, then raised with it in the reason.
   defp raising(token), do: fn _card -> raise "the chat refused the card #{token}" end
 
-  defp watcher!(ctx, mode) do
+  defp watcher!(ctx) do
     params = %{
       name: "codex-limits",
       filter: "none",
@@ -79,8 +61,7 @@ defmodule FermixCore.Cues.FollowUpCardsTest do
       follow_up: %{
         name: "Codex review",
         prompt: "Review the last day's commits on dev.",
-        allowed_tools: ["shell"],
-        mode: mode
+        allowed_tools: ["shell"]
       }
     }
 

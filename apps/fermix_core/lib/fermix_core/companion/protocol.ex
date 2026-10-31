@@ -58,15 +58,23 @@ defmodule FermixCore.Companion.Protocol do
 
   Version 5 brings a watcher's follow-ups to the same card
   (M60_WATCHER_CODING_RUNS.md §6.2): a `proposal` whose card is a follow-up's
-  waiting to run, or an automatic follow-up's approval prompt, carries
-  `follow_up` (its name, the owner's instructions, its tools, where it reports
-  and what the card asks) in place of `mandate`, `tool` and the call's
-  arguments, which a version 4 client requires, so such a card reaches a
-  version 5 connection only (`server_payload_version/2`). It is answered with
-  the same `proposal_answer`, and its end is the same `proposal_resolved`. A
-  mandate's card gains `outside.args` (each argument as `name` and `value`)
-  and `outside.reason` (the filter's reason) for the compact card (§6.3),
-  additive, so on every version. The window is now {4, 5}.
+  waiting to run carries `follow_up` (its name, the owner's instructions, its
+  tools, where it reports and what the card asks) in place of `mandate`,
+  `tool` and the call's arguments, which a version 4 client requires, so such
+  a card reaches a version 5 connection only (`server_payload_version/2`). It
+  is answered with the same `proposal_answer`, and its end is the same
+  `proposal_resolved`. A mandate's card gains `outside.args` (each argument as
+  `name` and `value`) and `outside.reason` (the filter's reason) for the
+  compact card (§6.3), additive, so on every version. The window is now
+  {4, 5}.
+
+  A follow-up's card also takes Always allow (the 2026-10-31 revision of
+  §3.4): its `follow_up.offers_always_allow` says so, and `proposal_answer`
+  takes the `decision` `always_allow` for it, which runs it as `confirm` does
+  and lets the follow-up's later items run with no card. Both are additive and
+  need no version: an older client ignores the field and answers with
+  `confirm` and `deny` as before, and only a client that read the field sends
+  the value, which this daemon refuses for a mandate's card.
 
   Version 6 says what a turn is doing while it runs, in words a person reads
   rather than a tool's name: `reasoning` carries the model's summary of one
@@ -135,7 +143,9 @@ defmodule FermixCore.Companion.Protocol do
   # A mandate's card names its call; a follow-up's card (version 5) names the
   # follow-up instead.
   @mandate_card_strings ~w(mandate tool)
-  @follow_up_asks ~w(run automatic)
+  @follow_up_asks ~w(run)
+  # What the automatic approval's prompt carried, which no card does now.
+  @follow_up_gone ~w(daily_cap set_off_by)
   @follow_up_strings ~w(name instructions reports_to)
   @follow_up_card_version 5
   # What a turn is doing (version 6): a tool's step in the engine's words, and
@@ -575,7 +585,7 @@ defmodule FermixCore.Companion.Protocol do
 
   defp validate_client("proposal_answer", payload) do
     with :ok <- strings(payload, ~w(client_msg_id profile_id proposal_id)) do
-      enum(payload, "decision", ~w(confirm deny))
+      enum(payload, "decision", ~w(confirm deny always_allow))
     end
   end
 
@@ -881,19 +891,11 @@ defmodule FermixCore.Companion.Protocol do
        when asks in @follow_up_asks and is_list(tools) do
     Enum.all?(@follow_up_strings, &(nonempty(follow_up, &1) == :ok)) and
       Enum.all?(tools, &(is_binary(&1) and &1 != "")) and
-      follow_up_automatic?(asks, follow_up)
+      is_boolean(Map.get(follow_up, "offers_always_allow", false)) and
+      not Enum.any?(@follow_up_gone, &Map.has_key?(follow_up, &1))
   end
 
   defp follow_up?(_follow_up), do: false
-
-  defp follow_up_automatic?("run", follow_up),
-    do: not Map.has_key?(follow_up, "daily_cap") and not Map.has_key?(follow_up, "set_off_by")
-
-  defp follow_up_automatic?("automatic", %{"daily_cap" => cap} = follow_up)
-       when is_integer(cap) and cap > 0,
-       do: nonempty(follow_up, "set_off_by") == :ok
-
-  defp follow_up_automatic?(_asks, _follow_up), do: false
 
   # A follow-up is handed nothing of the item, so its card carries no call's
   # arguments: only the item and the filter's reason.

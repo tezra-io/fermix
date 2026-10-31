@@ -809,7 +809,8 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "Linux app",
           "Only the owner can change cues",
           # Follow-ups (M60_WATCHER_CODING_RUNS.md): the field, its verbs, the
-          # boundary with the task, readiness, both modes, the switch and cards.
+          # boundary with the task, readiness, asking first and Always allow
+          # with how it is taken back, the switch and cards.
           "follow_up",
           "stop_follow_up",
           "run_follow_up",
@@ -817,8 +818,9 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "Fermix hands the follow-up nothing from the item",
           "held",
           "Ask first",
-          "Automatic",
-          "Keep asking",
+          "Always allow",
+          "always_allow: false",
+          "/always",
           "Let watchers act",
           "runs when watcher <name> passes an item",
           "Run \"<name>\"?",

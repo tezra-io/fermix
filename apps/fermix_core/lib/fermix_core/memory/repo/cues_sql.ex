@@ -23,7 +23,7 @@ defmodule FermixCore.Memory.Repo.CuesSql do
     (`TemporalSql.timestamp/1`), which keeps text comparison in time order;
   - `extend_gap/7`: one open gap row per (source, watcher, reason);
   - `checked_origin/1`, `origin_text/1`, `waiting_why/2`, `answer_chat/3`: an
-    answer from a chat, for `CuesFollowUpSql` and `CuesFollowUpApprovalsSql`.
+    answer from a chat, for `CuesFollowUpSql`.
   """
 
   require Logger
@@ -404,6 +404,10 @@ defmodule FermixCore.Memory.Repo.CuesSql do
 
   @watcher_follow_up_columns ~w(follow_up_job_id follow_up_mode follow_up_approved_at
                                 follow_up_approval_digest)
+  # Migration 58 drops `follow_up_mode`: a follow-up asks first unless the owner
+  # always allowed it.
+  @watcher_columns_58 @watcher_columns_53 ++
+                        ~w(follow_up_job_id follow_up_approved_at follow_up_approval_digest)
 
   @watcher_rebuild_sql """
   CREATE TABLE cue_watchers_54 (
@@ -471,16 +475,58 @@ defmodule FermixCore.Memory.Repo.CuesSql do
   ALTER TABLE cue_deliveries_54 RENAME TO cue_deliveries;
   """
 
+  # Migration 58 (the 2026-10-31 revision of M60_WATCHER_CODING_RUNS.md): an
+  # automatic follow-up whose approval still matches stays allowed, so the copy
+  # keeps an `auto` row's approval (the migration first clears one that no
+  # longer matches) and drops every other.
+  @watcher_always_allow_rebuild_sql """
+  CREATE TABLE cue_watchers_58 (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    purpose TEXT,
+    filter TEXT NOT NULL CHECK (filter IN ('llm','none')),
+    task_job_id TEXT UNIQUE REFERENCES scheduled_jobs(id),
+    task_notes INTEGER NOT NULL DEFAULT 0 CHECK (task_notes IN (0, 1)),
+    daily_cap INTEGER NOT NULL DEFAULT 0 CHECK (daily_cap >= 0),
+    filter_budget INTEGER NOT NULL DEFAULT 0 CHECK (filter_budget >= 0),
+    filter_failures INTEGER NOT NULL DEFAULT 0,
+    filter_retry_at TEXT,
+    held_notified_at TEXT,
+    notices TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    created_from TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    listen_for TEXT NOT NULL DEFAULT '[]',
+    follow_up_job_id TEXT UNIQUE REFERENCES scheduled_jobs(id),
+    follow_up_approved_at TEXT,
+    follow_up_approval_digest TEXT,
+    CHECK (task_job_id IS NOT NULL OR follow_up_job_id IS NOT NULL),
+    CHECK (follow_up_job_id IS NOT NULL OR follow_up_approval_digest IS NULL),
+    CHECK ((follow_up_approved_at IS NULL) = (follow_up_approval_digest IS NULL))
+  );
+  INSERT INTO cue_watchers_58 (#{Enum.join(@watcher_columns_58, ", ")})
+    SELECT #{Enum.join(@watcher_columns_53, ", ")}, follow_up_job_id,
+      CASE WHEN follow_up_mode = 'auto' THEN follow_up_approved_at END,
+      CASE WHEN follow_up_mode = 'auto' THEN follow_up_approval_digest END
+    FROM cue_watchers;
+  DROP TABLE cue_watchers;
+  ALTER TABLE cue_watchers_58 RENAME TO cue_watchers;
+  """
+
   @typedoc """
-  One table migration 54 rebuilds: the columns it holds before and after, the
-  text its definition holds once rebuilt, and the rebuild itself.
+  One table a migration rebuilds: the columns it holds before and after, the
+  text its definition holds once rebuilt, and the rebuild itself. `later` are
+  the column sets a later migration leaves the rebuilt table in, which count
+  as rebuilt too, so a store that lost this migration's version row opens.
   """
   @type follow_up_rebuild :: %{
-          table: String.t(),
-          before: [String.t()],
-          after: [String.t()],
-          marker: String.t(),
-          sql: String.t()
+          required(:table) => String.t(),
+          required(:before) => [String.t()],
+          required(:after) => [String.t()],
+          required(:marker) => String.t(),
+          required(:sql) => String.t(),
+          optional(:later) => [[String.t()]]
         }
 
   @doc """
@@ -490,7 +536,8 @@ defmodule FermixCore.Memory.Repo.CuesSql do
       only a follow-up, and the follow-up's job (`follow_up_job_id`, never
       shared), its mode (`approve` asks first, `auto` runs on each passing
       item) and the automatic approval (`follow_up_approved_at` and the digest
-      of what was approved); a watcher holds a task or a follow-up;
+      of what was approved); a watcher holds a task or a follow-up. Migration
+      58 drops the mode (`later`), which counts as rebuilt here too;
     * `cue_deliveries` with the outcome `follow_up`: a watcher with no task
       settles a passing item at once, and what came of it is its trigger's.
 
@@ -508,6 +555,7 @@ defmodule FermixCore.Memory.Repo.CuesSql do
         table: "cue_watchers",
         before: @watcher_columns_53,
         after: @watcher_columns_53 ++ @watcher_follow_up_columns,
+        later: [@watcher_columns_58],
         marker: "follow_up_job_id",
         sql: @watcher_rebuild_sql
       },
@@ -517,6 +565,29 @@ defmodule FermixCore.Memory.Repo.CuesSql do
         after: @delivery_columns_53,
         marker: "'follow_up'",
         sql: @delivery_rebuild_sql
+      }
+    ]
+  end
+
+  @doc """
+  The rebuild of migration 58 (the 2026-10-31 revision of
+  M60_WATCHER_CODING_RUNS.md): `cue_watchers` without `follow_up_mode`, since a
+  follow-up asks first unless the owner always allowed it, and with an
+  approval allowed only beside a follow-up. The copy keeps the approval of an
+  automatic follow-up and drops every other one; the caller first clears an
+  automatic approval that no longer matches what it runs and what sets it
+  off. Rebuilt only while its definition lacks the new CHECK, run as
+  `follow_up_rebuilds/0`'s are.
+  """
+  @spec always_allow_rebuilds() :: [follow_up_rebuild()]
+  def always_allow_rebuilds do
+    [
+      %{
+        table: "cue_watchers",
+        before: @watcher_columns_53 ++ @watcher_follow_up_columns,
+        after: @watcher_columns_58,
+        marker: "follow_up_job_id IS NOT NULL OR follow_up_approval_digest IS NULL",
+        sql: @watcher_always_allow_rebuild_sql
       }
     ]
   end
@@ -622,7 +693,6 @@ defmodule FermixCore.Memory.Repo.CuesSql do
              :prune_gaps,
              :prune_filter_calls,
              :prune_follow_up_triggers,
-             :prune_follow_up_approvals,
              :prune_counts,
              :drop_snapshots
            ] and is_integer(limit) and limit > 0 do
@@ -1808,18 +1878,6 @@ defmodule FermixCore.Memory.Repo.CuesSql do
      """, [ago(now, @prune_days * 86_400)]}
   end
 
-  # An automatic follow-up's approval prompt that was answered or expired is
-  # pruned 30 days after its expiry: an approval lives on its watcher's row
-  # (`follow_up_approved_at`), so the prompt holds nothing a later change reads.
-  def retention_sql(:prune_follow_up_approvals, now) do
-    {"""
-     DELETE FROM cue_follow_up_approvals WHERE id IN (
-       SELECT id FROM cue_follow_up_approvals INDEXED BY cue_follow_up_approvals_state
-       WHERE state IN ('approved', 'denied', 'expired') AND expires_at <= ?
-       LIMIT ?)
-     """, [ago(now, @prune_days * 86_400)]}
-  end
-
   # Counts outlive the rolling day they are read for by one more day.
   def retention_sql(:prune_counts, now) do
     {"DELETE FROM cue_counts WHERE rowid IN (SELECT rowid FROM cue_counts " <>
@@ -2030,8 +2088,8 @@ defmodule FermixCore.Memory.Repo.CuesSql do
 
   @doc """
   The chat an answer by token came from, checked: its `platform`, `chat_id`
-  and a non-empty `user_id`, else `:error`. A follow-up's card and an
-  approval's prompt answer only from the chat they went to.
+  and a non-empty `user_id`, else `:error`. A follow-up's card answers only
+  from the chat it went to.
   """
   @spec checked_origin(term()) :: {:ok, origin()} | :error
   def checked_origin(%{platform: platform, chat_id: chat_id, user_id: user_id})

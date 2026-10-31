@@ -115,6 +115,7 @@ defmodule FermixCore.Management.Protocol do
     {"cues.sources.url.get", 2},
     {"cues.watchers.list", 2},
     {"cues.watchers.get", 2},
+    {"cues.watchers.always_allow.revoke", 2},
     {"cues.mandates.list", 2},
     {"cues.mandates.choices", 2},
     {"cues.mandates.add", 2},

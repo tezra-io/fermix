@@ -33,6 +33,7 @@ defmodule FermixCore.Management.CuesTest do
   alias FermixTestSupport.MandateFixtures
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.SecretWriterStub
+  alias FermixTestSupport.TelemetryCapture
 
   @now ~U[2026-10-17 12:00:00.000000Z]
   @memory_off "Cues keep their records in memory, which is off."
@@ -1418,9 +1419,9 @@ defmodule FermixCore.Management.CuesTest do
     end
 
     # M60_WATCHER_CODING_RUNS.md §3.5: the Cues pane shows a watcher's follow-up
-    # with its mode and readiness, read-only; a watcher with only a follow-up has
-    # no task.
-    test "carry the follow-up, its mode, approval and readiness, and a null task without one",
+    # with whether it is always allowed and its readiness; a watcher with only a
+    # follow-up has no task.
+    test "carry the follow-up, whether it is always allowed and its readiness, and a null task",
          %{opts: opts, conn: conn, repo: repo} do
       id =
         CueFixtures.insert_watcher(conn, %{name: "deploy-watch", filter: "none", sources: ["s"]})
@@ -1441,10 +1442,12 @@ defmodule FermixCore.Management.CuesTest do
 
       CueFixtures.exec!(
         conn,
-        "UPDATE cue_watchers SET task_job_id = NULL, follow_up_job_id = ?, " <>
-          "follow_up_mode = 'auto', daily_cap = 5 WHERE id = ?",
+        "UPDATE cue_watchers SET task_job_id = NULL, follow_up_job_id = ?, daily_cap = 5 " <>
+          "WHERE id = ?",
         [job.id, id]
       )
+
+      CueFixtures.always_allow!(conn, id)
 
       held = Keyword.put(opts, :follow_up_opts, plugins: fn -> {:ok, []} end)
 
@@ -1456,8 +1459,7 @@ defmodule FermixCore.Management.CuesTest do
       assert row["follow_up"] == %{
                "job_id" => job.id,
                "name" => "Deploy check",
-               "mode" => "auto",
-               "approved" => false,
+               "always_allowed" => true,
                "state" => "held",
                "status_sentence" =>
                  "deploy_check is not set up on this computer (its program was not found or " <>
@@ -1491,9 +1493,65 @@ defmodule FermixCore.Management.CuesTest do
 
       assert %{
                "state" => "ready",
-               "approved" => false,
-               "status_sentence" => "Asks first until you approve it to run on its own."
+               "always_allowed" => true,
+               "status_sentence" => "Always allowed: it runs on each passing item with no card."
              } = detail["follow_up"]
+    end
+
+    # The 2026-10-31 revision of M60_WATCHER_CODING_RUNS.md: the app takes a
+    # follow-up's Always allow back, and only ever back.
+    test "a follow-up's Always allow is taken back from the app, and its row asks first",
+         %{opts: opts, conn: conn, repo: repo} do
+      id =
+        CueFixtures.insert_watcher(conn, %{name: "deploy-watch", filter: "none", sources: ["s"]})
+
+      {:ok, job} =
+        JobsRegistry.create_follow_up_job(
+          %{
+            name: "Deploy check",
+            task_prompt: "Run the deploy check.",
+            allowed_tools: ["deploy_check"],
+            delivery_mode: "channel",
+            delivery_target: %{"platform" => "slack", "channel_id" => "C1"},
+            created_by_trust: "operator"
+          },
+          repo: repo,
+          scheduler: nil
+        )
+
+      CueFixtures.exec!(conn, "UPDATE cue_watchers SET follow_up_job_id = ? WHERE id = ?", [
+        job.id,
+        id
+      ])
+
+      CueFixtures.always_allow!(conn, id)
+      TelemetryCapture.attach([[:fermix, :cue, :lifecycle]], watcher_id: id)
+      ready = Keyword.put(opts, :follow_up_opts, plugins: fn -> {:ok, []} end)
+
+      assert {:ok, %{"watcher" => row}} =
+               route("cues.watchers.always_allow.revoke", %{"name" => "deploy-watch"}, ready)
+
+      assert %{"always_allowed" => false} = row["follow_up"]
+
+      assert_receive {:telemetry, _event, _measurements,
+                      %{phase: :follow_up_always_allow_revoked, kind: "management"} = meta}
+
+      assert meta.job_id == job.id
+
+      # Again: it already asks first, and nothing more is traced.
+      assert {:ok, %{"watcher" => %{"follow_up" => %{"always_allowed" => false}}}} =
+               Cues.watchers_always_allow_revoke("deploy-watch", ready)
+
+      refute_received {:telemetry, _event, _measurements,
+                       %{phase: :follow_up_always_allow_revoked}}
+
+      CueFixtures.insert_watcher(conn, %{name: "task-only", filter: "none", sources: ["s"]})
+
+      assert Cues.watchers_always_allow_revoke("task-only", ready) ==
+               {:error, {:invalid_params, "name", "Watcher task-only has no follow-up."}}
+
+      assert Cues.watchers_always_allow_revoke("nowhere", ready) ==
+               {:error, {:invalid_params, "name", "There is no watcher named nowhere."}}
     end
 
     test "an llm watcher with no model while no default is set is on: the main model filters",

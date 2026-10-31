@@ -220,10 +220,9 @@ defmodule FermixCore.Cues.SweeperTest do
     assert cue(ctx.conn, "a").snapshot == nil
   end
 
-  # A follow-up's trigger, and an automatic follow-up's approval prompt, once
-  # it ended (M60_WATCHER_CODING_RUNS.md §4.3, §5); one still open is kept.
-  test "follow-up triggers that ended and approval prompts that closed age out after 30 days",
-       ctx do
+  # A follow-up's trigger once it ended (M60_WATCHER_CODING_RUNS.md §4.3); one
+  # still open is kept.
+  test "follow-up triggers that ended age out after 30 days", ctx do
     at = CuesSql.stamp(@t0)
 
     for {state, n, column, value} <- [
@@ -242,20 +241,6 @@ defmodule FermixCore.Cues.SweeperTest do
       )
     end
 
-    for {state, decided_at} <- [
-          {"approved", at},
-          {"denied", at},
-          {"expired", nil},
-          {"waiting", nil}
-        ] do
-      exec!(
-        ctx.conn,
-        "INSERT INTO cue_follow_up_approvals (id, watcher_id, shown_digest, expires_at, state, " <>
-          "decided_at, created_at) VALUES (?, 'w', 'digest', ?, ?, ?, ?)",
-        ["cfa_#{state}", at, state, decided_at, at]
-      )
-    end
-
     assert {:ok, 0} = step(ctx, :prune_follow_up_triggers, later(@t0, 29))
     # Bounded as every step is: a chunk deletes at most its limit.
     assert {:ok, 3} = step(ctx, :prune_follow_up_triggers, later(@t0, 30, 1), 3)
@@ -264,12 +249,9 @@ defmodule FermixCore.Cues.SweeperTest do
     assert [["cft_starting"], ["cft_waiting"]] =
              rows(ctx.conn, "SELECT id FROM cue_follow_up_triggers ORDER BY id")
 
-    assert {:ok, 0} = step(ctx, :prune_follow_up_approvals, later(@t0, 29))
-    assert {:ok, 3} = step(ctx, :prune_follow_up_approvals, later(@t0, 30, 1))
-    assert [["cfa_waiting"]] = rows(ctx.conn, "SELECT id FROM cue_follow_up_approvals")
-
     steps = Sweeper.step_names()
-    assert :prune_follow_up_triggers in steps and :prune_follow_up_approvals in steps
+    assert :prune_follow_up_triggers in steps
+    refute Enum.any?(steps, &(&1 in [:prune_follow_up_approvals, :follow_up_approval_expiry]))
   end
 
   test "counts age out 48 hours after their hour, through the Sweeper's step", ctx do

@@ -99,8 +99,8 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
 
   test "a starting trigger waits for a free slot, then runs as the watcher's, not by hand",
        ctx do
-    first = automatic_watcher!(ctx, "first")
-    second = automatic_watcher!(ctx, "second")
+    first = always_allowed_watcher!(ctx, "first")
+    second = always_allowed_watcher!(ctx, "second")
     pass!(ctx, first, 1)
     pass!(ctx, second, 2)
 
@@ -122,7 +122,7 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
   end
 
   test "a trigger whose follow-up still runs ends refused", ctx do
-    watcher = automatic_watcher!(ctx, "busy")
+    watcher = always_allowed_watcher!(ctx, "busy")
     pass!(ctx, watcher, 1)
     pass!(ctx, watcher, 2)
 
@@ -141,7 +141,7 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
   end
 
   test "a confirmed card starts exactly one run", ctx do
-    watcher = watcher!(ctx, "asking", "approve", ["shell"])
+    watcher = watcher!(ctx, "asking", ["shell"])
     pass!(ctx, watcher, 1)
 
     {:ok, [trigger]} =
@@ -167,7 +167,7 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
   # The tap said it was starting: a claim that cannot start it (here the job is
   # paused) tells the owner through where the follow-up reports, and every app.
   test "a confirmed card refused when its turn comes reaches the owner", ctx do
-    watcher = watcher!(ctx, "paused", "approve", ["shell"])
+    watcher = watcher!(ctx, "paused", ["shell"])
     pass!(ctx, watcher, 1)
 
     {:ok, [trigger]} =
@@ -205,7 +205,7 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
   end
 
   test "a follow-up whose tool is not set up is refused at its turn, with the held notice", ctx do
-    watcher = watcher!(ctx, "unready", "auto", ["deploy_check"])
+    watcher = watcher!(ctx, "unready", ["deploy_check"])
     approve!(ctx, watcher)
     pass!(ctx, watcher, 1)
     test = self()
@@ -226,29 +226,26 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
 
   # --- fixtures ----------------------------------------------------------------------
 
-  defp automatic_watcher!(ctx, name) do
-    watcher = watcher!(ctx, name, "auto", ["shell"])
+  defp always_allowed_watcher!(ctx, name) do
+    watcher = watcher!(ctx, name, ["shell"])
     approve!(ctx, watcher)
     watcher
   end
 
-  defp watcher!(ctx, name, mode, tools) do
+  defp watcher!(ctx, name, tools) do
     params = %{
       name: name,
       filter: "none",
       daily_cap: 5,
       sources: ["feed-#{name}"],
-      follow_up: %{prompt: "Run the deploy check.", allowed_tools: tools, mode: mode}
+      follow_up: %{prompt: "Run the deploy check.", allowed_tools: tools}
     }
 
     {:ok, %{watcher: watcher}} = Watchers.create(params, context(), opts(ctx))
     watcher
   end
 
-  defp approve!(ctx, watcher) do
-    {:ok, digest} = Watchers.current_follow_up_digest(watcher.name, opts(ctx))
-    {:ok, _approved} = Watchers.approve_follow_up(watcher.name, digest, opts(ctx))
-  end
+  defp approve!(ctx, watcher), do: always_allow!(ctx.conn, watcher.id)
 
   defp pass!(ctx, watcher, n) do
     [ref] = watcher.sources

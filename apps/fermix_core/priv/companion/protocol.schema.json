@@ -340,7 +340,7 @@
     },
     "proposal_answer": {
       "type": "object",
-      "description": "Version 4. The owner's answer to a proposal, by its id: confirm runs exactly the recorded call once, deny runs nothing. Answered accepted (duplicate false) once the decision is recorded, then proposal_resolved; refused with error request_failed carrying the daemon's sentence and client_msg_id. Taken only from a connection the daemon placed as the owner's.",
+      "description": "Version 4. The owner's answer to a proposal, by its id: confirm runs exactly the recorded call once, deny runs nothing. A follow-up's card whose follow_up.offers_always_allow is true also takes always_allow: it runs as confirm does and lets the follow-up's later items run with no card; a mandate's card refuses it. Answered accepted (duplicate false) once the decision is recorded, then proposal_resolved; refused with error request_failed carrying the daemon's sentence and client_msg_id. Taken only from a connection the daemon placed as the owner's.",
       "x-since-version": 4,
       "required": ["type", "client_msg_id", "profile_id", "proposal_id", "decision"],
       "properties": {
@@ -348,7 +348,7 @@
         "client_msg_id": { "type": "string", "minLength": 1 },
         "profile_id": { "type": "string", "minLength": 1 },
         "proposal_id": { "type": "string", "minLength": 1 },
-        "decision": { "enum": ["confirm", "deny"] }
+        "decision": { "enum": ["confirm", "deny", "always_allow"] }
       }
     },
     "checklists_pull": {
@@ -772,17 +772,16 @@
     },
     "followUpCard": {
       "type": "object",
-      "description": "Version 5. A watcher's follow-up, all Fermix's and the owner's words: asks run (once, now) or automatic (on every passing item, with no card, within the watcher's daily_cap; set_off_by names its sources and words). The follow-up is handed nothing of the item.",
+      "description": "Version 5. A watcher's follow-up, all Fermix's and the owner's words: asks run (once, now). offers_always_allow, when true, says the card also takes the decision always_allow, which runs it and lets the follow-up's later items run with no card until what it runs or what sets it off changes; a daemon that predates Always allow leaves it out. The follow-up is handed nothing of the item.",
       "x-since-version": 5,
       "required": ["asks", "name", "instructions", "tools", "reports_to"],
       "properties": {
-        "asks": { "enum": ["run", "automatic"] },
+        "asks": { "enum": ["run"] },
+        "offers_always_allow": { "type": "boolean" },
         "name": { "type": "string", "minLength": 1 },
         "instructions": { "type": "string", "minLength": 1 },
         "tools": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-        "reports_to": { "type": "string", "minLength": 1 },
-        "daily_cap": { "type": "integer", "minimum": 1 },
-        "set_off_by": { "type": "string", "minLength": 1 }
+        "reports_to": { "type": "string", "minLength": 1 }
       }
     },
     "proposalCue": {

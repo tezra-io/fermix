@@ -216,6 +216,7 @@
     "cues.sources.url.get": 2,
     "cues.watchers.list": 2,
     "cues.watchers.get": 2,
+    "cues.watchers.always_allow.revoke": 2,
     "cues.mandates.list": 2,
     "cues.mandates.choices": 2,
     "cues.mandates.add": 2,
@@ -331,6 +332,7 @@
             "cues.sources.url.get",
             "cues.watchers.list",
             "cues.watchers.get",
+            "cues.watchers.always_allow.revoke",
             "cues.mandates.list",
             "cues.mandates.choices",
             "cues.mandates.add",
@@ -884,6 +886,17 @@
         {
           "if": {
             "required": ["method"],
+            "properties": { "method": { "const": "cues.watchers.always_allow.revoke" } }
+          },
+          "then": {
+            "properties": {
+              "params": { "$ref": "#/$defs/cues_watchers_always_allow_revoke_params" }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["method"],
             "properties": { "method": { "const": "cues.mandates.list" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/cues_mandates_list_params" } } }
@@ -1205,6 +1218,7 @@
         { "$ref": "#/$defs/cues_sources_url_get_result" },
         { "$ref": "#/$defs/cues_watchers_list_result" },
         { "$ref": "#/$defs/cues_watchers_get_result" },
+        { "$ref": "#/$defs/cues_watchers_always_allow_revoke_result" },
         { "$ref": "#/$defs/cues_mandates_list_result" },
         { "$ref": "#/$defs/cues_mandates_choices_result" },
         { "$ref": "#/$defs/cues_mandates_add_result" },
@@ -3984,8 +3998,7 @@
               "required": [
                 "job_id",
                 "name",
-                "mode",
-                "approved",
+                "always_allowed",
                 "state",
                 "status_sentence"
               ],
@@ -4000,19 +4013,9 @@
                     "null"
                   ]
                 },
-                "mode": {
-                  "enum": [
-                    "approve",
-                    "auto"
-                  ],
-                  "description": "`approve` asks first on a card for each run; `auto` runs on its own within the daily cap once approved."
-                },
-                "approved": {
-                  "type": [
-                    "boolean",
-                    "null"
-                  ],
-                  "description": "Whether an automatic follow-up is approved for what it runs now; null for one that asks first. Unapproved, each run asks first."
+                "always_allowed": {
+                  "type": "boolean",
+                  "description": "Whether the owner's Always allow on one of its cards lets it run with no card for what it runs and what sets it off now; false while each run asks first on a card. Only the owner's answer on a card sets it, and `cues.watchers.always_allow.revoke` takes it back."
                 },
                 "state": {
                   "enum": [
@@ -5351,6 +5354,22 @@
       "properties": {
         "watcher": {
           "$ref": "#/$defs/cueWatcherDetail"
+        }
+      }
+    },
+    "cues_watchers_always_allow_revoke_params": {
+      "$ref": "#/$defs/cueNameParams"
+    },
+    "cues_watchers_always_allow_revoke_result": {
+      "description": "The watcher's row once its follow-up asks first again: `follow_up.always_allowed` is false.",
+      "type": "object",
+      "required": [
+        "watcher"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "watcher": {
+          "$ref": "#/$defs/cueWatcherRow"
         }
       }
     },

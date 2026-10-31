@@ -115,13 +115,15 @@ defmodule Fermix.CLI.Daemon do
   @owner_decisions_v0 ~w(mobile_pair_begin mobile_pair_decide mobile_pair_cancel
                          mobile_device_revoke)
   # The cue writes that widen what reaches a task or what a task may do, the
-  # two values handed out (a source's token and a webhook's address), and the
-  # answer to a proposal (M60 app surface §3.6). Reads stay open.
+  # two values handed out (a source's token and a webhook's address), the
+  # answer to a proposal (M60 app surface §3.6) and taking back a follow-up's
+  # Always allow, which is the owner's as the rest are. Reads stay open.
   @cue_decisions_v1 ~w(cues.sources.add cues.sources.update cues.sources.remove
                        cues.sources.enable cues.sources.disable cues.sources.token.new
                        cues.sources.url.get cues.mandates.add cues.mandates.update
                        cues.mandates.remove cues.mandates.enable cues.mandates.disable
-                       cues.mandates.approve cues.proposals.decide)
+                       cues.mandates.approve cues.proposals.decide
+                       cues.watchers.always_allow.revoke)
   # A cue source's secret rides the generic secret writes, so its id, spelled
   # by the module that stores it, is what makes one of them a cue write.
   @secret_writes ~w(secret.set secret.clear)

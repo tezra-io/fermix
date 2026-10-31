@@ -219,10 +219,7 @@ defmodule FermixCore.Memory.RepoCuesTest do
     end
 
     test "the follow-up steps search only the rows that ended, by their state index", ctx do
-      for {step, index} <- [
-            prune_follow_up_triggers: "cue_follow_up_triggers_state",
-            prune_follow_up_approvals: "cue_follow_up_approvals_state"
-          ] do
+      for {step, index} <- [prune_follow_up_triggers: "cue_follow_up_triggers_state"] do
         details = retention_plan(ctx.conn, step)
 
         assert Enum.any?(details, &(&1 =~ ~r/^SEARCH \w+ USING INDEX #{index}\b/)),
