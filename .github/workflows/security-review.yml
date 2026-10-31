@@ -1,0 +1,24 @@
+name: security-review
+
+# Every pull request's security review. The organization's shared workflow
+# (tezra-io/.github) has Claude read the change for serious, exploitable
+# vulnerabilities and comment what it finds; its "security / verdict" check,
+# which the ruleset requires, fails on a high or critical finding.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# A newer push replaces the review of an older one.
+concurrency:
+  group: security-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  security:
+    uses: tezra-io/.github/.github/workflows/security-review.yml@30dab1e8ac8b8bcc59cc705a33302fc984ec4d82
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
