@@ -10,6 +10,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Checklists.Registry, as: ChecklistRegistry
   alias FermixCore.ComputerHistory.Gate.Snapshot
   alias FermixCore.ComputerHistory.Taint
   alias FermixCore.ComputerUse.Safety
@@ -2315,6 +2316,92 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       refute Enum.any?(messages, &(&1.content =~ "Open loop due."))
     end
   end
+
+  # MILESTONE_85 §05, §11: the owner's private turn carries the list rules
+  # after the presentation note and the line naming the lists after the date
+  # note; a group chat's and a guest's turn carry neither.
+  describe "the owner's lists" do
+    setup do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-tr-checklists-#{unique}.db")
+      repo = :"tr_checklists_repo_#{unique}"
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path}, id: repo)
+
+      on_exit(fn ->
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      end)
+
+      owner = %{
+        agent_name: "main",
+        conversation_key: {"telegram", "40041", :root},
+        source_trust: :operator,
+        computer_use_origin: :interactive,
+        chat_type: "private",
+        outside_sources: MapSet.new()
+      }
+
+      changes = [
+        %{
+          "list" => "Fermix",
+          "ops" => [
+            %{"op" => "create", "folder" => "Projects"},
+            %{"op" => "add", "text" => "Lists"}
+          ]
+        },
+        %{
+          "list" => "Groceries",
+          "ops" => [%{"op" => "create"}, %{"op" => "add", "text" => "Lemons"}]
+        }
+      ]
+
+      {:ok, _answer} = ChecklistRegistry.edit(%{"changes" => changes}, owner, repo: repo)
+      %{repo: repo, owner: owner}
+    end
+
+    test "an owner's private turn carries the rules after the presentation and the index after the date",
+         %{repo: repo} do
+      system_run =
+        private_chat("40041")
+        |> capture_prompt(memory_repo: repo)
+        |> Enum.take_while(&(&1.role == "system"))
+
+      presentation = Enum.find_index(system_run, &(&1.content =~ "phone-width chat surface"))
+      rules = Enum.find_index(system_run, &(&1.content =~ "lives in a list and never in memory"))
+      date = Enum.find_index(system_run, &(&1.content =~ "Current date:"))
+      index = Enum.find_index(system_run, &(&1.content =~ "The owner's lists:"))
+
+      assert presentation < rules and rules < date and date < index
+      assert Enum.at(system_run, rules).content =~ "No list is drawn here"
+
+      assert Enum.at(system_run, index).content ==
+               ~s(The owner's lists: in "Projects", "Fermix"; "Groceries".)
+    end
+
+    test "a tick leaves every list line of the prompt byte-identical", %{repo: repo, owner: owner} do
+      before = list_lines(capture_prompt(private_chat("40041"), memory_repo: repo))
+
+      changes = [%{"list" => "Groceries", "ops" => [%{"op" => "check", "n" => 1}]}]
+      {:ok, _answer} = ChecklistRegistry.edit(%{"changes" => changes}, owner, repo: repo)
+
+      assert list_lines(capture_prompt(private_chat("40041"), memory_repo: repo)) == before
+    end
+
+    test "a shared chat's turn and a guest's carry neither", %{repo: repo} do
+      for msg <- [
+            %{channel: "telegram", chat_id: "-40041", metadata: %{chat_type: "group"}},
+            %{channel: "telegram", chat_id: "-40041", metadata: %{chat_type: nil}},
+            Map.put(private_chat("guest-9"), :source_trust, :guest)
+          ] do
+        messages = capture_prompt(msg, memory_repo: repo)
+
+        refute Enum.any?(messages, &(&1.content =~ "checklist_")), inspect(msg)
+        refute Enum.any?(messages, &(&1.content =~ "The owner's lists:")), inspect(msg)
+      end
+    end
+  end
+
+  defp list_lines(messages),
+    do: Enum.filter(messages, &(&1.content =~ "checklist_" or &1.content =~ "The owner's lists:"))
 
   defp private_chat(chat_id),
     do: %{channel: "telegram", chat_id: chat_id, metadata: %{chat_type: "private"}}

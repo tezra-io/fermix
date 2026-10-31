@@ -67,6 +67,19 @@ defmodule FermixCore.ReplyBlocksTest do
       assert [%{name: "Cafe 9"}] = ReplyBlocks.take(server, @other)
     end
 
+    # M85 §07: the lists a list tool read or changed are kept beside the places,
+    # in the order the tools touched them, and taken with them.
+    test "keeps the lists a tool touched beside the places, and the places' block draws only places" do
+      {server, _clock} = holder()
+      touch = %{list_id: "ck_3m9q2x7d1a", title: "Fermix", rows: ["ci_7k2m9d0q4a"]}
+
+      :ok = ReplyBlocks.put_places(server, @chat, [record(1)])
+      :ok = ReplyBlocks.put_checklists(server, @chat, [touch])
+
+      assert [%{name: "Cafe 1"}, {:checklist, ^touch}] = records = ReplyBlocks.take(server, @chat)
+      assert names(ReplyBlocks.build("[Cafe 1](https://cafe1.example/)", records)) == ["Cafe 1"]
+    end
+
     test "a conversation keeps its newest records, never more than the bound" do
       {server, _clock} = holder()
       bound = ReplyBlocks.max_records()

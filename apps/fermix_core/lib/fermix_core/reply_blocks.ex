@@ -5,8 +5,9 @@ defmodule FermixCore.ReplyBlocks do
   text makes of them.
 
   The holder keeps, per conversation key, the places `place_search` handed the
-  model (`put_places/3`), until the companion turn writer takes them for the
-  reply it writes (`take/2`). It is bounded whichever channel ran the search:
+  model (`put_places/3`) and the lists `checklist_read` and `checklist_edit`
+  read or changed (`put_checklists/3`, M85 §07), until the companion turn
+  writer takes them for the reply it writes (`take/2`). It is bounded whichever channel ran the search:
   a record expires 30 minutes after it was put, a conversation keeps its newest
   50, and expired records of every conversation are dropped on each call, so a
   conversation that never takes holds nothing past the window.
@@ -47,6 +48,15 @@ defmodule FermixCore.ReplyBlocks do
   @typedoc "One block under a reply, string keyed as the wire carries it."
   @type block :: %{required(String.t()) => term()}
 
+  @typedoc """
+  A list a tool read or changed: its id and title, and the ids of the rows the
+  call added or changed (none for a list it only read).
+  """
+  @type checklist_touch :: %{list_id: String.t(), title: String.t(), rows: [String.t()]}
+
+  @typedoc "What the holder keeps: a place a search returned, or a list a tool touched."
+  @type record :: map() | {:checklist, checklist_touch()}
+
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts) do
     case Keyword.get(opts, :name, __MODULE__) do
@@ -86,10 +96,24 @@ defmodule FermixCore.ReplyBlocks do
   end
 
   @doc """
+  Keep `touches`, the lists a list tool read or changed, under the
+  conversation it ran in, after the records already kept.
+  """
+  @spec put_checklists(GenServer.server(), conversation_key(), [checklist_touch()]) :: :ok
+  def put_checklists(server \\ __MODULE__, conversation_key, touches)
+      when is_tuple(conversation_key) and tuple_size(conversation_key) == 3 and is_list(touches) do
+    GenServer.call(server, {:put, conversation_key, Enum.map(touches, &checklist_record/1)})
+  end
+
+  defp checklist_record(%{list_id: id, title: title, rows: rows})
+       when is_binary(id) and is_binary(title) and is_list(rows),
+       do: {:checklist, %{list_id: id, title: title, rows: rows}}
+
+  @doc """
   The conversation's live records, oldest first, which the holder then
   forgets.
   """
-  @spec take(GenServer.server(), conversation_key()) :: [map()]
+  @spec take(GenServer.server(), conversation_key()) :: [record()]
   def take(server \\ __MODULE__, conversation_key)
       when is_tuple(conversation_key) and tuple_size(conversation_key) == 3 do
     GenServer.call(server, {:take, conversation_key})
@@ -100,9 +124,9 @@ defmodule FermixCore.ReplyBlocks do
   with the places the text links. When two records name the same link, the
   later one (the newer search) is the one drawn.
   """
-  @spec build(String.t(), [map()]) :: [block()]
+  @spec build(String.t(), [record()]) :: [block()]
   def build(text, records) when is_binary(text) and is_list(records) do
-    index = url_index(records)
+    index = records |> places() |> url_index()
 
     text
     |> read_links()
@@ -164,6 +188,8 @@ defmodule FermixCore.ReplyBlocks do
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
 
   # -- building --------------------------------------------------------------
+
+  defp places(records), do: Enum.reject(records, &match?({:checklist, _touch}, &1))
 
   defp drawn_urls(%{"type" => "places", "places" => places}),
     do: Enum.flat_map(places, &[&1["canonical_url"], &1["source_url"]])

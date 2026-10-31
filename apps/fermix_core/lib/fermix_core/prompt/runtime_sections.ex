@@ -316,6 +316,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
       |> Enum.reject(&credential_gated_when_unready?/1)
       |> Enum.reject(&call_scoped?/1)
       |> Enum.reject(&open_loop_unlisted?/1)
+      |> Enum.reject(&checklist_unlisted?/1)
       |> Enum.group_by(&(&1.metadata[:category] || :system))
       |> Enum.sort_by(fn {category, _caps} -> category_index(category) end)
       |> Enum.map_join("\n\n", &format_category/1)
@@ -354,6 +355,13 @@ defmodule FermixCore.Prompt.RuntimeSections do
   end
 
   defp credential_gated_when_unready?(_capability), do: false
+
+  # The list tools (M85 §11) are offered only on the owner's private turn or
+  # voice call, and the catalog is cached per profile, which an owner's group
+  # chat shares, so it never names them; the per-turn rules
+  # (`Checklists.Note.rules/2`) name them where the wire carries their schemas.
+  defp checklist_unlisted?(%{kind: :builtin, name: "checklist_" <> _rest}), do: true
+  defp checklist_unlisted?(_capability), do: false
 
   # A built-in offered only while a Live call in the chat is up (M56 §4.4). The
   # catalog is cached per profile and cannot follow a call that starts and ends

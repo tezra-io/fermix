@@ -54,6 +54,17 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.OpenLoopRespond
   ]
 
+  # The owner's lists (MILESTONE_85 §11), named as its own list for the same
+  # reason: `checklist_tools_trust_invariant_test.exs` loops over it and asserts
+  # both directions of its membership for every `checklist_*` built-in. Seeded
+  # always; every member's `advertise?/1` and `execute/2` ask
+  # `Checklists.Access`, so only the owner's private turn or voice call, or a
+  # job whose allowed tools name it, is offered one.
+  @checklist_tool_modules [
+    FermixCore.Tools.ChecklistRead,
+    FermixCore.Tools.ChecklistEdit
+  ]
+
   @builtin_tool_modules [
     FermixCore.Tools.Shell,
     FermixCore.Tools.FileRead,
@@ -114,7 +125,10 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.OpenLoopNote,
     FermixCore.Tools.OpenLoopUpdate,
     FermixCore.Tools.OpenLoopList,
-    FermixCore.Tools.OpenLoopRespond
+    FermixCore.Tools.OpenLoopRespond,
+    # The lists family; keep `@checklist_tool_modules` in step.
+    FermixCore.Tools.ChecklistRead,
+    FermixCore.Tools.ChecklistEdit
   ]
 
   def child_spec(opts) do
@@ -254,6 +268,14 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   """
   @spec open_loop_tool_modules() :: [module()]
   def open_loop_tool_modules, do: @open_loop_tool_modules
+
+  @doc """
+  The list tool family (MILESTONE_85 §11). Exposed so the whole-surface
+  invariant test gates EVERY member: none is offered outside the owner's
+  private turn or voice call and a job that names it.
+  """
+  @spec checklist_tool_modules() :: [module()]
+  def checklist_tool_modules, do: @checklist_tool_modules
 
   @doc """
   The meetings notetaker tool family (MILESTONE_21 C2 §14.1). Exposed so the

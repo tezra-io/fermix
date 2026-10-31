@@ -844,6 +844,34 @@ proposal's idempotency key, over the mandate, tool, arguments and cue, is
 unique), so a denied, expired or unreachable proposal is final for that cue. A cue run whose `job_runs.tools_started_at`
 is set (an allowed mandate call or a proposal) is never retried.
 
+### `FermixCore.Checklists`: the owner's lists
+
+A list (M85) is the owner's own record of things to tick off: a list per
+project in a folder such as Projects, sections inside, items with an optional
+note. Its rows live in `memory.db` (`checklists` and `checklist_items`,
+migration 56, `Memory.Repo.ChecklistsSql`), and `Checklists.Registry` is
+their one writer, a module over the Repo, never a process. The model sees a
+list only as markdown: `checklist_read` renders it (`Checklists.Render`, each
+row with its `[n]`), and `checklist_edit` takes a call of changes, a list
+each with its ops, which the Registry checks in the caller, `Checklists.Parse`
+reading a `replace`'s markdown back into rows, and hands to the Repo whole,
+where `Checklists.Ops`, pure, applies it to the rows the transaction loaded.
+`Checklists.Note` is the per-turn rules line and the line naming the lists,
+which `TurnRunner` appends beside the date note, and `ReplyBlocks` keeps the
+lists a turn touched for its reply's `checklists` block.
+
+Architecture Invariant: one `checklist_edit` call is one transaction: every
+change lands or none does, each list it changed moves its `rev` once, and a
+row's `n` is never reused within its list.
+
+Architecture Invariant: the lists are the owner's. `Checklists.Access` admits
+only the owner's private turn or voice call, and a scheduled job whose allowed
+tools name the tool; the tools are left out of the cached capability catalog,
+which an owner's group chat shares, so a shared turn sees no list tool, line
+or name. After a turn read outside content, rows it writes are stamped and
+framed when read back, and its removals, replaces and moves to another list
+are refused.
+
 ### Sandbox and Command Execution
 
 `FermixCore.Sandbox` is an in-process policy gate over paths, working

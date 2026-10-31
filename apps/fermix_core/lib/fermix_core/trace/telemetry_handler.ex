@@ -13,6 +13,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
   alias FermixCore.Agents.LifecycleTelemetry
   alias FermixCore.Attachments.Telemetry, as: AttachmentTelemetry
   alias FermixCore.Capabilities.MCP.Telemetry, as: MCPClientTelemetry
+  alias FermixCore.Checklists.Telemetry, as: ChecklistTelemetry
   alias FermixCore.ComputerUse.Telemetry, as: ComputerUseTelemetry
   alias FermixCore.Cues.Filter.Telemetry, as: CueFilterTelemetry
   alias FermixCore.Cues.Telemetry, as: CueTelemetry
@@ -292,6 +293,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
       GistTelemetry.trace_event_definitions() ++
       ComputerUseTelemetry.trace_event_definitions() ++
       AttachmentTelemetry.trace_event_definitions() ++
+      ChecklistTelemetry.trace_event_definitions() ++
       CueTelemetry.trace_event_definitions() ++
       CueFilterTelemetry.trace_event_definitions()
   end

@@ -556,6 +556,51 @@ defmodule FermixOpik.Mapper do
   defp maybe_save_failure(span, _metadata), do: span
 
   @doc """
+  Build a point span from a `[:fermix, :checklist, :read | :edit]` event — one
+  read or one edit of the owner's lists (M85), lasting the store's
+  transaction. Counts and Fermix's own words only: an item's words and a
+  list's title never ride. A refused or failed call is flagged errored with
+  its tag. `session_id` places the span and is not repeated in its metadata.
+  """
+  @spec checklist_span(:read | :edit, map(), map(), keyword()) :: map()
+  def checklist_span(kind, metadata, measurements, opts) when kind in [:read, :edit] do
+    ended = Keyword.fetch!(opts, :ended)
+    started = start_of(ended, div(Map.get(measurements, :duration_us, 0), 1000))
+
+    %{
+      id: new_id(started),
+      trace_id: Keyword.fetch!(opts, :trace_id),
+      parent_span_id: Keyword.get(opts, :parent_span_id),
+      project_name: Keyword.fetch!(opts, :project_name),
+      name: "checklist_#{kind}",
+      type: "general",
+      start_time: iso(started),
+      end_time: iso(ended),
+      metadata:
+        measurements
+        |> Map.take([:lists, :ops, :duration_us])
+        |> Map.merge(%{
+          scope: stringify(Map.get(metadata, :scope)),
+          made_via: stringify(Map.get(metadata, :made_via)),
+          outcome: stringify(Map.get(metadata, :outcome))
+        })
+        |> drop_nil()
+    }
+    |> maybe_checklist_failure(metadata)
+    |> drop_nil()
+  end
+
+  defp maybe_checklist_failure(span, %{outcome: outcome} = metadata)
+       when outcome in [:refused, :failed],
+       do:
+         Map.put(span, :error_info, %{
+           exception_type: "Checklist" <> String.capitalize(Atom.to_string(outcome)),
+           message: to_string(Map.get(metadata, :error_code) || outcome)
+         })
+
+  defp maybe_checklist_failure(span, _metadata), do: span
+
+  @doc """
   Build a point span from a `[:fermix, :agent_loop, :context_compaction]` event
   — one reduction the agent loop applied to a turn's tool results (older results
   folded into digests). The byte pair is the reduction's effect; `count` is

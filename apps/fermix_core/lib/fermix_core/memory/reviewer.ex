@@ -379,6 +379,7 @@ defmodule FermixCore.Memory.Reviewer do
     - one-shot answers the user did not ask you to keep (explanations, calculations, trivia);
     - precise location: a street address or exact coordinates — the city, region, or postal code they name is profile, their doorstep is not;
     - secrets, credentials, and transient one-off task details.
+    Items of a list the owner keeps are not memory: leave them to the list.
     Each value is one short declarative clause — no preamble, no hedging, no restating what its category already implies. Prefer a single general fact over several narrow ones, and merge duplicates. Stay well under each file's char budget and each category's row limit: rows past a limit drop out of the prompt, oldest first.
 
     Keep memory current, not append-only:

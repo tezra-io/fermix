@@ -90,6 +90,8 @@ defmodule FermixCore.Capabilities.Activity do
     "open_loop_update" => "Updating something to follow up on",
     "open_loop_list" => "Looking at what to follow up on",
     "open_loop_respond" => "Answering a follow-up",
+    "checklist_read" => "Looking at your lists",
+    "checklist_edit" => "Changing your lists",
     "join_meeting" => "Joining a meeting",
     "leave_meeting" => "Leaving a meeting",
     "list_meetings" => "Looking at meetings",

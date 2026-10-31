@@ -30,6 +30,9 @@ defmodule FermixCore.Capabilities.UntrustedContent do
 
   alias FermixCore.Attachments
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Checklists.Render, as: ChecklistRender
+  alias FermixCore.Tools.ChecklistEdit
+  alias FermixCore.Tools.ChecklistRead
   alias FermixCore.Tools.GetCodingRun
   alias FermixCore.Tools.GetJobRun
   alias FermixCore.Tools.ListCues
@@ -45,6 +48,11 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   # result and a note that restates a stored loop. Their taint is in what they
   # returned (`outside_source/3`).
   @framing_result_modules [OpenLoopList, OpenLoopNote, OpenLoopUpdate]
+
+  # The list tools whose result can show a row added after outside content,
+  # framed (`Checklists.Render`): a read, and an edit's answer, which names the
+  # rows it touched. Their taint is in what they returned (`outside_source/3`).
+  @checklist_framing_modules [ChecklistRead, ChecklistEdit]
 
   @typedoc """
   Where outside content came from: a plugin, one named tool, a cue source (its
@@ -66,6 +74,7 @@ defmodule FermixCore.Capabilities.UntrustedContent do
           | {:harness, String.t()}
           | {:message, String.t()}
           | {:open_loop, String.t()}
+          | {:checklist, String.t()}
 
   # Tool categories whose result relays what a worker read.
   @relaying_categories [:delegation]
@@ -188,6 +197,16 @@ defmodule FermixCore.Capabilities.UntrustedContent do
     if is_binary(output) and framed?(output), do: open_loop_source(), else: nil
   end
 
+  # A list's row framed as added after outside content may be someone else's
+  # words. The mark can over-report (the owner's own words may quote it,
+  # escaped), never miss a framed row.
+  def outside_source(%Capability{metadata: %{tool_module: module}}, arguments, output)
+      when module in @checklist_framing_modules and is_map(arguments) do
+    if is_binary(output) and String.contains?(output, ChecklistRender.frame()),
+      do: checklist_source(),
+      else: nil
+  end
+
   def outside_source(%Capability{} = capability, arguments, _output) when is_map(arguments),
     do: outside_source(capability, arguments)
 
@@ -261,6 +280,13 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   """
   @spec open_loop_source() :: outside_source()
   def open_loop_source, do: {:open_loop, "an open loop noted after outside content"}
+
+  @doc """
+  The outside source a list read or edit brings into its turn when it shows a
+  row added after outside content (M85 §11): its words may be someone else's.
+  """
+  @spec checklist_source() :: outside_source()
+  def checklist_source, do: {:checklist, "a list row added after outside content"}
 
   @doc """
   The outside source a coding-run continuation turn carries: a finished run

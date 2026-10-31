@@ -102,6 +102,16 @@ defmodule FermixCore.Prompt.ChannelPresentation do
     |> Enum.join("\n")
   end
 
+  @doc """
+  The line about the owner's lists for `channel` (MILESTONE_85 §05), which
+  `Checklists.Note.rules/2` carries on the owner's private turns only. No
+  surface draws a list yet, so every channel gets the one that says to write
+  it; the card's line comes with the wire that can draw it.
+  """
+  @spec checklist_line(String.t() | nil) :: String.t()
+  def checklist_line(channel) when is_binary(channel) or is_nil(channel),
+    do: "No list is drawn here: when the owner asks to see a list, write it as a short checklist."
+
   defp group_line(chat_type) when chat_type in @group_chat_types do
     "- This is a shared chat: answer the person who asked, briefly addressing them, without lecturing the room."
   end

@@ -298,6 +298,59 @@ defmodule FermixOpik.AggregationTest do
     end
   end
 
+  describe "the owner's lists (M85)" do
+    test "the reporter subscribes to the read and the edit" do
+      assert [:fermix, :checklist, :read] in FermixOpik.Reporter.events()
+      assert [:fermix, :checklist, :edit] in FermixOpik.Reporter.events()
+    end
+
+    test "an edit nests as a point span under the turn, and a refused read is errored" do
+      {_state, closed} =
+        run([
+          {[:fermix, :checklist, :edit], %{duration_us: 3_000, lists: 3, ops: 4},
+           %{
+             component: "checklists",
+             made_via: "chat",
+             outcome: :ok,
+             error_code: nil,
+             session_id: "main-1"
+           }},
+          {[:fermix, :checklist, :read], %{duration_us: 800, lists: 0},
+           %{
+             component: "checklists",
+             made_via: "chat",
+             outcome: :refused,
+             error_code: "no_list",
+             scope: :list,
+             session_id: "main-1"
+           }},
+          {[:fermix, :provider, :call], %{duration_ms: 1_000},
+           %{provider: :openai, model: "gpt-5.5", status: :ok, session_id: "main-1"}},
+          {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+           %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}}
+        ])
+
+      assert [%{spans: spans}] = closed
+      wrapper = span_named(spans, "agent:main")
+      edit = span_named(spans, "checklist_edit")
+      read = span_named(spans, "checklist_read")
+
+      assert edit.parent_span_id == wrapper.id
+
+      assert edit.metadata == %{
+               lists: 3,
+               ops: 4,
+               duration_us: 3_000,
+               made_via: "chat",
+               outcome: "ok"
+             }
+
+      refute Map.has_key?(edit, :error_info)
+      assert read.metadata.scope == "list"
+      assert read.error_info == %{exception_type: "ChecklistRefused", message: "no_list"}
+    end
+  end
+
   @compaction_event [:fermix, :agent_loop, :context_compaction]
   @recovery_event [:fermix, :agent_loop, :context_recovery]
 

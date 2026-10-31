@@ -9,6 +9,7 @@ defmodule FermixCore.Tools.ScheduleJob do
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Checklists.Access, as: ChecklistAccess
   alias FermixCore.Jobs.DeliveryDefaults
   alias FermixCore.Jobs.Registry
   alias FermixCore.Tools.JobRegistrySupport, as: Support
@@ -159,6 +160,7 @@ defmodule FermixCore.Tools.ScheduleJob do
          {:ok, requested_tools} <- caller_scoped_allowed_tools(args, context),
          {:ok, allowed_tools} <- Support.within_run_tools(requested_tools, context),
          :ok <- AccessGate.check_job_tools(allowed_tools, context),
+         :ok <- ChecklistAccess.check_job_tools(allowed_tools, context),
          {:ok, skill_name} <- validate_skill_name(args, context),
          {:ok, created_by_trust} <- creator_trust(context),
          {:ok, {provider, model}} <- Support.validate_route_pin(args) do

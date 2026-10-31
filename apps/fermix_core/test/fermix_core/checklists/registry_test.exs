@@ -331,7 +331,7 @@ defmodule FermixCore.Checklists.RegistryTest do
         %{
           "list" => "Fermix",
           "ops" => [
-            %{"op" => "folder", "text" => "Work"},
+            %{"op" => "folder", "folder" => "Work"},
             %{"op" => "rename", "text" => "Fermix engine"}
           ]
         }

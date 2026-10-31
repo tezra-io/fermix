@@ -37,6 +37,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Attachments.Manifest
   alias FermixCore.Attachments.Workspace
   alias FermixCore.Capabilities.UntrustedContent
+  alias FermixCore.Checklists.Note, as: ChecklistNote
   alias FermixCore.ComputerHistory.Gate, as: ComputerHistoryGate
   alias FermixCore.ComputerHistory.RecentActivity
   alias FermixCore.ComputerHistory.Taint
@@ -672,7 +673,9 @@ defmodule FermixCore.Agents.TurnRunner do
     # because it is byte-stable for the conversation's lifetime, which keeps the
     # date note's once-a-day churn the only churn in this prompt region.
     messages = inject_channel_presentation(messages, msg)
+    messages = append_system_note(messages, ChecklistNote.rules(context, msg.channel))
     messages = inject_current_date(messages)
+    messages = append_system_note(messages, ChecklistNote.index(context))
     messages = inject_recent_calls(messages, state, source_trust, voice_call)
     {messages, context} = inject_recent_activity(messages, context)
     :ok = capture_open_loop_reply(context, owner_text)
@@ -821,6 +824,10 @@ defmodule FermixCore.Agents.TurnRunner do
 
   # Kept in the leading system run (the Anthropic adapter requires system
   # messages to lead) so the date sits with the rest of the system prompt.
+  # The owner's lists (M85 §05) ride beside these two on the owner's private
+  # turns: their rules after the presentation, byte-stable for the
+  # conversation, and the line naming the lists after the date, changing only
+  # when a list is made, renamed, moved or removed (`Checklists.Note`).
   defp inject_current_date(messages), do: append_system_note(messages, CurrentDate.note())
 
   # The gists of the last Live calls in the chat (M56 §4.2), for an owner's

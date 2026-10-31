@@ -1277,6 +1277,30 @@ keyed on `channel`, and the Opik exporter places it under the turn's trace as an
 `channel` and `outcome`, flagged errored with `detail` when the outcome is
 `failed`). A failed save never fails the turn: the manifest names it as well.
 
+## The owner's lists (M85)
+
+`checklist_read` and `checklist_edit` are ordinary built-ins riding
+`[:fermix, :tool, :exec]` through `Tools.Telemetry.exec/5`; a refused call's
+event carries `error_code` (`Checklists.Registry.error_tag/1`) and
+`error_summary`, the sentence the model received. Beside them,
+`Checklists.Registry` emits **one point event per read and per edit**
+through `FermixCore.Checklists.Telemetry`, the event a later wire edit from
+the Mac or the phone will emit too: `[:fermix, :checklist, :read]` with
+measurements `duration_us` (the store's read) and `lists` (how many it
+returned), and `[:fermix, :checklist, :edit]` with `duration_us` (the call's
+one transaction), `lists` (the lists it touched) and `ops`. Metadata on both:
+`component: "checklists"`, `made_via` (`chat | job`), `outcome` (`ok |
+refused | failed`), `error_code` (the refusal's tag, else nil), `scope` on a
+read (`list | folder | index`), and the caller's `session_id` when it has one.
+Neither event ever carries an item's words or a list's title.
+`Trace.TelemetryHandler` records them as `checklist_read` and
+`checklist_edit` `agent_event` rows keyed on `component`, and the Opik
+exporter places each under its turn's or job run's trace as a point span
+(`FermixOpik.Mapper.checklist_span/4`: the counts, `scope`, `made_via` and
+`outcome`, flagged errored with the tag when the outcome is `refused` or
+`failed`). The edit's `duration_us` is the budget's measure (M85 §12: under
+5 ms at p95 for a call that changes three lists).
+
 ## Computer-history summarizer (a headless run with no bookends)
 
 The summarizer is **one bounded provider call per cycle**, not an agent loop:

@@ -287,8 +287,9 @@ defmodule FermixCore.Checklists.Registry do
     end
   end
 
+  # The folder a list goes in, named as a create names it; none takes it out.
   defp op_fields(:folder, op, _creates?) do
-    with {:ok, folder} <- optional_text(op, "text", :folder, @folder_max),
+    with {:ok, folder} <- optional_text(op, "folder", :folder, @folder_max),
          do: {:ok, %{op: :folder, text: folder}}
   end
 
