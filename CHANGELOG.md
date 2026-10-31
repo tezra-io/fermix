@@ -203,6 +203,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   anything is installed. `--snapshot-bucket` and `--snapshot-region` name
   where the server will keep its snapshots, and `--restore` prepares a server
   to restore your home from a snapshot instead.
+- **The browser fills a form and sends it in one step.** When the agent fills
+  in a form, or signs you in with a login saved in the Mac app, it can send
+  the form in the same step instead of a second one, and it sees the page the
+  form leads to right away. Signing in still asks you first, exactly as
+  before. If sending fails once the fields are filled, the agent is told they
+  are filled, so it does not type them again.
 
 ### Changed
 
@@ -272,6 +278,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   process it starts now begin with the kernel's highest score, so the kernel
   stops one of them instead and Fermix keeps running; a browser task that
   finds Chrome gone starts it again.
+- **The browser reads a page once it has stopped changing.** After a click,
+  a submit or an Enter, and after opening a page, Chrome's page is now read
+  once it has held still for a moment (the same address, title, number of
+  elements and amount of text), not as soon as its address stops moving, so
+  results still filling in after a click are no longer read half-built and
+  need no second look. A snapshot taken while a page is still loading now
+  waits for it, up to a second and a half, then reads what is there and says
+  whether it had finished loading.
+- **Long browser tasks stay quick.** In a long browser task, the agent's later
+  steps stop re-reading its older reads of a page it has since read again, so
+  each step is quicker and costs less.
 
 ### Removed
 
