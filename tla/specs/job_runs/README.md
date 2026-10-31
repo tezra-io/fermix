@@ -29,15 +29,15 @@ what is left out and every step folded into another.
   what the platform took survive. This also covers a crash of any core child
   started before the `RunnerSupervisor` (`CommandHostSupervisor` through
   `MainAgent`, `Memory.Repo`, `Trace` and `Finch` among them,
-  `application.ex:259-338`) or of the `RunnerSupervisor` itself, since
-  `:rest_for_one` restarts every job process in each case (`:180`). A
+  `application.ex:259-342`) or of the `RunnerSupervisor` itself, since
+  `:rest_for_one` restarts every job process in each case (`:182`). A
   runner's send helper and its AgentLoop are linked to it, so none outlives
   the restart; `LoopDiesWithRunner` off lets the loop outlive it (JOB-8).
 - `SchedulerCrashes`: how many times the Scheduler alone may die, at any point
   of any callback, including its own init. A Repo timeout no longer kills it
   (`SchedulerTimeouts`); another cause still does, such as `:rest_for_one`
   restarting it when `MeetingsSupervisor`, started between the
-  `RunnerSupervisor` and the Scheduler, dies (`application.ex:339-346`).
+  `RunnerSupervisor` and the Scheduler, dies (`application.ex:343-350`).
   Runners keep running. When it dies waiting on the reaper's write, that write
   may still land (see late writes).
 - `SchedulerTimeouts`: how many of the Scheduler's Repo calls may time out.
@@ -431,7 +431,7 @@ every pin but `runner_supervisor.ex`, `delivery.ex`, `channel_send.ex` and
   `tools_started_at` and `cue_delivery_id`, two columns the spec does not
   model), the registry's pause, resume and edit (an extra refusal for cue
   tasks only), and the core tree (the cue subtree is its LAST child,
-  `application.ex:383`, after `JobRunnerSupervisor`, `MeetingsSupervisor` and
+  `application.ex:388`, after `JobRunnerSupervisor`, `MeetingsSupervisor` and
   `JobScheduler`, which keep their order). The `:clock` option and the
   session-id suffix change nothing modelled. Checks 01 to 35 set the new
   constants off and reproduce their earlier verdicts and state counts.
@@ -1000,8 +1000,8 @@ shortest and can change between runs.
   write or Scheduler call (`job_registry_support.ex:36-41`): a request the owner
   never made. That check's job-row read feeds no modelled column. The store
   of parked confirmations (`Capabilities.AccessGate.Pending`,
-  `application.ex:332`) and the holder of a conversation's place records
-  (`ReplyBlocks`, `:329`, which no job process reads) are two more core
+  `application.ex:336`) and the holder of a conversation's place records
+  (`ReplyBlocks`, `:340`, which no job process reads) are two more core
   children started before the `RunnerSupervisor`, so a crash of either is the
   daemon crash above.
 - The run-row value `unset` stands for the `"none"` the claim writes before a
