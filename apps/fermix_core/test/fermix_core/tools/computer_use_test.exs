@@ -4,6 +4,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
   alias Compux.Protocol
   alias FermixCore.ComputerUse.Background
   alias FermixCore.ComputerUse.Config
+  alias FermixCore.ComputerUse.HelperActions
   alias FermixCore.ComputerUse.Session
   alias FermixCore.ComputerUse.Supervisor, as: CuSupervisor
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -18,6 +19,28 @@ defmodule FermixCore.Tools.ComputerUseTest do
   # is how it ships and how every test in this file runs.
   defp offered_actions, do: Enum.reject(Protocol.actions(), &(&1 in Background.actions()))
 
+  # The reading the schema is built from (M86 F1), as a helper that lists every
+  # action the library encodes answers it: today's pinned helper does, on every
+  # system.
+  defp read_helper(actions) do
+    start_supervised!({HelperActions, read_at_boot?: false})
+    :ok = HelperActions.record(actions)
+  end
+
+  @accessibility ~w(elements inspect press set_value)
+
+  # Every place in the schema a model reads an action's name from.
+  defp schemas do
+    [
+      {"the static schema", ComputerUse.parameters()},
+      {"the per-turn schema", ComputerUse.dynamic_parameters(%{})}
+    ]
+  end
+
+  defp names?(text, action), do: text =~ ~r/\b#{action}\b/
+
+  defp per_turn_enum, do: ComputerUse.dynamic_parameters(%{})["properties"]["action"]["enum"]
+
   defmodule StubDriver do
     @behaviour Compux.Driver
 
@@ -27,7 +50,13 @@ defmodule FermixCore.Tools.ComputerUseTest do
     @impl true
     def start(opts), do: {:ok, %{test_pid: Keyword.fetch!(opts, :test_pid)}}
 
+    # A real helper's handshake lists what it offers (M86 F1).
     @impl true
+    def execute(%{test_pid: pid}, %{"action" => "hello"} = request) do
+      send(pid, {:driver_execute, request})
+      {:ok, %{"actions" => Protocol.actions(), "capabilities" => %{}}}
+    end
+
     def execute(%{test_pid: pid}, request) do
       send(pid, {:driver_execute, request})
 
@@ -215,6 +244,10 @@ defmodule FermixCore.Tools.ComputerUseTest do
   end
 
   describe "static surface" do
+    setup do
+      read_helper(Protocol.actions())
+    end
+
     test "name and category" do
       assert ComputerUse.name() == "computer_use"
       assert ComputerUse.category() == :computer
@@ -283,6 +316,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
   describe "dynamic_parameters/1 — live access mode folded into the action schema" do
     setup do
+      read_helper(Protocol.actions())
       prev = Application.get_env(:fermix_core, :sandbox)
 
       on_exit(fn ->
@@ -326,6 +360,136 @@ defmodule FermixCore.Tools.ComputerUseTest do
       # action enum is unchanged either way
       assert ComputerUse.dynamic_parameters(%{})["properties"]["action"]["enum"] ==
                offered_actions()
+    end
+  end
+
+  describe "the action enum follows the helper's hello (M86 F1)" do
+    setup do
+      previous = Application.get_env(:fermix_core, :computer_use, [])
+      on_exit(fn -> Application.put_env(:fermix_core, :computer_use, previous) end)
+      Application.put_env(:fermix_core, :computer_use, enabled: true, background: false)
+      :ok
+    end
+
+    test "until a helper has answered, only the pixel actions are offered" do
+      for {where, schema} <- schemas() do
+        assert schema["properties"]["action"]["enum"] == HelperActions.pixel(), where
+      end
+    end
+
+    test "a hello without the accessibility actions removes them from the enum and the words" do
+      read_helper(HelperActions.pixel())
+
+      for {where, schema} <- schemas() do
+        assert schema["properties"]["action"]["enum"] == HelperActions.pixel(), where
+        refute Map.has_key?(schema["properties"], "element_ref"), "#{where} offers element_ref"
+        refute Map.has_key?(schema["properties"], "value"), "#{where} offers value"
+
+        for action <- @accessibility do
+          refute names?(Jason.encode!(schema), action), "#{where} names `#{action}`"
+        end
+      end
+
+      for action <- @accessibility do
+        refute names?(ComputerUse.dynamic_description(%{}), action),
+               "the per-turn description names `#{action}`"
+      end
+    end
+
+    test "a hello with them keeps them, with their words and their fields" do
+      read_helper(Protocol.actions())
+
+      for {where, schema} <- schemas() do
+        assert schema["properties"]["action"]["enum"] == offered_actions(), where
+        assert Map.has_key?(schema["properties"], "element_ref"), where
+        assert Map.has_key?(schema["properties"], "value"), where
+
+        for action <- @accessibility do
+          assert names?(schema["properties"]["action"]["description"], action),
+                 "#{where} does not name `#{action}`"
+        end
+      end
+
+      for action <- @accessibility do
+        assert names?(ComputerUse.dynamic_description(%{}), action),
+               "the per-turn description does not name `#{action}`"
+      end
+    end
+
+    # The description rides the provider's cached prompt prefix, so it may change
+    # only when what the helper offers changes, never from one turn to the next.
+    test "the per-turn description is the same for the same reading" do
+      read_helper(Protocol.actions())
+      full = ComputerUse.dynamic_description(%{})
+
+      assert ComputerUse.dynamic_description(%{conversation_key: {"cli", "other", :root}}) ==
+               full
+
+      :ok = HelperActions.record(HelperActions.pixel())
+      pixel = ComputerUse.dynamic_description(%{})
+      refute pixel == full
+
+      :ok = HelperActions.record(Protocol.actions())
+      assert ComputerUse.dynamic_description(%{}) == full
+    end
+
+    # The registered copy is read once, at boot, before any helper has answered.
+    test "the description registered at boot is the pixel wording" do
+      for action <- @accessibility do
+        refute names?(ComputerUse.description(), action),
+               "the registered description names `#{action}`"
+      end
+    end
+
+    test "an action the library does not encode is never offered" do
+      read_helper(~w(screenshot teleport left_click))
+
+      for {where, schema} <- schemas() do
+        assert schema["properties"]["action"]["enum"] == ~w(screenshot left_click), where
+      end
+    end
+
+    test "the bound-window flag still decides whether its actions are offered" do
+      read_helper(Protocol.actions())
+
+      refute "select_target" in per_turn_enum()
+
+      Application.put_env(:fermix_core, :computer_use, enabled: true, background: true)
+      assert "select_target" in per_turn_enum()
+    end
+
+    test "the flag offers nothing the helper did not list" do
+      Application.put_env(:fermix_core, :computer_use, enabled: true, background: true)
+      read_helper(HelperActions.pixel())
+
+      for action <- Background.actions() do
+        refute action in per_turn_enum()
+      end
+    end
+
+    # The rest of the bound-window surface (the field beside the actions and the
+    # words that teach them) follows the same reading: a helper that cannot bind
+    # a window is not told how to.
+    test "the flag names no bound-window token the helper did not list" do
+      Application.put_env(:fermix_core, :computer_use, enabled: true, background: true)
+      read_helper(HelperActions.pixel())
+
+      texts =
+        [{"the per-turn description", ComputerUse.dynamic_description(%{})}] ++
+          for {where, schema} <- schemas(), do: {where, Jason.encode!(schema)}
+
+      for {where, text} <- texts, token <- Background.tokens() do
+        refute text =~ token, "#{where} names `#{token}`"
+      end
+    end
+
+    test "with a helper that lists them, the flag still reveals the bound-window surface" do
+      Application.put_env(:fermix_core, :computer_use, enabled: true, background: true)
+      read_helper(Protocol.actions())
+
+      assert ComputerUse.dynamic_description(%{}) =~ "select_target"
+      assert Map.has_key?(ComputerUse.dynamic_parameters(%{})["properties"], "window_id")
+      assert action_desc(ComputerUse.dynamic_parameters(%{})) =~ "release_target"
     end
   end
 
@@ -416,8 +580,10 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert {:ok, result} = ComputerUse.execute(%{"action" => "teleport"}, context)
       assert result.success == false
       assert result.error =~ "invalid action"
-      # The session's one-time input-control probe is setup, not the action.
+      # The session's one-time input-control probe and handshake reading are
+      # setup, not the action.
       assert_received {:driver_execute, %{"action" => "probe"}}
+      assert_received {:driver_execute, %{"action" => "hello"}}
       refute_received {:driver_execute, _}
     end
   end
@@ -435,8 +601,10 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
       assert result.success == false
       assert result.error =~ "strict"
-      # The session's one-time input-control probe is setup, not the action.
+      # The session's one-time input-control probe and handshake reading are
+      # setup, not the action.
       assert_received {:driver_execute, %{"action" => "probe"}}
+      assert_received {:driver_execute, %{"action" => "hello"}}
       refute_received {:driver_execute, _}
     end
 

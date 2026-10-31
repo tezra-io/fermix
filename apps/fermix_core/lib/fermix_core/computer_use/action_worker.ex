@@ -84,13 +84,14 @@ defmodule FermixCore.ComputerUse.ActionWorker do
   What the helper this worker is talking to says it can do, from the `hello` it
   answered at the handshake.
 
-  Asked by the `Session` at start, and only where a surface that depends on the
-  answer is switched on: a capability the model is about to be offered has to be
-  a fact about THIS helper. The transport answers a second `hello` from its
-  cached identity, so this costs no round trip, and a helper that will not answer
-  is read as advertising nothing.
+  Asked by the `Session` at every start: a capability the model is about to be
+  offered has to be a fact about THIS helper, and the actions it lists are what
+  the tool's schema is built from (M86 F1). The transport answers a second
+  `hello` from its cached identity, so this costs no round trip. A helper that
+  will not answer is an `{:error, reason}`, and what that means is the session's
+  to decide.
   """
-  @spec capabilities(GenServer.server()) :: Capabilities.t()
+  @spec capabilities(GenServer.server()) :: {:ok, Capabilities.t()} | {:error, term()}
   def capabilities(worker), do: GenServer.call(worker, :capabilities)
 
   @doc """
@@ -153,7 +154,7 @@ defmodule FermixCore.ComputerUse.ActionWorker do
     do: {:reply, {state.driver_mod, state.driver_state}, state}
 
   def handle_call(:capabilities, _from, state),
-    do: {:reply, read_capabilities(state.driver_mod, state.driver_state), state}
+    do: {:reply, Capabilities.hello(state.driver_mod, state.driver_state), state}
 
   @impl true
   def handle_cast({:execute, request, exec_state}, state) do
@@ -240,25 +241,6 @@ defmodule FermixCore.ComputerUse.ActionWorker do
         )
 
         true
-    end
-  end
-
-  # A helper that would not answer `hello` advertises nothing: the conservative
-  # reading is the same shape as a real one (`Capabilities.none/0`), so every
-  # consumer reads one map rather than remembering a `nil`. A driver double that
-  # predates the handshake lands here too, which is right — a double proves
-  # nothing about what the shipped helper can do.
-  defp read_capabilities(driver_mod, driver_state) do
-    case driver_mod.execute(driver_state, %{"action" => "hello"}) do
-      {:ok, identity} when is_map(identity) ->
-        Capabilities.from_identity(identity)
-
-      other ->
-        Logger.warning(
-          "computer-use helper did not report its capabilities (none assumed): " <> inspect(other)
-        )
-
-        Capabilities.none()
     end
   end
 

@@ -7,9 +7,11 @@ defmodule FermixCore.ComputerUse.Capabilities do
   `hello` from the cached copy without a round trip, so asking costs nothing and
   the answer cannot drift from the helper the session is actually talking to.
   That is why every consumer asks the driver rather than keeping its own record:
-  the `ActionWorker` reads it once at start, and `fermix doctor` reads it through
-  a one-shot spawn of its own, exactly as `ComputerUse.Probe` does for the
-  permission grants.
+  a `Session` reads it through its `ActionWorker` at every start, and `fermix
+  doctor` reads it through a one-shot spawn of its own, exactly as
+  `ComputerUse.Probe` does for the permission grants. The one record kept is
+  `HelperActions`: the latest `actions`, which the tool's schema is built from on
+  turns that have no session to ask (M86 F1).
 
   `read/1` is tree-less on purpose — no session, no registry, no supervisor —
   because `fermix doctor` runs without the daemon's tree and a row that could
@@ -25,6 +27,7 @@ defmodule FermixCore.ComputerUse.Capabilities do
   alias FermixCore.ComputerUse.SidecarInstaller
 
   @type t :: %{
+          actions: [String.t()],
           input_methods: [String.t()],
           capture_methods: [String.t()],
           targets?: boolean(),
@@ -56,12 +59,15 @@ defmodule FermixCore.ComputerUse.Capabilities do
 
   Takes the whole identity map (the reply's own shape), because `capabilities` is
   a key of it and a reply that carries none is a helper that advertises none.
+  `actions` sits beside it on the reply: the model-facing verbs this build has,
+  which the tool's schema is built from (M86 F1).
   """
   @spec from_identity(map()) :: t()
   def from_identity(identity) when is_map(identity) do
     capabilities = map(identity["capabilities"])
 
     %{
+      actions: strings(identity["actions"]),
       input_methods: strings(capabilities["input_methods"]),
       capture_methods: strings(capabilities["capture_methods"]),
       targets?: capabilities["targets"] == true,
@@ -79,20 +85,35 @@ defmodule FermixCore.ComputerUse.Capabilities do
   """
   @spec none() :: t()
   def none,
-    do: %{input_methods: [], capture_methods: [], targets?: false, indicator: :unknown}
+    do: %{
+      actions: [],
+      input_methods: [],
+      capture_methods: [],
+      targets?: false,
+      indicator: :unknown
+    }
+
+  @doc """
+  Ask a running driver for its `hello` and read what it advertises.
+
+  The one reading of a `hello` reply, for `read/1`'s own spawn and for the
+  `ActionWorker` that already holds a driver. A reply that is not a map is
+  malformed, and a helper that does not answer is an error, never `none/0`: what
+  a caller assumes when it could not ask is the caller's decision.
+  """
+  @spec hello(module(), Compux.Driver.state()) :: {:ok, t()} | {:error, term()}
+  def hello(driver, state) when is_atom(driver) do
+    case driver.execute(state, %{"action" => "hello"}) do
+      {:ok, identity} when is_map(identity) -> {:ok, from_identity(identity)}
+      {:ok, other} -> {:error, {:malformed_hello, other}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   defp resolve_path(opts) do
     case Keyword.fetch(opts, :binary_path) do
       {:ok, path} -> {:ok, path}
       :error -> SidecarInstaller.binary_path()
-    end
-  end
-
-  defp hello(driver, state) do
-    case driver.execute(state, %{"action" => "hello"}) do
-      {:ok, identity} when is_map(identity) -> {:ok, from_identity(identity)}
-      {:ok, other} -> {:error, {:malformed_hello, other}}
-      {:error, reason} -> {:error, reason}
     end
   end
 

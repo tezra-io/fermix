@@ -33,8 +33,13 @@ defmodule FermixCore.ComputerUse.OperatorStopTest do
     @impl true
     def execute(_state, %{"action" => "probe"}), do: {:ok, %{"input_control" => true}}
 
-    def execute(_state, %{"action" => "hello"}),
-      do: {:ok, %{"capabilities" => %{"targets" => true, "indicator" => "present"}}}
+    def execute(_state, %{"action" => "hello"}) do
+      {:ok,
+       %{
+         "actions" => Compux.Protocol.actions(),
+         "capabilities" => %{"targets" => true, "indicator" => "present"}
+       }}
+    end
 
     # The courtesy probe runs before the action; only the action itself blocks.
     def execute(_state, %{"action" => "idle_ms"}), do: {:ok, %{"ok" => true, "idle_ms" => 10_000}}

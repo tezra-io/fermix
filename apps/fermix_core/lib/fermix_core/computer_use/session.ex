@@ -50,6 +50,7 @@ defmodule FermixCore.ComputerUse.Session do
   alias FermixCore.ComputerUse.CaptureHealth
   alias FermixCore.ComputerUse.Config
   alias FermixCore.ComputerUse.Courtesy
+  alias FermixCore.ComputerUse.HelperActions
   alias FermixCore.ComputerUse.InputOwner
   alias FermixCore.ComputerUse.Notice
   alias FermixCore.ComputerUse.Observations
@@ -300,14 +301,10 @@ defmodule FermixCore.ComputerUse.Session do
 
     with :ok <- ensure_host_start_allowed(config, origin),
          {:ok, worker} <- start_worker(driver_mod, driver_opts) do
-      # Asked only where the operator switched the experiment on. A handshake
-      # identity is free to read, but a session that will never offer the surface
-      # has no question to ask — and a driver that answers nothing else would
-      # otherwise be asked one it was never written for.
-      capabilities =
-        if Background.enabled?(config),
-          do: ActionWorker.capabilities(worker),
-          else: Capabilities.none()
+      # Asked at every start, whatever the flags: the handshake identity is free
+      # to read, and the actions this helper lists are what the tool's schema is
+      # built from (M86 F1), so every session refreshes the daemon's reading.
+      capabilities = record_capabilities(ActionWorker.capabilities(worker))
 
       state = %{
         config: config,
@@ -382,6 +379,25 @@ defmodule FermixCore.ComputerUse.Session do
     else
       {:error, reason} -> {:stop, reason}
     end
+  end
+
+  # A helper that answered gives the daemon its reading of which actions to
+  # offer. One that would not answer advertises nothing here and leaves that
+  # reading as it was: the conservative reading is the same shape as a real one
+  # (`Capabilities.none/0`), so every consumer reads one map rather than
+  # remembering a `nil`, and a driver double that predates the handshake lands
+  # here too — a double proves nothing about what the shipped helper can do.
+  defp record_capabilities({:ok, capabilities}) do
+    :ok = HelperActions.record(capabilities.actions)
+    capabilities
+  end
+
+  defp record_capabilities({:error, reason}) do
+    Logger.warning(
+      "computer-use helper did not report its capabilities (none assumed): " <> inspect(reason)
+    )
+
+    Capabilities.none()
   end
 
   # Linked, so the sidecar's Port still dies with its session, and so a worker that

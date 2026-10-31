@@ -22,6 +22,7 @@ defmodule FermixCore.Tools.ComputerUse do
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.ComputerUse.Background
   alias FermixCore.ComputerUse.Config
+  alias FermixCore.ComputerUse.HelperActions
   alias FermixCore.ComputerUse.Session
   alias FermixCore.ComputerUse.SessionManager
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
@@ -36,8 +37,34 @@ defmodule FermixCore.Tools.ComputerUse do
   @impl true
   def name, do: "computer_use"
 
+  # Built from the helper's latest reading (`HelperActions`), like the schema: a
+  # sentence about an accessibility action the enum lacks is that action
+  # advertised anyway (M86 F1). The copy registered here is read once, at boot,
+  # before any helper has answered, so it is the pixel wording;
+  # `dynamic_description/1` is what a turn reads.
   @impl true
-  def description do
+  def description, do: description(HelperActions.offered())
+
+  @doc """
+  The description for this turn (`Capabilities.Advertisement`): the same words
+  for the helper's latest reading. A function of that reading and the
+  bound-window flag alone, so it changes only when they do and the provider's
+  cached prompt prefix holds from one turn to the next.
+  """
+  @spec dynamic_description(map()) :: String.t()
+  def dynamic_description(context) when is_map(context), do: description()
+
+  defp description(offered) do
+    screen_description() <>
+      aiming_description(offered) <>
+      zoom_description() <>
+      check_description(offered) <>
+      background_description(offered) <>
+      controls_description(offered)
+  end
+
+  # Whose screen this is, and what to reach for before pixels.
+  defp screen_description do
     "Drive the host desktop GUI by screenshot + mouse/keyboard, one action per call. " <>
       "It is the ONLY tool that sees and acts on the user's OWN live screen — a page, app, or " <>
       "session they already have open; a `browser`/`shell` action runs in its own context and " <>
@@ -55,25 +82,39 @@ defmodule FermixCore.Tools.ComputerUse do
       "window — prefer that over pixel-aiming at their screen. For precision clicks, bring the " <>
       "target window to the FRONT and unobstructed; do not maximize it for aiming's sake — a " <>
       "window that fits the capture budget arrives at native detail, a maximized one gets " <>
-      "downscaled. " <>
-      "AIMING — ONE RULE: coordinates are pixels in the image you name. Every reply that " <>
-      "gives you coordinates names its image: `screenshot`, `elements` and `windows` each " <>
-      "return an `observation_id`, and every click, move, drag, scroll and inspect must " <>
-      "carry the id of the image its x,y were read in. There is no region to copy onto an " <>
+      "downscaled. "
+  end
+
+  # One rule for coordinates, and the exact targets that beat them.
+  defp aiming_description(offered) do
+    "AIMING — ONE RULE: coordinates are pixels in the image you name. Every reply that " <>
+      "gives you coordinates names its image: `screenshot`" <>
+      naming(offered, ["elements"], ", `elements`") <>
+      " and `windows` each return an `observation_id`, and every click, move, drag" <>
+      naming(offered, ["inspect"], ", scroll and inspect", " and scroll") <>
+      " must carry the id of the image its x,y were read in. There is no region to copy onto an " <>
       "action, and coordinates read in one image NEVER apply to another — read and aim in " <>
       "the same image, in the same breath. Only the last few images stay addressable and " <>
       "only for about half a minute; if an id is refused as unknown, expired or stale, take " <>
       "a fresh `screenshot` and read the coordinates again in IT, never re-send the old ones. " <>
       "Prefer exact targets where a surface exposes them (`browser` element " <>
-      "actions, numbered `marks`, `elements` click points). Take a `screenshot` with " <>
+      "actions, numbered `marks`" <>
+      naming(offered, ["elements"], ", `elements` click points") <>
+      "). Take a `screenshot` with " <>
       "`\"marks\": true` and act with `mark: <id>` plus that image's `observation_id` — the " <>
       "exact point is resolved for you, " <>
-      "which beats any pixel estimate. `elements`/`marks` are best-effort accessibility " <>
+      "which beats any pixel estimate. " <>
+      naming(offered, ["elements"], "`elements`/`marks` are", "`marks` are") <>
+      " best-effort accessibility " <>
       "metadata: an empty result means no accessibility-backed points were exposed, not that " <>
       "visible content cannot accept pixel interaction. In the MANAGED browser, use `get " <>
       "field=rect` + `click_coords` for a visible DOM target; THIS tool's pixels are for " <>
-      "every other surface. " <>
-      "A screen-share frame is a LOW-DETAIL awareness image with no observation_id, so it is " <>
+      "every other surface. "
+  end
+
+  # Screen-share frames, zooming to the window, and Fermix's own companion.
+  defp zoom_description do
+    "A screen-share frame is a LOW-DETAIL awareness image with no observation_id, so it is " <>
       "never a source of click coordinates: take a fresh `screenshot` to aim. " <>
       "ZOOM TO THE WINDOW, not just to small controls. A full-screen capture is downscaled to " <>
       "fit one size budget, so on a large or ultrawide display most of that budget goes to " <>
@@ -85,28 +126,50 @@ defmodule FermixCore.Tools.ComputerUse do
       "magnified image it returns, naming that image's id on every action inside it; zoom " <>
       "further for a small control within it. " <>
       "Fermix's own floating voice companion may be visible on that screen — never click it; " <>
-      "its controls end the call you are on. If it covers your target, ask the human to move it. " <>
-      "`screenshot` to see the screen, then act on it (click, type, key, scroll, drag) using " <>
+      "its controls end the call you are on. If it covers your target, ask the human to move it. "
+  end
+
+  # What every mutating action comes back with, and what it does and does not prove.
+  defp check_description(offered) do
+    "`screenshot` to see the screen, then act on it (click, type, key, scroll, drag) using " <>
       "pixel coordinates read in the image that screenshot names. Every " <>
       "mutating action comes back with its own check, and you never ask for one: a click, " <>
       "drag, scroll, keystroke or paste returns the VIEW it acted in — the same crop when the " <>
       "action was aimed in a zoomed image, the full screen otherwise — captured once that " <>
       "view stopped changing, and naming a NEW image: READ it, and aim your next action in " <>
-      "it. A `press` or `set_value` returns the CONTROL instead, read again after the action: " <>
-      "that is its state, never a picture and never proof the action had its effect. " <>
+      "it. " <>
+      naming(
+        offered,
+        ["press", "set_value"],
+        "A `press` or `set_value` returns the CONTROL instead, read again after the action: " <>
+          "that is its state, never a picture and never proof the action had its effect. "
+      ) <>
       "A check shows what the screen looks like now, not whether your input arrived, so " <>
       "repeat an action only when it shows the effect is missing. When the check says nothing " <>
       "visible changed, that is a fact about the VIEW and not a miss: do not repeat the " <>
       "action for it. " <>
       "Verify the effect through the surface's own structure where it has one (a " <>
       "`browser` snapshot or `get` for a page that browser drives), and change MECHANISM " <>
-      "— element click, keyboard, the browser's own click — not aim. " <>
-      background_description() <>
-      "`inspect` (read-only) reports the UI element under a point — its role and label — so you " <>
-      "can confirm you're about to click the right control (e.g., a button labeled \"Delete\") " <>
-      "before a consequential action. `elements` (read-only) lists the UI controls — each " <>
-      "with a reference, whether it is enabled, what it supports and a click point — so you " <>
-      "target by control instead of guessing pixels, and press the ones that can be pressed; " <>
+      "— element click, keyboard, the browser's own click — not aim. "
+  end
+
+  # The read-only controls, the wait, and the access mode.
+  defp controls_description(offered) do
+    naming(
+      offered,
+      ["inspect"],
+      "`inspect` (read-only) reports the UI element under a point — its role and label — so " <>
+        "you can confirm you're about to click the right control (e.g., a button labeled " <>
+        "\"Delete\") before a consequential action. "
+    ) <>
+      naming(
+        offered,
+        ["elements"],
+        "`elements` (read-only) lists the UI controls — each with a reference, whether it is " <>
+          "enabled, what it supports and a click point — so you target by control instead of " <>
+          "guessing pixels" <>
+          naming(offered, ["press"], ", and press the ones that can be pressed") <> "; "
+      ) <>
       "`wait_for_change` blocks until the screen updates (e.g. a page finishes loading) instead " <>
       "of repeated screenshots. Honor " <>
       "the configured access mode: standard confirms before anything " <>
@@ -115,17 +178,23 @@ defmodule FermixCore.Tools.ComputerUse do
   end
 
   # The bound-window surface, advertised only where the operator turned it on
-  # (M42 slice 5 §1). It is the same switch everywhere: the actions in the enum,
-  # the parameter beside them, this paragraph, the runtime steering. `Background`
-  # owns the list; nothing here repeats it.
-  defp background_description do
-    if Config.background?() do
+  # (M42 slice 5 §1) and the helper's reading offers it (M86 F1). It is the same
+  # switch everywhere: the actions in the enum, the parameter beside them, this
+  # paragraph, the runtime steering. `Background` owns the list; nothing here
+  # repeats it.
+  defp background_description(offered) do
+    if bound?(offered) do
       "WORK INSIDE ONE WINDOW. `windows` lists what is open; `select_target` with that " <>
         "window's `window_id` BINDS it, and from then on every look and every action is " <>
         "answered from that window's own picture — even when something covers it — and its " <>
-        "coordinates are that window's, not the screen's. Where the window exposes named " <>
-        "controls, `press` and `set_value` act on them without moving the pointer, so the " <>
-        "person can keep working in front of you. While a window is bound, a mutating action " <>
+        "coordinates are that window's, not the screen's. " <>
+        naming(
+          offered,
+          ["press", "set_value"],
+          "Where the window exposes named controls, `press` and `set_value` act on them " <>
+            "without moving the pointer, so the person can keep working in front of you. "
+        ) <>
+        "While a window is bound, a mutating action " <>
         "that names no window is refused: " <>
         ~s(`select_target` with `"window_id": "desktop"` is ) <>
         "how you say you mean the WHOLE screen, which is the visible, pointer-moving mode. " <>
@@ -140,8 +209,8 @@ defmodule FermixCore.Tools.ComputerUse do
 
   # The action enum and the parameters the flag reveals. Read through `Background`
   # on both, so a schema and a refusal can never disagree about what is offered.
-  defp background_properties do
-    if Config.background?() do
+  defp background_properties(offered) do
+    if bound?(offered) do
       %{
         "window_id" => %{
           "type" => ["integer", "string"],
@@ -156,31 +225,47 @@ defmodule FermixCore.Tools.ComputerUse do
     end
   end
 
-  defp actions do
+  # `offered` is what the installed helper says it has (M86 F1), never the
+  # library's whole list: a verb the helper lacks is one that always refuses.
+  defp actions(offered) do
     if Config.background?(),
-      do: Protocol.actions(),
-      else: Enum.reject(Protocol.actions(), &(&1 in Background.actions()))
+      do: offered,
+      else: Enum.reject(offered, &(&1 in Background.actions()))
   end
 
+  # Whether the bound-window surface is offered at all: the flag is on AND the
+  # helper lists the verb that binds. Everything that names the surface asks
+  # this, so the words never teach a binding the enum cannot carry.
+  defp bound?(offered), do: "select_target" in actions(offered)
+
+  # The schema for the helper's latest reading (`HelperActions`). Read at the
+  # call, so the static copy registered at boot and the per-turn refresh are the
+  # same function of the same fact.
   @impl true
-  def parameters do
+  def parameters, do: schema(HelperActions.offered())
+
+  defp schema(offered) do
     %{
       "type" => "object",
       "required" => ["action"],
       "additionalProperties" => false,
       "properties" =>
-        Map.merge(background_properties(), %{
+        background_properties(offered)
+        |> Map.merge(control_properties(offered))
+        |> Map.merge(%{
           "action" => %{
             "type" => "string",
-            "enum" => actions(),
-            "description" => base_action_description()
+            "enum" => actions(offered),
+            "description" => base_action_description(offered)
           },
           "observation_id" => %{
             "type" => "string",
             "description" =>
-              "The image these coordinates were read in — the id a `screenshot`, `elements` " <>
-                "or `windows` reply named. REQUIRED on click/move/drag/scroll/inspect; an id " <>
-                "from one image never applies to another"
+              "The image these coordinates were read in — the id a `screenshot`" <>
+                naming(offered, ["elements"], ", `elements`") <>
+                " or `windows` reply named. REQUIRED on click/move/drag/scroll" <>
+                naming(offered, ["inspect"], "/inspect") <>
+                "; an id from one image never applies to another"
           },
           "x" => %{
             "type" => "integer",
@@ -239,12 +324,14 @@ defmodule FermixCore.Tools.ComputerUse do
             },
             "required" => ["x", "y", "w", "h"],
             "description" =>
-              "Optional zoom rectangle {x,y,w,h}, for `screenshot`, `elements` and " <>
-                "`wait_for_change` only. With `observation_id` it is in that image's pixels; " <>
-                "without one it is in a full-screen screenshot's pixels (the space `windows` " <>
-                "answers in). The reply names a NEW image — aim in that one. A click, move, " <>
-                "drag, scroll or inspect never carries a region: it names its image with " <>
-                "`observation_id` instead."
+              "Optional zoom rectangle {x,y,w,h}, for `screenshot`" <>
+                naming(offered, ["elements"], ", `elements`") <>
+                " and `wait_for_change` only. With `observation_id` it is in that image's " <>
+                "pixels; without one it is in a full-screen screenshot's pixels (the space " <>
+                "`windows` answers in). The reply names a NEW image — aim in that one. A " <>
+                "click, move, drag" <>
+                naming(offered, ["inspect"], ", scroll or inspect", " or scroll") <>
+                " never carries a region: it names its image with `observation_id` instead."
           },
           "confirm_grid" => %{
             "type" => "boolean",
@@ -264,24 +351,64 @@ defmodule FermixCore.Tools.ComputerUse do
             "description" =>
               "Act on a numbered mark instead of x/y — the exact click point is resolved for " <>
                 "you. A mark belongs to the image it was badged on, so send it with that " <>
-                "image's `observation_id`. On `press`/`set_value` it names the badged CONTROL"
-          },
-          "element_ref" => %{
-            "type" => "string",
-            "description" =>
-              "A control, by the reference an `elements` listing (or a mark) gave it — `e1`, " <>
-                "`e2`, … A reference belongs to the listing that minted it, so send it with " <>
-                "that reply's `observation_id`. REQUIRED by `press`/`set_value`; a click, " <>
-                "right-click, double-click, move or scroll may take it INSTEAD of x,y and the " <>
-                "control's bounds are re-read at that moment, so a control that has shifted is " <>
-                "still hit. Never send both a reference and coordinates on one action"
-          },
-          "value" => %{
-            "type" => "string",
-            "description" => "The text to set (for action=set_value)"
+                "image's `observation_id`." <>
+                naming(
+                  offered,
+                  ["press", "set_value"],
+                  " On `press`/`set_value` it names the badged CONTROL"
+                )
           }
         })
     }
+  end
+
+  # The fields that exist only for the accessibility actions (M86 F1): the
+  # reference an `elements` listing mints, and the text `set_value` sets. Offered
+  # with the action they belong to, so a helper without it is not handed the
+  # field either.
+  defp control_properties(offered) do
+    Map.merge(element_ref_property(offered), value_property(offered))
+  end
+
+  defp element_ref_property(offered) do
+    if "elements" in offered do
+      %{
+        "element_ref" => %{
+          "type" => "string",
+          "description" =>
+            "A control, by the reference an `elements` listing (or a mark) gave it — `e1`, " <>
+              "`e2`, … A reference belongs to the listing that minted it, so send it with " <>
+              "that reply's `observation_id`. " <>
+              naming(offered, ["press", "set_value"], "REQUIRED by `press`/`set_value`; a", "A") <>
+              " click, right-click, double-click, move or scroll may take it INSTEAD of x,y and " <>
+              "the control's bounds are re-read at that moment, so a control that has shifted " <>
+              "is still hit. Never send both a reference and coordinates on one action"
+        }
+      }
+    else
+      %{}
+    end
+  end
+
+  defp value_property(offered) do
+    if "set_value" in offered do
+      %{
+        "value" => %{
+          "type" => "string",
+          "description" => "The text to set (for action=set_value)"
+        }
+      }
+    else
+      %{}
+    end
+  end
+
+  # Words that name an accessibility action, rendered only while the helper's
+  # reading offers every action they name (M86 F1): a sentence about a verb the
+  # enum lacks teaches the model a capability this helper does not have.
+  # `otherwise` is the wording without them, where the sentence needs one.
+  defp naming(offered, actions, text, otherwise \\ "") do
+    if Enum.all?(actions, &(&1 in offered)), do: text, else: otherwise
   end
 
   # Per-turn schema refresh (called by the agent loop when present): fold the LIVE
@@ -291,10 +418,12 @@ defmodule FermixCore.Tools.ComputerUse do
   # model without a cached prompt section that would freeze on config change.
   @spec dynamic_parameters(map()) :: map()
   def dynamic_parameters(_context) do
+    offered = HelperActions.offered()
+
     put_in(
-      parameters(),
+      schema(offered),
       ["properties", "action", "description"],
-      action_description(Config.current().access)
+      action_description(Config.current().access, offered)
     )
   end
 
@@ -313,50 +442,62 @@ defmodule FermixCore.Tools.ComputerUse do
       "In standard access, ask the owner and wait for their go-ahead before any irreversible action."
   end
 
-  defp base_action_description do
-    "The GUI action. Read-only: screenshot, inspect, elements (best-effort accessibility " <>
-      "click points — prefer usable points over guessing pixels, but an empty result does not " <>
-      "block pixel targeting of visible content), " <>
+  defp base_action_description(offered) do
+    "The GUI action. Read-only: screenshot, " <>
+      naming(offered, ["inspect"], "inspect, ") <>
+      naming(
+        offered,
+        ["elements"],
+        "elements (best-effort accessibility click points — prefer usable points over " <>
+          "guessing pixels, but an empty result does not block pixel targeting of visible " <>
+          "content), "
+      ) <>
       "windows (list the open windows, each with a ready-made `region` — use it to " <>
       "crop to the app you are working in instead of squinting at a downscaled " <>
       "whole screen), " <>
       "wait_for_change (block until the screen changes, then return the new frame), " <>
       "mouse_move, wait. Mutating: left_click, right_click, double_click, " <>
-      "left_click_drag, scroll, type, paste (clipboard — prefer for long text), key, " <>
-      "press, set_value. " <>
-      background_actions_description() <>
-      "PREFER A NAMED CONTROL: `elements` says, per control, whether it " <>
-      "can be pressed and whether its value can be set, and a control that lists `press` is " <>
-      "pressed by name with `press` + its `element_ref` — that moves no pointer, takes no aim " <>
-      "and cannot miss. `set_value` fills a field the same way where `elements` says it is " <>
-      "settable; `type` and `paste` remain for a field that is not, and for text that must go " <>
-      "through real keystrokes. A control that lists neither is clicked — by `element_ref` " <>
-      "(its bounds are re-read as it is clicked) or by point. Nothing is switched for you: a " <>
-      "refused `press` is a refusal, never a quiet click."
+      "left_click_drag, scroll, type, paste (clipboard — prefer for long text), key" <>
+      naming(offered, ["press"], ", press") <>
+      naming(offered, ["set_value"], ", set_value") <>
+      ". " <>
+      background_actions_description(offered) <>
+      naming(
+        offered,
+        ["elements", "press", "set_value"],
+        "PREFER A NAMED CONTROL: `elements` says, per control, whether it " <>
+          "can be pressed and whether its value can be set, and a control that lists `press` " <>
+          "is pressed by name with `press` + its `element_ref` — that moves no pointer, takes " <>
+          "no aim and cannot miss. `set_value` fills a field the same way where `elements` " <>
+          "says it is settable; `type` and `paste` remain for a field that is not, and for " <>
+          "text that must go through real keystrokes. A control that lists neither is " <>
+          "clicked — by `element_ref` (its bounds are re-read as it is clicked) or by point. " <>
+          "Nothing is switched for you: a refused `press` is a refusal, never a quiet click."
+      )
   end
 
-  defp background_actions_description do
-    if Config.background?(),
+  defp background_actions_description(offered) do
+    if bound?(offered),
       do:
         "Binding: select_target (bind one window from `windows`, or \"desktop\" for the whole " <>
           "screen), release_target (give it back) — both read-only, neither touches anything. ",
       else: ""
   end
 
-  defp action_description(:strict) do
-    base_action_description() <>
+  defp action_description(:strict, offered) do
+    base_action_description(offered) <>
       " ACCESS=strict (look only): screenshot/mouse_move/wait run; every mutating action is refused."
   end
 
-  defp action_description(:standard) do
-    base_action_description() <>
+  defp action_description(:standard, offered) do
+    base_action_description(offered) <>
       " ACCESS=standard: act directly for routine navigation and typing, but FIRST ask the owner" <>
       " and wait for their reply before any irreversible action — delete, send, purchase, sign out," <>
       " overwrite, move to trash."
   end
 
-  defp action_description(:open) do
-    base_action_description() <>
+  defp action_description(:open, offered) do
+    base_action_description(offered) <>
       " ACCESS=open (autonomous): act directly, including ordinary destructive steps, WITHOUT" <>
       " asking — but STILL pause to confirm with the owner before a TRULY dangerous, catastrophic" <>
       " action: bulk/mass deletion, wiping or formatting data, sending money or irreversible" <>

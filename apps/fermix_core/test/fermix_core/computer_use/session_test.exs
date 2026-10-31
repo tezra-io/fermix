@@ -177,6 +177,11 @@ defmodule FermixCore.ComputerUse.SessionTest do
     @impl true
     def execute(_state, %{"action" => "probe"}), do: {:ok, %{"input_control" => true}}
 
+    # The handshake reading every session takes at start (M86 F1) is not an
+    # action, so it answers at once, as a real helper's cached identity does.
+    def execute(_state, %{"action" => "hello"}),
+      do: {:ok, %{"actions" => Compux.Protocol.actions(), "capabilities" => %{}}}
+
     def execute(_state, %{"action" => "idle_ms"}),
       do: {:ok, %{"ok" => true, "idle_ms" => 10_000}}
 
