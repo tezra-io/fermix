@@ -49,11 +49,19 @@ defmodule FermixChannels.Home.Enrollment do
   an engine that starts from a file without the secret holds none, and no
   handshake completes against its window.
 
+  The status also says how long this engine has held the window while the
+  computer was awake (`awake_ms`, on the monotonic clock, which stops while it
+  sleeps), counted from when it was opened or, after a restart, read back:
+  `home.status.summary` calls a created server that never checked in within
+  30 minutes of it a server that did not finish setting up (M75 lean v1 §7),
+  and a sleeping computer is never the server's fault.
+
   Primary only: `FermixCore.Home.Role` leaves it out of a device and a
   candidate. Test seams: `:home`, `:helper`, `:device_store`, `:clock` (a
-  0-arity `DateTime`), `:schedule` (a 2-arity `Process.send_after/3` stand-in
-  for the expiry), `:host_name`, `:identity` (a 1-arity loader answering the
-  gateway's public key for a home).
+  0-arity `DateTime`), `:monotonic` (a 0-arity count of milliseconds),
+  `:schedule` (a 2-arity `Process.send_after/3` stand-in for the expiry),
+  `:host_name`, `:identity` (a 1-arity loader answering the gateway's public
+  key for a home).
   """
 
   use GenServer
@@ -83,7 +91,8 @@ defmodule FermixChannels.Home.Enrollment do
           state: :open | :used | :expired,
           expires_at: DateTime.t(),
           kind: kind(),
-          candidate_id: String.t() | nil
+          candidate_id: String.t() | nil,
+          awake_ms: non_neg_integer()
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -161,16 +170,19 @@ defmodule FermixChannels.Home.Enrollment do
   @impl true
   def init(opts) do
     home = Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
+    monotonic = Keyword.get(opts, :monotonic, fn -> System.monotonic_time(:millisecond) end)
 
     state = %{
       home: home,
       helper: Keyword.get(opts, :helper, Helper),
       device_store: Keyword.get(opts, :device_store, DeviceStore),
       clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
+      monotonic: monotonic,
       schedule: Keyword.get(opts, :schedule, &Process.send_after(self(), &1, &2)),
       host_name: Keyword.get(opts, :host_name, &host_name/0),
       identity: Keyword.get(opts, :identity, &gateway_public_key/1),
-      window: load(home)
+      window: load(home),
+      held_since_ms: monotonic.()
     }
 
     {:ok, expire_or_arm(state)}
@@ -244,7 +256,8 @@ defmodule FermixChannels.Home.Enrollment do
       state: window_state(window, state.clock.()),
       expires_at: window.expires_at,
       kind: window.kind,
-      candidate_id: window.candidate_id
+      candidate_id: window.candidate_id,
+      awake_ms: state.monotonic.() - state.held_since_ms
     }
 
     {:reply, view, state}
@@ -323,7 +336,12 @@ defmodule FermixChannels.Home.Enrollment do
         )
 
         arm(state, window, now)
-        keep(state, window, {:ok, %{code: code, expires_at: expires_at}})
+
+        keep(
+          %{state | held_since_ms: state.monotonic.()},
+          window,
+          {:ok, %{code: code, expires_at: expires_at}}
+        )
 
       {:error, reason} ->
         Logger.error("enrollment: no code could be made: #{inspect(reason)}")

@@ -569,13 +569,54 @@ it, never a second writer.
   through the same `home.*` methods and settings sections: the Fermix Mac and
   Linux apps' **Always On** pane and the CLI. Nothing on one surface is
   missing from the other except where the table says so.
-- The browser setup page's **Always On** tab sets nothing up and shows one
-  sentence for where Fermix runs, read when the tab opens and on
-  **Refresh**: on the primary that Fermix runs on this computer; on a desktop
-  the link's own sentence, or, with no link, where the home moved.
+- **One summary says where Always On stands.** `home.status` carries
+  `summary`: one sentence and at most one action, worked out once by the
+  engine, which the apps, the setup page and `fermix home status` (first,
+  before the rest) all print as they are. Its words never name an epoch, the
+  primary, a candidate, the relay, the rail or a phase. Its states:
+  - before the move, on the computer that sets it up: nothing set up ("Keep
+    Fermix running when this Mac sleeps. It moves to a server you own.", with
+    what stops after the move, and **Set up**); the token step ("Paste a
+    Hetzner API token…", whose How to get one says to turn on two-factor
+    sign-in in Hetzner and make a project for Fermix alone); the token works
+    (choose the server); creating (starting, installing Fermix, connecting,
+    with **Cancel**); ready (**Move now**, with the review's warnings, and
+    that there is no way back to this Mac in this version); the move undone
+    (**Try again**);
+  - on the computer the move leaves: moving ("Waiting for your server to
+    confirm the move. Fermix keeps trying." once it waits on the server);
+    "Fermix runs on your server. Last backup 2 hours ago." once linked; no
+    longer connected to it (**Learn more**);
+  - on the server: waiting for its move, then "Fermix runs here.";
+  - a problem, in one sentence with the one action that fixes it: turned off
+    (**Turn it on**), no answer for 10 minutes of this computer being awake
+    while Hetzner says it runs (**Restart server**), deleted in Hetzner, never
+    checked in within 30 minutes of being awake for it or waited past its 24
+    hours (**Start again**), no capacity (**Create in** the next location in
+    stock), the account's limit (**Open Hetzner**, beside the own-server
+    path), a token that can only read or stopped working (**Paste a new
+    token**), this computer too old for its server (**Update**), the server's
+    disk 85% full or more, the last backup over 3 days old (**Back up now**),
+    a review that blocks the move (**Check again**). Before the move, while
+    the created server stands, Details also says it costs money and offers to
+    delete it.
+- Details holds the rest: the token steps, how Hetzner bills, the server's
+  facts and the review's items, until when it waits, each place's last backup
+  and the space this computer's copies take, the server's disk and engine
+  version, Back up now and Replace the server, and what lives on the server
+  (conversations and memories, the secrets, the browser, traces) with the
+  plain fact that its host can technically read its disk; snapshots are
+  encrypted to the recovery passphrase. Learn more opens the Always On docs.
+- When the server's newest backup passes 7 days it tells the paired phones,
+  once per occurrence, as a message in the owner's phone chat: open Fermix on
+  the Mac to back up now.
+- The browser setup page's **Always On** tab sets nothing up and shows the
+  summary, read when the tab opens and on **Refresh**: its sentence, and its
+  action as the Fermix app's to take, or Learn more.
 
 | Fact or action | App | CLI |
 |---|---|---|
+| Where Always On stands: one sentence and at most one action (`summary`) | The pane's first line and its button | `fermix home status`, first |
 | The role and the epoch | This computer | `fermix home status` |
 | On a desktop: the primary (connected or not, since when, its sentence), or where the home moved | The primary | `fermix home status` |
 | On the primary: its desktops, each connected or not | Desktops | `fermix home status --json` |
@@ -599,7 +640,7 @@ it, never a second writer.
 | On a linked desktop: replace the server (a code from the server, the review on it, then the move with `keep_as_desktop` false) | Replace the server: **Get a code**, **Review the move**, the passphrase typed twice, **Move to NAME** (the server restarts, never this computer) | none |
 
 - In the device role the browser setup page opens on Always On and leads
-  with a notice that Fermix-wide settings live on the primary and are changed
+  with a notice that Fermix-wide settings live on the server and are changed
   in the Fermix app on this computer. Its tabs for providers,
   voice, channels, voice notes, plugins, search, images, coding agents,
   memory, personalization and cues show that sentence instead of their forms;

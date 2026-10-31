@@ -31,6 +31,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Management.Doctor.Descriptor
   alias FermixCore.Management.Doctor.Remediation
   alias FermixCore.Management.Home, as: ManagementHome
+  alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Logs
@@ -52,6 +53,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Setup.ConfigStore
   alias FermixTestSupport.CueFixtures
   alias FermixTestSupport.HetznerStub
+  alias FermixTestSupport.HomeSummaryGoldens
   alias FermixTestSupport.MandateFixtures
   alias FermixTestSupport.SafeRm
 
@@ -615,6 +617,41 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert "status" in primary["required"]
 
     assert primary["properties"]["status"]["enum"] == ManagementHome.primary_statuses()
+  end
+
+  # The summary's closed words (M75 lean v1 §7): an app maps each state to a
+  # screen, each kind to a problem and each id to what it calls, and refuses
+  # one outside its set.
+  test "the schema's summary vocabulary is the one home.status answers", %{schema: schema} do
+    defs = schema["$defs"]
+
+    assert defs["homeSummary"]["properties"]["state"]["enum"] == HomeSummary.states()
+    assert defs["homeSummaryDetail"]["properties"]["kind"]["enum"] == HomeSummary.problems()
+    assert defs["homeSummaryAction"]["properties"]["id"]["enum"] == HomeSummary.actions()
+
+    result = defs["home_status_result"]["properties"]
+    assert Enum.all?(~w(summary disk version), &Map.has_key?(result, &1))
+  end
+
+  # Each state family's golden is the record the engine builds from invented
+  # facts (`HomeSummaryGoldens`), and the first one's summary is what the
+  # router answers for its case, so no golden says what the engine does not.
+  test "the golden home.status summaries are the engine's own" do
+    for {name, result} <- HomeSummaryGoldens.rows() do
+      assert named_fixture_result(name) == json(result),
+             "the #{name} golden no longer matches what the engine builds"
+    end
+
+    {"home.status", params, opts} = Enum.find(router_cases(), &(elem(&1, 0) == "home.status"))
+    request = %{request_id: "req-1", protocol_version: 2, method: "home.status", params: params}
+    {:ok, %{"summary" => summary}} = Router.route(request, opts)
+
+    assert named_fixture_result("home_status")["summary"] == json(summary)
+
+    detail_keys = Map.keys(schema_detail_properties())
+
+    for {_name, %{"summary" => %{"detail" => detail}}} <- HomeSummaryGoldens.rows(),
+        do: assert(Map.keys(detail) -- detail_keys == [])
   end
 
   test "the schema's row vocabulary matches the settings module", %{schema: schema} do
@@ -1364,6 +1401,9 @@ defmodule FermixCore.Management.ProtocolContractTest do
           profile: "general",
           save_recipient: fn _recipient -> {:ok, %{}} end,
           now: ~U[2026-10-27 09:30:00Z],
+          host_os: :macos,
+          version: "1.2.3",
+          disk_usage: fn _home -> {:ok, %{used: 0.42, nearly_full: false}} end,
           link_status: fn ->
             %{
               primary: nil,
@@ -2167,6 +2207,16 @@ defmodule FermixCore.Management.ProtocolContractTest do
       end
 
     %{resolution: resolution, conflict: golden["conflict"], draft_id: golden["draft_id"]}
+  end
+
+  # A result as it crosses the wire: what `Jason` makes of it.
+  defp json(value), do: value |> Jason.encode!() |> Jason.decode!()
+
+  defp schema_detail_properties do
+    @schema_path
+    |> File.read!()
+    |> Jason.decode!()
+    |> get_in(["$defs", "homeSummaryDetail", "properties"])
   end
 
   defp named_fixture_result(name) do

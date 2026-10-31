@@ -3,6 +3,10 @@
   "result": {
     "candidates": [],
     "desktops": [],
+    "disk": {
+      "nearly_full": false,
+      "used": 0.42
+    },
     "enrollment": null,
     "epoch": 4,
     "move": null,
@@ -40,7 +44,33 @@
           "waiting": null
         }
       ]
-    }
+    },
+    "summary": {
+      "action": {
+        "id": "set_up",
+        "label": "Set up"
+      },
+      "detail": {
+        "connect": {
+          "alternatives": [
+            {
+              "id": "own_server",
+              "label": "Use my own Linux server"
+            }
+          ],
+          "sentence": "Paste a Hetzner API token to let Fermix create your server.",
+          "steps": [
+            "Sign in to Hetzner's console and turn on two-factor sign-in for your account.",
+            "Make a new project for Fermix alone, so the token reaches nothing else.",
+            "In that project, open Security, then API Tokens, and generate a token with Read & Write permission.",
+            "Paste the token here: Fermix checks it at once."
+          ]
+        }
+      },
+      "sentence": "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage, voice calls and meetings stop after the move.",
+      "state": "off"
+    },
+    "version": "1.2.3"
   },
   "schema_version": 1
 }

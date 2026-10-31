@@ -5737,7 +5737,110 @@
         "primary_missing": {
           "description": "On a linked desktop whose primary is unreachable or did not answer within 5 s, the sentence a person is shown for why primary_home is missing; null otherwise.",
           "type": ["string", "null"]
+        },
+        "summary": {
+          "description": "Where Always On stands, in one sentence and at most one action (PROTOCOL.md, The Always On summary). Absent from an engine older than it, which a client draws as one that needs updating.",
+          "$ref": "#/$defs/homeSummary"
+        },
+        "disk": {
+          "description": "On the primary, how full its disk is; null in any other role and when it cannot be read.",
+          "oneOf": [{ "$ref": "#/$defs/homeDisk" }, { "type": "null" }]
+        },
+        "version": {
+          "description": "This engine's version.",
+          "type": "string",
+          "minLength": 1
         }
+      }
+    },
+    "homeSummary": {
+      "type": "object",
+      "description": "Where Always On stands: state maps to a screen, sentence and action.label are printed as they are, detail sits behind Details.",
+      "required": ["state", "sentence", "action", "detail"],
+      "additionalProperties": false,
+      "properties": {
+        "state": { "enum": ["off", "connect", "choose", "creating", "ready", "moving", "on", "undone", "retired", "candidate", "primary", "problem"] },
+        "sentence": { "type": "string", "minLength": 1 },
+        "action": { "oneOf": [{ "$ref": "#/$defs/homeSummaryAction" }, { "type": "null" }] },
+        "detail": { "$ref": "#/$defs/homeSummaryDetail" }
+      }
+    },
+    "homeSummaryAction": {
+      "type": "object",
+      "description": "One action a summary offers: its id (PROTOCOL.md says what a client does for each) and the label it is shown under.",
+      "required": ["id", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "enum": ["set_up", "create_server", "cancel", "move_now", "try_again", "learn_more", "turn_on", "restart_server", "start_again", "create_in", "open_hetzner", "paste_token", "update", "back_up_now", "replace_server", "check_again", "own_server", "delete_server"] },
+        "label": { "type": "string", "minLength": 1 }
+      }
+    },
+    "homeSummaryDetail": {
+      "type": "object",
+      "description": "What Details holds for the state, and nothing else: on off the token step its action opens (connect); on connect the steps and alternatives; on choose billing; on ready server, readiness and waits_until; on on server, backups, copies_bytes, disk_used, data and actions; on problem kind, note, seen_at and alternatives (next_location and readiness where the problem has them).",
+      "additionalProperties": false,
+      "properties": {
+        "connect": {
+          "type": "object",
+          "required": ["sentence", "steps", "alternatives"],
+          "additionalProperties": false,
+          "properties": {
+            "sentence": { "type": "string", "minLength": 1 },
+            "steps": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1 } },
+            "alternatives": { "type": "array", "maxItems": 4, "items": { "$ref": "#/$defs/homeSummaryAction" } }
+          }
+        },
+        "steps": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1 } },
+        "alternatives": { "type": "array", "maxItems": 4, "items": { "$ref": "#/$defs/homeSummaryAction" } },
+        "actions": { "type": "array", "maxItems": 4, "items": { "$ref": "#/$defs/homeSummaryAction" } },
+        "billing": { "type": "string", "minLength": 1 },
+        "server": { "$ref": "#/$defs/homeSummaryServer" },
+        "readiness": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/homeReadinessItem" } },
+        "waits_until": { "type": ["string", "null"] },
+        "backups": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "required": ["place", "at"],
+            "additionalProperties": false,
+            "properties": {
+              "place": { "type": "string", "minLength": 1 },
+              "at": { "type": "string" }
+            }
+          }
+        },
+        "copies_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "disk_used": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "data": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["turned_off", "cannot_reach", "deleted", "not_set_up", "waited_too_long", "no_capacity", "account_limit", "read_only_token", "token_refused", "create_failed", "update", "disk_full", "backup_old", "not_ready", "unreadable"] },
+        "note": { "type": ["string", "null"] },
+        "seen_at": { "type": ["string", "null"] },
+        "next_location": { "enum": ["fsn1", "nbg1", "hel1"] }
+      }
+    },
+    "homeSummaryServer": {
+      "type": "object",
+      "description": "The server a summary names: Hetzner's facts (type, location as a city, ipv4) are null for a server of the owner's own; on ready the system and version it enrolled with, on on the version it answers with.",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": ["string", "null"] },
+        "type": { "type": ["string", "null"] },
+        "location": { "type": ["string", "null"] },
+        "ipv4": { "type": ["string", "null"] },
+        "system": { "type": "string" },
+        "version": { "type": ["string", "null"] }
+      }
+    },
+    "homeDisk": {
+      "type": "object",
+      "description": "How full the primary's disk is: used, the fraction in use, and nearly_full from 0.85.",
+      "required": ["used", "nearly_full"],
+      "additionalProperties": false,
+      "properties": {
+        "used": { "type": "number", "minimum": 0, "maximum": 1 },
+        "nearly_full": { "type": "boolean" }
       }
     },
     "homePrimary": {

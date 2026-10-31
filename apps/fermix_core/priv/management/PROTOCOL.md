@@ -215,6 +215,84 @@ else until the move makes it the primary.` Its `home.status` reports `role`
 `candidate`, `move` with `candidate` null, and `snapshots` that say they are
 the primary's.
 
+## The Always On summary
+
+`home.status.summary` says where Always On stands, worked out once by the
+engine (M75 lean v1 §7), so the Mac app, the Linux app, the setup page and
+`fermix home status` print the same thing:
+
+```json
+{"state": "problem", "sentence": "Your server is turned off.",
+ "action": {"id": "turn_on", "label": "Turn it on"},
+ "detail": {"kind": "turned_off", "note": "A turned-off server still costs its monthly price.",
+            "seen_at": "2031-05-04T11:50:00Z", "alternatives": []}}
+```
+
+A client maps `state` to its screen, prints `sentence` as it is and, when
+`action` is not null, offers that one action under its `label`; `detail`
+sits behind Details. Every word is the engine's: none names an epoch, the
+primary, a candidate, the relay, the rail, a phase, an item id or a key id.
+An engine that sends no `summary` is older than this record: the apps answer
+it with their "update Fermix" screen, so they raise their own minimum for
+`home.status` to an engine that sends it.
+
+| `state` | Where it is answered | What it means |
+|---|---|---|
+| `off` | the computer that sets Always On up | Nothing is set up. Its action, `set_up`, opens the token screen, whose words `detail.connect` holds (`{sentence, steps, alternatives}`); pressing it records nothing. |
+| `connect` | the same | A code for a server of the owner's own is open, or Hetzner refused the token before anything was created. `detail.steps` are the "How to get one" steps (two-factor sign-in first, a project for Fermix alone) and `detail.alternatives` the own-server link. No action: the token is checked when pasted. |
+| `choose` | the same | The token works. `detail.billing` says Hetzner bills by the hour until the server is deleted; the recommendation, the prices and the other offers are `home.provision.options`'s. |
+| `creating` | the same | Starting, installing Fermix on, connecting, or deleting the server, each in its own sentence. `cancel` while Fermix's own server sets up. |
+| `ready` | the same | The server is held and waits for Move now. `detail`: `server` (`{name, type, location, ipv4, system, version}`, Hetzner's facts null for a server of the owner's own), `readiness` (the last review's warnings and blocks, `home.move.readiness`'s items; empty when all is well or no review was made) and `waits_until`. |
+| `moving` | the computer the move leaves | The move runs; once that computer waits on the server's confirmation the sentence says Fermix keeps trying. |
+| `on` | a linked desktop | Fermix runs on the server. `detail`: `server` (`{name, location, version}`), `backups` (`{place, at}` for each place's newest verified backup), `copies_bytes` (the space this computer's copies take), `disk_used`, `data` (what lives on the server, and that its host can technically read its disk) and `actions` (`back_up_now`, `replace_server`). |
+| `undone` | the computer the move left | The move was undone and its server is still held (`try_again`), or the engine is restarting as it was (no action). |
+| `retired` | a computer the move left | It has no link to the server, or the server no longer knows it. |
+| `candidate` | the server, before its move | It waits for its move, or receives the home. |
+| `primary` | the server, after its move | Fermix runs there. |
+| `problem` | anywhere | `detail.kind` names it, `detail.note` adds one sentence where the design gives one, `detail.seen_at` is when Fermix last saw what it rests on, and `detail.alternatives` lists the other actions. Before the move, while a server Fermix created stands, `note` says it costs money and `alternatives` ends with `delete_server`. |
+
+Problems (`detail.kind`): `turned_off` (Hetzner says the server is off),
+`cannot_reach` (no session with the server for 10 minutes while this
+computer is awake; `restart_server` when Hetzner says it runs, `learn_more`
+for a server of the owner's own), `deleted` (gone from Hetzner), `not_set_up`
+(no check-in within 30 minutes of the code being open while this computer is
+awake), `waited_too_long` (enrolled, but waited past its 24 hours),
+`no_capacity` (`create_in`, its location in `detail.next_location`, or
+`learn_more` when nothing is in stock), `account_limit`, `read_only_token`,
+`token_refused`, `create_failed`, `update` (the server speaks a protocol this
+engine is too old for), `disk_full` (85% or more), `backup_old` (the newest
+backup is over 3 days old, or none since a move that long ago), `not_ready`
+(the last review blocks the move: `check_again`, every item in
+`detail.readiness`) and `unreadable` (the provisioner's file).
+
+Actions (`action.id`, and in `detail`), and what a client does for each:
+
+| `id` | The client |
+|---|---|
+| `set_up` | opens the token screen |
+| `create_server` | reads `home.provision.options`, then `home.provision.create` |
+| `cancel` | `job.cancel` on the running `home_provision` job, then `home.provision.delete` |
+| `move_now` | `home.move.readiness`, then `home.move.start` (asking for the passphrase first when none is set) |
+| `try_again` | the same, for the server still held |
+| `check_again` | `home.move.readiness` |
+| `turn_on` | `home.provision.power` `{action: on}` |
+| `restart_server` | `home.provision.power` `{action: reset}` |
+| `start_again` | `home.provision.delete`, then `home.provision.create` with the same type and location |
+| `create_in` | `home.provision.create` in `detail.next_location` |
+| `delete_server` | `home.provision.delete` |
+| `paste_token` | the token field, `home.provision.connect` |
+| `own_server` | `home.enroll.open`, and the command for the owner's own Linux server |
+| `open_hetzner` | opens Hetzner's console |
+| `back_up_now` | `home.snapshots.run` |
+| `replace_server` | listed in Details; its flow is not in this version |
+| `update` | the app's own update |
+| `learn_more` | opens the Always On docs page |
+
+The server also tells the paired phones, once per occurrence, when its newest
+backup passes 7 days, as a message in the owner's phone chat ("Your last
+backup is 8 days old. It runs when your Mac is online: open Fermix on your
+Mac to back up now.").
+
 ## v0 compatibility window
 
 The daemon also serves the historical **unversioned** control protocol as v0 for
@@ -363,7 +441,7 @@ daemon onto anything else.
 | `cues.proposals.list` | `state` (`waiting`, the default, or `recent`) | Fermix's record of each waiting proposal (oldest first, at most 100) or of the last 7 days (at most 50), and `waiting`. No arguments and no cue text. Minimum version `2`. |
 | `cues.proposals.get` | `proposal_id` | `{proposal}`: the record plus the card, the outside text apart. Minimum version `2`. |
 | `cues.proposals.decide` | `proposal_id`, `decision` (`confirm` or `deny`) | Answers a waiting proposal and returns `{proposal}` once the decision is recorded: `denied`, or `confirmed` with a null `result_status` while the call runs. Minimum version `2`. |
-| `home.status` | none | The one picture of this home every surface draws: `role` (`primary`, `device` or `candidate`), `epoch` (null before the home's first boot as the primary), `moved` (`{to, moved_at, epoch}` or null), `snapshots` (as `home.snapshots.status`), `primary` (in the device role after a move, the primary this desktop reaches: `{name, connected, status, since, epoch, sentence}`, `status` one of `connected`, `renewing`, `unreachable`, `revoked` or `stale` (see *After a move*), `since` null while not connected and `epoch` the highest primary epoch this desktop has seen; null otherwise), `desktops` (on the primary, each desktop that holds a session to it: `{device_id, name, connected, since}`, `since` null while not connected; empty otherwise), `enrollment` (on the primary, the enrollment window opened since the engine started: `{state, expires_at}`, `state` `open`, `used` or `expired`, never the code; null otherwise), `candidates` (on the primary, the candidate primaries it holds, as `home.candidates.list` answers them; empty otherwise), `move` (the move this home started or, on a candidate, the one it waits for: `{phase, candidate, sentence}`; null when there is none), `secrets_missing` (on the primary, the ids `secret.set` takes of the secret references in its settings that did not resolve on this host, each one to enter again; empty otherwise), `primary_home` (on a linked desktop, the primary's own `home.status`, asked within 5 s; null otherwise) and `primary_missing` (on a linked desktop, the sentence while `primary_home` is missing; null otherwise). Answered locally in every role; composed on a linked desktop (see *After a move*), whose own `snapshots` list no target, its status file being a retired copy. Minimum version `2`. |
+| `home.status` | none | The one picture of this home every surface draws: `role` (`primary`, `device` or `candidate`), `epoch` (null before the home's first boot as the primary), `moved` (`{to, moved_at, epoch}` or null), `snapshots` (as `home.snapshots.status`), `primary` (in the device role after a move, the primary this desktop reaches: `{name, connected, status, since, epoch, sentence}`, `status` one of `connected`, `renewing`, `unreachable`, `revoked` or `stale` (see *After a move*), `since` null while not connected and `epoch` the highest primary epoch this desktop has seen; null otherwise), `desktops` (on the primary, each desktop that holds a session to it: `{device_id, name, connected, since}`, `since` null while not connected; empty otherwise), `enrollment` (on the primary, the enrollment window opened since the engine started: `{state, expires_at}`, `state` `open`, `used` or `expired`, never the code; null otherwise), `candidates` (on the primary, the candidate primaries it holds, as `home.candidates.list` answers them; empty otherwise), `move` (the move this home started or, on a candidate, the one it waits for: `{phase, candidate, sentence}`; null when there is none), `secrets_missing` (on the primary, the ids `secret.set` takes of the secret references in its settings that did not resolve on this host, each one to enter again; empty otherwise), `primary_home` (on a linked desktop, the primary's own `home.status`, asked within 5 s; null otherwise), `primary_missing` (on a linked desktop, the sentence while `primary_home` is missing; null otherwise), `summary` (where Always On stands, in one sentence and at most one action: `{state, sentence, action, detail}`, see *The Always On summary*), `disk` (on the primary, how full its disk is: `{used, nearly_full}`, `used` a fraction from 0 to 1 and `nearly_full` from 0.85; null in any other role and when it cannot be read) and `version` (this engine's version). Answered locally in every role; composed on a linked desktop (see *After a move*), whose own `snapshots` list no target, its status file being a retired copy. `summary`, `disk` and `version` came after the method: an engine that does not send `summary` is drawn as one that needs updating. Minimum version `2`. |
 | `home.snapshots.status` | none | The snapshots view: `configured`, `recipient_set`, `interval_hours`, `running`, `next_run_at`, one row per target (`id`, `label`, `configured`, `destination`, `last_attempt_at`, `last_result` (`verified`, `failed`, `waiting` or null), `last_verified` `{at, name, epoch, size, sha256, location, key_id}` or null, `last_error`, `waiting`) and one `sentence`. Minimum version `2`. |
 | `home.snapshots.run` | none | Starts a snapshot now and answers `{started: true, snapshots}`. `busy` while one runs; `unavailable` {`capability`: `snapshots`} with the daemon's sentence when nothing is configured, in the device role, or with no scheduler. Minimum version `2`. |
 | `home.snapshots.passphrase` | `recovery_passphrase` (12 to 1024 bytes) | Derives the recovery key from the passphrase and keeps only its public half as `[fermix_core.snapshots] recipient`; answers `{recipient, key_id, snapshots, sentence}`, the sentence saying that snapshots written before now open only with the earlier passphrase. The passphrase is never stored, logged or answered. A shorter one is `invalid_params` with a sentence; the device role answers `unavailable`. Minimum version `2`. |

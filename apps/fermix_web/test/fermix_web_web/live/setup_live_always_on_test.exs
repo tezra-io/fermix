@@ -1,6 +1,7 @@
 defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
-  # The setup page's Always On tab (M75 §14, B14): one read-only sentence for
-  # where Fermix runs, and the device role's word on the rest of the page.
+  # The setup page's Always On tab (M75 §14, B14, lean v1 §7): the summary
+  # every surface prints, read-only, and the device role's word on the rest of
+  # the page, which names the server, never "the primary".
   # Every fact comes from `Management.Home.status/1` over a temp FERMIX_HOME:
   # the epoch, the move's phase and the moved marker are real files the core
   # modules write; the rail's facts (the primary, the desktops, the enrollment
@@ -11,6 +12,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
   import ExUnit.CaptureLog
   import Phoenix.LiveViewTest
 
+  alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
@@ -116,8 +118,8 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
     end
 
     # The apps hold the rest of Always On; this page names none of it, and
-    # offers nothing to do but read the sentence again.
-    test "on a primary: one sentence for where Fermix runs, and nothing to set up", %{
+    # offers nothing to do but read the summary again.
+    test "on the server: the summary's one sentence, and nothing to set up", %{
       conn: conn,
       home: home,
       link: link
@@ -132,7 +134,8 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       {:ok, _view, html} = live(conn, "/setup?tab=always_on")
 
       assert html =~ ~s(id="always-on-pane")
-      assert text(html, "#always-on-status") == "Fermix runs on this computer."
+      assert text(html, "#always-on-sentence") == "Fermix runs here."
+      refute html =~ ~s(id="always-on-action")
       assert html =~ ~s(href="https://fermix.ai/docs/always-on")
       assert actions(html, "#always-on-pane") == ["always_on_refresh"]
 
@@ -141,6 +144,20 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       end
 
       refute html =~ ~s(id="device-role-notice")
+    end
+
+    # The summary's action is the app's to take: the page names where, and
+    # offers no control of its own for it.
+    test "on a computer with nothing set up: the first screen, and where to set it up", %{
+      conn: conn
+    } do
+      {:ok, _view, html} = live(conn, "/setup?tab=always_on")
+
+      assert text(html, "#always-on-sentence") =~
+               ~r/\AKeep Fermix running when this (Mac|computer) sleeps\./
+
+      assert text(html, "#always-on-action") == "In the Fermix app: Set up."
+      assert actions(html, "#always-on-pane") == ["always_on_refresh"]
     end
 
     test "an event the tab no longer draws changes nothing and logs only its name", %{
@@ -183,9 +200,11 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       assert html =~ ~s(id="always-on-pane")
 
       assert text(html, "#device-role-notice") ==
-               "This computer runs Fermix as a desktop of the primary, invented-vm. " <>
-                 "Fermix-wide settings live on the primary: change them in the Fermix app " <>
+               "This computer runs Fermix as a desktop of your server, invented-vm. " <>
+                 "Fermix-wide settings live on the server: change them in the Fermix app " <>
                  "on this computer. This page sets up this computer."
+
+      refute text(html, "#device-role-notice") =~ "primary"
     end
 
     test "the primary's tabs say so instead of offering their forms; this computer's stay", %{
@@ -197,7 +216,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
         assert html =~ ~s(id="primary-only-pane"), "#{tab} offers the primary's settings"
 
         assert html =~
-                 "These settings are Fermix-wide, so they live on the primary, invented-vm. " <>
+                 "These settings are Fermix-wide, so they live on your server, invented-vm. " <>
                    "Change them in the Fermix app on this computer."
 
         refute html =~ "setup page"
@@ -214,78 +233,54 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       end
     end
 
-    # The link's own sentence, whatever its state: never a role word, a
-    # connection dot or a time.
-    test "linked: the link's own sentence", %{conn: conn, link: link} do
-      for {status, connected, sentence} <- [
-            {:connected, true, "Fermix is connected to the server invented-vm."},
-            {:renewing, false, "Fermix is reconnecting to the server invented-vm."},
-            {:unreachable, false,
-             "The server invented-vm is unreachable: it did not answer. " <>
-               "Fermix tries again in 30 s."}
-          ] do
-        primary = %{
-          name: "invented-vm",
-          connected: connected,
-          status: status,
-          since: if(connected, do: ~U[2026-10-27 11:30:00Z]),
-          epoch: 5,
-          sentence: sentence
-        }
+    # The summary, whatever the link's word: a session opening is still
+    # Fermix on the server, never a role word, a connection dot or a time.
+    test "linked: Fermix runs on the server while the link is up or opening", %{
+      conn: conn,
+      home: home,
+      link: link
+    } do
+      :ok = DesktopLink.write(home, desktop_link())
 
-        Agent.update(link, &%{&1 | primary: primary})
+      for {status, connected} <- [{:connected, true}, {:renewing, false}] do
+        Agent.update(link, &%{&1 | primary: primary(status, connected, nil)})
         {:ok, view, html} = live(conn, "/setup")
 
-        assert text(html, "#always-on-status") == sentence
+        assert text(html, "#always-on-sentence") == "Fermix runs on your server."
+        refute html =~ ~s(id="always-on-action")
         refute html =~ "bg-error"
         GenServer.stop(view.pid)
       end
     end
 
-    test "Refresh reads the link again", %{conn: conn, link: link} do
-      primary = %{
-        name: "invented-vm",
-        connected: true,
-        status: :connected,
-        since: ~U[2026-10-27 11:30:00Z],
-        epoch: 5,
-        sentence: "Fermix is connected to the server invented-vm."
-      }
+    test "Refresh reads the link again, and ten minutes of silence is the summary's problem", %{
+      conn: conn,
+      home: home,
+      link: link
+    } do
+      :ok = DesktopLink.write(home, desktop_link())
+      Agent.update(link, &%{&1 | primary: primary(:connected, true, nil)})
+      {:ok, view, html} = live(conn, "/setup")
+      assert text(html, "#always-on-sentence") == "Fermix runs on your server."
 
-      Agent.update(link, &%{&1 | primary: primary})
-      {:ok, view, _html} = live(conn, "/setup")
-
-      unreachable = "The server invented-vm is unreachable: it did not answer."
-
-      lost = %{
-        primary
-        | connected: false,
-          status: :unreachable,
-          since: nil,
-          sentence: unreachable
-      }
-
-      Agent.update(link, &%{&1 | primary: lost})
-
+      Agent.update(link, &%{&1 | primary: primary(:unreachable, false, 11 * 60_000)})
       html = view |> element(~s|button[phx-click="always_on_refresh"]|) |> render_click()
 
-      assert text(html, "#always-on-status") == unreachable
+      assert text(html, "#always-on-sentence") ==
+               "Fermix cannot reach your server. Your messages wait until it is back."
+
+      assert text(html, "#always-on-learn-more") == "Learn more"
     end
 
-    test "unlinked after a move: where the home went, and that this computer no longer " <>
-           "reaches it",
+    test "unlinked after a move: Fermix moved, and this computer no longer reaches it",
          %{conn: conn, home: home} do
       :ok = Moved.write(home, %{epoch: 4, moved_at: ~U[2026-10-26 09:00:00Z], to: "invented-vm"})
       {:ok, _view, html} = live(conn, "/setup")
 
-      assert text(html, "#always-on-status") ==
-               "Fermix moved to invented-vm, and this computer is no longer connected to it."
-    end
+      assert text(html, "#always-on-sentence") =~
+               ~r/\AFermix moved to your server, and this (Mac|computer) is no longer connected to it\.\z/
 
-    test "unlinked with no marker: not connected to a server", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/setup")
-
-      assert text(html, "#always-on-status") == "This computer is not connected to a server."
+      assert html =~ ~s(id="always-on-learn-more")
     end
   end
 
@@ -298,8 +293,39 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
 
   defp put_seams(link) do
     Application.put_env(:fermix_web, :always_on,
-      home: [now: @now, scheduler: nil, link_status: fn -> Agent.get(link, & &1) end]
+      home: [
+        now: @now,
+        scheduler: nil,
+        link_status: fn -> Agent.get(link, & &1) end,
+        disk_usage: fn _home -> {:ok, %{used: 0.42, nearly_full: false}} end
+      ]
     )
+  end
+
+  defp primary(status, connected, down_ms) do
+    %{
+      name: "invented-vm",
+      connected: connected,
+      status: status,
+      since: if(connected, do: ~U[2026-10-27 11:30:00Z]),
+      epoch: 5,
+      sentence: "The link's own words.",
+      down_ms: down_ms
+    }
+  end
+
+  defp desktop_link do
+    %{
+      device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e",
+      primary: %{
+        name: "invented-vm",
+        gateway_pk: :binary.copy(<<3>>, 32),
+        node_id: String.duplicate("c4", 32),
+        relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+        relays_rev: String.duplicate("a1", 8)
+      },
+      epoch: 5
+    }
   end
 
   # -- reading the page ----------------------------------------------------------

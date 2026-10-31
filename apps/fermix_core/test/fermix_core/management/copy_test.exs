@@ -38,6 +38,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Cues.WatcherRow, as: CueWatcherRow
   alias FermixCore.Management.Doctor.Remediation
   alias FermixCore.Management.HomeMove, as: ManagementHomeMove
+  alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.McpServers.Row, as: McpRow
   alias FermixCore.Management.Mobile
   alias FermixCore.Management.Placement
@@ -824,6 +825,63 @@ defmodule FermixCore.Management.CopyTest do
     for reason <- reasons, do: {reason, Provision.error_sentence(reason)}
   end
 
+  # The words of `home.status.summary` (M75 lean v1 §7): every sentence key
+  # Copy holds, for a Mac and for a Linux computer, every action's label, the
+  # token steps, and the refusal that asks a desktop to update. The apps and
+  # the setup page print them as they are, so beside the rules they carry
+  # none of the engine's own words for the move and no fermix command.
+  describe "the Always On summary copy" do
+    test "every sentence, label and step obeys the rules and names nothing internal" do
+      for {where, text, kind} <- summary_copy() do
+        assert_clean(text, kind, [], where)
+
+        assert Copy.internal_words(text) == [],
+               "#{where}: #{inspect(text)} names an internal word"
+
+        refute_command(text, where)
+      end
+    end
+
+    test "every key and every action answers its words" do
+      assert length(Copy.summary_keys()) >= 38
+      assert length(HomeSummary.actions()) == length(Enum.uniq(HomeSummary.actions()))
+      assert Enum.count(summary_copy()) > 2 * length(Copy.summary_keys())
+    end
+  end
+
+  defp summary_copy do
+    values = %{
+      age: 7_200,
+      days: 5,
+      percent: 90,
+      provider: "Hetzner",
+      block: "This home is about 4 GiB; the move needs about 9 GiB free.",
+      location: "nbg1"
+    }
+
+    sentences =
+      for key <- Copy.summary_keys(),
+          machine <- ["Mac", "computer"],
+          do:
+            {"summary #{key}", Copy.summary_sentence(key, Map.put(values, :machine, machine)),
+             :prose}
+
+    labels =
+      for id <- HomeSummary.actions(),
+          do: {"action #{id}", Copy.summary_label(String.to_existing_atom(id), values), :name}
+
+    {:too_old, too_old} =
+      Placement.primary_part(
+        fn _request, _opts -> {:error, :client_too_old, %{}} end,
+        "home.status"
+      )
+
+    sentences ++
+      labels ++
+      Enum.map(Copy.token_steps(), &{"token step", &1, :prose}) ++
+      [{"too old", too_old, :prose}]
+  end
+
   # The older copy the apps and the setup page show (readiness actions and
   # every settings row) is held to the same rule: what to do in the app, or
   # on the server, never a `fermix` command.
@@ -942,6 +1000,7 @@ defmodule FermixCore.Management.CopyTest do
       Enum.map(PluginRow.statuses(), &PluginRow.check_sentence/1) ++
       plugin_copy() ++
       Enum.map(provision_copy(), &elem(&1, 1)) ++
+      Enum.map(summary_copy(), &elem(&1, 1)) ++
       Enum.map(source_sentences(), &elem(&1, 1))
   end
 

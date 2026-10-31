@@ -137,8 +137,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   any install is; one it could not install says so in Plugins, with Install….
   Once a recovery passphrase is set, a primary keeps encrypted snapshots of
   itself in an S3 bucket, every six hours by default, and after a move on your
-  desktop too, and a lost server is restored from the newest one. The setup
-  page's Always On tab says where Fermix runs, and `fermix home` does all of
+  desktop too, and a lost server is restored from the newest one. The app,
+  the setup page's Always On tab and `fermix home status` all lead with the
+  same one sentence for where Always On stands and, when something is wrong,
+  the one action that fixes it: a server turned off in Hetzner (Turn it on),
+  one silent for ten minutes while your Mac is awake (Restart server), one
+  that never finished setting up or waited past its day (Start again), no
+  capacity (Create in the next location in stock), a token that stopped
+  working (Paste a new token), the server's disk 85% full, or a last backup
+  over three days old (Back up now). Details says what lives on the server
+  (conversations and memories, secrets, the browser, traces) and that Hetzner
+  can technically read its disk, and the server tells your phones once when
+  its newest backup is a week old. `fermix home` does all of
   this at a terminal, with `export`, `import` and `mark-moved` for moving a
   home by hand. Fermix can also create the server
   for you on Hetzner: paste a Read & Write API token from a Hetzner project

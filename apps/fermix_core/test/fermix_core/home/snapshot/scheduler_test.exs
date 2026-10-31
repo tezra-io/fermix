@@ -263,6 +263,120 @@ defmodule FermixCore.Home.Snapshot.SchedulerTest do
     assert sentence == "The home has no primary epoch yet, so there is nothing to snapshot."
   end
 
+  # M75 lean v1 §7: once the newest verified backup passes seven days the
+  # phones are told, once, in the summary's words; a later backup that grows
+  # as old is told again. The push is a seam; the clock is the test's.
+  describe "the backup a week old" do
+    test "is told to the phones once per occurrence",
+         %{config: config, pair: pair, home: home} = context do
+      :ok =
+        Status.write(
+          home,
+          Status.record(Status.empty(), "fake", verified(~U[2026-10-20 08:00:00Z]))
+        )
+
+      Agent.update(config, fn _ -> configured(pair, "asleep") end)
+      scheduler = start!(context, notify: pushed_to(self()))
+      assert_receive {:planned, {:tick, _first}, _delay}
+
+      run_once(scheduler)
+
+      assert_receive {:pushed,
+                      "Your last backup is 7 days old. It runs when your Mac is online: open " <>
+                        "Fermix on your Mac to back up now."}
+
+      assert {:ok, %{stale_notice: ~U[2026-10-20 08:00:00Z]}} = Status.read(home)
+      run_once(scheduler)
+      refute_received {:pushed, _sentence}
+
+      # A new backup lands, and in its turn grows eight days old.
+      Agent.update(config, fn _ -> configured(pair, "kept") end)
+      run_once(scheduler)
+      refute_received {:pushed, _sentence}
+      advance(context, 8 * 86_400)
+      Agent.update(config, fn _ -> configured(pair, "asleep") end)
+      run_once(scheduler)
+      assert_receive {:pushed, "Your last backup is 8 days old." <> _rest}
+    end
+
+    test "a push the phones did not get is tried again at the next run, and logged",
+         %{config: config, pair: pair, home: home} = context do
+      :ok =
+        Status.write(
+          home,
+          Status.record(Status.empty(), "fake", verified(~U[2026-10-19 08:00:00Z]))
+        )
+
+      Agent.update(config, fn _ -> configured(pair, "asleep") end)
+      test = self()
+
+      notify = fn sentence, _key ->
+        send(test, {:pushed, sentence})
+        {:error, :phones_off}
+      end
+
+      scheduler = start!(context, notify: notify)
+      assert_receive {:planned, {:tick, _first}, _delay}
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          run_once(scheduler)
+          assert_receive {:pushed, "Your last backup is 8 days old." <> _rest}
+        end)
+
+      assert log =~ "phones_off"
+      assert {:ok, %{stale_notice: nil}} = Status.read(home)
+      run_once(scheduler)
+      assert_receive {:pushed, "Your last backup is 8 days old." <> _rest}
+    end
+
+    test "a backup under a week old, and none at all, tell nothing", context do
+      %{config: config, pair: pair, home: home} = context
+      Agent.update(config, fn _ -> configured(pair, "asleep") end)
+      scheduler = start!(context, notify: pushed_to(self()))
+      assert_receive {:planned, {:tick, _first}, _delay}
+
+      run_once(scheduler)
+
+      :ok =
+        Status.write(
+          home,
+          Status.record(Status.empty(), "fake", verified(~U[2026-10-20 09:30:00Z]))
+        )
+
+      run_once(scheduler)
+      refute_received {:pushed, _sentence}
+    end
+  end
+
+  defp pushed_to(test) do
+    fn sentence, key ->
+      assert key =~ ~r/\Abackup_stale:2026-10-\d\dT\d\d:\d\d:\d\dZ\z/
+      send(test, {:pushed, sentence})
+      :ok
+    end
+  end
+
+  # One run now, waited out to its next plan, which comes after any push.
+  defp run_once(scheduler) do
+    assert Scheduler.run_now(scheduler) == {:ok, :started}
+    assert_receive {:stored, _snapshot, _bytes}, @wait
+    assert_receive {:planned, {:tick, _next}, _delay}, @wait
+  end
+
+  defp verified(at) do
+    %{
+      at: at,
+      result: :verified,
+      name: "n",
+      epoch: 2,
+      size: 1,
+      sha256: String.duplicate("a", 64),
+      location: "fake://kept/n",
+      error: nil
+    }
+  end
+
   defp start!(context, extra \\ []) do
     test = self()
     %{home: home, clock: clock, config: config} = context

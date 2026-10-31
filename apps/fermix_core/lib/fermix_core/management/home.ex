@@ -40,6 +40,14 @@ defmodule FermixCore.Management.Home do
   carried here without its value, a locked keychain, a file the store lacks.
   Empty in any other role.
 
+  `summary` is where Always On stands in one sentence and at most one action
+  (`FermixCore.Management.HomeSummary`, M75 lean v1 §7), gathered from the
+  rest of this record and the provisioner's ledger; every surface prints it
+  first. `disk` is how full this primary's disk is (`Home.Disk.usage/2`:
+  `used`, a fraction, and `nearly_full` from 85%), null in any other role and
+  when it cannot be read, so a linked desktop reads its server's from
+  `primary_home`. `version` is this engine's.
+
   `home.snapshots.run` starts a snapshot now (`busy` while one runs);
   `home.snapshots.passphrase` derives the recovery key from
   `recovery_passphrase` and keeps only its public half in
@@ -54,11 +62,16 @@ defmodule FermixCore.Management.Home do
   none), `:profile`, `:save_recipient` (in place of
   `Snapshot.Settings.put_recipient/2`), and `:link_status` (in place of
   `FermixCore.Home.Link.impl().status/0`), `:settings_snapshot` (a 0-arity
-  reader of the live settings, `ConfigStore.current_snapshot/0`).
+  reader of the live settings, `ConfigStore.current_snapshot/0`),
+  `:disk_usage` (a 1-arity reader of a home's disk, `Home.Disk.usage/2`),
+  `:version`, `:now` and `:host_os`. `:supervised` is the caller's world for
+  the disk's `df` (false from a tree-less verb).
   `:primary_forward` is the daemon's way to the primary, given only on a
   linked desktop.
   """
 
+  alias FermixCore.BuildInfo
+  alias FermixCore.Home.Disk
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.Link
   alias FermixCore.Home.Moved
@@ -69,6 +82,7 @@ defmodule FermixCore.Management.Home do
   alias FermixCore.Home.Snapshot.Settings, as: SnapshotSettings
   alias FermixCore.Home.Snapshot.Status
   alias FermixCore.Management.HomeMove
+  alias FermixCore.Management.HomeSummary
   alias FermixCore.Management.Placement
   alias FermixCore.Setup.ConfigStore
 
@@ -97,24 +111,48 @@ defmodule FermixCore.Management.Home do
     role = role(opts)
     link = Keyword.get(opts, :link_status, fn -> Link.impl().status() end).()
     move = HomeMove.facts(home, role, link, opts)
-    {primary_home, primary_missing} = primary_home(opts)
+    {primary_home, primary_missing, too_old?} = primary_home(opts)
 
-    {:ok,
-     picture(%{
-       role: role.role,
-       epoch: epoch(home),
-       moved: moved(home),
-       snapshots: snapshots_view(home, role, opts),
-       primary: link.primary,
-       desktops: link.desktops,
-       enrollment: move.enrollment,
-       candidates: move.candidates,
-       move: move.move,
-       primary_home: primary_home,
-       primary_missing: primary_missing,
-       secrets_missing: secrets_missing(role, opts)
-     })}
+    facts = %{
+      role: role.role,
+      epoch: epoch(home),
+      moved: moved(home),
+      snapshots: snapshots_view(home, role, opts),
+      primary: link.primary,
+      desktops: link.desktops,
+      enrollment: move.enrollment,
+      candidates: move.candidates,
+      move: move.move,
+      primary_home: primary_home,
+      primary_missing: primary_missing,
+      secrets_missing: secrets_missing(role, opts),
+      disk: disk(home, role, opts),
+      version: Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0)
+    }
+
+    gathered =
+      HomeSummary.gather(home, role, link, Map.put(facts, :primary_too_old, too_old?), opts)
+
+    {:ok, picture(Map.put(facts, :summary, HomeSummary.summary(gathered)))}
   end
+
+  # How full a primary's disk is; a desktop reads its server's in
+  # `primary_home`, and a disk that cannot be read is said in the log.
+  defp disk(home, %{role: :primary}, opts) do
+    supervised = Keyword.get(opts, :supervised, true)
+    usage = Keyword.get(opts, :disk_usage, &Disk.usage(&1, supervised: supervised))
+
+    case usage.(home) do
+      {:ok, %{used: used, nearly_full: nearly_full}} ->
+        %{"used" => Float.round(used * 1.0, 2), "nearly_full" => nearly_full}
+
+      {:error, reason} ->
+        Logger.warning("home status: the disk could not be read: #{inspect(reason)}")
+        nil
+    end
+  end
+
+  defp disk(_home, _record, _opts), do: nil
 
   defp secrets_missing(%{role: :primary}, opts),
     do:
@@ -124,26 +162,29 @@ defmodule FermixCore.Management.Home do
 
   defp secrets_missing(_record, _opts), do: []
 
-  # A linked desktop adds the primary's own picture, or why it is missing.
+  # A linked desktop adds the primary's own picture, or why it is missing,
+  # and whether the server speaks a protocol this engine is too old for.
   defp primary_home(opts) do
     case Keyword.fetch(opts, :primary_forward) do
       {:ok, forward} ->
         case Placement.primary_part(forward, "home.status") do
-          {:ok, status} -> {status, nil}
-          {:missing, sentence} -> {nil, sentence}
+          {:ok, status} -> {status, nil, false}
+          {:too_old, sentence} -> {nil, sentence, true}
+          {:missing, sentence} -> {nil, sentence, false}
         end
 
       :error ->
-        {nil, nil}
+        {nil, nil, false}
     end
   end
 
   @doc """
   The `home.status` record from its facts: the role, the epoch (or nil), the
-  marker (or nil), the snapshots view, the rail's `primary` (or nil) and
-  `desktops` (none when absent), `HomeMove.facts/4`'s `enrollment`,
-  `candidates` and `move` (null, none and null when absent), and a linked
-  desktop's `primary_home` and `primary_missing` (null when absent). Pure, so
+  marker (or nil), the snapshots view, the summary, this engine's version,
+  the rail's `primary` (or nil) and `desktops` (none when absent),
+  `HomeMove.facts/4`'s `enrollment`, `candidates` and `move` (null, none and
+  null when absent), a linked desktop's `primary_home` and `primary_missing`
+  (null when absent), and the primary's `disk` (null when absent). Pure, so
   the CLI's goldens are built from it.
   """
   @spec picture(%{
@@ -151,6 +192,9 @@ defmodule FermixCore.Management.Home do
           required(:epoch) => pos_integer() | nil,
           required(:moved) => Moved.marker() | nil,
           required(:snapshots) => map(),
+          required(:summary) => map(),
+          required(:version) => String.t(),
+          optional(:disk) => map() | nil,
           optional(:primary) => map() | nil,
           optional(:desktops) => [map()],
           optional(:enrollment) => map() | nil,
@@ -160,9 +204,19 @@ defmodule FermixCore.Management.Home do
           optional(:primary_missing) => String.t() | nil,
           optional(:secrets_missing) => [String.t()]
         }) :: map()
-  def picture(%{role: role, epoch: epoch, moved: moved, snapshots: snapshots} = facts)
-      when role in [:primary, :device, :candidate] and is_map(snapshots) do
+  def picture(
+        %{
+          role: role,
+          epoch: epoch,
+          moved: moved,
+          snapshots: snapshots,
+          summary: %{"state" => _state} = summary,
+          version: version
+        } = facts
+      )
+      when role in [:primary, :device, :candidate] and is_map(snapshots) and is_binary(version) do
     %{
+      "summary" => summary,
       "role" => Atom.to_string(role),
       "epoch" => epoch,
       "moved" => marker(moved),
@@ -174,7 +228,9 @@ defmodule FermixCore.Management.Home do
       "move" => Map.get(facts, :move),
       "primary_home" => Map.get(facts, :primary_home),
       "primary_missing" => Map.get(facts, :primary_missing),
-      "secrets_missing" => Map.get(facts, :secrets_missing, [])
+      "secrets_missing" => Map.get(facts, :secrets_missing, []),
+      "disk" => Map.get(facts, :disk),
+      "version" => version
     }
   end
 

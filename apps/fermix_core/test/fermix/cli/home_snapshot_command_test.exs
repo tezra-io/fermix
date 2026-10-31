@@ -184,6 +184,46 @@ defmodule Fermix.CLI.HomeSnapshotCommandTest do
       assert out =~ "Waiting: Your studio-mac is not connected"
     end
 
+    # M75 lean v1 §7: the summary's sentence and its one action lead, the
+    # same words the apps and the setup page show; the rest follows.
+    test "prints the summary's sentence and action first", ctx do
+      answer = %{
+        "role" => "device",
+        "summary" => %{
+          "state" => "problem",
+          "sentence" => "Your server is turned off.",
+          "action" => %{"id" => "turn_on", "label" => "Turn it on"},
+          "detail" => %{"kind" => "turned_off"}
+        },
+        "snapshots" => %{"sentence" => "Snapshots are the server's.", "targets" => []}
+      }
+
+      client = fn "home.status", %{}, opts -> socket(opts, ctx.home) && {:ok, answer} end
+      {0, out, ""} = run(["status"], home: ctx.home, client: client)
+
+      assert [
+               "Your server is turned off.",
+               "Next: Turn it on (in the Fermix app)",
+               "Role: device" | _
+             ] =
+               String.split(out, "\n")
+
+      quiet = put_in(answer, ["summary", "action"], nil)
+      client = fn "home.status", %{}, _opts -> {:ok, quiet} end
+      {0, out, ""} = run(["status"], home: ctx.home, client: client)
+      assert ["Your server is turned off.", "Role: device" | _] = String.split(out, "\n")
+    end
+
+    test "with Fermix stopped, the summary comes from the home's own files too", ctx do
+      {0, out, ""} = run(["status"], home: ctx.home, client: stopped())
+
+      assert out =~
+               ~r/\AKeep Fermix running when this (Mac|computer) sleeps\. It moves to a server you own\./
+
+      {0, json, ""} = run(["status", "--json"], home: ctx.home, client: stopped())
+      assert %{"result" => %{"summary" => %{"state" => "off"}}} = Jason.decode!(json)
+    end
+
     test "snapshots status prints the snapshots alone", ctx do
       {0, out, ""} = run(["snapshots", "status", "--json"], home: ctx.home, client: stopped())
 

@@ -152,6 +152,25 @@ defmodule FermixChannels.Desktop.RelayTest do
     refute_received {:relay_emit, :degraded, _failures, _class}
   end
 
+  # How long the link has had no session, on the clock that stops while this
+  # computer sleeps (M75 lean v1 §7: "Fermix cannot reach your server" after
+  # ten minutes of it): from the start until the first session, none while a
+  # session is up, and from the moment one ends.
+  test "the time with no session counts from when it went down, and is none while one is up" do
+    primary = DesktopRail.primary!()
+    root = DesktopRail.desktop_home!(primary)
+    {:ok, mono} = Agent.start_link(fn -> 1_000 end)
+    relay = DesktopRail.start_relay!(root, primary, monotonic: fn -> Agent.get(mono, & &1) end)
+
+    assert %{connected: true, down_ms: nil} = DesktopRail.await_connected(relay)
+
+    :ok = drop_sessions(primary)
+    assert_receive {:scheduled, {:relay_timer, :reconnect, _token}, 1_000}, 10_000
+    Agent.update(mono, &(&1 + 600_000))
+
+    assert %{connected: false, down_ms: 600_000} = Relay.status(relay)
+  end
+
   # The status word is what an app draws: the first dial is quiet, and a
   # redial during an outage is still the outage until a session is up.
   test "the first dial is renewing, and a redial during an outage stays unreachable" do

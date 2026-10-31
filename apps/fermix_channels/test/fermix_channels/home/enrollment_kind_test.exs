@@ -50,6 +50,46 @@ defmodule FermixChannels.Home.EnrollmentKindTest do
     assert %{state: :open, kind: :manual} = Enrollment.status(ctx.primary.enrollment)
   end
 
+  # How long the window has been open while this computer was awake, on the
+  # clock that stops while it sleeps (M75 lean v1 §7: a created server that
+  # never checks in within 30 minutes of it did not finish setting up). A
+  # restart counts again from when it read the window back, so it never
+  # counts more than the computer was awake.
+  test "the window counts its open time on the clock that stops while this computer sleeps" do
+    test = self()
+    {:ok, mono} = Agent.start_link(fn -> 5_000 end)
+    monotonic = fn -> Agent.get(mono, & &1) end
+
+    primary =
+      HomeMove.primary!(
+        monotonic: monotonic,
+        schedule: fn message, delay ->
+          send(test, {:scheduled, message, delay})
+          make_ref()
+        end
+      )
+
+    assert Enrollment.status(primary.enrollment) == nil
+    {:ok, _code} = Enrollment.open(primary.enrollment, :provisioned)
+    Agent.update(mono, &(&1 + @half_hour_ms))
+    assert %{state: :open, awake_ms: @half_hour_ms} = Enrollment.status(primary.enrollment)
+
+    again = :"enrollment_again_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {Enrollment,
+       name: again,
+       home: primary.root,
+       clock: fn -> HomeMove.now() end,
+       monotonic: monotonic,
+       schedule: fn _message, _delay -> make_ref() end},
+      id: again
+    )
+
+    Agent.update(mono, &(&1 + 60_000))
+    assert %{state: :open, awake_ms: 60_000} = Enrollment.status(again)
+  end
+
   test "a copied code is refused while a created server's window is open, in one sentence",
        ctx do
     {:ok, %{code: code}} = Enrollment.open(ctx.primary.enrollment, :provisioned)

@@ -48,6 +48,12 @@ defmodule FermixChannels.Desktop.Relay do
   unknown key at the handshake) is not retried: the relay says so and stays
   down until the engine restarts.
 
+  `status/1` also says how long the link has had no session (`down_ms`, on
+  the monotonic clock, which stops while this computer sleeps): from the
+  engine's start until the first session, nil while one is up, and from the
+  moment one ends until the next is up. `home.status.summary` says Fermix
+  cannot reach the server after ten minutes of it (M75 lean v1 §7).
+
   `status/1` names the link's state in one word from a closed set, so an app
   draws a quiet renewal apart from an outage: `connected` (a session is up);
   `renewing` (a session is being opened with nothing known to be wrong: the
@@ -91,7 +97,7 @@ defmodule FermixChannels.Desktop.Relay do
   Test seams: `:connect` (handed to `Rail.open/3` in place of dialing),
   `:addrs` (a route's direct addresses, a test's), `:rail_opts`, `:schedule`
   and `:cancel_timer` (this process's timers, delivered by hand in a test),
-  `:clock` and `:emit`.
+  `:clock`, `:monotonic` (a 0-arity count of milliseconds) and `:emit`.
   """
 
   use GenServer
@@ -162,7 +168,8 @@ defmodule FermixChannels.Desktop.Relay do
           status: word(),
           since: DateTime.t() | nil,
           epoch: pos_integer() | nil,
-          sentence: String.t()
+          sentence: String.t(),
+          down_ms: non_neg_integer() | nil
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -189,7 +196,8 @@ defmodule FermixChannels.Desktop.Relay do
         status: :unreachable,
         since: nil,
         epoch: nil,
-        sentence: "The link to the server did not answer in time."
+        sentence: "The link to the server did not answer in time.",
+        down_ms: nil
       }
   end
 
@@ -320,6 +328,8 @@ defmodule FermixChannels.Desktop.Relay do
   end
 
   defp base_state(root, opts) do
+    monotonic = Keyword.get(opts, :monotonic, fn -> System.monotonic_time(:millisecond) end)
+
     %{
       root: root,
       staging: Keyword.get_lazy(opts, :staging, fn -> Media.staging_dir(root) end),
@@ -330,6 +340,8 @@ defmodule FermixChannels.Desktop.Relay do
       schedule: Keyword.get(opts, :schedule, &Process.send_after(self(), &1, &2)),
       cancel_timer: Keyword.get(opts, :cancel_timer, &Process.cancel_timer/1),
       clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
+      monotonic: monotonic,
+      down_since_ms: monotonic.(),
       emit:
         Keyword.get(opts, :emit, &ChannelTelemetry.emit_transport(:desktop_relay, &1, &2, &3)),
       link: nil,
@@ -599,6 +611,7 @@ defmodule FermixChannels.Desktop.Relay do
         phase: :connected,
         word: :connected,
         since: state.clock.(),
+        down_since_ms: nil,
         failures: 0,
         degraded?: false,
         max_media_bytes: max_media,
@@ -1138,6 +1151,7 @@ defmodule FermixChannels.Desktop.Relay do
       | phase: :waiting,
         word: outage_word(reason),
         since: nil,
+        down_since_ms: down_since(state),
         failures: failures,
         degraded?: true,
         sentence: "#{sentence} Fermix tries again in #{div(delay, 1_000)} s.",
@@ -1158,6 +1172,7 @@ defmodule FermixChannels.Desktop.Relay do
       | phase: :connecting,
         word: :renewing,
         since: nil,
+        down_since_ms: down_since(state),
         sentence: "Fermix is reconnecting to the server #{name}.",
         reconnect: arm(state, :reconnect, @first_backoff_ms)
     }
@@ -1182,12 +1197,18 @@ defmodule FermixChannels.Desktop.Relay do
       | phase: :revoked,
         word: :revoked,
         since: nil,
+        down_since_ms: down_since(state),
         failures: state.failures + 1,
         degraded?: true,
         sentence: sentence,
         reconnect: nil
     }
   end
+
+  # A session that just ended starts the count; a redial during an outage
+  # keeps it.
+  defp down_since(%{down_since_ms: nil} = state), do: state.monotonic.()
+  defp down_since(%{down_since_ms: since}), do: since
 
   defp outage_word({:stale_primary, _mine, _theirs}), do: :stale
   defp outage_word(_reason), do: :unreachable
@@ -1306,7 +1327,8 @@ defmodule FermixChannels.Desktop.Relay do
       status: state.word,
       since: nil,
       epoch: nil,
-      sentence: state.sentence
+      sentence: state.sentence,
+      down_ms: down_ms(state)
     }
   end
 
@@ -1317,9 +1339,13 @@ defmodule FermixChannels.Desktop.Relay do
       status: state.word,
       since: state.since,
       epoch: state.link.epoch,
-      sentence: state.sentence
+      sentence: state.sentence,
+      down_ms: down_ms(state)
     }
   end
+
+  defp down_ms(%{down_since_ms: nil}), do: nil
+  defp down_ms(state), do: state.monotonic.() - state.down_since_ms
 
   defp unreachable(state), do: Placement.unreachable(name(state), unreachable_sentence(state))
 

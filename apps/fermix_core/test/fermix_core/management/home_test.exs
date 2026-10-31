@@ -1,8 +1,13 @@
 defmodule FermixCore.Management.HomeTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Home.Candidates
+  alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Epoch
+  alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.Provision.Ledger
+  alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Home.Snapshot.Scheduler
   alias FermixCore.Home.Snapshot.Status
@@ -12,6 +17,7 @@ defmodule FermixCore.Management.HomeTest do
   @primary %{role: :primary, primary: nil}
   @device %{role: :device, primary: "invented host"}
   @passphrase "invented-lighthouse-meridian"
+  @at ~U[2031-05-04 12:00:00Z]
 
   setup do
     tmp = SafeRm.make_tmp_dir!("management_home")
@@ -143,6 +149,147 @@ defmodule FermixCore.Management.HomeTest do
                  %{},
                  opts(home, config: config, scheduler: scheduler)
                )
+    end
+  end
+
+  # The gatherer behind `home.status.summary` (M75 lean v1 §7), with each of
+  # its sources a real file in a temp home or an injected seam: the ledger,
+  # the candidates, the window and link as the rail says them, the review,
+  # the disk, the server's own part and this desktop's copies.
+  describe "home.status's summary" do
+    test "a primary with nothing says off, and publishes its disk and version", %{home: home} do
+      assert {:ok, status} =
+               route("home.status", %{}, opts(home, disk_usage: disk(0.42), version: "9.9.9"))
+
+      assert status["summary"]["state"] == "off"
+      assert status["summary"]["action"]["id"] == "set_up"
+      assert status["disk"] == %{"used" => 0.42, "nearly_full" => false}
+      assert status["version"] == "9.9.9"
+    end
+
+    test "the ledger's token makes choose, and its created server waiting makes ready, " <>
+           "with the last review's warnings",
+         %{home: home} do
+      {:ok, _ledger} =
+        Ledger.update(home, "hetzner", &{:ok, Ledger.connect(&1, "invented-token-0001", @at)})
+
+      assert {:ok, %{"summary" => %{"state" => "choose"}}} = route("home.status", %{}, opts(home))
+
+      {:ok, held} = Candidates.add(home, candidate_attrs(), @at)
+      {:ok, _ledger} = Ledger.update(home, "hetzner", &{:ok, Ledger.put_server(&1, server())})
+      report = %{ready: true, items: [%{id: "whatsapp", status: :warn, sentence: "Warned."}]}
+      :ok = Move.put_review(home, held.candidate_id, report, @at)
+
+      window = provisioned(:used, held.candidate_id)
+
+      assert {:ok, %{"summary" => summary}} =
+               route("home.status", %{}, opts(home, link_status: link(enrollment: window)))
+
+      assert summary["state"] == "ready"
+      assert summary["action"]["id"] == "move_now"
+
+      assert summary["detail"]["readiness"] == [
+               %{"id" => "whatsapp", "status" => "warn", "sentence" => "Warned."}
+             ]
+
+      assert summary["detail"]["server"]["location"] == "Falkenstein"
+    end
+
+    test "a created server whose code has been open thirty minutes awake did not set up",
+         %{home: home} do
+      {:ok, _ledger} =
+        Ledger.update(home, "hetzner", fn ledger ->
+          {:ok,
+           ledger |> Ledger.connect("invented-token-0001", @at) |> Ledger.put_server(server())}
+        end)
+
+      window = %{provisioned(:open, nil) | awake_ms: 31 * 60_000}
+
+      assert {:ok, %{"summary" => summary}} =
+               route("home.status", %{}, opts(home, link_status: link(enrollment: window)))
+
+      assert summary["state"] == "problem"
+      assert summary["detail"]["kind"] == "not_set_up"
+    end
+
+    test "a linked desktop reads the server's part, its own copies and the link's silence",
+         %{home: home} do
+      :ok = DesktopLink.write(home, desktop_link())
+      :ok = Moved.write(home, %{epoch: 4, moved_at: @at, to: "invented-vm"})
+      File.mkdir_p!(Capture.dir(home))
+      File.write!(Path.join(Capture.dir(home), "20310504T100000Z-e5.fxsnap"), "12345")
+
+      server_part = %{
+        "role" => "primary",
+        "version" => "9.9.8",
+        "disk" => %{"used" => 0.4, "nearly_full" => false},
+        "snapshots" => %{
+          "targets" => [
+            %{"label" => "your desktop", "last_verified" => %{"at" => "2031-05-04T11:00:00Z"}}
+          ]
+        }
+      }
+
+      forward = fn _request, _opts -> {:ok, server_part} end
+
+      assert {:ok, status} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home, engine_role: @device, link_status: link(primary: primary(nil)))
+                 |> Keyword.put(:primary_forward, forward)
+               )
+
+      assert status["summary"]["sentence"] ==
+               "Fermix runs on your server. Last backup 1 hour ago."
+
+      assert status["summary"]["detail"]["copies_bytes"] == 5
+      assert status["summary"]["detail"]["server"]["version"] == "9.9.8"
+      assert status["disk"] == nil
+
+      silent = link(primary: primary(11 * 60_000))
+
+      assert {:ok, %{"summary" => summary}} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home, engine_role: @device, link_status: silent)
+                 |> Keyword.put(:primary_forward, forward)
+               )
+
+      assert summary["detail"]["kind"] == "cannot_reach"
+      assert summary["action"]["id"] == "learn_more"
+    end
+
+    test "a server this desktop is too old for asks to update it", %{home: home} do
+      :ok = DesktopLink.write(home, desktop_link())
+      too_old = fn _request, _opts -> {:error, :client_too_old, %{"minimum_version" => 3}} end
+
+      assert {:ok, status} =
+               route(
+                 "home.status",
+                 %{},
+                 opts(home, engine_role: @device, link_status: link(primary: primary(nil)))
+                 |> Keyword.put(:primary_forward, too_old)
+               )
+
+      assert status["summary"]["detail"]["kind"] == "update"
+      assert status["primary_home"] == nil
+      assert status["primary_missing"] =~ "newer Fermix"
+    end
+
+    test "a disk that cannot be read publishes none and says why in the log", %{home: home} do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, %{"disk" => nil}} =
+                   route(
+                     "home.status",
+                     %{},
+                     opts(home, disk_usage: fn _home -> {:error, :df_unavailable} end)
+                   )
+        end)
+
+      assert log =~ "df_unavailable"
     end
   end
 
@@ -280,6 +427,78 @@ defmodule FermixCore.Management.HomeTest do
            ] = view["targets"]
   end
 
+  defp disk(used), do: fn _home -> {:ok, %{used: used, nearly_full: used >= 0.85}} end
+
+  # The rail's facts, as the `link_status` seam answers them.
+  defp link(overrides) do
+    status = Map.merge(%{primary: nil, desktops: [], enrollment: nil}, Map.new(overrides))
+    fn -> status end
+  end
+
+  defp provisioned(state, candidate_id) do
+    %{
+      state: state,
+      expires_at: ~U[2031-05-05 10:00:00Z],
+      kind: :provisioned,
+      candidate_id: candidate_id,
+      awake_ms: 60_000
+    }
+  end
+
+  defp primary(down_ms) do
+    %{
+      name: "invented-vm",
+      connected: down_ms == nil,
+      status: if(down_ms, do: :unreachable, else: :connected),
+      since: if(down_ms, do: nil, else: @at),
+      epoch: 5,
+      sentence: "The link's own words.",
+      down_ms: down_ms
+    }
+  end
+
+  defp server do
+    %{
+      name: "fermix-general-a3f9",
+      id: 61_839_204,
+      status: :created,
+      type: "cpx22",
+      location: "fsn1",
+      ipv4: "203.0.113.7",
+      power: "running",
+      created_at: @at,
+      seen_at: @at
+    }
+  end
+
+  defp candidate_attrs do
+    %{
+      name: "fermix-general-a3f9",
+      os: "linux",
+      arch: "x86_64",
+      version: "9.9.9",
+      node_id: String.duplicate("b7", 32),
+      relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+      noise_pk: :binary.copy(<<1>>, 32),
+      recipient: :binary.copy(<<2>>, 32),
+      snapshots: nil
+    }
+  end
+
+  defp desktop_link do
+    %{
+      device_id: "6f1e2d3c-4b5a-4968-8778-695a4b3c2d1e",
+      primary: %{
+        name: "invented-vm",
+        gateway_pk: :binary.copy(<<3>>, 32),
+        node_id: String.duplicate("c4", 32),
+        relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+        relays_rev: String.duplicate("a1", 8)
+      },
+      epoch: 5
+    }
+  end
+
   defp route(method, params, opts) do
     Router.route(
       %{request_id: "req-1", protocol_version: 2, method: method, params: params},
@@ -290,7 +509,15 @@ defmodule FermixCore.Management.HomeTest do
   defp opts(home, extra \\ []) do
     home_opts =
       Keyword.merge(
-        [home: home, engine_role: @primary, config: [], scheduler: nil, profile: "general"],
+        [
+          home: home,
+          engine_role: @primary,
+          config: [],
+          scheduler: nil,
+          profile: "general",
+          now: @at,
+          disk_usage: disk(0.42)
+        ],
         extra
       )
 

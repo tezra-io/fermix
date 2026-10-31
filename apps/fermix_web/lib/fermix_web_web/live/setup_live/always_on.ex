@@ -1,14 +1,14 @@
 defmodule FermixWebWeb.SetupLive.AlwaysOn do
   @moduledoc """
-  The browser setup's Always On tab (M75 §14, B14): where Fermix runs, in one
-  sentence, and the device role's word on the rest of the page. Setting
-  Always On up, and everything else it shows, belongs to the Fermix apps and
-  the CLI.
+  The browser setup's Always On tab (M75 §14, B14, lean v1 §7): the summary
+  every surface prints (`home.status.summary`), and the device role's word on
+  the rest of the page. Setting Always On up, and everything else it shows,
+  belongs to the Fermix apps.
 
-  The sentence comes from `Management.Home.status/1` (`home.status`), read in
-  the page's own process when the tab opens and on Refresh: on the primary,
-  that Fermix runs on this computer; on a desktop, the link's own sentence
-  (`primary.sentence`), or, with no link, where the home moved.
+  The summary comes from `Management.Home.status/1` (`home.status`), read in
+  the page's own process when the tab opens and on Refresh: its one sentence,
+  and its action as the Fermix app's to take, or, for Learn more, the Always
+  On docs page. Nothing on the tab names the engine's own words for the move.
 
   All of its state is the page's one `:always_on` assign. Seam, under
   `config :fermix_web, :always_on`: `home` (options for
@@ -63,13 +63,13 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   defp place({method, nil}), do: Placement.place(method, %{})
   defp place({method, section}), do: Placement.place(method, %{"section" => section})
 
-  # The primary's own setup page is unreachable from here on most servers (it
+  # The server's own setup page is unreachable from here on most servers (it
   # listens on the server's loopback only), so the page points at the app.
   @doc "The notice a device-role page leads with, or nil off the device role."
   @spec device_notice(Role.record()) :: String.t() | nil
   def device_notice(%{role: :device} = record) do
-    "This computer runs Fermix as a desktop of #{primary_words(record)}. Fermix-wide " <>
-      "settings live on the primary: change them in the Fermix app on this computer. " <>
+    "This computer runs Fermix as a desktop of #{server_words(record)}. Fermix-wide " <>
+      "settings live on the server: change them in the Fermix app on this computer. " <>
       "This page sets up this computer."
   end
 
@@ -78,14 +78,14 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   @doc "The sentence a tab the primary serves shows in the device role."
   @spec unavailable_sentence(Role.record()) :: String.t()
   def unavailable_sentence(%{role: :device} = record) do
-    "These settings are Fermix-wide, so they live on #{primary_words(record)}. Change them " <>
+    "These settings are Fermix-wide, so they live on #{server_words(record)}. Change them " <>
       "in the Fermix app on this computer."
   end
 
-  defp primary_words(%{primary: name}) when is_binary(name) and name != "",
-    do: "the primary, #{name}"
+  defp server_words(%{primary: name}) when is_binary(name) and name != "",
+    do: "your server, #{name}"
 
-  defp primary_words(_record), do: "the primary"
+  defp server_words(_record), do: "your server"
 
   # -- state ---------------------------------------------------------------------
 
@@ -167,23 +167,42 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   attr :status, :any, required: true
 
   defp status(assigns) do
-    {:ok, picture} = assigns.status
-    assigns = assign(assigns, sentence: sentence(picture), card: @card)
+    {:ok, %{"summary" => summary}} = assigns.status
+    assigns = assign(assigns, summary: summary, card: @card, docs: @docs_url)
 
     ~H"""
     <section id="always-on-status" class={@card}>
-      <p class="text-sm">{@sentence}</p>
+      <p id="always-on-sentence" class="text-sm">{@summary["sentence"]}</p>
+      <.summary_action action={@summary["action"]} docs={@docs} />
     </section>
     """
   end
 
-  # Where Fermix runs, from the picture's own facts: the link's sentence on a
-  # desktop that has one, and where the home went on one that has none.
-  defp sentence(%{"role" => "primary"}), do: "Fermix runs on this computer."
-  defp sentence(%{"role" => "device", "primary" => %{"sentence" => sentence}}), do: sentence
+  attr :action, :any, required: true
+  attr :docs, :string, required: true
 
-  defp sentence(%{"role" => "device", "moved" => %{"to" => to}}),
-    do: "Fermix moved to #{to}, and this computer is no longer connected to it."
+  # Learn more opens the docs here too; every other action is the app's.
+  defp summary_action(%{action: nil} = assigns), do: ~H""
 
-  defp sentence(%{"role" => "device"}), do: "This computer is not connected to a server."
+  defp summary_action(%{action: %{"id" => "learn_more"}} = assigns) do
+    ~H"""
+    <a
+      id="always-on-learn-more"
+      href={@docs}
+      target="_blank"
+      rel="noopener noreferrer"
+      class="link mt-2 inline-block text-sm"
+    >
+      {@action["label"]}
+    </a>
+    """
+  end
+
+  defp summary_action(assigns) do
+    ~H"""
+    <p id="always-on-action" class="mt-2 text-sm text-base-content/70">
+      In the Fermix app: {@action["label"]}.
+    </p>
+    """
+  end
 end

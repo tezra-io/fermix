@@ -12,7 +12,9 @@ defmodule Fermix.CLI.HomeStatusCommand do
   `daemon.sock`) when it runs, and reads the home's own files when it does
   not: the role its settings configure (`Home.Role.configured/1`), the epoch,
   the marker, `[fermix_core.snapshots]` and `snapshots/status.json`, through
-  the same projection the engine answers with (`Management.Home`). `run` and
+  the same projection the engine answers with (`Management.Home`). It prints
+  the summary first (M75 lean v1 §7): its sentence, and its one action as the
+  Fermix app names it, since production is managed there. `run` and
   `passphrase` need the engine: a snapshot is the scheduler's, and the
   recovery key is saved through the running settings path. With the engine
   stopped they refuse with `engine_stopped`.
@@ -78,7 +80,13 @@ defmodule Fermix.CLI.HomeStatusCommand do
   def offline(home) when is_binary(home) do
     with {:ok, role} <- Role.configured(home),
          {:ok, config} <- ConfigStore.snapshots_config(home) do
-      Home.status(home: home, engine_role: role, config: config, scheduler: nil)
+      Home.status(
+        home: home,
+        engine_role: role,
+        config: config,
+        scheduler: nil,
+        supervised: false
+      )
     end
   end
 
@@ -195,14 +203,22 @@ defmodule Fermix.CLI.HomeStatusCommand do
   end
 
   defp status_lines(status) do
-    [
-      "Role: #{status["role"]}",
-      "Primary epoch: #{status["epoch"] || "none yet"}"
-    ] ++
+    summary_lines(status["summary"]) ++
+      [
+        "Role: #{status["role"]}",
+        "Primary epoch: #{status["epoch"] || "none yet"}"
+      ] ++
       moved_line(status["moved"]) ++
       move_lines(status) ++
       secrets_lines(status["secrets_missing"] || []) ++ snapshot_lines(status["snapshots"])
   end
+
+  # Where Always On stands, first; an engine from before the summary has none.
+  defp summary_lines(%{"sentence" => sentence, "action" => %{"label" => label}}),
+    do: [sentence, "Next: #{label} (in the Fermix app)"]
+
+  defp summary_lines(%{"sentence" => sentence}), do: [sentence]
+  defp summary_lines(nil), do: []
 
   # The secret references this primary could not resolve, by the id
   # `fermix setup` and `secret.set` take: each must be entered again here.

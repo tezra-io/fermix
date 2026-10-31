@@ -219,3 +219,26 @@ scenarios:
              snapshot onto a new server.
           3. Does not claim the delete removes the server and moves Fermix
              back to the Mac.
+      - id: what_the_always_on_pane_says
+        query: >
+          The Always On pane on my Mac says "Your server is turned off." with a
+          Turn it on button, and yesterday my phone told me my last backup is 8
+          days old. I never turned anything off. Does a turned-off server still
+          cost me, what does that button do, and why would my backup be old?
+        expect:
+          reply_matches: '(?i)\bbackup'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says a turned-off Hetzner server still costs its monthly price:
+             Hetzner bills for it until it is deleted.
+          2. Says Turn it on in the pane asks Hetzner to turn the server Fermix
+             created back on, after which Fermix runs there again and the
+             messages that waited arrive.
+          3. Says the server keeps its backups on the Mac while the Mac is
+             online (and in an S3 bucket when one is set), so a Mac that was
+             asleep or away leaves the last backup old, that Back up now in
+             the pane takes one now, and that the phones are told once when
+             the newest backup is a week old.
+          4. Does not tell the owner to sign in to the server over SSH or run
+             commands on it to fix either problem.

@@ -388,6 +388,43 @@ defmodule FermixCore.Home.Move do
   defp review_path(home), do: Path.join(dir(home), "readiness.json")
 
   @doc """
+  The last review `put_review/4` kept, whatever its age or verdict, for
+  `home.status.summary` to show: `{:ok, %{candidate_id, reviewed_at, ready,
+  items}}` (the items as `home.move.readiness` answered them), `:none` when
+  none is kept. A file Fermix did not write is an error.
+  """
+  @spec last_review(Path.t()) :: {:ok, map()} | :none | {:error, term()}
+  def last_review(home) when is_binary(home) do
+    file = review_path(home)
+
+    case read_json(file) do
+      {:ok, review} -> kept_review(review, file)
+      {:error, {:file, _path, :enoent}} -> :none
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp kept_review(
+         %{
+           "candidate_id" => id,
+           "reviewed_at" => at,
+           "report" => %{"ready" => ready, "items" => items}
+         },
+         file
+       )
+       when is_binary(id) and is_binary(at) and is_boolean(ready) and is_list(items) do
+    case DateTime.from_iso8601(at) do
+      {:ok, reviewed_at, _offset} ->
+        {:ok, %{candidate_id: id, reviewed_at: reviewed_at, ready: ready, items: items}}
+
+      _invalid ->
+        {:error, {:invalid_move_file, file}}
+    end
+  end
+
+  defp kept_review(_other, file), do: {:error, {:invalid_move_file, file}}
+
+  @doc """
   The `move` of `home.status`: the phase, the candidate's name and a
   sentence, or nil when this home never started a move.
   """

@@ -22,6 +22,7 @@ defmodule FermixTestSupport.CliContractCases do
   alias FermixCore.Management.Diagnostics.Offline
   alias FermixCore.Management.Home
   alias FermixCore.Management.HomeMove
+  alias FermixCore.Management.HomeSummary
 
   @vendor_unit "/usr/lib/systemd/user/fermix.service"
   @legacy_unit "/home/operator/.config/systemd/user/fermix.service"
@@ -248,9 +249,38 @@ defmodule FermixTestSupport.CliContractCases do
     }
   end
 
-  # `fermix home status`: a primary at epoch 4 whose last snapshot S3 stored.
+  # `fermix home status`: a primary at epoch 4 whose last snapshot S3 stored,
+  # with nothing of Always On set up yet, so its summary is the first screen.
   defp home_status do
-    Home.picture(%{role: :primary, epoch: 4, moved: nil, snapshots: snapshots_view()})
+    Home.picture(%{
+      role: :primary,
+      epoch: 4,
+      moved: nil,
+      snapshots: snapshots_view(),
+      summary: HomeSummary.summary(off_facts()),
+      disk: %{"used" => 0.42, "nearly_full" => false},
+      version: "1.2.3"
+    })
+  end
+
+  defp off_facts do
+    %{
+      role: :primary,
+      host_os: :macos,
+      now: ~U[2026-10-27 09:30:00Z],
+      linked: false,
+      moved: nil,
+      move: nil,
+      link: %{primary: nil, desktops: [], enrollment: nil},
+      candidates: [],
+      provision: %{state: :none, token: :none, server: nil, failure: nil, sentence: nil},
+      review: nil,
+      snapshots: snapshots_view(),
+      disk: nil,
+      primary_home: nil,
+      primary_too_old: false,
+      copies_bytes: nil
+    }
   end
 
   defp snapshots_view do

@@ -234,6 +234,9 @@ its enrollment stands).
 | `secrets_missing` | array | On a running primary, the ids (as `fermix setup` and `secret.set` take them) of the secret references in its settings that did not resolve on this host: each needs entering again. Empty in every other role, and while Fermix is stopped. The human output names them on a line of its own. |
 | `primary_home` | object, null | On a running linked desktop, the primary's own record (this table's fields, as the primary answers them), asked within 5 s; its recovery, enrollment, candidates and move are the server's. Null on any other engine, while it is missing, and while Fermix is stopped. |
 | `primary_missing` | string, null | On a running linked desktop whose primary is unreachable or did not answer within 5 s, the sentence that says why `primary_home` is missing. Null otherwise. |
+| `summary` | object | Where Always On stands, as every surface prints it: `state`, `sentence`, `action` (`{id, label}` or null) and `detail`, as the management `home.status` answers it (`priv/management/PROTOCOL.md`, "The Always On summary"). With Fermix stopped it is worked out from the home's own files, so the link, the window and the server's own part read as absent. The human output leads with its sentence and, on a line of its own, its action as the Fermix app names it. |
+| `disk` | object, null | On the primary, how full its disk is: `used` (a fraction from 0 to 1) and `nearly_full` (from 0.85). Null in every other role and when it cannot be read. |
+| `version` | string | This engine's version. |
 
 ## The snapshots result
 

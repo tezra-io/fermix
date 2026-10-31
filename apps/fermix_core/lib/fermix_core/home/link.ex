@@ -18,12 +18,16 @@ defmodule FermixCore.Home.Link do
 
   @typedoc """
   What the rail knows for `home.status`. `primary` is the device role's link to
-  its primary (`nil` on any other role, or a device role with no desktop link).
-  `desktops` are the primary's desktop peers. `enrollment` is the primary's
-  enrollment window: `state` `:open`, `:used` or `:expired`, when it expires,
-  its `kind` (`:manual`, the code a person copies, or `:provisioned`, the code
-  inside a server Fermix created) and the `candidate_id` that enrolled
-  through it (nil until one did); `nil` when no window is kept.
+  its primary (`nil` on any other role, or a device role with no desktop link),
+  with `down_ms`, how long it has had no session while this computer was
+  awake (nil while one is up). `desktops` are the primary's desktop peers.
+  `enrollment` is the primary's enrollment window: `state` `:open`, `:used` or
+  `:expired`, when it expires, its `kind` (`:manual`, the code a person
+  copies, or `:provisioned`, the code inside a server Fermix created), the
+  `candidate_id` that enrolled through it (nil until one did) and `awake_ms`,
+  how long this engine has held it while the computer was awake; `nil` when
+  no window is kept. Both counts are on the monotonic clock, which stops
+  while the computer sleeps (`home.status.summary`, M75 lean v1 §7).
   """
   @type status :: %{
           primary: map() | nil,
@@ -33,7 +37,8 @@ defmodule FermixCore.Home.Link do
               state: :open | :used | :expired,
               expires_at: DateTime.t(),
               kind: :manual | :provisioned,
-              candidate_id: String.t() | nil
+              candidate_id: String.t() | nil,
+              awake_ms: non_neg_integer()
             }
             | nil
         }

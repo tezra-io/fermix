@@ -31,6 +31,10 @@ defmodule FermixCore.Home.Snapshot.Status do
   waiting attempt is no failure: its sentence is its `note`, the last error is
   cleared and the last verified point kept.
 
+  `stale_notice` is the newest verified point the phones were told had grown
+  a week old (the scheduler's notice, M75 lean v1 §7), so they are told once
+  per occurrence; null until then.
+
   `run_at_boot` asks the scheduler's next start to run at once rather than
   after its boot delay: a move's activation writes it, so the new primary
   stores its first snapshot right away (`Snapshot.Scheduler`). A file that
@@ -68,6 +72,7 @@ defmodule FermixCore.Home.Snapshot.Status do
   @type t :: %{
           next_run_at: DateTime.t() | nil,
           run_at_boot: boolean(),
+          stale_notice: DateTime.t() | nil,
           targets: %{String.t() => target_status()}
         }
 
@@ -77,7 +82,16 @@ defmodule FermixCore.Home.Snapshot.Status do
 
   @doc "The status before any run."
   @spec empty() :: t()
-  def empty, do: %{next_run_at: nil, run_at_boot: false, targets: %{}}
+  def empty, do: %{next_run_at: nil, run_at_boot: false, stale_notice: nil, targets: %{}}
+
+  @doc "When the newest verified point of any target was made, or nil when none is."
+  @spec newest_verified(t()) :: DateTime.t() | nil
+  def newest_verified(%{targets: targets}) do
+    targets
+    |> Map.values()
+    |> Enum.flat_map(fn entry -> List.wrap(entry.last_verified && entry.last_verified.at) end)
+    |> Enum.max(DateTime, fn -> nil end)
+  end
 
   @doc "The status under `root`; `empty/0` when no run has written one."
   @spec read(Path.t()) :: {:ok, t()} | {:error, {:status_unreadable, term()}}
@@ -258,6 +272,7 @@ defmodule FermixCore.Home.Snapshot.Status do
       "version" => @version,
       "next_run_at" => iso(status.next_run_at),
       "run_at_boot" => Map.get(status, :run_at_boot, false),
+      "stale_notice" => iso(Map.get(status, :stale_notice)),
       "targets" =>
         Map.new(status.targets, fn {id, entry} ->
           {id,
@@ -284,8 +299,15 @@ defmodule FermixCore.Home.Snapshot.Status do
            Jason.decode(json),
          {:ok, next_run_at} <- time(Map.get(map, "next_run_at")),
          run_at_boot when is_boolean(run_at_boot) <- Map.get(map, "run_at_boot", false),
+         {:ok, stale_notice} <- time(Map.get(map, "stale_notice")),
          {:ok, decoded} <- decode_targets(targets) do
-      {:ok, %{next_run_at: next_run_at, run_at_boot: run_at_boot, targets: decoded}}
+      {:ok,
+       %{
+         next_run_at: next_run_at,
+         run_at_boot: run_at_boot,
+         stale_notice: stale_notice,
+         targets: decoded
+       }}
     else
       _invalid -> {:error, {:status_unreadable, :invalid}}
     end

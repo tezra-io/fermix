@@ -552,7 +552,8 @@ server's cloud-init user data, the enrollment code in `FERMIX_ENROLL_CODE`.
 A create checks the type against the live stock, makes the firewall (the
 first write, where a read-only token fails before anything costs money),
 opens a provisioned enrollment window (24 hours; `home.enroll.open` is
-refused while it is open), creates the server named and labelled by the
+refused while it is open, and while the server it enrolled is held as a
+candidate), creates the server named and labelled by the
 ledger's ref, and polls each action with a bound; a create whose answer was
 lost is found again by its labels in `reconcile/2`, which also marks a
 resource deleted outside Fermix gone. `Management.Provision` answers
@@ -566,6 +567,23 @@ and once this engine is its linked desktop (or the home carries the moved
 marker). `Ledger.state/1` is the one reading of the provisioner for `home.status`'s
 summary: none, connected, creating, created, deleting, gone, failed (with the
 reason) or unreadable, beside whether the token is still accepted.
+
+`Management.HomeSummary` is that summary (M75 lean v1 §7): `gather/5` reads
+the ledger, the last kept review (`Move.last_review/1`) and a desktop's stored
+copies beside the record `Management.Home.status/1` already holds (the role,
+the move's phase, the candidates, the rail's window and link, the snapshots,
+the primary's disk, `Home.Disk.usage/2`, and a linked desktop's composed
+`primary_home`, or `Placement.primary_part/2`'s `too_old` when the server
+refused this engine's protocol), and the pure `summary/1` answers `{state,
+sentence, action, detail}` in `Management.Copy`'s words, which `CopyTest`
+holds to the copy rules and to `Copy.internal_words/1`. The two times it
+counts are awake time on the monotonic clock: how long the created server's
+window has been held (`Enrollment`'s `awake_ms`, 30 minutes) and how long the
+desktop relay has had no session (`Relay`'s `down_ms`, 10 minutes). The
+snapshot scheduler tells the paired phones, once per occurrence (the point
+kept in `snapshots/status.json`'s `stale_notice`), when the newest verified
+snapshot passes 7 days, through the phones' own path: a message in the
+owner's phone chat (`ChannelSend` to `mobile`, its proactive key the point).
 
 Architecture Invariant: one role gate, one epoch writer, one marker, one
 device-local list, one placement table; a linked device's request takes one
@@ -1497,11 +1515,12 @@ The router exposes:
 asynchronously; a failed handoff returns 503 with the duplicate record rolled
 back, and a device-role engine answers every webhook route 503. `HealthController` reports `FermixCore.Health`'s status.
 `SetupLive` drives `Setup.Wizard` and the core setup modules. Its Always On tab
-(`SetupLive.AlwaysOn`, M75 B14) is read-only: one sentence for where Fermix
-runs, drawn from `Management.Home.status/1` in the page's own process when
-the tab opens and on Refresh (on a desktop, the link's own sentence); setting
-Always On up is the apps' and the CLI's. On a device-role engine the
-page leads with a notice and draws every tab whose request
+(`SetupLive.AlwaysOn`, M75 B14) is read-only: the summary every surface
+prints (`home.status.summary`), drawn from `Management.Home.status/1` in the
+page's own process when the tab opens and on Refresh, its action named as
+the app's to take; setting Always On up is the apps'. On a device-role
+engine the page leads with a notice that Fermix-wide settings live on the
+server and draws every tab whose request
 `Management.Placement` places on the primary as unavailable. Not all ingress is
 Phoenix: the mobile listener, the OAuth loopback listener, and the Unix sockets
 (`daemon.sock`, `realtime.sock`, `acp.sock`, `companion.sock`) live in core and

@@ -23,18 +23,32 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   section) plans again at once. `run_now/1` starts one at once unless one is
   running (`{:error, :busy}`).
 
+  **A backup a week old.** After each run, once the newest verified point of
+  any target is seven days old, the phones are told, once per occurrence (M75
+  lean v1 §7): the summary's sentence (`Management.Copy`) goes through the
+  phones' own push path, a message in the owner's phone chat that every
+  paired phone away from it is pushed (`FermixChannels.Channels.Mobile`,
+  reached through `[:fermix_core, :jobs, :delivery_channels]`). The point told
+  is kept in the status (`stale_notice`), so a later point that grows as old
+  is told again; a push the phones did not get is logged and tried again at
+  the next run. The message carries the point as its proactive key, so a
+  retry after a push whose record was lost writes no second one.
+
   **One writer.** The run is a task under `FermixCore.TaskSupervisor`; this
   process alone writes the status file (`Snapshot.Status`), from the answer the
   task returns, or from its exit when it crashed. The clock and the timer are
-  injected (`:now`, `:timer`), so tests deliver a tick by hand.
+  injected (`:now`, `:timer`), so tests deliver a tick by hand, and so is the
+  push (`:notify`).
   """
 
   use GenServer
 
+  alias FermixCore.Delivery.ChannelSend
   alias FermixCore.Home.Snapshot.Config
   alias FermixCore.Home.Snapshot.Run
   alias FermixCore.Home.Snapshot.S3
   alias FermixCore.Home.Snapshot.Status
+  alias FermixCore.Management.Copy
   alias FermixCore.Setup.ConfigStore
 
   require Logger
@@ -42,6 +56,9 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   @boot_delay_s 300
   @crashed "The snapshot run stopped unexpectedly; the daemon log says why."
   @hour_s 3_600
+  @day_s 86_400
+  @stale_notice_s 7 * @day_s
+  @push_timeout_ms 10_000
 
   @type state :: %{
           home: Path.t(),
@@ -53,6 +70,7 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
                   {:ok, Run.result()} | :not_configured),
           run_opts: keyword(),
           task_supervisor: GenServer.server(),
+          notify: (String.t(), String.t() -> :ok | {:error, term()}),
           started_at: DateTime.t(),
           task: reference() | nil,
           token: reference() | nil,
@@ -73,7 +91,9 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   (false keeps it from planning timers: a test tree), `:timer` (a 2-arity
   `send_after` in its place, given the message and the delay in ms), `:run`
   (`Run.run/4` in its place), `:run_opts` (passed to every run: `:profile`,
-  `:host`, a target's seams) and `:task_supervisor`.
+  `:host`, a target's seams), `:task_supervisor` and `:notify` (a 2-arity
+  push of a sentence and its proactive key to the phones, in place of their
+  push path).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts) do
@@ -112,6 +132,7 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
       run: Keyword.get(opts, :run, &Run.run/4),
       run_opts: Keyword.get(opts, :run_opts, []),
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
+      notify: Keyword.get(opts, :notify, &push_to_phones/2),
       started_at: now.(),
       task: nil,
       token: nil,
@@ -183,6 +204,7 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
       Enum.reduce(outcomes, status, &record_outcome(&1, &2, facts))
     end)
 
+    :ok = notice_stale(state)
     plan(%{state | task: nil}, started_at)
   end
 
@@ -202,6 +224,68 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
     end)
 
     plan(%{state | task: nil}, at)
+  end
+
+  # The phones hear once when the newest verified point passes seven days,
+  # and again only for a later point grown as old.
+  defp notice_stale(state) do
+    case Status.read(state.home) do
+      {:ok, status} ->
+        notice_stale(state, status, Status.newest_verified(status))
+
+      {:error, reason} ->
+        Logger.error("home snapshot: the status could not be read: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp notice_stale(_state, _status, nil), do: :ok
+
+  defp notice_stale(state, status, at) do
+    age = DateTime.diff(state.now.(), at, :second)
+    told? = status.stale_notice != nil and DateTime.compare(status.stale_notice, at) == :eq
+
+    if age >= @stale_notice_s and not told?,
+      do: tell_phones(state, at, div(age, @day_s)),
+      else: :ok
+  end
+
+  defp tell_phones(state, at, days) do
+    key = "backup_stale:" <> DateTime.to_iso8601(at)
+
+    case state.notify.(Copy.summary_sentence(:backup_push, %{days: days}), key) do
+      :ok ->
+        record(state, &%{&1 | stale_notice: at})
+
+      {:error, reason} ->
+        Logger.warning(
+          "home snapshot: the phones were not told the last backup is #{days} days old " <>
+            "(#{inspect(reason)}); the next run tries again"
+        )
+    end
+
+    :ok
+  end
+
+  # The phones' own push path: a message in the owner's phone chat, pushed to
+  # every paired phone that is away from it, while the phones' channel runs.
+  defp push_to_phones(sentence, key) do
+    channels =
+      :fermix_core |> Application.get_env(:jobs, []) |> Keyword.get(:delivery_channels, %{})
+
+    with {:ok, adapter} <- ChannelSend.resolve_adapter("mobile", channels: channels),
+         {:ok, profile} <- phone_chat(adapter) do
+      ChannelSend.with_timeout(@push_timeout_ms, fn ->
+        ChannelSend.send("mobile", profile, sentence, [proactive_key: key], channels: channels)
+      end)
+    end
+  end
+
+  defp phone_chat(adapter) do
+    case adapter.owner_inbox() do
+      {:ok, profile} -> {:ok, profile}
+      :unavailable -> {:error, :phones_off}
+    end
   end
 
   defp record_outcome({target, {:ok, stored}}, status, facts) do

@@ -35,6 +35,15 @@ defmodule FermixCore.Management.Copy do
   declared name is data, so no rule reads it: the sandbox row labelled with the
   environment variable an operator allowed is `UPPER_SNAKE` by convention, and
   it is the operator's word rather than one this daemon wrote.
+
+  The words of `home.status.summary` (M75 lean v1 §7) are held here too, beside
+  the rules (`summary_sentence/2`, `summary_label/2`, `token_steps/0`): one
+  sentence and at most one action for where Always On stands, which the Mac
+  app, the Linux app, the setup page and `fermix home status` print as they
+  are (`FermixCore.Management.HomeSummary` picks them). They obey one rule
+  more, `internal_words/1`: none of the engine's own words for the move
+  (epoch, primary, candidate, relay, rail, phase, ledger, key id) reaches an
+  owner.
   """
 
   alias FermixCore.Providers.Descriptor
@@ -48,6 +57,15 @@ defmodule FermixCore.Management.Copy do
   @version ~r/\bv?\d+\.\d+(?:\.\d+)?\b/
   @wire_token ~r/\b(?:[a-z][a-z0-9]*(?:_[a-z0-9]+)+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b/
   @capitalised ~r/\b[A-Z][a-z]+\b/
+  # The engine's own words for the move, which no summary word may carry.
+  @internal_words ~r/\b(?:epochs?|primar(?:y|ies)|candidates?|relays?|rails?|phases?|ledgers?|key ids?)\b/i
+  @cities %{"fsn1" => "Falkenstein", "nbg1" => "Nuremberg", "hel1" => "Helsinki"}
+  @summary_keys ~w(off connect choose starting installing connecting deleting ready moving
+                   waiting on on_backup on_no_backup undone retired candidate_waiting
+                   candidate_receiving primary turned_off cannot_reach deleted not_set_up
+                   server_not_set_up waited_too_long server_waited_too_long token_refused
+                   update disk_full server_disk_full backup_old backup_none server_backup_old
+                   backup_push not_ready turned_off_cost server_costs billing data)a
   # A sentence starts at the beginning of the string and after a terminator or
   # a colon, which is how this copy introduces a command or a list.
   @sentence_break ~r/(?<=[.?:])\s+/
@@ -68,6 +86,10 @@ defmodule FermixCore.Management.Copy do
     "Falkenstein",
     "Nuremberg",
     "Helsinki",
+    # The two places in Hetzner's console the token steps name, as it labels
+    # them.
+    "API Tokens",
+    "Security",
     "Apple ID",
     "Apple",
     "Full Disk Access",
@@ -197,6 +219,189 @@ defmodule FermixCore.Management.Copy do
     |> Enum.sort_by(&(-String.length(&1)))
     |> Enum.reduce(text, &String.replace(&2, &1, "-"))
   end
+
+  # -- the Always On summary's words (M75 lean v1 §7) ---------------------------
+
+  @doc """
+  The internal words `text` carries (`@internal_words`, any case): the
+  engine's own words for the move, which no summary word may name.
+  """
+  @spec internal_words(String.t()) :: [String.t()]
+  def internal_words(text) when is_binary(text),
+    do: @internal_words |> Regex.scan(text) |> Enum.map(&hd/1)
+
+  @doc "Every key `summary_sentence/2` takes, so the copy gate walks them all."
+  @spec summary_keys() :: [atom()]
+  def summary_keys, do: @summary_keys
+
+  @doc """
+  One sentence of `home.status.summary`, by its key, with the values it
+  names: `machine` ("Mac" or "computer"), `age` (seconds since the last
+  backup), `days`, `percent`, `block` (a readiness sentence) or `provider`.
+  """
+  @spec summary_sentence(atom(), map()) :: String.t()
+  def summary_sentence(:off, %{machine: "Mac"}),
+    do:
+      "Keep Fermix running when this Mac sleeps. It moves to a server you own. iMessage, " <>
+        "voice calls and meetings stop after the move."
+
+  def summary_sentence(:off, %{machine: machine}),
+    do:
+      "Keep Fermix running when this #{machine} sleeps. It moves to a server you own. Voice " <>
+        "calls and meetings stop after the move."
+
+  def summary_sentence(:connect, _values),
+    do: "Paste a Hetzner API token to let Fermix create your server."
+
+  def summary_sentence(:choose, _values),
+    do: "Your Hetzner token works, so choose the server Fermix creates."
+
+  def summary_sentence(:starting, _values), do: "Starting your server…"
+  def summary_sentence(:installing, _values), do: "Installing Fermix on your server…"
+  def summary_sentence(:connecting, _values), do: "Connecting your server…"
+  def summary_sentence(:deleting, _values), do: "Deleting your server…"
+
+  def summary_sentence(:ready, %{machine: machine}),
+    do:
+      "Your server is ready for the move. There is no way back to this #{machine} in this " <>
+        "version."
+
+  def summary_sentence(:moving, %{machine: machine}),
+    do:
+      "Moving. This #{machine} restarts and reconnects to your server. Messages wait until " <>
+        "it is done."
+
+  def summary_sentence(:waiting, _values),
+    do: "Waiting for your server to confirm the move. Fermix keeps trying."
+
+  def summary_sentence(:on, _values), do: "Fermix runs on your server."
+
+  def summary_sentence(:on_backup, %{age: age}),
+    do: "Fermix runs on your server. Last backup #{ago(age)}."
+
+  def summary_sentence(:on_no_backup, _values),
+    do: "Fermix runs on your server. No backup has finished yet."
+
+  def summary_sentence(:undone, %{machine: machine}),
+    do: "The move was undone. Fermix still runs on this #{machine}."
+
+  def summary_sentence(:retired, %{machine: machine}),
+    do: "Fermix moved to your server, and this #{machine} is no longer connected to it."
+
+  def summary_sentence(:candidate_waiting, _values), do: "This server is waiting for its move."
+  def summary_sentence(:candidate_receiving, _values), do: "Your home is moving to this server."
+  def summary_sentence(:primary, _values), do: "Fermix runs here."
+  def summary_sentence(:turned_off, _values), do: "Your server is turned off."
+
+  def summary_sentence(:cannot_reach, _values),
+    do: "Fermix cannot reach your server. Your messages wait until it is back."
+
+  def summary_sentence(:deleted, _values), do: "Your server was deleted in Hetzner."
+  def summary_sentence(:not_set_up, _values), do: "Your server did not finish setting up."
+  def summary_sentence(:server_not_set_up, _values), do: "This server did not finish setting up."
+
+  def summary_sentence(:waited_too_long, _values),
+    do: "Your server waited too long and must be set up again."
+
+  def summary_sentence(:server_waited_too_long, _values),
+    do: "This server waited too long for its move and must be set up again."
+
+  def summary_sentence(:token_refused, _values), do: "Hetzner no longer accepts Fermix's token."
+
+  def summary_sentence(:update, %{machine: machine}),
+    do: "Update Fermix on this #{machine} to keep using Always On."
+
+  def summary_sentence(:disk_full, %{percent: percent}),
+    do: "Your server's disk is #{percent}% full."
+
+  def summary_sentence(:server_disk_full, %{percent: percent}),
+    do: "This server's disk is #{percent}% full."
+
+  def summary_sentence(:backup_old, %{days: days, machine: machine}),
+    do: "Your last backup is #{days} days old. It runs when this #{machine} is online."
+
+  def summary_sentence(:backup_none, %{days: days, machine: machine}),
+    do:
+      "No backup has finished since the move #{days} days ago. It runs when this " <>
+        "#{machine} is online."
+
+  def summary_sentence(:server_backup_old, %{days: days}),
+    do: "The last backup is #{days} days old. It runs when your Mac is online."
+
+  def summary_sentence(:backup_push, %{days: days}),
+    do:
+      "Your last backup is #{days} days old. It runs when your Mac is online: open Fermix " <>
+        "on your Mac to back up now."
+
+  def summary_sentence(:not_ready, %{block: block}), do: "The move cannot start yet. #{block}"
+
+  def summary_sentence(:turned_off_cost, _values),
+    do: "A turned-off server still costs its monthly price."
+
+  def summary_sentence(:server_costs, _values),
+    do: "Your server costs its monthly price until it is deleted."
+
+  def summary_sentence(:billing, _values),
+    do: "Hetzner bills by the hour until the server is deleted."
+
+  def summary_sentence(:data, %{provider: provider}),
+    do:
+      "Your conversations and memories, the secrets, the browser and traces live on your " <>
+        "server, and #{provider} can technically read its disk. Backups are encrypted to " <>
+        "your recovery passphrase."
+
+  @doc """
+  The label of one summary action, by its id; `create_in` names the city of
+  `location` (`fsn1`, `nbg1` or `hel1`).
+  """
+  @spec summary_label(atom(), map()) :: String.t()
+  def summary_label(:set_up, _values), do: "Set up"
+  def summary_label(:create_server, _values), do: "Create server"
+  def summary_label(:cancel, _values), do: "Cancel"
+  def summary_label(:move_now, _values), do: "Move now"
+  def summary_label(:try_again, _values), do: "Try again"
+  def summary_label(:learn_more, _values), do: "Learn more"
+  def summary_label(:turn_on, _values), do: "Turn it on"
+  def summary_label(:restart_server, _values), do: "Restart server"
+  def summary_label(:start_again, _values), do: "Start again"
+  def summary_label(:create_in, %{location: location}), do: "Create in #{city(location)}"
+  def summary_label(:open_hetzner, _values), do: "Open Hetzner"
+  def summary_label(:paste_token, _values), do: "Paste a new token"
+  def summary_label(:update, _values), do: "Update"
+  def summary_label(:back_up_now, _values), do: "Back up now"
+  def summary_label(:replace_server, _values), do: "Replace the server"
+  def summary_label(:check_again, _values), do: "Check again"
+  def summary_label(:own_server, _values), do: "Use my own Linux server"
+  def summary_label(:delete_server, _values), do: "Delete your server"
+
+  @doc """
+  The "How to get one" steps of the token screen (M75 lean v1 §2, L20): two-
+  factor sign-in first, and a project made for Fermix alone, since a token
+  reaches its whole project.
+  """
+  @spec token_steps() :: [String.t()]
+  def token_steps do
+    [
+      "Sign in to Hetzner's console and turn on two-factor sign-in for your account.",
+      "Make a new project for Fermix alone, so the token reaches nothing else.",
+      "In that project, open Security, then API Tokens, and generate a token with Read & " <>
+        "Write permission.",
+      "Paste the token here: Fermix checks it at once."
+    ]
+  end
+
+  @doc "The city of a Hetzner location Fermix creates a server in, as Hetzner names it."
+  @spec city(String.t()) :: String.t()
+  def city(location) when is_map_key(@cities, location), do: Map.fetch!(@cities, location)
+
+  # How long ago, in the largest whole unit: minutes, hours or days.
+  defp ago(seconds) when seconds < 60, do: "just now"
+  defp ago(seconds) when seconds < 3_600, do: count(div(seconds, 60), "minute") <> " ago"
+  defp ago(seconds) when seconds < 86_400, do: count(div(seconds, 3_600), "hour") <> " ago"
+  defp ago(seconds), do: count(div(seconds, 86_400), "day") <> " ago"
+
+  defp count(1, unit), do: "1 #{unit}"
+  defp count(n, unit), do: "#{n} #{unit}s"
 
   defp descriptor_names do
     Descriptor.all()

@@ -867,7 +867,7 @@ defmodule FermixCore.Management.Router do
       {:ok, _malformed} ->
         {:ok, %{"sections" => own, "primary_missing" => @primary_sections_unread}}
 
-      {:missing, sentence} ->
+      {missing, sentence} when missing in [:missing, :too_old] ->
         {:ok, %{"sections" => own, "primary_missing" => sentence}}
     end
   end
