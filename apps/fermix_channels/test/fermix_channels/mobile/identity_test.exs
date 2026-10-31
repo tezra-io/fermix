@@ -103,16 +103,18 @@ defmodule FermixChannels.Mobile.IdentityTest do
 
   # M75 D14: the primary boot writes a home's first epoch, before the phone
   # subtree starts (the setup's `PrimaryHome.booted!/1`); the identity carries
-  # it and never writes it.
+  # it and never writes it. What shows the file unwritten is its inode, its
+  # times of change and its bytes, never its access time, which a read moves
+  # on Linux.
   test "a new identity carries the epoch the home booted with", %{root: root} do
     {:ok, paths} = Identity.paths(root: root)
     assert paths.epoch == Epoch.path(root)
-    before = File.stat!(paths.epoch, time: :posix)
+    before = unwritten(paths.epoch)
 
     assert {:ok, %Identity{primary_epoch: 1}} = Identity.ensure(root: root)
     assert {:ok, %Identity{primary_epoch: 1}} = Identity.load(root: root)
     assert Identity.primary_epoch(root: root) == {:ok, 1}
-    assert File.stat!(paths.epoch, time: :posix) == before
+    assert unwritten(paths.epoch) == before
   end
 
   # A restored home may be past 1 before any phone pairs; a move raises it
@@ -304,4 +306,14 @@ defmodule FermixChannels.Mobile.IdentityTest do
 
   defp mode(path), do: Bitwise.band(File.stat!(path).mode, 0o777)
   defp unique_id, do: System.unique_integer([:positive, :monotonic])
+
+  # A file's facts that only a write changes: a rename into place mints a new
+  # inode, a write in place moves mtime and ctime, and either can change the
+  # size and the bytes. The access time is left out.
+  defp unwritten(path) do
+    %File.Stat{inode: inode, mtime: mtime, ctime: ctime, size: size} =
+      File.stat!(path, time: :posix)
+
+    {inode, mtime, ctime, size, File.read!(path)}
+  end
 end
