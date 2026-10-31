@@ -74,13 +74,15 @@ defmodule FermixCore.Home.StatusWatchNoticesTest do
     assert reads(ctx) == 2
   end
 
-  test "a settings write reads the summary again (the off line names what stops)", ctx do
+  # It feeds only the `off` line, which is never told: an app forgets Always
+  # On while it is off, and reads that line when its pane opens.
+  test "a settings write reads nothing", ctx do
     assert :ok =
              ConfigStore.save_snapshot(%{fermix_core: [], fermix_channels: [], fermix_web: []})
 
     assert File.exists?(Path.join(ctx.home, "config.toml"))
     settle()
-    assert reads(ctx) == 2
+    assert reads(ctx) == 1
   end
 
   defp reads(ctx), do: ctx.reads |> Agent.get(& &1) |> length()

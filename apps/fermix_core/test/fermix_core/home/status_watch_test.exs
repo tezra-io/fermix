@@ -137,13 +137,20 @@ defmodule FermixCore.Home.StatusWatchTest do
       settle(ctx)
       assert reads(ctx) == 2
 
-      for kind <- [:ledger, :enrollment, :move, :config] do
+      for kind <- [:ledger, :enrollment, :move] do
         :ok = StatusWatch.changed(ctx.watch, kind)
         settle(ctx)
       end
 
-      assert reads(ctx) == 6
+      assert reads(ctx) == 5
       refute_received :home_status_changed
+    end
+
+    # A settings write feeds only the `off` line, which an app reads when its
+    # pane opens and is never told (the owner's rule: an app forgets Always
+    # On while it is off), so it is nothing the watch hears.
+    test "a settings write is not a change the watch hears", ctx do
+      assert_raise FunctionClauseError, fn -> StatusWatch.changed(ctx.watch, :config) end
     end
   end
 
