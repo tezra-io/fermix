@@ -24,24 +24,31 @@ defmodule FermixCore.Browser.BrowserObserveTest do
 
     alias FermixCore.Browser.Error
 
-    # `url` and `ready` are QUEUES read by the live-URL probe, oldest first, and
-    # the last entry sticks: that is how a page that commits a navigation a
-    # moment after the click, or reaches "complete" a poll later, is driven.
-    # Everything else (the tab list, the action's own `location.href` receipt)
-    # reads the head, which is exactly the stale sample a receipt takes before
-    # the navigation commits.
+    # `url`, `ready`, `elements` and `text` are QUEUES read by the live-URL
+    # probe, oldest first, and the last entry sticks: that is how a page that
+    # commits a navigation a moment after the click, reaches "complete" a poll
+    # later, or is still filling in its results, is driven. Everything else (the
+    # tab list, the action's own `location.href` receipt) reads the head, which
+    # is exactly the stale sample a receipt takes before the navigation commits.
+    # `log` keeps what each probe answered and each render, newest first, so a
+    # test can tell what the page looked like when it was read.
     def start_link(_url, opts) do
       state = %{
         owner: Keyword.get(opts, :owner),
         tree: :before,
         url: ["https://example.com/form"],
         ready: ["complete"],
+        elements: [4],
+        text: [120],
+        log: [],
         # Whether each live-URL probe answers at all — same queue discipline.
         # `:error` is what Chrome returns in the moments right after a commit
         # ("Execution context was destroyed"), which is exactly when the settle
         # polls.
         meta: [:ok],
         ax: :ok,
+        # How long the page takes to build its accessibility tree.
+        ax_ms: 0,
         href: :ok,
         probes: 0
       }
@@ -51,6 +58,9 @@ defmodule FermixCore.Browser.BrowserObserveTest do
 
     def close(pid), do: Agent.stop(pid)
 
+    # How long the page takes to answer a probe of its live URL.
+    @probe_reply_ms 10
+
     def command(pid, method, params, _session_id, timeout_ms, _grace_ms) do
       page = Agent.get(pid, & &1)
 
@@ -58,8 +68,22 @@ defmodule FermixCore.Browser.BrowserObserveTest do
         send(collector, {:cdp, method, params, timeout_ms})
       end
 
-      run(pid, page, method, params)
+      if is_integer(timeout_ms) and timeout_ms < reply_ms(page, method, params),
+        do: {:error, Error.new("cdp_timeout", "#{method} timed out")},
+        else: run(pid, page, method, params)
     end
+
+    # How long the page takes to answer: a command given less time than that
+    # misses the reply, as Chrome's own timeout would. A probe sent with the
+    # budget spent reads a page that answered all through the wait as one that
+    # never answered, and a render bounded too tightly reads a large page as one
+    # that could not be seen.
+    defp reply_ms(_page, "Runtime.evaluate", %{expression: expression}) do
+      if String.contains?(expression, "document.location.href"), do: @probe_reply_ms, else: 0
+    end
+
+    defp reply_ms(page, "Accessibility.getFullAXTree", _params), do: page.ax_ms
+    defp reply_ms(_page, _method, _params), do: 0
 
     defp run(_pid, page, "Target.getTargets", _params) do
       {:ok,
@@ -87,8 +111,10 @@ defmodule FermixCore.Browser.BrowserObserveTest do
     defp run(_pid, %{ax: :null_nodes}, "Accessibility.getFullAXTree", _params),
       do: {:ok, %{"nodes" => nil}}
 
-    defp run(_pid, page, "Accessibility.getFullAXTree", _params),
-      do: {:ok, %{"nodes" => ax_nodes(page.tree)}}
+    defp run(pid, page, "Accessibility.getFullAXTree", _params) do
+      Agent.update(pid, &%{&1 | log: [:render | &1.log]})
+      {:ok, %{"nodes" => ax_nodes(page.tree)}}
+    end
 
     defp run(_pid, _page, "DOM.getBoxModel", _params),
       do: {:ok, %{"model" => %{"content" => [0, 0, 20, 0, 20, 20, 0, 20]}}}
@@ -132,17 +158,29 @@ defmodule FermixCore.Browser.BrowserObserveTest do
       do: {:error, Error.new("cdp_error", "Execution context was destroyed.")}
 
     defp probe_answer(page) do
-      meta = %{"url" => current(page.url), "title" => "Form", "ready" => current(page.ready)}
+      meta = %{
+        "url" => current(page.url),
+        "title" => "Form",
+        "ready" => current(page.ready),
+        "elements" => current(page.elements),
+        "text" => current(page.text)
+      }
+
       {:ok, %{"result" => %{"value" => meta}}}
     end
 
     defp advance_probe(state) do
+      seen = {:probe, current(state.ready), current(state.elements), current(state.text)}
+
       %{
         state
         | url: advance(state.url),
           ready: advance(state.ready),
+          elements: advance(state.elements),
+          text: advance(state.text),
           meta: advance(state.meta),
-          probes: state.probes + 1
+          probes: state.probes + 1,
+          log: [seen | state.log]
       }
     end
 
@@ -244,6 +282,36 @@ defmodule FermixCore.Browser.BrowserObserveTest do
     after
       0 -> Enum.reverse(acc)
     end
+  end
+
+  # What each probe of the page saw, oldest first, up to the first render since
+  # the log was last cleared.
+  defp probes_before_render do
+    @page |> Agent.get(& &1.log) |> Enum.reverse() |> Enum.take_while(&(&1 != :render))
+  end
+
+  # A second server on the same fake page that reads the test's clock, which
+  # moves only when the server sleeps between polls: what a look waits for is
+  # counted in polls, so a busy runner cannot change where it ends, and the
+  # last poll of a budget lands on the deadline itself.
+  defp counted_server(config) do
+    start_supervised!(%{
+      id: :observe_clock,
+      start: {Agent, :start_link, [fn -> 0 end, [name: :observe_fake_clock]]}
+    })
+
+    start_supervised!(
+      {ProfileServer,
+       owner_key: "owner-observe-counted",
+       profile_name: "fermix",
+       profile: %{cdp_url: "ws://fake/observe"},
+       config: config,
+       launcher: NoLauncher,
+       connection: Page,
+       now_fn: fn -> Agent.get(:observe_fake_clock, & &1) end,
+       sleep_fn: fn ms -> Agent.update(:observe_fake_clock, &(&1 + ms)) end},
+      id: :counted_server
+    )
   end
 
   # The whole point: a click that restructures the page hands back the new
@@ -481,6 +549,44 @@ defmodule FermixCore.Browser.BrowserObserveTest do
              req(pid, "act", %{"kind" => "click", "ref" => "textbox_1"})
   end
 
+  # A click whose request is still re-rendering the page (a list filling in, a
+  # spinner giving way to results) has a complete document and an address that
+  # reads the same on every poll. The look waits until what is on the page
+  # holds still too, so it is not read mid-render.
+  test "a page still re-rendering after a click is looked at once it holds still",
+       %{config: config} do
+    pid = counted_server(config)
+    snapshotted(pid)
+    change_page()
+    Agent.update(@page, &%{&1 | elements: [4, 9], text: [120, 120, 480], log: []})
+
+    assert {:ok, %{"page" => "changed"}} =
+             req(pid, "act", %{"kind" => "click", "ref" => "textbox_1"})
+
+    probes = probes_before_render()
+
+    assert Enum.take(probes, -2) == [{:probe, "complete", 9, 480}, {:probe, "complete", 9, 480}],
+           "the page was read before it held still: #{inspect(probes)}"
+  end
+
+  # Two polls that agree are not yet a page at rest: it must read the same for
+  # `rest_ms`. On a clock that moves one poll between probes, a page that never
+  # changes is read on the first probe a whole `rest_ms` after the first one
+  # saw it, never on the second.
+  test "a page is looked at once it has held still for rest_ms, not after two polls",
+       %{config: config} do
+    pid = counted_server(config)
+    snapshotted(pid)
+    Agent.update(@page, &%{&1 | log: []})
+
+    assert {:ok, %{"page" => "unchanged"}} =
+             req(pid, "act", %{"kind" => "click", "ref" => "textbox_1"})
+
+    poll = config.wait_poll_interval_ms
+    polls_at_rest = div(Config.act_limits().rest_ms + poll - 1, poll)
+    assert length(probes_before_render()) == polls_at_rest + 1
+  end
+
   # A document that never reaches "complete" is routine (a hung subresource, a
   # streaming response). It answers every probe instantly, so nothing but an
   # explicit deadline ends the poll — and `request/2` is an :infinity call, so
@@ -488,14 +594,17 @@ defmodule FermixCore.Browser.BrowserObserveTest do
   # page is still ANSWERING, so what is there is rendered rather than withheld:
   # `ready_state` is how the model knows it is looking at a page that was still
   # building (§3.6, revised).
-  test "a page still building at the cap is handed back as it stands", %{pid: pid} do
+  #
+  # The settle's last sleep ends on the deadline itself, and the probe it sends
+  # then still gets a poll to answer in: a probe sent with the budget spent
+  # missed the reply, and a page that answered every poll came back unobserved.
+  test "a page still building at the cap is handed back as it stands", %{config: config} do
+    pid = counted_server(config)
     snapshotted(pid)
     change_page()
     Agent.update(@page, &%{&1 | ready: ["interactive"], probes: 0})
 
-    started = System.monotonic_time(:millisecond)
     assert {:ok, result} = req(pid, "act", %{"kind" => "click", "ref" => "textbox_1"})
-    elapsed = System.monotonic_time(:millisecond) - started
 
     assert result["ok"] == true
     assert result["page"] == "changed"
@@ -503,12 +612,35 @@ defmodule FermixCore.Browser.BrowserObserveTest do
     assert result["ready_state"] == "interactive"
 
     budget = Config.act_limits().settle_budget_ms
-    assert elapsed < budget * 2, "the settle loop ran for #{elapsed} ms"
+    poll = config.wait_poll_interval_ms
+    assert Agent.get(:observe_fake_clock, & &1) == budget, "the look did not wait out the budget"
 
     probes = Agent.get(@page, & &1.probes)
-    max_probes = div(budget, 100) + 2
+    max_probes = div(budget, poll) + 2
     assert probes <= max_probes, "the settle loop probed #{probes} times"
     assert probes > 1, "the settle loop never polled at all"
+  end
+
+  # The same deadline seen from a page that settles on it: the poll that lands
+  # on the budget is the first to see the page a whole `rest_ms` still, so the
+  # look must still read it, not end on a deadline the settle already spent.
+  test "a page that comes to rest on the last poll of the budget is read", %{config: config} do
+    pid = counted_server(config)
+    snapshotted(pid)
+    change_page()
+
+    poll = config.wait_poll_interval_ms
+    polls_at_rest = div(Config.act_limits().rest_ms + poll - 1, poll)
+    first_still = div(Config.act_limits().settle_budget_ms, poll) + 1 - polls_at_rest
+    Agent.update(@page, &%{&1 | text: Enum.to_list(1..first_still), log: []})
+
+    assert {:ok, result} = req(pid, "act", %{"kind" => "click", "ref" => "textbox_1"})
+
+    assert result["page"] == "changed"
+    assert result["ready_state"] == "complete"
+
+    assert Agent.get(:observe_fake_clock, & &1) == Config.act_limits().settle_budget_ms,
+           "the page came to rest before the budget, so this proves nothing"
   end
 
   # The other half of the same rule: a page that settled says so, so a reader
@@ -539,20 +671,20 @@ defmodule FermixCore.Browser.BrowserObserveTest do
 
   # And a page that never answers is still bounded: the last error, with the
   # budget spent, is the verdict.
-  test "a page that never answers the probe is unobserved, inside the budget", %{pid: pid} do
+  test "a page that never answers the probe is unobserved, inside the budget",
+       %{config: config} do
+    pid = counted_server(config)
     snapshotted(pid)
     Agent.update(@page, &%{&1 | meta: [:error], probes: 0})
 
-    started = System.monotonic_time(:millisecond)
     assert {:ok, result} = req(pid, "act", %{"kind" => "click", "ref" => "textbox_1"})
-    elapsed = System.monotonic_time(:millisecond) - started
 
     assert result["ok"] == true
     assert result["page"] == "unobserved"
     refute Map.has_key?(result, "snapshot")
 
-    budget = Config.act_limits().settle_budget_ms
-    assert elapsed < budget * 2, "the settle loop ran for #{elapsed} ms"
+    assert Agent.get(:observe_fake_clock, & &1) == Config.act_limits().settle_budget_ms,
+           "the look did not end at the budget"
   end
 
   # A page holding a JS dialog answers nothing, and a dialog opened by the click
@@ -606,6 +738,29 @@ defmodule FermixCore.Browser.BrowserObserveTest do
              req(pid, "act", %{"kind" => "click", "ref" => "textbox_1"})
   end
 
+  # A navigation's look has the longer budget because its settle is the only
+  # load wait, and a page that settles early keeps the rest of that budget for
+  # the render rather than one settle budget counted from the settle: a large
+  # page whose accessibility tree takes longer than one settle budget to build
+  # is still read, not handed back unobserved. That a render never gets less
+  # than one settle budget is pinned by the page that comes to rest on the last
+  # poll of the budget, not here.
+  test "a navigation that settles early keeps the rest of its budget for the render",
+       %{config: config} do
+    pid = counted_server(config)
+    assert {:ok, _} = req(pid, "start")
+    settle_budget = Config.act_limits().settle_budget_ms
+    Agent.update(@page, &%{&1 | ax_ms: settle_budget + config.wait_poll_interval_ms})
+
+    assert {:ok, result} = req(pid, "open", %{"url" => "https://example.com/form"})
+
+    assert result["page"] == "changed"
+    assert result["snapshot"] =~ "Where to?"
+
+    assert Agent.get(:observe_fake_clock, & &1) < settle_budget,
+           "the navigation did not settle early, so this proves nothing"
+  end
+
   # A new tab answers from its initial empty document until the request commits,
   # and that document is complete and its url is stable — so a settle that did
   # not know what it was leaving would hand back the blank page the open exists
@@ -628,32 +783,31 @@ defmodule FermixCore.Browser.BrowserObserveTest do
   # The bound on that wait: a request that never commits costs the navigation
   # budget and not the turn. The blank page it never left is not the page that
   # was asked for, so there is nothing honest to render at the cap either.
-  test "a request that never commits gives up inside the budget", %{pid: pid} do
+  test "a request that never commits gives up inside the budget", %{config: config} do
+    pid = counted_server(config)
     assert {:ok, _} = req(pid, "start")
     Agent.update(@page, &%{&1 | url: ["about:blank"]})
 
-    started = System.monotonic_time(:millisecond)
     assert {:ok, result} = req(pid, "open", %{"url" => "https://example.com/form"})
-    elapsed = System.monotonic_time(:millisecond) - started
 
     assert result["page"] == "unobserved"
     refute Map.has_key?(result, "snapshot")
 
-    budget = Config.act_limits().navigation_budget_ms
-    assert elapsed < budget * 2, "the settle loop ran for #{elapsed} ms"
+    assert Agent.get(:observe_fake_clock, & &1) == Config.act_limits().navigation_budget_ms,
+           "the look did not end at the navigation budget"
   end
 
   # The defect this cap exists for: an ordinary site takes seconds to reach
   # `complete`, and answering `unobserved` with no snapshot would spend the wait
   # AND still cost the snapshot turn. The page is rendered as it stands, and
   # `ready_state` says it was still building.
-  test "an open of a page still loading at the cap hands back what is there", %{pid: pid} do
+  test "an open of a page still loading at the cap hands back what is there",
+       %{config: config} do
+    pid = counted_server(config)
     assert {:ok, _} = req(pid, "start")
     Agent.update(@page, &%{&1 | ready: ["interactive"], probes: 0})
 
-    started = System.monotonic_time(:millisecond)
     assert {:ok, result} = req(pid, "open", %{"url" => "https://example.com/form"})
-    elapsed = System.monotonic_time(:millisecond) - started
 
     assert result["page"] == "changed"
     assert result["snapshot"] =~ "Where to?"
@@ -662,44 +816,54 @@ defmodule FermixCore.Browser.BrowserObserveTest do
     # sample the tab list carried.
     assert result["url"] == "https://example.com/form"
 
-    budget = Config.act_limits().navigation_budget_ms
-    assert elapsed >= budget, "the look gave up after #{elapsed} ms, before the cap"
-    assert elapsed < budget * 2, "the settle loop ran for #{elapsed} ms"
+    assert Agent.get(:observe_fake_clock, & &1) == Config.act_limits().navigation_budget_ms,
+           "the look did not wait out the navigation budget"
   end
 
   # And a page that finishes inside the cap is answered when it finishes, not at
   # the cap: the budget is a ceiling, never a wait.
-  test "a page that completes inside the cap is answered as soon as it does", %{pid: pid} do
+  test "a page that completes inside the cap is answered as soon as it does",
+       %{config: config} do
+    pid = counted_server(config)
     assert {:ok, _} = req(pid, "start")
-    Agent.update(@page, &%{&1 | ready: List.duplicate("interactive", 15) ++ ["complete"]})
 
-    started = System.monotonic_time(:millisecond)
+    Agent.update(
+      @page,
+      &%{&1 | ready: List.duplicate("interactive", 15) ++ ["complete"], log: []}
+    )
+
     assert {:ok, result} = req(pid, "open", %{"url" => "https://example.com/form"})
-    elapsed = System.monotonic_time(:millisecond) - started
 
     assert result["page"] == "changed"
     assert result["ready_state"] == "complete"
 
-    budget = Config.act_limits().navigation_budget_ms
-    assert elapsed < budget, "the look waited #{elapsed} ms, out to the cap"
-    assert elapsed > 1_000, "the look answered in #{elapsed} ms without waiting at all"
+    # Its address, title and content held still while it loaded, so it is read
+    # on the very poll that first sees it complete: every poll before that one
+    # saw it loading, and none was spent after it.
+    {loading, complete} = Enum.split_while(probes_before_render(), &(elem(&1, 1) != "complete"))
+    assert length(loading) == 15
+    assert [{:probe, "complete", _elements, _text}] = complete
+
+    clock = Agent.get(:observe_fake_clock, & &1)
+    assert clock < Config.act_limits().navigation_budget_ms, "the look waited out to the cap"
+    assert clock > 1_000, "the look answered at #{clock} ms without waiting at all"
   end
 
   # A page that cannot be looked at AT ALL is still `unobserved`: a dialog opened
   # on load blocks page script, so every probe fails and the budget bounds it.
-  test "a page that answers nothing on load is unobserved, inside the budget", %{pid: pid} do
+  test "a page that answers nothing on load is unobserved, inside the budget",
+       %{config: config} do
+    pid = counted_server(config)
     assert {:ok, _} = req(pid, "start")
     Agent.update(@page, &%{&1 | meta: [:error]})
 
-    started = System.monotonic_time(:millisecond)
     assert {:ok, result} = req(pid, "open", %{"url" => "https://example.com/form"})
-    elapsed = System.monotonic_time(:millisecond) - started
 
     assert result["page"] == "unobserved"
     refute Map.has_key?(result, "snapshot")
 
-    budget = Config.act_limits().navigation_budget_ms
-    assert elapsed < budget * 2, "the settle loop ran for #{elapsed} ms"
+    assert Agent.get(:observe_fake_clock, & &1) == Config.act_limits().navigation_budget_ms,
+           "the look did not end at the navigation budget"
   end
 
   # The session `open` created is part of the state the look returns, whichever
@@ -845,5 +1009,94 @@ defmodule FermixCore.Browser.BrowserObserveTest do
       assert timeout <= budget,
              "`#{method}` was given #{timeout} ms, not the #{budget} ms settle budget"
     end
+  end
+
+  # ── an explicit `snapshot` and a load in flight ────────────────────────────
+
+  # A snapshot asked for while a load is in flight would read a page that is
+  # not there yet. It waits for the load through the same settle a look after
+  # an act uses, then reads.
+  test "a snapshot that finds a load in flight waits for the page", %{config: config} do
+    pid = counted_server(config)
+    assert {:ok, _} = req(pid, "start")
+    Agent.update(@page, &%{&1 | ready: ["loading", "interactive", "complete"], log: []})
+
+    assert {:ok, result} = req(pid, "snapshot")
+
+    assert result["ready_state"] == "complete"
+    assert {:probe, "complete", _elements, _text} = List.last(probes_before_render())
+
+    assert Agent.get(:observe_fake_clock, & &1) < Config.act_limits().settle_budget_ms,
+           "the snapshot waited out the budget for a page that finished"
+  end
+
+  # The wait is bounded by the settle budget and running out of it is not an
+  # error: the page is read as it stands, and `ready_state` says it was still
+  # building. The wait's last poll lands on the deadline itself, and the page
+  # answering it is read, not refused as one whose address nobody could read.
+  test "a snapshot of a page still loading at the budget reads it as it stands",
+       %{config: config} do
+    pid = counted_server(config)
+    assert {:ok, _} = req(pid, "start")
+    Agent.update(@page, &%{&1 | ready: ["interactive"], log: []})
+
+    assert {:ok, result} = req(pid, "snapshot")
+
+    assert result["snapshot"] =~ "Where to?"
+    assert result["ready_state"] == "interactive"
+    assert length(probes_before_render()) > 1, "the snapshot read the page without waiting"
+
+    assert Agent.get(:observe_fake_clock, & &1) == Config.act_limits().settle_budget_ms,
+           "the snapshot did not wait out the budget"
+  end
+
+  # A finished page is read at once: the read gate's probe is the only one.
+  test "a snapshot of a finished page reads it at once", %{pid: pid} do
+    assert {:ok, _} = req(pid, "start")
+    Agent.update(@page, &%{&1 | log: []})
+
+    assert {:ok, %{"ready_state" => "complete"}} = req(pid, "snapshot")
+    assert [_gate] = probes_before_render()
+  end
+
+  # The read gate is asked on every poll of the wait, as in a look after an
+  # act: a load that lands on a host the policy will not read is refused, not
+  # read.
+  test "a load that lands on a blocked host while a snapshot waits is refused", %{pid: pid} do
+    assert {:ok, _} = req(pid, "start")
+
+    Agent.update(
+      @page,
+      &%{
+        &1
+        | ready: ["loading"],
+          url: ["https://example.com/form", "http://10.0.0.8/admin"],
+          log: []
+      }
+    )
+
+    assert {:error, %Error{code: "read_blocked"}} = req(pid, "snapshot")
+
+    # Refused by the wait's first poll, the first probe to see the blocked host,
+    # after the gate's own probe saw the page loading: not by the gate asked
+    # again once the wait ran out, and nothing was read.
+    assert [{:probe, "loading", _, _}, {:probe, "loading", _, _}] =
+             @page |> Agent.get(& &1.log) |> Enum.reverse()
+  end
+
+  # A page that stops answering while it loads cannot be put to the read gate
+  # at the end of the wait, so the snapshot is refused as the gate refuses a
+  # page whose address it cannot read.
+  test "a load that stops answering while a snapshot waits is refused as unreadable",
+       %{config: config} do
+    pid = counted_server(config)
+    assert {:ok, _} = req(pid, "start")
+    Agent.update(@page, &%{&1 | ready: ["loading"], meta: [:ok, :error], log: []})
+
+    assert {:error, %Error{code: "read_url_unavailable"}} = req(pid, "snapshot")
+    refute :render in Agent.get(@page, & &1.log)
+
+    assert Agent.get(:observe_fake_clock, & &1) == Config.act_limits().settle_budget_ms,
+           "the snapshot gave up before the budget"
   end
 end

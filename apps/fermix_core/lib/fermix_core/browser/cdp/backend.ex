@@ -91,7 +91,11 @@ defmodule FermixCore.Browser.CDP.Backend do
       # Why the granted tab went away, so the next request says what happened
       # rather than asking for a click that was already made.
       detached: nil,
+      # The clock the launch cooldown and an observation's budget and rest are
+      # read on, and the sleep between an observation's polls, so a test can
+      # count them in polls instead of timing them.
       now_fn: Keyword.get(opts, :now_fn, fn -> System.monotonic_time(:millisecond) end),
+      sleep_fn: Keyword.get(opts, :sleep_fn, &Process.sleep/1),
       runtime: nil,
       targets: %{},
       # Which tabs are whose (see the moduledoc): per conversation, its tabs, the
@@ -882,7 +886,14 @@ defmodule FermixCore.Browser.CDP.Backend do
     end
   end
 
-  @live_meta_js "({url: document.location.href, title: document.title, ready: document.readyState})"
+  # Where the page is, what it is called and how far its document has loaded,
+  # which every read reports, and how many elements and how much body text it
+  # has, which a settle compares from poll to poll (`settle/5`), as the app's
+  # pane does. One expression, so a poll stays one round trip.
+  @live_meta_js "({url: document.location.href, title: document.title, " <>
+                  "ready: document.readyState, " <>
+                  "elements: document.getElementsByTagName('*').length, " <>
+                  "text: document.body ? document.body.textContent.length : 0})"
 
   # The url/title a read reports must be LIVE — the cached Target.getTargets
   # values lag a client-side or redirect navigation, which is why fresh content
@@ -935,17 +946,42 @@ defmodule FermixCore.Browser.CDP.Backend do
   # exact moment its game began. Same family as `live_meta/2` above, which
   # already distrusts the cached url/title.
   defp snapshot_tab(opts, tab, state) do
-    with {:ok, rendered} <- render_tab(opts, tab, state, :none) do
+    with {:ok, tab, state} <- loaded_page(tab, state),
+         {:ok, rendered} <- render_tab(opts, tab, state, :none) do
       {:ok, snapshot_result(tab, rendered), remember_snapshot(state, tab, opts, rendered)}
+    end
+  end
+
+  # A `snapshot` that finds a load in flight waits for the page through the
+  # settle a look after an act uses, within the same budget, and then reads it
+  # as it stands: at the budget `ready_state` says it was still loading. The read
+  # gate is asked again of the page the wait ended on, which need not be the one
+  # it was first asked about. A finished page is read at once.
+  defp loaded_page(%{ready_state: "complete"} = tab, state), do: {:ok, tab, state}
+
+  defp loaded_page(tab, state) do
+    deadline = state.now_fn.() + Config.act_limits().settle_budget_ms
+
+    case settle(tab, state, %{leaving: nil}, deadline, nil) do
+      {verdict, _settled} when verdict in [:ok, :partial] -> live_page(tab, state)
+      {:blocked, %Error{} = error} -> {:error, error, state}
+      {:error, reason} -> {:error, live_url_unavailable(bounded_inspect(reason)), state}
     end
   end
 
   defp render_tab(opts, tab, state, deadline) do
     with {:ok, _} <-
-           command(state, "Accessibility.disable", %{}, tab.session_id, budget(deadline)),
-         {:ok, _} <- command(state, "Accessibility.enable", %{}, tab.session_id, budget(deadline)),
+           command(state, "Accessibility.disable", %{}, tab.session_id, budget(deadline, state)),
+         {:ok, _} <-
+           command(state, "Accessibility.enable", %{}, tab.session_id, budget(deadline, state)),
          {:ok, %{"nodes" => nodes}} when is_list(nodes) <-
-           command(state, "Accessibility.getFullAXTree", %{}, tab.session_id, budget(deadline)) do
+           command(
+             state,
+             "Accessibility.getFullAXTree",
+             %{},
+             tab.session_id,
+             budget(deadline, state)
+           ) do
       Snapshot.render(nodes, opts)
     else
       {:error, %Error{} = error} -> {:error, error}
@@ -971,8 +1007,8 @@ defmodule FermixCore.Browser.CDP.Backend do
   # `:none` hands `command/5` the configured action timeout; a deadline hands it
   # what is LEFT of the observation budget, so three AX commands can never cost
   # three budgets.
-  defp budget(:none), do: nil
-  defp budget(deadline), do: max(deadline - System.monotonic_time(:millisecond), 1)
+  defp budget(:none, _state), do: nil
+  defp budget(deadline, state), do: max(deadline - state.now_fn.(), 1)
 
   # The ref map and the mark a later observation compares against are written
   # together, because they describe the same view of the same page.
@@ -1526,7 +1562,7 @@ defmodule FermixCore.Browser.CDP.Backend do
   end
 
   defp url_receipt(state, tab, deadline) do
-    receipt(%{}, "url", url_value(state, tab, budget(deadline)))
+    receipt(%{}, "url", url_value(state, tab, budget(deadline, state)))
   end
 
   defp node_value(state, session_id, backend_node_id) do
@@ -1561,8 +1597,8 @@ defmodule FermixCore.Browser.CDP.Backend do
   # ── what the action changed ────────────────────────────────────────────────
 
   # The document a new tab answers from until its request commits. The empty
-  # document is complete and its url stable, so a settle that did not know what
-  # it was leaving would hand back the blank page the open exists to replace —
+  # document is complete and holds still, so a settle that did not know what it
+  # was leaving would hand back the blank page the open exists to replace —
   # and a navigation that commits nothing (a download, a 204) leaves the tab on
   # it. Nothing to leave when the blank page IS the request.
   defp leaving_document(uri) do
@@ -1602,7 +1638,7 @@ defmodule FermixCore.Browser.CDP.Backend do
   defp observe_navigation(result, _tab, state, :none), do: {:ok, result, state}
 
   defp observe_navigation(result, tab, state, mark) do
-    deadline = System.monotonic_time(:millisecond) + Config.act_limits().navigation_budget_ms
+    deadline = state.now_fn.() + Config.act_limits().navigation_budget_ms
     {result, state} = observe_page(result, tab, state, mark, deadline)
     {:ok, result, state}
   end
@@ -1616,7 +1652,7 @@ defmodule FermixCore.Browser.CDP.Backend do
 
   defp observe_deadline(true, tab, state) do
     if Map.has_key?(state.observations, tab.id),
-      do: System.monotonic_time(:millisecond) + Config.act_limits().settle_budget_ms,
+      do: state.now_fn.() + Config.act_limits().settle_budget_ms,
       else: :none
   end
 
@@ -1648,7 +1684,7 @@ defmodule FermixCore.Browser.CDP.Backend do
   # every branch below keeps the receipt and only says what could be seen. Same
   # rule as the receipts above — logged, never swallowed, never fatal.
   defp observe_attached(result, mark, tab, state, deadline) do
-    case rendered_view(settle(tab, state, mark, deadline, nil), deadline) do
+    case rendered_view(settle(tab, state, mark, deadline, nil), deadline, state) do
       {:ok, tab, deadline} ->
         observe_document(result, mark, tab, state, deadline)
 
@@ -1688,34 +1724,38 @@ defmodule FermixCore.Browser.CDP.Backend do
   end
 
   # One render, from one of two views of the page: the one that settled, or the
-  # one the budget ran out on while the page was still building. The second gets
-  # a fresh bound because the settle has just proved the page answers, and
-  # `render_within/4` will not start a render with a spent deadline — a look
-  # bounded to nothing is how the caller was handed nothing at all.
-  defp rendered_view({:partial, tab}, _deadline),
-    do: {:ok, tab, System.monotonic_time(:millisecond) + Config.act_limits().settle_budget_ms}
+  # one the budget ran out on while the page was still building. The render
+  # keeps what is left of the look's budget, which a navigation's settle that
+  # ends early leaves most of, but never less than one settle budget: the
+  # settle has just proved the page answers, its last poll may answer at the
+  # deadline itself, and `render_within/4` will not start a render with a spent
+  # deadline — a look bounded to nothing is how the caller was handed nothing at
+  # all.
+  defp rendered_view({verdict, tab}, deadline, state) when verdict in [:ok, :partial],
+    do: {:ok, tab, max(deadline, state.now_fn.() + Config.act_limits().settle_budget_ms)}
 
-  defp rendered_view({:ok, tab}, deadline), do: {:ok, tab, deadline}
-  defp rendered_view(other, _deadline), do: other
+  defp rendered_view(other, _deadline, _state), do: other
 
-  # Poll until the document is complete and its url is unchanged across one
-  # poll, bounded by the budget. Every probe carries what is LEFT of it: a JS
+  # Poll until the page holds still, bounded by the budget: the document is
+  # complete and its fingerprint (`fingerprint/1`) has read the same for
+  # `rest_ms`. Every probe carries what is LEFT of the budget, and never less
+  # than one poll (`live_meta_within/3`): a JS
   # dialog opened BY this action is not visible to this callback (dialog events
   # are only processed between callbacks) and blocks page script entirely, so
   # without the bound the observation would sit out the whole action budget.
   #
   # The real ceiling is not a flat budget and this does not pretend otherwise: a
   # command waits its own timeout and `command/5` adds `cdp_response_grace_ms`
-  # on top, the last poll may begin just under the deadline, and a page still
+  # on top, the last poll may begin at the deadline itself, and a page still
   # building at the deadline is then rendered inside one more settle budget — so
   # the worst case is the budget, plus one poll, plus one grace, plus that
   # render. That is the price of letting the server-side timer fire first with a
   # precise error, and of handing back a page that was nearly there rather than
   # nothing at all.
-  defp settle(tab, state, mark, deadline, previous_url) do
+  defp settle(tab, state, mark, deadline, held) do
     case live_meta_within(tab, state, deadline) do
-      {:ok, meta} -> settle_step(meta, tab, state, mark, deadline, previous_url)
-      {:error, reason} -> settle_retry(reason, tab, state, mark, deadline, previous_url)
+      {:ok, meta} -> settle_step(meta, tab, state, mark, deadline, held)
+      {:error, reason} -> settle_retry(reason, tab, state, mark, deadline)
     end
   end
 
@@ -1723,15 +1763,17 @@ defmodule FermixCore.Browser.CDP.Backend do
   # destroyed" is routine in the moments after a commit, which is exactly when
   # this probe runs (see `live_meta/2`). Only the LAST error, with the budget
   # spent, is reported — and a page that answers nothing at all still ends here,
-  # because every probe carries what is left of the budget.
-  defp settle_retry(reason, tab, state, mark, deadline, previous_url) do
-    remaining = deadline - System.monotonic_time(:millisecond)
+  # because every probe carries what is left of the budget. A poll that saw
+  # nothing did not see the page holding still, so the rest starts again at the
+  # next poll that answers.
+  defp settle_retry(reason, tab, state, mark, deadline) do
+    remaining = deadline - state.now_fn.()
 
     if remaining <= 0 do
       {:error, settle_reason(reason)}
     else
-      Process.sleep(min(state.config.wait_poll_interval_ms, remaining))
-      settle(tab, state, mark, deadline, previous_url)
+      state.sleep_fn.(min(state.config.wait_poll_interval_ms, remaining))
+      settle(tab, state, mark, deadline, nil)
     end
   end
 
@@ -1741,50 +1783,67 @@ defmodule FermixCore.Browser.CDP.Backend do
   # The read gate, re-asked on EVERY poll rather than once: a page that scripts
   # itself onto a private host mid-settle must not have its text returned, and
   # this is the same rule `wait` follows for the same reason.
-  defp settle_step(%{"url" => url} = meta, tab, state, mark, deadline, previous_url)
+  defp settle_step(%{"url" => url} = meta, tab, state, mark, deadline, held)
        when is_binary(url) do
     case Policy.read_verdict(url, state.config) do
-      :ok -> settle_ready(meta, url, tab, state, mark, deadline, previous_url)
+      :ok -> settle_ready(meta, url, tab, state, mark, deadline, hold(meta, held, state))
       {:error, %Error{} = error} -> {:blocked, error}
     end
   end
 
-  defp settle_step(meta, _tab, _state, _mark, _deadline, _previous_url),
+  defp settle_step(meta, _tab, _state, _mark, _deadline, _held),
     do: {:error, {:live_url_unavailable, bounded_inspect(meta)}}
 
-  # Settled: the document is complete, the url read the same twice running, and
-  # it is not the one the caller said it was leaving. The repeated `url` binding
-  # IS the comparison.
-  defp settle_ready(
-         %{"ready" => "complete"} = meta,
-         url,
-         tab,
-         _state,
-         %{leaving: leaving},
-         _deadline,
-         url
-       )
-       when url != leaving,
-       do: {:ok, settled_tab(tab, url, meta)}
+  # What the page looked like at this poll, and since when it has looked so: a
+  # fingerprint unlike the last poll's starts the rest again from now.
+  defp hold(meta, held, state) do
+    print = fingerprint(meta)
 
-  # The loop's bound. A document that never reaches "complete" — a hung
-  # subresource, a streaming response — answers every probe in microseconds, so
-  # nothing but this check ends the poll, and `request/2` is an `:infinity` call:
-  # an unbounded loop here is a wedged profile, not a slow one. Checked BEFORE
-  # the sleep, and the sleep never overruns the deadline, exactly as
-  # `continue_wait/4` does for `act wait`.
-  defp settle_ready(meta, url, tab, state, mark, deadline, _previous_url) do
-    remaining = deadline - System.monotonic_time(:millisecond)
-
-    if remaining <= 0 do
-      settle_expired(meta, url, tab, mark)
-    else
-      Process.sleep(min(state.config.wait_poll_interval_ms, remaining))
-      settle(tab, state, mark, deadline, url)
+    case held do
+      {^print, _since} -> held
+      _new_or_changed -> {print, state.now_fn.()}
     end
   end
 
-  # The budget is spent and the page is still answering. An ordinary site takes
+  # What a page is judged still by: where it is, what it is called, how many
+  # elements it has and how much text, the four the app's pane compares too. A
+  # click whose request is still re-rendering the page moves the last two while
+  # the address holds. The ready state is not in it: "complete" is required on
+  # its own (`settled?/4`).
+  defp fingerprint(meta), do: Map.take(meta, ["url", "title", "elements", "text"])
+
+  # The loop's bound. A document that never reaches "complete" — a hung
+  # subresource, a streaming response — or a page that never stops changing
+  # answers every probe in microseconds, so nothing but this check ends the
+  # poll, and `request/2` is an `:infinity` call: an unbounded loop here is a
+  # wedged profile, not a slow one. Checked BEFORE the sleep, and the sleep
+  # never overruns the deadline, exactly as `continue_wait/4` does for `act
+  # wait`.
+  defp settle_ready(meta, url, tab, state, mark, deadline, {_print, since} = held) do
+    now = state.now_fn.()
+
+    cond do
+      settled?(meta, url, mark, now - since) ->
+        {:ok, settled_tab(tab, url, meta)}
+
+      now >= deadline ->
+        settle_expired(meta, url, tab, mark)
+
+      true ->
+        state.sleep_fn.(min(state.config.wait_poll_interval_ms, deadline - now))
+        settle(tab, state, mark, deadline, held)
+    end
+  end
+
+  # Settled: the document is complete, its fingerprint has read the same for
+  # `rest_ms`, and it is not the one the caller said it was leaving.
+  defp settled?(%{"ready" => "complete"}, url, %{leaving: leaving}, still_ms),
+    do: url != leaving and still_ms >= Config.act_limits().rest_ms
+
+  defp settled?(_meta, _url, _mark, _still_ms), do: false
+
+  # The budget is spent and the page is still answering, still loading or still
+  # changing. An ordinary site takes
   # seconds to reach "complete", so withholding the page here would spend the
   # whole wait AND still cost the snapshot turn this exists to remove: render
   # what is there, and let `ready_state` on the result say it was still
@@ -1802,17 +1861,23 @@ defmodule FermixCore.Browser.CDP.Backend do
     |> Map.put(:ready_state, Map.get(meta, "ready"))
   end
 
+  # A poll's probe gets what is left of the budget, but never less than one poll
+  # to answer in: the loop's last sleep may end on the deadline itself, and a
+  # probe sent with no time left misses a reply the page was about to give, so
+  # a page that answered all through the wait would end as one nobody could
+  # read. That poll is the one the worst case above allows past the budget.
   defp live_meta_within(tab, state, deadline) do
     params = %{expression: @live_meta_js, returnByValue: true}
+    timeout = max(deadline - state.now_fn.(), state.config.wait_poll_interval_ms)
 
-    case command(state, "Runtime.evaluate", params, tab.session_id, budget(deadline)) do
+    case command(state, "Runtime.evaluate", params, tab.session_id, timeout) do
       {:ok, result} -> {:ok, runtime_value(result)}
       {:error, reason} -> {:error, reason}
     end
   end
 
   defp render_within(mark, tab, state, deadline) do
-    if System.monotonic_time(:millisecond) >= deadline do
+    if state.now_fn.() >= deadline do
       {:error, :settle_timeout}
     else
       render_tab(mark.opts, tab, state, deadline)
