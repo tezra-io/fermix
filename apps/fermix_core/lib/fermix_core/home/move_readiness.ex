@@ -22,11 +22,20 @@ defmodule FermixCore.Home.MoveReadiness do
       it blocks, saying how much is needed; the server needs as much again;
     * `s3_size`: a home larger than one S3 upload (5 GiB) warns where the
       server keeps its snapshots in S3: it would never back up there;
-    * `plugins`: plugins installed for another OS or architecture warn,
-      named: the owner installs them again on the server from the app after
-      the move;
+    * `plugins`: on a server of another OS or architecture, the plugins
+      whose installed version the catalog has no build of for it warn,
+      named: they stop working after the move. The server installs every
+      other one again for itself right after the move
+      (`FermixCore.Plugins.Dist.Reinstall`), through the plugin installer;
     * `stays_here`: voice calls and meetings, and iMessage on a Mac, stop after
       the move;
+    * `whatsapp`: WhatsApp turned on warns: it needs an inbound address Meta
+      can reach, which the server does not have, so it stops after the move;
+    * `slack`: Slack turned on in its Events (webhook) mode warns for the
+      same reason, unless it is switched to Socket Mode first;
+    * `coding_agents`: coding-harness consent given here warns: a move
+      withdraws it, as every restore does (`Archive.RestoredConfig`), so
+      coding agents ask for the owner's approval again on the server;
     * `cutover_gap`: Telegram messages sent during the move wait until it
       is done (Telegram keeps them, `Channels.Telegram.Poller`), and a
       recurring job more than an hour late is skipped;
@@ -36,14 +45,16 @@ defmodule FermixCore.Home.MoveReadiness do
   `CommandRunner` and the keychain read from a tree-less verb), `:version`
   (this engine's, `BuildInfo.product_version/0`), `:host` (this host's plugin
   target, `Archive.host/1`), `:home_bytes` (the home's size, in place of
-  walking it).
+  walking it), `:index_opts` (`Plugins.Dist.Index.load/1`'s, the catalog).
   """
 
   alias FermixCore.BuildInfo
   alias FermixCore.Home.Archive
+  alias FermixCore.Home.Archive.ConfigText
   alias FermixCore.Home.Disk
   alias FermixCore.Home.MoveSecrets
   alias FermixCore.Home.Snapshot.S3
+  alias FermixCore.Plugins.Dist.Index
 
   require Logger
 
@@ -71,8 +82,11 @@ defmodule FermixCore.Home.MoveReadiness do
       version(candidate, Keyword.get_lazy(opts, :version, &BuildInfo.product_version/0)),
       disk(home, home_bytes, name, opts),
       s3_size(candidate, home_bytes),
-      plugins(home, host, candidate),
+      plugins(home, host, candidate, opts),
       stays_here(host, name),
+      whatsapp(config, name),
+      slack(config, name),
+      coding_agents(config, name),
       item("cutover_gap", :warn, cutover_sentence()),
       item(
         "serves_nothing",
@@ -254,25 +268,60 @@ defmodule FermixCore.Home.MoveReadiness do
   defp s3_size(%{name: name}, _home_bytes),
     do: item("s3_size", :ok, "#{name} keeps no snapshots in S3.")
 
-  defp plugins(home, host, %{name: name} = candidate) do
+  defp plugins(home, host, %{name: name} = candidate, opts) do
     there = target(candidate)
 
     case {installed(home), host == there} do
       {[], _same} ->
         item("plugins", :ok, "No plugin is installed.")
 
-      {_names, true} ->
+      {_installed, true} ->
         item("plugins", :ok, "The installed plugins run on #{name} as they are.")
 
-      {names, false} ->
+      {installed, false} ->
+        plugins_elsewhere(installed, there, name, opts)
+    end
+  end
+
+  # The server installs again every plugin whose installed version the
+  # catalog has a build of for it; only the rest stop.
+  defp plugins_elsewhere(installed, there, name, opts) do
+    case Index.load(Keyword.get(opts, :index_opts, [])) do
+      {:ok, index} ->
+        installed
+        |> Enum.reject(fn {plugin, version} -> built?(index, plugin, version, there) end)
+        |> Enum.map(fn {plugin, _version} -> plugin end)
+        |> no_build(name)
+
+      {:error, reason} ->
+        Logger.error("move readiness: the plugin catalog could not be read: #{inspect(reason)}")
+
         item(
           "plugins",
           :warn,
-          "These plugins were installed for this computer; after the move, install them " <>
-            "again on #{name} from Plugins in the app: #{Enum.join(names, ", ")}."
+          "Fermix could not read its plugin catalog, so it cannot tell which plugins " <>
+            "#{name} installs again; the daemon log says why."
         )
     end
   end
+
+  defp built?(_index, _plugin, nil, _target), do: false
+
+  defp built?(index, plugin, version, target),
+    do: Index.build_for?(index, plugin, version, target)
+
+  defp no_build([], name),
+    do:
+      item("plugins", :ok, "#{name} installs the plugins again for itself right after the move.")
+
+  defp no_build(names, name),
+    do:
+      item(
+        "plugins",
+        :warn,
+        "These plugins have no build for #{name}, so they stop working after the move: " <>
+          "#{Enum.join(names, ", ")}."
+      )
 
   defp stays_here("macos-" <> _arch, name),
     do:
@@ -291,6 +340,62 @@ defmodule FermixCore.Home.MoveReadiness do
         "Voice calls and meetings stop after the move: neither this computer nor " <>
           "#{name} runs them."
       )
+
+  # WhatsApp's Cloud API reaches Fermix only at an inbound address, and the
+  # server takes no inbound connection.
+  defp whatsapp({:ok, text}, name) do
+    if on?(text, "fermix_channels.whatsapp", "enabled"),
+      do:
+        item(
+          "whatsapp",
+          :warn,
+          "WhatsApp stops after the move: it needs an address on the internet that " <>
+            "WhatsApp can send messages to, and #{name} has none."
+        ),
+      else: item("whatsapp", :ok, "WhatsApp is not turned on.")
+  end
+
+  defp whatsapp({:error, sentence}, _name), do: item("whatsapp", :warn, sentence)
+
+  # Slack's Events API needs the same inbound address; Socket Mode dials out.
+  defp slack({:ok, text}, name) do
+    cond do
+      not on?(text, "fermix_channels.slack", "enabled") ->
+        item("slack", :ok, "Slack is not turned on.")
+
+      slack_mode(text) == {:ok, "socket"} ->
+        item("slack", :ok, "Slack uses Socket Mode and keeps working on #{name}.")
+
+      true ->
+        item(
+          "slack",
+          :warn,
+          "Slack stops after the move unless it uses Socket Mode, which you turn on in " <>
+            "your Slack app's settings and then in Fermix's Slack settings."
+        )
+    end
+  end
+
+  defp slack({:error, sentence}, _name), do: item("slack", :warn, sentence)
+
+  # A restore withdraws coding-harness consent (`Archive.RestoredConfig`), and
+  # the move restores the home on the server.
+  defp coding_agents({:ok, text}, name) do
+    if on?(text, "fermix_core.harness", "approved"),
+      do: item("coding_agents", :warn, "Coding agents ask for your approval again on #{name}."),
+      else: item("coding_agents", :ok, "No coding agent has your approval on this computer.")
+  end
+
+  defp coding_agents({:error, sentence}, _name), do: item("coding_agents", :warn, sentence)
+
+  defp on?(text, section, key), do: ConfigText.value(text, section, key) == {:ok, "true"}
+
+  defp slack_mode(text) do
+    case ConfigText.value(text, "fermix_channels.slack", "mode") do
+      {:ok, raw} -> ConfigText.string(raw)
+      :absent -> :absent
+    end
+  end
 
   defp cutover_sentence,
     do:
@@ -339,12 +444,17 @@ defmodule FermixCore.Home.MoveReadiness do
     end
   end
 
+  # Each installed plugin with the version its lockfile entry names (nil
+  # when it names none).
   defp installed(home) do
     with {:ok, json} <- File.read(Path.join(home, @plugin_lockfile)),
          {:ok, %{} = installed} <- Jason.decode(json) do
-      installed |> Map.keys() |> Enum.sort()
+      installed |> Enum.map(fn {name, entry} -> {name, locked_version(entry)} end) |> Enum.sort()
     else
       _none -> []
     end
   end
+
+  defp locked_version(%{"version" => version}) when is_binary(version), do: version
+  defp locked_version(_entry), do: nil
 end

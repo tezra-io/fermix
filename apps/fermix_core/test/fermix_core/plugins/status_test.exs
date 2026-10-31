@@ -4,7 +4,9 @@ defmodule FermixCore.Plugins.StatusTest do
   alias FermixCore.Auth.Store
   alias FermixCore.Plugins.CanonicalJson
   alias FermixCore.Plugins.Config
+  alias FermixCore.Plugins.Dist.Archive
   alias FermixCore.Plugins.Dist.McpSource
+  alias FermixCore.Plugins.Dist.Reinstall
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Registry
   alias FermixCore.Plugins.Status
@@ -334,6 +336,65 @@ defmodule FermixCore.Plugins.StatusTest do
     put_plugins_env([], %{})
 
     assert Status.status("ghost") == :not_configured
+  end
+
+  # A move from another system installs the plugins again here
+  # (`Dist.Reinstall`); one it could not install is said, enabled or not,
+  # until an install records another build.
+  describe "after a move" do
+    setup %{store: store, fixtures: fixtures} do
+      {tgz, sha} = DistFixtures.build_tarball(fixtures, "moved", "1.0.0")
+      staged = Path.join(DistStore.paths(store).staging, "moved-1.0.0")
+      :ok = Archive.extract(tgz, staged)
+      :ok = DistStore.install_tree(store, "moved", "1.0.0", staged)
+      :ok = DistStore.record(store, "moved", locked(sha))
+      %{plugin: load_installed(store, "moved")}
+    end
+
+    test "a plugin the move could not install again is :reinstall_failed", %{
+      store: store,
+      plugin: plugin
+    } do
+      fail_reinstall(store, fn _name, _opts -> {:error, :invented} end)
+
+      put_plugins_env(["moved"], %{})
+      assert Status.status(plugin) == :reinstall_failed
+      put_plugins_env([], %{})
+      assert Status.status(plugin) == :reinstall_failed
+    end
+
+    test "one with no build for this computer is :incompatible", %{store: store, plugin: plugin} do
+      fail_reinstall(store, fn _name, _opts ->
+        {:error, {:no_build_for_target, "linux-x86_64"}}
+      end)
+
+      put_plugins_env(["moved"], %{})
+      assert Status.status(plugin) == :incompatible
+    end
+
+    test "an install of another build ends it", %{store: store, plugin: plugin} do
+      fail_reinstall(store, fn _name, _opts -> {:error, :invented} end)
+      :ok = DistStore.record(store, "moved", locked("f6"))
+
+      put_plugins_env(["moved"], %{})
+      assert Status.status(plugin) == :ready
+    end
+  end
+
+  defp locked(sha),
+    do: %{"version" => "1.0.0", "sha256" => sha, "plugin_api" => 2, "min_core_version" => "0.1.0"}
+
+  defp fail_reinstall(store, install) do
+    :ok = Reinstall.request(store, ["moved"])
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      :ok =
+        Reinstall.run(
+          root: store,
+          install: install,
+          sleep: fn _ms -> :ok end
+        )
+    end)
   end
 
   # A remote manifest is loadable ONLY from a verified artifact (M27 §9.3), so

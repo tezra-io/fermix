@@ -502,7 +502,10 @@ in `mobile/candidates.json` (`Home.Candidates`, at most four, 24 hours);
 `home.move.readiness`, `home.move.start` and the `enrollment`, `candidates`
 and `move` places of `home.status`. `Home.MoveReadiness` is the report the
 owner reviews (keychain secrets, engine versions, free disk, the S3 upload
-bound, plugins, what stays on the desktop, the cutover gap) and
+bound, the plugins the catalog has no build of for the server, what stops:
+iMessage, voice calls and meetings, WhatsApp, and Slack without Socket Mode;
+coding agents asking for approval again, read from `config.toml`; the
+cutover gap) and
 `Home.Move.start/5` refuses while an item blocks; the review is kept in
 `.move/readiness.json` and a start within 15 minutes of a ready one takes it
 (`Move.review/3`), so a move reads the keychain in the review and once more in
@@ -522,7 +525,16 @@ stream; on the candidate
 `Home.Candidate.Activation` restores the stream into `candidate/staging`,
 turns each carried reference into `@file`, and later renames it into place,
 `config.toml` last, asking the new primary's first boot for a snapshot at
-once; `Home.MoveTelemetry` emits the move's bookends. `home.status`'s
+once. Its staging names the plugins the stream brought from another system
+(`Plugins.Dist.Reinstall.request/2`, `plugins/reinstall.json`, device-local),
+and the new primary's first boot installs each again at its locked version
+through `Dist.Installer.run_install/2` (`Dist.Reinstall`, a `:temporary`
+primary-only child right after the installer, so a crash restarts nothing
+under `:rest_for_one`); one it could not install is the plugin status
+`reinstall_failed`, one with no build there `incompatible`, until an install
+records another build. `Dist.Index.target_artifact/2` is the one rule for
+which build a host installs, shared by the installer and the readiness.
+`Home.MoveTelemetry` emits the move's bookends. `home.status`'s
 `secrets_missing` names the references that did not resolve on the primary
 (`MoveSecrets.missing/1`). The channels half
 (`FermixChannels.Home`) is described under `fermix_channels`.

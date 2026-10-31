@@ -55,6 +55,7 @@ defmodule FermixCore.Application do
   alias FermixCore.OpenLoops.Scheduler, as: OpenLoopsScheduler
   alias FermixCore.Plugins.CapabilitySeeder, as: PluginCapabilitySeeder
   alias FermixCore.Plugins.Dist.Installer, as: PluginInstaller
+  alias FermixCore.Plugins.Dist.Reinstall, as: PluginReinstall
   alias FermixCore.Prompt.BootstrapRename
   alias FermixCore.Prompt.IdentityName
   alias FermixCore.Prompt.TemplateReconciler
@@ -275,6 +276,11 @@ defmodule FermixCore.Application do
         BuiltinSeeder,
         {CommandCapabilities, capability_registry: CapabilityRegistry},
         PluginInstaller,
+        # After a move from another system, installs its plugins again for
+        # this computer once the installer's boot sweep is done; `:temporary`,
+        # so it restarts nothing after it, and it ends at once when nothing
+        # waits.
+        PluginReinstall,
         {PluginCapabilitySeeder, capability_registry: CapabilityRegistry},
         {SkillRegistry, capability_registry: CapabilityRegistry},
         # Outside the MCP tree on purpose (M27 §7.8): a remote server's subtree

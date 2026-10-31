@@ -559,6 +559,7 @@ def test_the_shipped_numbered_rubrics_parse():
                       "twentieth_corrected_to_thirteenth": 3,
                       # home_move.yaml
                       "move_to_vm_sanity": 4, "device_role_after_the_move": 3,
+                      "what_stops_after_an_always_on_move": 5,
                       "new_fermix_release_on_the_server": 3,
                       "security_patches_and_reboots_on_the_server": 3,
                       # open_loops.yaml

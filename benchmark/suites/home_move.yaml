@@ -14,7 +14,8 @@
 #
 # GATES. One labelled sanity case pins that the answer comes from the skill
 # (`skill_view`); every other gate is a floor any correct answer meets (the
-# export and the import; the primary the device-role Mac points at). The rubric
+# export and the import; the primary the device-role Mac points at; WhatsApp,
+# which the owner named, in the answer about what stops). The rubric
 # owns the wording. No `reply_not_matches`: the wrong move (copying the home
 # folder by hand) is something a correct answer may well warn against, and a
 # pattern cannot tell the two polarities apart.
@@ -89,6 +90,32 @@ scenarios:
           3. Says the VM is now the primary, the one copy that runs the agent
              and writes long-term memory, and that a home marked moved can no
              longer start as the primary.
+      # The move's review (M75): what stops on a server with no inbound
+      # address, what Fermix does for the plugins by itself, and the approval
+      # a move withdraws, as the skill's `home` reference says them.
+      - id: what_stops_after_an_always_on_move
+        query: >
+          I'm about to move Fermix from my Mac to my own server with Always On.
+          I use WhatsApp and Slack with it, a few plugins, and I let Codex work
+          as a coding agent. What will stop working or need redoing once it
+          runs on the server?
+        expect:
+          reply_matches: '(?i)\bwhatsapp\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says WhatsApp stops after the move, because it needs an address on
+             the internet that WhatsApp can reach, which the server does not
+             have.
+          2. Says Slack keeps working on the server only over Socket Mode:
+             set up the other way (events sent to an address) it stops unless
+             it is switched to Socket Mode first.
+          3. Says the server installs the plugins again by itself right after
+             the move, and that only plugins with no build for the server stop
+             (the move's review names them).
+          4. Says coding agents such as Codex ask for the owner's approval
+             again on the server.
+          5. Does not tell the owner to install every plugin again by hand.
 
   # How an Always On server keeps itself current, from the skill's `home`
   # reference: Fermix's package comes from release files, so general knowledge

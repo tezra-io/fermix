@@ -62,6 +62,30 @@ defmodule FermixCore.Plugins.Dist.Index do
   def find(%{plugins: plugins}, name) when is_binary(name),
     do: Enum.find(plugins, &(&1.name == name))
 
+  @doc """
+  The artifact of `version_entry` built for `target` (`macos-aarch64`,
+  `linux-x86_64`), or the one built for any target; nil when it has neither.
+  The installer installs exactly this one.
+  """
+  @spec target_artifact(version_entry(), String.t()) :: artifact() | nil
+  def target_artifact(%{artifacts: artifacts}, target) when is_binary(target),
+    do: Enum.find(artifacts, &(&1.target == target or &1.target == "any"))
+
+  @doc """
+  Whether a loaded index carries a build of `version` of `name` for `target`
+  (`target_artifact/2`): false for a plugin or version it does not carry.
+  """
+  @spec build_for?(t(), String.t(), String.t(), String.t()) :: boolean()
+  def build_for?(index, name, version, target)
+      when is_binary(name) and is_binary(version) and is_binary(target) do
+    with %{versions: versions} <- find(index, name),
+         %{} = entry <- Enum.find(versions, &(&1.version == version)) do
+      target_artifact(entry, target) != nil
+    else
+      nil -> false
+    end
+  end
+
   @doc "Whether `version` of `name` is marked yanked in a loaded index."
   @spec yanked?(t(), String.t(), String.t()) :: boolean()
   def yanked?(index, name, version) when is_binary(name) and is_binary(version) do

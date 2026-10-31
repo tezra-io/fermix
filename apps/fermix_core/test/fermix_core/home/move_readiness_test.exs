@@ -8,6 +8,7 @@ defmodule FermixCore.Home.MoveReadinessTest do
   alias FermixCore.Home.Epoch
   alias FermixCore.Home.MoveReadiness
   alias FermixCore.Setup.SecretWriter
+  alias FermixTestSupport.DistFixtures
   alias FermixTestSupport.SafeRm
 
   @now ~U[2031-05-04 10:00:00Z]
@@ -25,12 +26,34 @@ defmodule FermixCore.Home.MoveReadinessTest do
 
     [fermix_core.providers.anthropic]
     api_key = "@keyring"
+
+    [fermix_core.harness]
+    approved = true
+
+    [fermix_channels.whatsapp]
+    enabled = true
+
+    [fermix_channels.slack]
+    enabled = true
     """)
 
     File.mkdir_p!(Path.join(home, "plugins"))
-    File.write!(Path.join(home, "plugins/installed.json"), ~s({"invented-notes": {}}))
+
+    File.write!(
+      Path.join(home, "plugins/installed.json"),
+      ~s({"invented-notes": {"version": "1.0.0"}, "invented-tasks": {"version": "2.1.0"}})
+    )
+
+    # The catalog this engine ships: invented-notes is built for this Mac
+    # only, invented-tasks for any system.
+    index =
+      DistFixtures.write_index(Path.join(home, "catalog/index.json"), [
+        catalog_entry("invented-notes", "1.0.0", ["macos-aarch64"]),
+        catalog_entry("invented-tasks", "2.1.0", ["any"])
+      ])
+
     {:ok, candidate} = Candidates.add(home, candidate_attrs(), @now)
-    %{home: home, candidate: candidate, profile: profile}
+    %{home: home, candidate: candidate, profile: profile, index: index}
   end
 
   test "a ready move: the keychain's secret can be read, and every warning is said", ctx do
@@ -40,7 +63,8 @@ defmodule FermixCore.Home.MoveReadinessTest do
         store: :keyring
       )
 
-    assert %{ready: true, items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts())
+    assert %{ready: true, items: items} =
+             MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
 
     assert Enum.map(items, &{&1.id, &1.status}) == [
              {"keychain_secrets", :ok},
@@ -49,6 +73,9 @@ defmodule FermixCore.Home.MoveReadinessTest do
              {"s3_size", :ok},
              {"plugins", :warn},
              {"stays_here", :warn},
+             {"whatsapp", :warn},
+             {"slack", :warn},
+             {"coding_agents", :warn},
              {"cutover_gap", :warn},
              {"serves_nothing", :warn}
            ]
@@ -60,8 +87,25 @@ defmodule FermixCore.Home.MoveReadinessTest do
     assert sentence.("keychain_secrets") =~
              "Checking it opened this computer's keychain, and the move opens it once more"
 
-    assert sentence.("plugins") =~ "invented-notes"
+    # Only the plugin with no build for the server is named: the server
+    # installs the others again itself.
+    assert sentence.("plugins") ==
+             "These plugins have no build for north-box, so they stop working after the " <>
+               "move: invented-notes."
+
     assert sentence.("stays_here") =~ "iMessage"
+
+    assert sentence.("whatsapp") ==
+             "WhatsApp stops after the move: it needs an address on the internet that " <>
+               "WhatsApp can send messages to, and north-box has none."
+
+    assert sentence.("slack") ==
+             "Slack stops after the move unless it uses Socket Mode, which you turn on in " <>
+               "your Slack app's settings and then in Fermix's Slack settings."
+
+    assert sentence.("coding_agents") ==
+             "Coding agents ask for your approval again on north-box."
+
     # Telegram keeps what it holds until the poller asks again.
     assert sentence.("cutover_gap") =~ "Telegram while the move runs wait until it is done"
     refute sentence.("cutover_gap") =~ "lost"
@@ -69,9 +113,59 @@ defmodule FermixCore.Home.MoveReadinessTest do
     refute Enum.any?(items, &(&1.sentence =~ "sk-ant-invented"))
   end
 
+  test "WhatsApp and Slack turned off, Slack on Socket Mode, and no coding agent approved say so",
+       ctx do
+    File.write!(Path.join(ctx.home, "config.toml"), """
+    [fermix_channels.whatsapp]
+    enabled = false
+
+    [fermix_channels.slack]
+    enabled = true
+    mode = "socket"
+    """)
+
+    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
+    item = fn id -> Enum.find(items, &(&1.id == id)) end
+
+    assert %{status: :ok, sentence: "WhatsApp is not turned on."} = item.("whatsapp")
+
+    assert %{status: :ok, sentence: "Slack uses Socket Mode and keeps working on north-box."} =
+             item.("slack")
+
+    assert %{status: :ok, sentence: "No coding agent has your approval on this computer."} =
+             item.("coding_agents")
+
+    File.write!(Path.join(ctx.home, "config.toml"), "")
+    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
+    assert %{status: :ok, sentence: "Slack is not turned on."} = item_in(items, "slack")
+  end
+
+  test "plugins with a build for the server are installed again there, and say so", ctx do
+    File.write!(
+      Path.join(ctx.home, "plugins/installed.json"),
+      ~s({"invented-tasks": {"version": "2.1.0"}})
+    )
+
+    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
+
+    assert %{status: :ok, sentence: "north-box installs the plugins again for itself right " <> _} =
+             item_in(items, "plugins")
+
+    # A plugin the catalog does not carry, or carries in another version, has
+    # no build Fermix can install there either.
+    File.write!(
+      Path.join(ctx.home, "plugins/installed.json"),
+      ~s({"invented-tasks": {"version": "9.9.9"}, "invented-local": {"version": "1.0.0"}})
+    )
+
+    assert %{items: items} = MoveReadiness.report(ctx.home, ctx.candidate, opts(ctx))
+    assert %{status: :warn, sentence: sentence} = item_in(items, "plugins")
+    assert sentence =~ "move: invented-local, invented-tasks."
+  end
+
   test "blocks: an unreadable secret named, an older server, a disk with no room", ctx do
     old = %{ctx.candidate | version: "0.0.1"}
-    tight = Keyword.put(opts(), :free_bytes, fn _dir -> {:ok, 1_000} end)
+    tight = Keyword.put(opts(ctx), :free_bytes, fn _dir -> {:ok, 1_000} end)
 
     assert %{ready: false, items: items} = MoveReadiness.report(ctx.home, old, tight)
     blocks = for %{status: :block} = item <- items, do: {item.id, item.sentence}
@@ -89,7 +183,7 @@ defmodule FermixCore.Home.MoveReadinessTest do
 
   test "a home over one S3 upload warns where the server keeps snapshots in S3", ctx do
     s3 = %{ctx.candidate | snapshots: %{"s3_bucket" => "invented-bucket", "s3_region" => "eu-1"}}
-    big = Keyword.put(opts(), :home_bytes, 6 * 1_073_741_824)
+    big = Keyword.put(opts(ctx), :home_bytes, 6 * 1_073_741_824)
 
     assert %{items: items} = MoveReadiness.report(ctx.home, s3, big)
     assert %{status: :warn, sentence: sentence} = Enum.find(items, &(&1.id == "s3_size"))
@@ -105,12 +199,37 @@ defmodule FermixCore.Home.MoveReadinessTest do
            }
   end
 
-  defp opts,
+  defp opts(ctx),
     do: [
       free_bytes: fn _dir -> {:ok, @plenty} end,
       version: "0.16.9",
-      host: "macos-aarch64"
+      host: "macos-aarch64",
+      index_opts: [seed_path: ctx.index]
     ]
+
+  defp item_in(items, id), do: Enum.find(items, &(&1.id == id))
+
+  defp catalog_entry(name, version, targets) do
+    %{
+      "name" => name,
+      "latest" => version,
+      "versions" => [
+        %{
+          "version" => version,
+          "artifacts" =>
+            for target <- targets do
+              %{
+                "target" => target,
+                "url" => "https://example.com/#{name}-#{target}.tar.gz",
+                "sha256" => String.duplicate("0", 64),
+                "sig_url" => "https://example.com/#{name}-#{target}.sig",
+                "cert_url" => "https://example.com/#{name}-#{target}.pem"
+              }
+            end
+        }
+      ]
+    }
+  end
 
   defp candidate_attrs do
     %{

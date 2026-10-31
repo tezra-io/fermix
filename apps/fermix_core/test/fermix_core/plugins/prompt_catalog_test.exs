@@ -3,7 +3,12 @@ defmodule FermixCore.Plugins.PromptCatalogTest do
 
   alias FermixCore.Auth.Store
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Plugins.Dist.Archive
+  alias FermixCore.Plugins.Dist.Reinstall
+  alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.PromptCatalog
+  alias FermixCore.Setup.ConfigStore
+  alias FermixTestSupport.DistFixtures
 
   setup do
     home = FermixTestSupport.SafeRm.make_tmp_dir!("prompt-catalog-home")
@@ -88,6 +93,42 @@ defmodule FermixCore.Plugins.PromptCatalogTest do
     assert entry.tools == []
     assert entry.skills == []
     assert is_binary(entry.remediation) and entry.remediation != ""
+  end
+
+  test "a plugin a move could not install again sends the owner to install it again" do
+    store = ConfigStore.workspace_paths().plugins
+    fixtures = Path.join(store, "fixtures")
+    File.mkdir_p!(fixtures)
+    DistStore.ensure!(store)
+    {tgz, sha} = DistFixtures.build_tarball(fixtures, "moved", "1.0.0")
+    staged = Path.join(DistStore.paths(store).staging, "moved-1.0.0")
+    :ok = Archive.extract(tgz, staged)
+    :ok = DistStore.install_tree(store, "moved", "1.0.0", staged)
+
+    :ok =
+      DistStore.record(store, "moved", %{
+        "version" => "1.0.0",
+        "sha256" => sha,
+        "plugin_api" => 2,
+        "min_core_version" => "0.1.0"
+      })
+
+    :ok = Reinstall.request(store, ["moved"])
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      Reinstall.run(
+        root: store,
+        install: fn _name, _opts -> {:error, :invented} end,
+        sleep: fn _ms -> :ok end
+      )
+    end)
+
+    Application.put_env(:fermix_core, :plugins, enabled: ["moved"])
+
+    assert [entry] = PromptCatalog.entries([], [])
+    assert entry.status == :reinstall_failed
+    assert entry.remediation =~ "not installed again for this computer after the move"
+    assert entry.remediation =~ "fermix plugins install moved"
   end
 
   test "an enabled name absent from every plugin source surfaces as :not_installed" do

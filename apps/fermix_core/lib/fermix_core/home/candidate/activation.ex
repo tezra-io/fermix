@@ -19,7 +19,10 @@ defmodule FermixCore.Home.Candidate.Activation do
   the source carried in the stream are in the staged file store by then, and
   each `@keyring` reference whose file arrived becomes `@file`
   (`FermixCore.Home.MoveSecrets.adopt/2`), so the new primary resolves every
-  secret the source had.
+  secret the source had. The plugins the stream brought from another system
+  or architecture (the restore's `plugins_to_reinstall`) are named in the
+  staged plugin store (`FermixCore.Plugins.Dist.Reinstall.request/2`), and
+  the new primary's first boot installs them again for this computer.
 
   **Activation** renames each staged entry into the home (an entry of the
   candidate's own engine already there, such as a log, is moved aside into
@@ -40,6 +43,7 @@ defmodule FermixCore.Home.Candidate.Activation do
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Home.Snapshot.Status
+  alias FermixCore.Plugins.Dist.Reinstall
 
   @config "config.toml"
   @file_mode 0o600
@@ -57,7 +61,8 @@ defmodule FermixCore.Home.Candidate.Activation do
 
     with :ok <- remove_tree(staging),
          {:ok, restored} <- Snapshot.restore(incoming, pair, staging, opts),
-         :ok <- settle_config(home, staging, facts) do
+         :ok <- settle_config(home, staging, facts),
+         :ok <- Reinstall.request(Path.join(staging, "plugins"), restored.plugins_to_reinstall) do
       {:ok, restored.epoch}
     else
       {:error, _reason} = error ->

@@ -8,6 +8,7 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Recipient
   alias FermixCore.Home.Snapshot.Status
+  alias FermixCore.Plugins.Dist.Reinstall
   alias FermixTestSupport.SafeRm
 
   @now ~U[2031-05-04 10:00:00Z]
@@ -124,6 +125,43 @@ defmodule FermixCore.Home.Candidate.ActivationTest do
     assert :ok = Activation.activate(ctx.home)
 
     assert {:ok, %{run_at_boot: true}} = Status.read(ctx.home)
+  end
+
+  # Plugins installed for another system are installed again by the new
+  # primary's first boot (`Plugins.Dist.Reinstall`): the staged home names
+  # them, and the name list moves into place with it.
+  test "the plugins the stream brought from another system wait to be installed again", ctx do
+    File.mkdir_p!(Path.join(ctx.source, "plugins"))
+
+    File.write!(
+      Path.join(ctx.source, "plugins/installed.json"),
+      ~s({"invented-notes": {"version": "1.0.0"}, "invented-tasks": {"version": "2.1.0"}})
+    )
+
+    SafeRm.rm!(ctx.incoming)
+
+    {:ok, _written} =
+      Snapshot.write(ctx.source, Recipient.public(ctx.pair), ctx.incoming, host: "macos-aarch64")
+
+    assert {:ok, 7} = Activation.stage(ctx.home, ctx.incoming, ctx.pair, %{}, restore_opts())
+    assert :ok = Activation.activate(ctx.home)
+
+    plugins = Path.join(ctx.home, "plugins")
+
+    assert %{"pending" => ["invented-notes", "invented-tasks"]} =
+             Jason.decode!(File.read!(Reinstall.path(plugins)))
+  end
+
+  test "from a computer of the same system nothing waits", ctx do
+    File.mkdir_p!(Path.join(ctx.source, "plugins"))
+    File.write!(Path.join(ctx.source, "plugins/installed.json"), ~s({"invented-notes": {}}))
+    SafeRm.rm!(ctx.incoming)
+
+    {:ok, _written} =
+      Snapshot.write(ctx.source, Recipient.public(ctx.pair), ctx.incoming, host: "linux-aarch64")
+
+    assert {:ok, 7} = Activation.stage(ctx.home, ctx.incoming, ctx.pair, %{}, restore_opts())
+    refute File.exists?(Reinstall.path(Path.join(Candidate.staging_path(ctx.home), "plugins")))
   end
 
   test "a Mac keeps its iMessage setting", ctx do

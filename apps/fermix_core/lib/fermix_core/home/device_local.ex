@@ -55,6 +55,8 @@ defmodule FermixCore.Home.DeviceLocal do
     {"acp_identities/*.broken.*", "an ACP identity this machine quarantined as unreadable"},
     {"bootstrap/*/*.tmp-*", "an interrupted write of a prompt file"},
     {"plugins/.staging", "plugin install scratch"},
+    {"plugins/reinstall.json",
+     "the plugins a move brought here from another system, installed again for this machine"},
     {"plugins/run", "token copies handed to running plugin children"},
     {"plugins/compux", "the computer-use helper app built for this machine"},
     {"plugins/stt", "the speech helper binary for this machine"},

@@ -125,6 +125,13 @@ defmodule FermixCore.Plugins.PromptCatalog do
   defp remediation(:not_installed, name),
     do: "run `fermix plugins install #{name}`"
 
+  # A move from another system installs plugins again on the new primary
+  # (`Dist.Reinstall`), and this one did not install.
+  defp remediation(:reinstall_failed, name),
+    do:
+      "it was not installed again for this computer after the move — have the owner " <>
+        "install it again from Plugins, or run `fermix plugins install #{name}`"
+
   defp remediation(:incompatible, name),
     do:
       "incompatible with this Fermix version — run `fermix plugins upgrade #{name}` or upgrade Fermix"

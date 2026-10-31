@@ -232,12 +232,19 @@ it, never a second writer.
   value); the server's Fermix (an older one blocks); free disk here (the
   capture needs about twice the home; short of it blocks, with the numbers);
   a home over one S3 upload (5 GiB) when the server keeps snapshots in S3
-  (warns: it would never back up there); plugins built for another system
-  (warns, named); voice calls and meetings, and iMessage on a Mac, stopping
-  after the move; the cutover gap (Telegram messages sent during the move
-  wait until it is done, and a recurring job more than an hour late is
-  skipped); and this computer serving nothing while the move runs. The move
-  does not start while anything blocks, from the apps or
+  (warns: it would never back up there); on a server of another system, the
+  plugins the catalog has no build of for it (warns, named: they stop
+  working; the server installs every other one again itself); voice calls
+  and meetings, and iMessage on a Mac, stopping after the move; WhatsApp
+  turned on (warns: it needs an address on the internet the server does not
+  have, so it stops); Slack turned on without Socket Mode (warns: it stops
+  unless switched to Socket Mode in the Slack app's settings and Fermix's);
+  coding agents approved here (warns: a move withdraws that approval, as
+  every restore does, so they ask again on the server); the cutover gap
+  (Telegram messages sent during the move wait until it is done, and a
+  recurring job more than an hour late is skipped); and this computer
+  serving nothing while the move runs. The move does not start while
+  anything blocks, from the apps or
   from `fermix home move`, which says each block. Checking the keychain reads
   each secret, which opens the keychain and can ask the owner to allow it; a
   start within 15 minutes of a ready review takes that review rather than
@@ -277,7 +284,12 @@ it, never a second writer.
   iMessage turned off on a server that is not a Mac, in `candidate/staging`),
   `activating` (the restored home renamed into place,
   its settings last), then it restarts as the primary, and its first start
-  takes a snapshot at once. The keychain's secrets land in the server's
+  takes a snapshot at once and installs again, through the plugin installer
+  (checksum and signature checked), every plugin from the old system that
+  has a build for the server. One it could not install, tried three times,
+  says so on its row in Plugins ("Fermix could not install it again after
+  the move.", with Install…), and one with no build there reads "This build
+  of Fermix cannot run it."; the daemon log says why. The keychain's secrets land in the server's
   secret files and its settings name them there (`@file`), so the server
   resolves every secret this computer had. The server never becomes the
   primary until this computer, already marked moved, tells it to.

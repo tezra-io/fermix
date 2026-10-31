@@ -273,7 +273,7 @@ defmodule FermixCore.Plugins.Dist.Installer do
 
   defp resolve_artifact(version_entry, opts) do
     with {:ok, target} <- target_for(opts) do
-      case Enum.find(version_entry.artifacts, &(&1.target == target or &1.target == "any")) do
+      case Index.target_artifact(version_entry, target) do
         nil -> {:error, {:no_build_for_target, target}}
         artifact -> {:ok, artifact}
       end

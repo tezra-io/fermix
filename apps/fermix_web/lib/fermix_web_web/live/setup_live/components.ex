@@ -4544,6 +4544,8 @@ defmodule FermixWebWeb.SetupLive.Components do
   # rendering as a grey "Unknown". Warning, not error — each has a fix.
   def status_pill_class(:missing_host_runtime), do: "badge badge-warning badge-sm"
   def status_pill_class(:not_installed), do: "badge badge-warning badge-sm"
+  # A move from another system could not install it again here.
+  def status_pill_class(:reinstall_failed), do: "badge badge-warning badge-sm"
   def status_pill_class(:preparing_browser), do: "badge badge-warning badge-sm"
   def status_pill_class(:needs_signin), do: "badge badge-warning badge-sm"
   # Remote MCP runtimes (M27 §12 Stage 3). Warning where the operator can act,
@@ -4577,6 +4579,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   def status_pill_label(:incompatible), do: "Incompatible"
   def status_pill_label(:missing_host_runtime), do: "Needs runtime"
   def status_pill_label(:not_installed), do: "Not installed"
+  def status_pill_label(:reinstall_failed), do: "Not reinstalled"
   def status_pill_label(:preparing_browser), do: "Preparing browser"
   def status_pill_label(:needs_signin), do: "Sign-in needed"
   def status_pill_label(:needs_workspace), do: "Needs workspace"

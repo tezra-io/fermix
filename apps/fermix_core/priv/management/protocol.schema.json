@@ -16,6 +16,7 @@
   "x-plugin-vocabulary": {
     "description": "The closed sets a plugin row draws on. Published so a reader can enumerate them and a support log can be searched by status; a client renders `status_sentence` and `primary_verb` and never switches on those words — it switches on `primary_action` and `actions`, which name the method each button runs.",
     "statuses": [
+      "reinstall_failed",
       "not_configured",
       "missing_host_runtime",
       "needs_config",
@@ -5834,7 +5835,7 @@
     },
     "homeReadinessItem": {
       "type": "object",
-      "description": "One fact about the move. id is keychain_secrets, engine_version, disk, s3_size, plugins, stays_here, cutover_gap or serves_nothing; a client that does not know an id shows its sentence as it is.",
+      "description": "One fact about the move. id is keychain_secrets, engine_version, disk, s3_size, plugins, stays_here, whatsapp, slack, coding_agents, cutover_gap or serves_nothing; a client that does not know an id shows its sentence as it is.",
       "required": ["id", "status", "sentence"],
       "additionalProperties": false,
       "properties": {

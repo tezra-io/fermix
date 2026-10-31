@@ -351,6 +351,12 @@ defmodule FermixCore.Management.Plugins.Row do
 
   defp sentence(:ready, _facts), do: "Turned on and ready."
   defp sentence(:not_configured, _facts), do: "Installed and turned off."
+
+  # A move from another system installs plugins again on the new primary
+  # (`Plugins.Dist.Reinstall`); this one did not install, and the log says why.
+  defp sentence(:reinstall_failed, _facts),
+    do: "Fermix could not install it again after the move."
+
   defp sentence(:needs_auth, _facts), do: "Turned on and waiting for a sign-in."
   defp sentence(:needs_secret, _facts), do: "Turned on and waiting for a token."
   defp sentence(:needs_client_config, _facts), do: "Turned on and waiting for a sign-in client."
@@ -443,7 +449,9 @@ defmodule FermixCore.Management.Plugins.Row do
   # this surface owns (a manifest setting, a host runtime, an incompatible
   # build, a connection already in flight), so the client uses its own word for
   # whatever action it drew rather than a daemon word that names something else.
-  defp primary_verb(status) when status in [:not_installed, :available], do: "Install…"
+  defp primary_verb(status) when status in [:not_installed, :available, :reinstall_failed],
+    do: "Install…"
+
   defp primary_verb(:not_configured), do: "Turn on"
   defp primary_verb(:needs_auth), do: "Sign in"
   defp primary_verb(:reauthorization_required), do: "Sign in again"

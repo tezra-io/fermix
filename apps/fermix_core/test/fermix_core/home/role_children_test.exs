@@ -17,7 +17,8 @@ defmodule FermixCore.Home.RoleChildrenTest do
     FermixCore.Harness.Supervisor,
     FermixCore.Meetings.Supervisor,
     FermixCore.Auth.TokenSupervisor,
-    FermixCore.Home.Snapshot.Scheduler
+    FermixCore.Home.Snapshot.Scheduler,
+    FermixCore.Plugins.Dist.Reinstall
   ]
 
   @kept_here [

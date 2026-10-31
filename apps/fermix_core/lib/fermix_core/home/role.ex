@@ -109,7 +109,10 @@ defmodule FermixCore.Home.Role do
        "captures its own"},
     {FermixChannels.Home.Enrollment,
      "holds the enrollment window a candidate primary enrolls through; only the primary " <>
-       "can be moved"}
+       "can be moved"},
+    {FermixCore.Plugins.Dist.Reinstall,
+     "installs again the plugins a move brought to the new primary; a device's home is a " <>
+       "retired copy"}
   ]
 
   @primary_only_modules Enum.map(@primary_only, &elem(&1, 0))
