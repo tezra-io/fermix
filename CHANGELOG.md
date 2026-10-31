@@ -286,6 +286,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   need no second look. A snapshot taken while a page is still loading now
   waits for it, up to a second and a half, then reads what is there and says
   whether it had finished loading.
+- **Long browser tasks stay quick.** In a long browser task, the agent's later
+  steps stop re-reading its older reads of a page it has since read again, so
+  each step is quicker and costs less.
 
 ### Removed
 

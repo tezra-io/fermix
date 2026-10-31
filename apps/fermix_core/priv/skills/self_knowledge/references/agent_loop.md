@@ -5,7 +5,8 @@
 - Every tool result is kept for the whole run. When a turn's results near the model's context window, older ones are compressed in place into task-guided digests; the step being answered and the two before it stay raw.
 - A digest names its call id, and `tool_result_recall` reads the original back (search a phrase, or a line range). Nothing is dropped or cut.
 - If the provider still refuses the request as too large, the loop compresses more and re-issues the call, at most three times, and never re-runs a tool.
-- A request that still does not fit fails the turn with a sentence saying so; a scheduled job's notice carries the same sentence and the raw reason. A run that never nears its window is unchanged.
+- A request that still does not fit fails the turn with a sentence saying so; a scheduled job's notice carries the same sentence and the raw reason. Superseded looks aside, a run that never nears its window is unchanged.
+- Only the newest look at a page stays: an earlier `browser` result carrying the page text of the same tab and address (the `#` fragment aside) is superseded. Once superseded looks add up to about 32 KB they are all replaced at once, without a model call, by the same result with its page text swapped for a one-line note; a `snapshot` reads the page again. A look at another address or in another tab is kept, and so is the step being answered.
 - Between turns, auto-compaction summarizes the conversation at a threshold (default 0.85; Mac Settings > Memory > **Compact a conversation at**); `/compact` forces it.
 
 ## Caps and fan-out
