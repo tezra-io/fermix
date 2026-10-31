@@ -410,7 +410,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
   # provisioner left it in this computer's ledger.
   defp waiting_replace!(root) do
     now = ~U[2031-05-04 10:00:00Z]
-    server = %{name: "fermix-general-a3f9", type: "cpx22", location: "fsn1", id: 7}
+    server = %{name: "fermix-general-a3f9", type: "cpx22", location: "fsn1", id: "7"}
 
     {:ok, _ledger} =
       Ledger.update(root, "hetzner", fn ledger ->
@@ -421,7 +421,7 @@ defmodule Fermix.CLI.DaemonForwardingTest do
         |> Ledger.begin_replace(5, now)
       end)
 
-    new = %{name: "fermix-general-b7c2", type: "cpx32", location: "hel1", id: 8}
+    new = %{name: "fermix-general-b7c2", type: "cpx32", location: "hel1", id: "8"}
 
     {:ok, _ledger} =
       Ledger.update(root, "hetzner", fn ledger ->

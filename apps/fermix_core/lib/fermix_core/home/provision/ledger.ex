@@ -39,9 +39,9 @@ defmodule FermixCore.Home.Provision.Ledger do
   - `ref` is the short id (four hex digits) a create mints and every resource
     it makes is named and labelled by, so a lost create is found again by its
     labels; null when nothing was created.
-  - A resource's `id` is its provider's own, opaque to Fermix: a string (a
-    file written before ids were strings holds the provider's numbers, and each
-    reads as its string). Null until the provider answered with one.
+  - A resource's `id` is its provider's own, opaque to Fermix: a string, and
+    any other id makes the file malformed. Null until the provider answered
+    with one.
   - A resource's `status` is `requested` (written before the call that
     creates it, with no id yet), `creating` (the provider answered with an id
     and its action runs), `created`, `deleting` (written before the call that
@@ -883,10 +883,8 @@ defmodule FermixCore.Home.Provision.Ledger do
   defp optional_id(nil), do: {:ok, nil}
   defp optional_id(id), do: id(id)
 
-  # The provider's own id, as a string; a positive number a file written
-  # before ids were strings holds reads as its string.
+  # The provider's own id, opaque: a string, and nothing else.
   defp id(id) when is_binary(id) and byte_size(id) in 1..128, do: {:ok, id}
-  defp id(id) when is_integer(id) and id > 0, do: {:ok, Integer.to_string(id)}
   defp id(_id), do: :error
 
   defp optional_time(nil), do: {:ok, nil}

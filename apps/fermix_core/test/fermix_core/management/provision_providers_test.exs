@@ -204,7 +204,7 @@ defmodule FermixCore.Management.ProvisionProvidersTest do
            |> Ledger.begin_create("a3f9", %{name: "fermix-general-a3f9"})
            |> Ledger.put_server(%{
              name: "fermix-general-a3f9",
-             id: 42,
+             id: "42",
              status: :created,
              type: "cpx22",
              location: "fsn1"

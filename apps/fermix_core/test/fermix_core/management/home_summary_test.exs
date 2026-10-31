@@ -785,7 +785,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
       Map.merge(
         %{
           name: "fermix-general-a3f9",
-          id: 61_839_204,
+          id: "61839204",
           status: :created,
           type: "cpx22",
           location: "fsn1",
@@ -826,7 +826,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
       %{
         created_ledger().server
         | name: "fermix-general-5d2e",
-          id: 61_900_117,
+          id: "61900117",
           type: "cpx32",
           location: "hel1",
           ipv4: "203.0.113.9",
