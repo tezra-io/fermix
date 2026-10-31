@@ -65,7 +65,7 @@ defmodule FermixCore.Home.MoveReadiness do
   require Logger
 
   @plugin_lockfile "plugins/installed.json"
-  @unreadable_settings "The settings file could not be read; the daemon log says why."
+  @unreadable_settings "The settings file could not be read; Fermix's log says why."
 
   @type status :: :ok | :warn | :block
   @type item :: %{id: String.t(), status: status(), sentence: String.t()}
@@ -247,7 +247,7 @@ defmodule FermixCore.Home.MoveReadiness do
 
   defp disk(_home, {:error, reason}, _name, _opts) do
     Logger.error("move readiness: the home could not be measured: #{inspect(reason)}")
-    item("disk", :block, "Fermix could not measure this home; the daemon log says why.")
+    item("disk", :block, "Fermix could not measure this home; Fermix's log says why.")
   end
 
   defp disk(home, {:ok, home_bytes}, name, opts) do
@@ -281,7 +281,7 @@ defmodule FermixCore.Home.MoveReadiness do
         item(
           "disk",
           :block,
-          "Fermix could not tell how much space this computer's disk has; the daemon log " <>
+          "Fermix could not tell how much space this computer's disk has; Fermix's log " <>
             "says why."
         )
     end
@@ -339,7 +339,7 @@ defmodule FermixCore.Home.MoveReadiness do
           "plugins",
           :warn,
           "Fermix could not read its plugin catalog, so it cannot tell which plugins " <>
-            "#{name} installs again; the daemon log says why."
+            "#{name} installs again; Fermix's log says why."
         )
     end
   end

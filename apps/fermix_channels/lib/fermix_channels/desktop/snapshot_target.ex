@@ -102,7 +102,7 @@ defmodule FermixChannels.Desktop.SnapshotTarget do
     do: "Your #{name} received a copy that did not match the snapshot, so it kept none."
 
   def sentence({:refused, name, _reason}),
-    do: "Your #{name} could not keep the snapshot. Its daemon log says why."
+    do: "Your #{name} could not keep the snapshot. Fermix's log there says why."
 
   def sentence({:read_failed, reason}),
     do: "The snapshot could not be read to send it (#{inspect(reason)})."

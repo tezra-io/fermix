@@ -54,7 +54,7 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   require Logger
 
   @boot_delay_s 300
-  @crashed "The snapshot run stopped unexpectedly; the daemon log says why."
+  @crashed "The snapshot run stopped unexpectedly; Fermix's log says why."
   @hour_s 3_600
   @day_s 86_400
   @stale_notice_s 7 * @day_s

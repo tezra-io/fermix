@@ -42,8 +42,9 @@ defmodule FermixCore.Management.Copy do
   app, the Linux app, the setup page and `fermix home status` print as they
   are (`FermixCore.Management.HomeSummary` picks them). They obey one rule
   more, `summary_violations/1`: none of the engine's own words for the move
-  (epoch, primary, candidate, relay, rail, phase, ledger, key id) reaches an
-  owner (`internal_words/1`), and no backticked literal or code does either.
+  or itself (epoch, primary, candidate, relay, rail, phase, ledger, daemon,
+  key id) reaches an owner (`internal_words/1`), and no backticked literal,
+  code or secret id does either.
   """
 
   alias FermixCore.Providers.Descriptor
@@ -60,9 +61,10 @@ defmodule FermixCore.Management.Copy do
   @version ~r/\bv?\d+\.\d+(?:\.\d+)?\b/
   @wire_token ~r/\b(?:[a-z][a-z0-9]*(?:_[a-z0-9]+)+|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b/
   @capitalised ~r/\b[A-Z][a-z]+\b/
-  # The engine's own words for the move, which no summary word may carry. A
-  # key id is the recovery key's; an S3 "access key ID" is AWS's name.
-  @internal_words ~r/\b(?:epochs?|primar(?:y|ies)|candidates?|relays?|rails?|phases?|ledgers?|(?<!access )key ids?)\b/i
+  # The engine's own words for the move, and for itself, which no summary
+  # word may carry. A key id is the recovery key's; an S3 "access key ID" is
+  # AWS's name.
+  @internal_words ~r/\b(?:epochs?|primar(?:y|ies)|candidates?|relays?|rails?|phases?|ledgers?|daemons?|(?<!access )key ids?)\b/i
   @cities %{"fsn1" => "Falkenstein", "nbg1" => "Nuremberg", "hel1" => "Helsinki"}
   # What runs only on the computer a move leaves, in the order it is named.
   @stays_here [imessage: "iMessage", voice: "voice calls", meetings: "meetings"]

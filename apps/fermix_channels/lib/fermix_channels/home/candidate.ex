@@ -563,13 +563,13 @@ defmodule FermixChannels.Home.Candidate do
       put(%{state | activation_tries: tries}, "activating", %{
         "sentence" =>
           "The home from #{primary_name(state)} could not be put in place yet; Fermix " <>
-            "tries again shortly, and the daemon log says why."
+            "tries again shortly, and Fermix's log says why."
       })
     else
       put(%{state | activation_tries: tries}, "activating", %{
         "sentence" =>
           "The home from #{primary_name(state)} could not be put in place; Fermix tries " <>
-            "again when it restarts, and the daemon log says why."
+            "again when it restarts, and Fermix's log says why."
       })
     end
   end

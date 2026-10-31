@@ -107,7 +107,7 @@ defmodule FermixCore.Home.Provision.Ledger do
   @statuses ~w(requested creating created deleting gone)a
   @status_words Map.new(@statuses, &{Atom.to_string(&1), &1})
   @unreadable_sentence "Fermix could not read its Hetzner file, so it shows nothing it " <>
-                         "created there; the daemon log says why."
+                         "created there; Fermix's log says why."
 
   @type status :: :requested | :creating | :created | :deleting | :gone
   @type server :: %{

@@ -293,7 +293,7 @@ defmodule FermixCore.Home.Provision do
   def error_sentence(:no_link),
     do:
       "Fermix could not read how this computer reaches your server, so it created nothing; " <>
-        "the daemon log says why."
+        "Fermix's log says why."
 
   def error_sentence(:code_unreachable),
     do:
@@ -318,7 +318,7 @@ defmodule FermixCore.Home.Provision do
     do: "Hetzner no longer has what Fermix created there, so open Always On again."
 
   def error_sentence({:ledger, _reason}),
-    do: "Fermix could not keep its Hetzner file; the daemon log says why."
+    do: "Fermix could not keep its Hetzner file; Fermix's log says why."
 
   defp doing("create_server"), do: "creating your server"
   defp doing("start_server"), do: "starting your server"

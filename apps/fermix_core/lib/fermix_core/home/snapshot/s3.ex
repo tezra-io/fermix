@@ -110,7 +110,7 @@ defmodule FermixCore.Home.Snapshot.S3 do
     do: "Nothing is stored as `#{key}`: set it and try again."
 
   def sentence({:secret_unreadable, key, _reason}),
-    do: "The stored `#{key}` could not be read from the secret store; the daemon log says why."
+    do: "The stored `#{key}` could not be read from the secret store; Fermix's log says why."
 
   def sentence(reason), do: "The S3 upload failed: #{describe(reason)}."
 

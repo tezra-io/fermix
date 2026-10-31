@@ -115,8 +115,8 @@ defmodule FermixCore.Management.HomeSummaryTest do
        facts(provision: %{created | token: :refused}), "problem",
        "Hetzner no longer accepts Fermix's token.", "paste_token"},
       {"a Hetzner file Fermix cannot read", facts(provision: unreadable_ledger()), "problem",
-       "Fermix could not read its Hetzner file, so it shows nothing it created there; the " <>
-         "daemon log says why.", "learn_more"},
+       "Fermix could not read its Hetzner file, so it shows nothing it created there; " <>
+         "Fermix's log says why.", "learn_more"},
       {"the server being deleted", facts(provision: created_ledger(state: :deleting)), "creating",
        "Deleting your server…", nil},
       {"a move undone, the server still held",
@@ -592,7 +592,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
   describe "the internal words" do
     test "each one is caught, and a sentence free of them passes" do
-      for word <- ~w(epoch primary candidate relay rail phase ledger) do
+      for word <- ~w(epoch primary candidate relay rail phase ledger daemon) do
         assert Copy.internal_words("The #{word} is fine.") == [word]
       end
 
@@ -825,8 +825,8 @@ defmodule FermixCore.Management.HomeSummaryTest do
       server: nil,
       failure: nil,
       sentence:
-        "Fermix could not read its Hetzner file, so it shows nothing it created there; the " <>
-          "daemon log says why."
+        "Fermix could not read its Hetzner file, so it shows nothing it created there; " <>
+          "Fermix's log says why."
     }
   end
 
