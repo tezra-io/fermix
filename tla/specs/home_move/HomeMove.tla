@@ -53,7 +53,9 @@
 (*    fence's {move_id, attempt} order (move ids ordered by when the move  *)
 (*    started) is the attempt order;                                       *)
 (*  - the probe's own rail: probe_primary/2 succeeds exactly when the     *)
-(*    candidate runs as the primary.                                       *)
+(*    candidate runs as the primary;                                       *)
+(*  - the cast put_phase/4 sends the Always On watch (Home.StatusWatch)    *)
+(*    once a phase is written: it writes nothing, and no step reads it.    *)
 (*                                                                         *)
 (* One step = one thing in the code: one file write, one Candidate        *)
 (* callback (the responder's frame and the call it makes), one dial, or   *)
@@ -63,7 +65,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ 75587263f63d
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_responder.ex @ 31d80078d517
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ 65dd08bdd156
-\* SOURCE: apps/fermix_core/lib/fermix_core/home/move.ex#start,move_id,write_request,put_phase,pending?,not_pending,max_attempts,@max_attempts,@pending,@running,@phases,finish_at_boot,finish_due,ending,finish,view,remember_unrecorded_ending,boot_ending,@boot_key @ ea0b073a55f5
+\* SOURCE: apps/fermix_core/lib/fermix_core/home/move.ex#start,move_id,write_request,put_phase,pending?,not_pending,max_attempts,@max_attempts,@pending,@running,@phases,finish_at_boot,finish_due,ending,finish,view,remember_unrecorded_ending,boot_ending,@boot_key @ 52918b4a9417
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/role.ex#resolve,primary,configured_role @ 6b56d83c809d
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/moved.ex#write,exclusive_write,read @ f1fa82381547
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate.ex#put_state,write_private @ b39833e3c49c
@@ -107,7 +109,7 @@ CONSTANTS
                              \* candidate.ex:400-412). move_offer carries the attempt
                              \* (stream/3, move_worker.ex:370), which only grows across
                              \* restarts; move ids are ordered by when the move started
-                             \* (move_id/1, move.ex:463-472)
+                             \* (move_id/1, move.ex:506-515)
     ReadyAfterStaged,        \* move_ready goes out only once staged is written: restored/2
                              \* records staged, then tells the responder
                              \* (candidate.ex:481-487), which answers move_ready only then
@@ -173,11 +175,11 @@ Net      == <<railUp, req, rep, oldReq, oldOffers, oldReady>>
 Budgets  == <<losses, srcCrashes, candCrashes>>
 Hist     == <<doneLost, lateOfferFenced>>
 
-MaxAttempts == 3    \* @max_attempts, Move.max_attempts/0 (move.ex:64, :83)
+MaxAttempts == 3    \* @max_attempts, Move.max_attempts/0 (move.ex:65, :84)
 
 Phases   == {"none", "requested", "streaming", "committing", "committed", "done", "aborting",
              "undoing", "aborted"}
-Pending  == {"requested", "streaming", "committing", "aborting"}  \* @pending (move.ex:67)
+Pending  == {"requested", "streaming", "committing", "aborting"}  \* @pending (move.ex:68)
 Requests == {"offer", "stream", "commit", "resume"}
 Answers  == {"accept", "ready", "done", "error"}
 WorkerStates ==
@@ -233,7 +235,7 @@ OldRequest ==
 \* The source boots from its files r, m, p (its service manager, after
 \* the deliberate self-restart, Lifecycle.restart_self/0, or a crash). DeviceSupervisor.children/1 starts the
 \* worker only on a device boot while a move is pending (device_supervisor.ex:50-64,
-\* Move.pending?/1, move.ex:305-310). Its rails end with it: an owner that exits
+\* Move.pending?/1, move.ex:311-316). Its rails end with it: an owner that exits
 \* takes its session down (rail.ex moduledoc). A request already sent may still
 \* arrive; an answer reaches no one.
 SourceBoots(r, m, p) ==
@@ -316,7 +318,7 @@ Goto(w) ==
 
 \* home.move.start (HomeMove.move_start/3, home_move.ex:188-206): Move.start/5
 \* writes request.json, phase "requested", then role = "device", the last
-\* write (write_request/3, move.ex:518-545: a failure part-way removes .move/,
+\* write (write_request/3, move.ex:559-588: a failure part-way removes .move/,
 \* so a part-way start leaves the primary as it was), and the handler restarts
 \* through Lifecycle.restart_self/0. The boot is a device with a move pending,
 \* so the worker starts. One step: until the restart the engine still runs as

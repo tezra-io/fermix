@@ -67,7 +67,7 @@ Models one move of M75 §7.2 (B5). Three parts take part:
   untouched (`fenced_offer/2`, `later?/2`, `candidate.ex:400-412`).
   `move_offer` carries the attempt (`stream/3`, `move_worker.ex:370`), which
   only grows across restarts. Move ids are ordered by when the move started
-  (`move_id/1`, `move.ex:463-472`); with one move id, the fence orders by
+  (`move_id/1`, `move.ex:506-515`); with one move id, the fence orders by
   attempt.
 - `ReadyAfterStaged`: `move_ready` goes out only after `staged` is written.
   `restored/2` records `staged`, then tells the responder
@@ -298,7 +298,9 @@ The `.tla` header lists what is left out:
   is refused, as for any candidate still activating);
 - the one capture every attempt of a move sends again;
 - a second move id (with one, the fence orders by attempt);
-- the probe's own rail.
+- the probe's own rail;
+- the cast `put_phase/4` sends the Always On watch (`Home.StatusWatch`) once a
+  phase is written, which writes nothing and which no step reads.
 
 The worker's rail-level failures (a dial the network refuses) are the same,
 to every rule, as a lost request followed by the worker's wait ending.
